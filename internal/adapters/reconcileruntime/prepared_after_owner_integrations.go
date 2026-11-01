@@ -3,6 +3,7 @@ package reconcileruntime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -25,6 +26,13 @@ type afterOwnerIntegrationRoute struct {
 	Marker, LocalMarker string
 	Device, LocalDevice ownerPlanMap[string]
 }
+type afterOwnerIntegrationInventory struct {
+	Before    string                  `json:"before"`
+	Pending   string                  `json:"pending"`
+	Committed string                  `json:"committed"`
+	States    []afterOwnerConfigState `json:"states"`
+}
+
 type afterOwnerIntegrationPhysical struct {
 	Version                           int
 	Configs                           afterOwnerConfigPhysical
@@ -33,6 +41,7 @@ type afterOwnerIntegrationPhysical struct {
 	Changed                           bool
 	Facts                             []afterOwnerIntegrationFact
 	Routes                            []afterOwnerIntegrationRoute
+	Inventory                         *afterOwnerIntegrationInventory
 	Hooks                             ownerHookObservation
 }
 
@@ -60,7 +69,11 @@ func (runtime Runtime) PrepareAfterOwnerIntegrationSources(ctx context.Context) 
 		if name == "" {
 			name = entry.ID
 		}
-		keys[entry.Kind+":"+name] = ""
+		kind := entry.Kind
+		if kind == "structured" {
+			kind = "inventory-structured"
+		}
+		keys[kind+":"+name] = ""
 	}
 	for _, file := range configs.files {
 		if file.ownedFormat != "" {
@@ -123,7 +136,12 @@ func (p *PreparedInstalledRuntime) AfterOwnerIntegrationPhysicalBound() (int, er
 	}
 	d := original.Integrations
 	f := strings.Repeat("f", 64)
-	value := afterOwnerIntegrationPhysical{Version: 1, Configs: afterOwnerConfigPhysical{1, []byte(strings.Repeat("x", 128)), f}, Fingerprint: f, Scope: f, InstanceScope: f, Changed: true}
+	value := afterOwnerIntegrationPhysical{Version: 1, Configs: afterOwnerConfigPhysical{Version: 1, Instance: []byte(strings.Repeat("x", 128)), Binding: f}, Fingerprint: f, Scope: f, InstanceScope: f, Changed: true}
+	value.Configs = maxAfterOwnerConfigPhysical(p.configs)
+	value.Inventory = &afterOwnerIntegrationInventory{Before: f, Pending: f, Committed: f}
+	for range d.Entries {
+		value.Inventory.States = append(value.Inventory.States, afterOwnerConfigState{true, f, ^uint32(0), ^uint32(0), 07777})
+	}
 	for _, fact := range d.Plan.Facts {
 		desired := ""
 		if fact.Desired == "" {
@@ -177,7 +195,7 @@ func (runtime Runtime) ResolveAfterOwnerIntegrations(ctx context.Context, raw []
 	if err != nil {
 		return nil, nil, err
 	}
-	value := afterOwnerIntegrationPhysical{Version: 1, Configs: afterOwnerConfigPhysical{1, []byte(configs.instance), configs.binding}}
+	value := afterOwnerIntegrationPhysical{Version: 1, Configs: afterOwnerConfigPhysical{Version: 1, Instance: []byte(configs.instance), Binding: configs.binding}}
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err != nil {
 		return nil, nil, err
@@ -187,6 +205,7 @@ func (runtime Runtime) ResolveAfterOwnerIntegrations(ctx context.Context, raw []
 			return nil, nil, domain.ErrPlanStale
 		}
 		value.Stopped = true
+		value.Configs.Stopped = true
 	} else {
 		execution, err := runtime.materializedIntegrationExecution(ctx, p)
 		if err != nil {
@@ -195,13 +214,21 @@ func (runtime Runtime) ResolveAfterOwnerIntegrations(ctx context.Context, raw []
 		if err = execution.CheckProjectHookPlan(ctx, true); err != nil {
 			return nil, nil, err
 		}
-		plan, err := execution.IntegrationPlan(ctx)
+		plan, captured, err := execution.observeIntegrations(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
 		if plan.sources != p.integrations.plan.sources || !reflect.DeepEqual(plan.packageSources, p.integrations.plan.packageSources) || len(plan.Adoption) != 0 || plan.AdoptionFingerprint != "" || !reflect.DeepEqual(plan.profileRoutes, p.integrations.plan.profileRoutes) {
 			return nil, nil, domain.ErrPlanStale
 		}
+		value.Configs.Files, err = execution.observeAfterOwnerConfigFiles(ctx, configs)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err != nil || captured.Inventory == nil {
+			return nil, nil, domain.ErrPlanStale
+		}
+		value.Inventory = captured.Inventory
 		value.Fingerprint, value.Scope, value.InstanceScope, value.Changed = plan.Fingerprint, plan.Scope, plan.instanceScope, plan.Changed
 		facts := map[string]integrationFact{}
 		for _, fact := range plan.facts {
@@ -252,10 +279,21 @@ func (p *PreparedInstalledRuntime) overlayAfterOwnerIntegrations(d *materialized
 		return plan, nil, domain.ErrPlanStale
 	}
 	if v.Stopped {
+		if !v.Configs.Stopped || len(v.Configs.Files) != 0 || v.Inventory != nil {
+			return plan, nil, domain.ErrPlanStale
+		}
 		if len(v.Facts) != 0 || len(v.Routes) != 0 {
 			return plan, nil, domain.ErrPlanStale
 		}
 		return plan, hooks, nil
+	}
+	if v.Inventory == nil || len(v.Inventory.States) != len(d.Entries) || v.Inventory.Before != "" && !profileRuntimeDigest.MatchString(v.Inventory.Before) || !profileRuntimeDigest.MatchString(v.Inventory.Pending) || !profileRuntimeDigest.MatchString(v.Inventory.Committed) {
+		return plan, nil, domain.ErrPlanStale
+	}
+	for _, state := range v.Inventory.States {
+		if state.Exists && (!profileRuntimeDigest.MatchString(state.Digest) || state.Mode > 07777) || !state.Exists && state != (afterOwnerConfigState{}) {
+			return plan, nil, domain.ErrPlanStale
+		}
 	}
 	if !profileRuntimeDigest.MatchString(v.Fingerprint) || !profileRuntimeDigest.MatchString(v.Scope) || v.InstanceScope != d.Plan.Scope || len(v.Facts) != len(plan.facts) || len(v.Routes) != len(plan.profileRoutes) {
 		return plan, nil, domain.ErrPlanStale
@@ -324,6 +362,9 @@ func (runtime Runtime) ObserveAfterOwnerIntegrations(ctx context.Context, p *Pre
 	if err = execution.CheckProjectHookPlan(ctx, true); err != nil {
 		return IntegrationPlan{}, false, err
 	}
+	if _, err := execution.checkAfterOwnerConfigFiles(ctx, p.configs); err != nil {
+		return IntegrationPlan{}, false, err
+	}
 	fresh, err := execution.IntegrationPlan(ctx)
 	if err != nil {
 		return fresh, false, err
@@ -332,8 +373,64 @@ func (runtime Runtime) ObserveAfterOwnerIntegrations(ctx context.Context, p *Pre
 	if err != nil {
 		return fresh, false, err
 	}
+	compared, err = projectAfterOwnerIntegrationInventory(p.integrations.plan, compared, p.afterOwnerIntegrations)
+	if err != nil {
+		return fresh, false, err
+	}
 	if err = CheckIntegrationPlan(p.integrations.plan, compared); err != nil {
 		return fresh, false, err
 	}
 	return compared, false, nil
+}
+
+// Only the exact protected full-set successor permits the old fact projection.
+// The guest has already checked original/desired bytes and metadata for each row.
+func projectAfterOwnerIntegrationInventory(original, fresh IntegrationPlan, physical *afterOwnerIntegrationPhysical) (IntegrationPlan, error) {
+	if physical == nil || physical.Inventory == nil {
+		return fresh, domain.ErrPlanStale
+	}
+	before := map[string]integrationFact{}
+	for _, fact := range original.facts {
+		before[fact.Key] = fact
+	}
+	fresh.facts = slices.Clone(fresh.facts)
+	for i, fact := range fresh.facts {
+		old, ok := before[fact.Key]
+		if !ok || old.Desired != fact.Desired {
+			return fresh, domain.ErrPlanStale
+		}
+		if strings.HasPrefix(fact.Key, "file:") || strings.HasPrefix(fact.Key, "link:") || strings.HasPrefix(fact.Key, "inventory-structured:") || strings.HasPrefix(fact.Key, "structured:") {
+			if !fact.AtDesired {
+				fresh.facts[i].Observed = old.Observed
+				fresh.facts[i].AtDesired = old.AtDesired
+			}
+		}
+	}
+	return fresh, nil
+}
+
+func checkAfterOwnerIntegrationConfigSubset(configs *PreparedConfigs, entries []integrationArtifact) error {
+	selected := map[string]integrationArtifact{}
+	for _, entry := range entries {
+		if entry.Path != "" {
+			if _, exists := selected[entry.Path]; exists {
+				return domain.ErrPlanStale
+			}
+			selected[entry.Path] = entry
+		}
+	}
+	for _, config := range configs.entries {
+		entry, ok := selected[config.Path]
+		if !ok || entry.ID != config.ID || entry.Kind != config.Kind || entry.Format != config.Format || entry.Digest != config.Digest {
+			return domain.ErrPlanStale
+		}
+		payload, ok := configs.payloads[config.Path]
+		if !ok || fmt.Sprintf("%x", sha256.Sum256(payload)) != entry.Digest {
+			return domain.ErrPlanStale
+		}
+		if entry.Kind == "file" && entry.Content != base64.StdEncoding.EncodeToString(payload) {
+			return domain.ErrPlanStale
+		}
+	}
+	return nil
 }

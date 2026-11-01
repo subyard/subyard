@@ -185,16 +185,16 @@ exercise_activation_only_repair() {
   assert_activation_only_journal complete "$repair_transaction" "$repair_authorization"
   assert_activation_ledger_unchanged
   assert_candidate_state
-  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
   ok 'same-version activation-only repair resumed without replaying migration history'
 }
 
 assert_v2_transition() {
-  local direction="$1" target="${2#releases/}" expected_catalog="${3:-}"
+  local direction="$1" target="${2#releases/}" expected_catalog="${3:-}" registry_target="${4:-$CANDIDATE_RELEASE_TARGET}"
   local runtime="$OPERATOR_HOME/.subyard/runtime" artifact_digest registry_digest record
   artifact_digest="$(operator_env sha256sum "$runtime/releases/$target/runtime-files.sha256" | awk '{print $1}')" \
     || die 'target artifact manifest is unavailable'
-  registry_digest="$(operator_env sha256sum "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" | awk '{print $1}')" \
+  registry_digest="$(operator_env sha256sum "$runtime/$registry_target/config/release-transition.json" | awk '{print $1}')" \
     || die 'candidate transition owner registry is unavailable'
   operator_env jq -e '
     .schemaVersion == 2 and
@@ -283,7 +283,7 @@ assert_post_reboot_candidate() {
 
   load_release_targets
   assert_candidate_state
-  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
   manager_state="$(sudo -n systemctl show subyard-power-reconcile.service \
     --property=LoadState --property=NeedDaemonReload \
     --property=ActiveState --property=SubState --property=Result \
@@ -337,17 +337,17 @@ assert_legacy_native_policy() {
   capture_legacy_native_policy "$STATE_ROOT/native-policy.current"
   cmp -s "$STATE_ROOT/native-policy.before" "$STATE_ROOT/native-policy.current" \
     || die 'compatible transition changed the exact legacy native policy or identity'
-  assert_legacy_continuation
+  if [ -f "$STATE_ROOT/legacy-continuation.sha256" ]; then assert_legacy_continuation; fi
 }
 
 verify_legacy_rollback_refusal() {
-  local path index=0 grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+  local current="${1:-$CANDIDATE_RELEASE_TARGET}" previous="${2:-$OLD_RELEASE_TARGET}" path index=0 grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
   local -a paths=("$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"
     "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$grant")
   capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
   for path in "${paths[@]}"; do
-    # V2 predecessors may lack V1 evidence: preserve it when present, never manufacture it.
-    if [ "$index" = 3 ] && operator_env test ! -e "$path" && operator_env test ! -L "$path"; then
+    # Preserve absent V1 evidence and continuation grants without manufacturing them.
+    if { [ "$index" = 3 ] || [ "$index" = 4 ]; } && operator_env test ! -e "$path" && operator_env test ! -L "$path"; then
       printf 'absent\n' > "$STATE_ROOT/refusal-$index.mode"
     else
       operator_env stat -c '%a:%u:%g:%d:%i' "$path" > "$STATE_ROOT/refusal-$index.mode"
@@ -360,11 +360,14 @@ verify_legacy_rollback_refusal() {
   fi
   grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
     || die 'published predecessor rollback failed for an unexpected reason'
-  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_runtime_links "$current" "$previous"
   index=0
   for path in "${paths[@]}"; do
     if [ "$index" = 3 ]; then
       assert_published_v1_history_unchanged
+    elif [ "$(cat "$STATE_ROOT/refusal-$index.mode")" = absent ]; then
+      operator_env test ! -e "$path" && operator_env test ! -L "$path" \
+        || die 'refused rollback created a continuation grant'
     else
       [ "$(operator_env stat -c '%a:%u:%g:%d:%i' "$path")" = "$(cat "$STATE_ROOT/refusal-$index.mode")" ] \
         && operator_env cat "$path" | cmp -s "$STATE_ROOT/refusal-$index.bytes" - \
@@ -379,7 +382,7 @@ verify_legacy_rollback_refusal() {
 check_compatible_transition() {
   local version="$1" release_root="$2" target="${3#releases/}" active="${4#releases/}"
   operator_env env YARD_RELEASE_BASE_URL="file://$release_root" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$version" --check --json \
+    "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/bin/yard" update --offline --version "$version" --check --json \
     > "$STATE_ROOT/compatible-check.json"
   jq -e --arg target "$target" --arg active "$active" '
     .outcome.target == $target and .outcome.active == $active and
@@ -394,28 +397,9 @@ check_compatible_transition() {
 finish_candidate_flow() {
   local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
   load_release_targets
-  verify_legacy_rollback_refusal
-  info 'retaining the authentic published v0.21.0 runtime through verified public updates'
-  check_compatible_transition "$COMPATIBLE_VERSION" "$COMPATIBLE_RELEASE_ROOT" \
-    "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
-  operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --yes
-  assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
-  assert_runtime_state "$COMPATIBLE_VERSION" \
-    "$runtime/$COMPATIBLE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
-    "$COMPATIBLE_RELEASE_TARGET"
-  assert_legacy_native_policy
-  assert_published_v1_history_unchanged
-  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
-    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
-  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
-  assert_candidate_state
-  assert_legacy_native_policy
   rollback_catalog="$(operator_env jq -er '.catalogDigest | select(type == "string" and test("^[a-f0-9]{64}$"))' "$V2_JOURNAL")"
   rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')"
-  info 'rolling back to the exact compatible published v0.21.0 runtime'
+  info 'rolling back to the exact compatible published v0.22.0 runtime'
   operator_yard update --rollback --yes
   assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_state "$COMPATIBLE_VERSION" \
@@ -428,8 +412,7 @@ finish_candidate_flow() {
   assert_legacy_native_policy
   check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
     "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
-  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
+  operator_env "$runtime/$CANDIDATE_RELEASE_TARGET/bin/yard" update --offline --version "$CANDIDATE_VERSION" --yes
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
   assert_candidate_state
   assert_legacy_native_policy

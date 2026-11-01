@@ -1,12 +1,15 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -138,5 +141,162 @@ func TestPreparedInstalledExecutionUsesApprovedBytesAfterSourceGuard(t *testing.
 	}
 	if _, err := os.Stat(p.directory); !os.IsNotExist(err) {
 		t.Fatal("execution tree survived drained command", err)
+	}
+}
+
+func preparedGuestInstalledFixture(t *testing.T) Runtime {
+	t.Helper()
+	runtime := preparedInstalledFixture(t)
+	source, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{"scripts/refresh-installed-guest-runtime.sh", "scripts/prepare-preview-route.sh", "config/preview/subyard-preview", "config/agents/ccusage/provision.sh"} {
+		payload, err := os.ReadFile(filepath.Join(source, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(runtime.RepositoryRoot, relative)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, payload, 0755)
+	}
+	runtime.LogicalRepositoryRoot = runtime.RepositoryRoot
+	runtime.Environment = []string{"ALLOWS_CODING_TOOLS=true", "CCUSAGE_PROVISION=" + filepath.Join(runtime.RepositoryRoot, "config/agents/ccusage/provision.sh")}
+	return runtime
+}
+func retainedGuestRuntime(t *testing.T, runtime Runtime) Runtime {
+	t.Helper()
+	root, err := os.Open(runtime.RepositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	runtime.RepositoryRoot = fmt.Sprintf("/proc/self/fd/%d", root.Fd())
+	runtime.Environment = []string{"ALLOWS_CODING_TOOLS=true", "CCUSAGE_PROVISION=" + fmt.Sprintf("/proc/%d/fd/%d/config/agents/ccusage/provision.sh", os.Getpid(), root.Fd())}
+	return runtime
+}
+func TestPreparedGuestBuiltinHookUsesRetainedRepositoryAnchor(t *testing.T) {
+	runtime := preparedGuestInstalledFixture(t)
+	original, err := runtime.PrepareInstalledRuntime(context.Background(), "core-guest-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	retained := retainedGuestRuntime(t, runtime)
+	current, err := retained.PrepareInstalledRuntime(context.Background(), "core-guest-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer current.Close()
+	if !bytes.Equal(original.Recipe(), current.Recipe()) {
+		t.Fatal("retained spelling changed approved recipe")
+	}
+	for _, fresh := range []Runtime{retained, retainedGuestRuntime(t, runtime)} {
+		bound, err := fresh.BindInstalledRuntime(original.Recipe())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(bound.Recipe(), original.Recipe()) {
+			t.Fatal("fresh descriptor changed original recipe")
+		}
+		bound.Close()
+	}
+}
+func TestPreparedGuestHookRefusesUnapprovedAliasesAndSourceDrift(t *testing.T) {
+	for _, change := range []string{"bytes", "replacement", "mode", "mtime", "absent", "custom-bytes", "other-root", "custom-parent-link", "builtin-parent-link", "builtin-leaf-link", "foreign-pid", "other-fd"} {
+		t.Run(change, func(t *testing.T) {
+			runtime := preparedGuestInstalledFixture(t)
+			if change == "custom-bytes" {
+				path := filepath.Join(testkit.TempDir(t), "hook.sh")
+				testkit.WriteFile(t, path, []byte("#!/bin/sh\nexit 0\n"), 0755)
+				runtime.Environment = []string{"ALLOWS_CODING_TOOLS=true", "CCUSAGE_PROVISION=" + path}
+			}
+			original, err := runtime.PrepareInstalledRuntime(context.Background(), "core-guest-runtime")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer original.Close()
+			path := runtime.environmentValue("CCUSAGE_PROVISION")
+			payload, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "bytes", "custom-bytes":
+				testkit.WriteFile(t, path, append(payload, '\n'), 0755)
+			case "replacement":
+				testkit.WriteFile(t, path+".new", payload, 0755)
+				if err := os.Rename(path+".new", path); err != nil {
+					t.Fatal(err)
+				}
+			case "mtime":
+				if err := os.Chtimes(path, time.Unix(1, 0), time.Unix(1, 0)); err != nil {
+					t.Fatal(err)
+				}
+			case "absent":
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			case "mode":
+				if err := os.Chmod(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "other-root":
+				other := preparedGuestInstalledFixture(t)
+				other.LogicalRepositoryRoot = runtime.LogicalRepositoryRoot
+				other.Yard = runtime.Yard
+				runtime = retainedGuestRuntime(t, other)
+				if runtime.configRuntimeBinding() != original.runtime {
+					t.Fatal("root identity fixture changed command inputs")
+				}
+			case "custom-parent-link":
+				dir := testkit.TempDir(t)
+				if err := os.Symlink(filepath.Dir(path), filepath.Join(dir, "link")); err != nil {
+					t.Fatal(err)
+				}
+				runtime.Environment = []string{"ALLOWS_CODING_TOOLS=true", "CCUSAGE_PROVISION=" + filepath.Join(dir, "link/provision.sh")}
+			case "builtin-parent-link":
+				if err := os.Rename(filepath.Dir(path), filepath.Dir(path)+".held"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Dir(path)+".held", filepath.Dir(path)); err != nil {
+					t.Fatal(err)
+				}
+			case "builtin-leaf-link":
+				if err := os.Rename(path, path+".held"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(path+".held", path); err != nil {
+					t.Fatal(err)
+				}
+			case "foreign-pid":
+				runtime.Environment = []string{"ALLOWS_CODING_TOOLS=true", "CCUSAGE_PROVISION=" + fmt.Sprintf("/proc/1/fd/0/config/agents/ccusage/provision.sh")}
+			case "other-fd":
+				fd, err := os.Open(runtime.RepositoryRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer fd.Close()
+				runtime.Environment = []string{"ALLOWS_CODING_TOOLS=true", "CCUSAGE_PROVISION=" + fmt.Sprintf("/proc/%d/fd/%d/config/agents/ccusage/provision.sh", os.Getpid(), fd.Fd())}
+			}
+			if bound, err := runtime.BindInstalledRuntime(original.Recipe()); err == nil {
+				bound.Close()
+				t.Fatal("changed hook/source rebound")
+			}
+			if change == "custom-parent-link" || change == "builtin-parent-link" || change == "builtin-leaf-link" || change == "foreign-pid" || change == "other-fd" {
+				if fresh, err := runtime.PrepareInstalledRuntime(context.Background(), "core-guest-runtime"); err == nil {
+					fresh.Close()
+					t.Fatal("unapproved hook prepared")
+				}
+			}
+			if err := runtime.ApplyPreparedInstalledRuntime(context.Background(), original, "prepared", testRuntimeOldDigest, testRuntimeNewDigest); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatal("changed hook/source reached execution admission")
+			}
+			if original.directory != "" {
+				t.Fatal("refusal materialized execution tree")
+			}
+		})
 	}
 }

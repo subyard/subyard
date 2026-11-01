@@ -21,7 +21,6 @@ import (
 
 // Temporary integration hold. Remove this constant and its guards when the
 // coordinated functional prerequisites authorize the final owner cutover.
-const releaseOwnerRoutingEnabled = false
 
 type rustOwnerSessions struct {
 	mu       sync.Mutex
@@ -97,6 +96,23 @@ func (runtime *Runtime) invokeRustOwnerTransition(ctx context.Context, assets, e
 	}
 	if runtime.rustOwners == nil {
 		return releasetransition.ProcessResponse{}, errors.New("release runtime is unavailable")
+	}
+	if runtime.currentCheck && request.Mode == releasetransition.ProcessInspect {
+		session, err := runtime.startRustOwner(ctx, assets, engine, target, request, grant)
+		if err != nil {
+			return result, err
+		}
+		defer session.Close()
+		var inspection releasetransition.Inspection
+		if engine.readOnlyCheck && recovery == nil {
+			inspection, err = session.Check(ctx)
+		} else {
+			inspection, err = session.Inspect(ctx, recovery)
+		}
+		if err != nil {
+			return result, err
+		}
+		return releasetransition.ProcessResponse{SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Inspection: &inspection, ActivationReconciliationOwned: session.activationOwned}, nil
 	}
 	key, err := rustOwnerSessionKey(engine.manifestDigest, request, recovery)
 	if err != nil {
@@ -215,8 +231,11 @@ func (runtime *Runtime) InvokeFrozenRustTransition(ctx context.Context, reposito
 	if err != nil || request.Mode == releasetransition.ProcessInspect {
 		return response, err
 	}
-	if request.Mode != releasetransition.ProcessConverge || request.Execution == nil || response.Inspection == nil || request.Execution.Plan != response.Inspection.Plan {
+	if request.Mode != releasetransition.ProcessConverge || request.Execution == nil || response.Inspection == nil {
 		return releasetransition.ProcessResponse{}, domain.ErrPlanStale
+	}
+	if request.Execution.Plan != response.Inspection.Plan {
+		return rustFreshRecoveryRefusal(recovery, response, releasetransition.CodePlanStale, "the fresh recovery assessment changed before confirmation", domain.ErrPlanStale)
 	}
 	session := runtime.findRustOwnerSession(owner.manifestDigest, inspectedRequest, recovery)
 	if session == nil {
@@ -227,7 +246,7 @@ func (runtime *Runtime) InvokeFrozenRustTransition(ctx context.Context, reposito
 	session.mu.Unlock()
 	if !durableAdmission && response.Inspection.Resume == nil && response.Inspection.Assessment.Changed {
 		if expectedGrant == "" || request.Execution.Authorization != expectedGrant {
-			return releasetransition.ProcessResponse{}, errors.New("frozen Rust convergence is missing its original private parent authorization")
+			return rustFreshRecoveryRefusal(recovery, response, releasetransition.CodeConfirmationRequired, "the fresh activation recovery plan requires new authorization", errors.New("frozen Rust convergence is missing its original private parent authorization"))
 		}
 	} else if request.Execution.Authorization != "" && request.Execution.Authorization != expectedGrant {
 		return releasetransition.ProcessResponse{}, errors.New("frozen Rust convergence authorization differs from its parent")
@@ -253,6 +272,15 @@ func (runtime *Runtime) InvokeFrozenRustTransition(ctx context.Context, reposito
 	return runtime.invokeRustOwnerTransition(ctx, owner, owner, target, request, recovery, expectedGrant)
 }
 
+func rustFreshRecoveryRefusal(recovery *releasetransition.RecoveryProcessRequest, response releasetransition.ProcessResponse, code releasetransition.OutcomeCode, message string, cause error) (releasetransition.ProcessResponse, error) {
+	if recovery == nil || recovery.Recovery == nil || recovery.MigrationOwner != nil || recovery.Validate() != nil || response.Inspection == nil || response.Inspection.Outcome == nil || code != releasetransition.CodePlanStale && code != releasetransition.CodeConfirmationRequired {
+		return releasetransition.ProcessResponse{}, cause
+	}
+	before := response.Inspection.Outcome
+	outcome := publicReleaseOutcome(releasetransition.ReleaseLinks{Active: before.Active, Previous: before.Previous}, before.Target, before.Transaction, code, message, "review and confirm the fresh plan with yard migrate or yard update")
+	return releasetransition.ProcessResponse{SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Outcome: &outcome, ActivationReconciliationOwned: response.ActivationReconciliationOwned}, nil
+}
+
 func (session *rustOwnerSession) Capabilities(ctx context.Context, kind releasetransition.RecoveryProcessMode) (releasetransition.RecoveryProcessResponse, error) {
 	reply, err := session.exchange(ctx, map[string]any{"op": "capabilities", "kind": kind}, rustOwnerExchangeLimit)
 	if err != nil {
@@ -276,6 +304,10 @@ func (runtime *Runtime) InvokeFrozenRustCapabilities(ctx context.Context, reposi
 		return releasetransition.RecoveryProcessResponse{}, err
 	}
 	defer owner.Close()
+	return runtime.invokeRustCapabilitySession(ctx, owner, root, kind)
+}
+
+func (runtime *Runtime) invokeRustCapabilitySession(ctx context.Context, owner *verifiedPublishedCandidate, root string, kind releasetransition.RecoveryProcessMode) (releasetransition.RecoveryProcessResponse, error) {
 	configHome := runtime.config.Inputs.value("SUBYARD_CONFIG_HOME", runtime.config.Context)
 	if !filepath.IsAbs(configHome) {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("Rust capability inspection requires its pinned configuration scope")
@@ -324,17 +356,7 @@ func (runtime *Runtime) retainRustPreparation(prepared Prepared, session *rustOw
 func (runtime *Runtime) invokeRustRecoveryTransition(ctx context.Context, owner *verifiedPublishedCandidate, root string, request releasetransition.RecoveryProcessRequest, grant releasetransition.Authorization) (releasetransition.RecoveryProcessResponse, error) {
 	capability := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities || request.Mode == releasetransition.RecoveryProcessRuntimeCapabilities || request.Mode == releasetransition.RecoveryProcessMigrationOwnerCapabilities
 	if capability {
-		configHome := runtime.config.Inputs.value("SUBYARD_CONFIG_HOME", runtime.config.Context)
-		if !filepath.IsAbs(configHome) {
-			return releasetransition.RecoveryProcessResponse{}, errors.New("Rust capability inspection requires its pinned configuration scope")
-		}
-		scope := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: configHome, Yard: "default", Target: owner.candidate.release, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: owner.manifestDigest, RegistryDigest: owner.registryDigest}
-		session, err := runtime.startRustOwner(ctx, owner, owner, owner, scope, "")
-		if err != nil {
-			return releasetransition.RecoveryProcessResponse{}, err
-		}
-		defer session.Close()
-		return session.Capabilities(ctx, request.Mode)
+		return runtime.invokeRustCapabilitySession(ctx, owner, root, request.Mode)
 	}
 	response, err := runtime.invokeRustOwnerTransition(ctx, owner, owner, owner, request.TransitionRequest(), &request, grant)
 	if err != nil {

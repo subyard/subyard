@@ -501,23 +501,27 @@ printf 'ok: prepared split creation converges fresh disk /tmp and never restarts
   identity_bin="$TMP/identity-bin"
   install -d -m 0700 "$identity_bin"
   export MOCK_ACCOUNT_FILE="$TMP/fixture-account" MOCK_ACCOUNT_CALLS="$TMP/fixture-account-calls"
+  export MOCK_DEV_HOME="$TMP/developer-home" MOCK_HOME_CALLS="$TMP/home-ownership-calls"
   install -m 0600 /dev/null "$MOCK_ACCOUNT_FILE"
   install -m 0600 /dev/null "$MOCK_ACCOUNT_CALLS"
   # Execute the real account boundary with generated settings. UID 1000 is
   # reserved, matching the cloud-image failure; no host account commands run.
   sed -n '/^# Groups + unprivileged/,/^# dev sudo/{ /^# dev sudo/!p; }' \
-    "$ROOT/scripts/04-provision-subyard.sh" > "$TMP/provision-user.sh"
+    "$ROOT/scripts/04-provision-subyard.sh" | sed 's|dev_home="/home/$DEV_USER"|dev_home="$MOCK_DEV_HOME"|' > "$TMP/provision-user.sh"
   cat > "$identity_bin/id" <<'MOCK'
 #!/bin/sh
-test "$*" = '-u dev' || exit 90
-test -s "$MOCK_ACCOUNT_FILE" || exit 1
-cat "$MOCK_ACCOUNT_FILE"
+case "$*" in
+  '-u dev') test -s "$MOCK_ACCOUNT_FILE" || exit 1; cat "$MOCK_ACCOUNT_FILE" ;;
+  '-gn dev') printf 'primary-dev\n' ;;
+  *) exit 90 ;;
+esac
 MOCK
   cat > "$identity_bin/useradd" <<'MOCK'
 #!/bin/sh
 test "$*" = '-u 1001 -m -s /bin/bash dev' || exit 1
 echo "useradd $*" >> "$MOCK_ACCOUNT_CALLS"
 echo 1001 > "$MOCK_ACCOUNT_FILE"
+mkdir -p "$MOCK_DEV_HOME"
 MOCK
   cat > "$identity_bin/groupadd" <<'MOCK'
 #!/bin/sh
@@ -526,6 +530,12 @@ MOCK
   cat > "$identity_bin/usermod" <<'MOCK'
 #!/bin/sh
 test "$*" = '-aG yard,kvm,docker dev'
+MOCK
+  cat > "$identity_bin/chown" <<'MOCK'
+#!/bin/sh
+[ "$#" = 4 ] && [ "$1" = --no-dereference ] && [ "$2" = dev:primary-dev ] \
+  && [ "$3" = -- ] && [ "$4" = "$MOCK_DEV_HOME" ] || exit 90
+printf '%s\n' "$*" >> "$MOCK_HOME_CALLS"
 MOCK
   chmod 0700 "$identity_bin/"*
   for kind in container vm; do
@@ -550,6 +560,12 @@ MOCK
     [ "$DEV_USER:$DEV_UID" = dev:1001 ] || fail "$kind fixture identity was not explicit"
     : > "$MOCK_ACCOUNT_FILE"
     : > "$MOCK_ACCOUNT_CALLS"
+    : > "$MOCK_HOME_CALLS"
+    install -d -m 0711 "$MOCK_DEV_HOME"
+    printf 'retained data\n' > "$MOCK_DEV_HOME/retained"
+    chmod 0600 "$MOCK_DEV_HOME/retained"
+    before_home="$(stat -c '%a:%u:%g' "$MOCK_DEV_HOME")"
+    before_child="$(stat -c '%a:%u:%g' "$MOCK_DEV_HOME/retained")"
     for _ in 1 2; do
       PATH="$identity_bin:/usr/bin:/bin" bash -euo pipefail "$TMP/provision-user.sh" \
         > "$TMP/identity-output" 2>&1 || { cat "$TMP/identity-output" >&2; fail "$kind configured user did not provision"; }
@@ -557,6 +573,18 @@ MOCK
     done
     [ "$(cat "$MOCK_ACCOUNT_CALLS")" = 'useradd -u 1001 -m -s /bin/bash dev' ] \
       || fail "$kind generated identity did not reach native useradd exactly once"
+    [ "$(wc -l < "$MOCK_HOME_CALLS")" = 2 ] || fail "$kind home ownership did not reconcile on repeat"
+    [ "$(stat -c '%a:%u:%g' "$MOCK_DEV_HOME")" = "$before_home" ] || fail "$kind home mode changed"
+    [ "$(stat -c '%a:%u:%g' "$MOCK_DEV_HOME/retained")" = "$before_child" ] \
+      && [ "$(cat "$MOCK_DEV_HOME/retained")" = 'retained data' ] || fail "$kind home descendants changed"
+    mv "$MOCK_DEV_HOME" "$MOCK_DEV_HOME.saved"
+    ln -s "$MOCK_DEV_HOME.saved" "$MOCK_DEV_HOME"
+    if PATH="$identity_bin:/usr/bin:/bin" bash -euo pipefail "$TMP/provision-user.sh" > "$TMP/identity-output" 2>&1; then
+      fail "$kind symlink home was accepted"
+    fi
+    [ "$(wc -l < "$MOCK_HOME_CALLS")" = 2 ] || fail "$kind symlink home reached chown"
+    rm "$MOCK_DEV_HOME"
+    mv "$MOCK_DEV_HOME.saved" "$MOCK_DEV_HOME"
     : > "$MOCK_ACCOUNT_FILE"
     if DEV_UID=1000 PATH="$identity_bin:/usr/bin:/bin" bash -euo pipefail "$TMP/provision-user.sh" \
         > "$TMP/identity-output" 2>&1; then

@@ -109,6 +109,11 @@ case "${1:-}" in
   --owner-before-instance) owner_phase=before-instance ;;
   --owner-before-srv) owner_phase=before-srv ;;
   --owner-after-srv) owner_phase=after-srv ;;
+  --owner-before-start) owner_phase=before-start ;;
+  --owner-after-start) owner_phase=after-start ;;
+  --owner-prepare-boot) owner_phase=prepare-boot ;;
+  --owner-after-boot) owner_phase=after-boot ;;
+  --owner-*) die 'unknown original owner portion' ;;
 esac
 if [ "$owner_phase" != whole ]; then
   [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" = 1 ] || die 'owner portion requires its original prepared context'
@@ -123,12 +128,36 @@ if [ "$owner_phase" != whole ]; then
     fi
   fi
 fi
-if [ "$owner_phase" = after-srv ] && [ -n "${SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID:-}" ]; then
+if { [ "$owner_phase" = after-srv ] || [ "$owner_phase" = prepare-boot ] || [ "$owner_phase" = after-boot ]; } \
+  && [ -n "${SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID:-}" ]; then
   [ "$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID" = "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" ] \
     && [ -n "${SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN:-}" ] \
     || die 'fresh owner instance identity differs'
   created=1
   created_uuid="$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID"
+fi
+# Native power is owned by the original typed SDK lifecycle, never this shell
+# portion. These finite guest operations run only for this call's fresh POST.
+if [ "$owner_phase" = prepare-boot ] || [ "$owner_phase" = after-boot ]; then
+  [ "$created" = 1 ] || die 'initial storage boot requires this call fresh instance'
+  if [ "$owner_phase" = after-boot ]; then
+    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- wait-boot \
+      < "$SCRIPT_DIR/guest-disk-tmp.sh" || die 'new yard boot did not complete after temporary storage restart'
+    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- check \
+      < "$SCRIPT_DIR/guest-disk-tmp.sh" || die 'new yard temporary storage is not disk-backed'
+    exit 0
+  fi
+  tmp_output="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- apply \
+    < "$SCRIPT_DIR/guest-disk-tmp.sh" 2>&1)" || { printf '%s\n' "$tmp_output" >&2; die 'new yard temporary storage setup failed'; }
+  tmp_state=0
+  tmp_output="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- check \
+    < "$SCRIPT_DIR/guest-disk-tmp.sh" 2>&1)" || tmp_state=$?
+  case "$tmp_state" in
+    0) printf 'ready\n' ;;
+    10) printf 'restart\n' ;;
+    *) printf '%s\n' "$tmp_output" >&2; die 'new yard temporary storage could not be verified' ;;
+  esac
+  exit 0
 fi
 docker_apparmor_required=0
 if [ "$owner_phase" = whole ] || [ "$owner_phase" = before-instance ]; then
@@ -211,7 +240,7 @@ fi # original pre-instance portion
 if [ "$owner_phase" = before-srv ] && [ "${SUBYARD_PREPARED_INCUS_APPARMOR:-}" = disabled ]; then
   docker_apparmor_required=1
 fi
-if [ "$owner_phase" != after-srv ]; then
+if [ "$owner_phase" != after-srv ] && [ "$owner_phase" != before-start ] && [ "$owner_phase" != after-start ]; then
 if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
   ok "instance '$YARD_INSTANCE_NAME' exists"
   if [ "$YARD_KIND" = container ] \
@@ -430,10 +459,12 @@ fi
 
 fi # original metadata/devices portion
 [ "$owner_phase" != before-srv ] || exit 0
-if [ "$owner_phase" = after-srv ] && [ -n "${SUBYARD_PREPARED_OWNER_VOLUME_TOKEN:-}" ]; then
+if { [ "$owner_phase" = after-srv ] || [ "$owner_phase" = before-start ] || [ "$owner_phase" = after-start ]; } \
+  && [ -n "${SUBYARD_PREPARED_OWNER_VOLUME_TOKEN:-}" ]; then
   [ "$(incus storage volume get "$SRV_POOL" "$SRV_VOLUME" user.subyard.owner_create "${PROJ[@]}")" = "$SUBYARD_PREPARED_OWNER_VOLUME_TOKEN" ] \
     || die 'original owner SRV volume identity differs'
 fi
+if [ "$owner_phase" != after-start ]; then # original storage before start
 # --- 4. persistent /srv volume (idempotent) ----------------------------------
 echo "Storage (/srv):"
 if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
@@ -472,6 +503,9 @@ fi
 # when its first PCI function is already occupied by the balloon device.
 vm_storage_check_device_boundary false \
   || die 'instance has an unexpected effective host device or root disk override'
+fi # original storage before start
+[ "$owner_phase" != before-start ] || exit 0
+if [ "$owner_phase" != after-start ]; then # original physical start
 state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
 [ "$state" = RUNNING ] || info "starting $YARD_INSTANCE_NAME temporarily (was: ${state:-unknown})"
 power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
@@ -513,6 +547,7 @@ fi
 if [ -n "${VM_CPU_WEIGHT:-}" ]; then
   power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
 fi
+fi # original physical start
 if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
   vm_storage_mount
 fi

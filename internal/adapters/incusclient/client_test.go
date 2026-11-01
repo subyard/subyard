@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/gorilla/websocket"
+	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -349,5 +353,154 @@ func TestFixtureExecResponderChoosesExitFromExactCapturedInput(t *testing.T) {
 		if err == nil || result.ExitCode != value.exit {
 			t.Fatalf("captured-input response: %+v %v", result, err)
 		}
+	}
+}
+
+func TestNativeExecRequiresExplicitIntegralReturnAfterStreamsDrain(t *testing.T) {
+	for _, mode := range []string{"zero", "nonzero", "negative", "missing", "string", "fractional", "failure-missing", "ordinary-missing", "ordinary-nonzero", "stream-nonzero", "unscoped-nonzero", "remote-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			server, err := testkit.NewIncusServer(testkit.TempDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			metadata := map[string]any{}
+			switch mode {
+			case "zero", "remote-failure":
+				metadata["return"] = 0
+			case "nonzero", "ordinary-nonzero", "stream-nonzero", "unscoped-nonzero":
+				metadata["return"] = 7
+			case "negative":
+				metadata["return"] = -1
+			case "string":
+				metadata["return"] = "0"
+			case "fractional":
+				metadata["return"] = 0.5
+			}
+			step := testkit.IncusServerExecStep{Stdout: []byte("complete output"), ReturnMetadata: metadata}
+			if mode == "failure-missing" || mode == "remote-failure" {
+				step.OperationError = "remote failed"
+			}
+			server.QueueExec(step)
+			observer := &custodyObserver{}
+			ctx := context.Background()
+			if !strings.HasPrefix(mode, "ordinary-") {
+				ctx = ports.WithNativeOperationObserver(ctx, observer)
+			}
+			if mode != "unscoped-nonzero" {
+				ctx = ports.WithNativeSynchronousConfigCAS(ctx)
+			}
+			client := New(server.SocketPath)
+			request := ports.InstanceExecRequest{Command: []string{"fixture"}}
+			var result ports.InstanceExecResult
+			if mode == "stream-nonzero" {
+				result, err = client.StreamExec(ctx, "subyard", "yard", request, bytes.NewReader(nil))
+			} else {
+				result, err = client.Exec(ctx, "subyard", "yard", request)
+			}
+			var failure *ports.NativeOperationFailure
+			witnessed := errors.As(err, &failure) && failure.ExecExitCode != nil
+			if witnessed != (mode == "nonzero" || mode == "negative") {
+				t.Fatal("completed failure custody scope changed", mode, err)
+			}
+			if witnessed && (failure.Operation != observer.terminal[0] || failure.Operation.Status != 200 || *failure.ExecExitCode != result.ExitCode || result.ExitCode == 0) {
+				t.Fatal("command exit lost exact real SDK200 tuple", failure, result.ExitCode)
+			}
+			if string(result.Stdout) != "complete output" {
+				t.Fatal("streams did not drain", result)
+			}
+			invalid := mode == "missing" || mode == "string" || mode == "fractional" || mode == "failure-missing"
+			if !strings.HasPrefix(mode, "ordinary-") {
+				if len(observer.accepted) != 1 {
+					t.Fatal("missing exact SDK acceptance")
+				}
+				final, queryErr := client.NativeOperationState(context.Background(), observer.accepted[0])
+				if invalid {
+					if len(observer.terminal) != 0 || queryErr == nil {
+						t.Fatal("invalid exec exit sealed or queried terminal", queryErr, observer.terminal)
+					}
+				} else {
+					status := 200
+					if mode == "remote-failure" {
+						status = 400
+					}
+					if queryErr != nil || len(observer.terminal) != 1 || final != observer.terminal[0] || final.Status != status {
+						t.Fatal("valid exec exit lost real remote status", queryErr, observer.terminal)
+					}
+					if mode == "remote-failure" && (!errors.As(err, &failure) || failure.Operation.Status != 400 || failure.ExecExitCode != nil) {
+						t.Fatal("existing real remote400 failure changed", err)
+					}
+				}
+			}
+			if mode == "zero" || mode == "ordinary-missing" {
+				if err != nil || result.ExitCode != 0 || observer.uncertain {
+					t.Fatal(result, err, observer.uncertain)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("missing/failed native return became success")
+			}
+			if observer.uncertain != invalid {
+				t.Fatalf("unknown=%v err=%v", observer.uncertain, err)
+			}
+			if mode == "negative" && result.ExitCode != -1 {
+				t.Fatal("signed exit lost")
+			}
+		})
+	}
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), math.MaxFloat64} {
+		if _, valid := explicitNativeExecExit(map[string]any{"return": value}); valid {
+			t.Fatal("invalid numeric return accepted", value)
+		}
+	}
+}
+
+// The official SDK operation finishes with return7 while output websockets are
+// held open. Only the owning test release drains them after bounded refusal.
+func TestNativeCompletedExecRequiresSDKStreamDrain(t *testing.T) {
+	fixture, err := testkit.NewIncusServer(testkit.TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.Close()
+	fixture.QueueExec(testkit.IncusServerExecStep{ExitCode: 7})
+	release := make(chan struct{})
+	blocked := make(chan struct{})
+	var once sync.Once
+	var handlers sync.WaitGroup
+	listener, err := net.Listen("unix", filepath.Join(testkit.TempDir(t), "exec.socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/websocket") && (strings.HasSuffix(r.URL.Query().Get("secret"), "-stdout") || strings.HasSuffix(r.URL.Query().Get("secret"), "-stderr")) {
+			handlers.Add(1)
+			defer handlers.Done()
+			conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			once.Do(func() { close(blocked) })
+			<-release
+			return
+		}
+		fixture.ServeHTTP(w, r)
+	})}
+	go server.Serve(listener)
+	defer func() { close(release); server.Close(); listener.Close(); handlers.Wait() }()
+	observer := &custodyObserver{}
+	ctx, cancel := context.WithTimeout(ports.WithNativeSynchronousConfigCAS(ports.WithNativeOperationObserver(context.Background(), observer)), 300*time.Millisecond)
+	defer cancel()
+	_, err = New(listener.Addr().String()).Exec(ctx, "project", "yard", ports.InstanceExecRequest{Command: []string{"fixture"}})
+	var failure *ports.NativeOperationFailure
+	if err == nil || errors.As(err, &failure) || !observer.uncertain || len(observer.terminal) != 1 || observer.terminal[0].Status != 200 {
+		t.Fatal("undrained streams became completed command failure", err, observer)
+	}
+	select {
+	case <-blocked:
+	default:
+		t.Fatal("withheld SDK stream was not reached")
 	}
 }

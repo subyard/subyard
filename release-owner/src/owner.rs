@@ -15,7 +15,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs::File,
     io::Read,
     path::Path,
@@ -38,6 +38,8 @@ pub struct Options {
     pub registry_raw: Option<Vec<u8>>,
     pub catalog: Vec<r::CapabilityDescriptor>,
     pub inherited_setting_ids: Vec<String>,
+    #[serde(default)]
+    pub command_overrides: Vec<native::CommandOverride>,
     pub rollback_target: Option<f::RollbackTarget>,
     pub migration_checkpoint: bool,
     pub source_ingress: Option<j::SourceIngress>,
@@ -181,7 +183,20 @@ impl Grant {
         Ok(Self { secret })
     }
 }
+/// Internal callers choose whether pending facts belong to the original
+/// operation or to a separately checked replacement assessment. This is not
+/// consent; replacement owners still validate their exact predecessor proof.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservationPurpose {
+    Plan,
+    Check,
+    OriginalRecovery,
+    ActivationRecovery,
+    ReplacementAssessment,
+}
+
 pub(crate) struct Observation {
+    pub(crate) observed_links: crate::wire::recovery_v1::ReleaseLinks,
     pub(crate) plan: plan::Plan,
     pub(crate) work: Vec<Work>,
     pub(crate) journal: Option<record::Journal>,
@@ -292,8 +307,21 @@ impl Owner {
         )?;
         crate::store::checked(&repository, true, false, false)?;
         let reader = FrozenReader::capture_native_helper(helper)?;
-        let catalog = record::Catalog::new(Some(options.catalog.clone()))?;
-        require(catalog.digest() == crate::migration_owner::builtin_catalog(true, true)?.digest())?;
+        let catalog = crate::migration_owner::current_catalog()?;
+        let caller_catalog = record::Catalog::new(Some(options.catalog.clone()))?;
+        require(
+            caller_catalog
+                .descriptors()
+                .iter()
+                .flatten()
+                .all(|descriptor| {
+                    catalog
+                        .descriptors()
+                        .iter()
+                        .flatten()
+                        .any(|compiled| compiled == descriptor)
+                }),
+        )?;
         let (registry, registry_digest) = record::Registry::from_frozen(
             &reader,
             options.registry_raw.as_deref().ok_or(Error::Invalid)?,
@@ -406,12 +434,15 @@ impl Owner {
             artifact: owner.options.artifact_digest.clone(),
             root: native::Identity::capture(root)?,
             repository: native::Identity::capture(&owner.repository)?,
+            inherited_setting_ids: owner.options.inherited_setting_ids.clone(),
+            command_overrides: owner.options.command_overrides.clone(),
         };
         owner.native(
             &N::Initialize { context },
             vec![
                 crate::store::io(rustix::io::dup(root))?,
                 crate::store::io(rustix::io::dup(&owner.repository))?,
+                crate::store::io(rustix::io::fcntl_dupfd_cloexec(std::io::stderr(), 3))?,
             ],
         )?;
         Ok(owner)
@@ -442,6 +473,15 @@ impl Owner {
                     process_schema: 2,
                     journal_schema: 2,
                     receipt_schema: 2,
+                })
+            }
+            "migration-owner-capabilities" => {
+                require(crate::migration_operation::supported_platform())?;
+                response.capabilities = Some(RecoveryCapabilities {
+                    contract: crate::recovery::MIGRATION_OWNER.into(),
+                    process_schema: 2,
+                    journal_schema: 2,
+                    receipt_schema: 1,
                 })
             }
             "runtime-activation-capabilities" => {
@@ -503,21 +543,39 @@ impl Owner {
         self.native(&request, vec![])
     }
     pub fn prepare(&self, goal: p::Goal, grant: Grant) -> Result<Prepared<'_>> {
+        self.prepare_observation(goal, grant, ObservationPurpose::Plan)
+    }
+    /// Terminal presentation only. The preparation and its grant are dropped;
+    /// no executable authority is returned or retained by the private Check.
+    pub fn check(&self, goal: p::Goal, grant: Grant) -> Result<p::Inspection> {
+        Ok(self
+            .prepare_observation(goal, grant, ObservationPurpose::Check)?
+            .inspection())
+    }
+    fn prepare_observation(
+        &self,
+        goal: p::Goal,
+        grant: Grant,
+        purpose: ObservationPurpose,
+    ) -> Result<Prepared<'_>> {
         self.store.reader.health()?;
         require(self.options.migration_sources.is_none())?;
         let cleanup = self.prepare_owner_cleanup(&goal)?;
-        let (observation, cleanup) = if let Some((observation, cleanup)) = cleanup {
+        let (mut observation, cleanup) = if let Some((observation, cleanup)) = cleanup {
             (observation, Some(cleanup))
         } else {
             (
                 if let Some(selection) = &self.options.replacement {
                     self.replacement_observation(goal, selection)?
                 } else {
-                    self.observe(goal)?
+                    self.observe_inner(goal, purpose)?
                 },
                 None,
             )
         };
+        if cleanup.is_none() {
+            self.inspect_ordinary_activation_recovery(&mut observation)?;
+        }
         self.store.reader.health()?;
         Ok(Prepared {
             owner: self,
@@ -814,7 +872,8 @@ impl Owner {
         request: &p::JournalReplacement,
     ) -> Result<Observation> {
         record::replacement(request)?;
-        let mut observation = self.observe_inner(goal, false, true)?;
+        let mut observation =
+            self.observe_inner(goal, ObservationPurpose::ReplacementAssessment)?;
         let before = observation.journal.as_ref().ok_or(Error::Invalid)?;
         let j = before.wire();
         require(
@@ -969,18 +1028,92 @@ impl Owner {
         self.store.reader.health()?;
         Ok(observation)
     }
+    pub(crate) fn observe_completed_metadata(
+        &self,
+        observations: &mut Vec<f::ResourceObservation>,
+        decisions: &mut Vec<p::RedactedDecision>,
+    ) {
+        // Optional ordinary presentation matches Go; new source admission still
+        // requires the complete proof and never accepts an omitted annotation.
+        if let Ok(proof) = crate::source_query::completed_proof(self) {
+            observations.push(f::ResourceObservation {
+                resource: "transition.source-metadata".into(),
+                class: "completed-metadata-v1".into(),
+                fingerprint: proof.binding.clone(),
+            });
+            decisions.push(p::RedactedDecision {
+                resource: "transition.source-metadata".into(),
+                decision: "preserve".into(),
+                result: proof.binding,
+                ..Default::default()
+            });
+        }
+    }
     pub(crate) fn observe(&self, goal: p::Goal) -> Result<Observation> {
-        self.observe_inner(goal, false, false)
+        self.observe_inner(goal, ObservationPurpose::Plan)
+    }
+    pub(crate) fn current_migration_receipt(&self, current: &record::Journal) -> Result<bool> {
+        for receipt in self.store.migration_owner_receipts()?.values() {
+            if receipt.wire().predecessor.transaction != current.wire().transaction {
+                continue;
+            }
+            receipt.source_evidence(&self.store)?;
+            let successor = record::Journal::new(receipt.wire().successor.clone())?;
+            let next = successor.wire();
+            if next.artifact_digest != self.options.artifact_digest
+                || next.registry_digest != self.registry_digest
+                || next.catalog_digest != self.catalog.digest()
+                || next.goal.target != self.options.releases.target
+            {
+                continue;
+            }
+            let bundle = self.store.bundle(&successor, &self.registry)?;
+            require(
+                bundle.helper == self.helper_digest()
+                    && bundle.session == self.session
+                    && bundle.facts.artifact_digest == self.options.artifact_digest,
+            )?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn blocked_source_observation(
+        &self,
+        goal: p::Goal,
+        message: &str,
+    ) -> Result<Observation> {
+        let links = self.links.observe()?;
+        let snapshot = self.store.read(&Address::journal())?;
+        let facts = f::PlanFacts {
+            goal, releases: self.options.releases.clone(), links: links.clone(),
+            artifact_digest: self.options.artifact_digest.clone(), registry_digest: self.registry_digest.clone(),
+            catalog_digest: self.catalog.digest().into(), observation_scope: snapshot.fingerprint(),
+            assessment: plan::assess(false, false, &[])?,
+            blockers: Some(vec![p::Blocker { code: "precondition-blocked".into(), resource: "transition.source".into(),
+                message: message.into(), retry: "Finish any unfinished transition with its exact retained runtime, then upgrade with released Go v0.22.0 and complete its migrations. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard update with fresh confirmation. Preserve existing installation data.".into() }]),
+            ..Default::default()
+        };
+        // This is a refusal, never an invitation to resume a different owner's
+        // journal. Its actual protected snapshot remains bound and untouched.
+        Ok(Observation {
+            observed_links: links,
+            plan: plan::Plan::new(facts)?,
+            work: vec![],
+            journal: None,
+            journal_snapshot: snapshot,
+            targets: vec![],
+        })
     }
     pub(crate) fn observe_recovery(&self, goal: p::Goal) -> Result<Observation> {
-        self.observe_inner(goal, true, true)
+        self.observe_inner(goal, ObservationPurpose::ActivationRecovery)
     }
     pub(crate) fn observe_inner(
         &self,
         goal: p::Goal,
-        fresh_activation: bool,
-        ignore_pending: bool,
+        purpose: ObservationPurpose,
     ) -> Result<Observation> {
+        let fresh_activation = purpose == ObservationPurpose::ActivationRecovery;
         require(goal.target == self.options.releases.target && record::direction(&goal.direction))?;
         require(!self.pre_v2_owner() || goal.direction == "activate-previous")?;
         let links = self.links.observe()?;
@@ -1022,14 +1155,70 @@ impl Owner {
             crate::graph::State::read(&self.store)?;
             self.store.recovery_for(journal)?;
         }
-        if let Some(current) = journal
-            .as_ref()
-            .filter(|j| !fresh_activation && !ignore_pending && j.wire().checkpoint != "complete")
-        {
+        // A read-only assessment uses one validated bundle snapshot. No native
+        // effect or repair occurs between this check and the pending-plan use.
+        // Authorization and later observations load and validate it again.
+        let mut current_bundle = None;
+        let current_owned = if let Some(current) = journal.as_ref().filter(|j| {
+            let j = j.wire();
+            j.goal.target == goal.target
+                && j.goal.direction == goal.direction
+                && j.artifact_digest == self.options.artifact_digest
+                && j.registry_digest == self.registry_digest
+                && j.catalog_digest == self.catalog.digest()
+        }) {
+            if self.store.has_bundle(&current.wire().transaction)? {
+                let bundle = self.store.bundle(current, &self.registry)?;
+                require(bundle.helper == self.helper_digest() && bundle.session == self.session)?;
+                current_bundle = Some(bundle);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !current_owned && self.options.source_artifact.is_some() {
+            self.native_quiescent(journal.as_ref().map(|j| j.wire()))?;
+            let receipt_owned = if let Some(current) = &journal {
+                self.current_migration_receipt(current)?
+            } else {
+                false
+            };
+            if !receipt_owned {
+                if journal
+                    .as_ref()
+                    .is_some_and(|j| j.wire().checkpoint != "complete")
+                {
+                    return self.blocked_source_observation(goal, "The unfinished transition belongs to its exact retained owner; a new Rust goal cannot adopt it.");
+                }
+                if !crate::source_query::fresh_source_supported(self)? {
+                    return self.blocked_source_observation(goal, "Fresh transitions require a completed Go v0.22.0 or newer source at its own current migration frontier.");
+                }
+            }
+        }
+        let owned_terminal = purpose == ObservationPurpose::OriginalRecovery
+            && if let Some(j) = journal
+                .as_ref()
+                .filter(|j| j.wire().checkpoint == "complete")
+            {
+                self.store.has_bundle(&j.wire().transaction)?
+            } else {
+                false
+            };
+        let mut pending_bundle = if let Some(current) = journal.as_ref().filter(|j| {
+            owned_terminal
+                || matches!(
+                    purpose,
+                    ObservationPurpose::Plan
+                        | ObservationPurpose::Check
+                        | ObservationPurpose::OriginalRecovery
+                ) && j.wire().checkpoint != "complete"
+        }) {
             require(
                 current.wire().goal.target == goal.target
                     && current.wire().goal.direction == goal.direction
-                    && current.wire().releases == self.options.releases
+                    && (owned_terminal || current.wire().releases == self.options.releases)
                     && current.wire().registry_digest == self.registry_digest
                     && current.wire().catalog_digest == self.catalog.digest()
                     && current.wire().artifact_digest == self.options.artifact_digest
@@ -1039,17 +1228,31 @@ impl Owner {
                         &current.wire().releases,
                     ),
             )?;
-            let bundle = self.store.bundle(current, &self.registry)?;
+            let bundle = match current_bundle.take() {
+                Some(bundle) => bundle,
+                None => self.store.bundle(current, &self.registry)?,
+            };
             require(bundle.helper == self.helper_digest() && bundle.session == self.session)?;
-            let plan = plan::Plan::new(bundle.facts)?;
-            self.store.reader.health()?;
-            return Ok(Observation {
-                plan,
-                work: bundle.work,
-                journal,
-                journal_snapshot,
-                targets: bundle.targets,
-            });
+            Some(bundle)
+        } else {
+            None
+        };
+        if matches!(
+            purpose,
+            ObservationPurpose::Plan | ObservationPurpose::Check
+        ) {
+            if let Some(bundle) = pending_bundle.take() {
+                let plan = plan::Plan::new(bundle.facts)?;
+                self.store.reader.health()?;
+                return Ok(Observation {
+                    observed_links: links,
+                    plan,
+                    work: bundle.work,
+                    journal,
+                    journal_snapshot,
+                    targets: bundle.targets,
+                });
+            }
         }
 
         let mut initial_artifacts = crate::assets::VerificationPhase::new();
@@ -1086,6 +1289,7 @@ impl Owner {
             {
                 let facts=f::PlanFacts{goal,releases,links,artifact_digest:self.options.artifact_digest.clone(),registry_digest:self.registry_digest.clone(),catalog_digest:self.catalog.digest().into(),observation_scope:digest(b"blocked-source-checkpoint-reader"),assessment:plan::assess(false,false,&[])?,blockers:Some(vec![p::Blocker{code:"rollback-incompatible".into(),resource:"transition.source-checkpoint-compatibility".into(),message:"the current source release cannot verify the authoritative migration checkpoint".into(),retry:"install a verified checkpoint-reader bridge before advancing migrations, then run yard update --check".into()}]),..Default::default()};
                 return Ok(Observation {
+                    observed_links: facts.links.clone(),
                     plan: plan::Plan::new(facts)?,
                     work: vec![],
                     journal,
@@ -1132,7 +1336,7 @@ impl Owner {
             let fresh = journal.as_ref().is_none_or(|j| {
                 j.wire().goal.target != goal.target || j.wire().goal.direction != goal.direction
             });
-            let compatible = (!fresh || version >= semver::Version::new(0, 11, 0))
+            let compatible = (!fresh || version >= semver::Version::new(0, 22, 0))
                 && (!target.registry_digest.is_empty()
                     || self.registry.wire().migrations.iter().flatten().all(|m| {
                         self.catalog
@@ -1178,6 +1382,7 @@ impl Owner {
                 ..Default::default()
             };
             return Ok(Observation {
+                observed_links: facts.links.clone(),
                 plan: plan::Plan::new(facts)?,
                 work: vec![],
                 journal,
@@ -1228,6 +1433,7 @@ impl Owner {
         }];
         let mut blockers = ingress.blockers;
         let mut work = vec![];
+        let mut captured_complete_source = None;
         let mut ingress_rank = 0;
         for operation in ingress.operations {
             let (kind, rank) = match operation.kind.as_str() {
@@ -1253,18 +1459,6 @@ impl Owner {
             });
             work.push(w);
         }
-        let legacy_git = yards.iter().flat_map(|y| &y.sources).any(|s| {
-            s.label.contains(".sync/settings/")
-                && s.assignments.iter().any(|a| a.name == "SSH_PORT")
-        });
-        if legacy_git {
-            let mut ports = BTreeSet::new();
-            for y in &yards {
-                if y.access == "local" && y.ssh_port != 0 {
-                    require(ports.insert(y.ssh_port))?;
-                }
-            }
-        }
         let mut authority = ledger.ledger().authority().clone();
         let mut before = ledger_execution::semantic_snapshot(&ledger)?;
         let pending = self
@@ -1285,31 +1479,26 @@ impl Owner {
                 .find(|m| m.id == id)
                 .ok_or(Error::Invalid)?;
             match migration.kind.as_str() {
-                "local-ssh-port-settings-v2-to-v3" | "test-vms-settings-v1-to-v2" => {
+                kind if settings::migration(kind).is_some() => {
                     let mut migration_decisions = Vec::new();
                     for original in &yards {
-                        let mut input = self
-                            .call(N::CaptureYard {
-                                session: self.session.clone(),
-                                yard: original.yard.clone(),
-                                resolved: migration.kind == "local-ssh-port-settings-v2-to-v3",
-                            })?
-                            .settings
-                            .ok_or(Error::Invalid)?;
-                        let local = migration.kind == "local-ssh-port-settings-v2-to-v3";
-                        let inheritance = if local {
-                            ssh_inheritance(&input)?
-                        } else {
-                            let (inherited, pin) =
-                                template_inheritance(&input, &self.options.inherited_setting_ids)?;
-                            input.inherited = inherited;
-                            pin
-                        };
-                        let conversion = if local {
-                            settings::local_ssh_conversion(&input, legacy_git)
-                        } else {
-                            settings::test_vm_conversion(&input)
-                        };
+                        let definition =
+                            settings::migration(&migration.kind).ok_or(Error::Invalid)?;
+                        let overlay_prepared = work.iter().any(|item| {
+                            matches!(
+                                &item.recipe,
+                                Recipe::Settings { recipe, .. }
+                                    if recipe.yard == original.yard
+                            )
+                        });
+                        let (input, inheritance) = (definition.prepare)(settings::Capture::new(
+                            self,
+                            original,
+                            overlay_prepared,
+                            &yards,
+                        ))?;
+                        require(input.yard == original.yard)?;
+                        let conversion = (definition.convert)(&input, &yards);
                         let conversion = match conversion {
                             Ok(v) => v,
                             Err(_) => {
@@ -1361,18 +1550,13 @@ impl Owner {
                             };
                             observations.push(f::ResourceObservation {
                                 resource: format!("yard.{}", input.yard),
-                                class: if local {
-                                    "local-ssh-port-settings-v1"
-                                } else {
-                                    "yard-settings-file-v1"
-                                }
-                                .into(),
+                                class: definition.resource_class.into(),
                                 fingerprint: expected,
                             });
                             work.push(Work::settings(
                                 migration,
+                                definition,
                                 recipe,
-                                local,
                                 &conversion.decision,
                             )?);
                         }
@@ -1387,14 +1571,117 @@ impl Owner {
                             && migration.from_epoch == 1
                             && migration.to_epoch == 2,
                     )?;
-                    let owner = self
-                        .call(N::CaptureOwner {
+                    let mut owner = if let Some(original) = &pending_bundle {
+                        // Recovery reobserves the original preparation; pending state
+                        // is never a substitute for an original COMPLETE source proof.
+                        let mut owners = original.work.iter().enumerate().filter(|(_, work)| {
+                            matches!(work.recipe, Recipe::TestYardOwnerRegistration(_))
+                        });
+                        if let Some((index, work)) = owners.next() {
+                            require(
+                                owners.next().is_none() && work.intent.migration == migration.id,
+                            )?;
+                            let Recipe::TestYardOwnerRegistration(before) = &work.recipe else {
+                                unreachable!()
+                            };
+                            self.bind_installed_recipe(
+                                &before.prepared_recipe,
+                                &original.installed,
+                            )?;
+                            let current = journal.as_ref().ok_or(Error::Invalid)?.wire();
+                            let step = current
+                                .steps
+                                .as_ref()
+                                .and_then(|steps| steps.get(index))
+                                .ok_or(Error::Invalid)?;
+                            let binding = self
+                                .binding(current, crate::program::ordinal(&original.work, index)?);
+                            let intent = self.store.read(&Address::native(
+                                &current.transaction,
+                                binding.ordinal,
+                                "intent",
+                            )?)?;
+                            if step.checkpoint == "intent" && intent.bytes().is_none() {
+                                require(step.evidence.is_none())?;
+                                self.store.validate_owner_producer(&binding)?;
+                                let recovery = Address::at(
+                                    vec![
+                                        "release-transition".into(),
+                                        "v2".into(),
+                                        "transactions".into(),
+                                        current.transaction.clone(),
+                                        "recovery".into(),
+                                    ],
+                                    format!("{}.json", step.id),
+                                    true,
+                                );
+                                require(self.store.read(&recovery)?.bytes().is_none())?;
+                                let observed = self
+                                    .call(N::CaptureOwnerObservation {
+                                        session: self.session.clone(),
+                                    })?
+                                    .owner
+                                    .ok_or(Error::Invalid)?;
+                                require(observed.fingerprint()? == before.fingerprint()?)?;
+                            } else {
+                                let actual = self.fingerprint(work, current)?;
+                                require(
+                                    actual == work.intent.expected || actual == work.intent.desired,
+                                )?;
+                            }
+                            before.clone()
+                        } else {
+                            let observed = self
+                                .call(N::CaptureOwnerObservation {
+                                    session: self.session.clone(),
+                                })?
+                                .owner
+                                .ok_or(Error::Invalid)?;
+                            require(
+                                matches!(observed.state.as_str(), "absent" | "current")
+                                    && observed.prepared_recipe.is_empty(),
+                            )?;
+                            observed
+                        }
+                    } else if purpose == ObservationPurpose::ReplacementAssessment
+                        && journal
+                            .as_ref()
+                            .is_some_and(|j| j.wire().checkpoint != "complete")
+                    {
+                        // A checked replacement may observe a no-op registration,
+                        // but pending state grants no fresh owner preparation.
+                        let observed = self
+                            .call(N::CaptureOwnerObservation {
+                                session: self.session.clone(),
+                            })?
+                            .owner
+                            .ok_or(Error::Invalid)?;
+                        require(
+                            matches!(observed.state.as_str(), "absent" | "current")
+                                && observed.prepared_recipe.is_empty(),
+                        )?;
+                        observed
+                    } else {
+                        let complete_source = crate::source_query::complete_reference(self)?;
+                        require(match &complete_source {
+                            Some(reference) => journal_snapshot
+                                .bytes()
+                                .is_some_and(|raw| digest(raw) == reference.journal_digest),
+                            None => journal_snapshot.bytes().is_none(),
+                        })?;
+                        captured_complete_source = Some(complete_source.clone());
+                        self.call(N::CaptureOwner {
                             session: self.session.clone(),
+                            complete_source: complete_source.clone(),
                         })?
                         .owner
-                        .ok_or(Error::Invalid)?;
+                        .ok_or(Error::Invalid)?
+                    };
                     owner.validate()?;
                     if !matches!(owner.state.as_str(), "absent" | "current") {
+                        if pending_bundle.is_none() {
+                            owner.program = Some(crate::test_vm_owner::program(&owner)?);
+                        }
                         let expected = owner.fingerprint()?;
                         let desired = owner.desired().fingerprint()?;
                         let intent = f::PlannerStepIntent {
@@ -1476,7 +1763,13 @@ impl Owner {
             authority = edge.into_after();
         }
         if let Some(current) = journal.as_ref().filter(|j| {
-            j.wire().goal.target == goal.target
+            // Ordinary completed inspection observes current state after archive retirement.
+            !(j.wire().checkpoint == "complete"
+                && matches!(
+                    purpose,
+                    ObservationPurpose::Plan | ObservationPurpose::Check
+                ))
+                && j.wire().goal.target == goal.target
                 && j.wire().goal.direction == goal.direction
                 && j.wire().artifact_digest == self.options.artifact_digest
                 && j.wire().registry_digest == self.registry_digest
@@ -1488,7 +1781,6 @@ impl Owner {
                     original.session == self.session && original.helper == self.helper_digest(),
                 )?;
                 if self.restore_owner_results(current.wire(), &original, None)? {
-                    self.project_owner_activation(&original.work)?;
                     self.restore_after_owner(current.wire(), &original)?;
                 }
             }
@@ -1497,7 +1789,23 @@ impl Owner {
         let mut targets = vec![];
         let mut activation_scope = vec![];
         let mut consequences = vec![];
+        // Only an ordinary, original-projection forward check can omit profile
+        // capture: pending source migrations already determine those fingerprints.
+        // Ready, checkpoint/history, replacement and recovery use the full path.
+        let pending_report = purpose == ObservationPurpose::Check
+            && journal.is_none()
+            && ledger.checkpoint().is_none()
+            && goal.direction == "activate-target"
+            && self.options.source_ingress.is_none()
+            && self.options.source_checkpoint.is_none()
+            && !self.options.migration_checkpoint
+            && self
+                .registry
+                .history()
+                .complete(ledger.ledger().authority())
+                .is_err();
         let mut owners = inventory.owners;
+        let profile_count = owners.len();
         owners.extend(
             [
                 "materialized-config",
@@ -1512,38 +1820,45 @@ impl Owner {
         require(owners.len() <= 256 && owners.iter().all(|id| record::safe_id(id)))?;
         let mut seen = BTreeSet::new();
         require(owners.iter().all(|id| seen.insert(id.clone())))?;
-        for owner in owners.drain(..) {
-            let mut current = match self.call(N::CaptureActivation {
-                session: self.session.clone(),
-                owner: owner.clone(),
-                fresh: false,
-            }) {
-                Ok(reply) => reply.targets,
-                Err(error) => {
-                    self.store.reader.health()?;
-                    if !matches!(error, Error::Io | Error::Stale | Error::Unknown) {
-                        return Err(error);
-                    }
-                    let cause = self.last_cause.borrow();
-                    let cause = cause.as_ref();
-                    let conflict = cause.is_some_and(|d| d.kind == "component-conflict");
-                    let mut item = blocker(
-                        if conflict {
-                            "activation-ambiguous"
-                        } else {
-                            "dependency-unavailable"
-                        },
-                        &format!("activation.{owner}"),
-                        &format!("activation reconciler \"{owner}\" cannot be observed safely"),
-                    );
-                    if let Some(cause) = cause.filter(|d| record::text(&d.message, 512, true)) {
-                        item.message = cause.message.clone();
-                        if record::action(&cause.retry) {
-                            item.retry = cause.retry.clone();
+        for (index, owner) in owners.drain(..).enumerate() {
+            let mut current = if pending_report
+                && (index < profile_count
+                    || matches!(owner.as_str(), "core-guest-runtime" | "key-tools-runtime"))
+            {
+                vec![]
+            } else {
+                match self.call(N::CaptureActivation {
+                    session: self.session.clone(),
+                    owner: owner.clone(),
+                    fresh: false,
+                }) {
+                    Ok(reply) => reply.targets,
+                    Err(error) => {
+                        self.store.reader.health()?;
+                        if !matches!(error, Error::Io | Error::Stale | Error::Unknown) {
+                            return Err(error);
                         }
+                        let cause = self.last_cause.borrow();
+                        let cause = cause.as_ref();
+                        let conflict = cause.is_some_and(|d| d.kind == "component-conflict");
+                        let mut item = blocker(
+                            if conflict {
+                                "activation-ambiguous"
+                            } else {
+                                "dependency-unavailable"
+                            },
+                            &format!("activation.{owner}"),
+                            &format!("activation reconciler \"{owner}\" cannot be observed safely"),
+                        );
+                        if let Some(cause) = cause.filter(|d| record::text(&d.message, 512, true)) {
+                            item.message = cause.message.clone();
+                            if record::action(&cause.retry) {
+                                item.retry = cause.retry.clone();
+                            }
+                        }
+                        blockers.push(item);
+                        continue;
                     }
-                    blockers.push(item);
-                    continue;
                 }
             };
             if owner == "materialized-config" {
@@ -1564,12 +1879,7 @@ impl Owner {
                 if !all_local {
                     current.retain(|t| t.yard == self.options.yard);
                 }
-                current.sort_by(|a, b| {
-                    a.yard.cmp(&b.yard).then_with(|| {
-                        (a.class != "materialized-integrations")
-                            .cmp(&(b.class != "materialized-integrations"))
-                    })
-                });
+                current.sort_by(native::Target::materialized_order);
             }
             for target in &current {
                 target.validate()?;
@@ -1608,9 +1918,9 @@ impl Owner {
             targets.extend(current);
         }
         require(
-            work.len()
-                .checked_add(targets.len())
-                .is_some_and(|n| n <= 2048),
+            crate::program::ordinal(&work, work.len())?
+                .checked_add(targets.len() as u64)
+                .is_some_and(|n| n <= 2049),
         )?;
         self.after_owner_preflight(&targets, &work)?;
         // Rehash all actual release bytes after native capture. Never reuse
@@ -1646,6 +1956,11 @@ impl Owner {
                 });
             }
         }
+        // Source facts remain the exact original COMPLETE revision across ALL
+        // native capture, checked with the final independently verified assets.
+        if let Some(original) = captured_complete_source {
+            require(original == crate::source_query::complete_reference(self)?)?;
+        }
         if let Some(proof) = &self.options.config_layout {
             observations.push(f::ResourceObservation {
                 resource: "release.config-layout".into(),
@@ -1672,6 +1987,16 @@ impl Owner {
             class: "release-native-v1".into(),
             fingerprint: crate::bundle::binding(&work, &targets)?,
         });
+        let mut scope_source = ledger.authority().fingerprint();
+        if let Some(bundle) = pending_bundle.as_ref() {
+            let current = journal.as_ref().ok_or(Error::Invalid)?;
+            scope_source = self.bundle_scope_source(current.wire(), bundle, &ledger)?;
+        }
+        observations.push(f::ResourceObservation {
+            resource: "migration-history.authority".into(),
+            class: "validated-migration-authority-v1".into(),
+            fingerprint: scope_source.clone(),
+        });
         let (scope, checkpoint_consent) = current_observation_scope(
             &activation_scope,
             &self.options.inherited_setting_ids,
@@ -1680,7 +2005,7 @@ impl Owner {
                 .filter(|_| !fresh_activation)
                 .map(|j| j.wire()),
             self.options.migration_checkpoint,
-            &ledger.authority().fingerprint(),
+            &scope_source,
         )?;
         let checkpoint_work = self.options.migration_checkpoint
             && (journal
@@ -1713,6 +2038,12 @@ impl Owner {
                 fingerprint: self.store.read(&Address::checkpoint())?.fingerprint(),
             });
         }
+        if journal
+            .as_ref()
+            .is_some_and(|j| j.wire().checkpoint == "complete")
+        {
+            self.observe_completed_metadata(&mut observations, &mut decisions);
+        }
         let changed = !work.is_empty()
             || links.active != goal.target
             || targets.iter().any(|t| t.state == "stale")
@@ -1744,6 +2075,7 @@ impl Owner {
         };
         self.store.reader.health()?;
         Ok(Observation {
+            observed_links: facts.links.clone(),
             plan: plan::Plan::new(facts)?,
             work,
             journal,
@@ -1759,9 +2091,9 @@ pub struct CustodyContext {
     data_root: native::Identity,
 }
 #[derive(Clone, Serialize)]
-struct ActivationScope {
-    id: String,
-    desired: String,
+pub(crate) struct ActivationScope {
+    pub(crate) id: String,
+    pub(crate) desired: String,
 }
 fn observation_scope(
     activation: &[ActivationScope],
@@ -1791,7 +2123,7 @@ fn observation_scope(
         false,
     )?))
 }
-fn current_observation_scope(
+pub(crate) fn current_observation_scope(
     activation: &[ActivationScope],
     inherited: &[String],
     journal: Option<&j::Record>,
@@ -1860,74 +2192,6 @@ fn legacy_source_blocker() -> p::Blocker {
         message: "Sources before v0.11.0 are unsupported.".into(),
         retry: "Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data. Review and confirm its removal plan. After verified cleanup, install a new version separately.".into(),
     }
-}
-
-fn ssh_inheritance(yard: &settings::YardSettings) -> Result<String> {
-    let mut inputs = BTreeMap::new();
-    for source in &yard.sources {
-        if source.role.contains("scalar settings") {
-            inputs.insert(
-                source.label.clone(),
-                settings::snapshot_fingerprint(source.exists, &source.sha256)?,
-            );
-        }
-    }
-    Ok(digest(&codec::encode(&inputs, false)?))
-}
-fn template_inheritance(
-    yard: &settings::YardSettings,
-    command: &[String],
-) -> Result<(BTreeSet<String>, String)> {
-    #[derive(Serialize)]
-    struct Resource<'a> {
-        role: &'a str,
-        settings: Vec<String>,
-    }
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Value<'a> {
-        schema_version: i64,
-        resources: Vec<Resource<'a>>,
-        command_setting_ids: Vec<String>,
-    }
-    let affected = |name: &str| matches!(name, "YARD_TEMPLATE" | "NESTED_E2E_VMS");
-    let mut inherited = BTreeSet::new();
-    let mut resources = vec![];
-    for role in ["shared", "host"] {
-        let source = yard
-            .sources
-            .iter()
-            .find(|s| s.role == role)
-            .ok_or(Error::Invalid)?;
-        let names = source
-            .assignments
-            .iter()
-            .filter(|a| affected(&a.name))
-            .map(|a| a.name.clone())
-            .collect::<BTreeSet<_>>();
-        inherited.extend(names.iter().cloned());
-        resources.push(Resource {
-            role,
-            settings: names.into_iter().collect(),
-        });
-    }
-    let ids = command
-        .iter()
-        .filter(|s| affected(s))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    inherited.extend(ids.iter().cloned());
-    Ok((
-        inherited,
-        digest(&codec::encode(
-            &Value {
-                schema_version: 1,
-                resources,
-                command_setting_ids: ids.into_iter().collect(),
-            },
-            false,
-        )?),
-    ))
 }
 
 fn same_intents(j: &j::Record, f: &f::PlanFacts) -> bool {

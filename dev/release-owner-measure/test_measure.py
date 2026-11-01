@@ -60,6 +60,27 @@ os._exit(0)
             pair["rust"]["cpu_seconds"] = 1.2
         assert measure.comparison(pairs, 1, replicates=100)["status"] == "FAIL"
         assert measure.comparison(pairs[:1], 1, replicates=100)["status"] == "INCONCLUSIVE"
+        source, guest = root / "logical-source", root / "logical-guest"
+        source.write_bytes(b"approved"); guest.write_bytes(source.read_bytes())
+        program = (measure.ROOT / "internal/adapters/reconcileruntime/integration_inventory.py").read_text().replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0")
+        script = (measure.ROOT / "internal/testkit/cmd/empty-incus/config-write.sh").read_text()
+        history = {"source": str(source), "guest": str(guest), "destination": "/home/dev/.fixture", "inventoryProgramSHA256": measure.hashlib.sha256(program.encode()).hexdigest()}
+        shell = {"command": ["sh", "-eu", "-c", script, "subyard", history["destination"], "1000"], "stdinSHA256": measure.sha(source), "exit": 0}
+        python = {"command": ["python3", "-B", "-c", program, "configs-write"], "stdinSHA256": "b" * 64, "payloadSHA256": measure.sha(source), "exit": 0}
+        inventory = [{"inventory": kind, "stdinSHA256": "c" * 64, "exit": 0} for kind in ("configs-prepare", "configs-commit")]
+        events = [inventory[0], shell, inventory[1]]
+        expected = measure.logical_native_effects(events, history)
+        assert expected == measure.logical_native_effects([inventory[0], python, inventory[1]], history)
+        assert expected != measure.logical_native_effects(events[:-1], history)
+        assert expected != measure.logical_native_effects(list(reversed(events)), history)
+        for invalid in ({**python, "payloadSHA256": "d" * 64}, {**shell, "stdinSHA256": "d" * 64}, {**inventory[0], "inventory": "unknown"}, {"stdinSHA256": "c" * 64, "exit": 0}, {**shell, "inventory": "configs-commit"}):
+            try:
+                measure.logical_native_effects([invalid], history)
+                raise AssertionError("unknown or changed native effect was accepted")
+            except RuntimeError:
+                pass
+        guest.write_bytes(b"different")
+        assert expected != measure.logical_native_effects(events, history)
         fixture_root = root / "fixture"
         fixture_root.mkdir()
         data = fixture_root / "data"
@@ -102,6 +123,24 @@ os._exit(0)
         fixture = SimpleNamespace(root=declined, config=config, runtime=runtime, env={},
             journal=config / "journal.json", retained=retained, retained_hash=measure.sha(retained), project_marker=project)
         verify = measure.module("refusal_fixture", measure.ROOT / "dev/verify-release-upgrades.py")
+        # Both history arms must supply the verified direct bridge asset path.
+        class HistoryBoundaryReached(Exception):
+            pass
+        def history_boundary(release, version, arch, fixture_root, baselines, checkpointed, name):
+            assert baselines[verify.DIRECT_BASELINE] == root / ("baseline-" + verify.DIRECT_BASELINE)
+            assert all(baselines[v] == root / ("baseline-" + v) for v in verify.HISTORY_BASELINES)
+            assert name == "fixture" and checkpointed == current_workload.startswith("checkpoint")
+            raise HistoryBoundaryReached
+        boundary = SimpleNamespace(HISTORY_BASELINES=verify.HISTORY_BASELINES,
+            DIRECT_BASELINE=verify.DIRECT_BASELINE, history_chain=history_boundary,
+            set_fixture_observation=lambda control: None)
+        for current_workload in ("legacy-history-recovery", "checkpoint-history-recovery"):
+            try:
+                measure.prepare_arm(boundary, root / "release", "candidate", root, "amd64",
+                                    current_workload, root, root)
+                raise AssertionError("history boundary unexpectedly returned")
+            except HistoryBoundaryReached:
+                pass
         calls = []
         saved = measure.command_measure
         def refusal(command, env, directory, interval):
@@ -124,5 +163,33 @@ os._exit(0)
         print(json.dumps({"status": "PASS", "controls": results}, sort_keys=True))
 
 
+def fixture_failure_control():
+    with tempfile.TemporaryDirectory(prefix="subyard-measure-witness-control-", dir="/tmp") as temporary:
+        root = Path(temporary)
+        server = root / "server"
+        server.write_text("#!/usr/bin/python3\nimport time\nprint('ready', flush=True)\ntime.sleep(60)\n")
+        server.chmod(0o700)
+        output = root / "output"
+        output.mkdir()
+        error = RuntimeError("original setup failure")
+        try:
+            with measure.fixture_root(server, output) as fixture:
+                journal = fixture / "fixture/home/.config/subyard/release-transition/v2/journal.json"
+                journal.parent.mkdir(parents=True)
+                journal.write_bytes(b"synthetic journal witness")
+                (fixture / "fixture/unexpected-host-command").symlink_to(root / "outside")
+                raise error
+        except RuntimeError as caught:
+            assert caught is error
+        else:
+            raise AssertionError("setup failure disappeared")
+        witness = output / "failure-witness"
+        statuses = json.loads((witness / "status.json").read_text())
+        assert (witness / str(journal.relative_to(fixture)).replace("/", "__")).read_bytes() == b"synthetic journal witness"
+        assert statuses["fixture/unexpected-host-command"].startswith("error:")
+        assert not fixture.exists()
+        print("fixture failure capture: PASS")
+
+
 if __name__ == "__main__":
-    main()
+    fixture_failure_control() if sys.argv[1:] == ["--fixture-failure-control"] else main()

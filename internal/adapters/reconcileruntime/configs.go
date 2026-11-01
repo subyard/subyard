@@ -45,6 +45,7 @@ type PreparedConfigs struct {
 	sources             map[configSourceKey]configSourceBytes
 	packageSources      []config.MaterializedAsset
 	packageIdentities   map[string]string
+	afterOwnerFiles     []afterOwnerConfigFilePhysical
 }
 
 type configSourceKey struct {
@@ -296,6 +297,14 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 		}
 	}
 	files, payloads, entries := prepared.files, prepared.payloads, prepared.entries
+	var atDesired map[string]bool
+	if prepared.afterOwnerFiles != nil {
+		var err error
+		atDesired, err = runtime.checkAfterOwnerConfigFiles(ctx, prepared)
+		if err != nil {
+			return err
+		}
+	}
 	if recheck {
 		files = slices.Clone(files)
 		for i := range files {
@@ -306,8 +315,17 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if output == nil {
 		output = io.Discard
 	}
-	if len(entries) != 0 || prepared.previewSkillCutover {
-		if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {
+	prepareEntries := entries
+	if atDesired != nil {
+		prepareEntries = nil
+		for _, entry := range entries {
+			if !atDesired[entry.Path] {
+				prepareEntries = append(prepareEntries, entry)
+			}
+		}
+	}
+	if (len(prepareEntries) != 0 || prepared.previewSkillCutover) && runtime.afterOwnerIntegrations == nil {
+		if _, err := runtime.integrationInventory(ctx, "configs-prepare", prepareEntries, ""); err != nil {
 			return err
 		}
 	}
@@ -318,14 +336,28 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			fmt.Fprintf(output, "  [ ok ] %s: no source — skipping\n", file.label)
 			continue
 		}
-		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
+		if atDesired[file.destination] {
+			copied[file.label] = true
+			continue
+		}
+		var applyErr error
+		if prepared.afterOwnerFiles != nil {
+			index := slices.IndexFunc(prepared.afterOwnerFiles, func(row afterOwnerConfigFilePhysical) bool { return string(row.Destination) == file.destination })
+			if index < 0 {
+				return domain.ErrPlanStale
+			}
+			applyErr = runtime.writeAfterOwnerConfigFile(ctx, file, payload, prepared.afterOwnerFiles[index])
+		} else {
+			applyErr = runtime.applyGuestConfig(ctx, file, payload)
+		}
+		if err := applyErr; err != nil {
 			return fmt.Errorf("apply %s: %w", file.label, err)
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
 			file.label, runtime.devUser(), strings.TrimPrefix(file.destination, "/home/"+runtime.devUser()+"/"))
 	}
-	if len(entries) != 0 || prepared.previewSkillCutover {
+	if (len(entries) != 0 || prepared.previewSkillCutover) && runtime.afterOwnerIntegrations == nil {
 		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, ""); err != nil {
 			return err
 		}

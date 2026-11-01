@@ -12,6 +12,7 @@ use crate::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 const MAX: usize = 96 << 20;
 const AFTER_OWNER_MAX: usize = crate::prepared_payload::FILE_MAX;
 #[derive(Serialize, Deserialize)]
@@ -178,7 +179,7 @@ impl PackedRecipe {
         Ok(value)
     }
     pub(crate) fn fingerprint(&self, store: &Store) -> Result<String> {
-        Ok(digest(&self.raw(store)?))
+        codec::hash_native_recipe(&self.wire(store)?)
     }
     fn pack(lease: &UpdateLease<'_>, wire: Recipe) -> Result<Self> {
         wire.validate_shape()?;
@@ -264,7 +265,7 @@ impl PackedRecipe {
                 }),
         )
     }
-    fn raw(&self, store: &Store) -> Result<Vec<u8>> {
+    fn wire(&self, store: &Store) -> Result<Recipe> {
         self.validate()?;
         let mut total = 0usize;
         let files = self
@@ -292,7 +293,7 @@ impl PackedRecipe {
                     .collect::<Result<Vec<_>>>()
             })
             .transpose()?;
-        let raw = codec::encode_native_recipe(&Recipe {
+        Ok(Recipe {
             version: self.version,
             owner: self.owner.clone(),
             source: self.source.clone(),
@@ -312,9 +313,10 @@ impl PackedRecipe {
                 require(bytes.len() <= AFTER_OWNER_MAX)?;
                 STANDARD.encode(bytes)
             },
-        })?;
-        require(raw.len() <= MAX)?;
-        Ok(raw)
+        })
+    }
+    fn raw(&self, store: &Store) -> Result<Vec<u8>> {
+        codec::encode_native_recipe(&self.wire(store)?)
     }
 }
 pub(crate) fn validate<'a>(
@@ -341,7 +343,7 @@ pub(crate) fn validate<'a>(
     )?;
     for (hash, recipe) in recipes {
         recipe.validate()?;
-        require(digest(&recipe.raw(store)?) == *hash)?;
+        require(recipe.fingerprint(store)? == *hash)?;
     }
     Ok(())
 }
@@ -489,25 +491,38 @@ impl Owner {
         let packed = recipes.get(hash).ok_or(Error::Invalid)?;
         let raw = packed.raw(&self.store)?;
         require(digest(&raw) == hash)?;
-        for (offset, part) in raw.chunks(crate::prepared_payload::CHUNK).enumerate() {
-            let offset = offset * crate::prepared_payload::CHUNK;
-            let reply = self.call(native::Request::BindInstalledRecipe {
+        require(!raw.is_empty() && raw.len() <= MAX)?;
+        use rustix::fs::{self, MemfdFlags, Mode, SealFlags};
+        let fd = fs::memfd_create(
+            "subyard-installed-recipe",
+            MemfdFlags::ALLOW_SEALING | MemfdFlags::CLOEXEC,
+        )
+        .map_err(|_| Error::Io)?;
+        let mut file = std::fs::File::from(fd);
+        file.write_all(&raw).map_err(|_| Error::Io)?;
+        fs::fchmod(&file, Mode::from_raw_mode(0o600)).map_err(|_| Error::Io)?;
+        fs::fcntl_add_seals(
+            &file,
+            SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+        )
+        .map_err(|_| Error::Io)?;
+        let reply = self.native(
+            &native::Request::BindSealedInstalledRecipe {
                 session: self.session.clone(),
                 recipe_hash: hash.to_owned(),
-                offset: offset as u64,
                 total: raw.len() as u64,
-                content: STANDARD.encode(part),
-                target: target.filter(|_| offset + part.len() == raw.len()).cloned(),
-            })?;
-            let chunk = reply.installed_chunk.ok_or(Error::Invalid)?;
-            require(
-                chunk.recipe_hash == hash
-                    && chunk.offset == offset as u64
-                    && chunk.total == raw.len() as u64
-                    && chunk.content.is_empty()
-                    && chunk.complete == (offset + part.len() == raw.len()),
-            )?;
-        }
+                target: target.cloned(),
+            },
+            vec![file.into()],
+        )?;
+        let chunk = reply.installed_chunk.ok_or(Error::Invalid)?;
+        require(
+            chunk.recipe_hash == hash
+                && chunk.offset == 0
+                && chunk.total == raw.len() as u64
+                && chunk.content.is_empty()
+                && chunk.complete,
+        )?;
         Ok(())
     }
 }
@@ -818,6 +833,7 @@ mod tests {
                 &targets,
                 &case.context.session,
                 &recipes,
+                None,
             )
             .unwrap();
         drop(raw);
@@ -878,6 +894,7 @@ mod tests {
             controller: "c".repeat(64),
             shared_images: true,
             prepared_recipe: hash,
+            ..Default::default()
         };
         let semantic = before.semantic();
         assert_eq!(
@@ -919,6 +936,28 @@ mod tests {
         let packed = PackedRecipe::pack(&store.lock().unwrap(), recipe).unwrap();
         assert_eq!(packed.raw(&store).unwrap(), raw);
         assert_eq!(store.payload_usage().unwrap().roots, 0);
+    }
+    #[test]
+    fn streamed_fingerprint_rechecks_protected_payload_bytes() {
+        let (f, store, _, _) = fixture();
+        let packed = PackedRecipe::pack(&store.lock().unwrap(), wire()).unwrap();
+        let raw = packed.raw(&store).unwrap();
+        let recipe_hash = digest(&raw);
+        assert_eq!(packed.fingerprint(&store).unwrap(), recipe_hash);
+        let recipes = BTreeMap::from([(recipe_hash.clone(), packed.clone())]);
+        let targets = vec![target(&recipe_hash)];
+        validate(&store, &recipes, &targets, std::iter::empty()).unwrap();
+        let foreign = vec![target(&"f".repeat(64))];
+        assert!(validate(&store, &recipes, &foreign, std::iter::empty()).is_err());
+        let hash = packed.files.as_ref().unwrap()[2].content.as_ref().unwrap();
+        let path =
+            f.0.join("migrations/native-prepared/v1")
+                .join(hash)
+                .join("000.bin");
+        std::fs::write(&path, b"changed").unwrap();
+        assert!(packed.fingerprint(&store).is_err());
+        assert!(packed.raw(&store).is_err());
+        assert!(validate(&store, &recipes, &targets, std::iter::empty()).is_err());
     }
     #[test]
     fn lossless_null_empty_binary_and_referenced_bundle_keep_payloads() {
@@ -972,7 +1011,7 @@ mod tests {
             .unwrap();
         s.lock()
             .unwrap()
-            .publish_bundle(&journal, plan.wire(), &h, &[], &targets, &h, &recipes)
+            .publish_bundle(&journal, plan.wire(), &h, &[], &targets, &h, &recipes, None)
             .unwrap();
         s.lock().unwrap().cleanup_prepared_payloads().unwrap();
         assert_eq!(s.payload_usage().unwrap().roots, 3);
@@ -1022,6 +1061,12 @@ mod tests {
                 packed.raw(&s).unwrap(),
                 raw,
                 "{} restored original",
+                case.name
+            );
+            assert_eq!(
+                packed.fingerprint(&s).unwrap(),
+                case.sha256,
+                "{} streamed hash",
                 case.name
             );
             if let Some(target) = case.target {

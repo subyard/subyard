@@ -3,26 +3,91 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
+func TestOwnerChildDispatcherKeepsRetainedRootAcrossExec(t *testing.T) {
+	c, _ := nativeActivationSourceFixture(t)
+	root := c.cli.options.RepositoryRoot
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "bin", "yard-engine"), []byte("#!/bin/sh\nprintf retained-dispatcher\n"), 0700)
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "reconcile-integrations.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+	held, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	c.cli.options.RepositoryRoot = fmt.Sprintf("/proc/self/fd/%d", held.Fd())
+	operation := c.ownerChildOperation()
+	output, err := exec.CommandContext(t.Context(), operation.options.DispatcherPath).Output()
+	if err != nil || string(output) != "retained-dispatcher" {
+		t.Fatal("child lost the original dispatcher descriptor", err)
+	}
+	if _, _, err := c.CaptureInventory(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := c.load("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.context.PhysicalRepositoryRoot = c.cli.options.RepositoryRoot
+	runtime := c.platform(loaded, nil).(reconcileruntime.Runtime)
+	sources, err := runtime.PrepareOwnerRuntimeSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sources.Close()
+	original := runtime
+	runtime, err = runtime.OwnerSourceRuntime(t.Context(), sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"SUBYARD_DISPATCHER_PATH", "SUBYARD_POWER_ENGINE_SOURCE"} {
+		command := exec.CommandContext(t.Context(), "/bin/sh", "-c", "exec \"$"+key+"\"")
+		command.Dir, command.Env = runtime.RepositoryRoot, runtime.Environment
+		if output, err := command.Output(); err != nil || string(output) != "retained-dispatcher" {
+			t.Fatal("materialized component lost "+key, err)
+		}
+	}
+	resourceCLI, err := ownerResourceSourceCLI(operation, original, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.CommandContext(t.Context(), resourceCLI.options.DispatcherPath).Output(); err != nil || string(output) != "retained-dispatcher" {
+		t.Fatal("resource leaf lost the original dispatcher", err)
+	}
+}
+
 func TestOwnerInputViewKeepsOriginalInputsAcrossOwningPublication(t *testing.T) {
-	for _, drift := range []string{"none", "new-yard", "ordinary-inode", "member-inode"} {
+	for _, drift := range []string{"none", "new-yard", "ordinary-inode", "member-inode", "inherited-power-paths"} {
 		t.Run(drift, func(t *testing.T) {
 			ctx := context.Background()
 			c, home := nativeActivationSourceFixture(t)
 			c.cli.baseEnv["SUBYARD_CONFIG_HOME"] = home
 			c.cli.env["SUBYARD_CONFIG_HOME"] = home
+			if drift == "inherited-power-paths" {
+				c.context.InheritedSettingIDs = []string{"SUBYARD_POWER_LIBEXEC_DIR", "SUBYARD_POWER_RECONCILER_PATH", "SUBYARD_POWER_UNIT_PATH"}
+				for _, name := range c.context.InheritedSettingIDs {
+					c.cli.env[name], c.cli.baseEnv[name] = filepath.Join(home, name), filepath.Join(home, name)
+				}
+			}
 			profile, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config/yards/profiles/test-vms.env"))
 			if err != nil {
 				t.Fatal(err)
@@ -104,7 +169,16 @@ func TestOwnerInputViewKeepsOriginalInputsAcrossOwningPublication(t *testing.T) 
 			if err := baseline.check(ctx, operation); err != nil {
 				t.Fatal("owning archived source refused", err)
 			}
+			if drift == "inherited-power-paths" {
+				current := future.baselines[testyardmigration.CurrentYard]
+				current.ownerSource = view
+				if err := current.check(ctx, operation); err != nil {
+					t.Fatal("owning current source lost admitted inputs", err)
+				}
+			}
 			switch drift {
+			case "inherited-power-paths":
+				operation.env["SUBYARD_POWER_UNIT_PATH"], operation.baseEnv["SUBYARD_POWER_UNIT_PATH"] = filepath.Join(home, "changed.service"), filepath.Join(home, "changed.service")
 			case "new-yard":
 				path := filepath.Join(home, "yards/new-yard/config.env")
 				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -134,5 +208,49 @@ func TestOwnerInputViewKeepsOriginalInputsAcrossOwningPublication(t *testing.T) 
 				t.Fatal("unexpected refusal category", err)
 			}
 		})
+	}
+}
+
+func TestOwnerInputFileLabelsRequireExactOwnedFacts(t *testing.T) {
+	root := "/proc/self/fd/47"
+	alias := "/proc/" + strconv.Itoa(os.Getpid()) + "/fd/47"
+	fact := ownerInputFile{Exists: true, Mode: 0600, Size: 3, Device: 4, Inode: 5, UID: 6, GID: 7, Link: "literal"}
+	files := map[string]ownerInputFile{root + "/config/file": fact, alias + "/config/file": fact}
+	before := map[string]ownerInputFile{root + "/config/file": fact, alias + "/config/file": fact}
+	got, err := ownerInputFileLabels(files, root)
+	if err != nil || len(got) != 1 || got[root+"/config/file"] != fact || !reflect.DeepEqual(files, before) {
+		t.Fatal("owned aliases changed facts", err)
+	}
+	for _, field := range []string{"Exists", "Mode", "Size", "Device", "Inode", "UID", "GID", "Modified", "Changed", "Link"} {
+		t.Run(field, func(t *testing.T) {
+			changed := fact
+			value := reflect.ValueOf(&changed).Elem().FieldByName(field)
+			switch value.Kind() {
+			case reflect.Bool:
+				value.SetBool(false)
+			case reflect.String:
+				value.SetString("changed")
+			case reflect.Int64:
+				value.SetInt(100)
+			case reflect.Uint32, reflect.Uint64:
+				value.SetUint(100)
+			case reflect.Struct:
+				value.Field(0).SetInt(100)
+			}
+			if _, err := ownerInputFileLabels(map[string]ownerInputFile{root + "/config/file": fact, alias + "/config/file": changed}, root); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatal("conflicting alias facts accepted", err)
+			}
+		})
+	}
+	for _, foreign := range []string{"/proc/1/fd/47", "/proc/self/fd/48", "/proc/self/fd/470", root + "-sibling"} {
+		got, err := ownerInputFileLabels(map[string]ownerInputFile{root + "/config/file": fact, foreign + "/config/file": fact}, root)
+		if err != nil || len(got) != 2 {
+			t.Fatal("foreign path relabeled", err)
+		}
+	}
+	nilMap, err := ownerInputFileLabels(nil, root)
+	empty, emptyErr := ownerInputFileLabels(map[string]ownerInputFile{}, root)
+	if err != nil || emptyErr != nil || nilMap != nil || empty == nil {
+		t.Fatal("map presence changed")
 	}
 }

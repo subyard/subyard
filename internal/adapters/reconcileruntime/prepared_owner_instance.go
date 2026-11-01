@@ -5,6 +5,8 @@ import (
 	"context"
 	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -208,11 +210,34 @@ func (runtime Runtime) OwnerInitPlanningView(p OwnerInitProjection) (Runtime, er
 	if !p.valid(runtime) {
 		return Runtime{}, domain.ErrPlanStale
 	}
+	original := runtime
 	runtime.Incus = ownerInitPlanningReader{IncusReader: runtime.Incus, projection: p}
 	runtime.ownerInitPlanning = true
 	runtime.ConfigWriter = nil
 	runtime.Executor = nil
+	return runtime.OwnerInitPortReleaseView(original, p)
+}
+
+// Only prospective preparation may account for the exact SSH proxy removed by
+// this original teardown. It does not make an absent target a repairable base.
+func (runtime Runtime) OwnerInitPortReleaseView(legacy Runtime, p OwnerInitProjection) (Runtime, error) {
+	if !p.valid(legacy) {
+		return Runtime{}, domain.ErrPlanStale
+	}
+	i := p.record.State.restore().Instance
+	ssh := i.LocalDevices["ssh"]
+	if runtime.Yard.SSHPort > 0 && runtime.Yard.SSHPort == legacy.Yard.SSHPort &&
+		p.record.State.InstanceFound && strings.EqualFold(i.Status, "running") &&
+		ssh["type"] == "proxy" && (ssh["bind"] == "" || ssh["bind"] == "host") && ssh["listen"] == "tcp:127.0.0.1:"+strconv.Itoa(runtime.Yard.SSHPort) &&
+		ssh["connect"] == "tcp:127.0.0.1:22" {
+		runtime.ownerInitPortRelease = &p
+	}
 	return runtime, nil
+}
+
+func (runtime Runtime) WithoutOwnerInitPortRelease() Runtime {
+	runtime.ownerInitPortRelease = nil
+	return runtime
 }
 
 type ownerInitPlanningReader struct {

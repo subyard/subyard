@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -114,7 +116,7 @@ func (startup *resourceStartup) refresh(ctx context.Context, cli *CLI) error {
 }
 
 func sameStartupIngressEffects(before, after yardnetwork.IngressPreview) bool {
-	if before.Target != after.Target || !reflect.DeepEqual(before.Before.Policy, after.Before.Policy) ||
+	if before.Target != after.Target || before.Protocol != after.Protocol || before.GuestPort != after.GuestPort || !reflect.DeepEqual(before.Before.Policy, after.Before.Policy) ||
 		!reflect.DeepEqual(before.After.Policy, after.After.Policy) ||
 		before.After.Changed != after.After.Changed || before.After.Physical != after.After.Physical ||
 		len(before.After.Updates) != len(after.After.Updates) {
@@ -138,8 +140,13 @@ func (startup *resourceStartup) apply(ctx context.Context, cli *CLI, operationID
 	if err := startup.intent.refresh(ctx, cli); err != nil {
 		return err
 	}
+	steps, err := json.Marshal(startup.assessment.Steps)
+	if err != nil {
+		return err
+	}
 	output, err := cli.prepareResourceModeTimeout(ctx, startup.loaded, startup.definition,
-		[]string{startup.definition.BringUp}, "prepare", startupResourcePrepareTimeout)
+		[]string{startup.definition.BringUp}, "prepare", startupResourcePrepareTimeout,
+		map[string]string{"SUBYARD_RESOURCE_BINDING": startup.assessment.Binding, "SUBYARD_RESOURCE_STEPS": string(steps)})
 	if err != nil {
 		return err
 	}
@@ -173,6 +180,18 @@ func (startup *resourceStartup) apply(ctx context.Context, cli *CLI, operationID
 		verb: startup.definition.BringUp, localAction: local, effect: assessment.Effect,
 		arguments: []string{startup.definition.BringUp}, consequences: assessment.Consequences,
 		ingress: ingress, startupIntent: startup.intent}
+	if startup.intent.instanceUUID != "" {
+		if ports.NativeOperationObserverFrom(ctx) == nil {
+			return domain.ErrPlanStale
+		}
+		runner.ownedIngress, err = startup.originalIngress()
+		if err != nil {
+			return err
+		}
+		service := *ingress.service
+		service.Host = resourceOriginalNetworkHost{Host: service.Host, target: startup.ingress.preview.Target, uuid: runner.ownedIngress.uuid}
+		ingress.service = &service
+	}
 	if err := attachApprovedResourceVerification(runner, startup.assessment, prepared); err != nil {
 		return err
 	}

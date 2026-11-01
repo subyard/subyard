@@ -1,7 +1,7 @@
 ---
 title: Rust release-transition owner
 status: proposed architecture; selected boundary for gated evaluation
-updated: 2026-10-18
+updated: 2026-10-27
 ---
 
 # Rust release-transition owner
@@ -9,6 +9,15 @@ updated: 2026-10-18
 Status: experimental. Go remains the production default. Ordinary packages omit the
 Rust declaration and executable; use `dev/package-engine.sh --experimental-release-owner`
 for explicit owner experiments. Rust process and predecessor checks are opt-in targets.
+
+Fresh Rust ingress starts from verified Go v0.22.0 or newer with completed metadata at the
+source registry's own head and the bridge frontier described in
+[Legacy support](legacy-migration-support.md). Earlier unfinished owners finish through
+their exact retained runtime; a new Rust goal cannot adopt their work. Current exact
+Rust bundles retain same-transaction recovery. The Go v0.22.0 frontend's refusal of Rust
+targets remains intentional: verified publish-only tooling and its printed frontend
+provide the separately confirmed transition. Historical readers and shared native SDK
+contracts remain; retiring obsolete migration authors is a separate change.
 
 
 This ADR selects a complete Rust release-transition owner as the next architecture to evaluate.
@@ -84,6 +93,67 @@ the release plan before consent. Native execution can reject changed facts or pr
 it cannot choose a wider release operation or introduce new adoption permission. Profile behavior
 remains in the owning profile. This is subordinate component ownership, not a claim that every
 component consists only of policy-free system calls.
+
+## Migration authoring
+
+The result of this boundary is a reusable way to write migrations in Rust. A definition owns its
+descriptor, domain and epoch transition, deterministic conversion or step sequence, postcondition
+and any compensation. Adding a migration that uses existing component operations must require
+only its Rust definition, registry entry and tests. It must not require another Go migration kind,
+callback dispatcher, serialized CLI execution graph or recovery implementation.
+
+Definitions use the existing release engine for preparation, consent, fresh validation, durable
+intents and results, verification, ledger advancement and same-transaction continuation. Authors
+do not construct those records themselves. Each operation exposes a bounded prepared input and an
+observable outcome; an unknown outcome remains unresolved until observation establishes what
+happened. Compensation is an explicit guarded sequence owned by the Rust definition.
+
+Keep planning deterministic for the same captured inputs. Stable operation identities and chosen
+nonces belong to the prepared transaction, rather than being regenerated during validation.
+This follows the separation between deterministic workflow decisions and recorded external
+effects described in [Temporal's workflow contract](https://docs.temporal.io/workflow-definition).
+The existing local engine implements that separation; no additional workflow service is needed.
+
+Private consuming phase handles express local transitions, as described in the
+[Rust state-pattern example](https://doc.rust-lang.org/stable/book/ch18-03-oo-design-patterns.html).
+Their types do not prove external freshness or crash recovery. Source/CAS checks, native operation
+completion and durable evidence remain responsibilities of the common engine and component ports.
+Owning migration modules receive read-only capture APIs and live outside the engine module's
+descendants: Rust permits descendants to access private ancestor fields, as specified by its
+[privacy rules](https://doc.rust-lang.org/reference/visibility-and-privacy.html#vis.access).
+
+Reading committed migration history is separate from admitting executable migration kinds.
+Component readers validate the full registry history, protected ledger and required domain epoch;
+they do not need a Go implementation of every migration in another domain. Execution admission
+still requires the selected owner's capability policy and verified runtime assets.
+
+The experimental owner-registration route expresses teardown, initialization, verification and
+compensation as a finite Rust program. The common executor uses the existing native intent and
+result records; Go applies individual prepared component operations. The former experimental Go
+aggregate and callback factory are removed. Init remains a bounded component operation, including
+its existing SDK and filesystem mechanics. Default Go execution remains until accepted cutover,
+along with the exact historical owners and codecs required by existing transactions.
+
+Prepared component handles distinguish original configuration from materialized execution paths
+and transport environment. Validation and deterministic rendering use the checked original view;
+component scripts read retained sources and use the original executable. Read-only probes retain
+native custody and close normal negative results after foreground drain. Cancellation, missing
+closure and failed mutations must not become ordinary readiness drift.
+
+An owner-registration program remains one public migration step. Its prepared forward and
+compensation actions use the common native intent and result records with checked invocation
+slots. Compensation can undo an earlier successful action, so those actions must not become
+independent verified public steps that Resume would skip. A compensated attempt needs explicit
+evidence of the closed compensation sequence, native quiescence and restored original state
+before the existing retry mechanism can admit fresh invocations for the same transaction.
+Missing invocation terminals remain unknown. This extends the existing engine's evidence model;
+it does not add a separate runner or journal.
+
+Acceptance must include a new nonshipping Rust migration kind using an existing component
+operation, with no change to Go's migration catalog. It must exercise the selected Rust route,
+consent, an interruption after an actual effect, fresh same-transaction continuation, verified
+ledger advancement and a fresh no-op. An unused trait or an extra layer around the old dispatch
+does not establish this authoring contract.
 
 Current ports are not ready-made implementations of this boundary:
 
@@ -299,7 +369,7 @@ cannot replace authentic predecessor evidence.
 | Closed v0.11.1 defective-owner recovery | Existing exact eligibility/proof-bound replacement owner and its archive meaning | Preserve predecessor fingerprint, exact registry/catalog/links and ledger evidence, eligible candidate and fresh scope/grant. Version alone never proves eligibility |
 | `migration-ledger-owner-replacement-v1` in current Go | Separate negotiated schema-2 proof/receipt contract for the exact supported official Linux amd64 v0.21.0 owner | Keep its closed affected-owner/proof eligibility; it does not authorize a generic Go-to-Rust owner replacement or extend activation-only grammars |
 | Terminal Go history without a checkpoint | Final checked history reader consumes canonical ledger and retained evidence; a fresh Rust transaction can be considered only after old continuation is closed | Same admitted history set and frozen bytes across fresh/resume/source readers; new transaction requires fresh plan/consent, never a terminal grant |
-| Complete journal with new activation drift | A new assessed repair transaction; completed migration authorization does not resume | Preserve the frozen v0.11.2 caller projection (`recovering/recovery-pending`, historical transaction, no executable resume) while modern inspection reports the canonical fresh-repair outcome |
+| Complete journal with new activation drift | A new assessed repair transaction; completed migration authorization does not resume | Preserve the completed historical transaction and its evidence while the current frontend reports the canonical fresh-repair outcome; admission starts after the completed Go v0.22 bridge |
 | Terminal checkpointed Go history | Checkpoint is authority; pinned ledger is only compatibility projection; readers use the final common history model | Projection stays byte-identical. Existing checkpoint-aware-current and rollback rules apply before advancing authority; an unaware predecessor needs its supported reader bridge |
 | New Rust-owned pending or complete transaction | Exact Rust owner/assets remain the sole continuation writer; Go is transport/component adapter or historical owner for a different closed transaction | Old Go may not continue it because JSON happens to decode. New owner routing and any format change need explicit version/capability plus actual predecessor evidence |
 | Retained previous release selected for rollback | A new inspected rollback goal uses proven reader/capability and persisted-state compatibility | Retention, unchanged projection and equal epochs are insufficient. Incompatible downgrade refuses before new writes; after activation, ordinary recovery goes forward |
@@ -375,6 +445,17 @@ owns component preparation, source-bound recipes, guarded physical effects and n
 observations. It does not call the Go release reducer or return a release eligibility
 verdict. A retained read-only Go syntax bridge preserves historical JSON admission;
 Rust checks policy while retaining original bytes for fingerprints and canonicality.
+
+The experimental owner-registration path composes finite prepared actions in Rust.
+One consent-bound work item contains the programme and its compensation branches;
+the existing native intent, results and retry edges implement execution and Resume.
+The Go helper executes a selected action against its original component capsule.
+It publishes a physical output digest after closed native work and before its whole
+terminal. A subsequent action reconstructs physical handles only when the complete
+observation matches that causal receipt. Source, logical scope and publication
+contracts remain those of the original capsule. A failed terminal can supply closed
+partial output; an unknown invocation cannot. This boundary remains experimental
+until its native recreation and compensation acceptance is complete.
 
 The frontend verifies the manifest inventory and declaration before starting an owner.
 It seals both executable images into immutable memfds and retains the repository root

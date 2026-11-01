@@ -13,6 +13,11 @@ central plan. After consent, the owner checks bounded source metadata, including
 host companions tied to approved incidents. Core repeats the check after draining
 producers and before resource deletion. Unknown or foreign evidence refuses
 dependent cleanup without printing records.
+After owner migration, the original producer source is accepted only when the
+selected installation's protected, complete owner journal, original recovery,
+evidence triple and ledger prove its transition to the approved current source.
+Missing or collected proof refuses cleanup; restore approved producer inventory
+before retrying. This assessment never creates replacement ownership evidence.
 
 Run its host-free ownership checks with config/profiles/test-vms/tests/run.sh.
 Installed-runtime, delayed sink and reboot checks belong to the full-uninstall

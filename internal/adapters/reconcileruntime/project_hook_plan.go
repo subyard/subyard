@@ -329,7 +329,7 @@ func (plan *ProjectHookPlan) Environment() map[string]string {
 		Bindings map[string]string `json:"bindings"`
 		Facts    map[string]string `json:"facts"`
 		Resolved map[string]string `json:"resolved"`
-	}{plan.allowedHooks, plan.current.Projects, plan.current.Roots, plan.hookBindings, plan.current.Facts, plan.current.Resolved})
+	}{append([]string{}, plan.allowedHooks...), plan.current.Projects, plan.current.Roots, plan.hookBindings, plan.current.Facts, plan.current.Resolved})
 	return map[string]string{"SUBYARD_PROJECT_HOOK_SCOPE": string(payload)}
 }
 

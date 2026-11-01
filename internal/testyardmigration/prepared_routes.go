@@ -72,7 +72,11 @@ func PrepareRouteDevices(ctx context.Context, options Options, before string, na
 	if err != nil {
 		return nil, err
 	}
-	result.Broker = !ready || !hasManagedYard(yards, CurrentYard) || managedYardRunning(yards, CurrentYard)
+	return prepareRouteDeviceSet(ctx, options, before, native, yards, !ready || !hasManagedYard(yards, CurrentYard) || managedYardRunning(yards, CurrentYard))
+}
+
+func prepareRouteDeviceSet(ctx context.Context, options Options, before string, native RouteDevicePreparer, yards []managedYard, broker bool) (*PreparedRouteDevices, error) {
+	result := &PreparedRouteDevices{Before: before, Devices: []ports.PreparedReadOnlyDisk{}, Broker: broker}
 	for _, yard := range yards {
 		if yard.Yard == LegacyYard || !yard.AllowsHostAccess {
 			continue

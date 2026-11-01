@@ -31,6 +31,16 @@ type RetiredMigrationPrefixV2 struct {
 type MigrationDefinitionV2 = migrationhistory.Migration
 
 func ParseRegistryV2(payload []byte, catalog CapabilityCatalog) (RegistryV2, Fingerprint, error) {
+	return parseRegistryV2(payload, &catalog)
+}
+
+// ParseRegistryHistoryV2 validates history and exact bytes without granting executable capability.
+// A selected release owner must independently admit every executable migration kind.
+func ParseRegistryHistoryV2(payload []byte) (RegistryV2, Fingerprint, error) {
+	return parseRegistryV2(payload, nil)
+}
+
+func parseRegistryV2(payload []byte, catalog *CapabilityCatalog) (RegistryV2, Fingerprint, error) {
 	var registry RegistryV2
 	if err := decodeBoundedRecord(payload, MaxRegistryV2Bytes, &registry); err != nil {
 		return RegistryV2{}, "", fmt.Errorf(
@@ -38,7 +48,13 @@ func ParseRegistryV2(payload []byte, catalog CapabilityCatalog) (RegistryV2, Fin
 			ErrRegistryInvalid, ErrInvalid, err,
 		)
 	}
-	if err := registry.Validate(catalog); err != nil {
+	var err error
+	if catalog != nil {
+		err = registry.Validate(*catalog)
+	} else {
+		_, err = registry.historyRegistry()
+	}
+	if err != nil {
 		return RegistryV2{}, "", fmt.Errorf("%w: %w", ErrRegistryInvalid, err)
 	}
 	return registry, fingerprintPayload(payload), nil

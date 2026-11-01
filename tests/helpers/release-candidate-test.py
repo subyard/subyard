@@ -11,6 +11,72 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class RollbackOwnerCoverageTest(unittest.TestCase):
+    def test_capabilities_are_closed_and_return_missing_owners(self):
+        check = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))['verify_retained_activation_owner_coverage']
+        for case in ('covered', 'missing', 'extra', 'empty', 'schema', 'duplicate', 'exit',
+                     'stderr', 'outcome', 'state', 'links', 'host'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix='rollback-owners-', dir='/tmp') as temp:
+                base = Path(temp); config = base/'config'; config.mkdir()
+                state = config/'protected'; state.write_text('original')
+                runtime = base/'runtime'; runtime.mkdir()
+                (runtime/'current').symlink_to('releases/current')
+                (runtime/'previous').symlink_to('releases/previous')
+                fixture = SimpleNamespace(config=config, runtime=runtime, old_launcher=runtime/'previous/bin/yard', env={})
+                unexpected = base/'unexpected'
+                current = ['core', 'materialized-config', 'profile']
+                retained = ['core', 'profile']
+                if case == 'missing': retained = ['core']
+                if case == 'extra': current.append('z-extra')
+                if case == 'empty': current = ['materialized-config']
+                calls = []
+                def run(argv, env, **kwargs):
+                    self.assertEqual(json.loads(kwargs['input_text']), {'schemaVersion':2, 'mode':'runtime-activation-capabilities'})
+                    calls.append(argv)
+                    values = sorted(current if len(calls) == 1 else retained)
+                    response = {'schemaVersion':2, 'activationOwners':values}
+                    if case == 'schema': response['schemaVersion'] = 1
+                    if case == 'duplicate': response['activationOwners'] = ['core', 'core']
+                    if case == 'outcome': response['outcome'] = {'status':'ready'}
+                    if len(calls) == 2:
+                        if case == 'state': state.write_text('changed')
+                        if case == 'links': (runtime/'previous').unlink(); (runtime/'previous').symlink_to('releases/foreign')
+                        if case == 'host': unexpected.write_text('called')
+                    return subprocess.CompletedProcess(argv, 1 if case == 'exit' else 0,
+                                                       json.dumps(response), 'error' if case == 'stderr' else '')
+                with patch.dict(check.__globals__, {'run_process':run}):
+                    if case in ('covered', 'missing', 'extra'):
+                        expected = {'covered':[], 'missing':['profile'], 'extra':['z-extra']}[case]
+                        self.assertEqual(check(fixture, unexpected), expected)
+                    else:
+                        with self.assertRaises(RuntimeError): check(fixture, unexpected)
+
+    def test_stopped_refusal_preserves_protected_state_and_effects(self):
+        check = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))['verify_stopped_missing_owner_rollback']
+        for case in ('valid', 'success', 'wrong-code', 'state', 'links', 'effects', 'host', 'api'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix='rollback-refusal-', dir='/tmp') as temp:
+                base = Path(temp); config = base/'config'; config.mkdir()
+                state = config/'journal'; state.write_text('original')
+                runtime = base/'runtime'; runtime.mkdir()
+                (runtime/'current').symlink_to('releases/current')
+                (runtime/'previous').symlink_to('releases/previous')
+                fixture = SimpleNamespace(config=config, runtime=runtime, env={})
+                control = base/'control'; unexpected = base/'unexpected'
+                def run(argv, env, **kwargs):
+                    self.assertEqual(argv[1:], ['update', '--rollback', '--yes'])
+                    if case == 'state': state.write_text('changed')
+                    if case == 'links': (runtime/'previous').unlink(); (runtime/'previous').symlink_to('releases/foreign')
+                    if case == 'effects': Path(str(control)+'.effects.jsonl').write_text('effect')
+                    if case == 'host': unexpected.write_text('called')
+                    if case == 'api': Path(str(control)+'.unexpected').write_text('called')
+                    return subprocess.CompletedProcess(argv, 0 if case == 'success' else 1,
+                                                       '' if case == 'wrong-code' else 'code=rollback-incompatible', '')
+                with patch.dict(check.__globals__, {'run_process':run}):
+                    if case == 'valid': check(fixture, runtime/'current/bin/yard', unexpected, control)
+                    else:
+                        with self.assertRaises(RuntimeError): check(fixture, runtime/'current/bin/yard', unexpected, control)
+
+
 class SkillPackageTest(unittest.TestCase):
     def test_current_package_transport_survives_normalized_and_private_layouts(self):
         helper = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))
@@ -96,7 +162,7 @@ class HistoryLedgerCutTest(unittest.TestCase):
                 journal.write_text(json.dumps(value))
                 self.assertIsNone(observer['observe_ledger'](args))
                 raise ObservedCut()
-            with patch.dict(helper.__globals__, {'history_chain':lambda *args: (fixture, 'prior', {}),
+            with patch.dict(helper.__globals__, {'history_chain':lambda *args: (fixture, 'prior', {}, None),
                                                  'run_process':observe}):
                 with self.assertRaises(ObservedCut): helper(release, 'candidate', 'amd64', root, {})
             self.assertEqual(len(calls), 1)

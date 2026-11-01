@@ -78,6 +78,37 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_experimental_release_owner_binding(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            output = directory/'experimental'
+            check_output = m.subprocess.check_output
+            def tools(command, **kwargs):
+                return "go version fixture" if command == ["go", "version"] else check_output(command, **kwargs)
+            with patch.object(m, "ROOT", checkout), patch.object(m.subprocess, "check_output", side_effect=tools):
+                m.prepare(output, "test", experimental_release_owner=True)
+            source, receipt = m.load_bound(output)
+            self.assertEqual(receipt['release_owner'], 'rust')
+            self.assertEqual(receipt['checks']['package']['command'][-1], '--experimental-release-owner')
+            metadata = json.loads((source/'.subyard-acceptance/candidate.json').read_text())
+            self.assertEqual(metadata['release_owner'], 'rust')
+            receipt['release_owner'] = 'go'
+            metadata['release_owner'] = 'go'
+            (source/'.subyard-acceptance/candidate.json').write_text(json.dumps(metadata)+'\n')
+            # Metadata tamper and transport tamper each refuse; rebinding its checksum
+            # cannot hide a different package variant in the retained command.
+            m.save(output, receipt)
+            with self.assertRaisesRegex(ValueError, 'package compiled release owner binding changed'):
+                m.load_bound(output)
+
+    def test_experimental_prepared_ci_import_refuses(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'prepared CI identity does not bind'):
+                m.prepare(directory/'output', 'test', prepared=directory/'prepared', experimental_release_owner=True)
+            self.assertFalse((directory/'output').exists())
+
     def test_owning_preflight_reuses_only_validated_local_receipt(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             directory = Path(temporary)

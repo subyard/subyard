@@ -64,6 +64,35 @@ func (preview IngressPreview) ValidateRollback(closure IngressPreview, contract 
 	return validateResourceIngressRemoval(closure.Before, preview.Target, contract)
 }
 
+// ValidateRollbackOriginalPending preserves only an originally captured absent
+// route's exact pending ownership marker. Ordinary rollback remains stricter.
+func (preview IngressPreview) ValidateRollbackOriginalPending(closure IngressPreview, contract resource.ProxyContract, originalPending string) error {
+	if originalPending == "" {
+		return preview.ValidateRollback(closure, contract)
+	}
+	if !pendingIngressMarker.MatchString(originalPending) || closure.Target != preview.Target || closure.Before.Fingerprint == "" {
+		return errors.New("invalid original pending ingress rollback")
+	}
+	check := func(plan Plan) bool {
+		count := 0
+		for _, yard := range plan.Snapshot.Yards {
+			if yard.Yard != preview.Target {
+				continue
+			}
+			count++
+			instance := yard.InstanceInfo
+			if !yard.InstanceFound || len(instance.LocalDevices[contract.Device]) != 0 || len(instance.Devices[contract.Device]) != 0 || instance.LocalConfig[contract.OwnershipKey()] != originalPending || instance.Config[contract.OwnershipKey()] != originalPending {
+				return false
+			}
+		}
+		return count == 1
+	}
+	if !check(preview.Before) || !check(closure.Before) {
+		return errors.New("original pending ingress rollback changed route or marker")
+	}
+	return validateResourceIngressRemoval(closure.Before, preview.Target, contract)
+}
+
 // Shutdown and rollback may finish an interrupted closure, but cannot repair
 // unrelated target drift under resource-operation authority.
 func validateResourceIngressRemoval(actual Plan, target Yard, contract resource.ProxyContract) error {

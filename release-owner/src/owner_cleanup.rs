@@ -85,7 +85,7 @@ impl Owner {
         journal: &record::Journal,
     ) -> Result<Option<CleanupRecipe>> {
         let bundle = self.store.bundle(journal, &self.registry)?;
-        let Some(ordinal) = self.cleanup_owner_ordinal(journal.wire())? else {
+        let Some(ordinal) = Self::cleanup_owner_ordinal_from_bundle(&bundle)? else {
             return Ok(None);
         };
         let mut selected = None;
@@ -188,6 +188,7 @@ impl Owner {
         };
         require(self.store.read(&Address::journal())? == snapshot)?;
         let observation = Observation {
+            observed_links: links,
             plan: crate::plan::Plan::new(bundle.facts)?,
             work: bundle.work,
             journal: Some(record::Journal::new(j.clone())?),

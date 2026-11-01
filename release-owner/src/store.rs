@@ -59,7 +59,13 @@ impl Address {
             || ordinal == 0
             || !matches!(
                 kind,
-                "intent" | "accepted" | "terminal" | "reservation" | "closure" | "recovery"
+                "intent"
+                    | "accepted"
+                    | "terminal"
+                    | "reservation"
+                    | "closure"
+                    | "recovery"
+                    | "physical"
             )
         {
             return Err(Error::Invalid);

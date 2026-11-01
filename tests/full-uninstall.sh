@@ -67,7 +67,7 @@ finally:
  sentinel.terminate();sentinel.wait(timeout=5)
 print('ok: actual signing PTY waits for OpenSSH prompts, refuses repeats, retains exits and cleans only its child')
 PY_SIGNING_PTY
-version=0.17.0-test.full-uninstall
+version=0.22.1-test.full-uninstall
 release="$fixture/release"
 bash "$ROOT/dev/package-engine.sh" --output-dir "$release" --version "$version" --arch amd64 >/dev/null
 bundle="$release/subyard-$version-linux-amd64.tar.gz"
@@ -124,9 +124,25 @@ mkdir -m 0777 "$SUBYARD_HOME"
 if bash "$ROOT/dev/bootstrap-runtime.sh" --version "$version" --yes > "$fixture/unsafe-data.log" 2>&1; then exit 1; fi
 grep -Fq 'unsafe installation data directory' "$fixture/unsafe-data.log"
 /bin/rmdir "$SUBYARD_HOME"
+# Observe the real first-transition boundary even when the packaged owner does
+# not itself require DataHome during inspection.
+export TEST_BOOTSTRAP_TRANSITION_MARKER="$fixture/bootstrap-transition-observed"
+/bin/rm "$fixture/tools/env"
+cat > "$fixture/tools/env" <<'SH'
+#!/bin/bash
+if [ "$#" = 4 ] && [ "$1" = "YARD_RUNTIME_ROOT=$YARD_RUNTIME_ROOT" ] && [ "$3" = migrate ] && [ "$4" = --yes ]; then
+  [ -d "$SUBYARD_HOME" ] && [ ! -L "$SUBYARD_HOME" ] \
+    && [ "$(stat -c '%a:%u' "$SUBYARD_HOME")" = "700:$(id -u)" ] || exit 97
+  printf 'observed\n' >> "$TEST_BOOTSTRAP_TRANSITION_MARKER"
+fi
+exec /usr/bin/env "$@"
+SH
+chmod 0700 "$fixture/tools/env"
 if ! bash "$ROOT/dev/bootstrap-runtime.sh" --version "$version" --yes > "$fixture/bootstrap.log" 2>&1; then
   /bin/cat "$fixture/bootstrap.log" >&2; exit 1
 fi
+grep -Fxq observed "$TEST_BOOTSTRAP_TRANSITION_MARKER"
+[ "$(wc -l < "$TEST_BOOTSTRAP_TRANSITION_MARKER")" = 1 ]
 [ "$(stat -c '%a' "$SUBYARD_HOME")" = 700 ]
 printf 'foreign cache control\n' > "$YARD_RELEASE_CACHE/$version/foreign.control"
 if ! "$YARD_BIN_DIR/yard" teardown --full --yes > "$fixture/bootstrap-full.log" 2>&1; then

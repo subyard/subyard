@@ -341,6 +341,7 @@ pub(crate) fn inspection(
 impl crate::owner::Owner {
     pub(crate) fn projected_inspection(&self, o: &crate::owner::Observation) -> p::Inspection {
         let f = o.plan.wire();
+        let links = &o.observed_links;
         let journal = o
             .journal
             .as_ref()
@@ -356,9 +357,9 @@ impl crate::owner::Owner {
                     .complete(l.ledger().authority())
                     .is_ok()
             });
-        let initial = f.links.active == f.releases.from && f.links.previous == f.releases.previous;
-        let activated = f.links.active == f.releases.target
-            && f.links.previous.as_deref() == Some(f.releases.from.as_str());
+        let initial = links.active == f.releases.from && links.previous == f.releases.previous;
+        let activated = links.active == f.releases.target
+            && links.previous.as_deref() == Some(f.releases.from.as_str());
         let fixed = quiet
             && complete
             && o.work.is_empty()
@@ -376,11 +377,11 @@ impl crate::owner::Owner {
                 && j.registry_digest == f.registry_digest
                 && j.catalog_digest == f.catalog_digest
                 && (j.releases == f.releases
-                    && crate::links::allowed("complete", &f.links, &j.releases)
+                    && crate::links::allowed("complete", links, &j.releases)
                     || f.releases.from == j.releases.target
                         && f.releases.target == j.releases.target
                         && initial
-                        && crate::links::allowed("complete", &f.links, &j.releases))
+                        && crate::links::allowed("complete", links, &j.releases))
         });
         let conversion = f
             .decisions
@@ -393,8 +394,8 @@ impl crate::owner::Owner {
                 assessment: f.assessment.clone(),
                 outcome: Some(operator(
                     p::Outcome {
-                        active: f.links.active.clone(),
-                        previous: f.links.previous.clone(),
+                        active: links.active.clone(),
+                        previous: links.previous.clone(),
                         target: f.goal.target.clone(),
                         ..Default::default()
                     },
@@ -403,6 +404,12 @@ impl crate::owner::Owner {
                 )),
                 ..Default::default()
             });
+        // Durable plan facts retain their original link pins; public outcomes
+        // describe the checked links observed for this inspection.
+        if let Some(outcome) = result.outcome.as_mut() {
+            outcome.active = links.active.clone();
+            outcome.previous = links.previous.clone();
+        }
         if self.store.reader.health().is_err() || !quiet {
             if let Some(outcome) = result.outcome.take() {
                 result.outcome = Some(operator(
@@ -458,6 +465,7 @@ pub(crate) struct ActivationFailure<'a> {
     pub blockers: &'a [p::Blocker],
     pub current: bool,
     pub warnings: &'a [String],
+    pub approved_partial: bool,
 }
 pub(crate) fn activation_failure(f: &ActivationFailure<'_>) -> p::Outcome {
     let mut out = p::Outcome {
@@ -503,7 +511,7 @@ pub(crate) fn activation_failure(f: &ActivationFailure<'_>) -> p::Outcome {
             "protected transition facts changed during activation reconciliation",
         );
     }
-    if actual != f.before && !converged {
+    if actual != f.before && !converged && !f.approved_partial {
         return operator(
             out,
             "recovery-ambiguous",
@@ -575,6 +583,43 @@ mod activation_failure_tests {
         observe_calls: usize,
     }
     #[test]
+    fn materialized_partial_requires_checked_original_custody() {
+        let (_fixture, _store, journal, _binding) = crate::custody::tests::fixture();
+        let links = ReleaseLinks {
+            active: journal.goal.target.clone(),
+            previous: None,
+        };
+        let mut facts = ActivationFailure {
+            journal: &journal,
+            owner: "materialized-config",
+            phase: "reconcile",
+            before: "original",
+            after: Some(("actual-partial", false)),
+            links: Some(&links),
+            blockers: &[],
+            current: true,
+            warnings: &[],
+            approved_partial: false,
+        };
+        assert_eq!(
+            activation_failure(&facts).status,
+            "operator-action-required"
+        );
+        facts.approved_partial = true;
+        assert_eq!(activation_failure(&facts).status, "recovering");
+        facts.current = false;
+        assert_eq!(
+            activation_failure(&facts).status,
+            "operator-action-required"
+        );
+        facts.current = true;
+        facts.links = None;
+        assert_eq!(
+            activation_failure(&facts).status,
+            "operator-action-required"
+        );
+    }
+    #[test]
     fn actual_go_failure_reducer() {
         let Ok(path) = std::env::var("SUBYARD_RUST_ACTIVATION_FAILURE_CORPUS") else {
             return;
@@ -609,6 +654,7 @@ mod activation_failure_tests {
                 blockers: &[],
                 current: true,
                 warnings: &[],
+                approved_partial: false,
             };
             let mut actual = activation_failure(&f);
             if actual.status == "operator-action-required" {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -23,6 +24,12 @@ import (
 func TestMaterializedIntegrationExecutionUsesClosedCachedDefinitionsAndAssets(t *testing.T) {
 	root := testkit.TempDir(t)
 	runtime, _ := materializedIntegrationFixture(t, root, true)
+	hook := filepath.Join(root, "config/profiles/synthetic/guest.sh")
+	if err := os.MkdirAll(filepath.Dir(hook), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, hook, []byte("# approved guest environment\n"), 0755)
+	runtime.Environment = append(runtime.Environment, "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS="+hook)
 	metadata := []byte(`{"schema_version":1,"lifecycle":{"handler":"runtime.sh","source_files":["payload.txt"]}}`)
 	testkit.WriteFile(t, filepath.Join(root, "config/agents/sample/integration.json"), metadata, 0o600)
 	runtime.Integrations = nil
@@ -45,6 +52,22 @@ func TestMaterializedIntegrationExecutionUsesClosedCachedDefinitionsAndAssets(t 
 	testkit.WriteFile(t, foreign, []byte("unapproved"), 0o600)
 	if _, err := execution.SourceReader(config.MaterializedAsset{Source: foreign}); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatal("execution read an uncaptured live asset", err)
+	}
+	helper, err := os.ReadFile("../../../scripts/lib/engine-context.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, path := range []string{execution.environmentValue("SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS"), hook} {
+		command := exec.Command("bash", "--noprofile", "--norc", "-peu", "-s", "--", filepath.Join(p.directory, "config/profiles"), path)
+		command.Env = execution.Environment
+		command.Stdin = strings.NewReader(string(helper) + "\nincus(){ cat; }\nsubyard_apply_profile_guest_environment_hooks \"$1\" yard project dev \"$2\"\n")
+		output, err := command.CombinedOutput()
+		if i == 0 && (err != nil || string(output) != "# approved guest environment\n") {
+			t.Fatal("retained guest hook rejected by the SSH component boundary", err)
+		}
+		if i == 1 && err == nil {
+			t.Fatal("live hook escaped the retained profile root")
+		}
 	}
 }
 
@@ -211,6 +234,88 @@ func TestMaterializedIntegrationFreshProcessOriginalRecipe(t *testing.T) {
 	}
 }
 
+func TestRebindPreparedIntegrationRetainsOriginalAndChecksFreshSources(t *testing.T) {
+	for _, change := range []string{"content", "identity"} {
+		t.Run(change, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			runtime, _ := materializedIntegrationFixture(t, root, true)
+			original := prepareMaterializedIntegrationFixture(t, runtime)
+			defer original.Close()
+			decoded, err := runtime.BindInstalledRuntimeContext(context.Background(), original.Recipe())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer decoded.Close()
+			rebound, err := runtime.RebindPreparedInstalledRuntime(context.Background(), original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rebound.Close()
+			if rebound.Binding() != decoded.Binding() || rebound.Binding() != original.Binding() || !bytes.Equal(rebound.Recipe(), decoded.Recipe()) || !bytes.Equal(rebound.Recipe(), original.Recipe()) {
+				t.Fatal("rebound recipe differs from the original capsule")
+			}
+			for path, payload := range original.files {
+				if len(payload) == 0 {
+					continue
+				}
+				before := payload[0]
+				rebound.files[path][0] ^= 1
+				if payload[0] != before {
+					t.Fatal("rebound recipe aliases original payload")
+				}
+				rebound.files[path][0] ^= 1
+				break
+			}
+			path := filepath.Join(root, "provision.sh")
+			if change == "content" {
+				testkit.WriteFile(t, path, []byte("unapproved\n"), 0o755)
+			} else {
+				payload, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, path+".new", payload, 0o755)
+				if err := os.Rename(path+".new", path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := runtime.RebindPreparedInstalledRuntime(context.Background(), original); err == nil {
+				t.Fatal("rebind accepted changed source")
+			}
+		})
+	}
+}
+
+func TestRebindPreparedIntegrationPreservesJSONNormalization(t *testing.T) {
+	root := testkit.TempDir(t)
+	runtime, _ := materializedIntegrationFixture(t, root, true)
+	original := prepareMaterializedIntegrationFixture(t, runtime)
+	defer original.Close()
+	// These omitted empty slices decode as nil on the established wire path.
+	original.native = []installedSourceGuard{}
+	original.afterOwner = []byte{}
+	decoded, err := runtime.BindInstalledRuntimeContext(context.Background(), original.Recipe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoded.Close()
+	rebound, err := runtime.RebindPreparedInstalledRuntime(context.Background(), original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rebound.Close()
+	if rebound.Binding() != decoded.Binding() || !bytes.Equal(rebound.Recipe(), decoded.Recipe()) {
+		t.Fatal("empty and nil fields changed the canonical recipe")
+	}
+	// Invalid UTF-8 is normalized by JSON decoding and must use the old path.
+	original.files[string([]byte{0xff})] = []byte("untrusted")
+	_, decodedErr := runtime.BindInstalledRuntimeContext(context.Background(), original.Recipe())
+	_, reboundErr := runtime.RebindPreparedInstalledRuntime(context.Background(), original)
+	if decodedErr == nil || reboundErr == nil || decodedErr.Error() != reboundErr.Error() {
+		t.Fatal("invalid UTF-8 differed from strict decoding", decodedErr, reboundErr)
+	}
+}
+
 func TestMaterializedIntegrationBeforeDispatchSourceAndScopeGuards(t *testing.T) {
 	for _, change := range []string{"wrapper", "provision", "lifecycle", "identity", "uuid", "hook-scope", "metadata"} {
 		t.Run(change, func(t *testing.T) {
@@ -321,4 +426,158 @@ func TestMaterializedIntegrationSourceExcludesOwnProgress(t *testing.T) {
 	if installedRuntimeDigest(original) == installedRuntimeDigest(changed) {
 		t.Fatal("original baseline missing from durable recipe")
 	}
+}
+
+func TestOriginalIntegrationCoreEndpointProjection(t *testing.T) {
+	previewLoopbackFixture(t)
+	for _, change := range []string{"endpoint-only", "combined-profile", "closed-core", "original-absence", "unchanged-no-core", "foreign-config", "uuid", "wrong-endpoint", "local-mismatch", "missing-core", "wrong-desired", "core-source", "stale-core"} {
+		t.Run(change, func(t *testing.T) {
+			root := preparedInstalledFixture(t).RepositoryRoot
+			runtime, _ := materializedIntegrationFixture(t, root, true)
+			runtime.Environment = append(runtime.Environment, "ALLOWS_CODING_TOOLS=false", "WEB_PREVIEW_HOST_PORT=32222")
+			for _, relative := range []string{"config/preview/subyard-preview", "config/agents/ccusage/provision.sh", "scripts/refresh-installed-guest-runtime.sh", "scripts/prepare-preview-route.sh"} {
+				path := filepath.Join(root, relative)
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, path, []byte("fixed approved source\n"), 0755)
+			}
+			combined := change == "combined-profile" || change == "foreign-config"
+			if combined {
+				profileRuntimeFixtureAt(t, root, "#!/bin/sh\nprintf '{\"state\":\"current\",\"actual\":\""+testRuntimeNewDigest+"\",\"desired\":\""+testRuntimeNewDigest+"\"}\\n'\n")
+				definitions, err := profile.Load(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				definitions[0].Dashboard = &profile.IntegrationDashboard{PortSetting: "SYNTHETIC_PORT", GuestPort: 3030, ContainerRoute: &profile.IntegrationRoute{MarkerKey: "user.synthetic.route", DeviceName: "synthetic-route"}}
+				runtime.Profiles = definitions
+				runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=synthetic", "SYNTHETIC_PORT=32223")
+			}
+			fake := runtime.Incus.(*testkit.Incus)
+			fake.Reconcile.Instance.Config["user.subyard.preview_sha256"] = strings.Repeat("b", 64)
+			fake.Reconcile.Instance.Config["user.subyard.preview_endpoint_sha256"] = strings.Repeat("a", 64)
+			fake.Reconcile.Instance.LocalConfig = map[string]string{"user.subyard.preview_sha256": strings.Repeat("b", 64), "user.subyard.preview_endpoint_sha256": strings.Repeat("a", 64)}
+			if combined {
+				fake.Reconcile.Instance.Devices = map[string]map[string]string{"eth0": {"type": "nic", "network": "fixture"}}
+				fake.Reconcile.Instance.LocalDevices = map[string]map[string]string{"eth0": {"type": "nic", "network": "fixture"}}
+			}
+			fake.Instances = map[string]ports.InstanceInfo{"test/yard": fake.Reconcile.Instance}
+			if change == "original-absence" {
+				delete(fake.Reconcile.Instance.Config, "user.subyard.preview_endpoint_sha256")
+				delete(fake.Reconcile.Instance.LocalConfig, "user.subyard.preview_endpoint_sha256")
+			}
+			core, err := runtime.PrepareInstalledRuntime(context.Background(), "core-guest-runtime")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer core.Close()
+			originalWitness, err := runtime.ObserveInstalledRuntime(context.Background(), "core-guest-runtime")
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := prepareMaterializedIntegrationFixture(t, runtime)
+			defer original.Close()
+			expected, err := runtime.previewEndpointHash(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.Reconcile.Instance.Config["user.subyard.preview_endpoint_sha256"] = expected
+			fake.Reconcile.Instance.LocalConfig["user.subyard.preview_endpoint_sha256"] = expected
+			if combined {
+				fake.Reconcile.Instance.Config["user.synthetic.route"] = "v1:32223"
+				fake.Reconcile.Instance.LocalConfig["user.synthetic.route"] = "v1:32223"
+				fake.Reconcile.Instance.Devices["synthetic-route"] = ownerroute.Device("127.0.0.1", "32223", 3030)
+				fake.Reconcile.Instance.LocalDevices["synthetic-route"] = ownerroute.Device("127.0.0.1", "32223", 3030)
+				fake.Instances["test/yard"] = fake.Reconcile.Instance
+			}
+			switch change {
+			case "closed-core":
+				core.Close()
+			case "foreign-config":
+				fake.Reconcile.Instance.Config["user.foreign.fixture"] = "foreign"
+			case "uuid":
+				fake.Reconcile.Instance.Config["volatile.uuid"] = "different-fixed-instance"
+			case "wrong-endpoint":
+				fake.Reconcile.Instance.Config["user.subyard.preview_endpoint_sha256"] = strings.Repeat("c", 64)
+				fake.Reconcile.Instance.LocalConfig["user.subyard.preview_endpoint_sha256"] = strings.Repeat("c", 64)
+			case "unchanged-no-core":
+				fake.Reconcile.Instance.Config["user.subyard.preview_endpoint_sha256"] = strings.Repeat("a", 64)
+				fake.Reconcile.Instance.LocalConfig["user.subyard.preview_endpoint_sha256"] = strings.Repeat("a", 64)
+			case "local-mismatch":
+				fake.Reconcile.Instance.LocalConfig["user.subyard.preview_endpoint_sha256"] = strings.Repeat("c", 64)
+			}
+			witness, err := runtime.ObserveInstalledRuntime(context.Background(), "core-guest-runtime")
+			if err != nil || witness.State != ports.RuntimeStateCurrent || witness.Actual == "" || witness.Actual != witness.Desired {
+				t.Fatal("native core witness unavailable", err)
+			}
+			retained, err := runtime.BindInstalledRuntimeContext(context.Background(), original.Recipe())
+			if change == "uuid" {
+				if err == nil {
+					retained.Close()
+					t.Fatal("foreign UUID admitted original capsule")
+				}
+				t.Log("foreign UUID refused original capsule")
+				return
+			}
+			if err != nil {
+				t.Fatal("original capsule unavailable", err)
+			}
+			defer retained.Close()
+			fresh, err := runtime.IntegrationPlan(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := originalWitness.Desired
+			switch change {
+			case "missing-core", "unchanged-no-core":
+				core = nil
+			case "wrong-desired":
+				desired = strings.Repeat("0", 64)
+			case "core-source":
+				core.source = strings.Repeat("0", 64)
+			case "stale-core":
+				runtime.Executor = endpointProjectionExecutor{runtime.Executor}
+			}
+			compared, err := runtime.ProjectIntegrationPlanAfterCoreRuntime(context.Background(), core, desired, retained.PreparedIntegrations().Plan(), fresh)
+			if err == nil {
+				compared, err = runtime.ProjectIntegrationPlanAfterProfileActivation(context.Background(), retained.PreparedIntegrations().Plan(), compared)
+			}
+			if err == nil {
+				err = CheckIntegrationPlan(retained.PreparedIntegrations().Plan(), compared)
+			}
+			if err == nil && change == "combined-profile" {
+				reversed, reverseErr := runtime.ProjectIntegrationPlanAfterProfileActivation(context.Background(), retained.PreparedIntegrations().Plan(), fresh)
+				if reverseErr == nil {
+					reversed, reverseErr = runtime.ProjectIntegrationPlanAfterCoreRuntime(context.Background(), core, desired, retained.PreparedIntegrations().Plan(), reversed)
+				}
+				if reverseErr != nil || reversed.Scope != compared.Scope || reversed.Fingerprint != compared.Fingerprint {
+					t.Fatal("sibling projections did not share the same comparison", reverseErr)
+				}
+			}
+			if !bytes.Equal(retained.Recipe(), original.Recipe()) {
+				t.Fatal("original integration capsule changed")
+			}
+			actualInstance, _ := json.Marshal(compared.instance)
+			physicalInstance, _ := json.Marshal(fresh.instance)
+			if !bytes.Equal(actualInstance, physicalInstance) {
+				t.Fatal("comparison changed the raw physical instance")
+			}
+			positive := change == "endpoint-only" || change == "combined-profile" || change == "closed-core" || change == "original-absence" || change == "unchanged-no-core"
+			if positive && err != nil {
+				t.Fatal("exact core endpoint publication invalidates original integration scope", err)
+			}
+			if !positive && err == nil {
+				t.Fatal("foreign guard accepted")
+			}
+		})
+	}
+}
+
+type endpointProjectionExecutor struct{ ports.InstanceExecutor }
+
+func (e endpointProjectionExecutor) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if strings.Contains(strings.Join(request.Command, "\x00"), "helper=/usr/local/bin/subyard-preview") {
+		return ports.InstanceExecResult{ExitCode: 1}, errors.New("fixture preview is stale")
+	}
+	return e.InstanceExecutor.Exec(ctx, project, name, request)
 }

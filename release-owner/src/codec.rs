@@ -1,7 +1,9 @@
 //! Canonical Go JSON encoding, separate from raw frozen decoder admission.
 use crate::{Error, Result};
 use serde::{de::DeserializeOwned, Serialize};
-use serde_json::ser::{CompactFormatter, Formatter};
+#[cfg(test)]
+use serde_json::ser::CompactFormatter;
+use serde_json::ser::Formatter;
 use std::io::{self, Write};
 pub const MAX_BYTES: usize = 1 << 20;
 struct GoFormatter;
@@ -95,17 +97,21 @@ impl Formatter for GoFormatter {
         out: &mut W,
         value: &str,
     ) -> io::Result<()> {
-        for c in value.chars() {
-            match c {
-                '<' => out.write_all(b"\\u003c")?,
-                '>' => out.write_all(b"\\u003e")?,
-                '&' => out.write_all(b"\\u0026")?,
-                '\u{2028}' => out.write_all(b"\\u2028")?,
-                '\u{2029}' => out.write_all(b"\\u2029")?,
-                _ => CompactFormatter.write_string_fragment(out, c.encode_utf8(&mut [0; 4]))?,
-            }
+        let mut start = 0;
+        for (index, c) in value.char_indices() {
+            let escaped: &[u8] = match c {
+                '<' => b"\\u003c",
+                '>' => b"\\u003e",
+                '&' => b"\\u0026",
+                '\u{2028}' => b"\\u2028",
+                '\u{2029}' => b"\\u2029",
+                _ => continue,
+            };
+            out.write_all(value[start..index].as_bytes())?;
+            out.write_all(escaped)?;
+            start = index + c.len_utf8();
         }
-        Ok(())
+        out.write_all(value[start..].as_bytes())
     }
 }
 pub fn encode<T: Serialize>(value: &T, newline: bool) -> Result<Vec<u8>> {
@@ -124,6 +130,48 @@ pub(crate) fn encode_bundle<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 }
 pub(crate) fn encode_native_recipe<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     encode_limit(value, false, 96 << 20)
+}
+// Hash the same canonical recipe bytes without retaining a second full copy.
+pub(crate) fn hash_native_recipe<T: Serialize>(value: &T) -> Result<String> {
+    struct Bounded<'a> {
+        out: &'a mut dyn Write,
+        written: usize,
+        exceeded: &'a mut bool,
+    }
+    impl Write for Bounded<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let Some(total) = self.written.checked_add(bytes.len()) else {
+                *self.exceeded = true;
+                return Err(io::Error::other("recipe bound"));
+            };
+            if total > 96 << 20 {
+                *self.exceeded = true;
+                return Err(io::Error::other("recipe bound"));
+            }
+            self.out.write_all(bytes)?;
+            self.written = total;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.out.flush()
+        }
+    }
+    let mut exceeded = false;
+    let mut empty = false;
+    let result = source_hash_with(|out| {
+        let mut bounded = Bounded {
+            out,
+            written: 0,
+            exceeded: &mut exceeded,
+        };
+        let result = write_source_json(&mut bounded, value);
+        empty = bounded.written == 0;
+        result
+    });
+    if exceeded || empty && result.is_ok() {
+        return Err(Error::Bound);
+    }
+    result
 }
 fn encode_limit<T: Serialize>(value: &T, newline: bool, maximum: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -157,6 +205,73 @@ pub fn decode_canonical<T: DeserializeOwned + Serialize>(bytes: &[u8], newline: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn streamed_recipe_hash_matches_exact_bytes_and_bound() {
+        struct Empty;
+        impl Serialize for Empty {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("fixture serialization failure"))
+            }
+        }
+        assert!(matches!(hash_native_recipe(&Empty), Err(Error::Codec)));
+        let long = "A/+=".repeat(262144);
+        for value in ["", "<>&\u{2028}\u{2029}\"\\\n😀", long.as_str()] {
+            let raw = encode_native_recipe(&value).unwrap();
+            assert_eq!(hash_native_recipe(&value).unwrap(), crate::digest(&raw));
+        }
+        let at_limit = "a".repeat((96 << 20) - 2);
+        let raw = encode_native_recipe(&at_limit).unwrap();
+        assert_eq!(raw.len(), 96 << 20);
+        assert_eq!(hash_native_recipe(&at_limit).unwrap(), crate::digest(&raw));
+        drop(raw);
+        let over_limit = at_limit + "a";
+        assert!(matches!(hash_native_recipe(&over_limit), Err(Error::Bound)));
+        assert!(matches!(
+            encode_native_recipe(&over_limit),
+            Err(Error::Bound)
+        ));
+    }
+    #[test]
+    fn bulk_fragments_match_original_formatter_for_large_and_mixed_strings() {
+        struct Original;
+        impl Formatter for Original {
+            fn write_string_fragment<W: ?Sized + Write>(
+                &mut self,
+                out: &mut W,
+                value: &str,
+            ) -> io::Result<()> {
+                for c in value.chars() {
+                    match c {
+                        '<' => out.write_all(b"\\u003c")?,
+                        '>' => out.write_all(b"\\u003e")?,
+                        '&' => out.write_all(b"\\u0026")?,
+                        '\u{2028}' => out.write_all(b"\\u2028")?,
+                        '\u{2029}' => out.write_all(b"\\u2029")?,
+                        _ => CompactFormatter
+                            .write_string_fragment(out, c.encode_utf8(&mut [0; 4]))?,
+                    }
+                }
+                Ok(())
+            }
+        }
+        for value in [
+            "A/+=".repeat(262144),
+            "é<&>\u{2028}\u{2029}\"\\\n😀".repeat(1000),
+            String::new(),
+        ] {
+            let mut previous = Vec::new();
+            value
+                .serialize(&mut serde_json::Serializer::with_formatter(
+                    &mut previous,
+                    Original,
+                ))
+                .unwrap();
+            assert_eq!(encode_native_recipe(&value).unwrap(), previous);
+        }
+    }
     #[test]
     fn source_proof_carries_an_original_maximum_record() {
         let proof = crate::source_query::Proof {

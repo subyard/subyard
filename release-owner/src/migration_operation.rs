@@ -3,7 +3,7 @@
 use crate::{
     codec, digest,
     migration_owner::{self, Proposal},
-    owner::{Grant, Observation, Owner},
+    owner::{Grant, Observation, ObservationPurpose, Owner},
     plan::Plan,
     record::{self, require},
     store::Address,
@@ -13,7 +13,7 @@ use crate::{
 use std::time::{Duration, Instant};
 struct Review {
     observation: Observation,
-    proposal: Proposal,
+    proposal: Option<Proposal>,
     request: m::MigrationOwnerReplacementRequest,
 }
 pub struct PreparedMigrationOwner<'a> {
@@ -129,6 +129,17 @@ impl Owner {
         )?;
         self.native_quiescent(Some(b))?;
         require(!self.store.native_cleanup_pending()?)?;
+        crate::graph::State::read(&self.store)?;
+        self.store.recovery_for(&before)?;
+        self.store.source_metadata()?;
+        if !self.current_migration_receipt(&before)? {
+            return Ok(Review {
+                observation: self.blocked_source_observation(p::Goal {
+                    target: self.options.releases.target.clone(), direction: "activate-target".into(),
+                }, "Finish the unfinished Go transition with its exact retained owner before selecting a new Rust goal.")?,
+                proposal: None, request,
+            });
+        }
         crate::fixture::point("migration-owner-before-assets")?;
         let (assets, raw_source, previous_source) = self.migration_assets(b)?;
         crate::fixture::point("migration-owner-assets-verified")?;
@@ -164,8 +175,7 @@ impl Owner {
                 target: self.options.releases.target.clone(),
                 direction: "activate-target".into(),
             },
-            false,
-            true,
+            ObservationPurpose::ReplacementAssessment,
         )?;
         crate::fixture::point("migration-owner-observation-captured")?;
         for work in &observation.work {
@@ -203,7 +213,7 @@ impl Owner {
         self.store.reader.health()?;
         Ok(Review {
             observation,
-            proposal,
+            proposal: Some(proposal),
             request,
         })
     }
@@ -211,6 +221,9 @@ impl Owner {
         let Some((current, _)) = self.store.read_checked_journal()? else {
             return Ok(None);
         };
+        if !self.current_migration_receipt(&current)? {
+            return Ok(None);
+        }
         let receipts = self.store.migration_owner_receipts()?;
         let Some(receipt) = receipts
             .values()
@@ -241,6 +254,7 @@ impl Owner {
         self.verify_prepared_sources(&bundle.facts)?;
         let proved = review
             .proposal
+            .ok_or(Error::Invalid)?
             .finish(successor.wire().clone(), &self.store)?;
         require(proved.wire() == receipt.wire())?;
         proved.source_evidence(&self.store)?;
@@ -292,7 +306,7 @@ impl Owner {
         )?;
         crate::fixture::point("migration-owner-resume-binding-verified")?;
         let checked = Proposal {
-            wire: review.proposal.wire.clone(),
+            wire: review.proposal.as_ref().ok_or(Error::Invalid)?.wire.clone(),
         }
         .finish(successor.wire().clone(), &self.store)?;
         require(checked.wire() == receipt.wire())?;
@@ -304,7 +318,11 @@ impl Owner {
         grant: Grant,
     ) -> Result<PreparedMigrationOwner<'_>> {
         let review = self.migration_review(request)?;
-        let durable = self.migration_resume_journal(&review)?;
+        let durable = if review.proposal.is_some() {
+            self.migration_resume_journal(&review)?
+        } else {
+            None
+        };
         Ok(PreparedMigrationOwner {
             owner: self,
             review,
@@ -422,6 +440,7 @@ impl ConsentedMigrationOwner<'_> {
         crate::fixture::point("migration-owner-successor-formed")?;
         let receipt = review
             .proposal
+            .ok_or(Error::Invalid)?
             .finish(journal.wire().clone(), &owner.store)?;
         crate::fixture::point("migration-owner-receipt-checked")?;
         if let Some(prior) = prior.values().next() {
@@ -440,6 +459,7 @@ impl ConsentedMigrationOwner<'_> {
             &review.observation.targets,
             &owner.session,
             &installed,
+            Some(&owner.catalog),
         )?;
         crate::fixture::point("before-migration-owner-receipt")?;
         lease.create_owner_immutable(
@@ -486,7 +506,7 @@ impl ConsentedMigrationOwner<'_> {
     }
 }
 
-fn supported_platform() -> bool {
+pub(crate) fn supported_platform() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 #[cfg(test)]

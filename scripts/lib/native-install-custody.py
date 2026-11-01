@@ -96,7 +96,7 @@ def installed_files(paths):
 
 
 def claim_vector(owner, resources, descriptors, expected, selected, successor='', ordinary=False):
-    roles = ('engine', 'service') if owner == 'host-power' else ('engine', 'service', 'timer')
+    roles = (('engine', 'service') if len(resources) == 2 else ('engine', 'service', 'publication')) if owner == 'host-power' else ('engine', 'service', 'timer')
     if len(resources) != len(roles) or len(set(map(str, resources))) != len(roles) or len(descriptors) != len(roles):
         raise ValueError('invalid native installed resource vector')
     records = []
@@ -185,10 +185,31 @@ def main():
         if len(pairs) % 2 or mode not in ('claim', 'invalidate', 'fence'):
             raise ValueError('invalid native resource vector action')
         claim_vector(owner, [Path(value) for value in pairs[::2]], [int(value) for value in pairs[1::2]], expected, selected, successor, mode == 'invalidate')
+    elif action == 'installation-result':
+        selected, *pairs = arguments
+        generation(selected)
+        if owner != 'host-power' or len(pairs) != 6:
+            raise ValueError('invalid installation result roles')
+        paths, identities, generations = pairs[::2], [], []
+        for role, path, descriptor in zip(('engine', 'service', 'publication'), paths, pairs[1::2]):
+            path = Path(path)
+            safe_parent(path.parent)
+            validate_lock(path.parent/('.'+path.name+'.native-install.lock'), int(descriptor))
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != (0o755 if role == 'engine' else 0o644):
+                raise ValueError('unsafe installed result file')
+            value = observe(path.parent/('.'+path.name+'.native-custody.json'), owner)
+            if value != selected: raise ValueError('installation result generation differs')
+            identities.append({'role': role, 'device': info.st_dev, 'inode': info.st_ino})
+            generations.append({'role': role, 'value': value})
+        result = {'version': 1, 'filesDigest': installed_files(paths), 'identities': identities, 'generations': generations}
+        raw = (json.dumps(result, separators=(',', ':'))+'\n').encode()
+        if len(raw) > 4096: raise ValueError('installation result bound')
+        sys.stdout.buffer.write(raw)
     elif action == 'before':
         expected, *paths = arguments
         generation(expected)
-        if len(paths) != {'host-power': 2, 'test-vms-host-sink': 3}[owner] or installed_files(paths) != expected:
+        if len(paths) not in ({2, 3} if owner == 'host-power' else {3}) or installed_files(paths) != expected:
             raise ValueError('native installed files changed before mutation')
     elif action == 'claim':
         expected, selected = arguments

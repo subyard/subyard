@@ -70,12 +70,16 @@ type ownerOrphanEntry struct {
 	Marker                                string
 	ShutdownEligible, ShutdownUnavailable bool
 	Shutdown                              *ownerOrphanAssessment
+	Schema, Binding, Handler              string
+	Steps                                 []ownerResourceStep
 }
 type ownerOrphanRecord struct {
 	Version        int
 	RepositoryRoot string
 	Yard           yardnetwork.Yard
 	Entries        []ownerOrphanEntry
+	UUID           string
+	NIC            ownerTeardownMap[string]
 }
 
 func ownerOrphanHandlerLabel(value string, cli *CLI, logical string) string {
@@ -87,7 +91,14 @@ func ownerOrphanHandlerLabel(value string, cli *CLI, logical string) string {
 }
 
 func describeOwnerOrphanDefinition(value resource.Definition, cli *CLI, logical string) (ownerOrphanDefinition, error) {
-	if value.Command == "" || value.HandlerPath() == "" || value.Proxy == nil || !value.Proxy.IsOwnerIPv4Ingress() {
+	if value.Proxy == nil || !value.Proxy.IsOwnerIPv4Ingress() {
+		return ownerOrphanDefinition{}, domain.ErrPlanStale
+	}
+	return describeOwnerResourceDefinition(value, cli, logical)
+}
+
+func describeOwnerResourceDefinition(value resource.Definition, cli *CLI, logical string) (ownerOrphanDefinition, error) {
+	if value.Command == "" || value.HandlerPath() == "" {
 		return ownerOrphanDefinition{}, domain.ErrPlanStale
 	}
 	d := ownerOrphanDefinition{Profile: value.Profile, Name: value.Name, Command: value.Command, Handler: value.Handler, HandlerPath: ownerOrphanHandlerLabel(value.HandlerPath(), cli, logical), BringUp: value.BringUp, Shutdown: value.Shutdown, Title: value.Title, Verbs: value.Verbs, ControllerSessions: value.ControllerSessions, Proxy: value.Proxy, Dashboard: value.Dashboard, Management: value.Management, Endpoint: value.Endpoint, Bootstrap: value.Bootstrap, Startup: value.Startup}
@@ -120,6 +131,9 @@ func validateOwnerOrphanEntry(entry orphanIngressEntry, description ownerOrphanD
 	if entry.definition.Proxy == nil || *entry.definition.Proxy != entry.contract || entry.shutdownUnavailable && !entry.shutdownEligible || entry.shutdown != nil && (!entry.shutdownEligible || entry.shutdownUnavailable) {
 		return domain.ErrPlanStale
 	}
+	if entry.prepared != nil && (entry.shutdown == nil || !reflect.DeepEqual(entry.prepared.Assessment, *entry.shutdown)) {
+		return domain.ErrPlanStale
+	}
 	if entry.shutdown == nil {
 		return nil
 	}
@@ -143,7 +157,7 @@ func captureOwnerOrphanRecord(plan *orphanIngressPlan, cli *CLI, logicalReposito
 	if len(plan.entries) != 0 && (cli == nil || !filepath.IsAbs(logicalRepositoryRoot) || filepath.Clean(logicalRepositoryRoot) != logicalRepositoryRoot) {
 		return nil, domain.ErrPlanStale
 	}
-	r := ownerOrphanRecord{Version: 1, RepositoryRoot: logicalRepositoryRoot, Yard: plan.yard}
+	r := ownerOrphanRecord{Version: 1, RepositoryRoot: logicalRepositoryRoot, Yard: plan.yard, UUID: plan.uuid, NIC: teardownMap(plan.nic)}
 	if plan.entries != nil {
 		r.Entries = []ownerOrphanEntry{}
 	}
@@ -162,6 +176,16 @@ func captureOwnerOrphanRecord(plan *orphanIngressPlan, cli *CLI, logicalReposito
 			return nil, err
 		}
 		row := ownerOrphanEntry{Definition: description, Contract: entry.contract, DevicePresent: entry.device != nil, Marker: entry.marker, ShutdownEligible: entry.shutdownEligible, ShutdownUnavailable: entry.shutdownUnavailable, Shutdown: describeOwnerOrphanAssessment(entry.shutdown)}
+		handler, err := os.ReadFile(definition.HandlerPath())
+		if err != nil {
+			return nil, err
+		}
+		row.Handler = operationStateDigest(handler)
+		if entry.prepared != nil {
+			row.Schema = entry.prepared.Schema
+			row.Binding = entry.prepared.Binding
+			row.Steps = teardownSlice(entry.prepared.Steps, describeResourceStep)
+		}
 		for _, key := range slices.Sorted(maps.Keys(entry.device)) {
 			row.Device = append(row.Device, ownerOrphanDeviceRow{key, entry.device[key]})
 		}
@@ -181,7 +205,7 @@ func restoreOwnerOrphanRecord(raw []byte, cli *CLI, logicalRepositoryRoot string
 	if r.Version != 1 || r.RepositoryRoot != logicalRepositoryRoot || len(r.Entries) != 0 && (cli == nil || !filepath.IsAbs(logicalRepositoryRoot) || filepath.Clean(logicalRepositoryRoot) != logicalRepositoryRoot) {
 		return nil, domain.ErrPlanStale
 	}
-	plan := &orphanIngressPlan{yard: r.Yard}
+	plan := &orphanIngressPlan{yard: r.Yard, uuid: r.UUID, nic: r.NIC.restore()}
 	if r.Entries != nil {
 		plan.entries = []orphanIngressEntry{}
 	}
@@ -201,7 +225,17 @@ func restoreOwnerOrphanRecord(raw []byte, cli *CLI, logicalRepositoryRoot string
 		if !reflect.DeepEqual(description, row.Definition) {
 			return nil, domain.ErrPlanStale
 		}
+		handler, err := os.ReadFile(definition.HandlerPath())
+		if err != nil || operationStateDigest(handler) != row.Handler {
+			return nil, domain.ErrPlanStale
+		}
 		entry := orphanIngressEntry{definition: definition, contract: row.Contract, marker: row.Marker, shutdownEligible: row.ShutdownEligible, shutdownUnavailable: row.ShutdownUnavailable, shutdown: row.Shutdown.restore()}
+		if row.Schema != "" {
+			if entry.shutdown == nil {
+				return nil, domain.ErrPlanStale
+			}
+			entry.prepared = &resource.PrepareResult{Schema: row.Schema, Binding: row.Binding, Assessment: *entry.shutdown, Steps: teardownSlice(row.Steps, ownerResourceStep.restore)}
+		}
 		if row.DevicePresent {
 			entry.device = map[string]string{}
 		} else if len(row.Device) != 0 {

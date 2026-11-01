@@ -109,6 +109,23 @@ impl Store {
         registry: &record::Registry,
         registry_digest: &str,
     ) -> Result<SourceMetadata> {
+        self.inspect_source_inner(registry, registry_digest, false)
+    }
+    // The caller has authenticated the original Rust runtime's full manifest.
+    // A stored snapshot proves historical identity, never executable admission.
+    pub(crate) fn inspect_rust_source(
+        &self,
+        registry: &record::Registry,
+        registry_digest: &str,
+    ) -> Result<SourceMetadata> {
+        self.inspect_source_inner(registry, registry_digest, true)
+    }
+    fn inspect_source_inner(
+        &self,
+        registry: &record::Registry,
+        registry_digest: &str,
+        rust_source: bool,
+    ) -> Result<SourceMetadata> {
         let before = self.source_metadata()?;
         let snapshot = self.read(&Address::journal())?;
         let current = snapshot
@@ -117,10 +134,14 @@ impl Store {
             .transpose()?;
         if let Some(current) = &current {
             let j = current.wire();
-            let mut original = None;
+            let mut original = if rust_source && self.has_bundle(&j.transaction)? {
+                self.source_catalog(current)?
+            } else {
+                None
+            };
             for (ssh, publication) in [(false, false), (true, false), (false, true), (true, true)] {
                 let catalog = migration_owner::builtin_catalog(ssh, publication)?;
-                if catalog.digest() == j.catalog_digest {
+                if original.is_none() && catalog.digest() == j.catalog_digest {
                     original = Some(catalog);
                     break;
                 }

@@ -3,7 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,17 +17,68 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
-	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
+
+type afterOwnerConfigTestState struct {
+	*nativeMaterializedState
+}
+
+func (s afterOwnerConfigTestState) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) > 4 && request.Command[0] == "python3" && (request.Command[4] == "configs-observe" || request.Command[4] == "configs-write") {
+		var value struct {
+			Entries []struct{ Path, Digest, Content string } `json:"entries"`
+			UID     uint32                                   `json:"uid"`
+		}
+		if err := json.Unmarshal(request.Stdin, &value); err != nil {
+			return ports.InstanceExecResult{}, err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if request.Command[4] == "configs-write" {
+			entry := value.Entries[0]
+			payload, err := base64.StdEncoding.DecodeString(entry.Content)
+			if err != nil {
+				return ports.InstanceExecResult{}, err
+			}
+			s.files[entry.Path] = payload
+			s.writes++
+			return ports.InstanceExecResult{}, nil
+		}
+		rows := []map[string]any{}
+		for _, entry := range value.Entries {
+			payload, present := s.files[entry.Path]
+			digest := ""
+			uid, mode := uint32(0), uint32(0)
+			if present {
+				digest = fmt.Sprintf("%x", sha256.Sum256(payload))
+				uid = value.UID
+				mode = 0644
+			}
+			rows = append(rows, map[string]any{"exists": present, "digest": digest, "uid": uid, "gid": uid, "mode": mode})
+		}
+		raw, _ := json.Marshal(rows)
+		return ports.InstanceExecResult{Stdout: raw}, nil
+	}
+	return s.nativeMaterializedState.Exec(ctx, project, name, request)
+}
 
 func afterOwnerFilesFixture(t *testing.T) (*releaseOwnerComponents, *testkit.Incus, *nativeMaterializedState, releaseowner.Target, []byte) {
 	t.Helper()
 	ctx := context.Background()
 	c, _ := nativeActivationSourceFixture(t)
 	nativeMaterializedSourceFiles(t, c.context.RepositoryRoot)
+	settings := filepath.Join(c.context.RepositoryRoot, "config/agents.env")
+	content, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = bytes.ReplaceAll(content, []byte("AGENT_sample_RULES_DEST=.sample/rules"), []byte("AGENT_sample_RULES_DEST=.sample/b.rules"))
+	content = append(content, []byte("AGENT_sample_CONFIG='"+filepath.Join(c.context.RepositoryRoot, "config/agents/sample/CONFIG")+"'\nAGENT_sample_CONFIG_DEST=.sample/a.conf\n")...)
+	testkit.WriteFile(t, settings, content, 0755)
+	testkit.WriteFile(t, filepath.Join(c.context.RepositoryRoot, "config/agents/sample/CONFIG"), []byte("approved original CONFIG\n"), 0755)
 	if err := os.MkdirAll(c.context.DataHome, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +86,7 @@ func afterOwnerFilesFixture(t *testing.T) (*releaseOwnerComponents, *testkit.Inc
 	delete(incus.Instances, "subyard/yard")
 	incus.Reconcile = ports.ReconcileState{}
 	state := &nativeMaterializedState{files: map[string][]byte{}}
-	c.cli.options.Executor = state
+	c.cli.options.Executor = afterOwnerConfigTestState{state}
 	if _, _, err := c.CaptureInventory(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +106,95 @@ func afterOwnerFilesFixture(t *testing.T) (*releaseOwnerComponents, *testkit.Inc
 		t.Fatal("original source-only bind", err)
 	}
 	return c, incus, state, original, raw
+}
+
+// The real filesystem/CAS proof lives in the owning adapter process test. This
+// fixture proves the CLI retains that record instead of rejecting its mixture
+// through the ordinary aggregate-only guard.
+func TestAfterOwnerFilesCLIPartialStateUsesOriginalRecord(t *testing.T) {
+	ctx := context.Background()
+	c, incus, state, original, raw := afterOwnerFilesFixture(t)
+	completed := bindAfterOwnerFilesResults(t, c, original)
+	instance := ports.InstanceInfo{Name: original.Instance, Project: original.Project, Status: "Running", Config: map[string]string{"volatile.uuid": "original-created-uuid", "user.subyard.owner_create": strings.Repeat("1", 32)}}
+	incus.Instances[original.Project+"/"+original.Instance] = instance
+	incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: instance}
+	resolved, hash, err := c.ResolveAfterOwner(ctx, original, completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived, err := c.InstalledRuntimeRecipe(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.files["/home/dev/.sample/a.conf"] = []byte("approved original CONFIG\n")
+	prepared := c.activation[activationKey(resolved)]
+	if err := c.cli.refreshConfigApply(ctx, prepared.configs); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatal("ordinary aggregate guard accepted partial mixture", err)
+	}
+	fresh := &releaseOwnerComponents{cli: c.cli, root: c.root, context: c.context, inputs: map[string]config.PersistentFileSnapshot{}, overlays: map[string]config.PersistentFileSnapshot{}, loaded: map[string]config.Loaded{}, activation: map[string]releaseActivationPrepared{}, installedBound: map[string]bool{}}
+	t.Cleanup(func() { fresh.Close() })
+	if _, _, err := fresh.CaptureInventory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh.CaptureActivation(ctx, original.Owner, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.BindInstalledRuntimeRecipeForTarget(ctx, original.PreparedRecipe, raw, original); err != nil {
+		t.Fatal(err)
+	}
+	if got := bindAfterOwnerFilesResults(t, fresh, original); got != completed {
+		t.Fatal("producer changed")
+	}
+	if err := fresh.BindAfterOwnerCompletion(completed); err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.BindInstalledRuntimeRecipeForTarget(ctx, hash, derived, resolved); err != nil {
+		t.Fatal("fresh original physical record", err)
+	}
+	values, err := fresh.CaptureActivation(ctx, original.Owner, true)
+	if err != nil {
+		t.Fatal("partial observation", err)
+	}
+	observed := resolved
+	for _, value := range values {
+		if value.Class == resolved.Class {
+			observed = value
+		}
+	}
+	if observed.Source != resolved.Source || observed.Desired != resolved.Desired || observed.Before != resolved.Before || observed.PreparedRecipe != resolved.PreparedRecipe {
+		t.Fatal("partial observation replaced original contract")
+	}
+	if err := fresh.ValidateMaterializedAfterOwnerRecovery(ctx, resolved, completed); err != nil {
+		t.Fatal("original derived recovery binding", err)
+	}
+	if err := fresh.ValidateMaterializedAfterOwnerRecovery(ctx, observed, completed); err == nil {
+		t.Fatal("fresh partial observation replaced original accepted target")
+	}
+	for field, mutate := range map[string]func(*releaseowner.Target){
+		"source":              func(v *releaseowner.Target) { v.Source = strings.Repeat("e", 64) },
+		"desired":             func(v *releaseowner.Target) { v.Desired = strings.Repeat("e", 64) },
+		"before":              func(v *releaseowner.Target) { v.Before = strings.Repeat("e", 64) },
+		"recipe":              func(v *releaseowner.Target) { v.PreparedRecipe = strings.Repeat("e", 64) },
+		"uuid":                func(v *releaseowner.Target) { v.InstanceUUID = "replacement" },
+		"selector":            func(v *releaseowner.Target) { v.Scope = "replacement" },
+		"producer-descriptor": func(v *releaseowner.Target) { v.AfterOwner = "v1:materialized-files:" + strings.Repeat("e", 64) },
+	} {
+		foreign := resolved
+		mutate(&foreign)
+		if err := fresh.ApplyActivation(ctx, foreign); !errors.Is(err, domain.ErrPlanStale) || state.writes != 0 {
+			t.Fatal("foreign recovery contract reached effects", field, err, state.writes)
+		}
+	}
+	// Native recovery reuses the exact accepted derived target, including its original observation.
+	if err := fresh.ApplyActivation(ctx, resolved); err != nil {
+		t.Fatal("partial apply", err)
+	}
+	if state.writes != 1 || string(state.files["/home/dev/.sample/b.rules"]) != "approved original materialized rules\n" {
+		t.Fatal("partial apply expanded writes", state.writes)
+	}
+	if !bytes.Equal(raw, c.afterOwnerOriginals[original.PreparedRecipe].prepared.nativeInstalled.Recipe()) {
+		t.Fatal("original source recipe replaced")
+	}
 }
 func bindAfterOwnerFilesResults(t *testing.T, c *releaseOwnerComponents, target releaseowner.Target) releaseowner.AfterOwnerCompletion {
 	t.Helper()
@@ -230,23 +374,34 @@ func TestAfterOwnerRuntimeCLIUsesOriginalHandlerAndGeneration(t *testing.T) {
 	}
 	generation := filepath.Join(c.context.DataHome, "physical-generation")
 	testkit.WriteFile(t, generation, []byte("0"), 0600)
-	old, newDigest := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	newDigest := strings.Repeat("b", 64)
 	script := `#!/bin/sh
 set -eu
 case "$1" in
- observe) printf '{"state":"stale","actual":"%s","desired":"%s"}\n' "$OLD" "$NEW";;
- custody-observe) printf '{"generation":"%s"}\n' "$(cat "$GENERATION")";;
+ observe) printf '{"state":"stale","actual":"%s","desired":"%s"}\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";;
+ custody-observe) printf '{"generation":"%s"}\n' "$(cat "$SUBYARD_HOME/physical-generation")";;
  *) exit 93;;
 esac
 `
 	testkit.WriteFile(t, filepath.Join(root, "runtime.sh"), []byte(script), 0755)
-	runtime := reconcileruntime.Runtime{RepositoryRoot: c.context.RepositoryRoot, Profiles: []profile.Definition{{SchemaVersion: 1, Name: "synthetic", Root: root, Runtime: &profile.RuntimeHook{ActivationID: "synthetic-runtime", Handler: "runtime.sh", Custody: true}}}, Integrations: []profile.IntegrationDefinition{}, Environment: []string{"PATH=/usr/bin:/bin", "OLD=" + old, "NEW=" + newDigest, "GENERATION=" + generation}, Yard: domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000, Paths: domain.RuntimePaths{DataHome: c.context.DataHome, ConfigHome: c.context.ConfigHome, RepositoryRoot: c.context.RepositoryRoot}}, Incus: c.cli.options.Incus.(*testkit.Incus), Executor: c.cli.options.Incus.(*testkit.Incus)}
-	source, err := runtime.SelectedRuntimeInputs("synthetic-runtime")
+	testkit.WriteFile(t, filepath.Join(root, "profile.json"), []byte(`{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh","custody":true}}`), 0644)
+	program, err := New(c.cli.options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	original := releaseowner.Target{Owner: "synthetic-runtime", Class: "profile-runtime", Yard: "default", Project: "subyard", Instance: "yard", InstanceUUID: "absent", State: "absent", Actual: old, Desired: newDigest, Source: source}
-	prepared, err := c.prepareAfterOwnerRuntime(ctx, releaseActivationPrepared{value: original, platform: runtime})
+	c.cli, c.catalog = program.releaseActivationOperation(), &program.catalog
+	incus := c.cli.options.Incus.(*testkit.Incus)
+	delete(incus.Instances, "subyard/yard")
+	incus.Reconcile = ports.ReconcileState{}
+	if _, _, err := c.CaptureInventory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	values, err := c.CaptureActivation(ctx, "synthetic-runtime", false)
+	if err != nil || len(values) != 1 {
+		t.Fatalf("original runtime capture count=%d type=%T", len(values), err)
+	}
+	original := values[0]
+	prepared, err := c.prepareAfterOwnerRuntime(ctx, c.activation[activationKey(original)])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,10 +412,12 @@ esac
 		t.Fatal(err)
 	}
 	completed := bindAfterOwnerFilesResults(t, c, original)
-	incus := c.cli.options.Incus.(*testkit.Incus)
 	instance := ports.InstanceInfo{Name: "yard", Project: "subyard", Status: "Running", Config: map[string]string{"volatile.uuid": "original-created-uuid", "user.subyard.owner_create": strings.Repeat("1", 32)}}
 	incus.Instances["subyard/yard"] = instance
 	incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: instance}
+	if _, err := c.CaptureActivation(ctx, original.Owner, true); err != nil {
+		t.Fatalf("fresh unresolved runtime type=%T", err)
+	}
 	resolved, recipe, err := c.ResolveAfterOwner(ctx, original, completed)
 	if err != nil {
 		t.Fatal("runtime physical resolution", err)
@@ -268,8 +425,46 @@ esac
 	if resolved.Source != original.Source || resolved.AfterOwner != original.AfterOwner || resolved.ReportedDesired != newDigest || resolved.Before == "" {
 		t.Fatal("runtime source/generation not retained")
 	}
-	if _, err := c.observeAfterOwnerViews(ctx, original.Owner, []releaseowner.Target{resolved}); err != nil {
-		t.Fatal("selected cached view", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		values, err := c.CaptureActivation(ctx, original.Owner, true)
+		if err != nil || len(values) != 1 || values[0] != resolved {
+			t.Fatalf("fresh resolved runtime attempt=%d count=%d type=%T", attempt, len(values), err)
+		}
+	}
+	storage, approved := map[*byte]int{}, map[*byte]int{}
+	for index, payload := range []*reconcileruntime.PreparedInstalledRuntime{c.afterOwnerOriginals[original.PreparedRecipe].prepared.nativeInstalled, c.afterOwnerViews[activationKey(resolved)].prepared.nativeInstalled} {
+		before, binding := payload.Recipe(), payload.Binding()
+		seen, duplicates := 0, 0
+		err := payload.ShareSources(func(value []byte) ([]byte, error) {
+			if len(value) != 0 {
+				seen++
+				storage[&value[0]] = len(value)
+				retained := c.sourceBytes[nativeDigest(value)]
+				if len(retained) == 0 || &retained[0] != &value[0] {
+					duplicates++
+				}
+				if len(retained) != 0 {
+					approved[&retained[0]] = len(retained)
+				}
+			}
+			return value, nil
+		})
+		if err != nil || !bytes.Equal(before, payload.Recipe()) || binding != payload.Binding() {
+			t.Fatal("source storage inspection changed the recipe")
+		}
+		if seen == 0 || duplicates != 0 {
+			t.Errorf("retained source storage stage=%d payloads=%d duplicates=%d", index, seen, duplicates)
+		}
+	}
+	actualBytes, approvedBytes := 0, 0
+	for _, size := range storage {
+		actualBytes += size
+	}
+	for _, size := range approved {
+		approvedBytes += size
+	}
+	if actualBytes != approvedBytes {
+		t.Errorf("retained unique source bytes=%d approved=%d", actualBytes, approvedBytes)
 	}
 	testkit.WriteFile(t, generation, []byte(strings.Repeat("e", 64)), 0600)
 	if _, err := c.observeAfterOwnerViews(ctx, original.Owner, []releaseowner.Target{resolved}); err == nil {
@@ -294,6 +489,9 @@ esac
 type afterOwnerCLIIntegrationInventory struct{ *nativeMaterializedState }
 
 func (s *afterOwnerCLIIntegrationInventory) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) > 4 && request.Command[0] == "python3" && strings.HasPrefix(request.Command[4], "configs-") {
+		return (afterOwnerConfigTestState{s.nativeMaterializedState}).Exec(ctx, project, name, request)
+	}
 	result, err := s.nativeMaterializedState.Exec(ctx, project, name, request)
 	if err == nil && len(request.Command) >= 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") && request.Command[4] == "observe" {
 		var input struct {
@@ -311,6 +509,7 @@ func (s *afterOwnerCLIIntegrationInventory) Exec(ctx context.Context, project, n
 			facts = append(facts, map[string]any{"key": entry.Kind + ":" + path, "desired": strings.Repeat("a", 64), "observed": strings.Repeat("b", 64), "at_desired": false})
 		}
 		body["facts"] = facts
+		body["after_owner"] = map[string]any{"before": strings.Repeat("b", 64), "pending": strings.Repeat("b", 64), "committed": strings.Repeat("b", 64), "states": make([]map[string]any, len(input.Entries))}
 		result.Stdout, _ = json.Marshal(body)
 	}
 	return result, err
@@ -323,7 +522,7 @@ func TestAfterOwnerIntegrationsCLIOriginalResolveDerivedBind(t *testing.T) {
 	c.cli.options.Executor = &afterOwnerCLIIntegrationInventory{state}
 	runtime.Executor = c.cli.options.Executor
 	c.ownerChildren = &preparedOwnerChildren{inits: map[string]preparedOwnerInitChild{}}
-	prepared, err := c.prepareAfterOwnerIntegration(ctx, originalPrepared.configTarget, runtime, files.Source)
+	prepared, err := c.prepareAfterOwnerIntegration(ctx, originalPrepared.configTarget, runtime, c.activationSource())
 	if err != nil {
 		t.Fatal("constructor", err)
 	}
@@ -364,7 +563,7 @@ func afterOwnerUUIDFixture(t *testing.T, kind string) (*releaseOwnerComponents, 
 		runtime.Executor = c.cli.options.Executor
 		c.ownerChildren = &preparedOwnerChildren{inits: map[string]preparedOwnerInitChild{}}
 		var err error
-		prepared, err = c.prepareAfterOwnerIntegration(context.Background(), prepared.configTarget, runtime, original.Source)
+		prepared, err = c.prepareAfterOwnerIntegration(context.Background(), prepared.configTarget, runtime, c.activationSource())
 		if err != nil {
 			t.Fatal(err)
 		}

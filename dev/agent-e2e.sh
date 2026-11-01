@@ -1343,6 +1343,8 @@ prepare_guest() {
 }
 
 run_guest() {
+  local raw_stdout=0
+  if [ "${1:-}" = --raw-stdout ]; then raw_stdout=1; shift; fi
   local vm="$1" bundle="$2" expected_hash="$3" directory rc=0; shift 3
   phase_start transport "$vm"
   prepare_guest "$vm" "$bundle" "$expected_hash" || { rc=$?; phase_end "$rc"; return "$rc"; }
@@ -1353,10 +1355,17 @@ run_guest() {
   guest "$vm" chmod 0700 "$directory/run.sh" </dev/null \
     || { printf 'agent-e2e: VM%s command preparation failed\n' "$vm" >&2; phase_end 2; return 2; }
   phase_end 0
-  printf '\n== e2e-vm-%s ==\n' "$vm"
   phase_start guest "$vm"
-  guest "$vm" "$directory/run.sh" </dev/null 2>&1 | normalize_terminal_progress
-  rc=$?
+  if [ "$raw_stdout" = 1 ]; then
+    # Framed stdout is a byte stream. Diagnostics stay on the separate SSH
+    # stderr channel rather than being spliced into a partial DATA record.
+    printf '\n== e2e-vm-%s ==\n' "$vm" >&2
+    guest "$vm" "$directory/run.sh" </dev/null || rc=$?
+  else
+    printf '\n== e2e-vm-%s ==\n' "$vm"
+    guest "$vm" "$directory/run.sh" </dev/null 2>&1 | normalize_terminal_progress
+    rc=$?
+  fi
   phase_end "$rc"
   return "$rc"
 }

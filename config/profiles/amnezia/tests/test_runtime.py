@@ -2,6 +2,7 @@
 """Behavioral checks for Amnezia's owner handler and guest runtime."""
 import contextlib
 import copy
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -237,6 +238,53 @@ esac
                 result = json.load(archive.extractfile('result.json'))
                 self.assertTrue(result['probes']['observe']['truncated'])
 
+    def test_failure_capture_new_log_redaction_and_projection_are_bounded(self):
+        capture = load_module('amnezia_capture_projection_test', PROFILE / 'tests/e2e/failure-capture.py')
+        body = (b'event=SHUTDOWN reason=host-qmp-quit\n'
+                b'Authorization: Bearer synthetic-auth-canary\n'
+                b'{"password":"synthetic-password-canary"}\n'
+                b'--token=synthetic-token-canary\n'
+                b'https://synthetic-user:synthetic-url-canary@example.invalid/path\n'
+                b'-----BEGIN PRIVATE KEY-----\nsynthetic-pem-canary\n-----END PRIVATE KEY-----\n')
+        redacted = capture.redact_diagnostic_log(body)
+        self.assertIn(b'host-qmp-quit', redacted)
+        for canary in (b'synthetic-auth', b'synthetic-password', b'synthetic-token', b'synthetic-url', b'synthetic-pem'):
+            self.assertNotIn(canary, redacted)
+        self.assertLessEqual(len(capture.redact_diagnostic_log(b'\xff' * (capture.LIMIT + 1))), capture.LIMIT)
+        instance = dict(type='virtual-machine', architecture='x86_64',
+                        config={'volatile.base_image': 'a' * 64, 'user.user-data': 'synthetic-config-canary'})
+        image = dict(fingerprint='a' * 64, architecture='x86_64',
+                     properties=dict(os='Debian', release='13', secret='synthetic-image-canary'))
+        with mock.patch.object(capture, 'query_json', side_effect=[instance, image]):
+            facts = capture.image_facts()
+        self.assertEqual(facts['base_fingerprint'], 'a' * 64)
+        self.assertNotIn('synthetic-', json.dumps(facts))
+
+    def test_failure_capture_cpu_projection_omits_argv_and_rejects_replaced_pid(self):
+        capture = load_module('amnezia_capture_cpu_test', PROFILE / 'tests/e2e/failure-capture.py')
+        uuid = '12345678-abcd-1234-abcd-123456789abc'
+        instance = dict(type='virtual-machine', config={'volatile.uuid': uuid})
+        original_stat = b'1234 (qemu) R ' + b'0 ' * 18 + b'123 0\n'
+        for replaced in (False, True):
+            with self.subTest(replaced=replaced):
+                reads = []
+                def read(path):
+                    if path.name == 'stat':
+                        reads.append(True)
+                        return original_stat if not replaced or len(reads) == 1 else original_stat.replace(b'123 0', b'124 0')
+                    return {'cmdline': b'/usr/bin/qemu-system-x86_64\0-uuid\0' + uuid.encode() + b'\0-password\0synthetic-argv-canary\0',
+                            'cgroup': b'0::/subyardvm-aaaaaaaa.scope\n', 'cpu.weight': b'1000\n'}[path.name]
+                with mock.patch.object(capture, 'query_json', side_effect=[instance, {'pid': 1234}]), \
+                        mock.patch.object(capture, 'read_bounded', side_effect=read):
+                    if replaced:
+                        with self.assertRaisesRegex(ValueError, 'identity'):
+                            capture.cpu_runtime()
+                    else:
+                        facts = capture.cpu_runtime()
+                        self.assertEqual(facts['cpu_weight'], 1000)
+                        self.assertEqual(facts['scope'], 'subyardvm-aaaaaaaa.scope')
+                        self.assertNotIn('synthetic-argv', json.dumps(facts))
+
     def test_capture_refuses_unowned_instances(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             directory = Path(temporary)
@@ -350,6 +398,176 @@ class OwnerHandlerTest(unittest.TestCase):
                 'type': 'virtual-machine', 'status': 'Running',
                 'config': {}, 'devices': {},
                 'expanded_devices': {'eth0': {'type': 'nic', 'ipv4.address': '10.80.0.10'}}}
+
+    def test_original_startup_parent_owns_proxy_writes_and_checks_instance(self):
+        os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='up',
+                          SUBYARD_OPERATION_ID='op-original', SUBYARD_RESOURCE_INGRESS_OWNER='parent',
+                          SUBYARD_RESOURCE_INSTANCE_UUID='original-uuid')
+        state = self.instance()
+        state['config']['volatile.uuid'] = 'original-uuid'
+        want = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        with mock.patch.object(handler, 'query', return_value=state):
+            self.assertEqual(handler.inspect(), state)
+            state['config']['volatile.uuid'] = 'replacement-uuid'
+            with self.assertRaisesRegex(RuntimeError, 'original startup instance changed'):
+                handler.inspect()
+            state['config']['volatile.uuid'] = 'original-uuid'
+        with mock.patch.object(handler, 'inspect', return_value=state), \
+                mock.patch.object(handler, 'endpoint', return_value=('10.20.30.40', 'eth0', '51820', want)), \
+                mock.patch.object(handler, 'collisions'), \
+                mock.patch.object(handler, 'guest', return_value=result()) as guest, \
+                mock.patch.object(handler, 'runtime_status', return_value={'ready': True, 'enabled': True}), \
+                mock.patch.object(handler, 'ensure_ingress', side_effect=AssertionError('child published host proxy')), \
+                mock.patch.object(handler, 'incus', side_effect=AssertionError('child mutated host proxy')), \
+                mock.patch.object(sys, 'argv', ['vpn', 'up']):
+            self.assertEqual(handler.main(), 0)
+            guest.assert_called_once_with('python3', handler.RUNTIME, 'up', '--endpoint', '10.20.30.40', '--port', '51820')
+            handler.remove_ingress(retain_pending=True)
+
+    def test_original_orphan_parent_owns_proxy_writes_but_guest_shutdown_runs(self):
+        os.environ.update(ENVIRONMENT_PROFILES='', SUBYARD_RESOURCE_MODE='apply',
+                          SUBYARD_RESOURCE_ACTION='down', SUBYARD_OPERATION_ID='op-original',
+                          SUBYARD_RESOURCE_INGRESS_OWNER='parent',
+                          SUBYARD_RESOURCE_INSTANCE_UUID='original-uuid')
+        state = self.instance()
+        state['config'].update({'volatile.uuid': 'original-uuid',
+                                handler.KEY: 'v1:pending:' + 'a' * 64})
+        with mock.patch.object(handler, 'query', return_value=state), \
+                mock.patch.object(handler, 'guest', return_value=result()) as guest, \
+                mock.patch.object(handler, 'incus', side_effect=AssertionError('child mutated host proxy')), \
+                mock.patch.object(sys, 'argv', ['vpn', 'down']):
+            self.assertEqual(handler.main(), 0)
+            guest.assert_called_once_with('python3', handler.RUNTIME, 'down', timeout=20)
+            self.assertEqual(state['config'][handler.KEY], 'v1:pending:' + 'a' * 64)
+            state['config']['volatile.uuid'] = 'replacement-uuid'
+            with self.assertRaisesRegex(RuntimeError, 'original startup instance changed'):
+                handler.main()
+            guest.assert_called_once()
+
+    def test_original_guest_mutation_rechecks_uuid_after_parent_route_closure(self):
+        state = self.instance()
+        state['config'].update({'volatile.uuid': 'original-uuid',
+                                handler.KEY: 'v1:pending:' + 'a' * 64})
+        replacement = copy.deepcopy(state)
+        replacement['config']['volatile.uuid'] = 'replacement-uuid'
+        os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_OPERATION_ID='op-original',
+                          SUBYARD_RESOURCE_INGRESS_OWNER='parent',
+                          SUBYARD_RESOURCE_INSTANCE_UUID='original-uuid')
+        for verb, action in (('down', 'down'), ('rollback-ingress', 'up')):
+            with self.subTest(verb=verb):
+                os.environ['SUBYARD_RESOURCE_ACTION'] = action
+                observations = [state, replacement] if verb == 'down' else [replacement]
+                with mock.patch.object(handler, 'query', side_effect=observations), \
+                        mock.patch.object(handler, 'run', side_effect=AssertionError('foreign guest mutation')) as run, \
+                        mock.patch.object(sys, 'argv', ['vpn', verb]):
+                    with self.assertRaisesRegex(RuntimeError, 'shutdown is unverified'):
+                        handler.main()
+                    run.assert_not_called()
+
+    def test_actual_handler_incus_cli_keeps_original_ofd_after_helper_and_handler_loss(self):
+        # Real handler + real subprocess.run, with only the external Incus CLI
+        # synthetic. The surviving CLI must retain the original account OFD.
+        with tempfile.TemporaryDirectory(prefix='subyard-amnezia-ofd-', dir='/tmp') as temporary:
+            directory = Path(temporary)
+            directory.chmod(0o700)
+            home = directory / 'home'
+            home.mkdir(mode=0o700)
+            home.chmod(0o700)
+            lock_parent = Path('/tmp') / ('subyard-owner-locks-' + str(os.getuid()))
+            try:
+                lock_parent.mkdir(mode=0o700)
+                lock_parent.chmod(0o700)
+            except FileExistsError:
+                pass
+            lock = lock_parent / (hashlib.sha256(os.fsencode(home)).hexdigest() + '.lock')
+            owner = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            os.fchmod(owner, 0o600)
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            incus = directory / 'incus'
+            incus.write_text("""#!/usr/bin/env python3
+import json,os,pathlib,sys,time
+root=pathlib.Path(os.environ['FIXTURE'])
+if sys.argv[1]=='query':
+    uuid='replacement-uuid' if os.environ.get('FIXTURE_REPLACED')=='1' else 'original-uuid'
+    print(json.dumps(dict(type='virtual-machine',status='Running',config={'volatile.uuid':uuid},devices={})))
+    sys.exit(0)
+assert sys.argv[1]=='exec'
+assert os.fstat(3).st_ino==int(os.environ['OWNER_INODE'])
+(root/'cli-pid').write_text(str(os.getpid()))
+with (root/'effects').open('a') as output: output.write('once\\n')
+while not (root/'release').exists(): time.sleep(.01)
+""")
+            incus.chmod(0o700)
+            wrapper = """import os,pathlib,subprocess,sys
+fd=int(os.environ['FIXTURE_OWNER_FD'])
+if fd!=3:
+    os.dup2(fd,3)
+    os.close(fd)
+os.set_inheritable(3,True)
+child=subprocess.Popen([sys.executable,sys.argv[1],'rollback-ingress'],pass_fds=(3,))
+pathlib.Path(os.environ['FIXTURE'],'handler-pid').write_text(str(child.pid))
+sys.exit(child.wait())
+"""
+            environment = dict(os.environ, SUBYARD_HOME=str(home), SUBYARD_ENGINE_CONTEXT='1',
+                               SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='up',
+                               SUBYARD_OPERATION_ID='op-original', SUBYARD_RESOURCE_INGRESS_OWNER='parent',
+                               SUBYARD_RESOURCE_INSTANCE_UUID='original-uuid', SUBYARD_NATIVE_OWNER_FD3='1',
+                               YARD_INSTANCE_NAME='yard-personal-vpn', INCUS_PROJECT='subyard-personal-vpn',
+                               PATH=str(directory) + ':' + os.environ['PATH'], FIXTURE=str(directory),
+                               FIXTURE_OWNER_FD=str(owner), OWNER_INODE=str(os.fstat(owner).st_ino),
+                               FIXTURE_REPLACED='0')
+            helper = None
+            contender = None
+            try:
+                refused = subprocess.run([sys.executable, '-c', wrapper, str(PROFILE / 'resources/vpn/handler.py')],
+                                         env=dict(environment, FIXTURE_REPLACED='1'), pass_fds=(owner,),
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertFalse((directory / 'effects').exists(), 'replacement reached real guest CLI mutation')
+                self.assertFalse((directory / 'cli-pid').exists())
+                helper = subprocess.Popen([sys.executable, '-c', wrapper, str(PROFILE / 'resources/vpn/handler.py')],
+                                          env=environment, pass_fds=(owner,), start_new_session=True,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                deadline = time.monotonic() + 5
+                while not (directory / 'cli-pid').exists() and time.monotonic() < deadline:
+                    if helper.poll() is not None:
+                        self.fail('handler failed before CLI dispatch: ' + helper.stderr.read().decode())
+                    time.sleep(.01)
+                self.assertTrue((directory / 'cli-pid').exists(), 'CLI not dispatched')
+                handler_pid = int((directory / 'handler-pid').read_text())
+                helper.kill()
+                os.kill(handler_pid, signal.SIGKILL)
+                self.assertNotEqual(helper.wait(timeout=5), 0)
+                os.close(owner)
+                owner = None
+                contender = os.open(lock, os.O_RDWR)
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual((directory / 'effects').read_text().splitlines(), ['once'])
+                (directory / 'release').touch(mode=0o600)
+                (directory / 'release').chmod(0o600)
+                while time.monotonic() < deadline:
+                    try:
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(.01)
+                else:
+                    self.fail('surviving CLI did not release original OFD')
+            finally:
+                if helper is not None:
+                    try:
+                        os.killpg(helper.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    helper.wait(timeout=5)
+                    helper.stderr.close()
+                if contender is not None:
+                    os.close(contender)
+                if owner is not None:
+                    os.close(owner)
+                lock.unlink()
 
     @contextlib.contextmanager
     def admin_handler(self):

@@ -10,19 +10,43 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 type ownerResultsFixture struct {
 	Components
-	values []ports.NativeOwnerCreated
+	values        []ports.NativeOwnerCreated
+	rejectCreated bool
+	physical      string
+	physicalError error
+	captured      int
+	boundPhysical string
+}
+
+func (f *ownerResultsFixture) CaptureOwnerPhysical(ctx context.Context, _ OwnerBefore, _ string, _ OwnerActionReference) (string, error) {
+	f.captured++
+	observer := ports.NativeOperationObserverFrom(ctx).(*invocationObserver)
+	if _, err := observer.session.readTerminal(observer.binding); err == nil {
+		return "", errors.New("physical output captured after terminal")
+	}
+	return f.physical, f.physicalError
+}
+
+func (f *ownerResultsFixture) BindOwnerPhysical(_ context.Context, _ OwnerBefore, _ string, _ OwnerActionReference, physical string) error {
+	f.boundPhysical = physical
+	return nil
 }
 
 func (f *ownerResultsFixture) BindOwnerResults(_ context.Context, _ OwnerBefore, _ string, values []ports.NativeOwnerCreated) error {
+	if f.rejectCreated && len(values) > 0 {
+		return errors.New("created resource does not match original capsule")
+	}
 	f.values = append([]ports.NativeOwnerCreated(nil), values...)
 	return nil
 }
@@ -245,14 +269,18 @@ func addOwnerResultProducer(t *testing.T, s *session, request Request, ordinal u
 	directory := filepath.Join(s.root.Name(), "migrations/native-custody/v1", binding.Transaction)
 	reservation, _ := json.Marshal(nativeReservation{Version: 1, Binding: binding, Files: 2570, Bytes: 16 << 20})
 	testkit.WriteFile(t, filepath.Join(directory, factName(ordinal, "reservation")), append(reservation, '\n'), 0600)
-	recipe, _ := recipeFingerprint(Request{Op: "apply-owner", Before: request.Before, Token: request.Token})
+	op := "apply-owner"
+	if request.ProducerAction != nil {
+		op = "apply-owner-action"
+	}
+	recipe, _ := recipeFingerprint(Request{Op: op, Binding: &binding, Before: request.Before, Token: request.Token, Action: request.ProducerAction})
 	if err := s.writeFact(binding, "intent", Intent{Version: 1, Binding: binding, Owner: "owner-registration", Resource: "test-yard", Expected: binding.Artifact, Desired: binding.Artifact, Source: binding.Artifact, Recipe: recipe}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.writeFact(binding, "accepted", Terminal{Version: 1, Binding: binding, Owner: "owner-registration", Resource: "test-yard", State: "accepted", Operations: []ports.NativeOperation{}}); err != nil {
 		t.Fatal(err)
 	}
-	return &invocationObserver{session: s, binding: binding, ownerToken: request.Token}
+	return &invocationObserver{session: s, binding: binding, ownerToken: request.Token, action: request.ProducerAction}
 }
 func TestNativeOwnerResultLineageRetainsEarlierSuccessAcrossClosedRetries(t *testing.T) {
 	s, request, first, fixture, _ := ownerResultsOriginal(t)
@@ -362,5 +390,303 @@ func TestNativeOwnerResultVerbsPassStrictSessionAdmission(t *testing.T) {
 	raw, _ = json.Marshal(request)
 	if reply, err := s.handle(context.Background(), raw, nil); err != nil || reply.Code != "" {
 		t.Fatal("pure explicit result binding acquired mutation grant", reply.Code, err)
+	}
+}
+
+func ownerResultsPhysical(t *testing.T, s *session, observer *invocationObserver) {
+	t.Helper()
+	root, err := observer.creationRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeFact(observer.binding, "physical", ownerPhysicalFact{1, observer.binding, root.Recipe, root.Source, strings.Repeat("d", 64)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNativeOwnerActionResultsKeepExactProducerAndConsumer(t *testing.T) {
+	for _, change := range []string{"valid", "retained", "retained-rejected-create", "wrong-producer-action", "wrong-token", "wrong-payload", "wrong-consumer-action", "missing-consumer-action", "foreign-program", "missing-terminal", "readonly", "finalizer", "duplicate-role", "physical", "physical-failed", "physical-retained", "physical-source", "physical-recipe", "physical-binding", "physical-digest", "physical-noncanonical", "physical-rejected", "physical-missing-terminal", "physical-missing"} {
+		t.Run(change, func(t *testing.T) {
+			s, request, _, fixture, _ := ownerResultsOriginal(t)
+			producer := OwnerActionReference{Group: *request.Producer, Program: strings.Repeat("a", 64), Index: 0, Action: OwnerAction{Operation: "project", Slot: 0}}
+			request.ProducerAction = &producer
+			first := addOwnerResultProducer(t, s, request, 3)
+			created := completeOwnerProject(t, first, ownerProjectCreateIntent(first, "current", "subyard-test-yard"))
+			if change != "physical-missing" {
+				root, err := first.creationRoot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				fact := ownerPhysicalFact{1, first.binding, root.Recipe, root.Source, strings.Repeat("d", 64)}
+				switch change {
+				case "physical-source":
+					fact.Source = strings.Repeat("e", 64)
+				case "physical-recipe":
+					fact.Recipe = strings.Repeat("e", 64)
+				case "physical-binding":
+					fact.Binding.Ordinal++
+				case "physical-digest":
+					fact.Physical = "invalid"
+				}
+				if err := s.writeFact(first.binding, "physical", fact); err != nil {
+					t.Fatal(err)
+				}
+				if change == "physical-noncanonical" {
+					raw, _ := json.MarshalIndent(fact, "", " ")
+					testkit.WriteFile(t, filepath.Join(s.root.Name(), "migrations/native-custody/v1", first.binding.Transaction, factName(first.binding.Ordinal, "physical")), append(raw, '\n'), 0600)
+				}
+			}
+			member := ports.NativeOwnerMember{Device: 1, Inode: 2, UID: uint32(os.Getuid()), Mode: unix.S_IFREG | 0600, Links: 1, Size: 25, Digest: first.binding.Artifact}
+			if change == "retained" {
+				if err := first.RecordOwnerRestoration(request.Token, first.binding.Artifact, member); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if change != "missing-terminal" && change != "physical-missing-terminal" {
+				state := "complete"
+				if change == "physical-failed" {
+					state = "failed"
+				}
+				ownerResultsTerminal(t, s, first, state)
+			}
+			consumer := producer
+			consumer.Index, consumer.Action = 1, OwnerAction{Operation: "init", Slot: 0}
+			request.ProducerAction = &consumer
+			second := addOwnerResultProducer(t, s, request, 4)
+			s.binding = &second.binding
+			request.Binding, request.Action, request.Producer, request.ProducerAction = &second.binding, &consumer, &first.binding, &producer
+			switch change {
+			case "retained":
+				request.RetainedOnly = true
+			case "physical-retained":
+				request.RetainedOnly = true
+			case "physical-rejected":
+				fixture.rejectCreated = true
+			case "retained-rejected-create":
+				request.RetainedOnly, fixture.rejectCreated = true, true
+			case "wrong-producer-action":
+				copy := producer
+				copy.Action.Slot = 1
+				request.ProducerAction = &copy
+			case "wrong-token":
+				request.Token = strings.Repeat("2", 32)
+			case "wrong-payload":
+				request.Before.PreparedRecipe = strings.Repeat("c", 64)
+			case "wrong-consumer-action":
+				copy := consumer
+				copy.Action.Operation = "project"
+				request.Action = &copy
+			case "missing-consumer-action":
+				request.Action = nil
+			case "foreign-program":
+				copy := consumer
+				copy.Program = strings.Repeat("c", 64)
+				request.Action = &copy
+			case "readonly":
+				request.Binding, request.Action = nil, nil
+				s.context = &Context{Session: first.binding.Session, Artifact: first.binding.Artifact}
+				s.image = first.binding.Helper
+			}
+			reply, err := s.bindOwnerResults(context.Background(), request)
+			valid := change == "valid" || change == "retained" || change == "readonly" || change == "finalizer" || change == "duplicate-role" || change == "physical" || change == "physical-failed" || change == "physical-retained"
+			if !valid {
+				if err == nil && reply.Code == "" {
+					t.Fatal("unbound action admitted")
+				}
+				if fixture.boundPhysical != "" {
+					t.Fatal("refused producer attached physical output")
+				}
+				return
+			}
+			if err != nil || reply.Code != "" || len(s.ownerOrigins) != 1 || s.ownerCompleted != nil {
+				t.Fatal("action result admission or completion", reply.Code, err)
+			}
+			if change == "physical" || change == "physical-failed" {
+				if fixture.boundPhysical != strings.Repeat("d", 64) {
+					t.Fatal("closed producer physical output lost")
+				}
+			}
+			if change == "retained" || change == "physical-retained" {
+				if len(fixture.values) != 0 {
+					t.Fatal("retired create retained")
+				}
+				if change == "retained" {
+					if got, err := s.ownerOrigins[created.Ref.Producer].ReadOwnerRestoration(request.Token, first.binding.Artifact); err != nil || got != member {
+						t.Fatal("restoration lost", err)
+					}
+				}
+				if fixture.boundPhysical != "" {
+					t.Fatal("retired producer restored physical output")
+				}
+				if _, err := s.ownerOrigins[created.Ref.Producer].ReadOwnerCreated(created.Ref); err == nil {
+					t.Fatal("retired create readable")
+				}
+				return
+			}
+			if len(fixture.values) != 1 || fixture.values[0] != created {
+				t.Fatal("original create lost")
+			}
+			if change == "readonly" {
+				return
+			}
+			if err := s.checkOwnerResultEffectBinding(second.binding); err != nil {
+				t.Fatal(err)
+			}
+			foreign := consumer
+			foreign.Program = strings.Repeat("c", 64)
+			s.ownerActions[second.binding] = foreign
+			if s.checkOwnerResultEffectBinding(second.binding) == nil {
+				t.Fatal("foreign consumer admitted")
+			}
+			s.ownerActions[second.binding] = consumer
+			request.Producer, request.ProducerAction = &second.binding, &consumer
+			if change == "duplicate-role" {
+				completeOwnerProject(t, second, ownerProjectCreateIntent(second, "current", "subyard-test-yard"))
+			}
+			ownerResultsTerminal(t, s, second, "complete")
+			ownerResultsPhysical(t, s, second)
+			if reply, err = s.bindOwnerResults(context.Background(), request); change == "duplicate-role" {
+				if err == nil && reply.Code == "" {
+					t.Fatal("conflicting producer admitted")
+				}
+				return
+			} else if err != nil || reply.Code != "" || len(fixture.values) != 1 || len(s.ownerOrigins) != 2 || s.ownerCompleted != nil {
+				t.Fatal("empty action lost origin or completed group", reply.Code, err)
+			}
+			if change == "finalizer" {
+				final := consumer
+				final.Index, final.Action = 2, OwnerAction{Operation: "verify-desired"}
+				request.ProducerAction = &final
+				last := addOwnerResultProducer(t, s, request, 5)
+				ownerResultsTerminal(t, s, last, "complete")
+				ownerResultsPhysical(t, s, last)
+				request.Producer = &last.binding
+				if reply, err = s.bindOwnerResults(context.Background(), request); err != nil || reply.Code != "" || s.ownerCompleted == nil || *s.ownerCompleted != last.binding {
+					t.Fatal("finalizer did not complete group", reply.Code, err)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeOwnerPhysicalCaptureRequiresClosedInvocation(t *testing.T) {
+	for _, change := range []string{"complete", "failed", "unknown", "capture-error", "failed-capture-error", "invalid-digest"} {
+		t.Run(change, func(t *testing.T) {
+			s, b, path := nativeFactFixture(t)
+			before := OwnerBefore{State: "legacy-directory", Registration: b.Artifact, Overrides: b.Artifact, Controller: b.Artifact, PreparedRecipe: strings.Repeat("b", 64)}
+			action := OwnerActionReference{Group: b, Program: b.Artifact, Action: OwnerAction{Operation: "init", Slot: 0}}
+			request := Request{Op: "apply-owner-action", Binding: &b, Before: &before, Token: strings.Repeat("1", 32), Action: &action}
+			recipe, err := recipeFingerprint(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.writeFact(b, "intent", Intent{Version: 1, Binding: b, Owner: "owner-registration", Resource: "test-yard", Expected: b.Artifact, Desired: b.Artifact, Source: b.Artifact, Recipe: recipe}); err != nil {
+				t.Fatal(err)
+			}
+			fixture := &ownerResultsFixture{physical: strings.Repeat("d", 64)}
+			if strings.HasSuffix(change, "capture-error") {
+				fixture.physicalError = errors.New("physical observation unavailable")
+			}
+			if change == "invalid-digest" {
+				fixture.physical = "invalid"
+			}
+			s.components = fixture
+			var actionError error
+			reply, err := s.apply(context.Background(), request, "owner-registration", "test-yard", func() error {
+				observer := ports.NativeOperationObserverFrom(s.effectContext)
+				if change == "unknown" {
+					_, err := observer.CommandStarted("shipped-handler", b.Artifact)
+					if err != nil {
+						return err
+					}
+					return errors.New("unclosed command")
+				}
+				if strings.HasPrefix(change, "failed") {
+					op := ports.NativeOperation{Kind: "instance-state", Server: b.Artifact, Project: "project", Resource: "yard"}
+					if err := observer.Before(op); err != nil {
+						return err
+					}
+					op.ID = "operation-1"
+					if err := observer.Accepted(op); err != nil {
+						return err
+					}
+					op.Status = 400
+					if err := observer.Terminal(op); err != nil {
+						return err
+					}
+					actionError = &ports.NativeOperationFailure{Operation: op, Cause: publicComponentFailure{message: "original action failed", retry: "retry the original operation"}}
+				}
+				return actionError
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change != "complete" && change != "failed" {
+				if reply.Code != "unknown" || reply.Terminal != nil {
+					t.Fatal("incomplete physical output became terminal", reply.Code)
+				}
+				if change == "unknown" && fixture.captured != 0 {
+					t.Fatal("unclosed invocation captured physical output")
+				}
+				if change == "failed-capture-error" && !reflect.DeepEqual(reply.Diagnostic, componentDiagnostic(actionError)) {
+					t.Fatal("capture failure hid original action diagnostic")
+				}
+				return
+			}
+			if reply.Terminal == nil || fixture.captured != 1 || reply.Terminal.State != change {
+				t.Fatal("closed physical output missing", reply.Code)
+			}
+			raw, err := os.ReadFile(filepath.Join(path, factName(b.Ordinal, "physical")))
+			var fact ownerPhysicalFact
+			if err != nil || strict(raw, &fact) != nil || fact != (ownerPhysicalFact{1, b, recipe, b.Artifact, fixture.physical}) {
+				t.Fatal("physical output binding lost", err)
+			}
+		})
+	}
+}
+
+func TestNativeOwnerActionRetainedOriginKeepsInstallationAndCache(t *testing.T) {
+	s, request, _, fixture, _ := ownerResultsOriginal(t)
+	producer := OwnerActionReference{Group: *request.Producer, Program: strings.Repeat("a", 64), Action: OwnerAction{Operation: "power", Slot: 1}}
+	request.ProducerAction = &producer
+	first := addOwnerResultProducer(t, s, request, 3)
+	command, err := first.CommandStarted("owner-host-power-install", first.binding.Artifact)
+	if err != nil || first.CommandTerminal(command) != nil {
+		t.Fatal("installation command")
+	}
+	installation, err := first.RecordHostPowerInstallation(command, hostInstallationInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := ports.OwnerImageSourceGuard{Path: []byte("/original/cache"), State: "file:" + strings.Repeat("a", 64)}
+	cache := ports.OwnerImageCacheSuccessor{Policy: first.binding.Artifact, Before: []ports.OwnerImageSourceGuard{guard}, After: []ports.OwnerImageSourceGuard{guard}}
+	if err := first.RecordOwnerImageCache(cache); err != nil {
+		t.Fatal(err)
+	}
+	ownerResultsPhysical(t, s, first)
+	ownerResultsTerminal(t, s, first, "complete")
+	consumer := producer
+	consumer.Index, consumer.Action = 1, OwnerAction{Operation: "init", Slot: 0}
+	request.ProducerAction = &consumer
+	second := addOwnerResultProducer(t, s, request, 4)
+	s.binding = &second.binding
+	request.Binding, request.Action, request.Producer, request.ProducerAction, request.RetainedOnly = &second.binding, &consumer, &first.binding, &producer, true
+	if reply, err := s.bindOwnerResults(context.Background(), request); err != nil || reply.Code != "" || len(fixture.values) != 0 || len(s.ownerOrigins) != 1 {
+		t.Fatal(reply.Code, err)
+	}
+	actual, err := second.ReadHostPowerInstallation(installation.Producer)
+	if err != nil || actual == nil || !reflect.DeepEqual(*actual, installation) {
+		t.Fatal("installation lost", err)
+	}
+	facts, err := second.ReadOwnerImageCache(cache.Policy)
+	if err != nil || len(facts) != 1 {
+		t.Fatal("cache lost", err)
+	}
+	second.action = nil
+	if _, err := second.ReadHostPowerInstallation(installation.Producer); err == nil {
+		t.Fatal("legacy mixed with action installation")
+	}
+	if _, err := second.ReadOwnerImageCache(cache.Policy); err == nil {
+		t.Fatal("legacy mixed with action cache")
 	}
 }

@@ -24,6 +24,7 @@ import (
 )
 
 type verifiedPublishedCandidate struct {
+	readOnlyCheck         bool
 	commandManifestBound  bool
 	commandManifestDigest releasetransition.Fingerprint
 	projectCreatorDigest  [sha256.Size]byte
@@ -62,6 +63,8 @@ type candidateManifestEntry struct {
 }
 
 const (
+	releaseOwnerCheckPath       = "config/release-owner-check-v1"
+	releaseOwnerCheckMarker     = "subyard-release-owner-check-v1\n"
 	releaseOwnerDeclarationPath = "config/release-owner.json"
 	releaseOwnerImagePath       = "bin/subyard-release-owner"
 	releaseOwnerSchemaPath      = "config/release-owner.schema.json"
@@ -100,6 +103,35 @@ type releaseOwnerBuild struct {
 		Path   string `json:"path"`
 		SHA256 string `json:"sha256"`
 	} `json:"inputs"`
+}
+
+// A fixed optional inventory-bound marker keeps old declaration/Open decoders
+// compatible. Absence selects the existing full Inspect before dispatch.
+func verifyReleaseOwnerCheck(rootFD int, entries []candidateManifestEntry, declared bool) (bool, error) {
+	var expected [sha256.Size]byte
+	bound := false
+	for _, entry := range entries {
+		if entry.path == releaseOwnerCheckPath {
+			expected = entry.digest
+			bound = true
+		}
+	}
+	file, err := openCandidateFile(rootFD, releaseOwnerCheckPath)
+	if errors.Is(err, os.ErrNotExist) && !bound {
+		return false, nil
+	}
+	if err != nil || !bound || !declared {
+		if file != nil {
+			file.Close()
+		}
+		return false, errors.New("published runtime Check capability is incomplete")
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, int64(len(releaseOwnerCheckMarker)+1)))
+	if err != nil || string(raw) != releaseOwnerCheckMarker || sha256.Sum256(raw) != expected {
+		return false, errors.New("published runtime Check capability is invalid")
+	}
+	return true, nil
 }
 
 // Declaration absence is the legacy format. A partially added owner is never legacy.
@@ -327,6 +359,10 @@ func (runtime *Runtime) verifyPublishedCandidate(
 			selectedRust = true
 		}
 	}
+	verified.readOnlyCheck, err = verifyReleaseOwnerCheck(rootFD, entries, selectedRust)
+	if err != nil {
+		return fail(err)
+	}
 	for _, entry := range entries {
 		file, openErr := openCandidateFile(rootFD, entry.path)
 		if openErr != nil {
@@ -354,6 +390,7 @@ func (runtime *Runtime) verifyPublishedCandidate(
 				verified.commandManifestDigest = releasetransition.Fingerprint(hex.EncodeToString(entry.digest[:]))
 			}
 			if err == nil && (entry.path == "config/systemd/subyard-power-reconcile.service.in" ||
+				entry.path == "config/systemd/subyard-publication-reconcile.service.in" ||
 				entry.path == "config/systemd/subyard-keys-sync.service.in" || entry.path == "config/systemd/subyard-keys-sync.timer.in") {
 				body, readErr := io.ReadAll(io.NewSectionReader(file, 0, 1<<20+1))
 				if readErr != nil || len(body) > 1<<20 || sha256.Sum256(body) != entry.digest {
@@ -656,7 +693,7 @@ func (runtime *Runtime) runVerifiedCandidateVersion(
 	if err := runtime.runVerifiedCandidate(
 		ctx, candidate, runtimeRoot, []string{"--version"}, nil, &output, "",
 	); err != nil {
-		return "", errors.New("published runtime self-check failed")
+		return "", errors.Join(errors.New("published runtime self-check failed"), ctx.Err())
 	}
 	fields := strings.Fields(output.String())
 	if len(fields) != 2 || fields[0] != "yard-engine" || !safeVersion(fields[1]) {
@@ -778,6 +815,10 @@ func (runtime *Runtime) invokeVerifiedRuntimeTransition(
 	request releasetransition.ProcessRequest,
 	grant releasetransition.Authorization,
 ) (releasetransition.ProcessResponse, error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return releasetransition.ProcessResponse{}, selectionErr
+	}
 	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
 		return releasetransition.ProcessResponse{},
 			errors.New("verified published runtime is unavailable")

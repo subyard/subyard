@@ -3,15 +3,21 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
+	"reflect"
+	"strings"
 )
 
 // BindOwnerResults matches only the original inert capsule. Live resource
 // checks remain at each component dispatch; result identity is not closure.
-func (c *releaseOwnerComponents) BindOwnerResults(ctx context.Context, before releaseowner.OwnerBefore, _ string, values []ports.NativeOwnerCreated) error {
+func (c *releaseOwnerComponents) BindOwnerResults(ctx context.Context, before releaseowner.OwnerBefore, token string, values []ports.NativeOwnerCreated) error {
+	if len(token) != 32 || strings.Trim(token, "0123456789abcdef") != "" || c.ownerRecoveryToken != "" && c.ownerRecoveryToken != token {
+		return domain.ErrPlanStale
+	}
 	original := c.ownerChildren
 	if original == nil || original.binding() != before.PreparedRecipe || original.before != ownerSemanticBefore(before) || !c.installedBound[before.PreparedRecipe] {
 		return domain.ErrPlanStale
@@ -91,6 +97,67 @@ func (c *releaseOwnerComponents) BindOwnerResults(ctx context.Context, before re
 			return domain.ErrPlanStale
 		}
 	}
+	installation := c.hostPowerInstallation
+	if installer, ok := ports.NativeOperationObserverFrom(ctx).(ports.NativeHostPowerInstallationObserver); ok {
+		value, err := installer.ReadHostPowerInstallation("")
+		if err != nil {
+			return err
+		}
+		if value != nil {
+			matches := 0
+			for _, child := range record.Inits {
+				_, publication, err := child.input()
+				if err != nil {
+					return domain.ErrPlanStale
+				}
+				if publication != nil && publication.OutputDigest == value.Output && string(publication.Power.Source) == value.HostSource {
+					matches++
+				}
+			}
+			if matches == 0 || installation != nil && !reflect.DeepEqual(*installation, *value) {
+				return domain.ErrPlanStale
+			}
+			installation = value
+		}
+		if installation != nil {
+			actual, err := installer.ReadHostPowerInstallation(installation.Producer)
+			if err != nil || actual == nil || !reflect.DeepEqual(*actual, *installation) {
+				return domain.ErrPlanStale
+			}
+		}
+	} else if installation != nil {
+		return domain.ErrPlanStale
+	}
+	// This observer came through the session's original intent/terminal and
+	// producer checks. Retain only its read authority, never mutation context.
+	recoveryObserver := ports.NativeOperationObserverFrom(ctx)
+	recoverySource := ""
+	if len(record.RegistrationSource) > 0 {
+		source := nativeDigest(record.RegistrationSource)
+		if c.ownerRecoverySource != "" && c.ownerRecoverySource != source {
+			return domain.ErrPlanStale
+		}
+		if current, ok := recoveryObserver.(ports.NativeOwnerRestorationObserver); ok {
+			_, err := current.ReadOwnerRestoration(token, source)
+			if err == nil {
+				recoverySource = source
+			} else {
+				if !errors.Is(err, ports.ErrNativeOwnerRestorationAbsent) {
+					return domain.ErrPlanStale
+				}
+				if c.ownerRecoverySource != "" {
+					recoveryObserver = c.ownerRecoveryObserver
+					recoverySource = c.ownerRecoverySource
+				}
+			}
+		} else if c.ownerRecoverySource != "" {
+			return domain.ErrPlanStale
+		}
+	}
+	c.ownerRecoverySource = recoverySource
+	c.ownerRecoveryToken = token
+	c.ownerRecoveryObserver = recoveryObserver
+	c.hostPowerInstallation = installation
 	c.ownerResultReader = reader
 	c.ownerResultsRecipe = before.PreparedRecipe
 	c.ownerResults = append([]ports.NativeOwnerCreated(nil), values...)

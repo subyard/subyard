@@ -18,7 +18,7 @@ func ParseFenceVectorRecipe(raw string) (FenceVectorRecipe, error) {
 	if strict([]byte(raw), &value) != nil || value.Version != 2 || len(value.Expected) < 2 || len(value.Expected) > 3 || !fingerprint(value.Generation) {
 		return value, errors.New("native vector fence recipe")
 	}
-	roles := []string{"engine", "service", "timer"}
+	roles := []string{"engine", "service", "publication"}
 	for index, entry := range value.Expected {
 		if entry.Role != roles[index] || (entry.Value != "0" && !fingerprint(entry.Value)) {
 			return value, errors.New("native vector fence roles")

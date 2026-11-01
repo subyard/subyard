@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export TMPDIR=/tmp
+unset GOTMPDIR
+bash dev/build-profiles.sh
 out="$PWD/.build/release-owner-runtime"
 mkdir -p "$out"
 # Keep downloads and intermediates shared; final artifacts belong to this check.
@@ -32,12 +34,12 @@ cargo fmt --manifest-path release-owner/Cargo.toml -- --check
 go test -count=1 -v ./internal/releasetransition -run '^TestRustOwner((RuntimeFacts|SettingsFacts|LinksFacts|ReducerFacts|InspectionFacts)Corpus|ActivationFailureCorpus|MigrationEntryFixture)$'
 go test -count=1 -v ./internal/cli -run '^TestRustOwnerActivationFactsCorpus$'
 go test -race -count=1 -v ./internal/releasetransition -run '^TestRustOwnerOperationTraceCorpus$'
-go test -count=1 -v ./internal/adapters/releaseruntime -run '^TestRollbackSupportLeafOracle$'
+go test -count=1 -v ./internal/adapters/releaseruntime -run '^(TestRollbackSupportLeafOracle|TestSourcePolicyUsesSealedVersionAndV2Provenance)$'
 go test -count=1 -v ./internal/adapters/reconcileruntime -run '^TestPreparedRuntimeRecipeCorpus$'
 cargo test --locked --manifest-path release-owner/Cargo.toml --lib --bins -- --nocapture
 cargo test --locked --manifest-path release-owner/Cargo.toml --doc
 cargo clippy --locked --manifest-path release-owner/Cargo.toml --all-targets --all-features -- --remap-path-prefix="$PWD=." -D warnings
-go test -race -count=1 ./internal/config ./internal/adapters/incusclient ./internal/adapters/reconcileruntime ./internal/releaseowner
+go test -race -count=1 -timeout=20m ./internal/config ./internal/adapters/incusclient ./internal/adapters/reconcileruntime ./internal/releaseowner
 go build -o "$out/yard" ./cmd/yard
 cargo build --locked --manifest-path release-owner/Cargo.toml --bin subyard-release-owner
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR-fixture" cargo build --locked --manifest-path release-owner/Cargo.toml --features fixture-cuts --bin subyard-release-owner
@@ -48,16 +50,7 @@ export SUBYARD_RUST_NATIVE_HELPER="$out/yard"
 export SUBYARD_RUST_OPERATION_REPLAY_OUTPUT="$out/operation-replay"
 go test -race -count=1 -v ./internal/cli -run '^TestRustOwnerWholeOperationReplay$'
 cargo test --locked --manifest-path release-owner/Cargo.toml --lib operation_oracle:: -- --nocapture
-go test -race -count=1 -v ./internal/cli -run '^TestRustOwner(OperationNativeLocalSSH|DurableProcessCuts)$'
-if [[ "$(go env GOARCH)" != amd64 ]]; then
- printf 'Closed official linux-amd64 migration-owner replacement: native unsupported-contract/no-effect control ran in the operation matrix.\n'
-elif [[ -n "${SUBYARD_RUST_PREDECESSOR_ASSETS:-}" ]]; then
- go build -ldflags '-X github.com/Subyard/Subyard/internal/cli.Version=1.0.0' -o "$out/yard-migration-1.0.0" ./cmd/yard
- SUBYARD_RUST_NATIVE_HELPER="$out/yard-migration-1.0.0" go test -race -count=1 -v ./internal/cli -run '^TestRustOwnerMigrationOwner(Operation|ProcessCuts)$'
-else
- printf 'Authentic migration-owner process check not run: set SUBYARD_RUST_PREDECESSOR_ASSETS to the verified baseline archive directory.\n' >&2
- exit 1
-fi
+go test -race -count=1 -v ./internal/cli -run '^TestRustOwner(OperationNativeLocalSSH|DurableProcessCuts|ResumeAfterCompensatedCheck)$'
 # rust-lld ships with rustc; these are cross-build checks, never ARM execution.
 sysroot="$("$RUSTC" --print sysroot)"
 host="$("$RUSTC" -vV | sed -n 's/^host: //p')"

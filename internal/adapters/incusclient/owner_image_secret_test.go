@@ -67,28 +67,37 @@ func (*ownerSecretObserver) CommandTerminal(uint64) error { return errors.New("u
 // The wait handler holds the original operation after its lookup disappears,
 // matching Incus 6.0.6 and 6.23.0's header-flush / Wait / Render ordering.
 type ownerSecretFixture struct {
-	mu                     sync.Mutex
-	server                 *httptest.Server
-	op                     api.Operation
-	final                  chan struct{}
-	armed                  chan struct{}
-	lookupGone             bool
-	waitFail, waitDrop     bool
-	corrupt                string
-	deletes, posts, events int
-	project                string
-	metadata               int
-	waitBody               <-chan struct{}
-	lookupObserved         chan struct{}
-	lookupOnce             sync.Once
+	requireClientCertificate bool
+	authorize                func(http.ResponseWriter, *http.Request) bool
+	mu                       sync.Mutex
+	server                   *httptest.Server
+	op                       api.Operation
+	final                    chan struct{}
+	armed                    chan struct{}
+	lookupGone               bool
+	waitFail, waitDrop       bool
+	corrupt                  string
+	deletes, posts, events   int
+	project                  string
+	metadata                 int
+	waitBody                 <-chan struct{}
+	lookupObserved           chan struct{}
+	lookupOnce               sync.Once
 }
 
 func newOwnerSecretFixture(t *testing.T) (*ownerSecretFixture, incus.ConnectionArgs, ports.NativeOperation, *ownerSecretObserver, context.Context) {
+	return newOwnerSecretFixtureTransport(t, true)
+}
+func newOwnerSecretFixtureTransport(t *testing.T, clientCertificate bool) (*ownerSecretFixture, incus.ConnectionArgs, ports.NativeOperation, *ownerSecretObserver, context.Context) {
 	t.Helper()
 	f := &ownerSecretFixture{final: make(chan struct{}), armed: make(chan struct{}), op: api.Operation{ID: "11111111-2222-4333-8444-555555555555", Class: api.OperationClassToken, StatusCode: api.Running, Resources: map[string][]string{"images": {"/1.0/images/" + strings.Repeat("a", 64)}}, Metadata: map[string]any{"secret": strings.Repeat("b", 64)}}}
+	f.requireClientCertificate = clientCertificate
 	f.project = "source-project"
 	f.server = httptest.NewUnstartedServer(f)
-	f.server.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+	f.server.TLS = &tls.Config{}
+	if clientCertificate {
+		f.server.TLS.ClientAuth = tls.RequireAnyClientCert
+	}
 	f.server.StartTLS()
 	t.Cleanup(f.server.Close)
 	cert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.server.Certificate().Raw}))
@@ -126,7 +135,10 @@ func (f *ownerSecretFixture) reply(w http.ResponseWriter, op api.Operation, asyn
 }
 
 func (f *ownerSecretFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("project") != f.project || len(r.TLS.PeerCertificates) == 0 {
+	if f.authorize != nil && !f.authorize(w, r) {
+		return
+	}
+	if r.URL.Query().Get("project") != f.project || f.requireClientCertificate && len(r.TLS.PeerCertificates) == 0 {
 		http.Error(w, "wrong original namespace or TLS identity", 403)
 		return
 	}
@@ -377,6 +389,9 @@ func TestOwnerImageSecretDelayedTerminalReconcilesCleanupAbsence(t *testing.T) {
 			}
 			if mode == "terminal" && (observer.uncertain || len(observer.terminal) != 1 || observer.terminal[0].ID != handle.operation.ID || observer.terminal[0].Status != 401) {
 				t.Fatal("exact delayed token terminal lost")
+			}
+			if mode == "late-terminal" && (!observer.uncertain || len(observer.terminal) != 0) {
+				t.Fatal("expired custody published terminal evidence")
 			}
 		})
 	}

@@ -328,13 +328,11 @@ impl Store {
                         && embedded.recovery.is_empty(),
                 )?
             } else {
-                let supported = (migration.kind == "test-vms-settings-v1-to-v2"
-                    && safe_yard(&step.resource)
-                    && ["canonicalize", "reset"].contains(&step.decision.as_str()))
-                    || (migration.kind == "local-ssh-port-settings-v2-to-v3"
-                        && safe_yard(&step.resource)
-                        && step.decision == "canonicalize")
-                    || (migration.kind == "test-yard-owner-v1-to-v2"
+                let supported =
+                    crate::settings::migration(&migration.kind).is_some_and(|definition| {
+                        safe_yard(&step.resource)
+                            && definition.decisions.contains(&step.decision.as_str())
+                    }) || (migration.kind == "test-yard-owner-v1-to-v2"
                         && step.resource == "test-yard-owner"
                         && step.decision == "canonicalize");
                 require(supported && step.id == format!("{}.{}", migration.id, step.resource))?;
@@ -527,6 +525,8 @@ impl Store {
             // This private payload pin belongs to the checked prepared bundle,
             // not the frozen semantic owner recovery record.
             prepared_recipe: before.prepared_recipe.clone(),
+            capture: before.capture.clone(),
+            program: before.program.clone(),
         };
         require(
             &observed == before
@@ -550,17 +550,16 @@ impl Store {
             bytes.len() <= 4096
                 && snapshot.fingerprint() == step.evidence.as_ref().ok_or(Error::Invalid)?.recovery,
         )?;
-        if [
-            "test-vms-settings-v1-to-v2",
-            "local-ssh-port-settings-v2-to-v3",
-        ]
-        .contains(&kind)
-        {
+        if let Some(definition) = crate::settings::migration(kind) {
             let v: SettingsRecovery = self.decode(bytes, true, true)?;
-            let local = v.schema_version == 2 && v.kind == "local-ssh-port-settings-v2-to-v3";
             require(
-                (local || (v.schema_version == 1 && v.kind.is_empty()))
-                    && local == (kind == "local-ssh-port-settings-v2-to-v3")
+                v.schema_version == if definition.wire_local { 2 } else { 1 }
+                    && v.kind
+                        == if definition.wire_local {
+                            definition.kind
+                        } else {
+                            ""
+                        }
                     && v.transaction == journal.transaction
                     && v.step == step.id
                     && v.migration == step.migration
@@ -569,28 +568,11 @@ impl Store {
                     && v.expected_fingerprint == step.expected,
             )?;
             let values = v.before.as_deref().unwrap_or_default();
-            require(values.len() <= 2 && (!local || values.len() == 1))?;
             let mut seen = BTreeSet::new();
             for value in values {
-                require(
-                    seen.insert(&value.setting)
-                        && if local {
-                            value.setting == "SSH_PORT"
-                        } else {
-                            ["YARD_TEMPLATE", "NESTED_E2E_VMS"].contains(&value.setting.as_str())
-                        },
-                )?;
-                require(if !value.present {
-                    value.value.is_empty()
-                } else {
-                    match value.setting.as_str() {
-                        "SSH_PORT" => value.value.parse::<u16>().is_ok_and(|p| p > 0),
-                        "YARD_TEMPLATE" => ["e2e-vms", "test-vms"].contains(&value.value.as_str()),
-                        "NESTED_E2E_VMS" => ["0", "1"].contains(&value.value.as_str()),
-                        _ => false,
-                    }
-                })?
+                require(seen.insert(&value.setting) && (value.present || value.value.is_empty()))?;
             }
+            (definition.validate_recovery)(values)?;
         } else {
             let v: OwnerRecovery = self.decode(bytes, true, true)?;
             require(
@@ -649,14 +631,6 @@ fn safe_yard(s: &str) -> bool {
 }
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct Before {
-    setting: String,
-    present: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    value: String,
-}
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct SettingsRecovery {
     schema_version: i64,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -666,7 +640,7 @@ pub(crate) struct SettingsRecovery {
     migration: String,
     yard: String,
     expected_fingerprint: String,
-    before: Option<Vec<Before>>,
+    before: Option<Vec<crate::settings::RecoveryValue>>,
 }
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -760,7 +734,19 @@ pub(crate) fn terminal_bindings_at(
             }
             Ok(edges)
         };
-    let edges = match encode(&canonical) {
+    let closed_prefix = || {
+        require(
+            (journal.checkpoint == "complete" || journal.checkpoint.is_empty())
+                && steps
+                    .iter()
+                    .all(|s| s.checkpoint == "verified" && s.evidence.is_some()),
+        )?;
+        let trace = h
+            .closed_prefix(observed.authority(), &selected)
+            .map_err(|_| Error::Invalid)?;
+        encode(&trace)
+    };
+    let edges = match encode(&canonical).or_else(|_| closed_prefix()) {
         Ok(edges) => edges,
         Err(_) => {
             let last = steps
@@ -820,6 +806,112 @@ mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
     #[test]
+    fn closed_retained_prefix_survives_an_interposed_domain_edge() {
+        use serde_json::json;
+        let catalog = record::Catalog::new(Some(
+            serde_json::from_value(json!([
+                {"kind":"alpha-kind","domain":"alpha","version":1},
+                {"kind":"beta-kind","domain":"beta","version":1},
+                {"kind":"gamma-kind","domain":"gamma","version":1}
+            ]))
+            .unwrap(),
+        ))
+        .unwrap();
+        let registry = |interposed: bool, dependency: bool| {
+            let mut migrations = vec![
+                json!({"id":"a2","domain":"alpha","fromEpoch":1,"toEpoch":2,"kind":"alpha-kind"}),
+            ];
+            if interposed {
+                migrations.push(
+                    json!({"id":"b2","domain":"beta","fromEpoch":1,"toEpoch":2,"kind":"beta-kind"}),
+                );
+            }
+            migrations.push(json!({"id":"c2","domain":"gamma","fromEpoch":1,"toEpoch":2,"kind":"gamma-kind","dependsOn":if dependency {vec!["b2"]} else {vec![]}}));
+            record::Registry::new(
+                serde_json::from_value(json!({"schemaVersion":2,
+                "minimumEpochs":{"alpha":1,"beta":1,"gamma":1},
+                "currentEpochs":{"alpha":2,"beta":if interposed {2} else {1},"gamma":2},
+                "migrations":migrations}))
+                .unwrap(),
+                &catalog,
+            )
+            .unwrap()
+        };
+        let original = registry(false, false);
+        let mut cursor = original.history().baseline();
+        let mut journal = j::Record {
+            checkpoint: "complete".into(),
+            steps: Some(vec![]),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let edge = original.history().next(&cursor).unwrap();
+            let id = edge.migration().id.clone();
+            journal.steps.as_mut().unwrap().push(j::Step {
+                id: format!("{}.ledger", id),
+                migration: id,
+                expected: digest(&crate::migration_owner::ledger_bytes(&cursor).unwrap()),
+                desired: digest(&crate::migration_owner::ledger_bytes(edge.after()).unwrap()),
+                checkpoint: "verified".into(),
+                evidence: Some(j::Evidence::default()),
+                ..Default::default()
+            });
+            cursor = edge.into_after();
+        }
+        for fault in [
+            "none",
+            "reconstructed",
+            "before",
+            "after",
+            "order",
+            "unknown",
+            "nonbaseline",
+            "pending",
+            "partial",
+            "duplicate",
+            "missing-evidence",
+            "dependency",
+            "unobserved",
+        ] {
+            let current = registry(true, fault == "dependency");
+            let mut cursor = current.history().baseline();
+            let mut order = vec![];
+            for _ in 0..3 {
+                let edge = current.history().next(&cursor).unwrap();
+                order.push(edge.migration().id.clone());
+                cursor = edge.into_after();
+            }
+            assert_eq!(order, vec!["a2", "b2", "c2"]);
+            let observed = record::Ledger::new(serde_json::from_value(json!({"schemaVersion":2,"domains":{
+                "alpha":{"epoch":2,"applied":["a2"]},"beta":{"epoch":2,"applied":["b2"]},
+                "gamma":{"epoch":if fault == "unobserved" {1} else {2},"applied":if fault == "unobserved" {vec![]} else {vec!["c2"]}}
+            }})).unwrap(),&current).unwrap();
+            let mut changed = journal.clone();
+            let steps = changed.steps.as_mut().unwrap();
+            match fault {
+                "reconstructed" => changed.checkpoint.clear(),
+                "before" => steps[0].expected = "f".repeat(64),
+                "after" => steps[0].desired = "f".repeat(64),
+                "order" => steps.reverse(),
+                "unknown" => steps[0].migration = "unknown-edge".into(),
+                "nonbaseline" => {
+                    steps.remove(0);
+                }
+                "pending" => changed.checkpoint = "reconciling".into(),
+                "partial" => steps[0].checkpoint = "applied".into(),
+                "duplicate" => steps.push(steps[0].clone()),
+                "missing-evidence" => steps[0].evidence = None,
+                _ => (),
+            }
+            assert_eq!(
+                terminal_bindings_at(&changed, &current, &observed, Some(&observed)).is_ok(),
+                matches!(fault, "none" | "reconstructed"),
+                "{}",
+                fault
+            );
+        }
+    }
+    #[test]
     fn owner_progress_uses_the_original_bound_recovery_before_completion() {
         let (fixture, store, journal, _) = crate::custody::tests::fixture();
         let before = crate::work::OwnerBefore {
@@ -829,6 +921,7 @@ mod tests {
             controller: "c".repeat(64),
             shared_images: false,
             prepared_recipe: "d".repeat(64),
+            ..Default::default()
         };
         let mut step = j::Step {
             id: "canonicalize-test-yard-owner-v2.test-yard-owner".into(),

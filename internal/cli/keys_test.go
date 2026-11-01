@@ -67,8 +67,9 @@ func TestKeysTypedConfirmationProtectsPayloadAndUsesResolvedDefaults(t *testing.
 	t.Run("yes cannot bypass rotate preflight or open its source", func(t *testing.T) {
 		source := filepath.Join(t.TempDir(), "replacement")
 		prompt := &testkit.Prompt{}
+		var output bytes.Buffer
 		program, loaded, definition, _ := credentialCLIFixture(
-			t, strings.NewReader("unused"), prompt, true,
+			t, strings.NewReader("unused"), prompt, true, &output,
 		)
 
 		if code := program.runKeys(context.Background(), loaded, definition, []string{
@@ -79,7 +80,7 @@ func TestKeysTypedConfirmationProtectsPayloadAndUsesResolvedDefaults(t *testing.
 		if len(prompt.Requests) != 0 {
 			t.Fatalf("invalid rotate prompted: %#v", prompt.Requests)
 		}
-		stderr := program.options.Stderr.(*bytes.Buffer).String()
+		stderr := output.String()
 		if !strings.Contains(stderr, "credential") || strings.Contains(stderr, source) {
 			t.Fatalf("rotate opened protected source before head preflight: %q", stderr)
 		}
@@ -232,6 +233,7 @@ func credentialCLIFixture(
 	input io.Reader,
 	prompt *testkit.Prompt,
 	initialized bool,
+	capture ...*bytes.Buffer,
 ) (*CLI, config.Loaded, command.Definition, string) {
 	t.Helper()
 	root := repositoryRoot(t)
@@ -248,9 +250,13 @@ func credentialCLIFixture(
 		"SUBYARD_OPERATION_ID=credential-operation",
 	}
 	var stdout, stderr bytes.Buffer
+	output := &stderr
+	if len(capture) != 0 {
+		output = capture[0]
+	}
 	options := Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment,
-		Stdin: input, Stdout: &stdout, Stderr: &stderr,
+		Stdin: input, Stdout: &stdout, Stderr: output,
 	}
 	if prompt != nil {
 		options.Prompt = prompt

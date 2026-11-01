@@ -30,6 +30,56 @@ import (
 	"time"
 )
 
+// This architecture-independent invalid request exercises the same terminal
+// lifecycle as the unsupported migration contract, without impersonating ARM.
+func TestRustOwnerTerminalRefusal(t *testing.T) {
+	owner, helper, corpusPath := os.Getenv("SUBYARD_RUST_FIXTURE_OWNER"), os.Getenv("SUBYARD_RUST_NATIVE_HELPER"), os.Getenv("SUBYARD_RUST_RUNTIME_CORPUS")
+	if owner == "" || helper == "" || corpusPath == "" {
+		t.Skip("opt-in actual Rust coordinator terminal refusal")
+	}
+	var corpus struct {
+		Registry string                                   `json:"registry"`
+		Catalog  []releasetransition.CapabilityDescriptor `json:"catalog"`
+	}
+	raw, err := os.ReadFile(corpusPath)
+	if err != nil || json.Unmarshal(raw, &corpus) != nil {
+		t.Fatal("runtime corpus unavailable", err)
+	}
+	root, environment, _ := nativeFixture(t)
+	configHome, runtimeRoot, dataHome := filepath.Join(root, "state"), filepath.Join(root, "runtime"), filepath.Join(root, "data")
+	for _, path := range []string{configHome, dataHome, filepath.Join(runtimeRoot, "releases", "old"), filepath.Join(runtimeRoot, "releases", "new")} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("releases/old", filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	options := map[string]any{"dataHome": dataHome, "configHome": configHome, "runtimeRoot": runtimeRoot, "repositoryRoot": root, "yard": "default", "releases": map[string]string{"from": "old", "target": "new"}, "artifactDigest": strings.Repeat("a", 64), "registryRaw": []byte(corpus.Registry), "catalog": corpus.Catalog, "inheritedSettingIds": []string{}, "rollbackTarget": nil, "migrationCheckpoint": false, "sourceIngress": nil}
+	checkRustOwnerTerminalRefusal(t, owner, helper, environment, root, options, map[string]any{"op": "capabilities", "kind": "unsupported"})
+}
+
+func checkRustOwnerTerminalRefusal(t *testing.T, owner, helper string, environment []string, root string, options, request map[string]any) {
+	t.Helper()
+	rejected := startRustOwnerWithBudget(t, owner, helper, environment, root, false, 10*time.Second)
+	defer rejected.close()
+	if reply := rejected.exchange(map[string]any{"op": "open", "options": options}); reply.Error != "" {
+		t.Fatal("refusal control Open", reply.Error)
+	}
+	if refused := rejected.exchange(request); refused.Error != "invalid" {
+		t.Fatalf("unsupported contract admitted: %s", refused.Error)
+	}
+	err := rejected.cmd.Wait()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatal("unsupported contract coordinator exit", err)
+	}
+	rejected.close()
+	if _, err := os.Stat(filepath.Join(options["configHome"].(string), "migrations", "update.lock")); !os.IsNotExist(err) {
+		t.Fatal("unsupported contract acquired write lease")
+	}
+}
+
 func TestRustOwnerOperationNativeLocalSSH(t *testing.T) {
 	ownerPath, helperPath, corpusPath := os.Getenv("SUBYARD_RUST_OWNER_EXECUTABLE"), os.Getenv("SUBYARD_RUST_NATIVE_HELPER"), os.Getenv("SUBYARD_RUST_RUNTIME_CORPUS")
 	if ownerPath == "" || helperPath == "" || corpusPath == "" {
@@ -91,7 +141,7 @@ func TestRustOwnerOperationNativeLocalSSH(t *testing.T) {
 			t.Fatal("native raw yard", err)
 		}
 	}
-	if _, err = components.CaptureOwner(context.Background()); err != nil {
+	if _, err = components.CaptureOwner(context.Background(), nil); err != nil {
 		t.Fatal("native owner", err)
 	}
 	for _, yard := range names {
@@ -138,13 +188,7 @@ func TestRustOwnerOperationNativeLocalSSH(t *testing.T) {
 	}
 	exchange(map[string]any{"op": "open", "options": options})
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		refused := process.exchange(map[string]any{"op": "inspect-migration-owner", "replacement": map[string]any{"transaction": "old-transaction", "fingerprint": strings.Repeat("a", 64)}})
-		if refused.Error != "invalid" {
-			t.Fatalf("unsupported migration contract admitted: %s", refused.Error)
-		}
-		if _, e := os.Stat(filepath.Join(configHome, "migrations", "update.lock")); !os.IsNotExist(e) {
-			t.Fatal("unsupported migration contract acquired write lease")
-		}
+		checkRustOwnerTerminalRefusal(t, ownerPath, helperPath, environment, root, options, map[string]any{"op": "inspect-migration-owner", "replacement": map[string]any{"transaction": "old-transaction", "fingerprint": strings.Repeat("a", 64)}})
 	}
 	inspection := exchange(map[string]any{"op": "inspect", "goal": map[string]string{"target": "new", "direction": "activate-target"}}).Inspection
 	if inspection == nil || len(inspection.Blockers) != 0 {
@@ -290,8 +334,9 @@ func TestRustOwnerDurableProcessCuts(t *testing.T) {
 		t.Skip("opt-in real owner process cuts")
 	}
 	var corpus struct {
-		Registry string                                   `json:"registry"`
-		Catalog  []releasetransition.CapabilityDescriptor `json:"catalog"`
+		Registry         string                                   `json:"registry"`
+		Catalog          []releasetransition.CapabilityDescriptor `json:"catalog"`
+		ExpectedSettings string                                   `json:"expectedSettings"`
 	}
 	raw, err := os.ReadFile(corpusPath)
 	if err != nil {
@@ -328,7 +373,7 @@ func TestRustOwnerDurableProcessCuts(t *testing.T) {
 				if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, path, []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n"), 0o600)
+				testkit.WriteFile(t, path, []byte("DEV_USER='dev'\nYARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n"), 0o600)
 			}
 			server, e := testkit.NewIncusServer(testkit.TempDir(t))
 			if e != nil {
@@ -340,9 +385,10 @@ func TestRustOwnerDurableProcessCuts(t *testing.T) {
 			first := startRustOwner(t, ownerPath, helperPath, environment, root, true)
 			defer first.close()
 			first.exchange(map[string]any{"op": "open", "options": options})
-			inspection := first.exchange(map[string]any{"op": "inspect", "goal": map[string]string{"target": "new", "direction": "activate-target"}}).Inspection
+			review := first.exchange(map[string]any{"op": "inspect", "goal": map[string]string{"target": "new", "direction": "activate-target"}})
+			inspection := review.Inspection
 			if inspection == nil || len(inspection.Blockers) != 0 {
-				t.Fatalf("inspection: %#v", inspection)
+				t.Fatalf("inspection: error=%s report=%#v", review.Error, inspection)
 			}
 			if err = first.encoder.Encode(map[string]any{"op": "execute", "plan": inspection.Plan, "authorization": "fixture-private-consent"}); err != nil {
 				t.Fatal(err)
@@ -551,11 +597,53 @@ func TestRustOwnerDurableProcessCuts(t *testing.T) {
 			if reply.Error != "" || reply.Outcome == nil || reply.Outcome.Status != releasetransition.StatusReady {
 				t.Fatalf("fresh resume: %#v (%s)", reply, second.stderr.String())
 			}
+			if strings.HasSuffix(cut, "/settings-successor") {
+				original, err := releasetransition.ParseJournal(before[0])
+				if err != nil || reply.Outcome.Transaction == nil || *reply.Outcome.Transaction != original.Transaction {
+					t.Fatal("resume lost original transaction", err)
+				}
+				registry, pin, err := releasetransition.ParseRegistryHistoryV2([]byte(corpus.Registry))
+				if err != nil {
+					t.Fatal(err)
+				}
+				store, err := releasetransition.NewPOSIXV2Store(configHome)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ledger, err := store.ReadMigrationLedger(registry, pin)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for domain, epoch := range registry.CurrentEpochs {
+					if ledger.Ledger.Domains[domain].Epoch != epoch {
+						t.Fatal("resume did not commit registry target epoch", domain)
+					}
+				}
+				for _, migration := range registry.Migrations {
+					if migration.Domain != "settings" {
+						continue
+					}
+					found := false
+					for _, step := range original.Steps {
+						if step.ID == migration.ID+".default" && step.Checkpoint == releasetransition.StepVerified {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatal("successor cut lacked verified settings effect", migration.ID)
+					}
+				}
+			}
+
 			contents, e := os.ReadFile(filepath.Join(configHome, "yards", "default", "config.env"))
 			expectedPort := "2240"
 			if replacementCase {
 				expectedPort = "2241"
 			}
+			if strings.HasSuffix(cut, "/settings-successor") && corpus.ExpectedSettings != "" && string(contents) != corpus.ExpectedSettings {
+				t.Fatal("resume changed exact approved settings bytes")
+			}
+
 			if e != nil || !strings.Contains(string(contents), expectedPort) {
 				t.Fatalf("resume did not preserve actual pin: %v", e)
 			}

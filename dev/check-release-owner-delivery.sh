@@ -78,14 +78,17 @@ env HOME="$fixture/home" SUBYARD_HOME="$fixture/home/data" SUBYARD_CONFIG_HOME="
   bash "$out/$host_arch/subyard-install-runtime-release.sh" --runtime-root "$fixture/runtime" \
   --bundle "$bundle" --checksum "$bundle.sha256" --manifest "$bundle.manifest.json" --provenance "$bundle.provenance.json"
 SUBYARD_RUST_DELIVERY_RUNTIME_ROOT="$fixture/runtime" \
-  go test -count=1 ./internal/adapters/releaseruntime -run '^(TestReleaseOwnerRealPublishedCandidate|TestRustOwnerRealPackagedRetainedSession|TestRustOwnerRealPackagedArtifactTamper)$'
+  go test -count=1 -v ./internal/adapters/releaseruntime -run '^TestReleaseOwnerRealPublishedCandidate$'
+SUBYARD_RUST_DELIVERY_RUNTIME_ROOT="$fixture/runtime" \
+  go test -count=1 -v -ldflags '-X github.com/Subyard/Subyard/internal/adapters/releaseruntime.compiledReleaseOwner=rust' \
+    ./internal/adapters/releaseruntime -run '^(TestRustOwnerRealPackagedRootlessCapabilities|TestRustOwnerRealPackagedRetainedSession|TestRustOwnerRealPackagedArtifactTamper)$'
 SUBYARD_RUST_DELIVERY_RUNTIME_ROOT="$fixture/runtime" \
   go test -count=1 ./internal/cli -run '^TestRustOwnerFrozenFacadeProcess$'
 SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT="$fixture/runtime/current" \
   go test -count=1 ./internal/adapters/releaseruntime \
     -run '^TestRustSourceQuery(VerifiedTooling|ToolingIdentityGuards)$'
 SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT="$fixture/runtime/current" \
-  go test -race -count=1 ./internal/cli \
+  go test -race -count=1 -ldflags '-X github.com/Subyard/Subyard/internal/adapters/releaseruntime.compiledReleaseOwner=rust' ./internal/cli \
     -run '^(TestConfigAliasRepair|TestQueuedSourceRepair|TestQueuedHostRename|TestPendingSourceRenameRecovery|TestCompletedSourceAuthoringFixture|TestRustCompletedRollbackAdmitsProfileInitThroughCLI)'
 env -i PATH="$fixture/no-toolchain" HOME="$fixture/home" bash -c '
   for tool in go cargo rustc; do ! command -v "$tool" >/dev/null || exit 91; done

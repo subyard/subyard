@@ -39,7 +39,7 @@ func (cli *CLI) invokeRustReleaseTransitionFacade(ctx context.Context, payload [
 		return releaseOwnerFacadeInputError("release transition operation context is invalid")
 	}
 	runtime := releaseruntime.New(releaseruntime.Config{
-		Inputs: cli.commandInputs, RepositoryRoot: cli.options.RepositoryRoot, Stderr: cli.options.Stderr,
+		WorkingDir: cli.options.WorkingDir, Inputs: cli.commandInputs, RepositoryRoot: cli.options.RepositoryRoot, Stderr: cli.options.Stderr,
 		Context: releaseruntime.RuntimeContext{OperatorHome: firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]),
 			DataHome: cli.env["SUBYARD_HOME"], ConfigHome: firstNonempty(request.ConfigHome, cli.env["SUBYARD_CONFIG_HOME"]),
 			RuntimeRoot: request.RuntimeRoot, OperationID: cli.env["SUBYARD_OPERATION_ID"]},

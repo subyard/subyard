@@ -18,6 +18,16 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestCanonicalRecipeDigestPreservesExistingBinding(t *testing.T) {
+	for _, owner := range []string{"materialized-integrations", "<&>\u2028\u2029", ""} {
+		p := &PreparedInstalledRuntime{owner: owner, files: map[string][]byte{"payload": {0, 1, 254, 255}}}
+		raw := p.Recipe()
+		if got, want := installedCanonicalRecipeDigest(raw), installedRuntimeDigest(json.RawMessage(raw)); got != want {
+			t.Fatalf("canonical recipe binding changed: got %s want %s", got, want)
+		}
+	}
+}
+
 func TestMaterializedProjectedSourceAcceptsOnlyApprovedPublication(t *testing.T) {
 	root := testkit.TempDir(t)
 	runtime, source := materializedConfigFixture(t, root)

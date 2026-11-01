@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -150,12 +151,12 @@ with (root / 'reader-stages').open('a') as output:
 }
 
 func TestResourceOwnerBarrierUsesOnlyCurrentAdmission(t *testing.T) {
-	for _, scenario := range []string{"held", "absent", "other-cli", "wire", "transport", "foreign-home", "retired", "session-prepare", "session-apply", "cancelled"} {
+	for _, scenario := range []string{"held", "native", "absent", "other-cli", "wire", "transport", "foreign-home", "retired", "session-prepare", "session-apply", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := resourceExactFixture(t)
 			nativeInstallationFixture(t, environment)
 			// This caller value must never become descriptor authority.
-			environment = append(environment, "SUBYARD_OWNER_LOCK_FD=malformed-caller-value")
+			environment = append(environment, "SUBYARD_OWNER_LOCK_FD=malformed-caller-value", "SUBYARD_NATIVE_OWNER_FD3=1")
 			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
 				Stdout: io.Discard, Stderr: io.Discard})
 			if err != nil {
@@ -165,6 +166,7 @@ func TestResourceOwnerBarrierUsesOnlyCurrentAdmission(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			program.resourceSourceEnvironment = map[string]string{"SUBYARD_NATIVE_OWNER_FD3": "source-caller-value"}
 			definition, _ := program.resources.Lookup("demo")
 			home := loaded.Context.Paths.DataHome
 			if scenario == "other-cli" {
@@ -207,7 +209,7 @@ func TestResourceOwnerBarrierUsesOnlyCurrentAdmission(t *testing.T) {
 				}
 			case "session-prepare", "session-apply":
 				// Exercise the actual session launch sites, not just the helper.
-				testkit.WriteFile(t, definition.HandlerPath(), []byte("#!/bin/sh\n[ -z \"${SUBYARD_OWNER_LOCK_FD:-}\" ] || exit 71\nprintf '{}\\n'\n"), 0700)
+				testkit.WriteFile(t, definition.HandlerPath(), []byte("#!/bin/sh\n[ -z \"${SUBYARD_OWNER_LOCK_FD:-}\" ] && [ -z \"${SUBYARD_NATIVE_OWNER_FD3:-}\" ] || exit 71\nprintf '{}\\n'\n"), 0700)
 				if scenario == "session-prepare" {
 					_, err = program.prepareResourceModeTimeout(context.Background(), loaded, definition, []string{"view"}, "prepare", time.Second)
 				} else {
@@ -235,7 +237,18 @@ func TestResourceOwnerBarrierUsesOnlyCurrentAdmission(t *testing.T) {
 				}
 			}
 			command.Env = program.resourceEnvironment(loaded, definition, "prepare", "", "")
-			release, err := program.resourceOwnerBarrier(context.Background(), loaded, command)
+			if environmentValue(command.Env, "SUBYARD_NATIVE_OWNER_FD3") != "" {
+				t.Fatal("ambient native FD3 role survived resource environment cleanup")
+			}
+			ctx := context.Background()
+			if scenario == "native" {
+				program.ownerMutationLock = nil
+				ctx = ports.WithNativeOwnerHome(ports.WithNativeOperationObserver(ctx, &ownerGraphObserver{}), home)
+			}
+			release, err := program.resourceOwnerBarrier(ctx, loaded, command)
+			if (environmentValue(command.Env, "SUBYARD_NATIVE_OWNER_FD3") == "1") != (scenario == "native") {
+				t.Fatal("native FD3 role did not follow current observer admission")
+			}
 			if scenario == "foreign-home" || scenario == "retired" {
 				if err == nil || len(command.ExtraFiles) != 0 {
 					if release != nil {
@@ -249,7 +262,7 @@ func TestResourceOwnerBarrierUsesOnlyCurrentAdmission(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer release()
-			if scenario != "held" && scenario != "cancelled" {
+			if scenario != "held" && scenario != "cancelled" && scenario != "native" {
 				if len(command.ExtraFiles) != 0 || environmentValue(command.Env, "SUBYARD_OWNER_LOCK_FD") != "" {
 					t.Fatal("resource acquired or forwarded unrelated descriptor authority")
 				}

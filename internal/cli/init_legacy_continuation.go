@@ -26,6 +26,7 @@ type initLegacyContinuation struct {
 	adopt              bool
 	adoptionConfig     map[string]string
 	projectBefore      map[string]string
+	ownerSource        *ownerLegacySource
 	grant              domain.LegacyContinuation
 	path               string
 	before             config.PersistentFileSnapshot
@@ -102,12 +103,22 @@ func decodeLegacyContinuation(snapshot config.PersistentFileSnapshot) (domain.Le
 }
 
 func (cli *CLI) legacyContinuationSource(ctx context.Context, loaded config.Loaded) (string, string, error) {
+	if cli.ownerLegacySource != nil {
+		return cli.ownerLegacySource.source(ctx, cli, loaded)
+	}
+	repository := cli.options.RepositoryRoot
+	if cli.ownerCompleteSource != nil && cli.ownerLegacyRepository != "" {
+		repository = cli.ownerLegacyRepository
+	}
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil {
 		return "", "", config.OwnerMetadataError("", "legacy continuation installed release", "cannot verify installed release and protected history", "", err)
 	}
 	if !available {
 		return "", "", errors.New("legacy continuation requires a verified installed release and completed protected history")
+	}
+	if runtimeRootForRepository(repository, options.RuntimeRoot) != options.RuntimeRoot {
+		return "", "", errors.New("legacy continuation must use the installed owner launcher")
 	}
 	installation, err := uninstall.ReadInstallationFile(filepath.Join(options.RuntimeRoot, uninstall.ManifestName), loaded.Context.Paths.DataHome, uint32(os.Getuid()))
 	if err != nil {
@@ -126,14 +137,32 @@ func (cli *CLI) legacyContinuationSource(ctx context.Context, loaded config.Load
 	if err := installation.CheckRuntimeScope(); err != nil {
 		return "", "", config.OwnerMetadataContext(filepath.Join(options.RuntimeRoot, uninstall.ManifestName), "runtime installation inventory", err)
 	}
-	inspector := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
+	var originalRoot ownerInputFile
+	if cli.ownerCompleteSource != nil {
+		originalRoot, err = ownerLegacyRootFact(options.RuntimeRoot)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	inspector := releaseruntime.NewSourceInspector(repository, cli.options.Stderr)
 	defer inspector.Close()
-	configDir, tooling, err := inspector.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
+	configDir, tooling, err := inspector.InspectSourceTooling(ctx, options.RuntimeRoot, repository)
 	if err != nil {
 		return "", "", config.OwnerMetadataError(options.RuntimeRoot, "legacy continuation installed configuration assets", "cannot verify sealed installed configuration assets", "", err)
 	}
-	if current := filepath.Clean(loaded.Context.Paths.ConfigDir); current != configDir {
+	if current := filepath.Clean(ownerRepositoryValue(loaded.Context.Paths.ConfigDir, cli.options.RepositoryRoot, repository)); current != configDir {
 		return "", "", config.OwnerMetadataError(options.RuntimeRoot, "legacy continuation installed configuration assets", "configuration asset roots differ", "configDir: stored="+config.QuoteMetadataPath(configDir)+", current="+config.QuoteMetadataPath(current), nil)
+	}
+	if cli.ownerCompleteSource != nil {
+		if !cli.ownerCompleteSource.Valid() {
+			return "", "", domain.ErrPlanStale
+		}
+		snapshot, err := config.ReadPersistentFileSnapshot(options.RuntimeRoot, filepath.Join(options.RuntimeRoot, uninstall.ManifestName))
+		if err != nil {
+			return "", "", err
+		}
+		cli.ownerLegacySource = &ownerLegacySource{Reference: *cli.ownerCompleteSource, Repository: repository, RuntimeRoot: options.RuntimeRoot, ConfigDir: configDir, Tooling: tooling, Installation: snapshot, Root: originalRoot}
+		return cli.ownerLegacySource.source(ctx, cli, loaded)
 	}
 	proof, err := cli.inspectConfigSourceAdmission(ctx, inspector)
 	if err != nil {
@@ -261,6 +290,7 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 	if strings.TrimSpace(string(hostBefore.Content)) != execution.hostID {
 		return config.OwnerMetadataError(configsync.HostIDPath(runtime.Yard.Paths.ConfigHome), "protected owner HostID", "HostID changed during legacy assessment", "", nil)
 	}
+	continuation.ownerSource = cli.ownerLegacySource
 	continuation.hostBefore = hostBefore
 	continuation.registrationPath = path
 	continuation.registrationBefore = registration

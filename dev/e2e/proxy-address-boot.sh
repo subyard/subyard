@@ -3,19 +3,84 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# The FIFO keeps run_guest in this shell, retaining its owned worktree map.
+# Receiver failure drains the stream and never acknowledges incomplete bytes.
+proxy_run_guest() {
+  local role="$1" rc=0 capture_rc=0 wire_rc=0 receiver wire_pid fifo decode_fifo wire
+  shift
+  if [ "$role" = clean ] && { [ "$PROXY_CAPTURE_ACK" != 1 ] || [ "$PROXY_CAPTURE_FAILED" != 0 ]; }; then
+    printf 'E2E_PUBLICATION_CAPTURE state=refused fixture_cleanup=skipped disposable_release=controller-owned\n' >&2
+    return 3
+  fi
+  PROXY_CAPTURE_ACK=0
+  if [ "$role" != clean ]; then PROXY_WORKLOAD_EXIT=unknown; PROXY_WORKLOAD_PHASE="$role"; fi
+  fifo="$LOCAL_TEMP/publication-$role.fifo"
+  decode_fifo="$LOCAL_TEMP/publication-$role.decode.fifo"
+  wire="$PROXY_CAPTURE_DIRECTORY/$role.capture.wire"
+  mkfifo -m 0600 "$fifo" "$decode_fifo" || { PROXY_CAPTURE_FAILED=1; return 3; }
+  (set -o noclobber; : > "$wire") && chmod 0600 "$wire" || { PROXY_CAPTURE_FAILED=1; return 3; }
+  PROXY_CAPTURE_WIRE="$wire"
+  python3 "$ROOT/dev/e2e/publication-capture.py" receive \
+    "$PROXY_CAPTURE_DIRECTORY/$role.capture.tar.gz" "$PROXY_CAPTURE_ENGINE" "$PROXY_CONTROLLER_TOKEN" < "$decode_fifo" &
+  receiver=$!
+  PROXY_CAPTURE_RECEIVER_PID="$receiver"
+  tee "$wire" < "$fifo" > "$decode_fifo" &
+  wire_pid=$!
+  PROXY_CAPTURE_WIRE_PID="$wire_pid"
+  exec {PROXY_CAPTURE_SAVED_STDOUT}>&1
+  run_guest --raw-stdout "$@" > "$fifo" || rc=$?
+  exec {PROXY_CAPTURE_SAVED_STDOUT}>&-
+  PROXY_CAPTURE_SAVED_STDOUT=''
+  if [ "$role" != clean ]; then PROXY_WORKLOAD_EXIT="$rc"; else PROXY_FIXTURE_CLEANUP_EXIT="$rc"; fi
+  wait "$wire_pid" || wire_rc=$?
+  PROXY_CAPTURE_WIRE_PID=''
+  wait "$receiver" || capture_rc=$?
+  PROXY_CAPTURE_RECEIVER_PID=''
+  [ "$wire_rc" = 0 ] || capture_rc=3
+  rm -f -- "$fifo" "$decode_fifo" || capture_rc=3
+  proxy_sync_wire "$wire" || capture_rc=3
+  if [ "$capture_rc" = 0 ] && [ -f "$PROXY_CAPTURE_DIRECTORY/$role.capture.tar.gz" ]; then
+    PROXY_CAPTURE_ACK=1
+  elif [ "$role" = handoff ] || [ "$role" = resume ] || { [ "$rc" != 0 ] && [ "$role" != clean ]; }; then capture_rc=3; fi
+  if [ "$capture_rc" != 0 ]; then PROXY_CAPTURE_FAILED=1; fi
+  printf 'E2E_PUBLICATION_TRANSPORT phase=%s operation_exit=%s capture_exit=%s wire_exit=%s\n' "$role" "$rc" "$capture_rc" "$wire_rc" >&2
+  [ "$rc" != 0 ] || [ "$capture_rc" = 0 ] || rc=3
+  return "$rc"
+}
+
+# Retain partial wire bytes on interruption as well as decoder refusal.
+proxy_sync_wire() {
+  python3 - "$1" <<'PY_SYNC'
+import os,sys
+fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW)
+os.fchmod(fd,0o600)
+os.fsync(fd)
+os.close(fd)
+fd=os.open(os.path.dirname(sys.argv[1]),os.O_DIRECTORY|os.O_NOFOLLOW)
+os.fsync(fd)
+os.close(fd)
+PY_SYNC
+}
+
 controller_main() {
   local slot='' before_boot='' after_boot=''
-  local down=0 up=0
+  local down=0 up=0 handoff=0
   # EXIT can run after errexit has unwound this function's local scope.
   # Keep only the trap's owned fixture state in the top-level shell.
   PROXY_CONTROLLER_BUNDLE='' PROXY_CONTROLLER_BUNDLE_HASH=''
   PROXY_CONTROLLER_TOKEN='' PROXY_CONTROLLER_PREPARED=0
+  PROXY_CAPTURE_ACK=0 PROXY_CAPTURE_FAILED=0
+  PROXY_CAPTURE_DIRECTORY='' PROXY_CAPTURE_ENGINE=''
+  PROXY_CAPTURE_RECEIVER_PID='' PROXY_CAPTURE_WIRE_PID='' PROXY_CAPTURE_WIRE='' PROXY_CAPTURE_SAVED_STDOUT=''
+  PROXY_WORKLOAD_EXIT=unknown PROXY_WORKLOAD_PHASE=none PROXY_FIXTURE_CLEANUP_EXIT=not-run
+  if [ "$#" = 3 ] && [ "$3" = --publication-handoff ]; then handoff=1; set -- "$1" "$2"; fi
   [ "$#" = 2 ] && [ "$1" = --slot ] || {
-    printf 'Usage: dev/e2e/proxy-address-boot.sh --slot N\n' >&2; return 2;
+    printf 'Usage: dev/e2e/proxy-address-boot.sh --slot N [--publication-handoff]\n' >&2; return 2;
   }
   slot="$2"
   # shellcheck source=dev/agent-e2e.sh
   . "$ROOT/dev/agent-e2e.sh"
+  command -v python3 >/dev/null && command -v mkfifo >/dev/null && command -v tee >/dev/null || die 'publication capture requires python3, mkfifo and tee'
   set_requested_slot "$slot" --slot
   # Consumed by the sourced lease client.
   # shellcheck disable=SC2034
@@ -25,12 +90,38 @@ controller_main() {
     local rc=$? failed=0
     trap - EXIT INT TERM
     set +e
+    if [ -n "$PROXY_CAPTURE_SAVED_STDOUT" ]; then
+      exec 1>&"$PROXY_CAPTURE_SAVED_STDOUT"
+      exec {PROXY_CAPTURE_SAVED_STDOUT}>&-
+      PROXY_CAPTURE_SAVED_STDOUT=''
+    fi
+    if [ -n "${PROXY_CAPTURE_WIRE_PID:-}" ]; then
+      kill -TERM "$PROXY_CAPTURE_WIRE_PID" 2>/dev/null
+      wait "$PROXY_CAPTURE_WIRE_PID" 2>/dev/null
+      PROXY_CAPTURE_WIRE_PID=''
+      PROXY_CAPTURE_FAILED=1
+    fi
+    if [ -n "$PROXY_CAPTURE_RECEIVER_PID" ]; then
+      kill -TERM "$PROXY_CAPTURE_RECEIVER_PID" 2>/dev/null
+      wait "$PROXY_CAPTURE_RECEIVER_PID" 2>/dev/null
+      PROXY_CAPTURE_RECEIVER_PID=''
+      PROXY_CAPTURE_FAILED=1
+    fi
+    if [ -n "${PROXY_CAPTURE_WIRE:-}" ]; then
+      proxy_sync_wire "$PROXY_CAPTURE_WIRE" || PROXY_CAPTURE_FAILED=1
+    fi
     if [ "$PROXY_CONTROLLER_PREPARED" = 1 ]; then
       cleanup_guest 1 quiet >/dev/null 2>&1 || failed=1
-      run_guest 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
-        bash dev/e2e/proxy-address-boot.sh clean "$PROXY_CONTROLLER_TOKEN" \
-        || failed=1
+      if [ "$PROXY_CAPTURE_ACK" = 1 ] && [ "$PROXY_CAPTURE_FAILED" = 0 ]; then
+        proxy_run_guest clean 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+          bash dev/e2e/proxy-address-boot.sh clean "$PROXY_CONTROLLER_TOKEN" || failed=1
+      else
+        printf 'E2E_PUBLICATION_CAPTURE state=refused fixture_cleanup=skipped disposable_release=controller-owned\n' >&2
+        failed=1
+      fi
     fi
+    printf 'E2E_PUBLICATION_CONTROLLER workload_phase=%s workload_exit=%s capture_failed=%s fixture_cleanup_exit=%s\n' \
+      "$PROXY_WORKLOAD_PHASE" "$PROXY_WORKLOAD_EXIT" "$PROXY_CAPTURE_FAILED" "$PROXY_FIXTURE_CLEANUP_EXIT" >&2
     [ "$failed" = 0 ] || [ "$rc" != 0 ] || rc=3
     cleanup_on_exit '' "$rc"
   }
@@ -43,13 +134,25 @@ controller_main() {
   build_bundle "$ROOT" "$PROXY_CONTROLLER_BUNDLE"
   PROXY_CONTROLLER_BUNDLE_HASH="$(sha256sum "$PROXY_CONTROLLER_BUNDLE" | awk '{print $1}')"
   printf 'evidence: public_bundle_sha256=%s\n' "$PROXY_CONTROLLER_BUNDLE_HASH"
+  PROXY_CAPTURE_DIRECTORY="$(python3 "$ROOT/dev/e2e/publication-capture.py" directory "$ROOT" "${SUBYARD_E2E_LOCAL_EVIDENCE:-}")"
+  PROXY_CAPTURE_ENGINE="$(python3 "$ROOT/dev/e2e/publication-capture.py" engine-hash "$PROXY_CONTROLLER_BUNDLE")"
   acquire_lease
   start_lease_keeper
   PROXY_CONTROLLER_TOKEN="$LEASE_GENERATION"
   [[ "$PROXY_CONTROLLER_TOKEN" =~ ^[1-9][0-9]*$ ]] || die 'invalid lease generation'
   PROXY_CONTROLLER_PREPARED=1
-  run_guest 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+  proxy_run_guest prepare 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
     bash dev/e2e/proxy-address-boot.sh prepare "$PROXY_CONTROLLER_TOKEN"
+  if [ "$handoff" = 1 ]; then
+    proxy_run_guest handoff 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+      bash dev/e2e/proxy-address-boot.sh handoff "$PROXY_CONTROLLER_TOKEN"
+    proxy_run_guest clean 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+      bash dev/e2e/proxy-address-boot.sh clean "$PROXY_CONTROLLER_TOKEN"
+    cleanup_guest 1
+    PROXY_CONTROLLER_PREPARED=0
+    ok 'actual Go owner callback and installed passive publication handoff passed'
+    exit 0
+  fi
   cleanup_guest 1
   before_boot="$(ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- cat /proc/sys/kernel/random/boot_id)"
   timeout --foreground 20 ssh -F "$CLIENT_CONFIG" -T \
@@ -72,8 +175,10 @@ controller_main() {
   done
   [ "$up" = 1 ] || die 'VM did not return with a new boot ID'
   printf 'evidence: preboot=%s postboot=%s\n' "$before_boot" "$after_boot"
-  run_guest 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+  proxy_run_guest resume 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
     bash dev/e2e/proxy-address-boot.sh resume "$PROXY_CONTROLLER_TOKEN"
+  proxy_run_guest clean 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+    bash dev/e2e/proxy-address-boot.sh clean "$PROXY_CONTROLLER_TOKEN"
   cleanup_guest 1
   PROXY_CONTROLLER_PREPARED=0
   ok 'current-worktree runtime restored desired power automatically after delayed-address reboot'
@@ -100,6 +205,9 @@ ADDRESS=192.0.2.123
 INTERFACE="sypb$TOKEN"
 READY=z-ready
 WAITING=a-required
+FOREIGN_PROJECT="sypub-foreign-$TOKEN"
+FOREIGN_INSTANCE=control
+PUBLIC_IMAGE=images:debian/13/cloud
 OWNER_ADDRESS=100.64.200.123
 OWNER_PORT=38475
 PREVIEW_UNIT="subyard-e2e-preview-$TOKEN.service"
@@ -133,10 +241,19 @@ CLEAN_PREVIEW
   incus exec "$INSTANCE" --project "$PROJECT" -- sh -eu -c "$payload" sh "$MARKER" "$PREVIEW_UNIT"
 }
 proxy_cleanup() {
-  local rc=$? failed=0
+  local rc=$? failed=0 project_presence_rc=0
   if [ "$rc" = 0 ] && [ "$PRESERVE_FIXTURE" = 1 ]; then cleanup; fi
   trap - EXIT INT TERM
   set +e
+  if [ "$MODE" != clean ] && [ "$CLEANUP_ARMED" = 1 ]; then
+    # Stream original bytes, then leave the fixture intact until the controller
+    # has verified and fsynced its private artifact. Separate clean is the ack.
+    local capture_rc=0
+    sudo -n python3 "$ROOT/dev/e2e/publication-capture.py" collect "$ROOT" "$TOKEN" "$ADDRESS_UNIT" || capture_rc=$?
+    printf 'E2E_PUBLICATION_OUTCOME workload_exit=%s capture_exit=%s fixture_cleanup=deferred\n' "$rc" "$capture_rc" >&2
+    [ "$rc" != 0 ] || [ "$capture_rc" = 0 ] || rc=3
+    exit "$rc"
+  fi
   if [ "$rc" != 0 ]; then
     sudo -n systemctl show subyard-power-reconcile.service "$ADDRESS_UNIT" \
       -p LoadState -p ActiveState -p SubState -p Result -p ExecMainStatus >&2
@@ -145,6 +262,17 @@ proxy_cleanup() {
   fi
   if [ "$CLEANUP_ARMED" = 1 ]; then
     assert_state_root
+    drain_publication_worker || { printf 'proxy-address-boot: passive consumer did not drain; preserving fixture\n' >&2; exit 3; }
+    project_presence || project_presence_rc=$?
+    if [ "$project_presence_rc" = 0 ]; then
+      capture_owned_project_images "$INSTANCE" "$READY" "$WAITING" || {
+        printf 'proxy-address-boot: unbound isolated image cleanup; preserving fixture\n' >&2
+        exit 3
+      }
+    elif [ "$project_presence_rc" != 1 ]; then
+      printf 'proxy-address-boot: project absence is unknown; preserving fixture\n' >&2
+      exit 3
+    fi
     # A stopped or inaccessible guest is removed by the owning project cleanup.
     # Never start it for cleanup; a running guest permits exact payload removal.
     if [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s 2>/dev/null)" = RUNNING ]; then
@@ -162,6 +290,19 @@ proxy_cleanup() {
     if ip link show dev "$INTERFACE" >/dev/null 2>&1; then
       if [ "$(ip -j link show dev "$INTERFACE" | jq -r '.[0].ifalias')" = "$MARKER" ]; then
         sudo -n ip link delete dev "$INTERFACE" || failed=1
+      else failed=1; fi
+    fi
+    if incus project show "$FOREIGN_PROJECT" >/dev/null 2>&1; then
+      if [ "$(incus project get "$FOREIGN_PROJECT" user.subyard.p0-publication-foreign)" = "$MARKER" ]; then
+        if incus info "$FOREIGN_INSTANCE" --project "$FOREIGN_PROJECT" >/dev/null 2>&1; then
+          if [ "$(incus config get "$FOREIGN_INSTANCE" user.subyard.e2e --project "$FOREIGN_PROJECT")" = "$MARKER" ] \
+            && [ "$(incus config get "$FOREIGN_INSTANCE" user.subyard.managed --project "$FOREIGN_PROJECT")" != true ]; then
+            incus delete "$FOREIGN_INSTANCE" --project "$FOREIGN_PROJECT" --force || failed=1
+          else failed=1; fi
+        fi
+        if [ "$(incus list --project "$FOREIGN_PROJECT" --format json | jq length)" = 0 ]; then
+          incus project delete "$FOREIGN_PROJECT" || failed=1
+        else failed=1; fi
       else failed=1; fi
     fi
     for cleanup_instance in "$READY" "$WAITING"; do
@@ -254,13 +395,14 @@ assert_release() {
     "$OPERATOR_HOME/.subyard/runtime/$target" || die 'installed runtime checksum mismatch'
   operator_env cmp "$OPERATOR_HOME/.subyard/runtime/$target/bin/yard-engine" "$RECONCILER" \
     || die 'boot runtime differs from the candidate engine'
-  for path in "$RECONCILER" "$UNIT"; do
+  for path in "$RECONCILER" "$UNIT" "$PUBLICATION_UNIT"; do
     sudo -n test -f "$path" && sudo -n test ! -L "$path" \
       && [ "$(sudo -n stat -c %u:%g "$path")" = 0:0 ] || die 'boot runtime is not root-owned'
   done
   [ "$(sudo -n stat -c %a "$RECONCILER")" = 755 ] \
-    && [ "$(sudo -n stat -c %a "$UNIT")" = 644 ] || die 'unexpected boot runtime permissions'
-  assert_unit_matches "$OPERATOR_HOME/.subyard/runtime/$target/config/systemd/subyard-power-reconcile.service.in" loaded 5
+    && [ "$(sudo -n stat -c %a "$UNIT")" = 644 ] \
+    && [ "$(sudo -n stat -c %a "$PUBLICATION_UNIT")" = 644 ] || die 'unexpected boot runtime permissions'
+  assert_unit_matches "$OPERATOR_HOME/.subyard/runtime/$target/config/systemd/subyard-power-reconcile.service.in" loaded candidate
   snapshot="$(sudo -n systemctl show subyard-power-reconcile.service -p FragmentPath -p DropInPaths)"
   grep -Fxq "FragmentPath=$UNIT" <<<"$snapshot" \
     && grep -Fxq 'DropInPaths=' <<<"$snapshot" || die 'unexpected boot unit override'
@@ -273,6 +415,22 @@ assert_release() {
     "$SOURCE_BUNDLE_SHA256" "$CANDIDATE_VERSION" "$digest" \
     "$(sudo -n sha256sum "$RECONCILER" | awk '{print $1}')"
   assert_guards
+}
+
+pin_original_publication_instance() {
+  local uuid path="$STATE_ROOT/publication-physical.uuid"
+  uuid="$(incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -er --arg name "$INSTANCE" '
+    select(.name == $name and .type == "container" and .status == "Running"
+      and .config["user.subyard.managed"] == "true"
+      and .config["user.subyard.initialized"] == "true")
+    | .config["volatile.uuid"] | select(type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))')" \
+    || die 'original publication instance identity is unavailable'
+  if [ "${1:-}" = capture ] && [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    write_fixture_value "$path" "$uuid"
+  fi
+  [ "$(read_fixture_value "$path")" = "$uuid" ] \
+    || die 'original publication instance identity changed'
 }
 
 optional_route() {
@@ -387,8 +545,10 @@ GUEST
   )"
   incus exec "$INSTANCE" --project "$PROJECT" -- sh -eu -c "$payload" sh "$MARKER" "$PREVIEW_UNIT"
   wait_local_preview
-  optional_route "$OWNER_ADDRESS"
+  # Stop before introducing the synthetic route: it intentionally differs
+  # from configured preview readiness. Start observes the stopped guest normally.
   operator_yard stop --force --yes
+  optional_route "$OWNER_ADDRESS"
   sudo -n ip address del "$OWNER_ADDRESS/32" dev "$INTERFACE"
   operator_yard start --yes
   incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -e '
@@ -445,10 +605,9 @@ prepare_proxy() {
   incus list --all-projects --format json | jq -e \
     'all(.[]; (.expanded_config["user.subyard.managed"] // .config["user.subyard.managed"] // "false") != "true")' \
     >/dev/null || die 'unexpected managed yards on disposable host'
-  if ! incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null 2>&1; then
-    timeout --foreground --kill-after=10 300 sudo -n incus image copy images:debian/13/cloud local: \
-      --alias subyard-e2e-debian-13-cloud-container --project default >/dev/null
-  fi
+  local project_presence_rc=0
+  project_presence || project_presence_rc=$?
+  [ "$project_presence_rc" = 1 ] || die 'fresh fixture project is present or its absence is unknown'
   ! ip link show dev "$INTERFACE" >/dev/null 2>&1 || die 'dummy interface already exists'
   ! ip -j address show | jq -e --arg address "$ADDRESS" \
     'any(.[].addr_info[]; .local == $address)' >/dev/null || die 'synthetic address already exists'
@@ -477,15 +636,23 @@ prepare_proxy() {
   write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" \
     "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-  incus project create "$PROJECT" -c features.images=false \
-    -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+  operator_yard config --yes set YARD_IMAGE "$PUBLIC_IMAGE" --scope yard --local
+  operator_yard config --yes set WEB_PREVIEW_HOST_PORT "$OWNER_PORT" --scope yard --local
+  operator_yard config --yes set YARD_IMAGE_FALLBACK "$PUBLIC_IMAGE" --scope yard --local
   operator_yard init --yes
+  [ "$(incus project get "$PROJECT" user.subyard.installation)" = 1 ] \
+    && [ "$(incus project get "$PROJECT" user.subyard.operator_uid)" = "$(operator_uid)" ] \
+    && [ "$(incus project get "$PROJECT" user.subyard.data_home)" = "$OPERATOR_HOME/.subyard" ] \
+    && [ "$(incus project get "$PROJECT" user.subyard.config_home)" = "$OPERATOR_HOME/.config/subyard" ] \
+    || die 'ordinary init did not establish exact product project ownership'
+  incus project set "$PROJECT" user.subyard.p0-power-systemd="$MARKER"
   operator_yard start --yes
+  pin_original_publication_instance capture
   sudo -n ip link add "$INTERFACE" type dummy
   sudo -n ip link set dev "$INTERFACE" alias "$MARKER"
   sudo -n ip link set dev "$INTERFACE" up
   sudo -n ip address add "$ADDRESS/32" dev "$INTERFACE"
-  incus init subyard-e2e-debian-13-cloud-container "$WAITING" --project "$PROJECT" --storage default \
+  incus init "$PUBLIC_IMAGE" "$WAITING" --project "$PROJECT" --storage default \
     -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
     -c user.subyard.managed=true -c user.subyard.initialized=true \
     -c user.subyard.desired_power=running -c user.subyard.name="$WAITING" \
@@ -493,7 +660,7 @@ prepare_proxy() {
   incus config device add "$WAITING" delayed-address proxy --project "$PROJECT" \
     listen="tcp:$ADDRESS:38473" connect=tcp:127.0.0.1:22 bind=host nat=false >/dev/null
   incus start "$WAITING" --project "$PROJECT"
-  incus init subyard-e2e-debian-13-cloud-container "$READY" --project "$PROJECT" --storage default \
+  incus init "$PUBLIC_IMAGE" "$READY" --project "$PROJECT" --storage default \
     -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
     -c user.subyard.managed=true -c user.subyard.initialized=true \
     -c user.subyard.desired_power=running -c user.subyard.name="$READY" \
@@ -603,15 +770,73 @@ resume_proxy() {
   printf 'ok: owned optional publication preserved RUNNING/local preview across delayed-address reboot; required foreign wait and independent yard preserved\n'
 }
 
-for command in sudo incus ip jq systemctl timeout go tar curl; do
+run_publication_handoff() {
+  local installed binary="$STATE_ROOT/publication-physical.test" log="$STATE_ROOT/publication-physical.jsonl"
+  assert_state_root
+  CLEANUP_ARMED=1
+  PRESERVE_FIXTURE=0
+  assert_fixture_phase proxy-ready
+  assert_release
+  # A separate unregistered project is outside ordinary teardown inventory.
+  # Its exact marker permits cleanup; it carries no managed yard registration.
+  ! incus project show "$FOREIGN_PROJECT" >/dev/null 2>&1 || die 'foreign-control project already exists'
+  incus project create "$FOREIGN_PROJECT" -c features.images=false -c features.profiles=false \
+    -c user.subyard.p0-publication-foreign="$MARKER" >/dev/null
+  ! incus info "$FOREIGN_INSTANCE" --project "$FOREIGN_PROJECT" >/dev/null 2>&1 || die 'foreign-control instance already exists'
+  incus init "$PUBLIC_IMAGE" "$FOREIGN_INSTANCE" --project "$FOREIGN_PROJECT" --storage default \
+    -c user.subyard.e2e="$MARKER" -c boot.autostart=false >/dev/null
+  installed="$OPERATOR_HOME/.subyard/runtime/$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  pin_original_publication_instance
+  write_fixture_value "$STATE_ROOT/publication-physical.foreign.uuid" "$(incus config get "$FOREIGN_INSTANCE" volatile.uuid --project "$FOREIGN_PROJECT")"
+  # Compile the real CLI package; execution uses its production client/socket.
+  # No Rust source selector or test-only product build tags enter this lane.
+  env -u SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT go test -c -o "$binary" ./internal/cli
+  chmod 0755 "$binary"
+  # The unprivileged VM operator owns STATE_ROOT; only the test process needs sudo.
+  # shellcheck disable=SC2024
+  (
+    cd "$ROOT/internal/cli"
+    sudo -n env -u GOTMPDIR -u SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT TMPDIR=/tmp \
+      SUBYARD_ORIGINAL_CALLBACK_REQUIRED=1 SUBYARD_HOST_INSTALL_RESULT_SOURCE="$installed" \
+      "$binary" -test.v -test.count=1 -test.timeout=3m \
+      -test.run='^TestOwnerOriginalCallbackContinuesAfterInstallationImport$' \
+      > "$STATE_ROOT/callback-continuation.jsonl" 2>&1
+  ) || { cat "$STATE_ROOT/callback-continuation.jsonl"; return 1; }
+  cat "$STATE_ROOT/callback-continuation.jsonl"
+  [ "$(grep -c '^--- PASS: TestOwnerOriginalCallbackContinuesAfterInstallationImport (' "$STATE_ROOT/callback-continuation.jsonl")" = 1 ] \
+    && ! grep -q -- '--- SKIP:' "$STATE_ROOT/callback-continuation.jsonl" \
+    || die 'required original callback continuation case did not execute'
+  sudo -n systemctl stop subyard-power-reconcile.service
+  operator_env env -u GOTMPDIR -u SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT TMPDIR=/tmp \
+    SUBYARD_E2E_VM="$SUBYARD_E2E_VM" SUBYARD_REPOSITORY_ROOT="$installed" SUBYARD_CONFIG_DIR="$installed/config" \
+    SUBYARD_OPERATOR_HOME="$OPERATOR_HOME" SUBYARD_HOME="$OPERATOR_HOME/.subyard" SUBYARD_CONFIG_HOME="$OPERATOR_HOME/.config/subyard" \
+    SUBYARD_PUBLICATION_PHYSICAL_REQUIRED=1 SUBYARD_PUBLICATION_PHYSICAL_ROOT="$installed" \
+    SUBYARD_PUBLICATION_PHYSICAL_MARKER="$MARKER" SUBYARD_PUBLICATION_PHYSICAL_PROJECT="$PROJECT" \
+    SUBYARD_PUBLICATION_PHYSICAL_INSTANCE="$INSTANCE" SUBYARD_PUBLICATION_PHYSICAL_FOREIGN_PROJECT="$FOREIGN_PROJECT" \
+    SUBYARD_PUBLICATION_PHYSICAL_FOREIGN="$FOREIGN_INSTANCE" \
+    SUBYARD_PUBLICATION_PHYSICAL_INTERFACE="$INTERFACE" SUBYARD_PUBLICATION_PHYSICAL_ADDRESS="$OWNER_ADDRESS" \
+    SUBYARD_PUBLICATION_PHYSICAL_PORT="$OWNER_PORT" SUBYARD_PUBLICATION_PHYSICAL_PREVIEW="$PREVIEW_UNIT" \
+    SUBYARD_SUDO_PREAUTHORIZED=1 "$binary" -test.v -test.count=1 -test.timeout=8m \
+      -test.run='^TestOwnerPublicationHandoffPhysical$' > "$log" 2>&1 || { cat "$log"; return 1; }
+  cat "$log"
+  [ "$(grep -c '^--- PASS: TestOwnerPublicationHandoffPhysical (' "$log")" = 1 ] \
+    && ! grep -q -- '--- SKIP:' "$log" || die 'required physical publication case did not execute'
+  for phase in ack-tail coalesced-retry exact-restore temporary-stop serialized-stop-retirement teardown-waiting; do
+    grep -Fq -- "--- PASS: TestOwnerPublicationHandoffPhysical/$phase " "$log" \
+      || die "required publication phase missing: $phase"
+  done
+}
+
+for command in sudo incus ip jq systemctl timeout go tar curl python3; do
   command -v "$command" >/dev/null || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
 case "$MODE" in
   prepare) prepare_proxy ;;
   resume) resume_proxy ;;
+  handoff) run_publication_handoff ;;
   clean)
     if [ -e "$STATE_ROOT" ]; then assert_state_root; CLEANUP_ARMED=1; fi
     ;;
-  *) die 'expected prepare, resume or clean' ;;
+  *) die 'expected prepare, resume, handoff or clean' ;;
 esac

@@ -20,6 +20,9 @@ enum Request {
     Inspect {
         goal: p::Goal,
     },
+    Check {
+        goal: p::Goal,
+    },
     InspectRecovery {
         replacement: subyard_release_owner::wire::recovery_v1::ActivationOnlyRecoveryRequest,
         contract: String,
@@ -171,6 +174,13 @@ fn capabilities() -> Result<(File, File, File, File)> {
     Ok((helper, grant, custody, repository))
 }
 fn run() -> Result<()> {
+    // Go's bootstrap ExtraFiles role must survive this exec, but never a later
+    // helper, SDK child or detached UI opener. Keep the proof FD, mark CLOEXEC.
+    let bootstrap = unsafe { std::os::fd::BorrowedFd::borrow_raw(3) };
+    if rustix::io::fcntl_getfd(bootstrap).is_ok() {
+        rustix::io::fcntl_setfd(bootstrap, rustix::io::FdFlags::CLOEXEC).map_err(|_| Error::Io)?;
+    }
+
     if std::env::args().collect::<Vec<_>>()
         == [
             std::env::args().next().ok_or(Error::Invalid)?,
@@ -217,6 +227,7 @@ fn run() -> Result<()> {
         input.get_mut(),
     )?;
     while let Some(request) = read(&mut input, false)? {
+        let terminal = matches!(request, Request::Check { .. });
         let result = match request {
             Request::Inspect { goal } => {
                 if prepared.is_some() || recovery_prepared.is_some() || migration_prepared.is_some()
@@ -240,6 +251,26 @@ fn run() -> Result<()> {
                                 outcome: None,
                                 error: None,
                             }
+                        })
+                }
+            }
+            Request::Check { goal } => {
+                if prepared.is_some() || recovery_prepared.is_some() || migration_prepared.is_some()
+                {
+                    Err(Error::Invalid)
+                } else {
+                    owner
+                        .check(goal, grant.take().ok_or(Error::Invalid)?)
+                        .map(|inspection| Reply {
+                            retained_releases: None,
+                            admission: None,
+                            activation_reconciliation_owned: true,
+                            capabilities: None,
+                            activation_owners: None,
+                            custody: None,
+                            inspection: Some(inspection),
+                            outcome: None,
+                            error: None,
                         })
                 }
             }
@@ -371,6 +402,9 @@ fn run() -> Result<()> {
                     reply.retained_releases = Some(owner.retained_releases()?);
                 }
                 send(reply, input.get_mut())?;
+                if terminal {
+                    return Ok(());
+                }
             }
             Err(error) => {
                 send(

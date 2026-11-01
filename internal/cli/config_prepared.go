@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
@@ -332,6 +333,19 @@ func (execution *configApplyExecution) steps() []domain.OperationStep {
 }
 
 func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyExecution) error {
+	return cli.refreshConfigApplyChecked(ctx, execution, nil)
+}
+
+func (cli *CLI) refreshAfterOwnerConfigApply(ctx context.Context, execution *configApplyExecution, p *reconcileruntime.PreparedInstalledRuntime, runtime reconcileruntime.Runtime) error {
+	if p == nil {
+		return domain.ErrPlanStale
+	}
+	return cli.refreshConfigApplyChecked(ctx, execution, func(fresh []config.MaterializedArtifactAssessment) error {
+		return runtime.CheckAfterOwnerConfigAssessments(ctx, p, fresh)
+	})
+}
+
+func (cli *CLI) refreshConfigApplyChecked(ctx context.Context, execution *configApplyExecution, afterOwner func([]config.MaterializedArtifactAssessment) error) error {
 	if execution.selector == nil {
 		return errors.New("config apply: target selector is required")
 	}
@@ -359,7 +373,11 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 		if initial.DesiredFingerprint != fresh.DesiredFingerprint {
 			return fmt.Errorf("%w: yard %s: desired configuration or target changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
 		}
-		if !(initial.Changed && !fresh.Changed) && (initial.MaterializedFingerprint != fresh.MaterializedFingerprint || initial.Changed != fresh.Changed) {
+		if afterOwner != nil {
+			if err := afterOwner(fresh.Artifacts); err != nil {
+				return err
+			}
+		} else if !(initial.Changed && !fresh.Changed) && (initial.MaterializedFingerprint != fresh.MaterializedFingerprint || initial.Changed != fresh.Changed) {
 			return fmt.Errorf("%w: yard %s: materialized configuration changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
 		}
 		current = append(current, fresh)

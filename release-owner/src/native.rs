@@ -69,8 +69,20 @@ pub(crate) struct Context {
     pub artifact: String,
     pub root: Identity,
     pub repository: Identity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_setting_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_overrides: Vec<CommandOverride>,
 }
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommandOverride {
+    pub name: String,
+    pub present: bool,
+    #[serde(with = "crate::wire::go_bytes")]
+    pub value: Option<Vec<u8>>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Binding {
     pub session: String,
@@ -120,6 +132,94 @@ pub(crate) struct Target {
     pub source: String,
 }
 impl Target {
+    pub(crate) fn materialized_order(&self, other: &Self) -> std::cmp::Ordering {
+        self.yard.cmp(&other.yard).then_with(|| {
+            (self.class != "materialized-files").cmp(&(other.class != "materialized-files"))
+        })
+    }
+    // Only after the exact original recipe binder has checked captured facts.
+    pub(crate) fn original_integration_observation(&self, original: &Self) -> bool {
+        if self.validate().is_err()
+            || original.validate().is_err()
+            || original.owner != "materialized-config"
+            || original.class != "materialized-integrations"
+            || !original.after_owner.is_empty()
+            || original.state != "stale"
+            || original.instance_uuid == "absent"
+            || original.prepared_recipe.is_empty()
+            || !matches!(self.state.as_str(), "current" | "stale")
+        {
+            return false;
+        }
+        let mut observed = self.clone();
+        observed.state = original.state.clone();
+        observed.actual = original.actual.clone();
+        observed.reported_actual = original.reported_actual.clone();
+        observed.before = original.before.clone();
+        observed.prepared_recipe = original.prepared_recipe.clone();
+        observed == *original
+    }
+    pub(crate) fn materialized_current(&self) -> bool {
+        self.validate().is_ok()
+            && self.owner == "materialized-config"
+            && self.class == "materialized-files"
+            && self.after_owner.is_empty()
+            && !self.prepared_recipe.is_empty()
+            && self.state != "deferred"
+            && self.instance_uuid != "absent"
+    }
+    // Used only after binding the retained ORIGINAL recipe/target. The native
+    // binder requires original physical custody for a mixed current state.
+    pub(crate) fn materialized_current_observation(&self, original: &Self) -> bool {
+        if !self.materialized_current() || !original.materialized_current() {
+            return false;
+        }
+        let mut comparison = self.clone();
+        comparison.state = original.state.clone();
+        comparison.actual = original.actual.clone();
+        comparison.reported_actual = original.reported_actual.clone();
+        comparison.prepared_recipe = original.prepared_recipe.clone();
+        comparison == *original
+    }
+    pub(crate) fn materialized_after_owner(&self) -> bool {
+        self.validate().is_ok()
+            && self.owner == "materialized-config"
+            && self.class == "materialized-files"
+            && self.state != "deferred"
+            && self.instance_uuid != "absent"
+            && matches!(
+                crate::after_owner::AfterOwnerActivation::parse(&self.after_owner),
+                Ok((
+                    crate::after_owner::AfterOwnerActivation::MaterializedFiles,
+                    _
+                ))
+            )
+    }
+    pub(crate) fn materialized_after_owner_observation(&self, original: &Self) -> bool {
+        let eligible = |target: &Self| {
+            target.materialized_after_owner()
+                || (target.validate().is_ok()
+                    && target.owner == "materialized-config"
+                    && target.class == "materialized-integrations"
+                    && target.state != "deferred"
+                    && target.instance_uuid != "absent"
+                    && matches!(
+                        crate::after_owner::AfterOwnerActivation::parse(&target.after_owner),
+                        Ok((
+                            crate::after_owner::AfterOwnerActivation::MaterializedIntegrations,
+                            _
+                        ))
+                    ))
+        };
+        if !eligible(self) || !eligible(original) {
+            return false;
+        }
+        let mut comparison = self.clone();
+        comparison.state = original.state.clone();
+        comparison.actual = original.actual.clone();
+        comparison.reported_actual = original.reported_actual.clone();
+        comparison == *original
+    }
     pub(crate) fn resolved(&self, targets: &[Self]) -> Result<Self> {
         require(targets.len() == 1)?;
         let resolved = &targets[0];
@@ -156,6 +256,13 @@ impl Target {
                     .all(|s| record::fingerprint(s)),
         )
     }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CompleteSourceReference {
+    pub transaction: String,
+    pub journal_digest: String,
+    pub metadata_binding: String,
 }
 #[derive(Clone, Serialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
@@ -210,8 +317,13 @@ pub(crate) enum Request {
         yard: String,
         edits: Vec<Edit>,
     },
+    CaptureOwnerObservation {
+        session: String,
+    },
     CaptureOwner {
         session: String,
+        #[serde(rename = "completeSource", skip_serializing_if = "Option::is_none")]
+        complete_source: Option<CompleteSourceReference>,
     },
     ObserveOwner {
         session: String,
@@ -227,8 +339,18 @@ pub(crate) enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         binding: Option<Binding>,
         producer: Binding,
-        before: OwnerBefore,
+        before: Box<OwnerBefore>,
         token: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<crate::program::ActionReference>,
+        #[serde(rename = "producerAction", skip_serializing_if = "Option::is_none")]
+        producer_action: Option<crate::program::ActionReference>,
+        #[serde(
+            rename = "retainedOnly",
+            default,
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        retained_only: bool,
     },
     ResolveOwnerTarget {
         session: String,
@@ -258,6 +380,14 @@ pub(crate) enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         target: Option<Target>,
     },
+    BindSealedInstalledRecipe {
+        session: String,
+        #[serde(rename = "recipeHash")]
+        recipe_hash: String,
+        total: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<Target>,
+    },
     CaptureActivation {
         session: String,
         owner: String,
@@ -276,11 +406,6 @@ pub(crate) enum Request {
         session: String,
         recipe: SettingsRecipe,
     },
-    ProjectSettings {
-        session: String,
-        recipe: SettingsRecipe,
-        edits: Vec<Edit>,
-    },
     ApplySettings {
         binding: Binding,
         recipe: SettingsRecipe,
@@ -289,6 +414,18 @@ pub(crate) enum Request {
         binding: Binding,
         before: OwnerBefore,
         token: String,
+    },
+    ApplyOwnerAction {
+        binding: Binding,
+        before: OwnerBefore,
+        token: String,
+        action: crate::program::ActionReference,
+    },
+    ObserveOwnerAction {
+        session: String,
+        before: OwnerBefore,
+        token: String,
+        action: crate::program::ActionReference,
     },
     CleanupOwner {
         binding: Binding,
@@ -311,6 +448,8 @@ pub(crate) enum Request {
     },
     QueryInvocation {
         binding: Binding,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<Target>,
     },
     ReleaseLease {
         session: String,
@@ -322,6 +461,7 @@ impl Request {
         match &mut value {
             Self::ApplySettings { binding: b, .. }
             | Self::ApplyOwner { binding: b, .. }
+            | Self::ApplyOwnerAction { binding: b, .. }
             | Self::CleanupOwner { binding: b, .. }
             | Self::ApplyActivation { binding: b, .. }
             | Self::ApplyIngress { binding: b, .. }
@@ -335,6 +475,12 @@ impl Request {
         struct Owner<'a> {
             before: &'a OwnerBefore,
             token: &'a str,
+        }
+        #[derive(Serialize)]
+        struct Action<'a> {
+            before: &'a OwnerBefore,
+            token: &'a str,
+            action: &'a crate::program::ActionReference,
         }
         #[derive(Serialize)]
         struct Cleanup<'a> {
@@ -351,6 +497,22 @@ impl Request {
             Self::ApplySettings { recipe, .. } => crate::codec::encode(recipe, false)?,
             Self::ApplyOwner { before, token, .. } => {
                 crate::codec::encode(&Owner { before, token }, false)?
+            }
+            Self::ApplyOwnerAction {
+                binding,
+                before,
+                token,
+                action,
+            } => {
+                action.validate(binding)?;
+                crate::codec::encode(
+                    &Action {
+                        before,
+                        token,
+                        action,
+                    },
+                    false,
+                )?
             }
             Self::CleanupOwner { before, token, .. } => crate::codec::encode(
                 &Cleanup {
@@ -432,9 +594,25 @@ impl Reply {
                     && self.yards.windows(2).all(|pair| pair[0] < pair[1])
                     && self.yards.iter().all(|yard| record::safe_name(yard)),
             ),
+            Request::CaptureOwnerObservation { .. } => {
+                require(
+                    self.installed_chunk.is_none()
+                        && self.terminal.is_none()
+                        && self.targets.is_empty(),
+                )?;
+                let owner = self.owner.as_ref().ok_or(Error::Invalid)?;
+                owner.validate()?;
+                require(owner.prepared_recipe.is_empty())
+            }
             Request::ObserveOwner { .. } => require(
                 self.installed_chunk.is_none()
                     && matches!(self.actual.as_str(), "expected" | "in-progress" | "desired"),
+            ),
+            Request::ObserveOwnerAction { .. } => require(
+                self.installed_chunk.is_none()
+                    && self.targets.is_empty()
+                    && self.terminal.is_none()
+                    && self.actual == "desired",
             ),
             Request::ObserveLegacyCheckpoint { .. } => {
                 require(self.installed_chunk.is_none() && record::fingerprint(&self.actual))
@@ -477,6 +655,26 @@ impl Reply {
                         && c.total == *total
                         && c.content.is_empty()
                         && c.complete == (offset.checked_add(size) == Some(*total)),
+                )
+            }
+            Request::BindSealedInstalledRecipe {
+                recipe_hash,
+                total,
+                target,
+                ..
+            } => {
+                let c = self.installed_chunk.as_ref().ok_or(Error::Invalid)?;
+                require(
+                    *total > 0
+                        && *total <= 96 << 20
+                        && target
+                            .as_ref()
+                            .is_none_or(|t| t.prepared_recipe == *recipe_hash)
+                        && c.recipe_hash == *recipe_hash
+                        && c.offset == 0
+                        && c.total == *total
+                        && c.content.is_empty()
+                        && c.complete,
                 )
             }
             _ => require(self.installed_chunk.is_none()),
@@ -694,6 +892,171 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine};
     #[test]
+    fn command_override_wire_preserves_absence_and_empty_and_rejects_malformed() {
+        for (raw, present, bytes) in [
+            (
+                r#"{"name":"SSH_PORT","present":false,"value":null}"#,
+                false,
+                None,
+            ),
+            (
+                r#"{"name":"ENVIRONMENT_PROFILES","present":true,"value":""}"#,
+                true,
+                Some(Vec::new()),
+            ),
+            (
+                r#"{"name":"SSH_PORT","present":true,"value":"MjI0MQ=="}"#,
+                true,
+                Some(b"2241".to_vec()),
+            ),
+        ] {
+            let value: CommandOverride = serde_json::from_str(raw).unwrap();
+            assert_eq!(value.present, present);
+            assert_eq!(value.value, bytes);
+            let round: CommandOverride =
+                serde_json::from_slice(&serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(round.value, value.value);
+        }
+        for raw in [
+            r#"{"name":"SSH_PORT","present":true,"value":"%%%"}"#,
+            r#"{"name":"SSH_PORT","present":true,"value":[50]}"#,
+            r#"{"name":"SSH_PORT","present":false,"value":null,"unknown":1}"#,
+        ] {
+            assert!(serde_json::from_str::<CommandOverride>(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn materialized_integration_partial_observation_keeps_original_authority() {
+        let original: Target = serde_json::from_value(serde_json::json!({
+            "owner":"materialized-config", "class":"materialized-integrations", "yard":"yard",
+            "scope":"scope", "reportedActual":"", "reportedDesired":"", "before":"", "scopeState":"", "stage":"",
+            "project":"project", "instance":"instance", "instanceUuid":"original-instance",
+            "state":"stale", "actual":"a".repeat(64), "desired":"b".repeat(64), "source":"c".repeat(64),
+            "preparedRecipe":"d".repeat(64), "afterOwner":format!("v1:materialized-integrations:{}","e".repeat(64))
+        })).unwrap();
+        let before = crate::codec::encode(&original, false).unwrap();
+        let mut current = original.clone();
+        current.state = "current".into();
+        current.actual = "f".repeat(64);
+        current.reported_actual = "1".repeat(64);
+        assert!(current.materialized_after_owner_observation(&original));
+        assert!(!current.materialized_after_owner()); // Query recovery remains files-only.
+        for field in [
+            "owner",
+            "class",
+            "source",
+            "desired",
+            "before",
+            "scope",
+            "scopeState",
+            "stage",
+            "preparedRecipe",
+            "afterOwner",
+            "instanceUuid",
+            "project",
+            "instance",
+            "yard",
+            "reportedDesired",
+        ] {
+            let mut value = serde_json::to_value(&current).unwrap();
+            value[field] = "foreign".into();
+            assert!(
+                !serde_json::from_value::<Target>(value)
+                    .unwrap()
+                    .materialized_after_owner_observation(&original),
+                "{field}"
+            );
+        }
+        current.state = "deferred".into();
+        assert!(!current.materialized_after_owner_observation(&original));
+        assert_eq!(before, crate::codec::encode(&original, false).unwrap());
+    }
+
+    #[test]
+    fn original_integration_progress_and_new_order_keep_persisted_targets() {
+        let original: Target = serde_json::from_value(serde_json::json!({
+            "owner":"materialized-config", "class":"materialized-integrations", "yard":"yard",
+            "scope":"scope", "reportedActual":"", "reportedDesired":"", "before":"before", "scopeState":"", "stage":"",
+            "project":"project", "instance":"instance", "instanceUuid":"original-instance",
+            "state":"stale", "actual":"a".repeat(64), "desired":"b".repeat(64), "source":"c".repeat(64),
+            "preparedRecipe":"d".repeat(64)
+        })).unwrap();
+        let mut progressed = original.clone();
+        progressed.actual = "e".repeat(64);
+        progressed.reported_actual = "progress".into();
+        progressed.before = "fresh-before".into();
+        progressed.prepared_recipe = "f".repeat(64);
+        assert!(progressed.original_integration_observation(&original));
+        assert!(!progressed.materialized_current());
+        for field in [
+            "owner",
+            "class",
+            "source",
+            "desired",
+            "scope",
+            "scopeState",
+            "stage",
+            "afterOwner",
+            "instanceUuid",
+            "project",
+            "instance",
+            "yard",
+            "reportedDesired",
+        ] {
+            let mut foreign = serde_json::to_value(&progressed).unwrap();
+            foreign[field] = "foreign".into();
+            assert!(
+                !serde_json::from_value::<Target>(foreign)
+                    .unwrap()
+                    .original_integration_observation(&original),
+                "{field}"
+            );
+        }
+        let mut files = original.clone();
+        files.class = "materialized-files".into();
+        let persisted = vec![original.clone(), files];
+        let bytes = crate::codec::encode(&persisted, false).unwrap();
+        let binding = crate::bundle::binding(&[], &persisted).unwrap();
+        let mut fresh = persisted.clone();
+        fresh.sort_by(Target::materialized_order);
+        assert_eq!(fresh[0].class, "materialized-files");
+        assert_eq!(persisted[0].class, "materialized-integrations");
+        assert_eq!(binding, crate::bundle::binding(&[], &persisted).unwrap());
+        assert_ne!(binding, crate::bundle::binding(&[], &fresh).unwrap());
+        assert_eq!(bytes, crate::codec::encode(&persisted, false).unwrap());
+        assert!(progressed.original_integration_observation(&persisted[0]));
+    }
+
+    #[test]
+    fn capture_owner_complete_reference_is_only_readonly_request_input() {
+        let original = CompleteSourceReference {
+            transaction: "original-source".into(),
+            journal_digest: "a".repeat(64),
+            metadata_binding: "b".repeat(64),
+        };
+        let request = Request::CaptureOwner {
+            session: "c".repeat(64),
+            complete_source: Some(original.clone()),
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire["completeSource"],
+            serde_json::to_value(&original).unwrap()
+        );
+        assert!(wire.get("complete_source").is_none());
+        let omitted = serde_json::to_value(Request::CaptureOwner {
+            session: "c".repeat(64),
+            complete_source: None,
+        })
+        .unwrap();
+        assert!(omitted.get("completeSource").is_none());
+        let mut expanded = serde_json::to_value(original).unwrap();
+        expanded["authority"] = true.into();
+        assert!(serde_json::from_value::<CompleteSourceReference>(expanded).is_err());
+    }
+
+    #[test]
     fn owner_result_projection_only_resolves_the_original_absent_uuid() {
         let original = Target {
             prepared_recipe: "a".repeat(64),
@@ -739,6 +1102,20 @@ mod tests {
             ..Default::default()
         };
         reply.protocol(&bind(Some(original.clone()))).unwrap();
+        let sealed = Request::BindSealedInstalledRecipe {
+            session: "a".repeat(64),
+            recipe_hash: original.prepared_recipe.clone(),
+            total: 1,
+            target: Some(original.clone()),
+        };
+        reply.protocol(&sealed).unwrap();
+        let foreign = Request::BindSealedInstalledRecipe {
+            session: "a".repeat(64),
+            recipe_hash: "f".repeat(64),
+            total: 1,
+            target: Some(original.clone()),
+        };
+        assert!(reply.protocol(&foreign).is_err());
         let mut nonfinal = bind(Some(original.clone()));
         if let Request::BindInstalledRecipe { total, .. } = &mut nonfinal {
             *total = 2;
@@ -806,6 +1183,31 @@ mod tests {
             assert!(original.resolved(std::slice::from_ref(&resolved)).is_err());
         }
     }
+    #[test]
+    fn owner_observation_cannot_return_preparation_authority() {
+        let request = Request::CaptureOwnerObservation {
+            session: "a".repeat(64),
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["op"], "capture-owner-observation");
+        assert_eq!(wire.as_object().unwrap().len(), 2);
+        let mut reply = Reply {
+            owner: Some(OwnerBefore {
+                state: "absent".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        reply.protocol(&request).unwrap();
+        reply.owner.as_mut().unwrap().prepared_recipe = "b".repeat(64);
+        assert!(reply.protocol(&request).is_err());
+        reply.owner.as_mut().unwrap().prepared_recipe.clear();
+        reply.owner.as_mut().unwrap().state = "unknown".into();
+        assert!(reply.protocol(&request).is_err());
+        reply.owner = None;
+        assert!(reply.protocol(&request).is_err());
+    }
+
     #[test]
     fn owner_progress_is_a_closed_success_projection() {
         let request = Request::ObserveOwner {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
@@ -25,7 +27,42 @@ import (
 
 const releaseTransitionRequestLimit = 1 << 20
 
+// ReadRootlessReleaseCapabilities recognizes only the two fixed declarations
+// queried from a sealed engine without repository or configuration context.
+// Every other bounded payload is replayed unchanged to the operational parser.
+func ReadRootlessReleaseCapabilities(input io.Reader, output io.Writer) (io.Reader, bool, error) {
+	selected, err := releaseruntime.CompiledRustReleaseOwner()
+	if err != nil || !selected {
+		return input, false, err
+	}
+	payload, err := io.ReadAll(io.LimitReader(input, releaseTransitionRequestLimit+1))
+	if err != nil || len(payload) > releaseTransitionRequestLimit {
+		return nil, false, errors.New("release transition request is invalid")
+	}
+	replay := bytes.NewReader(payload)
+	request, err := releasetransition.ParseRecoveryProcessRequest(payload)
+	if err != nil || (request.Mode != releasetransition.RecoveryProcessCapabilities && request.Mode != releasetransition.RecoveryProcessLifecycleCapabilities) {
+		return replay, false, nil
+	}
+	capabilities := releasetransition.ActivationOnlyRecoveryCapabilities()
+	if request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
+		capabilities = releasetransition.ActivationRecoveryLifecycleCapabilities()
+	}
+	encoded, err := releasetransition.MarshalRecoveryProcessResponse(releasetransition.RecoveryProcessResponse{
+		SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Capabilities: &capabilities,
+	})
+	if err == nil {
+		_, err = fmt.Fprintln(output, string(encoded))
+	}
+	return replay, true, err
+}
+
 func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) int {
+	rustOwner, err := releaseruntime.CompiledRustReleaseOwner()
+	if err != nil {
+		cli.errorf("release transition: %v", err)
+		return 1
+	}
 	if len(arguments) != 0 {
 		cli.errorf("internal: _release-transition accepts a JSON request on stdin")
 		return 2
@@ -40,6 +77,17 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	if err != nil || len(payload) > releaseTransitionRequestLimit || json.Unmarshal(payload, &envelope) != nil {
 		cli.errorf("release transition request is invalid")
 		return 2
+	}
+	if rustOwner {
+		if err := cli.invokeRustReleaseTransitionFacade(ctx, payload, protocolOutput); err != nil {
+			cli.errorf("release transition: %v", err)
+			var input releaseOwnerFacadeInputError
+			if errors.As(err, &input) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	}
 	var request releasetransition.ProcessRequest
 	var recovery *releasetransition.ActivationOnlyRecoveryRequest
@@ -649,6 +697,13 @@ func (cli *CLI) releaseTransitionTestYardOptions(
 		}
 		dataHome = filepath.Join(operatorHome, ".subyard")
 	}
+	sourceRoot := ""
+	if request.SourceIngress != nil {
+		if err := request.SourceIngress.Validate(); err != nil {
+			return testyardmigration.Options{}, err
+		}
+		sourceRoot = request.SourceIngress.SourceRoot
+	}
 	return testyardmigration.Options{
 		Executable:     filepath.Join(cli.options.RepositoryRoot, "bin", "yard-engine"),
 		RepositoryRoot: cli.options.RepositoryRoot,
@@ -656,7 +711,9 @@ func (cli *CLI) releaseTransitionTestYardOptions(
 		ConfigHome:     request.ConfigHome, DataHome: dataHome,
 		Environment: environmentList(environment, nil),
 		Stdout:      cli.options.Stderr, Stderr: cli.options.Stderr,
-		RunYard: cli.runReleaseTransitionYardCommand,
+		RunYard: func(ctx context.Context, yard string, output io.Writer, arguments ...string) error {
+			return cli.runSourceReleaseTransitionYardCommandIO(ctx, sourceRoot, yard, output, output, arguments...)
+		},
 		EnsureImageProject: func(ctx context.Context, yard string, shared bool) error {
 			return cli.ensureReleaseTransitionImageProject(ctx, request.ConfigHome, yard, shared)
 		},
@@ -799,19 +856,17 @@ func (cli *CLI) releaseTransitionPrivilegeAuthorization(ctx context.Context) err
 func inspectPowerActivationApplicability(
 	environment map[string]string,
 ) (activationApplicability, error) {
-	paths := []struct {
-		setting  string
-		fallback string
-	}{
-		{"SUBYARD_POWER_RECONCILER_PATH", "/usr/local/libexec/subyard/yard-boot-reconcile"},
-		{"SUBYARD_POWER_UNIT_PATH", "/etc/systemd/system/subyard-power-reconcile.service"},
+	powerUnit := environment["SUBYARD_POWER_UNIT_PATH"]
+	if powerUnit == "" {
+		powerUnit = "/etc/systemd/system/subyard-power-reconcile.service"
 	}
+	reconciler := environment["SUBYARD_POWER_RECONCILER_PATH"]
+	if reconciler == "" {
+		reconciler = "/usr/local/libexec/subyard/yard-boot-reconcile"
+	}
+	paths := []string{reconciler, powerUnit, filepath.Join(filepath.Dir(powerUnit), ownerpublication.HandoffService)}
 	present := false
-	for _, candidate := range paths {
-		path := environment[candidate.setting]
-		if path == "" {
-			path = candidate.fallback
-		}
+	for _, path := range paths {
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue

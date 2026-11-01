@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
@@ -66,9 +67,12 @@ type IntegrationPlan struct {
 	// Attribution only; the existing aggregate source binding remains the guard.
 	packageSources map[string]string
 	instance       ports.InstanceInfo
-	instanceScope  string
-	fingerprints   []string
-	profileRoutes  []integrationProfileRoute
+	// Ephemeral approval comparison only; instance and serialized recipes retain
+	// the raw physical observation while sibling projections compose here.
+	comparisonInstance *ports.InstanceInfo
+	instanceScope      string
+	fingerprints       []string
+	profileRoutes      []integrationProfileRoute
 }
 
 type integrationProfileRoute struct {
@@ -96,12 +100,14 @@ type integrationArtifact struct {
 	Mode         int    `json:"mode,omitempty"`
 }
 type integrationObservation struct {
-	Fingerprint string                `json:"fingerprint"`
-	Changed     bool                  `json:"changed"`
-	Retired     []integrationArtifact `json:"retired"`
-	Adopted     []integrationArtifact `json:"adopted"`
-	Initial     bool                  `json:"initial"`
-	Facts       []integrationFact     `json:"facts"`
+	Fingerprint string                          `json:"fingerprint"`
+	Changed     bool                            `json:"changed"`
+	Retired     []integrationArtifact           `json:"retired"`
+	Adopted     []integrationArtifact           `json:"adopted"`
+	Initial     bool                            `json:"initial"`
+	Facts       []integrationFact               `json:"facts"`
+	Inventory   *afterOwnerIntegrationInventory `json:"after_owner,omitempty"`
+	States      []afterOwnerConfigState         `json:"states,omitempty"`
 }
 
 // IntegrationScope binds the selected artifact destinations and desired
@@ -306,7 +312,7 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 	return entries, nil
 }
 
-func (runtime Runtime) integrationInventory(ctx context.Context, mode string, entries []integrationArtifact, expected string) (integrationObservation, error) {
+func (runtime Runtime) integrationInventory(ctx context.Context, mode string, entries []integrationArtifact, expected string, commitStates ...map[string]afterOwnerConfigFilePhysical) (integrationObservation, error) {
 	home := "/home/" + runtime.devUser()
 	uid := runtime.Yard.DevUID
 	if uid <= 0 {
@@ -340,7 +346,19 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			}
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": !runtime.legacyPreviewInstructions})
+	request := map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": !runtime.legacyPreviewInstructions}
+	if runtime.afterOwnerIntegrations != nil {
+		if runtime.afterOwnerIntegrations.Inventory == nil {
+			return integrationObservation{}, domain.ErrPlanStale
+		}
+		request["after_owner"] = runtime.afterOwnerIntegrations.Inventory
+	} else if runtime.afterOwnerIntegrationSource {
+		request["after_owner"] = map[string]bool{"capture": true}
+	}
+	if len(commitStates) != 0 {
+		request["commit_states"] = commitStates[0]
+	}
+	payload, _ := json.Marshal(request)
 	program := strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", "/var/lib/subyard/integrations")
 	program = strings.ReplaceAll(program, "@STATE_UID@", "0")
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", program, mode}, Stdin: payload})
@@ -759,6 +777,9 @@ func (runtime Runtime) ProjectIntegrationPlanAfterProfileActivation(ctx context.
 		return fresh, nil
 	}
 	instance := fresh.instance
+	if fresh.comparisonInstance != nil {
+		instance = *fresh.comparisonInstance
+	}
 	instance.Config, instance.LocalConfig = maps.Clone(instance.Config), maps.Clone(instance.LocalConfig)
 	instance.Devices, instance.LocalDevices = maps.Clone(instance.Devices), maps.Clone(instance.LocalDevices)
 	for _, route := range approved.profileRoutes {
@@ -794,6 +815,67 @@ func (runtime Runtime) ProjectIntegrationPlanAfterProfileActivation(ctx context.
 			}
 		}
 	}
+	fresh.comparisonInstance = &instance
+	fresh.Scope = integrationInstanceScope(fresh.instanceScope, instance)
+	parts := slices.Clone(fresh.fingerprints)
+	if len(parts) == 0 {
+		return fresh, domain.ErrPlanStale
+	}
+	parts[0] = fresh.Scope
+	fresh.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
+	return fresh, nil
+}
+
+// ProjectIntegrationPlanAfterCoreRuntime compares only the endpoint publication
+// against its original core capsule and desired identity. The caller retains
+// that capsule's authenticated target, including its source and instance UUID.
+func (runtime Runtime) ProjectIntegrationPlanAfterCoreRuntime(ctx context.Context, core *PreparedInstalledRuntime, desired string, approved, fresh IntegrationPlan) (IntegrationPlan, error) {
+	key := previewroute.EndpointKey
+	if fresh.instance.Config[key] == approved.instance.Config[key] && fresh.instance.LocalConfig[key] == approved.instance.LocalConfig[key] {
+		return fresh, nil
+	}
+	if core == nil || core.owner != "core-guest-runtime" || desired == "" {
+		return fresh, domain.ErrPlanStale
+	}
+	retained, err := runtime.BindInstalledRuntimeContext(ctx, core.Recipe())
+	if err != nil {
+		return fresh, err
+	}
+	defer retained.Close()
+	if retained.Binding() != core.Binding() {
+		return fresh, domain.ErrPlanStale
+	}
+	if err := runtime.validateInstalledRecipe(retained); err != nil {
+		return fresh, err
+	}
+	execution, err := runtime.preparedSourceExecution(ports.WithoutNativeOperationObserver(ctx), retained)
+	if err != nil {
+		return fresh, err
+	}
+	endpoint, err := execution.previewEndpointHash(ctx)
+	if err != nil || endpoint == "" || fresh.instance.Config[key] != endpoint || fresh.instance.LocalConfig[key] != endpoint {
+		return fresh, domain.ErrPlanStale
+	}
+	witness, err := execution.ObserveInstalledRuntime(ctx, "core-guest-runtime")
+	if err != nil {
+		return fresh, err
+	}
+	if witness.State != ports.RuntimeStateCurrent || witness.Actual != desired || witness.Desired != desired {
+		return fresh, domain.ErrPlanStale
+	}
+	instance := fresh.instance
+	if fresh.comparisonInstance != nil {
+		instance = *fresh.comparisonInstance
+	}
+	instance.Config, instance.LocalConfig = maps.Clone(instance.Config), maps.Clone(instance.LocalConfig)
+	for _, pair := range [][2]map[string]string{{instance.Config, approved.instance.Config}, {instance.LocalConfig, approved.instance.LocalConfig}} {
+		if value, exists := pair[1][key]; exists {
+			pair[0][key] = value
+		} else {
+			delete(pair[0], key)
+		}
+	}
+	fresh.comparisonInstance = &instance
 	fresh.Scope = integrationInstanceScope(fresh.instanceScope, instance)
 	parts := slices.Clone(fresh.fingerprints)
 	if len(parts) == 0 {
@@ -915,6 +997,18 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 			return err
 		}
 	}
+	if runtime.afterOwnerIntegrations != nil {
+		compared, err = projectAfterOwnerIntegrationInventory(plan, compared, runtime.afterOwnerIntegrations)
+		if err != nil {
+			return err
+		}
+		if prepared == nil || prepared.configs.afterOwnerFiles == nil {
+			return domain.ErrPlanStale
+		}
+		if _, err := runtime.checkAfterOwnerConfigFiles(ctx, prepared.configs); err != nil {
+			return err
+		}
+	}
 	if err := CheckIntegrationPlan(plan, compared); err != nil {
 		return runtime.integrationPlanDiagnostic(err, plan, fresh)
 	}
@@ -960,7 +1054,7 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 		}
 	}
 	expectedInventory := ""
-	if observed.Initial {
+	if observed.Initial || runtime.afterOwnerIntegrations != nil {
 		expectedInventory = observed.Fingerprint
 	}
 	if _, err := runtime.integrationInventory(ctx, "apply", entries, expectedInventory); err != nil {
@@ -1008,7 +1102,33 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 	if err := execution.RunProjectHooks(ctx); err != nil {
 		return err
 	}
-	if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
+	if runtime.afterOwnerIntegrations != nil {
+		if prepared == nil {
+			return domain.ErrPlanStale
+		}
+		rows, err := runtime.observeAfterOwnerConfigFiles(ctx, prepared.configs)
+		if err != nil {
+			return err
+		}
+		desired, err := checkAfterOwnerConfigRows(prepared.configs, rows, runtime.Yard.DevUID)
+		if err != nil {
+			return err
+		}
+		states := map[string]afterOwnerConfigFilePhysical{}
+		for _, row := range rows {
+			if !desired[string(row.Destination)] {
+				return domain.ErrPlanStale
+			}
+			states[string(row.Destination)] = row
+		}
+		observed, err := runtime.integrationInventory(ctx, "observe", entries, "")
+		if err != nil {
+			return err
+		}
+		if _, err := runtime.integrationInventory(ctx, "commit", entries, observed.Fingerprint, states); err != nil {
+			return err
+		}
+	} else if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
 		return err
 	}
 	if prepared != nil && prepared.sources != nil {

@@ -245,3 +245,29 @@ else:m.claim_vector('host-power',resources,fds,expected,'a'*64,'b'*64 if 'fence'
 		t.Fatal("vector refusal partially claimed original primary", err)
 	}
 }
+
+func TestHostPublicationThirdResourceSharesExistingCAS(t *testing.T) {
+	root := testkit.TempDir(t)
+	helper, err := filepath.Abs("../../../scripts/lib/native-install-custody.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("python3", "-B", "-c", `import importlib.util,sys,os,fcntl,json
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('custody',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+root=Path(sys.argv[2]);resources=[root/'engine',root/'service',root/'publication'];fds=[]
+for resource in resources:
+ fd=os.open(resource.parent/('.'+resource.name+'.native-install.lock'),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600);os.fchmod(fd,0o600);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);fds.append(fd)
+expected=json.dumps([{'role':r,'value':'0'} for r in ('engine','service','publication')],separators=(',',':'))
+m.claim_vector('host-power',resources,fds,expected,'a'*64)
+assert all(m.observe(root/('.'+r.name+'.native-custody.json'),'host-power')=='a'*64 for r in resources)
+m.claim(root/'.publication.native-custody.json','host-power',('a'*64,),'b'*64)
+try:m.claim_vector('host-power',resources,fds,expected,'a'*64)
+except ValueError:pass
+else:raise AssertionError('changed publication generation admitted')
+assert m.observe(root/'.engine.native-custody.json','host-power')=='a'*64
+`, helper, root)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatal(err, string(output))
+	}
+}

@@ -3,6 +3,7 @@
 package releaseruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,16 +13,100 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	goRuntime "runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
+
+// The real packaged helper is sealed exactly as a source query seals the
+// active engine. No repository, owner or configuration context is supplied.
+func TestRustOwnerRealPackagedRootlessCapabilities(t *testing.T) {
+	installed := os.Getenv("SUBYARD_RUST_DELIVERY_RUNTIME_ROOT")
+	if installed == "" {
+		t.Skip("opt-in normal packaged Rust-owner engine")
+	}
+	published, err := filepath.EvalSymlinks(filepath.Join(installed, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := New(Config{})
+	defer runtime.Close()
+	verified, err := runtime.verifyPublishedCandidate(context.Background(), publishedCandidate{release: releasetransition.ReleaseID(filepath.Base(published)), root: published}, installed, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verified.Close()
+	if verified.releaseOwner == nil {
+		t.Fatal("experimental runtime has no Rust declaration")
+	}
+	root := testkit.TempDir(t)
+	marker := filepath.Join(root, "protected", "migrations", "current.json")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, marker, []byte("protected rootless capability sentinel\n"), 0o600)
+	before, err := os.Stat(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	working := filepath.Join(root, "empty")
+	if err := os.Mkdir(working, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []releasetransition.RecoveryProcessMode{releasetransition.RecoveryProcessCapabilities, releasetransition.RecoveryProcessLifecycleCapabilities} {
+		payload, err := releasetransition.MarshalRecoveryProcessRequest(releasetransition.RecoveryProcessRequest{SchemaVersion: 2, Mode: kind})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		command := exec.CommandContext(ctx, "/proc/self/fd/3", "_release-transition")
+		command.ExtraFiles = []*os.File{verified.engine}
+		command.Env, command.Dir, command.Stdin = []string{"PATH=/nonexistent"}, working, bytes.NewReader(payload)
+		output, err := command.CombinedOutput()
+		cancel()
+		want := releasetransition.ActivationOnlyRecoveryCapabilities()
+		if kind == releasetransition.RecoveryProcessLifecycleCapabilities {
+			want = releasetransition.ActivationRecoveryLifecycleCapabilities()
+		}
+		encoded, encodeErr := releasetransition.MarshalRecoveryProcessResponse(releasetransition.RecoveryProcessResponse{SchemaVersion: 2, Capabilities: &want})
+		if err != nil || encodeErr != nil || !bytes.Equal(output, append(encoded, '\n')) {
+			t.Fatalf("sealed rootless %s: output=%q err=%v encode=%v", kind, output, err, encodeErr)
+		}
+	}
+	for _, payload := range []string{`{"schemaVersion":2,"mode":"capabilities","extra":true}`, `{"schemaVersion":2,"mode":"runtime-activation-capabilities"}`, `{"schemaVersion":2,"mode":"migration-owner-capabilities"}`} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		command := exec.CommandContext(ctx, "/proc/self/fd/3", "_release-transition")
+		command.ExtraFiles = []*os.File{verified.engine}
+		command.Env, command.Dir, command.Stdin = []string{"PATH=/nonexistent"}, working, strings.NewReader(payload)
+		var output bytes.Buffer
+		command.Stdout = &output
+		err := command.Run()
+		cancel()
+		if err == nil || output.Len() != 0 {
+			t.Fatalf("rootless request incorrectly declared: %s output=%q err=%v", payload, output.String(), err)
+		}
+	}
+	after, err := os.Stat(marker)
+	if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("rootless capability changed protected metadata", err)
+	}
+	payload, err := os.ReadFile(marker)
+	if err != nil || string(payload) != "protected rootless capability sentinel\n" {
+		t.Fatal("protected bytes changed", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(marker), "update.lock")); !os.IsNotExist(err) {
+		t.Fatal("rootless capabilities acquired protected lease", err)
+	}
+}
 
 func TestRustOwnerRealPackagedRetainedSession(t *testing.T) {
 	testRustOwnerRealPackagedSession(t, "")
@@ -255,6 +340,13 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 	if !strings.HasPrefix(tamper, "cleanup-") {
 		testkit.WriteFile(t, filepath.Join(configHome, ".sync/settings/config.env"), []byte("SSH_PORT=2240\n"), 0600)
 	}
+	if tamper == "" {
+		if err := os.MkdirAll(filepath.Join(configHome, "yards/default"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(configHome, "yards/default/config.env"), []byte("DEV_USER='dev'\n"), 0o600)
+	}
+
 	if strings.HasPrefix(tamper, "cleanup-") {
 		// Start from a valid partial settings frontier. Reapplying the historical
 		// template conversion deliberately removes NESTED_E2E_VMS=0 and requires
@@ -287,6 +379,70 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 		t.Fatal(err)
 	}
 	defer verified.Close()
+	if tamper == "" || tamper == "source" || tamper == "target" {
+		// Form a real completed source using the packaged owner before testing a
+		// distinct target. Cold bootstrap is valid only for the active image itself.
+		source, err := runtime.verifyPublishedCandidate(context.Background(), publishedCandidate{release: releasetransition.ReleaseID(sourceID), root: filepath.Join(runtimeRoot, "releases", sourceID)}, runtimeRoot, nil)
+		if err != nil {
+			t.Fatal("verify bootstrap source:", err)
+		}
+		defer source.Close()
+		bootstrap := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: releasetransition.ReleaseID(sourceID), Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: source.manifestDigest, RegistryDigest: source.registryDigest}
+		initial, err := runtime.startRustOwner(context.Background(), source, source, source, bootstrap, "")
+		if err != nil {
+			t.Fatal("bootstrap Open:", err)
+		}
+		initialInspection, err := initial.Inspect(context.Background(), nil)
+		if err != nil || len(initialInspection.Blockers) != 0 {
+			t.Fatalf("bootstrap Inspect: %+v err=%v", initialInspection, err)
+		}
+		_, unlock, err := uninstall.OwnerLock(context.Background(), dataHome, nil)
+		if err != nil {
+			t.Fatal("bootstrap owner lock:", err)
+		}
+		initialOutcome, err := initial.Execute(context.Background(), initialInspection.Plan, "")
+		unlock()
+		if err != nil || !initialOutcome.ReachedGoal {
+			t.Fatalf("bootstrap Execute: %+v err=%v", initialOutcome, err)
+		}
+		if err := initial.Close(); err != nil {
+			t.Fatal("bootstrap Close:", err)
+		}
+		ready, err := runtime.InspectCurrentReadiness(context.Background(), configHome)
+		if err != nil || ready.Status != releasetransition.StatusReady || !ready.ReachedGoal {
+			t.Fatalf("bootstrap readiness: %+v err=%v", ready, err)
+		}
+	}
+	lockPath := filepath.Join(configHome, "migrations/update.lock")
+	lockBefore, lockErr := os.Stat(lockPath)
+	if lockErr != nil && !errors.Is(lockErr, os.ErrNotExist) {
+		t.Fatal(lockErr)
+	}
+	releaseReadOnlyLock := func() {}
+	if lockBefore != nil {
+		lock, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Close()
+		if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			t.Fatal("hold update lease during read-only preparation:", err)
+		}
+		// Released after inspection below; execution must acquire the real lease.
+		defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
+		releaseReadOnlyLock = func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }
+	}
+	checkReadOnlyLock := func() {
+		t.Helper()
+		after, err := os.Stat(lockPath)
+		if lockBefore == nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("read-only operation created update lease", err)
+			}
+		} else if err != nil || !os.SameFile(lockBefore, after) || lockBefore.Mode() != after.Mode() || lockBefore.Size() != after.Size() || !lockBefore.ModTime().Equal(after.ModTime()) {
+			t.Fatal("read-only operation changed update lease", err)
+		}
+	}
 	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: releasetransition.ReleaseID(targetID), Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: verified.manifestDigest, RegistryDigest: verified.registryDigest}
 	owner := verified
 	if rollbackRoot != "" {
@@ -311,6 +467,115 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 		}
 		testkit.WriteFile(t, path, append(body, '\n'), 0o644)
 	}
+	if tamper == "" {
+		// Exercise the compiled normal engine ingress, not a synthetic TestMain
+		// or a direct adapter call. materialized-config distinguishes Rust's
+		// inventory from the ordinary Go capability response.
+		definitions, err := profile.Load(owner.candidate.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantOwners := []string{"materialized-config", "core-guest-runtime", "key-tools-runtime", "test-vm-broker", "test-yard-route-consumers", "host-power"}
+		for _, definition := range definitions {
+			if definition.Runtime != nil {
+				wantOwners = append(wantOwners, definition.Runtime.ActivationID)
+			}
+		}
+		slices.Sort(wantOwners)
+		settingsPath := filepath.Join(configHome, ".sync/settings/config.env")
+		settingsBefore, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settingsInfo, err := os.Stat(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		invoke := func(kind releasetransition.RecoveryProcessMode) (releasetransition.RecoveryProcessResponse, []byte, error) {
+			t.Helper()
+			payload, err := releasetransition.MarshalRecoveryProcessRequest(releasetransition.RecoveryProcessRequest{SchemaVersion: 2, Mode: kind})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, filepath.Join(owner.candidate.root, "bin/yard-engine"), "_release-transition")
+			command.Env = []string{"HOME=" + filepath.Join(root, "home"), "PATH=" + tools,
+				"SUBYARD_REPOSITORY_ROOT=" + owner.candidate.root, "SUBYARD_HOME=" + dataHome, "SUBYARD_CONFIG_HOME=" + configHome,
+				"SUBYARD_NO_AUDIT=1", "SUBYARD_INCUS_SOCKET=" + server.SocketPath,
+				"SUBYARD_POWER_RECONCILER_PATH=" + filepath.Join(root, "absent-power"), "SUBYARD_POWER_UNIT_PATH=" + filepath.Join(root, "absent-unit")}
+			var stdout, stderr bytes.Buffer
+			command.Stdin, command.Stdout, command.Stderr = bytes.NewReader(payload), &stdout, &stderr
+			if err := command.Run(); err != nil {
+				return releasetransition.RecoveryProcessResponse{}, stdout.Bytes(), fmt.Errorf("%w: %s", err, stderr.String())
+			}
+			response, err := releasetransition.ParseRecoveryProcessResponse(stdout.Bytes())
+			return response, stdout.Bytes(), err
+		}
+		response, _, err := invoke(releasetransition.RecoveryProcessRuntimeCapabilities)
+		if err != nil || !slices.Equal(response.ActivationOwners, wantOwners) {
+			t.Fatalf("compiled Rust inventory ingress: %+v err=%v want=%v", response, err, wantOwners)
+		}
+		if goRuntime.GOARCH == "amd64" {
+			response, _, err := invoke(releasetransition.RecoveryProcessMigrationOwnerCapabilities)
+			want := releasetransition.MigrationOwnerReplacementCapabilities()
+			if err != nil || response.Capabilities == nil || *response.Capabilities != want {
+				t.Fatalf("compiled Rust migration capability ingress: %+v err=%v", response, err)
+			}
+		} else {
+			before := rustCleanupQueryState(t, configHome, dataHome)
+			_, output, err := invoke(releasetransition.RecoveryProcessMigrationOwnerCapabilities)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 || len(output) != 0 {
+				t.Fatalf("unsupported compiled migration capability exit: output=%q err=%v", output, err)
+			}
+			if !reflect.DeepEqual(before, rustCleanupQueryState(t, configHome, dataHome)) {
+				t.Fatal("unsupported compiled migration capability changed protected state")
+			}
+		}
+		asset := filepath.Join(owner.candidate.root, releaseOwnerImagePath)
+		original, err := os.ReadFile(asset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(asset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(asset, asset+".retained"); err != nil {
+			t.Fatal(err)
+		}
+		for _, negative := range []string{"missing", "tampered"} {
+			if negative == "tampered" {
+				testkit.WriteFile(t, asset, []byte("tampered owner image\n"), info.Mode().Perm())
+			}
+			_, output, refused := invoke(releasetransition.RecoveryProcessRuntimeCapabilities)
+			if negative == "tampered" {
+				if err := os.Remove(asset); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if refused == nil || len(output) != 0 {
+				t.Fatalf("compiled Rust %s owner fell back: output=%q err=%v", negative, output, refused)
+			}
+		}
+		if err := os.Rename(asset+".retained", asset); err != nil {
+			t.Fatal(err)
+		}
+		restored, err := os.ReadFile(asset)
+		if err != nil || !bytes.Equal(restored, original) {
+			t.Fatal("owner fixture restoration failed", err)
+		}
+		settingsAfter, err := os.ReadFile(settingsPath)
+		if err != nil || !bytes.Equal(settingsBefore, settingsAfter) {
+			t.Fatal("capability ingress changed protected settings", err)
+		}
+		after, err := os.Stat(settingsPath)
+		if err != nil || !os.SameFile(settingsInfo, after) || !settingsInfo.ModTime().Equal(after.ModTime()) {
+			t.Fatal("capability ingress replaced protected settings", err)
+		}
+		checkReadOnlyLock()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	session, err := runtime.startRustOwner(ctx, owner, engine, verified, request, "")
 	if strings.HasPrefix(tamper, "legacy-") && tamper != "legacy-rollback" {
@@ -329,7 +594,38 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 	}
 	defer session.Close()
 	cancel()
-	for _, kind := range []releasetransition.RecoveryProcessMode{releasetransition.RecoveryProcessCapabilities, releasetransition.RecoveryProcessLifecycleCapabilities, releasetransition.RecoveryProcessRuntimeCapabilities} {
+	kinds := []releasetransition.RecoveryProcessMode{releasetransition.RecoveryProcessCapabilities, releasetransition.RecoveryProcessLifecycleCapabilities, releasetransition.RecoveryProcessRuntimeCapabilities}
+	if goRuntime.GOARCH == "amd64" {
+		kinds = append(kinds, releasetransition.RecoveryProcessMigrationOwnerCapabilities)
+	} else {
+		refusalContext, cancelRefusal := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelRefusal()
+		rejected, err := runtime.startRustOwner(refusalContext, owner, engine, verified, request, "")
+		if err != nil {
+			t.Fatal("unsupported capability control Open", err)
+		}
+		defer rejected.Close()
+		before := rustCleanupQueryState(t, configHome, dataHome)
+		if _, err := rejected.Capabilities(refusalContext, releasetransition.RecoveryProcessMigrationOwnerCapabilities); err == nil {
+			t.Fatal("unsupported migration capability admitted through Go SDK")
+		}
+		select {
+		case <-rejected.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("unsupported migration capability coordinator did not exit")
+		}
+		var exit *exec.ExitError
+		if !errors.As(rejected.exitErr, &exit) || exit.ExitCode() != 1 {
+			t.Fatal("unsupported migration capability coordinator exit", rejected.exitErr)
+		}
+		if err := rejected.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, rustCleanupQueryState(t, configHome, dataHome)) {
+			t.Fatal("unsupported migration capability through Go SDK changed protected state")
+		}
+	}
+	for _, kind := range kinds {
 		response, err := session.Capabilities(context.Background(), kind)
 		if err != nil {
 			t.Fatalf("normal packaged %s: %v", kind, err)
@@ -339,10 +635,27 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 			if err != nil {
 				t.Fatal(err)
 			}
+			want := []string{"materialized-config", "core-guest-runtime", "key-tools-runtime", "test-vm-broker", "test-yard-route-consumers", "host-power"}
 			for _, definition := range definitions {
-				if definition.Runtime != nil && !slices.Contains(response.ActivationOwners, definition.Runtime.ActivationID) {
-					t.Fatal("Rust omitted declared component owner", definition.Runtime.ActivationID)
+				if definition.Runtime != nil {
+					want = append(want, definition.Runtime.ActivationID)
 				}
+			}
+			slices.Sort(want)
+			if !slices.Equal(response.ActivationOwners, want) {
+				t.Fatalf("Rust activation inventory: got %v want %v", response.ActivationOwners, want)
+			}
+		}
+		if kind != releasetransition.RecoveryProcessRuntimeCapabilities {
+			want := releasetransition.ActivationOnlyRecoveryCapabilities()
+			if kind == releasetransition.RecoveryProcessLifecycleCapabilities {
+				want = releasetransition.ActivationRecoveryLifecycleCapabilities()
+			}
+			if kind == releasetransition.RecoveryProcessMigrationOwnerCapabilities {
+				want = releasetransition.MigrationOwnerReplacementCapabilities()
+			}
+			if response.Capabilities == nil || *response.Capabilities != want {
+				t.Fatalf("%s exact capability tuple differs: %+v", kind, response)
 			}
 		}
 	}
@@ -351,9 +664,8 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 	if err != nil {
 		t.Fatalf("normal packaged Inspect: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(configHome, "migrations/update.lock")); !os.IsNotExist(err) {
-		t.Fatal("read-only preparation acquired update lease", err)
-	}
+	checkReadOnlyLock()
+	releaseReadOnlyLock()
 
 	t.Logf("normal inspection status=%s changed=%v blockers=%+v", inspection.Outcome.Status, inspection.Assessment.Changed, inspection.Blockers)
 	if rollbackRoot != "" {
@@ -385,6 +697,15 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 		t.Fatal(err)
 	}
 	defer release()
+	var beforeTamper map[string]string
+	var settingsBeforeTamper []byte
+	if tamper == "source" || tamper == "target" {
+		beforeTamper = rustCleanupQueryState(t, configHome, dataHome)
+		settingsBeforeTamper, err = os.ReadFile(filepath.Join(configHome, ".sync/settings/config.env"))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if strings.HasPrefix(tamper, "cleanup-") && tamper != "cleanup-success" {
 		testRustOwnerRealCleanupRetry(t, runtime, owner, verified, request, session, inspection, root, tamper, release)
 		return
@@ -395,12 +716,12 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 		if err == nil && outcome.ReachedGoal {
 			t.Fatal("owner accepted changed", tamper, "artifact")
 		}
-		if _, statErr := os.Stat(filepath.Join(configHome, "release-transition/v2/journal.json")); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatal("artifact refusal published a journal", statErr)
+		if !reflect.DeepEqual(beforeTamper, rustCleanupQueryState(t, configHome, dataHome)) {
+			t.Fatal("artifact refusal changed source history or protected state")
 		}
 		current, linkErr := os.Readlink(filepath.Join(runtimeRoot, "current"))
 		settings, settingsErr := os.ReadFile(filepath.Join(configHome, ".sync/settings/config.env"))
-		if linkErr != nil || current != "releases/"+sourceID || settingsErr != nil || string(settings) != "SSH_PORT=2240\n" {
+		if linkErr != nil || current != "releases/"+sourceID || settingsErr != nil || !bytes.Equal(settings, settingsBeforeTamper) {
 			t.Fatal("artifact refusal changed release links or migration settings")
 		}
 		return
@@ -462,6 +783,32 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 	}
 	if _, err := noop.Execute(context.Background(), settled.Plan, ""); err != nil {
 		t.Fatal("normal no-grant/no-account-barrier no-op", err)
+	}
+	if tamper == "" {
+		content, err := os.ReadFile(filepath.Join(configHome, "yards/default/config.env"))
+		if err != nil || string(content) != "DEV_USER='dev'\nSSH_PORT='2240'\n" {
+			t.Fatal("normal selected-owner settings bytes", err)
+		}
+
+		if err := CheckSourcePolicy(context.Background(), request); err != nil {
+			t.Fatal("normal selected-owner source admission", err)
+		}
+		ready, err := runtime.InspectCurrentReadiness(context.Background(), configHome)
+		if err != nil || ready.Status != releasetransition.StatusReady || !ready.ReachedGoal {
+			t.Fatalf("normal selected-owner current readiness: err=%v status=%s code=%s message=%s", err, ready.Status, ready.Code, ready.Message)
+		}
+		if tooling := os.Getenv("SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT"); tooling != "" {
+			query := NewSourceInspector(tooling, diagnostics)
+			defer query.Close()
+			before := rustCleanupQueryState(t, configHome, dataHome)
+			proof, err := query.InspectSourceAdmission(context.Background(), runtimeRoot, configHome)
+			if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete || !lowerSHA256(proof.Binding) {
+				t.Fatal("later tooling source admission", err)
+			}
+			if !reflect.DeepEqual(before, rustCleanupQueryState(t, configHome, dataHome)) {
+				t.Fatal("later tooling source query changed original history")
+			}
+		}
 	}
 
 }

@@ -285,3 +285,22 @@ func TestRegistryV2ErrorsRemainClassifiableAsInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryHistoryDoesNotGrantExecutableCapability(t *testing.T) {
+	payload := []byte(strings.Replace(validRegistryV2, "settings-fixture-v2-to-v3", "new-rust-settings-kind", 1))
+	registry, digest, err := ParseRegistryHistoryV2(payload)
+	if err != nil || digest != fingerprintPayload(payload) {
+		t.Fatal("valid history unavailable", err)
+	}
+	if err := registry.Validate(registryV2TestCatalog(t)); err == nil {
+		t.Fatal("history parser granted execution capability")
+	}
+	if _, _, err := ParseRegistryV2(payload, registryV2TestCatalog(t)); err == nil {
+		t.Fatal("strict Go policy admitted unknown kind")
+	}
+	for _, malformed := range [][]byte{append(append([]byte{}, payload...), []byte("{}")...), []byte(strings.Replace(string(payload), `"fromEpoch":2,"toEpoch":3`, `"fromEpoch":3,"toEpoch":4`, 1)), []byte("null")} {
+		if _, _, err := ParseRegistryHistoryV2(malformed); err == nil {
+			t.Fatal("invalid history accepted")
+		}
+	}
+}

@@ -14,6 +14,17 @@ type ReconcileStage struct {
 	Label string
 }
 
+// ReconcileStageError preserves the cause while exposing fixed stage metadata
+// to operation boundaries that cannot render arbitrary component diagnostics.
+type ReconcileStageError struct {
+	Stage ports.ReconcileStageID
+	Phase string
+	cause error
+}
+
+func (failure *ReconcileStageError) Error() string { return failure.cause.Error() }
+func (failure *ReconcileStageError) Unwrap() error { return failure.cause }
+
 type ReconcileStep struct {
 	Stage     ReconcileStage
 	Converged bool
@@ -34,7 +45,7 @@ func staleStage(stage ports.ReconcileStageID, observation ports.ReconcileStageOb
 	if domain.SafeName(observation.Owner) && observation.NativeExit > 0 && observation.NativeExit <= 255 {
 		detail = fmt.Sprintf(" (owner=%s native-exit=%d)", observation.Owner, observation.NativeExit)
 	}
-	return fmt.Errorf("%w: init stage %q now requires work%s", domain.ErrPlanStale, stage, detail)
+	return &ReconcileStageError{stage, "drift", fmt.Errorf("%w: init stage %q now requires work%s", domain.ErrPlanStale, stage, detail)}
 }
 
 type ReconcilePlan struct {
@@ -80,7 +91,7 @@ func (reconciler Reconciler) plan(ctx context.Context, observations map[ports.Re
 			var err error
 			observation, err = reconciler.observe(ctx, stage.ID)
 			if err != nil {
-				return ReconcilePlan{}, fmt.Errorf("check init stage %q: %w", stage.ID, err)
+				return ReconcilePlan{}, &ReconcileStageError{stage.ID, "check", fmt.Errorf("check init stage %q: %w", stage.ID, err)}
 			}
 		}
 		plan.Steps = append(plan.Steps, ReconcileStep{Stage: stage, Converged: observation.Converged})
@@ -128,7 +139,7 @@ func (reconciler Reconciler) checkApproved(ctx context.Context, approved Reconci
 		if step.Converged {
 			observation, err := reconciler.observe(ctx, stage.ID)
 			if err != nil {
-				return fmt.Errorf("check init stage %q: %w", stage.ID, err)
+				return &ReconcileStageError{stage.ID, "check", fmt.Errorf("check init stage %q: %w", stage.ID, err)}
 			}
 			if !observation.Converged {
 				return staleStage(stage.ID, observation)
@@ -148,7 +159,7 @@ func (reconciler Reconciler) Apply(ctx context.Context, approved ReconcilePlan) 
 	for index, stage := range reconciler.Stages {
 		observation, err := reconciler.observe(ctx, stage.ID)
 		if err != nil {
-			return fmt.Errorf("check init stage %q: %w", stage.ID, err)
+			return &ReconcileStageError{stage.ID, "check", fmt.Errorf("check init stage %q: %w", stage.ID, err)}
 		}
 		if observation.Converged {
 			if reconciler.Reporter != nil {
@@ -163,7 +174,7 @@ func (reconciler Reconciler) Apply(ctx context.Context, approved ReconcilePlan) 
 			reconciler.Reporter.StageStarted(stage)
 		}
 		if err := reconciler.Runner.ApplyStage(ctx, stage.ID); err != nil {
-			return fmt.Errorf("apply init stage %q: %w", stage.ID, err)
+			return &ReconcileStageError{stage.ID, "apply", fmt.Errorf("apply init stage %q: %w", stage.ID, err)}
 		}
 		var verified bool
 		if verifier, ok := reconciler.Runner.(interface {
@@ -174,10 +185,10 @@ func (reconciler Reconciler) Apply(ctx context.Context, approved ReconcilePlan) 
 			verified, err = reconciler.Runner.VerifyStage(ctx, stage.ID)
 		}
 		if err != nil {
-			return fmt.Errorf("verify init stage %q: %w", stage.ID, err)
+			return &ReconcileStageError{stage.ID, "verify", fmt.Errorf("verify init stage %q: %w", stage.ID, err)}
 		}
 		if !verified {
-			return fmt.Errorf("init stage %q completed but did not converge: %s", stage.ID, stage.Label)
+			return &ReconcileStageError{stage.ID, "nonconverged", fmt.Errorf("init stage %q completed but did not converge: %s", stage.ID, stage.Label)}
 		}
 	}
 	return nil

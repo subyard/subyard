@@ -400,7 +400,7 @@ func (bootstrap *profileBootstrap) apply(ctx context.Context, cli *CLI) error {
 			return err
 		}
 		if bootstrap.init != nil {
-			return bootstrap.init.integrationBaseline.acceptPublishedSource(bootstrap.selectionPath, content)
+			return bootstrap.init.integrationBaseline.acceptPublishedSource(bootstrap.selectionPath, content, cli.options.RepositoryRoot)
 		}
 		return nil
 	}

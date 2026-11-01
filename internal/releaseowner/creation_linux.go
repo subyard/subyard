@@ -4,9 +4,11 @@ package releaseowner
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -87,6 +89,32 @@ func (o *invocationObserver) creationRoot() (Intent, error) {
 		return intent, errors.New("owner create intent unavailable")
 	}
 	return o.restorationIntent(o.ownerToken, intent.Source)
+}
+
+// OwnerCreatedResults exposes only this invocation's recorded outputs. Reads
+// use the same original fact checks as imported causal results.
+func (o *invocationObserver) OwnerCreatedResults() ([]ports.NativeOwnerCreated, error) {
+	o.mu.Lock()
+	refs := make([]ports.NativeOwnerCreateRef, 0, len(o.created))
+	for ref := range o.created {
+		refs = append(refs, ref)
+	}
+	o.mu.Unlock()
+	slices.SortFunc(refs, func(a, b ports.NativeOwnerCreateRef) int {
+		if a.Domain != b.Domain {
+			return strings.Compare(a.Domain, b.Domain)
+		}
+		return cmp.Compare(a.Index, b.Index)
+	})
+	values := make([]ports.NativeOwnerCreated, 0, len(refs))
+	for _, ref := range refs {
+		value, err := o.ReadOwnerCreated(ref)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, nil
 }
 
 func (o *invocationObserver) BeforeOwnerCreate(v ports.NativeOwnerCreateIntent) (ref ports.NativeOwnerCreateRef, err error) {

@@ -5,6 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 const installedRecipeChunkSize = 512 << 10
@@ -55,7 +60,9 @@ func (s *session) installedRecipe(ctx context.Context, r Request) (Reply, error)
 		return Reply{}, errors.New("installed recipe target binding")
 	}
 	payload, err := base64.StdEncoding.Strict().DecodeString(r.Content)
-	if err != nil || len(payload) == 0 || base64.StdEncoding.EncodeToString(payload) != r.Content || len(payload) > installedRecipeChunkSize || r.Offset+uint64(len(payload)) > r.Total {
+	// Strict decoding checks padding bits; reject newlines explicitly because
+	// the standard decoder otherwise ignores them.
+	if err != nil || len(payload) == 0 || strings.ContainsAny(r.Content, "\r\n") || len(payload) > installedRecipeChunkSize || r.Offset+uint64(len(payload)) > r.Total {
 		return Reply{}, errors.New("installed recipe chunk")
 	}
 	if r.Target != nil && r.Offset+uint64(len(payload)) != r.Total {
@@ -78,54 +85,85 @@ func (s *session) installedRecipe(ctx context.Context, r Request) (Reply, error)
 	complete := uint64(len(t.bytes)) == t.total
 	if complete {
 		defer func() { s.installedTransfer = nil }()
-		if digest(t.bytes) != t.hash {
-			return Reply{}, errors.New("installed recipe digest")
-		}
-		if r.Target != nil {
-			binder, ok := s.components.(interface {
-				BindInstalledRuntimeRecipeForTarget(context.Context, string, []byte, Target) error
-			})
-			if !ok {
-				return Reply{}, errors.New("installed target recipe capability")
-			}
-			if r.Target.AfterOwner != "" {
-				_, original, err := ParseAfterOwner(r.Target.AfterOwner)
-				if err != nil {
-					return Reply{}, err
-				}
-				if original != r.RecipeHash {
-					complete, err := s.ownerCompletion()
-					if err != nil {
-						return Reply{Code: "unknown"}, nil
-					}
-					receiver, ok := s.components.(interface {
-						BindAfterOwnerCompletion(AfterOwnerCompletion) error
-					})
-					if !ok {
-						return Reply{}, errors.New("after-owner completion capability")
-					}
-					if err := receiver.BindAfterOwnerCompletion(complete); err != nil {
-						return Reply{}, err
-					}
-				}
-			}
-			if err := binder.BindInstalledRuntimeRecipeForTarget(ctx, t.hash, t.bytes, *r.Target); err != nil {
-				return Reply{}, err
-			}
-		} else if err := components.BindInstalledRuntimeRecipe(ctx, t.hash, t.bytes); err != nil {
-			return Reply{}, err
-		}
-		var header struct {
-			Owner string `json:"owner"`
-		}
-		if json.Unmarshal(t.bytes, &header) == nil && header.Owner == "owner-registration" {
-			s.ownerOrigins = nil
-			s.ownerCompleted = nil
-			s.ownerCompletedTerminal = ""
-			s.ownerResultsPayload = ""
-			s.ownerResultsRecipe = ""
-			s.ownerResultsSource = ""
+		if reply, err := s.bindInstalledBytes(ctx, components, t.hash, t.bytes, r.Target); err != nil || reply.Code != "" {
+			return reply, err
 		}
 	}
 	return Reply{InstalledChunk: &InstalledRecipeChunk{RecipeHash: r.RecipeHash, Offset: r.Offset, Total: r.Total, Complete: complete}}, nil
+}
+
+func (s *session) bindInstalledBytes(ctx context.Context, components installedRecipeComponents, hash string, raw []byte, target *Target) (Reply, error) {
+	if digest(raw) != hash {
+		return Reply{}, errors.New("installed recipe digest")
+	}
+	if target != nil {
+		binder, ok := s.components.(interface {
+			BindInstalledRuntimeRecipeForTarget(context.Context, string, []byte, Target) error
+		})
+		if !ok {
+			return Reply{}, errors.New("installed target recipe capability")
+		}
+		if target.AfterOwner != "" {
+			_, original, err := ParseAfterOwner(target.AfterOwner)
+			if err != nil {
+				return Reply{}, err
+			}
+			if original != hash {
+				complete, err := s.ownerCompletion()
+				if err != nil {
+					return Reply{Code: "unknown"}, nil
+				}
+				receiver, ok := s.components.(interface {
+					BindAfterOwnerCompletion(AfterOwnerCompletion) error
+				})
+				if !ok {
+					return Reply{}, errors.New("after-owner completion capability")
+				}
+				if err := receiver.BindAfterOwnerCompletion(complete); err != nil {
+					return Reply{}, err
+				}
+			}
+		}
+		if err := binder.BindInstalledRuntimeRecipeForTarget(ctx, hash, raw, *target); err != nil {
+			return unavailable(err)
+		}
+	} else if err := components.BindInstalledRuntimeRecipe(ctx, hash, raw); err != nil {
+		return unavailable(err)
+	}
+	var header struct {
+		Owner string `json:"owner"`
+	}
+	if json.Unmarshal(raw, &header) == nil && header.Owner == "owner-registration" {
+		s.ownerOrigins = nil
+		s.ownerCompleted = nil
+		s.ownerCompletedTerminal = ""
+		s.ownerResultsPayload = ""
+		s.ownerResultsRecipe = ""
+		s.ownerResultsSource = ""
+	}
+	return Reply{}, nil
+}
+
+func (s *session) bindSealedInstalledRecipe(ctx context.Context, r Request, file *os.File) (Reply, error) {
+	components, ok := s.components.(installedRecipeComponents)
+	if !ok || !fingerprint(r.RecipeHash) || r.Total == 0 || r.Total > installedRecipeMaximum || s.installedTransfer != nil ||
+		(r.Target != nil && r.Target.PreparedRecipe != r.RecipeHash) {
+		return Reply{}, errors.New("sealed installed recipe binding")
+	}
+	var stat unix.Stat_t
+	seals, err := unix.FcntlInt(file.Fd(), unix.F_GET_SEALS, 0)
+	const required = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
+	if err != nil || seals&required != required || unix.Fstat(int(file.Fd()), &stat) != nil ||
+		stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || stat.Nlink != 0 ||
+		stat.Uid != uint32(os.Getuid()) || stat.Size <= 0 || uint64(stat.Size) != r.Total {
+		return Reply{}, errors.New("sealed installed recipe descriptor")
+	}
+	raw := make([]byte, int(r.Total))
+	if _, err := io.ReadFull(io.NewSectionReader(file, 0, stat.Size), raw); err != nil {
+		return Reply{}, errors.New("sealed installed recipe read")
+	}
+	if reply, err := s.bindInstalledBytes(ctx, components, r.RecipeHash, raw, r.Target); err != nil || reply.Code != "" {
+		return reply, err
+	}
+	return Reply{InstalledChunk: &InstalledRecipeChunk{RecipeHash: r.RecipeHash, Total: r.Total, Complete: true}}, nil
 }

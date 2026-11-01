@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -168,7 +169,7 @@ func TestRustOwnerFrozenFacadeProcess(t *testing.T) {
 	}
 	ownerRoot := filepath.Join(runtimeRoot, "releases", targetID)
 	environment := []string{"HOME=" + filepath.Join(root, "home"), "PATH=" + tools, "SUBYARD_HOME=" + dataHome, "SUBYARD_CONFIG_HOME=" + configHome,
-		"SUBYARD_FACADE_FIXTURE_ROOT=" + ownerRoot, "SUBYARD_NO_AUDIT=1", "SUBYARD_INCUS_SOCKET=" + server.SocketPath,
+		"SUBYARD_NO_AUDIT=1", "SUBYARD_INCUS_SOCKET=" + server.SocketPath,
 		"SUBYARD_POWER_RECONCILER_PATH=" + filepath.Join(root, "absent-power"), "SUBYARD_POWER_UNIT_PATH=" + filepath.Join(root, "absent-unit")}
 	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome,
 		Yard: "default", Target: targetID, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: artifact, RegistryDigest: registry}
@@ -179,7 +180,7 @@ func TestRustOwnerFrozenFacadeProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		command := exec.Command(filepath.Join(ownerRoot, "bin/yard-engine"), "_release-transition")
-		command.Env = append([]string{}, environment...)
+		command.Env = append(append([]string{}, environment...), "SUBYARD_FACADE_FIXTURE_ROOT="+ownerRoot)
 		if barrier != "" {
 			command.Env = append(command.Env, "SUBYARD_OWNER_LOCK_FD="+barrier)
 		}
@@ -208,17 +209,59 @@ func TestRustOwnerFrozenFacadeProcess(t *testing.T) {
 		}
 		return response, nil
 	}
+	// The source owns its cold self-activation through the same sealed facade
+	// and native callback before the distinct target can be inspected.
+	ownerRoot = filepath.Join(runtimeRoot, "releases", sourceID)
+	bootstrap := request
+	bootstrap.Target = sourceID
+	initial, err := invoke(bootstrap, "", "")
+	if err != nil || initial.Inspection == nil || len(initial.Inspection.Blockers) != 0 || !initial.Inspection.Assessment.Changed {
+		t.Fatalf("source bootstrap inspection: %+v err=%v", initial.Inspection, err)
+	}
+	bootstrap.Mode = releasetransition.ProcessConverge
+	bootstrap.Execution = &releasetransition.Execution{Plan: initial.Inspection.Plan, Authorization: "fixture-parent-grant"}
+	created, err := invoke(bootstrap, "fixture-parent-grant", "")
+	if err != nil || created.Outcome == nil || !created.Outcome.ReachedGoal {
+		t.Fatalf("source bootstrap convergence: %+v err=%v", created.Outcome, err)
+	}
+	bootstrap.Mode, bootstrap.Execution = releasetransition.ProcessInspect, nil
+	ready, err := invoke(bootstrap, "", "")
+	if err != nil || ready.Inspection == nil || ready.Inspection.Outcome == nil || ready.Inspection.Outcome.Status != releasetransition.StatusReady || ready.Inspection.Assessment.Changed {
+		t.Fatalf("source bootstrap readiness: %+v err=%v", ready.Inspection, err)
+	}
+	journalPath := filepath.Join(configHome, "release-transition/v2/journal.json")
+	journalBytes, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal("source journal:", err)
+	}
+	journal, err := releasetransition.ParseJournal(journalBytes)
+	if err != nil || journal.Checkpoint != releasetransition.JournalComplete || journal.Goal.Target != sourceID {
+		t.Fatal("source journal is not a genuine completed self-activation", err)
+	}
+	if _, err := os.Stat(filepath.Join(configHome, "release-transition/v2/ledger.json")); err != nil {
+		t.Fatal("source ledger:", err)
+	}
+	before := nativeTreeSnapshot(t, configHome)
+	ownerRoot = filepath.Join(runtimeRoot, "releases", targetID)
+	_, unlock, err := uninstall.OwnerLock(context.Background(), dataHome, nil)
+	if err != nil {
+		t.Fatal("hold owner barrier during read-only inspection:", err)
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	inspected, err := invoke(request, "", "")
 	if err != nil || inspected.Inspection == nil || !inspected.Inspection.Assessment.Changed {
 		t.Fatal("frozen inspection", inspected, err)
-	}
-	if _, err := os.Stat(uninstall.OwnerLockPath(dataHome)); !os.IsNotExist(err) {
-		t.Fatal("read-only frozen inspection acquired account lock", err)
 	}
 	inspectedAgain, err := invoke(request, "", "")
 	if err != nil || inspectedAgain.Inspection == nil || inspectedAgain.Inspection.Plan != inspected.Inspection.Plan {
 		t.Fatal("independent frozen inspection changed its stable plan", inspected.Inspection, inspectedAgain.Inspection, err)
 	}
+	unlock()
+	unlock = nil
 	request.Mode = releasetransition.ProcessConverge
 	request.Execution = &releasetransition.Execution{Plan: inspected.Inspection.Plan, Authorization: "fixture-parent-grant"}
 	if _, err := invoke(request, "", ""); err == nil {
@@ -227,8 +270,8 @@ func TestRustOwnerFrozenFacadeProcess(t *testing.T) {
 	if _, err := invoke(request, "fixture-parent-grant", "44"); err == nil {
 		t.Fatal("frozen convergence replaced invalid supplied barrier")
 	}
-	if _, err := os.Stat(filepath.Join(configHome, "release-transition/v2/journal.json")); !os.IsNotExist(err) {
-		t.Fatal("rejected frozen caller published history", err)
+	if !reflect.DeepEqual(before, nativeTreeSnapshot(t, configHome)) {
+		t.Fatal("rejected frozen caller changed source history")
 	}
 	converged, err := invoke(request, "fixture-parent-grant", "")
 	if err != nil || converged.Outcome == nil || !converged.Outcome.ReachedGoal {

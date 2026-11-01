@@ -19,6 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func shippedPreparedSourcesFixture(t *testing.T) Runtime {
@@ -249,6 +250,24 @@ func TestPreparedHostSourceRealSealedPublicationReader(t *testing.T) {
 }
 
 func TestPreparedHostExecutionUsesApprovedWrapperAndTemplate(t *testing.T) {
+	if os.Getenv("SUBYARD_TEST_APPROVED_HOST_POWER_NS") != "1" {
+		unshare, err := exec.LookPath("unshare")
+		if err != nil {
+			t.Skip("private user namespace unavailable")
+		}
+		if err := exec.Command(unshare, "--user", "--map-root-user", "--mount", "true").Run(); err != nil {
+			t.Skip("private user namespace unavailable")
+		}
+		command := exec.Command(unshare, "--user", "--map-root-user", "--mount", os.Args[0], "-test.v", "-test.run=^TestPreparedHostExecutionUsesApprovedWrapperAndTemplate$", "-test.count=1")
+		command.Env = append(os.Environ(), "SUBYARD_TEST_APPROVED_HOST_POWER_NS=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatal(err, string(output))
+		} else {
+			t.Logf("executed private namespace: %s", output)
+		}
+		return
+	}
+
 	runtime := shippedPreparedSourcesFixture(t)
 	home := runtime.Yard.Paths.DataHome
 	source := filepath.Join(home, "source-engine")
@@ -263,7 +282,17 @@ func TestPreparedHostExecutionUsesApprovedWrapperAndTemplate(t *testing.T) {
 	if err := os.Mkdir(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, filepath.Join(bin, "systemctl"), []byte("#!/bin/sh\ncase \"$1\" in show) printf 'LoadState=loaded\\nNeedDaemonReload=no\\n';; esac\n"), 0755)
+	passive := filepath.Join(filepath.Dir(unit), ownerpublication.HandoffService)
+	manager := filepath.Join(bin, "systemctl")
+	testkit.WriteFile(t, manager, []byte("#!/bin/sh\ncase \"$1\" in show) printf 'LoadState=loaded\\nNeedDaemonReload=no\\n'; if [ \"$2\" = "+ownerpublication.HandoffService+" ]; then printf 'FragmentPath="+passive+"\\nDropInPaths=\\n'; fi;; esac\n"), 0755)
+	if err := unix.Mount(manager, "/usr/bin/systemctl", "", unix.MS_BIND, ""); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := unix.Unmount("/usr/bin/systemctl", 0); err != nil {
+			t.Error(err)
+		}
+	}()
 	contracts, err := ownerpublication.Load(runtime.RepositoryRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -274,18 +303,31 @@ func TestPreparedHostExecutionUsesApprovedWrapperAndTemplate(t *testing.T) {
 	}
 	originalScript := filepath.Join(runtime.RepositoryRoot, "scripts/install-power-reconciler.sh")
 	originalTemplate := filepath.Join(runtime.RepositoryRoot, "config/systemd/subyard-power-reconcile.service.in")
+	originalPassiveTemplate := filepath.Join(runtime.RepositoryRoot, "config/systemd/subyard-publication-reconcile.service.in")
+	approvedPassive := mustReadPreparedTest(t, originalPassiveTemplate)
 	script := `#!/bin/bash
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 printf 'unapproved source changed after guard' >"$ORIGINAL_TEMPLATE"
+printf 'unapproved passive changed after guard' >"$ORIGINAL_PASSIVE_TEMPLATE"
 printf '#!/bin/sh\nexit 91\n' >"$ORIGINAL_SCRIPT"
 cp "$SUBYARD_POWER_ENGINE_SOURCE" "$SUBYARD_POWER_RECONCILER_PATH"
 chmod 0755 "$SUBYARD_POWER_RECONCILER_PATH"
 sed "s|@SUBYARD_POWER_RECONCILER@|$SUBYARD_POWER_RECONCILER_PATH|g" "$SCRIPT_DIR/../config/systemd/subyard-power-reconcile.service.in" >"$SUBYARD_POWER_UNIT_PATH"
 printf '\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=%s\n' "$CONTRACTS" >>"$SUBYARD_POWER_UNIT_PATH"
+passive="$(dirname "$SUBYARD_POWER_UNIT_PATH")/subyard-publication-reconcile.service"
+python3 - "$SCRIPT_DIR/../config/systemd/subyard-publication-reconcile.service.in" "$SUBYARD_POWER_RECONCILER_PATH" "$SUBYARD_POWER_UNIT_PATH" "$CONTRACTS" >"$passive" <<'PY_RENDER'
+import os,sys,base64
+raw=os.fsencode(sys.argv[2]); quoted=':"'
+for c in raw:
+    quoted += chr(c)*2 if c == 37 else '\\'+chr(c) if c in (34,92) else ('\\x%02x'%c) if c<32 or c>=127 else chr(c)
+quoted+='"'
+command=quoted+' _publication-reconcile '+base64.b64encode(raw).decode()+' '+base64.b64encode(os.fsencode(sys.argv[3])).decode()
+sys.stdout.write(open(sys.argv[1]).read().replace('@SUBYARD_PUBLICATION_COMMAND@',command)+'\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS='+sys.argv[4]+'\n')
+PY_RENDER
 `
 	testkit.WriteFile(t, originalScript, []byte(script), 0755)
-	runtime.Environment = append(runtime.Environment, "PATH="+bin+":/usr/bin:/bin", "SUBYARD_USER="+account.Username, "SUBYARD_POWER_ENGINE_SOURCE="+source, "SUBYARD_POWER_RECONCILER_PATH="+installed, "SUBYARD_POWER_UNIT_PATH="+unit, "ORIGINAL_TEMPLATE="+originalTemplate, "ORIGINAL_SCRIPT="+originalScript, "CONTRACTS="+encoded)
+	runtime.Environment = append(runtime.Environment, "PATH="+bin+":/usr/bin:/bin", "SUBYARD_USER="+account.Username, "SUBYARD_POWER_ENGINE_SOURCE="+source, "SUBYARD_POWER_RECONCILER_PATH="+installed, "SUBYARD_POWER_UNIT_PATH="+unit, "ORIGINAL_TEMPLATE="+originalTemplate, "ORIGINAL_PASSIVE_TEMPLATE="+originalPassiveTemplate, "ORIGINAL_SCRIPT="+originalScript, "CONTRACTS="+encoded)
 	prepared, err := runtime.PrepareHostPowerRuntime(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -308,6 +350,10 @@ printf '\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=%s\n' "$CONTRACTS
 	}
 	if bytes.Equal(mustReadPreparedTest(t, unit), mustReadPreparedTest(t, originalTemplate)) {
 		t.Fatal("changed template executed")
+	}
+	expectedPassive := ownerpublication.RenderPublicationUnit(string(approvedPassive), installed, unit, encoded)
+	if string(mustReadPreparedTest(t, passive)) != expectedPassive || bytes.Equal(mustReadPreparedTest(t, passive), mustReadPreparedTest(t, originalPassiveTemplate)) {
+		t.Fatal("passive unit did not use its original approved template")
 	}
 	if _, err := os.Stat(sources.directory); !os.IsNotExist(err) {
 		t.Fatal("drained execution stage retained", err)

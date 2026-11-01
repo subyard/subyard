@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func nativeFactFixture(t *testing.T) (*session, Binding, string) {
@@ -371,5 +373,176 @@ func TestNativeTokenRecoveryRequiresBothOriginalLeasesAndRetainsOuterUnknown(t *
 				t.Fatal("foreign or unproven operation got terminal")
 			}
 		})
+	}
+}
+
+func TestCheckedInvocationBindsCompleteCanonicalIntent(t *testing.T) {
+	for _, field := range []string{"expected", "desired", "source", "recipe"} {
+		t.Run(field, func(t *testing.T) {
+			first, _ := ownerCreateFixture(t)
+			second, _ := ownerCreateFixture(t)
+			before, source, e := first.CheckedInvocation()
+			if e != nil {
+				t.Fatal(e)
+			}
+			intent, e := second.creationRoot()
+			if e != nil {
+				t.Fatal(e)
+			}
+			changed := strings.Repeat("b", 64)
+			switch field {
+			case "expected":
+				intent.Expected = changed
+			case "desired":
+				intent.Desired = changed
+			case "source":
+				intent.Source = changed
+			case "recipe":
+				intent.Recipe = changed
+			}
+			// A second admitted intent can share Binding; its complete digest must differ.
+			directory, e := second.session.factsDirectory(second.binding)
+			if e != nil {
+				t.Fatal(e)
+			}
+			path := fmt.Sprintf("/proc/self/fd/%d/%s", directory, factName(second.binding.Ordinal, "intent"))
+			raw, _ := json.Marshal(intent)
+			testkit.WriteFile(t, path, append(raw, '\n'), 0600)
+			unix.Close(directory)
+			after, afterSource, e := second.CheckedInvocation()
+			if e != nil || after == before || afterSource != intent.Recipe || source != first.binding.Artifact {
+				t.Fatal("Binding-only identity reused", e)
+			}
+			second.Uncertain()
+			if _, _, e := second.CheckedInvocation(); e == nil {
+				t.Fatal("unknown invocation granted handoff")
+			}
+		})
+	}
+}
+
+func TestNativeApplyCompletedExecFailureRequiresOriginalClosedCensus(t *testing.T) {
+	for _, mode := range []string{"exact", "wrapped", "unscoped", "generic", "missing-witness", "zero-witness", "changed-id", "wrong-kind", "wrong-status", "joined", "command", "operation", "fault", "missing-whole-ack"} {
+		t.Run(mode, func(t *testing.T) {
+			s, b, _ := nativeFactFixture(t)
+			request := Request{Op: "apply-ingress", Binding: &b, Step: &IngressStep{Kind: "source"}}
+			recipe, err := recipeFingerprint(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.writeFact(b, "intent", Intent{Version: 1, Binding: b, Owner: "source-ingress", Resource: "source", Expected: b.Artifact, Desired: b.Artifact, Source: b.Artifact, Recipe: recipe}); err != nil {
+				t.Fatal(err)
+			}
+			server, err := testkit.NewIncusServer(testkit.TempDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			server.QueueExec(testkit.IncusServerExecStep{ExitCode: 7, Stdout: []byte("drained")})
+			client := incusclient.New(server.SocketPath)
+			calls := 0
+			apply := func() error {
+				calls++
+				ctx := s.effectContext
+				if mode != "unscoped" {
+					ctx = ports.WithNativeSynchronousConfigCAS(ctx)
+				}
+				result, execErr := client.Exec(ctx, "project", "yard", ports.InstanceExecRequest{Command: []string{"fixture"}})
+				var failure *ports.NativeOperationFailure
+				if mode == "unscoped" {
+					if execErr == nil || errors.As(execErr, &failure) || result.ExitCode != 7 || string(result.Stdout) != "drained" {
+						t.Fatal("ordinary bounded Exec acquired failure authority", execErr)
+					}
+					return execErr
+				}
+				if !errors.As(execErr, &failure) || failure.ExecExitCode == nil || *failure.ExecExitCode != 7 || failure.Operation.Status != 200 || string(result.Stdout) != "drained" {
+					t.Fatal("missing SDK completed-exec proof", execErr)
+				}
+				observer := ports.NativeOperationObserverFrom(s.effectContext)
+				switch mode {
+				case "wrapped":
+					return fmt.Errorf("component: %w", execErr)
+				case "generic":
+					return errors.New("instance command exited with status 7")
+				case "missing-witness":
+					failure.ExecExitCode = nil
+				case "zero-witness":
+					zero := 0
+					failure.ExecExitCode = &zero
+				case "changed-id":
+					failure.Operation.ID = "foreign-operation"
+				case "wrong-kind":
+					failure.Operation.Kind = "instance-power"
+				case "wrong-status":
+					failure.Operation.Status = 400
+				case "joined":
+					return errors.Join(execErr, errors.New("opaque sibling"))
+				case "command":
+					if _, err := observer.CommandStarted("shipped-handler", b.Artifact); err != nil {
+						t.Fatal(err)
+					}
+				case "operation":
+					op := ports.NativeOperation{Kind: "instance-power", Server: b.Artifact, Project: "project", Resource: "yard"}
+					if err := observer.Before(op); err != nil {
+						t.Fatal(err)
+					}
+					op.ID = "sibling"
+					if err := observer.Accepted(op); err != nil {
+						t.Fatal(err)
+					}
+				case "fault":
+					observer.Uncertain()
+				case "missing-whole-ack":
+					return errors.New("original result unavailable")
+				}
+				return execErr
+			}
+			reply, err := s.apply(context.Background(), request, "source-ingress", "source", apply)
+			if err != nil {
+				t.Fatal(err)
+			}
+			known := mode == "exact" || mode == "wrapped"
+			if known {
+				if reply.Code != "failed" || reply.Terminal == nil || reply.Terminal.State != "failed" || len(reply.Terminal.Operations) != 1 || reply.Terminal.Operations[0].Status != 200 {
+					t.Fatal("drained command failure lost real status200", reply)
+				}
+			} else if reply.Code != "unknown" || reply.Terminal != nil {
+				t.Fatal("unproved failure became terminal", reply)
+			}
+			if mode == "missing-whole-ack" {
+				queried, err := s.queryInvocation(context.Background(), b)
+				if err != nil || queried.Code != "unknown" || queried.Terminal == nil || queried.Terminal.State != "unknown" {
+					t.Fatal("operation200 invented whole acknowledgment", queried, err)
+				}
+			}
+			if _, err = s.apply(context.Background(), request, "source-ingress", "source", apply); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatal("failed/unknown invocation replayed")
+			}
+		})
+	}
+}
+
+func TestNativeCompletedExecFailureCannotCloseMissingCreateResult(t *testing.T) {
+	observer, _ := ownerCreateFixture(t)
+	ref, err := observer.BeforeOwnerCreate(ownerProjectCreateIntent(observer, "current", "subyard-test-yard"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = observer.CommandTerminal(ref.Index); err != nil {
+		t.Fatal(err)
+	}
+	server, err := testkit.NewIncusServer(testkit.TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	server.QueueExec(testkit.IncusServerExecStep{ExitCode: 7})
+	_, execErr := incusclient.New(server.SocketPath).Exec(ports.WithNativeSynchronousConfigCAS(ports.WithNativeOperationObserver(context.Background(), observer)), "project", "yard", ports.InstanceExecRequest{Command: []string{"fixture"}})
+	var failure *ports.NativeOperationFailure
+	if !errors.As(execErr, &failure) || failure.ExecExitCode == nil || observer.failed(execErr) {
+		t.Fatal("command exit hid missing create result", execErr)
 	}
 }

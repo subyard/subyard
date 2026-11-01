@@ -15,7 +15,7 @@ func RequireReader(root, configHome string) error {
 	if err != nil {
 		return err
 	}
-	registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	registry, digest, err := releasetransition.ParseRegistryHistoryV2(payload)
 	if err != nil {
 		return err
 	}

@@ -71,6 +71,10 @@ func (c *releaseOwnerComponents) DrainOwnerImageSecret(ctx context.Context, oper
 	if !ok {
 		return ports.NativeOperation{}, domain.ErrPlanStale
 	}
+	runtime.LogicalRepositoryRoot = c.context.RepositoryRoot
+	if _, err := restoreOwnerInitRecord(child.Metadata, loaded, runtime); err != nil {
+		return ports.NativeOperation{}, err
+	}
 	environment := append([]string(nil), runtime.Environment...)
 	environment = append(environment, "INCUS_PROJECT="+loaded.Context.IncusProject)
 	incus, _ := c.cli.statusPorts()

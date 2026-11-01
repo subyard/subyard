@@ -4793,10 +4793,10 @@ power_rollback_fixture_contract() {
     . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
-    OLD_VERSION=0.8.0 CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=0.21.0
+    OLD_VERSION=0.11.0 CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=0.22.0
     CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
-    OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
-    COMPATIBLE_RELEASE_TARGET=releases/0.21.0-1fee6251856e
+    OLD_RELEASE_TARGET=releases/0.11.0-bbbbbbbbbbbb
+    COMPATIBLE_RELEASE_TARGET=releases/0.22.0-11e9174b7cac
     V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
     V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
     PROJECT=legacy INSTANCE=yard
@@ -4804,11 +4804,12 @@ power_rollback_fixture_contract() {
     install -d -m 0700 "$STATE_ROOT" "$V2_STATE_ROOT" "${grant%/*}" "$OPERATOR_HOME/.config/subyard/migrations"
     printf 'retained grant\n' > "$grant"
     chmod 0600 "$grant"
+    printf 'grant baseline\n' > "$STATE_ROOT/legacy-continuation.sha256"
     printf 'retained v1\n' > "$OPERATOR_HOME/.config/subyard/migrations/state.json"
     printf 'retained ledger\n' > "$V2_LEDGER"
     printf 'retained checkpoint\n' > "$V2_STATE_ROOT/history-checkpoint.json"
     jq -n '{catalogDigest: ("c" * 64)}' > "$V2_JOURNAL"
-    printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
+    printf '%s\n' "$COMPATIBLE_RELEASE_TARGET" > "$STATE_ROOT/current"
     printf '%s\n' "$OLD_RELEASE_TARGET" > "$STATE_ROOT/previous"
     printf '{"config":{"restricted":"true"}}\n' > "$STATE_ROOT/project"
     printf '{"config":{},"devices":{"root":{"type":"disk","path":"/","pool":"default"}}}\n' > "$STATE_ROOT/profile"
@@ -4840,13 +4841,11 @@ power_rollback_fixture_contract() {
     }
     operator_env() {
       if [ "$1" = env ]; then
-        local source="$2"
-        shift 3
-        case "$*" in
-          'update --version 0.21.0 '*) [ "$source" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] || die 'foreign compatible source' ;;
-          'update --version candidate '*) [ "$source" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] || die 'foreign candidate source' ;;
-          *) die 'unexpected public operation' ;;
-        esac
+        [ "$2" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] || die 'foreign candidate source'
+        shift 2
+      fi
+      if [ "$1" = "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/bin/yard" ]; then
+        shift
         operator_yard "$@"
       else
         "$@"
@@ -4866,7 +4865,7 @@ power_rollback_fixture_contract() {
               journal-change) printf 'foreign\n' > "$V2_JOURNAL" ;;
               checkpoint-change) printf 'foreign\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
               history-change) printf 'foreign\n' > "$OPERATOR_HOME/.config/subyard/migrations/state.json" ;;
-              grant-change) printf 'foreign\n' > "$grant" ;;
+              grant-change|grant-created) printf 'foreign\n' > "$grant" ;;
               mode-change) chmod 0644 "$grant" ;;
               native-change) jq '.config["security.privileged"]="true"' "$STATE_ROOT/instance" > "$STATE_ROOT/instance.next"; mv "$STATE_ROOT/instance.next" "$STATE_ROOT/instance" ;;
             esac
@@ -4876,9 +4875,8 @@ power_rollback_fixture_contract() {
           [ "$previous" = "$COMPATIBLE_RELEASE_TARGET" ] || die 'wrong compatible rollback'
           [ "$scenario" != rollback-fail ] || return 45
           next="$COMPATIBLE_RELEASE_TARGET" ;;
-        'update --version 0.21.0 --check --json'|'update --version candidate --check --json')
+        'update --offline --version candidate --check --json')
           next="$CANDIDATE_RELEASE_TARGET"
-          [ "$3" != 0.21.0 ] || next="$COMPATIBLE_RELEASE_TARGET"
           jq -n --arg target "${next#releases/}" --arg active "${current#releases/}" --arg scenario "$scenario" '
             {plan:"plan-v1-fixture",assessment:{changed:true},blockers:[],outcome:{target:$target,active:$active,status:"migration-required",code:"transition-required",reachedGoal:false}} |
             if $scenario == "blocked-check" then .blockers=[{code:"blocked"}] | .outcome.status="operator-action-required"
@@ -4886,8 +4884,7 @@ power_rollback_fixture_contract() {
             elif $scenario == "noop-check" then .assessment.changed=false | .outcome.status="ready" | .outcome.reachedGoal=true
             else . end'
           return ;;
-        'update --version 0.21.0 --yes') next="$COMPATIBLE_RELEASE_TARGET" ;;
-        'update --version candidate --yes')
+        'update --offline --version candidate --yes')
           [ "$scenario" != rollforward-fail ] || return 45
           next="$CANDIDATE_RELEASE_TARGET" ;;
         'init --yes') assert_candidate_state; return ;;
@@ -4901,12 +4898,34 @@ power_rollback_fixture_contract() {
         mv "$STATE_ROOT/project.next" "$STATE_ROOT/project"
       fi
     }
+    if [ "$scenario" = absent-grant ] || [ "$scenario" = grant-created ]; then
+      find "$grant" "$STATE_ROOT/legacy-continuation.sha256" -delete
+    fi
+    if [ "$scenario" = shared-no-arg ]; then
+      printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
+      verify_legacy_rollback_refusal
+      printf '%s\n' "$COMPATIBLE_RELEASE_TARGET" > "$STATE_ROOT/current"
+    else
+      verify_legacy_rollback_refusal "$COMPATIBLE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+    fi
+    if [ "$scenario" = absent-grant ]; then
+      printf 'retained grant\n' > "$grant"
+      chmod 0600 "$grant"
+      printf 'grant baseline\n' > "$STATE_ROOT/legacy-continuation.sha256"
+    fi
+    check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
+      "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+    operator_env "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/bin/yard" \
+      update --offline --version "$CANDIDATE_VERSION" --yes
+    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+    assert_legacy_native_policy
     finish_candidate_flow
     assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
-    [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] && [ -f "$STATE_ROOT/passed" ] || die 'compatible cycle incomplete'
+    [ "$(cat "$STATE_ROOT/updates")" = $'update --offline --version candidate --yes\nupdate --rollback --yes\nupdate --offline --version candidate --yes' ] \
+      && [ -f "$STATE_ROOT/passed" ] || die 'compatible cycle commands or ordering changed'
   )
 }
-for power_rollback_scenario in success unexpected-accept wrong-reason links-change ledger-change journal-change \
+for power_rollback_scenario in success shared-no-arg absent-grant grant-created unexpected-accept wrong-reason links-change ledger-change journal-change \
   checkpoint-change history-change grant-change mode-change native-change blocked-check wrong-target noop-check \
   compatible-policy-change full-removal-change rollback-fail rollforward-fail; do
   power_rollback_log="$TMP/power-rollback-$power_rollback_scenario.log"
@@ -4914,7 +4933,7 @@ for power_rollback_scenario in success unexpected-accept wrong-reason links-chan
   power_rollback_fixture_contract "$power_rollback_scenario" > "$power_rollback_log" 2>&1
   power_rollback_rc=$?
   set -e
-  if [ "$power_rollback_scenario" = success ]; then
+  if [ "$power_rollback_scenario" = success ] || [ "$power_rollback_scenario" = shared-no-arg ] || [ "$power_rollback_scenario" = absent-grant ]; then
     if [ "$power_rollback_rc" != 0 ]; then
       cat "$power_rollback_log" >&2
       fail 'power fixture lost authentic incompatible refusal or compatible rollback/forward'
@@ -5615,6 +5634,8 @@ for dispatcher_mode in prepare resume finish; do
       prepare_candidate() { log prepare_candidate; }
       exercise_activation_only_repair() { log exercise_activation_only_repair; }
       establish_legacy_continuation() { log establish_legacy_continuation; }
+      capture_legacy_native_policy() { log "capture_legacy_native_policy $*"; }
+      assert_legacy_native_policy() { log assert_legacy_native_policy; }
       record_reboot_baseline() { log record_reboot_baseline; }
       write_fixture_value() { log "write_fixture_value $*"; }
       finish_candidate_flow() { log finish_candidate_flow; }
@@ -5633,7 +5654,7 @@ for dispatcher_mode in prepare resume finish; do
     || fail "power reconciler $dispatcher_mode dispatcher rejected its valid phase"
   case "$dispatcher_mode" in
     prepare)
-      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_legacy_continuation\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_legacy_continuation\ncapture_legacy_native_policy /state/native-policy.before\nassert_legacy_native_policy\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
       ;;
     resume)
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\nverify_historical_init_boundary\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
@@ -5667,7 +5688,7 @@ run_activation_repair_contract() (
   V2_JOURNAL="$V2_STATE_ROOT/journal.json"
   CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
   local candidate_runtime="$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET"
-  OLD_RELEASE_TARGET=releases/0.11.0-bbbbbbbbbbbb
+  COMPATIBLE_RELEASE_TARGET=releases/0.22.0-11e9174b7cac
   CANDIDATE_VERSION=candidate
   OPERATOR='fixture-operator'
   FAKE_YARD_CALLS="$fixture/yard-calls"
@@ -5786,7 +5807,7 @@ EOF
   }
   assert_candidate_state() { cmp "$CANDIDATE_UNIT" "$UNIT"; }
   assert_runtime_links() {
-    [ "$1" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$2" = "$OLD_RELEASE_TARGET" ]
+    [ "$1" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$2" = "$COMPATIBLE_RELEASE_TARGET" ]
   }
 
   install_activation_reconcile_fault
@@ -6027,11 +6048,11 @@ for evidence_scenario in success same-boot route-change manager-failure yard-sto
         fi
       }
       load_release_targets() {
-        OLD_RELEASE_TARGET=/runtime/old
+        COMPATIBLE_RELEASE_TARGET=/runtime/bridge
         CANDIDATE_RELEASE_TARGET=/runtime/candidate
       }
       assert_candidate_state() { :; }
-      assert_runtime_links() { :; }
+      assert_runtime_links() { [ "$1" = /runtime/candidate ] && [ "$2" = /runtime/bridge ]; }
       sudo() {
         if [ "$EVIDENCE_SCENARIO" = manager-failure ]; then
           printf "%s\n" \

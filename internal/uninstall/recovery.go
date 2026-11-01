@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -314,16 +315,27 @@ type ProducerEvidence struct {
 }
 
 func CaptureProducers(root string, plan RecoveryPlan, environment map[string]string, owners []string, port int, original ProducerEvidence) ([]RecoveryService, error) {
+	templateRoot := ""
+	if suffix, ok := strings.CutPrefix(root, "/proc/self/fd/"); ok {
+		descriptor, err := strconv.Atoi(suffix)
+		if err != nil || descriptor < 0 || strconv.Itoa(descriptor) != suffix {
+			return nil, domain.ErrPlanStale
+		}
+		// The caller retains this descriptor throughout the synchronous helper.
+		// Root also matches literal unit bytes, so only asset reads use this alias.
+		templateRoot = "/proc/" + strconv.Itoa(os.Getpid()) + "/fd/" + suffix
+	}
 	var services []RecoveryService
 	request := struct {
 		Root         string
+		TemplateRoot string `json:",omitempty"`
 		Installation Installation
 		Environment  map[string]string
 		Owners       []string
 		Yards        []RecoveryYard
 		Port         int
 		Original     ProducerEvidence
-	}{root, plan.Installation, environment, owners, plan.Yards, port, original}
+	}{root, templateRoot, plan.Installation, environment, owners, plan.Yards, port, original}
 	err := nativeArtifact("capture-producers", request, &services)
 	return services, err
 }

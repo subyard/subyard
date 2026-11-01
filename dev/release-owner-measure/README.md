@@ -19,6 +19,12 @@ comparison selects public outcomes, verified migration states and retained data.
 Transaction IDs, timestamps, version identities, recipe facts and plan fingerprints
 are deliberately excluded from cross-implementation equality, never rewritten.
 
+Safe raw transport fields remain in `native-effects.json`. Cross-implementation
+comparison uses `logical-native-effects.json`: verified inventory/write kinds,
+count, order, exit status, payload digest and final guest-file digest. The fixture
+still validates exact allowed commands and payloads; unknown effect shapes refuse
+comparison. Repeated samples within each arm retain exact raw-effect equality.
+
 The plan, package/source hashes, seed and randomized arm order are written before
 results. Each arm retains its controlled fixture path and restores its hash-bound
 baseline outside timed commands before every sample. `--fixture-lifecycle fresh`

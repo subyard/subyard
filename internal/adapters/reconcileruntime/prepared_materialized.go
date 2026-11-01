@@ -130,6 +130,7 @@ type materializedRecipe struct {
 	Version      int
 	Configs      materializedConfigs
 	Integrations *materializedIntegrations `json:",omitempty"`
+	CurrentFiles *afterOwnerConfigPhysical `json:",omitempty"`
 }
 
 type materializedArtifact struct {
@@ -274,25 +275,74 @@ func (runtime Runtime) PrepareMaterializedConfigs(ctx context.Context, prepared 
 		return nil, err
 	}
 	p.source = description.sourceBinding()
-	if err := checkMaterializedRecipeSize(p); err != nil {
+	raw, err := checkedMaterializedRecipe(p)
+	if err != nil {
 		return nil, err
 	}
-	p.binding = installedRuntimeDigest(json.RawMessage(p.Recipe()))
+	p.binding = installedCanonicalRecipeDigest(raw)
 	return p, nil
 }
 
+// PrepareCurrentMaterializedConfigs retains the original physical baseline in
+// the approved capsule. It does not change the semantic source identity.
+func (runtime Runtime) PrepareCurrentMaterializedConfigs(ctx context.Context, prepared *PreparedConfigs) (*PreparedInstalledRuntime, error) {
+	if prepared == nil || prepared.instance == afterOwnerConfigInstance || !domain.SafeID(prepared.instance) || len(prepared.instance) > 128 {
+		return nil, domain.ErrPlanStale
+	}
+	p, err := runtime.PrepareMaterializedConfigs(ctx, prepared)
+	if err != nil {
+		return nil, err
+	}
+	files, err := runtime.observeAfterOwnerConfigFiles(ctx, prepared)
+	if err != nil {
+		return nil, errors.Join(err, p.Close())
+	}
+	description, err := runtime.materializedConfigDescription(prepared)
+	if err != nil {
+		return nil, errors.Join(err, p.Close())
+	}
+	physical := &afterOwnerConfigPhysical{Version: 1, Instance: []byte(prepared.instance), Binding: prepared.binding, Files: files}
+	if err = writeMaterializedMetadata(p, materializedRecipe{Version: 1, Configs: description, CurrentFiles: physical}); err != nil {
+		return nil, errors.Join(err, p.Close())
+	}
+	raw, err := checkedMaterializedRecipe(p)
+	if err != nil {
+		return nil, errors.Join(err, p.Close())
+	}
+	p.currentConfigCustody.Store(true)
+	prepared.afterOwnerFiles = files
+	if err = validateAfterOwnerConfigFiles(prepared); err != nil {
+		return nil, errors.Join(err, p.Close())
+	}
+	p.binding = installedCanonicalRecipeDigest(raw)
+	return p, nil
+}
+
+func (p *PreparedInstalledRuntime) HasCurrentMaterializedCustody() bool {
+	return p != nil && !p.closed.Load() && p.owner == "materialized-files" && p.currentConfigCustody.Load() && p.afterOwner == nil
+}
+
 func checkMaterializedRecipeSize(p *PreparedInstalledRuntime) error {
+	_, err := checkedMaterializedRecipe(p)
+	return err
+}
+
+func checkedMaterializedRecipe(p *PreparedInstalledRuntime) ([]byte, error) {
 	total := 0
 	for _, content := range p.files {
 		if len(content) > 32<<20 {
-			return errors.New("materialized recipe leaf bound")
+			return nil, errors.New("materialized recipe leaf bound")
 		}
 		total += len(content)
 	}
-	if len(p.files) > 8192 || total > 64<<20 || len(p.Recipe()) > MaxInstalledRecipe {
-		return errors.New("materialized recipe source bound")
+	if len(p.files) > 8192 || total > 64<<20 {
+		return nil, errors.New("materialized recipe source bound")
 	}
-	return nil
+	raw := p.Recipe()
+	if len(raw) > MaxInstalledRecipe {
+		return nil, errors.New("materialized recipe source bound")
+	}
+	return raw, nil
 }
 
 func writeMaterializedMetadata(p *PreparedInstalledRuntime, value materializedRecipe) error {
@@ -423,6 +473,31 @@ func (runtime Runtime) restoreMaterializedConfigs(ctx context.Context, p *Prepar
 		return nil, errors.New("unrecognized materialized recipe leaf")
 	}
 	fresh.entries = restoreMaterializedArtifacts(original.Configs.Entries)
+	if original.CurrentFiles != nil {
+		physical := original.CurrentFiles
+		if p.owner != "materialized-files" || p.afterOwner != nil || p.afterOwnerConfigs != nil || p.afterOwnerConfigSource || physical.Version != 1 || physical.Stopped || string(physical.Instance) != fresh.instance || physical.Binding != fresh.binding {
+			return nil, domain.ErrPlanStale
+		}
+		fresh.afterOwnerFiles = physical.Files
+		if err := validateAfterOwnerConfigFiles(fresh); err != nil {
+			return nil, err
+		}
+		if _, err := runtime.checkAfterOwnerConfigFiles(ctx, fresh); err != nil {
+			return nil, err
+		}
+		p.currentConfigCustody.Store(true)
+	}
+	if p.afterOwnerConfigs != nil && (p.owner == "materialized-files" || p.owner == "materialized-integrations") {
+		if !p.afterOwnerConfigs.Stopped && len(p.afterOwnerConfigs.Files) != len(fresh.entries) {
+			return nil, domain.ErrPlanStale
+		}
+		if !p.afterOwnerConfigs.Stopped {
+			fresh.afterOwnerFiles = p.afterOwnerConfigs.Files
+			if err := validateAfterOwnerConfigFiles(fresh); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return fresh, nil
 }
 
@@ -459,14 +534,22 @@ func (runtime Runtime) bindMaterializedRecipe(ctx context.Context, r installedRe
 	return p, nil
 }
 
+type currentMaterializedConfigCASKey struct{}
+
 func (runtime Runtime) ApplyPreparedMaterializedConfigs(ctx context.Context, p *PreparedInstalledRuntime) error {
 	if p == nil || p.owner != "materialized-files" || p.closed.Load() || p.runtime != runtime.configRuntimeBinding() || p.resources != runtime.installedResourceBinding() {
+		return domain.ErrPlanStale
+	}
+	if p.afterOwnerConfigs != nil && p.afterOwnerConfigs.Stopped {
 		return domain.ErrPlanStale
 	}
 	prepared, err := runtime.restoreMaterializedConfigs(ctx, p)
 	if err != nil {
 		return err
 	}
+	// Only original-current files custody admits completed synchronous CAS
+	// failures. Integrations and after-owner recipes may execute opaque hooks.
+	ctx = context.WithValue(ctx, currentMaterializedConfigCASKey{}, p.HasCurrentMaterializedCustody())
 	// No source reads occur beyond this guard: all guest writes consume the
 	// reconstructed original payloads and original source-owned destinations.
 	return runtime.applyPreparedConfigs(ctx, prepared, false)

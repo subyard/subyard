@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
@@ -43,11 +44,17 @@ func (runtime Runtime) PrepareTestVMBrokerRuntime(ctx context.Context) (*Prepare
 	return runtime.prepareTestVMBrokerRuntime(ctx, true)
 }
 func (runtime Runtime) prepareTestVMBrokerRuntime(ctx context.Context, physical bool) (*PreparedTestVMBroker, error) {
-	intent, err := runtime.powerService().Intent(ctx, runtime.Yard)
-	if err != nil {
-		return nil, err
+	// After-owner sources describe the approved new init, before an instance
+	// exists. Physical preparation and apply still check actual power intent.
+	desired := application.InitialPower(runtime.Yard)
+	if physical {
+		intent, err := runtime.powerService().Intent(ctx, runtime.Yard)
+		if err != nil {
+			return nil, err
+		}
+		desired = intent.Desired
 	}
-	backend, err := runtime.testVMBackend(intent.Desired)
+	backend, err := runtime.testVMBackend(desired)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +67,7 @@ func (runtime Runtime) prepareTestVMBrokerRuntime(ctx context.Context, physical 
 	if err != nil {
 		return nil, err
 	}
-	p := &PreparedTestVMBroker{backend: backend, apply: prepared, power: intent.Desired, runtime: runtime.configRuntimeBinding()}
+	p := &PreparedTestVMBroker{backend: backend, apply: prepared, power: desired, runtime: runtime.configRuntimeBinding()}
 	ok := false
 	defer func() {
 		if !ok {

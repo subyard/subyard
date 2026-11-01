@@ -8,6 +8,7 @@ import grp
 import stat
 import sys
 import secrets
+import fcntl
 
 ROOT = '@STATE_ROOT@'
 OWNER = int('@STATE_UID@')
@@ -172,13 +173,21 @@ def unowned_selected(entry, current):
     return OwnershipConflict('unowned selected artifact', entry['path'],
                              core_adoption_problem(entry, current))
 
-def open_parent(path):
+def open_parent(path, create=False, uid=OWNER):
     descriptor = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in os.path.dirname(path).strip('/').split('/'):
             if not part:
                 continue
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=descriptor)
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                os.fchown(child, uid, uid)
+                os.fchmod(child, 0o755)
             os.close(descriptor)
             descriptor = child
         return descriptor
@@ -186,8 +195,10 @@ def open_parent(path):
         os.close(descriptor)
         raise
 
-def atomic(path, payload, mode=0o600, uid=OWNER):
-    parent = open_parent(path)
+def atomic(path, payload, mode=0o600, uid=OWNER, parent=None, expected=None, validate=None):
+    owned_parent = parent is None
+    if owned_parent:
+        parent = open_parent(path)
     temporary = '.integration-' + secrets.token_hex(12)
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
@@ -197,6 +208,10 @@ def atomic(path, payload, mode=0o600, uid=OWNER):
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        if expected is not None and config_state_at(parent, os.path.basename(path)) != expected:
+            raise ValueError('concurrent config change')
+        if validate is not None:
+            validate()
         os.replace(temporary, os.path.basename(path), src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
     finally:
@@ -204,6 +219,64 @@ def atomic(path, payload, mode=0o600, uid=OWNER):
             os.unlink(temporary, dir_fd=parent)
         except FileNotFoundError:
             pass
+        if owned_parent:
+            os.close(parent)
+
+def config_state_at(parent, name):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except FileNotFoundError:
+        return {'exists': False, 'digest': '', 'uid': 0, 'gid': 0, 'mode': 0}
+    with os.fdopen(fd, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError('invalid config destination')
+        payload = stream.read((32 << 20) + 1)
+        after = os.fstat(stream.fileno())
+        identity = lambda st: (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if len(payload) > 32 << 20 or identity(before) != identity(after):
+            raise ValueError('config observation changed or exceeds bound')
+    return {'exists': True, 'digest': digest(payload), 'uid': before.st_uid,
+            'gid': before.st_gid, 'mode': stat.S_IMODE(before.st_mode)}
+
+def config_state(path):
+    try:
+        parent = open_parent(path)
+    except FileNotFoundError:
+        return {'exists': False, 'digest': '', 'uid': 0, 'gid': 0, 'mode': 0}
+    try:
+        return config_state_at(parent, os.path.basename(path))
+    finally:
+        os.close(parent)
+
+def config_files(mode, request, home, uid, entries):
+    if len(entries) > 2048 or any(e['kind'] not in ('file', 'structured') or not e['id']
+            or not e['path'].startswith(home + '/') or os.path.normpath(e['path']) != e['path'] for e in entries):
+        raise ValueError('invalid config file scope')
+    if mode == 'configs-observe':
+        print(json.dumps([config_state(e['path']) for e in entries]))
+        return
+    if len(entries) != 1 or entries[0]['kind'] != 'file':
+        raise ValueError('invalid config write scope')
+    entry = entries[0]
+    payload = base64.b64decode(entry['content'], validate=True)
+    if len(payload) > 32 << 20 or digest(payload) != entry['digest']:
+        raise ValueError('invalid config payload')
+    expected = request['before']
+    desired = {'exists': True, 'digest': entry['digest'], 'uid': uid, 'gid': uid, 'mode': 0o644}
+    # Check before creating a missing parent; foreign state is never repair work.
+    current = config_state(entry['path'])
+    if current not in (expected, desired):
+        raise ValueError('config original state changed')
+    parent = open_parent(entry['path'], True, uid)
+    try:
+        current = config_state_at(parent, os.path.basename(entry['path']))
+        if current == desired:
+            return
+        if current != expected:
+            raise ValueError('concurrent config change')
+        atomic(entry['path'], payload, 0o644, uid, parent, current)
+    finally:
         os.close(parent)
 
 def mkdir_owned(path, uid, gid=None):
@@ -216,12 +289,72 @@ def mkdir_owned(path, uid, gid=None):
         os.mkdir(directory, 0o755)
         os.chown(directory, uid, uid if gid is None else gid)
 
-def main():
+def artifact_state_at(parent, name, kind):
+    if kind != 'link':
+        return config_state_at(parent, name)
+    try:
+        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return {'exists': False, 'digest': '', 'uid': 0, 'gid': 0, 'mode': 0}
+    if not stat.S_ISLNK(before.st_mode):
+        raise ValueError('invalid integration link')
+    value = os.readlink(name, dir_fd=parent)
+    after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if (before.st_dev, before.st_ino, before.st_uid, before.st_gid, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_ctime_ns):
+        raise ValueError('concurrent integration link change')
+    return {'exists': True, 'digest': digest(value.encode()), 'uid': before.st_uid, 'gid': before.st_gid, 'mode': 0}
+
+def artifact_state(entry):
+    if entry['kind'] == 'package':
+        return {'exists': False, 'digest': '', 'uid': 0, 'gid': 0, 'mode': 0}
+    try:
+        parent = open_parent(entry['path'])
+    except FileNotFoundError:
+        return {'exists': False, 'digest': '', 'uid': 0, 'gid': 0, 'mode': 0}
+    try:
+        return artifact_state_at(parent, os.path.basename(entry['path']), entry['kind'])
+    finally:
+        os.close(parent)
+
+def wanted_state(entry, home, uid):
+    owner, group, mode = expected_metadata(entry, home, uid)
+    return {'exists': True, 'digest': entry['digest'], 'uid': owner, 'gid': group,
+            'mode': 0o644 if entry['kind'] == 'structured' else mode or 0}
+
+def pending_records(previous, wanted, observed):
+    pending = dict(previous)
+    for name, entry in wanted.items():
+        if entry['kind'] == 'package':
+            continue
+        candidate = dict(clean(entry), pending_digest=entry['digest'])
+        if name in previous:
+            candidate = dict(previous[name], pending_digest=entry['digest'])
+        elif observed[name] is not None:
+            candidate['digest'] = observed[name]
+        pending[name] = candidate
+    return list(pending.values())
+
+def committed_records(previous, desired):
+    records = [clean(entry) for entry in desired]
+    for entry in records:
+        if previous.get(entry['kind'] + ':' + entry.get('path', entry['id']), {}).get('preview_migrated'):
+            entry['preview_migrated'] = True
+    return records
+
+def receipt_bytes(entries, released):
+    return encode({'schema': 1, 'entries': entries, 'released': sorted(set(released))})
+
+def main(request=None, locked=False):
     mode = sys.argv[1]
-    request = json.load(sys.stdin)
+    if request is None:
+        request = json.load(sys.stdin)
     home = request['home']
     uid = request['uid']
     desired = request['entries'] or []
+    guarded = request.get('after_owner')
+    if mode in ('configs-observe', 'configs-write'):
+        config_files(mode, request, home, uid, desired)
+        return
     if any(entry['kind'] == 'link' for entry in desired):
         developer = request['developer']
         if pwd.getpwnam(developer).pw_uid != uid:
@@ -235,6 +368,7 @@ def main():
     adopt = request.get('adopt') is True
     path = ROOT + '/inventory.json'
     records = []
+    receipt = None
     released = []
     established = False
     if os.path.lexists(ROOT):
@@ -242,8 +376,17 @@ def main():
         protected(ROOT, True)
     if os.path.lexists(path):
         protected(path)
-        with open(path, 'rb') as stream:
-            inventory = json.load(stream)
+        if guarded is not None:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                receipt = stream.read((32 << 20) + 1)
+                if info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or len(receipt) > 32 << 20:
+                    raise ValueError('unsafe original inventory receipt')
+        else:
+            with open(path, 'rb') as stream:
+                receipt = stream.read()
+        inventory = json.loads(receipt)
         if inventory.get('schema') != 1 or not isinstance(inventory.get('entries'), list):
             raise ValueError('unsupported inventory')
         records = inventory['entries']
@@ -270,6 +413,9 @@ def main():
     cutover = request.get('preview_skill_cutover') is True
     migrations = preview_migration_plan(records, home, uid) if cutover else []
     if mode in ('configs-prepare', 'configs-commit'):
+        for entry in desired:
+            if entry['kind'] not in ('file', 'structured') or not entry['path'].startswith(home + '/'):
+                raise ValueError('invalid config inventory entry')
         # Config refresh acknowledges existing ownership only. It cannot adopt,
         # retire or finish a pending package/link/hook reconciliation.
         by_path = {e.get('path'): e for e in records if e.get('path')}
@@ -284,13 +430,13 @@ def main():
                 elif (any(record.get(k) != entry.get(k) for k in ('id','kind','path','format'))
                       or current not in (None,record['digest'],record.get('pending_digest'),record.get('config_pending_digest'))):
                     raise OwnershipConflict('owned artifact drift', entry['path'])
+            if not locked:
+                return locked_main(request, create=True)
             apply_preview_migrations(migrations, inventory, path, uid)
         elif migrations:
             raise ValueError('preview migration requires prepared apply')
 
         for entry in desired:
-            if entry['kind'] not in ('file', 'structured') or not entry['path'].startswith(home + '/'):
-                raise ValueError('invalid config inventory entry')
             record = by_path.get(entry['path'])
             if record is None:
                 if mode == 'configs-prepare' and entry['kind'] == 'file' and actual(entry) is not None:
@@ -322,6 +468,8 @@ def main():
         with open(path, 'rb') as stream:
             unchanged = stream.read() == updated
         if not unchanged:
+            if not locked:
+                return locked_main(request, create=True)
             atomic(path, updated)
         return
     observed = {}
@@ -374,6 +522,56 @@ def main():
     if cutover:
         identity.append('preview-skill-cutover-v1')
     fingerprint = digest(encode(identity))
+    guarded = request.get('after_owner')
+    if guarded is not None and receipt is not None:
+        info = os.lstat(path)
+        if info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError('unsafe original inventory receipt')
+    receipt_state = config_state(path) if guarded is not None else None
+    states = [artifact_state(entry) for entry in desired] if guarded is not None else None
+    projected_previous = dict(previous)
+    for record, _, payload in migrations:
+        projected_previous[key(record)] = dict(record, preview_migrated=True)
+        if key(record) not in wanted:
+            projected_previous[key(record)]['config_pending_digest'] = digest(payload)
+    next_pending = receipt_bytes(pending_records(projected_previous, wanted, observed), released)
+    committed_released = released + [e['path'] for e in retired
+                                    if e['kind'] == 'structured' or projected_previous[key(e)].get('preview_migrated')]
+    committed_released = [p for p in committed_released if p not in [e.get('path') for e in desired]]
+    next_committed = receipt_bytes(committed_records(projected_previous, desired), committed_released)
+    witness = None
+    already_committed = False
+    if guarded is not None:
+        current_receipt = '' if receipt is None else digest(receipt)
+        if guarded.get('capture') is True:
+            if any(previous.get(name, {}).get('config_pending_digest') not in (None, '', entry['digest']) for name, entry in wanted.items()):
+                raise ValueError('foreign original config pending intent')
+            if mode != 'observe':
+                raise ValueError('invalid integration capture')
+            witness = {'before': current_receipt, 'pending': digest(next_pending),
+                       'committed': digest(next_committed), 'states': states}
+        else:
+            if set(guarded) != {'before', 'pending', 'committed', 'states'} or len(guarded['states']) != len(desired):
+                raise ValueError('missing original integration witness')
+            if current_receipt not in (guarded['before'], guarded['pending'], guarded['committed']) or digest(next_committed) != guarded['committed']:
+                raise ValueError('original integration receipt changed')
+            for index, entry in enumerate(desired):
+                if entry['kind'] == 'package':
+                    continue
+                original, current = guarded['states'][index], states[index]
+                target = wanted_state(entry, home, uid)
+                if entry['kind'] == 'structured':
+                    current = dict(current, digest='')
+                    original = dict(original, digest='')
+                    target = dict(target, digest='')
+                if current not in (original, target):
+                    raise ValueError('original integration artifact changed')
+            already_committed = current_receipt == guarded['committed'] and all(
+                e['kind'] in ('structured', 'package') or states[i] == wanted_state(e, home, uid)
+                for i, e in enumerate(desired))
+            if not already_committed and digest(next_pending) != guarded['pending']:
+                raise ValueError('original integration pending intent changed')
+            witness = guarded
     expected = request.get('expected')
     if expected and fingerprint != expected:
         raise ValueError('integration plan is stale')
@@ -382,7 +580,8 @@ def main():
         for name in sorted(set(previous) | set(wanted)):
             entry = wanted.get(name) or previous[name]
             value = observed.get(name)
-            facts.append({'key': name, 'desired': digest(encode(clean(wanted[name]))) if name in wanted else 'absent',
+            fact_name = 'inventory-' + name if name.startswith('structured:') else name
+            facts.append({'key': fact_name, 'desired': digest(encode(clean(wanted[name]))) if name in wanted else 'absent',
                           'observed': digest(encode([previous.get(name), value, metadata.get(name)])),
                           'at_desired': (value is None if name not in wanted else
                               {k: v for k, v in (previous.get(name) or {}).items() if k != 'preview_migrated'} == clean(entry) and (
@@ -390,7 +589,7 @@ def main():
                                   value == entry['digest'] and metadata.get(name) == expected_metadata(entry, home, uid)))})
         print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'retired': retired,
                           'adopted': [clean(e) for e in adopted], 'initial': not established,
-                          'facts': facts}))
+                          'facts': facts, **({'after_owner': witness, 'states': states} if guarded is not None else {})}))
         return
     if mode not in ('apply', 'commit'):
         raise ValueError('invalid inventory operation')
@@ -399,43 +598,94 @@ def main():
         if not (adoptable_core(entry, current)
                 or adopt and not established and adoptable_selected(entry, current, home, uid)):
             raise unowned_selected(entry, current)
-    if migrations:
-        if mode != 'apply':
-            raise ValueError('preview migration requires prepared apply')
+    if not locked:
+        # The request has passed its original guards. Create mutation custody
+        # only now, then validate that same request again under the stable lock.
+        return locked_main(request, create=True)
+    if migrations and mode != 'apply':
+        raise ValueError('preview migration requires prepared apply')
+    if migrations and guarded is None:
         apply_preview_migrations(migrations, inventory, path, uid)
         for record, _, _ in migrations:
             observed[key(record)] = actual(record)
-    os.makedirs(ROOT, mode=0o700, exist_ok=True)
     protected(ROOT, True)
+    def validate_commit():
+        with open(path, 'rb') as stream:
+            if digest(stream.read()) != current_receipt:
+                raise ValueError('concurrent inventory receipt change')
+        for entry in desired:
+            if entry['kind'] == 'package':
+                continue
+            current = artifact_state(entry)
+            if entry['kind'] == 'structured':
+                row = request.get('commit_states', {}).get(entry['path'])
+                if row is None or current != row['State']:
+                    raise ValueError('structured destination changed before commit')
+                proof = row.get('materialization')
+                if not isinstance(proof, dict):
+                    raise ValueError('missing structured commit witness')
+                identity = digest((request['developer'] + '\0' + entry['path']).encode())
+                for suffix, key in (('.json','baseline'),('.ownership','receipt')):
+                    protected_path = '/var/lib/subyard/config-materialization/' + identity + suffix
+                    protected(protected_path)
+                    descriptor = os.open(protected_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(descriptor, 'rb') as source:
+                        info = os.fstat(source.fileno())
+                        raw = source.read((32 << 20) + 1)
+                        if info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or len(raw) > 32 << 20 or digest(raw) != proof[key]:
+                            raise ValueError('structured receipt changed before commit')
+            elif current != wanted_state(entry, home, uid):
+                raise ValueError('incomplete approved integration set')
     def save(entries):
-        atomic(path, encode({'schema': 1, 'entries': entries, 'released': sorted(set(released))}))
+        atomic(path, receipt_bytes(entries, released), expected=receipt_state, validate=validate_commit if mode == 'commit' and guarded is not None else None)
     if mode == 'commit':
         # Structured retirement releases fields, preserving the user's document.
         # Tombstones prove why these known paths are no longer owned.
         released += [e['path'] for e in retired if e['kind'] == 'structured' or e.get('preview_migrated')]
         released = [p for p in released if p not in [e.get('path') for e in desired]]
-        committed = [clean(e) for e in desired]
-        for entry in committed:
-            if previous.get(key(entry), {}).get('preview_migrated'):
-                entry['preview_migrated'] = True
-        save(committed)
+        locks = []
+        try:
+            if guarded is not None:
+                # Retain the publisher's existing locks through the final tuple
+                # checks and inventory commit; these readonly opens create no state.
+                for identity in sorted({digest((request['developer'] + '\0' + entry['path']).encode())
+                                        for entry in desired if entry['kind'] == 'structured'}):
+                    lock_path = '/var/lib/subyard/config-materialization/' + identity + '.lock'
+                    parent = open_parent(lock_path)
+                    try:
+                        descriptor = os.open(os.path.basename(lock_path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                    finally:
+                        os.close(parent)
+                    locks.append(descriptor)
+                    info = os.fstat(descriptor)
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != OWNER or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+                        raise ValueError('unsafe structured publisher lock')
+                    fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            save(committed_records(previous, desired))
+        finally:
+            for descriptor in locks:
+                os.close(descriptor)
         return
     # Publish intent before file replacement; both old and candidate digests permit retry.
-    pending = dict(previous)
-    for name, entry in wanted.items():
-        if entry['kind'] == 'package':
-            continue
-        candidate = dict(clean(entry), pending_digest=entry['digest'])
-        if name in previous:
-            candidate = dict(previous[name], pending_digest=entry['digest'])
-        elif observed[name] is not None:
-            candidate['digest'] = observed[name]
-        pending[name] = candidate
-    save(list(pending.values()))
+    if already_committed:
+        return
+    if guarded is None or current_receipt != guarded['pending']:
+        save(pending_records(projected_previous if guarded is not None else previous, wanted, observed))
+    if guarded is not None:
+        # Keep the exact pending receipt through every retired preview write.
+        # Selected instructions use the ordinary original-to-desired publisher.
+        for record, before, payload in migrations:
+            if key(record) in wanted:
+                continue
+            current = artifact_state(record)
+            if (current['digest'] != before or digest(payload) != projected_previous[key(record)]['config_pending_digest']
+                    or actual_metadata(record) != expected_metadata(record, home, uid)):
+                raise OwnershipConflict('owned artifact drift', record['path'])
+            atomic(record['path'], payload, 0o644, uid, expected=current)
     for entry in retired:
         # Preview cutover retains unmarked instruction text when its host source
         # disappears or its client is disabled. The tombstone releases ownership.
-        if entry.get('preview_migrated'):
+        if projected_previous[key(entry)].get('preview_migrated'):
             continue
         if entry['kind'] in ('file', 'link') and os.path.lexists(entry['path']):
             parent = open_parent(entry['path'])
@@ -465,7 +715,15 @@ def main():
                 raise ValueError('invalid artifact payload')
             if actual(entry) != observed[name]:
                 raise ValueError('concurrent artifact change')
-            atomic(destination, payload, entry.get('mode', 0o644), owner)
+            parent_fd = open_parent(destination)
+            try:
+                current = artifact_state_at(parent_fd, os.path.basename(destination), 'file')
+                expected_state = states[list(wanted).index(name)] if guarded is not None else current
+                if current != expected_state or current['digest'] != (observed[name] or '') or actual_metadata(entry) != metadata.get(name):
+                    raise ValueError('concurrent artifact metadata change')
+                atomic(destination, payload, entry.get('mode', 0o644), owner, parent_fd, current)
+            finally:
+                os.close(parent_fd)
         else:
             target = entry['target']
             mount = '/' + '/'.join(target.strip('/').split('/')[:3])
@@ -479,9 +737,14 @@ def main():
             parent_fd = open_parent(destination)
             temporary = '.integration-' + secrets.token_hex(12)
             try:
+                before_link = artifact_state_at(parent_fd, os.path.basename(destination), 'link')
+                before_metadata = [before_link['uid'], before_link['gid'], None] if before_link['exists'] else None
+                if (guarded is not None and before_link != states[list(wanted).index(name)]
+                        or before_link['digest'] != (observed[name] or '') or before_metadata != metadata.get(name)):
+                    raise OwnershipConflict('concurrent artifact change', destination)
                 os.symlink(target, temporary, dir_fd=parent_fd)
                 os.chown(temporary, uid, entry['gid'], dir_fd=parent_fd, follow_symlinks=False)
-                if actual(entry) != observed[name] or actual_metadata(entry) != metadata.get(name):
+                if artifact_state_at(parent_fd, os.path.basename(destination), 'link') != before_link:
                     raise OwnershipConflict('concurrent artifact change', destination)
                 os.replace(temporary, os.path.basename(destination), src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
                 os.fsync(parent_fd)
@@ -492,8 +755,39 @@ def main():
                     pass
                 os.close(parent_fd)
 
+def locked_main(request=None, create=False):
+    # Read-only/config-only absence never creates inventory evidence. A new
+    # lock is created only after main validates an actual inventory mutation.
+    if request is None:
+        request = json.load(sys.stdin)
+    writing = sys.argv[1] not in ('observe', 'configs-observe')
+    if sys.argv[1] in ('configs-observe', 'configs-write', 'configs-prepare', 'configs-commit') and not os.path.lexists(ROOT + '/inventory.json'):
+        return main(request)
+    lock_path = ROOT + '/inventory.lock'
+    if not create and not os.path.lexists(lock_path):
+        return main(request)
+    if not os.path.lexists(ROOT):
+        os.makedirs(ROOT, mode=0o700)
+        os.chmod(ROOT, 0o700)
+    ancestors(ROOT)
+    protected(ROOT, True)
+    if create:
+        try:
+            descriptor = os.open(lock_path, os.O_NOFOLLOW | os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            os.fchmod(descriptor, 0o600)
+        except FileExistsError:
+            descriptor = os.open(lock_path, os.O_NOFOLLOW | os.O_RDWR)
+    else:
+        descriptor = os.open(lock_path, os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_RDWR if writing else os.O_RDONLY))
+    with os.fdopen(descriptor, 'r+b' if writing else 'rb') as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != OWNER or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError('unsafe inventory lock')
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX if writing else fcntl.LOCK_SH)
+        main(request, locked=True)
+
 try:
-    main()
+    locked_main()
 except OwnershipConflict as error:
     # Only a fixed category and destination are emitted, never document contents.
     print(json.dumps({'reason': error.reason, 'path': error.path, 'detail': error.detail}), file=sys.stderr)

@@ -321,6 +321,10 @@ func ownerInstanceRequest(p ports.PreparedOwnerInstance, token string) (api.Inst
 // ApplyPreparedOwnerPolicyInstance resolves only the original accepted policy
 // and submits one CreateInstance call. A lost response never gains a result.
 func (client *Client) ApplyPreparedOwnerPolicyInstance(ctx context.Context, p ports.PreparedOwnerInstance, environment []string, home string) (created *ports.NativeOwnerCreated, resolved ports.PreparedOwnerInstance, result error) {
+	if ownerSourceCapability(ctx) {
+		result, err := client.runOwnerSource(ctx, "apply", ownerSourceRequest{Policy: valueOwnerPolicy(p), Instance: p, Environment: environment, Home: home})
+		return result.Created, result.Resolved, err
+	}
 	if p.Policy == nil || !reflect.DeepEqual(p.Image, ports.PreparedOwnerImageSource{}) || len(p.Rendered) == 0 || p.Rendered[len(p.Rendered)-1] != 0 {
 		return nil, ports.PreparedOwnerInstance{}, domain.ErrPlanStale
 	}
@@ -341,12 +345,16 @@ func (client *Client) ApplyPreparedOwnerPolicyInstance(ctx context.Context, p po
 		}()
 		ctx = secret.WorkContext()
 	}
-	if source.Protocol == "oci" && !ownerImageOCISource(source) || source.Protocol != "oci" && (source.Type != "image" || source.Alias != "" || !ownerImageHex(source.Fingerprint, 64)) || source.Secret != "" && secret == nil || source.Mode != "" && source.Mode != "pull" {
+	if source.Protocol == "oci" && !ownerNativeOCISource(ctx, source) || source.Protocol != "oci" && (source.Type != "image" || source.Alias != "" || !ownerImageHex(source.Fingerprint, 64)) || source.Secret != "" && secret == nil || source.Mode != "" && source.Mode != "pull" {
 		return nil, ports.PreparedOwnerInstance{}, domain.ErrPlanStale
 	}
 	// Version two exists only in this accepted call's result handle. The
 	// original durable policy capsule retains a zero concrete image record.
-	p.Image = ports.PreparedOwnerImageSource{Version: 2, Reference: bytes.Clone(selected), Kind: p.Policy.Kind, Protocol: source.Protocol, Server: []byte(source.Server), Certificate: []byte(source.Certificate), Fingerprint: source.Fingerprint, Alias: []byte(source.Alias), Project: []byte(source.Project)}
+	publicSource := source
+	if source.Protocol == "oci" {
+		publicSource = ownerImagePublicOCISource(source)
+	}
+	p.Image = ports.PreparedOwnerImageSource{Version: 2, Reference: bytes.Clone(selected), Kind: p.Policy.Kind, Protocol: source.Protocol, Server: []byte(publicSource.Server), Certificate: []byte(source.Certificate), Fingerprint: source.Fingerprint, Alias: []byte(source.Alias), Project: []byte(source.Project)}
 	if source.Server == "" && source.Protocol == "incus" {
 		server, err := client.connect(ctx, true)
 		if err != nil {
@@ -402,12 +410,12 @@ func (client *Client) applyPreparedOwnerInstance(ctx context.Context, p ports.Pr
 	if err != nil {
 		return nil, err
 	}
-	if (p.Image.Protocol == "oci" || source.Protocol == "oci") && (!ownerImageOCISource(source) || !reflect.DeepEqual(request.Source, source)) {
+	if (p.Image.Protocol == "oci" || source.Protocol == "oci") && (!ownerNativeOCISource(ctx, source) || !reflect.DeepEqual(request.Source, ownerImagePublicOCISource(source))) {
 		return nil, domain.ErrPlanStale
 	}
 	request.Source = source
 	defer func() {
-		if result != nil && source.Secret != "" {
+		if result != nil && (source.Secret != "" || source.Server != ownerImagePublicOCISource(source).Server) {
 			result = ownerPrivateCreateError(result)
 		}
 	}()
@@ -498,16 +506,13 @@ func (client *Client) ownerCreatedInstanceRequest(ctx context.Context, p ports.P
 	if p.Policy == nil {
 		return api.InstancesPost{}, domain.ErrPlanStale
 	}
-	environment := slices.Clone(os.Environ())
-	for index := len(environment) - 1; index >= 0; index-- {
-		if strings.HasPrefix(environment[index], "INCUS_PROJECT=") {
-			environment = slices.Delete(environment, index, index+1)
-		}
-	}
-	environment = append(environment, "INCUS_PROJECT="+string(p.Policy.Project))
-	if err := client.CheckOwnerImagePolicy(ctx, *p.Policy, environment, os.Getenv("HOME")); err != nil {
+	// This exact p is authenticated by the retained causal result above. No
+	// provider is launched here; compare its original states without adopting
+	// another helper's ambient environment or working directory.
+	if err := checkRetainedOwnerImagePolicy(ctx, *p.Policy); err != nil {
 		return api.InstancesPost{}, err
 	}
+
 	if p.Image.Version != 0 && (p.Image.Version != 2 || p.Image.Fingerprint != expected.Intent.Fingerprint) {
 		return api.InstancesPost{}, domain.ErrPlanStale
 	}
@@ -811,7 +816,8 @@ func (client *Client) ApplyPreparedOwnerVolume(ctx context.Context, p ports.Prep
 			observer.Uncertain()
 		}
 	}()
-	response, _, err := target.RawQuery(http.MethodPost, "/1.0/storage-pools/"+url.PathEscape(p.Pool)+"/volumes/custom", request, "")
+	// RawQuery does not apply UseProject's query attributes.
+	response, _, err := target.RawQuery(http.MethodPost, "/1.0/storage-pools/"+url.PathEscape(p.Pool)+"/volumes/custom?project="+url.QueryEscape(p.Project), request, "")
 	if err != nil {
 		return nil, normalizeError("create original owner SRV volume", err)
 	}
@@ -1003,4 +1009,11 @@ func (client *Client) OwnerCreateServer(ctx context.Context) (string, error) {
 	}
 	identity, err := nativeOperation(server, "owner-create", "", "")
 	return identity.Server, err
+}
+
+func valueOwnerPolicy(p ports.PreparedOwnerInstance) ports.PreparedOwnerImagePolicy {
+	if p.Policy == nil {
+		return ports.PreparedOwnerImagePolicy{}
+	}
+	return *p.Policy
 }

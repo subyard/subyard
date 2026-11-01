@@ -27,6 +27,9 @@ func TestHostCheckRejectsStrictPortCollisionWithoutHostAccess(t *testing.T) {
 	if !strings.Contains(output.String(), "also used by yard(s): beta") {
 		t.Fatalf("missing collision diagnostic:\n%s", output.String())
 	}
+	if err := check.Run(context.Background(), CheckOptions{Strict: true, PortWillBeReleased: true}); !errors.Is(err, ErrHostNotReady) {
+		t.Fatal("planned proxy removal suppressed a different configured yard", err)
+	}
 }
 
 func TestHostCheckRejectsListeningPortForFreshStrictInit(t *testing.T) {
@@ -48,6 +51,11 @@ func TestHostCheckRejectsListeningPortForFreshStrictInit(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "host port 2323 is already listening") {
 		t.Fatalf("missing listening-port diagnostic:\n%s", output.String())
+	}
+	facts.StorageFree = 1 << 30
+	check.Environment = map[string]string{"MIN_DISK_GIB": "2", "RESUME_MIN_DISK_GIB": "1"}
+	if err := check.Run(context.Background(), CheckOptions{Strict: true, PortWillBeReleased: true}); !errors.Is(err, ErrHostNotReady) {
+		t.Fatal("planned proxy removal lowered the fresh disk floor", err)
 	}
 }
 

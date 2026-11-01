@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
@@ -46,7 +49,7 @@ func teardownRecordFixture(t *testing.T) (*teardownExecution, config.Loaded, *CL
 	live.Artifacts = []ports.TeardownArtifact{}
 	network := &yardnetwork.RemovalPlan{Yard: networkYard(loaded.Context), Stored: yardnetwork.StoredPolicy{Policy: yardnetwork.Policy{Schema: 1, Isolation: true, Links: []yardnetwork.Link{{A: "default", B: "peer"}}, Revision: 4, AppliedRevision: 3, AppliedIsolation: true, PendingStart: []string{}, Removing: []string{"default"}, Bindings: []yardnetwork.Binding{{Yard: networkYard(loaded.Context), IPv4: "10.0.0.2", MAC: "00:11:22:33:44:55", OriginalNIC: map[string]string{value: value}, OriginalAccess: value, ApprovedIngress: []yardnetwork.ApprovedIngress{{Device: "proxy", Protocol: "tcp", Listen: "tcp:127.0.0.1:8080", GuestPort: 80}}}}}, Content: value, ETag: value}, Cleanup: true, Consequences: []string{value}}
 	tree := uninstall.Tree(artifact)
-	execution := &teardownExecution{RecoveryPlan: uninstall.RecoveryPlan{Schema: 1, Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache"), BinDir: filepath.Join(root, "bin"), ShellFiles: []string{value}, CacheFiles: artifact.Entries}, Stage: uninstall.RecoveryPrepared, Yards: []uninstall.RecoveryYard{{Context: loaded.Context, Environment: structuredCommandContext(loaded), Snapshot: snapshot, Network: network}}, Trees: []uninstall.Tree{tree}, Launchers: []uninstall.Tree{}, Startup: []uninstall.StartupEdit{{Before: tree, Blocks: []string{value}, Pending: &tree, Temporary: value}}, OwnedGitDirectories: []string{value}, Services: []uninstall.RecoveryService{service}, Preserved: []string{}, SourceRoot: root, SourceAssets: []uninstall.Tree{tree}, AssetsReady: true, Shared: []ports.TeardownResource{resource}, OwnerLock: &tree, EpochBefore: 19, ProfileChecks: []uninstall.RecoveryProfileCheck{{Profile: "generic", Hook: "hook.sh", Environment: map[string]string{value: value}}}}, holdShared: true, changed: true, physicalChanged: true, revokeAgent: true, liveSnapshot: &live, RecoveryBinding: &tree, Assessed: true, resumed: true, ManagedRoots: []string{value}, PreservedRoots: []string{}, MutableRoots: []string{value}}
+	execution := &teardownExecution{teardownOptions: teardownOptions{holdShared: true, revokeAgent: true}, RecoveryPlan: uninstall.RecoveryPlan{Schema: 1, Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache"), BinDir: filepath.Join(root, "bin"), ShellFiles: []string{value}, CacheFiles: artifact.Entries}, Stage: uninstall.RecoveryPrepared, Yards: []uninstall.RecoveryYard{{Context: loaded.Context, Environment: structuredCommandContext(loaded), Snapshot: snapshot, Network: network}}, Trees: []uninstall.Tree{tree}, Launchers: []uninstall.Tree{}, Startup: []uninstall.StartupEdit{{Before: tree, Blocks: []string{value}, Pending: &tree, Temporary: value}}, OwnedGitDirectories: []string{value}, Services: []uninstall.RecoveryService{service}, Preserved: []string{}, SourceRoot: root, SourceAssets: []uninstall.Tree{tree}, AssetsReady: true, Shared: []ports.TeardownResource{resource}, OwnerLock: &tree, EpochBefore: 19, ProfileChecks: []uninstall.RecoveryProfileCheck{{Profile: "generic", Hook: "hook.sh", Environment: map[string]string{value: value}}}}, changed: true, physicalChanged: true, liveSnapshot: &live, RecoveryBinding: &tree, Assessed: true, resumed: true, ManagedRoots: []string{value}, PreservedRoots: []string{}, MutableRoots: []string{value}}
 	execution.activeYard = &execution.Yards[0]
 	return execution, loaded, &CLI{options: Options{RepositoryRoot: root}}
 }
@@ -82,6 +85,184 @@ func TestOwnerTeardownRecordPreservesOriginalPlanAndAssociations(t *testing.T) {
 	restored, err = restoreOwnerTeardownRecord(raw, loaded, cli)
 	if err != nil || restored.liveSnapshot != restored.snapshot() {
 		t.Fatalf("shared snapshot identity lost: %v", err)
+	}
+}
+
+func TestOwnerTeardownRecordUsesLogicalHookLabelsAndRetainsExecutionFD(t *testing.T) {
+	original, loaded, cli := teardownRecordFixture(t)
+	root := loaded.Context.Paths.RepositoryRoot
+	// Reuse the complete owning loader bootstrap rather than a partial set of
+	// required context defaults. Rebind only this fixture-authored source root.
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, _, _ := nativeFixture(t)
+	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
+		raw, err := os.ReadFile(filepath.Join(bootstrap, "config", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, "config", name), []byte(strings.ReplaceAll(string(raw), bootstrap, root)), 0600)
+	}
+	profile := filepath.Join(root, "config/profiles/fixture")
+	if err := os.MkdirAll(profile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(profile, "profile.json"), []byte(`{"schema_version":1,"guest_environment":{"handler":"guest.sh"}}`), 0600)
+	testkit.WriteFile(t, filepath.Join(profile, "guest.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+	sourceDir := filepath.Join(root, "config/agents/sample")
+	if err := os.MkdirAll(sourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(sourceDir, "integration.json"), []byte(`{"schema_version":2,"artifacts":[{"id":"config","kind":"config","source":"config.json","destination":".sample/config.json","format":"destination"}]}`), 0600)
+	for _, name := range []string{"config.json", "second.json"} {
+		testkit.WriteFile(t, filepath.Join(sourceDir, name), []byte("{}\n"), 0600)
+	}
+	if err := os.MkdirAll(filepath.Join(loaded.Context.Paths.ConfigHome, "yards", "second"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(loaded.Context.Paths.ConfigHome, "yards", "second", "config.env"), []byte("AGENT_sample_CONFIG=\"${SUBYARD_CONFIG_DIR}/agents/sample/second.json\"\n"), 0600)
+	// Keep the fixture's native snapshots; independently load checked package
+	// defaults/overrides for each yard and descriptor without effect execution.
+	inputs := func(base config.Loaded, source string) config.Loaded {
+		t.Helper()
+		checked, err := config.Load(config.LoadOptions{RepositoryRoot: source, YardName: base.Context.YardName, OperatorHome: base.Context.Paths.OperatorHome, DisablePrivate: true, Environment: map[string]string{"SUBYARD_HOME": base.Context.Paths.DataHome, "SUBYARD_CONFIG_HOME": base.Context.Paths.ConfigHome, "SUBYARD_OPERATOR_HOME": base.Context.Paths.OperatorHome, "CODING_TOOL_INTEGRATIONS": "sample"}})
+		if err != nil {
+			t.Fatal("checked package inputs", err)
+		}
+		base.Catalog = checked.Catalog
+		base.Settings = checked.Settings
+		base.Environment = checked.Environment
+		if trace := base.Settings["AGENT_sample_CONFIG"]; trace.Kind != config.SettingFile || trace.Type != config.SettingRegularFilePath {
+			t.Fatal("fixture lacks checked typed package authority")
+		}
+		return base
+	}
+	first, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	foreign, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer foreign.Close()
+	firstRoot := fmt.Sprintf("/proc/self/fd/%d", first.Fd())
+	secondRoot := fmt.Sprintf("/proc/self/fd/%d", second.Fd())
+	// Child readers can name this process explicitly for inherited descriptors.
+	loaded = inputs(loaded, fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), first.Fd()))
+	original.retainOwnerSourceSettings(loaded)
+	original.Yards[0].Environment = structuredCommandContext(loaded)
+	secondYard := loaded
+	secondYard.Context.YardName = "second"
+	secondYard.Context.YardInstanceName = "second"
+	secondYard = inputs(secondYard, firstRoot)
+	original.retainOwnerSourceSettings(secondYard)
+	if secondYard.Environment["AGENT_sample_CONFIG"] == loaded.Environment["AGENT_sample_CONFIG"] {
+		t.Fatal("distinct yard inputs not established")
+	}
+	original.Yards = append(original.Yards, uninstall.RecoveryYard{Context: secondYard.Context, Environment: structuredCommandContext(secondYard), Snapshot: &teardownSnapshot{}})
+	original.activeYard = &original.Yards[0]
+	const key = "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS"
+	originalHook := original.Yards[0].Environment[key]
+	if !strings.Contains(originalHook, fmt.Sprintf("/fd/%d/", first.Fd())) {
+		t.Fatal("fixture did not bind the first descriptor")
+	}
+	original.snapshot().Registered[0].Paths.RepositoryRoot = firstRoot
+	original.snapshot().Registered[0].Paths.ConfigDir = filepath.Join(firstRoot, "config")
+	raw, err := captureOwnerTeardownRecord(original, firstRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var descriptor ownerTeardownRecord
+	if err := nativejson.DecodeLosslessNativeJSON(raw, &descriptor, ownerTeardownRecordLimit); err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.Snapshots[0].Registered[0].Paths.RepositoryRoot != root || descriptor.Snapshots[0].Registered[0].Paths.ConfigDir != filepath.Join(root, "config") || original.snapshot().Registered[0].Paths.RepositoryRoot != firstRoot {
+		t.Fatal("capture lost logical peer labels or changed live peer handles")
+	}
+	if original.Yards[0].Environment[key] != originalHook {
+		t.Fatal("capture changed the live execution environment")
+	}
+	fresh := inputs(loaded, secondRoot)
+	freshSecond := inputs(secondYard, secondRoot)
+	cli.options.RepositoryRoot = secondRoot
+	restored, err := restoreOwnerTeardownRecord(raw, fresh, cli, freshSecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Yards[0].Environment[key] != structuredCommandContext(fresh)[key] {
+		t.Fatal("restoration lost the current executable descriptor")
+	}
+	for i, checked := range []config.Loaded{fresh, freshSecond} {
+		if restored.Yards[i].Environment["AGENT_sample_CONFIG"] != structuredCommandContext(checked)["AGENT_sample_CONFIG"] {
+			t.Fatal("yard source lost its own checked physical value")
+		}
+	}
+	wrongType := fresh
+	wrongType.Settings = maps.Clone(fresh.Settings)
+	trace := wrongType.Settings["AGENT_sample_CONFIG"]
+	trace.Kind = config.SettingScalar
+	trace.Type = config.SettingString
+	wrongType.Settings["AGENT_sample_CONFIG"] = trace
+	if _, err := restoreOwnerTeardownRecord(raw, wrongType, cli, freshSecond); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatal("unchecked source type gained label authority", err)
+	}
+	for _, peers := range [][]config.Loaded{nil, {freshSecond, freshSecond}, {fresh}} {
+		if _, err := restoreOwnerTeardownRecord(raw, fresh, cli, peers...); !errors.Is(err, domain.ErrPlanStale) {
+			t.Fatal("missing/duplicate/conflicting peer admitted", err)
+		}
+	}
+	again, err := captureOwnerTeardownRecord(restored, secondRoot)
+	if err != nil || !bytes.Equal(raw, again) {
+		t.Fatal("descriptor alias changed original metadata", err)
+	}
+	for _, drift := range []string{"foreign descriptor", "hook target", "unrelated environment", "nonactive hook target", "foreign source FD", "foreign source PID", "source sibling", "source target", "source presence", "source type", "nonactive source target"} {
+		t.Run(drift, func(t *testing.T) {
+			var record ownerTeardownRecord
+			if err := nativejson.DecodeLosslessNativeJSON(raw, &record, ownerTeardownRecordLimit); err != nil {
+				t.Fatal(err)
+			}
+			index := 0
+			if drift == "nonactive hook target" || drift == "nonactive source target" {
+				index = 1
+			}
+			environment := record.Yards[index].Environment.restore()
+			switch drift {
+			case "foreign descriptor":
+				environment[key] = strings.Replace(environment[key], root, fmt.Sprintf("/proc/self/fd/%d", foreign.Fd()), 1)
+			case "hook target", "nonactive hook target":
+				environment[key] += ".changed"
+			case "foreign source FD":
+				environment["AGENT_sample_CONFIG"] = strings.Replace(environment["AGENT_sample_CONFIG"], root, fmt.Sprintf("/proc/self/fd/%d", foreign.Fd()), 1)
+			case "foreign source PID":
+				environment["AGENT_sample_CONFIG"] = strings.Replace(environment["AGENT_sample_CONFIG"], root, fmt.Sprintf("/proc/%d/fd/%d", os.Getpid()+1, first.Fd()), 1)
+			case "source sibling":
+				environment["AGENT_sample_CONFIG"] = strings.Replace(environment["AGENT_sample_CONFIG"], root, root+"-other", 1)
+			case "source target", "nonactive source target":
+				environment["AGENT_sample_CONFIG"] += ".changed"
+			case "source presence":
+				delete(environment, "AGENT_sample_CONFIG")
+			case "source type":
+				environment["AGENT_sample_CONFIG"] = "literal"
+			case "unrelated environment":
+				environment["SRV_POOL"] = "changed"
+			}
+			record.Yards[index].Environment = teardownMap(environment)
+			changed, err := nativejson.EncodeLosslessNativeJSON(record, ownerTeardownRecordLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := restoreOwnerTeardownRecord(changed, fresh, cli, freshSecond); err == nil || drift != "nonactive hook target" && drift != "nonactive source target" && !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatal("changed original hook/environment admitted", err)
+			}
+		})
 	}
 }
 
@@ -131,7 +312,7 @@ func TestOwnerTeardownRecordPreservesMultipleYardsAndLiveOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := restoreOwnerTeardownRecord(raw, second, cli)
+	got, err := restoreOwnerTeardownRecord(raw, second, cli, loaded)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -614,7 +614,9 @@ def capacity_reason(log):
     return reason
 
 
-def prepare(output, version, prepared=None):
+def prepare(output, version, prepared=None, experimental_release_owner=False):
+    if prepared and experimental_release_owner:
+        raise ValueError("prepared CI identity does not bind the experimental release owner")
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError("prepare requires an empty output directory")
@@ -649,6 +651,7 @@ def prepare(output, version, prepared=None):
     release = root / ".subyard-acceptance/release"
     release.mkdir(parents=True)
     receipt = {"schema_version": 1, "version": version, "source_fingerprint": original,
+               "release_owner": "rust" if experimental_release_owner else "go",
                "profiles": inventory, "external_obligations": external, "checks": {},
                "environment": execution_environment()}
     for name, command in commands(root, version, inventory).items():
@@ -676,7 +679,7 @@ def prepare(output, version, prepared=None):
         receipt["checks"]["package"] = {"status": "passed", "exit_code": 0,
             "log": log.name, "log_sha256": digest(log), "command": ["ci-prepared", identity["candidate_id"]]}
     else:
-        receipt["checks"]["package"] = execute("package", ["bash", "dev/package-engine.sh", "--output-dir", str(release), "--version", version], root, output, clean_environment())
+        receipt["checks"]["package"] = execute("package", ["bash", "dev/package-engine.sh", "--output-dir", str(release), "--version", version] + (["--experimental-release-owner"] if experimental_release_owner else []), root, output, clean_environment())
     receipt["checks"]["package"]["execution_environment"] = receipt["environment"]
     save(output, receipt)
     if receipt["checks"]["package"]["status"] != "passed":
@@ -686,7 +689,7 @@ def prepare(output, version, prepared=None):
     receipt["runtime_file"] = runtime.name
     receipt["runtime_sha256"] = digest(runtime)
     receipt["release_files"] = {path.name: digest(path) for path in sorted(release.iterdir()) if path.is_file()}
-    metadata = {key: receipt[key] for key in ("version", "runtime_file", "runtime_sha256")}
+    metadata = {key: receipt[key] for key in ("version", "runtime_file", "runtime_sha256", "release_owner")}
     (root / ".subyard-acceptance/candidate.json").write_text(json.dumps(metadata) + "\n")
     transport = output / "candidate-bundle.tar.gz"
     bundle(root, transport, ".subyard-acceptance/candidate.json",
@@ -700,6 +703,11 @@ def prepare(output, version, prepared=None):
 def load_bound(output, entries=None, context=None):
     receipt = json.loads((output / "receipt.json").read_text())
     root = output / "source"
+    release_owner = receipt.get("release_owner", "go")
+    if release_owner not in ("go", "rust"):
+        raise ValueError("invalid compiled release owner variant")
+    if release_owner == "rust" and "preparation" in receipt:
+        raise ValueError("prepared CI identity does not bind the experimental release owner")
     fingerprint = source_fingerprint(root) if entries is None else entries_fingerprint(entries)
     if receipt.get("schema_version") != 1 or fingerprint != receipt["source_fingerprint"]:
         raise ValueError("frozen source fingerprint mismatch")
@@ -739,13 +747,22 @@ def load_bound(output, entries=None, context=None):
     if Path(receipt["runtime_file"]).name != receipt["runtime_file"]:
         raise ValueError("invalid candidate runtime filename")
     metadata = json.loads((root / ".subyard-acceptance/candidate.json").read_text())
-    if metadata != {key: receipt[key] for key in ("version", "runtime_file", "runtime_sha256")}:
+    expected_metadata = {key: receipt[key] for key in ("version", "runtime_file", "runtime_sha256")}
+    if "release_owner" in receipt:
+        expected_metadata["release_owner"] = release_owner
+    if metadata != expected_metadata:
         raise ValueError("candidate metadata changed")
     release = root / ".subyard-acceptance/release"
     if {path.name: digest(path) for path in sorted(release.iterdir()) if path.is_file()} != receipt["release_files"]:
         raise ValueError("candidate release assets changed")
     optional_vms = vm_checks_optional(root)
     validate_optional_vm_history(output, {name for name, result in receipt["checks"].items() if optional_vm_not_run(name, result)})
+    if "preparation" not in receipt:
+        expected_package = ["bash", "dev/package-engine.sh", "--output-dir", str(release), "--version", receipt["version"]]
+        if release_owner == "rust":
+            expected_package.append("--experimental-release-owner")
+        if receipt["checks"]["package"].get("command") != command_identity(expected_package, root):
+            raise ValueError("package compiled release owner binding changed")
     for name, result in receipt["checks"].items():
         if result["status"] == "not-run" and (not optional_vms or not required_commands.get(name) or not optional_vm_not_run(name, result)):
             raise ValueError("invalid optional VM not-run result or frozen policy")
@@ -2262,6 +2279,7 @@ def main():
     prep = sub.add_parser("prepare", help="retain an immutable source/artifact candidate")
     prep.add_argument("--version", required=True)
     prep.add_argument("--output", type=Path, required=True)
+    prep.add_argument("--experimental-release-owner", action="store_true", help="build the explicit experimental Rust-owner variant")
     prep.add_argument("--prepared", type=Path, help="import bound CI sources/assets without rebuilding")
     run = sub.add_parser("run", help="run pending checks; each live retry acquires fresh VMs")
     run.add_argument("--output", type=Path, required=True)
@@ -2310,7 +2328,7 @@ def main():
     if args.action == "prepare":
         if not args.version or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-" for c in args.version):
             parser.error("unsafe version")
-        prepare(output, args.version, args.prepared.resolve() if args.prepared else None)
+        prepare(output, args.version, args.prepared.resolve() if args.prepared else None, args.experimental_release_owner)
         return 0
     if args.action == "import":
         with acceptance_lock(output), acceptance_lock(args.source_output.resolve(), shared=True):

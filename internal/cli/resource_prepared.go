@@ -298,8 +298,12 @@ func (execution *resourceExecution) verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	output, err := runner.cli.prepareResourceModeTimeout(ctx, runner.loaded, runner.definition, runner.arguments, "verify", resourcePrepareTimeout,
-		map[string]string{"SUBYARD_RESOURCE_BINDING": execution.current.Binding, "SUBYARD_RESOURCE_STEPS": string(steps)})
+	extra := map[string]string{"SUBYARD_RESOURCE_BINDING": execution.current.Binding, "SUBYARD_RESOURCE_STEPS": string(steps)}
+	if runner.ownedIngress != nil {
+		extra["SUBYARD_RESOURCE_INGRESS_OWNER"] = "parent"
+		extra["SUBYARD_RESOURCE_INSTANCE_UUID"] = runner.ownedIngress.uuid
+	}
+	output, err := runner.cli.prepareResourceModeTimeout(ctx, runner.loaded, runner.definition, runner.arguments, "verify", resourcePrepareTimeout, extra)
 	if err != nil {
 		return fmt.Errorf("verify resource postcondition: %w", err)
 	}

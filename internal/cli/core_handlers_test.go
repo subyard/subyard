@@ -448,6 +448,67 @@ func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
 	}
 }
 
+func TestMigrationTestVMStatusUsesRetainedRootWithoutOwnerAdmission(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	settings := filepath.Join(root, "config", "subyard.env")
+	content, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, settings, append(content, []byte("NESTED_E2E_VMS=1\n")...), 0o600)
+	retained, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retained.Close()
+	alias := "/proc/self/fd/" + strconv.Itoa(int(retained.Fd()))
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
+	runner := &testkit.ScriptedAdapter{}
+	prompt := &testkit.Prompt{}
+	program, err := New(Options{
+		RepositoryRoot: alias, Program: "yard", Environment: environment, WorkingDir: root,
+		Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, diagnostics bytes.Buffer
+	if err := program.runReleaseTransitionYardCommandIO(context.Background(), "default", &output, &diagnostics, "test-vms", "status"); err != nil {
+		t.Fatalf("internal broker status failed: %v; diagnostics=%s", err, diagnostics.String())
+	}
+	var status struct {
+		Pool *testvmsruntime.LeasePool `json:"pool"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &status); err != nil || status.Pool == nil ||
+		status.Pool.SchemaVersion != 1 || len(status.Pool.Slots) != 2 || status.Pool.Slots[1].LeaseEpoch != 3 {
+		t.Fatalf("broker status did not retain the actual pool: %v", err)
+	}
+	if len(probe.requests) != 1 || !slices.Equal(probe.requests[0].Command,
+		[]string{testvmsruntime.DefaultInstalledPath, "_test-vms-worker", "status"}) {
+		t.Fatalf("status probes=%#v", probe.requests)
+	}
+	output.Reset()
+	if err := program.runReleaseTransitionYardCommandIO(context.Background(), "default", &output, &diagnostics, "test-vms", "status", "--json"); err == nil || len(probe.requests) != 1 {
+		t.Fatal("non-exact internal arguments bypassed ordinary command admission")
+	}
+	probe.output = []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"foreign","resource_id":"test-vms","slots":[]}}`)
+	output.Reset()
+	if err := program.runReleaseTransitionYardCommandIO(context.Background(), "default", &output, &diagnostics, "test-vms", "status"); err == nil || output.Len() != 0 || len(probe.requests) != 2 {
+		t.Fatal("internal status accepted an invalid pool response")
+	}
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 || len(incus.PowerUpdates) != 0 {
+		t.Fatal("internal status invoked a mutation or confirmation")
+	}
+	ownerLock := uninstall.OwnerLockPath(environmentValue(environment, "SUBYARD_HOME"))
+	if _, err := os.Lstat(ownerLock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("internal status created an owner lock: %v", err)
+	}
+}
+
 func TestTestVMsRejectsStoppedYardBeforePrompt(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = append(environment, "NESTED_E2E_VMS=1")
@@ -1096,7 +1157,7 @@ func TestTeardownExecutionBuildsTypedActionDelta(t *testing.T) {
 		changed   bool
 	}{
 		{name: "absent", execution: teardownExecution{}, action: "yard.teardown.purge"},
-		{name: "keep data", execution: teardownExecution{keepData: true, changed: true}, action: "yard.teardown.keep-data", changed: true},
+		{name: "keep data", execution: teardownExecution{teardownOptions: teardownOptions{keepData: true}, changed: true}, action: "yard.teardown.keep-data", changed: true},
 		{name: "purge", execution: teardownExecution{changed: true}, action: "yard.teardown.purge", changed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

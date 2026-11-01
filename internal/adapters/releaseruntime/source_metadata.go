@@ -83,6 +83,10 @@ func (err sourceAdmissionError) Unwrap() error { return err.cause }
 // InspectSourceAdmission uses the selected production owner. Rust query failures
 // never fall back to Go; the experimental query remains explicitly callable.
 func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, configHome string) (SourceAdmission, error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return SourceAdmission{}, selectionErr
+	}
 	if releaseOwnerRoutingEnabled {
 		return runtime.InspectRustSourceAdmission(ctx, root, configHome)
 	}

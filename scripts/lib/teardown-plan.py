@@ -564,6 +564,16 @@ def retain_runtime():
                 raise ValueError("retained runtime destination appeared during publication")
 
 
+def render_publication_template(template, helper, unit):
+    if b"@SUBYARD_PUBLICATION_COMMAND@" not in template:
+        return template.replace(b"@SUBYARD_POWER_RECONCILER@", os.fsencode(helper))
+    import base64
+    quoted = b':"'
+    for c in os.fsencode(helper):
+        quoted += bytes([c, c]) if c == 37 else b"\\" + bytes([c]) if c in (34, 92) else ("\\x%02x" % c).encode() if c < 32 or c >= 127 else bytes([c])
+    command = quoted + b'" _publication-reconcile ' + base64.b64encode(os.fsencode(helper)) + b" " + base64.b64encode(os.fsencode(unit))
+    return template.replace(b"@SUBYARD_PUBLICATION_COMMAND@", command)
+
 def producer_template_matches(content, expected, publication):
     suffix = content[len(expected):] if content.startswith(expected) else b""
     return content == expected or bool(publication and re.fullmatch(rb"\n\[Service\]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=[A-Za-z0-9+/=]+\n", suffix))
@@ -620,13 +630,13 @@ def core_producers(request):
         if service["Artifacts"]:
             result.append(service)
     def template(name):
-        with open(os.path.join(root, "config/systemd", name), "rb") as source:
+        with open(os.path.join(request.get("TemplateRoot", root), "config/systemd", name), "rb") as source:
             return source.read(1024 * 1024 + 1)
     runtime = installation["runtimeRoot"]
     if "power" in owners:
         helper = environment.get("SUBYARD_POWER_RECONCILER_PATH") or os.path.join(environment.get("SUBYARD_POWER_LIBEXEC_DIR") or "/usr/local/libexec/subyard", "yard-boot-reconcile")
         unit = environment.get("SUBYARD_POWER_UNIT_PATH") or "/etc/systemd/system/subyard-power-reconcile.service"
-        if os.path.lexists(helper) or os.path.lexists(unit):
+        if os.path.lexists(helper) or os.path.lexists(unit) or os.path.lexists(os.path.join(os.path.dirname(unit), "subyard-publication-reconcile.service")):
             import glob
             candidates = [environment.get("SUBYARD_DISPATCHER_PATH", ""), environment.get("SUBYARD_POWER_ENGINE_SOURCE", "")] + glob.glob(runtime + "/releases/*/bin/yard-engine")
             owned = False
@@ -650,7 +660,23 @@ def core_producers(request):
             if (not producer_template_matches(content, power_template.replace(b"@SUBYARD_POWER_RECONCILER@", helper.encode()), True)
                     and (original_helper or candidate_helper) and original_templates):
                 power_template = original_templates["subyard-power-reconcile.service.in"].encode()
-            add("system", [os.path.basename(unit)], {unit: power_template.replace(b"@SUBYARD_POWER_RECONCILER@", helper.encode())}, {helper: owned}, 0)
+            units = [os.path.basename(unit)]
+            files = {unit: power_template.replace(b"@SUBYARD_POWER_RECONCILER@", helper.encode())}
+            passive = os.path.join(os.path.dirname(unit), "subyard-publication-reconcile.service")
+            if os.path.lexists(passive):
+                try:
+                    passive_template = template("subyard-publication-reconcile.service.in")
+                except FileNotFoundError:
+                    passive_template = b""
+                passive_content = open(passive, "rb").read(1024 * 1024 + 1) if os.path.isfile(passive) else b""
+                historical_passive = original_templates.get("subyard-publication-reconcile.service.in")
+                if (not passive_template or not producer_template_matches(passive_content, render_publication_template(passive_template, helper, unit), True)):
+                    if not historical_passive or not (original_helper or candidate_helper):
+                        raise ValueError("unknown publication producer template")
+                    passive_template = historical_passive.encode()
+                units.append(os.path.basename(passive))
+                files[passive] = render_publication_template(passive_template, helper, unit)
+            add("system", units, files, {helper: owned}, 0)
     if "keys" in owners:
         directory = environment.get("SUBYARD_KEYS_SYSTEMD_DIR") or os.path.join(environment["SUBYARD_OPERATOR_HOME"], ".config/systemd/user")
         unit, timer = os.path.join(directory, "subyard-keys-sync.service"), os.path.join(directory, "subyard-keys-sync.timer")

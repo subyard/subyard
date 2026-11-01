@@ -21,17 +21,30 @@ ENGINE_SOURCE="${SUBYARD_POWER_ENGINE_SOURCE:-}"
 UNIT_PATH="${SUBYARD_POWER_UNIT_PATH:-/etc/systemd/system/subyard-power-reconcile.service}"
 UNIT_NAME="$(basename "$UNIT_PATH")"
 TEMPLATE="$SCRIPT_DIR/../config/systemd/subyard-power-reconcile.service.in"
+PUBLICATION_TEMPLATE="$SCRIPT_DIR/../config/systemd/subyard-publication-reconcile.service.in"
+PUBLICATION_UNIT_PATH="$(dirname "$UNIT_PATH")/subyard-publication-reconcile.service"
+installed_resources=("$RECONCILER_PATH" "$UNIT_PATH")
+[ ! -f "$PUBLICATION_TEMPLATE" ] || installed_resources+=("$PUBLICATION_UNIT_PATH")
 
+native_result=0
 action=install
 for arg in "$@"; do
   case "$arg" in
     --remove-if-unused) action=remove-if-unused ;;
     --native-fence) action=native-fence ;;
+    --native-installation-result) native_result=1 ;;
     -y|--yes) ;;
     -*) die "unknown option '$arg'" ;;
   esac
 done
 
+if [ "$native_result" = 1 ]; then
+  [ "$action" = install ] && [ "${SUBYARD_NATIVE_OWNER_STDIN:-}" = 1 ] && [ -n "${SUBYARD_NATIVE_GENERATION:-}" ] && [ "${#installed_resources[@]}" = 3 ] || die 'native installation result lacks original custody'
+  info() { printf '  [ .. ] %s\n' "$*" >&2; }
+  ok() { printf '  [ ok ] %s\n' "$*" >&2; }
+  warn() { printf '  [warn] %s\n' "$*" >&2; }
+  announce() { printf '%s\n' "$@" >&2; }
+fi
 if [ "$action" = install ]; then
   announce "Subyard — install guarded yard boot reconciliation" \
     "Install a root-owned systemd service that restores only yards with desired=running after Incus/network guards are ready." \
@@ -42,9 +55,10 @@ else
 fi
 proceed_or_die
 require_root "installing a host systemd unit and root-owned reconciler needs root"
+subyard_install_power_body() {
 # shellcheck source=scripts/lib/native-install-custody.sh
 . "$SCRIPT_DIR/lib/native-install-custody.sh"
-subyard_install_custody host-power "$LIBEXEC_DIR" "$RECONCILER_PATH" "$UNIT_PATH"
+subyard_install_custody host-power "$LIBEXEC_DIR" "${installed_resources[@]}"
 if [ "$action" = native-fence ]; then
   [ -n "${SUBYARD_NATIVE_SUCCESSOR:-}" ] || die 'native fence successor is required'
   subyard_install_custody_verify host-power "$LIBEXEC_DIR"
@@ -107,7 +121,7 @@ exec {publication_engine_fd}<&-
 
 tmp="$(mktemp)"
 subyard_result=0
-trap 'subyard_result=$?; rm -f "$tmp"; subyard_prepared_installed_finish "$subyard_result"' EXIT
+trap 'subyard_result=$?; rm -f "$tmp"; if [ "$native_result" = 1 ]; then subyard_prepared_installed_finish "$subyard_result" >&2; else subyard_prepared_installed_finish "$subyard_result"; fi' EXIT
 sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER_PATH|g" "$TEMPLATE" > "$tmp"
 # Snapshot owning declarations into the root-owned unit beside its copied engine.
 printf '\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=%s\n' "$publication_contracts" >> "$tmp"
@@ -117,9 +131,37 @@ if [ ! -f "$UNIT_PATH" ] || ! cmp -s "$tmp" "$UNIT_PATH"; then
 else
   ok "$UNIT_NAME already current"
 fi
+if [ -f "$PUBLICATION_TEMPLATE" ]; then
+  python3 - "$PUBLICATION_TEMPLATE" "$RECONCILER_PATH" "$UNIT_PATH" "$publication_contracts" > "$tmp" <<'PY_RENDER'
+import os,sys,base64
+raw=os.fsencode(sys.argv[2]); quoted=':"'
+for c in raw:
+    quoted += chr(c)*2 if c == 37 else '\\'+chr(c) if c in (34,92) else ('\\x%02x'%c) if c<32 or c>=127 else chr(c)
+quoted+='"'
+command=quoted+' _publication-reconcile '+base64.b64encode(raw).decode()+' '+base64.b64encode(os.fsencode(sys.argv[3])).decode()
+sys.stdout.write(open(sys.argv[1]).read().replace('@SUBYARD_PUBLICATION_COMMAND@',command)+'\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS='+sys.argv[4]+'\n')
+PY_RENDER
+  if [ ! -f "$PUBLICATION_UNIT_PATH" ] || ! cmp -s "$tmp" "$PUBLICATION_UNIT_PATH"; then
+    install -o root -g root -m 0644 "$tmp" "$PUBLICATION_UNIT_PATH"
+  fi
+fi
 systemctl daemon-reload
 if ! systemctl is-enabled --quiet "$UNIT_NAME"; then
   systemctl enable "$UNIT_NAME" >/dev/null
 fi
 ok "$UNIT_NAME enabled (it runs on boot; not started during setup)"
 subyard_install_custody_verify host-power "$LIBEXEC_DIR"
+
+}
+if [ "$native_result" = 1 ]; then
+  subyard_install_power_body >&2
+  result_vector=()
+  for resource in "${installed_resources[@]}"; do
+    for index in "${!SUBYARD_INSTALL_LOCK_FILES[@]}"; do
+      if [ "$resource" = "${SUBYARD_INSTALL_LOCK_FILES[$index]}" ]; then result_vector+=("$resource" "${SUBYARD_INSTALL_LOCK_FDS[$index]}"); fi
+    done
+  done
+  python3 -B "$SCRIPT_DIR/lib/native-install-custody.py" installation-result host-power "$RECONCILER_PATH" "$SUBYARD_INSTALL_LOCK_FD" "$SUBYARD_NATIVE_GENERATION" "${result_vector[@]}"
+else
+  subyard_install_power_body
+fi

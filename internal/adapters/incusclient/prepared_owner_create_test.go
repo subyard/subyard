@@ -124,6 +124,7 @@ type ownerCreateServerFixture struct {
 	project              *api.Project
 	instance             *api.Instance
 	volume               *api.StorageVolume
+	volumeProject        string
 	volumePosts, updates int
 	instanceETag         string
 	before               func() bool
@@ -220,6 +221,14 @@ func (f *ownerCreateServerFixture) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/1.0/storage-pools/") {
+			project := r.URL.Query().Get("project")
+			if project == "" {
+				project = "default"
+			}
+			if project != f.volumeProject {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			if r.Method == http.MethodPost {
 				f.volumePosts++
 				var request api.StorageVolumesPost
@@ -357,7 +366,7 @@ func ownerCreateClientFixture(t *testing.T, observer *ownerCreateObserverFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &ownerCreateServerFixture{mode: mode, before: func() bool { observer.mu.Lock(); defer observer.mu.Unlock(); return observer.before > 0 }}
+	fixture := &ownerCreateServerFixture{mode: mode, volumeProject: "original-project", before: func() bool { observer.mu.Lock(); defer observer.mu.Unlock(); return observer.before > 0 }}
 	server := &http.Server{Handler: fixture}
 	t.Cleanup(func() { _ = server.Close() })
 	go func() { _ = server.Serve(listener) }()
@@ -817,6 +826,7 @@ func TestOwnerExistingVolumeGuardAllowsOnlyOriginalInstanceUsage(t *testing.T) {
 		t.Run(project, func(t *testing.T) {
 			observer := &ownerCreateObserverFixture{}
 			client, fixture := ownerCreateClientFixture(t, observer, "volume-success")
+			fixture.volumeProject = project
 			oldUse := "/1.0/instances/original-foreign?project=" + project
 			fixture.volume = &api.StorageVolume{Name: "yard-srv", Type: "custom", ContentType: "filesystem", CreatedAt: time.Unix(100, 0), UsedBy: []string{oldUse}, StorageVolumePut: api.StorageVolumePut{Description: "original", Config: api.ConfigMap{"driver.default": "retained"}}}
 			original := ports.PreparedOwnerVolume{Project: project, Instance: "yard", Scope: "current", Pool: "default", Volume: "yard-srv", Rendered: []byte("filesystem\x00\x00type=disk\x00pool=default\x00source=yard-srv\x00path=/srv\x00")}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -14,8 +15,10 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
+	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -24,11 +27,83 @@ type resourceIngress struct {
 	loaded   config.Loaded
 	service  *yardnetwork.Service
 	yards    []yardnetwork.Yard
+	contexts []domain.Context
 	preview  yardnetwork.IngressPreview
 	up       bool
 	contract resource.ProxyContract
 	address  string
 	port     int
+}
+
+// Only the original native startup path hands host proxy writes to the parent.
+// These values are reconstructed from its retained preview, never recaptured
+// from a name after guest work or partial progress.
+type resourceOwnedIngress struct {
+	uuid                        string
+	nic, before, desired        map[string]string
+	beforeMarker, desiredMarker string
+	published                   bool
+}
+
+func (startup *resourceStartup) originalIngress() (*resourceOwnedIngress, error) {
+	if startup.intent.instanceUUID == "" {
+		return nil, nil
+	}
+	preview := startup.ingress.preview
+	find := func(plan yardnetwork.Plan) (ports.InstanceInfo, error) {
+		var found *ports.InstanceInfo
+		for _, yard := range plan.Snapshot.Yards {
+			if yard.Yard == preview.Target {
+				if found != nil || !yard.InstanceFound || yard.InstanceInfo.Config["volatile.uuid"] != startup.intent.instanceUUID {
+					return ports.InstanceInfo{}, domain.ErrPlanStale
+				}
+				copy := yard.InstanceInfo
+				found = &copy
+			}
+		}
+		if found == nil {
+			return ports.InstanceInfo{}, domain.ErrPlanStale
+		}
+		return *found, nil
+	}
+	before, err := find(preview.Before)
+	if err != nil {
+		return nil, err
+	}
+	after, err := find(preview.After)
+	if err != nil {
+		return nil, err
+	}
+	contract := startup.ingress.contract
+	if !maps.Equal(before.Devices["eth0"], after.Devices["eth0"]) {
+		return nil, domain.ErrPlanStale
+	}
+	return &resourceOwnedIngress{uuid: startup.intent.instanceUUID, nic: maps.Clone(before.Devices["eth0"]), before: maps.Clone(before.LocalDevices[contract.Device]), desired: maps.Clone(after.LocalDevices[contract.Device]), beforeMarker: before.LocalConfig[contract.OwnershipKey()], desiredMarker: after.LocalConfig[contract.OwnershipKey()]}, nil
+}
+
+func (owned *resourceOwnedIngress) write(ctx context.Context, runner *resourceApplyRunner, rollback bool) error {
+	incus, _ := runner.cli.statusPorts()
+	writer, ok := incus.(interface {
+		SetOwnedResourceIngressIf(context.Context, yardnetwork.Yard, resource.ProxyContract, string, map[string]string, map[string]string, string, map[string]string, string) error
+	})
+	if !ok {
+		return errors.New("original startup ingress requires guarded Incus writer")
+	}
+	before, marker, desired, wanted := owned.before, owned.beforeMarker, owned.desired, owned.desiredMarker
+	if rollback {
+		if !owned.published {
+			return nil
+		}
+		before, marker, desired, wanted = owned.desired, owned.desiredMarker, nil, ""
+		if len(owned.before) == 0 {
+			wanted = owned.beforeMarker
+		}
+	}
+	if err := writer.SetOwnedResourceIngressIf(ctx, runner.ingress.preview.Target, runner.ingress.contract, owned.uuid, owned.nic, before, marker, desired, wanted); err != nil {
+		return err
+	}
+	owned.published = !rollback
+	return nil
 }
 
 func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded, definition resource.Definition, verb string) (*resourceIngress, error) {
@@ -41,28 +116,17 @@ func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded
 		!slices.Contains(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]), definition.Profile) {
 		return nil, errors.New("public ingress requires a selected resource in a local named VM yard")
 	}
-	contexts, err := cli.powerYardContexts(loaded)
+	contextCLI := cli
+	if cli.ownerResourceContext != nil {
+		contextCLI = cli.ownerResourceContext
+	}
+	contexts, err := contextCLI.powerYardContexts(loaded)
 	if err != nil {
 		return nil, err
 	}
-	service := cli.networkService(contexts)
+	service := cli.resourceIngressService(loaded, contexts)
 	if service == nil {
 		return nil, errors.New("owner network policy adapter is unavailable")
-	}
-	if cli.options.NetworkPolicy == nil {
-		service.ClearStaleUDP = clearResourceStaleUDP
-	}
-	// Use the prepared selection for the target yard while resolving other
-	// yards from their own persisted configuration.
-	selectedSource := service.ContractSource
-	service.ContractSource = func(yard yardnetwork.Yard) ([]resource.ProxyContract, error) {
-		if yard == networkYard(loaded.Context) {
-			return cli.resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])), nil
-		}
-		if selectedSource == nil {
-			return nil, nil
-		}
-		return selectedSource(yard)
 	}
 	yards := make([]yardnetwork.Yard, 0, len(contexts))
 	for _, selected := range contexts {
@@ -77,7 +141,7 @@ func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded
 		}
 	}
 	ingress := &resourceIngress{
-		loaded:  loaded,
+		loaded: loaded, contexts: contexts,
 		service: service, yards: yards, up: up, port: port, contract: *definition.Proxy,
 		address: loaded.Environment[definition.Proxy.AdvertiseHostSetting],
 	}
@@ -86,6 +150,35 @@ func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded
 		return nil, err
 	}
 	return ingress, nil
+}
+
+func (cli *CLI) resourceIngressService(loaded config.Loaded, contexts []domain.Context) *yardnetwork.Service {
+	contextCLI := cli
+	if cli.ownerResourceContext != nil {
+		contextCLI = cli.ownerResourceContext
+	}
+	service := contextCLI.networkService(contexts)
+	if service == nil {
+		return nil
+	}
+	if cli.options.NetworkPolicy == nil {
+		service.ClearStaleUDP = func(ctx context.Context, endpoint netip.AddrPort) error {
+			return clearResourceStaleUDP(ctx, endpoint, cli.options.RepositoryRoot)
+		}
+	}
+	// Use the prepared selection for the target yard while resolving other
+	// yards from their own persisted configuration.
+	selectedSource := service.ContractSource
+	service.ContractSource = func(yard yardnetwork.Yard) ([]resource.ProxyContract, error) {
+		if yard == networkYard(loaded.Context) {
+			return cli.resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])), nil
+		}
+		if selectedSource == nil {
+			return nil, nil
+		}
+		return selectedSource(yard)
+	}
+	return service
 }
 
 func (ingress *resourceIngress) augment(assessment domain.ActionAssessment) domain.ActionAssessment {
@@ -129,6 +222,9 @@ func (ingress *resourceIngress) refresh(ctx context.Context, cli *CLI) error {
 	})
 	if err != nil {
 		return err
+	}
+	if cli.resourceSourceEnvironment != nil {
+		freshLoaded = ownerLoadedLabels(freshLoaded, cli.options.RepositoryRoot, ingress.loaded.Context.Paths.RepositoryRoot)
 	}
 	if !reflect.DeepEqual(freshLoaded.Context, ingress.loaded.Context) ||
 		len(freshLoaded.Settings) != len(ingress.loaded.Settings) {
@@ -195,21 +291,29 @@ func (ingress *resourceIngress) apply(ctx context.Context, runner *resourceApply
 	if !ingress.up {
 		return fmt.Errorf("coordinate resource ingress isolation: %w", err)
 	}
-	if rollbackErr := ingress.rollback(runner, operationID); rollbackErr != nil {
+	var terminal *ports.NativeOperationFailure
+	if ports.NativeOperationObserverFrom(ctx) != nil && !errors.Is(err, domain.ErrPlanStale) && !errors.As(err, &terminal) {
+		return fmt.Errorf("coordinate resource ingress isolation: %w", err)
+	}
+	if rollbackErr := ingress.rollback(ctx, runner, operationID); rollbackErr != nil {
 		return fmt.Errorf("coordinate resource ingress isolation: %w; rollback ingress failed: %v", err, rollbackErr)
 	}
 	return fmt.Errorf("coordinate resource ingress isolation: %w; owned public ingress rolled back", err)
 }
 
-func clearResourceStaleUDP(ctx context.Context, endpoint netip.AddrPort) error {
+func clearResourceStaleUDP(ctx context.Context, endpoint netip.AddrPort, sourceRoot string) error {
 	path, found := hostruntime.FindConntrack("", "/usr/sbin", "/sbin", "/usr/bin")
 	if !found {
 		return errors.New("conntrack is required for public UDP resource recovery; rerun yard init")
 	}
 	cleaner := hostruntime.ConntrackCleaner{Lookup: func(string) (string, error) { return path, nil }}
-	if os.Geteuid() != 0 {
-		cleaner.Run = func(ctx context.Context, _ string, arguments ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, "sudo", append([]string{"-n", "--", path}, arguments...)...).Output()
+	cleaner.Run = func(ctx context.Context, binary string, arguments ...string) ([]byte, error) {
+		return runResourceConntrack(ctx, sourceRoot, binary, os.Geteuid() != 0, arguments...)
+	}
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		cleaner.Delete = func(ctx context.Context, binary string, arguments []string, settle func(error) error) error {
+			_, err := runResourceConntrackPostcondition(ctx, sourceRoot, binary, os.Geteuid() != 0, settle, arguments...)
+			return err
 		}
 	}
 	return cleaner.Clear(ctx, endpoint)
@@ -403,17 +507,25 @@ func (ingress *resourceIngress) probeReady(ctx context.Context, runner *resource
 	}
 }
 
-func (ingress *resourceIngress) rollback(runner *resourceApplyRunner, operationID string) error {
+func (ingress *resourceIngress) rollback(parent context.Context, runner *resourceApplyRunner, operationID string) error {
 	if ingress == nil || !ingress.up {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 30*time.Second)
 	defer cancel()
+	if runner.ownedIngress != nil {
+		if err := runner.ownedIngress.write(ctx, runner, true); err != nil {
+			return fmt.Errorf("close original startup ingress: %w", err)
+		}
+	}
 	command := exec.CommandContext(ctx, runner.definition.HandlerPath(), "rollback-ingress")
 	configureResourceProcess(command)
 	command.Dir = runner.cli.options.WorkingDir
 	command.Env = runner.cli.resourceApplyEnvironment(runner.loaded, runner.definition, runner.localAction,
 		operationID, runner.effect)
+	if runner.ownedIngress != nil {
+		command.Env = environmentList(environmentMap(command.Env), map[string]string{"SUBYARD_RESOURCE_INGRESS_OWNER": "parent", "SUBYARD_RESOURCE_INSTANCE_UUID": runner.ownedIngress.uuid})
+	}
 	if runner.effect != domain.ActionSession {
 		release, err := runner.cli.resourceOwnerBarrier(ctx, runner.loaded, command)
 		if err != nil {
@@ -423,39 +535,51 @@ func (ingress *resourceIngress) rollback(runner *resourceApplyRunner, operationI
 	}
 	command.Stdout = runner.cli.options.Stdout
 	command.Stderr = runner.cli.options.Stderr
-	if err := command.Run(); err != nil {
+	if err := shelladapter.RunNativeCommand(ctx, command, nil, nil, nil); err != nil {
 		return fmt.Errorf("run owned ingress rollback: %w", err)
 	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(parent), 2*time.Minute)
 	defer cleanupCancel()
-	if err := ingress.cleanupRollbackACL(cleanupCtx); err != nil {
+	pending := ""
+	if runner.ownedIngress != nil && len(runner.ownedIngress.before) == 0 {
+		pending = runner.ownedIngress.beforeMarker
+	}
+	uuid := ""
+	if runner.ownedIngress != nil {
+		uuid = runner.ownedIngress.uuid
+	}
+	if err := ingress.cleanupRollbackACL(cleanupCtx, pending, uuid); err != nil {
 		return fmt.Errorf("verify owned public ingress rollback and clean isolation ACL: %w", err)
 	}
 	return nil
 }
 
-func (ingress *resourceIngress) cleanupRollbackACL(ctx context.Context) error {
-	closure, err := ingress.service.PreviewResourceIngress(ctx, ingress.yards,
+func (ingress *resourceIngress) cleanupRollbackACL(ctx context.Context, originalPending, originalUUID string) error {
+	service := *ingress.service
+	if originalUUID != "" {
+		service.Host = resourceOriginalNetworkHost{Host: service.Host, target: ingress.preview.Target, uuid: originalUUID}
+	}
+	closure, err := service.PreviewResourceIngress(ctx, ingress.yards,
 		ingress.preview.Target, ingress.contract, "", 0, false)
 	if err != nil {
 		return err
 	}
-	if err := ingress.preview.ValidateRollback(closure, ingress.contract); err != nil {
+	if err := ingress.preview.ValidateRollbackOriginalPending(closure, ingress.contract, originalPending); err != nil {
 		return err
 	}
 	actual := closure.Before
 	if !actual.Changed {
 		return nil
 	}
-	if err := ingress.service.Apply(ctx, actual); err != nil {
+	if err := service.Apply(ctx, actual); err != nil {
 		return err
 	}
-	verified, err := ingress.service.PreviewResourceIngress(ctx, ingress.yards,
+	verified, err := service.PreviewResourceIngress(ctx, ingress.yards,
 		ingress.preview.Target, ingress.contract, "", 0, false)
 	if err != nil {
 		return err
 	}
-	if err := ingress.preview.ValidateRollback(verified, ingress.contract); err != nil {
+	if err := ingress.preview.ValidateRollbackOriginalPending(verified, ingress.contract, originalPending); err != nil {
 		return err
 	}
 	if verified.Before.Changed {

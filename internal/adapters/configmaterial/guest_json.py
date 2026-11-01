@@ -1,4 +1,6 @@
 import fcntl
+import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -288,7 +290,7 @@ def read_current(destination):
         raise MaterializationError("invalid current " + FORMAT.upper())
 
 
-def validate_destination_parent(destination, allowed_home, uid, create):
+def validate_destination_parent(destination, allowed_home, uid, create, retain=False):
     directory = os.path.dirname(destination)
     if destination == allowed_home or not destination.startswith(allowed_home + os.sep):
         raise MaterializationError("invalid destination path")
@@ -304,7 +306,9 @@ def validate_destination_parent(destination, allowed_home, uid, create):
                 child = os.open(part, flags, dir_fd=descriptor)
             except FileNotFoundError:
                 if not create:
-                    return False
+                    os.close(descriptor)
+                    descriptor = None
+                    return None if retain else False
                 os.mkdir(part, 0o755, dir_fd=descriptor)
                 child = os.open(part, flags, dir_fd=descriptor)
                 os.fchown(child, uid, uid)
@@ -312,11 +316,13 @@ def validate_destination_parent(destination, allowed_home, uid, create):
             os.close(descriptor)
             descriptor = child
     except Exception:
+        if descriptor is not None and retain:
+            os.close(descriptor)
         raise MaterializationError("invalid destination path")
     finally:
-        if descriptor is not None:
+        if descriptor is not None and not retain:
             os.close(descriptor)
-    return True
+    return descriptor if retain else True
 
 
 def semantic_payload(value):
@@ -348,6 +354,109 @@ def fingerprint(current, desired, baseline_digest, state, tracked):
     payload = (toml_fingerprint_payload(materialized) if FORMAT == "toml"
                else semantic_payload(materialized))
     return hashlib.sha256(payload).hexdigest()
+
+
+def materialized_observation(current, desired, baseline, evidence, compatible, original, desired_digest):
+    if baseline is None:
+        return {"converged": False, "fingerprint": fingerprint(current, desired, "missing", "baseline-missing", [])}
+    wanted_owned = sorted(ownership(desired), key=lambda item: (item["path"], item["kind"]))
+    baseline_current = (baseline["desired_digest"] == desired_digest and
+                        baseline["owned"] == wanted_owned and baseline.get("phase", "applied") == "applied")
+    managed_current = original is not None
+    for entry in wanted_owned:
+        found_current, value = lookup(current, pointer_parts(entry["path"]))
+        found_desired, wanted = lookup(desired, pointer_parts(entry["path"]))
+        managed_current = managed_current and found_current and found_desired and (
+            isinstance(value, dict) if entry["kind"] == "empty-object" else json_equal(value, wanted))
+    converged = baseline_current and managed_current and evidence is not None and compatible
+    return {"converged": converged, "fingerprint": fingerprint(current, desired, baseline["desired_digest"],
+            "converged" if converged else "drift", baseline["owned"])}
+
+
+def apply_document(current, desired, baseline):
+    if baseline is not None and baseline.get("phase") != "retired":
+        wanted_keys = {(entry["path"], entry["kind"]) for entry in ownership(desired)}
+        wanted_objects = object_paths(desired)
+        retired = [entry for entry in baseline["owned"] if (entry["path"], entry["kind"]) not in wanted_keys and entry["path"] not in wanted_objects]
+        for entry in sorted(retired, key=lambda item: item["path"].count("/"), reverse=True):
+            remove_owned(current, entry)
+    overlay(current, desired)
+
+
+def read_current_at(parent, name):
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except FileNotFoundError:
+        return {}, None, {"exists": False, "uid": 0, "gid": 0, "mode": 0}
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise MaterializationError("invalid destination path")
+        raw = source.read((32 << 20) + 1)
+        after = os.fstat(source.fileno())
+        identity = lambda st: (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if len(raw) > 32 << 20 or identity(info) != identity(after):
+            raise MaterializationError("concurrent destination change")
+    value = parse_document(raw)
+    if not isinstance(value, dict):
+        raise MaterializationError("invalid current configuration")
+    return value, raw, {"exists": True, "uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}
+
+
+def protected_state(baseline_path, receipt_path):
+    result = {}
+    for key, path in (("baseline", baseline_path), ("receipt", receipt_path)):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            result[key] = ""
+            continue
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != STATE_UID or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+                raise MaterializationError("invalid materialization state")
+            raw = source.read((32 << 20) + 1)
+            if len(raw) > 32 << 20:
+                raise MaterializationError("materialization state bound")
+        result[key] = hashlib.sha256(raw).hexdigest()
+    return result
+
+
+def applied_evidence(current, desired, developer, destination, desired_digest):
+    owned = sorted(ownership(desired), key=lambda item: (item["path"], item["kind"]))
+    return {"schema": 2, "developer": developer, "destination": destination,
+            "desired_digest": desired_digest, "format": FORMAT, "phase": "applied",
+            "projection_digest": projection_digest(current, owned), "retired_digest": "", "owned": owned}
+
+
+def after_owner_report(current, desired, baseline, evidence, compatible, original, desired_digest,
+                       metadata, developer, destination, baseline_path, receipt_path, expected):
+    report = materialized_observation(current, desired, baseline, evidence, compatible, original, desired_digest)
+    state = protected_state(baseline_path, receipt_path)
+    report["state"] = state
+    report["destination"] = dict(metadata, digest='' if original is None else hashlib.sha256(original).hexdigest())
+    if expected is None:
+        return report
+    initial = expected.get("state")
+    if not isinstance(initial, dict) or set(initial) != {"baseline", "receipt"}:
+        raise MaterializationError("missing original materialization state")
+    approved = copy.deepcopy(current)
+    apply_document(approved, desired, baseline)
+    wanted = applied_evidence(approved, desired, developer, destination, desired_digest)
+    baseline_hash = hashlib.sha256(semantic_payload(compatible_baseline(wanted)) + b"\n").hexdigest()
+    receipt_hash = hashlib.sha256(semantic_payload(wanted) + b"\n").hexdigest()
+    # Only the existing publisher's ordered prefixes are possible successors.
+    prefixes = (initial, {"baseline": baseline_hash, "receipt": initial["receipt"]},
+                {"baseline": baseline_hash, "receipt": receipt_hash})
+    if state not in prefixes:
+        raise MaterializationError("original materialization evidence changed")
+    tracked = list(ownership(desired)) + ([] if baseline is None else baseline["owned"])
+    at_desired = original is not None and projection_digest(current, tracked) == projection_digest(approved, tracked)
+    report["approvedDesired"] = at_desired and metadata == {"exists": True, "uid": int(sys.argv[4]), "gid": int(sys.argv[4]), "mode": 0o644}
+    original_metadata = {key: expected[key] for key in ("exists", "uid", "gid", "mode")}
+    if not (state == initial and report["fingerprint"] == expected["fingerprint"] and metadata == original_metadata or report["approvedDesired"]):
+        raise MaterializationError("original owned configuration changed")
+    return report
 
 
 def projection(current, entries):
@@ -439,12 +548,13 @@ def toml_fingerprint_payload(value):
     return json.dumps(typed(value), ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def atomic_write(path, payload, uid, mode):
+def atomic_write(path, payload, uid, mode, parent=None, check=None):
     directory = os.path.dirname(path)
     directory_flags = os.O_RDONLY | os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
-    directory_descriptor = os.open(directory, directory_flags)
+    owned_parent = parent is None
+    directory_descriptor = os.open(directory, directory_flags) if owned_parent else parent
     temporary = ".subyard-config." + secrets.token_hex(12)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -457,6 +567,8 @@ def atomic_write(path, payload, uid, mode):
             os.fchown(output.fileno(), uid, uid)
             os.fchmod(output.fileno(), mode)
             os.fsync(output.fileno())
+        if check is not None:
+            check()
         os.replace(temporary, os.path.basename(path),
                    src_dir_fd=directory_descriptor, dst_dir_fd=directory_descriptor)
         os.fsync(directory_descriptor)
@@ -467,10 +579,19 @@ def atomic_write(path, payload, uid, mode):
                 os.unlink(temporary, dir_fd=directory_descriptor)
             except FileNotFoundError:
                 pass
-        os.close(directory_descriptor)
+        if owned_parent:
+            os.close(directory_descriptor)
 
 
-def replace_destination(destination, allowed_home, uid, original, payload, create, file_mode=0o644):
+def replace_destination(destination, allowed_home, uid, original, payload, create, file_mode=0o644, parent=None, metadata=None):
+    if parent is not None:
+        def unchanged():
+            _, latest, observed = read_current_at(parent, os.path.basename(destination))
+            if latest != original or observed != metadata:
+                raise MaterializationError("concurrent destination change")
+        unchanged()
+        atomic_write(destination, payload, uid, file_mode, parent, unchanged)
+        return
     validate_destination_parent(destination, allowed_home, uid, create)
     _, latest = read_current(destination)
     if latest != original:
@@ -527,9 +648,15 @@ def retire(mode, baseline, baseline_path, receipt_path, current, original, desti
 
 
 def main():
-    if len(sys.argv) != 7:
+    if len(sys.argv) not in (7, 8):
         fail("invalid request")
-    mode, developer, destination, uid_text, desired_digest, allowed_home = sys.argv[1:]
+    mode, developer, destination, uid_text, desired_digest, allowed_home = sys.argv[1:7]
+    after_owner = len(sys.argv) == 8
+    options = json.loads(sys.argv[7]) if after_owner else None
+    capture = after_owner and options.get("capture") is True
+    expected = None if capture else options
+    if after_owner and (mode not in ("observe", "apply") or capture and mode != "observe"):
+        fail("invalid expected materialization state")
     if mode not in ("observe", "apply", "assess-adopt", "assess-retire", "retire"):
         fail("invalid request")
     read_only = mode in ("observe", "assess-adopt", "assess-retire")
@@ -550,7 +677,22 @@ def main():
     lock_path = os.path.join(STATE_ROOT, identity + ".lock")
     state_exists = validate_state_root()
 
-    if mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
+    if after_owner and mode == "observe" and not os.path.lexists(lock_path):
+        if os.path.lexists(baseline_path) or os.path.lexists(receipt_path):
+            raise MaterializationError("materialization evidence lacks lock")
+        with contextlib.ExitStack() as custody:
+            parent = validate_destination_parent(destination, allowed_home, uid, False, True)
+            if parent is None:
+                current, original, metadata = {}, None, {"exists": False, "uid": 0, "gid": 0, "mode": 0}
+            else:
+                custody.callback(os.close, parent)
+                current, original, metadata = read_current_at(parent, os.path.basename(destination))
+            report = after_owner_report(current, desired, None, None, False, original, desired_digest,
+                                        metadata, developer, destination, baseline_path, receipt_path, expected)
+            print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+            return
+
+    if not after_owner and mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination) if parent_exists else ({}, None)
         if mode == "assess-adopt" and original is not None:
@@ -585,7 +727,7 @@ def main():
             lock_flags |= os.O_NOFOLLOW
         lock_descriptor = os.open(lock_path, lock_flags)
 
-    with os.fdopen(lock_descriptor, "rb" if mode != "apply" else "r+b") as lock:
+    with contextlib.ExitStack() as custody, os.fdopen(lock_descriptor, "rb" if mode != "apply" else "r+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_SH if read_only else fcntl.LOCK_EX)
         baseline = None
         if os.path.lexists(baseline_path):
@@ -595,7 +737,16 @@ def main():
         evidence = read_ownership(receipt_path, baseline, developer, destination)
         compatible = baseline is not None and baseline["schema"] == 1
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
-        current, original = read_current(destination) if parent_exists else ({}, None)
+        current, original = read_current(destination) if parent_exists and not after_owner else ({}, None)
+
+        destination_parent, metadata = None, None
+        if after_owner:
+            destination_parent = validate_destination_parent(destination, allowed_home, uid, mode == "apply", True)
+            if destination_parent is None:
+                current, original, metadata = {}, None, {"exists": False, "uid": 0, "gid": 0, "mode": 0}
+            else:
+                custody.callback(os.close, destination_parent)
+                current, original, metadata = read_current_at(destination_parent, os.path.basename(destination))
 
         if mode in ("assess-retire", "retire"):
             retire(mode, evidence, baseline_path, receipt_path, current, original, destination, allowed_home, uid)
@@ -603,6 +754,13 @@ def main():
 
         if evidence is not None:
             baseline = evidence
+
+        if mode == "observe":
+            report = (after_owner_report(current, desired, baseline, evidence, compatible, original, desired_digest,
+                      metadata, developer, destination, baseline_path, receipt_path, expected) if after_owner else
+                      materialized_observation(current, desired, baseline, evidence, compatible, original, desired_digest))
+            print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+            return
 
         if mode in ("observe", "assess-adopt"):
             baseline_current = (baseline["desired_digest"] == desired_digest and
@@ -648,22 +806,16 @@ def main():
 
         if baseline is not None and baseline.get("phase") == "retiring":
             raise MaterializationError("materialization retirement pending")
-        if baseline is not None and baseline.get("phase") != "retired":
-            wanted_keys = {(entry["path"], entry["kind"]) for entry in wanted_owned}
-            wanted_objects = object_paths(desired)
-            retired = [entry for entry in baseline["owned"]
-                       if (entry["path"], entry["kind"]) not in wanted_keys and
-                       entry["path"] not in wanted_objects]
-            for entry in sorted(retired, key=lambda item: item["path"].count("/"), reverse=True):
-                remove_owned(current, entry)
-        overlay(current, desired)
-        replace_destination(destination, allowed_home, uid, original,
-                            document_payload(current, original), True)
-        evidence = {"schema": 2, "developer": developer,
-                    "destination": destination, "desired_digest": desired_digest,
-                    "format": FORMAT, "phase": "applied",
-                    "projection_digest": projection_digest(current, wanted_owned),
-                    "retired_digest": "", "owned": wanted_owned}
+        if expected is not None:
+            after_owner_report(current, desired, baseline, evidence, compatible, original, desired_digest,
+                               metadata, developer, destination, baseline_path, receipt_path, expected)
+            wanted_metadata = {"exists": True, "uid": uid, "gid": uid, "mode": 0o644}
+        apply_document(current, desired, baseline)
+        payload = document_payload(current, original)
+        if expected is None or payload != original or metadata != wanted_metadata:
+            replace_destination(destination, allowed_home, uid, original, payload, True,
+                                parent=destination_parent, metadata=metadata)
+        evidence = applied_evidence(current, desired, developer, destination, desired_digest)
         atomic_write(baseline_path, semantic_payload(compatible_baseline(evidence)) + b"\n", STATE_UID, 0o600)
         atomic_write(receipt_path, semantic_payload(evidence) + b"\n", STATE_UID, 0o600)
 

@@ -7,11 +7,13 @@ REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT="$REPO/.build/yard"
 VERSION="${YARD_BUILD_VERSION:-0.1.0-dev}"
 FORCE=0
+RELEASE_OWNER=go
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --output) [ $# -ge 2 ] || { printf 'build-engine: --output needs a path\n' >&2; exit 2; }; OUTPUT="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --experimental-release-owner) RELEASE_OWNER=rust; shift ;;
     *) printf 'build-engine: unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -19,6 +21,8 @@ done
 engine_stale() {
   [ "$FORCE" = 1 ] && return 0
   [ -x "$OUTPUT" ] || return 0
+  [ "$SCRIPT_DIR/build-engine.sh" -nt "$OUTPUT" ] && return 0
+  [ "$("$OUTPUT" _release-owner-variant-v1 2>/dev/null)" = "$RELEASE_OWNER" ] || return 0
   [ "$("$OUTPUT" --version 2>/dev/null)" = "$(basename "$OUTPUT") $VERSION" ] || return 0
   [ "$REPO/go.mod" -nt "$OUTPUT" ] || [ "$REPO/go.sum" -nt "$OUTPUT" ] || \
     find "$REPO/cmd" "$REPO/internal" -type f -name '*.go' ! -name '*_test.go' \
@@ -42,7 +46,7 @@ lock="$(dirname "$OUTPUT")/.build.lock"
   # packaged builds deliberately use isolated homes, and the explicit VERSION is authoritative.
   cd "$REPO"
   CGO_ENABLED=0 go build -buildvcs=false -mod=readonly -trimpath \
-    -ldflags "-s -w -X github.com/Subyard/Subyard/internal/cli.Version=$VERSION" \
+    -ldflags "-s -w -X github.com/Subyard/Subyard/internal/cli.Version=$VERSION -X github.com/Subyard/Subyard/internal/adapters/releaseruntime.compiledReleaseOwner=$RELEASE_OWNER" \
     -o "$tmp" ./cmd/yard
   chmod 0755 "$tmp"
   mv -f "$tmp" "$OUTPUT"

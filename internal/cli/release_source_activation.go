@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,13 +19,14 @@ import (
 )
 
 type sourceActivationDraft struct {
-	cli        *CLI
-	home       string
-	view       releasetransition.V2SettingsSnapshotView
-	projection testyardmigration.ActivationProjection
-	inputs     *config.ProspectiveFiles
-	overrides  map[string]string
-	names      []string
+	cli           *CLI
+	home          string
+	view          releasetransition.V2SettingsSnapshotView
+	projection    testyardmigration.ActivationProjection
+	inputs        *config.ProspectiveFiles
+	overrides     map[string]string
+	commandInputs map[string]string
+	names         []string
 }
 
 func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition.V2SourceActivationView) (*sourceActivationDraft, error) {
@@ -126,6 +128,7 @@ func (draft *sourceActivationDraft) readAsset(asset config.MaterializedAsset) ([
 }
 func (draft *sourceActivationDraft) load(name string) (config.Loaded, error) {
 	environment := draft.cli.freshMigrationEnvironment(draft.cli.baseEnv, draft.cli.options.RepositoryRoot)
+	maps.Copy(environment, draft.commandInputs)
 	environment["SUBYARD_CONFIG_HOME"] = draft.home
 	home := environment["SUBYARD_OPERATOR_HOME"]
 	if home == "" {

@@ -18,7 +18,17 @@ import (
 // waitNative preserves the ordinary SDK wait path when no native custodian is
 // present. Custodied calls durably report the exact SDK ID before waiting and
 // require an explicit final remote status. A nil Wait is insufficient.
-func waitNative(ctx context.Context, server incus.InstanceServer, operation incus.Operation, kind, project, resource string) (result error) {
+type nativeWaitResult struct {
+	operation ports.NativeOperation
+	exitCode  int
+	exitValid bool
+}
+
+func waitNative(ctx context.Context, server incus.InstanceServer, operation incus.Operation, kind, project, resource string) error {
+	return waitNativeChecked(ctx, server, operation, kind, project, resource, nil)
+}
+
+func waitNativeChecked(ctx context.Context, server incus.InstanceServer, operation incus.Operation, kind, project, resource string, checked *nativeWaitResult) (result error) {
 	observer := ports.NativeOperationObserverFrom(ctx)
 	if observer == nil {
 		return operation.Wait()
@@ -90,11 +100,44 @@ func waitNative(ctx context.Context, server incus.InstanceServer, operation incu
 	if !nativeFinalStatus(remote.StatusCode) {
 		return errors.Join(recordErr, waited, errors.New("native operation terminal status unproved"))
 	}
+	if kind == "instance-exec" {
+		if _, valid := explicitNativeExecExit(remote.Metadata); !valid {
+			return errors.Join(recordErr, waited, errors.New("native instance command return status unproved"))
+		}
+	}
 	terminalErr := observer.Terminal(value)
 	if remote.StatusCode != api.Success && recordErr == nil && terminalErr == nil {
 		return &ports.NativeOperationFailure{Operation: value, Cause: errors.Join(waited, fmt.Errorf("remote operation status %d", remote.StatusCode))}
 	}
-	return errors.Join(recordErr, waited, terminalErr)
+	result = errors.Join(recordErr, waited, terminalErr)
+	if result == nil && checked != nil && kind == "instance-exec" {
+		checked.operation = value
+		checked.exitCode, checked.exitValid = explicitNativeExecExit(remote.Metadata)
+	}
+	return result
+}
+
+// completedNativeExec is called only after bounded Exec's SDK data streams drain.
+// It retains the original accepted tuple and compares one fresh SDK snapshot;
+// API success alone never supplies a command failure witness.
+func completedNativeExec(ctx context.Context, server incus.InstanceServer, operation incus.Operation, checked nativeWaitResult) (int, error) {
+	observer := ports.NativeOperationObserverFrom(ctx)
+	remote := operation.Get()
+	current, identityErr := nativeOperation(server, "instance-exec", checked.operation.Project, checked.operation.Resource)
+	current.ID, current.Status = remote.ID, int(remote.StatusCode)
+	identityErr = errors.Join(identityErr, nativeOperationIdentity(remote, checked.operation))
+	exitCode, valid := explicitNativeExecExit(remote.Metadata)
+	if ctx.Err() != nil || identityErr != nil || current != checked.operation || current.Kind != "instance-exec" || current.Status != int(api.Success) || !checked.exitValid || !valid || exitCode != checked.exitCode {
+		observer.Uncertain()
+		return 0, errors.Join(context.Cause(ctx), identityErr, errors.New("native completed exec binding unproved"))
+	}
+	if exitCode != 0 {
+		if !ports.NativeSynchronousConfigCASFrom(ctx) {
+			return exitCode, fmt.Errorf("instance command exited with status %d", exitCode)
+		}
+		return exitCode, &ports.NativeOperationFailure{Operation: current, ExecExitCode: &exitCode, Cause: fmt.Errorf("instance command exited with status %d", exitCode)}
+	}
+	return exitCode, nil
 }
 
 // NativeOperationState observes only an already accepted exact SDK operation.
@@ -118,6 +161,11 @@ func (client *Client) NativeOperationState(ctx context.Context, expected ports.N
 	}
 	if err := nativeOperationIdentity(*remote, expected); err != nil {
 		return ports.NativeOperation{}, err
+	}
+	if expected.Kind == "instance-exec" && nativeFinalStatus(remote.StatusCode) {
+		if _, valid := explicitNativeExecExit(remote.Metadata); !valid {
+			return ports.NativeOperation{}, errors.New("native instance command return status unproved")
+		}
 	}
 	identity.ID, identity.Status = remote.ID, int(remote.StatusCode)
 	return identity, nil

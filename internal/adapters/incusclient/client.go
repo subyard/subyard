@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -121,6 +123,37 @@ func (client *Client) SetInstancePower(
 	action string,
 	force bool,
 ) error {
+	if err := client.setInstancePower(ctx, project, name, action, force, "", domain.YardVM); err != nil {
+		return err
+	}
+	if action == "start" {
+		if err := client.applyVMCPU(ctx, project, name); err != nil {
+			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+			defer cancel()
+			return errors.Join(err, client.SetInstancePower(stopContext, project, name, "stop", true))
+		}
+	}
+	return nil
+}
+
+// SetInstancePowerIf changes only the original VM power state. The native
+// lifecycle caller owns host guards, guest readiness and CPU scheduling.
+func (client *Client) SetInstancePowerIf(ctx context.Context, project, name, action string, force bool, expectedUUID string) error {
+	if expectedUUID == "" {
+		return domain.ErrPlanStale
+	}
+	return client.setInstancePower(ctx, project, name, action, force, expectedUUID, domain.YardVM)
+}
+
+// SetOriginalInstancePowerIf retains the captured kind and UUID through the raw SDK leaf.
+func (client *Client) SetOriginalInstancePowerIf(ctx context.Context, project, name, action string, force bool, uuid string, kind domain.YardKind) error {
+	if uuid == "" || kind != domain.YardVM && kind != domain.YardContainer {
+		return domain.ErrPlanStale
+	}
+	return client.setInstancePower(ctx, project, name, action, force, uuid, kind)
+}
+
+func (client *Client) setInstancePower(ctx context.Context, project, name, action string, force bool, expectedUUID string, kind domain.YardKind) error {
 	if action != "start" && action != "stop" {
 		return fmt.Errorf("invalid instance power action %q", action)
 	}
@@ -132,6 +165,15 @@ func (client *Client) SetInstancePower(
 		return err
 	}
 	if err := client.validateServerExtensions(server); err != nil {
+		return err
+	}
+	check := func() error {
+		if kind == domain.YardVM {
+			return client.checkVMUUID(ctx, project, name, expectedUUID)
+		}
+		return client.checkOriginalKindUUID(ctx, project, name, expectedUUID, kind)
+	}
+	if err := check(); err != nil {
 		return err
 	}
 	if err := beforeNative(ctx, server, "instance-power", project, name); err != nil {
@@ -146,14 +188,7 @@ func (client *Client) SetInstancePower(
 	if err := waitNative(ctx, server, operation, "instance-power", project, name); err != nil {
 		return normalizeOperationError("wait for "+action+" instance", operation.Get(), err)
 	}
-	if action == "start" {
-		if err := client.applyVMCPU(ctx, project, name); err != nil {
-			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
-			defer cancel()
-			return errors.Join(err, client.SetInstancePower(stopContext, project, name, "stop", true))
-		}
-	}
-	return nil
+	return check()
 }
 
 func (client *Client) ReconcileState(
@@ -232,7 +267,7 @@ func (client *Client) Exec(
 	name string,
 	request ports.InstanceExecRequest,
 ) (ports.InstanceExecResult, error) {
-	return client.exec(ctx, project, name, request, bytes.NewReader(request.Stdin))
+	return client.execWithInput(ctx, project, name, request, bytes.NewReader(request.Stdin), false, true)
 }
 
 func (client *Client) StreamExec(
@@ -242,7 +277,7 @@ func (client *Client) StreamExec(
 	request ports.InstanceExecRequest,
 	stdin io.Reader,
 ) (ports.InstanceExecResult, error) {
-	return client.exec(ctx, project, name, request, stdin)
+	return client.exec(ctx, project, name, request, stdin, false)
 }
 
 func (client *Client) exec(
@@ -251,13 +286,50 @@ func (client *Client) exec(
 	name string,
 	request ports.InstanceExecRequest,
 	stdin io.Reader,
+	agentProbe bool,
+) (ports.InstanceExecResult, error) {
+	return client.execWithInput(ctx, project, name, request, stdin, agentProbe, false)
+}
+
+func (client *Client) execWithInput(
+	ctx context.Context,
+	project, name string,
+	request ports.InstanceExecRequest,
+	stdin io.Reader,
+	agentProbe, boundedInput bool,
 ) (ports.InstanceExecResult, error) {
 	if len(request.Command) == 0 {
 		return ports.InstanceExecResult{}, errors.New("instance exec command is required")
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	server, err := client.connect(ctx, true)
 	if err != nil {
 		return ports.InstanceExecResult{}, err
+	}
+	info, err := server.GetConnectionInfo()
+	if err != nil {
+		return ports.InstanceExecResult{}, err
+	}
+	httpClient, err := server.GetHTTPClient()
+	if err != nil {
+		return ports.InstanceExecResult{}, err
+	}
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok || info.SocketPath == "" {
+		return ports.InstanceExecResult{}, errors.New("instance exec requires its original Unix transport")
+	}
+	// The SDK websocket handshake detaches the request context. Keep each
+	// connection inside this Exec, including its original wait/drain reserve.
+	transport.DialContext = func(dialContext context.Context, _, _ string) (net.Conn, error) {
+		dialContext, stop := context.WithCancel(dialContext)
+		stopOwner := context.AfterFunc(ctx, stop)
+		defer func() { stopOwner(); stop() }()
+		connection, err := (&net.Dialer{}).DialContext(dialContext, "unix", info.SocketPath)
+		if err == nil {
+			context.AfterFunc(ctx, func() { _ = connection.Close() })
+		}
+		return connection, err
 	}
 	if err := client.validateServerExtensions(server); err != nil {
 		return ports.InstanceExecResult{}, err
@@ -265,6 +337,11 @@ func (client *Client) exec(
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	dataDone := make(chan bool)
+	var output, diagnostics io.Writer = &stdout, &stderr
+	if agentProbe {
+		// The fixed read-only probe has no output contract.
+		output, diagnostics = io.Discard, io.Discard
+	}
 	if err := beforeNative(ctx, server, "instance-exec", project, name); err != nil {
 		return ports.InstanceExecResult{}, err
 	}
@@ -272,23 +349,44 @@ func (client *Client) exec(
 		Command: request.Command, Environment: cloneMap(request.Environment),
 		WaitForWS: true, Interactive: false, User: request.User, Group: request.Group,
 	}, &incus.InstanceExecArgs{
-		Stdin: stdin, Stdout: &stdout, Stderr: &stderr,
+		Stdin: stdin, Stdout: output, Stderr: diagnostics,
 		DataDone: dataDone,
 	})
 	if err != nil {
-		return ports.InstanceExecResult{}, normalizeError("start instance command", err)
+		if observer := ports.NativeOperationObserverFrom(ctx); observer != nil {
+			observer.Uncertain()
+		}
+		err = errors.Join(normalizeError("start instance command", err), context.Cause(ctx))
+		if agentProbe {
+			err = fmt.Errorf("agent probe dispatch unproved: %w", err)
+		}
+		return ports.InstanceExecResult{}, err
+	}
+	if agentProbe {
+		return ports.InstanceExecResult{}, finishInstanceAgentProbe(ctx, operation, dataDone)
 	}
 	wait := make(chan error, 1)
-	go func() { wait <- waitNative(ctx, server, operation, "instance-exec", project, name) }()
+	var checked nativeWaitResult
+	go func() { wait <- waitNativeChecked(ctx, server, operation, "instance-exec", project, name, &checked) }()
 	select {
 	case <-ctx.Done():
 		_ = operation.Cancel()
-		<-wait
+		waited := <-wait
+		observer := ports.NativeOperationObserverFrom(ctx)
+		if observer != nil {
+			observer.Uncertain()
+		}
 		if err := drainExecData(ctx, dataDone); err != nil {
+			if observer != nil {
+				return ports.InstanceExecResult{}, errors.Join(waited, err, context.Cause(ctx))
+			}
 			return ports.InstanceExecResult{}, err
 		}
-		return ports.InstanceExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()},
-			fmt.Errorf("wait for instance command: %w", context.Cause(ctx))
+		canceled := fmt.Errorf("wait for instance command: %w", context.Cause(ctx))
+		if observer != nil {
+			canceled = errors.Join(waited, canceled)
+		}
+		return ports.InstanceExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}, canceled
 	case err := <-wait:
 		if drainErr := drainExecData(ctx, dataDone); drainErr != nil {
 			return ports.InstanceExecResult{}, errors.Join(err, drainErr)
@@ -303,6 +401,19 @@ func (client *Client) exec(
 		if err != nil {
 			return result, normalizeOperationError("wait for instance command", operation.Get(), err)
 		}
+		if observer := ports.NativeOperationObserverFrom(ctx); observer != nil {
+			if boundedInput {
+				explicit, completedErr := completedNativeExec(ctx, server, operation, checked)
+				result.ExitCode = explicit
+				return result, completedErr
+			}
+			explicit, valid := explicitNativeExecExit(operation.Get().Metadata)
+			if !valid {
+				observer.Uncertain()
+				return result, errors.New("native instance command return status unproved")
+			}
+			exitCode, result.ExitCode = explicit, explicit
+		}
 		if exitCode != 0 {
 			return result, fmt.Errorf("instance command exited with status %d", exitCode)
 		}
@@ -314,7 +425,7 @@ func drainExecData(ctx context.Context, done <-chan bool) error {
 	observer := ports.NativeOperationObserverFrom(ctx)
 	if observer == nil {
 		<-done
-		return nil
+		return context.Cause(ctx)
 	}
 	select {
 	case <-done:
@@ -395,6 +506,35 @@ func (client *Client) SetInstanceConfig(
 	instanceName string,
 	values map[string]string,
 ) error {
+	return client.SetInstanceConfigIf(ctx, project, instanceName, "", nil, values)
+}
+
+// SetInstanceConfigIf checks the original instance and selected local keys in
+// the same SDK GET/ETag update. An empty UUID retains ordinary Go behavior.
+func (client *Client) SetInstanceConfigIf(ctx context.Context, project, instanceName, uuid string, before, values map[string]string) error {
+	return client.setInstanceConfigIf(ctx, project, instanceName, uuid, domain.YardVM, false, before, values)
+}
+
+// SetOriginalInstanceConfigIf keeps the captured native owner kind and UUID.
+// Ordinary and existing VM-only callers retain their existing entrypoints.
+func (client *Client) SetOriginalInstanceConfigIf(ctx context.Context, project, name, uuid string, kind domain.YardKind, before, values map[string]string) error {
+	if uuid == "" || kind != domain.YardVM && kind != domain.YardContainer {
+		return domain.ErrPlanStale
+	}
+	if err := client.setInstanceConfigIf(ctx, project, name, uuid, kind, true, before, values); err != nil {
+		return err
+	}
+	instance, err := client.Instance(ctx, project, name)
+	if err != nil {
+		return err
+	}
+	if instance.Project != project || instance.Name != name || instance.Type != kind || instance.Config["volatile.uuid"] != uuid || instance.LocalConfig["volatile.uuid"] != uuid {
+		return domain.ErrPlanStale
+	}
+	return nil
+}
+
+func (client *Client) setInstanceConfigIf(ctx context.Context, project, instanceName, uuid string, kind domain.YardKind, original bool, before, values map[string]string) error {
 	server, err := client.connect(ctx, true)
 	if err != nil {
 		return err
@@ -406,6 +546,23 @@ func (client *Client) SetInstanceConfig(
 	instance, etag, err := projectServer.GetInstance(instanceName)
 	if err != nil {
 		return normalizeError("get instance", err)
+	}
+	if uuid != "" {
+		if instance == nil || instance.Name != instanceName || instance.Project != "" && instance.Project != project || instance.Config["volatile.uuid"] != uuid || etag == "" {
+			return domain.ErrPlanStale
+		}
+		if original {
+			if instanceInfo(project, instance).Type != kind || instance.ExpandedConfig["volatile.uuid"] != uuid {
+				return domain.ErrPlanStale
+			}
+		} else if instance.Type != "virtual-machine" {
+			return domain.ErrPlanStale
+		}
+		for key, value := range before {
+			if instance.Config[key] != value || instance.ExpandedConfig[key] != "" && instance.ExpandedConfig[key] != value {
+				return domain.ErrPlanStale
+			}
+		}
 	}
 	changed := false
 	if instance.Config == nil {
@@ -674,4 +831,15 @@ func instanceInfo(project string, instance *api.Instance) ports.InstanceInfo {
 		Config: cloneMap(instance.ExpandedConfig), Devices: cloneDevices(instance.ExpandedDevices),
 		LocalConfig: cloneMap(instance.Config), LocalDevices: cloneDevices(instance.Devices),
 	}
+}
+
+// The official SDK decodes JSON operation metadata numbers as float64. Preserve
+// signed nonzero statuses (including signal/exec failure), but never infer zero.
+func explicitNativeExecExit(metadata map[string]any) (int, bool) {
+	value, ok := metadata["return"].(float64)
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value {
+		return 0, false
+	}
+	code := int(value)
+	return code, float64(code) == value
 }

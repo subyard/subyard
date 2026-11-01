@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -939,6 +940,14 @@ type selectionOnlyIntegrationExecutor struct {
 
 func (executor *selectionOnlyIntegrationExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	command := strings.Join(request.Command, "\x00")
+	if len(request.Command) >= 10 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "\ntry:\n    main()\n") {
+		if request.Command[4] != configmaterial.ModeObserve {
+			executor.mutations++
+			return ports.InstanceExecResult{}, errors.New("unexpected structured configuration mutation")
+		}
+		observation, _, err := completedSourceStructuredObservation(request, !executor.staleFiles)
+		return ports.InstanceExecResult{Stdout: observation}, err
+	}
 	if len(request.Command) > 4 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") {
 		if request.Command[4] != "observe" {
 			executor.mutations++

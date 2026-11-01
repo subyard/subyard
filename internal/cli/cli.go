@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Subyard/Subyard/internal/releaseowner"
 	"io"
 	"maps"
 	"net"
@@ -52,6 +53,7 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/safewriter"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/state"
@@ -101,6 +103,9 @@ type Options struct {
 }
 
 type CLI struct {
+	ownerLegacyRepository        string
+	ownerCompleteSource          *releaseowner.CompleteSourceReference
+	ownerLegacySource            *ownerLegacySource
 	catalog                      config.Catalog
 	provisionEndpointAddresses   func() ([]hostruntime.OwnerIPv4, error)
 	options                      Options
@@ -125,6 +130,8 @@ type CLI struct {
 	allowResetYard               bool
 	resourceSessionTransport     string
 	resourceWire                 string
+	resourceSourceEnvironment    map[string]string
+	ownerResourceContext         *CLI
 	profileInitRepair            *configApplyRepairPermit
 	integrationCleanupRepair     *configApplyRepairPermit
 	teardownRepair               *configApplyRepairPermit
@@ -171,6 +178,10 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	stderr io.Writer,
 	arguments ...string,
 ) error {
+	return cli.runSourceReleaseTransitionYardCommandIO(ctx, "", yard, stdout, stderr, arguments...)
+}
+
+func (cli *CLI) runSourceReleaseTransitionYardCommandIO(ctx context.Context, sourceRoot, yard string, stdout, stderr io.Writer, arguments ...string) error {
 	operationID := cli.ensureOperationID()
 	operation := cli.rpcOperation(operationID)
 	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
@@ -193,6 +204,13 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.profileInitRepair = nil
 	operation.integrationCleanupRepair = nil
 	operation.resourceShutdownRepair = nil
+	if slices.Equal(arguments, []string{"test-vms", "status"}) {
+		loaded, err := operation.loadContext(yard)
+		if err != nil {
+			return err
+		}
+		return operation.readSourceTestVMBrokerStatus(ctx, sourceRoot, loaded, stdout)
+	}
 	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
 		// Keep the native execution error in process. Only the outer command
 		// boundary renders it or converts it to an exit status.
@@ -355,6 +373,8 @@ func New(options Options) (*CLI, error) {
 	if options.Stderr == nil {
 		options.Stderr = io.Discard
 	}
+	outputs := safewriter.Outputs(options.Stdout, options.Stderr)
+	options.Stdout, options.Stderr = outputs[0], outputs[1]
 	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))
 	if err != nil {
 		return nil, fmt.Errorf("open command manifest: %w", err)
@@ -429,6 +449,10 @@ func New(options Options) (*CLI, error) {
 
 func (cli *CLI) Run(ctx context.Context) int {
 	cli.localMetadataDiagnostics = !cli.releaseTransitionChild
+	if _, err := releaseruntime.CompiledRustReleaseOwner(); err != nil {
+		cli.errorf("%v", err)
+		return 2
+	}
 	cli.configResources, cli.configResourcesRoot = nil, ""
 	cli.resourceShutdownRepair = nil
 	cli.updateProgress = cli.options.Stdout
@@ -2753,6 +2777,7 @@ func (cli *CLI) freshMigrationEnvironment(
 		switch name {
 		case "E2E_VM_TTL_MINUTES",
 			"SUBYARD_CONFIG_DIR",
+			"SUBYARD_CONFIG_SECRETS_DIR",
 			"SUBYARD_CONFIG_LOADED",
 			"SUBYARD_DISPATCH_ARG0",
 			"SUBYARD_DISPATCH_COMMAND",
@@ -2762,6 +2787,16 @@ func (cli *CLI) freshMigrationEnvironment(
 			"SUBYARD_ENGINE_CONTEXT_SOURCED",
 			"SUBYARD_SUDO_PREAUTHORIZED",
 			"SUBYARD_YARD":
+			continue
+		}
+		if name == "SSH_CODE_HOST" {
+			continue
+		}
+		retired := false
+		for _, owner := range cli.catalog.Integrations() {
+			retired = retired || owner.Retired && slices.Contains(owner.RetiredSettings, name)
+		}
+		if retired {
 			continue
 		}
 		environment[name] = value

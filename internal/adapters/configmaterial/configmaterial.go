@@ -46,10 +46,21 @@ var guestTOMLWriter string
 //go:embed TOMLI_W_LICENSE
 var guestTOMLWriterLicense string
 
+type DestinationState struct {
+	Exists bool   `json:"exists"`
+	Digest string `json:"digest"`
+	UID    uint32 `json:"uid"`
+	GID    uint32 `json:"gid"`
+	Mode   uint32 `json:"mode"`
+}
+
 type JSONObservation struct {
-	Converged   bool   `json:"converged"`
-	Adoptable   bool   `json:"adoptable,omitempty"`
-	Fingerprint string `json:"fingerprint"`
+	Converged       bool              `json:"converged"`
+	Adoptable       bool              `json:"adoptable,omitempty"`
+	Fingerprint     string            `json:"fingerprint"`
+	State           *ProtectedState   `json:"state,omitempty"`
+	ApprovedDesired bool              `json:"approvedDesired,omitempty"`
+	Destination     *DestinationState `json:"destination,omitempty"`
 }
 
 type Observation = JSONObservation
@@ -78,6 +89,70 @@ func Request(format, mode, developer, destination string, uid int, payload []byt
 	}
 	return materializationRequest(format, mode, developer, destination, uid, payload,
 		guestStateRoot, 0, "/home/"+developer, legacyTemplates...)
+}
+
+// ProtectedState retains exact protected-file bytes; a nonnil empty pair records absence.
+type ProtectedState struct {
+	Baseline string `json:"baseline"`
+	Receipt  string `json:"receipt"`
+}
+
+func (state *ProtectedState) Valid() bool {
+	if state == nil {
+		return false
+	}
+	for _, hash := range []string{state.Baseline, state.Receipt} {
+		if hash != "" && (len(hash) != 64 || strings.Trim(hash, "0123456789abcdef") != "") {
+			return false
+		}
+	}
+	return true
+}
+
+// ApplyExpectedState binds an AfterOwner retry to its original owned projection
+// and metadata. Unmanaged document fields remain outside that projection.
+type ApplyExpectedState struct {
+	State       *ProtectedState `json:"state"`
+	Fingerprint string          `json:"fingerprint"`
+	Exists      bool            `json:"exists"`
+	UID         uint32          `json:"uid"`
+	GID         uint32          `json:"gid"`
+	Mode        uint32          `json:"mode"`
+}
+
+func WithExpectedApply(request ports.InstanceExecRequest, expected ApplyExpectedState) (ports.InstanceExecRequest, error) {
+	if len(request.Command) != 10 || request.Command[4] != ModeApply || !expected.State.Valid() || len(expected.Fingerprint) != 64 || strings.Trim(expected.Fingerprint, "0123456789abcdef") != "" || expected.Mode > 07777 || !expected.Exists && (expected.UID != 0 || expected.GID != 0 || expected.Mode != 0) {
+		return ports.InstanceExecRequest{}, errors.New("invalid expected materialization state")
+	}
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		return ports.InstanceExecRequest{}, err
+	}
+	request.Command = append(append([]string(nil), request.Command...), string(encoded))
+	return request, nil
+}
+
+// WithAfterOwnerObservation adds only a private read-only state witness. A nil
+// expectation captures the first physical state; retained expectations never recapture it.
+func WithAfterOwnerObservation(request ports.InstanceExecRequest, expected *ApplyExpectedState) (ports.InstanceExecRequest, error) {
+	if len(request.Command) != 10 || request.Command[4] != ModeObserve {
+		return ports.InstanceExecRequest{}, errors.New("invalid AfterOwner observation")
+	}
+	var options any = struct {
+		Capture bool `json:"capture"`
+	}{true}
+	if expected != nil {
+		if !expected.State.Valid() {
+			return ports.InstanceExecRequest{}, errors.New("missing original materialization state")
+		}
+		options = expected
+	}
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return ports.InstanceExecRequest{}, err
+	}
+	request.Command = append(append([]string(nil), request.Command...), string(encoded))
+	return request, nil
 }
 
 func DesiredDigest(payload []byte) (string, error) {
@@ -344,9 +419,12 @@ func materializationRequest(format, mode, developer, destination string, uid int
 
 func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	type encodedObservation struct {
-		Converged   *bool  `json:"converged"`
-		Adoptable   bool   `json:"adoptable,omitempty"`
-		Fingerprint string `json:"fingerprint"`
+		Converged       *bool             `json:"converged"`
+		Adoptable       bool              `json:"adoptable,omitempty"`
+		Fingerprint     string            `json:"fingerprint"`
+		State           *ProtectedState   `json:"state,omitempty"`
+		ApprovedDesired bool              `json:"approvedDesired,omitempty"`
+		Destination     *DestinationState `json:"destination,omitempty"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -362,5 +440,11 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	if _, err := hex.DecodeString(encoded.Fingerprint); err != nil {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
-	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint}, nil
+	if encoded.State != nil && !encoded.State.Valid() {
+		return JSONObservation{}, errors.New("invalid materialization state witness")
+	}
+	if d := encoded.Destination; d != nil && (d.Mode > 07777 || d.Exists && (len(d.Digest) != 64 || strings.Trim(d.Digest, "0123456789abcdef") != "") || !d.Exists && *d != (DestinationState{})) {
+		return JSONObservation{}, errors.New("invalid guarded destination state")
+	}
+	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint, State: encoded.State, ApprovedDesired: encoded.ApprovedDesired, Destination: encoded.Destination}, nil
 }

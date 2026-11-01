@@ -45,23 +45,10 @@ func BorrowOwnerLock(dataHome string) (*os.File, error) {
 // held; release closes only this duplicate, never unlocks any borrower's OFD.
 // It performs no path reopen or lock acquisition.
 func RegisterBorrowedOwnerLock(dataHome string, held *os.File) (func(), error) {
-	if held == nil {
-		return nil, errors.New("native owner barrier is missing")
+	if err := ValidateOwnerLockDescriptor(dataHome, uint32(os.Getuid()), held); err != nil {
+		return nil, err
 	}
 	path := OwnerLockPath(dataHome)
-	current, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	info, err := held.Stat()
-	if err != nil {
-		return nil, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 ||
-		stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || !os.SameFile(current, info) {
-		return nil, config.OwnerMetadataError(path, "native owner barrier", "differs from its protected installation; "+ownerLockFacts(info)+"; required type=regular, mode=0600, links=1, matching inode", fmt.Sprintf("required uid=%d; current %s", os.Getuid(), config.FileMetadata(current)), nil)
-	}
 	fd, err := syscall.Dup(int(held.Fd()))
 	if err != nil {
 		return nil, err
@@ -237,9 +224,40 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 }
 
 // OwnerLockPath names shared coordination without creating it.
-func OwnerLockPath(dataHome string) string {
+func OwnerLockPath(dataHome string) string { return ownerLockPathForUID(dataHome, uint32(os.Getuid())) }
+func ownerLockPathForUID(dataHome string, uid uint32) string {
 	digest := sha256.Sum256([]byte(filepath.Clean(dataHome)))
-	return filepath.Join("/tmp", "subyard-owner-locks-"+strconv.Itoa(os.Getuid()), hex.EncodeToString(digest[:])+".lock")
+	return filepath.Join("/tmp", "subyard-owner-locks-"+strconv.FormatUint(uint64(uid), 10), hex.EncodeToString(digest[:])+".lock")
+}
+
+// ValidateOwnerLockDescriptor checks the inherited original barrier after a
+// privilege boundary. It never reopens, acquires, or unlocks the descriptor.
+func ValidateOwnerLockDescriptor(dataHome string, uid uint32, held *os.File) error {
+	if held == nil || !filepath.IsAbs(dataHome) || filepath.Clean(dataHome) != dataHome {
+		return errors.New("native owner barrier is missing or scope invalid")
+	}
+	path := ownerLockPathForUID(dataHome, uid)
+	parent, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	parentStat, ok := parent.Sys().(*syscall.Stat_t)
+	if !ok || !parent.IsDir() || parentStat.Mode&07777 != 0700 || parentStat.Uid != uid {
+		return config.OwnerMetadataError(filepath.Dir(path), "native owner barrier parent", "is not protected; "+ownerLockFacts(parent), fmt.Sprintf("required type=directory, mode=0700, uid=%d", uid), nil)
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	info, err := held.Stat()
+	if err != nil {
+		return err
+	}
+	actual, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || actual.Mode&07777 != 0600 || actual.Uid != uid || actual.Nlink != 1 || !os.SameFile(current, info) {
+		return config.OwnerMetadataError(path, "native owner barrier", "differs from its protected installation; "+ownerLockFacts(info)+"; required type=regular, mode=0600, links=1, matching inode", fmt.Sprintf("required uid=%d; current %s", uid, config.FileMetadata(current)), nil)
+	}
+	return nil
 }
 
 func ReadOwnerEpoch(dataHome string) (uint64, error) {

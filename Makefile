@@ -1,7 +1,7 @@
 GO ?= go
 PYTHON ?= python3
 VERSION ?= 0.1.0-dev
-TEST_VERSION ?= 0.22.0-test
+TEST_VERSION ?= 0.22.1-test
 
 .PHONY: build package test verify verify-veranda clean cli-docs cli-docs-check
 
@@ -57,11 +57,14 @@ verify-release-owner-recovery:
 .PHONY: verify-release-owner-legacy
 verify-release-owner-legacy:
 	./release-owner/check-legacy.sh
+	git diff --check
 
 .PHONY: verify-release-owner-runtime
 verify-release-owner-runtime:
 	./release-owner/check-runtime.sh
 
 .PHONY: build-experimental-release-owner
-build-experimental-release-owner: build
-	./dev/package-engine.sh --experimental-release-owner --runtime-dir .build/runtime --engine .build/yard --version "$(VERSION)"
+build-experimental-release-owner:
+	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/build-engine.sh --experimental-release-owner --output .build/yard-experimental-release-owner
+	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/build-profiles.sh
+	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/package-engine.sh --experimental-release-owner --runtime-dir .build/runtime-experimental-release-owner --engine .build/yard-experimental-release-owner --version "$(VERSION)"

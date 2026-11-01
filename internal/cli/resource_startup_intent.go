@@ -137,10 +137,11 @@ func (cli *CLI) setStartupIntent(ctx context.Context, loaded config.Loaded, defi
 }
 
 type resourceStartupIntent struct {
-	loaded     config.Loaded
-	definition resource.Definition
-	before     string
-	after      string
+	loaded       config.Loaded
+	definition   resource.Definition
+	before       string
+	after        string
+	instanceUUID string
 }
 
 func (cli *CLI) prepareResourceStartupIntent(ctx context.Context, loaded config.Loaded, definition resource.Definition, verb string) (*resourceStartupIntent, error) {
@@ -188,6 +189,9 @@ func (intent *resourceStartupIntent) refresh(ctx context.Context, cli *CLI) erro
 	if err != nil {
 		return err
 	}
+	if intent.instanceUUID != "" && instance.Config["volatile.uuid"] != intent.instanceUUID {
+		return domain.ErrPlanStale
+	}
 	if current != intent.before {
 		return domain.ErrPlanStale
 	}
@@ -197,6 +201,17 @@ func (intent *resourceStartupIntent) refresh(ctx context.Context, cli *CLI) erro
 func (intent *resourceStartupIntent) commit(ctx context.Context, cli *CLI) error {
 	if intent == nil || intent.before == intent.after {
 		return nil
+	}
+	if intent.instanceUUID != "" {
+		incus, _ := cli.statusPorts()
+		writer, ok := incus.(interface {
+			SetInstanceConfigIf(context.Context, string, string, string, map[string]string, map[string]string) error
+		})
+		if !ok {
+			return fmt.Errorf("original startup intent requires guarded Incus config writer")
+		}
+		key := startupIntentKey(intent.definition)
+		return writer.SetInstanceConfigIf(ctx, intent.loaded.Context.IncusProject, intent.loaded.Context.YardInstanceName, intent.instanceUUID, map[string]string{key: intent.before}, map[string]string{key: intent.after})
 	}
 	return cli.setStartupIntent(ctx, intent.loaded, intent.definition, intent.before, intent.after)
 }

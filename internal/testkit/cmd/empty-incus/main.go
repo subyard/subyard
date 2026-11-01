@@ -7,14 +7,24 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func main() {
+	if len(os.Args) == 5 && os.Args[1] == "--source-admission" {
+		if err := sourceAdmissionProof(os.Args[2], os.Args[3], os.Args[4]); err != nil {
+			fmt.Fprintln(os.Stderr, "empty-incus: source admission refused")
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) != 2 && len(os.Args) != 3 {
 		fmt.Fprintln(os.Stderr, "empty-incus: expected a private fixture root and optional observation file")
 		os.Exit(2)
@@ -48,11 +58,13 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 		Info    map[string]any `json:"info"`
 	}
 	type control struct {
-		Instances []instance      `json:"instances"`
-		Journal   string          `json:"holdJournal"`
-		History   *historyControl `json:"migrationHistory"`
+		Instances []instance                `json:"instances"`
+		Journal   string                    `json:"holdJournal"`
+		History   *historyControl           `json:"migrationHistory"`
+		Configs   *configObservationControl `json:"materializedObservation"`
 	}
 	var observationMu sync.Mutex
+	var pending <-chan struct{}
 	read := func() control {
 		observationMu.Lock()
 		defer observationMu.Unlock()
@@ -69,12 +81,27 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 			if value.History != nil {
 				server.SetExecResponder(historyResponder(*value.History, path))
 			} else {
-				server.SetExecResponder(nil)
+				release := pending
+				server.SetExecResponder(func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+					if value.Configs != nil && len(call.Command) > 0 && (strings.HasPrefix(call.Command[len(call.Command)-1], "configs-") || len(call.Command) >= 11 && call.Command[0] == "python3" || slices.Equal(call.Command, []string{"bash", "-s", "--", "--observe"})) {
+						return configObservationStep(*value.Configs, call, release)
+					}
+					return testkit.IncusServerExecStep{Stdout: []byte(`{"converged":false,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`), Release: release}
+				})
 			}
 			_ = os.WriteFile(path+".applied", payload, 0o600)
 		}
 		return value
 	}
+	queue := func() chan struct{} {
+		release := make(chan struct{})
+		observationMu.Lock()
+		pending = release
+		observationMu.Unlock()
+		read()
+		return release
+	}
+	release := queue()
 	go func() {
 		for {
 			read()
@@ -85,15 +112,6 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 			}
 		}
 	}()
-	queue := func() chan struct{} {
-		release := make(chan struct{})
-		server.QueueExec(testkit.IncusServerExecStep{
-			Stdout:  []byte(`{"converged":false,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
-			Release: release,
-		})
-		return release
-	}
-	release := queue()
 	for count := 1; ; count++ {
 		if err := server.WaitForExecCount(ctx, count); err != nil {
 			close(release)
@@ -122,4 +140,20 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 		close(release)
 		release = next
 	}
+}
+
+// This companion mode returns only the existing finite source inspector's
+// binding. It does not start an Incus server or provide an execution boundary.
+func sourceAdmissionProof(runtimeRoot, configHome, repository string) error {
+	inspector := releaseruntime.NewSourceInspector(repository, os.Stderr)
+	defer inspector.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	proof, err := inspector.InspectSourceAdmission(ctx, runtimeRoot, configHome)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(struct {
+		Binding string `json:"binding"`
+	}{Binding: proof.Binding})
 }

@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Subyard/Subyard/internal/config"
-	"io"
 	"maps"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/releaseowner/nativejson"
@@ -76,17 +77,22 @@ type ownerInitChildRecord struct {
 	Power      *reconcileruntime.OwnerHostPowerRecord `json:",omitempty"`
 	Start      *ownerLifecycleRecord                  `json:",omitempty"`
 }
+type ownerLifecycleChildMetadata struct {
+	Input       ownerLoadedSnapshot
+	Publication *reconcileruntime.OwnerPublicationRecord
+}
+
 type preparedOwnerInitChild struct {
-	sourceRaw  []byte
-	projection *reconcileruntime.OwnerInitProjection
-	loaded     config.Loaded
-	execution  *initExecution
-	sources    *reconcileruntime.PreparedInstalledRuntime
-	runtime    reconcileruntime.Runtime
-	power      *reconcileruntime.OwnerHostPowerRecord
-	start      *ownerLifecycleRecord
-	instance   *ports.PreparedOwnerInstance
-	volume     *ports.PreparedOwnerVolume
+	projection          *reconcileruntime.OwnerInitProjection
+	loaded              config.Loaded
+	execution           *initExecution
+	sources             *reconcileruntime.PreparedInstalledRuntime
+	runtime             reconcileruntime.Runtime
+	power               *reconcileruntime.OwnerHostPowerRecord
+	start               *ownerLifecycleRecord
+	publicationConsumer *ownerpublication.Consumer
+	instance            *ports.PreparedOwnerInstance
+	volume              *ports.PreparedOwnerVolume
 }
 type ownerTeardownChildRecord struct {
 	Yard     string
@@ -117,25 +123,26 @@ type ownerChildrenWire struct {
 }
 
 type preparedOwnerChildren struct {
-	operation              *CLI
-	before                 releaseowner.OwnerBefore
-	wire                   ownerChildrenWire
-	raw                    []byte
-	checks                 map[string]ownerChildCheck
-	baselines              map[string]*ownerInputBaseline
-	inits                  map[string]preparedOwnerInitChild
-	recreate               map[string]preparedOwnerInitChild
-	removed                map[string]bool
-	createdCurrentProject  *ports.NativeOwnerCreated
-	createdLegacyProject   *ports.NativeOwnerCreated
-	createdRecreateProject *ports.NativeOwnerCreated
-	teardowns              map[string]preparedOwnerTeardownChild
-	registrationSource     *testyardmigration.PreparedOwnerSource
-	checkedSource          *testyardmigration.CheckedOwnerSource
+	publicationInstallation *reconcileruntime.OwnerPublicationInstallation
+	operation               *CLI
+	before                  releaseowner.OwnerBefore
+	wire                    ownerChildrenWire
+	raw                     []byte
+	checks                  map[string]ownerChildCheck
+	baselines               map[string]*ownerInputBaseline
+	inits                   map[string]preparedOwnerInitChild
+	recreate                map[string]preparedOwnerInitChild
+	createdCurrentProject   *ports.NativeOwnerCreated
+	createdLegacyProject    *ports.NativeOwnerCreated
+	createdRecreateProject  *ports.NativeOwnerCreated
+	teardowns               map[string]preparedOwnerTeardownChild
+	registrationSource      *testyardmigration.PreparedOwnerSource
+	checkedSource           *testyardmigration.CheckedOwnerSource
 }
 
 func ownerSemanticBefore(before releaseowner.OwnerBefore) releaseowner.OwnerBefore {
 	before.PreparedRecipe = ""
+	before.Capture = nil
 	return before
 }
 
@@ -158,6 +165,9 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 	if err != nil {
 		return nil, err
 	}
+	// Native capture and its prospective component views use the same admitted
+	// command inputs. Persisted source bytes still come from the original view.
+	draft.commandInputs = c.activationEnvironment(operation.options.RepositoryRoot)
 	loaded, err := draft.load(testyardmigration.CurrentYard)
 	if err != nil {
 		return nil, err
@@ -208,12 +218,15 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 		}
 		record.Inputs = append(record.Inputs, input)
 	}
-	slices.SortFunc(record.Inputs, func(a, b ownerChildInput) int { return bytes.Compare(a.Path, b.Path) })
+	record.Inputs, err = canonicalOwnerChildInputs(record.Inputs)
+	if err != nil {
+		return nil, err
+	}
 	metadata, err := json.Marshal(record)
 	if err != nil {
 		return nil, err
 	}
-	p := &preparedOwnerChildren{operation: operation, before: before, checks: map[string]ownerChildCheck{testyardmigration.CurrentYard: check}, baselines: map[string]*ownerInputBaseline{testyardmigration.CurrentYard: baseline}, inits: map[string]preparedOwnerInitChild{}, recreate: map[string]preparedOwnerInitChild{}, removed: map[string]bool{}, teardowns: map[string]preparedOwnerTeardownChild{}}
+	p := &preparedOwnerChildren{operation: operation, before: before, checks: map[string]ownerChildCheck{testyardmigration.CurrentYard: check}, baselines: map[string]*ownerInputBaseline{testyardmigration.CurrentYard: baseline}, inits: map[string]preparedOwnerInitChild{}, recreate: map[string]preparedOwnerInitChild{}, teardowns: map[string]preparedOwnerTeardownChild{}}
 	p.wire = ownerChildrenWire{Version: 1, Owner: "owner-registration", Source: nativeValueDigest(ownerChildrenSemantic(record)), Runtime: nativeValueDigest(struct{ Session, Artifact, Repository string }{c.context.Session, c.context.Artifact, c.context.RepositoryRoot}), Resources: nativeValueDigest(record.Checks), Files: []ownerRecipeFile{{"prepared/owner-children.json", metadata}}}
 	adopt := before.State == string(testyardmigration.StateLegacyFlatAdoptCurrent) || before.State == string(testyardmigration.StateLegacyDirectoryAdoptCurrent)
 	if !adopt && children {
@@ -272,7 +285,10 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 			}
 			record.LegacyInputs = append(record.LegacyInputs, ownerChildInput{Path: []byte(c.ownerPathLabel(path)), Fact: encoded})
 		}
-		slices.SortFunc(record.LegacyInputs, func(a, b ownerChildInput) int { return bytes.Compare(a.Path, b.Path) })
+		record.LegacyInputs, err = canonicalOwnerChildInputs(record.LegacyInputs)
+		if err != nil {
+			return nil, err
+		}
 		intermediate := slices.Clone(originalPeers)
 		for _, peer := range peers {
 			i := slices.IndexFunc(intermediate, func(value domain.Context) bool { return value.YardName == peer.YardName })
@@ -302,6 +318,25 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 		if err := c.captureOwnerNativeResources(ctx, &record); err != nil {
 			return nil, err
 		}
+		legacyTeardown, err := prepareTeardownExecution([]string{"--yes"})
+		if err != nil {
+			return nil, err
+		}
+		// The approved replacement retains this installation's shared producers.
+		legacyTeardown.holdShared = true
+		legacyTeardownLoaded := c.ownerLabeledLoaded(legacyLoaded)
+		if err := operation.observeTeardownExecution(ctx, legacyTeardownLoaded, legacyTeardown); err != nil {
+			return nil, err
+		}
+		legacyTeardown.retainOwnerSourceSettings(legacyTeardownLoaded)
+		legacyRuntime, ok := c.platform(legacyLoaded, originalPeers).(reconcileruntime.Runtime)
+		if !ok {
+			return nil, domain.ErrPlanStale
+		}
+		legacyProjection, err := legacyRuntime.PrepareOwnerInitProjection(ctx, legacyTeardown.snapshot().State, legacyTeardown.snapshot().Resources)
+		if err != nil {
+			return nil, fmt.Errorf("project original legacy removal: %w", err)
+		}
 		var recreate *ownerInitChildRecord
 		for _, yard := range []string{testyardmigration.CurrentYard, testyardmigration.LegacyYard} {
 			childLoaded := loaded
@@ -316,32 +351,55 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 				childPeers = originalPeers
 			}
 			teardownLoaded := c.ownerLabeledLoaded(childLoaded)
-			teardown, err := prepareTeardownExecution([]string{"--yes"})
-			if err != nil {
-				return nil, err
+			teardown := legacyTeardown
+			if yard != testyardmigration.LegacyYard {
+				teardown, err = prepareTeardownExecution([]string{"--yes"})
+				if err != nil {
+					return nil, err
+				}
+				if err := operation.observeTeardownExecution(ctx, teardownLoaded, teardown); err != nil {
+					return nil, err
+				}
+				teardown.retainOwnerSourceSettings(teardownLoaded)
 			}
-			if err := operation.observeTeardownExecution(ctx, teardownLoaded, teardown); err != nil {
-				return nil, err
-			}
-			body, err := captureOwnerTeardownRecord(teardown)
+			body, err := captureOwnerTeardownRecord(teardown, c.cli.options.RepositoryRoot)
 			if err != nil {
 				return nil, err
 			}
 			record.Teardowns = append(record.Teardowns, ownerTeardownChildRecord{yard, body})
 			p.teardowns[yard] = preparedOwnerTeardownChild{teardownLoaded, teardown}
-			execution, sources, err := c.prepareOwnerInit(ctx, operation, childLoaded, childPeers)
+			view, ok := c.platform(childLoaded, childPeers).(reconcileruntime.Runtime)
+			if !ok {
+				return nil, domain.ErrPlanStale
+			}
+			view, err = view.OwnerInitPortReleaseView(legacyRuntime, legacyProjection)
+			if err != nil {
+				return nil, err
+			}
+			var execution *initExecution
+			var sources *reconcileruntime.PreparedInstalledRuntime
+			var metadata []byte
+			childRuntime := view
+			lifecycle := yard == testyardmigration.LegacyYard && legacyTeardown.snapshot().State.InstanceFound
+			if lifecycle {
+				childRuntime, sources, err = c.prepareOwnerChildSources(ctx, view)
+				if err == nil {
+					metadata, err = nativejson.EncodeLosslessNativeJSON(ownerLifecycleChildMetadata{captureOwnerLoaded(ownerLoadedLabels(childLoaded, childRuntime.RepositoryRoot, childRuntime.LogicalRepositoryRoot)), childRuntime.OwnerPublicationRecord()}, 32<<20)
+				}
+			} else {
+				execution, sources, err = c.prepareOwnerInitView(ctx, operation, childLoaded, childPeers, &view)
+				if err == nil {
+					metadata, err = captureOwnerInitRecord(execution, operation)
+					childRuntime = execution.platform.(reconcileruntime.Runtime)
+				}
+			}
 			if err != nil {
 				return nil, fmt.Errorf("prepare original %s init: %w", yard, err)
-			}
-			metadata, err := captureOwnerInitRecord(execution)
-			if err != nil {
-				return nil, fmt.Errorf("record original %s init: %w", yard, err)
 			}
 			sourceRecord, err := p.addSourceRecipe(sources.Recipe())
 			if err != nil {
 				return nil, err
 			}
-			childRuntime := execution.platform.(reconcileruntime.Runtime)
 			projectConfig, err := childRuntime.RenderOwnerProjectConfig(ctx, sources)
 			if err != nil {
 				return nil, err
@@ -352,6 +410,9 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 				}
 			}
 			childRecord := ownerInitChildRecord{Yard: yard, Metadata: metadata, Sources: sourceRecord}
+			if lifecycle {
+				childRecord.Kind = "lifecycle"
+			}
 			scope := "current"
 			if yard == testyardmigration.LegacyYard {
 				scope = "legacy"
@@ -374,6 +435,7 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 				return nil, originalInstanceErr
 			}
 			if yard == testyardmigration.LegacyYard {
+				var publicationPlan *reconcileruntime.PublicationConsumerPlan
 				incus, _ := operation.statusPorts()
 				_, instanceErr := incus.Instance(ctx, childLoaded.Context.IncusProject, childLoaded.Context.YardInstanceName)
 				if instanceErr == nil {
@@ -382,6 +444,12 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 						return nil, err
 					}
 					powerRecord, recordErr := childRuntime.RecordOwnerHostPower(power)
+					if recordErr == nil && record.TemporaryStop != nil {
+						if publication := childRuntime.OwnerPublicationRecord(); publication != nil {
+							plan := publication.Consumer
+							publicationPlan = &plan
+						}
+					}
 					closeErr := power.Close()
 					if recordErr != nil || closeErr != nil {
 						return nil, errors.Join(recordErr, closeErr)
@@ -391,19 +459,17 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 					return nil, instanceErr
 				}
 				if record.TemporaryStop != nil {
-					childRecord.Start, err = captureOwnerStart(ctx, operation, childLoaded)
+					childRecord.Start, err = captureOwnerStart(ctx, operation, childLoaded, c.context.RepositoryRoot)
 					if err != nil {
 						return nil, err
 					}
+					childRecord.Start.Publication = publicationPlan
 				}
 			}
 			record.Inits = append(record.Inits, childRecord)
-			p.inits[yard] = preparedOwnerInitChild{sourceRaw: bytes.Clone(sources.Recipe()), loaded: childLoaded, execution: execution, sources: sources, runtime: childRuntime, power: childRecord.Power, start: childRecord.Start, instance: childRecord.Instance, volume: childRecord.Volume}
+			p.inits[yard] = preparedOwnerInitChild{loaded: childLoaded, execution: execution, sources: sources, runtime: childRuntime, power: childRecord.Power, start: childRecord.Start, instance: childRecord.Instance, volume: childRecord.Volume}
 			if yard == testyardmigration.LegacyYard {
-				projection, err := childRuntime.PrepareOwnerInitProjection(ctx, teardown.snapshot().State, teardown.snapshot().Resources)
-				if err != nil {
-					return nil, fmt.Errorf("project original legacy removal: %w", err)
-				}
+				projection := legacyProjection
 				view, err := childRuntime.OwnerInitPlanningView(projection)
 				if err != nil {
 					return nil, err
@@ -412,7 +478,7 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 				if err != nil {
 					return nil, fmt.Errorf("prepare original legacy recreation: %w", err)
 				}
-				metadata, err := captureOwnerInitRecord(future)
+				metadata, err := captureOwnerInitRecord(future, operation)
 				if err != nil {
 					return nil, err
 				}
@@ -438,13 +504,31 @@ func (c *releaseOwnerComponents) captureOwnerChildren(ctx context.Context, befor
 					return nil, err
 				}
 				recreate = &ownerInitChildRecord{Volume: futureVolume, Instance: futureInstance, Kind: "recreate", Projection: projectionRaw, Project: &ports.PreparedImageProject{Project: childLoaded.Context.IncusProject, Absent: true, SharedImages: before.SharedImages, InitialConfig: futureProjectConfig, Server: record.Projects[1].Server}, Yard: yard, Metadata: metadata, Sources: sourceRecord}
-				p.recreate[yard] = preparedOwnerInitChild{sourceRaw: bytes.Clone(futureSources.Recipe()), projection: &projection, loaded: childLoaded, execution: future, sources: futureSources, runtime: childRuntime, instance: futureInstance, volume: futureVolume}
+				p.recreate[yard] = preparedOwnerInitChild{projection: &projection, loaded: childLoaded, execution: future, sources: futureSources, runtime: futureRuntime, instance: futureInstance, volume: futureVolume}
 			}
 		}
 		if recreate == nil {
 			return nil, domain.ErrPlanStale
 		}
 		record.Inits = append(record.Inits, *recreate)
+		var policies []*ports.PreparedOwnerImagePolicy
+		for _, child := range record.Inits {
+			if child.Instance != nil && child.Instance.Policy != nil && child.Instance.Policy.CacheBinding != "" {
+				policies = append(policies, child.Instance.Policy)
+			}
+		}
+		if len(policies) > 0 {
+			incus, _ := operation.statusPorts()
+			binder, ok := incus.(interface {
+				BindOwnerImagePreparationCache(context.Context, []*ports.PreparedOwnerImagePolicy) error
+			})
+			if !ok {
+				return nil, domain.ErrPlanStale
+			}
+			if err := binder.BindOwnerImagePreparationCache(ctx, policies); err != nil {
+				return nil, err
+			}
+		}
 		metadata, err = json.Marshal(record)
 		if err != nil {
 			return nil, err
@@ -549,27 +633,78 @@ func ownerMigrationBefore(before releaseowner.OwnerBefore) testyardmigration.Pre
 }
 
 func ownerInitChildSlot(child ownerInitChildRecord, index int) bool {
+	if index == 1 && child.Kind == "lifecycle" {
+		return child.Yard == testyardmigration.LegacyYard && len(child.Projection) == 0 && child.Project == nil && child.Instance == nil && child.Volume != nil && child.Volume.InstanceUUID != "" && child.Power != nil
+	}
 	if index < 2 {
 		return child.Yard == []string{testyardmigration.CurrentYard, testyardmigration.LegacyYard}[index] && child.Kind == "" && len(child.Projection) == 0 && child.Project == nil
 	}
 	return index == 2 && child.Yard == testyardmigration.LegacyYard && child.Kind == "recreate" && len(child.Projection) > 0 && child.Power == nil && child.Start == nil && child.Project != nil && child.Project.Project == "subyard-"+testyardmigration.LegacyYard && child.Project.Absent && child.Project.Config == nil
 }
 
-func (p *preparedOwnerChildren) originalInitChild(yard string) (preparedOwnerInitChild, error) {
-	child, ok := p.inits[yard]
-	if p.removed[yard] {
-		child, ok = p.recreate[yard]
-		if child.projection == nil {
-			return preparedOwnerInitChild{}, domain.ErrPlanStale
+func (child ownerInitChildRecord) input() (ownerLoadedSnapshot, *reconcileruntime.OwnerPublicationRecord, error) {
+	if child.Kind == "lifecycle" {
+		var record ownerLifecycleChildMetadata
+		if err := nativejson.DecodeLosslessNativeJSON(child.Metadata, &record, 32<<20); err != nil {
+			return ownerLoadedSnapshot{}, nil, err
 		}
+		return record.Input, record.Publication, nil
 	}
-	if !ok || child.execution == nil || len(child.sourceRaw) == 0 {
-		return preparedOwnerInitChild{}, domain.ErrPlanStale
+	var record ownerInitRecord
+	if err := nativejson.DecodeLosslessNativeJSON(child.Metadata, &record, 32<<20); err != nil || record.Version != 1 {
+		return ownerLoadedSnapshot{}, nil, domain.ErrPlanStale
 	}
-	return child, nil
+	return record.Input, record.Publication, nil
 }
 
+// prepareOwnerProjection restores only the original checked descriptions. It
+// grants no invocation token and executes no init, resolver or publication.
+func (c *releaseOwnerComponents) prepareOwnerProjection(ctx context.Context, before releaseowner.OwnerBefore) error {
+	if before.PreparedRecipe == "" {
+		return nil
+	}
+	p := c.ownerChildren
+	if p == nil || p.binding() != before.PreparedRecipe || p.before != ownerSemanticBefore(before) {
+		return domain.ErrPlanStale
+	}
+	if c.ownerRecoverySource != "" {
+		reader, ok := c.ownerRecoveryObserver.(ports.NativeOwnerRestorationObserver)
+		if !ok || c.ownerResultsRecipe != before.PreparedRecipe || p.registrationSource == nil {
+			return domain.ErrPlanStale
+		}
+		member, err := reader.ReadOwnerRestoration(c.ownerRecoveryToken, c.ownerRecoverySource)
+		if err != nil || p.registrationSource.ValidateRestoredMember(member) != nil {
+			return domain.ErrPlanStale
+		}
+	}
+	if child, ok := p.inits[testyardmigration.CurrentYard]; ok && child.execution != nil {
+		return nil
+	}
+	if p.before.State == string(testyardmigration.StateLegacyFlatAdoptCurrent) || p.before.State == string(testyardmigration.StateLegacyDirectoryAdoptCurrent) {
+		return nil
+	}
+	if !c.installedBound[before.PreparedRecipe] {
+		return domain.ErrPlanStale
+	}
+	ctx = ports.WithNativePreparationExecutable(ctx, c.context.PreparationExecutable)
+	ctx = ports.WithNativeInteraction(ctx, c.context.Interaction)
+	token := ""
+	if c.ownerResultsRecipe == before.PreparedRecipe {
+		if c.ownerRecoveryToken == "" || c.ownerRecoveryObserver == nil {
+			return domain.ErrPlanStale
+		}
+		token = c.ownerRecoveryToken
+		ctx = ports.WithNativeOperationObserver(ctx, c.ownerRecoveryObserver)
+	}
+	return c.restoreOwnerChildren(ctx, before.PreparedRecipe, p.raw, token, true)
+}
 func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, hash string, raw []byte, token string) error {
+	return c.restoreOwnerChildren(ctx, hash, raw, token, false)
+}
+func (c *releaseOwnerComponents) restoreOwnerChildren(ctx context.Context, hash string, raw []byte, token string, projection bool) error {
+	if projection && token != "" && (token != c.ownerRecoveryToken || c.ownerResultsRecipe != hash || c.ownerRecoveryObserver == nil) {
+		return domain.ErrPlanStale
+	}
 	if nativeDigest(raw) != hash {
 		return domain.ErrPlanStale
 	}
@@ -583,6 +718,12 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 	metadataIndex := slices.IndexFunc(wire.Files, func(file ownerRecipeFile) bool { return file.Path == "prepared/owner-children.json" })
 	if !bytes.Equal(canonical, raw) || metadataIndex < 0 || wire.Owner != "owner-registration" || wire.Version != 1 || wire.Launcher != "" || wire.HookBefore != "" || len(wire.Leaves) != 0 {
 		return domain.ErrPlanStale
+	}
+	// Share only the already owned immutable capsule, never its physical views.
+	if previous := c.ownerChildren; previous != nil && bytes.Equal(previous.raw, raw) {
+		raw, wire = previous.raw, previous.wire
+	} else {
+		raw = bytes.Clone(raw)
 	}
 	// Current preparation is only a guard against original source/scope drift.
 	// The immutable original bytes remain the incoming bundle authority.
@@ -618,20 +759,20 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 			if child.Project != nil && child.Project.SharedImages != original.Before.SharedImages {
 				return domain.ErrPlanStale
 			}
-			var metadata ownerInitRecord
-			if err := nativejson.DecodeLosslessNativeJSON(child.Metadata, &metadata, 32<<20); err != nil {
+			metadata, _, err := child.input()
+			if err != nil {
 				return err
 			}
-			input := metadata.Input.Context
-			if metadata.Version != 1 || input.YardName != child.Yard || input.AccessKind != domain.AccessLocal || input.Paths.ConfigHome != c.context.ConfigHome || input.Paths.DataHome != c.context.DataHome || input.Paths.RepositoryRoot != c.context.RepositoryRoot || input.Paths.ConfigDir != filepath.Join(c.context.RepositoryRoot, "config") {
+			input := metadata.Context
+			if input.YardName != child.Yard || input.AccessKind != domain.AccessLocal || input.Paths.ConfigHome != c.context.ConfigHome || input.Paths.DataHome != c.context.DataHome || input.Paths.RepositoryRoot != c.context.RepositoryRoot || input.Paths.ConfigDir != filepath.Join(c.context.RepositoryRoot, "config") {
 				return domain.ErrPlanStale
 			}
 		}
 		// Binding restores only original durable bytes. The original token and
 		// borrowed mutation scope arrive at ApplyOwner, where every live source
 		// and native guard is checked before these handles may be used.
-		if token == "" {
-			inert := &preparedOwnerChildren{operation: c.ownerChildOperation(), before: original.Before, raw: bytes.Clone(raw), wire: wire, registrationSource: registration}
+		if token == "" && !projection {
+			inert := &preparedOwnerChildren{operation: c.ownerChildOperation(), before: original.Before, raw: raw, wire: wire, registrationSource: registration}
 			var total int
 			previous := ""
 			if len(wire.Files) > 8192 || len(raw) > reconcileruntime.MaxInstalledRecipe || wire.Source != nativeValueDigest(ownerChildrenSemantic(original)) {
@@ -671,6 +812,9 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 		checked, err = testyardmigration.CheckOwnerChildSource(options, ownerMigrationBefore(original.Before), *registration, c.root)
 		if err != nil {
 			observer, ok := ports.NativeOperationObserverFrom(ctx).(ports.NativeOwnerRestorationObserver)
+			if c.ownerRecoverySource == nativeDigest(original.RegistrationSource) && c.ownerRecoveryToken == token && c.ownerResultsRecipe == hash {
+				observer, ok = c.ownerRecoveryObserver.(ports.NativeOwnerRestorationObserver)
+			}
 			if !ok {
 				return err
 			}
@@ -722,7 +866,7 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 	}
 	baseline := current.baselines[testyardmigration.CurrentYard]
 	for _, input := range original.Inputs {
-		path := c.ownerPathPhysical(string(input.Path))
+		path := c.ownerInputPathPhysical(string(input.Path), baseline.initial.Context.Paths)
 		if _, ok := baseline.files[path]; !ok {
 			return domain.ErrPlanStale
 		}
@@ -732,7 +876,7 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 		}
 		baseline.files[path] = fact
 	}
-	current.raw, current.wire = bytes.Clone(raw), wire
+	current.raw, current.wire = raw, wire
 	current.registrationSource = registration
 	current.checkedSource = checked
 	checked = nil
@@ -760,6 +904,9 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 		}
 		options.RecoveryToken = token
 		view := &preparedOwnerChildInputView{root: c.root, source: *registration, sourceDigest: nativeDigest(original.RegistrationSource), options: options, peers: scopes, current: current.checks[testyardmigration.CurrentYard]}
+		if c.ownerRecoverySource == view.sourceDigest && c.ownerRecoveryToken == token && c.ownerResultsRecipe == hash {
+			view.restoration, _ = c.ownerRecoveryObserver.(ports.NativeOwnerRestorationObserver)
+		}
 		for i, names := range original.YardScopes {
 			if len(names) == 0 || len(names) > 128 || !slices.IsSorted(names) {
 				return domain.ErrPlanStale
@@ -773,20 +920,6 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 		}
 		baseline.ownerSource = view
 		current.baselines[testyardmigration.LegacyYard] = &ownerInputBaseline{files: map[string]ownerInputFile{}, peers: scopes[0], runtimeRoot: c.cli.options.RepositoryRoot, ownerSource: view}
-		for _, input := range original.LegacyInputs {
-			if input.Projected || len(input.Approved) != 0 {
-				return domain.ErrPlanStale
-			}
-			fact, err := decodeOwnerFact(input.Fact)
-			if err != nil {
-				return err
-			}
-			path := c.ownerPathPhysical(string(input.Path))
-			if _, duplicate := current.baselines[testyardmigration.LegacyYard].files[path]; duplicate {
-				return domain.ErrPlanStale
-			}
-			current.baselines[testyardmigration.LegacyYard].files[path] = fact
-		}
 	}
 	if adopt && len(original.Inits) != 0 || !adopt && len(original.Inits) != 3 {
 		return domain.ErrPlanStale
@@ -795,11 +928,11 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 		if !ownerInitChildSlot(child, i) {
 			return domain.ErrPlanStale
 		}
-		var description ownerInitRecord
-		if err := nativejson.DecodeLosslessNativeJSON(child.Metadata, &description, 32<<20); err != nil {
+		input, publication, err := child.input()
+		if err != nil {
 			return err
 		}
-		loaded, err := description.Input.restore(c.cli.catalog)
+		loaded, err := input.restore(c.cli.catalog)
 		if err != nil {
 			return err
 		}
@@ -816,17 +949,27 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 		if err != nil {
 			return err
 		}
-		execution, err := restoreOwnerInitRecord(child.Metadata, loaded, runtime)
+		var execution *initExecution
+		if child.Kind == "lifecycle" {
+			runtime, err = runtime.RestoreOwnerPublication(publication)
+		} else {
+			execution, err = restoreOwnerInitRecord(child.Metadata, loaded, runtime)
+			if err == nil {
+				runtime = execution.platform.(reconcileruntime.Runtime)
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("restore original %s init: %w", child.Yard, err)
 		}
-		runtime = execution.platform.(reconcileruntime.Runtime)
 		// Check every original immutable source before the owning component's
 		// first publication. The returned source handle is discarded; actual
 		// branch execution binds its original payload again at that boundary.
 		guard, err := runtime.BindInstalledRuntimeContext(ctx, sourceRaw)
 		if err != nil {
 			return fmt.Errorf("check original %s source: %w", child.Yard, err)
+		}
+		if err := guard.ShareSources(c.retainPreparedSource); err != nil {
+			return errors.Join(err, guard.Close())
 		}
 		projectConfig, renderErr := runtime.RenderOwnerProjectConfig(ctx, guard)
 		if renderErr != nil {
@@ -888,24 +1031,9 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 				return errors.Join(err, guard.Close())
 			}
 		}
-		knownVolume := false
-		for _, result := range restoredResults {
-			if result.Intent.Kind == "srv-volume" && result.Intent.Scope == expectedVolumeScope && result.Intent.Project == child.Volume.Project && result.Intent.Resource == child.Volume.Volume {
-				knownVolume = true
-			}
+		if execution != nil {
+			execution.platform = runtime
 		}
-		if child.Kind != "recreate" && !knownVolume {
-			checker, ok := runtime.Incus.(interface {
-				CheckOwnerVolumeGuard(context.Context, ports.PreparedOwnerVolume) error
-			})
-			if !ok {
-				return errors.Join(domain.ErrPlanStale, guard.Close())
-			}
-			if err := checker.CheckOwnerVolumeGuard(ctx, *child.Volume); err != nil {
-				return errors.Join(err, guard.Close())
-			}
-		}
-		execution.platform = runtime
 		if err := guard.Close(); err != nil {
 			return err
 		}
@@ -918,7 +1046,7 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 			if execution.inputBaseline == nil {
 				return domain.ErrPlanStale
 			}
-			current.recreate[child.Yard] = preparedOwnerInitChild{sourceRaw: bytes.Clone(sourceRaw), projection: &projection, loaded: loaded, execution: execution, runtime: runtime, instance: child.Instance, volume: child.Volume}
+			current.recreate[child.Yard] = preparedOwnerInitChild{sources: guard, projection: &projection, loaded: loaded, execution: execution, runtime: runtime, instance: child.Instance, volume: child.Volume}
 			continue
 		}
 		childBaseline := current.baselines[child.Yard]
@@ -927,6 +1055,20 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 		}
 		if child.Yard == testyardmigration.LegacyYard {
 			childBaseline.initial = loaded
+			for _, input := range original.LegacyInputs {
+				if input.Projected || len(input.Approved) != 0 {
+					return domain.ErrPlanStale
+				}
+				fact, err := decodeOwnerFact(input.Fact)
+				if err != nil {
+					return err
+				}
+				path := c.ownerInputPathPhysical(string(input.Path), loaded.Context.Paths)
+				if _, duplicate := current.baselines[testyardmigration.LegacyYard].files[path]; duplicate {
+					return domain.ErrPlanStale
+				}
+				current.baselines[testyardmigration.LegacyYard].files[path] = fact
+			}
 			legacyCheck := ownerChildCheck{Kind: "check", Yard: loaded.Context, Yards: childBaseline.peers, Environment: map[string]string{}}
 			for _, key := range []string{"MIN_DISK_GIB", "RESUME_MIN_DISK_GIB", "MIN_INCUS_VER"} {
 				if value, ok := loaded.Environment[key]; ok {
@@ -939,8 +1081,10 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 			}
 			current.checks[child.Yard] = legacyCheck
 		}
-		execution.inputBaseline = childBaseline
-		current.inits[child.Yard] = preparedOwnerInitChild{sourceRaw: bytes.Clone(sourceRaw), loaded: loaded, execution: execution, runtime: runtime, power: child.Power, start: child.Start, instance: child.Instance, volume: child.Volume}
+		if execution != nil {
+			execution.inputBaseline = childBaseline
+		}
+		current.inits[child.Yard] = preparedOwnerInitChild{sources: guard, loaded: loaded, execution: execution, runtime: runtime, power: child.Power, start: child.Start, instance: child.Instance, volume: child.Volume}
 	}
 	if adopt && len(original.Teardowns) != 0 || !adopt && len(original.Teardowns) != 2 {
 		return domain.ErrPlanStale
@@ -950,11 +1094,33 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 			return domain.ErrPlanStale
 		}
 		loaded := c.ownerLabeledLoaded(current.inits[child.Yard].loaded)
-		execution, err := restoreOwnerTeardownRecord(child.Metadata, loaded, current.operation)
+		var descriptor ownerTeardownRecord
+		if err := nativejson.DecodeLosslessNativeJSON(child.Metadata, &descriptor, ownerTeardownRecordLimit); err != nil {
+			return err
+		}
+		var peers []config.Loaded
+		for _, row := range descriptor.Yards {
+			if domain.Context(row.Context) == loaded.Context {
+				continue
+			}
+			found := false
+			for _, prepared := range current.inits {
+				peer := c.ownerLabeledLoaded(prepared.loaded)
+				if peer.Context == domain.Context(row.Context) {
+					peers = append(peers, peer)
+					found = true
+					break
+				}
+			}
+			if !found {
+				return domain.ErrPlanStale
+			}
+		}
+		execution, err := restoreOwnerTeardownRecord(child.Metadata, loaded, current.operation, peers...)
 		if err != nil {
 			return fmt.Errorf("restore original %s teardown: %w", child.Yard, err)
 		}
-		if execution == nil {
+		if execution == nil || original.Inits[i].Kind == "lifecycle" && !execution.snapshot().State.InstanceFound {
 			return domain.ErrPlanStale
 		}
 		current.teardowns[child.Yard] = preparedOwnerTeardownChild{loaded, execution}
@@ -972,7 +1138,43 @@ func (c *releaseOwnerComponents) ownerLabeledLoaded(loaded config.Loaded) config
 	return loaded
 }
 
-func (c *releaseOwnerComponents) applyOwnerChildren(ctx context.Context, before releaseowner.OwnerBefore, token string) error {
+func (p *preparedOwnerChildren) record() (ownerChildrenRecord, error) {
+	var record ownerChildrenRecord
+	for _, file := range p.wire.Files {
+		if file.Path == "prepared/owner-children.json" {
+			err := json.Unmarshal(file.Content, &record)
+			return record, err
+		}
+	}
+	return record, domain.ErrPlanStale
+}
+
+func (record ownerChildrenRecord) capture() (releaseowner.OwnerCapture, error) {
+	capture := releaseowner.OwnerCapture{Instance: "adopted"}
+	if len(record.Inits) == 0 {
+		return capture, nil
+	}
+	if len(record.Inits) != 3 {
+		return capture, domain.ErrPlanStale
+	}
+	capture.Instance = "absent"
+	if record.Inits[1].Kind == "lifecycle" {
+		capture.Instance = "running"
+	}
+	if record.TemporaryStop != nil {
+		capture.Instance = "stopped"
+	}
+	return capture, nil
+}
+
+func (c *releaseOwnerComponents) ApplyOwnerAction(ctx context.Context, before releaseowner.OwnerBefore, token string, reference releaseowner.OwnerActionReference) (actionErr error) {
+	phase := "owner action inputs"
+	defer func() {
+		if actionErr != nil {
+			actionErr = materializedConfigActivationError{actionErr, c.context.Yard, phase, "update", "apply", c.context.ConfigHome}
+		}
+	}()
+	c.ownerPhysicalValidated = false
 	p := c.ownerChildren
 	if p == nil || before.PreparedRecipe != p.binding() || ownerSemanticBefore(before) != p.before || !c.installedBound[before.PreparedRecipe] {
 		return domain.ErrPlanStale
@@ -981,6 +1183,25 @@ func (c *releaseOwnerComponents) applyOwnerChildren(ctx context.Context, before 
 		return err
 	}
 	p = c.ownerChildren
+	if c.hostPowerInstallation != nil {
+		imported := false
+		for _, child := range p.inits {
+			record := child.runtime.OwnerPublicationRecord()
+			if record == nil || record.OutputDigest != c.hostPowerInstallation.Output || string(record.Power.Source) != c.hostPowerInstallation.HostSource {
+				continue
+			}
+			runtime, e := child.runtime.ImportOwnerPublicationInstallation(ctx, *c.hostPowerInstallation)
+			if e != nil {
+				return e
+			}
+			p.publicationInstallation = runtime.OwnerPublicationInstallation()
+			imported = true
+			break
+		}
+		if !imported {
+			return domain.ErrPlanStale
+		}
+	}
 	if c.ownerResultReader != nil {
 		values, err := c.checkedOwnerResults()
 		if err != nil {
@@ -1009,33 +1230,34 @@ func (c *releaseOwnerComponents) applyOwnerChildren(ctx context.Context, before 
 		return err
 	}
 	options.RecoveryToken = token
-	var record ownerChildrenRecord
-	for _, file := range p.wire.Files {
-		if file.Path == "prepared/owner-children.json" {
-			if err := json.Unmarshal(file.Content, &record); err != nil {
-				return err
-			}
+	record, err := p.record()
+	if err != nil {
+		return err
+	}
+	capture, err := record.capture()
+	if err != nil || before.Capture == nil || capture != *before.Capture || reference.Action.Slot > 2 {
+		return domain.ErrPlanStale
+	}
+	options.AllowMissingLegacyProject = len(record.Projects) == 2 && record.Projects[1].Absent
+	if err := c.restoreOwnerPhysical(ctx, before, token, reference); err != nil {
+		return err
+	}
+	output := options.Stdout
+	switch reference.Action.Operation {
+	case "power", "start", "check-lease", "teardown":
+		yard := testyardmigration.LegacyYard
+		if reference.Action.Operation == "teardown" && reference.Action.Slot == 0 {
+			yard = testyardmigration.CurrentYard
+		}
+		baseline := p.baselines[yard]
+		if baseline == nil {
+			return domain.ErrPlanStale
+		}
+		if err := baseline.check(ctx, p.operation); err != nil {
+			return err
 		}
 	}
 	if len(record.Inits) != 0 {
-		if err := c.ownerNativeOptions(record, &options, p); err != nil {
-			return err
-		}
-		originalEnsure := options.EnsureImageProject
-		options.EnsureImageProject = func(ctx context.Context, yard string, shared bool) error {
-			if !p.removed[yard] {
-				return originalEnsure(ctx, yard, shared)
-			}
-			if yard != testyardmigration.LegacyYard || len(record.Inits) != 3 || !ownerInitChildSlot(record.Inits[2], 2) || record.Inits[2].Project.SharedImages != shared {
-				return domain.ErrPlanStale
-			}
-			incus, _ := c.cli.statusPorts()
-			native, ok := incus.(ownerNativeResources)
-			if !ok {
-				return domain.ErrPlanStale
-			}
-			return p.applyOwnerImageProject(ctx, native, *record.Inits[2].Project, "recreate")
-		}
 		if p.registrationSource == nil {
 			return domain.ErrPlanStale
 		}
@@ -1050,37 +1272,75 @@ func (c *releaseOwnerComponents) applyOwnerChildren(ctx context.Context, before 
 			return observer.RecordOwnerRestoration(token, nativeDigest(record.RegistrationSource), member)
 		}
 	}
-	options.RunYard = func(ctx context.Context, yard string, output io.Writer, args ...string) error {
-		baseline := p.baselines[yard]
-		if baseline == nil {
+	switch reference.Action.Operation {
+	case "project":
+		incus, _ := c.cli.statusPorts()
+		native, ok := incus.(ownerNativeResources)
+		if !ok || len(record.Projects) != 2 {
 			return domain.ErrPlanStale
 		}
-		if err := baseline.check(ctx, p.operation); err != nil {
-			return err
+		index, scope := reference.Action.Slot, "current"
+		if index == 1 {
+			scope = "legacy"
 		}
-		if yard == testyardmigration.LegacyYard {
-			if slices.Equal(args, []string{"_migrate", "reconcile-power-reconciler"}) {
-				return p.runPower(ctx, yard)
+		project := record.Projects[0]
+		if index < 2 {
+			project = record.Projects[index]
+		} else {
+			if len(record.Inits) != 3 || record.Inits[2].Project == nil {
+				return domain.ErrPlanStale
 			}
-			if slices.Equal(args, []string{"start", "--yes"}) {
-				return p.runStart(ctx, yard, output)
-			}
-			if slices.Equal(args, []string{"test-vms", "status"}) {
-				return p.readBrokerStatus(ctx, yard, output)
+			project, scope = *record.Inits[2].Project, "recreate"
+		}
+		return p.applyOwnerImageProject(ctx, native, project, scope)
+	case "init":
+		phase = "owner init volume"
+		yard := testyardmigration.CurrentYard
+		if reference.Action.Slot != 0 {
+			yard = testyardmigration.LegacyYard
+		}
+		child, found := p.inits[yard]
+		recreate := reference.Action.Slot == 2
+		knownRecreated := c.ownerPhysical != nil && c.hasOwnerCreatedInstance("recreate")
+		if reference.Action.Slot == 1 && knownRecreated {
+			// This logical legacy role now has the incarnation produced by the
+			// original compensated recreation. Reuse that approved component
+			// capsule and its causal results, never prepare a new init.
+			recreate = true
+		}
+		if recreate {
+			child, found = p.recreate[yard]
+		}
+		if !found || child.execution == nil || child.sources == nil {
+			return domain.ErrPlanStale
+		}
+		// Only this selected init consumes its original live volume precondition.
+		// Other captured slots may already have been intentionally torn down.
+		knownVolume := false
+		for _, value := range c.ownerResults {
+			if child.volume != nil && value.Intent.Kind == "srv-volume" && value.Intent.Scope == child.volume.Scope && value.Intent.Project == child.volume.Project && value.Intent.Resource == child.volume.Volume {
+				knownVolume = true
 			}
 		}
-		if slices.Equal(args, []string{"teardown", "--yes"}) {
-			return p.runTeardown(ctx, yard, output)
-		}
-		if slices.Equal(args, []string{"init", "--yes"}) {
-			child, err := p.originalInitChild(yard)
-			if err != nil {
+		if !recreate && !knownVolume {
+			checker, ok := child.runtime.Incus.(interface {
+				CheckOwnerVolumeGuard(context.Context, ports.PreparedOwnerVolume) error
+			})
+			if !ok || child.volume == nil {
+				return domain.ErrPlanStale
+			}
+			if err := checker.CheckOwnerVolumeGuard(ctx, *child.volume); err != nil {
 				return err
 			}
-			if p.removed[yard] {
-				if child.projection == nil {
-					return domain.ErrPlanStale
-				}
+		}
+		if recreate {
+			if child.projection == nil {
+				return domain.ErrPlanStale
+			}
+			// The exact output receipt and restored create results supersede
+			// the pre-create absence guard. Native init retains its source,
+			// UUID, volume and stage guards.
+			if !knownRecreated {
 				if p.createdRecreateProject != nil && yard == testyardmigration.LegacyYard {
 					if len(record.Inits) != 3 || record.Inits[2].Project == nil || child.runtime.CheckOwnerInitCreatedProject(ctx, *child.projection, *record.Inits[2].Project, *p.createdRecreateProject) != nil {
 						return domain.ErrPlanStale
@@ -1089,91 +1349,266 @@ func (c *releaseOwnerComponents) applyOwnerChildren(ctx context.Context, before 
 					return domain.ErrPlanStale
 				}
 			}
-			baseline := p.baselines[yard]
-			if baseline == nil || yard == testyardmigration.CurrentYard && (baseline.projected == nil || baseline.projected.requirePublished() != nil) {
-				return domain.ErrPlanStale
-			}
-			if err := baseline.check(ctx, p.operation); err != nil {
-				return err
-			}
-			runtime := child.runtime
-			sources, err := child.runtime.BindInstalledRuntimeContext(ctx, child.sourceRaw)
-			if err != nil {
-				return err
-			}
-			executionRuntime, err := runtime.OwnerSourceRuntime(ctx, sources)
-			if err != nil {
-				return errors.Join(err, sources.Close())
-			}
-			var project *ports.PreparedImageProject
-			var projectResult *ports.NativeOwnerCreated
-			scope := "current"
-			if yard == testyardmigration.LegacyYard {
-				scope = "legacy"
-			}
-			if p.removed[yard] {
-				scope = "recreate"
-				project = record.Inits[2].Project
-				projectResult = p.createdRecreateProject
-			} else {
-				for i := range record.Projects {
-					if record.Projects[i].Project == child.loaded.Context.IncusProject {
-						project = &record.Projects[i]
-					}
-				}
-				if scope == "current" {
-					projectResult = p.createdCurrentProject
-				} else {
-					projectResult = p.createdLegacyProject
-				}
-			}
-			if project == nil {
-				return errors.Join(domain.ErrPlanStale, sources.Close())
-			}
-			executionRuntime, err = executionRuntime.WithOwnerYardProject(ctx, sources, *project, scope, projectResult)
-			if err != nil {
-				return errors.Join(err, sources.Close())
-			}
-			executionRuntime.RuntimePlan = child.execution.runtimePlan
-			executionRuntime.HookPlan = child.execution.hookPlan
-			child.execution.platform = executionRuntime
-			child.execution.operationID = "owner-registration"
-			approved := map[string][]byte{}
-			if baseline.projected != nil {
-				approved = baseline.projected.approved
-			}
-			for path, payload := range approved {
-				if err := child.execution.integrationBaseline.acceptPublishedSource(path, payload); err != nil {
-					return err
-				}
-			}
-			err = child.execution.run(ctx, p.operation, output)
-			if result := executionRuntime.OwnerCreatedProject(); result != nil {
-				switch scope {
-				case "current":
-					p.createdCurrentProject = result
-				case "legacy":
-					p.createdLegacyProject = result
-				case "recreate":
-					p.createdRecreateProject = result
-				}
-			}
-			return errors.Join(err, sources.FinishOwnerSources(err))
 		}
-		check, ok := p.checks[yard]
-		if !ok || check.Kind != "check" || !slices.Equal(args, []string{"check"}) {
-			return domain.ErrPlanStale
-		}
+		phase = "owner init input view"
+		baseline := p.baselines[yard]
 		if baseline == nil || yard == testyardmigration.CurrentYard && (baseline.projected == nil || baseline.projected.requirePublished() != nil) {
 			return domain.ErrPlanStale
 		}
 		if err := baseline.check(ctx, p.operation); err != nil {
 			return err
 		}
+		runtime := child.runtime
+		phase = "owner init sources"
+		sources, err := child.runtime.BindInstalledRuntimeContext(ctx, child.sources.Recipe())
+		if err != nil {
+			return err
+		}
+		phase = "owner init project"
+		var project *ports.PreparedImageProject
+		var projectResult *ports.NativeOwnerCreated
+		scope := "current"
+		if yard == testyardmigration.LegacyYard {
+			scope = "legacy"
+		}
+		if recreate {
+			scope = "recreate"
+			project = record.Inits[2].Project
+			projectResult = p.createdRecreateProject
+		} else {
+			for i := range record.Projects {
+				if record.Projects[i].Project == child.loaded.Context.IncusProject {
+					project = &record.Projects[i]
+				}
+			}
+			if scope == "current" {
+				projectResult = p.createdCurrentProject
+			} else {
+				projectResult = p.createdLegacyProject
+			}
+		}
+		if project == nil {
+			return errors.Join(domain.ErrPlanStale, sources.Close())
+		}
+		// Bind the captured project before materialization adds execution-only paths.
+		runtime, err = runtime.WithOwnerYardProject(ctx, sources, *project, scope, projectResult)
+		if err != nil {
+			return errors.Join(err, sources.Close())
+		}
+		phase = "owner init sources"
+		executionRuntime, err := runtime.OwnerSourceRuntime(ctx, sources)
+		if err != nil {
+			return errors.Join(err, sources.Close())
+		}
+		phase = "owner init host power"
+		if p.publicationInstallation != nil && executionRuntime.OwnerPublicationRecord() != nil {
+			executionRuntime, err = executionRuntime.WithOwnerPublicationInstallation(ctx, p.publicationInstallation)
+			if err != nil {
+				return errors.Join(err, sources.Close())
+			}
+		}
+		executionRuntime.RuntimePlan = child.execution.runtimePlan
+		executionRuntime.HookPlan = child.execution.hookPlan
+		child.execution.platform = executionRuntime
+		child.execution.operationID = "owner-registration"
+		phase = "owner init published inputs"
+		approved := map[string][]byte{}
+		if baseline.projected != nil {
+			approved = baseline.projected.approved
+		}
+		for path, payload := range approved {
+			if err := child.execution.integrationBaseline.acceptPublishedSource(path, payload, p.operation.options.RepositoryRoot); err != nil {
+				return err
+			}
+		}
+		phase = "owner init execution"
+		err = runOriginalOwnerInit(ctx, p.operation, child.execution, child.runtime, executionRuntime, output)
+		if err == nil && executionRuntime.OwnerPublicationInstallation() != nil {
+			p.publicationInstallation = executionRuntime.OwnerPublicationInstallation()
+		}
+		if result := executionRuntime.OwnerCreatedProject(); result != nil {
+			switch scope {
+			case "current":
+				p.createdCurrentProject = result
+			case "legacy":
+				p.createdLegacyProject = result
+			case "recreate":
+				p.createdRecreateProject = result
+			}
+		}
+		return errors.Join(err, sources.FinishOwnerSources(err))
+	case "teardown":
+		if reference.Action.Slot > 1 {
+			return domain.ErrPlanStale
+		}
+		yard := []string{testyardmigration.CurrentYard, testyardmigration.LegacyYard}[reference.Action.Slot]
+		return p.runTeardown(ctx, yard)
+	case "power":
+		return p.runPower(ctx, testyardmigration.LegacyYard)
+	case "start":
+		return p.runStart(ctx, testyardmigration.LegacyYard, output)
+	case "check-lease":
+		var status bytes.Buffer
+		if err := p.readBrokerStatus(ctx, testyardmigration.LegacyYard, &status); err != nil {
+			return err
+		}
+		return testyardmigration.VerifyNoActiveOwnerLease(status.Bytes())
+	case "restore-stopped":
+		if record.TemporaryStop == nil {
+			return domain.ErrPlanStale
+		}
+		stop := *record.TemporaryStop
+		stop.UUID, err = c.originalLegacyInstance(reference.Action.Slot)
+		if err != nil || stop.UUID == "" {
+			return errors.Join(domain.ErrPlanStale, err)
+		}
 		incus, _ := c.cli.statusPorts()
-		return (hostruntime.HostCheck{Yard: check.Yard, Yards: check.Yards, Environment: check.Environment, Incus: incus, Output: output}).Run(ctx, hostruntime.CheckOptions{})
+		native, ok := incus.(ownerNativeResources)
+		if !ok {
+			return domain.ErrPlanStale
+		}
+		return native.ApplyPreparedTemporaryStop(ctx, stop)
+	case "check":
+		if reference.Action.Slot > 1 {
+			return domain.ErrPlanStale
+		}
+		yard := []string{testyardmigration.CurrentYard, testyardmigration.LegacyYard}[reference.Action.Slot]
+		baseline := p.baselines[yard]
+		check, ok := p.checks[yard]
+		if !ok || check.Kind != "check" {
+			return domain.ErrPlanStale
+		}
+		if baseline == nil || yard == testyardmigration.CurrentYard && (baseline.projected == nil || baseline.projected.requirePublished() != nil) {
+			return domain.ErrPlanStale
+		}
+		if err := baseline.check(ctx, p.operation); err != nil {
+			return materializedConfigActivationError{err, c.context.Yard, "owner registration inputs", "update", "verify", c.context.ConfigHome}
+		}
+		incus, _ := c.cli.statusPorts()
+		if err := (hostruntime.HostCheck{Yard: check.Yard, Yards: check.Yards, Environment: check.Environment, Incus: incus, Output: output}).Run(ctx, hostruntime.CheckOptions{}); err != nil {
+			return materializedConfigActivationError{err, c.context.Yard, "owner host readiness", "update", "verify", c.context.ConfigHome}
+		}
+		return nil
+	case "verify-desired":
+		actual, err := c.ObserveOwner(ctx, before, token)
+		if err != nil || actual != "desired" {
+			return errors.Join(domain.ErrPlanStale, err)
+		}
+		return nil
+	case "verify-compensated":
+		_, err := c.ObserveOwnerAction(ctx, before, token, reference)
+		return err
+	default:
+		err := testyardmigration.ApplyPreparedRegistrationAction(ctx, options, ownerMigrationBefore(before), reference.Action.Operation)
+		if testyardmigration.PreparedRegistrationActionUncertain(err) {
+			if observer := ports.NativeOperationObserverFrom(ctx); observer != nil {
+				observer.Uncertain()
+			}
+		}
+		return err
 	}
-	return testyardmigration.Commit(ctx, options, testyardmigration.Prepared{State: testyardmigration.State(before.State), RegistrationDigest: before.Registration, OverridesDigest: before.Overrides, ControllerDigest: before.Controller, SharedImages: before.SharedImages})
+}
+
+func (c *releaseOwnerComponents) ObserveOwnerAction(ctx context.Context, before releaseowner.OwnerBefore, token string, reference releaseowner.OwnerActionReference) (string, error) {
+	if reference.Action.Operation == "verify-desired" {
+		return c.ObserveOwner(ctx, before, token)
+	}
+	if reference.Action.Operation != "verify-compensated" {
+		return "", domain.ErrPlanStale
+	}
+	if err := c.prepareOwnerProjection(ctx, before); err != nil {
+		return "", err
+	}
+	if c.ownerPhysical != nil {
+		if err := c.restoreOwnerPhysical(ctx, before, token, reference); err != nil {
+			return "", err
+		}
+	}
+	port, ok := c.cli.ownerRegistrationTransition(c.request()).(*ownerRegistrationTransition)
+	if !ok {
+		return "", domain.ErrPlanStale
+	}
+	options, err := port.options()
+	if err != nil {
+		return "", err
+	}
+	options.RecoveryToken = token
+	record, err := c.ownerChildren.record()
+	if err != nil {
+		return "", err
+	}
+	options.AllowMissingLegacyProject = reference.Action.Slot == 1 && len(record.Projects) == 2 && record.Projects[1].Absent
+	if err := testyardmigration.ApplyPreparedRegistrationAction(ctx, options, ownerMigrationBefore(before), "verify-compensated"); err != nil {
+		return "", err
+	}
+	if reference.Action.Slot != 0 {
+		if before.Capture == nil {
+			return "", domain.ErrPlanStale
+		}
+		uuid, err := c.originalLegacyInstance(reference.Action.Slot)
+		if err != nil {
+			return "", err
+		}
+		incus, _ := c.cli.statusPorts()
+		actual, err := incus.Instance(ctx, "subyard-"+testyardmigration.LegacyYard, "yard-"+testyardmigration.LegacyYard)
+		if uuid == "" && errors.Is(err, ports.ErrInstanceNotFound) {
+			return "desired", nil
+		}
+		status := "running"
+		if before.Capture.Instance == "stopped" {
+			status = "stopped"
+		}
+		if err != nil || uuid == "" || actual.Config["volatile.uuid"] != uuid || !strings.EqualFold(actual.Status, status) || actual.Config["user.subyard.desired_power"] != "running" {
+			return "", errors.Join(domain.ErrPlanStale, err)
+		}
+	}
+	return "desired", nil
+}
+
+func (c *releaseOwnerComponents) originalLegacyInstance(slot uint64) (string, error) {
+	p := c.ownerChildren
+	if p == nil || slot < 1 || slot > 2 {
+		return "", domain.ErrPlanStale
+	}
+	var selected *ports.NativeOwnerCreated
+	if c.ownerResultReader != nil {
+		values, err := c.checkedOwnerResults()
+		if err != nil {
+			return "", err
+		}
+		scope := "legacy"
+		if slot == 2 {
+			scope = "recreate"
+		}
+		for i, value := range values {
+			if value.Intent.Kind != "instance" || value.Intent.Scope != scope && !(slot == 1 && c.ownerPhysical != nil && value.Intent.Scope == "recreate") {
+				continue
+			}
+			if selected != nil || value.Intent.Project != "subyard-"+testyardmigration.LegacyYard || value.Intent.Resource != "yard-"+testyardmigration.LegacyYard || value.InstanceUUID == "" {
+				return "", domain.ErrPlanStale
+			}
+			selected = &values[i]
+		}
+	}
+	if selected != nil {
+		return selected.InstanceUUID, nil
+	}
+	if slot == 2 {
+		return "", domain.ErrPlanStale
+	}
+	child, found := p.teardowns[testyardmigration.LegacyYard]
+	if !found || child.execution == nil {
+		return "", domain.ErrPlanStale
+	}
+	state := child.execution.snapshot().State
+	if !state.InstanceFound {
+		return "", nil
+	}
+	uuid := state.Instance.Config["volatile.uuid"]
+	if uuid == "" {
+		return "", domain.ErrPlanStale
+	}
+	return uuid, nil
 }
 
 func (c *releaseOwnerComponents) ownerPathLabel(path string) string {
@@ -1181,14 +1616,13 @@ func (c *releaseOwnerComponents) ownerPathLabel(path string) string {
 	if root == "" {
 		root = c.cli.options.RepositoryRoot
 	}
-	if path == root {
-		return c.context.RepositoryRoot
-	}
-	if strings.HasPrefix(path, root+string(filepath.Separator)) {
-		return c.context.RepositoryRoot + strings.TrimPrefix(path, root)
-	}
-	return path
+	return ownerSourcePathLabel(path, root, c.context.RepositoryRoot)
 }
+
+func (c *releaseOwnerComponents) ownerInputPathPhysical(path string, paths domain.RuntimePaths) string {
+	return ownerRepositoryValue(path, c.context.RepositoryRoot, c.cli.options.RepositoryRoot, ownerMutableRoots(paths)...)
+}
+
 func (c *releaseOwnerComponents) ownerPathPhysical(path string) string {
 	root := c.context.RepositoryRoot
 	if path == root {
@@ -1212,6 +1646,28 @@ func (c *releaseOwnerComponents) ownerCheckLabel(check ownerChildCheck) ownerChi
 	}
 	return check
 }
+
+// Canonical labels may name one physical input through both owned FD spellings.
+// Coalesce only byte-identical evidence; presence and projected authority remain strict.
+func canonicalOwnerChildInputs(inputs []ownerChildInput) ([]ownerChildInput, error) {
+	if len(inputs) < 2 {
+		return inputs, nil
+	}
+	ordered := slices.Clone(inputs)
+	slices.SortFunc(ordered, func(a, b ownerChildInput) int { return bytes.Compare(a.Path, b.Path) })
+	result := ordered[:0]
+	for _, input := range ordered {
+		if len(result) > 0 && bytes.Equal(result[len(result)-1].Path, input.Path) {
+			if !reflect.DeepEqual(result[len(result)-1], input) {
+				return nil, domain.ErrPlanStale
+			}
+			continue
+		}
+		result = append(result, input)
+	}
+	return result, nil
+}
+
 func ownerChildrenSemantic(record ownerChildrenRecord) ownerChildrenRecord {
 	record.Inputs = slices.Clone(record.Inputs)
 	for i := range record.Inputs {
@@ -1222,17 +1678,35 @@ func ownerChildrenSemantic(record ownerChildrenRecord) ownerChildrenRecord {
 	return record
 }
 
+// The native session retains this descriptor throughout synchronous children.
+func ownerChildDispatcher(root string) string {
+	if strings.HasPrefix(root, "/proc/self/fd/") {
+		root = fmt.Sprintf("/proc/%d/fd/%s", os.Getpid(), strings.TrimPrefix(root, "/proc/self/fd/"))
+	}
+	return filepath.Join(root, "bin", "yard-engine")
+}
+
 func (c *releaseOwnerComponents) ownerChildOperation() *CLI {
 	operation := c.cli.releaseActivationOperation()
+	operation.ownerCompleteSource = c.completeSource
+	operation.ownerLegacyRepository = c.context.RepositoryRoot
+	operation.ownerLegacySource = nil
 	operation.env = maps.Clone(operation.env)
 	operation.baseEnv = maps.Clone(operation.baseEnv)
 	for _, environment := range []map[string]string{operation.env, operation.baseEnv} {
+		// Keep the command inputs admitted by the native front door after
+		// discarding the predecessor's resolved environment.
+		for _, name := range c.context.InheritedSettingIDs {
+			if value, present := c.cli.baseEnv[name]; present {
+				environment[name] = value
+			}
+		}
 		delete(environment, "SUBYARD_CONFIG_LOADED")
 		environment["SUBYARD_ENGINE_CONTEXT"] = "1"
 		environment["SUBYARD_ENGINE_CONTEXT_SCHEMA"] = "1"
 		environment["SUBYARD_INTERNAL_MIGRATION_CHILD"] = "1"
 	}
-	operation.options.DispatcherPath = filepath.Join(c.cli.options.RepositoryRoot, "bin", "yard-engine")
+	operation.options.DispatcherPath = ownerChildDispatcher(c.cli.options.RepositoryRoot)
 	operation.options.Stdin = strings.NewReader("")
 	operation.releaseTransitionChild = true
 	operation.configApplyRepair = nil
@@ -1339,6 +1813,7 @@ func ownerStrings(values []string) [][]byte {
 	return result
 }
 func (c *releaseOwnerComponents) ownerSettingsBinding(settings map[string]config.SettingTrace) (string, error) {
+	settings = ownerSettingsLabels(settings, c.ownerPathLabel)
 	names := make([]string, 0, len(settings))
 	for name := range settings {
 		names = append(names, name)
@@ -1348,9 +1823,6 @@ func (c *releaseOwnerComponents) ownerSettingsBinding(settings map[string]config
 	for _, name := range names {
 		v := settings[name]
 		effective := v.EffectiveValue
-		if v.Kind == config.SettingFile || v.Type == config.SettingRegularFilePath {
-			effective = c.ownerPathLabel(effective)
-		}
 		row := ownerTraceRecord{Text: ownerStrings([]string{name, effective, string(v.Kind), string(v.Type), v.Merge, string(v.Application), v.Owner}), Aliases: ownerStrings(v.Aliases), Syncable: v.Syncable, Sensitive: v.Sensitive}
 		if v.Scopes != nil {
 			row.Scopes = make([][]byte, len(v.Scopes))
@@ -1361,7 +1833,7 @@ func (c *releaseOwnerComponents) ownerSettingsBinding(settings map[string]config
 		if v.Resolutions != nil {
 			row.Resolutions = make([]ownerResolutionRecord, len(v.Resolutions))
 			for i, r := range v.Resolutions {
-				row.Resolutions[i] = ownerResolutionRecord{ownerStrings([]string{r.Scope, r.Role, c.ownerPathLabel(r.Path), r.Value, r.Status, r.Detail}), r.Line}
+				row.Resolutions[i] = ownerResolutionRecord{ownerStrings([]string{r.Scope, r.Role, r.Path, r.Value, r.Status, r.Detail}), r.Line}
 			}
 		}
 		rows = append(rows, row)

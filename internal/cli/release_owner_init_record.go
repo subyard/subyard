@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -107,7 +109,7 @@ func captureOwnerLoaded(loaded config.Loaded) ownerLoadedSnapshot {
 	return r
 }
 
-func ownerRepositoryValue(value, from, to string) string {
+func ownerRepositoryValue(value, from, to string, mutableRoots ...string) string {
 	if from == "" || to == "" || from == to {
 		return value
 	}
@@ -120,7 +122,17 @@ func ownerRepositoryValue(value, from, to string) string {
 		}
 		end := i + len(from)
 		out.WriteString(value[:i])
-		if (i == 0 || strings.ContainsRune("=:\"'\n\r\t [,(", rune(value[i-1]))) && (end == len(value) || strings.ContainsRune("/\"'\n\r\t ", rune(value[end]))) {
+		mutable := false
+		for _, root := range mutableRoots {
+			if strings.HasPrefix(root, from+string(filepath.Separator)) && strings.HasPrefix(value[i:], root) {
+				rootEnd := i + len(root)
+				mutable = rootEnd == len(value) || strings.ContainsRune("/\"'\n\r\t ", rune(value[rootEnd]))
+				if mutable {
+					break
+				}
+			}
+		}
+		if !mutable && (i == 0 || strings.ContainsRune("=:\"'\n\r\t [,(", rune(value[i-1]))) && (end == len(value) || strings.ContainsRune("/\"'\n\r\t ", rune(value[end]))) {
 			out.WriteString(to)
 		} else {
 			out.WriteString(from)
@@ -129,12 +141,55 @@ func ownerRepositoryValue(value, from, to string) string {
 	}
 }
 
-func ownerLoadedLabels(loaded config.Loaded, from, to string) config.Loaded {
-	label := func(value string) string {
-		if strings.HasPrefix(from, "/proc/self/fd/") {
-			value = ownerRepositoryValue(value, strings.Replace(from, "/proc/self/", "/proc/"+strconv.Itoa(os.Getpid())+"/", 1), to)
+// Only the current process spelling of this exact retained root is equivalent.
+func ownerRepositoryAliases(root string) []string {
+	result := []string{root}
+	current := "/proc/" + strconv.Itoa(os.Getpid()) + "/fd/"
+	if strings.HasPrefix(root, "/proc/self/fd/") {
+		result = append(result, current+strings.TrimPrefix(root, "/proc/self/fd/"))
+	} else if strings.HasPrefix(root, current) {
+		result = append(result, "/proc/self/fd/"+strings.TrimPrefix(root, current))
+	}
+	return result
+}
+func ownerSourcePathLabel(path, from, to string) string {
+	if from == "" || to == "" {
+		return path
+	}
+	for _, root := range ownerRepositoryAliases(from) {
+		if path == root {
+			return to
 		}
-		return ownerRepositoryValue(value, from, to)
+		if strings.HasPrefix(path, root+string(filepath.Separator)) {
+			return to + strings.TrimPrefix(path, root)
+		}
+	}
+	return path
+}
+func ownerFileSettingNames(settings map[string]config.SettingTrace) []string {
+	var names []string
+	for name, trace := range settings {
+		if trace.Kind == config.SettingFile || trace.Type == config.SettingRegularFilePath {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+func ownerMutableRoots(paths domain.RuntimePaths) []string {
+	return []string{paths.OperatorHome, paths.ConfigHome, paths.DataHome, paths.StoragePath, paths.HostBase, paths.StateDir}
+}
+
+func ownerLoadedLabels(loaded config.Loaded, from, to string) config.Loaded {
+	// Mutable roots nested in a checkout keep their own canonical authority.
+	// A runtime repository inside DataHome still uses its retained source FD.
+	mutableRoots := ownerMutableRoots(loaded.Context.Paths)
+	label := func(value string) string {
+		for _, root := range ownerRepositoryAliases(from) {
+			value = ownerRepositoryValue(value, root, to, mutableRoots...)
+		}
+		return value
 	}
 	loaded.Context.Paths.RepositoryRoot = label(loaded.Context.Paths.RepositoryRoot)
 	loaded.Context.Paths.ConfigDir = label(loaded.Context.Paths.ConfigDir)
@@ -161,6 +216,9 @@ func ownerSettingsLabels(settings map[string]config.SettingTrace, label func(str
 		trace.Resolutions = slices.Clone(trace.Resolutions)
 		for i := range trace.Resolutions {
 			trace.Resolutions[i].Path = label(trace.Resolutions[i].Path)
+			if trace.Kind == config.SettingFile || trace.Type == config.SettingRegularFilePath {
+				trace.Resolutions[i].Value = label(trace.Resolutions[i].Value)
+			}
 		}
 		result[key] = trace
 	}
@@ -196,11 +254,14 @@ func (r ownerLoadedSnapshot) restore(catalog config.Catalog) (config.Loaded, err
 }
 
 type ownerInitRecord struct {
+	Publication                                                    *reconcileruntime.OwnerPublicationRecord `json:",omitempty"`
 	Version                                                        int
 	Loaded                                                         string
 	Input                                                          ownerLoadedSnapshot
 	Plan, Approved, Finalize                                       application.ReconcilePlan
 	NativePlans                                                    []byte
+	Orphan                                                         []byte
+	Continuation                                                   *ownerLegacyContinuation `json:",omitempty"`
 	Baseline                                                       *ownerInitBaseline
 	Selection                                                      *ownerInitSelection
 	PowerYards                                                     []ownerInitContext
@@ -210,13 +271,7 @@ type ownerInitRecord struct {
 }
 
 func ownerLoadedBinding(loaded config.Loaded, runtime reconcileruntime.Runtime) (string, error) {
-	loaded = ownerLoadedLabels(loaded, runtime.RepositoryRoot, runtime.LogicalRepositoryRoot)
-	settings := describeOwnerSettings(loaded.Settings)
-	layers := loaded.ConfigurationLayers
-	var environment []ownerStringPair
-	for _, name := range slices.Sorted(maps.Keys(loaded.Environment)) {
-		environment = append(environment, ownerStringPair{[]byte(name), []byte(loaded.Environment[name])})
-	}
+	snapshot := captureOwnerLoaded(ownerLoadedLabels(loaded, runtime.RepositoryRoot, runtime.LogicalRepositoryRoot))
 	raw, err := nativejson.EncodeLosslessNativeJSON(struct {
 		Context           ownerInitContext
 		Selection         ownerSelectionRecord
@@ -225,27 +280,22 @@ func ownerLoadedBinding(loaded config.Loaded, runtime reconcileruntime.Runtime) 
 		LoadedEnvironment []ownerStringPair
 		Settings          []ownerSettingRow
 		Layers            []config.ConfigurationLayer
-	}{ownerInitContext(loaded.Context), describeOwnerSelection(loaded.Integrations), loaded.EnvironmentProfiles, runtime.OwnerEnvironmentBinding(), environment, settings, layers}, 32<<20)
+	}{snapshot.Context, snapshot.Selection, snapshot.Profiles, runtime.OwnerEnvironmentBinding(), snapshot.Environment, snapshot.Settings, snapshot.Layers}, 32<<20)
 	if err != nil {
 		return "", err
 	}
 	return nativeDigest(raw), nil
 }
 
-func captureOwnerInitRecord(execution *initExecution) ([]byte, error) {
+func captureOwnerInitRecord(execution *initExecution, operations ...*CLI) ([]byte, error) {
 	if execution == nil || execution.mode != initReconcile || execution.bootstrap != nil || execution.resetBaseline != nil || execution.profileSetup != nil || execution.profileProvision != nil || execution.requestedProfile != "" || execution.provisionProfile != "" || execution.resourceCommand != "" || len(execution.resourceArguments) != 0 {
 		return nil, errors.New("owner migration requires its original plain init handle")
-	}
-	// These scopes require their own original resource/continuation capsules;
-	// never erase them or replace them with a freshly selected callback.
-	if execution.orphanIngress != nil || execution.legacyContinuation != nil {
-		return nil, errors.New("owner init resource or continuation capsule unavailable")
 	}
 	runtime, ok := execution.platform.(reconcileruntime.Runtime)
 	if !ok {
 		return nil, domain.ErrPlanStale
 	}
-	r := ownerInitRecord{Version: 1, Input: captureOwnerLoaded(ownerLoadedLabels(execution.loaded, runtime.RepositoryRoot, runtime.LogicalRepositoryRoot)), Plan: execution.plan, Approved: execution.approvedPlan, Finalize: execution.approvedFinalize, HookProjects: execution.hookProjects, HostID: execution.hostID, HostIDPending: execution.hostIDPending, ConfigsChanged: execution.configsChanged, HooksApplicable: execution.hooksApplicable, OrphanDeferred: execution.orphanIngressDeferred}
+	r := ownerInitRecord{Publication: runtime.OwnerPublicationRecord(), Version: 1, Input: captureOwnerLoaded(ownerLoadedLabels(execution.loaded, runtime.RepositoryRoot, runtime.LogicalRepositoryRoot)), Plan: execution.plan, Approved: execution.approvedPlan, Finalize: execution.approvedFinalize, HookProjects: execution.hookProjects, HostID: execution.hostID, HostIDPending: execution.hostIDPending, ConfigsChanged: execution.configsChanged, HooksApplicable: execution.hooksApplicable, OrphanDeferred: execution.orphanIngressDeferred}
 	if execution.powerYards != nil {
 		r.PowerYards = []ownerInitContext{}
 		for _, yard := range execution.powerYards {
@@ -259,19 +309,37 @@ func captureOwnerInitRecord(execution *initExecution) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.Orphan = execution.ownerOrphanRaw
+	if r.Orphan == nil && execution.orphanIngress != nil {
+		if len(operations) != 1 || operations[0] == nil || execution.orphanIngress.uuid == "" {
+			return nil, domain.ErrPlanStale
+		}
+		for _, entry := range execution.orphanIngress.entries {
+			if entry.shutdown != nil && entry.prepared == nil {
+				return nil, domain.ErrPlanStale
+			}
+		}
+		r.Orphan, err = captureOwnerOrphanRecord(execution.orphanIngress, operations[0], runtime.LogicalRepositoryRoot)
+		if err != nil {
+			return nil, err
+		}
+	}
+	r.Continuation, err = captureOwnerLegacyContinuation(execution.legacyContinuation)
+	if err != nil {
+		return nil, err
+	}
 	r.NativePlans, err = runtime.CaptureOwnerNativePlans(execution.integrationAdoption)
 	if err != nil {
 		return nil, err
 	}
 	if b := execution.integrationBaseline; b != nil {
-		label := func(value string) string {
-			return ownerRepositoryValue(value, runtime.RepositoryRoot, runtime.LogicalRepositoryRoot)
+		b, err = b.sourceLabels(runtime.RepositoryRoot, runtime.LogicalRepositoryRoot)
+		if err != nil {
+			return nil, err
 		}
-		selection := b.Selection
-		selection.Provenance.Path = label(selection.Provenance.Path)
-		d := &ownerInitBaseline{Selection: describeOwnerSelection(selection), Settings: describeOwnerSettings(ownerSettingsLabels(b.Settings, label))}
+		d := &ownerInitBaseline{Selection: describeOwnerSelection(b.Selection), Settings: describeOwnerSettings(b.Settings)}
 		for _, path := range slices.Sorted(maps.Keys(b.Sources)) {
-			d.Sources = append(d.Sources, ownerInitSource{label(path), b.Sources[path]})
+			d.Sources = append(d.Sources, ownerInitSource{path, b.Sources[path]})
 		}
 		for _, name := range slices.Sorted(maps.Keys(b.Packages)) {
 			d.Packages = append(d.Packages, ownerStringPair{[]byte(name), []byte(b.Packages[name])})
@@ -306,7 +374,19 @@ func restoreOwnerInitRecord(raw []byte, loaded config.Loaded, runtime reconciler
 	if err != nil {
 		return nil, err
 	}
-	e := &initExecution{loaded: loaded, mode: initReconcile, plan: r.Plan, approvedPlan: r.Approved, approvedFinalize: r.Finalize, hookProjects: r.HookProjects, hostID: r.HostID, hostIDPending: r.HostIDPending, configsChanged: r.ConfigsChanged, hooksApplicable: r.HooksApplicable, orphanIngressDeferred: r.OrphanDeferred, platform: runtime, runtimePlan: runtime.RuntimePlan, hookPlan: runtime.HookPlan, integrationAdoption: adoption}
+	runtime, err = runtime.RestoreOwnerPublication(r.Publication)
+	if err != nil {
+		return nil, err
+	}
+	e := &initExecution{ownerOrphanRaw: slices.Clone(r.Orphan), loaded: loaded, mode: initReconcile, plan: r.Plan, approvedPlan: r.Approved, approvedFinalize: r.Finalize, hookProjects: r.HookProjects, hostID: r.HostID, hostIDPending: r.HostIDPending, configsChanged: r.ConfigsChanged, hooksApplicable: r.HooksApplicable, orphanIngressDeferred: r.OrphanDeferred, platform: runtime, runtimePlan: runtime.RuntimePlan, hookPlan: runtime.HookPlan, integrationAdoption: adoption}
+	e.legacyContinuation, err = r.Continuation.restore()
+	if err != nil {
+		return nil, err
+	}
+	if e.legacyContinuation != nil {
+		runtime.LegacyContinuation = &e.legacyContinuation.grant
+		e.platform = runtime
+	}
 	if r.PowerYards != nil {
 		e.powerYards = []domain.Context{}
 		for _, yard := range r.PowerYards {
@@ -318,13 +398,17 @@ func restoreOwnerInitRecord(raw []byte, loaded config.Loaded, runtime reconciler
 	}
 	if b := r.Baseline; b != nil {
 		physical := func(value string) string {
-			return ownerRepositoryValue(value, runtime.LogicalRepositoryRoot, runtime.RepositoryRoot)
+			return ownerSourcePathLabel(value, runtime.LogicalRepositoryRoot, runtime.RepositoryRoot)
 		}
 		selection := b.Selection.restore()
 		selection.Provenance.Path = physical(selection.Provenance.Path)
 		e.integrationBaseline = &initIntegrationBaseline{Selection: selection, Settings: ownerSettingsLabels(restoreOwnerSettings(b.Settings), physical), Sources: map[string]initIntegrationSource{}, Packages: map[string]string{}}
 		for _, source := range b.Sources {
-			e.integrationBaseline.Sources[physical(source.Path)] = source.Source
+			path := physical(source.Path)
+			if previous, present := e.integrationBaseline.Sources[path]; present && previous != source.Source {
+				return nil, domain.ErrPlanStale
+			}
+			e.integrationBaseline.Sources[path] = source.Source
 		}
 		for _, row := range b.Packages {
 			e.integrationBaseline.Packages[string(row.Name)] = string(row.Value)
@@ -346,18 +430,62 @@ func restoreOwnerInitRecord(raw []byte, loaded config.Loaded, runtime reconciler
 	return e, nil
 }
 
-func (c *releaseOwnerComponents) prepareOwnerInit(ctx context.Context, operation *CLI, loaded config.Loaded, powerYards []domain.Context) (*initExecution, *reconcileruntime.PreparedInstalledRuntime, error) {
-	return c.prepareOwnerInitView(ctx, operation, loaded, powerYards, nil)
+// The shared current/legacy/recreate callback binds executable definitions only
+// after the original source recipe has yielded its retained execution tree.
+func restoreOwnerInitResources(operation *CLI, execution *initExecution, original, retained reconcileruntime.Runtime) (*CLI, error) {
+	physical, err := ownerResourceSourceCLI(operation, original, retained)
+	if err != nil {
+		return nil, err
+	}
+	execution.orphanIngress, err = restoreOwnerOrphanRecord(execution.ownerOrphanRaw, physical, original.LogicalRepositoryRoot)
+	if err != nil {
+		return nil, err
+	}
+	if execution.orphanIngress != nil {
+		if execution.orphanIngress.uuid == "" {
+			return nil, domain.ErrPlanStale
+		}
+		execution.orphanIngress.native = true
+	}
+	execution.ownerResourceCLI = physical
+	if execution.legacyContinuation != nil {
+		physical.ownerLegacySource = execution.legacyContinuation.ownerSource
+		physical.ownerCompleteSource = nil
+		retained.LegacyContinuation = &execution.legacyContinuation.grant
+		execution.platform = retained
+	}
+	return physical, nil
 }
+
+// Whole-init configuration and inode baselines use the original operation.
+// Only the original resource leaf uses its retained executable registry.
+func runOriginalOwnerInit(ctx context.Context, operation *CLI, execution *initExecution, original, retained reconcileruntime.Runtime, output io.Writer) error {
+	if _, err := restoreOwnerInitResources(operation, execution, original, retained); err != nil {
+		return err
+	}
+	logical := *operation
+	if execution.legacyContinuation != nil {
+		logical.ownerLegacySource = execution.legacyContinuation.ownerSource
+		logical.ownerCompleteSource = nil
+	}
+	err := execution.run(ctx, &logical, output)
+	var stage *application.ReconcileStageError
+	if errors.As(err, &stage) && domain.SafeName(string(stage.Stage)) {
+		switch stage.Phase {
+		case "check", "apply", "verify", "drift", "nonconverged":
+			return materializedConfigActivationError{err, execution.loaded.Context.YardName, "owner init " + stage.Phase + " " + string(stage.Stage), "update", "apply", execution.loaded.Context.Paths.ConfigHome}
+		}
+	}
+	return err
+}
+
 func (c *releaseOwnerComponents) prepareOwnerInitView(ctx context.Context, operation *CLI, loaded config.Loaded, powerYards []domain.Context, planning *reconcileruntime.Runtime) (*initExecution, *reconcileruntime.PreparedInstalledRuntime, error) {
-	// The fixed child has no --continue-legacy grant. Do not enter the public
-	// release source inspector through a saved general-purpose continuation.
 	continuation, err := readLegacyContinuation(loaded.Context)
 	if err != nil {
 		return nil, nil, err
 	}
-	if continuation.Exists {
-		return nil, nil, errors.New("saved legacy continuation needs its original source-admission component facts")
+	if continuation.Exists && !operation.ownerCompleteSource.Valid() {
+		return nil, nil, errors.New("saved legacy continuation needs its original COMPLETE source reference")
 	}
 	preparer := *operation
 	preparer.options.InitPlatform = c.platform(loaded, powerYards)
@@ -382,10 +510,32 @@ func (c *releaseOwnerComponents) prepareOwnerInitView(ctx context.Context, opera
 	if !ok {
 		return nil, nil, domain.ErrPlanStale
 	}
+	runtime, sources, err := c.prepareOwnerChildSources(ctx, runtime)
 	execution.platform = runtime
+	return execution, sources, err
+}
+
+func (c *releaseOwnerComponents) prepareOwnerChildSources(ctx context.Context, runtime reconcileruntime.Runtime) (reconcileruntime.Runtime, *reconcileruntime.PreparedInstalledRuntime, error) {
+	runtime = runtime.WithoutOwnerInitPortRelease()
+	publication, err := runtime.PrepareOwnerPublication(ctx)
+	if err != nil {
+		return reconcileruntime.Runtime{}, nil, err
+	}
+	if publication != nil && c.publicationPlans != nil {
+		key := publication.OutputDigest
+		if prior, ok := c.publicationPlans[key]; ok {
+			publication.Consumer.Generation = prior
+		} else {
+			c.publicationPlans[key] = publication.Consumer.Generation
+		}
+	}
+	runtime, err = runtime.RestoreOwnerPublication(publication)
+	if err != nil {
+		return reconcileruntime.Runtime{}, nil, err
+	}
 	sources, err := runtime.PrepareOwnerRuntimeSources(ctx)
 	if err != nil {
-		return nil, nil, err
+		return reconcileruntime.Runtime{}, nil, err
 	}
-	return execution, sources, nil
+	return runtime, sources, nil
 }

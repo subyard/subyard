@@ -18,25 +18,43 @@ import (
 
 const v0173ProcessEnvironment = "SUBYARD_TEST_V0173_TRANSITION_PROCESS"
 
-func TestV0173UpdateNamesStandaloneMigrationRecovery(t *testing.T) {
-	fixture := newV0173RecoveryFixture(t)
-	environment := fixture.environment()
-	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
-	runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment), Stderr: &bytes.Buffer{}})
-	defer runtime.Close()
-	_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--version", "0.17.5"}, fixture.configHome, "default")
-	if err == nil || !strings.Contains(err.Error(), filepath.Join(fixture.candidate.root, "bin", "yard")) ||
-		!strings.Contains(err.Error(), "migrate --check") || !strings.Contains(err.Error(), "retry yard update after recovery") {
-		t.Fatalf("update omitted concrete recovery commands: %v", err)
-	}
-	store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
-	journal, _ := store.ReadCurrentJournal()
-	if !sameProtectedSnapshot(fixture.journal, journal) {
-		t.Fatal("blocked update changed the authorized journal")
+func TestV0173FreshUpdateRequiresCompletedGoBridge(t *testing.T) {
+	for _, arguments := range [][]string{{"--offline", "--version", "0.17.5"}, {"--check", "--version", "0.17.5"}, {"--rollback"}} {
+		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
+			fixture := newV0173RecoveryFixture(t)
+			environment := fixture.environment()
+			environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
+			runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment), Stderr: &bytes.Buffer{}})
+			defer runtime.Close()
+			before, err := runtime.inspectRuntimeLinks(fixture.runtimeRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = runtime.PrepareTransition(context.Background(), arguments, fixture.configHome, "default")
+			if err == nil || err.Error() != SourceBridgeGuidance {
+				t.Fatalf("old-owner new-goal refusal=%v", err)
+			}
+			store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
+			journal, err := store.ReadCurrentJournal()
+			if err != nil || !sameProtectedSnapshot(fixture.journal, journal) {
+				t.Fatal("refusal changed original journal", err)
+			}
+			ledger, err := store.ReadLedger()
+			if err != nil || !bytes.Equal(ledger.Payload, fixture.ledger) {
+				t.Fatal("refusal changed completed ledger", err)
+			}
+			after, err := runtime.inspectRuntimeLinks(fixture.runtimeRoot)
+			if err != nil || after != before {
+				t.Fatal("refusal changed runtime links", err)
+			}
+			if _, err := os.Stat(fixture.statePath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("refusal ran reconciliation", err)
+			}
+		})
 	}
 }
 
-func TestV0173StandaloneRetryRequiresMatchingRegistry(t *testing.T) {
+func TestV0173CurrentRecoveryRetryRequiresOriginalRegistry(t *testing.T) {
 	fixture := newV0173RecoveryFixture(t)
 	var registry releasetransition.RegistryV2
 	if err := json.Unmarshal(fixture.registry, &registry); err != nil {

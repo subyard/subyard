@@ -22,6 +22,10 @@ func (runtime *Runtime) inspectActivationRecovery(
 	verifiedOwner *verifiedPublishedCandidate,
 	protected *protectedTransitionInspection,
 ) (*protectedTransitionInspection, error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return nil, selectionErr
+	}
 	if protected == nil || !currentScopeBlocker(protected.inspection) {
 		return protected, nil
 	}
@@ -133,6 +137,10 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	request releasetransition.RecoveryProcessRequest,
 	grant releasetransition.Authorization,
 ) (releasetransition.RecoveryProcessResponse, error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return releasetransition.RecoveryProcessResponse{}, selectionErr
+	}
 	if owner == nil || owner.root == nil || owner.engine == nil || owner.registryDigest == "" {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("verified recovery owner is unavailable")
 	}

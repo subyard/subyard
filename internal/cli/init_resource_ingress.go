@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -39,17 +41,21 @@ type orphanIngressEntry struct {
 	shutdownEligible    bool
 	shutdownUnavailable bool
 	shutdown            *domain.ActionAssessment
+	prepared            *resource.PrepareResult
 }
 
 type orphanIngressPlan struct {
 	yard    yardnetwork.Yard
 	entries []orphanIngressEntry
+	uuid    string
+	nic     map[string]string
+	native  bool
 }
 
 // prepareOrphanIngress inspects only the target yard and only public
 // devices declared by the resource registry. A missing selection cannot keep
 // a previously owned public route open through init.
-func (cli *CLI) prepareOrphanIngress(ctx context.Context, loaded config.Loaded) (*orphanIngressPlan, error) {
+func (cli *CLI) prepareOrphanIngress(ctx context.Context, loaded config.Loaded, originals ...*orphanIngressPlan) (*orphanIngressPlan, error) {
 	if loaded.Context.AccessKind != domain.AccessLocal || loaded.Context.YardName == "default" {
 		return nil, nil
 	}
@@ -93,7 +99,20 @@ func (cli *CLI) prepareOrphanIngress(ctx context.Context, loaded config.Loaded) 
 		if !entry.shutdownEligible {
 			continue
 		}
-		output, prepareErr := cli.prepareResource(ctx, loaded, entry.definition, []string{entry.definition.Shutdown})
+		extra := map[string]string{}
+		if len(originals) == 1 && originals[0] != nil && originals[0].native {
+			for _, original := range originals[0].entries {
+				if original.definition.Command == entry.definition.Command && original.prepared != nil {
+					steps, err := json.Marshal(original.prepared.Steps)
+					if err != nil {
+						return nil, err
+					}
+					extra["SUBYARD_RESOURCE_BINDING"] = original.prepared.Binding
+					extra["SUBYARD_RESOURCE_STEPS"] = string(steps)
+				}
+			}
+		}
+		output, prepareErr := cli.prepareResourceModeTimeout(ctx, loaded, entry.definition, []string{entry.definition.Shutdown}, "prepare", resourcePrepareTimeout, extra)
 		if prepareErr != nil {
 			if len(entry.device) != 0 || entry.marker != "" {
 				entry.shutdownUnavailable = true
@@ -101,15 +120,17 @@ func (cli *CLI) prepareOrphanIngress(ctx context.Context, loaded config.Loaded) 
 			}
 			return nil, fmt.Errorf("assess deselected resource shutdown: %w", prepareErr)
 		}
-		assessment, assessErr := cli.resources.AssessPrepareResult(cli.coreActions,
+		prepared, assessErr := cli.resources.PrepareResult(cli.coreActions,
 			entry.definition.Command, entry.definition.Shutdown, output)
 		if assessErr != nil {
 			return nil, assessErr
 		}
+		assessment := prepared.Assessment
 		if err := validateOrphanShutdown(entry.definition, assessment); err != nil {
 			return nil, err
 		}
 		entry.shutdown = &assessment
+		entry.prepared = &prepared
 	}
 	plan.entries = slices.DeleteFunc(plan.entries, func(entry orphanIngressEntry) bool {
 		return len(entry.device) == 0 && entry.marker == "" && (entry.shutdown == nil || !entry.shutdown.Changed)
@@ -124,7 +145,7 @@ func planOrphanIngress(yard yardnetwork.Yard, instance *ports.InstanceInfo, sele
 	if instance == nil {
 		return nil, nil
 	}
-	plan := &orphanIngressPlan{yard: yard}
+	plan := &orphanIngressPlan{yard: yard, uuid: instance.Config["volatile.uuid"], nic: maps.Clone(instance.Devices["eth0"])}
 	for _, definition := range definitions {
 		contract := definition.Proxy
 		if contract == nil || !contract.IsOwnerIPv4Ingress() ||
@@ -209,14 +230,39 @@ func (plan *orphanIngressPlan) consequences() []string {
 }
 
 func (plan *orphanIngressPlan) refresh(ctx context.Context, cli *CLI, loaded config.Loaded) error {
-	fresh, err := cli.prepareOrphanIngress(ctx, loaded)
+	fresh, err := cli.prepareOrphanIngress(ctx, loaded, plan)
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(plan, fresh) {
+	if plan != nil && plan.native && (fresh == nil || plan.uuid == "" || fresh.uuid != plan.uuid || !maps.Equal(fresh.nic, plan.nic)) {
+		return domain.ErrPlanStale
+	}
+	// Only native original-resource authority includes the full prepared plan.
+	// Ordinary Go retains its previous assessment comparison semantics.
+	normalized := func(value *orphanIngressPlan) *orphanIngressPlan {
+		if value == nil {
+			return nil
+		}
+		copy := *value
+		copy.native = false
+		copy.entries = slices.Clone(value.entries)
+		if plan == nil || !plan.native {
+			copy.uuid = ""
+			copy.nic = nil
+			for i := range copy.entries {
+				copy.entries[i].prepared = nil
+			}
+		}
+		return &copy
+	}
+	if !reflect.DeepEqual(normalized(plan), normalized(fresh)) {
 		return fmt.Errorf("%w: owned public ingress changed after approval", domain.ErrPlanStale)
 	}
 	return nil
+}
+
+type originalOrphanIngressCloser interface {
+	RemoveOwnedResourceIngressIf(context.Context, yardnetwork.Yard, resource.ProxyContract, string, map[string]string, map[string]string, string, bool) error
 }
 
 type orphanIngressCloser interface {
@@ -243,7 +289,15 @@ func (plan *orphanIngressPlan) apply(ctx context.Context, cli *CLI, loaded confi
 				return errors.New("owner Incus adapter cannot close owned resource ingress")
 			}
 			retainPending := entry.shutdown == nil || entry.shutdown.Changed
-			if err := closer.RemoveOwnedResourceIngress(ctx, plan.yard, entry.contract, entry.device, entry.marker, retainPending); err != nil {
+			if plan.native {
+				guarded, ok := incus.(originalOrphanIngressCloser)
+				if !ok {
+					return errors.New("owner Incus adapter cannot close original resource ingress")
+				}
+				if err := guarded.RemoveOwnedResourceIngressIf(ctx, plan.yard, entry.contract, plan.uuid, plan.nic, entry.device, entry.marker, retainPending); err != nil {
+					return err
+				}
+			} else if err := closer.RemoveOwnedResourceIngress(ctx, plan.yard, entry.contract, entry.device, entry.marker, retainPending); err != nil {
 				return err
 			}
 		}
@@ -255,6 +309,19 @@ func (plan *orphanIngressPlan) apply(ctx context.Context, cli *CLI, loaded confi
 			configureResourceProcess(command)
 			command.Dir = cli.options.WorkingDir
 			command.Env = cli.resourceApplyEnvironment(loaded, entry.definition, local, operationID, entry.shutdown.Effect)
+			if plan.native {
+				if entry.prepared == nil || plan.uuid == "" {
+					return domain.ErrPlanStale
+				}
+				steps, err := json.Marshal(entry.prepared.Steps)
+				if err != nil {
+					return err
+				}
+				command.Env = environmentList(environmentMap(command.Env), map[string]string{
+					"SUBYARD_RESOURCE_INGRESS_OWNER": "parent", "SUBYARD_RESOURCE_INSTANCE_UUID": plan.uuid,
+					"SUBYARD_RESOURCE_BINDING": entry.prepared.Binding, "SUBYARD_RESOURCE_STEPS": string(steps),
+				})
+			}
 			release := func() {}
 			if entry.shutdown.Effect != domain.ActionSession {
 				var err error
@@ -265,10 +332,19 @@ func (plan *orphanIngressPlan) apply(ctx context.Context, cli *CLI, loaded confi
 			}
 			command.Stdout = cli.options.Stdout
 			command.Stderr = cli.options.Stderr
-			err := command.Run()
+			err := shelladapter.RunNativeCommand(ctx, command, nil, nil, nil)
 			release()
 			if err != nil {
 				return fmt.Errorf("run deselected resource %s shutdown: %w", entry.definition.Command, err)
+			}
+		}
+		if plan.native && entry.shutdown != nil && entry.shutdown.Changed && (len(entry.device) != 0 || entry.marker != "") {
+			pending := entry.marker
+			if len(entry.device) != 0 {
+				pending = "v1:pending:" + strings.TrimPrefix(entry.contract.OwnershipValue(entry.device), "v1:")
+			}
+			if err := incus.(originalOrphanIngressCloser).RemoveOwnedResourceIngressIf(ctx, plan.yard, entry.contract, plan.uuid, plan.nic, nil, pending, false); err != nil {
+				return err
 			}
 		}
 		if entry.shutdown == nil {
@@ -281,6 +357,9 @@ func (plan *orphanIngressPlan) apply(ctx context.Context, cli *CLI, loaded confi
 		return err
 	}
 	var observed *ports.InstanceInfo
+	if plan.native && (err != nil || instance.Config["volatile.uuid"] != plan.uuid || !maps.Equal(instance.Devices["eth0"], plan.nic)) {
+		return domain.ErrPlanStale
+	}
 	if err == nil {
 		observed = &instance
 	}
@@ -293,7 +372,20 @@ func (plan *orphanIngressPlan) apply(ctx context.Context, cli *CLI, loaded confi
 		return errors.New("owned public ingress removal did not converge")
 	}
 	for _, entry := range plan.entries {
-		if entry.shutdown == nil || !entry.shutdown.Changed {
+		if entry.shutdown == nil {
+			continue
+		}
+		if plan.native && entry.prepared != nil && entry.prepared.Schema == resource.PrepareAssessmentSchemaV2 {
+			runner := &resourceApplyRunner{cli: cli, loaded: loaded, definition: entry.definition, verb: entry.definition.Shutdown, arguments: []string{entry.definition.Shutdown}, ownedIngress: &resourceOwnedIngress{uuid: plan.uuid}}
+			if err := attachApprovedResourceVerification(runner, *entry.prepared, *entry.prepared); err != nil {
+				return err
+			}
+			if err := runner.verify.verify(ctx); err != nil {
+				return err
+			}
+			continue
+		}
+		if !entry.shutdown.Changed {
 			continue
 		}
 		output, err := cli.prepareResource(ctx, loaded, entry.definition, []string{entry.definition.Shutdown})
@@ -304,6 +396,12 @@ func (plan *orphanIngressPlan) apply(ctx context.Context, cli *CLI, loaded confi
 			entry.definition.Command, entry.definition.Shutdown, output)
 		if err != nil || assessment.Changed {
 			return fmt.Errorf("deselected resource shutdown did not converge: %v", err)
+		}
+	}
+	if plan.native {
+		observed, err := incus.Instance(ctx, plan.yard.Project, plan.yard.Instance)
+		if err != nil || observed.Config["volatile.uuid"] != plan.uuid || !maps.Equal(observed.Devices["eth0"], plan.nic) {
+			return domain.ErrPlanStale
 		}
 	}
 	return nil

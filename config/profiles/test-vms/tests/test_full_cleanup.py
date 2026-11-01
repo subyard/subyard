@@ -162,6 +162,137 @@ class SinkOwnershipTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             owner.verify_private(self.environment, inventory=[])
 
+    def completed_owner_migration(self):
+        config = self.root / "owner-config"
+        config.mkdir(mode=0o700)
+        self.environment.update(SUBYARD_CONFIG_HOME=str(config), SUBYARD_FULL_CLEANUP_SOURCES='["test-yard"]')
+        before = dict(state="legacy-directory+projects", registration="a" * 64, overrides="b" * 64, controller="c" * 64, sharedImages=False)
+        digest = lambda value: hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
+        migration = next(item for item in json.loads((owner.ROOT / "config/release-transition.json").read_bytes())["migrations"] if item["kind"] == "test-yard-owner-v1-to-v2")
+        transaction, step = "tx-owner-proof", migration["id"] + ".test-yard-owner"
+        releases = {"from": "old", "target": "current"}
+        recovery = dict(schemaVersion=1, transaction=transaction, step=step, migration=migration["id"], resource="test-yard-owner", expectedFingerprint=digest(before), token="d" * 32, before=before)
+        recovery_raw = json.dumps(recovery, separators=(",", ":")).encode() + b"\n"
+        common = dict(schemaVersion=2, transaction=transaction, releases=releases, step=step, expectedFingerprint=digest(before), desiredFingerprint=digest(dict(before, state="current")), recoveryFingerprint=hashlib.sha256(recovery_raw).hexdigest())
+        records = {"release-transition/v2/transactions/" + transaction + "/recovery/" + step + ".json": recovery_raw}
+        for phase in ("captured", "applied", "verified"):
+            evidence = dict(common, checkpoint=phase, observedFingerprint=common["expectedFingerprint" if phase == "captured" else "desiredFingerprint"])
+            records["release-transition/v2/transactions/" + transaction + "/evidence/" + step + "." + phase + ".json"] = json.dumps(evidence).encode()
+        journal = dict(schemaVersion=2, checkpoint="complete", transaction=transaction, releases=releases, registryDigest=hashlib.sha256((owner.ROOT / "config/release-transition.json").read_bytes()).hexdigest(), steps=[dict(id=step, migration=migration["id"], resource="test-yard-owner", decision="canonicalize", checkpoint="verified", expectedFingerprint=common["expectedFingerprint"], desiredFingerprint=common["desiredFingerprint"], evidence=evidence)])
+        records["release-transition/v2/journal.json"] = json.dumps(journal).encode()
+        records["release-transition/v2/ledger.json"] = json.dumps(dict(schemaVersion=2, domains={"owner-registration": dict(epoch=2, applied=[migration["id"]])})).encode()
+        for relative, raw in records.items():
+            path = config / relative
+            path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            for parent in path.parents:
+                if parent == config.parent:
+                    break
+                parent.chmod(0o700)
+            self.write(path, raw, 0o600)
+        directory = pathlib.Path(self.environment["SUBYARD_HOME"]) / "logs/test-vms-broker-incidents"
+        directory.mkdir(mode=0o700, parents=True)
+        self.write(directory / "retained.json", b'{"source":"e2e-yard"}', 0o600)
+        return config, journal
+
+    def test_completed_owner_migration_retains_original_producer_source(self):
+        self.install()
+        self.completed_owner_migration()
+        materialized = pathlib.Path(self.environment["SUBYARD_HOME"]) / "logs/test-vms-broker.jsonl"
+        self.write(materialized, b'{"source":"e2e-yard"}\n', 0o600)
+        before = {path: (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns, path.stat().st_ctime_ns) for path in self.root.rglob("*") if path.is_file()}
+        owner.verify_private(self.environment, inventory=[])
+        self.assertFalse(owner.assess(self.environment, system_uid=os.getuid(), inventory=[])["blockers"])
+        self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns, path.stat().st_ctime_ns) for path in before})
+
+    def test_original_producer_requires_closed_protected_proof_in_selected_root(self):
+        self.install()
+        config, journal = self.completed_owner_migration()
+        records = {path: path.read_bytes() for path in config.rglob("*.json")}
+        journal_path = config / "release-transition/v2/journal.json"
+        recovery = next(config.glob("**/recovery/*.json"))
+        captured = next(config.glob("**/evidence/*.captured.json"))
+        applied = next(config.glob("**/evidence/*.applied.json"))
+        ledger = config / "release-transition/v2/ledger.json"
+        foreign_root = self.root / "other-config"
+        foreign_root.mkdir(mode=0o700)
+
+        def change(path, key, value):
+            record = json.loads(path.read_bytes())
+            record[key] = value
+            self.write(path, json.dumps(record).encode(), 0o600)
+
+        failures = ("cross-root", "cross-transaction", "registry", "before", "recovery", "captured", "applied", "unverified", "pending", "ledger", "collected", "missing-recovery", "unsafe-file", "unsafe-directory", "symlink", "unapproved-current", "unknown-producer")
+        failures += tuple("numeric-" + field + "-" + number for field in ("journal", "ledger", "recovery", "evidence", "summary", "epoch") for number in ("bool", "float"))
+        for failure in failures:
+            with self.subTest(failure=failure):
+                self.environment.update(SUBYARD_CONFIG_HOME=str(config), SUBYARD_FULL_CLEANUP_SOURCES='["test-yard"]')
+                for path, raw in records.items():
+                    if path.is_symlink():
+                        path.unlink()
+                    self.write(path, raw, 0o600)
+                recovery.parent.chmod(0o700)
+                incident = pathlib.Path(self.environment["SUBYARD_HOME"]) / "logs/test-vms-broker-incidents/retained.json"
+                self.write(incident, b'{"source":"e2e-yard"}', 0o600)
+                if failure.startswith("numeric-"):
+                    _, field, number = failure.split("-")
+                    path = {"journal": journal_path, "ledger": ledger, "recovery": recovery, "evidence": applied, "summary": journal_path, "epoch": ledger}[field]
+                    value = True if number == "bool" else (1.0 if field == "recovery" else 2.0)
+                    if field == "epoch":
+                        change(path, "domains", {"owner-registration": {"epoch": value, "applied": [journal["steps"][0]["migration"]]}})
+                    elif field == "summary":
+                        step = journal["steps"][0]
+                        change(path, "steps", [dict(step, evidence=dict(step["evidence"], schemaVersion=value))])
+                    else:
+                        change(path, "schemaVersion", value)
+                    if field == "recovery":
+                        # Preserve all integrity bindings so only the numeric type is wrong.
+                        fingerprint = hashlib.sha256(recovery.read_bytes()).hexdigest()
+                        for evidence in config.glob("**/evidence/*.json"):
+                            change(evidence, "recoveryFingerprint", fingerprint)
+                        step = journal["steps"][0]
+                        change(journal_path, "steps", [dict(step, evidence=dict(step["evidence"], recoveryFingerprint=fingerprint))])
+                elif failure == "cross-root":
+                    self.environment["SUBYARD_CONFIG_HOME"] = str(foreign_root)
+                elif failure == "cross-transaction":
+                    change(captured, "transaction", "another-transaction")
+                elif failure == "registry":
+                    change(journal_path, "registryDigest", "0" * 64)
+                elif failure == "before":
+                    change(recovery, "before", dict(json.loads(recovery.read_bytes())["before"], registration="0" * 64))
+                elif failure == "recovery":
+                    change(recovery, "token", "e" * 32)
+                elif failure == "captured":
+                    captured.unlink()
+                elif failure == "applied":
+                    change(applied, "observedFingerprint", "0" * 64)
+                elif failure == "unverified":
+                    change(journal_path, "steps", [dict(journal["steps"][0], checkpoint="applied")])
+                elif failure == "pending":
+                    change(journal_path, "checkpoint", "migrating")
+                elif failure == "ledger":
+                    change(ledger, "domains", {"owner-registration": {"epoch": 1, "applied": []}})
+                elif failure == "collected":
+                    journal_path.unlink()
+                elif failure == "missing-recovery":
+                    recovery.unlink()
+                elif failure == "unsafe-file":
+                    recovery.chmod(0o644)
+                elif failure == "unsafe-directory":
+                    recovery.parent.chmod(0o755)
+                elif failure == "symlink":
+                    recovery.unlink()
+                    recovery.symlink_to(ledger)
+                elif failure == "unapproved-current":
+                    self.environment["SUBYARD_FULL_CLEANUP_SOURCES"] = '["another-yard"]'
+                elif failure == "unknown-producer":
+                    self.write(incident, b'{"source":"unknown-producer"}', 0o600)
+                with self.assertRaises(ValueError):
+                    owner.verify_private(self.environment, inventory=[])
+                plan = owner.assess(self.environment, system_uid=os.getuid(), inventory=[])
+                self.assertTrue(plan["blockers"])
+                self.assertFalse(plan["artifacts"])
+                self.assertTrue(incident.exists())
+
     def test_missing_owner_unsafe_helper_and_foreign_uid_refuse(self):
         self.install()
         with self.assertRaises(ValueError):

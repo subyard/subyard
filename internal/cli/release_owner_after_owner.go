@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
+
 	"errors"
+	"github.com/Subyard/Subyard/internal/config"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
@@ -39,7 +42,7 @@ func afterOwnerTemplate(kind string, originalBefore ...string) []byte {
 	if kind == "routes" && len(originalBefore) == 1 {
 		before = originalBefore[0]
 	}
-	physical := make([]byte, reconcileruntime.AfterOwnerMaterializedPhysicalBound())
+	var physical []byte
 	if kind == "routes" {
 		physical = make([]byte, reconcileruntime.AfterOwnerRoutePhysicalBound())
 	}
@@ -65,7 +68,16 @@ func (c *releaseOwnerComponents) prepareAfterOwnerFiles(ctx context.Context, pre
 	if !ok {
 		return prepared, domain.ErrPlanStale
 	}
-	p, err := runtime.PrepareAfterOwnerMaterializedConfigs(ctx, afterOwnerTemplate("materialized-files"))
+	source, err := runtime.PrepareAfterOwnerMaterializedConfigSources(ctx)
+	if err != nil {
+		return prepared, err
+	}
+	defer source.Close()
+	bound, err := source.AfterOwnerMaterializedPhysicalBound()
+	if err != nil {
+		return prepared, err
+	}
+	p, err := source.ReserveAfterOwnerMaterializedConfigMetadata(afterOwnerSizedTemplate(strings.Repeat("f", 64), make([]byte, bound)))
 	if err != nil {
 		return prepared, err
 	}
@@ -90,6 +102,14 @@ func (c *releaseOwnerComponents) bindAfterOwnerRecipe(ctx context.Context, hash 
 	}
 	key := activationKey(target)
 	prepared, ok := c.activation[key]
+	// Non-runtime source proofs consume the component-specific logical read set.
+	if originalHash == hash && (!ok || kind != "runtime") {
+		prepared, err = c.restoreAfterOwnerSourceTarget(ctx, target, kind)
+		if err != nil {
+			return err
+		}
+		ok = true
+	}
 	if !ok {
 		return domain.ErrPlanStale
 	}
@@ -103,6 +123,18 @@ func (c *releaseOwnerComponents) bindAfterOwnerRecipe(ctx context.Context, hash 
 			return err
 		}
 		expectedTemplate := afterOwnerTemplate(kind, target.Before)
+		if kind == "materialized-files" {
+			source, sourceErr := runtime.BindAfterOwnerMaterializedConfigSource(ctx, raw)
+			if sourceErr != nil {
+				return sourceErr
+			}
+			bound, boundErr := source.AfterOwnerMaterializedPhysicalBound()
+			source.Close()
+			if boundErr != nil {
+				return boundErr
+			}
+			expectedTemplate = afterOwnerSizedTemplate(strings.Repeat("f", 64), make([]byte, bound))
+		}
 		if kind == "materialized-integrations" {
 			source, sourceErr := runtime.BindAfterOwnerIntegrations(ctx, raw, nil)
 			if sourceErr != nil {
@@ -138,6 +170,13 @@ func (c *releaseOwnerComponents) bindAfterOwnerRecipe(ctx context.Context, hash 
 		}
 		if err != nil {
 			return err
+		}
+		if err := c.checkAfterOwnerOriginalSource(ctx, target, kind, runtime, p); err != nil {
+			p.Close()
+			return err
+		}
+		if err := p.ShareSources(c.retainPreparedSource); err != nil {
+			return errors.Join(err, p.Close())
 		}
 		prepared.nativeInstalled = p
 		prepared.nativeConfigs = nil
@@ -188,7 +227,7 @@ func (c *releaseOwnerComponents) bindAfterOwnerRecipe(ctx context.Context, hash 
 		return err
 	}
 	defer expected.Close()
-	if !bytes.Equal(expected.Recipe(), raw) {
+	if expected.Binding() != hash {
 		return domain.ErrPlanStale
 	}
 	var p *reconcileruntime.PreparedInstalledRuntime
@@ -215,6 +254,9 @@ func (c *releaseOwnerComponents) bindAfterOwnerRecipe(ctx context.Context, hash 
 			p.Close()
 			return domain.ErrPlanStale
 		}
+	}
+	if err := p.ShareSources(c.retainPreparedSource); err != nil {
+		return errors.Join(err, p.Close())
 	}
 	prepared = original.prepared
 	prepared.nativeInstalled = p
@@ -605,10 +647,15 @@ func (c *releaseOwnerComponents) observeAfterOwnerViews(ctx context.Context, own
 		if err != nil {
 			return nil, err
 		}
-		_ = check.Close()
-		if err = c.cli.refreshConfigApply(ctx, original.configs); err != nil {
+		if err = runtime.CheckAfterOwnerMaterializedConfigs(ctx, check); err != nil {
+			check.Close()
 			return nil, err
 		}
+		if err = c.cli.refreshAfterOwnerConfigApply(ctx, original.configs, check, runtime); err != nil {
+			check.Close()
+			return nil, err
+		}
+		_ = check.Close()
 		assessment := original.configs.current[0]
 		value := original.value
 		value.State = "current"
@@ -702,4 +749,240 @@ func (c *releaseOwnerComponents) prepareAfterOwnerIntegration(ctx context.Contex
 	c.installedRecipes[p.Binding()] = p
 	c.closers = append(c.closers, p)
 	return releaseActivationPrepared{value: value, platform: runtime, configTarget: target, nativeInstalled: p}, nil
+}
+
+// ValidateMaterializedAfterOwnerRecovery checks the exact originally bound
+// derived target and authenticated producer; it performs no new assessment.
+func (c *releaseOwnerComponents) ValidateMaterializedAfterOwnerRecovery(_ context.Context, target releaseowner.Target, completed releaseowner.AfterOwnerCompletion) error {
+	kind, _, err := releaseowner.ParseAfterOwner(target.AfterOwner)
+	bound, ok := c.afterOwnerViews[activationKey(target)]
+	if err != nil || kind != "materialized-files" || target.Class != "materialized-files" || target.Owner != "materialized-config" || target.State == "deferred" || !ok || bound.prepared.value != target || bound.completion != completed || c.validateAfterOwnerCompletion(releaseowner.AfterOwnerMetadata{Producer: completed.Producer, ProducerTerminal: completed.Terminal}) != nil {
+		return domain.ErrPlanStale
+	}
+	p := bound.prepared.nativeInstalled
+	configs := bound.prepared.nativeConfigs
+	installed := c.installedRecipes[target.PreparedRecipe]
+	if p == nil || p.Binding() != target.PreparedRecipe || installed == nil || installed.Binding() != target.PreparedRecipe || !c.installedBound[target.PreparedRecipe] || configs == nil || configs.Binding() != target.Before || configs.InstanceUUID() != target.InstanceUUID {
+		return domain.ErrPlanStale
+	}
+	return nil
+}
+
+func (c *releaseOwnerComponents) materializedAfterOwnerRetry(ctx context.Context, prepared releaseActivationPrepared, original releaseowner.Target) bool {
+	if c.afterOwnerCompletion == nil || prepared.value.State == "deferred" {
+		return false
+	}
+	kind, _, err := releaseowner.ParseAfterOwner(original.AfterOwner)
+	if err != nil {
+		return false
+	}
+	if kind == "materialized-integrations" {
+		bound, ok := c.afterOwnerViews[activationKey(original)]
+		p := bound.prepared.nativeInstalled
+		native := bound.prepared.nativeIntegrations
+		if !ok || original.Owner != "materialized-config" || original.Class != "materialized-integrations" || bound.prepared.value != original || bound.completion != *c.afterOwnerCompletion || c.validateAfterOwnerCompletion(releaseowner.AfterOwnerMetadata{Producer: bound.completion.Producer, ProducerTerminal: bound.completion.Terminal}) != nil || p == nil || p.Binding() != original.PreparedRecipe || !c.installedBound[original.PreparedRecipe] || native == nil || native.Binding() != original.Before || bound.prepared.nativeConfigs == nil || bound.prepared.nativeConfigs.InstanceUUID() != original.InstanceUUID {
+			return false
+		}
+	} else if c.ValidateMaterializedAfterOwnerRecovery(ctx, original, *c.afterOwnerCompletion) != nil {
+		return false
+	}
+	comparison := prepared.value
+	comparison.State, comparison.Actual, comparison.ReportedActual = original.State, original.Actual, original.ReportedActual
+	if comparison != original {
+		return false
+	}
+	runtime, ok := prepared.platform.(reconcileruntime.Runtime)
+	if !ok {
+		return false
+	}
+	if kind == "materialized-integrations" {
+		_, stopped, err := runtime.ObserveAfterOwnerIntegrations(ctx, prepared.nativeInstalled)
+		return err == nil && !stopped
+	}
+	return runtime.CheckAfterOwnerMaterializedConfigs(ctx, prepared.nativeInstalled) == nil
+}
+
+// Restore only the declared logical selector/read set. The existing source
+// binder below validates immutable payloads before any physical observation.
+func (c *releaseOwnerComponents) restoreAfterOwnerSourceTarget(ctx context.Context, target releaseowner.Target, kind string) (releaseActivationPrepared, error) {
+	if c.yards == nil {
+		if _, _, err := c.CaptureInventory(ctx); err != nil {
+			return releaseActivationPrepared{}, err
+		}
+	}
+	c.inputs = map[string]config.PersistentFileSnapshot{}
+	c.loaded = map[string]config.Loaded{}
+	previous := c.activationActual
+	c.activationActual = false
+	defer func() { c.activationActual = previous }()
+	for _, yard := range c.activationYards() {
+		loaded, err := c.loadActivation(yard)
+		if err != nil {
+			return releaseActivationPrepared{}, err
+		}
+		c.loaded[yard] = loaded
+	}
+	loaded, ok := c.loaded[target.Yard]
+	if !ok || loaded.Context.IncusProject != target.Project || loaded.Context.YardInstanceName != target.Instance || loaded.Context.AccessKind != domain.AccessLocal {
+		return releaseActivationPrepared{}, domain.ErrPlanStale
+	}
+	if kind == "materialized-files" || kind == "materialized-integrations" {
+		// Original materialized capture resolves lazy asset override candidates
+		// before sealing activationSource. Reconstruct that source read set only.
+		if _, _, _, err := materializationDesired(configTarget{Name: target.Yard, Loaded: loaded}, true, loaded.ProspectiveFiles.ReadAsset); err != nil {
+			return releaseActivationPrepared{}, err
+		}
+	}
+	power := []domain.Context(nil)
+	if kind == "broker" {
+		power = []domain.Context{loaded.Context}
+	}
+	prepared := releaseActivationPrepared{value: target, configTarget: configTarget{Name: target.Yard, Loaded: loaded}, platform: c.platform(loaded, power)}
+	switch kind {
+	case "routes":
+		if target.Stage != "" {
+			return prepared, domain.ErrPlanStale
+		}
+		options, err := c.cli.releaseTransitionTestYardOptions(c.request())
+		if err != nil {
+			return prepared, err
+		}
+		options.ProspectiveFiles = c.activationFiles()
+		prepared.route = &testYardRouteConsumerActivation{options: options}
+		prepared.before = target.Before
+	case "broker":
+		if target.Stage != string(ports.ReconcileStageTestVMs) {
+			return prepared, domain.ErrPlanStale
+		}
+		prepared.stage = ports.ReconcileStageTestVMs
+	case "runtime":
+		if !slices.Contains(append(c.cli.profileRuntimeIDs(), "core-guest-runtime", "key-tools-runtime"), target.Owner) || target.Stage != "" {
+			return prepared, domain.ErrPlanStale
+		}
+	case "materialized-files", "materialized-integrations":
+		if target.Owner != "materialized-config" || target.Stage != "" {
+			return prepared, domain.ErrPlanStale
+		}
+	default:
+		return prepared, domain.ErrPlanStale
+	}
+	return prepared, nil
+}
+
+func (c *releaseOwnerComponents) checkAfterOwnerOriginalSource(ctx context.Context, target releaseowner.Target, kind string, runtime reconcileruntime.Runtime, p *reconcileruntime.PreparedInstalledRuntime) error {
+	var header struct {
+		Owner string `json:"owner"`
+	}
+	if json.Unmarshal(p.Recipe(), &header) != nil {
+		return domain.ErrPlanStale
+	}
+	expected := ""
+	switch kind {
+	case "materialized-files":
+		scope, _, err := runtime.IntegrationScope()
+		if err != nil || target.Scope != scope || header.Owner != "materialized-files" {
+			return domain.ErrPlanStale
+		}
+		expected = nativeValueDigest(struct{ Source, Component string }{c.activationSource(), p.MaterializedSourceBinding()})
+	case "materialized-integrations":
+		if p.PreparedIntegrations() == nil || header.Owner != "materialized-integrations" {
+			return domain.ErrPlanStale
+		}
+		expected = nativeValueDigest(struct{ Input, Scope, Component string }{c.activationSource(), p.PreparedIntegrations().Plan().Scope, p.MaterializedSourceBinding()})
+	case "runtime":
+		source, err := runtime.SelectedRuntimeInputs(target.Owner)
+		if err != nil || header.Owner != target.Owner {
+			return domain.ErrPlanStale
+		}
+		expected = nativeValueDigest(struct{ Source, Recipe string }{source, p.Binding()})
+	case "broker":
+		source, err := runtime.SelectedRuntimeInputs("core-guest-runtime")
+		if err != nil || header.Owner != "test-vm-broker" {
+			return domain.ErrPlanStale
+		}
+		base := nativeValueDigest(struct{ Inputs, State, Stage, NativeSource string }{c.activationSource(), target.ScopeState, string(ports.ReconcileStageTestVMs), source})
+		expected = nativeValueDigest(struct{ Source, Recipe string }{base, p.BrokerSourceBinding()})
+	case "routes":
+		routes := p.PreparedRoutes()
+		if routes == nil || routes.Before != target.Before || header.Owner != "route-consumers" || testyardmigration.ValidatePreparedRouteDevices(testyardmigration.Options{DataHome: runtime.Yard.Paths.DataHome}, target.Before, routes) != nil {
+			return domain.ErrPlanStale
+		}
+		expected = nativeValueDigest(struct{ Input, Scope, Component string }{c.activationSource(), target.Before, p.RouteSourceBinding()})
+	}
+	if expected == "" || target.Source != expected {
+		return domain.ErrPlanStale
+	}
+	return nil
+}
+
+func (c *releaseOwnerComponents) retainedAfterOwnerOwner(ctx context.Context, owner, class string) (releaseActivationPrepared, bool, error) {
+	for _, original := range c.afterOwnerOriginals {
+		if original.original.Owner == owner && original.original.Class == class {
+			return c.retainedAfterOwnerTarget(ctx, owner, original.original.Yard, class)
+		}
+	}
+	return releaseActivationPrepared{}, false, nil
+}
+
+func (c *releaseOwnerComponents) retainedAfterOwnerTarget(ctx context.Context, owner, yard, class string) (releaseActivationPrepared, bool, error) {
+	key := owner + ":" + yard + ":" + class
+	var original releaseAfterOwner
+	found := false
+	for _, candidate := range c.afterOwnerOriginals {
+		if activationKey(candidate.original) == key {
+			if found {
+				return releaseActivationPrepared{}, false, domain.ErrPlanStale
+			}
+			original = candidate
+			found = true
+		}
+	}
+	if !found {
+		return releaseActivationPrepared{}, false, nil
+	}
+	loaded, ok := c.loaded[yard]
+	if !ok || loaded.Context.IncusProject != original.original.Project || loaded.Context.YardInstanceName != original.original.Instance {
+		return releaseActivationPrepared{}, false, domain.ErrPlanStale
+	}
+	power := []domain.Context(nil)
+	if owner == "test-vm-broker" {
+		power = []domain.Context{loaded.Context}
+	}
+	runtime, ok := c.platform(loaded, power).(reconcileruntime.Runtime)
+	if !ok {
+		return releaseActivationPrepared{}, false, domain.ErrPlanStale
+	}
+	kind, _, err := releaseowner.ParseAfterOwner(original.original.AfterOwner)
+	if err != nil {
+		return releaseActivationPrepared{}, false, err
+	}
+	var source *reconcileruntime.PreparedInstalledRuntime
+	switch kind {
+	case "materialized-files":
+		source, err = runtime.BindAfterOwnerMaterializedConfigSource(ctx, original.prepared.nativeInstalled.Recipe())
+	case "materialized-integrations":
+		source, err = runtime.BindAfterOwnerIntegrations(ctx, original.prepared.nativeInstalled.Recipe(), nil)
+	case "runtime":
+		source, err = runtime.BindAfterOwnerRuntimeSources(ctx, original.prepared.nativeInstalled.Recipe())
+	case "broker":
+		source, err = runtime.BindAfterOwnerBroker(ctx, original.prepared.nativeInstalled.Recipe(), nil)
+	case "routes":
+		source, err = runtime.BindAfterOwnerRoutes(ctx, original.prepared.nativeInstalled.Recipe(), nil)
+	default:
+		err = domain.ErrPlanStale
+	}
+	if err != nil {
+		return releaseActivationPrepared{}, false, err
+	}
+	defer source.Close()
+	if err := c.checkAfterOwnerOriginalSource(ctx, original.original, kind, runtime, source); err != nil {
+		return releaseActivationPrepared{}, false, err
+	}
+	if bound, ok := c.afterOwnerViews[key]; ok {
+		if c.validateAfterOwnerCompletion(releaseowner.AfterOwnerMetadata{Producer: bound.completion.Producer, ProducerTerminal: bound.completion.Terminal}) != nil {
+			return releaseActivationPrepared{}, false, domain.ErrPlanStale
+		}
+		return bound.prepared, true, nil
+	}
+	return original.prepared, true, nil
 }

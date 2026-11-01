@@ -170,12 +170,16 @@ func (p retireWriterPrompt) Confirm(context.Context, domain.ConfirmationRequest)
 	return true, nil
 }
 
-func writerUnlockFixture(t *testing.T) (*CLI, config.Loaded, string, string) {
+func writerUnlockFixture(t *testing.T, capture ...*bytes.Buffer) (*CLI, config.Loaded, string, string) {
 	t.Helper()
 	root, environment, _ := nativeFixture(t)
 	var stderr bytes.Buffer
+	output := &stderr
+	if len(capture) != 0 {
+		output = capture[0]
+	}
 	executor := &sshAgentDispatchExecutor{}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: lifecycleIncus(), Executor: executor, Stderr: &stderr, DispatcherPath: filepath.Join(root, "missing-worker")})
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: lifecycleIncus(), Executor: executor, Stderr: output, DispatcherPath: filepath.Join(root, "missing-worker")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,8 +229,8 @@ func writerUnlockFixture(t *testing.T) (*CLI, config.Loaded, string, string) {
 }
 
 func TestSSHUnlockCannotRecreateRetiredSigningNamespace(t *testing.T) {
-	program, loaded, key, directory := writerUnlockFixture(t)
-	stderr := program.options.Stderr.(*bytes.Buffer)
+	var stderr bytes.Buffer
+	program, loaded, key, directory := writerUnlockFixture(t, &stderr)
 	// Configuration/source roots remain valid (e.g. preserved Git); the native
 	// grant must still be denied after the installation epoch is retired.
 	program.options.Prompt = retireWriterPrompt(func() { retireWriterInstallation(t, loaded, false) })

@@ -2,10 +2,12 @@
 """Exercise supported update contracts with unmodified released updaters."""
 
 import argparse
+import base64
 import ctypes
 from dataclasses import asdict, dataclass
 import hashlib
 import http.client
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import select
 import signal
 import socket
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -36,10 +39,10 @@ LEGACY_BASELINE_SHA256 = {
     "arm64": "4c349fe6316f90242c09398261e7f76f9bf07c94fa50862e8e707989cd76eea5",
 }
 LEGACY_INSTALLER_SHA256 = "7932034b1c4f42c7fd66975ff1291bec5ea83b687988d634d67d46ff93ce6d06"
-MINIMUM_BASELINE = "0.11.0"
+MINIMUM_BASELINE = "0.22.0"
 MINIMUM_BASELINE_SHA256 = {
-    "amd64": "30ff2437219dcaaa568599a9df68a62d3f9203d66579d7ee6c802e527ca92163",
-    "arm64": "cf89b7319ad9fdb31872ba5272921b84d585c3baf20ecff52056d843448d53a3",
+    "amd64": "11e9174b7cac129ad41167b60864eb30e7b8540d1a57ad10481f7f0fcf19bbe0",
+    "arm64": "2c709d7423aaed64c9d9bf9d54d7bb4c41eaefec663298d139946747bdfe7121",
 }
 RETIRED_BASELINES = {
     "0.4.1": {"amd64": "fc5b030785089039177292b8127a793defdb54644d00fdcf0d8067106e9c3700", "arm64": "04bfe62cc5964ae841a2827e260dcba6afb4d511f41f62b54c45d9c74930048f"},
@@ -64,11 +67,9 @@ PUBLISHED_BASELINE_SHA256 = {
     "amd64": "a2e4a18ac806079b70b35a5b679ef6c616bc22137453d6f3f0e0e34ef491ef74",
     "arm64": "2172f375871fe280297f69e9ae88a7d1ca1df5678c02d6189551cfa98aa07d9a",
 }
-DIRECT_BASELINE = "0.19.0"
-DIRECT_BASELINE_SHA256 = {
-    "amd64": "81c55205368ef891976f28ef21b303da5ef97114d80f76c6ec60e9f3a2b698a9",
-    "arm64": "5b8646eabda155eb48203eac80fba81bde2a773050a35839fc6d9216b6ec47d7",
-}
+DIRECT_BASELINE = MINIMUM_BASELINE
+DIRECT_BASELINE_SHA256 = MINIMUM_BASELINE_SHA256
+
 MIGRATION_OWNER_BASELINE = "0.21.0"
 MIGRATION_OWNER_SHA256 = {"amd64": "1fee6251856ede2c1cbd0c01f48d226fbce64915f712df97085d35abb4991282"}
 SOURCE_BASELINE = "0.18.6"
@@ -143,48 +144,19 @@ def check_scratch_capacity(candidate, baselines=(), stage="before fixture instal
 
 
 def selected_baseline_archives(args, release, arch):
-    """Name only inputs used by the selected case, without downloading them."""
-    normal = [(BASELINE, args.baseline_dir), (PUBLISHED_BASELINE, args.published_baseline_dir),
-              (SOURCE_BASELINE, args.source_baseline_dir)]
-    activation = (ACTIVATION_BASELINE, args.activation_baseline_dir)
+    """Name only inputs used by the selected supported case."""
     direct = (DIRECT_BASELINE, args.direct_baseline_dir)
-    history = [(version, args.migration_history_baselines / ("baseline-" + version)
-                if args.migration_history_baselines is not None else None)
-               for version in HISTORY_BASELINES
-               if (args.migration_history_case in ("all", "checkpoint")
-                   if version in (SOURCE_BASELINE, HISTORY_BASELINE)
-                   else args.migration_history_case in ("all", "legacy", "cuts"))]
-    if args.only_migration_history:
-        selected = history
-    elif args.only_legacy_retirement:
-        selected = [(v, args.legacy_baseline_dir if v == LEGACY_BASELINE else None)
-                    for v in RETIRED_BASELINES] + [(MINIMUM_BASELINE, None)]
-    elif args.only_direct_019:
-        selected = [direct]
-    elif args.only_migration_owner_replacement:
-        selected = [(MIGRATION_OWNER_BASELINE, args.migration_owner_baseline_dir), direct]
-    elif args.only_fresh_activation_recovery:
-        selected = normal[:1]
-    elif args.only_activation_recovery:
-        selected = [activation, normal[2]]
-    elif args.only_runtime_recovery:
-        selected = [normal[2], activation]
-    elif args.only_source_repair:
-        selected = [normal[2]]
-    elif args.only_power_publication or args.only_power_transition_regression:
-        selected = normal[1:] if args.only_power_publication else normal
-        selected = [(v, directory if directory is not None else
-                     release.parent / "power-publication-baselines" / v) for v, directory in selected]
-    elif args.only_checkpoint_source:
-        selected = normal
-    else:
-        selected = normal + [activation, direct] + history + [
-            (v, args.legacy_baseline_dir if v == LEGACY_BASELINE else None)
-            for v in RETIRED_BASELINES] + [(MINIMUM_BASELINE, None)]
+    selected = [direct]
+    if args.only_migration_history or not any((args.only_direct_019, args.only_fresh_activation_recovery, args.only_legacy_retirement)):
+        selected += [(v, args.migration_history_baselines / ("baseline-" + v)
+                       if args.migration_history_baselines else None) for v in HISTORY_BASELINES]
+    if args.only_legacy_retirement or not any((args.only_direct_019, args.only_fresh_activation_recovery, args.only_migration_history)):
+        selected += [(v, args.legacy_baseline_dir if v == LEGACY_BASELINE else None)
+                     for v in RETIRED_BASELINES]
     pins = {BASELINE: BASELINE_SHA256, ACTIVATION_BASELINE: ACTIVATION_BASELINE_SHA256,
             PUBLISHED_BASELINE: PUBLISHED_BASELINE_SHA256, SOURCE_BASELINE: SOURCE_BASELINE_SHA256,
             DIRECT_BASELINE: DIRECT_BASELINE_SHA256, MIGRATION_OWNER_BASELINE: MIGRATION_OWNER_SHA256,
-            MINIMUM_BASELINE: MINIMUM_BASELINE_SHA256, **RETIRED_BASELINES}
+            MINIMUM_BASELINE: MINIMUM_BASELINE_SHA256, **RETIRED_BASELINES, **HISTORY_BASELINES}
     archives = []
     for version, directory in selected:
         bundle = directory.resolve() / f"subyard-{version}-linux-{arch}.tar.gz" if directory is not None else None
@@ -219,6 +191,28 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
         if (package_root / 'config/skills/package.py').is_file():
             for command, members in skills_transport_contract(package_root):
                 skills.setdefault(command, []).append(members)
+    skill_probes = {}
+    for package_root in ((source, *package_roots) if skills_roots is None else skills_roots):
+        if (package_root / "config/skills/package.py").is_file():
+            continue
+        script = package_root / "scripts/refresh-agent-skills.sh"
+        if not script.is_file():
+            continue
+        # Bind the exact shipped guest program and its native tar producer.
+        command, producer = script.read_text().split("\nimport json, pathlib, sys, tarfile\n", 1)
+        words = shlex.split(command.split("<<'PY' | ", 1)[1])
+        require(words[-5:-3] == ["-eu", "-c"] and words[-2:] == ["--", "$mode"],
+                "skill delivery fixture has an unsupported command")
+        arguments = ("exec", "yard", "--project", "subyard", "--env", "DEV_USER=dev",
+                     "--env", "ENVIRONMENT_PROFILES=", "--env", "ALLOWS_CODING_TOOLS=true",
+                     "--", "bash", "-eu", "-c", words[-3], "--", "apply")
+        payload = subprocess.check_output([sys.executable, "-B", "-c",
+            "import json, pathlib, sys, tarfile\n" + producer.removesuffix("PY\n"), str(package_root)])
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+            members = [(m.name, m.type, m.mode, m.linkname, m.size,
+                        hashlib.sha256(archive.extractfile(m).read()).hexdigest() if m.isfile() else "")
+                       for m in archive.getmembers()]
+        skill_probes.setdefault(arguments, []).append(members)
     fixtures = [fixture for owner in ("agents", "profiles", "retired-integrations")
                 for fixture in source.glob(f"config/{owner}/*/tests/release-observation.py")]
     for fixture in sorted(fixtures):
@@ -254,9 +248,10 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                 host_probes[key] = (response, code)
     incus = shims / "incus"
     # Exact observations only; profile digest helpers never execute guest input.
-    incus.write_text("#!/usr/bin/python3\nimport hashlib, json, pathlib, subprocess, sys, tarfile\n"
+    incus.write_text("#!/usr/bin/python3\nimport hashlib, io, json, pathlib, subprocess, sys, tarfile\n"
                      "arguments = sys.argv[1:]\n"
                      f"probes = {probes!r}\n"
+                     f"skill_probes = {skill_probes!r}\n"
                      f"activation_failure = {str(activation_failure) if activation_failure else None!r}\n"
                      "if activation_failure and pathlib.Path(activation_failure).exists():\n"
                      "    journal = json.loads(pathlib.Path(activation_failure).read_text())\n"
@@ -273,7 +268,8 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                      "    seen = set()\n"
                      "    valid = True\n"
                      "    try:\n"
-                     "        with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:\n"
+                     "        payload = sys.stdin.buffer.read((16 << 20) + 1)\n"
+                     "        with tarfile.open(fileobj=io.BytesIO(payload), mode='r:') as archive:\n"
                      "            for member in archive:\n"
                      "                kind = 'directory' if member.isdir() else 'file' if member.isfile() else 'unsafe'\n"
                      "                valid = valid and (not member.isdir() or member.size == 0)\n"
@@ -281,7 +277,9 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                      "                valid = valid and member.name not in seen\n"
                      "                actual[member.name] = (kind, member.mode, digest)\n"
                      "                seen.add(member.name)\n"
-                     "        valid = valid and actual in inventories\n"
+                     "            padding = payload[archive.offset:]\n"
+                     "        valid = valid and actual in inventories and len(payload) <= (16 << 20)\n"
+                     "        valid = valid and len(payload) % 512 == 0 and len(padding) >= 1024 and not any(padding)\n"
                      "    except (OSError, ValueError, tarfile.TarError):\n"
                      "        valid = False\n"
                      "    if valid: sys.exit(0)\n"
@@ -314,6 +312,16 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                      "    sys.exit(0)\n"
                      "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
                      "    sys.exit(3)\n"
+                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
+                     "    command = arguments[arguments.index('--') + 1:]\n"
+                     "    if command[:3] == ['bash', '-eu', '-c']:\n"
+                     "        payload = sys.stdin.buffer.read() # Drain even rejected transports.\n"
+                     "        try:\n"
+                     "            with tarfile.open(fileobj=io.BytesIO(payload), mode='r:') as archive:\n"
+                     "                members = [(m.name, m.type, m.mode, m.linkname, m.size, hashlib.sha256(archive.extractfile(m).read()).hexdigest() if m.isfile() else '') for m in archive.getmembers()]\n"
+                     "                padding = payload[archive.offset:]\n"
+                     "            if len(padding) >= 1024 and len(payload) % 512 == 0 and not any(padding) and members in skill_probes.get(tuple(arguments), []): sys.exit(0)\n"
+                     "        except (tarfile.TarError, ValueError, OSError): pass\n"
                      f"pathlib.Path({str(unexpected)!r}).write_text('incus operation rejected')\n"
                      f"pathlib.Path({str(unexpected) + '.argv.json'!r}).write_text(json.dumps(['incus', *arguments]))\n"
                      "sys.exit(99)\n")
@@ -507,11 +515,22 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                     output.write(payload)
 
 
-def set_fixture_observation(control, status=None, journal=None, history=None):
+def materialized_observation_binding(fixture):
+    launcher = fixture.runtime / "current/bin/yard"
+    inventory = Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py"
+    program = inventory.read_text().replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0")
+    return {"Repository": str(launcher.parent.parent), "Home": str(fixture.home),
+            "Config": str(fixture.config), "Data": str(fixture.data),
+            "InventoryProgram": str(inventory), "InventorySHA256": hashlib.sha256(program.encode()).hexdigest()}
+
+
+def set_fixture_observation(control, status=None, journal=None, history=None, materialized=None):
     instances = [] if status is None else [{"project": "subyard", "name": "yard",
                                             "info": {"name": "yard", "status": status,
-                                                     "type": "container", "config": {}, "devices": {}}}]
-    payload = json.dumps({"instances": instances, "holdJournal": str(journal) if journal else "", "migrationHistory": history})
+                                                     "type": "container", "config": {"volatile.uuid": "history-fixture-instance"},
+                                                     "expanded_config": {"volatile.uuid": "history-fixture-instance"}, "devices": {}}}]
+    payload = json.dumps({"instances": instances, "holdJournal": str(journal) if journal else "", "migrationHistory": history,
+                          "materializedObservation": materialized})
     control.write_text(payload)
     control.chmod(0o600)
     applied = Path(str(control) + ".applied")
@@ -542,6 +561,7 @@ class Fixture:
         if control.exists() and not preserve_observation:
             set_fixture_observation(control)
         self.env = {
+            "LC_ALL": "C.UTF-8",
             "PATH": "/usr/bin:/bin", "HOME": str(self.home), "SHELL": "/bin/bash",
             "SUBYARD_OPERATOR_HOME": str(self.home), "SUBYARD_HOME": str(self.data),
             "SUBYARD_CONFIG_HOME": str(self.config), "YARD_RUNTIME_ROOT": str(self.runtime),
@@ -875,14 +895,6 @@ def verify_legacy(release, version, baseline, arch, root, baseline_version=LEGAC
           "fully uninstalls and permits a separate clean install", flush=True)
 
 
-def verify_minimum_source(release, version, baseline, arch, root):
-    fixture = Fixture(root / "minimum-source", release, version, baseline, arch, MINIMUM_BASELINE)
-    require(fixture.check()["outcome"]["status"] == "migration-required",
-            "actual v0.11.0 lower-bound caller cannot inspect the update")
-    fixture.update("--version", version, "--yes")
-    fixture.complete()
-    print(f"PASS: actual released v0.11.0 inclusive lower-bound update -> {version}", flush=True)
-
 
 def verify_completed_activation_drift(fixture):
     transaction = json.loads(fixture.journal.read_text())["transaction"]
@@ -905,9 +917,20 @@ def verify_completed_activation_drift(fixture):
                     and retained["outcome"]["code"] == "transition-required"
                     and retained["outcome"].get("transaction") is None,
                     "published updater did not preserve fresh activation-plan semantics")
-        require(current["outcome"]["status"] == "migration-required"
-                and current["outcome"].get("transaction") is None,
-                "current updater did not preserve fresh activation-plan semantics")
+        variant = fixture.run([str(fixture.runtime / "current/bin/yard"),
+                               "_release-owner-variant-v1"]).strip()
+        require(variant in ("go", "rust"), "current updater owner variant is unavailable")
+        if variant == "rust":
+            require(current["outcome"]["status"] == "recovering"
+                    and current["outcome"]["code"] == "recovery-pending"
+                    and current["outcome"].get("transaction") == transaction
+                    and not current["outcome"]["reachedGoal"]
+                    and current["outcome"]["message"] == "activation repair requires a new plan and authorization; the completed transaction is history",
+                    "current Rust updater did not preserve its original completed transaction for fresh activation")
+        else:
+            require(current["outcome"]["status"] == "migration-required"
+                    and current["outcome"].get("transaction") is None,
+                    "current updater did not preserve fresh activation-plan semantics")
         require(retained["plan"] == current["plan"]
                 and retained["assessment"]["changed"] and current["assessment"]["changed"]
                 and retained.get("resume") is None and current.get("resume") is None,
@@ -1366,26 +1389,68 @@ def verify_recovery_preservation(fixture, expected, transaction, links_before, u
     require(False, "released-caller resume changed recovery evidence, selections, ledger or runtime links")
 
 
+def verify_retained_activation_owner_coverage(fixture, unexpected):
+    before = snapshot(fixture.config)
+    links = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+
+    def owners(launcher):
+        result = run_process([str(launcher), "_release-transition"], fixture.env, timeout=30,
+                             input_text=json.dumps({"schemaVersion": 2, "mode": "runtime-activation-capabilities"}))
+        require(result.returncode == 0 and not result.stderr, "runtime activation capability query failed")
+        response = json.loads(result.stdout)
+        values = response.get("activationOwners")
+        require(response.get("schemaVersion") == 2 and not response.get("activationReconciliationOwned")
+                and not response.get("inspection") and not response.get("outcome") and not response.get("capabilities")
+                and isinstance(values, list) and values and all(isinstance(value, str) for value in values)
+                and values == sorted(set(values)), "runtime activation capability response is invalid")
+        return set(values)
+
+    # The config reconciler is separate from the non-config rollback owners.
+    required = owners(fixture.runtime / "current/bin/yard") - {"materialized-config"}
+    retained = owners(fixture.old_launcher)
+    require(required, "current runtime has no non-config rollback activation owners")
+    require(snapshot(fixture.config) == before and not unexpected.exists()
+            and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == links,
+            "rollback owner capability inspection changed protected state")
+    return sorted(required - retained)
+
+
+def verify_stopped_missing_owner_rollback(fixture, launcher, unexpected, control):
+    before = history_snapshot(fixture.config)
+    links = history_links(fixture)
+    effects = history_effects(control)
+    api_unexpected = Path(str(control) + ".unexpected")
+    require(not unexpected.exists() and not api_unexpected.exists(), "unexpected command before stopped rollback")
+    stopped = run_process([str(launcher), "update", "--rollback", "--yes"], fixture.env, timeout=60)
+    require(stopped.returncode != 0 and "code=rollback-incompatible" in (stopped.stdout + stopped.stderr)
+            and history_snapshot(fixture.config) == before and history_links(fixture) == links
+            and history_effects(control) == effects and not unexpected.exists() and not api_unexpected.exists(),
+            "stopped runtime rollback lost its typed refusal or changed protected state")
+
+
 def verify_fresh_activation_recovery(release, version, baseline, arch, root, compatible=False, failure_dir=None, evidence_dir=None):
     failure_dir = failure_dir or Path.cwd() / ".build/release-upgrade-failures"
     fixture = Fixture(root / ("fresh-activation-compatible" if compatible else "fresh-activation"),
-                      release, version, baseline, arch)
+                      release, version, baseline, arch, DIRECT_BASELINE)
     host_settings = fixture.config / "config.env"
     # This core recovery fixture has no installed optional profile runtimes.
     host_settings.write_text("ENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=codex\n")
     host_settings.chmod(0o600)
-    fixture.update("--version", version, "--yes")
-    fixture.complete()
-    if compatible:
-        verify_epoch_one_publication_gate(fixture)
-    launcher = fixture.runtime / "current/bin/yard"
+    fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
+    control = root / "incus-observation.json"
+    command = bridge_update_command(fixture, release, version, control)
+    fixture.run(command + ["--yes"])
+    fixture.complete(old=False)
+    launcher = fixture.runtime / os.readlink(fixture.runtime / "current") / "bin/yard"
     ledger = fixture.config / "release-transition/v2/ledger.json"
     ledger_before = ledger.read_bytes()
     links_before = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
     control = root / "incus-observation.json"
 
+    materialized = materialized_observation_binding(fixture)
+
     def observe(status, hold):
-        set_fixture_observation(control, status, fixture.journal if hold else None)
+        set_fixture_observation(control, status, fixture.journal if hold else None, materialized=materialized)
 
     # Native observations are synthetic; any privileged or mutating host command
     # is rejected. This exercises the actual candidate engine and wire contract.
@@ -1532,32 +1597,32 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
                 and receipt["replacement"] == request["recovery"]
                 and receipt["ledgerFingerprint"] == hashlib.sha256(ledger_before).hexdigest(),
                 "fresh recovery lost canonical predecessor or completed ledger bindings")
-        require(fixture.check()["outcome"]["status"] == "recovering",
-                "released V1 caller cannot inspect the ordinary V2 successor")
-        fixture.update("--offline", "--version", version)
-        fixture.complete()
+        require(json.loads(fixture.run([str(launcher), "update", "--check", "--offline", "--version", version]))["outcome"]["status"] == "recovering",
+                "current frontend cannot inspect the ordinary V2 successor")
+        fixture.run([str(launcher), "update", "--offline", "--version", version])
+        fixture.complete(old=False)
         verify_recovery_preservation(
             fixture, {"receipt": receipt_bytes, "ledger": ledger_before, "selection": changed_bytes},
             transaction, links_before, unexpected, failure_dir)
         if compatible:
-            # A stopped guest cannot establish absence for owners missing from the
-            # retained release; the ordinary rollback guard must refuse without mutation.
-            before_stopped = snapshot(fixture.config)
-            stopped_links = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
-            stopped = run_process([str(fixture.runtime / "current/bin/yard"), "update", "--rollback", "--yes"], fixture.env, timeout=60)
-            require(stopped.returncode != 0 and "code=rollback-incompatible" in (stopped.stdout + stopped.stderr)
-                    and snapshot(fixture.config) == before_stopped and not unexpected.exists()
-                    and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == stopped_links,
-                    "stopped runtime rollback lost its typed refusal or changed protected state")
+            missing = verify_retained_activation_owner_coverage(fixture, unexpected)
+            if missing:
+                # A stopped guest cannot prove absence for a missing owner.
+                observe("Stopped", False)
+                fixture.run([str(launcher), "update", "--offline", "--version", version, "--yes"])
+                fixture.complete(old=False)
+                verify_stopped_missing_owner_rollback(fixture, launcher, unexpected, control)
+            else:
+                print("INFO: stopped missing-owner rollback refusal is inapplicable; retained owners cover the current set", flush=True)
             # This positive case proves an absent installation through the API.
             # Real running activation belongs to installed-runtime acceptance.
             observe(None, False)
             verify_observed_instance_removed(fixture)
             # The changed native observation requires an ordinary fresh assessment
             # and consent for the current target before selecting another goal.
-            fixture.update("--offline", "--version", version, "--yes", old=False)
+            fixture.run([str(launcher), "update", "--offline", "--version", version, "--yes"])
             fixture.complete(old=False)
-            fixture.update("--rollback", "--yes", old=False)
+            fixture.run([str(launcher), "update", "--rollback", "--yes"])
             require(os.readlink(fixture.runtime / "current") == fixture.initial,
                     "API-proved absent installation lost eligible matching-epoch rollback")
         else:
@@ -1565,8 +1630,8 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
             require(receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
                     and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
                     "refused power rollback changed protected recovery evidence")
-        fixture.update("--offline", "--version", version, "--yes")
-        fixture.complete()
+        fixture.run([str(launcher), "update", "--offline", "--version", version, "--yes"])
+        fixture.complete(old=False)
         terminal_path = fixture.config / "release-transition/recovery/v2/archive" / (transaction + ".json")
         retained_receipt = receipt_path.read_bytes() if receipt_path.exists() else (
             json.dumps(json.loads(terminal_path.read_text())["receipt"], separators=(",", ":")) + "\n").encode()
@@ -1576,11 +1641,8 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     finally:
         observe(None, False)
         verify_observed_instance_removed(fixture)
-    print(f"PASS: capable {version} fresh activation recovery preserves ledger and links; released {BASELINE} "
-          f"caller inspects and resumes V2 successor, {'absent-installation rollback' if compatible else 'power rollback refusal'} and forward", flush=True)
-    if not compatible:
-        bridge_release, bridge_version = compatible_power_release(release, version, arch, root)
-        verify_fresh_activation_recovery(bridge_release, bridge_version, baseline, arch, root, compatible=True, failure_dir=failure_dir, evidence_dir=evidence_dir)
+    print(f"PASS: capable {version} fresh activation recovery preserves ledger and links; current "
+          f"frontend inspects and resumes V2 successor, {'absent-installation rollback' if compatible else 'power rollback refusal'} and forward", flush=True)
 
 
 def verify_alias_source_repair(fixture, release, unfinished=False):
@@ -1697,6 +1759,7 @@ def verify_completed_source_repair(release, version, baseline, arch, root):
 
 def verify_completed_source_selection(fixture, root):
     launcher = str(fixture.runtime / "current/bin/yard")
+    original = json.loads(fixture.journal.read_text())
     before = snapshot(fixture.config / "release-transition")
     links = (os.readlink(fixture.runtime / "current"), os.readlink(fixture.runtime / "previous"))
     fixture.run([launcher, "-Y", "hermes", "config", "unset", "CODING_TOOL_INTEGRATIONS",
@@ -1704,14 +1767,22 @@ def verify_completed_source_selection(fixture, root):
     # A running consumer exposes ordinary materialized drift. Keep every other
     # runtime absent/current so this exercises completed config.set admission.
     control = root / "incus-observation.json"
-    set_fixture_observation(control, "Running")
+    set_fixture_observation(control, "Running", materialized=materialized_observation_binding(fixture))
     shims = fixture.root / "selection-commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-selection-host-command"
     write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     gate = json.loads(fixture.run([launcher, "migrate", "--check", "--json"]))
-    require(gate["outcome"]["status"] == "migration-required" and not gate.get("blockers")
+    outcome = gate["outcome"]
+    variant = fixture.run([launcher, "_release-owner-variant-v1"]).strip()
+    require(variant in ("go", "rust"), "completed selection owner variant is unavailable")
+    fresh_drift = outcome["status"] == "migration-required" if variant == "go" else (
+        original["checkpoint"] == "complete" and outcome["status"] == "recovering"
+        and outcome["code"] == "recovery-pending" and outcome.get("transaction") == original["transaction"]
+        and not outcome["reachedGoal"] and outcome["message"] ==
+        "activation repair requires a new plan and authorization; the completed transaction is history")
+    require(fresh_drift and not gate.get("blockers")
             and [(decision["resource"], decision["decision"]) for decision in gate.get("decisions", [])
                  if decision["decision"] != "preserve"]
             == [("activation.materialized-config", "canonicalize")],
@@ -1919,9 +1990,70 @@ def verify_migration_owner_replacement(release, version, baseline, source_baseli
           f"negotiated {version} supersession, fresh consent, interrupted CAS successor and ordinary resume", flush=True)
 
 
-def verify_direct_019(release, version, baseline, baseline_version, arch, root):
-    fixture = Fixture(root / ("direct-" + baseline_version), release, version,
-                      baseline, arch, baseline_version)
+def bridge_update_command(fixture, release, version, control):
+    variant = fixture.run([str(release / f"yard-{version}-linux-{fixture.arch}"), "_release-owner-variant-v1"]).strip()
+    require(variant in ("go", "rust"), "candidate owner variant is unavailable")
+    fixture.target_owner_variant = variant
+    if variant == "go":
+        return [str(fixture.old_launcher), "update", "--version", version]
+    before = history_no_effects(fixture, control)
+    refused = run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"], fixture.env, timeout=180)
+    require(refused.returncode == 1 and
+            "the verified candidate cannot provide a valid release transition inspection" in refused.stderr
+            and history_no_effects(fixture, control) == before,
+            "released Go bridge did not preserve its Rust routing refusal and protected state")
+    staged = fixture.run(["bash", str(release / "subyard-install.sh"), "--publish-only", "--version", version])
+    line = next((line for line in staged.splitlines() if line.startswith("staged release=")), "")
+    require(line and " candidate=" in line, "verified publication omitted its printed candidate")
+    candidate = Path(line.split(" candidate=", 1)[1]) / "bin/yard"
+    command = [str(candidate), "update", "--offline", "--version", version]
+    before = history_no_effects(fixture, control)
+    inspected = run_process(command + ["--check", "--json"], fixture.env, timeout=90)
+    require(inspected.returncode == 0 and history_no_effects(fixture, control) == before,
+            "printed candidate could not inspect without effects: " + inspected.stdout + inspected.stderr)
+    declined = run_process(command, fixture.env, timeout=90)
+    require(declined.returncode != 0 and "confirmation" in (declined.stdout + declined.stderr).lower()
+            and history_no_effects(fixture, control) == before,
+            "printed candidate reused authorization or changed protected state without consent")
+    print("PASS: released Go bridge refusal and printed Rust frontend require separate consent without effects", flush=True)
+    return command
+
+
+def capture_bridge_observation_failure(fixture, control):
+    if HISTORY_EVIDENCE is None:
+        return
+    try:
+        if HISTORY_EVIDENCE.is_symlink() or not HISTORY_EVIDENCE.is_dir():
+            raise ValueError('unsafe evidence directory')
+        destination = Path(tempfile.mkdtemp(prefix=fixture.root.name + '-observation-', dir=HISTORY_EVIDENCE))
+        paths = sorted(fixture.root.glob('unexpected-host-command*')) + [Path(str(control) + '.unexpected')]
+        if len(paths) > 16:
+            raise ValueError('too many observation markers')
+        for path in paths:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, 'rb') as source:
+                    info = os.fstat(source.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+                        raise ValueError('unsafe observation marker')
+                    payload = source.read(65537)
+                    if len(payload) > 65536 or len(payload) != info.st_size:
+                        raise ValueError('changed observation marker')
+                output = os.open(destination / path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(output, 'wb') as target:
+                    os.fchmod(target.fileno(), 0o600)
+                    target.write(payload)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as error:
+                print('bridge observation capture refused: ' + type(error).__name__, file=sys.stderr, flush=True)
+    except (OSError, ValueError) as error:
+        print('bridge observation capture refused: ' + type(error).__name__, file=sys.stderr, flush=True)
+
+
+def verify_supported_bridge(release, version, baseline, baseline_version, arch, root, fixture=None, source_previous=None, obsolete_transaction=None):
+    fixture = fixture or Fixture(root / ("direct-" + baseline_version), release, version,
+                                baseline, arch, baseline_version)
     host = fixture.config / "config.env"
     # The running fixture has no materialized guest config. Seed an empty
     # selection so the released owner can verify its completed source before
@@ -1940,84 +2072,83 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
     registration.write_text("YARD_TEMPLATE=''\nSSH_PORT=2226\n")
     registration.chmod(0o600)
     control = root / "incus-observation.json"
-    def observe(status):
-        value = ({"removeInstances": [{"project": "subyard", "name": "yard"}]} if status is None else
-                 {"instances": [{"project": "subyard", "name": "yard",
-                   "info": {"name": "yard", "status": status, "type": "container",
-                            "config": {}, "devices": {}}}]})
-        payload = json.dumps(value)
-        control.write_text(payload)
-        control.chmod(0o600)
-        applied = Path(str(control) + ".applied")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if applied.exists() and applied.read_text() == payload:
-                return
-            time.sleep(0.02)
-        require(False, "direct upgrade observation fixture did not apply")
+    previous = history_links(fixture)[1]
+    require((previous[0] if previous else None) == source_previous,
+            "bridge predecessor does not match its exact retained history")
+    source_active = "releases/" + source["goal"]["target"]
+    require(history_links(fixture)[0][0] == source_active, "completed source is not the active bridge")
     try:
-        observe("Running")
-        shims = fixture.root / "commands"
-        shims.mkdir()
-        unexpected = fixture.root / "unexpected-host-command"
-        failure_control = fixture.root / "activation-failure.json"
-        failure_marker = fixture.root / "activation-failure-observed"
-        write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent],
-                                activation_failure=failure_control)
-        fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+        history, config_source, guest, unexpected = history_materialized_fixture(fixture, root, control)
         source_inspection = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
         require(source_inspection["outcome"]["status"] == "ready" and not source_inspection.get("blockers")
                 and not unexpected.exists(),
                 "released direct source is not current before candidate activation")
-        failure_control.write_text(json.dumps({"journal": str(fixture.journal), "marker": str(failure_marker)}))
         transactions = fixture.config / "release-transition/v2/transactions"
         require((transactions / source_transaction).is_dir(), "direct fixture omitted retained terminal evidence")
-        result = run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],
-                             fixture.env, timeout=180)
+        prior_evidence = capture_history_evidence(transactions)
+        effects_before_apply = history_effects(control)
+        command = bridge_update_command(fixture, release, version, control)
+        retired = obsolete_transaction if fixture.target_owner_variant == "rust" else None
+        require(retired != source_transaction, "the bridge source transaction cannot be retired")
+        result = run_process(command + ["--yes"], fixture.env, timeout=180)
         (fixture.root / "post-effects-failure.log").write_text(result.stdout + result.stderr)
-        require(result.returncode != 0 and failure_marker.is_file(),
-                "direct fixed update did not reach controlled post-effects failure: " + result.stdout + result.stderr)
+        require(result.returncode != 0 and Path(str(control) + ".failed").is_file(),
+                "direct fixed update did not reach controlled materialized failure: " + result.stdout + result.stderr)
         failed = json.loads(fixture.journal.read_text())
         require(failed["checkpoint"] == "reconciling" and
-                [step["migration"] for step in failed["steps"]] ==
-                ["introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"] and
+                os.readlink(fixture.runtime / "current") == "releases/" + history["target"] and
+                [step["migration"] for step in failed["steps"]] == history["migrations"] and
                 all(step["checkpoint"] == "verified" for step in failed["steps"]),
                 "controlled activation failure preceded migration verification")
+        diagnostic = result.stdout + result.stderr
+        require("yard default: cannot apply materialized config for release activation" in diagnostic
+                and "run yard -Y default config status" in diagnostic,
+                "original materialized-config diagnostic or retry disappeared: " + diagnostic)
+        verify_materialized_apply_failure(fixture, control, history, config_source, failed, effects_before_apply)
         require(projection.read_bytes() == projection_before, "direct update rewrote frozen projection")
-        evidence = snapshot(transactions / failed["transaction"])
+        history_preserves_evidence(fixture, prior_evidence)
+        evidence = history_snapshot(transactions / failed["transaction"])
         candidate = fixture.runtime / "current/bin/yard"
-        before = snapshot(fixture.config)
-        reread = json.loads(fixture.run([str(candidate), "update", "--check", "--offline",
-                                        "--version", version, "--json"]))
-        require(reread.get("resume") == failed["transaction"] and
-                reread["outcome"]["code"] == "dependency-unavailable" and
-                "activation" in json.dumps(reread.get("blockers", [])).lower() and
-                snapshot(fixture.config) == before,
-                "post-error reobservation lost its owning diagnostic or valid history")
-        (fixture.root / "post-effects-inspection.json").write_text(json.dumps(reread) + "\n")
-        failure_control.unlink()
-        observe("Stopped")
-        resumed = json.loads(fixture.run([str(candidate), "update", "--check", "--offline",
-                                         "--version", version, "--json"]))
-        (fixture.root / "resume-inspection.json").write_text(json.dumps(resumed) + "\n")
-        require(resumed.get("resume") == failed["transaction"] and not resumed.get("blockers"),
-                "direct fixed reader could not resume the valid independent-domain history")
+        for name in ("post-effects-inspection", "resume-inspection"):
+            before = history_no_effects(fixture, control)
+            inspection = json.loads(fixture.run([str(candidate), "update", "--check", "--offline",
+                                                "--version", version, "--json"]))
+            require(inspection.get("resume") == failed["transaction"] and
+                    inspection["outcome"]["status"] == "recovering" and not inspection.get("blockers") and
+                    history_no_effects(fixture, control) == before,
+                    "fresh direct reader lost valid history or performed effects")
+            (fixture.root / (name + ".json")).write_text(json.dumps(inspection) + "\n")
+        # The first exact write already recorded its controlled failure. Keep
+        # the running instance and responder for the real same-grant retry.
         fixture.run([str(candidate), "update", "--offline", "--version", version])
-        fixture.complete(old=False)
+        fixture.complete(old=False, expected_previous=source_active)
         fixture.run([str(candidate), "config", "apply", "--yes"])
         completed = json.loads(fixture.journal.read_text())
         require(completed["transaction"] == failed["transaction"] and
                 completed["steps"] == failed["steps"] and
-                snapshot(transactions / failed["transaction"]) == evidence and
+                history_snapshot(transactions / failed["transaction"]) == evidence and
                 projection.read_bytes() == projection_before,
                 "ordinary restart replayed or replaced completed migration evidence")
+        history_preserves_evidence(fixture, prior_evidence, retired)
+        require(guest.read_bytes() == config_source.read_bytes() and
+                digest(fixture.runtime / "current/config/agents.env") == digest(config_source) and
+                not unexpected.exists() and not Path(str(control) + ".unexpected").exists(),
+                "direct retry did not apply only its exact shipped source")
+        before = history_no_effects(fixture, control)
+        fixture.run([str(candidate), "update", "--offline", "--version", version])
+        require(history_no_effects(fixture, control) == before, "repeated direct Ready update performed effects")
+    except Exception:
+        capture_bridge_observation_failure(fixture, control)
+        raise
     finally:
-        observe(None)
+        set_fixture_observation(control)
         # Read the actual API inventory after the removal acknowledgement, not
-        # merely the desired control file. Other canned instances remain intact.
+        # merely the desired control file.
         verify_observed_instance_removed(fixture)
-    print(f"PASS: authentic {baseline_version} -> fixed {version} directly; controlled post-effects "
-          "activation error, owning diagnostic/reobservation, new-process resume, no migration replay and gated operation", flush=True)
+    ancestry = "from previous=nil" if source_previous is None else "with the exact retained predecessor"
+    print(f"PASS: authentic {baseline_version} -> fixed {version} {ancestry}; controlled "
+          "materialized failure, owning diagnostic, fresh-process same-TX resume, no migration replay and Ready no-op", flush=True)
+    return retired, prior_evidence
 
 def history_snapshot(root):
     return {str(path.relative_to(root)): (path.stat().st_mode, path.stat().st_ino,
@@ -2158,35 +2289,63 @@ def history_chain(release, version, arch, root, baselines, checkpointed, name):
         shutil.copytree(fixture.config, HISTORY_EVIDENCE / (name + "-closed-source"))
     checkpoint = fixture.config / "release-transition/v2/history-checkpoint.json"
     require(checkpoint.exists() == checkpointed, "authentic chain has the wrong authority role")
+    bridge = baseline_assets(root, baselines[DIRECT_BASELINE], DIRECT_BASELINE, DIRECT_BASELINE_SHA256, arch)
+    for asset in bridge.iterdir():
+        if asset.is_file(): shutil.copy2(asset, mirror / asset.name)
+    fixture.update("--version", DIRECT_BASELINE, "--yes")
+    fixture.version = DIRECT_BASELINE
+    fixture.complete(old=False, expected_previous=prior_current)
+    history_preserves_evidence(fixture, prior_evidence)
+    prior_current = os.readlink(fixture.runtime / "current")
     fixture.old_launcher = fixture.runtime / prior_current / "bin/yard"
-    fixture.baseline_version, fixture.version = prior, version
+    fixture.baseline_version, fixture.version = DIRECT_BASELINE, version
     fixture.env["YARD_RELEASE_BASE_URL"] = release.as_uri()
-    return fixture, prior_current, prior_evidence
+    return fixture, prior_current, prior_evidence, prior_journal["transaction"]
 
 
 def history_materialized_fixture(fixture, root, control, fail_once=True):
     source, guest = fixture.root / "fixture-source.txt", fixture.root / "fixture-guest.txt"
-    drift = fixture.root / "fixture-drift.txt"
-    source.write_text("generic migration history fixture desired\n")
-    guest.write_bytes(source.read_bytes())
-    drift.write_text("generic migration history fixture prior\n")
-    for path in (source, guest, drift):
+    bundle = (Path(fixture.env["YARD_RELEASE_BASE_URL"].removeprefix("file://")) /
+              f"subyard-{fixture.version}-linux-{fixture.arch}.tar.gz")
+    # The same declared file resolves in each checked runtime's shipped config.
+    # Seed the old bytes once: the predecessor is ready and the candidate has
+    # genuine immutable-source drift, without mutation during observation.
+    with tarfile.open(bundle, "r:gz") as archive:
+        members = [member for member in archive.getmembers()
+                   if member.name.removeprefix("./") == "config/agents.env"]
+        require(len(members) == 1 and members[0].isfile() and 0 < members[0].size <= 1 << 20,
+                "candidate has no bounded shipped config fixture source")
+        source.write_bytes(archive.extractfile(members[0]).read())
+    old_source = fixture.old_launcher.parent.parent / "config/agents.env"
+    guest.write_bytes(old_source.read_bytes())
+    require(digest(source) != digest(guest), "released and candidate fixture sources must differ")
+    for path in (source, guest):
         path.chmod(0o600)
     yard = fixture.config / "yards/default/config.env"
     yard.parent.mkdir(parents=True, mode=0o700)
     (fixture.config / "yards").chmod(0o700)
     yard.parent.chmod(0o700)
     yard.write_text("SSH_PORT=2224\nENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=fixture\n"
-                    f"AGENT_fixture_CONFIG='{source}'\nAGENT_fixture_CONFIG_DEST=.subyard-fixture/config.txt\n")
+                    'AGENT_fixture_CONFIG="${SUBYARD_CONFIG_DIR}/agents.env"\nAGENT_fixture_CONFIG_DEST=.subyard-fixture/config.txt\n')
     yard.chmod(0o600)
+    original = json.loads(fixture.journal.read_text())
+    original_registry = json.loads((fixture.old_launcher.parent.parent / "config/release-transition.json").read_text())
+    require(original["checkpoint"] == "complete", "materialized source fixture requires completed original history")
+    checkpoint = json.loads((fixture.config / "release-transition/v2/history-checkpoint.json").read_text())
+    epochs = {domain: state["epoch"] for domain, state in checkpoint["domains"].items()}
+    require(epochs == original_registry["currentEpochs"], "source checkpoint is not at its own registry head")
+    with tarfile.open(bundle, "r:gz") as archive:
+        members = [member for member in archive.getmembers() if member.name.removeprefix("./") == "config/release-transition.json"]
+        require(len(members) == 1 and members[0].isfile(), "candidate registry is unavailable")
+        candidate_registry = json.loads(archive.extractfile(members[0]).read())
+    pending = [migration["id"] for migration in candidate_registry["migrations"]
+               if migration["fromEpoch"] >= epochs[migration["domain"]]]
     history = {"journal": str(fixture.journal), "runtime": str(fixture.runtime),
-               "target": "", "source": str(source), "guest": str(guest), "initialDrift": str(drift),
+               "target": "", "source": str(source), "priorSource": str(old_source), "guest": str(guest),
                "destination": "/home/dev/.subyard-fixture/config.txt", "failOnce": fail_once,
-               "migrations": ["introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"]}
+               "migrations": pending}
     # The exact candidate identity comes from verified package bytes, not a
     # patched installed asset or a journal supplied by this fixture.
-    bundle = (Path(fixture.env["YARD_RELEASE_BASE_URL"].removeprefix("file://")) /
-              f"subyard-{fixture.version}-linux-{fixture.arch}.tar.gz")
     history["target"] = fixture.version + "-" + digest(bundle)[:12]
     inventory = (Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
     history["inventoryProgramSHA256"] = hashlib.sha256(inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0").encode()).hexdigest()
@@ -2195,19 +2354,85 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     history['skills'] = {'files': {name: digest(package_root / name) for name in package['source_files'](package_root)},
                          'programSHA256': digest(package_root / 'config/skills/probe.py'),
                          'user': 'dev', 'profiles': '', 'coding': True}
+    dispatcher = Path(__file__).resolve().parent.parent / "config/projects-changed.sh"
+    history["projectHookProgram"] = str(dispatcher)
+    history["projectHookSHA256"] = digest(dispatcher)
     shims = fixture.root / "commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-host-command"
-    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
+    # Model install-runtime-release.sh --no-same-permissions under main's
+    # private 077 umask, rather than the public archive staging modes.
+    with tempfile.TemporaryDirectory(prefix="subyard-history-skills-", dir="/tmp") as temporary:
+        package = Path(temporary)
+        with tarfile.open(bundle, "r:gz") as archive:
+            members = [member for member in archive.getmembers()
+                       if member.name.removeprefix("./") == "scripts/refresh-agent-skills.sh"
+                       or member.name.removeprefix("./").startswith(("config/skills/", "config/profiles/"))
+                       or member.name.removeprefix("./") in ("config/skills", "config/profiles")]
+            require(all(member.isfile() or member.isdir() for member in members),
+                    "candidate skill fixture contains unsupported archive entries")
+            archive.extractall(package, members=members, filter="data")
+            for member in reversed(members):
+                (package / member.name).chmod(member.mode & 0o700)
+        write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent, package])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     set_fixture_observation(control, "Running", history=history)
+    shown = fixture.run([str(fixture.old_launcher), "-Y", "default", "config", "show", "AGENT_fixture_CONFIG"])
+    resolved = [line.removeprefix("effective: ") for line in shown.splitlines() if line.startswith("effective: ")]
+    require(len(resolved) == 1 and Path(resolved[0]).resolve() == old_source.resolve(),
+            "predecessor did not select its own checked shipped source")
     return history, source, guest, unexpected
 
 
-def history_preserves_evidence(fixture, before):
+def verify_materialized_apply_failure(fixture, control, history, source, journal, effects_before_apply):
+    effects_after_apply = history_effects(control)
+    require(effects_after_apply.startswith(effects_before_apply), "apply rewrote prior fixture effects")
+    effects = [json.loads(line) for line in effects_after_apply[len(effects_before_apply):].splitlines()]
+    failed_apply = [event for event in effects if event.get("exit") == 37]
+    apply_script = (Path(__file__).resolve().parent.parent /
+                    "internal/testkit/cmd/empty-incus/config-write.sh").read_text()
+    require(len(failed_apply) == 1, "controlled apply failure must occur exactly once")
+    event = failed_apply[0]
+    shell = ["sh", "-eu", "-c", apply_script, "subyard", history["destination"], "1000"]
+    inventory = (Path(__file__).resolve().parent.parent /
+                 "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
+    inventory = inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0")
+    python = ["python3", "-B", "-c", inventory, "configs-write"]
+    if event.get("command") == shell:
+        exact_apply = event.get("stdinSHA256") == digest(source)
+    elif event.get("command") == python:
+        before = {"exists": True, "digest": digest(fixture.old_launcher.parent.parent / "config/agents.env"),
+                  "uid": 1000, "gid": 1000, "mode": 0o644}
+        original = {"home": "/home/dev", "uid": 1000, "entries": [
+            {"id": "fixture", "kind": "file", "path": history["destination"],
+             "digest": digest(source), "content": base64.b64encode(source.read_bytes()).decode()}],
+            "before": before}
+        raw = json.dumps(original, separators=(",", ":")).encode()
+        exact_apply = (event.get("before") == before and event.get("payloadSHA256") == digest(source)
+                       and event.get("stdinSHA256") == hashlib.sha256(raw).hexdigest())
+    else:
+        exact_apply = False
+    require(exact_apply and event.get("transaction") == journal,
+            "controlled failure did not capture the exact seeded apply command/stdin and verified journal")
+
+
+def history_preserves_evidence(fixture, before, retired_transaction=None):
+    transactions = fixture.config / "release-transition/v2/transactions"
+    if retired_transaction is not None:
+        obsolete = {name for name in before if name.split("/", 1)[0] == retired_transaction}
+        require(obsolete, "expected retirement is not bound to original fixture evidence")
+        journal = json.loads(fixture.journal.read_text())
+        require(journal["checkpoint"] == "complete" and journal["transaction"] != retired_transaction,
+                "historical evidence cannot retire before the current transaction completes")
+        require(not os.path.lexists(transactions / retired_transaction),
+                "expected obsolete transaction was not retired as a whole directory")
+        before = {name: value for name, value in before.items() if name not in obsolete}
+    if retired_transaction is not None:
+        known = {name.split("/", 1)[0] for name in before} | {journal["transaction"]}
+        require(all(path.name in known for path in transactions.iterdir()),
+                "retirement left an unrecognized transaction directory")
     journal = json.loads(fixture.journal.read_text())
-    verify_history_evidence(fixture.config / 'release-transition/v2/transactions', before,
-                            history_evidence_destinations(journal))
+    verify_history_evidence(transactions, before, history_evidence_destinations(journal))
 
 
 def history_protocol(fixture, request):
@@ -2226,8 +2451,9 @@ def history_request(fixture, plan, mode="converge"):
 
 
 def history_no_effects(fixture, control):
-    guest = json.loads(control.read_text())["migrationHistory"]["guest"]
-    return history_snapshot(fixture.config), history_links(fixture), digest(Path(guest)), history_effects(control)
+    history = json.loads(control.read_text()).get("migrationHistory")
+    guest = digest(Path(history["guest"])) if history else None
+    return history_snapshot(fixture.config), history_links(fixture), guest, history_effects(control)
 
 
 def verify_history_safety(fixture, control, checkpointed):
@@ -2235,46 +2461,96 @@ def verify_history_safety(fixture, control, checkpointed):
     journal = json.loads(journal_bytes)
     root = fixture.config / "release-transition/v2"
     registry = fixture.runtime / "current/config/release-transition.json"
-    cases = [("pin", fixture.journal, lambda payload: payload.replace(journal["steps"][0]["desiredFingerprint"].encode(), b"f" * 64, 1)),
+    if journal["steps"]:
+        evidence_record, step = fixture.journal, journal["steps"][0]
+    else:
+        candidates = sorted((root / "transactions").glob("*/evidence/*.verified.json"))
+        require(candidates, "supported bridge lost all retained historical evidence")
+        evidence_record = candidates[0]
+        record = json.loads(evidence_record.read_text())
+        require(record.get("step") and record.get("observedFingerprint"),
+                "retained evidence lacks its original step or observed fingerprint")
+        step = {"resource": record["step"]}
+    retained_rust = getattr(fixture, "target_owner_variant", None) == "rust" and not journal["steps"]
+    source_command = ([str(control.parent / "empty-incus"), "--source-admission", str(fixture.runtime),
+                       str(fixture.config), str((fixture.runtime / "current").resolve())] if retained_rust else None)
+    def bound_source():
+        before = history_no_effects(fixture, control)
+        result = run_process(source_command, fixture.env, timeout=90)
+        try:
+            value = json.loads(result.stdout)
+        except ValueError:
+            value = None
+        require(result.returncode == 0 and isinstance(value, dict) and set(value) == {"binding"}
+                and isinstance(value["binding"], str) and re.fullmatch(r"[0-9a-f]{64}", value["binding"])
+                and history_no_effects(fixture, control) == before,
+                "retained source admission baseline lacks its unchanged valid binding")
+        return value["binding"]
+    binding = bound_source() if retained_rust else None
+    cases = [("pin", fixture.journal, lambda payload: payload.replace(journal["resumePlan"].encode(), b"plan-v1-" + b"f" * 64, 1)),
              ("registry", registry, lambda payload: payload + b"\n"),
-             ("evidence-embedded", fixture.journal, lambda payload: payload.replace(b'"observedFingerprint":"', b'"observedFingerprint":"f', 1)),
-             ("unknown-effect", fixture.journal, lambda payload: payload.replace(journal["steps"][0]["resource"].encode(), b"unrecognized.effect", 1))]
+             ("evidence-embedded", evidence_record, lambda payload: payload.replace(b'"observedFingerprint":"', b'"observedFingerprint":"f', 1)),
+             ("unknown-effect", evidence_record, lambda payload: payload.replace(step["resource"].encode(), b"unrecognized.effect", 1))]
     if checkpointed:
         cases.append(("projection", root / "ledger.json", lambda payload: payload + b"\n"))
     refused = []
     for name, path, mutate in cases:
         original = path.read_bytes()
+        info = path.stat()
+        source_probe = retained_rust and name in ("evidence-embedded", "unknown-effect")
         try:
             mutated = mutate(original)
             require(mutated != original, name + " mutant did not change its intended input")
             path.write_bytes(mutated)
             before = history_no_effects(fixture, control)
-            result = run_process([str(fixture.runtime / "current/bin/yard"), "migrate", "--check", "--json"], fixture.env, timeout=90)
+            command = source_command if source_probe else [str(fixture.runtime / "current/bin/yard"), "migrate", "--check", "--json"]
+            result = run_process(command, fixture.env, timeout=90)
             try:
                 outcome = json.loads(result.stdout)["outcome"]
             except (ValueError, KeyError):
                 outcome = {}
             diagnostic = (result.stdout + result.stderr).lower()
-            require(outcome.get("status") == "operator-action-required" or
-                    result.returncode != 0 and any(word in diagnostic for word in ("invalid", "manifest", "checksum", "registry", "projection", "evidence", "integrity")),
-                    f"{name} mutant did not produce a concrete refusal: {result.stdout}{result.stderr}")
+            if source_probe:
+                require(result.returncode == 1 and not result.stdout and result.stderr.splitlines() == [
+                    "release owner operation refused: Invalid", "empty-incus: source admission refused"],
+                    f"{name} retained source mutant did not produce its exact integrity refusal")
+            else:
+                require(outcome.get("status") == "operator-action-required" or
+                        result.returncode != 0 and any(word in diagnostic for word in ("invalid", "manifest", "checksum", "registry", "projection", "evidence", "integrity")),
+                        f"{name} mutant did not produce a concrete refusal: {result.stdout}{result.stderr}")
             require(history_no_effects(fixture, control) == before, name + " refusal performed additional effects")
-            refused.append({"case": name, "exit": result.returncode, "status": outcome.get("status"), "code": outcome.get("code")})
+            refused.append({"case": name, "consumer": "source-admission" if source_probe else "current-readiness",
+                            "exit": result.returncode, "status": outcome.get("status"), "code": outcome.get("code")})
         finally:
             path.write_bytes(original)
+            os.chmod(path, stat.S_IMODE(info.st_mode))
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        if source_probe:
+            require(bound_source() == binding, "restored retained evidence changed its source binding")
     # A stale process plan is not a fresh authorization. The ordinary same-goal
     # idempotent retry was already checked separately above.
     link = fixture.runtime / "previous"
     original_link = os.readlink(link)
+    changed_link = os.readlink(fixture.runtime / "current")
+    require(original_link != changed_link, "link mutant did not change its intended input")
     try:
         link.unlink()
-        link.symlink_to(fixture.initial)
+        link.symlink_to(changed_link)
         before = history_no_effects(fixture, control)
         result = history_protocol(fixture, history_request(fixture, journal["resumePlan"]))
-        require(result.returncode == 0 and json.loads(result.stdout)["outcome"]["status"] != "ready"
-                and history_no_effects(fixture, control) == before, "changed links reused a completed plan")
+        require(history_no_effects(fixture, control) == before, "changed-link refusal performed additional effects")
+        # Invalid bindings may refuse before the Rust facade produces an outcome.
+        invalid = (result.returncode == 1 and not result.stdout and (result.stderr.splitlines() == [
+            "release owner operation refused: Invalid",
+            "yard: release transition: Rust release owner refused: invalid"] or result.stderr ==
+            "yard: release transition: invalid release transition record: active and previous links resolve to the same release\n"))
+        stale = (result.returncode == 1 and not result.stdout and result.stderr ==
+                 "yard: release transition: operation plan is stale\n")
+        outcome = json.loads(result.stdout)["outcome"] if result.returncode == 0 else {}
+        require(invalid or stale or result.returncode == 0 and outcome["status"] != "ready",
+                "changed-link request did not produce a supported refusal")
         refused.append({"case": "links", "exit": result.returncode,
-                        "code": json.loads(result.stdout)["outcome"]["code"]})
+                        "code": "invalid" if invalid else "plan-stale" if stale else outcome["code"]})
     finally:
         link.unlink()
         link.symlink_to(original_link)
@@ -2294,11 +2570,23 @@ def verify_history_source_admission(fixture, control, checkpointed, phase, mutat
     else:
         expected = ("yard: config repair-alias: release source admission: protected metadata is unsupported or unresolved; "
                     "finish pending publications or recovery intent with the exact sealed original owner before source repair")
-        require(result.returncode == 1 and result.stderr.strip() == expected,
+        # The selected Rust facade retains its canonical refusal before the CLI diagnostic.
+        refused = result.stderr.splitlines() in ([expected], ["release owner operation refused: Invalid", expected])
+        require(result.returncode == 1 and not result.stdout and refused,
                 "legacy history must retain the exact known historical-anchor refusal: " + result.stdout + result.stderr)
         print("UNSUPPORTED: legacy source metadata admission " + phase +
               "; known historical-anchor refusal; ordinary readiness is separate", flush=True)
     report = {"status": "supported" if supported else "unsupported", "exit": result.returncode}
+    if supported:
+        before = history_no_effects(fixture, control)
+        proof = run_process([str(control.parent / "empty-incus"), "--source-admission",
+                             str(fixture.runtime), str(fixture.config),
+                             str((fixture.runtime / "current").resolve())], fixture.env, timeout=90)
+        require(history_no_effects(fixture, control) == before, "source proof query performed effects")
+        value = json.loads(proof.stdout) if proof.returncode == 0 else {}
+        require(set(value) == {"binding"} and re.fullmatch(r"[0-9a-f]{64}", value["binding"]),
+                "source admission lacks its independently checked binding")
+        report["binding"] = value["binding"]
     if supported and mutate:
         journal = json.loads(fixture.journal.read_text())
         evidence = fixture.config / "release-transition/v2/transactions" / journal["transaction"] / "evidence"
@@ -2321,6 +2609,12 @@ def verify_history_source_admission(fixture, control, checkpointed, phase, mutat
     return report
 
 
+def history_plan_stale(result):
+    if result.returncode == 1:
+        return not result.stdout and result.stderr == "yard: release transition: operation plan is stale\n"
+    return result.returncode == 0 and json.loads(result.stdout)["outcome"]["code"] == "plan-stale"
+
+
 def verify_history_fresh_repair(fixture, control, history, guest, checkpointed):
     journal = json.loads(fixture.journal.read_text())
     preserved = capture_history_evidence(fixture.config / "release-transition/v2/transactions")
@@ -2328,15 +2622,26 @@ def verify_history_fresh_repair(fixture, control, history, guest, checkpointed):
     history["migrations"] = []
     set_fixture_observation(control, "Running", history=history)
     fresh = history_inspect(fixture, control)
-    require(fresh["outcome"]["status"] == "migration-required" and fresh.get("resume") is None,
+    outcome = fresh["outcome"]
+    frozen_fresh = (outcome["status"] == "recovering" and outcome["code"] == "recovery-pending"
+                    and outcome["message"] == "activation repair requires a new plan and authorization; the completed transaction is history")
+    require((outcome["status"] == "migration-required" or frozen_fresh) and fresh.get("resume") is None,
             "completed history did not require a fresh activation plan")
     before = history_no_effects(fixture, control)
+    request = history_request(fixture, journal["resumePlan"], mode="inspect")
+    request.pop("execution")
+    inspected = history_protocol(fixture, request)
+    require(history_no_effects(fixture, control) == before, "fresh-plan inspection performed effects")
+    inspection = json.loads(inspected.stdout).get("inspection") if inspected.returncode == 0 else None
+    require(inspection is not None and inspection["plan"] != journal["resumePlan"]
+            and inspection["assessment"]["changed"] and inspection.get("resume") is None,
+            "completed history reused original consent instead of preparing fresh activation")
     stale = history_protocol(fixture, history_request(fixture, "plan-v1-" + "f" * 64))
-    require(stale.returncode == 0 and json.loads(stale.stdout)["outcome"]["code"] == "plan-stale"
-            and history_no_effects(fixture, control) == before, "stale process plan authorized fresh repair")
+    require(history_no_effects(fixture, control) == before, "stale process plan refusal performed effects")
+    require(history_plan_stale(stale), "stale process plan authorized fresh repair")
     replay = history_protocol(fixture, history_request(fixture, journal["resumePlan"]))
-    require(replay.returncode == 0 and json.loads(replay.stdout)["outcome"]["code"] == "plan-stale",
-            "old durable consent authorized a new activation repair scope")
+    require(history_no_effects(fixture, control) == before, "old durable consent refusal performed effects")
+    require(history_plan_stale(replay), "old durable consent authorized a new activation repair scope")
     declined = run_process([str(fixture.runtime / "current/bin/yard"), "migrate"], fixture.env, timeout=90)
     require(declined.returncode != 0 and "confirmation" in (declined.stdout + declined.stderr).lower()
             and history_no_effects(fixture, control) == before,
@@ -2353,7 +2658,8 @@ def verify_history_fresh_repair(fixture, control, history, guest, checkpointed):
     admission = verify_history_source_admission(fixture, control, checkpointed, "after-repair")
     if admission["status"] == "supported":
         require(any(decision.get("resource") == "transition.source-metadata" and decision.get("decision") == "preserve"
-                    for decision in gate.get("decisions", [])), "supported source metadata admission lacks its preservation decision")
+                    and decision.get("result") == admission["binding"]
+                    for decision in gate.get("decisions", [])), "supported source metadata admission lacks its exact preservation decision")
     return admission
 
 
@@ -2376,7 +2682,7 @@ def history_final_pending_migration(bundle, ledger_path):
 def verify_history_process_cuts(release, version, arch, root, baselines):
     observer = Path(__file__).resolve().parent / "e2e/release-transition-post-cas-observer.py"
     for cut in ("ledger", "checkpoint"):
-        fixture, prior, _ = history_chain(release, version, arch, root, baselines, False, "history-cut-" + cut)
+        fixture, prior, _, _ = history_chain(release, version, arch, root, baselines, False, "history-cut-" + cut)
         original = json.loads(fixture.journal.read_text())
         checkpoint = fixture.config / "release-transition/v2/history-checkpoint.json"
         marker = fixture.root / (cut + "-observed.json")
@@ -2427,7 +2733,7 @@ def verify_history_process_cuts(release, version, arch, root, baselines):
 
 
 
-def verify_migration_history(release, version, arch, root, baselines, evidence, case="all"):
+def verify_historical_migration_history(release, version, arch, root, baselines, evidence, case="all"):
     global HISTORY_EVIDENCE, HISTORY_RESULTS
     evidence = evidence.resolve()
     if (evidence / "native-results.json").exists():
@@ -2459,7 +2765,7 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
         authorities = (True, False) if case == "all" else (case == "checkpoint",)
         for checkpointed in authorities:
             label = "checkpoint" if checkpointed else "legacy"
-            fixture, prior, prior_evidence = history_chain(release, version, arch, root, inputs,
+            fixture, prior, prior_evidence, _ = history_chain(release, version, arch, root, inputs,
                                                           checkpointed, "history-" + label)
             projection = fixture.config / "release-transition/v2/ledger.json"
             projection_before = projection.read_bytes()
@@ -2468,6 +2774,12 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
             result = run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"], fixture.env, timeout=180)
             require(result.returncode != 0 and Path(str(control) + ".failed").exists(),
                     "materialized config did not fail at the actual post-migration apply: " + result.stdout + result.stderr)
+            selected_source = fixture.runtime / "current/config/agents.env"
+            require(digest(selected_source) == digest(source), "candidate fixture source differs from its bound asset")
+            shown = fixture.run([str(fixture.runtime / "current/bin/yard"), "-Y", "default", "config", "show", "AGENT_fixture_CONFIG"])
+            resolved = [line.removeprefix("effective: ") for line in shown.splitlines() if line.startswith("effective: ")]
+            require(len(resolved) == 1 and Path(resolved[0]).resolve() == selected_source.resolve(),
+                    "candidate did not select its own checked shipped source")
             journal = json.loads(fixture.journal.read_text())
             require(journal["checkpoint"] == "reconciling" and os.readlink(fixture.runtime / "current") == "releases/" + history["target"]
                     and len(journal["steps"]) == 2 and all(step["checkpoint"] == "verified" for step in journal["steps"]),
@@ -2476,21 +2788,9 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
             require("yard default: cannot apply materialized config for release activation" in diagnostic
                     and "run yard -Y default config status" in diagnostic,
                     "original materialized-config diagnostic or retry disappeared: " + diagnostic)
-            effects_after_apply = history_effects(control)
-            require(effects_after_apply.startswith(effects_before_apply), "apply rewrote prior fixture effects")
-            effects = [json.loads(line) for line in effects_after_apply[len(effects_before_apply):].splitlines()]
-            failed_apply = [event for event in effects if event.get("exit") == 37]
-            apply_script = (Path(__file__).resolve().parent.parent /
-                            "internal/testkit/cmd/empty-incus/config-write.sh").read_text()
-            require(len(failed_apply) == 1
-                    and failed_apply[0].get("command") == ["sh", "-eu", "-c", apply_script,
-                                                           "subyard", history["destination"], "1000"]
-                    and failed_apply[0].get("stdinSHA256") == digest(source)
-                    and failed_apply[0].get("transaction") == journal,
-                    "controlled failure did not capture the exact seeded apply command/stdin and verified journal")
+            verify_materialized_apply_failure(fixture, control, history, source, journal, effects_before_apply)
             if checkpointed: require(projection.read_bytes() == projection_before, "checkpoint authority changed the frozen projection")
             history_preserves_evidence(fixture, prior_evidence)
-            verify_history_safety(fixture, control, checkpointed)
             migration_evidence = capture_history_evidence(fixture.config / "release-transition/v2/transactions",
                                                          history_evidence_destinations(journal))
             (evidence / (label + "-evidence-before-retry.json")).write_text(json.dumps(migration_evidence, indent=2,
@@ -2515,6 +2815,9 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
             require(current["outcome"]["status"] == retained["outcome"]["status"] == "ready",
                     "current and actual retained updater disagree on completed history")
             require(history_no_effects(fixture, control) == before, "completed caller inspections performed effects")
+            # Immutable-source corruption probes belong after the original retry:
+            # restoring source bytes cannot restore their native metadata pins.
+            verify_history_safety(fixture, control, checkpointed)
             source_before = verify_history_source_admission(fixture, control, checkpointed, "before-repair", mutate=True)
             source_after = verify_history_fresh_repair(fixture, control, history, guest, checkpointed)
             results.append({"case": label, "status": "passed", "prior": prior,
@@ -2543,6 +2846,40 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
 
 
 
+def verify_migration_history(release, version, arch, root, baselines, evidence, case="all"):
+    global HISTORY_EVIDENCE, HISTORY_RESULTS
+    require(case != "cuts", "Migration-ledger CAS cuts require the future Rust author edge; the completed bridge has no pending migrations. Current activation successor cuts run in the fresh-recovery case.")
+    evidence = evidence.resolve()
+    evidence.mkdir(parents=True, exist_ok=True)
+    HISTORY_EVIDENCE, HISTORY_RESULTS = evidence, []
+    inputs = {}
+    try:
+        for baseline_version, pins in {**HISTORY_BASELINES, DIRECT_BASELINE: DIRECT_BASELINE_SHA256}.items():
+            directory = baselines / ("baseline-" + baseline_version) if baselines else None
+            inputs[baseline_version] = baseline_assets(root, directory, baseline_version, pins, arch)
+        for checkpointed in ((False, True) if case == "all" else (case == "checkpoint",)):
+            label = "checkpoint" if checkpointed else "legacy"
+            fixture, _, retained, obsolete_transaction = history_chain(release, version, arch, root, inputs, checkpointed,
+                                                  "retained-history-" + label)
+            bridge_source = json.loads(fixture.journal.read_text())
+            require(bridge_source["checkpoint"] == "complete", "retained bridge has no completed source proof")
+            source_previous = "releases/" + bridge_source["releases"]["from"]
+            retired, protected = verify_supported_bridge(release, version, inputs[DIRECT_BASELINE], DIRECT_BASELINE,
+                                    arch, root, fixture=fixture, source_previous=source_previous,
+                                    obsolete_transaction=None if checkpointed else obsolete_transaction)
+            history_preserves_evidence(fixture, protected | retained, retired)
+            control = root / "incus-observation.json"
+            verify_history_safety(fixture, control, True)
+            for suffix in (".effects.jsonl", ".unexpected", ".failed", ".drift"):
+                artifact = Path(str(control) + suffix)
+                if artifact.exists():
+                    shutil.copy2(artifact, evidence / (label + suffix))
+                    artifact.unlink()
+            print("PASS: released Go historical " + label + " chain completes Go0.22 before current Rust admission and retains required closed evidence", flush=True)
+    finally:
+        HISTORY_EVIDENCE = None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
@@ -2561,7 +2898,7 @@ def main():
     parser.add_argument("--source-baseline-dir", type=Path,
                         help="optional directory containing the pinned source-repair baseline assets")
     parser.add_argument("--only-legacy-retirement", action="store_true",
-                        help="run retired-source refusal/full-uninstall and actual v0.11.0 admission")
+                        help="run retired-source refusal/full-uninstall and actual Go v0.22 bridge admission")
     parser.add_argument("--only-source-repair", action="store_true",
                         help="run actual released completed and interrupted source-repair contracts")
     parser.add_argument("--only-activation-recovery", action="store_true",
@@ -2582,7 +2919,8 @@ def main():
     parser.add_argument("--migration-owner-source-dir", type=Path)
     parser.add_argument("--migration-owner-source-version")
     parser.add_argument("--migration-owner-evidence-dir", type=Path)
-    parser.add_argument("--only-direct-019", action="store_true")
+    parser.add_argument("--only-direct-019", action="store_true",
+                        help="run the authenticated Go v0.22 bridge and printed current frontend")
     parser.add_argument("--direct-baseline-dir", type=Path)
     parser.add_argument("--only-migration-history", action="store_true",
                         help="run authentic independent-domain history, recovery and safety contracts")
@@ -2597,6 +2935,10 @@ def main():
                args.only_legacy_retirement, args.only_migration_history)
     require(sum(focused) <= 1,
             "choose only one focused compatibility regression")
+    require(not any((args.only_migration_owner_replacement, args.only_activation_recovery,
+                     args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery,
+                     args.only_power_publication, args.only_power_transition_regression)),
+            "This historical fresh-ingress case is retired. Complete the released Go v0.22 bridge, then use the printed current frontend; supported bridge and current recovery controls run by default.")
     require(args.migration_history_case == "all" or args.only_migration_history,
             "--migration-history-case requires --only-migration-history")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
@@ -2615,7 +2957,13 @@ def main():
         # a missing transport cannot establish the profile activation state.
         source = Path(__file__).resolve().parent.parent
         server_binary = root / "empty-incus"
-        built = run_process(["go", "-C", str(source), "build", "-buildvcs=false",
+        variant = run_process([str(release / f"yard-{args.version}-linux-{arch}"),
+                               "_release-owner-variant-v1"], env=None, timeout=30)
+        require(variant.returncode == 0 and variant.stdout.strip() in ("go", "rust"),
+                "candidate release-owner variant is unavailable")
+        fixture_link = (["-ldflags", "-X github.com/Subyard/Subyard/internal/adapters/releaseruntime.compiledReleaseOwner=rust"]
+                        if variant.stdout.strip() == "rust" else [])
+        built = run_process(["go", "-C", str(source), "build", "-buildvcs=false", *fixture_link,
                              "-o", str(server_binary), "./internal/testkit/cmd/empty-incus"],
                             env=None, timeout=180)
         require(built.returncode == 0, f"cannot build Incus fixture: {built.stdout}{built.stderr}")
@@ -2627,154 +2975,39 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
-                if args.only_fresh_activation_recovery:
-                    baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
-                    verify_fresh_activation_recovery(release, args.version, baseline, arch, root,
-                                                     failure_dir=args.failure_dir, evidence_dir=args.migration_owner_evidence_dir)
-                    return
-                if args.only_direct_019:
-                    require(arch in DIRECT_BASELINE_SHA256, "published direct baseline is not pinned for this architecture")
-                    require(bool(args.migration_owner_source_dir) == bool(args.migration_owner_source_version),
-                            "custom predecessor directory and version must be supplied together")
-                    direct = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
-                                             DIRECT_BASELINE_SHA256, arch)
-                    predecessors = [(direct, DIRECT_BASELINE)]
-                    if args.migration_owner_source_dir:
-                        predecessors.append((args.migration_owner_source_dir.resolve(), args.migration_owner_source_version))
-                    for baseline, baseline_version in predecessors:
-                        try:
-                            verify_direct_019(release, args.version, baseline, baseline_version, arch, root)
-                        finally:
-                            if args.migration_owner_evidence_dir:
-                                evidence = args.migration_owner_evidence_dir.resolve() / baseline_version
-                                evidence.mkdir(parents=True, exist_ok=True)
-                                fixture_root = root / ("direct-" + baseline_version)
-                                for name in ("source-journal.json", "post-effects-failure.log",
-                                             "post-effects-inspection.json", "resume-inspection.json", "instance-cleanup.json"):
-                                    source_file = fixture_root / name
-                                    if source_file.is_file():
-                                        shutil.copy2(source_file, evidence / name)
-                                protected = fixture_root / "home/.config/subyard/release-transition"
-                                if protected.is_dir():
-                                    shutil.copytree(protected, evidence / "protected-state", dirs_exist_ok=True)
-                    return
-                if args.only_migration_owner_replacement:
-                    require(arch in MIGRATION_OWNER_SHA256, "no verified affected owner artifact is pinned for this architecture")
-                    require(args.migration_owner_source_dir and args.migration_owner_source_version,
-                            "authentic retained source bundle directory and version are required")
-                    baseline = baseline_assets(root, args.migration_owner_baseline_dir,
-                                               MIGRATION_OWNER_BASELINE, MIGRATION_OWNER_SHA256, arch)
-                    history = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
-                                              DIRECT_BASELINE_SHA256, arch)
+                if args.only_migration_history or not any(focused):
+                    verify_migration_history(release, args.version, arch, root,
+                        args.migration_history_baselines, args.failure_dir / "migration-history",
+                        args.migration_history_case)
+                    if args.only_migration_history:
+                        return
+                direct = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
+                                         DIRECT_BASELINE_SHA256, arch)
+                if args.only_legacy_retirement or not any(focused):
+                    for baseline_version, hashes in RETIRED_BASELINES.items():
+                        directory = args.legacy_baseline_dir if baseline_version == LEGACY_BASELINE else None
+                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
+                        verify_legacy(release, args.version, baseline, arch, root, baseline_version)
+                if not args.only_fresh_activation_recovery:
                     try:
-                        verify_migration_owner_replacement(release, args.version, baseline,
-                            args.migration_owner_source_dir.resolve(), args.migration_owner_source_version, history, arch, root)
+                        verify_supported_bridge(release, args.version, direct, DIRECT_BASELINE, arch, root)
                     finally:
                         if args.migration_owner_evidence_dir:
-                            evidence = args.migration_owner_evidence_dir.resolve()
+                            evidence = args.migration_owner_evidence_dir.resolve() / DIRECT_BASELINE
                             evidence.mkdir(parents=True, exist_ok=True)
-                            fixture_root = root / "migration-owner"
-                            for name in ("official-source-journal.json", "custom-source-journal.json", "source-history.json", "shipped-default-plan-stability.json", "previous-asset-refusal.log",
-                                         "predecessor.json", "released-owner-failure.log",
-                                         "released-owner-inspection.log", "released-owner-unavailable-observation",
-                                         "migration-owner-successor.json", "migration-owner-successor.json.stdout",
-                                         "migration-owner-successor.json.stderr"):
+                            fixture_root = root / ("direct-" + DIRECT_BASELINE)
+                            for name in ("source-journal.json", "post-effects-failure.log",
+                                         "post-effects-inspection.json", "resume-inspection.json"):
                                 source_file = fixture_root / name
                                 if source_file.is_file():
                                     shutil.copy2(source_file, evidence / name)
                             protected = fixture_root / "home/.config/subyard/release-transition"
                             if protected.is_dir():
                                 shutil.copytree(protected, evidence / "protected-state", dirs_exist_ok=True)
-                    return
-                if args.only_migration_history or not any(focused):
-                    verify_migration_history(release, args.version, arch, root,
-                                             args.migration_history_baselines, args.failure_dir / "migration-history", args.migration_history_case)
-                    if args.only_migration_history:
-                        return
-                if args.only_legacy_retirement or not any(focused):
-                    for baseline_version, hashes in RETIRED_BASELINES.items():
-                        directory = args.legacy_baseline_dir if baseline_version == LEGACY_BASELINE else None
-                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
-                        verify_legacy(release, args.version, baseline, arch, root, baseline_version)
-                    baseline = baseline_assets(root, None, MINIMUM_BASELINE, MINIMUM_BASELINE_SHA256, arch)
-                    verify_minimum_source(release, args.version, baseline, arch, root)
-                    if args.only_legacy_retirement:
-                        return
-                if args.only_power_transition_regression:
-                    for baseline_version, hashes, directory in (
-                            (BASELINE, BASELINE_SHA256, args.baseline_dir),
-                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir),
-                            (SOURCE_BASELINE, SOURCE_BASELINE_SHA256, args.source_baseline_dir)):
-                        cached = release.parent / "power-publication-baselines" / baseline_version
-                        if directory is None and cached.is_dir():
-                            directory = cached
-                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
-                        if directory is None:
-                            cached.mkdir(parents=True, exist_ok=True)
-                            for asset in baseline.iterdir():
-                                if asset.is_file():
-                                    shutil.copy2(asset, cached / asset.name)
-                        verify(release, args.version, baseline, arch, root, baseline_version)
-                        verify_checkpoint_source(release, args.version, baseline, arch, root, baseline_version)
-                        if baseline_version == BASELINE:
-                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root, failure_dir=args.failure_dir, evidence_dir=args.migration_owner_evidence_dir)
-                    return
-                if args.only_power_publication:
-                    for baseline_version, hashes, directory in (
-                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir),
-                            (SOURCE_BASELINE, SOURCE_BASELINE_SHA256, args.source_baseline_dir)):
-                        cached = release.parent / "power-publication-baselines" / baseline_version
-                        if directory is None and cached.is_dir():
-                            directory = cached
-                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
-                        if directory is None:
-                            cached.mkdir(parents=True, exist_ok=True)
-                            for asset in baseline.iterdir():
-                                if asset.is_file():
-                                    shutil.copy2(asset, cached / asset.name)
-                        verify_power_publication_boundary(release, args.version, baseline, arch, root, baseline_version)
-                    return
-                if args.only_runtime_recovery:
-                    baseline = baseline_assets(root, args.source_baseline_dir, SOURCE_BASELINE,
-                                               SOURCE_BASELINE_SHA256, arch)
-                    verify(release, args.version, baseline, arch, root, SOURCE_BASELINE)
-                    activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
-                                                 ACTIVATION_BASELINE_SHA256, arch)
-                    verify_activation_only_recovery(release, args.version, activation, arch, root,
-                                                   recovery_baseline=baseline)
-                    return
-                if args.only_source_repair:
-                    source_baseline = baseline_assets(root, args.source_baseline_dir, SOURCE_BASELINE,
-                                                      SOURCE_BASELINE_SHA256, arch)
-                    verify_completed_source_repair(release, args.version, source_baseline, arch, root)
-                    verify_activation_only_recovery(release, args.version, source_baseline, arch, root,
-                                                   SOURCE_BASELINE, source_repair=True)
-                    return
-                if not args.only_activation_recovery and not args.only_checkpoint_source:
-                    direct = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
-                                             DIRECT_BASELINE_SHA256, arch)
-                    verify_direct_019(release, args.version, direct, DIRECT_BASELINE, arch, root)
-                if not args.only_activation_recovery:
-                    for baseline_version, hashes, directory in (
-                            (BASELINE, BASELINE_SHA256, args.baseline_dir),
-                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir),
-                            (SOURCE_BASELINE, SOURCE_BASELINE_SHA256, args.source_baseline_dir)):
-                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
-                        if not args.only_checkpoint_source:
-                            verify(release, args.version, baseline, arch, root, baseline_version)
-                        verify_checkpoint_source(release, args.version, baseline, arch, root, baseline_version)
-                        if baseline_version == BASELINE and not args.only_checkpoint_source:
-                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root, failure_dir=args.failure_dir, evidence_dir=args.migration_owner_evidence_dir)
-                        if baseline_version == SOURCE_BASELINE and not args.only_checkpoint_source:
-                            verify_completed_source_repair(release, args.version, baseline, arch, root)
-                            verify_activation_only_recovery(release, args.version, baseline, arch, root,
-                                                           SOURCE_BASELINE, source_repair=True)
-                    if args.only_checkpoint_source:
-                        return
-                activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
-                                             ACTIVATION_BASELINE_SHA256, arch)
-                verify_activation_only_recovery(release, args.version, activation, arch, root,
-                                               recovery_baseline=args.source_baseline_dir)
+                if not args.only_direct_019 and not args.only_legacy_retirement:
+                    verify_fresh_activation_recovery(release, args.version, direct, arch, root,
+                        compatible=True, failure_dir=args.failure_dir,
+                        evidence_dir=args.migration_owner_evidence_dir)
             finally:
                 server.terminate()
                 try:
@@ -2787,16 +3020,18 @@ def main():
 def baseline_assets(root, directory, version, hashes, arch):
     baseline = directory.resolve() if directory else root / f"baseline-{version}"
     bundle_name = f"subyard-{version}-linux-{arch}.tar.gz"
-    if directory is None:
+    names = [bundle_name + suffix for suffix in ("", ".sha256", ".manifest.json", ".provenance.json")]
+    if version in RETIRED_BASELINES:
+        names.append("subyard-install-runtime-release.sh")
+    if directory is None and not baseline.exists():
         baseline.mkdir()
         print(f"Downloading pinned official {version} baseline for linux/{arch}", flush=True)
-        names = [bundle_name + suffix for suffix in ("", ".sha256", ".manifest.json", ".provenance.json")]
-        if version in RETIRED_BASELINES:
-            names.append("subyard-install-runtime-release.sh")
         for name in names:
             url = f"https://github.com/Subyard/Subyard/releases/download/v{version}/{name}"
             with urllib.request.urlopen(url, timeout=60) as response:
                 (baseline / name).write_bytes(response.read())
+    if directory is None:
+        require(all((baseline / name).is_file() for name in names), "downloaded baseline assets are incomplete")
     require(digest(baseline / bundle_name) == hashes[arch],
             "official baseline checksum does not match the pinned release")
     if version in RETIRED_BASELINES:

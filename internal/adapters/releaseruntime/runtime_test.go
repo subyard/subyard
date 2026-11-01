@@ -66,7 +66,7 @@ func TestLatestTagReportsGitHubHTTPStatus(t *testing.T) {
 	}
 }
 
-func TestUpdateReportsInstalledVersionBeforeLatestLookup(t *testing.T) {
+func TestUpdateReportsVersionAndRejectsSourceTamperBeforeLatestLookup(t *testing.T) {
 	for _, tampered := range []bool{false, true} {
 		t.Run(fmt.Sprintf("tampered=%v", tampered), func(t *testing.T) {
 			root := testkit.TempDir(t)
@@ -101,7 +101,14 @@ func TestUpdateReportsInstalledVersionBeforeLatestLookup(t *testing.T) {
 			})
 			defer runtime.Close()
 			_, err := runtime.PrepareTransition(context.Background(), []string{"--runtime-root", root}, root, "default")
-			if !lookedUp || err == nil || err.Error() != "GitHub latest release request returned 403 Forbidden" {
+			if !strings.HasPrefix(progress.String(), "Installed version: "+version+"\nInspecting the installed release...\n") {
+				t.Fatalf("installed source progress=%q", progress.String())
+			}
+			if tampered {
+				if lookedUp || err == nil || err.Error() != "published runtime files do not match their manifest" {
+					t.Fatalf("tampered source reached lookup: lookup=%v error=%v", lookedUp, err)
+				}
+			} else if !lookedUp || err == nil || err.Error() != "GitHub latest release request returned 403 Forbidden" {
 				t.Fatalf("lookup=%v error=%v progress=%q", lookedUp, err, progress.String())
 			}
 		})
@@ -304,12 +311,7 @@ func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.WriteFile(
-				filepath.Join(runtimeRoot, "releases", "release-a", "bin", "yard-engine"),
-				[]byte("#!/bin/sh\nexit 0\n"), 0o700,
-			); err != nil {
-				t.Fatal(err)
-			}
+			writeSupportedRuntimeSource(t, filepath.Join(runtimeRoot, "releases", "release-a"))
 			if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
 				t.Fatal(err)
 			}
@@ -1403,13 +1405,13 @@ func TestPrepareTransitionCheckOfProtectedRecoveryIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestPrepareTransitionRejectsArbitraryV0111RecoveryCandidate(t *testing.T) {
+func TestHistoricalRecoveryAdmissionRemainsFailClosed(t *testing.T) {
 	tests := []struct {
 		name               string
 		prepare            func(*testing.T, *v0111CandidateRoutingFixture) (string, []string)
 		tamperRoot         bool
 		environmentVersion bool
-		wantRetry          string
+		wantDiagnostic     string
 	}{
 		{
 			name: "ordinary active runtime update",
@@ -1463,22 +1465,22 @@ func TestPrepareTransitionRejectsArbitraryV0111RecoveryCandidate(t *testing.T) {
 		{
 			name:               "environment version without explicit version option",
 			environmentVersion: true,
-			wantRetry:          "run the verified standalone release with --offline and its exact --version",
+			wantDiagnostic:     SourceBridgeGuidance,
 			prepare: func(_ *testing.T, fixture *v0111CandidateRoutingFixture) (string, []string) {
 				return fixture.candidate.root, []string{"--offline"}
 			},
 		},
 		{
-			name:      "candidate registry missing",
-			wantRetry: "install a verified standalone release newer than v0.11.1, then run it with --offline and its exact --version",
+			name:           "candidate registry missing",
+			wantDiagnostic: SourceBridgeGuidance,
 			prepare: func(t *testing.T, fixture *v0111CandidateRoutingFixture) (string, []string) {
 				unbindCandidateRegistry(t, fixture.candidate, true)
 				return fixture.candidate.root, []string{"--offline", "--version", fixture.candidateVersion}
 			},
 		},
 		{
-			name:      "candidate registry not manifest bound",
-			wantRetry: "install a verified standalone release newer than v0.11.1, then run it with --offline and its exact --version",
+			name:           "candidate registry not manifest bound",
+			wantDiagnostic: SourceBridgeGuidance,
 			prepare: func(t *testing.T, fixture *v0111CandidateRoutingFixture) (string, []string) {
 				unbindCandidateRegistry(t, fixture.candidate, false)
 				return fixture.candidate.root, []string{"--offline", "--version", fixture.candidateVersion}
@@ -1494,6 +1496,23 @@ func TestPrepareTransitionRejectsArbitraryV0111RecoveryCandidate(t *testing.T) {
 				return candidate.root, []string{"--offline", "--version", "0.11.0"}
 			},
 		},
+		{
+			name:           "source artifact provenance before bridge guidance",
+			wantDiagnostic: "published runtime files do not match their manifest",
+			prepare: func(t *testing.T, fixture *v0111CandidateRoutingFixture) (string, []string) {
+				testkit.WriteFile(t, filepath.Join(fixture.source.root, "bin/yard-engine"), []byte("#!/bin/sh\nexit 99\n"), 0o700)
+				return fixture.candidate.root, []string{"--offline", "--version", fixture.candidateVersion}
+			},
+		},
+		{
+			name:           "invalid journal before bridge guidance",
+			wantDiagnostic: "code=journal-invalid",
+			prepare: func(t *testing.T, fixture *v0111CandidateRoutingFixture) (string, []string) {
+				testkit.WriteFile(t, filepath.Join(fixture.configHome, "release-transition/v2/journal.json"), []byte("{\n"), 0o600)
+				return fixture.candidate.root, []string{"--offline", "--version", fixture.candidateVersion}
+			},
+		},
+
 		{
 			name: "different sole blocker code",
 			prepare: func(t *testing.T, fixture *v0111CandidateRoutingFixture) (string, []string) {
@@ -1540,8 +1559,8 @@ func TestPrepareTransitionRejectsArbitraryV0111RecoveryCandidate(t *testing.T) {
 			if err == nil {
 				t.Fatal("arbitrary recovery candidate was accepted")
 			}
-			if test.wantRetry != "" && !strings.Contains(err.Error(), "next: "+test.wantRetry) {
-				t.Fatalf("blocked recovery diagnostic = %v, want retry %q", err, test.wantRetry)
+			if test.wantDiagnostic != "" && !strings.Contains(err.Error(), test.wantDiagnostic) {
+				t.Fatalf("blocked recovery diagnostic = %v, want diagnostic %q", err, test.wantDiagnostic)
 			}
 			if after := fixture.snapshot(t); !bytes.Equal(before, after) {
 				t.Fatalf("blocked recovery changed protected state:\nbefore:\n%s\nafter:\n%s", before, after)
@@ -1554,405 +1573,6 @@ func TestPrepareTransitionRejectsArbitraryV0111RecoveryCandidate(t *testing.T) {
 			}
 			if _, statErr := os.Lstat(fixture.publicationCapture); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("blocked recovery invoked publication: %v", statErr)
-			}
-		})
-	}
-}
-
-func TestPrepareTransitionUsesExactDirectCandidateForV0111RecoveryPlan(t *testing.T) {
-	const recoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
-	fixture := newV0111CandidateRoutingFixture(t)
-	before := fixture.snapshot(t)
-	directRoot := filepath.Join(filepath.Dir(fixture.runtimeRoot), "direct-candidate-root")
-	if err := os.Symlink(fixture.candidate.root, directRoot); err != nil {
-		t.Fatal(err)
-	}
-	var stdout bytes.Buffer
-	runtime := New(Config{
-		RepositoryRoot: directRoot,
-		Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
-		Stdout: &stdout, Stderr: &bytes.Buffer{},
-	})
-
-	prepared, err := runtime.PrepareTransition(
-		context.Background(), []string{
-			"--check", "--offline", "--version", fixture.candidateVersion,
-			"--runtime-root", fixture.runtimeRoot,
-		}, fixture.configHome, "default",
-	)
-	if err != nil {
-		t.Fatalf("prepare exact standalone recovery check: %v", err)
-	}
-	if prepared.Action != "update.check" || prepared.Changed || prepared.RefreshConfigs {
-		t.Fatalf("standalone recovery check preparation = %#v", prepared)
-	}
-	if err := prepared.Execute(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	var inspection releasetransition.Inspection
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &inspection); err != nil {
-		t.Fatalf("decode standalone recovery check output %q: %v", stdout.String(), err)
-	}
-	if inspection.Plan != releasetransition.PlanToken("plan-v1-"+strings.Repeat("c", 64)) ||
-		inspection.Outcome == nil ||
-		inspection.Outcome.Target != releasetransition.ReleaseID(fixture.candidateID) ||
-		countString(inspection.Assessment.Consequences, recoveryConsequence) != 1 {
-		t.Fatalf("standalone recovery check inspection = %#v", inspection)
-	}
-	if after := fixture.snapshot(t); !bytes.Equal(before, after) {
-		t.Fatalf("standalone recovery check changed protected state:\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-	requests := readCandidateRoutingRequests(t, fixture.candidateCalls)
-	if len(requests) != 1 || requests[0].Mode != releasetransition.ProcessInspect ||
-		requests[0].Target != releasetransition.ReleaseID(fixture.candidateID) ||
-		requests[0].Replacement == nil ||
-		requests[0].Replacement.Transaction != releasetransition.TransactionID(fixture.transaction) ||
-		requests[0].Replacement.Fingerprint != fixture.journalFingerprint ||
-		requests[0].Replacement.Reason != releasetransition.JournalReplacementPostActivationScopeV0111 ||
-		requests[0].Replacement.SourceVersion != fixture.sourceVersion {
-		t.Fatalf("standalone recovery request = %#v", requests)
-	}
-}
-
-func TestV0111RecoveryValidatesAugmentedConsequenceBoundaryBeforeConverge(t *testing.T) {
-	const recoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
-	tests := []struct {
-		name                 string
-		candidateCount       int
-		includeRecovery      bool
-		wantPreparationError bool
-		wantCount            int
-	}{
-		{
-			name:           "64 generic consequences have no recovery capacity",
-			candidateCount: 64, wantPreparationError: true,
-		},
-		{
-			name:           "64 consequences including recovery stay bounded",
-			candidateCount: 64, includeRecovery: true, wantCount: 64,
-		},
-		{
-			name:           "63 generic consequences admit recovery",
-			candidateCount: 63, wantCount: 64,
-		},
-	}
-	for _, test := range tests {
-		for _, check := range []bool{true, false} {
-			mode := "interactive"
-			if check {
-				mode = "check"
-			}
-			t.Run(test.name+"/"+mode, func(t *testing.T) {
-				fixture := newV0111CandidateRoutingFixture(t)
-				consequences := make([]string, test.candidateCount)
-				for index := range consequences {
-					consequences[index] = fmt.Sprintf("candidate consequence %02d", index)
-				}
-				if test.includeRecovery {
-					consequences[31] = recoveryConsequence
-				}
-				fixture.writeCandidateConsequences(t, consequences)
-				before := fixture.snapshot(t)
-				var stdout bytes.Buffer
-				runtime := New(Config{
-					RepositoryRoot: fixture.candidate.root,
-					Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
-					Stdout: &stdout, Stderr: &bytes.Buffer{},
-				})
-				defer runtime.Close()
-				arguments := []string{
-					"--offline", "--version", fixture.candidateVersion,
-					"--runtime-root", fixture.runtimeRoot,
-				}
-				if check {
-					arguments = append(arguments, "--check")
-				}
-				prepared, err := runtime.PrepareTransition(
-					context.Background(), arguments, fixture.configHome, "default",
-				)
-				if test.wantPreparationError {
-					if err == nil {
-						t.Fatal("recovery preparation accepted an invalid augmented assessment")
-					}
-					requests := readCandidateRoutingRequests(t, fixture.candidateCalls)
-					if len(requests) != 1 || requests[0].Mode != releasetransition.ProcessInspect {
-						t.Fatalf("invalid recovery reached Converge: %#v", requests)
-					}
-					if after := fixture.snapshot(t); !bytes.Equal(before, after) {
-						t.Fatalf("invalid recovery changed protected state:\nbefore:\n%s\nafter:\n%s", before, after)
-					}
-					if _, statErr := os.Lstat(fixture.publicationCapture); !errors.Is(statErr, os.ErrNotExist) {
-						t.Fatalf("invalid recovery invoked publication: %v", statErr)
-					}
-					return
-				}
-				if err != nil {
-					t.Fatalf("prepare bounded recovery: %v", err)
-				}
-				if check {
-					if err := prepared.Execute(context.Background()); err != nil {
-						t.Fatal(err)
-					}
-					var inspection releasetransition.Inspection
-					if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &inspection); err != nil {
-						t.Fatal(err)
-					}
-					if err := inspection.ValidateOutcome(releasetransition.Goal{
-						Target:    fixture.candidate.release,
-						Direction: releasetransition.DirectionActivateTarget,
-					}); err != nil {
-						t.Fatalf("augmented check inspection is invalid: %v", err)
-					}
-					if inspection.Plan != releasetransition.PlanToken("plan-v1-"+strings.Repeat("c", 64)) ||
-						len(inspection.Assessment.Consequences) != test.wantCount ||
-						countString(inspection.Assessment.Consequences, recoveryConsequence) != 1 {
-						t.Fatalf("bounded check inspection = %#v", inspection)
-					}
-				} else {
-					if len(prepared.Consequences) != test.wantCount ||
-						countString(prepared.Consequences, recoveryConsequence) != 1 {
-						t.Fatalf("bounded interactive preparation = %#v", prepared)
-					}
-					if err := prepared.Execute(context.Background()); err != nil {
-						t.Fatalf("execute bounded recovery: %v", err)
-					}
-				}
-				requests := readCandidateRoutingRequests(t, fixture.candidateCalls)
-				wantRequests := 1
-				if !check {
-					wantRequests = 2
-				}
-				if len(requests) != wantRequests || requests[0].Mode != releasetransition.ProcessInspect {
-					t.Fatalf("bounded recovery requests = %#v", requests)
-				}
-				if !check && (requests[1].Mode != releasetransition.ProcessConverge ||
-					requests[1].Execution == nil ||
-					requests[1].Execution.Plan != releasetransition.PlanToken("plan-v1-"+strings.Repeat("c", 64))) {
-					t.Fatalf("bounded recovery changed candidate Plan: %#v", requests[1])
-				}
-			})
-		}
-	}
-}
-
-func TestPreparedV0111RecoveryAddsOneRedactedConsequenceAndConverges(t *testing.T) {
-	const recoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
-	for _, arguments := range [][]string{nil, {"--yes"}} {
-		name := "interactive"
-		if len(arguments) != 0 {
-			name = "assume yes"
-		}
-		t.Run(name, func(t *testing.T) {
-			fixture := newV0111CandidateRoutingFixture(t)
-			runtime := New(Config{
-				RepositoryRoot: fixture.candidate.root,
-				Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
-				Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
-			})
-			defer runtime.Close()
-			arguments = append(append([]string(nil), arguments...),
-				"--offline", "--version", fixture.candidateVersion,
-				"--runtime-root", fixture.runtimeRoot,
-			)
-			prepared, err := runtime.PrepareTransition(
-				context.Background(), arguments, fixture.configHome, "default",
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if prepared.Action != "update.activate" || !prepared.Changed ||
-				countString(prepared.Consequences, recoveryConsequence) != 1 ||
-				countString(prepared.Consequences,
-					"apply the exact typed migration and release activation plan") != 1 {
-				t.Fatalf("recovery preparation = %#v", prepared)
-			}
-			for _, private := range []string{
-				fixture.runtimeRoot, fixture.configHome, fixture.transaction, "pid", "fd", "environment",
-			} {
-				if strings.Contains(strings.ToLower(strings.Join(prepared.Consequences, "\n")), strings.ToLower(private)) {
-					t.Fatalf("recovery consequences expose %q: %q", private, prepared.Consequences)
-				}
-			}
-			if err := prepared.Execute(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			requests := readCandidateRoutingRequests(t, fixture.candidateCalls)
-			if len(requests) != 2 || requests[0].Mode != releasetransition.ProcessInspect ||
-				requests[1].Mode != releasetransition.ProcessConverge ||
-				requests[1].Replacement == nil ||
-				*requests[1].Replacement != *requests[0].Replacement {
-				t.Fatalf("recovery process sequence = %#v", requests)
-			}
-		})
-	}
-}
-
-func TestPreparedV0111RecoveryRevalidatesArtifactsAndJournalBeforeConverge(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*testing.T, v0111CandidateRoutingFixture)
-	}{
-		{
-			name: "candidate artifact",
-			mutate: func(t *testing.T, fixture v0111CandidateRoutingFixture) {
-				t.Helper()
-				if err := os.WriteFile(
-					filepath.Join(fixture.candidate.root, "bin", "yard-engine"),
-					[]byte("#!/bin/sh\nexit 91\n"), 0o700,
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "source artifact",
-			mutate: func(t *testing.T, fixture v0111CandidateRoutingFixture) {
-				t.Helper()
-				if err := os.WriteFile(
-					filepath.Join(fixture.source.root, "bin", "yard-engine"),
-					[]byte("#!/bin/sh\nexit 92\n"), 0o700,
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "source journal snapshot",
-			mutate: func(t *testing.T, fixture v0111CandidateRoutingFixture) {
-				t.Helper()
-				path := filepath.Join(fixture.configHome, "release-transition", "v2", "journal.json")
-				payload, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newV0111CandidateRoutingFixture(t)
-			runtime := New(Config{
-				RepositoryRoot: fixture.candidate.root,
-				Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
-				Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
-			})
-			defer runtime.Close()
-			prepared, err := runtime.PrepareTransition(
-				context.Background(), []string{
-					"--offline", "--version", fixture.candidateVersion,
-					"--runtime-root", fixture.runtimeRoot,
-				}, fixture.configHome, "default",
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			test.mutate(t, fixture)
-			if err := prepared.Execute(context.Background()); err == nil {
-				t.Fatal("recovery execution accepted facts changed after confirmation")
-			}
-			requests := readCandidateRoutingRequests(t, fixture.candidateCalls)
-			if len(requests) != 1 || requests[0].Mode != releasetransition.ProcessInspect {
-				t.Fatalf("stale recovery invoked candidate Converge: %#v", requests)
-			}
-		})
-	}
-}
-
-func TestV0111ScopeBlockerReportsTruthfulStandaloneRetry(t *testing.T) {
-	tests := []struct {
-		name           string
-		repositoryRoot func(v0111CandidateRoutingFixture) string
-		prepare        func(*testing.T, v0111CandidateRoutingFixture)
-		wantRetry      string
-	}{
-		{
-			name: "verified candidate available",
-			repositoryRoot: func(fixture v0111CandidateRoutingFixture) string {
-				return fixture.candidate.root
-			},
-			wantRetry: "run the verified standalone release with --offline and its exact --version",
-		},
-		{
-			name: "candidate absent",
-			repositoryRoot: func(fixture v0111CandidateRoutingFixture) string {
-				return fixture.source.root
-			},
-			wantRetry: "install a verified standalone release newer than v0.11.1, then run it with --offline and its exact --version",
-		},
-		{
-			name: "candidate registry missing",
-			repositoryRoot: func(fixture v0111CandidateRoutingFixture) string {
-				return fixture.candidate.root
-			},
-			prepare: func(t *testing.T, fixture v0111CandidateRoutingFixture) {
-				unbindCandidateRegistry(t, fixture.candidate, true)
-			},
-			wantRetry: "install a verified standalone release newer than v0.11.1, then run it with --offline and its exact --version",
-		},
-		{
-			name: "candidate registry not manifest bound",
-			repositoryRoot: func(fixture v0111CandidateRoutingFixture) string {
-				return fixture.candidate.root
-			},
-			prepare: func(t *testing.T, fixture v0111CandidateRoutingFixture) {
-				unbindCandidateRegistry(t, fixture.candidate, false)
-			},
-			wantRetry: "install a verified standalone release newer than v0.11.1, then run it with --offline and its exact --version",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newV0111CandidateRoutingFixture(t)
-			if test.prepare != nil {
-				test.prepare(t, fixture)
-			}
-			var stdout bytes.Buffer
-			runtime := New(Config{
-				RepositoryRoot: test.repositoryRoot(fixture),
-				Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
-				Stdout: &stdout, Stderr: &bytes.Buffer{},
-			})
-			defer runtime.Close()
-			prepared, err := runtime.PrepareTransition(
-				context.Background(), []string{
-					"--check", "--runtime-root", fixture.runtimeRoot,
-				}, fixture.configHome, "default",
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := prepared.Execute(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			var inspection releasetransition.Inspection
-			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &inspection); err != nil ||
-				inspection.Outcome == nil || inspection.Outcome.Retry != test.wantRetry ||
-				len(inspection.Blockers) != 1 || inspection.Blockers[0].Retry != test.wantRetry {
-				t.Fatalf("scope retry inspection=%#v output=%q err=%v", inspection, stdout.String(), err)
-			}
-			for _, private := range []string{
-				fixture.runtimeRoot, fixture.configHome, fixture.candidate.root,
-				"pid", " fd ", "environment",
-			} {
-				if strings.Contains(strings.ToLower(stdout.String()), strings.ToLower(private)) {
-					t.Fatalf("scope retry exposes %q: %q", private, stdout.String())
-				}
-			}
-			if strings.Contains(inspection.Outcome.Retry, "yard update --check") {
-				t.Fatalf("scope retry makes a false check promise: %q", inspection.Outcome.Retry)
-			}
-			_, err = runtime.PrepareTransition(
-				context.Background(), []string{
-					"--version", fixture.candidateVersion,
-					"--runtime-root", fixture.runtimeRoot,
-				}, fixture.configHome, "default",
-			)
-			if err == nil || !strings.Contains(err.Error(), "next: "+test.wantRetry) ||
-				strings.Contains(err.Error(), "yard update --check") {
-				t.Fatalf("scope retry error = %v", err)
 			}
 		})
 	}
@@ -2584,6 +2204,22 @@ type protectedRuntimeTransitionFixture struct {
 	journalPath, engine                                           string
 }
 
+// Seal only initial synthetic source files, independently of the journal target.
+func writeSupportedRuntimeSource(t *testing.T, releaseRoot string) {
+	t.Helper()
+	for _, directory := range []string{"bin", "config"} {
+		if err := os.MkdirAll(filepath.Join(releaseRoot, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceEngine := []byte("#!/bin/sh\n[ \"${1:-}\" = --version ] || exit 64\nprintf 'yard-engine 0.22.1-test\\n'\n")
+	sourceRegistry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}` + "\n")
+	testkit.WriteFile(t, filepath.Join(releaseRoot, "bin/yard-engine"), sourceEngine, 0o700)
+	testkit.WriteFile(t, filepath.Join(releaseRoot, "config/release-transition.json"), sourceRegistry, 0o600)
+	testkit.WriteFile(t, filepath.Join(releaseRoot, "VERSION"), []byte("0.22.1-test\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(releaseRoot, "runtime-files.sha256"), []byte(fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n%x  ./VERSION\n", sha256.Sum256(sourceEngine), sha256.Sum256(sourceRegistry), sha256.Sum256([]byte("0.22.1-test\n")))), 0o600)
+}
+
 func newProtectedRuntimeTransitionFixture(
 	t *testing.T,
 	checkpoint releasetransition.JournalCheckpoint,
@@ -2605,6 +2241,7 @@ func newProtectedRuntimeTransitionFixture(
 			t.Fatal(err)
 		}
 	}
+	writeSupportedRuntimeSource(t, filepath.Join(fixture.runtimeRoot, "releases", "release-a"))
 	current := "release-a"
 	if checkpoint == releasetransition.JournalComplete {
 		current = fixture.target

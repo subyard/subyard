@@ -581,22 +581,29 @@ func inspectRouteConsumerYards(ctx context.Context, options Options, activation 
 	if err != nil || !activation {
 		return yards, err
 	}
+	if err := inspectRouteConsumerEligibility(options, yards); err != nil {
+		return nil, err
+	}
+	return yards, nil
+}
+
+func inspectRouteConsumerEligibility(options Options, yards []managedYard) error {
 	for index := range yards {
 		loaded, err := loadBrokerYard(options, yards[index].Yard)
 		if err != nil {
-			return nil, routeConfigDiagnostic(fmt.Errorf("inspect route consumer eligibility: %w", err),
+			return routeConfigDiagnostic(fmt.Errorf("inspect route consumer eligibility: %w", err),
 				"consumer eligibility configuration inspection failed", yards[index].Yard, options.ConfigHome)
 		}
 		yards[index].AllowsHostAccess = loaded.Environment["ALLOWS_HOST_ACCESS"] != "false"
 		if !yards[index].AllowsHostAccess && yards[index].Mounted {
-			return nil, routeDiagnostic(fmt.Errorf(
+			return routeDiagnostic(fmt.Errorf(
 				"managed yard %s/%s has the shared E2E route mount but its effective policy forbids host access",
 				yards[index].Project, yards[index].Instance,
 			), "subyard-e2e-routes device remains but effective policy forbids host access", yards[index].Yard,
 				yards[index].Project, yards[index].Instance, true)
 		}
 	}
-	return yards, nil
+	return nil
 }
 
 func inspectCurrentRoute(options Options) (bool, error) {

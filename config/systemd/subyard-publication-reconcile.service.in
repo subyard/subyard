@@ -1,0 +1,19 @@
+[Unit]
+Description=Restore receipt-owned Subyard optional publications
+After=NetworkManager.service incus.service incus.socket
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=@SUBYARD_PUBLICATION_COMMAND@
+TimeoutStartSec=30
+RuntimeMaxSec=30
+Restart=no
+SuccessExitStatus=75
+RestartForceExitStatus=75
+RestartSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/run/lock

@@ -6,17 +6,32 @@ TMP="$(mktemp -d /tmp/subyard-proxy-controller.XXXXXXXX)"
 trap 'find "$TMP" -depth -delete' EXIT
 mkdir -p "$TMP/dev/e2e"
 cp "$ROOT/dev/e2e/proxy-address-boot.sh" "$TMP/dev/e2e/proxy-address-boot.sh"
+cp "$ROOT/dev/e2e/publication-capture.py" "$TMP/dev/e2e/publication-capture.py"
+python3 - "$TMP/dev/e2e/publication-capture.py" "$TMP/capture.frame" <<'FRAME'
+import importlib.util,pathlib,sys
+spec=importlib.util.spec_from_file_location("capture",sys.argv[1])
+capture=importlib.util.module_from_spec(spec);spec.loader.exec_module(capture)
+records={name:({"status":"absent"},None) for name in capture.LABELS}
+marker=b"subyard-p0-power-systemd-1\n"
+records["state-0"]=({"status":"present","size":len(marker),"sha256":capture.digest(marker)},marker)
+body,complete=capture.make_archive(records)
+with pathlib.Path(sys.argv[2]).open("wb") as stream:
+    capture.emit(body,complete,stream)
+pathlib.Path(sys.argv[2]).chmod(0o600)
+FRAME
 cat > "$TMP/dev/agent-e2e.sh" <<'CLIENT'
 set_requested_slot() { :; }
-build_bundle() { printf fixture > "$2"; }
+build_bundle() { tar -czf "$2" --files-from /dev/null; }
 acquire_lease() { LEASE_GENERATION=1; printf 'acquire\n' >> "$FIXTURE_LOG"; }
 start_lease_keeper() { :; }
 run_guest() {
+  [ "${1:-}" = --raw-stdout ] || return 98
+  shift
   case "$*" in
     *' prepare '*)
       printf 'prepare\n' >> "$FIXTURE_LOG"
       case "$FIXTURE_SCENARIO" in
-        failure|cleanup-failure) return 23 ;;
+        failure|cleanup-failure) cat "$FIXTURE_FRAME"; return 23 ;;
         term|int)
           printf '%s\n' "$BASHPID" > "$FIXTURE_PID.tmp"
           mv -- "$FIXTURE_PID.tmp" "$FIXTURE_PID"
@@ -48,7 +63,7 @@ for scenario in failure cleanup-failure; do
   # Cleanup failure cannot replace the native preparation failure.
   expected=23
   rc=0
-  FIXTURE_LOG="$TMP/$scenario.log" FIXTURE_SCENARIO="$scenario" SUBYARD_E2E_VM='' \
+  FIXTURE_LOG="$TMP/$scenario.log" FIXTURE_SCENARIO="$scenario" FIXTURE_FRAME="$TMP/capture.frame" SUBYARD_E2E_VM='' \
     bash "$TMP/dev/e2e/proxy-address-boot.sh" --slot 2 \
     > "$TMP/$scenario.output" 2>&1 || rc=$?
   [ "$rc" = "$expected" ] && [ "$(cat "$TMP/$scenario.log")" = "$(printf 'acquire\nprepare\nguest-cleanup\nclean\nrelease:%s' "$expected")" ] || {
@@ -105,7 +120,8 @@ for scenario, signum, expected in (
         process.wait(timeout=5)
         assert process.returncode == expected, (scenario, process.returncode)
         output = process.stdout.read().decode()
-        assert log.read_text() == f"acquire\nprepare\nguest-cleanup\nclean\nrelease:{expected}\n", (scenario, log.read_text(), output)
+        assert log.read_text() == f"acquire\nprepare\nguest-cleanup\nrelease:{expected}\n", (scenario, log.read_text(), output)
+        assert "fixture_cleanup=skipped" in output, "interrupted capture permitted unacknowledged fixture cleanup"
         for pid in (controller_pid, transport_pid):
             if pid is None:
                 continue
@@ -129,3 +145,35 @@ for scenario, signum, expected in (
         process.stdout.close()
 PY
 printf 'ok: reboot controller releases after prepare failure, INT, TERM and cleanup failure\n'
+
+# Guest cleanup accepts proven absence after ordinary teardown, never unknown or foreign ownership.
+python3 - "$ROOT" <<'PROJECT_CLEANUP'
+from pathlib import Path
+import subprocess,sys
+root=Path(sys.argv[1])
+def function(path,name):
+ text=path.read_text();start=text.index(name+'() {');return text[start:text.index('\n}\n',start)+3]
+source=root/'dev/e2e/proxy-address-boot.sh'
+script='\n'.join([function(source,'proxy_cleanup'),function(root/'dev/e2e/lib-power-upgrade-contracts.sh','project_presence'),function(root/'dev/e2e/power-reconciler-upgrade.sh','assert_project_owned'),function(root/'dev/e2e/power-reconciler-upgrade.sh','capture_owned_project_images')])+r'''
+MODE=clean CLEANUP_ARMED=1 PRESERVE_FIXTURE=0 PROJECT=subyard MARKER=fixture INSTANCE=yard READY=ready WAITING=waiting FOREIGN_PROJECT=foreign FOREIGN_INSTANCE=control ADDRESS_UNIT_PATH=/fixture/absent INTERFACE=absent
+assert_state_root(){ :; }
+drain_publication_worker(){ :; }
+sudo(){ return 1; }
+ip(){ return 1; }
+die(){ printf 'REFUSED\n'; exit 2; }
+cleanup(){ exit "$?"; }
+incus(){
+ case "$*" in
+ 'project list --format csv -c n') case "$SCENARIO" in absent) return 0;; unknown) return 2;; *) printf 'subyard\n'; return 0;; esac;;
+ 'project get subyard user.subyard.p0-power-systemd') [ "$SCENARIO" = owned ] && printf 'fixture\n';;
+ 'project get subyard features.images') printf 'false\n';;
+ *) return 1;;
+ esac
+}
+proxy_cleanup
+'''
+for scenario,expected in [('absent',0),('unknown',3),('unmarked',2),('owned',0)]:
+ p=subprocess.run(['bash','-c',script],env={'PATH':'/usr/bin:/bin','SCENARIO':scenario},capture_output=True)
+ print(scenario,p.returncode,'expected',expected)
+ if p.returncode!=expected:raise SystemExit(1)
+PROJECT_CLEANUP

@@ -34,6 +34,9 @@ func (c *releaseOwnerComponents) preparedSourceFiles() *config.ProspectiveFiles 
 }
 
 func (c *releaseOwnerComponents) ProjectActivation(ctx context.Context, before releaseowner.OwnerBefore) ([]string, error) {
+	if err := c.prepareOwnerProjection(ctx, before); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -79,5 +82,5 @@ func (c *releaseOwnerComponents) loadActivation(yard string) (config.Loaded, err
 	if operator == "" {
 		operator = c.context.ConfigHome
 	}
-	return config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: operator, YardName: yard, DisablePrivate: true, ConfigLocked: true, ProspectiveFiles: c.activationDraft.inputs, FileOverrides: c.activationDraft.overrides, Environment: map[string]string{"SUBYARD_HOME": c.context.DataHome, "SUBYARD_CONFIG_HOME": c.context.ConfigHome, "SUBYARD_CONFIG_DIR": root + "/config"}})
+	return config.Load(config.LoadOptions{Catalog: c.catalog, Resources: c.cli.operationResourceRegistry, RepositoryRoot: root, OperatorHome: operator, YardName: yard, DisablePrivate: true, ConfigLocked: true, ProspectiveFiles: c.activationDraft.inputs, FileOverrides: c.activationDraft.overrides, Environment: c.activationEnvironment(root)})
 }

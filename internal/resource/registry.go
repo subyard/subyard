@@ -63,7 +63,8 @@ type ManagementContract struct {
 }
 
 // ProxyContract describes one profile-owned owner-host proxy. The resource handler
-// still owns lifecycle and address validation; the typed metadata lets the global
+// still owns lifecycle and address validation. Original native startup delegates
+// its host proxy CAS to the parent; the typed metadata lets the global
 // security checker distinguish that exact route from an arbitrary public proxy.
 type ProxyContract struct {
 	Profile               string

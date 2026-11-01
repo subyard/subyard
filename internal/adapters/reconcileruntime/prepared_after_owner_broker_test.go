@@ -10,12 +10,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestAfterOwnerBrokerRetainsSourceAndMeasuredNative(t *testing.T) {
 	runtime := brokerRecipeFixture(t)
+	runtime.Yard.NestedE2EVMs = true
+	incus := runtime.Incus.(*testkit.Incus)
+	incus.Err = ports.ErrInstanceNotFound
 	ctx := context.Background()
 	path := filepath.Join(strings.Split(os.Getenv("PATH"), ":")[0], "incus")
 	originalCommand, err := os.ReadFile(path)
@@ -28,18 +33,31 @@ func TestAfterOwnerBrokerRetainsSourceAndMeasuredNative(t *testing.T) {
 		t.Fatal("source capture queried physical broker", err)
 	}
 	defer p.Close()
+	if _, err := runtime.PrepareTestVMBrokerRuntime(ctx); !errors.Is(err, ports.ErrInstanceNotFound) {
+		t.Fatal("ordinary preparation stopped checking the actual instance", err)
+	}
 	raw := p.Recipe()
 	source, err := runtime.BindAfterOwnerBroker(ctx, raw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if source.PreparedBroker().power != application.InitialPower(runtime.Yard) {
+		t.Fatal("source power differs from approved canonical init")
+	}
 	source.Close()
 	testkit.WriteFile(t, path, originalCommand, 0700)
+	incus.Err = nil
 	resolved, physical, err := runtime.ResolveAfterOwnerBroker(ctx, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resolved.Close()
+	instance := incus.Instances[runtime.Yard.IncusProject+"/"+runtime.Yard.YardInstanceName]
+	instance.Config["user.subyard.desired_power"] = "stopped"
+	if err := runtime.ApplyPreparedTestVMBrokerRuntime(ctx, resolved.PreparedBroker()); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatal("changed actual power intent admitted", err)
+	}
+	instance.Config["user.subyard.desired_power"] = "running"
 	exportAfterOwnerAdapterPair(t, "broker", p, physical, "original-created-uuid", "")
 	var value afterOwnerBrokerPhysical
 	if json.Unmarshal(physical, &value) != nil || value.Native == strings.Repeat("0", 64) || len(physical) > AfterOwnerBrokerPhysicalBound() {

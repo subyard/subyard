@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -24,7 +25,7 @@ import (
 
 func TestReleaseOwnerDeclarationIsClosedBeforeExecution(t *testing.T) {
 	for _, scenario := range []string{
-		"valid", "legacy", "malformed", "unknown", "duplicate", "trailing", "missing-field", "case-substitution",
+		"valid", "check-valid", "check-malformed", "check-unlisted", "check-without-owner", "check-tamper", "legacy", "malformed", "unknown", "duplicate", "trailing", "missing-field", "case-substitution",
 		"unknown-version", "unknown-protocol", "unknown-kind", "owner-substitution", "helper-substitution", "schema-substitution",
 		"missing-owner", "missing-schema", "missing-build", "missing-declaration", "unlisted-declaration", "unlisted-owner",
 		"schema-tamper", "schema-duplicate", "schema-unknown", "build-tamper", "build-version", "fixture-features",
@@ -50,6 +51,17 @@ func TestReleaseOwnerDeclarationIsClosedBeforeExecution(t *testing.T) {
 				}
 			}
 			switch scenario {
+			case "check-valid", "check-malformed", "check-unlisted", "check-without-owner", "check-tamper":
+				raw := releaseOwnerCheckMarker
+				if scenario == "check-malformed" {
+					raw += "unsupported\n"
+				}
+				testkit.WriteFile(t, filepath.Join(candidate.root, releaseOwnerCheckPath), []byte(raw), 0600)
+				if scenario == "check-without-owner" {
+					for _, name := range []string{releaseOwnerDeclarationPath, releaseOwnerSchemaPath, releaseOwnerBuildPath, releaseOwnerImagePath} {
+						remove(name)
+					}
+				}
 			case "legacy":
 				for _, path := range []string{releaseOwnerDeclarationPath, releaseOwnerSchemaPath, releaseOwnerBuildPath, releaseOwnerImagePath} {
 					remove(path)
@@ -112,6 +124,22 @@ func TestReleaseOwnerDeclarationIsClosedBeforeExecution(t *testing.T) {
 				}
 			}
 			rewriteReleaseOwnerManifest(t, candidate)
+			if scenario == "check-tamper" {
+				testkit.WriteFile(t, filepath.Join(candidate.root, releaseOwnerCheckPath), []byte("foreign-marker\n"), 0600)
+			}
+			if scenario == "check-unlisted" {
+				raw, err := os.ReadFile(filepath.Join(candidate.root, "runtime-files.sha256"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				lines := []string{}
+				for _, line := range strings.Split(string(raw), "\n") {
+					if !strings.HasSuffix(line, releaseOwnerCheckPath) {
+						lines = append(lines, line)
+					}
+				}
+				testkit.WriteFile(t, filepath.Join(candidate.root, "runtime-files.sha256"), []byte(strings.Join(lines, "\n")), 0600)
+			}
 			if scenario == "build-tamper" {
 				change(releaseOwnerBuildPath, "rustc", "wrong")
 			}
@@ -135,12 +163,15 @@ func TestReleaseOwnerDeclarationIsClosedBeforeExecution(t *testing.T) {
 			runtime := New(Config{Stderr: &bytes.Buffer{}})
 			defer runtime.Close()
 			verified, err := runtime.verifyPublishedCandidate(context.Background(), candidate, root, nil)
-			if scenario == "valid" || scenario == "legacy" {
+			if scenario == "valid" || scenario == "check-valid" || scenario == "legacy" {
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer verified.Close()
-				if (verified.releaseOwner != nil) != (scenario == "valid") {
+				if verified.readOnlyCheck != (scenario == "check-valid") {
+					t.Fatal("Check capability did not match bound marker")
+				}
+				if (verified.releaseOwner != nil) != (scenario == "valid" || scenario == "check-valid") {
 					t.Fatal("release owner image does not match the declaration")
 				}
 			} else {
@@ -320,7 +351,12 @@ func TestReleaseOwnerNormalSealedMissingProofRefusal(t *testing.T) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { command.Process.Kill(); command.Wait() }()
+	defer func() {
+		if command.ProcessState == nil {
+			command.Process.Kill()
+			command.Wait()
+		}
+	}()
 	child.Close()
 	repository, err := os.Open(root)
 	if err != nil {
@@ -346,14 +382,18 @@ func TestReleaseOwnerNormalSealedMissingProofRefusal(t *testing.T) {
 		} `json:"custody"`
 		Error string `json:"error"`
 	}
-	if err := json.NewDecoder(client).Decode(&response); err != nil {
-		t.Fatalf("sealed owner Open response: %v (%s)", err, stderr.String())
-	}
-	if response.Error == "" || response.Custody.Session != "" {
-		t.Fatalf("normal owner admitted missing authenticated artifact proofs: %#v (%s)", response, stderr.String())
-	}
+	var stdout bytes.Buffer
+	decodeErr := json.NewDecoder(io.TeeReader(client, &stdout)).Decode(&response)
 	client.Close()
-	_ = command.Wait()
+	waitErr := command.Wait()
+	var exit *exec.ExitError
+	// Normal Open checks authenticated artifact proofs before sending custody.
+	// Drain the process before inspecting its stderr writer.
+	if !errors.Is(decodeErr, io.EOF) || stdout.Len() != 0 ||
+		!errors.As(waitErr, &exit) || exit.ExitCode() != 1 ||
+		stderr.String() != "release owner operation refused: Invalid\n" || response.Custody.Session != "" {
+		t.Fatalf("normal owner missing-proof refusal: decode=%v exit=%v stdout=%d stderr=%q", decodeErr, waitErr, stdout.Len(), stderr.String())
+	}
 	if _, err := os.Lstat(filepath.Join(root, "state/migrations/update.lock")); !os.IsNotExist(err) {
 		t.Fatal("read-only Open created an update lease")
 	}

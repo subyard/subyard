@@ -744,8 +744,8 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 
 	for _, assumeYes := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rollback precondition yes=%v", assumeYes), func(t *testing.T) {
-			root, environment, _ := updateReleaseFixture(t)
-			arguments := []string{"update", "--rollback", "--runtime-root", filepath.Join(root, "missing-runtime")}
+			root, environment, runtimeRoot := updateReleaseFixture(t)
+			arguments := []string{"update", "--rollback", "--runtime-root", runtimeRoot}
 			if assumeYes {
 				arguments = append([]string{"update", "--yes"}, arguments[1:]...)
 			}
@@ -1351,12 +1351,34 @@ func updateReleaseFixture(t *testing.T) (string, []string, string) {
 
 func prepareCLIOldRelease(t *testing.T, runtimeRoot string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "release-old"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeCLIUpdateSource(t, filepath.Join(runtimeRoot, "releases", "release-old"))
 	if err := os.Symlink("releases/release-old", filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeCLIUpdateSource(t *testing.T, releaseRoot string) {
+	t.Helper()
+	for _, directory := range []string{"bin", "config"} {
+		if err := os.MkdirAll(filepath.Join(releaseRoot, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This source is synthetic current tooling. Its version probe is read-only;
+	// transition inspection and execution remain owned by the selected candidate.
+	writeCLIFile(t, filepath.Join(releaseRoot, "VERSION"), "0.22.0\n", 0o600)
+	writeCLIFile(t, filepath.Join(releaseRoot, "bin", "yard-engine"), "#!/bin/sh\n[ \"${1:-}\" = --version ] || exit 64\nprintf 'yard-engine 0.22.0\\n'\n", 0o700)
+	writeCLIFile(t, filepath.Join(releaseRoot, "config", "release-transition.json"),
+		`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`+"\n", 0o600)
+	var manifest strings.Builder
+	for _, relative := range []string{"VERSION", "bin/yard-engine", "config/release-transition.json"} {
+		payload, err := os.ReadFile(filepath.Join(releaseRoot, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&manifest, "%x  ./%s\n", sha256.Sum256(payload), relative)
+	}
+	writeCLIFile(t, filepath.Join(releaseRoot, "runtime-files.sha256"), manifest.String(), 0o600)
 }
 
 func writeCLIUpdateInstaller(t *testing.T, repositoryRoot string) {
@@ -2907,6 +2929,7 @@ func installUnfinishedV2MutationGateFixture(
 			t.Fatal(err)
 		}
 	}
+	writeCLIUpdateSource(t, filepath.Join(runtimeRoot, "releases", "release-a"))
 	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
@@ -2936,6 +2959,13 @@ case "${V2_GATE_CAPTURE:-}" in
   printf '%s\n' "$request" > "$V2_GATE_CAPTURE.request"
   ;;
 esac
+if [ "$(printf '%s' "$request" | jq -r .mode)" = converge ]; then
+  case "${V2_GATE_CAPTURE:-}" in
+  /tmp/*) printf '%s\n' "$request" > "$V2_GATE_CAPTURE.converge" ;;
+  esac
+  printf '{"schemaVersion":1,"outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":"%s","code":"verification-failed","message":"the synthetic owner retained its original checkpoint","retry":"run yard update","transaction":"%s"}}\n' "$target_release" "$transaction"
+  exit 0
+fi
 if [ "$(jq -r .checkpoint "$journal")" = complete ]; then
   printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":[]},"outcome":{"status":"ready","reachedGoal":true,"active":"%s","previous":"release-a","target":"%s","code":"ready","message":"verified","transaction":"%s"}}}\n' "$target_release" "$target_release" "$transaction"
   exit 0
@@ -3583,16 +3613,31 @@ func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
 func TestMutatingUpdateIsExemptFromMutationGate(t *testing.T) {
 	root, environment, runtimeRoot := updateReleaseFixture(t)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
-	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	if err := os.Remove(filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	capture := filepath.Join(root, "update-exempt-called")
+	ownerCapture := filepath.Join(root, "original-owner")
 	writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"),
 		"#!/bin/sh\n# --publish-only\nprintf called > \"$UPDATE_EXEMPT_CAPTURE\"\nexit 17\n", 0o700)
-	environment = append(environment, "UPDATE_EXEMPT_CAPTURE="+capture)
+	environment = append(environment, "UPDATE_EXEMPT_CAPTURE="+capture, "V2_GATE_CAPTURE="+ownerCapture)
+	original, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedRoot := filepath.Dir(journalPath)
+	beforeProtected, beforeRuntime := nativeTreeSnapshot(t, protectedRoot), nativeTreeSnapshot(t, runtimeRoot)
+	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
-		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
+		Arguments:   []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+		Environment: environment, WorkingDir: root, Prompt: prompt, Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3600,9 +3645,25 @@ func TestMutatingUpdateIsExemptFromMutationGate(t *testing.T) {
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("update failure exit=%d stderr=%q", code, stderr.String())
 	}
-	if payload, err := os.ReadFile(capture); err != nil || string(payload) != "called" {
-		t.Fatalf("mutating update did not pass its gate exemption: payload=%q err=%v stderr=%q",
-			payload, err, stderr.String())
+	payload, err := os.ReadFile(ownerCapture + ".converge")
+	if err != nil {
+		t.Fatalf("mutating update did not converge through its original owner: %v; stderr=%q", err, stderr.String())
+	}
+	var request releasetransition.ProcessRequest
+	if err := json.Unmarshal(payload, &request); err != nil || request.Mode != releasetransition.ProcessConverge ||
+		request.Target != journal.Goal.Target || request.ArtifactDigest != journal.ArtifactDigest ||
+		request.RegistryDigest != journal.RegistryDigest || request.Execution == nil || request.Execution.Plan != journal.ResumePlan {
+		t.Fatalf("original owner converge request=%#v err=%v", request, err)
+	}
+	if len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), string(releasetransition.CodeVerificationFailed)) ||
+		!strings.Contains(stderr.String(), string(journal.Transaction)) {
+		t.Fatalf("original owner resume lost its outcome or requested consent: prompts=%#v stderr=%q", prompt.Requests, stderr.String())
+	}
+	if _, err := os.Lstat(capture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("original owner resume attempted fresh publication: %v", err)
+	}
+	if !slices.Equal(beforeProtected, nativeTreeSnapshot(t, protectedRoot)) || !slices.Equal(beforeRuntime, nativeTreeSnapshot(t, runtimeRoot)) {
+		t.Fatal("original owner routing changed protected state or runtime links")
 	}
 }
 

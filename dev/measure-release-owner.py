@@ -315,6 +315,35 @@ def semantics(fixture, inspection, observation, verify):
         "materialized_config_matches": None if not history else Path(history["source"]).read_bytes() == Path(history["guest"]).read_bytes()}
 
 
+def logical_native_effects(events, history):
+    """Compare fixture-verified effects across the shell and native CAS transports."""
+    if not history:
+        if events:
+            raise RuntimeError("native effects without a materialized fixture")
+        return {"effects": [], "finalSHA256": None}
+    payload = sha(Path(history["source"]))
+    script = (ROOT / "internal/testkit/cmd/empty-incus/config-write.sh").read_text()
+    logical = []
+    for event in events:
+        command, kind = event.get("command"), event.get("inventory")
+        keys = {"stdinSHA256", "exit"}
+        if kind in ("configs-prepare", "configs-commit") and command is None:
+            keys.add("inventory")
+        elif command == ["sh", "-eu", "-c", script, "subyard", history["destination"], "1000"]:
+            keys.add("command")
+            kind = "config-write"
+        elif isinstance(command, list) and len(command) == 5 and command[:3] == ["python3", "-B", "-c"] and command[4] == "configs-write" and isinstance(command[3], str) and hashlib.sha256(command[3].encode()).hexdigest() == history["inventoryProgramSHA256"]:
+            keys.update(("command", "payloadSHA256"))
+            kind = "config-write"
+        else:
+            raise RuntimeError("unknown synthetic native effect category")
+        stdin = event.get("stdinSHA256", "")
+        if set(event) != keys or type(event.get("exit")) is not int or event["exit"] != 0 or not isinstance(stdin, str) or len(stdin) != 64 or any(c not in "0123456789abcdef" for c in stdin) or kind == "config-write" and event.get("payloadSHA256", stdin) != payload:
+            raise RuntimeError("unknown or invalid synthetic native effect")
+        logical.append({"kind": kind, "exit": event["exit"], "payloadSHA256": payload})
+    return {"effects": logical, "finalSHA256": sha(Path(history["guest"]))}
+
+
 def prepare_arm(verify, release, version, baseline_root, arch, workload, root, output, nominal_cycle=False, require_rust_setup=False):
     control = root / "incus-observation.json"
     verify.set_fixture_observation(control)
@@ -330,8 +359,9 @@ def prepare_arm(verify, release, version, baseline_root, arch, workload, root, o
             commands.extend([("execute", [str(launcher), "migrate", "--yes"]),
                              ("inspect-ready", [str(launcher), "migrate", "--check", "--json"])])
     else:
-        baselines = {v: baseline_root / ("baseline-" + v) for v in verify.HISTORY_BASELINES}
-        fixture, _, _ = verify.history_chain(release, version, arch, root, baselines,
+        baselines = {v: baseline_root / ("baseline-" + v)
+                     for v in (*verify.HISTORY_BASELINES, verify.DIRECT_BASELINE)}
+        fixture, _, _, _ = verify.history_chain(release, version, arch, root, baselines,
                                              workload.startswith("checkpoint"), "fixture")
         verify.history_materialized_fixture(fixture, root, control)
         # Native custody binds the observed instance identity, unlike the older
@@ -348,16 +378,9 @@ def prepare_arm(verify, release, version, baseline_root, arch, workload, root, o
         while not applied.exists() or applied.read_text() != payload:
             verify.require(time.monotonic() < deadline, "fixture UUID observation was not applied")
             time.sleep(0.02)
-        # Frozen arms can carry different profile scripts from this checkout.
-        # Ask the existing observation providers for those exact package bytes.
-        packaged_observations = root / "candidate-observations"
-        with tarfile.open(release / f"subyard-{version}-linux-{arch}.tar.gz") as archive:
-            archive.extractall(packaged_observations, filter="data")
-        verify.write_observation_incus(fixture.root / "commands", control,
-            fixture.root / "unexpected-host-command", [fixture.old_launcher.parent.parent, packaged_observations])
         # Existing authentic controlled failure leaves a durable resume grant.
-        failed = verify.run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],
-                                    fixture.env, timeout=180)
+        command = verify.bridge_update_command(fixture, release, version, control)
+        failed = verify.run_process(command + ["--yes"], fixture.env, timeout=180)
         (output / "setup-failure.stdout").write_text(failed.stdout)
         (output / "setup-failure.stderr").write_text(failed.stderr)
         shutil.copytree(fixture.config, output / "setup-config")
@@ -441,9 +464,14 @@ def run_prepared(verify, fixture, commands, workload, root, output, interval, st
     verify.require(not (fixture.root / "unexpected-host-command").exists() and
                    not Path(str(control) + ".unexpected").exists(), "unexpected synthetic native command")
     verify.require(effects.startswith(initial_effects), "owner command rewrote prior synthetic native effects")
-    native_effects = [{key: event.get(key) for key in ("command", "stdinSHA256", "exit")}
-                      for event in map(json.loads, effects[len(initial_effects):].splitlines())]
+    records = [json.loads(line) for line in effects[len(initial_effects):].splitlines()]
+    verify.require(all(isinstance(event, dict) and set(event) in (
+        {"inventory", "stdinSHA256", "exit"}, {"command", "stdinSHA256", "transaction", "exit"},
+        {"command", "stdinSHA256", "payloadSHA256", "before", "transaction", "exit"}) for event in records), "unknown synthetic native effect shape")
+    native_effects = [{key: event[key] for key in ("command", "stdinSHA256", "inventory", "payloadSHA256", "exit") if key in event} for event in records]
     write_json(output / "native-effects.json", native_effects)
+    logical_effects = logical_native_effects(native_effects, json.loads(control.read_text()).get("migrationHistory"))
+    write_json(output / "logical-native-effects.json", logical_effects)
     write_json(output / "semantics.json", outcomes)
     shutil.copytree(fixture.config, output / "after-config")
     return {"wall_seconds": sum(x["wall_seconds"] for x in collected),
@@ -452,7 +480,7 @@ def run_prepared(verify, fixture, commands, workload, root, output, interval, st
             "cpu_complete": all(x["cpu_complete"] for x in collected),
             "rust_owner_observed": all(x["rust_owner_observed"] for x in collected),
             "rust_owner_observed_any": any(x["rust_owner_observed"] for x in collected),
-            "native_effects": native_effects, "semantics": outcomes}
+            "native_effects": native_effects, "logical_native_effects": logical_effects, "semantics": outcomes}
 
 
 def run_arm(verify, release, version, baseline_root, arch, workload, root, output, interval, stats, nominal_cycle=False, require_rust_setup=False):
@@ -474,11 +502,63 @@ def fixture_root(server_binary, output):
                 if not readable or server.stdout.readline().strip() != "ready":
                     raise RuntimeError("fixture server not ready")
                 yield root
+            except BaseException:
+                try:
+                    capture_fixture_failure(root, output)
+                except BaseException as error:
+                    try:
+                        write_json(output / "failure-capture-error.json", {"type": type(error).__name__})
+                    except BaseException:
+                        print("fixture failure capture could not be recorded", file=sys.stderr)
+                raise
             finally:
                 server.terminate()
                 server.wait(timeout=10)
                 stdout, stderr = server.communicate()
                 write_json(output / "observer-native.json", {"exit": server.returncode, "stdout": stdout, "stderr": stderr})
+
+
+def capture_fixture_failure(root, output):
+    """Save only bounded synthetic diagnostics before the fixture is removed."""
+    paths = (
+        "incus-observation.json", "incus-observation.json.unexpected",
+        "fixture/unexpected-host-command", "fixture/unexpected-host-command.argv.json",
+        "fixture/home/.config/subyard/release-transition/v2/journal.json",
+        "fixture/home/.config/subyard/release-transition/v2/ledger.json",
+        "fixture/home/.config/subyard/release-transition/v2/history-checkpoint.json",
+    )
+    destination = output / "failure-witness"
+    destination.mkdir(mode=0o700)
+    results = {}
+    for name in paths:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            parts = name.split("/")
+            for part in parts[:-1]:
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            try:
+                metadata = os.fstat(file_fd)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 1024 * 1024:
+                    results[name] = "refused"
+                    continue
+                data = os.read(file_fd, 1024 * 1024 + 1)
+                if len(data) > 1024 * 1024:
+                    results[name] = "refused"
+                    continue
+                (destination / name.replace("/", "__")).write_bytes(data)
+                results[name] = "captured"
+            finally:
+                os.close(file_fd)
+        except FileNotFoundError:
+            results[name] = "missing"
+        except OSError as error:
+            results[name] = "error:" + type(error).__name__ + ":" + str(error.errno)
+        finally:
+            os.close(fd)
+    write_json(destination / "status.json", results)
 
 
 class FixtureReset:
@@ -675,7 +755,7 @@ def main():
                         write_json(directory / "result.json", pair[owner])
                     verify.require(pair["go"]["semantics"] == pair["rust"]["semantics"],
                                    "paired semantic outcomes differ: " + str(directory.parent))
-                    verify.require(pair["go"]["native_effects"] == pair["rust"]["native_effects"],
+                    verify.require(pair["go"]["logical_native_effects"] == pair["rust"]["logical_native_effects"],
                                    "paired synthetic native effects differ: " + str(directory.parent))
                     pairs.append(pair)
                     write_json(directory.parent / "pair.json", {"order": owners, **pair})

@@ -3,13 +3,16 @@ package hostruntime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 func TestVMCPUWeightReadinessAndOwnership(t *testing.T) {
@@ -97,4 +100,39 @@ func writeVMCPUFixture(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, path, []byte(content), 0o644)
+}
+
+func TestVMCPUMutatorInheritsValidatedStdinAndEnclosingProcessGroup(t *testing.T) {
+	home := testkit.TempDir(t)
+	_, release, err := uninstall.OwnerLock(context.Background(), home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	owner, err := uninstall.BorrowOwnerLock(home)
+	if err != nil || owner == nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if err := uninstall.ValidateOwnerLockDescriptor(home, uint32(os.Getuid()), owner); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithVMCPUOwnerStdin(context.Background(), owner)
+	command := vmCPUCommand(ctx, "python3", "-B", "-c", `import json,os; s=os.fstat(0);print(json.dumps([s.st_dev,s.st_ino,os.getpgrp()]))`)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actual []uint64
+	if err := json.Unmarshal(output, &actual); err != nil {
+		t.Fatal(err)
+	}
+	info, err := owner.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := info.Sys().(*syscall.Stat_t)
+	if len(actual) != 3 || actual[0] != uint64(expected.Dev) || actual[1] != expected.Ino || actual[2] != uint64(syscall.Getpgrp()) {
+		t.Fatal("mutator changed original OFD or escaped enclosing group", actual)
+	}
 }

@@ -10,7 +10,7 @@ import sys
 
 
 def finish(stage, binding, recipe, owner):
-    if owner not in ('core-guest-runtime', 'key-tools-runtime', 'host-power', 'test-vms-host-sink', 'materialized-integrations') or not all(re.fullmatch('[a-f0-9]{64}', value) for value in (binding, recipe)):
+    if owner not in ('core-guest-runtime', 'key-tools-runtime', 'host-power', 'test-vms-host-sink', 'test-vm-broker', 'materialized-integrations') or not all(re.fullmatch('[a-f0-9]{64}', value) for value in (binding, recipe)):
         raise ValueError('invalid installed stage binding')
     parent = Path('/tmp')/('subyard-native-installed-'+str(os.getuid()))
     path = parent/(binding+'-'+owner)

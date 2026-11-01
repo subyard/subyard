@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
@@ -24,6 +25,43 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestIntegrationInventoryReadonlyRejectsFIFOWithoutWaiting(t *testing.T) {
+	for _, mode := range []string{"observe", "configs-observe"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newConfigInventoryFixture(t)
+			f.save([]map[string]any{}, nil)
+			before, err := os.ReadFile(f.state + "/inventory.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock := f.state + "/inventory.lock"
+			if err := syscall.Mkfifo(lock, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(lock, 0600); err != nil {
+				t.Fatal(err)
+			}
+			payload, _ := json.Marshal(map[string]any{"home": f.home, "uid": os.Getuid(), "entries": []any{}})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, "python3", "-B", "-c", f.program, mode)
+			command.Stdin = strings.NewReader(string(payload))
+			output, err := command.CombinedOutput()
+			if ctx.Err() != nil || err == nil {
+				t.Fatalf("unsafe FIFO must refuse without waiting: context=%v error=%v output=%s", ctx.Err(), err, output)
+			}
+			after, err := os.ReadFile(f.state + "/inventory.json")
+			if err != nil || string(after) != string(before) {
+				t.Fatal("readonly refusal changed inventory", err)
+			}
+			info, err := os.Lstat(lock)
+			if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+				t.Fatal("readonly refusal changed FIFO", err)
+			}
+		})
+	}
+}
 
 func TestIntegrationScopeUsesProspectiveAssetsWithoutChangingLogicalBinding(t *testing.T) {
 	root, configHome := testkit.TempDir(t), testkit.TempDir(t)
@@ -992,7 +1030,7 @@ func TestIntegrationInventoryAdoptsReleasedDispatcherPredecessor(t *testing.T) {
 				t.Fatal(err)
 			}
 			interrupted := strings.Replace(program,
-				"atomic(destination, payload, entry.get('mode', 0o644), owner)",
+				"atomic(destination, payload, entry.get('mode', 0o644), owner, parent_fd, current)",
 				"raise ValueError('fixture interruption')", 1)
 			run(interrupted, "apply", true)
 			if !run(program, "observe", false).Changed {

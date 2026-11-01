@@ -6,6 +6,8 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	incus "github.com/lxc/incus/v6/client"
 	"github.com/lxc/incus/v6/shared/api"
+	"math"
+	"strings"
 	"testing"
 )
 
@@ -139,5 +141,75 @@ func TestNativeCustodyMissingUUIDStaysUnknown(t *testing.T) {
 	var failure *ports.NativeOperationFailure
 	if err == nil || errors.As(err, &failure) || len(observer.accepted) != 0 || len(observer.terminal) != 0 || !observer.uncertain {
 		t.Fatalf("unbound request acquired a terminal proof: %v %#v", err, observer)
+	}
+}
+
+func TestNativeExecCustodyRequiresExitBeforeTerminal(t *testing.T) {
+	for _, value := range []any{nil, "0", 0.5, -1, 256} {
+		observer := &custodyObserver{}
+		operation := &custodyOperation{value: api.Operation{ID: "operation-1", StatusCode: api.Success, Resources: map[string][]string{"instances": {"/1.0/instances/yard"}}, Metadata: map[string]any{"return": value}}}
+		err := waitNative(ports.WithNativeOperationObserver(context.Background(), observer), custodyServer{}, operation, "instance-exec", "project", "yard")
+		if err == nil || len(observer.terminal) != 0 || !observer.uncertain {
+			t.Fatalf("exit metadata %v sealed terminal: %v %#v", value, err, observer)
+		}
+	}
+	for _, value := range []any{float64(0), float64(7)} {
+		observer := &custodyObserver{}
+		operation := &custodyOperation{value: api.Operation{ID: "operation-1", StatusCode: api.Success, Resources: map[string][]string{"instances": {"/1.0/instances/yard"}}, Metadata: map[string]any{"return": value}}}
+		if err := waitNative(ports.WithNativeOperationObserver(context.Background(), observer), custodyServer{}, operation, "instance-exec", "project", "yard"); err != nil || len(observer.terminal) != 1 || observer.terminal[0].Status != 200 {
+			t.Fatalf("valid remote exec exit changed status: %v %#v", err, observer)
+		}
+	}
+}
+
+func TestCompletedNativeExecRechecksExactDrainedResult(t *testing.T) {
+	for _, change := range []string{"none", "id", "project", "resource", "server", "status", "terminal-failure", "missing", "string", "fractional", "overflow", "changed-exit", "zero", "canceled"} {
+		t.Run(change, func(t *testing.T) {
+			observer := &custodyObserver{}
+			ctx, cancel := context.WithCancel(ports.WithNativeSynchronousConfigCAS(ports.WithNativeOperationObserver(context.Background(), observer)))
+			defer cancel()
+			operation := &custodyOperation{value: api.Operation{ID: "operation-1", StatusCode: api.Success, Resources: map[string][]string{"instances": {"/1.0/instances/yard?project=project"}}, Metadata: map[string]any{"return": float64(7)}}}
+			var checked nativeWaitResult
+			if err := waitNativeChecked(ctx, custodyServer{}, operation, "instance-exec", "project", "yard", &checked); err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "id":
+				operation.value.ID = "operation-2"
+			case "project":
+				operation.value.Resources["instances"][0] = "/1.0/instances/yard?project=other"
+			case "resource":
+				operation.value.Resources["instances"][0] = "/1.0/instances/other?project=project"
+			case "server":
+				checked.operation.Server = strings.Repeat("a", 64)
+			case "status":
+				operation.value.StatusCode = api.Running
+			case "terminal-failure":
+				operation.value.StatusCode = api.Failure
+			case "missing":
+				delete(operation.value.Metadata, "return")
+			case "string":
+				operation.value.Metadata["return"] = "7"
+			case "fractional":
+				operation.value.Metadata["return"] = 7.5
+			case "overflow":
+				operation.value.Metadata["return"] = math.MaxFloat64
+			case "changed-exit":
+				operation.value.Metadata["return"] = float64(8)
+			case "zero":
+				operation.value.Metadata["return"] = float64(0)
+			case "canceled":
+				cancel()
+			}
+			code, err := completedNativeExec(ctx, custodyServer{}, operation, checked)
+			var failure *ports.NativeOperationFailure
+			if change == "none" {
+				if !errors.As(err, &failure) || code != 7 || failure.ExecExitCode == nil || *failure.ExecExitCode != 7 || failure.Operation != observer.terminal[0] || observer.uncertain {
+					t.Fatal("exact completed failure lost", err)
+				}
+			} else if err == nil || errors.As(err, &failure) || !observer.uncertain {
+				t.Fatal("changed SDK result acquired failure custody", change, err)
+			}
+		})
 	}
 }

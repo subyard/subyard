@@ -63,6 +63,10 @@ func TestNativeOwnerCreateUsesOriginalIndicesAndKeepsMissingResultUnknown(t *tes
 			t.Fatal("exact original result lost", err)
 		}
 	}
+	values, err := o.OwnerCreatedResults()
+	if err != nil || len(values) != 2 || values[0] != current || values[1] != legacy {
+		t.Fatal("own create outputs unavailable before whole terminal", err)
+	}
 	if err := o.closed(); err != nil {
 		t.Fatal(err)
 	}

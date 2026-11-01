@@ -630,6 +630,12 @@ func (client *Client) WriteProjectNetworks(
 }
 
 func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, action string) error {
+	return client.NetworkPowerIf(ctx, yard, action, "")
+}
+
+// NetworkPowerIf retains the original target at each local boundary. Incus
+// state PUT has no UUID precondition: this is not a server-atomic UUID CAS.
+func (client *Client) NetworkPowerIf(ctx context.Context, yard yardnetwork.Yard, action, expectedUUID string) error {
 	if action != "start" && action != "stop" {
 		return fmt.Errorf("invalid network power action %q", action)
 	}
@@ -637,6 +643,9 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 	defer cancel()
 	server, err := client.networkServer(powerContext)
 	if err != nil {
+		return err
+	}
+	if err := client.checkVMUUID(powerContext, yard.Project, yard.Instance, expectedUUID); err != nil {
 		return err
 	}
 	if err := beforeNative(powerContext, server, "network-power", yard.Project, yard.Instance); err != nil {
@@ -658,14 +667,14 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 		return normalizeOperationError("wait for "+action+" network-managed instance", operation.Get(), err)
 	}
 	if action == "start" {
-		if err := client.applyVMCPU(powerContext, yard.Project, yard.Instance); err != nil {
+		if err := client.applyVMCPUIf(powerContext, yard.Project, yard.Instance, expectedUUID); err != nil {
 			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
 			defer cancel()
-			stopErr := client.NetworkPower(stopContext, yard, "stop")
+			stopErr := client.NetworkPowerIf(stopContext, yard, "stop", expectedUUID)
 			return errors.Join(err, stopErr)
 		}
 	}
-	return nil
+	return client.checkVMUUID(powerContext, yard.Project, yard.Instance, expectedUUID)
 }
 
 func apiNetworkRules(source []yardnetwork.Rule) []api.NetworkACLRule {

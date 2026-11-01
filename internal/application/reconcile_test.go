@@ -132,8 +132,9 @@ func TestReconcilerPlansLiveStateAndResumesAfterFailure(t *testing.T) {
 	if err != nil || plan.Pending() != 1 || !plan.Steps[0].Converged || plan.Steps[1].Converged {
 		t.Fatalf("unexpected plan: %#v, %v", plan, err)
 	}
-	if err := reconciler.Apply(context.Background(), plan); err == nil {
-		t.Fatal("partial failure was reported as success")
+	var stageError *ReconcileStageError
+	if err := reconciler.Apply(context.Background(), plan); !errors.As(err, &stageError) || stageError.Stage != "b" || stageError.Phase != "apply" {
+		t.Fatal("partial failure lost its stage metadata", err)
 	}
 	if err := reconciler.Apply(context.Background(), plan); err != nil {
 		t.Fatal(err)
@@ -142,8 +143,8 @@ func TestReconcilerPlansLiveStateAndResumesAfterFailure(t *testing.T) {
 		t.Fatalf("resume reapplied converged work: %#v", fixture.applied)
 	}
 	fixture.converged["a"] = false
-	if err := reconciler.Apply(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) {
-		t.Fatalf("observed skip expansion accepted: %v", err)
+	if err := reconciler.Apply(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) || !errors.As(err, &stageError) || stageError.Stage != "a" || stageError.Phase != "drift" {
+		t.Fatalf("observed skip expansion lost its cause or stage: %v", err)
 	}
 	if !reflect.DeepEqual(fixture.applied, []ports.ReconcileStageID{"b", "b"}) {
 		t.Fatalf("drift repair disturbed converged work: %#v", fixture.applied)

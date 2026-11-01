@@ -3,6 +3,7 @@ package ownerpublication
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -56,6 +57,25 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 	write()
 	if err := RequireReader(root, home); err != nil {
 		t.Fatalf("committed reader not admitted: %v", err)
+	}
+	// Reader admission is the committed physical schema, not executable policy
+	// for unrelated Rust settings kinds in the same authenticated source.
+	rustRoot := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(rustRoot, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	rustPayload := []byte(strings.Replace(string(payload), "local-ssh-port-settings-v2-to-v3", "new-rust-settings-kind", 1))
+	if _, _, err := releasetransition.ParseRegistryV2(rustPayload, releasetransition.BuiltinCapabilityCatalog()); err == nil {
+		t.Fatal("Go executable policy admitted Rust-only kind")
+	}
+	testkit.WriteFile(t, filepath.Join(rustRoot, "config/release-transition.json"), rustPayload, 0644)
+	if err := RequireReader(rustRoot, home); err != nil {
+		t.Fatal("unrelated Rust kind hid committed power reader", err)
+	}
+	invalid := []byte(strings.Replace(string(rustPayload), `"toEpoch": 3`, `"toEpoch": 4`, 1))
+	testkit.WriteFile(t, filepath.Join(rustRoot, "config/release-transition.json"), invalid, 0644)
+	if err := RequireReader(rustRoot, home); err == nil {
+		t.Fatal("invalid history admitted publication")
 	}
 	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)

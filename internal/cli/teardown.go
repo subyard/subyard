@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/application"
@@ -24,16 +25,22 @@ import (
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
+type teardownOptions struct {
+	full, holdShared, keepData, resetConfig, revokeAgent bool
+}
+
 type teardownExecution struct {
+	teardownOptions
+	ownerSourceSettings map[[2]string][]string
 	uninstall.RecoveryPlan
-	full, holdShared, keepData, resetConfig, completedReset bool
-	configSnapshot                                          *teardownConfigSnapshot
-	changed, physicalChanged, revokeAgent                   bool
-	liveSnapshot                                            *teardownSnapshot
-	activeYard                                              *uninstall.RecoveryYard
-	RecoveryBinding                                         *uninstall.Tree
-	Assessed, resumed                                       bool
-	ManagedRoots, PreservedRoots, MutableRoots              []string
+	completedReset                             bool
+	configSnapshot                             *teardownConfigSnapshot
+	changed, physicalChanged                   bool
+	liveSnapshot                               *teardownSnapshot
+	activeYard                                 *uninstall.RecoveryYard
+	RecoveryBinding                            *uninstall.Tree
+	Assessed, resumed                          bool
+	ManagedRoots, PreservedRoots, MutableRoots []string
 }
 
 type fullTeardown = teardownExecution
@@ -111,7 +118,7 @@ func (baseline *resetTeardownBaseline) verify(ctx context.Context, cli *CLI) err
 }
 
 func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
-	execution := &teardownExecution{revokeAgent: true}
+	execution := &teardownExecution{teardownOptions: teardownOptions{revokeAgent: true}}
 	for _, argument := range arguments {
 		switch argument {
 		case "-y", "--yes":
@@ -320,11 +327,16 @@ func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, e
 		for _, instance := range others {
 			managedNeighbor = managedNeighbor || instance.Project != loaded.Context.IncusProject && instance.Config["user.subyard.managed"] == "true"
 		}
-		if !managedNeighbor {
+		if !managedNeighbor && !execution.holdShared {
 			owners = append(owners, "power")
 		}
 		installation := uninstall.Installation{DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: firstNonempty(loaded.Environment["YARD_RUNTIME_ROOT"], filepath.Join(loaded.Context.Paths.DataHome, "runtime")), OperatorUID: uint32(os.Getuid())}
 		snapshot.Services, err = cli.captureCoreServices(loaded, uninstall.RecoveryPlan{Installation: installation, Yards: []uninstall.RecoveryYard{{Context: loaded.Context, Snapshot: snapshot}}}, owners, loaded.Context.SSHPort, uninstall.ProducerEvidence{})
+		if err != nil {
+			if original, sourceErr := releaseruntime.HistoricalUninstallProducerEvidence(ctx, installation.RuntimeRoot); sourceErr == nil {
+				snapshot.Services, err = cli.captureCoreServices(loaded, uninstall.RecoveryPlan{Installation: installation, Yards: []uninstall.RecoveryYard{{Context: loaded.Context, Snapshot: snapshot}}}, owners, loaded.Context.SSHPort, original)
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -476,7 +488,7 @@ func (cli *CLI) executeTeardown(ctx context.Context, orchestrator *application.O
 // re-enters public execution or acquires a second network/owner lock.
 func (cli *CLI) executeTeardownYards(ctx context.Context, orchestrator *application.Orchestrator, current config.Loaded, plan domain.OperationPlan, execution *teardownExecution, diagnostics io.Writer, before, after func() error, leaf func(string, map[string]string) error) (domain.AdapterResult, error) {
 	result := domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}
-	execution.holdShared = execution.full
+	execution.holdShared = execution.holdShared || execution.full
 	if execution.full && (len(execution.Yards) > 0 || len(execution.Shared) > 0) && cli.options.AdapterRunner == nil {
 		values := structuredCommandContext(current)
 		values["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath

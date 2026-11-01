@@ -357,7 +357,7 @@ func (runtime Runtime) PrepareMaterializedIntegrations(ctx context.Context, prep
 	if err := checkMaterializedRecipeSize(p); err != nil {
 		return nil, err
 	}
-	p.binding = installedRuntimeDigest(json.RawMessage(p.Recipe()))
+	p.binding = installedCanonicalRecipeDigest(p.Recipe())
 	return p, nil
 }
 
@@ -467,6 +467,11 @@ func (runtime Runtime) restoreMaterializedIntegrations(ctx context.Context, p *P
 	if prepared.calculateBinding() != expectedBinding {
 		return domain.ErrPlanStale
 	}
+	if p.afterOwnerIntegrations != nil {
+		if err := checkAfterOwnerIntegrationConfigSubset(p.configs, entries); err != nil {
+			return err
+		}
+	}
 	prepared.binding = expectedBinding
 	p.integrations = prepared
 	if _, _, err := p.stageUsage(); err != nil {
@@ -556,6 +561,8 @@ func (runtime Runtime) materializedIntegrationExecution(ctx context.Context, p *
 		execution.Environment = preparedInstalledEnvironment(execution.Environment, key, value)
 	}
 	execution.HookPlan = p.integrations.hooks
+	execution.afterOwnerIntegrations = p.afterOwnerIntegrations
+	execution.afterOwnerIntegrationSource = p.afterOwner != nil
 	return execution, nil
 }
 
@@ -573,6 +580,7 @@ func (runtime Runtime) ApplyPreparedMaterializedIntegrations(ctx context.Context
 	}
 	p.integrations.sources = p
 	runtime.HookPlan = p.integrations.hooks
+	runtime.afterOwnerIntegrations = p.afterOwnerIntegrations
 	if err := runtime.CheckProjectHookPlan(ctx, true); err != nil {
 		return err
 	}

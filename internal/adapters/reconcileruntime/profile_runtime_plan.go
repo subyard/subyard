@@ -124,6 +124,7 @@ func (runtime Runtime) profileRuntimeInputs(definitions []profile.Definition) (s
 	sources := map[string]string{}
 	count := 0
 	var bytes int64
+	buffer := make([]byte, 32<<10)
 	for _, root := range []string{filepath.Join(runtime.RepositoryRoot, "config"), filepath.Join(runtime.RepositoryRoot, "scripts")} {
 		if _, err := os.Stat(root); os.IsNotExist(err) {
 			continue
@@ -172,7 +173,7 @@ func (runtime Runtime) profileRuntimeInputs(definitions []profile.Definition) (s
 				return err
 			}
 			hash := sha256.New()
-			size, err := io.Copy(hash, io.LimitReader(file, (128<<20)+1))
+			size, err := io.CopyBuffer(hash, io.LimitReader(file, (128<<20)+1), buffer)
 			file.Close()
 			if err != nil {
 				return err

@@ -390,11 +390,15 @@ func (cli *CLI) probeTestVMPool(ctx context.Context, loaded config.Loaded) (*tes
 	if result.ExitCode != 0 {
 		return nil, fmt.Errorf("read test VM broker status: exit status %d", result.ExitCode)
 	}
-	if len(result.Stdout) > testVMStatusMaxBytes {
+	return parseTestVMPool(result.Stdout)
+}
+
+func parseTestVMPool(payload []byte) (*testvmsruntime.LeasePool, error) {
+	if len(payload) > testVMStatusMaxBytes {
 		return nil, errors.New("test VM broker status exceeds the safe probe limit")
 	}
 	var response testVMStatusResponse
-	if err := json.Unmarshal(result.Stdout, &response); err != nil {
+	if err := json.Unmarshal(payload, &response); err != nil {
 		return nil, fmt.Errorf("decode test VM broker status: %w", err)
 	}
 	if response.SchemaVersion != testvmsruntime.LeaseProtocolVersion || response.Status != "ok" ||
@@ -406,6 +410,30 @@ func (cli *CLI) probeTestVMPool(ctx context.Context, loaded config.Loaded) (*tes
 		return nil, errors.New("test VM broker returned an invalid status response")
 	}
 	return response.Pool, nil
+}
+
+func (cli *CLI) readSourceTestVMBrokerStatus(ctx context.Context, sourceRoot string, loaded config.Loaded, output io.Writer) error {
+	if output == nil {
+		return domain.ErrPlanStale
+	}
+	payload, legacy, err := testvmsruntime.ReadSourceWorkerStatus(ctx, sourceRoot, loaded.Context, cli.projectDataPlane())
+	if err != nil {
+		return err
+	}
+	if !legacy {
+		return cli.readTestVMBrokerStatus(ctx, loaded, output)
+	}
+	if bytes.HasPrefix(bytes.TrimSpace(payload), []byte("{")) {
+		pool, err := parseTestVMPool(payload)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(struct {
+			Pool *testvmsruntime.LeasePool `json:"pool"`
+		}{pool})
+	}
+	_, err = output.Write(payload)
+	return err
 }
 
 func (cli *CLI) probeTestVMSlot(ctx context.Context, loaded config.Loaded, slot int) (testvmsruntime.LeaseSlot, error) {

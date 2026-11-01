@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -299,11 +300,59 @@ type ownerTeardownRecord struct {
 	ManagedRoots, PreservedRoots, MutableRoots               []string
 }
 
+// Retain only finite checked type names, never a Loaded snapshot or execution values.
+func (p *teardownExecution) retainOwnerSourceSettings(loaded config.Loaded) {
+	names := ownerFileSettingNames(loaded.Settings)
+	if len(names) == 0 {
+		return
+	}
+	if p.ownerSourceSettings == nil {
+		p.ownerSourceSettings = map[[2]string][]string{}
+	}
+	p.ownerSourceSettings[[2]string{loaded.Context.IncusProject, loaded.Context.YardInstanceName}] = names
+}
+
+// Semantic copies label typed source paths. Live execution maps are never changed.
+func ownerTeardownEnvironmentLabels(environment map[string]string, names []string, from, to string) map[string]string {
+	result := maps.Clone(environment)
+	for _, name := range names {
+		if value, present := result[name]; present {
+			result[name] = ownerSourcePathLabel(value, from, to)
+		}
+	}
+	const hooks = "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS"
+	if value, present := result[hooks]; present {
+		for _, root := range ownerRepositoryAliases(from) {
+			value = ownerRepositoryValue(value, root, to)
+		}
+		result[hooks] = value
+	}
+	return result
+}
+
 // captureOwnerTeardownRecord retains the original normal teardown graph. The
 // surrounding owner recipe pins its source and configuration-root descriptors.
-func captureOwnerTeardownRecord(p *teardownExecution) ([]byte, error) {
+func describeOwnerTeardownSnapshot(snapshot *teardownSnapshot) (ownerTeardownSnapshot, error) {
+	agent, err := snapshot.Agent.CaptureRecord()
+	if err != nil {
+		return ownerTeardownSnapshot{}, err
+	}
+	if snapshot.Agent != nil && (snapshot.Agent.Binding() != snapshot.AgentBinding || snapshot.Agent.State() != snapshot.AgentState) || snapshot.Agent == nil && (snapshot.AgentBinding != "" || snapshot.AgentState != "") {
+		return ownerTeardownSnapshot{}, domain.ErrPlanStale
+	}
+	return ownerTeardownSnapshot{teardownSlice(snapshot.Resources, describeTeardownResource), teardownSlice(snapshot.Artifacts, describeTeardownArtifact), teardownSlice(snapshot.Registered, func(c domain.Context) ownerTeardownContext { return ownerTeardownContext(c) }), teardownSlice(snapshot.Services, describeTeardownService), describeTeardownState(snapshot.State), agent, snapshot.AgentBinding, snapshot.AgentState}, nil
+}
+
+func captureOwnerTeardownRecord(p *teardownExecution, sourceRoots ...string) ([]byte, error) {
 	if p == nil {
 		return nil, nil
+	}
+	if len(sourceRoots) > 1 {
+		return nil, errors.New("owner teardown requires one physical source root")
+	}
+	physicalRoot := ""
+	if len(sourceRoots) == 1 {
+		physicalRoot = sourceRoots[0]
 	}
 	if p.full || p.keepData || p.resetConfig || p.completedReset || p.configSnapshot != nil {
 		return nil, errors.New("owner teardown snapshot requires normal teardown")
@@ -342,16 +391,20 @@ func captureOwnerTeardownRecord(p *teardownExecution) ([]byte, error) {
 		if index, exists := snapshotIDs[snapshot]; exists {
 			return index, nil
 		}
-		agent, err := snapshot.Agent.CaptureRecord()
+		row, err := describeOwnerTeardownSnapshot(snapshot)
 		if err != nil {
 			return -1, err
 		}
-		if snapshot.Agent != nil && (snapshot.Agent.Binding() != snapshot.AgentBinding || snapshot.Agent.State() != snapshot.AgentState) || snapshot.Agent == nil && (snapshot.AgentBinding != "" || snapshot.AgentState != "") {
-			return -1, domain.ErrPlanStale
+		if physicalRoot != "" && p.activeYard != nil {
+			logicalRoot := p.activeYard.Context.Paths.RepositoryRoot
+			for i := range row.Registered {
+				row.Registered[i].Paths.RepositoryRoot = ownerSourcePathLabel(row.Registered[i].Paths.RepositoryRoot, physicalRoot, logicalRoot)
+				row.Registered[i].Paths.ConfigDir = ownerSourcePathLabel(row.Registered[i].Paths.ConfigDir, physicalRoot, logicalRoot)
+			}
 		}
 		index := len(d.Snapshots)
 		snapshotIDs[snapshot] = index
-		d.Snapshots = append(d.Snapshots, ownerTeardownSnapshot{teardownSlice(snapshot.Resources, describeTeardownResource), teardownSlice(snapshot.Artifacts, describeTeardownArtifact), teardownSlice(snapshot.Registered, func(c domain.Context) ownerTeardownContext { return ownerTeardownContext(c) }), teardownSlice(snapshot.Services, describeTeardownService), describeTeardownState(snapshot.State), agent, snapshot.AgentBinding, snapshot.AgentState})
+		d.Snapshots = append(d.Snapshots, row)
 		return index, nil
 	}
 	if p.Yards != nil {
@@ -373,7 +426,7 @@ func captureOwnerTeardownRecord(p *teardownExecution) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		d.Yards = append(d.Yards, ownerTeardownYard{ownerTeardownContext(yard.Context), teardownMap(yard.Environment), snapshot, network})
+		d.Yards = append(d.Yards, ownerTeardownYard{ownerTeardownContext(yard.Context), teardownMap(ownerTeardownEnvironmentLabels(yard.Environment, p.ownerSourceSettings[[2]string{yard.Context.IncusProject, yard.Context.YardInstanceName}], physicalRoot, yard.Context.Paths.RepositoryRoot)), snapshot, network})
 	}
 	if p.activeYard != nil && d.ActiveYard == -1 {
 		return nil, errors.New("owner teardown active yard is outside original plan")
@@ -388,7 +441,7 @@ func captureOwnerTeardownRecord(p *teardownExecution) ([]byte, error) {
 
 // Restore uses the checked caller's original logical context. Physical source
 // aliases belong to the owner's cached runner, and are never reopened here.
-func restoreOwnerTeardownRecord(raw []byte, loaded config.Loaded, cli *CLI) (*teardownExecution, error) {
+func restoreOwnerTeardownRecord(raw []byte, loaded config.Loaded, cli *CLI, peers ...config.Loaded) (*teardownExecution, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
@@ -417,10 +470,11 @@ func restoreOwnerTeardownRecord(raw []byte, loaded config.Loaded, cli *CLI) (*te
 		return nil, domain.ErrPlanStale
 	}
 	active := d.Yards[d.ActiveYard]
-	if domain.Context(active.Context) != loaded.Context || !reflect.DeepEqual(active.Environment.restore(), structuredCommandContext(loaded)) {
+	freshEnvironment := structuredCommandContext(loaded)
+	if domain.Context(active.Context) != loaded.Context || !reflect.DeepEqual(active.Environment.restore(), ownerTeardownEnvironmentLabels(freshEnvironment, ownerFileSettingNames(loaded.Settings), cli.options.RepositoryRoot, loaded.Context.Paths.RepositoryRoot)) {
 		return nil, domain.ErrPlanStale
 	}
-	p := &teardownExecution{RecoveryPlan: uninstall.RecoveryPlan{Schema: d.Schema, Installation: d.Installation, Stage: d.Stage, Trees: teardownSlice(d.Trees, restoreTeardownTree), Launchers: teardownSlice(d.Launchers, restoreTeardownTree), OwnedGitDirectories: d.OwnedGitDirectories, Preserved: d.Preserved, Services: teardownSlice(d.Services, ownerTeardownService.restore), SourceRoot: d.SourceRoot, SourceAssets: teardownSlice(d.SourceAssets, restoreTeardownTree), AssetsReady: d.AssetsReady, Shared: teardownSlice(d.Shared, ownerTeardownResource.restore), EpochBefore: d.EpochBefore}, holdShared: d.HoldShared, changed: d.Changed, physicalChanged: d.PhysicalChanged, revokeAgent: d.RevokeAgent, Assessed: d.Assessed, resumed: d.Resumed, ManagedRoots: d.ManagedRoots, PreservedRoots: d.PreservedRoots, MutableRoots: d.MutableRoots}
+	p := &teardownExecution{teardownOptions: teardownOptions{holdShared: d.HoldShared, revokeAgent: d.RevokeAgent}, RecoveryPlan: uninstall.RecoveryPlan{Schema: d.Schema, Installation: d.Installation, Stage: d.Stage, Trees: teardownSlice(d.Trees, restoreTeardownTree), Launchers: teardownSlice(d.Launchers, restoreTeardownTree), OwnedGitDirectories: d.OwnedGitDirectories, Preserved: d.Preserved, Services: teardownSlice(d.Services, ownerTeardownService.restore), SourceRoot: d.SourceRoot, SourceAssets: teardownSlice(d.SourceAssets, restoreTeardownTree), AssetsReady: d.AssetsReady, Shared: teardownSlice(d.Shared, ownerTeardownResource.restore), EpochBefore: d.EpochBefore}, changed: d.Changed, physicalChanged: d.PhysicalChanged, Assessed: d.Assessed, resumed: d.Resumed, ManagedRoots: d.ManagedRoots, PreservedRoots: d.PreservedRoots, MutableRoots: d.MutableRoots}
 	if d.OwnerLock != nil {
 		value := restoreTeardownTree(*d.OwnerLock)
 		p.OwnerLock = &value
@@ -462,10 +516,37 @@ func restoreOwnerTeardownRecord(raw []byte, loaded config.Loaded, cli *CLI) (*te
 	if d.Yards != nil {
 		p.Yards = []uninstall.RecoveryYard{}
 	}
+	checked := map[[2]string]config.Loaded{}
+	for _, input := range append([]config.Loaded{loaded}, peers...) {
+		key := [2]string{input.Context.IncusProject, input.Context.YardInstanceName}
+		if _, duplicate := checked[key]; duplicate {
+			return nil, domain.ErrPlanStale
+		}
+		checked[key] = input
+	}
+	if len(checked) != len(d.Yards) {
+		return nil, domain.ErrPlanStale
+	}
 	restoredAgents := make([]bool, len(snapshots))
 	yardIdentities := map[[2]string]bool{}
 	for _, row := range d.Yards {
-		yard := uninstall.RecoveryYard{Context: domain.Context(row.Context), Environment: row.Environment.restore(), Network: row.Network.restore()}
+		input, present := checked[[2]string{row.Context.IncusProject, row.Context.YardInstanceName}]
+		if !present || input.Context != domain.Context(row.Context) {
+			return nil, domain.ErrPlanStale
+		}
+		fresh := structuredCommandContext(input)
+		names := ownerFileSettingNames(input.Settings)
+		if !reflect.DeepEqual(row.Environment.restore(), ownerTeardownEnvironmentLabels(fresh, names, cli.options.RepositoryRoot, input.Context.Paths.RepositoryRoot)) {
+			return nil, domain.ErrPlanStale
+		}
+		environment := row.Environment.restore()
+		for _, name := range append(slices.Clone(names), "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS") {
+			if _, present := environment[name]; present {
+				environment[name] = fresh[name]
+			}
+		}
+		p.retainOwnerSourceSettings(input)
+		yard := uninstall.RecoveryYard{Context: domain.Context(row.Context), Environment: environment, Network: row.Network.restore()}
 		if yard.Context.AccessKind != domain.AccessLocal || yard.Context.Paths.DataHome != loaded.Context.Paths.DataHome || yard.Context.Paths.ConfigHome != loaded.Context.Paths.ConfigHome {
 			return nil, domain.ErrPlanStale
 		}
@@ -511,7 +592,7 @@ func restoreOwnerTeardownRecord(raw []byte, loaded config.Loaded, cli *CLI) (*te
 			return nil, err
 		}
 	}
-	canonical, err := captureOwnerTeardownRecord(p)
+	canonical, err := captureOwnerTeardownRecord(p, cli.options.RepositoryRoot)
 	if err != nil {
 		return nil, err
 	}

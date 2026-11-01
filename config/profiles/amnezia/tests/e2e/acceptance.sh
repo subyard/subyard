@@ -9,7 +9,7 @@ VM_COUNT_REQUESTED=2
 VM_COUNT=2
 
 lane=full
-usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|setup|share|resources|reboot|recovery|startup|disabled|reconnect]\n'; }
+usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|setup|share|resources|reboot|recovery|startup|native-startup|disabled|reconnect]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -18,8 +18,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --lane)
-      [ "$#" -ge 2 ] || die '--lane requires full, setup, share, resources, reboot, recovery, startup, disabled or reconnect'
-      case "$2" in full|setup|share|resources|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, setup, share, resources, reboot, recovery, startup, disabled or reconnect' ;; esac
+      [ "$#" -ge 2 ] || die '--lane requires full, setup, share, resources, reboot, recovery, startup, native-startup, disabled or reconnect'
+      case "$2" in full|setup|share|resources|reboot|recovery|startup|native-startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, setup, share, resources, reboot, recovery, startup, native-startup, disabled or reconnect' ;; esac
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -27,6 +27,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
+if [ "$lane" = native-startup ]; then
+  VM_COUNT_REQUESTED=1
+  VM_COUNT=1
+fi
 
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE=amnezia-acceptance
@@ -113,6 +117,10 @@ cleanup_acceptance() {
 trap cleanup_acceptance EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [ "$lane" = native-startup ]; then
+  # Build the generic opt-in harness from this candidate before allocation.
+  (cd "$ROOT" && CGO_ENABLED=0 TMPDIR=/tmp go test -c -o "$LOCAL_TEMP/native-startup.test" ./internal/cli)
+fi
 acquire_lease
 start_lease_keeper
 
@@ -121,7 +129,12 @@ build_bundle "$ROOT" "$bundle"
 bundle_hash="$(sha256sum "$bundle" | awk '{print $1}')"
 printf 'amnezia_source_bundle_sha256=%s base_fingerprint=%s lane=%s\n' "$bundle_hash" "$BASE_FINGERPRINT" "$lane"
 prepare_guest 1 "$bundle" "$bundle_hash"
-prepare_guest 2 "$bundle" "$bundle_hash"
+if [ "$lane" != native-startup ]; then
+  prepare_guest 2 "$bundle" "$bundle_hash"
+else
+  guest 1 dd "of=${GUEST_DIRS[1]}/native-startup.test" status=none <"$LOCAL_TEMP/native-startup.test"
+  guest 1 chmod 0700 "${GUEST_DIRS[1]}/native-startup.test" </dev/null
+fi
 
 owner_phase() {
   local phase="$1" directory="${GUEST_DIRS[1]}" command
@@ -349,7 +362,15 @@ verify_boot_result() {
 
 # A fresh dev session receives product platform enrollment for the remaining commands.
 owner_phase bootstrap
-if [ "$lane" = disabled ] || [ "$lane" = reconnect ]; then
+if [ "$lane" = native-startup ]; then
+  owner_phase init-native "${GUEST_DIRS[1]}/native-startup.test"
+  guest 1 cat /var/tmp/subyard-amnezia-profile-e2e/native-startup.json >"$OUTPUT/native-startup.json" </dev/null
+  guest 1 cat /var/tmp/subyard-amnezia-profile-e2e/native-cpu.json >"$OUTPUT/native-cpu.json" </dev/null
+  owner_phase orphan-native "${GUEST_DIRS[1]}/native-startup.test"
+  guest 1 cat /var/tmp/subyard-amnezia-profile-e2e/native-orphan.json >"$OUTPUT/native-orphan.json" </dev/null
+  printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
+  exit 0
+elif [ "$lane" = disabled ] || [ "$lane" = reconnect ]; then
   owner_phase init-isolated
 else
   owner_phase init

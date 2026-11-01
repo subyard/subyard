@@ -153,6 +153,11 @@ elif [ "$(id -u "$DEV_USER")" != "$DEV_UID" ]; then
   echo "WARNING: $DEV_USER uid $(id -u "$DEV_USER") != DEV_UID $DEV_UID — host mounts won't map to $DEV_USER" >&2
 fi
 usermod -aG yard,kvm,docker "$DEV_USER"
+# Reconcile only the home itself; mounted agent data and other descendants retain ownership.
+dev_home="/home/$DEV_USER"
+[ -d "$dev_home" ] && [ ! -L "$dev_home" ] \
+  || { echo "expected developer home is not a non-symlink directory" >&2; exit 1; }
+chown --no-dereference "$DEV_USER:$(id -gn "$DEV_USER")" -- "$dev_home"
 
 # dev sudo (DEV_SUDO; public default 0, enable in private/config.env): passwordless sudo so
 # the agent — and you, via `yard shell` — can make root changes in the yard. dev is already

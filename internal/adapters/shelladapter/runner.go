@@ -3,7 +3,6 @@ package shelladapter
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,7 +109,6 @@ func (runner Runner) Run(ctx context.Context, request domain.AdapterRequest, sec
 	command.Stdin = bytes.NewReader(secretBytes)
 	command.ExtraFiles = []*os.File{metadataRead}
 	observer := ports.NativeOperationObserverFrom(ctx)
-	var nativeOrdinal uint64
 	if observer != nil {
 		home := request.Context["SUBYARD_HOME"]
 		if home == "" || ports.NativeOwnerHome(ctx) != "" && ports.NativeOwnerHome(ctx) != home {
@@ -126,34 +124,7 @@ func (runner Runner) Run(ctx context.Context, request domain.AdapterRequest, sec
 		defer owner.Close()
 		command.ExtraFiles = []*os.File{owner, metadataRead}
 		command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_FD3=1", "SUBYARD_METADATA_FD=4")
-		file, err := os.Open(action.Path)
-		if err != nil {
-			return domain.AdapterResult{}, "", err
-		}
-		body, readErr := io.ReadAll(io.LimitReader(file, (32<<20)+1))
-		closeErr := file.Close()
-		if err := errors.Join(readErr, closeErr); err != nil {
-			return domain.AdapterResult{}, "", err
-		}
-		if len(body) > 32<<20 {
-			return domain.AdapterResult{}, "", errors.New("native adapter source bound")
-		}
-		binding, _ := json.Marshal(struct {
-			Invocation string
-			Source     []byte
-			Request    []byte
-		}{ports.NativeInvocationKey(ctx), body, envelope})
-		nativeOrdinal, err = observer.CommandStarted("adapter-script", fmt.Sprintf("%x", sha256.Sum256(binding)))
-		if err != nil {
-			return domain.AdapterResult{}, "", err
-		}
-		// Every exit before a positively drained foreground leaves its intent
-		// unresolved. Local cancellation or process death is no remote proof.
-		defer func() {
-			if observer != nil {
-				observer.Uncertain()
-			}
-		}()
+
 	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
@@ -177,20 +148,20 @@ func (runner Runner) Run(ctx context.Context, request domain.AdapterRequest, sec
 		command.Stdout = stdout
 		command.Stderr = stderr
 	}
-	if err := command.Start(); err != nil {
-		return domain.AdapterResult{}, "", fmt.Errorf("start adapter: %w", err)
-	}
-	if _, err := metadataWrite.Write(envelope); err != nil {
-		_ = command.Cancel()
-		_ = command.Wait()
-		return domain.AdapterResult{}, "", fmt.Errorf("send adapter metadata: %w", err)
-	}
-	if err := metadataWrite.Close(); err != nil {
-		_ = command.Cancel()
-		_ = command.Wait()
-		return domain.AdapterResult{}, "", fmt.Errorf("close adapter metadata: %w", err)
-	}
-	waitErr := command.Wait()
+	waitErr := RunNativeCommand(callContext, command, envelope, func() error {
+		if _, err := metadataWrite.Write(envelope); err != nil {
+			return fmt.Errorf("send adapter metadata: %w", err)
+		}
+		if err := metadataWrite.Close(); err != nil {
+			return fmt.Errorf("close adapter metadata: %w", err)
+		}
+		return nil
+	}, func(waitErr error) error {
+		if stdout.exceeded || stderr.exceeded {
+			return errors.Join(waitErr, errors.New("adapter output exceeded limit"))
+		}
+		return waitErr
+	})
 	diagnostics := stderr.String()
 	if direct {
 		diagnostics = stdout.String() + diagnostics
@@ -208,18 +179,7 @@ func (runner Runner) Run(ctx context.Context, request domain.AdapterRequest, sec
 	if waitErr != nil {
 		return domain.AdapterResult{}, redactedStderr, fmt.Errorf("adapter failed: %w", waitErr)
 	}
-	if observer != nil {
-		// Wait also drains the foreground stdout/stderr copies. An actor that
-		// escaped those streams but retained this invocation's process group
-		// cannot turn a successful leader exit into a whole-command witness.
-		if err := syscall.Kill(-command.Process.Pid, 0); err != syscall.ESRCH {
-			return domain.AdapterResult{}, redactedStderr, errors.New("native adapter foreground is not drained")
-		}
-		if err := observer.CommandTerminal(nativeOrdinal); err != nil {
-			return domain.AdapterResult{}, redactedStderr, err
-		}
-		observer = nil
-	}
+
 	if direct {
 		return domain.AdapterResult{
 			Schema: ProtocolSchema, OperationID: request.OperationID, Status: "ok",

@@ -3,12 +3,14 @@
 package releaseowner
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
 
@@ -63,5 +65,30 @@ func TestNativeFrameKindIsClosed(t *testing.T) {
 		if got, want := nativeFrameKind(byte(kind)), kind >= 1 && kind <= 21; got != want {
 			t.Fatalf("kind %d accepted=%v", kind, got)
 		}
+	}
+}
+
+func TestNativeOwnerRestorationAbsenceRequiresAuthenticatedLeaf(t *testing.T) {
+	for _, fault := range []string{"absent-leaf", "missing-intent", "missing-accepted", "missing-directory", "corrupt-leaf"} {
+		t.Run(fault, func(t *testing.T) {
+			_, request, observer, _, path := ownerResultsOriginal(t)
+			switch fault {
+			case "missing-intent", "missing-accepted":
+				kind := strings.TrimPrefix(fault, "missing-")
+				if err := os.Remove(filepath.Join(path, factName(observer.binding.Ordinal, kind))); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-directory":
+				if err := os.Rename(path, path+".moved"); err != nil {
+					t.Fatal(err)
+				}
+			case "corrupt-leaf":
+				testkit.WriteFile(t, filepath.Join(path, factName(observer.binding.Ordinal, "restoration")), []byte("{}\n"), 0600)
+			}
+			_, err := observer.ReadOwnerRestoration(request.Token, observer.binding.Artifact)
+			if err == nil || errors.Is(err, ports.ErrNativeOwnerRestorationAbsent) != (fault == "absent-leaf") {
+				t.Fatal("ambiguous restoration absence", fault, err)
+			}
+		})
 	}
 }

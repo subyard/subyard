@@ -5,7 +5,7 @@ use crate::{
     lease::UpdateLease,
     ledger_execution,
     native::{self, Request as N},
-    owner::{Consented, Owner},
+    owner::{Consented, ObservationPurpose, Owner},
     record::{self, require},
     store::{Address, EvidenceCheckpoint, Snapshot},
     wire::{journal_v2 as j, process_v1 as p},
@@ -134,6 +134,7 @@ impl Consented<'_> {
             &self.observation.targets,
             &owner.session,
             &installed,
+            Some(&owner.catalog),
         )?;
         if let Some(selection) = fresh
             .plan
@@ -188,7 +189,31 @@ impl Owner {
             if before.prepared_recipe.is_empty() {
                 continue;
             }
-            let base = self.binding(journal, index as u64 + 1);
+            let base = self.binding(journal, crate::program::ordinal(&bundle.work, index)?);
+            if let Some(program) = &before.program {
+                self.bind_installed_recipe(&before.prepared_recipe, &bundle.installed)?;
+                let step = journal
+                    .steps
+                    .as_ref()
+                    .and_then(|v| v.get(index))
+                    .ok_or(Error::Invalid)?;
+                if step.checkpoint == "intent" {
+                    // The owner recovery/token is published when this public
+                    // work begins, after earlier work has advanced. An inert
+                    // capsule is needed for projection before then, but there
+                    // can be no native producer to restore yet.
+                    for slot in 0..program.slots() {
+                        let mut binding = base.clone();
+                        binding.ordinal += slot as u64;
+                        require(self.store.no_owner_invocation(&binding)?)?;
+                    }
+                    continue;
+                }
+                let token = self.store.owner_progress_token(journal, step, before)?;
+                restored |=
+                    self.restore_program_results(&base, before, &token, program, current, None)?;
+                continue;
+            }
             if self
                 .store
                 .read(&Address::native(
@@ -202,6 +227,9 @@ impl Owner {
                 // No producer is needed before this work starts; orphaned
                 // facts are corruption rather than an irrelevant branch.
                 self.store.validate_owner_producer(&base)?;
+                // Restore the approved inert capsule before projecting its
+                // reserved runtime views; no native invocation exists yet.
+                self.bind_installed_recipe(&before.prepared_recipe, &bundle.installed)?;
                 continue;
             }
             let step = journal
@@ -222,17 +250,22 @@ impl Owner {
                 &work.intent.desired,
                 &before.controller,
             )?;
+            // Even an original intent with no accepted producer needs its
+            // approved inert capsule for the read-only source projection.
+            self.bind_installed_recipe(&before.prepared_recipe, &bundle.installed)?;
             if producers.is_empty() {
                 continue;
             }
-            self.bind_installed_recipe(&before.prepared_recipe, &bundle.installed)?;
             for producer in producers {
                 self.call(N::BindOwnerResults {
                     session: self.session.clone(),
                     binding: current.cloned(),
                     producer,
-                    before: before.clone(),
+                    before: Box::new(before.clone()),
                     token: token.clone(),
+                    action: None,
+                    producer_action: None,
+                    retained_only: false,
                 })?;
                 restored = true;
             }
@@ -327,6 +360,7 @@ impl Owner {
         ordinal: u64,
         effect: Effect<'_>,
         request: impl FnOnce(native::Binding) -> N,
+        known_failed: Option<&mut bool>,
     ) -> Result<()> {
         let Effect {
             owner,
@@ -392,7 +426,11 @@ impl Owner {
             }
             require(
                 self.store
-                    .read(&Address::native(&journal.transaction, ordinal, "terminal")?)?
+                    .read(&Address::native(
+                        &journal.transaction,
+                        binding.ordinal,
+                        "terminal",
+                    )?)?
                     .bytes()
                     .is_none(),
             )?;
@@ -412,7 +450,25 @@ impl Owner {
             vec![crate::store::io(rustix::io::dup(&lease._lock))?, owner_fd],
         )?;
         crate::fixture::point("after-native-custody")?;
-        if matches!(
+        if let N::ApplyOwnerAction {
+            before,
+            token,
+            action,
+            ..
+        } = &request
+        {
+            // The program's original capsule was bound once before execution.
+            // Each action still admits exact producer results under this lease;
+            // replaying the whole source payload here would multiply transport.
+            self.restore_program_results(
+                &action.group,
+                before,
+                token,
+                before.program.as_ref().ok_or(Error::Invalid)?,
+                Some(&binding),
+                Some(action),
+            )?;
+        } else if matches!(
             request,
             N::ApplyOwner { .. } | N::ApplyActivation { .. } | N::FenceActivation { .. }
         ) {
@@ -442,6 +498,10 @@ impl Owner {
                         session: self.session.clone(),
                     })?;
                     lease.close_native(&binding)?;
+                    self.store.reader.health()?;
+                    if let Some(known_failed) = known_failed {
+                        *known_failed = true;
+                    }
                     return Err(Error::Io);
                 }
             }
@@ -482,7 +542,7 @@ impl Owner {
     }
     pub(crate) fn fingerprint(&self, work: &Work, journal: &j::Record) -> Result<String> {
         match &work.recipe {
-            Recipe::LocalSSHPortPin(r) | Recipe::TestVMSettingsMigration(r) => {
+            Recipe::Settings { recipe: r, .. } => {
                 let raw = self
                     .call(N::ObserveSettings {
                         session: self.session.clone(),
@@ -533,7 +593,7 @@ impl Owner {
                 .actual),
         }
     }
-    fn recovery(
+    pub(crate) fn recovery(
         &self,
         lease: &UpdateLease<'_>,
         journal: &j::Record,
@@ -541,6 +601,7 @@ impl Owner {
         work: &Work,
     ) -> Result<(String, String)> {
         let step = &journal.steps.as_ref().ok_or(Error::Invalid)?[index];
+        let (raw, recovery, token) = self.recovery_data(journal, index, work)?;
         let address = Address::at(
             vec![
                 "release-transition".into(),
@@ -552,8 +613,20 @@ impl Owner {
             format!("{}.json", step.id),
             true,
         );
+        if let Some(raw) = raw {
+            lease.create_immutable(&address, &raw)?;
+        }
+        Ok((recovery, token))
+    }
+    fn recovery_data(
+        &self,
+        journal: &j::Record,
+        index: usize,
+        work: &Work,
+    ) -> Result<(Option<Vec<u8>>, String, String)> {
+        let step = &journal.steps.as_ref().ok_or(Error::Invalid)?[index];
         match &work.recipe {
-            Recipe::LocalSSHPortPin(recipe) | Recipe::TestVMSettingsMigration(recipe) => {
+            Recipe::Settings { definition, recipe } => {
                 #[derive(Serialize)]
                 #[serde(rename_all = "camelCase")]
                 struct Recovery<'a> {
@@ -567,15 +640,11 @@ impl Owner {
                     expected_fingerprint: &'a str,
                     before: &'a [crate::work::BeforeValue],
                 }
-                let local = matches!(work.recipe, Recipe::LocalSSHPortPin(_));
+                let local = definition.wire_local;
                 let raw = codec::encode(
                     &Recovery {
                         schema_version: if local { 2 } else { 1 },
-                        kind: if local {
-                            "local-ssh-port-settings-v2-to-v3"
-                        } else {
-                            ""
-                        },
+                        kind: if local { definition.kind } else { "" },
                         transaction: &journal.transaction,
                         step: &step.id,
                         migration: &step.migration,
@@ -586,8 +655,8 @@ impl Owner {
                     true,
                 )?;
                 require(raw.len() <= 4096)?;
-                lease.create_immutable(&address, &raw)?;
-                Ok((digest(&raw), String::new()))
+                let hash = digest(&raw);
+                Ok((Some(raw), hash, String::new()))
             }
             Recipe::TestYardOwnerRegistration(before) => {
                 #[derive(Serialize)]
@@ -621,12 +690,129 @@ impl Owner {
                     true,
                 )?;
                 require(raw.len() <= 4096)?;
-                lease.create_immutable(&address, &raw)?;
-                Ok((digest(&raw), token))
+                let hash = digest(&raw);
+                Ok((Some(raw), hash, token))
             }
-            Recipe::LegacyV1Import { static_pin } => Ok((static_pin.clone(), String::new())),
-            _ => Ok((String::new(), String::new())),
+            Recipe::LegacyV1Import { static_pin } => Ok((None, static_pin.clone(), String::new())),
+            _ => Ok((None, String::new(), String::new())),
         }
+    }
+    // Immutable publication precedes journal CAS. Only the first unfinished
+    // prepared step may have its next evidence or recovery record present.
+    pub(crate) fn verify_pending_artifacts(
+        &self,
+        journal: &j::Record,
+        work: &[Work],
+    ) -> Result<()> {
+        use std::collections::BTreeSet;
+        let steps = journal.steps.as_deref().unwrap_or_default();
+        require(steps.len() == work.len())?;
+        let first = steps.iter().position(|s| s.checkpoint != "verified");
+        let parts = vec![
+            "release-transition".into(),
+            "v2".into(),
+            "transactions".into(),
+            journal.transaction.clone(),
+        ];
+        let names = |child: Option<&str>, bound: usize| -> Result<BTreeSet<String>> {
+            let mut parts = parts.clone();
+            if let Some(child) = child {
+                parts.push(child.into());
+            }
+            let Some(root) = &self.store.root else {
+                return Ok(BTreeSet::new());
+            };
+            Ok(crate::store::directory(root, &parts, false)?
+                .map(|fd| crate::inventory::names(&fd, bound))
+                .transpose()?
+                .unwrap_or_default()
+                .into_iter()
+                .collect())
+        };
+        require(
+            names(None, 3)?
+                .iter()
+                .all(|s| ["evidence", "recovery", "superseded-journal.json"].contains(&s.as_str())),
+        )?;
+        let actual = names(Some("evidence"), steps.len() * 3 + 1)?;
+        let recoveries = names(Some("recovery"), steps.len() + 1)?;
+        let mut expected = BTreeSet::new();
+        let mut expected_recovery = BTreeSet::new();
+        for (index, (step, w)) in steps.iter().zip(work).enumerate() {
+            require(
+                step.id == w.intent.id
+                    && step.migration == w.intent.migration
+                    && step.resource == w.intent.resource
+                    && step.expected == w.intent.expected
+                    && step.desired == w.intent.desired
+                    && step.decision == w.intent.decision,
+            )?;
+            let rank = match step.checkpoint.as_str() {
+                "intent" => 0,
+                "evidence" => 1,
+                "applied" => 2,
+                "verified" => 3,
+                _ => return Err(Error::Invalid),
+            };
+            require(first.is_none_or(|first| index <= first || rank == 0))?;
+            self.verify_recorded_step(journal, step)?;
+            let (raw_recovery, recovery, _) = self.recovery_data(journal, index, w)?;
+            let needs_recovery = raw_recovery.is_some();
+            if let Some(raw) = raw_recovery {
+                let name = format!("{}.json", step.id);
+                if rank > 0 || first == Some(index) && recoveries.contains(&name) {
+                    let mut address = Address::superseded(&journal.transaction)?;
+                    address.parents.push("recovery".into());
+                    address.name = name.clone();
+                    require(self.store.read(&address)?.bytes() == Some(raw.as_slice()))?;
+                    expected_recovery.insert(name);
+                }
+            }
+            for (offset, (checkpoint, kind)) in [
+                ("captured", EvidenceCheckpoint::Captured),
+                ("applied", EvidenceCheckpoint::Applied),
+                ("verified", EvidenceCheckpoint::Verified),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let name = format!("{}.{}.json", step.id, checkpoint);
+                let needed = offset < rank;
+                let ahead = first == Some(index) && offset == rank && actual.contains(&name);
+                if !needed && !ahead {
+                    continue;
+                }
+                let raw =
+                    self.store
+                        .read(&Address::evidence(&journal.transaction, &step.id, kind)?)?;
+                let value = record::Evidence::new(self.store.decode(
+                    raw.bytes().ok_or(Error::Invalid)?,
+                    true,
+                    true,
+                )?)?;
+                let wanted = j::Evidence {
+                    schema_version: 2,
+                    transaction: journal.transaction.clone(),
+                    releases: journal.releases.clone(),
+                    step: step.id.clone(),
+                    expected: step.expected.clone(),
+                    desired: step.desired.clone(),
+                    observed: if offset == 0 {
+                        step.expected.clone()
+                    } else {
+                        step.desired.clone()
+                    },
+                    recovery: recovery.clone(),
+                    checkpoint: checkpoint.into(),
+                };
+                require(value.wire() == &wanted)?;
+                if ahead && needs_recovery {
+                    require(expected_recovery.contains(&format!("{}.json", step.id)))?;
+                }
+                expected.insert(name);
+            }
+        }
+        require(actual == expected && recoveries == expected_recovery)
     }
     fn evidence(
         &self,
@@ -733,7 +919,7 @@ impl Owner {
             } else if journal.wire().checkpoint == "complete" {
                 let checked = (|| {
                     let bundle = self.store.bundle(journal, &self.registry)?;
-                    let targets = self.after_owner_targets(lease, journal.wire(), &bundle)?;
+                    let targets = self.after_owner_targets(journal.wire(), &bundle)?;
                     self.verify_targets(&targets)?;
                     self.ready(lease, journal)
                 })();
@@ -750,8 +936,7 @@ impl Owner {
                         target: journal.wire().goal.target.clone(),
                         direction: journal.wire().goal.direction.clone(),
                     },
-                    false,
-                    true,
+                    ObservationPurpose::OriginalRecovery,
                 ) {
                     Err(_) => crate::reducer::operator(
                         base(links.as_ref()),
@@ -812,6 +997,144 @@ impl Owner {
         }
         Ok(outcome)
     }
+    // Reconstruct original comparison authority before any resumed aggregate
+    // capture. Stable owner order restores sibling capsules before consumers;
+    // this grants no execution authority and never adopts a fresh recipe.
+    fn restore_activation_recipes(
+        &self,
+        journal: &j::Record,
+        bundle: &crate::bundle::Bundle,
+        targets: &[native::Target],
+    ) -> Result<()> {
+        let consumers = targets
+            .iter()
+            .filter(|t| {
+                t.class == "materialized-integrations"
+                    && t.after_owner.is_empty()
+                    && t.instance_uuid != "absent"
+            })
+            .collect::<Vec<_>>();
+        if consumers.is_empty() {
+            return Ok(());
+        }
+        self.native_quiescent(Some(journal))?;
+        let mut originals = targets
+            .iter()
+            .filter(|t| {
+                consumers.iter().any(|consumer| consumer.yard == t.yard)
+                    && t.after_owner.is_empty()
+                    && (t.owner == "core-guest-runtime" || t.class == "materialized-integrations")
+                    && t.instance_uuid != "absent"
+            })
+            .collect::<Vec<_>>();
+        originals.sort_by(|a, b| {
+            (&a.owner, &a.yard, &a.class, &a.scope).cmp(&(&b.owner, &b.yard, &b.class, &b.scope))
+        });
+        let mut owner = "";
+        for original in originals {
+            if owner != original.owner {
+                self.activation_capture(&original.owner)?;
+                owner = &original.owner;
+            }
+            self.bind_installed_recipe_target(
+                &original.prepared_recipe,
+                &bundle.installed,
+                Some(original),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn verify_projected_activation(
+        &self,
+        journal: &j::Record,
+        source: &str,
+        expected: &[native::Target],
+        mut owners: Vec<String>,
+    ) -> Result<()> {
+        use std::collections::BTreeSet;
+        owners.extend(
+            [
+                "materialized-config",
+                "core-guest-runtime",
+                "key-tools-runtime",
+                "test-vm-broker",
+                "test-yard-route-consumers",
+                "host-power",
+            ]
+            .map(str::to_string),
+        );
+        let mut seen = BTreeSet::new();
+        require(
+            owners.len() <= 256 && owners.iter().all(|o| record::safe_id(o) && seen.insert(o)),
+        )?;
+        let mut scope = vec![];
+        for owner in owners {
+            let mut current = self
+                .call(N::CaptureActivation {
+                    session: self.session.clone(),
+                    owner: owner.clone(),
+                    fresh: false,
+                })?
+                .targets;
+            if owner == "materialized-config" {
+                current.retain(|t| {
+                    expected
+                        .iter()
+                        .any(|e| e.owner == owner && e.yard == t.yard)
+                });
+                current.sort_by(crate::native::Target::materialized_order);
+            }
+            let originals = expected
+                .iter()
+                .filter(|t| t.owner == owner)
+                .collect::<Vec<_>>();
+            require(current.len() == originals.len())?;
+            let mut keys = BTreeSet::new();
+            for target in &current {
+                target.validate()?;
+                require(
+                    target.owner == owner
+                        && keys.insert((&target.yard, &target.class, &target.scope)),
+                )?;
+                let original = originals
+                    .iter()
+                    .find(|e| {
+                        e.yard == target.yard && e.class == target.class && e.scope == target.scope
+                    })
+                    .ok_or(Error::Stale)?;
+                if target.source != original.source
+                    || target.desired != original.desired
+                    || target.project != original.project
+                    || target.instance != original.instance
+                    || target.instance_uuid != original.instance_uuid
+                {
+                    return Err(Error::Stale);
+                }
+            }
+            let desired = crate::activation::assess(
+                &owner,
+                &journal.releases.target,
+                &journal.artifact_digest,
+                &self.links.observe()?.active,
+                &current,
+                true,
+            )?
+            .desired;
+            scope.push(crate::owner::ActivationScope { id: owner, desired });
+        }
+        let (scope, _) = crate::owner::current_observation_scope(
+            &scope,
+            &self.options.inherited_setting_ids,
+            Some(journal),
+            self.options.migration_checkpoint,
+            source,
+        )?;
+        if scope != journal.observation_scope {
+            return Err(Error::Stale);
+        }
+        Ok(())
+    }
     fn run_inner(
         &self,
         lease: &UpdateLease<'_>,
@@ -820,7 +1143,7 @@ impl Owner {
         targets: Vec<native::Target>,
     ) -> Result<p::Outcome> {
         let mut journal = checked.wire().clone();
-        self.call(N::CaptureInventory {
+        let native_inventory = self.call(N::CaptureInventory {
             session: self.session.clone(),
         })?;
         let ingress_binding = self.ingress_binding(&journal, &work);
@@ -839,6 +1162,10 @@ impl Owner {
                 .all(|o| o.kind != "legacy-v1-import"),
         )?;
         let bundle = self.store.bundle(&checked, &self.registry)?;
+        let ledger = self
+            .store
+            .migration_ledger(&self.registry, &self.registry_digest)?;
+        self.bundle_scope_source(&journal, &bundle, &ledger)?;
         self.verify_prepared_sources(&bundle.facts)?;
         let inventory = digest(&codec::encode(&ingress.yards, false)?);
         require(
@@ -868,15 +1195,39 @@ impl Owner {
             self.verify_recorded_step(&journal, step)?;
         }
         self.reobserve_prepared_settings(&work)?;
-        self.restore_owner_results(&journal, &bundle, None)?;
-        self.project_owner_activation(&work)?;
+        let restored = self.restore_owner_results(&journal, &bundle, None)?;
+        let expected = if restored {
+            self.restore_after_owner(&journal, &bundle)?
+        } else {
+            self.project_owner_activation(&work)?;
+            bundle.targets.clone()
+        };
+        let expected = self.resolved_owner_targets(&expected, restored)?;
+        self.restore_activation_recipes(&journal, &bundle, &expected)?;
+        let source = self.bundle_scope_source(&journal, &bundle, &ledger)?;
+        self.verify_projected_activation(&journal, &source, &expected, native_inventory.owners)?;
         for (index, w) in work.iter().enumerate() {
             if journal.steps.as_ref().ok_or(Error::Invalid)?[index].checkpoint == "verified" {
                 if let Recipe::LedgerAdvance { before, after } = &w.recipe {
                     self.validate_ledger_edge(w, before, after)?;
-                } else if matches!(w.recipe, Recipe::TestVMSettingsMigration(_)) {
+                } else if matches!(w.recipe, Recipe::Settings { .. }) {
                     self.verify_settings_predecessor(w, index, &work, &journal)?;
                 } else {
+                    if let Recipe::TestYardOwnerRegistration(before) = &w.recipe {
+                        if let Some(program) = &before.program {
+                            let token = self.store.owner_progress_token(
+                                &journal,
+                                &journal.steps.as_ref().ok_or(Error::Invalid)?[index],
+                                before,
+                            )?;
+                            self.verify_program_complete(
+                                &self.binding(&journal, crate::program::ordinal(&work, index)?),
+                                before,
+                                &token,
+                                program,
+                            )?;
+                        }
+                    }
                     require(self.fingerprint(w, &journal)? == w.intent.desired)?;
                 }
                 continue;
@@ -895,44 +1246,36 @@ impl Owner {
             if journal.steps.as_ref().ok_or(Error::Invalid)?[index].checkpoint == "evidence" {
                 let actual = self.fingerprint(w, &journal)?;
                 require(actual == w.intent.expected || actual == w.intent.desired)?;
-                if actual == w.intent.expected {
+                let has_program = matches!(&w.recipe, Recipe::TestYardOwnerRegistration(before) if before.program.is_some());
+                if actual == w.intent.expected || has_program {
                     match &w.recipe {
-                        Recipe::LocalSSHPortPin(r) | Recipe::TestVMSettingsMigration(r) => self
-                            .dispatch(
-                                lease,
-                                &journal,
-                                index as u64 + 1,
-                                Effect {
-                                    owner: "settings",
-                                    resource: &r.yard,
-                                    expected: &r.expected,
-                                    desired: &r.desired,
-                                    source: &r.source,
-                                },
-                                |binding| N::ApplySettings {
-                                    binding,
-                                    recipe: r.clone(),
-                                },
-                            )?,
+                        Recipe::Settings { recipe: r, .. } => self.dispatch(
+                            lease,
+                            &journal,
+                            crate::program::ordinal(&work, index)?,
+                            Effect {
+                                owner: "settings",
+                                resource: &r.yard,
+                                expected: &r.expected,
+                                desired: &r.desired,
+                                source: &r.source,
+                            },
+                            |binding| N::ApplySettings {
+                                binding,
+                                recipe: r.clone(),
+                            },
+                            None,
+                        )?,
                         Recipe::TestYardOwnerRegistration(before) => {
                             self.bind_installed_recipe(&before.prepared_recipe, &bundle.installed)?;
-                            self.dispatch(
+                            self.run_program(
                                 lease,
                                 &journal,
-                                index as u64 + 1,
-                                Effect {
-                                    owner: "owner-registration",
-                                    resource: "test-yard",
-                                    expected: &w.intent.expected,
-                                    desired: &w.intent.desired,
-                                    source: &before.controller,
-                                },
-                                |binding| N::ApplyOwner {
-                                    binding,
-                                    before: before.clone(),
-                                    token,
-                                },
-                            )?
+                                self.binding(&journal, crate::program::ordinal(&work, index)?),
+                                before,
+                                &token,
+                                before.program.as_ref().ok_or(Error::Invalid)?,
+                            )?;
                         }
                         Recipe::LedgerAdvance { before, after } => {
                             let current = self
@@ -969,7 +1312,7 @@ impl Owner {
                             self.dispatch(
                                 lease,
                                 &journal,
-                                index as u64 + 1,
+                                crate::program::ordinal(&work, index)?,
                                 Effect {
                                     owner: "source-ingress",
                                     resource: &kind,
@@ -981,6 +1324,7 @@ impl Owner {
                                     binding,
                                     step: step.clone(),
                                 },
+                                None,
                             )?;
                         }
                     }
@@ -1031,6 +1375,9 @@ impl Owner {
             self.persist(lease, &journal, &mut snapshot)?;
         }
         let restored = self.restore_owner_results(&journal, &bundle, None)?;
+        if restored {
+            self.restore_after_owner(&journal, &bundle)?;
+        }
         let approved_targets = targets;
         let mut targets = self.resolved_owner_targets(&approved_targets, restored)?;
         let mut installed = bundle.installed.clone();
@@ -1045,7 +1392,7 @@ impl Owner {
                     lease,
                     &journal,
                     &bundle,
-                    work.len() as u64 + index as u64 + 1,
+                    crate::program::ordinal(&work, work.len())? + index as u64,
                     original,
                 )?;
                 targets[index] = target;
@@ -1066,7 +1413,7 @@ impl Owner {
                     && current.instance_uuid == target.instance_uuid
                     && current.desired == target.desired,
             )?;
-            let ordinal = work.len() as u64 + index as u64 + 1;
+            let ordinal = crate::program::ordinal(&work, work.len())? + index as u64;
             if !target.after_owner.is_empty() && owner_noop {
                 require(
                     current == target
@@ -1075,19 +1422,45 @@ impl Owner {
                 )?;
             }
             if current.state == "stale" || self.needs_native_continuation(&journal, ordinal)? {
-                if current.state == "stale" && current.actual != target.actual {
+                let current_materialized =
+                    target.materialized_current() && approved_targets[index].materialized_current();
+                let original_integration = target.owner == "materialized-config"
+                    && target.class == "materialized-integrations"
+                    && target.after_owner.is_empty()
+                    && target.state == "stale"
+                    && target.instance_uuid != "absent";
+                if current_materialized || original_integration {
+                    // Native success proves this retained capsule admits the
+                    // actual physical state; old/no-custody mixtures refuse.
+                    self.bind_installed_recipe_target(
+                        &target.prepared_recipe,
+                        &installed,
+                        Some(target),
+                    )?;
+                }
+                let integration_progress =
+                    original_integration && current.original_integration_observation(target);
+                if current.state == "stale"
+                    && current.actual != target.actual
+                    && !current.materialized_after_owner_observation(target)
+                    && !(current_materialized && current.materialized_current_observation(target))
+                    && !integration_progress
+                {
                     return Err(Error::Unknown);
                 }
-                self.bind_installed_recipe_target(
-                    &target.prepared_recipe,
-                    &installed,
-                    if !target.after_owner.is_empty() {
-                        Some(target)
-                    } else {
-                        (restored && approved_targets[index].instance_uuid == "absent")
-                            .then_some(&approved_targets[index])
-                    },
-                )?;
+                if !current_materialized && !original_integration {
+                    self.bind_installed_recipe_target(
+                        &target.prepared_recipe,
+                        &installed,
+                        if !target.after_owner.is_empty() {
+                            Some(target)
+                        } else {
+                            (restored && approved_targets[index].instance_uuid == "absent")
+                                .then_some(&approved_targets[index])
+                        },
+                    )?;
+                }
+                let mut known_failed = false;
                 let applied = self.dispatch(
                     lease,
                     &journal,
@@ -1103,6 +1476,7 @@ impl Owner {
                         binding,
                         target: target.clone(),
                     },
+                    Some(&mut known_failed),
                 );
                 if let Err(cause) = applied {
                     let (after, observed, guarded) = crate::reducer::reobserve_activation_failure(
@@ -1122,13 +1496,26 @@ impl Owner {
                                     target: journal.goal.target.clone(),
                                     direction: journal.goal.direction.clone(),
                                 },
-                                false,
-                                true,
+                                ObservationPurpose::OriginalRecovery,
                             )
                             .ok()
                         },
                         || self.links.observe().ok(),
                     );
+                    let approved_partial = known_failed
+                        && current_materialized
+                        && after
+                            .as_ref()
+                            .is_some_and(|after| after.materialized_current_observation(target))
+                        && self.store.reader.health().is_ok()
+                        && self.native_quiescent(Some(&journal)).is_ok()
+                        && self
+                            .bind_installed_recipe_target(
+                                &target.prepared_recipe,
+                                &installed,
+                                Some(target),
+                            )
+                            .is_ok();
                     let safe = observed.as_ref().map(|o| o.plan.wire());
                     let facts = crate::reducer::ActivationFailure {
                         journal: &journal,
@@ -1146,6 +1533,7 @@ impl Owner {
                             .and_then(|o| o.journal.as_ref())
                             .is_some_and(|j| j.wire().transaction == journal.transaction),
                         warnings: &[],
+                        approved_partial,
                     };
                     let mut outcome = crate::reducer::activation_failure(&facts);
                     if !self.native_quiescent(Some(&journal)).is_ok()
@@ -1212,6 +1600,11 @@ impl Owner {
     pub(crate) fn cleanup_owner_ordinal(&self, journal: &j::Record) -> Result<Option<u64>> {
         let checked = record::Journal::new(journal.clone())?;
         let bundle = self.store.bundle(&checked, &self.registry)?;
+        Self::cleanup_owner_ordinal_from_bundle(&bundle)
+    }
+    pub(crate) fn cleanup_owner_ordinal_from_bundle(
+        bundle: &crate::bundle::Bundle,
+    ) -> Result<Option<u64>> {
         if !bundle
             .work
             .iter()
@@ -1219,14 +1612,11 @@ impl Owner {
         {
             return Ok(None);
         }
-        let ordinal = bundle
-            .work
-            .len()
-            .checked_add(bundle.targets.len())
-            .and_then(|n| n.checked_add(1))
+        let ordinal = crate::program::ordinal(&bundle.work, bundle.work.len())?
+            .checked_add(bundle.targets.len() as u64)
             .ok_or(Error::Bound)?;
         require(ordinal <= 2049)?;
-        Ok(Some(ordinal as u64))
+        Ok(Some(ordinal))
     }
     fn cleanup_owner(&self, lease: &UpdateLease<'_>, journal: &record::Journal) -> Result<()> {
         let Some(recipe) = self.pending_cleanup_recipe(journal)? else {
@@ -1255,6 +1645,7 @@ impl Owner {
                 before,
                 token,
             },
+            None,
         )
     }
     pub(crate) fn ready(
@@ -1264,10 +1655,20 @@ impl Owner {
     ) -> Result<p::Outcome> {
         self.store.reader.health()?;
         self.terminal_native_ready(lease, journal)?;
-        // The fresh evaluator below owns the structured link-drift verdict.
-        // Returning an untyped error here would lose its activation diagnostic
-        // when the post-effect failure reducer reobserves this complete journal.
-        self.links.observe()?;
+        let links = self.links.observe()?;
+        if !crate::links::allowed(&journal.wire().checkpoint, &links, &journal.wire().releases) {
+            return Ok(crate::reducer::operator(
+                p::Outcome {
+                    active: links.active,
+                    previous: links.previous,
+                    target: journal.wire().goal.target.clone(),
+                    transaction: Some(journal.wire().transaction.clone()),
+                    ..Default::default()
+                },
+                "activation-ambiguous",
+                "release links do not match the journaled activation checkpoint",
+            ));
+        }
         let ledger = self
             .store
             .migration_ledger(&self.registry, &self.registry_digest)?;
@@ -1285,8 +1686,7 @@ impl Owner {
                 target: journal.wire().goal.target.clone(),
                 direction: journal.wire().goal.direction.clone(),
             },
-            false,
-            true,
+            ObservationPurpose::OriginalRecovery,
         )?;
         require(
             terminal
@@ -1350,7 +1750,12 @@ impl Owner {
             warnings.push("recovery cleanup is pending".into());
         }
         if (lease
-            .cleanup_transactions(&journal.wire().transaction)
+            .cleanup_migration_transactions(
+                &journal.wire().transaction,
+                &self.registry,
+                &self.registry_digest,
+                &self.links.observe()?,
+            )
             .is_err()
             || lease.cleanup_native_transactions().is_err())
             && warnings.is_empty()
@@ -1497,7 +1902,7 @@ impl Owner {
         let mut groups =
             std::collections::BTreeMap::<&str, Vec<&crate::work::SettingsRecipe>>::new();
         for w in work {
-            if let Recipe::LocalSSHPortPin(r) | Recipe::TestVMSettingsMigration(r) = &w.recipe {
+            if let Recipe::Settings { recipe: r, .. } = &w.recipe {
                 groups.entry(&r.yard).or_default().push(r);
             }
         }
@@ -1624,11 +2029,12 @@ impl Owner {
             Err(Error::Stale) | Ok(_) => (),
             Err(e) => return Err(e),
         }
-        let Recipe::TestVMSettingsMigration(before) = &w.recipe else {
+        let Recipe::Settings { recipe: before, .. } = &w.recipe else {
             return Err(Error::Invalid);
         };
+        let mut predecessor = before;
         for (n, next) in work.iter().enumerate().skip(index + 1) {
-            let Recipe::LocalSSHPortPin(after) = &next.recipe else {
+            let Recipe::Settings { recipe: after, .. } = &next.recipe else {
                 continue;
             };
             if before.yard != after.yard {
@@ -1637,28 +2043,19 @@ impl Owner {
             let step = &journal.steps.as_ref().ok_or(Error::Invalid)?[n];
             require(
                 step.checkpoint != "intent"
-                    && next.intent.decision == "canonicalize"
-                    && before.target == after.target
-                    && before.desired_file == after.expected_file
-                    && after.before.len() == 1
-                    && after.before[0].setting == "SSH_PORT"
-                    && !after.before[0].present
-                    && after.before[0].value.is_empty(),
+                    && predecessor.target == after.target
+                    && predecessor.desired_file == after.expected_file
+                    && after.expected_exists,
             )?;
             self.verify_recorded_step(journal, step)?;
-            require(self.fingerprint(next, journal)? == next.intent.desired)?;
-            let projected = self
-                .call(N::ProjectSettings {
-                    session: self.session.clone(),
-                    recipe: after.clone(),
-                    edits: vec![crate::work::Edit {
-                        setting: "SSH_PORT".into(),
-                        value: None,
-                    }],
-                })?
-                .actual;
-            require(projected == after.expected_file && projected == before.desired_file)?;
-            return Ok(());
+            predecessor = after;
+            match self.fingerprint(next, journal) {
+                Ok(actual) if actual == next.intent.desired => {
+                    return Ok(());
+                }
+                Err(Error::Stale) | Ok(_) => (),
+                Err(error) => return Err(error),
+            }
         }
         Err(Error::Stale)
     }

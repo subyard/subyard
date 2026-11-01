@@ -21,12 +21,14 @@ type invocationObserver struct {
 	session         *session
 	binding         Binding
 	ownerToken      string
+	action          *OwnerActionReference
 	restored        bool
 	accepted        []ports.NativeOperation
 	started         []ports.NativeOperation
 	terminal        map[string]ports.NativeOperation
 	fault           error
 	commands        []commandFact
+	cacheCount      int
 	commandTerminal map[uint64]bool
 	creates         map[ports.NativeOwnerCreateRef]ownerCreateIntent
 	created         map[ports.NativeOwnerCreateRef]bool
@@ -94,6 +96,12 @@ func (s *session) queryInvocation(ctx context.Context, binding Binding) (Reply, 
 					return Reply{Code: "unknown"}, nil
 				}
 				cleanup, cancel := context.WithTimeout(ctx, 30*time.Second)
+				cleanup = ports.WithNativeOwnerImageCache(cleanup, &invocationObserver{session: s, binding: binding})
+				if s.self != nil {
+					cleanup = ports.WithNativeSelfExecutable(cleanup, s.self)
+				}
+				cleanup = ports.WithNativeOwnerHome(cleanup, s.context.DataHome)
+				cleanup = ports.WithNativeInteraction(cleanup, s.interaction)
 				terminal, err = drain.DrainOwnerImageSecret(cleanup, accepted)
 				cancel()
 			} else {
@@ -142,6 +150,29 @@ func (o *invocationObserver) CommandStarted(kind, source string) (ordinal uint64
 		return 0, errors.New("native command intent binding")
 	}
 	value := commandFact{kind, source}
+	if kind == "owner-host-power-install" {
+		if o.restored {
+			return 0, errors.New("restored host installer")
+		}
+		for _, prior := range o.commands {
+			if prior.Kind == kind {
+				return 0, errors.New("duplicate host installer")
+			}
+		}
+		directory, e := o.session.factsDirectory(o.binding)
+		if e != nil {
+			return 0, e
+		}
+		defer unix.Close(directory)
+		reservation, e := reservationAt(directory, o.binding)
+		if e != nil {
+			return 0, e
+		}
+		reservation.Files -= 2
+		if e := reservationCapacity(directory, o.binding, reservation, "", factName(o.binding.Ordinal, fmt.Sprintf("command-%03d-intent", len(o.commands)+1)), 3*(4<<10)); e != nil {
+			return 0, e
+		}
+	}
 	o.commands = append(o.commands, value)
 	ordinal = uint64(len(o.commands))
 	return ordinal, o.session.writeFact(o.binding, fmt.Sprintf("command-%03d-intent", ordinal), value)
@@ -285,12 +316,32 @@ func nativeOperationSucceeded(operation ports.NativeOperation) bool {
 }
 
 func (o *invocationObserver) failed(err error) bool {
-	for err != nil {
+	for depth := 0; err != nil && depth < 64; depth++ {
 		if failure, ok := err.(*ports.NativeOperationFailure); ok {
 			o.mu.Lock()
 			defer o.mu.Unlock()
 			terminal, found := o.terminal[failure.Operation.ID]
-			return o.fault == nil && found && terminal == failure.Operation && !nativeOperationSucceeded(terminal) && len(o.started) == len(o.accepted) && len(o.accepted) == len(o.terminal) && len(o.commands) == len(o.commandTerminal) && len(o.creates) == len(o.created)
+			knownFailure := failure.ExecExitCode == nil && !nativeOperationSucceeded(terminal)
+			if failure.ExecExitCode != nil {
+				knownFailure = terminal.Kind == "instance-exec" && terminal.Status == 200 && *failure.ExecExitCode != 0
+			}
+			return o.fault == nil && found && terminal == failure.Operation && knownFailure && len(o.started) == len(o.accepted) && len(o.accepted) == len(o.terminal) && len(o.commands) == len(o.commandTerminal) && len(o.creates) == len(o.created)
+		}
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			var only error
+			for _, cause := range joined.Unwrap() {
+				if cause != nil {
+					if only != nil {
+						return false
+					}
+					only = cause
+				}
+			}
+			if only == nil {
+				return false
+			}
+			err = only
+			continue
 		}
 		wrapped, ok := err.(interface{ Unwrap() error })
 		if !ok {
@@ -333,4 +384,24 @@ func (o *invocationObserver) operations() []ports.NativeOperation {
 		result = append(result, o.terminal[accepted.ID])
 	}
 	return result
+}
+
+func (o *invocationObserver) CheckedInvocation() (string, string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.fault != nil || o.restored {
+		return "", "", errors.New("original invocation unavailable")
+	}
+	intent, err := o.creationRoot()
+	if err != nil {
+		return "", "", err
+	}
+	if err := o.session.checkIntent(o.binding, intent.Owner, intent.Resource, intent.Recipe); err != nil {
+		return "", "", err
+	}
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		return "", "", err
+	}
+	return digest(raw), intent.Recipe, nil
 }

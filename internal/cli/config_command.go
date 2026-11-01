@@ -33,6 +33,7 @@ type configTargetAssessment struct {
 	Changed                 bool
 	DesiredFingerprint      string
 	MaterializedFingerprint string
+	Artifacts               []config.MaterializedArtifactAssessment `json:"-"`
 }
 
 type configTargetSelector func() ([]configTarget, error)
@@ -1038,7 +1039,7 @@ func (cli *CLI) assessConfigTarget(
 			return configTargetAssessment{}, err
 		}
 		return configTargetAssessment{Target: target, State: assessment.State, Changed: assessment.Changed,
-			DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint}, nil
+			DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint, Artifacts: facts}, nil
 	}
 	if target.Loaded.Context.AccessKind == domain.AccessRemote {
 		return finish("remote (settings only; consumers not checked)")

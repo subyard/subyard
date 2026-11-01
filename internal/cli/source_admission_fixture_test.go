@@ -11,11 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -223,41 +227,8 @@ func completedRustSourceAuthoringRuntimeFixture(t *testing.T, migrateSSH bool, e
 	if direction == releasetransition.DirectionActivatePrevious {
 		// Ordinary init repair requires an already identified existing host.
 		writeProfileTestFile(t, filepath.Join(home, "host-id"), []byte("source-authoring-owner\n"), 0600)
-		if err := os.Symlink("releases/"+targetID, filepath.Join(runtimeRoot, "previous")); err != nil {
-			t.Fatal(err)
-		}
 	}
 	rawRegistry := mustReadConfigFixture(t, filepath.Join(root, "config/release-transition.json"))
-	registry, registryDigest, err := releasetransition.ParseRegistryV2(rawRegistry, releasetransition.BuiltinCapabilityCatalog())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
-	for _, migration := range registry.Migrations {
-		if migrateSSH && migration.Kind == "local-ssh-port-settings-v2-to-v3" {
-			break
-		}
-		ledger, err = ledger.Advance(registry, migration)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	payload, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeProfileTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), payload, 0600)
-	store, err := releasetransition.NewPOSIXV2Store(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := store.ReadMigrationLedger(registry, registryDigest)
-	if err != nil {
-		t.Fatal("canonical seed ledger", err)
-	}
-	if err := store.ConvertMigrationLedger(state, registry, registryDigest, registry, registryDigest); err != nil {
-		t.Fatal("canonical seed checkpoint", err)
-	}
 	if migrateSSH {
 		writeProfileTestFile(t, filepath.Join(home, config.GitSettingsRelativePath, "config.env"), []byte("SSH_PORT=2240\n"), 0600)
 		writeProfileTestFile(t, filepath.Join(home, config.GitSettingsRelativePath, "yards/named/config.env"), []byte("SSH_PORT=2241\n"), 0600)
@@ -285,14 +256,16 @@ esac
 case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nActiveState=inactive\nMainPID=0\nUnitFileState=\n' ;; *) exit 64 ;; esac
 `), 0700)
 	processEnvironment := []string{"HOME=" + environmentValue(environment, "HOME"), "PATH=" + fixtureBin + ":/usr/bin:/bin", "SUBYARD_OPERATOR_HOME=" + environmentValue(environment, "HOME"), "SUBYARD_CONFIG_HOME=" + home, "SUBYARD_HOME=" + data, "YARD_RUNTIME_ROOT=" + runtimeRoot, "SUBYARD_REPOSITORY_ROOT=" + root, "SUBYARD_CONFIG_DIR=" + filepath.Join(root, "config"), "SUBYARD_NO_AUDIT=1", "SUBYARD_INCUS_SOCKET=" + server.SocketPath, "SUBYARD_POWER_RECONCILER_PATH=" + filepath.Join(original, "absent-power"), "SUBYARD_POWER_UNIT_PATH=" + filepath.Join(original, "absent-unit")}
+	ownerRoot := source
 	invoke := func(request releasetransition.ProcessRequest, grant string) releasetransition.ProcessResponse {
 		t.Helper()
 		raw, err := json.Marshal(request)
 		if err != nil {
 			t.Fatal(err)
 		}
-		command := exec.CommandContext(context.Background(), filepath.Join(root, "bin/yard-engine"), "_release-transition")
+		command := exec.CommandContext(context.Background(), filepath.Join(ownerRoot, "bin/yard-engine"), "_release-transition")
 		command.Env = append([]string{}, processEnvironment...)
+		command.Env = append(command.Env, "SUBYARD_REPOSITORY_ROOT="+ownerRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(ownerRoot, "config"))
 		if grant != "" {
 			read, write, err := os.Pipe()
 			if err != nil {
@@ -305,6 +278,7 @@ case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nAc
 			write.Close()
 			command.ExtraFiles = []*os.File{read}
 			command.Env = append(command.Env, "SUBYARD_RELEASE_TRANSITION_GRANT_FD=3")
+
 		}
 		var stdout, stderr bytes.Buffer
 		command.Stdin = bytes.NewReader(raw)
@@ -319,25 +293,73 @@ case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nAc
 		}
 		return response
 	}
-	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: home, Yard: "default", Target: releasetransition.ReleaseID(targetID), Direction: direction, ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest))), RegistryDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(rawRegistry)))}
-	inspected := invoke(request, "")
-	if inspected.Inspection == nil || len(inspected.Inspection.Blockers) != 0 {
-		t.Fatalf("normal source inspection refused: %+v", inspected.Inspection)
-	}
-	request.Mode = releasetransition.ProcessConverge
-	request.Execution = &releasetransition.Execution{Plan: inspected.Inspection.Plan, Authorization: "source-authoring-parent-grant"}
-	outcome := invoke(request, "source-authoring-parent-grant")
-	if outcome.Outcome == nil || !outcome.Outcome.ReachedGoal {
-		t.Fatalf("normal source formation did not complete: %+v", outcome.Outcome)
-	}
-	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, filepath.Join(home, "release-transition/v2/journal.json")))
-	if err != nil || journal.Checkpoint != releasetransition.JournalComplete {
-		t.Fatal("real completed journal absent", err)
-	}
-	if _, declared := os.Stat(filepath.Join(root, "config/release-owner.json")); declared == nil {
-		if _, err := os.Stat(filepath.Join(home, "migrations/native-custody/v1", string(journal.Transaction), "bundle.json")); err != nil {
-			t.Fatal("real Rust bundle absent", err)
+	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: home, Yard: "default", Target: releasetransition.ReleaseID(sourceID), Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest))), RegistryDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(rawRegistry)))}
+	converge := func(request releasetransition.ProcessRequest) releasetransition.JournalRecord {
+		t.Helper()
+		inspected := invoke(request, "")
+		if inspected.Inspection == nil || len(inspected.Inspection.Blockers) != 0 {
+			t.Fatalf("normal source inspection refused: %+v", inspected.Inspection)
 		}
+		again := invoke(request, "")
+		if again.Inspection == nil || again.Inspection.Plan != inspected.Inspection.Plan {
+			t.Fatalf("normal source inspection changed: first=%+v second=%+v", inspected.Inspection, again.Inspection)
+		}
+		request.Mode = releasetransition.ProcessConverge
+		request.Execution = &releasetransition.Execution{Plan: inspected.Inspection.Plan, Authorization: "source-authoring-parent-grant"}
+		outcome := invoke(request, "source-authoring-parent-grant")
+		if outcome.Outcome == nil || !outcome.Outcome.ReachedGoal {
+			t.Fatalf("normal source formation did not complete: %+v", outcome.Outcome)
+		}
+		request.Mode, request.Execution = releasetransition.ProcessInspect, nil
+		ready := invoke(request, "")
+		if ready.Inspection == nil || ready.Inspection.Outcome == nil || ready.Inspection.Outcome.Status != releasetransition.StatusReady || ready.Inspection.Assessment.Changed {
+			t.Fatalf("normal source was not ready: %+v", ready.Inspection)
+		}
+		journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, filepath.Join(home, "release-transition/v2/journal.json")))
+		if err != nil || journal.Checkpoint != releasetransition.JournalComplete || journal.Goal.Target != request.Target || journal.Goal.Direction != request.Direction {
+			t.Fatal("real completed journal absent", err)
+		}
+		if _, declared := os.Stat(filepath.Join(ownerRoot, "config/release-owner.json")); declared == nil {
+			if _, err := os.Stat(filepath.Join(home, "migrations/native-custody/v1", string(journal.Transaction), "bundle.json")); err != nil {
+				t.Fatal("real Rust bundle absent", err)
+			}
+		}
+		return journal
+	}
+	// Start with an actual empty-history self-activation; the initial source
+	// owns its migration effects and its completed checkpoint.
+	bootstrap := converge(request)
+	sshEvidence := map[string][]byte{}
+	if migrateSSH {
+		for _, step := range bootstrap.Steps {
+			if step.Migration == "localize-ssh-port-settings-v3" && step.Checkpoint == releasetransition.StepVerified {
+				path := filepath.Join(home, "release-transition/v2/transactions", string(bootstrap.Transaction), "evidence", string(step.ID)+".verified.json")
+				sshEvidence[path] = mustReadConfigFixture(t, path)
+			}
+		}
+		for _, id := range []string{"localize-ssh-port-settings-v3.default", "localize-ssh-port-settings-v3.named", "localize-ssh-port-settings-v3.ledger"} {
+			path := filepath.Join(home, "release-transition/v2/transactions", string(bootstrap.Transaction), "evidence", id+".verified.json")
+			if _, ok := sshEvidence[path]; !ok {
+				t.Fatalf("bootstrap did not verify SSH migration step %s", id)
+			}
+		}
+	}
+	// Other callers require both current and previous; establish them with a
+	// real forward activation, then perform a real rollback when requested.
+	ownerRoot = root
+	request.Target = releasetransition.ReleaseID(targetID)
+	converge(request)
+	for path, before := range sshEvidence {
+		if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
+			t.Fatal("forward activation changed retained SSH migration evidence")
+		}
+	}
+	if direction == releasetransition.DirectionActivatePrevious {
+		ownerRoot = source
+		request.Target, request.Direction = releasetransition.ReleaseID(sourceID), direction
+		converge(request)
+		root = source
+		processEnvironment = append(processEnvironment, "SUBYARD_REPOSITORY_ROOT="+root, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	}
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 	for _, name := range []string{"default", "named"} {
@@ -358,7 +380,7 @@ case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nAc
 	server.SetProject("subyard", map[string]any{"name": "subyard", "config": map[string]string{}})
 	server.SetInstance("subyard", "yard", map[string]any{"name": "yard", "type": "container", "status": "Running", "config": map[string]string{"volatile.uuid": "source-authoring-default", "user.subyard.managed": "true"}, "expanded_config": map[string]string{"volatile.uuid": "source-authoring-default", "user.subyard.managed": "true"}})
 	server.SetExecResponder(func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
-		return completedSourceNativeObservation(program, ready, call)
+		return completedSourceNativeObservation(t, program, ready, call)
 	})
 	return program, ready, home, server
 }
@@ -370,6 +392,22 @@ func TestCompletedSourceAuthoringFixture(t *testing.T) {
 	proof, err := reader.InspectSourceAdmission(context.Background(), program.env["YARD_RUNTIME_ROOT"], home)
 	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete {
 		t.Fatal("real completed source admission", err)
+	}
+}
+
+func TestCompletedSSHSourceAuthoringFixture(t *testing.T) {
+	program, _, home := completedRustSourceAuthoringFixture(t, true, nil)
+	for name, port := range map[string]string{"default": "2240", "named": "2241"} {
+		raw := mustReadConfigFixture(t, filepath.Join(home, "yards", name, "config.env"))
+		if !strings.Contains(string(raw), "SSH_PORT='"+port+"'\n") {
+			t.Fatalf("bootstrap did not localize the %s SSH setting", name)
+		}
+	}
+	reader := releaseruntime.NewSourceInspector(program.options.RepositoryRoot, io.Discard)
+	defer reader.Close()
+	proof, err := reader.InspectSourceAdmission(context.Background(), program.env["YARD_RUNTIME_ROOT"], home)
+	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete {
+		t.Fatal("completed SSH source admission", err)
 	}
 }
 
@@ -402,21 +440,198 @@ func sourceAuthoringPlatformFixture(t *testing.T, value ports.InitPlatform) *ini
 	}
 }
 
-func completedSourceNativeObservation(program *CLI, ready string, call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+// This fixture selects the current runtime policy: instruction files use actual
+// host bytes, while preview guidance is supplied by the separate agent skill.
+func completedSourceMaterializedPayloads(t *testing.T, program *CLI, yard string) (config.Loaded, []config.MaterializationSource, map[string][]byte, error) {
+	loaded, err := program.loadSelectionRepair(yard)
+	if err != nil {
+		t.Log("completed source observation failed: stage=selection-load")
+		return loaded, nil, nil, err
+	}
+	sources, err := config.SelectMaterializationSources(loaded.Environment, loaded.Context.DevUser, config.MaterializationRuntime, loaded.Catalog.Integrations()...)
+	if err != nil {
+		t.Log("completed source observation failed: stage=select-materialization")
+		return loaded, nil, nil, err
+	}
+	payloads := map[string][]byte{}
+	for _, source := range sources {
+		raw, readErr := source.Asset.ReadSource()
+		if readErr != nil && !os.IsNotExist(readErr) {
+			t.Log("completed source observation failed: stage=asset-read")
+			return loaded, nil, nil, readErr
+		}
+		payload, present, err := config.PrepareMaterializationContent(config.MaterializationRuntime, false, config.MaterializationContent{Present: readErr == nil, Payload: raw}, nil)
+		if err != nil {
+			t.Log("completed source observation failed: stage=prepare-content")
+			return loaded, nil, nil, err
+		}
+		if present {
+			payloads[source.Asset.Destination] = payload
+		}
+	}
+	return loaded, sources, payloads, nil
+}
+
+func completedSourceNativeObservation(t *testing.T, program *CLI, ready string, call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 	if slices.Equal(call.Command, []string{"bash", "-s", "--", "--observe"}) {
 		payload, _ := json.Marshal(map[string]any{"projects": fmt.Sprintf("%x", sha256.Sum256(nil)), "wiring": fmt.Sprintf("%x", sha256.Sum256(nil)), "hooks": []string{}, "roots": []string{}, "facts": map[string]string{}, "resolved": map[string]string{}})
 		return testkit.IncusServerExecStep{Stdout: payload}
 	}
 	_, err := os.Stat(ready)
 	current := err == nil
-	if len(call.Command) == 10 && call.Command[0] == "python3" && call.Command[4] == "observe" {
-		digest := call.Command[8]
-		if !current {
-			digest = strings.Repeat("0", 64)
+	if len(call.Command) == 5 && call.Command[0] == "python3" && call.Command[1] == "-B" && call.Command[2] == "-c" && strings.Contains(call.Command[3], "Version 1 records observed ownership only") && call.Command[4] == "configs-observe" {
+		yard := strings.TrimPrefix(call.Project, "subyard-")
+		if call.Project == "subyard" {
+			yard = "default"
 		}
-		payload, _ := json.Marshal(map[string]any{"converged": current, "fingerprint": digest})
-		return testkit.IncusServerExecStep{Stdout: payload}
+		loaded, sources, payloads, sourceErr := completedSourceMaterializedPayloads(t, program, yard)
+		if sourceErr != nil {
+			return testkit.IncusServerExecStep{ExitCode: 1}
+		}
+		type entry struct {
+			ID     string `json:"id"`
+			Kind   string `json:"kind"`
+			Path   string `json:"path"`
+			Digest string `json:"digest"`
+			Format string `json:"format,omitempty"`
+		}
+		type observationRequest struct {
+			Home    string  `json:"home"`
+			UID     int     `json:"uid"`
+			Entries []entry `json:"entries"`
+		}
+		var expected observationRequest
+		expected.Home, expected.UID = "/home/"+loaded.Context.DevUser, loaded.Context.DevUID
+		if expected.UID <= 0 {
+			expected.UID = 1000
+		}
+		expected.Entries = []entry{}
+		files := map[string][]byte{}
+		for _, source := range sources {
+			payload, present := payloads[source.Asset.Destination]
+			if !present {
+				continue
+			}
+			kind := "file"
+			if source.Asset.OwnedFormat != "" {
+				kind = "structured"
+			}
+			expected.Entries = append(expected.Entries, entry{source.Integration, kind, source.Asset.Destination, fmt.Sprintf("%x", sha256.Sum256(payload)), source.Asset.OwnedFormat})
+			if current {
+				guestPayload := payload
+				if source.Asset.OwnedFormat != "" {
+					request, prepareErr := configmaterial.Request(source.Asset.OwnedFormat, configmaterial.ModeObserve, loaded.Context.DevUser, source.Asset.Destination, loaded.Context.DevUID, payload)
+					if prepareErr != nil {
+						t.Log("completed source configs-observe failed: stage=structured-request")
+						return testkit.IncusServerExecStep{ExitCode: 1}
+					}
+					_, guestPayload, prepareErr = completedSourceStructuredObservation(request, true)
+					if prepareErr != nil {
+						t.Log("completed source configs-observe failed: stage=structured-observation")
+						return testkit.IncusServerExecStep{ExitCode: 1}
+					}
+				}
+				files[source.Asset.Destination] = guestPayload
+			}
+		}
+		// The SDK fixture selects stdout before websocket stdin arrives. Bind
+		// that canned physical observation to the actual request in AfterInput.
+		request, _ := json.Marshal(expected)
+		physical := afterOwnerConfigTestState{&nativeMaterializedState{files: files}}
+		result, observeErr := physical.Exec(context.Background(), call.Project, call.Name, ports.InstanceExecRequest{Command: call.Command, Stdin: request})
+		if observeErr != nil {
+			t.Log("completed source configs-observe failed: stage=physical-observation")
+			return testkit.IncusServerExecStep{ExitCode: 1}
+		}
+		if result.ExitCode != 0 {
+			t.Logf("completed source configs-observe failed: stage=physical-exit current=%t sources=%d entries=%d files=%d", current, len(sources), len(expected.Entries), len(files))
+		}
+		return testkit.IncusServerExecStep{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode, AfterInput: func(actual testkit.IncusServerExecCall) int {
+			var value observationRequest
+			decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+			decoder.DisallowUnknownFields()
+			decoded := decoder.Decode(&value) == nil
+			if !decoded || value.Entries == nil || value.Home != expected.Home || value.UID != expected.UID || !slices.Equal(value.Entries, expected.Entries) {
+				t.Logf("completed source configs-observe failed: stage=input decoded=%t entries_present=%t home_match=%t uid_match=%t entries_match=%t entries=%d expected=%d", decoded, value.Entries != nil, value.Home == expected.Home, value.UID == expected.UID, slices.Equal(value.Entries, expected.Entries), len(value.Entries), len(expected.Entries))
+				return 1
+			}
+			var extra any
+			if decoder.Decode(&extra) != io.EOF {
+				t.Log("completed source configs-observe failed: stage=input-trailing")
+				return 1
+			}
+			return 0
+		}}
 	}
+
+	if (len(call.Command) == 11 && call.Command[4] == configmaterial.ModeObserve || len(call.Command) == 10 && (call.Command[4] == configmaterial.ModeObserve || call.Command[4] == configmaterial.ModeAssessAdopt)) && call.Command[0] == "python3" {
+		reject := testkit.IncusServerExecStep{ExitCode: 1}
+		yard := strings.TrimPrefix(call.Project, "subyard-")
+		if call.Project == "subyard" {
+			yard = "default"
+		}
+		loaded, sources, payloads, loadErr := completedSourceMaterializedPayloads(t, program, yard)
+		if loadErr != nil || call.Project != loaded.Context.IncusProject || call.Name != loaded.Context.YardInstanceName || call.User != 0 || call.Group != 0 || len(call.Environment) != 0 {
+			return reject
+		}
+		for _, source := range sources {
+			payload, present := payloads[source.Asset.Destination]
+			if !present || source.Asset.OwnedFormat == "" {
+				continue
+			}
+			var templates [][]byte
+			if call.Command[4] == configmaterial.ModeAssessAdopt && source.Asset.OwnedFormat == "toml" {
+				root := filepath.Join(loaded.Context.Paths.RepositoryRoot, "config", "agents", source.Integration, "legacy-config")
+				entries, readErr := os.ReadDir(root)
+				if readErr != nil && !os.IsNotExist(readErr) {
+					return reject
+				}
+				for _, entry := range entries {
+					if filepath.Ext(entry.Name()) != ".toml" {
+						continue
+					}
+					raw, readErr := (config.MaterializedAsset{Source: filepath.Join(root, entry.Name())}).ReadSource()
+					if readErr != nil {
+						return reject
+					}
+					templates = append(templates, raw)
+				}
+			}
+			request, requestErr := configmaterial.Request(source.Asset.OwnedFormat, call.Command[4], loaded.Context.DevUser, source.Asset.Destination, loaded.Context.DevUID, payload, templates...)
+			if requestErr != nil || !slices.Equal(request.Command, call.Command[:10]) {
+				continue
+			}
+			capture := request
+			if len(call.Command) == 11 {
+				capture.Command = append(append([]string(nil), request.Command...), `{"capture":true}`)
+			}
+			result, _, observeErr := completedSourceStructuredObservation(capture, current)
+			if observeErr != nil {
+				return reject
+			}
+			observation, observeErr := configmaterial.ParseObservation(result)
+			if observeErr != nil {
+				return reject
+			}
+			if len(call.Command) == 11 && call.Command[10] != `{"capture":true}` {
+				d := observation.Destination
+				expected := configmaterial.ApplyExpectedState{State: observation.State, Fingerprint: observation.Fingerprint, Exists: d.Exists, UID: d.UID, GID: d.GID, Mode: d.Mode}
+				encoded, _ := json.Marshal(expected)
+				if call.Command[10] != string(encoded) {
+					return reject
+				}
+			}
+
+			return testkit.IncusServerExecStep{Stdout: result, AfterInput: func(actual testkit.IncusServerExecCall) int {
+				if actual.Project != call.Project || actual.Name != call.Name || actual.User != 0 || actual.Group != 0 || len(actual.Environment) != 0 || !slices.Equal(actual.Command, call.Command) || !bytes.Equal(actual.Stdin, request.Stdin) {
+					return 1
+				}
+				return 0
+			}}
+		}
+		return reject
+	}
+
 	if len(call.Command) == 3 && call.Command[0] == "sha256sum" && call.Command[1] == "--" {
 		digest := strings.Repeat("0", 64)
 		if current {
@@ -424,29 +639,15 @@ func completedSourceNativeObservation(program *CLI, ready string, call testkit.I
 			if call.Project == "subyard" {
 				yard = "default"
 			}
-			loaded, loadErr := program.loadSelectionRepair(yard)
-			if loadErr != nil {
+			_, _, payloads, sourceErr := completedSourceMaterializedPayloads(t, program, yard)
+			if sourceErr != nil {
 				return testkit.IncusServerExecStep{ExitCode: 1}
 			}
-			assets, assetErr := effectiveConfigAssets(loaded)
-			if assetErr != nil {
-				return testkit.IncusServerExecStep{ExitCode: 1}
-			}
-			found := false
-			for _, asset := range assets {
-				if asset.Destination == call.Command[2] {
-					content, readErr := os.ReadFile(asset.Source)
-					if readErr != nil {
-						return testkit.IncusServerExecStep{ExitCode: 1}
-					}
-					digest = fmt.Sprintf("%x", sha256.Sum256(content))
-					found = true
-					break
-				}
-			}
+			payload, found := payloads[call.Command[2]]
 			if !found {
 				return testkit.IncusServerExecStep{ExitCode: 1}
 			}
+			digest = fmt.Sprintf("%x", sha256.Sum256(payload))
 		}
 		return testkit.IncusServerExecStep{Stdout: []byte(digest + "  " + call.Command[2] + "\n")}
 	}
@@ -456,4 +657,128 @@ func completedSourceNativeObservation(program *CLI, ready string, call testkit.I
 		result.ExitCode = 1
 	}
 	return testkit.IncusServerExecStep{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}
+}
+
+// Reuse the shipped observer's pure projection and evidence constructors. The
+// fixture's applied phase has actual canonical baseline/receipt bytes; absence
+// stays explicit. Read-only probes never advance that phase or write guest state.
+func completedSourceStructuredObservation(request ports.InstanceExecRequest, applied bool) ([]byte, []byte, error) {
+	index := strings.LastIndex(request.Command[3], "\ntry:\n    main()\n")
+	if index < 0 {
+		return nil, nil, fmt.Errorf("unknown materialization observer entrypoint")
+	}
+	input, err := json.Marshal(map[string]any{"command": request.Command, "payload": request.Stdin, "applied": applied})
+	if err != nil {
+		return nil, nil, err
+	}
+	const observe = `
+import base64
+value=json.load(sys.stdin)
+command=value["command"]
+payload=base64.b64decode(value["payload"],validate=True)
+desired=parse_document(payload)
+current=copy.deepcopy(desired) if value["applied"] else {}
+original=document_payload(current,None) if value["applied"] else None
+baseline=evidence=None
+state={"baseline":"","receipt":""}
+if value["applied"]:
+    evidence=applied_evidence(current,desired,command[5],command[6],command[8])
+    baseline=compatible_baseline(evidence)
+    raw_baseline=semantic_payload(baseline)+b"\n"
+    raw_receipt=semantic_payload(evidence)+b"\n"
+    baseline=validate_baseline(raw_baseline,command[5],command[6])
+    evidence=validate_baseline(raw_receipt,command[5],command[6])
+    state={"baseline":hashlib.sha256(raw_baseline).hexdigest(),"receipt":hashlib.sha256(raw_receipt).hexdigest()}
+report=materialized_observation(current,desired,baseline,evidence,evidence is not None,original,command[8])
+if command[4]=="assess-adopt":
+    report["adoptable"]=evidence is not None and projection_digest(current,evidence["owned"])==evidence["projection_digest"]
+if len(command)==11:
+    report["state"]=state
+    report["destination"]={"exists":original is not None,"digest":"" if original is None else hashlib.sha256(original).hexdigest(),"uid":int(command[7]) if original is not None else 0,"gid":int(command[7]) if original is not None else 0,"mode":0o644 if original is not None else 0}
+print(json.dumps({"observation":report,"payload":None if original is None else base64.b64encode(original).decode()},separators=(",",":"),sort_keys=True))
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", "-B", "-c", request.Command[3][:index]+observe)
+	cmd.Stdin = bytes.NewReader(input)
+	result, err := cmd.Output()
+	if err != nil || len(result) > 4096 {
+		return nil, nil, fmt.Errorf("fixture protected observation failed: %w", err)
+	}
+	var state struct {
+		Observation json.RawMessage `json:"observation"`
+		Payload     []byte          `json:"payload"`
+	}
+	if err := json.Unmarshal(result, &state); err != nil {
+		return nil, nil, err
+	}
+	return state.Observation, state.Payload, nil
+}
+
+func TestCompletedSourceStructuredObservationMatchesProtectedEvidence(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			payload := []byte(`{"managed":"desired"}`)
+			if format == "toml" {
+				payload = []byte("managed = 'desired'\n")
+			}
+			root := testkit.TempDir(t)
+			home := filepath.Join(root, "home")
+			destination := filepath.Join(home, ".agent", "config")
+			if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+				t.Fatal(err)
+			}
+			request, err := configmaterial.Request(format, configmaterial.ModeObserve, "synthetic", "/home/synthetic/.agent/config", os.Getuid(), payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Command[6], request.Command[9] = destination, home
+			// Explicit private guest namespace, using the unchanged observer and writer.
+			request.Command[3] = strings.Replace(request.Command[3], `STATE_ROOT = "/var/lib/subyard/config-materialization"`, "STATE_ROOT = "+strconv.Quote(filepath.Join(root, "state")), 1)
+			request.Command[3] = strings.Replace(request.Command[3], "STATE_UID = 0", "STATE_UID = "+strconv.Itoa(os.Getuid()), 1)
+			request, err = configmaterial.WithAfterOwnerObservation(request, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(r ports.InstanceExecRequest) []byte {
+				t.Helper()
+				cmd := exec.Command(r.Command[0], r.Command[1:]...)
+				cmd.Stdin = bytes.NewReader(r.Stdin)
+				raw, err := cmd.Output()
+				if err != nil {
+					t.Fatal("private guest observer", err)
+				}
+				return raw
+			}
+			for _, applied := range []bool{false, true} {
+				if applied {
+					write := request
+					write.Command = append([]string(nil), request.Command[:10]...)
+					write.Command[4] = configmaterial.ModeApply
+					run(write)
+				}
+				real, err := configmaterial.ParseObservation(run(request))
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, guestPayload, err := completedSourceStructuredObservation(request, applied)
+				if err != nil {
+					t.Fatal(err)
+				}
+				modeled, err := configmaterial.ParseObservation(raw)
+				if err != nil || !reflect.DeepEqual(real, modeled) {
+					t.Fatal("fixture differs from real protected observer", format, applied, err)
+				}
+				if applied {
+					actual, readErr := os.ReadFile(destination)
+					if readErr != nil || !bytes.Equal(actual, guestPayload) {
+						t.Fatal("fixture guest bytes differ from real writer", readErr)
+					}
+				}
+				if real.Converged != applied || real.State == nil || real.Destination == nil || real.Destination.Exists != applied || (real.State.Baseline != "") != applied || (real.State.Receipt != "") != applied {
+					t.Fatal("incoherent protected phase", applied)
+				}
+			}
+		})
+	}
 }

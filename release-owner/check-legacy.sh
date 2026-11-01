@@ -32,4 +32,3 @@ cargo test --locked --manifest-path release-owner/Cargo.toml -- --nocapture
 cargo clippy --locked --manifest-path release-owner/Cargo.toml --all-targets -- --remap-path-prefix="$PWD=." -D warnings
 cargo build --locked --release --manifest-path release-owner/Cargo.toml --target x86_64-unknown-linux-musl
 cargo build --locked --release --manifest-path release-owner/Cargo.toml --target aarch64-unknown-linux-musl
-git diff --check

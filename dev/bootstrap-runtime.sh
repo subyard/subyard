@@ -387,6 +387,9 @@ if [ "$existing_runtime" = 0 ] || [ ! -d "$CONFIG_HOME" ]; then
   install -d -m 0700 "$CONFIG_HOME"
 fi
 unset SUBYARD_INSTALL_ENTRYPOINTS SUBYARD_INSTALL_VERIFIED_HELPER
+ensure_directory "$DATA_HOME"
+validate_data_directory \
+  || { printf 'bootstrap-runtime: unsafe installation data directory\n' >&2; exit 1; }
 if [ "$run_transition" = 1 ]; then
   transition_arguments=(update --runtime-root "$RUNTIME_ROOT" --version "$VERSION" --offline)
   transition_environment=(

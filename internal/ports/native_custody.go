@@ -1,6 +1,10 @@
 package ports
 
-import "context"
+import (
+	"context"
+	"errors"
+	"os"
+)
 
 // NativeResourceGeneration names a fixed owning component resource role. The
 // owning component binds the actual resource path; callers cannot supply it.
@@ -52,22 +56,45 @@ type NativeOwnerMember struct {
 
 // NativeOwnerRestorationObserver records an owning rename result, not native
 // quiescence. Missing or conflicting results never confer retry authority.
+// ErrNativeOwnerRestorationAbsent identifies only an absent restoration leaf
+// after the original intent, acceptance and facts directory were validated.
+var ErrNativeOwnerRestorationAbsent = errors.New("original owner restoration leaf absent")
+
 type NativeOwnerRestorationObserver interface {
 	RecordOwnerRestoration(token, source string, member NativeOwnerMember) error
 	ReadOwnerRestoration(token, source string) (NativeOwnerMember, error)
 }
 
 // NativeOperationFailure is returned only after the exact accepted operation has
-// a durably recorded final failure/cancellation. It proves that operation closed;
+// a durably recorded final failure/cancellation, or the owning synchronous
+// config CAS has an exact success-status operation plus a nonzero command exit
+// after stream drain.
+// It proves that operation closed;
 // an arbitrary transport or component error provides no such proof.
 type NativeOperationFailure struct {
 	Operation NativeOperation
-	Cause     error
+	// ExecExitCode is an error-only witness from the owning config CAS SDK leaf after
+	// exact remote status200 and stream drain. It is never request or wire data.
+	ExecExitCode *int
+	Cause        error
 }
 
 func (e *NativeOperationFailure) Error() string { return "native operation failed: " + e.Cause.Error() }
 func (e *NativeOperationFailure) Unwrap() error { return e.Cause }
 
+// WithNativeSynchronousConfigCAS scopes only the compiled synchronous Python
+// configs-write call under checked original-current materialized-files custody.
+// It is not request data and grants no authority to shell commands or hooks.
+func WithNativeSynchronousConfigCAS(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeSynchronousConfigCASKey{}, true)
+}
+
+func NativeSynchronousConfigCASFrom(ctx context.Context) bool {
+	value, _ := ctx.Value(nativeSynchronousConfigCASKey{}).(bool)
+	return value
+}
+
+type nativeSynchronousConfigCASKey struct{}
 type nativeOperationObserverKey struct{}
 type nativeInvocationKey struct{}
 type nativeOwnerHomeKey struct{}
@@ -100,4 +127,89 @@ func NativeOperationObserverFrom(ctx context.Context) NativeOperationObserver {
 // read-only probe. Expected drift from that probe is not an unknown mutation.
 func WithoutNativeOperationObserver(ctx context.Context) context.Context {
 	return context.WithValue(ctx, nativeOperationObserverKey{}, false)
+}
+
+// NativeSelfExecutable is the admitted helper's retained executable image.
+// Implementations compute the digest from their own image, never request data.
+type NativeSelfExecutable interface {
+	Borrow() (*os.File, string, error)
+}
+type nativeSelfExecutableKey struct{}
+
+func WithNativeSelfExecutable(ctx context.Context, executable NativeSelfExecutable) context.Context {
+	return context.WithValue(ctx, nativeSelfExecutableKey{}, executable)
+}
+func NativeSelfExecutableFrom(ctx context.Context) NativeSelfExecutable {
+	value, _ := ctx.Value(nativeSelfExecutableKey{}).(NativeSelfExecutable)
+	return value
+}
+
+// Preparation carries an executable proof only, never mutation admission.
+type nativePreparationExecutableKey struct{}
+
+func WithNativePreparationExecutable(ctx context.Context, image NativeSelfExecutable) context.Context {
+	if image == nil {
+		return context.WithValue(ctx, nativePreparationExecutableKey{}, false)
+	}
+	return context.WithValue(ctx, nativePreparationExecutableKey{}, image)
+}
+func NativePreparationExecutableFrom(ctx context.Context) NativeSelfExecutable {
+	v, _ := ctx.Value(nativePreparationExecutableKey{}).(NativeSelfExecutable)
+	return v
+}
+
+type nativeInteractionKey struct{}
+
+func WithNativeInteraction(ctx context.Context, file *os.File) context.Context {
+	return context.WithValue(ctx, nativeInteractionKey{}, file)
+}
+func NativeInteractionFrom(ctx context.Context) *os.File {
+	v, _ := ctx.Value(nativeInteractionKey{}).(*os.File)
+	return v
+}
+
+type nativeSourceDirectoryKey struct{}
+
+func WithNativeSourceDirectory(ctx context.Context, directory string) context.Context {
+	return context.WithValue(ctx, nativeSourceDirectoryKey{}, directory)
+}
+func NativeSourceDirectory(ctx context.Context) string {
+	v, _ := ctx.Value(nativeSourceDirectoryKey{}).(string)
+	return v
+}
+
+// NativeCheckedInvocation exposes only the canonical intent already admitted by
+// the original observer. It adds no transport field or ambient mutation grant.
+type NativeCheckedInvocation interface {
+	CheckedInvocation() (intentDigest, sourceRecipeDigest string, err error)
+}
+
+// NativeHostPowerInstallation is original producer provenance, never invocation
+// closure or permission to select a later matching installation.
+type NativeHostPowerConsumer struct {
+	EngineDigest    string                     `json:"engineDigest"`
+	UnitDigest      string                     `json:"unitDigest"`
+	ContractsDigest string                     `json:"contractsDigest"`
+	FilesDigest     string                     `json:"filesDigest"`
+	Generations     []NativeResourceGeneration `json:"generations"`
+}
+type NativeHostPowerIdentity struct {
+	Role   string `json:"role"`
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+type NativeHostPowerInstallation struct {
+	Producer   string                    `json:"producer"`
+	Intent     string                    `json:"intent"`
+	Recipe     string                    `json:"recipe"`
+	Source     string                    `json:"source"`
+	HostSource string                    `json:"hostSource"`
+	Output     string                    `json:"output"`
+	Command    uint64                    `json:"command"`
+	Consumer   NativeHostPowerConsumer   `json:"consumer"`
+	Identities []NativeHostPowerIdentity `json:"identities"`
+}
+type NativeHostPowerInstallationObserver interface {
+	RecordHostPowerInstallation(uint64, NativeHostPowerInstallation) (NativeHostPowerInstallation, error)
+	ReadHostPowerInstallation(string) (*NativeHostPowerInstallation, error)
 }

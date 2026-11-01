@@ -28,7 +28,7 @@ func (runtime Runtime) BindAfterOwnerRuntimeSources(ctx context.Context, raw []b
 	}
 	r.AfterOwner = nil
 	base, _ := json.Marshal(r)
-	p, err := runtime.BindInstalledRuntimeContext(ctx, base)
+	p, err := runtime.bindInstalledRuntimeRecord(ctx, r, base)
 	if err != nil {
 		return nil, err
 	}

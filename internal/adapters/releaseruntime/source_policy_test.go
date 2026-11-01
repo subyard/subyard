@@ -20,7 +20,11 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 	}{
 		{"last V1", "0.10.0", "", false, false, false},
 		{"low version with V2 registry", "0.10.0", "", true, false, false},
-		{"inclusive floor", "0.11.0", "", true, false, true},
+		{"previous floor", "0.11.0", "", true, false, false},
+		{"last bridge source", "0.21.0", "", true, false, false},
+		{"floor prerelease", "0.22.0-rc.1", "", true, false, false},
+		{"inclusive floor", "0.22.0", "", true, false, true},
+		{"newer source", "1.0.0", "", true, false, true},
 		{"missing provenance", "0.11.0", "", false, false, false},
 		{"unparseable source", "development", "", true, false, false},
 		{"fresh development bootstrap", "development", "", true, true, true},
@@ -39,7 +43,8 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 			}
 			release := scenario.version + "-aaaaaaaaaaaa"
 			candidate := filepath.Join(runtimeRoot, "releases", release)
-			engine := []byte("#!/bin/sh\nprintf 'yard-engine " + scenario.version + "\\n'\n")
+			unexpected := filepath.Join(root, "unexpected-engine-call")
+			engine := []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'yard-engine " + scenario.version + "\\n'; else touch '" + unexpected + "'; exit 99; fi\n")
 			write(filepath.Join(candidate, "bin", "yard-engine"), engine, 0o700)
 			manifest := fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(engine))
 			if scenario.registry {
@@ -65,8 +70,38 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 			if (err == nil) != scenario.allowed {
 				t.Fatalf("source policy allowed=%t: %v", scenario.allowed, err)
 			}
-			if !scenario.allowed && !strings.Contains(err.Error(), "uninstall --full") {
-				t.Fatalf("missing removal guidance: %v", err)
+			if !scenario.allowed {
+				wanted := LegacyReinstallGuidance
+				switch scenario.version {
+				case "0.11.0", "0.21.0", "0.22.0-rc.1":
+					wanted = SourceBridgeGuidance
+				}
+				if scenario.name == "missing provenance" {
+					wanted = "source release has invalid or missing V2 registry provenance"
+				}
+				if err.Error() != wanted {
+					t.Fatalf("unexpected source guidance: %v", err)
+				}
+				if wanted == SourceBridgeGuidance && strings.Contains(err.Error(), "uninstall") {
+					t.Fatal("bridge guidance requested removal")
+				}
+				for _, selection := range [][]string{{"--check", "--version", "1.0.0"}, {"--rollback"}} {
+					runtime := New(Config{Context: RuntimeContext{RuntimeRoot: runtimeRoot, OperatorHome: root, DataHome: filepath.Join(root, "data"), ConfigHome: configHome}})
+					_, refused := runtime.PrepareTransition(context.Background(), selection, configHome, "default")
+					runtime.Close()
+					if refused == nil || refused.Error() != wanted {
+						t.Fatalf("fresh frontend selection bypassed source policy: %v", refused)
+					}
+				}
+				if _, err := os.Lstat(unexpected); !os.IsNotExist(err) {
+					t.Fatal("refused source invoked a transition engine")
+				}
+				if scenario.history != "" {
+					body, err := os.ReadFile(filepath.Join(configHome, scenario.history))
+					if err != nil || string(body) != "{}\n" {
+						t.Fatal("source refusal changed retained history", err)
+					}
+				}
 			}
 		})
 	}

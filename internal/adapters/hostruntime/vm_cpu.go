@@ -13,6 +13,22 @@ import (
 	"time"
 )
 
+type vmCPUOwnerStdinKey struct{}
+
+// WithVMCPUOwnerStdin carries an owner descriptor already validated after
+// privilege entry. Mutators inherit it and their enclosing helper's group.
+func WithVMCPUOwnerStdin(ctx context.Context, owner *os.File) context.Context {
+	return context.WithValue(ctx, vmCPUOwnerStdinKey{}, owner)
+}
+func vmCPUCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
+	if owner, _ := ctx.Value(vmCPUOwnerStdinKey{}).(*os.File); owner != nil {
+		command.Stdin = owner
+		command.WaitDelay = 2 * time.Second
+	}
+	return command
+}
+
 // VMCPUWeight moves only the verified QEMU process into a root-slice scope.
 // A task nice value cannot raise its share against sibling container cgroups.
 // Leaving an ancestor with aggregate limits would bypass those limits, so such
@@ -20,13 +36,13 @@ import (
 func VMCPUWeight(ctx context.Context, pid int64, uuid string, weight int, apply bool) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	source, err := exec.CommandContext(ctx, "systemctl", "show", "incus.service", "--property=ControlGroup", "--value").Output()
+	source, err := vmCPUCommand(ctx, "systemctl", "show", "incus.service", "--property=ControlGroup", "--value").Output()
 	if err != nil {
 		return false, errors.New("cannot inspect the Incus service cgroup")
 	}
 	return vmCPUWeight(ctx, "/proc", "/sys/fs/cgroup", strings.TrimSpace(string(source)), pid, uuid, weight, apply,
 		func(ctx context.Context, name string, args ...string) error {
-			output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+			output, err := vmCPUCommand(ctx, name, args...).CombinedOutput()
 			if err != nil {
 				if len(output) > 2048 {
 					output = output[:2048]

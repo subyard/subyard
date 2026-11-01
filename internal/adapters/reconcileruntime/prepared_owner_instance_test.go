@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,6 +18,67 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestOwnerInitProjectionPreparesWhileOriginalSSHProxyStillListens(t *testing.T) {
+	for _, bind := range []string{"host", "omitted", "instance", "guest", "container", "foreign"} {
+		t.Run(bind, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			runtime, fake := ownerInstanceProjectionFixture()
+			runtime.Yard.SSHPort = listener.Addr().(*net.TCPAddr).Port
+			runtime.Environment = append(runtime.Environment, "MIN_DISK_GIB=0")
+			i := fake.Reconcile.Instance
+			i.Status = "Running"
+			i.LocalDevices = map[string]map[string]string{"ssh": {"type": "proxy", "listen": "tcp:127.0.0.1:" + strconv.Itoa(runtime.Yard.SSHPort), "connect": "tcp:127.0.0.1:22"}}
+			if bind != "omitted" {
+				i.LocalDevices["ssh"]["bind"] = bind
+			}
+			originalDevice := maps.Clone(i.LocalDevices["ssh"])
+			fake.Reconcile.Instance = i
+			fake.Instances[i.Project+"/"+i.Name] = i
+			p, err := runtime.PrepareOwnerInitProjection(context.Background(), fake.Reconcile, fake.TeardownResources)
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := runtime.OwnerInitPlanningView(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAllowed := bind == "host" || bind == "omitted"
+			if err := view.Preflight(context.Background(), false); (err == nil) != wantAllowed {
+				t.Fatalf("legacy recreation preflight allowed=%t: %v", wantAllowed, err)
+			}
+			canonical := runtime
+			canonical.Yard.YardName = "test-yard"
+			canonical.Yard.IncusProject = "subyard-test-yard"
+			canonical.Yard.YardInstanceName = "yard-test-yard"
+			canonical, err = canonical.OwnerInitPortReleaseView(runtime, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := canonical.Preflight(context.Background(), false); (err == nil) != wantAllowed {
+				t.Fatalf("absent canonical preflight allowed=%t: %v", wantAllowed, err)
+			}
+			if !reflect.DeepEqual(i.LocalDevices["ssh"], originalDevice) {
+				t.Fatal("planning normalized the original native device map")
+			}
+			if !wantAllowed {
+				return
+			}
+			if err := view.WithoutOwnerInitPortRelease().Preflight(context.Background(), false); err == nil {
+				t.Fatal("planning exception survived its removal")
+			}
+			i.Config = map[string]string{"volatile.uuid": "foreign"}
+			fake.Instances[i.Project+"/"+i.Name] = i
+			if err := canonical.Preflight(context.Background(), false); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("changed original UUID admitted: %v", err)
+			}
+		})
+	}
+}
 
 func ownerInstanceProjectionFixture() (Runtime, *testkit.Incus) {
 	i := ports.InstanceInfo{Name: "yard-e2e-yard", Project: "subyard-e2e-yard", Config: map[string]string{"volatile.uuid": "original-uuid", "external": "source-\xff"}, LocalConfig: map[string]string{}, Devices: map[string]map[string]string{}}

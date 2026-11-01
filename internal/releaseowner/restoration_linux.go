@@ -93,6 +93,9 @@ func (o *invocationObserver) ReadOwnerRestoration(token, source string) (ports.N
 	}
 	defer unix.Close(directory)
 	raw, err := readFactAt(directory, factName(o.binding.Ordinal, "restoration"))
+	if errors.Is(err, unix.ENOENT) {
+		return ports.NativeOwnerMember{}, errors.Join(ports.ErrNativeOwnerRestorationAbsent, err)
+	}
 	if err != nil {
 		return ports.NativeOwnerMember{}, err
 	}

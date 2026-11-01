@@ -31,6 +31,8 @@ mod owner_cleanup;
 mod owner_publication;
 pub mod plan;
 mod prepared_payload;
+mod program;
+mod program_execution;
 pub mod record;
 pub mod recovery;
 mod reducer;
@@ -41,6 +43,10 @@ pub mod source_admission;
 pub mod source_query;
 mod source_v1;
 pub mod store;
+#[path = "../../config/profiles/test-vms/release_owner.rs"]
+mod test_vm_owner;
+#[path = "../../config/profiles/test-vms/release_settings.rs"]
+mod test_vm_settings;
 pub mod wire;
 mod work;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

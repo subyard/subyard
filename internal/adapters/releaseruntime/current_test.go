@@ -28,10 +28,12 @@ func TestCurrentTransitionCheckPreservesValidatedOwnerConsequences(t *testing.T)
 		"yard default: requested coding integrations [fixture], effective [fixture], from Git settings (host scope)",
 		"yard named: requested coding integrations [], effective [], from local overrides (yard scope)",
 	}
-	for _, asJSON := range []bool{false, true} {
-		t.Run(fmt.Sprintf("json=%t", asJSON), func(t *testing.T) {
+	for _, test := range []struct{ asJSON, journalAppears bool }{{false, false}, {true, false}, {true, true}} {
+		asJSON := test.asJSON
+		t.Run(fmt.Sprintf("json=%t/journal-appears=%t", asJSON, test.journalAppears), func(t *testing.T) {
 			fixture := newCurrentProcessFixture(t)
 			calls := filepath.Join(filepath.Dir(fixture.runtimeRoot), "inspection-requests.jsonl")
+			rootCapture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "inspection-root")
 			response := releasetransition.ProcessResponse{
 				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, ActivationReconciliationOwned: true,
 				Inspection: &releasetransition.Inspection{
@@ -49,7 +51,15 @@ func TestCurrentTransitionCheckPreservesValidatedOwnerConsequences(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine 0.11.2\\n' ;;\n _release-transition) cat >> %q; printf '%%s\\n' %q ;;\n *) exit 64 ;;\nesac\n", calls, payload)
+			extra := ""
+			if test.journalAppears {
+				path := filepath.Join(fixture.configHome, "release-transition/v2/journal.json")
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				extra = fmt.Sprintf("umask 077; printf '{}\\n' > %q; ", path)
+			}
+			engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine 0.11.2\\n' ;;\n _release-transition) cat >> %q; printf '%%s\\n' \"$SUBYARD_REPOSITORY_ROOT\" > %q; %sprintf '%%s\\n' %q ;;\n *) exit 64 ;;\nesac\n", calls, rootCapture, extra, payload)
 			testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "bin/yard-engine"), []byte(engine), 0o700)
 			manifest := fmt.Sprintf("%s  ./bin/yard-engine\n%s  ./config/release-transition.json\n", v0111FixtureFingerprintBytes([]byte(engine)), v0111FixtureFingerprintBytes(fixture.registry))
 			testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600)
@@ -59,6 +69,18 @@ func TestCurrentTransitionCheckPreservesValidatedOwnerConsequences(t *testing.T)
 			runtime := New(Config{Inputs: fixtureCommandInputs(environment), Installer: "/missing-installer",
 				Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{Transport: currentNoNetwork{t}}})
 			defer runtime.Close()
+			var callerPin *os.File
+			if asJSON && !test.journalAppears {
+				source, err := runtime.verifyPublishedCandidate(context.Background(), fixture.source, fixture.runtimeRoot, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer source.Close()
+				if err := runtime.pinCandidateRoot(source); err != nil {
+					t.Fatal(err)
+				}
+				callerPin = runtime.pinnedCandidateRoot
+			}
 			before, err := runtime.readCurrentSnapshot(fixture.runtimeRoot, fixture.configHome)
 			if err != nil {
 				t.Fatal(err)
@@ -68,6 +90,27 @@ func TestCurrentTransitionCheckPreservesValidatedOwnerConsequences(t *testing.T)
 				arguments = append(arguments, "--json")
 			}
 			prepared, err := runtime.PrepareCurrentTransition(context.Background(), arguments, fixture.configHome, "recovery-yard")
+			if callerPin != nil {
+				if _, pinErr := callerPin.Stat(); pinErr != nil {
+					t.Fatal("report closed the caller's retained source root", pinErr)
+				}
+			}
+			reportRoot := strings.TrimSpace(string(mustReadFile(t, rootCapture)))
+			if !strings.HasPrefix(reportRoot, fmt.Sprintf("/proc/%d/fd/", os.Getpid())) {
+				t.Fatal("report did not use an exact retained parent root")
+			}
+			if _, pinErr := os.Stat(reportRoot); !errors.Is(pinErr, os.ErrNotExist) {
+				t.Fatal("report retained its temporary source root descriptor", pinErr)
+			}
+			if test.journalAppears {
+				if !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatal("appearing journal was accepted", err)
+				}
+				if _, statErr := os.Stat(filepath.Join(fixture.configHome, "release-transition/v2/journal.json")); statErr != nil {
+					t.Fatal("journal race did not occur", statErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("synthetic owner check: %v (cause: %v)", err, errors.Unwrap(err))
 			}

@@ -9,8 +9,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"io"
 	"os"
@@ -54,6 +54,16 @@ type Context struct {
 	Root                   Identity                                `json:"root"`
 	Repository             Identity                                `json:"repository"`
 	PhysicalRepositoryRoot string                                  `json:"-"`
+	PreparationExecutable  ports.NativeSelfExecutable              `json:"-"`
+	Interaction            *os.File                                `json:"-"`
+	InheritedSettingIDs    []string                                `json:"inheritedSettingIds,omitempty"`
+	CommandOverrides       []CommandOverride                       `json:"commandOverrides,omitempty"`
+}
+
+type CommandOverride struct {
+	Name    string `json:"name"`
+	Present bool   `json:"present"`
+	Value   []byte `json:"value"`
 }
 type Binding struct {
 	Session     string `json:"session"`
@@ -128,14 +138,77 @@ type PreparedSettings struct {
 	Source         string         `json:"source"`
 	Inputs         []InputBinding `json:"inputs"`
 }
-type OwnerBefore struct {
-	State          string `json:"state"`
-	Registration   string `json:"registration"`
-	Overrides      string `json:"overrides"`
-	Controller     string `json:"controller"`
-	SharedImages   bool   `json:"sharedImages"`
-	PreparedRecipe string `json:"preparedRecipe,omitempty"`
+
+// CompleteSourceReference is an original read-only source fact, never a grant.
+type CompleteSourceReference struct {
+	Transaction     string `json:"transaction"`
+	JournalDigest   string `json:"journalDigest"`
+	MetadataBinding string `json:"metadataBinding"`
 }
+
+func (r *CompleteSourceReference) Valid() bool {
+	return r != nil && domain.SafeID(r.Transaction) && len(r.Transaction) <= 128 && fingerprint(r.JournalDigest) && fingerprint(r.MetadataBinding)
+}
+
+type OwnerBefore struct {
+	State          string        `json:"state"`
+	Registration   string        `json:"registration"`
+	Overrides      string        `json:"overrides"`
+	Controller     string        `json:"controller"`
+	SharedImages   bool          `json:"sharedImages"`
+	PreparedRecipe string        `json:"preparedRecipe,omitempty"`
+	Capture        *OwnerCapture `json:"capture,omitempty"`
+}
+type OwnerCapture struct {
+	Instance string `json:"instance"`
+}
+type OwnerAction struct {
+	Operation string `json:"operation"`
+	Slot      uint64 `json:"slot"`
+}
+type OwnerActionReference struct {
+	Group   Binding     `json:"group"`
+	Program string      `json:"program"`
+	Index   uint64      `json:"index"`
+	Action  OwnerAction `json:"action"`
+}
+
+func (a *OwnerActionReference) valid(binding Binding) bool {
+	if a == nil || !bindingValid(&a.Group) || !bindingValid(&binding) || a.Index >= 64 || !fingerprint(a.Program) {
+		return false
+	}
+	scope := binding
+	scope.Ordinal = a.Group.Ordinal
+	if scope != a.Group {
+		return false
+	}
+	switch a.Action.Operation {
+	case "project", "init":
+		return a.Action.Slot < 3
+	case "teardown", "check":
+		return a.Action.Slot < 2
+	case "power", "start", "check-lease":
+		return a.Action.Slot == 1
+	case "restore-stopped":
+		return a.Action.Slot == 1 || a.Action.Slot == 2
+	case "verify-compensated":
+		return a.Action.Slot < 3
+	case "validate-original", "publish-registration", "remove-empty-flat", "move-overrides", "archive-registration", "archive-controller", "restore-registration", "restore-overrides", "park-current-registration", "verify-desired":
+		return a.Action.Slot == 0
+	}
+	return false
+}
+func (a *OwnerActionReference) sameProgram(b *OwnerActionReference) bool {
+	return a != nil && b != nil && a.Group == b.Group && a.Program == b.Program
+}
+func localOwnerAction(operation string) bool {
+	switch operation {
+	case "validate-original", "check", "check-lease", "publish-registration", "remove-empty-flat", "move-overrides", "archive-registration", "archive-controller", "restore-registration", "restore-overrides", "park-current-registration", "verify-compensated", "verify-desired":
+		return true
+	}
+	return false
+}
+
 type Target struct {
 	PreparedRecipe  string `json:"preparedRecipe,omitempty"`
 	AfterOwner      string `json:"afterOwner,omitempty"`
@@ -172,32 +245,36 @@ type Terminal struct {
 	Observed     string                  `json:"observed"`
 }
 type Request struct {
-	Producer             *Binding              `json:"producer,omitempty"`
-	OriginalV1           *OriginalV1Checkpoint `json:"originalV1,omitempty"`
-	LegacyRust           bool                  `json:"legacyRust,omitempty"`
-	RecipeHash           string                `json:"recipeHash,omitempty"`
-	Offset               uint64                `json:"offset,omitempty"`
-	Total                uint64                `json:"total,omitempty"`
-	Content              string                `json:"content,omitempty"`
-	Fresh                bool                  `json:"fresh,omitempty"`
-	Resolved             bool                  `json:"resolved,omitempty"`
-	IngressBinding       *IngressBinding       `json:"bindingIngress,omitempty"`
-	Step                 *IngressStep          `json:"step,omitempty"`
-	Op                   string                `json:"op"`
-	Session              string                `json:"session,omitempty"`
-	Yard                 string                `json:"yard,omitempty"`
-	Context              *Context              `json:"context,omitempty"`
-	Binding              *Binding              `json:"binding,omitempty"`
-	Update               *Identity             `json:"update,omitempty"`
-	Owner                json.RawMessage       `json:"owner,omitempty"`
-	Edits                []Edit                `json:"edits,omitempty"`
-	Recipe               *SettingsRecipe       `json:"recipe,omitempty"`
-	Target               *Target               `json:"target,omitempty"`
-	Before               *OwnerBefore          `json:"before,omitempty"`
-	Token                string                `json:"token,omitempty"`
-	Successor            string                `json:"successor,omitempty"`
-	RollbackRepositories *RollbackRepositories `json:"rollbackRepositories,omitempty"`
-	TargetOwners         []string              `json:"targetOwners,omitempty"`
+	CompleteSource       *CompleteSourceReference `json:"completeSource,omitempty"`
+	Producer             *Binding                 `json:"producer,omitempty"`
+	Action               *OwnerActionReference    `json:"action,omitempty"`
+	ProducerAction       *OwnerActionReference    `json:"producerAction,omitempty"`
+	RetainedOnly         bool                     `json:"retainedOnly,omitempty"`
+	OriginalV1           *OriginalV1Checkpoint    `json:"originalV1,omitempty"`
+	LegacyRust           bool                     `json:"legacyRust,omitempty"`
+	RecipeHash           string                   `json:"recipeHash,omitempty"`
+	Offset               uint64                   `json:"offset,omitempty"`
+	Total                uint64                   `json:"total,omitempty"`
+	Content              string                   `json:"content,omitempty"`
+	Fresh                bool                     `json:"fresh,omitempty"`
+	Resolved             bool                     `json:"resolved,omitempty"`
+	IngressBinding       *IngressBinding          `json:"bindingIngress,omitempty"`
+	Step                 *IngressStep             `json:"step,omitempty"`
+	Op                   string                   `json:"op"`
+	Session              string                   `json:"session,omitempty"`
+	Yard                 string                   `json:"yard,omitempty"`
+	Context              *Context                 `json:"context,omitempty"`
+	Binding              *Binding                 `json:"binding,omitempty"`
+	Update               *Identity                `json:"update,omitempty"`
+	Owner                json.RawMessage          `json:"owner,omitempty"`
+	Edits                []Edit                   `json:"edits,omitempty"`
+	Recipe               *SettingsRecipe          `json:"recipe,omitempty"`
+	Target               *Target                  `json:"target,omitempty"`
+	Before               *OwnerBefore             `json:"before,omitempty"`
+	Token                string                   `json:"token,omitempty"`
+	Successor            string                   `json:"successor,omitempty"`
+	RollbackRepositories *RollbackRepositories    `json:"rollbackRepositories,omitempty"`
+	TargetOwners         []string                 `json:"targetOwners,omitempty"`
 }
 type RollbackRepository struct {
 	Release        string   `json:"release"`
@@ -250,13 +327,11 @@ type Components interface {
 	CaptureInventory(context.Context) ([]string, []string, error)
 	CaptureYard(context.Context, string, bool) (YardSettings, error)
 	PrepareSettings(context.Context, string, []Edit) (PreparedSettings, error)
-	CaptureOwner(context.Context) (OwnerBefore, error)
+	CaptureOwner(context.Context, *CompleteSourceReference) (OwnerBefore, error)
 	CaptureActivation(context.Context, string, bool) ([]Target, error)
 	ObserveSettings(context.Context, SettingsRecipe) (string, error)
 	CaptureSettings(context.Context, SettingsRecipe) (string, error)
-	ProjectSettings(context.Context, SettingsRecipe, []Edit) (string, error)
 	ApplySettings(context.Context, SettingsRecipe) error
-	ApplyOwner(context.Context, OwnerBefore, string) error
 	ApplyActivation(context.Context, Target) error
 	Close() error
 }
@@ -269,10 +344,20 @@ type OwnerArchiveCleaner interface {
 	CleanupOwner(context.Context, OwnerBefore, string) error
 }
 
+// OwnerObservationReader captures registration facts without preparing children
+// or replacing any retained preparation. It never grants effect authority.
+type OwnerObservationReader interface {
+	CaptureOwnerObservation(context.Context) (OwnerBefore, error)
+}
+
 // OwnerProgressReader observes only the original component preparation and
 // recovery token. It never prepares a replacement owner plan or submits effects.
 type OwnerProgressReader interface {
 	ObserveOwner(context.Context, OwnerBefore, string) (string, error)
+}
+type PreparedOwnerActions interface {
+	ApplyOwnerAction(context.Context, OwnerBefore, string, OwnerActionReference) error
+	ObserveOwnerAction(context.Context, OwnerBefore, string, OwnerActionReference) (string, error)
 }
 
 // ActivationProjector retains the owning component's original prospective
@@ -383,18 +468,11 @@ func watchNativeOwner(input *os.File, done <-chan struct{}, cancel context.Cance
 // operations. A malformed frame terminates the helper; every received FD is
 // closed on refusal. Session.Close drains component work before lease closure.
 func Serve(ctx context.Context, input *os.File, output io.Writer, factory Factory) error {
-	image, err := os.Open("/proc/self/exe")
+	image, err := retainSelfExecutable()
 	if err != nil {
 		return err
 	}
-	hasher := sha256.New()
-	size, err := io.Copy(hasher, io.LimitReader(image, (128<<20)+1))
-	image.Close()
-	if err != nil || size > 128<<20 {
-		return errors.New("native image bound")
-	}
-	imageDigest := fmt.Sprintf("%x", hasher.Sum(nil))
-	session := &session{factory: factory, image: imageDigest}
+	session := &session{factory: factory, image: image.digest, self: image}
 	nativeContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan struct{})

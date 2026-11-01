@@ -15,7 +15,7 @@ type originalOwnerProgress struct {
 	calls  int
 }
 
-func (f *originalOwnerProgress) CaptureOwner(context.Context) (OwnerBefore, error) {
+func (f *originalOwnerProgress) CaptureOwner(context.Context, *CompleteSourceReference) (OwnerBefore, error) {
 	panic("owner progress must not prepare a replacement")
 }
 func (f *originalOwnerProgress) ObserveOwner(_ context.Context, before OwnerBefore, token string) (string, error) {

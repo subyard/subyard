@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import signal
 import stat
@@ -33,6 +34,11 @@ PROBES = {
                   '--format', '{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}|{{.State.ExitCode}}',
                   'amnezia-awg2'],
     'console': ['incus', 'console', INSTANCE, '--project', PROJECT, '--show-log'],
+    'qmp-log': ['incus', 'query', f'/1.0/instances/{INSTANCE}/logs/qemu.qmp.log?project={PROJECT}'],
+    'info-log': ['incus', 'info', '--show-log', INSTANCE, '--project', PROJECT],
+    'incus-journal': ['journalctl', '-u', 'incus.service', '-b', '--no-pager', '-n', '100', '-o', 'short-monotonic'],
+    'image-facts': [sys.executable, str(Path(__file__).resolve()), 'image-facts'],
+    'cpu-runtime': [sys.executable, str(Path(__file__).resolve()), 'cpu-runtime'],
     'owner-memory': ['free', '-b'],
     'owner-power': ['systemctl', 'show', 'subyard-power-reconcile.service', '-p', 'LoadState',
                     '-p', 'ActiveState', '-p', 'SubState', '-p', 'Result', '-p', 'ExecMainStatus', '-p', 'NRestarts'],
@@ -46,6 +52,85 @@ MEMBERS = sorted(['result.json', *[name + suffix for name in PROBES for suffix i
 
 def child_limits():
     resource.setrlimit(resource.RLIMIT_FSIZE, (LIMIT, LIMIT))
+
+
+def read_bounded(path):
+    with Path(path).open('rb') as source:
+        body = source.read(LIMIT + 1)
+    if len(body) > LIMIT:
+        raise ValueError('diagnostic input exceeds bound')
+    return body
+
+
+def query_json(path):
+    # The temporary output and native RLIMIT bound nested Incus responses too.
+    with tempfile.TemporaryFile(dir='/tmp') as output:
+        os.fchmod(output.fileno(), 0o600)
+        subprocess.run(['incus', 'query', path], stdin=subprocess.DEVNULL, stdout=output,
+                       stderr=subprocess.DEVNULL, timeout=3, check=True, preexec_fn=child_limits)
+        output.seek(0)
+        body = output.read(LIMIT + 1)
+        if len(body) > LIMIT:
+            raise ValueError('diagnostic response exceeds bound')
+        return json.loads(body)
+
+
+def image_facts():
+    instance = query_json(f'/1.0/instances/{INSTANCE}?project={PROJECT}')
+    config = instance.get('config', {})
+    fingerprint = config.get('volatile.base_image', '')
+    facts = dict(architecture=instance.get('architecture') if instance.get('architecture') in ('x86_64', 'aarch64') else None,
+                 type=instance.get('type') if instance.get('type') in ('virtual-machine', 'container') else None,
+                 base_fingerprint=fingerprint if re.fullmatch('[a-f0-9]{64}', fingerprint) else None)
+    if facts['base_fingerprint']:
+        try:
+            image = query_json('/1.0/images/' + fingerprint + '?project=default')
+            public = lambda value: value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9 .:/+_-]{0,128}', value) else None
+            facts['image'] = {key: public(image.get(key)) for key in ('fingerprint', 'architecture', 'created_at', 'uploaded_at')}
+            facts['properties'] = {key: public(image.get('properties', {}).get(key))
+                                   for key in ('os', 'release', 'architecture', 'serial')}
+        except (OSError, ValueError, subprocess.SubprocessError):
+            facts['image_lookup'] = 'unavailable'
+    return facts
+
+
+def cpu_runtime():
+    instance = query_json(f'/1.0/instances/{INSTANCE}?project={PROJECT}')
+    state = query_json(f'/1.0/instances/{INSTANCE}/state?project={PROJECT}')
+    pid = state.get('pid')
+    if type(pid) is not int or pid <= 1 or instance.get('type') != 'virtual-machine':
+        return dict(status=instance.get('status'), pid=pid, qemu='unavailable')
+    uuid = instance.get('config', {}).get('volatile.uuid', '')
+    if not re.fullmatch('[a-fA-F0-9-]{1,64}', uuid):
+        raise ValueError('QEMU UUID missing')
+    proc = Path('/proc') / str(pid)
+    before = read_bounded(proc / 'stat')
+    arguments = read_bounded(proc / 'cmdline').split(b'\0')
+    if (not arguments or not Path(os.fsdecode(arguments[0])).name.startswith('qemu-system-') or
+            b'-uuid' not in arguments or arguments[arguments.index(b'-uuid') + 1] != uuid.encode()):
+        raise ValueError('QEMU identity changed')
+    cgroup = read_bounded(proc / 'cgroup').decode().splitlines()
+    unified = [line[3:] for line in cgroup if line.startswith('0::')]
+    if len(unified) != 1 or not re.fullmatch(r'/[A-Za-z0-9_.@:/-]{1,512}', unified[0]) or '..' in unified[0].split('/'):
+        raise ValueError('QEMU cgroup unavailable')
+    weight = read_bounded(Path('/sys/fs/cgroup' + unified[0]) / 'cpu.weight').decode().strip()
+    after = read_bounded(proc / 'stat')
+    if (not weight.isdecimal() or not 1 <= int(weight) <= 10000 or
+            before.rsplit(b')', 1)[1].split()[19] != after.rsplit(b')', 1)[1].split()[19]):
+        raise ValueError('QEMU identity or CPU weight changed')
+    return dict(pid=pid, uuid=uuid, starttime=before.rsplit(b')', 1)[1].split()[19].decode(),
+                cgroup=unified[0], scope=unified[0].rsplit('/', 1)[-1], cpu_weight=int(weight))
+
+
+def redact_diagnostic_log(body):
+    text = body[:LIMIT].decode('utf-8', errors='replace')
+    text = re.sub(r'-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-\n]*PRIVATE KEY-----|\Z)',
+                  '[redacted-private-key]', text)
+    # These new logs are diagnostic only: discard entire credential-shaped lines.
+    text = re.sub(r'(?im)^.*(?:password|passwd|token|secret|credential|authorization|private[-_ ]?key|api[-_ ]?key|user\.user[-_]data).*$',
+                  '[redacted-credential-line]', text)
+    text = re.sub(r'https?://[^\s"<>]+', '[redacted-url]', text)
+    return text.encode()[:LIMIT]
 
 
 def collect():
@@ -85,11 +170,15 @@ def collect():
             finally:
                 for output in files:
                     output.close()
+            raw_sizes = [path.stat().st_size for path in paths]
+            if name in ('qmp-log', 'info-log', 'incus-journal'):
+                for path in paths:
+                    path.write_bytes(redact_diagnostic_log(path.read_bytes()))
             sizes = [path.stat().st_size for path in paths]
             results[name] = dict(exit_code=code, timed_out=timed_out,
                                  duration_seconds=round(time.monotonic() - started, 3),
                                  stdout_bytes=sizes[0], stderr_bytes=sizes[1],
-                                 truncated=any(size >= LIMIT for size in sizes))
+                                 truncated=any(size >= LIMIT for size in raw_sizes))
             if name == 'managed':
                 owned = code == 0 and paths[0].read_bytes().strip() == b'true'
         result = directory / 'result.json'
@@ -124,7 +213,11 @@ if __name__ == '__main__':
             collect()
         elif len(sys.argv) == 3 and sys.argv[1] == 'validate':
             sys.exit(validate(sys.argv[2]))
+        elif sys.argv[1:] == ['image-facts']:
+            print(json.dumps(image_facts()))
+        elif sys.argv[1:] == ['cpu-runtime']:
+            print(json.dumps(cpu_runtime()))
         else:
             sys.exit(2)
-    except (OSError, ValueError, KeyError, TypeError, tarfile.TarError):
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError, tarfile.TarError):
         sys.exit(1)

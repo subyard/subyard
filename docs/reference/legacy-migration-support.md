@@ -1,18 +1,32 @@
 ---
 title: Legacy migration support and reinstall policy
 status: accepted policy
-updated: 2026-10-16
+updated: 2026-10-27
 ---
 
 # Legacy migration support and reinstall policy
 
 ## Approved support boundary
 
-The approved minimum source version is **v0.11.0, inclusive**. Earlier installations use
-full uninstall followed by a clean installation performed by the user. This replaces the
-previous six-month notice window and V1 upgrade-bridge plan. The runtime refuses fresh
-pre-boundary admission while retaining the evidence readers required
-by accepted V2 histories. Physical acceptance is recorded separately against the tested candidate.
+The minimum source for a fresh upgrade is **v0.22.0, inclusive**; Go remains the default
+release owner. Sources from v0.11.0 through v0.21.x first upgrade with the released Go
+v0.22.0 runtime and complete its migrations. This bridge preserves installation data.
+Earlier sources retain the full-uninstall and separate clean-install path below.
+
+The Go owner applies the version/provenance floor and retains its existing migration engine.
+Rust handoff additionally admits a completed source only after verifying that source's own registry head and
+the bridge frontier: owner-registration 2, power-metadata 2, project-state 1 and settings 3.
+A future Rust target may require a later epoch; it does not change the predecessor's head.
+The existing empty first activation of the exact current image remains a separate bootstrap.
+For a new Rust goal, an unfinished Go or different-artifact experimental transition must finish with its exact
+retained runtime before selecting a new goal. Current Rust transactions retain their
+original bound bundle, helper, authorization and same-transaction recovery.
+
+The released Go v0.22.0 updater refuses an experimental Rust target. Publish verified
+current tooling with `subyard-install.sh --version <version> --publish-only`, then invoke
+the printed candidate's `bin/yard update` with fresh confirmation. Publication does not
+activate the candidate or authorize the transition. Refusals preserve journals, evidence,
+runtime links and installation data. Physical acceptance is recorded against the tested candidate.
 
 Retirement removes fresh V1 upgrades and journal imports, including unfinished source V1
 recovery and new rollback targets below v0.11.0. Detection must refuse before changing the
@@ -44,8 +58,8 @@ preserved and are listed in the plan and final result. Full removal does not cla
 were deleted. Modern receipt-owned namespaces retain their existing deletion and stale-plan guards.
 
 
-The cutoff concerns legacy migration V1. Supported v0.11.0+ updates, process V1, Ledger V2,
-recovery receipts and checkpoint-reader contracts retain their own compatibility requirements.
+The v0.11.0 retired-format boundary and v0.22.0 fresh-source floor are distinct. Process V1,
+Ledger V2, recovery receipts and checkpoint-reader contracts retain their own compatibility requirements.
 The source-version cutoff does not raise the domain epoch floor or retire V2 checkpoint history.
 
 Supported historical updates do not invent project ownership labels. Plain `yard init` refuses
@@ -81,31 +95,35 @@ The existing released baselines cover distinct contracts:
 | v0.4.2 | Retired V1 broker/route/owner checkpoints: refusal/uninstall; accepted V2 historical reader |
 | v0.9.1 | Retired V1 standalone updater: refusal/uninstall |
 | v0.10.0 | Last V1 release: refusal/uninstall at the upper unsupported edge |
-| v0.11.0 | Actual first V2 release: inclusive source-floor update |
-| v0.11.2 | Actual caller for frozen process V1 and Ledger V2; update, interrupted resume, compatible rollback and forward retry |
-| v0.17.3 | Actual activation-only journal producer and recovery baseline using Ledger V2 |
-| v0.18.6 | Actual completed and interrupted activation-only source-repair producer; original-owner schema-2 recovery and separately consented candidate upgrade |
-| v0.18.1 | Published caller using frozen process V1 and Ledger V2; update, interrupted resume, rollback, forward retry and checkpoint-reader bridge ordering |
-| v0.19.0 | Actual direct-upgrade caller with independent completed domain history; post-effects activation failure, reread and fresh-process resume on the fixed candidate |
-| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession; unknown artifacts fail closed |
+| v0.11.0 | First V2 release; finish its original work and use the released Go v0.22.0 bridge before a new Rust goal |
+| v0.11.2 | Frozen process V1/Ledger V2 history producer in the released-Go bridge chain; no direct fresh Rust admission |
+| v0.17.3 | Retained original activation-owner and recovery-format fixture; unfinished work stays with its exact original owner |
+| v0.18.1 | Released-Go closed-history producer before the Go v0.22.0 bridge; frozen syntax remains readable |
+| v0.18.6 | Original source-repair/history producer in the released-Go checkpoint chain; no unfinished-owner adoption by Rust |
+| v0.19.0 | Checkpoint/projection-anchor history producer before Go v0.22.0; required anchor evidence remains protected |
+| v0.21.0 Linux amd64 | Frozen defective-owner receipt and historical validation fixture; new Rust supersession/adoption is retired |
+| v0.22.0 | Supported released-Go bridge: complete its own source frontier, publish the Rust candidate, then use its printed frontend with fresh consent |
 
 The [historical reader](../../internal/migration/v1_import.go) binds the exact retained runtime
 pair, registry, journal and observed postconditions. It does not admit arbitrary historical
-journals. The [released compatibility check](../../dev/verify-release-upgrades.py) pins official
-v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtime checksums
-and the exact legacy runtime installers. These binaries
-remain acceptance inputs for their declared contracts; retirement replaces obsolete V1 success
-cases with refusal/uninstall cases. Rebuilding old versions from current source does not replace them.
+journals. The [released compatibility check](../../dev/verify-release-upgrades.py) pins the official
+v0.22.0 bridge and retired V1 inputs. Retained-history fixtures generate closed records with actual
+v0.11.2/v0.18.1 and v0.18.6/v0.19.0 Go engines, finish the Go v0.22.0 bridge, and then admit the
+current Rust frontend. Frozen codec and protocol fixtures retain their separate reader roles;
+they do not establish direct fresh admission from an old product version. Rebuilding old versions
+from current source does not replace authentic historical inputs.
 
 Completed-history source admission proves sealed original assets, the supported registry/catalog,
 canonical journal, authoritative ledger/checkpoint and terminal typed evidence independently of old
-operational readiness. A verified different candidate may prepare a new goal and fresh authorization
-when old operational inspection is blocked. Historical journals are neither reopened nor delegated.
+operational readiness. A verified different Rust candidate may prepare a new goal and fresh
+authorization only after the supported Go v0.22.0-or-newer source has completed its own registry
+frontier. Historical journals are neither reopened nor delegated.
 Known closed supersession and recovery provenance remain history; unresolved publications, live
 reservations, unsupported source ingress or unknown provenance refuse this new fallback without
 weakening ordinary/historical paths. Source repair changes only explicit allowed local alias families
 and confers no release authorization. A retained unfinished original owner must advertise its own
-schema-2 activation capability before source repair; newer staged tooling cannot supply it.
+schema-2 activation capability before original-owner source repair; newer staged tooling cannot
+supply it or use source repair to bypass the fresh Rust handoff boundary.
 
 Frozen process V1, recovery receipt V1 and legacy migration V1 have separate support policies.
 Retiring the legacy migration engine does not retire the caller protocol or recovery receipts.
@@ -113,9 +131,10 @@ The current domain upgrade floor is epoch 1 for each domain in the
 [release registry](../../config/release-transition.json). The legacy standalone-upgrade boundary,
 domain floor and proven retained-runtime rollback eligibility are assessed separately.
 
-Use [`yard update --check`](../cli-reference.md#update) for read-only assessment. Unsupported
-sources require the [staged full-uninstall route](../control-plane.md#legacy-upgrades), followed
-by the user's separate clean install. Unknown, ambiguous or foreign state blocks before mutation;
+Use [`yard update --check`](../cli-reference.md#update) for read-only assessment. Sources below
+v0.11.0 require the [staged full-uninstall route](../control-plane.md#legacy-upgrades), followed by
+the user's separate clean install. Sources from v0.11.0 through v0.21.x use the nondestructive Go
+v0.22.0 bridge after completing pending work with its exact original owner. Unknown, ambiguous or foreign state blocks before mutation;
 manual journal editing is unsupported. Ordinary ready operation emits no deprecation warning.
 
 ## Supported V2 checkpoint compatibility
@@ -138,21 +157,22 @@ and projection epochs, and pinned records before dispatch; captured records are 
 It preserves frozen transition owners and catalog/journal bindings. Marked targets read checkpoint
 authority themselves; incompatible history blocks mutation.
 
-Released-caller acceptance exercises the actual v0.11.2 and v0.18.1 binaries against matching epoch-2
-history, then a separately sealed synthetic epoch-3 owner built from the same bound source. It requires
-bridge-first refusal, successful advance after the bridge, an unchanged epoch-2 projection and
-refusal of epoch-2 rollback through each released caller and the candidate. The synthetic owner is not a
-published release.
-Published v0.18.1 has no sealed checkpoint-reader marker; it cannot itself serve as that reader bridge.
+Current acceptance crosses from completed released Go v0.22.0 through the verified printed Rust
+frontend. The released Go updater's Rust-routing refusal remains a separate negative control.
+Current Rust V1/V2 recovery checks retain fresh consent, same-transaction continuation, successor
+publication/fencing and compatible rollback guards. Earlier unaware-reader/epoch bridge fixtures
+remain historical protocol inputs, not direct fresh-Rust upgrade positives. Retained projection
+anchors survive ordinary cleanup; unrelated closed transactions may retire only after verified
+Ready and proof that no endpoint or projection reference requires them.
 
-Retirement guidance must state the v0.11.0 source boundary, affected V1 formats, full-uninstall
-data loss and the user's separate clean-install step. Diagnose unsupported legacy state when
-encountered; ordinary ready operation needs no deprecation warning. Supported V2 unfinished
-transactions retain their exact sealed owners, artifacts and evidence until closure. The separately negotiated `migration-ledger-owner-replacement-v1` contract may retain an exactly proved
-defective owner as typed superseded evidence and select a freshly authorized forward candidate;
-it never manufactures old activation readiness. Compatible retained rollback within the support
-boundary remains protected. Refusing an old
-upgrade never authorizes deleting its data. Only an explicitly confirmed full uninstall may
-remove its owned data without migration; ordinary evidence cleanup still requires proven closure
-and absence of required references. See
+Retirement guidance distinguishes sources below v0.11.0 (full-uninstall data loss and a separate
+clean install), v0.11.0 through v0.21.x (nondestructive released-Go v0.22.0 bridge), and supported
+fresh sources. Pending transitions keep their exact retained owner, artifacts and evidence until
+closure; a new Rust goal cannot adopt an unfinished old Go owner. Current exact-artifact Rust
+transactions retain their original bundle, authorization and same-transaction recovery. Frozen
+`migration-ledger-owner-replacement-v1` records keep their historical validation meaning; the
+current gate does not create new old-owner supersession transactions. Compatible retained rollback
+within the support boundary remains protected. Refusing an old upgrade never authorizes deleting
+its data. Only an explicitly confirmed full uninstall may remove owned data without migration;
+ordinary evidence cleanup still requires proven closure and absence of required references. See
 [Supported compatibility and recovery](resumable-release-transition-design.md#supported-compatibility-and-recovery).

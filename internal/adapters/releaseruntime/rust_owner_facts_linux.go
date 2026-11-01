@@ -56,6 +56,7 @@ type rustOwnerOptions struct {
 	RegistryRaw         []byte                                   `json:"registryRaw"`
 	Catalog             []releasetransition.CapabilityDescriptor `json:"catalog"`
 	InheritedSettingIDs []string                                 `json:"inheritedSettingIds"`
+	CommandOverrides    []releaseowner.CommandOverride           `json:"commandOverrides,omitempty"`
 	RollbackTarget      *releasetransition.RollbackTarget        `json:"rollbackTarget"`
 	MigrationCheckpoint bool                                     `json:"migrationCheckpoint"`
 	SourceIngress       *releasetransition.SourceIngressRequest  `json:"sourceIngress"`
@@ -164,6 +165,14 @@ func (runtime *Runtime) rustOwnerFacts(ctx context.Context, assets, target *veri
 		RegistryRaw: slices.Clone(raw), Catalog: releasetransition.BuiltinCapabilityCatalog().Descriptors(),
 		InheritedSettingIDs: append([]string{}, request.InheritedSettingIDs...), SourceIngress: request.SourceIngress,
 		SourceArtifact: &sourceFact, TargetArtifact: &targetFact, PreviousArtifact: previousFact, CandidateVersion: target.version,
+	}
+	for _, name := range request.InheritedSettingIDs {
+		value, present := runtime.config.Inputs.values[name]
+		var raw []byte
+		if present {
+			raw = []byte(value)
+		}
+		options.CommandOverrides = append(options.CommandOverrides, releaseowner.CommandOverride{Name: name, Present: present, Value: raw})
 	}
 	if journalRecord != nil {
 		// Syntax-only original IDs are optional physical facts. Only Rust can

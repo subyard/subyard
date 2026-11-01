@@ -6,7 +6,7 @@ subyard_prepared_installed_finish() {
   if [ "$result" -eq 0 ] && [ "${SUBYARD_PREPARED_INSTALLED_CLEANUP:-}" = 1 ]; then
     local -a stage_command=(python3 -B "$SCRIPT_DIR/lib/native-installed-stage.py")
     case "${SUBYARD_PREPARED_INSTALLED_OWNER:-}" in
-      host-power|test-vms-host-sink)
+      host-power|test-vms-host-sink|test-vm-broker)
         if [ "$(id -u)" = 0 ] && [ "${SUBYARD_USER:-root}" != root ]; then
           stage_command=(runuser -u "$SUBYARD_USER" -- "${stage_command[@]}")
         fi ;;

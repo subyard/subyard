@@ -32,12 +32,45 @@ func RunReleaseOwnerNative(ctx context.Context, input *os.File, output io.Writer
 }
 
 func newReleaseOwnerComponents(ctx context.Context, c releaseowner.Context, root *os.File) (releaseowner.Components, error) {
-	program, err := New(Options{RepositoryRoot: c.PhysicalRepositoryRoot, Program: "yard-native", Environment: append(os.Environ(), "SUBYARD_HOME="+c.DataHome, "SUBYARD_CONFIG_HOME="+c.ConfigHome), WorkingDir: c.PhysicalRepositoryRoot, Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: io.Discard})
+	workingDir, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
+	program, err := New(Options{RepositoryRoot: c.PhysicalRepositoryRoot, Program: "yard-native", Environment: append(os.Environ(), "SUBYARD_HOME="+c.DataHome, "SUBYARD_CONFIG_HOME="+c.ConfigHome), WorkingDir: workingDir, Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		return nil, err
+	}
+	// Older updaters exported resolved predecessor settings. Rebuild both
+	// observation and execution from current configuration, preserving only
+	// the original request's explicit settings as command overrides.
+	program = program.releaseActivationOperation()
+	seen := map[string]bool{}
+	if len(c.InheritedSettingIDs) != len(c.CommandOverrides) {
+		return nil, errors.New("native inherited setting context is invalid")
+	}
+	for _, override := range c.CommandOverrides {
+		name := override.Name
+		if seen[name] || !slices.Contains(c.InheritedSettingIDs, name) || override.Present != (override.Value != nil) {
+			return nil, errors.New("native inherited setting context is invalid")
+		}
+		value := string(override.Value)
+		if _, known := program.catalog.LookupSetting(name); !known {
+			return nil, errors.New("native inherited setting context is invalid")
+		}
+		seen[name] = true
+		if !override.Present {
+			continue
+		}
+		if err := program.catalog.ValidateSetting(config.ScopeCommand, name, value, false); err != nil {
+			return nil, errors.New("native inherited setting context is invalid")
+		}
+		program.env[name] = value
+		program.baseEnv[name] = value
+	}
+	program.options.Environment = environmentList(program.baseEnv, nil)
+	program.commandInputs = releaseruntime.CaptureCommandInputs(program.options.Environment, func(name string) bool { _, known := program.catalog.LookupSetting(name); return known })
 	uninstall.UseArtifactGuard(c.PhysicalRepositoryRoot)
-	return &releaseOwnerComponents{cli: program, context: c, root: root, inputs: map[string]config.PersistentFileSnapshot{}, overlays: map[string]config.PersistentFileSnapshot{}, loaded: map[string]config.Loaded{}, prepared: map[string]releaseSettingsPrepared{}, activation: map[string]releaseActivationPrepared{}}, nil
+	return &releaseOwnerComponents{cli: program, catalog: &program.catalog, context: c, root: root, inputs: map[string]config.PersistentFileSnapshot{}, overlays: map[string]config.PersistentFileSnapshot{}, loaded: map[string]config.Loaded{}, prepared: map[string]releaseSettingsPrepared{}, activation: map[string]releaseActivationPrepared{}}, nil
 }
 
 type releaseSettingsPrepared struct {
@@ -62,19 +95,32 @@ type releaseActivationPrepared struct {
 	broker             *reconcileruntime.PreparedTestVMBroker
 	configTarget       configTarget
 	integration        reconcileruntime.IntegrationPlan
+	integrationInput   string
 	stage              ports.ReconcileStageID
 }
 type releaseOwnerComponents struct {
-	afterOwnerOriginals  map[string]releaseAfterOwner
-	afterOwnerViews      map[string]releaseAfterOwner
-	afterOwnerCompletion *releaseowner.AfterOwnerCompletion
-	ownerResultsRecipe   string
-	ownerResultReader    interface {
+	ownerPhysical          *ownerPhysicalReceipt
+	ownerPhysicalValidated bool
+	hostPowerInstallation  *ports.NativeHostPowerInstallation
+	publicationPlans       map[string]string
+	afterOwnerOriginals    map[string]releaseAfterOwner
+	afterOwnerViews        map[string]releaseAfterOwner
+	afterOwnerCompletion   *releaseowner.AfterOwnerCompletion
+	ownerRecoveryToken     string
+	ownerRecoverySource    string
+	ownerRecoveryObserver  ports.NativeOperationObserver
+	ownerResultsRecipe     string
+	ownerResultReader      interface {
 		ReadOwnerCreated(ports.NativeOwnerCreateRef) (ports.NativeOwnerCreated, error)
 	}
-	ownerResults     []ports.NativeOwnerCreated
-	ownerChildren    *preparedOwnerChildren
-	cli              *CLI
+	completeSource *releaseowner.CompleteSourceReference
+	ownerResults   []ports.NativeOwnerCreated
+	ownerChildren  *preparedOwnerChildren
+	cli            *CLI
+	// The native factory loaded these immutable shipped declarations through
+	// the same retained repository FD. The Rust owner rehashes that repository
+	// after native capture; mutable configuration still loads on every call.
+	catalog          *config.Catalog
 	context          releaseowner.Context
 	root             *os.File
 	inputs           map[string]config.PersistentFileSnapshot
@@ -229,6 +275,7 @@ func (c *releaseOwnerComponents) CaptureInventory(ctx context.Context) ([]string
 	if err := c.Close(); err != nil {
 		return nil, nil, err
 	}
+	c.cli.configResources, c.cli.configResourcesRoot = nil, ""
 	c.inputs = map[string]config.PersistentFileSnapshot{}
 	c.overlays = map[string]config.PersistentFileSnapshot{}
 	c.loaded = map[string]config.Loaded{}
@@ -237,6 +284,15 @@ func (c *releaseOwnerComponents) CaptureInventory(ctx context.Context) ([]string
 	c.installedRecipes = map[string]*reconcileruntime.PreparedInstalledRuntime{}
 	c.installedBound = map[string]bool{}
 	c.ownerChildren = nil
+	c.ownerPhysical = nil
+	c.ownerPhysicalValidated = false
+	c.ownerRecoveryToken = ""
+	c.ownerRecoverySource = ""
+	c.ownerRecoveryObserver = nil
+	c.ownerResults = nil
+	c.ownerResultReader = nil
+	c.ownerResultsRecipe = ""
+	c.hostPowerInstallation = nil
 	c.afterOwnerOriginals = nil
 	c.afterOwnerViews = nil
 	c.afterOwnerCompletion = nil
@@ -259,7 +315,18 @@ func (c *releaseOwnerComponents) CaptureInventory(ctx context.Context) ([]string
 		for _, entry := range directory.Entries {
 			name := strings.TrimSuffix(entry, ".env")
 			if domain.SafeName(name) {
-				names[name] = true
+				// Retained yard data can outlive its registration.
+				registration := path + "/" + entry
+				if !strings.HasSuffix(entry, ".env") {
+					registration += "/config.env"
+				}
+				snapshot, err := config.ReadPersistentSnapshotAt(c.root, registration)
+				if err != nil {
+					return nil, nil, err
+				}
+				if snapshot.Exists {
+					names[name] = true
+				}
 			}
 		}
 	}
@@ -286,7 +353,17 @@ func (c *releaseOwnerComponents) load(yard string) (config.Loaded, error) {
 	if operatorHome == "" {
 		operatorHome = c.context.ConfigHome
 	}
-	return config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, YardName: yard, DisablePrivate: true, ConfigLocked: true, ProspectiveFiles: c.view(), Environment: map[string]string{"SUBYARD_HOME": c.context.DataHome, "SUBYARD_CONFIG_HOME": c.context.ConfigHome, "SUBYARD_CONFIG_DIR": filepath.Join(root, "config")}})
+	return config.Load(config.LoadOptions{Catalog: c.catalog, Resources: c.cli.operationResourceRegistry, RepositoryRoot: root, OperatorHome: operatorHome, YardName: yard, DisablePrivate: true, ConfigLocked: true, ProspectiveFiles: c.view(), Environment: c.activationEnvironment(root)})
+}
+
+func (c *releaseOwnerComponents) activationEnvironment(root string) map[string]string {
+	values := map[string]string{"SUBYARD_HOME": c.context.DataHome, "SUBYARD_CONFIG_HOME": c.context.ConfigHome, "SUBYARD_CONFIG_DIR": filepath.Join(root, "config")}
+	for _, name := range c.context.InheritedSettingIDs {
+		if value, present := c.cli.baseEnv[name]; present {
+			values[name] = value
+		}
+	}
+	return values
 }
 
 func (c *releaseOwnerComponents) platform(loaded config.Loaded, powerYards []domain.Context) ports.InitPlatform {
@@ -294,7 +371,7 @@ func (c *releaseOwnerComponents) platform(loaded config.Loaded, powerYards []dom
 	if root == "" {
 		root = c.context.RepositoryRoot
 	}
-	platform := c.cli.initPlatformWithDispatcher(loaded, powerYards, filepath.Join(root, "bin", "yard-engine"))
+	platform := c.cli.initPlatformWithDispatcher(loaded, powerYards, ownerChildDispatcher(root))
 	if runtime, ok := platform.(reconcileruntime.Runtime); ok {
 		runtime.LogicalRepositoryRoot = c.context.RepositoryRoot
 		runtime.PreparedSources = c.preparedSourceFiles()
@@ -510,36 +587,6 @@ func (c *releaseOwnerComponents) ObserveSettings(ctx context.Context, recipe rel
 	return "conflict", nil
 }
 
-// ProjectSettings performs a read-only, exact-input assignment edit. Release
-// predecessor/successor authorization remains in the Rust journal owner.
-func (c *releaseOwnerComponents) ProjectSettings(ctx context.Context, recipe releaseowner.SettingsRecipe, edits []releaseowner.Edit) (string, error) {
-	state, err := c.ObserveSettings(ctx, recipe)
-	if err != nil || state != "desired" {
-		return "", domain.ErrPlanStale
-	}
-	path, err := settingsPath(recipe)
-	if err != nil {
-		return "", err
-	}
-	snapshot, err := config.ReadPersistentSnapshotAt(c.root, path)
-	if err != nil {
-		return "", err
-	}
-	content := snapshot.Content
-	for _, edit := range edits {
-		content, err = config.EditPersistentAssignmentContent(path, content, edit.Setting, edit.Value)
-		if err != nil {
-			return "", err
-		}
-	}
-	if nativeDigest(content) != recipe.ExpectedFile && len(content) > 0 && content[len(content)-1] == '\n' {
-		shorter := content[:len(content)-1]
-		if nativeDigest(shorter) == recipe.ExpectedFile {
-			content = shorter
-		}
-	}
-	return nativeDigest(content), nil
-}
 func (c *releaseOwnerComponents) ApplySettings(ctx context.Context, recipe releaseowner.SettingsRecipe) error {
 	path, err := settingsPath(recipe)
 	if err != nil {
@@ -592,7 +639,30 @@ func (c *releaseOwnerComponents) ApplySettings(ctx context.Context, recipe relea
 	}
 	return config.CompareAndSwapLocalSettingsAt(root, path, config.BindPersistentSnapshot(current), desired, files, nil, nil)
 }
-func (c *releaseOwnerComponents) CaptureOwner(ctx context.Context) (releaseowner.OwnerBefore, error) {
+
+// CaptureOwnerObservation retains all original prepared handles. Prepare only
+// reads registration/topology and performs its bounded read-only legacy preflight.
+func (c *releaseOwnerComponents) CaptureOwnerObservation(ctx context.Context) (releaseowner.OwnerBefore, error) {
+	value, err := c.cli.ownerRegistrationTransition(c.request()).Prepare(ctx, c)
+	return releaseowner.OwnerBefore{State: string(value.State), Registration: string(value.Registration), Overrides: string(value.Overrides), Controller: string(value.Controller), SharedImages: value.SharedImages}, err
+}
+
+func (c *releaseOwnerComponents) CaptureOwner(ctx context.Context, complete *releaseowner.CompleteSourceReference) (releaseowner.OwnerBefore, error) {
+	// Recheck every input while retaining only the original planned nonce for
+	// the same publication key across independent captures in this session.
+	if c.publicationPlans == nil {
+		c.publicationPlans = map[string]string{}
+	}
+	ctx = ports.WithNativePreparationExecutable(ctx, c.context.PreparationExecutable)
+	ctx = ports.WithNativeInteraction(ctx, c.context.Interaction)
+	if complete != nil && !complete.Valid() {
+		return releaseowner.OwnerBefore{}, domain.ErrPlanStale
+	}
+	c.completeSource = nil
+	if complete != nil {
+		original := *complete
+		c.completeSource = &original
+	}
 	request := c.request()
 	port := c.cli.ownerRegistrationTransition(request)
 	value, err := port.Prepare(ctx, c)
@@ -607,19 +677,18 @@ func (c *releaseOwnerComponents) CaptureOwner(ctx context.Context) (releaseowner
 	c.ownerChildren = prepared
 	if prepared != nil {
 		before.PreparedRecipe = prepared.binding()
+		record, err := prepared.record()
+		if err != nil {
+			return before, err
+		}
+		capture, err := record.capture()
+		if err != nil {
+			return before, err
+		}
+		before.Capture = &capture
 	}
 	return before, nil
 }
-func (c *releaseOwnerComponents) ApplyOwner(ctx context.Context, before releaseowner.OwnerBefore, token string) error {
-	if before.State == string(testyardmigration.StateAbsent) || before.State == string(testyardmigration.StateCurrent) {
-		if before.PreparedRecipe != "" {
-			return domain.ErrPlanStale
-		}
-		return c.cli.ownerRegistrationTransition(c.request()).Commit(ctx, releasetransition.OwnerRegistrationObservation{State: releasetransition.OwnerRegistrationState(before.State), Registration: releasetransition.Fingerprint(before.Registration), Overrides: releasetransition.Fingerprint(before.Overrides), Controller: releasetransition.Fingerprint(before.Controller), SharedImages: before.SharedImages, RecoveryToken: token})
-	}
-	return c.applyOwnerChildren(ctx, before, token)
-}
-
 func (c *releaseOwnerComponents) ObserveOwner(ctx context.Context, before releaseowner.OwnerBefore, token string) (string, error) {
 	progress, err := c.cli.ownerRegistrationTransition(c.request()).Observe(ctx, releasetransition.OwnerRegistrationObservation{State: releasetransition.OwnerRegistrationState(before.State), Registration: releasetransition.Fingerprint(before.Registration), Overrides: releasetransition.Fingerprint(before.Overrides), Controller: releasetransition.Fingerprint(before.Controller), SharedImages: before.SharedImages, RecoveryToken: token})
 	return string(progress), err
@@ -629,7 +698,16 @@ func (c *releaseOwnerComponents) ObserveOwner(ctx context.Context, before releas
 // Rust supplies the original journal preparation and token; this primitive
 // chooses no release outcome and deletes no release/native proof records.
 func (c *releaseOwnerComponents) CleanupOwner(ctx context.Context, before releaseowner.OwnerBefore, token string) error {
-	return c.cli.ownerRegistrationTransition(c.request()).Commit(ctx, releasetransition.OwnerRegistrationObservation{State: releasetransition.OwnerRegistrationState(before.State), Registration: releasetransition.Fingerprint(before.Registration), Overrides: releasetransition.Fingerprint(before.Overrides), Controller: releasetransition.Fingerprint(before.Controller), SharedImages: before.SharedImages, RecoveryToken: token, TerminalCleanup: true})
+	port, ok := c.cli.ownerRegistrationTransition(c.request()).(*ownerRegistrationTransition)
+	if !ok {
+		return domain.ErrPlanStale
+	}
+	options, err := port.options()
+	if err != nil {
+		return err
+	}
+	options.RecoveryToken = token
+	return testyardmigration.ApplyPreparedRegistrationAction(ctx, options, ownerMigrationBefore(before), "cleanup-owned-archives")
 }
 func (c *releaseOwnerComponents) request() releasetransition.ProcessRequest {
 	return releasetransition.ProcessRequest{SchemaVersion: 1, RuntimeRoot: c.context.RuntimeRoot, ConfigHome: c.context.ConfigHome, Yard: c.context.Yard, Target: releasetransition.ReleaseID(c.context.Target), ArtifactDigest: releasetransition.Fingerprint(c.context.Artifact), Direction: c.context.Direction, SourceIngress: c.context.SourceIngress}
@@ -649,6 +727,7 @@ func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner st
 	c.activationActual = fresh
 	defer func() { c.activationActual = previousActual }()
 	if fresh {
+		c.cli.configResources, c.cli.configResourcesRoot = nil, ""
 		c.overlays = map[string]config.PersistentFileSnapshot{}
 	}
 	for _, yard := range c.activationYards() {
@@ -668,6 +747,13 @@ func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner st
 			return nil, err
 		}
 		if loaded.Context.AccessKind != domain.AccessLocal {
+			continue
+		}
+		if retained, ok, err := c.retainedAfterOwnerTarget(ctx, owner, yard, "profile-runtime"); err != nil {
+			return nil, err
+		} else if ok {
+			values = append(values, retained.value)
+			c.activation[activationKey(retained.value)] = retained
 			continue
 		}
 		platform := c.platform(loaded, nil)
@@ -692,18 +778,11 @@ func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner st
 		if err != nil {
 			return nil, err
 		}
-		instanceUUID := "absent"
-		incus, _ := c.cli.statusPorts()
-		instance, err := incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
-		if err == nil {
-			instanceUUID = instance.Config["volatile.uuid"]
-			if instanceUUID == "" {
-				return nil, errors.New("missing instance UUID")
-			}
-		} else if !errors.Is(err, ports.ErrInstanceNotFound) {
+		value := releaseowner.Target{Class: "profile-runtime", ReportedActual: actual.Actual, ReportedDesired: actual.Desired, Owner: owner, Yard: yard, State: string(actual.State), Actual: actual.Actual, Desired: actual.Desired, Source: source}
+		value, err = c.bindGuestTarget(ctx, loaded, value)
+		if err != nil {
 			return nil, err
 		}
-		value := releaseowner.Target{Class: "profile-runtime", ReportedActual: actual.Actual, ReportedDesired: actual.Desired, Owner: owner, Yard: yard, Project: loaded.Context.IncusProject, Instance: loaded.Context.YardInstanceName, InstanceUUID: instanceUUID, State: string(actual.State), Actual: actual.Actual, Desired: actual.Desired, Source: source}
 		var installed *reconcileruntime.PreparedInstalledRuntime
 		if actual.State == ports.RuntimeStateCurrent || actual.State == ports.RuntimeStateStale {
 			runtime, ok := platform.(reconcileruntime.Runtime)
@@ -754,6 +833,7 @@ func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner st
 			}
 		}
 		prepared := releaseActivationPrepared{value: value, platform: platform, runtime: actual, nativeInstalled: installed}
+		prepared.originalTarget = c.activation[activationKey(value)].originalTarget
 		if c.needsAfterOwner(yard) && actual.State != ports.RuntimeStateCurrent && actual.State != ports.RuntimeStateStale {
 			prepared, err = c.prepareAfterOwnerRuntime(ctx, prepared)
 			if err != nil {
@@ -768,13 +848,13 @@ func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner st
 }
 func (c *releaseOwnerComponents) ApplyActivation(ctx context.Context, target releaseowner.Target) error {
 	prepared, ok := c.activation[target.Owner+":"+target.Yard+":"+target.Class]
-	if ok && prepared.originalTarget != nil && target.AfterOwner == "" {
+	if ok && prepared.originalTarget != nil && prepared.originalTarget.InstanceUUID == "absent" && target.AfterOwner == "" {
 		resolved, err := c.ResolveOwnerTarget(ctx, *prepared.originalTarget)
 		if err != nil || resolved != target {
 			return domain.ErrPlanStale
 		}
 	}
-	if !ok || (prepared.value != target && !c.rebindProfileCustody(prepared.value, target, "")) {
+	if !ok || (prepared.value != target && !c.rebindProfileCustody(prepared.value, target, "") && !c.materializedAfterOwnerRetry(ctx, prepared, target)) {
 		return domain.ErrPlanStale
 	}
 	if target.Class != "profile-runtime" {
@@ -859,9 +939,15 @@ func (c *releaseOwnerComponents) BindInstalledRuntimeRecipe(ctx context.Context,
 			if err := c.bindOwnerChildren(ctx, hash, raw); err != nil {
 				return err
 			}
+			c.hostPowerInstallation = nil
+			c.ownerPhysical = nil
+			c.ownerPhysicalValidated = false
 			c.ownerResults = nil
 			c.ownerResultReader = nil
 			c.ownerResultsRecipe = ""
+			c.ownerRecoveryToken = ""
+			c.ownerRecoverySource = ""
+			c.ownerRecoveryObserver = nil
 			c.afterOwnerOriginals = nil
 			c.afterOwnerViews = nil
 			c.afterOwnerCompletion = nil
@@ -1028,6 +1114,10 @@ func (c *releaseOwnerComponents) coreTarget(owner, class, yard, state, scope, st
 
 func (c *releaseOwnerComponents) bindGuestTarget(ctx context.Context, loaded config.Loaded, target releaseowner.Target) (releaseowner.Target, error) {
 	incus, _ := c.cli.statusPorts()
+	if probe, ok := incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+		target.Project, target.Instance, target.InstanceUUID = loaded.Context.IncusProject, loaded.Context.YardInstanceName, "absent"
+		return target, nil
+	}
 	instance, err := incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		target.Project, target.Instance, target.InstanceUUID = loaded.Context.IncusProject, loaded.Context.YardInstanceName, "absent"
@@ -1062,6 +1152,12 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 		c.activation[activationKey(target)] = releaseActivationPrepared{value: target, installation: reconciler}
 		return []releaseowner.Target{target}, nil
 	case "test-yard-route-consumers":
+		if retained, ok, err := c.retainedAfterOwnerOwner(ctx, owner, "route-consumers"); err != nil {
+			return nil, err
+		} else if ok {
+			c.activation[activationKey(retained.value)] = retained
+			return []releaseowner.Target{retained.value}, nil
+		}
 		options, err := c.cli.releaseTransitionTestYardOptions(c.request())
 		if err != nil {
 			return nil, err
@@ -1098,6 +1194,7 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 			if err != nil {
 				return nil, err
 			}
+			before = routes.Before
 			p, err := runtime.PrepareAfterOwnerRoutes(ctx, routes, afterOwnerTemplate("routes", before))
 			if err != nil {
 				return nil, err
@@ -1218,6 +1315,14 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 		c.activation[owner+":test-yard:route-consumers"] = prepared
 		values = append(values, target)
 	case "host-power", "test-vm-broker":
+		if owner == "test-vm-broker" {
+			if retained, ok, err := c.retainedAfterOwnerOwner(ctx, owner, "stage"); err != nil {
+				return nil, err
+			} else if ok {
+				c.activation[activationKey(retained.value)] = retained
+				return []releaseowner.Target{retained.value}, nil
+			}
+		}
 		state := "absent"
 		applies := false
 		yard := "default"
@@ -1266,7 +1371,7 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 		var powerYards []domain.Context
 		if owner == "host-power" {
 			for _, name := range c.activationYards() {
-				configuration, err := c.load(name)
+				configuration, err := c.loadActivation(name)
 				if err != nil {
 					return nil, err
 				}
@@ -1427,83 +1532,105 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 				continue
 			}
 			target := configTarget{Name: yard, Loaded: loaded}
-			execution, err := c.cli.prepareConfigApply(ctx, []configTarget{target}, func() ([]configTarget, error) {
-				fresh, err := c.load(yard)
-				return []configTarget{{Name: yard, Loaded: fresh}}, err
-			})
-			if err != nil {
-				return nil, err
-			}
-			assessment := execution.approved[0]
-			state := "current"
-			if assessment.Changed {
-				state = "stale"
-			}
-			actual := assessment.MaterializedFingerprint
-			desired := assessment.DesiredFingerprint
-			if actual == "" {
-				actual = nativeValueDigest(struct{ State string }{assessment.State})
-			}
-			if desired == "" {
-				desired = actual
-			}
+			var assessment configTargetAssessment
+			var value releaseowner.Target
+			var state, actual, desired string
 			source := c.activationSource()
-			value := c.coreTarget(owner, "materialized-files", yard, state, assessment.State, "", actual, desired, source)
-			value, err = c.bindGuestTarget(ctx, loaded, value)
-			if err != nil {
+			if retained, ok, err := c.retainedAfterOwnerTarget(ctx, owner, yard, "materialized-files"); err != nil {
 				return nil, err
-			}
-			value.ReportedActual = assessment.MaterializedFingerprint
-			value.ReportedDesired = assessment.DesiredFingerprint
-			scope, _, err := c.cli.materializedIntegrationScope(loaded, c.view().ReadAsset)
-			if err != nil {
-				return nil, err
-			}
-			value.Scope = scope
-			c.activation[owner+":"+yard+":materialized-files"] = releaseActivationPrepared{value: value, configs: execution, configTarget: target, platform: c.platform(loaded, nil)}
-
-			if assessment.State == "drift" || assessment.State == "converged" {
-				prepared := c.activation[owner+":"+yard+":materialized-files"]
-				runtime, ok := prepared.platform.(reconcileruntime.Runtime)
-				if !ok {
-					return nil, errors.New("prepared config component unavailable")
+			} else if ok {
+				values = append(values, retained.value)
+				c.activation[activationKey(retained.value)] = retained
+				if retained.value.AfterOwner != "" {
+					assessment.State = "drift"
 				}
-				native, err := runtime.PrepareConfigs(ctx)
+			} else {
+				execution, err := c.cli.prepareConfigApply(ctx, []configTarget{target}, func() ([]configTarget, error) {
+					fresh, err := c.load(yard)
+					return []configTarget{{Name: yard, Loaded: fresh}}, err
+				})
 				if err != nil {
 					return nil, err
 				}
-				prepared.nativeConfigs = native
+				assessment = execution.approved[0]
+				state = "current"
 				if assessment.Changed {
-					value.Before = native.Binding()
+					state = "stale"
 				}
-				installed, err := runtime.PrepareMaterializedConfigs(ctx, native)
+				actual = assessment.MaterializedFingerprint
+				desired = assessment.DesiredFingerprint
+				if actual == "" {
+					actual = nativeValueDigest(struct{ State string }{assessment.State})
+				}
+				if desired == "" {
+					desired = actual
+				}
+				source = c.activationSource()
+				value = c.coreTarget(owner, "materialized-files", yard, state, assessment.State, "", actual, desired, source)
+				value, err = c.bindGuestTarget(ctx, loaded, value)
 				if err != nil {
 					return nil, err
 				}
-				if err := installed.ShareSources(c.retainPreparedSource); err != nil {
-					return nil, err
-				}
-				if c.installedRecipes == nil {
-					c.installedRecipes = map[string]*reconcileruntime.PreparedInstalledRuntime{}
-				}
-				c.installedRecipes[installed.Binding()] = installed
-				c.closers = append(c.closers, installed)
-				prepared.nativeInstalled = installed
-				value.PreparedRecipe = installed.Binding()
-				value.Source = nativeValueDigest(struct{ Source, Component string }{value.Source, installed.MaterializedSourceBinding()})
-				prepared.value = value
-				c.activation[owner+":"+yard+":materialized-files"] = prepared
-			}
-			if c.needsAfterOwner(yard) && (assessment.State == "absent" || assessment.State == "stopped") {
-				prepared := c.activation[owner+":"+yard+":materialized-files"]
-				prepared, err = c.prepareAfterOwnerFiles(ctx, prepared)
+				value.ReportedActual = assessment.MaterializedFingerprint
+				value.ReportedDesired = assessment.DesiredFingerprint
+				scope, _, err := c.cli.materializedIntegrationScope(loaded, c.view().ReadAsset)
 				if err != nil {
 					return nil, err
 				}
-				value = prepared.value
-				c.activation[activationKey(value)] = prepared
+				value.Scope = scope
+				c.activation[owner+":"+yard+":materialized-files"] = releaseActivationPrepared{value: value, configs: execution, configTarget: target, platform: c.platform(loaded, nil)}
+
+				if assessment.State == "drift" || assessment.State == "converged" {
+					prepared := c.activation[owner+":"+yard+":materialized-files"]
+					runtime, ok := prepared.platform.(reconcileruntime.Runtime)
+					if !ok {
+						return nil, errors.New("prepared config component unavailable")
+					}
+					native, err := runtime.PrepareConfigs(ctx)
+					if err != nil {
+						return nil, err
+					}
+					prepared.nativeConfigs = native
+					if assessment.Changed {
+						value.Before = native.Binding()
+					}
+					installed, err := runtime.PrepareCurrentMaterializedConfigs(ctx, native)
+					if err != nil {
+						return nil, err
+					}
+					if err := installed.ShareSources(c.retainPreparedSource); err != nil {
+						return nil, err
+					}
+					if c.installedRecipes == nil {
+						c.installedRecipes = map[string]*reconcileruntime.PreparedInstalledRuntime{}
+					}
+					c.installedRecipes[installed.Binding()] = installed
+					c.closers = append(c.closers, installed)
+					prepared.nativeInstalled = installed
+					value.PreparedRecipe = installed.Binding()
+					value.Source = nativeValueDigest(struct{ Source, Component string }{value.Source, installed.MaterializedSourceBinding()})
+					prepared.value = value
+					c.activation[owner+":"+yard+":materialized-files"] = prepared
+				}
+				if c.needsAfterOwner(yard) && (assessment.State == "absent" || assessment.State == "stopped") {
+					prepared := c.activation[owner+":"+yard+":materialized-files"]
+					prepared, err = c.prepareAfterOwnerFiles(ctx, prepared)
+					if err != nil {
+						return nil, err
+					}
+					value = prepared.value
+					c.activation[activationKey(value)] = prepared
+				}
+				values = append(values, value)
 			}
-			values = append(values, value)
+			if retained, ok, err := c.retainedAfterOwnerTarget(ctx, owner, yard, "materialized-integrations"); err != nil {
+				return nil, err
+			} else if ok {
+				values = append(values, retained.value)
+				c.activation[activationKey(retained.value)] = retained
+				continue
+			}
+
 			platform := c.platform(loaded, nil)
 			runtime, ok := platform.(reconcileruntime.Runtime)
 			if ok && loaded.Integrations.AllowsCodingTools && c.needsAfterOwner(yard) && (assessment.State == "absent" || assessment.State == "stopped") {
@@ -1544,6 +1671,16 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 			value.Before = plan.StateBinding()
 			value.ReportedActual = plan.Fingerprint
 			value.ReportedDesired = plan.Scope
+			key := activationKey(value)
+			if original := c.activation[key].originalTarget; original != nil && original.AfterOwner == "" && c.installedBound[original.PreparedRecipe] {
+				prepared, err := c.compareOriginalIntegration(ctx, releaseActivationPrepared{value: value, platform: runtime, configTarget: target, integration: plan, integrationInput: source}, *original, c.installedRecipes[original.PreparedRecipe])
+				if err != nil {
+					return nil, err
+				}
+				c.activation[key] = prepared
+				values = append(values, prepared.value)
+				continue
+			}
 			native, err := runtime.PrepareIntegrations(ctx, plan)
 			if err != nil {
 				return nil, err
@@ -1565,7 +1702,7 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 			c.closers = append(c.closers, installed)
 			value.PreparedRecipe = installed.Binding()
 			value.Source = nativeValueDigest(struct{ Source, Component string }{value.Source, installed.MaterializedSourceBinding()})
-			c.activation[owner+":"+yard+":materialized-integrations"] = releaseActivationPrepared{value: value, platform: runtime, configTarget: target, integration: plan, nativeIntegrations: native, nativeInstalled: installed}
+			c.activation[key] = releaseActivationPrepared{value: value, platform: runtime, configTarget: target, integration: plan, integrationInput: source, nativeIntegrations: native, nativeInstalled: installed}
 			values = append(values, value)
 		}
 	default:
@@ -1658,7 +1795,28 @@ func (c *releaseOwnerComponents) applyCoreActivation(ctx context.Context, target
 		}
 		return domain.ErrPlanStale
 	case "materialized-files":
-		if err := c.cli.refreshConfigApply(ctx, prepared.configs); err != nil {
+		refresh := c.cli.refreshConfigApply
+		if prepared.nativeInstalled.HasCurrentMaterializedCustody() {
+			refresh = func(ctx context.Context, execution *configApplyExecution) error {
+				runtime, ok := prepared.platform.(reconcileruntime.Runtime)
+				if !ok {
+					return domain.ErrPlanStale
+				}
+				return c.cli.refreshConfigApplyChecked(ctx, execution, func(fresh []config.MaterializedArtifactAssessment) error {
+					return runtime.CheckCurrentConfigAssessments(ctx, prepared.nativeInstalled, fresh)
+				})
+			}
+		}
+		if target.AfterOwner != "" {
+			refresh = func(ctx context.Context, execution *configApplyExecution) error {
+				runtime, ok := prepared.platform.(reconcileruntime.Runtime)
+				if !ok {
+					return domain.ErrPlanStale
+				}
+				return c.cli.refreshAfterOwnerConfigApply(ctx, execution, prepared.nativeInstalled, runtime)
+			}
+		}
+		if err := refresh(ctx, prepared.configs); err != nil {
 			return err
 		}
 		if !prepared.configs.changed() {
@@ -1669,7 +1827,7 @@ func (c *releaseOwnerComponents) applyCoreActivation(ctx context.Context, target
 			return domain.ErrPlanStale
 		}
 		if err := runtime.ApplyPreparedMaterializedConfigs(ctx, prepared.nativeInstalled); err != nil {
-			return err
+			return materializedConfigActivationError{err, target.Yard, "materialized config", "config status", "apply", c.context.ConfigHome}
 		}
 		assessment, err := c.cli.assessConfigTarget(ctx, prepared.configTarget, true)
 		if err != nil {
@@ -1696,6 +1854,10 @@ func (c *releaseOwnerComponents) applyCoreActivation(ctx context.Context, target
 
 func (c *releaseOwnerComponents) ListYards() ([]string, error) { return slices.Clone(c.yards), nil }
 func (c *releaseOwnerComponents) ReadSnapshot(path string) (config.PersistentFileSnapshot, error) {
+	// Observe publication presence afresh; admitted prepared inputs remain authoritative.
+	if relative, err := filepath.Rel(c.context.ConfigHome, path); err == nil {
+		delete(c.inputs, filepath.ToSlash(relative))
+	}
 	return c.view().ReadSnapshot(path)
 }
 func nativeIngressBinding(value *releaseowner.IngressBinding) *releasetransition.V2IngressBinding {

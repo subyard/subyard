@@ -13,7 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func TestV0173RustStandaloneRequiresHistoricalGoBridge(t *testing.T) {
+func TestV0173CurrentRecoveryRefusesRustDelegate(t *testing.T) {
 	fixture := newV0173RecoveryFixture(t)
 	declared := writeReleaseOwnerCandidate(t, testkit.TempDir(t), "#!/bin/sh\nprintf 'yard-engine 1.2.3\\n'\n")
 	for _, path := range []string{releaseOwnerDeclarationPath, releaseOwnerSchemaPath, releaseOwnerBuildPath, releaseOwnerImagePath} {

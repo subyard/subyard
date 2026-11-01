@@ -2,6 +2,7 @@ package configmaterial
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1133,4 +1134,62 @@ func snapshotMaterialization(t *testing.T, root string) map[string]string {
 		}
 	}
 	return result
+}
+
+func TestAfterOwnerObservationRetainsSameLockedDestinationTuple(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = format
+			payload, original := []byte(`{"managed":"desired"}`), []byte(`{"managed":"original","runtime":"kept"}`)
+			if format == "toml" {
+				payload = []byte("managed = 'desired'\n")
+				original = []byte("managed = 'original'\nruntime = 'kept'\n")
+			}
+			testkit.WriteFile(t, h.destination, original, 0644)
+			ordinary := h.observe(t, payload)
+			if ordinary.Destination != nil || ordinary.State != nil {
+				t.Fatal("ordinary observation acquired private proof fields")
+			}
+			observe := func(expected *ApplyExpectedState) JSONObservation {
+				t.Helper()
+				request, err := h.request(payload, ModeObserve)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request, err = WithAfterOwnerObservation(request, expected)
+				if err != nil {
+					t.Fatal(err)
+				}
+				command := exec.Command(request.Command[0], request.Command[1:]...)
+				command.Stdin = bytes.NewReader(request.Stdin)
+				output, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatal("guarded native observation", err, string(output))
+				}
+				value, err := ParseObservation(output)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return value
+			}
+			captured := observe(nil)
+			if captured.Destination == nil || !captured.Destination.Exists || captured.Destination.Digest != fmt.Sprintf("%x", sha256.Sum256(original)) || captured.Destination.Mode != 0644 || captured.Destination.UID != uint32(os.Getuid()) || captured.Destination.GID != uint32(os.Getgid()) {
+				t.Fatal("capture did not retain exact destination tuple")
+			}
+			if captured.State == nil || *captured.State != (ProtectedState{}) {
+				t.Fatal("captured protected absence is not explicit")
+			}
+			expected := &ApplyExpectedState{State: captured.State, Fingerprint: captured.Fingerprint, Exists: true, UID: captured.Destination.UID, GID: captured.Destination.GID, Mode: captured.Destination.Mode}
+			unmanaged := bytes.ReplaceAll(original, []byte("kept"), []byte("changed runtime"))
+			testkit.WriteFile(t, h.destination, unmanaged, 0644)
+			checked := observe(expected)
+			if checked.Fingerprint != captured.Fingerprint || checked.Destination.Digest != fmt.Sprintf("%x", sha256.Sum256(unmanaged)) {
+				t.Fatal("semantic guard and returned raw tuple did not describe the same document")
+			}
+			if _, err := os.Stat(h.state); !os.IsNotExist(err) {
+				t.Fatal("guarded absence read created protected state")
+			}
+		})
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -132,12 +133,11 @@ type ownerInstanceCreator interface {
 	CheckOwnerCreatedInstance(context.Context, ports.PreparedOwnerInstance, ports.NativeOwnerCreated) error
 }
 type ownerInstanceExecution struct {
-	original    ports.PreparedOwnerInstance
-	created     *ports.NativeOwnerCreated
-	resolved    *ports.PreparedOwnerInstance
-	sources     *PreparedInstalledRuntime
-	environment []string
-	home        string
+	original        ports.PreparedOwnerInstance
+	created         *ports.NativeOwnerCreated
+	resolved        *ports.PreparedOwnerInstance
+	sources         *PreparedInstalledRuntime
+	rendererRuntime Runtime
 }
 
 type ownerImagePolicyClient interface {
@@ -150,8 +150,9 @@ type ownerPolicyInstanceCreator interface {
 	ApplyPreparedOwnerPolicyInstance(context.Context, ports.PreparedOwnerInstance, []string, string) (*ports.NativeOwnerCreated, ports.PreparedOwnerInstance, error)
 }
 
-// PrepareOwnerInstancePolicy freezes only the original 03 decision inputs. The
-// ordinary component resolves its catalog after acceptance, before its one POST.
+// PrepareOwnerInstancePolicy freezes the original 03 decision inputs and any
+// verified preparation cache successor. The original renderer chooses an image
+// after admission, before the single instance POST.
 func (runtime Runtime) PrepareOwnerInstancePolicy(ctx context.Context, sources *PreparedInstalledRuntime, scope string) (*ports.PreparedOwnerInstance, error) {
 	client, ok := runtime.Incus.(ownerImagePolicyClient)
 	if !ok || scope != "current" && scope != "legacy" && scope != "recreate" {
@@ -164,6 +165,7 @@ func (runtime Runtime) PrepareOwnerInstancePolicy(ctx context.Context, sources *
 	env := ownerRenderEnvironment(runtime.Environment, "INCUS_PROJECT", runtime.Yard.IncusProject)
 	primary := runtime.environmentDefault("YARD_IMAGE", "images:debian/13")
 	fallback := runtime.environmentDefault("YARD_IMAGE_FALLBACK", "images:ubuntu/24.04")
+	ctx = ports.WithNativeSourceDirectory(ctx, runtime.WorkingDir)
 	policy, err := client.CaptureOwnerImagePolicy(ctx, primary, fallback, runtime.Yard.YardKind, env, runtime.Yard.Paths.OperatorHome)
 	if err != nil {
 		return nil, err
@@ -188,6 +190,19 @@ func (runtime Runtime) WithOwnerInstance(ctx context.Context, sources *PreparedI
 	if !reflect.DeepEqual(p.Image, ports.PreparedOwnerImageSource{}) || p.Policy.Version != 1 {
 		return Runtime{}, domain.ErrPlanStale
 	}
+	if len(p.Policy.Directory) != 0 {
+		directory := runtime.WorkingDir
+		if directory == "" {
+			var err error
+			directory, err = os.Getwd()
+			if err != nil {
+				return Runtime{}, err
+			}
+		}
+		if directory != string(p.Policy.Directory) {
+			return Runtime{}, domain.ErrPlanStale
+		}
+	}
 	env := ownerRenderEnvironment(runtime.Environment, "INCUS_PROJECT", runtime.Yard.IncusProject)
 	if err := client.CheckOwnerImagePolicy(ctx, *p.Policy, env, runtime.Yard.Paths.OperatorHome); err != nil {
 		return Runtime{}, err
@@ -208,7 +223,11 @@ func (runtime Runtime) WithOwnerInstance(ctx context.Context, sources *PreparedI
 	if err != nil || p.Server == "" || p.Server != server {
 		return Runtime{}, domain.ErrPlanStale
 	}
-	runtime.ownerInstance = &ownerInstanceExecution{original: p, sources: sources, environment: ownerRenderEnvironment(runtime.Environment, "INCUS_PROJECT", runtime.Yard.IncusProject), home: runtime.Yard.Paths.OperatorHome}
+	renderer := runtime
+	// Rendering remains bound to the checked original inputs after execution
+	// materializes sources and adds its private transport environment.
+	renderer.Environment = append([]string(nil), runtime.Environment...)
+	runtime.ownerInstance = &ownerInstanceExecution{original: p, sources: sources, rendererRuntime: renderer}
 	return runtime, nil
 }
 
@@ -396,10 +415,46 @@ func (runtime Runtime) checkOwnerVolumeInstance(ctx context.Context, p ports.Pre
 	return client.CheckPreparedOwnerVolumeInstance(ctx, p, instance, created)
 }
 
+// Refuse an older captured script before dispatch: unknown owner flags in that
+// body mean whole-script execution, not an unsupported portion. The normal source
+// proof binds these checks to the same retained bytes used by runScriptEnvironment.
+func (runtime Runtime) checkOwnerInstanceStartSource() error {
+	if runtime.ownerSources == nil {
+		return domain.ErrPlanStale
+	}
+	if _, err := runtime.SelectedRuntimeInputs("core-guest-runtime"); err != nil {
+		return err
+	}
+	body, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "scripts", "03-create-subyard.sh"))
+	if err != nil {
+		return err
+	}
+	for _, line := range []string{
+		"  --owner-before-start) owner_phase=before-start ;;",
+		"  --owner-after-start) owner_phase=after-start ;;",
+		"  --owner-prepare-boot) owner_phase=prepare-boot ;;",
+		"  --owner-after-boot) owner_phase=after-boot ;;",
+		"if [ \"$owner_phase\" != after-start ]; then # original storage before start",
+		"[ \"$owner_phase\" != before-start ] || exit 0",
+		"if [ \"$owner_phase\" != after-start ]; then # original physical start",
+	} {
+		if !hasLine(string(body), line) {
+			return domain.ErrPlanStale
+		}
+	}
+	return nil
+}
+
 func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environment map[string]string) error {
 	// A retained create result proves identity, not that a guest is still unused.
 	// Only this call's successful POST may authorize the initial storage restart.
 	environment["SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID"] = ""
+	if ports.NativeOperationObserverFrom(ctx) == nil {
+		return domain.ErrPlanStale
+	}
+	if err := runtime.checkOwnerInstanceStartSource(); err != nil {
+		return err
+	}
 	if runtime.ownerVolume == nil {
 		return domain.ErrPlanStale
 	}
@@ -439,11 +494,17 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--owner-before-instance", "--yes"); err != nil {
 		return err
 	}
+	if err := runtime.checkOwnerInstanceStartSource(); err != nil {
+		return err
+	}
 	var original *ports.PreparedOwnerInstance
 	var created *ports.NativeOwnerCreated
 	freshInstance := false
 	if runtime.ownerInstance != nil {
 		original = &runtime.ownerInstance.original
+		if runtime.ownerInstance.resolved != nil {
+			original = runtime.ownerInstance.resolved
+		}
 		var value *ports.NativeOwnerCreated
 		var err error
 		if runtime.ownerInstance.created != nil {
@@ -457,8 +518,9 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 			if !ok {
 				return domain.ErrPlanStale
 			}
-			env := runtime.ownerInstance.environment
-			home := runtime.ownerInstance.home
+			renderer := runtime.ownerInstance.rendererRuntime
+			env := ownerRenderEnvironment(renderer.Environment, "INCUS_PROJECT", renderer.Yard.IncusProject)
+			home := renderer.Yard.Paths.OperatorHome
 			if err = policyClient.CheckOwnerImagePolicy(ctx, *original.Policy, env, home); err != nil {
 				return err
 			}
@@ -466,7 +528,7 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 			if e != nil {
 				return e
 			}
-			rendered, e := runtime.RenderOwnerInstanceConfig(ctx, runtime.ownerInstance.sources, catalog)
+			rendered, e := renderer.RenderOwnerInstanceConfig(ctx, runtime.ownerInstance.sources, catalog)
 			if e != nil {
 				return e
 			}
@@ -509,6 +571,9 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 	if err := runtime.checkOwnerVolumeInstance(ctx, volume, original, created); err != nil {
 		return err
 	}
+	if err := runtime.checkOwnerInstanceStartSource(); err != nil {
+		return err
+	}
 	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--owner-before-srv", "--yes"); err != nil {
 		return err
 	}
@@ -533,7 +598,91 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 	if err := runtime.checkOwnerVolumeInstance(ctx, volume, original, created); err != nil {
 		return err
 	}
-	return runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--owner-after-srv", "--yes")
+	// The instance stage already holds WithStart. These checks retain original
+	// instance/create and SRV authority around the one shared temporary start.
+	check := func() error {
+		if err := runtime.checkOwnerInstanceStartSource(); err != nil {
+			return err
+		}
+		if original != nil {
+			if err := runtime.checkCreatedOwnerInstance(ctx, *original, *created); err != nil {
+				return err
+			}
+		}
+		if err := runtime.checkOwnerVolumeInstance(ctx, volume, original, created); err != nil {
+			return err
+		}
+		if runtime.ownerVolume.created != nil {
+			checker, ok := runtime.Incus.(interface {
+				CheckOwnerCreatedVolume(context.Context, ports.PreparedOwnerVolume, ports.NativeOwnerCreated) error
+			})
+			if !ok {
+				return domain.ErrPlanStale
+			}
+			return checker.CheckOwnerCreatedVolume(ctx, volume, *runtime.ownerVolume.created)
+		}
+		return client.CheckOwnerVolumeGuard(ctx, volume)
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--owner-before-start", "--yes"); err != nil {
+		return err
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	if err := runtime.ownerPhysicalLifecycle(ctx, domain.PowerRunning); err != nil {
+		return err
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	if freshInstance {
+		// Only this call's successful POST admits an unused guest restart. The
+		// fixed source reports a known check result without a nonterminal command.
+		result := &profileRuntimeBoundedBuffer{limit: 64 << 10}
+		if err := runtime.runScriptEnvironment(ctx, result, environment, "03-create-subyard.sh", "--owner-prepare-boot", "--yes"); err != nil {
+			if runtime.Stderr != nil {
+				_, _ = runtime.Stderr.Write(result.Bytes())
+			}
+			return err
+		}
+		if err := check(); err != nil {
+			return err
+		}
+		if result.exceeded {
+			return domain.ErrPlanStale
+		}
+		switch string(result.Bytes()) {
+		case "ready\n":
+		case "restart\n":
+			if err := runtime.ownerPhysicalLifecycle(ctx, domain.PowerStopped); err != nil {
+				return err
+			}
+			if err := check(); err != nil {
+				return err
+			}
+			if err := runtime.ownerPhysicalLifecycle(ctx, domain.PowerRunning); err != nil {
+				return err
+			}
+			if err := check(); err != nil {
+				return err
+			}
+			if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--owner-after-boot", "--yes"); err != nil {
+				return err
+			}
+		default:
+			return domain.ErrPlanStale
+		}
+		if err := check(); err != nil {
+			return err
+		}
+	}
+	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--owner-after-start", "--yes"); err != nil {
+		return err
+	}
+	return check()
 }
 
 // Only the original known instance can receive native successor power metadata.

@@ -46,6 +46,7 @@ type IncusServerExecStep struct {
 	Stdout         []byte
 	Stderr         []byte
 	ExitCode       int
+	ReturnMetadata map[string]any
 	StartError     string
 	OperationError string
 	Release        <-chan struct{}
@@ -588,6 +589,12 @@ func operationMetadata(
 	fds map[string]string,
 ) map[string]any {
 	metadata := map[string]any{"return": operation.step.ExitCode}
+	if operation.step.ReturnMetadata != nil {
+		metadata = make(map[string]any, len(operation.step.ReturnMetadata))
+		for key, value := range operation.step.ReturnMetadata {
+			metadata[key] = value
+		}
+	}
 	if fds != nil {
 		metadata["fds"] = fds
 	}

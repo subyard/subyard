@@ -17,13 +17,15 @@ import (
 )
 
 type lifecycleExecution struct {
-	action        string
-	force         bool
-	changed       bool
-	observed      *ports.InstanceInfo
-	status        string
-	vmCPUReady    bool
-	approvedSteps []domain.OperationStep
+	action           string
+	force            bool
+	changed          bool
+	observed         *ports.InstanceInfo
+	status           string
+	vmCPUReady       bool
+	approvedSteps    []domain.OperationStep
+	ownerPhysical    ports.AdapterRunner
+	ownerPowerConfig ports.InstanceConfigWriter
 }
 
 func prepareLifecycleExecution(
@@ -191,6 +193,9 @@ func (cli *CLI) executeLifecycle(
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}
+	if execution.ownerPowerConfig != nil {
+		power.Config = execution.ownerPowerConfig
+	}
 	contextValues := structuredAdapterContext(yard)
 	contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
 	if weight := execution.observed.Config["user.subyard.vm_cpu_weight"]; weight != "" {
@@ -205,12 +210,15 @@ func (cli *CLI) executeLifecycle(
 		contextValues["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
 	}
 	physical := orchestrator.Runner
+	if execution.ownerPhysical != nil {
+		physical = execution.ownerPhysical
+	}
 	orchestrator.Runner = application.LifecycleRunner{
 		Power:    power,
 		Physical: physical, Yard: yard,
 		AfterCommit: func(ctx context.Context, yard domain.Context) error {
 			instance, err := power.Instances.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
-			if err != nil || len(ownerpublication.Deferred(instance)) == 0 {
+			if err != nil || execution.ownerPhysical == nil && len(ownerpublication.Deferred(instance)) == 0 {
 				return err
 			}
 			retryResult, _, retryErr := physical.Run(ctx, domain.AdapterRequest{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Adapter: "lifecycle", Action: "start", Arguments: []string{"start", "--publication-retry-only"}, Context: contextValues}, nil)

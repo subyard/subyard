@@ -36,20 +36,46 @@ func (s *session) bindOwnerResults(ctx context.Context, request Request) (Reply,
 	} else if s.context == nil || producer.Session != s.context.Session || producer.Artifact != s.context.Artifact || producer.Helper != s.image {
 		return Reply{}, errors.New("owner result readonly context differs")
 	}
-	recipe, err := recipeFingerprint(Request{Op: "apply-owner", Before: request.Before, Token: request.Token})
-	if err != nil || s.checkIntent(*producer, "owner-registration", "test-yard", recipe) != nil {
+	_, err := s.ownerResultIntent(*producer, request.Before, request.Token, request.ProducerAction)
+	if err != nil {
 		return Reply{}, errors.New("owner result original intent differs")
 	}
+	if request.Binding != nil && request.Action != nil {
+		if !request.Action.sameProgram(request.ProducerAction) {
+			return Reply{}, errors.New("owner result consumer program differs")
+		}
+		if _, err := s.ownerResultIntent(*request.Binding, request.Before, request.Token, request.Action); err != nil {
+			return Reply{}, err
+		}
+	} else if request.Action != nil {
+		return Reply{}, errors.New("owner result readonly action")
+	}
+	if request.Binding != nil && request.Action == nil && request.ProducerAction != nil {
+		d, err := s.factsDirectory(*request.Binding)
+		if err != nil {
+			return Reply{}, err
+		}
+		raw, err := readFactAt(d, factName(request.Binding.Ordinal, "intent"))
+		unix.Close(d)
+		var intent Intent
+		if err != nil || strict(raw, &intent) != nil || intent.Owner == "owner-registration" || s.checkIntent(*request.Binding, intent.Owner, intent.Resource, intent.Recipe) != nil {
+			return Reply{}, errors.New("owner result consumer action missing")
+		}
+	}
 	terminal, err := s.readTerminal(*producer)
-	if err != nil || terminal.Owner != "owner-registration" || terminal.Resource != "test-yard" {
+	if err != nil || terminal.Owner != "owner-registration" || terminal.Resource != "test-yard" || terminal.State != "complete" && terminal.State != "failed" {
 		return Reply{Code: "unknown"}, nil
 	}
-	origin := &invocationObserver{session: s, binding: *producer, ownerToken: request.Token, restored: true, creates: map[ports.NativeOwnerCreateRef]ownerCreateIntent{}, created: map[ports.NativeOwnerCreateRef]bool{}}
+	origin := &invocationObserver{session: s, binding: *producer, ownerToken: request.Token, action: request.ProducerAction, restored: true, creates: map[ports.NativeOwnerCreateRef]ownerCreateIntent{}, created: map[ports.NativeOwnerCreateRef]bool{}}
 	root, err := origin.creationRoot()
 	if err != nil {
 		return Reply{}, err
 	}
-	if s.ownerResultsPayload != "" && (s.ownerResultsPayload != request.Before.PreparedRecipe || s.ownerResultsRecipe != root.Recipe || s.ownerResultsSource != root.Source) {
+	identity := root.Recipe
+	if request.ProducerAction != nil {
+		identity = request.ProducerAction.Program
+	}
+	if s.ownerResultsPayload != "" && (s.ownerResultsPayload != request.Before.PreparedRecipe || s.ownerResultsRecipe != identity || s.ownerResultsSource != root.Source) {
 		return Reply{}, errors.New("owner result original work differs")
 	}
 	directory, err := s.factsDirectory(*producer)
@@ -57,6 +83,14 @@ func (s *session) bindOwnerResults(ctx context.Context, request Request) (Reply,
 		return Reply{}, err
 	}
 	defer unix.Close(directory)
+	physical, err := readOwnerPhysical(directory, *producer, root, request.ProducerAction)
+	if err != nil {
+		return Reply{Code: "unknown"}, nil
+	}
+	physicalBinder, supportsPhysical := s.components.(OwnerPhysical)
+	if physical != "" && !supportsPhysical || request.ProducerAction != nil && supportsPhysical && physical == "" {
+		return Reply{Code: "unknown"}, nil
+	}
 	var values []ports.NativeOwnerCreated
 	semantic := map[string]bool{}
 	for _, reservationDomain := range []string{"command", "operation"} {
@@ -122,8 +156,13 @@ func (s *session) bindOwnerResults(ctx context.Context, request Request) (Reply,
 		return nil
 	}
 	for key, prior := range s.ownerOrigins {
+		if request.RetainedOnly && key == ownerCreateProducer(*producer) {
+			continue
+		}
 		priorRoot, err := prior.creationRoot()
-		if err != nil || !sameOwnerProducerScope(prior.binding, *producer) || priorRoot.Recipe != root.Recipe || priorRoot.Source != root.Source {
+		compatible := prior.action == nil && origin.action == nil && priorRoot.Recipe == root.Recipe || prior.action.sameProgram(origin.action)
+		_, intentErr := s.ownerResultIntent(prior.binding, request.Before, request.Token, prior.action)
+		if err != nil || intentErr != nil || !sameOwnerProducerScope(prior.binding, *producer) || !compatible || priorRoot.Source != root.Source {
 			return Reply{}, errors.New("owner result lineage differs")
 		}
 		for ref := range prior.created {
@@ -138,26 +177,58 @@ func (s *session) bindOwnerResults(ctx context.Context, request Request) (Reply,
 		merged[key] = prior
 	}
 	for _, value := range values {
+		if request.RetainedOnly {
+			continue
+		}
 		if err := include(value); err != nil {
 			return Reply{Code: "unknown"}, nil
 		}
 	}
-	if len(values) > 0 {
+	installation, installErr := origin.ReadHostPowerInstallation("")
+	if installErr != nil {
+		return Reply{Code: "unknown"}, nil
+	}
+	if len(values) > 0 || installation != nil || origin.action != nil {
 		merged[ownerCreateProducer(*producer)] = origin
 	}
 	slices.SortFunc(all, func(a, b ports.NativeOwnerCreated) int {
 		return strings.Compare(a.Intent.Scope+"\x00"+a.Intent.Kind, b.Intent.Scope+"\x00"+b.Intent.Kind)
 	})
-	previous := s.ownerOrigins
+	previous, previousActions := s.ownerOrigins, s.ownerActions
 	s.ownerOrigins = merged
+	if origin.action != nil {
+		s.ownerActions = make(map[Binding]OwnerActionReference, len(previousActions)+2)
+		for binding, action := range previousActions {
+			s.ownerActions[binding] = action
+		}
+		s.ownerActions[*producer] = *origin.action
+		if request.Action != nil {
+			s.ownerActions[*request.Binding] = *request.Action
+		}
+	}
+	if request.RetainedOnly {
+		// Validate the full producer against the original component capsule before
+		// removing its create-read capability from the admitted result set.
+		if err := binder.BindOwnerResults(ports.WithNativeOperationObserver(ctx, origin), *request.Before, request.Token, values); err != nil {
+			s.ownerOrigins, s.ownerActions = previous, previousActions
+			return Reply{Code: "stale", Diagnostic: componentDiagnostic(err)}, nil
+		}
+		origin.creates, origin.created = nil, nil
+	}
 	if err := binder.BindOwnerResults(ports.WithNativeOperationObserver(ctx, origin), *request.Before, request.Token, all); err != nil {
-		s.ownerOrigins = previous
+		s.ownerOrigins, s.ownerActions = previous, previousActions
 		return Reply{Code: "stale", Diagnostic: componentDiagnostic(err)}, nil
 	}
-	s.ownerResultsPayload, s.ownerResultsRecipe, s.ownerResultsSource = request.Before.PreparedRecipe, root.Recipe, root.Source
+	if physical != "" && !request.RetainedOnly {
+		if err := physicalBinder.BindOwnerPhysical(ports.WithNativeOperationObserver(ctx, origin), *request.Before, request.Token, *request.ProducerAction, physical); err != nil {
+			s.ownerOrigins, s.ownerActions = previous, previousActions
+			return Reply{Code: "stale", Diagnostic: componentDiagnostic(err)}, nil
+		}
+	}
+	s.ownerResultsPayload, s.ownerResultsRecipe, s.ownerResultsSource = request.Before.PreparedRecipe, identity, root.Source
 	s.ownerCompleted = nil
 	s.ownerCompletedTerminal = ""
-	if terminal.State == "complete" {
+	if terminal.State == "complete" && (origin.action == nil || origin.action.Action.Operation == "verify-desired") {
 		raw, err := readFactAt(directory, factName(producer.Ordinal, "terminal"))
 		if err != nil {
 			return Reply{}, err
@@ -167,6 +238,31 @@ func (s *session) bindOwnerResults(ctx context.Context, request Request) (Reply,
 		s.ownerCompletedTerminal = digest(raw)
 	}
 	return Reply{}, nil
+}
+
+// The action reference is bound into the producer's own immutable request,
+// rather than accepted as a separate label on a previously unrelated result.
+func (s *session) ownerResultIntent(binding Binding, before *OwnerBefore, token string, action *OwnerActionReference) (string, error) {
+	op := "apply-owner"
+	if action != nil {
+		op = "apply-owner-action"
+	}
+	recipe, err := recipeFingerprint(Request{Op: op, Binding: &binding, Before: before, Token: token, Action: action})
+	if err != nil || s.checkIntent(binding, "owner-registration", "test-yard", recipe) != nil {
+		return "", errors.New("owner result original intent differs")
+	}
+	return recipe, nil
+}
+
+// Both references were admitted against their own exact native intents. The
+// Rust owner alone selects eligible slots and compensated attempt lineage.
+func (o *invocationObserver) sameOwnerActionProgram(prior *invocationObserver) bool {
+	if !o.action.valid(o.binding) || !prior.action.valid(prior.binding) || !o.action.sameProgram(prior.action) {
+		return false
+	}
+	a, ok := o.session.ownerActions[o.binding]
+	b, priorOK := o.session.ownerActions[prior.binding]
+	return ok && priorOK && a == *o.action && b == *prior.action
 }
 
 func lowerHex(value string) bool {
@@ -261,6 +357,25 @@ func (s *session) checkOwnerResultEffectBinding(binding Binding) error {
 	for _, origin := range s.ownerOrigins {
 		if !sameOwnerProducerScope(origin.binding, binding) {
 			return errors.New("owner result effect scope differs")
+		}
+		if origin.action == nil {
+			continue
+		}
+		d, err := s.factsDirectory(binding)
+		if err != nil {
+			return err
+		}
+		raw, err := readFactAt(d, factName(binding.Ordinal, "intent"))
+		unix.Close(d)
+		var intent Intent
+		if err != nil || strict(raw, &intent) != nil || s.checkIntent(binding, intent.Owner, intent.Resource, intent.Recipe) != nil {
+			return errors.New("owner result consumer intent differs")
+		}
+		if intent.Owner == "owner-registration" {
+			action, ok := s.ownerActions[binding]
+			if !ok || !action.valid(binding) || !action.sameProgram(origin.action) {
+				return errors.New("owner result consumer program differs")
+			}
 		}
 	}
 	return nil

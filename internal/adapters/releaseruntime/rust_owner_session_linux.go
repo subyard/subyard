@@ -191,6 +191,7 @@ func (runtime *Runtime) startRustOwner(ctx context.Context, assets, engine, targ
 	// The repository descriptor is a separate typed startup role. Logical paths
 	// remain stable across processes, including before a draft is published.
 	command := exec.Command("/proc/self/fd/3", "_release-owner-operation-v1")
+	command.Dir = runtime.config.WorkingDir
 	command.ExtraFiles = []*os.File{engine.releaseOwner}
 	command.Stdin, command.Stdout = child, child
 	command.Stderr = runtime.config.Stderr
@@ -292,6 +293,27 @@ func (session *rustOwnerSession) readReply() (rustOwnerReply, error) {
 		return reply, fmt.Errorf("Rust release owner refused: %s", reply.Error)
 	}
 	return reply, nil
+}
+
+// Check is terminal and never populates the retained executable preparation.
+func (session *rustOwnerSession) Check(ctx context.Context) (releasetransition.Inspection, error) {
+	reply, err := session.exchange(ctx, map[string]any{"op": "check", "goal": releasetransition.Goal{Target: session.request.Target, Direction: session.request.Direction}}, rustOwnerExchangeLimit)
+	if err != nil {
+		return releasetransition.Inspection{}, err
+	}
+	if reply.Inspection == nil || reply.Outcome != nil || reply.Custody != nil || reply.Admission != nil || reply.Capabilities != nil || reply.ActivationOwners != nil {
+		return releasetransition.Inspection{}, errors.New("Rust owner returned an invalid terminal check")
+	}
+	if err := releasetransition.ValidateProcessInspection(releasetransition.Goal{Target: session.request.Target, Direction: session.request.Direction}, *reply.Inspection); err != nil {
+		return releasetransition.Inspection{}, err
+	}
+	if err := validateRustRetainedReleases(reply.RetainedReleases); err != nil {
+		return releasetransition.Inspection{}, err
+	}
+	session.mu.Lock()
+	session.activationOwned = reply.ActivationReconciliationOwned
+	session.mu.Unlock()
+	return *reply.Inspection, nil
 }
 
 func (session *rustOwnerSession) Inspect(ctx context.Context, recovery *releasetransition.RecoveryProcessRequest) (releasetransition.Inspection, error) {

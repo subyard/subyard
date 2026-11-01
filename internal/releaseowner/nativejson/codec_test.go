@@ -2,7 +2,9 @@ package nativejson
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"reflect"
 	"testing"
 )
@@ -38,5 +40,49 @@ func TestLosslessNativeJSONPreservesBytesAndRejectsAlternateGrammars(t *testing.
 	}
 	if _, err := EncodeLosslessNativeJSON(original, len(raw)-1); err == nil {
 		t.Fatal("capacity ignored")
+	}
+}
+
+func TestPrivateNativeFrameRetainsBytesAndRefusesForeignEnvelope(t *testing.T) {
+	raw := []byte{0, 255, 1, 2}
+	var out bytes.Buffer
+	if err := WritePrivateFrame(&out, 3, raw, 64); err != nil {
+		t.Fatal(err)
+	}
+	encoded := out.Bytes()
+	if got, err := ReadPrivateFrame(bytes.NewReader(encoded), 3, 64); err != nil || !bytes.Equal(got, raw) {
+		t.Fatal("private bytes lost", err)
+	}
+	for _, part := range []string{"magic", "version", "kind", "reserved", "sequence", "digest", "length", "truncated"} {
+		t.Run(part, func(t *testing.T) {
+			changed := bytes.Clone(encoded)
+			switch part {
+			case "magic":
+				changed[0]++
+			case "version":
+				changed[4]++
+			case "kind":
+				changed[5]++
+			case "reserved":
+				changed[6]++
+			case "sequence":
+				changed[15]++
+			case "digest":
+				changed[16]++
+			case "length":
+				binary.BigEndian.PutUint32(changed[48:], 65)
+			case "truncated":
+				changed = changed[:len(changed)-1]
+			}
+			if _, err := ReadPrivateFrame(bytes.NewReader(changed), 3, 64); err == nil {
+				t.Fatal("foreign envelope accepted")
+			}
+		})
+	}
+	if err := WritePrivateFrame(io.Discard, 0, raw, 64); err == nil {
+		t.Fatal("zero sequence accepted")
+	}
+	if err := WritePrivateFrame(io.Discard, 3, raw, 3); err == nil {
+		t.Fatal("write capacity ignored")
 	}
 }

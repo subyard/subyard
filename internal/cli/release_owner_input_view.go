@@ -16,6 +16,16 @@ import (
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
+type ownerInputDrift string
+
+func (err ownerInputDrift) Error() string {
+	return domain.ErrPlanStale.Error() + ": original owner " + string(err) + " changed"
+}
+func (ownerInputDrift) Unwrap() error { return domain.ErrPlanStale }
+func (err ownerInputDrift) ActivationDiagnostic() (string, string) {
+	return "original owner " + string(err) + " changed", "run yard update"
+}
+
 // Only the original owning registration may be replayed. Every other file is
 // read normally; the peer scopes are all captured before consent.
 type preparedOwnerChildInputView struct {
@@ -26,12 +36,16 @@ type preparedOwnerChildInputView struct {
 	peers        [3][]domain.Context
 	names        [3][]string
 	current      ownerChildCheck
+	restoration  ports.NativeOwnerRestorationObserver
 }
 
 func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, baseline *ownerInputBaseline, locked bool) error {
 	checked, err := testyardmigration.CheckOwnerChildSource(view.options, view.source.Before, view.source, view.root)
 	if err != nil {
 		observer, ok := ports.NativeOperationObserverFrom(ctx).(ports.NativeOwnerRestorationObserver)
+		if view.restoration != nil {
+			observer, ok = view.restoration, true
+		}
 		if !ok {
 			return err
 		}
@@ -79,8 +93,16 @@ func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, ba
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(fresh.Context, baseline.initial.Context) || !reflect.DeepEqual(fresh.Settings, baseline.initial.Settings) {
-		return domain.ErrPlanStale
+	// Retained catalog paths use the current-PID spelling of the same owned
+	// descriptor. Compare typed source labels without changing execution paths.
+	label := func(value string) string {
+		return ownerSourcePathLabel(value, cli.options.RepositoryRoot, cli.options.RepositoryRoot)
+	}
+	if !reflect.DeepEqual(fresh.Context, baseline.initial.Context) {
+		return ownerInputDrift("context")
+	}
+	if !reflect.DeepEqual(ownerSettingsLabels(fresh.Settings, label), ownerSettingsLabels(baseline.initial.Settings, label)) {
+		return ownerInputDrift("settings")
 	}
 	actual, err := ownerInputFiles(fresh)
 	if err != nil {
@@ -101,8 +123,16 @@ func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, ba
 			return err
 		}
 	}
-	if !reflect.DeepEqual(actual, baseline.files) {
-		return domain.ErrPlanStale
+	currentFiles, err := ownerInputFileLabels(actual, cli.options.RepositoryRoot)
+	if err != nil {
+		return err
+	}
+	originalFiles, err := ownerInputFileLabels(baseline.files, cli.options.RepositoryRoot)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(currentFiles, originalFiles) {
+		return ownerInputDrift("input identities")
 	}
 	peers, err := cli.powerYardContextsLocked(fresh, locked)
 	if err != nil {
@@ -123,7 +153,7 @@ func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, ba
 		}
 	}
 	if !allowed {
-		return domain.ErrPlanStale
+		return ownerInputDrift("peer scope")
 	}
 	// Retain exact bytes and security metadata through the complete loader and
 	// peer observation, not just the first registration read.
@@ -132,4 +162,20 @@ func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, ba
 		return domain.ErrPlanStale
 	}
 	return nil
+}
+
+// Equivalent spellings coalesce only when every observed security fact agrees.
+func ownerInputFileLabels(files map[string]ownerInputFile, root string) (map[string]ownerInputFile, error) {
+	if files == nil {
+		return nil, nil
+	}
+	result := make(map[string]ownerInputFile, len(files))
+	for path, fact := range files {
+		path = ownerSourcePathLabel(path, root, root)
+		if previous, present := result[path]; present && previous != fact {
+			return nil, domain.ErrPlanStale
+		}
+		result[path] = fact
+	}
+	return result, nil
 }

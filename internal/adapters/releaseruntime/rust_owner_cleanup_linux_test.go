@@ -208,8 +208,36 @@ func testRustOwnerRealCleanupRetry(t *testing.T, runtime *Runtime, owner, target
 		defer cancel()
 		proof, err := query.InspectSourceAdmission(ctx, request.RuntimeRoot, request.ConfigHome)
 		if accepted {
+			activeRegistry, readErr := os.ReadFile(filepath.Join(request.RuntimeRoot, "current", "config", "release-transition.json"))
+			source, previous := session.options.SourceArtifact, session.options.PreviousArtifact
+			if readErr != nil || releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(activeRegistry))) != journal.RegistryDigest ||
+				source == nil || source.Release != journal.Releases.From || previous == nil ||
+				journal.Releases.Previous == nil || previous.Release != *journal.Releases.Previous {
+				t.Fatal("closed cleanup lacks same-registry authenticated original source and previous facts", readErr)
+			}
+
 			if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Transaction != journal.Transaction || !lowerSHA256(proof.Binding) {
 				t.Fatal("closed failed cleanup lost readonly source admission", err)
+			}
+			selectedRust, selectionErr := CompiledRustReleaseOwner()
+			if selectionErr != nil {
+				t.Fatal(selectionErr)
+			}
+			if selectedRust && scenario == "cleanup-failure" {
+				sessionsBefore := len(runtime.rustOwners.sessions)
+				report, checkErr := runtime.PrepareCurrentTransition(ctx, []string{"--check"}, request.ConfigHome, request.Yard)
+				if checkErr != nil || report.Action != "migrate.check" || report.Changed || report.currentReport == nil || report.currentReport.Journal == nil || report.currentReport.Journal.Transaction != journal.Transaction {
+					t.Fatal("read-only completed cleanup report lost validated continuation", checkErr)
+				}
+				_, archiveErr := os.Stat(archive)
+				expected := releasetransition.StatusRecovering
+				if os.IsNotExist(archiveErr) {
+					expected = releasetransition.StatusReady
+				}
+				if report.currentReport.Outcome.Status != expected || len(runtime.rustOwners.sessions) != sessionsBefore {
+					t.Fatal("completed cleanup report changed its retained session or outcome")
+				}
+				t.Log("completed cleanup report kept full admission and dropped its private preparation", expected)
 			}
 		} else if err == nil {
 			t.Fatal("unresolved or changed cleanup acquired source admission")

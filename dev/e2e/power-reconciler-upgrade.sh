@@ -24,10 +24,10 @@ OPERATOR_HOME="/home/$OPERATOR"
 OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-power-systemd-home"
 RELEASE_ROOT="$STATE_ROOT/candidate"
 INSTALLER="$STATE_ROOT/subyard-install-v0.11.0.sh"
-COMPATIBLE_VERSION=0.21.0
+COMPATIBLE_VERSION=0.22.0
 COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
 COMPATIBLE_RUNTIME_ROOT="$STATE_ROOT/published-compatible-runtime"
-COMPATIBLE_RELEASE_TARGET=releases/0.21.0-1fee6251856e
+COMPATIBLE_RELEASE_TARGET=releases/0.22.0-11e9174b7cac
 SUDOERS="/etc/sudoers.d/$MARKER"
 SUDOERS_TEMP=''
 PROJECT=subyard
@@ -35,6 +35,12 @@ INSTANCE=yard
 RECONCILER=/usr/local/libexec/subyard/yard-boot-reconcile
 UNIT=/etc/systemd/system/subyard-power-reconcile.service
 UNIT_LINK=/etc/systemd/system/multi-user.target.wants/subyard-power-reconcile.service
+PUBLICATION_SERVICE=subyard-publication-reconcile.service
+PUBLICATION_UNIT=/etc/systemd/system/$PUBLICATION_SERVICE
+HOST_RUNTIME_PATHS=("$RECONCILER" "$UNIT" "$PUBLICATION_UNIT")
+for runtime_resource in "$RECONCILER" "$UNIT" "$PUBLICATION_UNIT"; do
+  HOST_RUNTIME_PATHS+=("$(dirname "$runtime_resource")/.$(basename "$runtime_resource").native-custody.json")
+done
 BEFORE_ROOT="$STATE_ROOT/before"
 SNAPSHOT_COMPLETE="$BEFORE_ROOT/.complete"
 PROJECT_MUTATION_ARMED="$STATE_ROOT/.project-mutation-armed"
@@ -108,8 +114,52 @@ remove_fixture_sudoers() {
   sudo -n find "$SUDOERS" -delete
 }
 
+# Stop PID1's passive consumer before any instance, executable or unit removal.
+# A successful stop must also cancel the 30-second automatic retry job.
+drain_publication_worker() {
+  local group state
+  group="$(sudo -n systemctl show "$PUBLICATION_SERVICE" -p ControlGroup --value 2>/dev/null || true)"
+  timeout --foreground --kill-after=5 40 sudo -n systemctl stop "$PUBLICATION_SERVICE" >/dev/null 2>&1 || {
+    [ "$(sudo -n systemctl show "$PUBLICATION_SERVICE" -p LoadState --value)" = not-found ] || return 1
+  }
+  state="$(sudo -n systemctl show "$PUBLICATION_SERVICE" -p MainPID -p ActiveState -p SubState -p Job 2>/dev/null || true)"
+  grep -Fxq MainPID=0 <<<"$state" || return 1
+  grep -Eq '^ActiveState=(inactive|failed)$' <<<"$state" || return 1
+  grep -Eq '^Job=(0)?$' <<<"$state" || return 1
+  if [ -n "$group" ] && sudo -n test -e "/sys/fs/cgroup$group/cgroup.procs"; then
+    [ -z "$(sudo -n cat "/sys/fs/cgroup$group/cgroup.procs")" ] || return 1
+  fi
+}
+
+restore_publication_manager() {
+  local enabled active actual
+  enabled="$(cat "$BEFORE_ROOT/publication-enabled")"
+  active="$(cat "$BEFORE_ROOT/publication-active")"
+  case "$enabled" in
+    enabled) sudo -n systemctl enable "$PUBLICATION_SERVICE" >/dev/null || return 1 ;;
+    disabled) sudo -n systemctl disable "$PUBLICATION_SERVICE" >/dev/null || return 1 ;;
+    static|absent) ;;
+    *) return 1 ;;
+  esac
+  case "$active" in
+    active) sudo -n systemctl start "$PUBLICATION_SERVICE" || return 1 ;;
+    inactive)
+      actual="$(sudo -n systemctl show "$PUBLICATION_SERVICE" -p ActiveState --value)" || return 1
+      if [ "$actual" = failed ]; then
+        sudo -n systemctl reset-failed "$PUBLICATION_SERVICE" >/dev/null || return 1
+      fi
+      ;;
+    failed) sudo -n systemctl reset-failed "$PUBLICATION_SERVICE" >/dev/null; sudo -n systemctl start "$PUBLICATION_SERVICE" >/dev/null 2>&1 || true ;;
+    *) return 1 ;;
+  esac
+  actual="$(sudo -n systemctl is-enabled "$PUBLICATION_SERVICE" 2>/dev/null || true)"
+  case "$enabled:$actual" in enabled:enabled|disabled:disabled|static:static|absent:not-found) ;; *) return 1 ;; esac
+  [ "$(sudo -n systemctl show "$PUBLICATION_SERVICE" -p ActiveState --value)" = "$active" ]
+}
+
 restore_host_runtime() {
   local path name state enabled_state restored_enabled restored_active
+  drain_publication_worker || return 1
   enabled_state="$(cat "$BEFORE_ROOT/unit-enabled" 2>/dev/null || true)"
   case "$enabled_state" in
     enabled|disabled|absent) ;;
@@ -121,7 +171,7 @@ restore_host_runtime() {
     sudo -n systemctl disable subyard-power-reconcile.service >/dev/null 2>&1 || true
     sudo -n test ! -e "$UNIT_LINK" && sudo -n test ! -L "$UNIT_LINK" || return 1
   fi
-  for path in "$RECONCILER" "$UNIT"; do
+  for path in "${HOST_RUNTIME_PATHS[@]}"; do
     name="$(basename "$path")"
     state="$(cat "$BEFORE_ROOT/$name.state" 2>/dev/null || true)"
     case "$state" in
@@ -165,6 +215,7 @@ restore_host_runtime() {
       ;;
     *) return 1 ;;
   esac
+  restore_publication_manager || return 1
   restored_enabled="$(sudo -n systemctl is-enabled subyard-power-reconcile.service \
     2>/dev/null || true)"
   case "$enabled_state:$restored_enabled" in
@@ -177,12 +228,38 @@ restore_host_runtime() {
     active:active|inactive:inactive|failed:failed) ;;
     *) return 1 ;;
   esac
-  for path in "$RECONCILER" "$UNIT"; do
+  for path in "${HOST_RUNTIME_PATHS[@]}"; do
     name="$(basename "$path")"
     [ "$(cat "$BEFORE_ROOT/$name.state")" != absent ] \
       || { sudo -n test ! -e "$path" && sudo -n test ! -L "$path"; } \
       || return 1
   done
+}
+
+# Bind isolated image cleanup before any managed instance or ordinary teardown
+# removes its base-image identity. This authority lives only in this cleanup shell.
+capture_owned_project_images() {
+  local feature instances expected images
+  [ "${CLEANUP_IMAGE_PROJECT:-}" != "$PROJECT:$MARKER" ] || return 0
+  assert_project_owned
+  feature="$(incus project get "$PROJECT" features.images)" || return 1
+  case "$feature" in
+    false) CLEANUP_PROJECT_IMAGES=''; CLEANUP_IMAGE_PROJECT="$PROJECT:$MARKER"; return 0 ;;
+    true) ;;
+    *) return 1 ;;
+  esac
+  expected="$(jq -cn '$ARGS.positional | sort' --args "$@")" || return 1
+  instances="$(incus list --project "$PROJECT" --format json)" || return 1
+  CLEANUP_PROJECT_IMAGES="$(jq -er --argjson expected "$expected" --arg instance "$INSTANCE" --arg marker "$MARKER" '
+    select(type == "array" and length > 0 and length <= 3)
+    | select(([.[].name] | sort) == $expected)
+    | select(all(.[]; .config["user.subyard.managed"] == "true"
+      and (.name == $instance or .config["user.subyard.e2e"] == $marker)
+      and (.config["volatile.base_image"] | type == "string" and test("^[0-9a-f]{64}$"))))
+    | [.[].config["volatile.base_image"]] | unique | .[]' <<<"$instances")" || return 1
+  images="$(incus image list --project "$PROJECT" --format json)" || return 1
+  [ "$(jq -er 'select(type == "array") | [.[].fingerprint] | sort | .[]' <<<"$images")" = "$CLEANUP_PROJECT_IMAGES" ] || return 1
+  CLEANUP_IMAGE_PROJECT="$PROJECT:$MARKER"
 }
 
 delete_owned_project() {
@@ -191,6 +268,7 @@ delete_owned_project() {
   [ "$project_presence_rc" != 1 ] || return 0
   [ "$project_presence_rc" = 0 ] || return 1
   assert_project_owned
+  capture_owned_project_images "$INSTANCE" || return 1
   if incus config show "$INSTANCE" --project "$PROJECT" >/dev/null 2>&1; then
     [ "$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT" 2>/dev/null)" = \
       true ] || die "refusing foreign instance $PROJECT/$INSTANCE"
@@ -200,9 +278,41 @@ delete_owned_project() {
     [ "$type" = custom ] && [ -n "$volume" ] || continue
     incus storage volume delete default "$volume" --project "$PROJECT" >/dev/null
   done < <(incus storage volume list default --project "$PROJECT" --format csv -c t,n)
-  [ -z "$(incus list --project "$PROJECT" --format csv -c n)" ] \
-    || die "unexpected instance remains in $PROJECT"
-  incus project delete "$PROJECT" >/dev/null
+  local remaining_instances
+  remaining_instances="$(incus list --project "$PROJECT" --format csv -c n)" || return 1
+  [ -z "$remaining_instances" ] || die "unexpected instance remains in $PROJECT"
+  if [ -n "$CLEANUP_PROJECT_IMAGES" ]; then
+    # A false/unknown feature would address shared/default images instead.
+    [ "$(incus project get "$PROJECT" features.images)" = true ] || return 1
+    local fingerprint current_images
+    current_images="$(incus image list --project "$PROJECT" --format json)" || return 1
+    current_images="$(jq -er 'select(type == "array") | [.[].fingerprint] | sort | .[]' <<<"$current_images")" || return 1
+    [ "$current_images" = "$CLEANUP_PROJECT_IMAGES" ] || return 1
+    assert_project_owned
+    while IFS= read -r fingerprint; do
+      [ -n "$fingerprint" ] || continue
+      incus image delete "$fingerprint" --project "$PROJECT" >/dev/null || return 1
+    done <<<"$current_images"
+  fi
+  local delete_rc=0 remaining LC_ALL=C
+  incus project delete "$PROJECT" >/dev/null || delete_rc=$?
+  if [ "$delete_rc" != 0 ]; then
+    # The marker was checked above. Observe only this project's bounded native
+    # references; never widen deletion to resources that were not captured.
+    if remaining="$(INCUS_COMMAND_TIMEOUT=10 INCUS_KILL_AFTER_SECONDS=5 incus query "/1.0/projects/$PROJECT" 2>/dev/null | head -c 16385)" \
+      && [ "${#remaining}" -le 16384 ] \
+      && remaining="$(jq -cse --arg name "$PROJECT" '
+        select(length == 1) | .[0] | select(.name == $name) | .used_by
+        | select(type == "array" and length <= 16
+          and all(.[]; type == "string" and length <= 256
+            and test("^/1[.]0/[A-Za-z0-9_./?=&%+-]+$")))
+        | {project:$name,used_by:.}' <<<"$remaining" 2>/dev/null)"; then
+      printf 'E2E_PROJECT_CLEANUP_DIAGNOSTIC status=present facts=%s\n' "$remaining" >&2
+    else
+      printf 'E2E_PROJECT_CLEANUP_DIAGNOSTIC status=unavailable-or-refused\n' >&2
+    fi
+  fi
+  return "$delete_rc"
 }
 
 cleanup() {
@@ -224,6 +334,10 @@ cleanup() {
       "$STATE_ROOT" >&2
     exit 3
   fi
+  if ! drain_publication_worker; then
+    printf 'power-reconciler-upgrade: passive worker did not drain; preserving fixture and runtime\n' >&2
+    exit 3
+  fi
   if incus info >/dev/null 2>&1; then
     project_presence || project_presence_rc=$?
     if [ "$project_presence_rc" = 0 ]; then
@@ -237,6 +351,10 @@ cleanup() {
       [ "$project_presence_rc" = 1 ] || cleanup_failed=1
     fi
   elif [ -e "$PROJECT_MUTATION_ARMED" ]; then
+    cleanup_failed=1
+  fi
+  if [ "$project_owned" = 1 ] && ! capture_owned_project_images "$INSTANCE"; then
+    project_owned=0
     cleanup_failed=1
   fi
   if id "$OPERATOR" >/dev/null 2>&1 \
@@ -297,7 +415,7 @@ trap 'exit 143' TERM
 snapshot_host_runtime() {
   local path name unit_path_state enabled_state active_state
   install -d -m 0700 "$BEFORE_ROOT"
-  for path in "$RECONCILER" "$UNIT"; do
+  for path in "${HOST_RUNTIME_PATHS[@]}"; do
     name="$(basename "$path")"
     if sudo -n test -e "$path" || sudo -n test -L "$path"; then
       sudo -n test -f "$path" && sudo -n test ! -L "$path" \
@@ -327,6 +445,19 @@ snapshot_host_runtime() {
     *) die "unsupported initial power reconciler active state: ${active_state:-query-error}" ;;
   esac
   printf '%s\n' "$active_state" > "$BEFORE_ROOT/unit-active"
+  enabled_state="$(sudo -n systemctl is-enabled "$PUBLICATION_SERVICE" 2>/dev/null || true)"
+  case "$(cat "$BEFORE_ROOT/$PUBLICATION_SERVICE.state"):$enabled_state" in
+    present:enabled|present:disabled|present:static|absent:not-found) ;;
+    *) die 'unsupported initial passive publication manager state' ;;
+  esac
+  [ "$enabled_state" != not-found ] || enabled_state=absent
+  printf '%s\n' "$enabled_state" > "$BEFORE_ROOT/publication-enabled"
+  active_state="$(sudo -n systemctl show "$PUBLICATION_SERVICE" -p ActiveState --value)"
+  case "$active_state" in active|inactive|failed) ;; *) die 'passive publication unit is transitioning' ;; esac
+  printf '%s\n' "$active_state" > "$BEFORE_ROOT/publication-active"
+  # The fixture caller owns BEFORE_ROOT; only the manager query needs root.
+  # shellcheck disable=SC2024
+  sudo -n systemctl show "$PUBLICATION_SERVICE" -p LoadState -p ActiveState -p SubState -p FragmentPath -p DropInPaths -p RestartUSec -p NRestarts > "$BEFORE_ROOT/publication-manager.before"
   printf '%s\n' "$MARKER" > "$SNAPSHOT_COMPLETE"
 }
 
@@ -731,21 +862,49 @@ prepare_candidate() {
     "$OLD_RELEASE_TARGET"
   ok 'actual supported v0.11.0 runtime and live power unit verified'
 
-  info 'running the candidate-owned supported update from the published predecessor'
+  info 'activating the exact published v0.22.0 bridge'
+  operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
+    "$RELEASE_ROOT/subyard-install.sh" --version "$COMPATIBLE_VERSION" --yes
+  assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_runtime_state "$COMPATIBLE_VERSION" \
+    "$OPERATOR_HOME/.subyard/runtime/$COMPATIBLE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" \
+    loaded candidate "$COMPATIBLE_RELEASE_TARGET"
+  assert_v2_transition activate-target "$COMPATIBLE_RELEASE_TARGET" '' "$COMPATIBLE_RELEASE_TARGET"
+  operator_yard migrate --check --json > "$STATE_ROOT/bridge-ready.json"
+  post_restart_release_ready "$STATE_ROOT/bridge-ready.json" "${COMPATIBLE_RELEASE_TARGET#releases/}" \
+    || die 'published bridge is not ready at its own registry head'
+  verify_legacy_rollback_refusal "$COMPATIBLE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+
+  info 'staging the candidate and requesting its own update plan'
   verify_bridge_plan_is_read_only
+  local before_stage after_stage candidate_root
+  before_stage="$(bridge_read_only_snapshot)"
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes
-  CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --publish-only \
+    > "$STATE_ROOT/candidate-stage.log"
+  after_stage="$(bridge_read_only_snapshot)"
+  [ "$before_stage" = "$after_stage" ] || die 'candidate staging changed protected state'
+  candidate_root="$(sed -n 's/^staged release=.* candidate=//p' "$STATE_ROOT/candidate-stage.log")"
+  case "$candidate_root" in
+    "$OPERATOR_HOME/.subyard/runtime/releases/$CANDIDATE_VERSION-"*) ;;
+    *) die 'candidate staging did not print an exact runtime path' ;;
+  esac
+  CANDIDATE_RELEASE_TARGET="releases/${candidate_root##*/}"
+  [ -x "$candidate_root/bin/yard" ] || die 'staged candidate frontend is unavailable'
   write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
+  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
+    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+  operator_env "$candidate_root/bin/yard" update --offline --version "$CANDIDATE_VERSION" --yes
   assert_candidate_state
-  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  ok 'supported update reached the V2 power fixed point'
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+  assert_legacy_native_policy
+  ok 'supported bridge and candidate updates reached the V2 power fixed point'
 }
 
 prepare_compatible_release() {
   local name digest
   mkdir -p "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
-  # Immutable official e92 assets, not a rebuilt compatibility fixture.
+  # Immutable official release assets, not a rebuilt compatibility fixture.
   while read -r digest name; do
     curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
       "https://github.com/Subyard/Subyard/releases/download/v$COMPATIBLE_VERSION/$name" \
@@ -753,12 +912,12 @@ prepare_compatible_release() {
     [ "$(sha256sum "$COMPATIBLE_RELEASE_ROOT/$name" | awk '{print $1}')" = "$digest" ] \
       || die 'published compatible asset checksum changed'
   done <<'ASSETS'
-1fee6251856ede2c1cbd0c01f48d226fbce64915f712df97085d35abb4991282 subyard-0.21.0-linux-amd64.tar.gz
-76a91b2233853cd4f75d20e7d8cc3ea468c2cca2782aad08871af12269352cbf subyard-0.21.0-linux-amd64.tar.gz.sha256
-fb17c012f72b45e44ed563f286e734ff38d4b3e473512c04d7fd2fde50a289e3 subyard-0.21.0-linux-amd64.tar.gz.manifest.json
-287e85b4c8aae826d27c2f9560e98358ba5a0513cc992c28685dc8b6eb7475e2 subyard-0.21.0-linux-amd64.tar.gz.provenance.json
+11e9174b7cac129ad41167b60864eb30e7b8540d1a57ad10481f7f0fcf19bbe0 subyard-0.22.0-linux-amd64.tar.gz
+380eebf7173604d7a4430cb8c0832376987c414404f9fea37a72e1487930b200 subyard-0.22.0-linux-amd64.tar.gz.sha256
+8393d6bcf5eb3919964a205ab9740d51830645b5271373bc46a97098d46ef133 subyard-0.22.0-linux-amd64.tar.gz.manifest.json
+fc94c30adcf71a0edbec74419f7f87701af6cbb8164a81bbdec0498da8a65fb9 subyard-0.22.0-linux-amd64.tar.gz.provenance.json
 ASSETS
-  tar -xzf "$COMPATIBLE_RELEASE_ROOT/subyard-0.21.0-linux-amd64.tar.gz" -C "$COMPATIBLE_RUNTIME_ROOT"
+  tar -xzf "$COMPATIBLE_RELEASE_ROOT/subyard-0.22.0-linux-amd64.tar.gz" -C "$COMPATIBLE_RUNTIME_ROOT"
   (cd "$COMPATIBLE_RUNTIME_ROOT" && sha256sum --check runtime-files.sha256 >/dev/null) \
     || die 'published compatible runtime manifest failed'
   chmod -R a+rX "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
@@ -829,6 +988,8 @@ case "$MODE" in
     prepare_candidate
     exercise_activation_only_repair
     establish_legacy_continuation
+    capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
+    assert_legacy_native_policy
     if [ "$MODE" = prepare ]; then
       record_reboot_baseline
       write_fixture_value "$PHASE_STATE" candidate-ready
@@ -837,7 +998,7 @@ case "$MODE" in
       exit 0
     fi
     finish_candidate_flow
-    printf 'ok: exact published v0.11.0 upgrade and authentic v0.21.0 rollback/roll-forward passed\n'
+    printf 'ok: exact published v0.11.0 upgrade and authentic v0.22.0 rollback/roll-forward passed\n'
     ;;
   resume)
     assert_state_root
@@ -858,6 +1019,6 @@ case "$MODE" in
     assert_fixture_phase candidate-reconciled
     assert_post_reboot_candidate
     finish_candidate_flow
-    printf 'ok: exact published v0.11.0 upgrade survived two reboots and authentic v0.21.0 rollback/roll-forward\n'
+    printf 'ok: exact published v0.11.0 upgrade survived two reboots and authentic v0.22.0 rollback/roll-forward\n'
     ;;
 esac

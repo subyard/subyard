@@ -1,8 +1,11 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,6 +43,19 @@ esac
 		t.Fatal(err)
 	}
 	defer original.Close()
+	for index, bind := range []func(context.Context, []byte) (*PreparedInstalledRuntime, error){runtime.BindInstalledRuntimeContext, runtime.BindAfterOwnerRuntimeSources} {
+		raw := [][]byte{source.Recipe(), original.Recipe()}[index]
+		for _, invalid := range [][]byte{
+			append(bytes.Clone(raw), ' '),
+			bytes.Replace(raw, []byte(`"version":1`), []byte(`"version":2`), 1),
+			append([]byte(`{"unexpected":0,`), raw[1:]...),
+		} {
+			if bound, err := bind(context.Background(), invalid); err == nil {
+				bound.Close()
+				t.Fatalf("invalid recipe admitted by binder=%d", index)
+			}
+		}
+	}
 	prepared, err := runtime.BindAfterOwnerRuntimeSources(context.Background(), original.Recipe())
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +75,9 @@ esac
 		t.Fatal(err)
 	}
 	defer derived.Close()
+	if derived.Binding() != fmt.Sprintf("%x", sha256.Sum256(derived.Recipe())) {
+		t.Fatal("metadata replacement binding differs from exact canonical bytes")
+	}
 	rebound, err := runtime.BindAfterOwnerRuntimeSources(context.Background(), derived.Recipe())
 	if err != nil {
 		t.Fatal(err)

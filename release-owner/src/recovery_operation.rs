@@ -23,6 +23,15 @@ struct Review {
     request: r::ActivationOnlyRecoveryRequest,
     contract: String,
 }
+
+fn ordinary_activation_recovery_candidate(before: &crate::wire::journal_v2::Record) -> bool {
+    before.checkpoint == "reconciling"
+        && before.goal.direction == "activate-target"
+        && before.source_ingress.is_none()
+        && before.steps.iter().flatten().count() == 0
+        && !recovery::recovery_transaction(&before.transaction)
+        && !before.transaction.starts_with("migration-owner-v1-")
+}
 pub struct PreparedRecovery<'a> {
     owner: &'a Owner,
     review: Review,
@@ -35,20 +44,81 @@ pub struct ConsentedRecovery<'a> {
     grant: Grant,
 }
 impl Owner {
+    // Keep the original durable resume identity. A changed scope is only an
+    // inspection blocker; the existing negotiated operation owns new consent.
+    pub(crate) fn inspect_ordinary_activation_recovery(
+        &self,
+        original: &mut Observation,
+    ) -> Result<()> {
+        let Some(before) = original.journal.as_ref().map(|j| j.wire()) else {
+            return Ok(());
+        };
+        if !ordinary_activation_recovery_candidate(before)
+            || self.options.replacement.is_some()
+            || original.plan.wire().replacement.is_some()
+            || !original.work.is_empty()
+        {
+            return Ok(());
+        }
+        match self.native_quiescent(Some(before)) {
+            Ok(()) => (),
+            Err(Error::Unknown) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        if self.store.native_cleanup_pending()? {
+            return Ok(());
+        }
+        let fresh = self.observe_recovery(original.plan.wire().goal.clone())?;
+        if fresh.plan.wire().observation_scope == before.observation_scope {
+            return Ok(());
+        }
+        self.recovery_review_from_observation(
+            r::ActivationOnlyRecoveryRequest {
+                transaction: before.transaction.clone(),
+                fingerprint: original.journal_snapshot.fingerprint(),
+            },
+            recovery::ACTIVATION_V2,
+            fresh,
+        )?;
+        let mut facts = original.plan.wire().clone();
+        facts.blockers = Some(vec![p::Blocker {
+            code: "plan-stale".into(),
+            resource: "transition.observation-scope".into(),
+            message: "the authorized transition observation scope differs from this engine".into(),
+            retry: "run yard update --check".into(),
+        }]);
+        original.plan = Plan::new(facts)?;
+        Ok(())
+    }
+
     fn recovery_review(
         &self,
         request: r::ActivationOnlyRecoveryRequest,
         contract: &str,
     ) -> Result<Review> {
+        let contract = if contract.is_empty() {
+            recovery::ACTIVATION_V1
+        } else {
+            contract
+        };
         require(matches!(
             contract,
             recovery::ACTIVATION_V1 | recovery::ACTIVATION_V2
         ))?;
         recovery::selection(&request)?;
-        let mut observation = self.observe_recovery(p::Goal {
+        let observation = self.observe_recovery(p::Goal {
             target: self.options.releases.target.clone(),
             direction: "activate-target".into(),
         })?;
+        self.recovery_review_from_observation(request, contract, observation)
+    }
+
+    fn recovery_review_from_observation(
+        &self,
+        request: r::ActivationOnlyRecoveryRequest,
+        contract: &str,
+        mut observation: Observation,
+    ) -> Result<Review> {
         let before = observation.journal.as_ref().ok_or(Error::Invalid)?.wire();
         require(
             before.transaction == request.transaction
@@ -115,11 +185,18 @@ impl Owner {
         plans.sort_by(|a, b| a.id.cmp(&b.id));
         require(!plans.is_empty())?;
         let mut execution = observation.plan.wire().clone();
-        let yard_set = execution
+        let retained_observations = execution
             .observations
             .iter()
             .flatten()
-            .filter(|o| o.resource == "native.yard-set")
+            .filter(|o| {
+                matches!(
+                    o.resource.as_str(),
+                    "native.yard-set"
+                        | "migration-history.authority"
+                        | "migration-history.checkpoint"
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         execution.observations = Some(vec![
@@ -134,7 +211,11 @@ impl Owner {
                 fingerprint: ledger.fingerprint(),
             },
         ]);
-        execution.observations.as_mut().unwrap().extend(yard_set);
+        execution
+            .observations
+            .as_mut()
+            .unwrap()
+            .extend(retained_observations);
         for plan in &plans {
             execution.observations.as_mut().unwrap().push(
                 crate::wire::plan_v1::ResourceObservation {
@@ -342,6 +423,7 @@ impl ConsentedRecovery<'_> {
             &review.observation.targets,
             &owner.session,
             &installed,
+            Some(&owner.catalog),
             Some((&review.facts, &receipt)),
         )?;
         crate::fixture::point("before-recovery-receipt")?;
@@ -353,5 +435,35 @@ impl ConsentedRecovery<'_> {
         lease.replace_journal(&fresh.observation.journal_snapshot, &journal)?;
         crate::fixture::point("after-recovery-journal-cas")?;
         owner.run(&lease, journal, vec![], review.observation.targets)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_recovery_never_selects_migration_source_or_successor_journals() {
+        let (_fixture, _store, journal, _binding) = crate::custody::tests::fixture();
+        assert!(ordinary_activation_recovery_candidate(&journal));
+        for checkpoint in ["prepared", "applying", "activating", "complete"] {
+            let mut changed = journal.clone();
+            changed.checkpoint = checkpoint.into();
+            assert!(!ordinary_activation_recovery_candidate(&changed));
+        }
+        let mut changed = journal.clone();
+        changed.steps = Some(vec![Default::default()]);
+        assert!(!ordinary_activation_recovery_candidate(&changed));
+        changed = journal.clone();
+        changed.source_ingress = Some(Default::default());
+        assert!(!ordinary_activation_recovery_candidate(&changed));
+        changed = journal.clone();
+        changed.goal.direction = "activate-previous".into();
+        assert!(!ordinary_activation_recovery_candidate(&changed));
+        for prefix in ["recovery-v1-", "recovery-v2-", "migration-owner-v1-"] {
+            changed = journal.clone();
+            changed.transaction = format!("{prefix}{}", "a".repeat(32));
+            assert!(!ordinary_activation_recovery_candidate(&changed));
+        }
     }
 }

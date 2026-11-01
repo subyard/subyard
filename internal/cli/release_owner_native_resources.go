@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -94,42 +93,6 @@ func (p *preparedOwnerChildren) applyOwnerImageProject(ctx context.Context, nati
 			return domain.ErrPlanStale
 		}
 		*retained = created
-	}
-	return nil
-}
-
-func (c *releaseOwnerComponents) ownerNativeOptions(record ownerChildrenRecord, options *testyardmigration.Options, children *preparedOwnerChildren) error {
-	incus, _ := c.cli.statusPorts()
-	native, ok := incus.(ownerNativeResources)
-	if !ok || len(record.Projects) != 2 || children == nil {
-		return domain.ErrPlanStale
-	}
-	for i, p := range record.Projects {
-		if p.Project != []string{"subyard-" + testyardmigration.CurrentYard, "subyard-" + testyardmigration.LegacyYard}[i] || p.SharedImages != record.Before.SharedImages || p.Absent && p.Config != nil {
-			return domain.ErrPlanStale
-		}
-	}
-	options.EnsureImageProject = func(ctx context.Context, yard string, shared bool) error {
-		if !slices.Contains([]string{testyardmigration.CurrentYard, testyardmigration.LegacyYard}, yard) || shared != record.Before.SharedImages {
-			return domain.ErrPlanStale
-		}
-		for _, p := range record.Projects {
-			if p.Project == "subyard-"+yard {
-				scope := "current"
-				if yard == testyardmigration.LegacyYard {
-					scope = "legacy"
-				}
-				return children.applyOwnerImageProject(ctx, native, p, scope)
-			}
-		}
-		return domain.ErrPlanStale
-	}
-	options.RestoreLegacyStop = func(ctx context.Context) error {
-		p := record.TemporaryStop
-		if p == nil || p.Project != "subyard-"+testyardmigration.LegacyYard || p.Instance != "yard-"+testyardmigration.LegacyYard {
-			return domain.ErrPlanStale
-		}
-		return native.ApplyPreparedTemporaryStop(ctx, *p)
 	}
 	return nil
 }

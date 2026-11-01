@@ -58,8 +58,6 @@ func (runtime Runtime) preparedProfileExecution(ctx context.Context, p *Prepared
 	execution.Profiles = definitions
 	execution.Environment = preparedInstalledEnvironment(execution.Environment, "SUBYARD_REPOSITORY_ROOT", p.directory)
 	execution.Environment = preparedInstalledEnvironment(execution.Environment, "SUBYARD_CONFIG_DIR", filepath.Join(p.directory, "config"))
-	hooks := runtime.environmentValue("SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS")
-	execution.Environment = preparedInstalledEnvironment(execution.Environment, "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS", mapper.bindingPath(hooks))
 	return execution, nil
 }
 

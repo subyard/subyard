@@ -50,6 +50,7 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
+	ownerResourceCLI      *CLI
 	legacyContinuation    *initLegacyContinuation
 	resourceCommand       string
 	resourceArguments     []string
@@ -76,6 +77,7 @@ type initExecution struct {
 	hostIDPending         bool
 	configsChanged        bool
 	hooksApplicable       bool
+	ownerOrphanRaw        []byte
 	orphanIngress         *orphanIngressPlan
 	orphanIngressDeferred bool
 	runtimePlan           *reconcileruntime.ProfileRuntimePlan
@@ -107,8 +109,15 @@ func (execution *initExecution) lock(ctx context.Context) (context.Context, func
 	}, nil
 }
 
+func (execution *initExecution) resourceCLI(cli *CLI) *CLI {
+	if execution.ownerResourceCLI != nil {
+		return execution.ownerResourceCLI
+	}
+	return cli
+}
+
 func (execution *initExecution) refreshOrphanIngress(ctx context.Context, cli *CLI) error {
-	err := execution.orphanIngress.refresh(ctx, cli, execution.loaded)
+	err := execution.orphanIngress.refresh(ctx, execution.resourceCLI(cli), execution.loaded)
 	if execution.orphanIngressDeferred && errors.Is(err, errOrphanIngressAccessDeferred) {
 		return nil
 	}
@@ -119,7 +128,7 @@ func (execution *initExecution) finishDeferredOrphanIngress(ctx context.Context,
 	if !execution.orphanIngressDeferred {
 		return nil
 	}
-	if err := execution.orphanIngress.refresh(ctx, cli, execution.loaded); err != nil {
+	if err := execution.orphanIngress.refresh(ctx, execution.resourceCLI(cli), execution.loaded); err != nil {
 		if errors.Is(err, domain.ErrPlanStale) {
 			return fmt.Errorf("%w: deselected public ingress was discovered after owner Incus access was restored; rerun init for a new assessment and approval", domain.ErrPlanStale)
 		}
@@ -400,6 +409,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 		Profiles:          loaded.Catalog.Profiles(),
 		Integrations:      loaded.Catalog.Integrations(),
 		RepositoryRoot:    cli.options.RepositoryRoot,
+		WorkingDir:        cli.options.WorkingDir,
 		Environment:       environmentList(cli.env, environment),
 		LaunchEnvironment: environmentList(cli.baseEnv, nil),
 		Stdin:             cli.options.Stdin,
@@ -993,7 +1003,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		}
 	}
 	if !execution.orphanIngressDeferred {
-		if err := execution.orphanIngress.apply(ctx, cli, execution.loaded, execution.operationID); err != nil {
+		if err := execution.orphanIngress.apply(ctx, execution.resourceCLI(cli), execution.loaded, execution.operationID); err != nil {
 			return fmt.Errorf("close deselected public ingress: %w", err)
 		}
 	}

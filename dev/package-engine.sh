@@ -28,6 +28,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+release_owner=go
+build_variant=()
+if [ "$EXPERIMENTAL_RELEASE_OWNER" = 1 ]; then
+  release_owner=rust
+  build_variant=(--experimental-release-owner)
+fi
+
 case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) printf 'package-engine: unsafe version: %s\n' "$VERSION" >&2; exit 2 ;; esac
 command -v go >/dev/null 2>&1 || { printf 'package-engine: Go is required\n' >&2; exit 2; }
 command -v rg >/dev/null 2>&1 || { printf 'package-engine: ripgrep is required\n' >&2; exit 2; }
@@ -70,6 +77,10 @@ if [ -n "$RUNTIME_DIR" ]; then
   if grep -Eq -- '(-tags=|GOFLAGS=)' <<< "$build_info"; then
     printf 'package-engine: development tooling requires an untagged normal engine\n' >&2; exit 2
   fi
+  if ! compiled_owner="$(bash -c 'exec -a yard-engine "$1" _release-owner-variant-v1' stage-owner "$artifact" 2>/dev/null)" \
+    || [ "$compiled_owner" != "$release_owner" ]; then
+    printf 'package-engine: prebuilt engine compiled release owner differs\n' >&2; exit 2
+  fi
   machine="$(readelf -h "$artifact" | sed -n 's/.*Machine: *//p')"
   case "$goarch:$machine" in amd64:*X86-64*|arm64:AArch64) ;; *) printf 'package-engine: prebuilt engine architecture differs\n' >&2; exit 2 ;; esac
   install -d -m 0755 "$RUNTIME_DIR/releases"
@@ -91,7 +102,7 @@ install -m 0755 "$RUNTIME_INSTALLER" \
     > subyard-install-runtime-release.sh.sha256 )
 artifact="$OUTPUT_DIR/yard-$VERSION-$goos-$goarch"
 GOOS="$goos" GOARCH="$goarch" YARD_BUILD_VERSION="$VERSION" \
-  "$SCRIPT_DIR/build-engine.sh" --force --output "$artifact"
+  "$SCRIPT_DIR/build-engine.sh" --force "${build_variant[@]}" --output "$artifact"
 (
   cd "$OUTPUT_DIR"
   sha256sum "$(basename "$artifact")" > "$(basename "$artifact").sha256"
@@ -129,6 +140,8 @@ if [ "$EXPERIMENTAL_RELEASE_OWNER" = 1 ]; then
   --output "$bundle_stage/bin/subyard-release-owner"
 install -d "$bundle_stage/config"
 mv "$bundle_stage/bin/subyard-release-owner.build.json" "$bundle_stage/config/release-owner-build.json"
+printf '%s\n' 'subyard-release-owner-check-v1' > "$bundle_stage/config/release-owner-check-v1"
+chmod 0644 "$bundle_stage/config/release-owner-check-v1"
 # Build locks are development coordination, never runtime assets.
 rm -f -- "$bundle_stage/bin/.release-owner-build.lock"
 fi

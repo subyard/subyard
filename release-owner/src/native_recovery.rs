@@ -59,9 +59,11 @@ impl Generation {
             Expected::Vector(v) => require(
                 value.version == 2
                     && (v.iter().map(|r| r.role.as_str()).eq(["engine", "service"])
-                        || v.iter()
-                            .map(|r| r.role.as_str())
-                            .eq(["engine", "service", "timer"])),
+                        || v.iter().map(|r| r.role.as_str()).eq([
+                            "engine",
+                            "service",
+                            "publication",
+                        ])),
             )?,
         }
         Ok(value)
@@ -114,6 +116,8 @@ pub(crate) struct Resolution {
     intent: String,
     retry: Binding,
     fence: Option<Fence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compensated: Option<Box<crate::program::CompensatedAttempt>>,
 }
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -137,11 +141,16 @@ impl Resolution {
     pub(crate) fn checked_hash(raw: &[u8], original: &Intent, intent_hash: &str) -> Result<Self> {
         let value: Self = codec::decode_canonical(raw, true)?;
         require(
-            value.version == 1
+            (value.version == 1 && value.compensated.is_none()
+                || value.version == 2 && value.compensated.is_some() && value.fence.is_none())
                 && value.binding == original.binding
                 && value.intent == intent_hash
                 && same_binding(&value.binding, &value.retry),
         )?;
+        if let Some(compensated) = &value.compensated {
+            compensated.matches(original, &value.retry)?;
+            require(raw.len() <= 64 << 10)?;
+        }
         if let Some(fence) = &value.fence {
             require(
                 same_binding(&value.binding, &fence.binding)
@@ -246,6 +255,10 @@ impl Resolution {
             &original.expected,
             &original.desired,
         )?;
+        if let Some(compensated) = &self.compensated {
+            compensated.proof(intents, terminals)?;
+            return Ok((false, success));
+        }
         if let Some(fence) = &self.fence {
             let request = Request::FenceActivation {
                 binding: fence.binding.clone(),
@@ -292,8 +305,86 @@ impl Resolution {
     ) -> Option<u64> {
         completed.get(&self.retry.ordinal).copied()
     }
+    pub(crate) fn compensated(&self) -> Option<&crate::program::CompensatedAttempt> {
+        self.compensated.as_deref()
+    }
+    pub(crate) fn retry_binding(&self) -> &Binding {
+        &self.retry
+    }
+    fn high_water(&self) -> u64 {
+        self.compensated
+            .as_ref()
+            .map_or(self.retry.ordinal, |p| {
+                p.bindings
+                    .iter()
+                    .chain(&p.retries)
+                    .copied()
+                    .max()
+                    .unwrap_or(self.retry.ordinal)
+            })
+            .max(self.fence.as_ref().map_or(0, |f| f.binding.ordinal))
+    }
+    pub(crate) fn compensated_edge(
+        original: &Intent,
+        raw: &[u8],
+        proof: &crate::program::CompensatedAttempt,
+        retry: Binding,
+    ) -> Result<Vec<u8>> {
+        let value = Self {
+            version: 2,
+            binding: original.binding.clone(),
+            intent: digest(raw),
+            retry,
+            fence: None,
+            compensated: Some(Box::new(proof.clone())),
+        };
+        let raw = codec::encode(&value, true)?;
+        Self::checked_hash(&raw, original, &value.intent)?;
+        Ok(raw)
+    }
 }
 impl store::Store {
+    /// A retry edge reserves its destinations before those invocations have
+    /// files. A partially published group edge already contains the full map.
+    pub(crate) fn native_ordinal_high_water(&self, transaction: &str) -> Result<u64> {
+        let root = self.root.as_ref().ok_or(Error::Protected)?;
+        let directory = store::directory(
+            root,
+            &[
+                "migrations".into(),
+                "native-custody".into(),
+                "v1".into(),
+                transaction.into(),
+            ],
+            false,
+        )?
+        .ok_or(Error::Unknown)?;
+        let mut last = 2048;
+        for name in inventory::names(&directory, 8192)? {
+            let logical = name
+                .strip_prefix('.')
+                .and_then(|n| n.strip_suffix(".pending"))
+                .unwrap_or(&name);
+            let Some((ordinal, kind)) = logical.split_once('.') else {
+                continue;
+            };
+            let Ok(ordinal) = ordinal.parse::<u64>() else {
+                continue;
+            };
+            require((1..=4096).contains(&ordinal))?;
+            last = last.max(ordinal);
+            if kind == "recovery.json" && logical == name {
+                let raw = self.read(&Address::native(transaction, ordinal, "recovery")?)?;
+                let intent_raw = self.read(&Address::native(transaction, ordinal, "intent")?)?;
+                let bytes = intent_raw.bytes().ok_or(Error::Unknown)?;
+                let intent = codec::decode_canonical(bytes, true)?;
+                let resolution =
+                    Resolution::checked(raw.bytes().ok_or(Error::Unknown)?, &intent, bytes)?;
+                last = last.max(resolution.high_water());
+            }
+        }
+        Ok(last)
+    }
     /// Select only the original invocation or its explicit protected retry
     /// edges. Directory order and resource names never select a producer.
     pub(crate) fn owner_result_producers(
@@ -318,6 +409,22 @@ impl store::Store {
                             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 )?;
                 before.validate()?;
+            }
+            Request::ApplyOwnerAction {
+                binding,
+                before,
+                token,
+                action,
+            } => {
+                require(
+                    binding == base
+                        && token.len() == 32
+                        && token
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                )?;
+                before.validate()?;
+                action.validate(binding)?;
             }
             _ => return Err(Error::Invalid),
         }
@@ -375,7 +482,9 @@ impl store::Store {
             self.validate_owner_producer(&binding)?;
             chain.push(binding.clone());
             let recovery = read("recovery")?;
-            if terminal.state == "complete" || recovery.bytes().is_none() {
+            if recovery.bytes().is_none()
+                || terminal.state == "complete" && matches!(request, Request::ApplyOwner { .. })
+            {
                 return Ok(chain);
             }
             let recovery =
@@ -404,7 +513,12 @@ impl Owner {
             .bytes()
             .map(|raw| codec::decode_canonical::<native::Terminal>(raw, true))
             .transpose()?;
-        Ok(!terminal.is_some_and(|t| t.state == "complete"))
+        Ok(!terminal.is_some_and(|t| t.state == "complete")
+            || self
+                .store
+                .read(&Address::native(&journal.transaction, ordinal, "recovery")?)?
+                .bytes()
+                .is_some())
     }
     pub(crate) fn continued_native_request(
         &self,
@@ -429,6 +543,16 @@ impl Owner {
             .map(|raw| codec::decode_canonical::<native::Terminal>(raw, true))
             .transpose()?;
         if terminal.as_ref().is_some_and(|t| t.state == "complete") {
+            if let Some(raw) = read("recovery")?.bytes() {
+                let intent_raw = read("intent")?;
+                let intent =
+                    codec::decode_canonical(intent_raw.bytes().ok_or(Error::Unknown)?, true)?;
+                let resolution =
+                    Resolution::checked(raw, &intent, intent_raw.bytes().ok_or(Error::Unknown)?)?;
+                require(resolution.compensated.is_some())?;
+                let request = request.rebound(resolution.retry.clone())?;
+                return Ok((resolution.retry, request));
+            }
             return Ok((binding, request));
         }
         if terminal.is_none() {
@@ -464,6 +588,44 @@ impl Owner {
                         && fact.resource == "test-yard",
                 )?;
                 return self.continued_native_request(lease, journal, binding, request);
+            }
+        }
+        if terminal.is_none() {
+            if let Request::ApplyActivation { target, .. } = &request {
+                if target.materialized_after_owner() {
+                    let update = native::Identity::capture(&lease._lock)?;
+                    let (owner_identity, owner_fd) = self.outer.borrowed()?;
+                    self.native(
+                        &Request::ClaimLease {
+                            binding: binding.clone(),
+                            update,
+                            owner: Some(owner_identity),
+                        },
+                        vec![store::io(rustix::io::dup(&lease._lock))?, owner_fd],
+                    )?;
+                    let queried = self.call(Request::QueryInvocation {
+                        binding: binding.clone(),
+                        target: Some(target.clone()),
+                    });
+                    if self.store.reader.health().is_ok() {
+                        self.call(Request::ReleaseLease {
+                            session: self.session.clone(),
+                        })?;
+                    }
+                    // The callback may return FAILED as an error. Only its exact
+                    // durable whole terminal permits the existing failed retry edge.
+                    let _ = queried;
+                    let raw = read("terminal")?;
+                    let fact: native::Terminal =
+                        codec::decode_canonical(raw.bytes().ok_or(Error::Unknown)?, true)?;
+                    require(
+                        fact.binding == binding
+                            && fact.owner == target.owner
+                            && fact.resource == target.yard
+                            && fact.state == "failed",
+                    )?;
+                    return self.continued_native_request(lease, journal, binding, request);
+                }
             }
         }
         let intent_raw = read("intent")?;
@@ -503,6 +665,7 @@ impl Owner {
                         )?;
                         let queried = self.call(Request::QueryInvocation {
                             binding: binding.clone(),
+                            target: None,
                         });
                         if self.store.reader.health().is_ok() {
                             self.call(Request::ReleaseLease {
@@ -516,24 +679,7 @@ impl Owner {
             } else {
                 None
             };
-            let root = self.store.root.as_ref().ok_or(Error::Protected)?;
-            let dir = store::directory(
-                root,
-                &[
-                    "migrations".into(),
-                    "native-custody".into(),
-                    "v1".into(),
-                    binding.transaction.clone(),
-                ],
-                false,
-            )?
-            .ok_or(Error::Stale)?;
-            let last = inventory::names(&dir, 8192)?
-                .iter()
-                .filter_map(|n| n.split_once('.').and_then(|(n, _)| n.parse::<u64>().ok()))
-                .max()
-                .unwrap_or(2048)
-                .max(2048);
+            let last = self.store.native_ordinal_high_water(&binding.transaction)?;
             let mut retry = binding.clone();
             retry.ordinal = last.checked_add(1).ok_or(Error::Bound)?;
             let reserved = self.cleanup_owner_ordinal(journal)?;
@@ -574,6 +720,7 @@ impl Owner {
                 intent: intent_raw.fingerprint(),
                 retry,
                 fence,
+                compensated: None,
             };
             let raw = codec::encode(&value, true)?;
             let value =
@@ -599,6 +746,7 @@ impl Owner {
                     target: fence.target.clone(),
                     successor: fence.successor.clone(),
                 },
+                None,
             )?;
         }
         let request = if let Some(fence) = &resolution.fence {
@@ -618,6 +766,164 @@ mod tests {
     use super::*;
     use crate::custody::tests::{fixture, terminal, write, Fixture};
     #[test]
+    fn generation_vectors_preserve_publication_and_historical_roles() {
+        for roles in [
+            vec!["engine", "service"],
+            vec!["engine", "service", "publication"],
+        ] {
+            let before = Generation {
+                version: 2,
+                expected: Expected::Vector(
+                    roles
+                        .iter()
+                        .map(|role| ResourceGeneration {
+                            role: (*role).into(),
+                            value: "0".into(),
+                        })
+                        .collect(),
+                ),
+                generation: "a".repeat(64),
+            };
+            let raw = codec::encode(&before, false).unwrap();
+            let parsed = Generation::parse(std::str::from_utf8(&raw).unwrap()).unwrap();
+            assert_eq!(codec::encode(&parsed, false).unwrap(), raw);
+            let after = parsed.replacement(&"b".repeat(64), "c".repeat(64));
+            let raw_after = codec::encode(&after, false).unwrap();
+            let checked = Generation::parse(std::str::from_utf8(&raw_after).unwrap()).unwrap();
+            assert!(parsed
+                .matches_replacement(&checked, &"b".repeat(64))
+                .is_ok());
+            assert!(parsed
+                .matches_replacement(&checked, &parsed.generation)
+                .is_err());
+            assert!(parsed.matches_replacement(&checked, "0").is_err());
+            let mut changed = after;
+            if let Expected::Vector(v) = &mut changed.expected {
+                v[0].role = "foreign".into();
+            }
+            assert!(parsed
+                .matches_replacement(&changed, &"b".repeat(64))
+                .is_err());
+        }
+        for roles in [
+            vec!["engine", "service", "timer"],
+            vec!["engine", "service", "unknown"],
+            vec!["service", "engine"],
+        ] {
+            let invalid = Generation {
+                version: 2,
+                expected: Expected::Vector(
+                    roles
+                        .iter()
+                        .map(|role| ResourceGeneration {
+                            role: (*role).into(),
+                            value: "0".into(),
+                        })
+                        .collect(),
+                ),
+                generation: "a".repeat(64),
+            };
+            let raw = codec::encode(&invalid, false).unwrap();
+            assert!(Generation::parse(std::str::from_utf8(&raw).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn materialized_after_owner_retry_changes_only_observation_fields() {
+        let mut original = target();
+        original.owner = "materialized-config".into();
+        original.class = "materialized-files".into();
+        original.after_owner = format!("v1:materialized-files:{}", "a".repeat(64));
+        original.prepared_recipe = "b".repeat(64);
+        let before = codec::encode(&original, false).unwrap();
+        let mut current = original.clone();
+        current.state = "current".into();
+        current.actual = "c".repeat(64);
+        current.reported_actual = "d".repeat(64);
+        assert!(current.materialized_after_owner_observation(&original));
+        for field in [
+            "source",
+            "desired",
+            "before",
+            "scope",
+            "scopeState",
+            "stage",
+            "preparedRecipe",
+            "afterOwner",
+            "instanceUuid",
+            "project",
+            "instance",
+            "yard",
+            "reportedDesired",
+        ] {
+            let mut value = serde_json::to_value(&current).unwrap();
+            value[field] = "foreign".into();
+            let changed: native::Target = serde_json::from_value(value).unwrap();
+            assert!(
+                !changed.materialized_after_owner_observation(&original),
+                "{field}"
+            );
+        }
+        current.state = "deferred".into();
+        assert!(!current.materialized_after_owner_observation(&original));
+        assert_eq!(before, codec::encode(&original, false).unwrap());
+        let (_, _, _, binding) = fixture();
+        let legacy = serde_json::to_value(Request::QueryInvocation {
+            binding: binding.clone(),
+            target: None,
+        })
+        .unwrap();
+        assert!(legacy.get("target").is_none());
+        let retained = serde_json::to_value(Request::QueryInvocation {
+            binding,
+            target: Some(original.clone()),
+        })
+        .unwrap();
+        assert_eq!(retained["target"], serde_json::to_value(original).unwrap());
+    }
+
+    #[test]
+    fn current_materialized_observation_keeps_original_authority() {
+        let mut original = target();
+        original.owner = "materialized-config".into();
+        original.class = "materialized-files".into();
+        original.prepared_recipe = "a".repeat(64);
+        original.after_owner.clear();
+        let mut current = original.clone();
+        current.actual = "b".repeat(64);
+        current.reported_actual = "c".repeat(64);
+        current.prepared_recipe = "d".repeat(64);
+        assert!(current.materialized_current_observation(&original));
+        for field in [
+            "source",
+            "desired",
+            "before",
+            "scope",
+            "scopeState",
+            "stage",
+            "instanceUuid",
+            "project",
+            "instance",
+            "yard",
+            "reportedDesired",
+            "afterOwner",
+        ] {
+            let mut value = serde_json::to_value(&current).unwrap();
+            value[field] = "foreign".into();
+            let changed: native::Target = serde_json::from_value(value).unwrap();
+            assert!(
+                !changed.materialized_current_observation(&original),
+                "{field}"
+            );
+        }
+        current.prepared_recipe.clear();
+        assert!(!current.materialized_current_observation(&original));
+        current.prepared_recipe = original.prepared_recipe.clone();
+        original.instance_uuid = "absent".into();
+        assert!(!current.materialized_current_observation(&original));
+    }
+
+    #[test]
     fn owner_results_follow_only_original_closed_retry_edges() {
         let (f, s, _, base) = fixture();
         let before = crate::work::OwnerBefore {
@@ -627,6 +933,7 @@ mod tests {
             controller: "c".repeat(64),
             shared_images: false,
             prepared_recipe: "d".repeat(64),
+            ..Default::default()
         };
         let request = Request::ApplyOwner {
             binding: base.clone(),
@@ -669,6 +976,7 @@ mod tests {
                     intent: digest(&codec::encode(&intent, true).unwrap()),
                     retry: retry.clone(),
                     fence: None,
+                    compensated: None,
                 },
             );
         }
@@ -800,10 +1108,10 @@ mod tests {
     }
     #[test]
     fn only_exact_resource_fence_then_verified_retry_resolves_opaque_loss() {
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             let (f, s, j, binding) = fixture();
             let mut target = target();
-            if version == 2 {
+            if version >= 2 {
                 target.class = "stage".into();
                 target.before = String::from_utf8(
                     codec::encode(
@@ -826,6 +1134,17 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
+            }
+            if version == 3 {
+                let mut generation = Generation::parse(&target.before).unwrap();
+                if let Expected::Vector(v) = &mut generation.expected {
+                    v.push(ResourceGeneration {
+                        role: "publication".into(),
+                        value: "0".into(),
+                    });
+                }
+                target.before =
+                    String::from_utf8(codec::encode(&generation, false).unwrap()).unwrap();
             }
             let original = intent(
                 &binding,
@@ -866,6 +1185,7 @@ mod tests {
                     successor: successor.clone(),
                     replacement: replacement.clone(),
                 }),
+                compensated: None,
             };
             write(&f, &binding, "001.recovery.json", &resolution);
             let observed = resolution.observed().unwrap();
@@ -945,6 +1265,7 @@ mod tests {
             intent: digest(&codec::encode(&original, true).unwrap()),
             retry: retry.clone(),
             fence: None,
+            compensated: None,
         };
         write(&f, &binding, "001.recovery.json", &first);
         let second_intent = intent(&retry, &target, original.recipe.clone());
@@ -956,6 +1277,7 @@ mod tests {
             intent: digest(&codec::encode(&second_intent, true).unwrap()),
             retry: next.clone(),
             fence: None,
+            compensated: None,
         };
         write(&f, &retry, "2049.recovery.json", &second);
         top(

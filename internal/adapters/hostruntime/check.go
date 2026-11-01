@@ -42,8 +42,9 @@ type HostFacts struct {
 }
 
 type CheckOptions struct {
-	Strict      bool
-	BasePresent bool
+	Strict             bool
+	BasePresent        bool
+	PortWillBeReleased bool
 }
 
 type HostCheck struct {
@@ -192,7 +193,7 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	}
 	if facts.PortListening {
 		level := "warn"
-		if options.Strict && !options.BasePresent {
+		if options.Strict && !options.BasePresent && !options.PortWillBeReleased {
 			level = "fail"
 		}
 		add("Yard SSH port", level,

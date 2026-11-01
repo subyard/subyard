@@ -21,6 +21,9 @@ type afterOwnerIntegrationExecutor struct {
 }
 
 func (e *afterOwnerIntegrationExecutor) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) > 4 && request.Command[0] == "python3" && request.Command[4] == "configs-observe" {
+		return ports.InstanceExecResult{Stdout: []byte("[]")}, nil
+	}
 	result, err := e.retryableIntegrationExecutor.Exec(ctx, project, name, request)
 	if err != nil {
 		return result, err
@@ -28,6 +31,7 @@ func (e *afterOwnerIntegrationExecutor) Exec(ctx context.Context, project, name 
 	if len(request.Command) >= 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") && request.Command[4] == "observe" {
 		var input struct {
 			Entries []integrationArtifact `json:"entries"`
+			Guard   json.RawMessage       `json:"after_owner"`
 		}
 		if json.Unmarshal(request.Stdin, &input) != nil {
 			return result, err
@@ -41,9 +45,21 @@ func (e *afterOwnerIntegrationExecutor) Exec(ctx context.Context, project, name 
 			if path == "" {
 				path = entry.ID
 			}
-			observation.Facts = append(observation.Facts, integrationFact{Key: entry.Kind + ":" + path, Desired: strings.Repeat("a", 64), Observed: e.observed})
+			kind := entry.Kind
+			if kind == "structured" {
+				kind = "inventory-structured"
+			}
+			observation.Facts = append(observation.Facts, integrationFact{Key: kind + ":" + path, Desired: strings.Repeat("a", 64), Observed: e.observed})
 		}
 		observation.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(e.observed)))
+		// Synthetic custody rows retain this unit fixture's original observation.
+		// The separate full-set process fixture runs the real receipt CAS.
+		var guard afterOwnerIntegrationInventory
+		_ = json.Unmarshal(input.Guard, &guard)
+		if guard.Before != "" && guard.Before != observation.Fingerprint {
+			return ports.InstanceExecResult{}, fmt.Errorf("changed synthetic inventory")
+		}
+		observation.Inventory = &afterOwnerIntegrationInventory{Before: observation.Fingerprint, Pending: observation.Fingerprint, Committed: observation.Fingerprint, States: make([]afterOwnerConfigState, len(input.Entries))}
 		result.Stdout, _ = json.Marshal(observation)
 	}
 	return result, nil

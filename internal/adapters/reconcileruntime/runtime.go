@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,8 +59,12 @@ type IncusReader interface {
 
 type Runtime struct {
 	// Retained only when restoring frozen materialization recipes.
-	legacyPreviewInstructions   bool
+	legacyPreviewInstructions bool
+	hostPowerCompletion       *hostPowerCompletion
+
 	ownerInitPlanning           bool
+	ownerInitPortRelease        *OwnerInitProjection
+	ownerPublication            *ownerPublicationExecution
 	ownerSources                *preparedOwnerSourceExecution
 	afterOwnerConfigs           *afterOwnerConfigPhysical
 	afterOwnerConfigSource      bool
@@ -71,6 +77,7 @@ type Runtime struct {
 	ownerVolume                 *ownerVolumeExecution
 	LegacyContinuation          *domain.LegacyContinuation
 	RepositoryRoot              string
+	WorkingDir                  string
 	// LogicalRepositoryRoot labels durable recipes while RepositoryRoot may be
 	// the helper's own retained descriptor used only for physical source reads.
 	LogicalRepositoryRoot string
@@ -129,8 +136,22 @@ func readOnlyProbeContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, readOnlyProbeKey{}, struct{}{})
 }
 
+// Project and instance stages can dispatch the selected 03 body or create its
+// resources. Admit its original capabilities before observation preflights or
+// apply metadata writes; unrelated stages do not execute these portions.
+func (runtime Runtime) checkOwnerStageSource(ctx context.Context, stage ports.ReconcileStageID) error {
+	if (stage == ports.ReconcileStageProject || stage == ports.ReconcileStageInstance) &&
+		(runtime.ownerSources != nil || ports.NativeOperationObserverFrom(ctx) != nil) {
+		return runtime.checkOwnerInstanceStartSource()
+	}
+	return nil
+}
+
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
 	ctx = readOnlyProbeContext(ctx)
+	if err := runtime.checkOwnerStageSource(ctx, stage); err != nil {
+		return false, err
+	}
 	var err error
 	switch stage {
 	case ports.ReconcileStageProject:
@@ -144,7 +165,7 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageGitIdentity:
 		return runtime.gitIdentityConverged(ctx)
 	case ports.ReconcileStageNetwork:
-		err = runtime.runObservedPowerScript(ctx, nil, true, "06-network.sh", "--check")
+		err = runtime.runObservedPowerScript(readOnlyCommand(ctx), nil, true, "06-network.sh", "--check")
 	case ports.ReconcileStageNetworkPolicy:
 		if runtime.NetworkPolicy == nil {
 			return false, errors.New("yard network policy service is required")
@@ -230,6 +251,9 @@ func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileSt
 }
 
 func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
+	if err := runtime.checkOwnerStageSource(ctx, stage); err != nil {
+		return err
+	}
 	if runtime.ownerInitPlanning {
 		return domain.ErrPlanStale
 	}
@@ -369,7 +393,7 @@ func (runtime Runtime) VerifyStageWithDiagnostic(ctx context.Context, stage port
 }
 
 func (runtime Runtime) scriptConverged(ctx context.Context, name string, arguments ...string) (bool, error) {
-	ctx = ports.WithoutNativeOperationObserver(ctx)
+	ctx = readOnlyCommand(ctx)
 	return probeConverged(runtime.runScript(ctx, nil, name, arguments...))
 }
 
@@ -962,6 +986,18 @@ func charDeviceMatches(device map[string]string, path string) bool {
 }
 
 func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
+	portRelease := runtime.ownerInitPortRelease
+	if portRelease != nil {
+		reader := runtime.Incus
+		if projected, ok := reader.(ownerInitPlanningReader); ok {
+			reader = projected.IncusReader
+		}
+		original := portRelease.record.State.restore().Instance
+		actual, err := reader.Instance(ctx, original.Project, original.Name)
+		if err != nil || !reflect.DeepEqual(actual, original) {
+			return domain.ErrPlanStale
+		}
+	}
 	basePresent := false
 	if !fresh && runtime.Incus != nil {
 		if _, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName); err == nil {
@@ -972,7 +1008,7 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 		Yard: runtime.Yard, Yards: runtime.powerYards(),
 		Environment: runtimeEnvironment(runtime.Environment),
 		Incus:       runtime.Incus, Output: runtime.Stdout,
-	}).Run(ctx, hostruntime.CheckOptions{Strict: true, BasePresent: basePresent})
+	}).Run(ctx, hostruntime.CheckOptions{Strict: true, BasePresent: basePresent, PortWillBeReleased: portRelease != nil})
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
@@ -1112,6 +1148,8 @@ func (runtime Runtime) powerService() application.PowerService {
 	config := runtime.ConfigWriter
 	if runtime.ownerInstance != nil && runtime.ownerInstance.created != nil {
 		config = ownerCreatedPowerWriter{runtime}
+	} else if runtime.ownerSources != nil && runtime.ownerVolume != nil && runtime.ownerVolume.original.InstanceUUID != "" {
+		config = ownerExistingPowerWriter{runtime}
 	}
 	return application.PowerService{Instances: runtime.Incus, Config: config}
 }
@@ -1479,11 +1517,16 @@ func (runtime Runtime) observedPowerScriptConverged(
 	arguments ...string,
 ) (bool, error) {
 	return probeConverged(
-		runtime.runObservedPowerScript(ctx, nil, allowUnmanaged, name, arguments...),
+		runtime.runObservedPowerScript(readOnlyCommand(ctx), nil, allowUnmanaged, name, arguments...),
 	)
 }
 
 func (runtime Runtime) finalizePowerState(ctx context.Context) error {
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		if _, err := runtime.ownerPowerUUID(ctx); err != nil {
+			return err
+		}
+	}
 	intent, err := runtime.powerService().Ensure(ctx, runtime.Yard)
 	if err != nil {
 		return err
@@ -1496,6 +1539,21 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 		return runtime.runScript(
 			ctx, runtime.Stderr, "lifecycle-guard.sh", action, "--reconcile",
 		)
+	}
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		complete := func() error {
+			if err := runtime.ownerPhysicalLifecycle(ctx, intent.Desired); err != nil {
+				return err
+			}
+			if err := runtime.powerService().Commit(ctx, runtime.Yard, intent.Desired); err != nil {
+				return err
+			}
+			return runtime.waitOwnerPublications(ctx, intent.Desired)
+		}
+		if action == "start" {
+			return runtime.withNetworkStart(ctx, complete)
+		}
+		return complete()
 	}
 	var runErr error
 	if action == "start" {
@@ -2158,6 +2216,14 @@ func (runtime Runtime) powerReconcilerConverged(ctx context.Context) bool {
 	if string(contents) != expected {
 		return false
 	}
+	if len(runtime.hostPowerResourcePaths()) == 3 {
+		passiveTemplate, e := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "config/systemd/subyard-publication-reconcile.service.in"))
+		passive, e2 := os.ReadFile(runtime.publicationUnitPath())
+		wanted := ownerpublication.RenderPublicationUnit(string(passiveTemplate), reconciler, unit, snapshot)
+		if e != nil || e2 != nil || string(passive) != wanted || runtime.checkPublicationManager(ctx) != nil {
+			return false
+		}
+	}
 	systemctl, err := runtime.executableFromPath("systemctl")
 	if err != nil {
 		return false
@@ -2292,6 +2358,13 @@ func (runtime Runtime) runPathEnvironment(
 	command.Stdin = runtime.Stdin
 	command.Stdout = output
 	command.Stderr = output
+	capture := runtime.hostPowerCompletion
+	if capture != nil {
+		if filepath.Base(path) != "install-power-reconciler.sh" || !slices.Contains(arguments, "--native-installation-result") || ports.NativeOperationObserverFrom(ctx) == nil {
+			return domain.ErrPlanStale
+		}
+		command.Stdout = &capture.output
+	}
 	if ports.NativeOperationObserverFrom(ctx) != nil {
 		home := runtime.Yard.Paths.DataHome
 		if home == "" {
@@ -2327,14 +2400,56 @@ func (runtime Runtime) runPathEnvironment(
 		}
 		command.WaitDelay = 2 * time.Second
 	}
-	finish, err := runtime.beginNativeCommand(ctx, "component-script", path, command.Env, arguments)
+	probe, _ := ctx.Value(readOnlyCommandKey{}).(bool)
+	kind := "component-script"
+	if probe {
+		kind = "component-probe"
+	}
+	if capture != nil {
+		kind = "owner-host-power-install"
+	}
+	finish, ordinal, err := runtime.beginNativeCommandOrdinal(ctx, kind, path, command.Env, arguments)
 	if err != nil {
 		return err
 	}
-	if err := command.Run(); err != nil {
+	runErr := command.Run()
+	if ctx.Err() != nil {
+		return finish(ctx.Err())
+	}
+	var probeExit *exec.ExitError
+	normalProbeExit := probe && errors.As(runErr, &probeExit) && command.ProcessState != nil && command.ProcessState.Exited()
+	if err := runErr; err != nil && !normalProbeExit {
+		if interaction := ports.NativeInteractionFrom(ctx); interaction != nil {
+			name := filepath.Base(path)
+			if len(name) > 128 || !domain.SafeID(name) {
+				name = "component"
+			}
+			var exit *exec.ExitError
+			var errno syscall.Errno
+			if errors.As(err, &exit) {
+				fmt.Fprintf(interaction, "owner component %s exit=%d\n", name, exit.ExitCode())
+			} else if errors.As(err, &errno) {
+				fmt.Fprintf(interaction, "owner component %s: %s\n", name, errno)
+			}
+		}
 		return finish(fmt.Errorf("reconcile adapter %s: %w", strings.Join(arguments, " "), err))
 	}
-	return finish(nil)
+	if ports.NativeOperationObserverFrom(ctx) != nil && command.SysProcAttr != nil && command.SysProcAttr.Setpgid {
+		if err := syscall.Kill(-command.Process.Pid, 0); err != syscall.ESRCH {
+			return finish(errors.New("native component foreground is not drained"))
+		}
+	}
+	if err := finish(nil); err != nil {
+		return err
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if capture != nil {
+		capture.command = ordinal
+		capture.completed = true
+	}
+	return nil
 }
 
 func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {
@@ -2353,7 +2468,7 @@ func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.Reconc
 		environment["SUBYARD_PROFILE_STOPPED"] = "1"
 	}
 	output := &profileRuntimeBoundedBuffer{limit: 256}
-	err = runtime.runScriptEnvironment(ctx, output, environment, "profile-services.sh", "--check")
+	err = runtime.runScriptEnvironment(readOnlyCommand(ctx), output, environment, "profile-services.sh", "--check")
 	return profileServiceObservation(output.String(), output.exceeded, err)
 }
 
@@ -2393,7 +2508,7 @@ func (runtime Runtime) ProfileServiceConverged(ctx context.Context, name string)
 
 // ProfileServiceObservation retains the same bounded check used for convergence.
 func (runtime Runtime) ProfileServiceObservation(ctx context.Context, name string) (ports.ReconcileStageObservation, error) {
-	ctx = readOnlyProbeContext(ctx)
+	ctx = readOnlyCommand(readOnlyProbeContext(ctx))
 	output := &profileRuntimeBoundedBuffer{limit: 256}
 	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", "--check", name)
 	return profileServiceObservation(output.String(), output.exceeded, err)
@@ -2437,6 +2552,9 @@ func firstTeardownPool(pool, srvPool string) string {
 // ApplyHostPowerRuntime is the fixed host-power component operation. Its ordinary
 // stage caller and the release native helper share the same implementation.
 func (runtime Runtime) ApplyHostPowerRuntime(ctx context.Context) error {
+	if ports.NativeOperationObserverFrom(ctx) != nil && runtime.ownerPublication != nil {
+		return runtime.applyOwnerPublicationPower(ctx)
+	}
 	operator, err := runtime.operatorIdentity()
 	if err != nil {
 		return err

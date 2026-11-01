@@ -123,6 +123,64 @@ print('{"state":"absent","actual":"","desired":""}')
             self.assertEqual(run(argv, payload).returncode, 99)
             self.assertTrue(marker.exists())
 
+    def test_go022_shape_and_hybrid_refusal(self):
+        harness = runpy.run_path(str(ROOT / 'dev/verify-release-upgrades.py'))
+        provider_path = PROFILE / 'tests/release-observation.py'
+        provider = runpy.run_path(str(provider_path))
+        originals = provider['read_only_stdin_commands'].__globals__['FIXTURES']
+        with tempfile.TemporaryDirectory(prefix='orca-022-', dir='/tmp') as temp:
+            root = Path(temp)
+            package = root / 'runtime/config/profiles/orca'
+            resource = package / 'resources/orca'
+            (resource / 'registration').mkdir(parents=True)
+            handler = resource / 'handler.sh'; handler.write_bytes(b'Go 0.22 handler')
+            member = resource / 'registration/fixture.py'; member.write_bytes(b'Go 0.22 registration')
+            fixtures = root / 'contracts'; fixtures.mkdir()
+            for name in ('contract-0.22.0.txt', 'observer-0.22.0.txt'):
+                shutil.copyfile(originals / name, fixtures / name)
+            digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+            identity = {'handler': digest(handler), 'registration': {'fixture.py': digest(member)},
+                        'contract': '0.22.0', 'observer': '0.22.0', 'codexPaths': True}
+            (fixtures / 'identities.json').write_text(json.dumps({'0.22.0': identity}))
+            provider['read_only_stdin_commands'].__globals__['FIXTURES'] = fixtures
+            argv, payload, _, _, digest_command = provider['read_only_stdin_commands'](package)[0]
+            self.assertEqual(argv[-3:], ['/etc/profile.d/subyard-orca-codex.sh',
+                                        '/usr/local/libexec/subyard/orca-codex/codex', 'fixture.py'])
+            self.assertEqual(digest(fixtures / 'observer-0.22.0.txt'),
+                             '14f969ad9809d4801aa9a622672b23ee1e9bed3bb57105e626239ac4b7a6bb47')
+            env = dict(os.environ, SUBYARD_CONFIG_HOME=str(root / 'config'), DEV_USER='dev')
+            rendered = subprocess.run(digest_command, env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            argv[argv.index(None)] = rendered.stdout.strip()
+            shims = root / 'shims'; shims.mkdir()
+            control = root / 'control'; control.write_text('{"instances": []}')
+            marker = root / 'rejected'
+            load_original = runpy.run_path
+            def load(path, *args, **kwargs):
+                return provider if Path(path) == provider_path else load_original(path, *args, **kwargs)
+            with mock.patch.object(runpy, 'run_path', side_effect=load):
+                harness['write_observation_incus'](shims, control, marker, [root / 'runtime'])
+            def run(arguments, data):
+                return subprocess.run([str(shims / 'incus'), *arguments], input=data,
+                                      capture_output=True, env=env, timeout=5)
+            self.assertEqual(run(argv, payload).returncode, 0)
+            for arguments, data in ((argv[:-1], payload), (argv + ['extra'], payload),
+                                    (argv[:8] + ['0' * 64] + argv[9:], payload),
+                                    (argv, payload + b'X'), (argv, b'foreign')):
+                self.assertEqual(run(arguments, data).returncode, 99)
+            member.write_bytes(b'changed')
+            self.assertEqual(provider['read_only_stdin_commands'](package), [])
+            self.assertEqual(run(argv, payload).returncode, 99)
+            member.write_bytes(b'Go 0.22 registration')
+            (resource / 'registration-contract.sh').write_text('foreign')
+            self.assertEqual(provider['read_only_stdin_commands'](package), [])
+            (resource / 'registration-contract.sh').unlink()
+            (resource / 'registration/foreign.py').write_text('foreign')
+            self.assertEqual(provider['read_only_stdin_commands'](package), [])
+            (resource / 'registration/foreign.py').unlink()
+            handler.write_bytes(b'foreign handler')
+            self.assertEqual(provider['read_only_stdin_commands'](package), [])
+
 
 if __name__ == '__main__':
     unittest.main()

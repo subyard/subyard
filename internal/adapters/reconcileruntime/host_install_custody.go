@@ -55,14 +55,25 @@ func hostInstallGeneration(resource, owner string) (string, error) {
 }
 
 func (runtime Runtime) hostPowerResourcePaths() []string {
-	return []string{runtime.environmentDefault("SUBYARD_POWER_RECONCILER_PATH", "/usr/local/libexec/subyard/yard-boot-reconcile"), runtime.environmentDefault("SUBYARD_POWER_UNIT_PATH", "/etc/systemd/system/subyard-power-reconcile.service")}
+	paths := []string{runtime.environmentDefault("SUBYARD_POWER_RECONCILER_PATH", "/usr/local/libexec/subyard/yard-boot-reconcile"), runtime.environmentDefault("SUBYARD_POWER_UNIT_PATH", "/etc/systemd/system/subyard-power-reconcile.service")}
+	// Historical retained source recipes keep their exact two-resource contract.
+	if _, err := os.Stat(filepath.Join(runtime.RepositoryRoot, "config/systemd/subyard-publication-reconcile.service.in")); err == nil {
+		paths = append(paths, runtime.publicationUnitPath())
+	}
+	return paths
 }
 func (runtime Runtime) CaptureHostPowerCustody() ([]ports.NativeResourceGeneration, error) {
-	paths := runtime.hostPowerResourcePaths()
-	roles := []string{"engine", "service"}
+	return captureHostPowerCustody(runtime.hostPowerResourcePaths())
+}
+func captureHostPowerCustody(paths []string) ([]ports.NativeResourceGeneration, error) {
+	roles := []string{"engine", "service", "publication"}
 	result := make([]ports.NativeResourceGeneration, len(paths))
-	if paths[0] == paths[1] {
-		return nil, errors.New("overlapping host installer roles")
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if seen[path] {
+			return nil, errors.New("overlapping host installer roles")
+		}
+		seen[path] = true
 	}
 	for index, path := range paths {
 		value, err := hostInstallGeneration(path, "host-power")
@@ -74,7 +85,7 @@ func (runtime Runtime) CaptureHostPowerCustody() ([]ports.NativeResourceGenerati
 	return result, nil
 }
 func hostPowerVector(expected []ports.NativeResourceGeneration) (string, error) {
-	if len(expected) != 2 || expected[0].Role != "engine" || expected[1].Role != "service" {
+	if (len(expected) != 2 && len(expected) != 3) || expected[0].Role != "engine" || expected[1].Role != "service" || len(expected) == 3 && expected[2].Role != "publication" {
 		return "", domain.ErrPlanStale
 	}
 	for _, entry := range expected {

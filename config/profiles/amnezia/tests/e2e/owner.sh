@@ -315,7 +315,7 @@ case "$phase" in
     python3 -B "$root/config/profiles/amnezia/tests/e2e/first-boot-observer.py" -- \
       "$YARD_BIN" -Y vpn-e2e init --profile amnezia --yes
     ;;
-  init|init-isolated)
+  init|init-isolated|init-native)
     if [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ]; then
       yard init --profile amnezia --yes
     else
@@ -334,7 +334,36 @@ case "$phase" in
     if [ "$phase" = init-isolated ]; then
       yard network isolation on --yes
     fi
-    yard start --yes
+    if [ "$phase" = init-native ]; then
+      [ -n "${2:-}" ] && [ -x "$2" ] || die 'native startup test executable is required'
+      source_root="$(dirname "$(dirname "$(readlink -f "$YARD_BIN")")")"
+      [ -x "$source_root/bin/yard-engine" ] || die 'native startup requires the installed candidate source'
+      SUBYARD_NATIVE_STARTUP_REPOSITORY="$source_root" SUBYARD_NATIVE_STARTUP_YARD=vpn-e2e \
+        SUBYARD_NATIVE_STARTUP_RESULT="$fixture/native-startup.json" TMPDIR=/tmp \
+        "$2" -test.run='^TestOwnerStartupPhysicalOriginal$' -test.v
+      jq -e '.success and .uuidMismatchRejected and (.unknown | not) and .commands >= 2 and (.Accepted | length) > 0 and ((.Accepted | length) == (.Terminal | length))' \
+        "$fixture/native-startup.json" >/dev/null || die 'native startup custody proof is incomplete'
+      printf 'amnezia_native_original_startup_sdk_custody=true rust_lineage=false\n'
+      # The owning profile supplies this kernel-only fault. Persisted VM policy
+      # remains the original authority consumed by the generic CPU component.
+      cpu_pid="$(incus query '/1.0/instances/yard-vpn-e2e/state?project=subyard-vpn-e2e' | jq -er '.pid | select(. > 1)')"
+      cpu_scope="$(sed -n 's|^0::/||p' "/proc/$cpu_pid/cgroup")"
+      [[ "$cpu_scope" =~ ^subyardvm-[a-f0-9]{24}\.scope$ ]] || die 'CPU fault requires the owned VM scope'
+      cpu_weight="$(incus config get yard-vpn-e2e user.subyard.vm_cpu_weight --project subyard-vpn-e2e)"
+      cpu_drift=1
+      [ "$cpu_weight" != 1 ] || cpu_drift=2
+      sudo -n systemctl set-property --runtime "$cpu_scope" "CPUWeight=$cpu_drift"
+      SUBYARD_NATIVE_STARTUP_REPOSITORY="$source_root" SUBYARD_NATIVE_STARTUP_YARD=vpn-e2e \
+        SUBYARD_NATIVE_STARTUP_RESULT="$fixture/native-cpu.json" TMPDIR=/tmp \
+        "$2" -test.run='^TestOwnerVMCPUPhysicalOriginal$' -test.v
+      jq -e '.success and (.readyBefore | not) and .readyAfter and (.unknown | not) and .commands == 1 and .commandTerminals == 1 and .selfProof == "trusted-fixture-installed-engine" and (.rustLineage | not)' \
+        "$fixture/native-cpu.json" >/dev/null || die 'native CPU component custody proof is incomplete'
+      [ "$(incus config get yard-vpn-e2e user.subyard.vm_cpu_weight --project subyard-vpn-e2e)" = "$cpu_weight" ] \
+        || die 'native CPU fault changed persisted policy'
+      printf 'amnezia_native_cpu_component_custody=true serve_admission_proof=local rust_lineage=false\n'
+    else
+      yard start --yes
+    fi
     verify_resources
     verify_cpu_policy
     yard vpn-admin up --yes
@@ -630,6 +659,26 @@ PYPRIORITY
       "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env"
     yard init --yes
     verify_deselected
+    ;;
+  orphan-native)
+    [ -n "${2:-}" ] && [ -x "$2" ] || die 'native orphan test executable is required'
+    source_root="$(dirname "$(dirname "$(readlink -f "$YARD_BIN")")")"
+    [ -x "$source_root/bin/yard-engine" ] || die 'native orphan requires installed candidate source'
+    before_key="$(guest sha256sum /srv/amnezia/admin.key)"
+    # Reuse the existing owned-settings recovery scenario; dedicated VM role stays.
+    sed -i 's/^ENVIRONMENT_PROFILES=.*/ENVIRONMENT_PROFILES=/' \
+      "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env"
+    SUBYARD_NATIVE_STARTUP_REPOSITORY="$source_root" SUBYARD_NATIVE_STARTUP_YARD=vpn-e2e \
+      SUBYARD_NATIVE_STARTUP_RESULT="$fixture/native-orphan.json" TMPDIR=/tmp \
+      "$2" -test.run='^TestOwnerOrphanPhysicalOriginal$' -test.v
+    jq -e '.success and .uuidMismatchRejected and (.unknown | not) and .commands >= 1 and .commandTerminals == .commands and (.Accepted | length) > 0 and ((.Accepted | length) == (.Terminal | length)) and (.rustLineage | not)' \
+      "$fixture/native-orphan.json" >/dev/null || die 'native orphan component custody proof incomplete'
+    incus query '/1.0/instances/yard-vpn-e2e?project=subyard-vpn-e2e' \
+      | jq -e '(.devices["amnezia-vpn"] == null) and (.config["user.subyard.resource.amnezia-vpn"] == null) and (.devices["amnezia-admin"] == null) and (.config["user.subyard.resource.amnezia-admin"] == null)' >/dev/null
+    guest python3 /usr/local/lib/subyard-amnezia/runtime.py observe \
+      | jq -e '(.running or .enabled) | not' >/dev/null || die 'native orphan guest remains enabled'
+    [ "$(guest sha256sum /srv/amnezia/admin.key)" = "$before_key" ] || die 'native orphan changed persistent key'
+    printf 'amnezia_native_original_orphan_component_custody=true full_init=false rust_lineage=false\n'
     ;;
   reconcile-deselected)
     yard init --yes

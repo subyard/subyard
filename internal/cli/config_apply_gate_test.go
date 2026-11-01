@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -1057,8 +1058,25 @@ func TestCompletedConfigRepairKeepsRustDriftDistinctFromCleanup(t *testing.T) {
 // ordinary init pipeline reaches its approved finalization stage.
 type rollbackSourceInitPlatform struct {
 	*completedSourcePlatformFixture
+	test     *testing.T
 	ready    string
 	physical *selectionOnlyIntegrationExecutor
+	program  *CLI
+}
+
+// Both the retained SDK observer and ordinary CLI assessment read the same
+// declared synthetic guest state; effectful operations keep the original fixture.
+func (fixture *rollbackSourceInitPlatform) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if (len(request.Command) == 10 || len(request.Command) == 11) && request.Command[0] == "python3" && (request.Command[4] == configmaterial.ModeObserve || request.Command[4] == configmaterial.ModeAssessAdopt) {
+		call := testkit.IncusServerExecCall{Project: project, Name: instance, Command: request.Command, Environment: request.Environment, User: request.User, Group: request.Group, Stdin: request.Stdin}
+		step := completedSourceNativeObservation(fixture.test, fixture.program, fixture.ready, call)
+		result := ports.InstanceExecResult{Stdout: step.Stdout, Stderr: step.Stderr, ExitCode: step.ExitCode}
+		if result.ExitCode == 0 && step.AfterInput != nil {
+			result.ExitCode = step.AfterInput(call)
+		}
+		return result, nil
+	}
+	return fixture.physical.Exec(ctx, project, instance, request)
 }
 
 func (fixture *rollbackSourceInitPlatform) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
@@ -1076,7 +1094,7 @@ func TestRustCompletedRollbackAdmitsProfileInitThroughCLI(t *testing.T) {
 	if os.Getenv("SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT") == "" {
 		t.Skip("explicit experimental Rust tooling supplied by delivery gate")
 	}
-	program, ready, home, _ := completedRustSourceAuthoringRuntimeFixture(t, false, nil, releasetransition.DirectionActivatePrevious)
+	program, ready, home, server := completedRustSourceAuthoringRuntimeFixture(t, false, nil, releasetransition.DirectionActivatePrevious)
 	journalPath := filepath.Join(home, "release-transition/v2/journal.json")
 	raw := mustReadConfigFixture(t, journalPath)
 	journal, err := releasetransition.ParseJournal(raw)
@@ -1113,6 +1131,98 @@ func TestRustCompletedRollbackAdmitsProfileInitThroughCLI(t *testing.T) {
 	if err != nil || gate == nil || gate.Transaction == nil || *gate.Transaction != journal.Transaction || !configApplyRepairRustGateShape(*gate) {
 		t.Fatalf("actual rollback drift gate missing: %#v %v", gate, err)
 	}
+	observations := 0
+	for _, call := range server.ExecCalls() {
+		if len(call.Command) != 5 || call.Command[0] != "python3" || call.Command[4] != "configs-observe" {
+			continue
+		}
+		step := completedSourceNativeObservation(t, program, ready, call)
+		if step.AfterInput == nil || step.AfterInput(call) != 0 {
+			t.Fatal("exact config observation request was not bound")
+		}
+		for _, input := range [][]byte{nil, []byte("{}"), []byte("null"), append(bytes.Clone(call.Stdin), 'x')} {
+			invalid := call
+			invalid.Stdin = input
+			if step.AfterInput(invalid) == 0 {
+				t.Fatal("malformed or missing config observation input admitted")
+			}
+		}
+		observations++
+	}
+	if observations == 0 {
+		t.Fatal("actual configs-observe request was not executed")
+	}
+	structured := 0
+	for _, call := range server.ExecCalls() {
+		if len(call.Command) != 11 || call.Command[0] != "python3" || call.Command[4] != "observe" {
+			continue
+		}
+		step := completedSourceNativeObservation(t, program, ready, call)
+		if step.ExitCode != 0 || step.AfterInput == nil || step.AfterInput(call) != 0 {
+			t.Fatal("actual structured observation was not bound")
+		}
+		value, parseErr := configmaterial.ParseObservation(step.Stdout)
+		if parseErr != nil || !value.State.Valid() || value.Destination == nil {
+			t.Fatal("structured observation lacks original physical state", parseErr)
+		}
+		for _, name := range []string{"program", "options", "trailing", "scope", "user", "environment"} {
+			invalid := call
+			invalid.Command = append([]string(nil), call.Command...)
+			switch name {
+			case "program":
+				invalid.Command[3] += "\n# foreign"
+			case "options":
+				invalid.Command[10] = `{"capture":true,"unknown":true}`
+			case "trailing":
+				invalid.Command[10] += "x"
+			case "scope":
+				invalid.Project = "foreign"
+			case "user":
+				invalid.User = 1000
+			case "environment":
+				invalid.Environment = map[string]string{"FOREIGN": "value"}
+			}
+			if completedSourceNativeObservation(t, program, ready, invalid).ExitCode == 0 {
+				t.Fatal("invalid structured observation admitted", name)
+			}
+		}
+		invalid := call
+		invalid.Stdin = append(bytes.Clone(call.Stdin), 'x')
+		if step.AfterInput(invalid) == 0 {
+			t.Fatal("changed structured payload admitted")
+		}
+		structured++
+	}
+	if structured == 0 {
+		t.Fatal("actual AfterOwner structured observation was not executed")
+	}
+	adoption := 0
+	for _, call := range server.ExecCalls() {
+		if len(call.Command) != 10 || call.Command[0] != "python3" || call.Command[4] != configmaterial.ModeAssessAdopt {
+			continue
+		}
+		step := completedSourceNativeObservation(t, program, ready, call)
+		value, parseErr := configmaterial.ParseObservation(step.Stdout)
+		if step.ExitCode != 0 || step.AfterInput == nil || step.AfterInput(call) != 0 || parseErr != nil || value.Adoptable {
+			t.Fatal("missing structured ownership did not remain non-adoptable", parseErr)
+		}
+		invalid := call
+		invalid.Command = append([]string(nil), call.Command...)
+		invalid.Command[3] += "\n# foreign"
+		if completedSourceNativeObservation(t, program, ready, invalid).ExitCode == 0 {
+			t.Fatal("foreign adoption observer admitted")
+		}
+		invalid = call
+		invalid.Stdin = append(bytes.Clone(call.Stdin), 'x')
+		if step.AfterInput(invalid) == 0 {
+			t.Fatal("changed adoption payload admitted")
+		}
+		adoption++
+	}
+	if adoption == 0 {
+		t.Fatal("actual structured adoption observation was not executed")
+	}
+
 	loaded, err := program.loadSelectionRepair("default")
 	if err != nil {
 		t.Fatal(err)
@@ -1123,7 +1233,7 @@ func TestRustCompletedRollbackAdmitsProfileInitThroughCLI(t *testing.T) {
 	incus.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = instance
 	incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: instance}
 	physical := &selectionOnlyIntegrationExecutor{source: loaded.Environment["AGENT_codex_RULES"], staleFiles: true}
-	platform := &rollbackSourceInitPlatform{completedSourcePlatformFixture: program.options.InitPlatform.(*completedSourcePlatformFixture), ready: ready, physical: physical}
+	platform := &rollbackSourceInitPlatform{completedSourcePlatformFixture: program.options.InitPlatform.(*completedSourcePlatformFixture), test: t, ready: ready, physical: physical, program: program}
 	for stage := range platform.converged {
 		platform.converged[stage] = true
 	}
@@ -1131,7 +1241,7 @@ func TestRustCompletedRollbackAdmitsProfileInitThroughCLI(t *testing.T) {
 	platform.converged[ports.ReconcileStageProfileRuntimes] = false
 	platform.hooksApplicable = false
 	options := program.options
-	options.InitPlatform, options.Executor = platform, physical
+	options.InitPlatform, options.Executor = platform, platform
 	options.Arguments = []string{"init", "--yes"}
 	var output rustOwnerOutput
 	options.Stdout, options.Stderr = &output, &output

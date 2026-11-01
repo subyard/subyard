@@ -26,7 +26,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"0.19.1-active","previous":"0.11.2-target","target":"0.11.2-target","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`
+			inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"0.22.2-active","previous":"0.22.1-target","target":"0.22.1-target","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`
 			if scenario == "invalid-inspection" {
 				inspection = `{}`
 			}
@@ -34,7 +34,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 			if scenario == "malformed-query" {
 				probe = "printf 'malformed\\n'"
 			}
-			for _, candidate := range []struct{ path, id, version string }{{active, "0.19.1-active", "0.19.1"}, {target, "0.11.2-target", "0.11.2"}} {
+			for _, candidate := range []struct{ path, id, version string }{{active, "0.22.2-active", "0.22.2"}, {target, "0.22.1-target", "0.22.1"}} {
 				for _, directory := range []string{"bin", "config/preview"} {
 					if err := os.MkdirAll(filepath.Join(candidate.path, directory), 0o700); err != nil {
 						t.Fatal(err)
@@ -70,7 +70,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for name, id := range map[string]string{"current": "0.19.1-active", "previous": "0.11.2-target"} {
+			for name, id := range map[string]string{"current": "0.22.2-active", "previous": "0.22.1-target"} {
 				if err := os.Symlink("releases/"+id, filepath.Join(runtimeRoot, name)); err != nil {
 					t.Fatal(err)
 				}
@@ -99,7 +99,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 					t.Fatalf("execution did not recheck runtime-owner loss: %v", err)
 				}
 			}
-			for name, expected := range map[string]string{"current": "releases/0.19.1-active", "previous": "releases/0.11.2-target"} {
+			for name, expected := range map[string]string{"current": "releases/0.22.2-active", "previous": "releases/0.22.1-target"} {
 				if got, err := os.Readlink(filepath.Join(runtimeRoot, name)); err != nil || got != expected {
 					t.Fatalf("inspection changed %s: %q, %v", name, got, err)
 				}

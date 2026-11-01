@@ -10,7 +10,7 @@ use crate::{
     Error, Result,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Intent {
@@ -28,6 +28,31 @@ pub(crate) struct Intent {
 pub(crate) struct Command {
     pub(crate) kind: String,
     pub(crate) source: String,
+}
+// A component's physical output is a bound digest, never a terminal or a grant
+// to reinterpret an unfinished invocation.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhysicalOutput {
+    version: u8,
+    binding: native::Binding,
+    recipe: String,
+    source: String,
+    physical: String,
+}
+impl PhysicalOutput {
+    fn checked(raw: &[u8]) -> Result<Self> {
+        require(raw.len() <= 4096)?;
+        let value: Self = codec::decode_canonical(raw, true)?;
+        value.binding.validate()?;
+        require(
+            value.version == 1
+                && [&value.recipe, &value.source, &value.physical]
+                    .into_iter()
+                    .all(|v| record::fingerprint(v)),
+        )?;
+        Ok(value)
+    }
 }
 // Resource causality from an original typed create. These facts do not prove
 // invocation quiescence and remain alongside the original top-level witnesses.
@@ -182,6 +207,150 @@ pub(crate) fn operation_success(value: &native::Operation) -> bool {
 pub(crate) fn create_fact(name: &str) -> bool {
     name.ends_with("-create-intent.json") || name.ends_with("-create-result.json")
 }
+// Token-cache successors are endpoint provenance only. They remain beside
+// original create/source proofs and never replace command/SDK/outer terminals.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct ImageCacheFact {
+    version: u8,
+    binding: native::Binding,
+    recipe: String,
+    source: String,
+    successor: ImageCacheSuccessor,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct ImageCacheSuccessor {
+    policy: String,
+    before: Vec<ImageCacheGuard>,
+    after: Vec<ImageCacheGuard>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct ImageCacheGuard {
+    path: String,
+    state: String,
+}
+// A successful fixed installer result is causal resource evidence only. It
+// cannot close its command or its enclosing invocation.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostPowerInstallationFact {
+    version: u8,
+    binding: native::Binding,
+    result: HostPowerInstallation,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostPowerInstallation {
+    producer: String,
+    intent: String,
+    recipe: String,
+    source: String,
+    host_source: String,
+    output: String,
+    command: usize,
+    consumer: HostPowerConsumer,
+    identities: Vec<HostPowerIdentity>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostPowerConsumer {
+    engine_digest: String,
+    unit_digest: String,
+    contracts_digest: String,
+    files_digest: String,
+    generations: Vec<HostPowerGeneration>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct HostPowerIdentity {
+    role: String,
+    device: u64,
+    inode: u64,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct HostPowerGeneration {
+    role: String,
+    value: String,
+}
+impl HostPowerInstallationFact {
+    fn checked(raw: &[u8]) -> Result<Self> {
+        require(raw.len() <= 4096)?;
+        let value: Self = codec::decode_canonical(raw, true)?;
+        value.binding.validate()?;
+        let r = &value.result;
+        require(
+            value.version == 1
+                && (1..=256).contains(&r.command)
+                && [
+                    &r.producer,
+                    &r.intent,
+                    &r.recipe,
+                    &r.source,
+                    &r.host_source,
+                    &r.output,
+                    &r.consumer.engine_digest,
+                    &r.consumer.unit_digest,
+                    &r.consumer.contracts_digest,
+                    &r.consumer.files_digest,
+                ]
+                .into_iter()
+                .all(|v| record::fingerprint(v))
+                && r.identities.len() == 3
+                && r.consumer.generations.len() == 3
+                && r.producer == crate::digest(&codec::encode(&value.binding, false)?),
+        )?;
+        for (i, role) in ["engine", "service", "publication"].iter().enumerate() {
+            require(
+                r.identities[i].role == *role
+                    && r.identities[i].inode != 0
+                    && r.consumer.generations[i].role == *role
+                    && record::fingerprint(&r.consumer.generations[i].value)
+                    && r.consumer.generations[i].value == r.consumer.generations[0].value,
+            )?;
+        }
+        Ok(value)
+    }
+}
+impl ImageCacheFact {
+    fn checked(raw: &[u8]) -> Result<Self> {
+        use base64::Engine;
+        require(raw.len() <= 64 << 10)?;
+        let value: Self = codec::decode_canonical(raw, true)?;
+        value.binding.validate()?;
+        require(
+            value.version == 1
+                && record::fingerprint(&value.recipe)
+                && record::fingerprint(&value.source)
+                && record::fingerprint(&value.successor.policy)
+                && (1..=4).contains(&value.successor.before.len())
+                && value.successor.before.len() == value.successor.after.len(),
+        )?;
+        for (before, after) in value.successor.before.iter().zip(&value.successor.after) {
+            require(before.path == after.path)?;
+            let path = base64::engine::general_purpose::STANDARD
+                .decode(&before.path)
+                .map_err(|_| Error::Protected)?;
+            require(
+                !path.is_empty()
+                    && path.len() <= 4096
+                    && path[0] == b'/'
+                    && !path.contains(&0)
+                    && base64::engine::general_purpose::STANDARD.encode(&path) == before.path,
+            )?;
+            for guard in [before, after] {
+                let (kind, state) = guard.state.split_once(':').ok_or(Error::Protected)?;
+                require(
+                    matches!(kind, "file" | "directory")
+                        && (state == "absent" || record::fingerprint(state)),
+                )?;
+            }
+        }
+        Ok(value)
+    }
+}
 // A native owner's bound local compensation result. This is source-baseline
 // evidence only; it never replaces accepted/terminal/drain witnesses.
 #[derive(Deserialize, Serialize)]
@@ -290,7 +459,13 @@ impl store::Store {
         let prefix = format!("{:03}.", binding.ordinal);
         let files = inventory::names(&dir, 8192)?
             .into_iter()
-            .filter(|name| name.starts_with(&prefix) || name.starts_with(&format!(".{prefix}")))
+            // This validates this invocation's physical terminal/child facts.
+            // Retry edges are checked with the complete DAG, not an isolated
+            // producer missing its compensated siblings.
+            .filter(|name| {
+                (name.starts_with(&prefix) || name.starts_with(&format!(".{prefix}")))
+                    && *name != format!("{prefix}recovery.json")
+            })
             .map(|name| {
                 let snapshot = store::read_at(&dir, &name, false)?;
                 Ok((name, snapshot.bytes().ok_or(Error::Unknown)?.to_vec()))
@@ -487,6 +662,9 @@ pub(crate) fn validate_files(
     let mut create_intents = BTreeMap::new();
     let mut create_results = BTreeMap::new();
     let mut after_owner = BTreeMap::new();
+    let mut image_caches = BTreeMap::new();
+    let mut host_installations = BTreeMap::new();
+    let mut physical_outputs = BTreeMap::new();
     for file in files {
         let (name, raw) = file?;
         let raw = raw.as_slice();
@@ -511,6 +689,23 @@ pub(crate) fn validate_files(
         // retried only by the original exact publication; no admission hides them.
         if pending {
             return Err(Error::Unknown);
+        }
+        if kind == "host-power-installation.json" {
+            let value = HostPowerInstallationFact::checked(raw)?;
+            require(value.binding.transaction == tx && value.binding.ordinal == ordinal)?;
+            require(host_installations.insert(ordinal, value).is_none())?;
+            continue;
+        }
+        if let Some(index) = kind
+            .strip_prefix("image-cache-")
+            .and_then(|n| n.strip_suffix(".json"))
+        {
+            let index: usize = index.parse().map_err(|_| Error::Protected)?;
+            require((1..=64).contains(&index) && kind == format!("image-cache-{index:03}.json"))?;
+            let value = ImageCacheFact::checked(raw)?;
+            require(value.binding.transaction == tx && value.binding.ordinal == ordinal)?;
+            require(image_caches.insert((ordinal, index), value).is_none())?;
+            continue;
         }
         if create_fact(kind) {
             let (domain, rest) = kind.split_once('-').ok_or(Error::Protected)?;
@@ -589,6 +784,11 @@ pub(crate) fn validate_files(
             continue;
         }
         match kind {
+            "physical.json" => {
+                let value = PhysicalOutput::checked(raw)?;
+                require(value.binding.transaction == tx && value.binding.ordinal == ordinal)?;
+                require(physical_outputs.insert(ordinal, value).is_none())?;
+            }
             "after-owner.json" => {
                 let value = crate::after_owner::Resolution::checked(raw)?;
                 require(value.binding.transaction == tx && value.binding.ordinal == ordinal)?;
@@ -657,7 +857,41 @@ pub(crate) fn validate_files(
             _ => return Err(Error::Protected),
         }
     }
+    for ((ordinal, index), value) in &image_caches {
+        let intent = intents.get(ordinal).ok_or(Error::Unknown)?;
+        let admission = accepted.get(ordinal).ok_or(Error::Unknown)?;
+        require(
+            intent.owner == "owner-registration"
+                && intent.resource == "test-yard"
+                && value.binding == intent.binding
+                && value.recipe == intent.recipe
+                && value.source == intent.source
+                && admission.binding == intent.binding
+                && admission.owner == intent.owner
+                && admission.resource == intent.resource
+                && admission.state == "accepted"
+                && (*index == 1 || image_caches.contains_key(&(*ordinal, index - 1))),
+        )?;
+    }
     let mut closures = BTreeMap::new();
+    for (ordinal, value) in &physical_outputs {
+        let intent = intents.get(ordinal).ok_or(Error::Unknown)?;
+        let admission = accepted.get(ordinal).ok_or(Error::Unknown)?;
+        let terminal = terminals.get(ordinal).ok_or(Error::Unknown)?;
+        require(
+            value.binding == intent.binding
+                && value.recipe == intent.recipe
+                && value.source == intent.source
+                && admission.binding == intent.binding
+                && admission.owner == intent.owner
+                && admission.resource == intent.resource
+                && admission.state == "accepted"
+                && terminal.binding == intent.binding
+                && terminal.owner == intent.owner
+                && terminal.resource == intent.resource
+                && matches!(terminal.state.as_str(), "complete" | "failed"),
+        )?;
+    }
     for (ordinal, value) in &after_owner {
         let producer = intents.get(&value.producer.ordinal).ok_or(Error::Unknown)?;
         let terminal = terminals
@@ -813,9 +1047,70 @@ pub(crate) fn validate_files(
             }
         }
     }
+    for (ordinal, fact) in &host_installations {
+        let intent = intents.get(ordinal).ok_or(Error::Unknown)?;
+        let admission = accepted.get(ordinal).ok_or(Error::Unknown)?;
+        let r = &fact.result;
+        require(
+            intent.owner == "owner-registration"
+                && intent.resource == "test-yard"
+                && fact.binding == intent.binding
+                && admission.binding == intent.binding
+                && admission.owner == intent.owner
+                && admission.resource == intent.resource
+                && admission.state == "accepted"
+                && r.recipe == intent.recipe
+                && r.source == intent.source
+                && r.intent == crate::digest(&codec::encode(intent, false)?),
+        )?;
+        let command = commands
+            .get(&(*ordinal, r.command, "intent.json".into()))
+            .or_else(|| {
+                closures
+                    .get(ordinal)
+                    .and_then(|c| c.commands.get(r.command - 1))
+            })
+            .ok_or(Error::Unknown)?;
+        require(command.kind == "owner-host-power-install")?;
+        if let Some(terminal) = commands.get(&(*ordinal, r.command, "terminal.json".into())) {
+            require(terminal == command)?;
+        } else {
+            let closure = closures.get(ordinal).ok_or(Error::Unknown)?;
+            require(closure.commands.get(r.command - 1) == Some(command))?;
+        }
+    }
     let mut proofs = BTreeMap::new();
     // Recovery edges strictly increase ordinals: walk this finite DAG
     // without recursive parsing or a caller-supplied success flag.
+    // Even the first published group edge proves that every earlier forward
+    // effect was undone. Missing sibling edges must not preserve their old
+    // COMPLETE status or admit another native effect during partial publication.
+    let mut replay = BTreeSet::new();
+    for resolution in recoveries.values() {
+        if let Some(attempt) = resolution.compensated() {
+            for index in 0..=attempt.failed {
+                replay.insert(attempt.bindings[index]);
+            }
+            if successful || admitting.is_some() {
+                for index in 0..attempt.program.slots() {
+                    if !attempt.replayed(index) {
+                        continue;
+                    }
+                    let sibling = recoveries
+                        .get(&attempt.bindings[index])
+                        .ok_or(Error::Unknown)?;
+                    require(
+                        sibling.retry_binding() == &attempt.retry(index)
+                            && sibling
+                                .compensated()
+                                .map(|p| codec::encode(p, false))
+                                .transpose()?
+                                == Some(codec::encode(attempt, false)?),
+                    )?;
+                }
+            }
+        }
+    }
     for (ordinal, intent) in intents.iter().rev() {
         let proof = recoveries
             .get(ordinal)
@@ -836,6 +1131,7 @@ pub(crate) fn validate_files(
         if terminals
             .get(ordinal)
             .is_some_and(|t| t.state == "complete")
+            && !replay.contains(ordinal)
         {
             completed.insert(*ordinal, *ordinal);
         } else if proof.is_some_and(|p| p.1) {
@@ -874,7 +1170,7 @@ pub(crate) fn validate_files(
             continue;
         }
         let resolution = proofs.get(ordinal).copied().flatten();
-        if resolution.is_some_and(|r| r.0) {
+        if resolution.is_some_and(|r| r.0) && !physical_outputs.contains_key(ordinal) {
             let accepted = accepted.get(ordinal).ok_or(Error::Unknown)?;
             require(
                 accepted.binding == intent.binding
@@ -902,6 +1198,7 @@ pub(crate) fn validate_files(
         if intent.owner == "owner-registration-cleanup"
             && cleanup_admission.is_some()
             && !completed.contains_key(ordinal)
+            && !physical_outputs.contains_key(ordinal)
         {
             require(
                 cleanup_admission.is_some_and(|mode| mode.recipe() == intent.recipe)
@@ -1009,6 +1306,9 @@ pub(crate) fn validate_files(
         )?;
         if let Some(j) = current.filter(|j| j.transaction == tx) {
             if successful {
+                if replay.contains(ordinal) {
+                    require(resolution.is_some_and(|r| r.1))?;
+                }
                 let local_cleanup = local_cleanup(j, intent)
                     && terminal.state == "failed"
                     && terminal.operations.is_empty()
@@ -1429,6 +1729,7 @@ pub(crate) mod tests {
         fs::remove_file(&top).unwrap();
         assert_eq!(s.native_inventory(Some(&j), true), Err(Error::Unknown));
         fs::write(&top, &terminal_raw).unwrap();
+        fs::set_permissions(&top, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(s.native_inventory(Some(&j), true).is_ok());
         fs::remove_file(&result).unwrap();
         assert_eq!(s.native_inventory(Some(&j), false), Err(Error::Unknown));
@@ -1581,6 +1882,120 @@ pub(crate) mod tests {
             }
         }
         assert!(successes > 0);
+    }
+    #[test]
+    fn physical_output_requires_the_original_closed_invocation() {
+        for state in ["complete", "failed"] {
+            let (f, store, journal, binding) = fixture();
+            let hash = "a".repeat(64);
+            let intent = Intent {
+                version: 1,
+                binding: binding.clone(),
+                owner: "host-power".into(),
+                resource: "default".into(),
+                expected: hash.clone(),
+                desired: hash.clone(),
+                source: hash.clone(),
+                recipe: hash.clone(),
+            };
+            let mut fact = PhysicalOutput {
+                version: 1,
+                binding: binding.clone(),
+                recipe: hash.clone(),
+                source: hash.clone(),
+                physical: hash,
+            };
+            let original = codec::encode(&fact, true).unwrap();
+            write(&f, &binding, "001.intent.json", &intent);
+            write(&f, &binding, "001.physical.json", &fact);
+            assert_eq!(
+                store.native_inventory(Some(&journal), false),
+                Err(Error::Unknown)
+            );
+            write(
+                &f,
+                &binding,
+                "001.accepted.json",
+                &terminal(&binding, "accepted", vec![]),
+            );
+            assert_eq!(
+                store.native_inventory(Some(&journal), false),
+                Err(Error::Unknown)
+            );
+            write(
+                &f,
+                &binding,
+                "001.terminal.json",
+                &terminal(&binding, state, vec![]),
+            );
+            assert!(store.native_inventory(Some(&journal), false).is_ok());
+            assert_eq!(
+                store.native_inventory(Some(&journal), true).is_ok(),
+                state == "complete"
+            );
+            store.validate_owner_producer(&binding).unwrap();
+            for field in ["version", "binding", "recipe", "source", "physical"] {
+                match field {
+                    "version" => fact.version = 2,
+                    "binding" => fact.binding.helper = "b".repeat(64),
+                    "recipe" => fact.recipe = "b".repeat(64),
+                    "source" => fact.source = "b".repeat(64),
+                    "physical" => fact.physical = "invalid".into(),
+                    _ => unreachable!(),
+                }
+                write(&f, &binding, "001.physical.json", &fact);
+                assert!(
+                    store.native_inventory(Some(&journal), false).is_err(),
+                    "{field}"
+                );
+                fact = codec::decode_canonical(&original, true).unwrap();
+            }
+            write(&f, &binding, "001.physical.json", &fact);
+            let command = Command {
+                kind: "component-script".into(),
+                source: "a".repeat(64),
+            };
+            write(&f, &binding, "001.command-001-intent.json", &command);
+            assert!(store.validate_owner_producer(&binding).is_err());
+            write(&f, &binding, "001.command-001-terminal.json", &command);
+            let operation = native::Operation {
+                kind: "instance-state".into(),
+                server: "b".repeat(64),
+                project: "project".into(),
+                resource: "yard".into(),
+                id: String::new(),
+                status: 0,
+            };
+            write(&f, &binding, "001.operation-001-intent.json", &operation);
+            assert!(store.validate_owner_producer(&binding).is_err());
+            let mut accepted = operation.clone();
+            accepted.id = "operation-1".into();
+            write(&f, &binding, "001.operation-001-accepted.json", &accepted);
+            let mut finished = accepted;
+            finished.status = if state == "complete" { 200 } else { 400 };
+            write(&f, &binding, "001.operation-001-terminal.json", &finished);
+            write(
+                &f,
+                &binding,
+                "001.terminal.json",
+                &terminal(&binding, state, vec![finished]),
+            );
+            store.validate_owner_producer(&binding).unwrap();
+            store.lock().unwrap().close_native(&binding).unwrap();
+            store.validate_owner_producer(&binding).unwrap();
+            let dir =
+                f.0.join("migrations/native-custody/v1")
+                    .join(&binding.transaction);
+            assert_eq!(fs::read(dir.join("001.physical.json")).unwrap(), original);
+            write(&f, &binding, ".001.physical.json.pending", &fact);
+            assert_eq!(
+                store.native_inventory(Some(&journal), false),
+                Err(Error::Unknown)
+            );
+            fs::remove_file(dir.join(".001.physical.json.pending")).unwrap();
+            fs::remove_file(dir.join("001.physical.json")).unwrap();
+            store.validate_owner_producer(&binding).unwrap();
+        }
     }
     #[test]
     fn restoration_is_bound_source_evidence_and_survives_native_compaction() {
@@ -1760,6 +2175,244 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap()
         }
+    }
+    #[test]
+    fn actual_go_cache_facts_remain_source_proof_through_closure_and_retirement() {
+        use base64::Engine;
+        let Ok(path) = std::env::var("SUBYARD_NATIVE_IMAGE_CACHE_CORPUS") else {
+            return;
+        };
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase", deny_unknown_fields)]
+        struct Corpus {
+            binding: native::Binding,
+            files: BTreeMap<String, String>,
+        }
+        let corpus: Corpus = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let (f, store, _, old) = fixture();
+        fs::remove_dir_all(
+            f.0.join("migrations/native-custody/v1")
+                .join(old.transaction),
+        )
+        .unwrap();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&corpus.binding.transaction);
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        for (name, encoded) in corpus.files {
+            assert!(!name.contains('/'));
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            fs::write(dir.join(&name), raw).unwrap();
+            fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        // Actual Go pending endpoint provenance cannot manufacture quiescence.
+        assert_eq!(store.native_inventory(None, false), Err(Error::Unknown));
+        assert_eq!(
+            store.validate_owner_producer(&corpus.binding),
+            Err(Error::Unknown)
+        );
+        let original = fs::read(dir.join("001.image-cache-001.json")).unwrap();
+        let mut complete = terminal(&corpus.binding, "complete", vec![]);
+        complete.owner = "owner-registration".into();
+        complete.resource = "test-yard".into();
+        write(&f, &corpus.binding, "001.terminal.json", &complete);
+        store.validate_owner_producer(&corpus.binding).unwrap();
+        store.lock().unwrap().close_native(&corpus.binding).unwrap();
+        assert_eq!(
+            fs::read(dir.join("001.image-cache-001.json")).unwrap(),
+            original
+        );
+        store.native_inventory(None, false).unwrap();
+        // Foreign recipe, noncanonical pending bytes and a missing predecessor
+        // remain refusals even alongside an explicit synthetic complete fact.
+        let mut changed: ImageCacheFact = ImageCacheFact::checked(&original).unwrap();
+        changed.recipe = "b".repeat(64);
+        write(&f, &corpus.binding, "001.image-cache-001.json", &changed);
+        assert!(store.native_inventory(None, false).is_err());
+        fs::write(dir.join("001.image-cache-001.json"), &original).unwrap();
+        fs::rename(
+            dir.join("001.image-cache-001.json"),
+            dir.join(".001.image-cache-001.json.pending"),
+        )
+        .unwrap();
+        assert_eq!(store.native_inventory(None, false), Err(Error::Unknown));
+        fs::rename(
+            dir.join(".001.image-cache-001.json.pending"),
+            dir.join("001.image-cache-001.json"),
+        )
+        .unwrap();
+        fs::remove_file(dir.join("001.image-cache-001.json")).unwrap();
+        assert!(store.native_inventory(None, false).is_err());
+        fs::write(dir.join("001.image-cache-001.json"), original).unwrap();
+        store
+            .native_retireable_transaction(&corpus.binding.transaction)
+            .unwrap();
+        store.lock().unwrap().cleanup_native_transactions().unwrap();
+        assert!(!dir.exists());
+    }
+    #[test]
+    fn actual_go_host_installation_survives_compaction_without_replacing_whole_terminal() {
+        use base64::Engine;
+        let Ok(path) = std::env::var("SUBYARD_NATIVE_HOST_INSTALL_CORPUS") else {
+            return;
+        };
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase", deny_unknown_fields)]
+        struct Corpus {
+            binding: native::Binding,
+            files: BTreeMap<String, String>,
+        }
+        let c: Corpus = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let (f, s, _, old) = fixture();
+        fs::remove_dir_all(
+            f.0.join("migrations/native-custody/v1")
+                .join(old.transaction),
+        )
+        .unwrap();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&c.binding.transaction);
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        for (name, encoded) in c.files {
+            assert!(!name.contains('/'));
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            fs::write(dir.join(&name), raw).unwrap();
+            fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let result = fs::read(dir.join("001.host-power-installation.json")).unwrap();
+        HostPowerInstallationFact::checked(&result).unwrap();
+        assert!(s.native_inventory(None, false).is_ok());
+        let terminal = fs::read(dir.join("001.terminal.json")).unwrap();
+        fs::remove_file(dir.join("001.terminal.json")).unwrap();
+        assert_eq!(s.native_inventory(None, false), Err(Error::Unknown));
+        fs::write(dir.join("001.terminal.json"), terminal).unwrap();
+        fs::set_permissions(
+            dir.join("001.terminal.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        s.lock().unwrap().close_native(&c.binding).unwrap();
+        assert_eq!(
+            fs::read(dir.join("001.host-power-installation.json")).unwrap(),
+            result
+        );
+        assert!(!dir.join("001.command-001-intent.json").exists());
+        assert!(s.native_inventory(None, false).is_ok());
+        fs::remove_file(dir.join("001.terminal.json")).unwrap();
+        assert_eq!(s.native_inventory(None, false), Err(Error::Unknown));
+    }
+    #[test]
+    fn host_installation_is_optional_retained_causality_never_whole_closure() {
+        let (f, s, j, b) = fixture();
+        let hash = "a".repeat(64);
+        let intent = Intent {
+            version: 1,
+            binding: b.clone(),
+            owner: "owner-registration".into(),
+            resource: "test-yard".into(),
+            expected: hash.clone(),
+            desired: hash.clone(),
+            source: hash.clone(),
+            recipe: hash.clone(),
+        };
+        write(&f, &b, "001.intent.json", &intent);
+        let mut end = terminal(&b, "accepted", vec![]);
+        end.owner = "owner-registration".into();
+        end.resource = "test-yard".into();
+        write(&f, &b, "001.accepted.json", &end);
+        let command = Command {
+            kind: "owner-host-power-install".into(),
+            source: hash.clone(),
+        };
+        write(&f, &b, "001.command-001-intent.json", &command);
+        write(&f, &b, "001.command-001-terminal.json", &command);
+        let mut fact = HostPowerInstallationFact {
+            version: 1,
+            binding: b.clone(),
+            result: HostPowerInstallation {
+                producer: crate::digest(&codec::encode(&b, false).unwrap()),
+                intent: crate::digest(&codec::encode(&intent, false).unwrap()),
+                recipe: hash.clone(),
+                source: hash.clone(),
+                host_source: hash.clone(),
+                output: hash.clone(),
+                command: 1,
+                consumer: HostPowerConsumer {
+                    engine_digest: hash.clone(),
+                    unit_digest: hash.clone(),
+                    contracts_digest: hash.clone(),
+                    files_digest: hash.clone(),
+                    generations: ["engine", "service", "publication"]
+                        .iter()
+                        .map(|r| HostPowerGeneration {
+                            role: (*r).into(),
+                            value: hash.clone(),
+                        })
+                        .collect(),
+                },
+                identities: ["engine", "service", "publication"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| HostPowerIdentity {
+                        role: (*r).into(),
+                        device: 1,
+                        inode: (i + 1) as u64,
+                    })
+                    .collect(),
+            },
+        };
+        write(&f, &b, "001.host-power-installation.json", &fact);
+        assert_eq!(s.native_inventory(Some(&j), false), Err(Error::Unknown));
+        end.state = "failed".into();
+        write(&f, &b, "001.terminal.json", &end);
+        assert!(s.native_inventory(Some(&j), false).is_ok());
+        assert!(s.native_inventory(Some(&j), true).is_err());
+        for field in [
+            "producer",
+            "intent",
+            "source",
+            "recipe",
+            "command",
+            "generation",
+            "identity",
+        ] {
+            let original = codec::encode(&fact, true).unwrap();
+            match field {
+                "producer" => fact.result.producer = "b".repeat(64),
+                "intent" => fact.result.intent = "b".repeat(64),
+                "source" => fact.result.source = "b".repeat(64),
+                "recipe" => fact.result.recipe = "b".repeat(64),
+                "command" => fact.result.command = 2,
+                "generation" => fact.result.consumer.generations[1].value = "b".repeat(64),
+                "identity" => fact.result.identities[1].inode = 0,
+                _ => unreachable!(),
+            }
+            write(&f, &b, "001.host-power-installation.json", &fact);
+            assert!(s.native_inventory(Some(&j), false).is_err(), "{field}");
+            fact = codec::decode_canonical(&original, true).unwrap();
+        }
+        write(&f, &b, "001.host-power-installation.json", &fact);
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        fs::remove_file(dir.join("001.command-001-terminal.json")).unwrap();
+        assert!(s.native_inventory(Some(&j), false).is_err());
+        write(&f, &b, "001.command-001-terminal.json", &command);
+        s.lock().unwrap().close_native(&b).unwrap();
+        assert!(dir.join("001.host-power-installation.json").exists());
+        assert!(s.native_inventory(Some(&j), false).is_ok());
+        assert!(!dir.join("001.command-001-intent.json").exists());
+        let raw = fs::read(dir.join("001.host-power-installation.json")).unwrap();
+        assert!(raw.len() <= 4096);
+        let mut unknown = raw.clone();
+        unknown.insert(unknown.len() - 2, b' ');
+        assert!(HostPowerInstallationFact::checked(&unknown).is_err());
     }
     pub(crate) fn fixture() -> (Fixture, store::Store, j::Record, native::Binding) {
         let root = PathBuf::from(format!(

@@ -204,9 +204,9 @@ func (cli *CLI) prepareActivationRepair(
 		}
 		owner := releaseruntime.New(releaseruntime.Config{Inputs: cli.commandInputs,
 			Context: releaseruntime.RuntimeContext{OperatorHome: firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), DataHome: options.DataHome, ConfigHome: options.ConfigHome, RuntimeRoot: options.RuntimeRoot, OperationID: cli.env["SUBYARD_OPERATION_ID"]}, Stderr: cli.options.Stderr})
-		defer owner.Close()
 		inspection, inspectErr := owner.InspectMutationGateInspection(ctx, options.RuntimeRoot, options.ConfigHome, "default")
-		if inspectErr != nil || !configApplyRepairRustInspectionMatches(journal, outcome, inspection, profileInit) {
+		closeErr := owner.Close()
+		if inspectErr != nil || closeErr != nil || !configApplyRepairRustInspectionMatches(journal, outcome, inspection, profileInit) {
 			return nil, nil
 		}
 		sourceBinding = proof.Binding

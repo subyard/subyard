@@ -577,12 +577,16 @@ func TestProfileRuntimeActivationDefersLegacyYardLoadingUntilSourceMigrationsCom
 	}
 }
 
-func seedCurrentReleaseLedger(t *testing.T, root, configHome string) {
+func seedCurrentReleaseLedger(t *testing.T, root, configHome string, explicitSourceRoot ...string) {
 	t.Helper()
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	payload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
+	sourceRoot := repositoryRoot(t)
+	if len(explicitSourceRoot) != 0 {
+		sourceRoot = explicitSourceRoot[0]
+	}
+	payload, err := os.ReadFile(filepath.Join(sourceRoot, "config", "release-transition.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3250,6 +3254,15 @@ func TestInspectPowerActivationApplicabilityRejectsSymlinkAndPreservesAbsence(t 
 	state, err := inspectPowerActivationApplicability(environment)
 	if err != nil || state.state != "absent" || state.applies {
 		t.Fatalf("absent state = %#v, err=%v", state, err)
+	}
+	passivePath := filepath.Join(root, "subyard-publication-reconcile.service")
+	writeReleaseTransitionTestFile(t, passivePath, []byte("passive unit\n"), 0644)
+	state, err = inspectPowerActivationApplicability(environment)
+	if err != nil || !state.applies || state.state != "installed" {
+		t.Fatal("orphan passive producer hidden", state, err)
+	}
+	if err := os.Remove(passivePath); err != nil {
+		t.Fatal(err)
 	}
 	writeReleaseTransitionTestFile(t, reconcilerPath, []byte("engine\n"), 0o700)
 	state, err = inspectPowerActivationApplicability(environment)

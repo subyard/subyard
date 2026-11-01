@@ -493,10 +493,19 @@ impl State {
         &self.binding
     }
     pub(crate) fn ordinary_cleanup_for(&self, current: &str, budget: usize) -> Result<Vec<String>> {
+        self.ordinary_cleanup_retaining(current, &BTreeSet::new(), budget)
+    }
+    pub(crate) fn ordinary_cleanup_retaining(
+        &self,
+        current: &str,
+        retained: &BTreeSet<String>,
+        budget: usize,
+    ) -> Result<Vec<String>> {
         if self.current.is_none() {
             require(!self.ordinary.edges.contains_key(current))?;
         }
         let mut roots = self.owner_roots.clone();
+        roots.extend(retained.iter().cloned());
         roots.insert(current.into());
         self.ordinary.cleanup_order(
             self.current.as_ref(),

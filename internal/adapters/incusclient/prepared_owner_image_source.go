@@ -1,6 +1,7 @@
 package incusclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -154,6 +155,16 @@ func ownerImageCheckGuards(environment string, guards []ports.OwnerImageSourceGu
 	if err := ownerImageEnvironmentCurrent(environment); err != nil || len(guards) == 0 {
 		return domain.ErrPlanStale
 	}
+	if err := ownerImageCheckGuardStates(guards); err != nil {
+		return err
+	}
+	return ownerImageEnvironmentCurrent(environment)
+}
+
+func ownerImageCheckGuardStates(guards []ports.OwnerImageSourceGuard) error {
+	if len(guards) == 0 {
+		return domain.ErrPlanStale
+	}
 	for _, guard := range guards {
 		prefix, expected, ok := strings.Cut(guard.State, ":")
 		if !ok || !slices.Contains([]string{"file", "directory", "trust-directory"}, prefix) || !filepath.IsAbs(string(guard.Path)) {
@@ -167,7 +178,7 @@ func ownerImageCheckGuards(environment string, guards []ports.OwnerImageSourceGu
 			return domain.ErrPlanStale
 		}
 	}
-	return ownerImageEnvironmentCurrent(environment)
+	return nil
 }
 
 func ownerImageTrustDirectory(path string) (string, error) {
@@ -344,12 +355,17 @@ func ownerImagePolicyReference(reference []byte) bool {
 	return err == nil && !(parsed.IsAbs() && parsed.Host != "")
 }
 
-// CaptureOwnerImagePolicy reads only original filesystem inputs. It deliberately
-// does not connect, select an image, parse a private key, invoke a helper, refresh
-// credentials or issue an image token. The owning runtime binds its renderer and
-// full semantic environment; this record binds the SDK's relevant source inputs.
+// CaptureOwnerImagePolicy binds original source inputs. Factory-only retained
+// preparation may authenticate read-only metadata and return a checked cache
+// successor; it has no create/token authority. The direct filesystem capture
+// below never connects or invokes a provider. The owning runtime binds its
+// original renderer and complete environment separately.
 func (client *Client) CaptureOwnerImagePolicy(ctx context.Context, primary, fallback string, kind domain.YardKind, environment []string, operatorHome string) (ports.PreparedOwnerImagePolicy, error) {
 	p := ports.PreparedOwnerImagePolicy{}
+	if ownerSourceCapability(ctx) {
+		result, err := client.runOwnerSource(ctx, "capture", ownerSourceRequest{Primary: primary, Fallback: fallback, Kind: kind, Environment: environment, Home: operatorHome})
+		return result.Policy, err
+	}
 	if !ownerImagePolicyReference([]byte(primary)) || !ownerImagePolicyReference([]byte(fallback)) {
 		return p, domain.ErrPlanStale
 	}
@@ -377,6 +393,7 @@ func (client *Client) CaptureOwnerImagePolicy(ctx context.Context, primary, fall
 		return p, errors.New("original image policy configuration unavailable")
 	}
 	needsTrust := false
+	var tokenPaths [][]byte
 	for _, reference := range []string{primary, fallback} {
 		name, _, err := config.ParseRemote(reference)
 		if err != nil {
@@ -390,6 +407,9 @@ func (client *Client) CaptureOwnerImagePolicy(ctx context.Context, primary, fall
 		}
 		if remote.AuthType == api.AuthenticationMethodOIDC {
 			paths = append(paths, config.OIDCTokenPath(name))
+			if !slices.ContainsFunc(tokenPaths, func(p []byte) bool { return string(p) == config.OIDCTokenPath(name) }) {
+				tokenPaths = append(tokenPaths, []byte(config.OIDCTokenPath(name)))
+			}
 		}
 		if strings.HasPrefix(remote.Addr, "unix:") {
 			continue
@@ -403,8 +423,16 @@ func (client *Client) CaptureOwnerImagePolicy(ctx context.Context, primary, fall
 				paths = append(paths, config.ConfigPath("clientcerts", name+"."+suffix), config.ConfigPath("client."+suffix))
 			}
 		}
-		if remote.Protocol == "oci" && filepath.IsAbs(remote.CredHelper) {
-			paths = append(paths, remote.CredHelper)
+		if remote.Protocol == "oci" && remote.CredHelper != "" {
+			directory, err := os.Getwd()
+			if err != nil {
+				return p, err
+			}
+			helper, err := ownerSourceExecutable(remote.CredHelper, values["PATH"], directory)
+			if err != nil {
+				return p, err
+			}
+			paths = append(paths, helper)
 		}
 		// Relative/named helper executable resolution needs the original
 		// component working directory. Its config and PATH are bound here;
@@ -424,7 +452,30 @@ func (client *Client) CaptureOwnerImagePolicy(ctx context.Context, primary, fall
 	if err := ownerImageCheckGuards(ambient, before); err != nil {
 		return p, err
 	}
-	p = ports.PreparedOwnerImagePolicy{Version: 1, Primary: []byte(primary), Fallback: []byte(fallback), Kind: imageKind, Environment: digest, Project: []byte(values["INCUS_PROJECT"]), Guards: guards}
+	directory, err := os.Getwd()
+	if err != nil {
+		return p, err
+	}
+	for current := directory; ; current = filepath.Dir(current) {
+		if !slices.ContainsFunc(guards, func(g ports.OwnerImageSourceGuard) bool { return string(g.Path) == current }) {
+			state, err := ownerImagePathState(current, false)
+			if err != nil {
+				return p, err
+			}
+			guards = append(guards, ports.OwnerImageSourceGuard{Path: []byte(current), State: "directory:" + state})
+		}
+		if filepath.Dir(current) == current {
+			break
+		}
+	}
+	cacheBinding := ""
+	if len(tokenPaths) > 0 {
+		cacheBinding = ownerCreateDigest(struct {
+			Environment string
+			Guards      []ports.OwnerImageSourceGuard
+		}{ambient, before})
+	}
+	p = ports.PreparedOwnerImagePolicy{CacheBinding: cacheBinding, Directory: []byte(directory), TokenPaths: tokenPaths, Version: 1, Primary: []byte(primary), Fallback: []byte(fallback), Kind: imageKind, Environment: digest, Project: []byte(values["INCUS_PROJECT"]), Guards: guards}
 	if err := client.CheckOwnerImagePolicy(ctx, p, environment, operatorHome); err != nil {
 		return ports.PreparedOwnerImagePolicy{}, err
 	}
@@ -435,20 +486,54 @@ func (client *Client) CaptureOwnerImagePolicy(ctx context.Context, primary, fall
 // belongs to the original renderer after parent acceptance; a selected reference
 // must equal Primary or Fallback, and its kind must equal this record's Kind.
 func (client *Client) CheckOwnerImagePolicy(ctx context.Context, p ports.PreparedOwnerImagePolicy, environment []string, operatorHome string) error {
-	if p.Version != 1 || !ownerImagePolicyReference(p.Primary) || !ownerImagePolicyReference(p.Fallback) || !slices.Contains([]string{"container", "virtual-machine"}, p.Kind) {
+	if ownerSourceCapability(ctx) {
+		if ports.NativeInvocationKey(ctx) == "" {
+			ctx = ports.WithNativeOwnerImageCache(ports.WithoutNativeOperationObserver(ctx), ownerImageCacheObserver(ctx))
+		}
+		result, err := client.runOwnerSource(ctx, "check", ownerSourceRequest{Policy: p, Environment: environment, Home: operatorHome})
+		_ = result
+		return err
+	}
+	if len(p.Directory) != 0 {
+		directory, err := os.Getwd()
+		if err != nil || directory != string(p.Directory) {
+			return domain.ErrPlanStale
+		}
+	}
+	if !ownerImageCachePolicyShape(p) || p.Version != 1 || !ownerImagePolicyReference(p.Primary) || !ownerImagePolicyReference(p.Fallback) || !slices.Contains([]string{"container", "virtual-machine"}, p.Kind) {
 		return domain.ErrPlanStale
 	}
 	values, digest, ambient, err := ownerImagePolicyEnvironment(environment)
 	if err != nil || p.Environment != digest || !slices.Equal(p.Project, []byte(values["INCUS_PROJECT"])) {
 		return domain.ErrPlanStale
 	}
-	if _, err := ownerImageConfigPaths(values, operatorHome); err != nil {
+	paths, err := ownerImageConfigPaths(values, operatorHome)
+	if err != nil {
 		return domain.ErrPlanStale
+	}
+	if len(p.TokenPaths) > 0 {
+		// This is an equivalence check against the already-captured immutable
+		// config/auth envelope, never a fresh source authority.
+		before, err := ownerImageGuardPaths(paths)
+		if err != nil {
+			return err
+		}
+		expected := ownerCreateDigest(struct {
+			Environment string
+			Guards      []ports.OwnerImageSourceGuard
+		}{ambient, before})
+		if p.CacheBinding != expected {
+			return domain.ErrPlanStale
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return context.Cause(ctx)
 	}
-	return ownerImageCheckGuards(ambient, p.Guards)
+	guards, err := ownerImageCacheGuards(ctx, p)
+	if err != nil {
+		return err
+	}
+	return ownerImageCheckGuards(ambient, guards)
 }
 
 var errOwnerPolicyImageAuthentication = errors.New("accepted image source authentication custody remains required")
@@ -459,6 +544,7 @@ type ownerPolicyImageConnection struct {
 	local  bool
 	guards ports.PreparedOwnerImageSource
 	args   *incus.ConnectionArgs
+	save   func() error
 }
 
 func (connection ownerPolicyImageConnection) close() {
@@ -503,8 +589,11 @@ func (client *Client) ownerPolicyImageServer(ctx context.Context, policy ports.P
 	}
 	// GetImageServer can refresh OIDC tokens or invoke an OCI helper before
 	// returning. Those effects need their own original custody, not this probe.
-	if remote.AuthType == api.AuthenticationMethodOIDC || remote.Protocol == "oci" && remote.CredHelper != "" {
-		return connection, errOwnerPolicyImageAuthentication
+	if remote.AuthType == api.AuthenticationMethodOIDC && (!strings.HasPrefix(remote.Addr, "unix:") || sourceLeaf(ctx) == nil) || remote.Protocol == "oci" && (remote.CredHelper != "" || sourceLeaf(ctx) != nil) {
+		if sourceLeaf(ctx) == nil {
+			return connection, errOwnerPolicyImageAuthentication
+		}
+		return client.ownerAuthenticatedImageServer(ctx, policy, reference, environment, operatorHome, config, name, object, remote)
 	}
 	connection.object = object
 	if strings.HasPrefix(remote.Addr, "unix:") {
@@ -645,6 +734,11 @@ func ownerPolicyClientCertificate(config *cliconfig.Config, name string) (certif
 }
 
 func (client *Client) checkOwnerPolicyImageRead(ctx context.Context, policy ports.PreparedOwnerImagePolicy, connection ownerPolicyImageConnection, environment []string, operatorHome string) error {
+	if connection.save != nil {
+		if err := connection.save(); err != nil {
+			return err
+		}
+	}
 	if err := client.CheckOwnerImagePolicy(ctx, policy, environment, operatorHome); err != nil {
 		return err
 	}
@@ -679,7 +773,11 @@ func ownerPolicyImageReadError(ctx context.Context, err error) error {
 // metadata attempts after parent acceptance. Only the retained shell rule may
 // choose a fallback; no instance creation happens here.
 func (client *Client) ReadOwnerPolicyImageCatalog(ctx context.Context, policy ports.PreparedOwnerImagePolicy, environment []string, operatorHome string) ([]byte, error) {
-	if ports.NativeOperationObserverFrom(ctx) == nil || ports.NativeInvocationKey(ctx) == "" {
+	if ownerSourceCapability(ctx) {
+		result, err := client.runOwnerSource(ctx, "catalog", ownerSourceRequest{Policy: policy, Environment: environment, Home: operatorHome})
+		return result.Data, err
+	}
+	if (ports.NativeOperationObserverFrom(ctx) == nil || ports.NativeInvocationKey(ctx) == "") && (sourceLeaf(ctx) == nil || !sourceLeaf(ctx).preparation) {
 		return nil, domain.ErrPlanStale
 	}
 	ctx, cancel := context.WithTimeout(ctx, 95*time.Second)
@@ -748,7 +846,11 @@ func (client *Client) resolveOwnerPolicyImageSource(parent context.Context, poli
 		}
 		source := api.InstanceSource{Type: "image", Mode: "pull", Protocol: "oci", Server: info.URL, Certificate: info.Certificate, Alias: connection.object}
 		if !ownerImageOCISource(source) {
-			return api.InstanceSource{}, nil, domain.ErrPlanStale
+			leaf := sourceLeaf(ctx)
+			if leaf == nil || !ownerImageOCISource(ownerImagePublicOCISource(source)) {
+				return api.InstanceSource{}, nil, domain.ErrPlanStale
+			}
+			leaf.oci = &source
 		}
 		if err := client.checkOwnerPolicyImageRead(ctx, policy, connection, environment, operatorHome); err != nil {
 			return api.InstanceSource{}, nil, err
@@ -757,6 +859,9 @@ func (client *Client) resolveOwnerPolicyImageSource(parent context.Context, poli
 	}
 	image, _, err := ownerImageResolve(connection.ImageServer, connection.object, policy.Kind)
 	if err != nil {
+		if connection.save != nil {
+			err = errors.Join(err, connection.save())
+		}
 		return api.InstanceSource{}, nil, ownerPolicyImageReadError(ctx, err)
 	}
 	source := api.InstanceSource{Type: "image", Fingerprint: image.Fingerprint, Protocol: info.Protocol}
@@ -782,8 +887,14 @@ func (client *Client) resolveOwnerPolicyImageSource(parent context.Context, poli
 		}
 		handle, err := beginOwnerImageSecret(parent, info.URL, *connection.args, expected)
 		if err != nil {
+			// A failed token POST/watch setup may still have refreshed the
+			// shared SDK pointer before a handle can own deferred Close.
+			if connection.save != nil {
+				err = errors.Join(err, connection.save())
+			}
 			return api.InstanceSource{}, nil, err
 		}
+		handle.finish = connection.save
 		if err := client.CheckOwnerImagePolicy(parent, policy, environment, operatorHome); err != nil {
 			return api.InstanceSource{}, nil, errors.Join(err, handle.Close())
 		}
@@ -819,7 +930,11 @@ func ownerPolicyImageSecretKind(policy ports.PreparedOwnerImagePolicy, selected,
 // DrainOwnerImageSecretOperation is called only by the native original-fact
 // gateway while both original leases are held. It never resolves an alias or
 // creates a token; a missing exact UUID remains unknown.
-func (client *Client) DrainOwnerImageSecretOperation(ctx context.Context, policy ports.PreparedOwnerImagePolicy, selected string, environment []string, home string, expected ports.NativeOperation) (ports.NativeOperation, error) {
+func (client *Client) DrainOwnerImageSecretOperation(ctx context.Context, policy ports.PreparedOwnerImagePolicy, selected string, environment []string, home string, expected ports.NativeOperation) (result ports.NativeOperation, resultErr error) {
+	if ownerSourceCapability(ctx) {
+		result, err := client.runOwnerSource(ctx, "drain", ownerSourceRequest{Policy: policy, Selected: selected, Expected: expected, Environment: environment, Home: home})
+		return result.Operation, err
+	}
 	scopeRole := strings.TrimPrefix(expected.Kind, "owner-image-secret-")
 	scope, _, _ := strings.Cut(scopeRole, "-")
 	deadline, bounded := ctx.Deadline()
@@ -833,6 +948,18 @@ func (client *Client) DrainOwnerImageSecretOperation(ctx context.Context, policy
 		return ports.NativeOperation{}, ownerPolicyImageReadError(ctx, err)
 	}
 	defer connection.close()
+	defer func() {
+		if connection.save != nil {
+			if err := connection.save(); err != nil {
+				if observer := ports.NativeOperationObserverFrom(ctx); observer != nil {
+					observer.Uncertain()
+				}
+				result = ports.NativeOperation{}
+				resultErr = errors.Join(resultErr, err)
+			}
+		}
+	}()
+
 	if connection.args == nil || connection.local {
 		stopMetadata()
 		return ports.NativeOperation{}, errOwnerImageSecret
@@ -921,4 +1048,23 @@ func ownerImageResolve(server incus.ImageServer, object, kind string) (*api.Imag
 		return nil, "", errors.New("original selected image unavailable")
 	}
 	return image, aliasName, nil
+}
+
+func checkRetainedOwnerImagePolicy(ctx context.Context, p ports.PreparedOwnerImagePolicy) error {
+	if !ownerImageCachePolicyShape(p) || p.Version != 1 || !ownerImagePolicyReference(p.Primary) || !ownerImagePolicyReference(p.Fallback) || !slices.Contains([]string{"container", "virtual-machine"}, p.Kind) || !ownerImageHex(p.Environment, 64) {
+		return domain.ErrPlanStale
+	}
+	if len(p.Directory) != 0 && !slices.ContainsFunc(p.Guards, func(g ports.OwnerImageSourceGuard) bool {
+		return bytes.Equal(g.Path, p.Directory) && strings.HasPrefix(g.State, "directory:")
+	}) {
+		return domain.ErrPlanStale
+	}
+	guards, err := ownerImageCacheGuards(ctx, p)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return context.Cause(ctx)
+	}
+	return ownerImageCheckGuardStates(guards)
 }

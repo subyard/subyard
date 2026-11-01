@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,6 +31,17 @@ func (runtime Runtime) hostInstallerSourcePaths(owner string) (string, []string,
 		return "", nil, errors.New("unknown host installer source recipe")
 	}
 	paths := []string{}
+	// Owner-service cleanup also consumes shared materialization code when
+	// its profile is no longer selected.
+	const writer = "internal/adapters/configmaterial/tomli_w.py"
+	if info, err := os.Lstat(filepath.Join(runtime.RepositoryRoot, writer)); err == nil {
+		if !info.Mode().IsRegular() {
+			return "", nil, errors.New("shared host source must be regular")
+		}
+		paths = append(paths, writer)
+	} else if !os.IsNotExist(err) {
+		return "", nil, err
+	}
 	for _, prefix := range []string{"config", "scripts"} {
 		root := filepath.Join(runtime.RepositoryRoot, prefix)
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {

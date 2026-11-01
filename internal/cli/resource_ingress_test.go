@@ -66,7 +66,7 @@ func TestResourceIngressRollbackVerifiesSuccessfulHandlerClosedRoute(t *testing.
 	ingress := &resourceIngress{service: service, yards: yards, preview: preview, contract: contract, up: true}
 	runner := &resourceApplyRunner{cli: program, loaded: loaded, definition: definition,
 		localAction: definition.BringUp, effect: domain.ActionMutation}
-	if err := ingress.rollback(runner, "rollback-test"); err == nil || !strings.Contains(err.Error(), "left a proxy or ownership marker") {
+	if err := ingress.rollback(context.Background(), runner, "rollback-test"); err == nil || !strings.Contains(err.Error(), "left a proxy or ownership marker") {
 		t.Fatalf("successful handler hid an open route: %v", err)
 	}
 	instance := &host.snapshot.Yards[0].InstanceInfo
@@ -74,7 +74,7 @@ func TestResourceIngressRollbackVerifiesSuccessfulHandlerClosedRoute(t *testing.
 	delete(instance.Devices, contract.Device)
 	delete(instance.LocalConfig, contract.OwnershipKey())
 	delete(instance.Config, contract.OwnershipKey())
-	if err := ingress.rollback(runner, "rollback-test"); err != nil {
+	if err := ingress.rollback(context.Background(), runner, "rollback-test"); err != nil {
 		t.Fatalf("verified closed route failed rollback: %v", err)
 	}
 }

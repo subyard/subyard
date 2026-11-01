@@ -17,6 +17,11 @@ echo 'age-keygen 9.9.1'
 SH
 cat > "$TMP/fixture/sops" <<'SH'
 #!/usr/bin/env bash
+if [ "${SOPS_DISABLE_VERSION_CHECK:-}" != 1 ]; then
+  : > "$KEY_TOOL_VERSION_LOOKUP"
+  printf 'unexpected SOPS release lookup\n' >&2
+  exit 99
+fi
 echo 'sops 8.8.2'
 SH
 chmod +x "$TMP/fixture/age/age" "$TMP/fixture/age/age-keygen" "$TMP/fixture/sops"
@@ -56,10 +61,13 @@ export SUBYARD_SOPS_SHA256_AMD64="$sops_sha"
 export KEY_TOOL_CURL_LOG="$TMP/curl.log"
 export KEY_TOOL_AGE_FIXTURE="$TMP/fixture/age.tar.gz"
 export KEY_TOOL_SOPS_FIXTURE="$TMP/fixture/sops"
+export KEY_TOOL_VERSION_LOOKUP="$TMP/version-lookup"
+# Readiness must override an ambient update-check preference for this probe only.
+export SOPS_DISABLE_VERSION_CHECK=false
 
 PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
 [ "$("$SUBYARD_KEYS_TOOLS_DIR/bin/age" --version)" = 'age 9.9.1' ] || fail 'age version mismatch'
-[ "$("$SUBYARD_KEYS_TOOLS_DIR/bin/sops" --version)" = 'sops 8.8.2' ] || fail 'SOPS version mismatch'
+[ "$(SOPS_DISABLE_VERSION_CHECK=1 "$SUBYARD_KEYS_TOOLS_DIR/bin/sops" --version)" = 'sops 8.8.2' ] || fail 'SOPS version mismatch'
 [ "$(stat -c '%a' "$SUBYARD_KEYS_TOOLS_DIR/bin/sops")" = 755 ] || fail 'SOPS mode mismatch'
 [ "$(wc -l < "$KEY_TOOL_CURL_LOG")" = 2 ] || fail 'installer fetched unexpected artifact count'
 
@@ -100,5 +108,8 @@ if PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >"$TMP/
 fi
 [ ! -e "$SUBYARD_KEYS_TOOLS_DIR/bin/age" ] || fail 'checksum failure published a binary'
 grep -Fq 'checksum mismatch' "$TMP/bad.out" || fail 'checksum failure diagnostic missing'
+
+[ ! -e "$KEY_TOOL_VERSION_LOOKUP" ] || fail 'version probe attempted an upstream release lookup'
+[ "$SOPS_DISABLE_VERSION_CHECK" = false ] || fail 'version probe changed the caller environment'
 
 printf 'ok: pinned age/SOPS installer is checksum-verified, atomic and idempotent\n'

@@ -192,8 +192,11 @@ fn capture_image(input: &mut File, released: bool) -> Result<(File, String)> {
     let mut image = if stat.st_nlink == 0 {
         input.try_clone().map_err(|_| Error::Io)?
     } else {
-        let fd = fs::memfd_create("subyard-frozen-codec", MemfdFlags::ALLOW_SEALING)
-            .map_err(|_| Error::Io)?;
+        let fd = fs::memfd_create(
+            "subyard-frozen-codec",
+            MemfdFlags::ALLOW_SEALING | MemfdFlags::CLOEXEC,
+        )
+        .map_err(|_| Error::Io)?;
         let mut image = File::from(fd);
         let copied =
             std::io::copy(&mut input.take((128 << 20) + 1), &mut image).map_err(|_| Error::Io)?;
@@ -623,6 +626,33 @@ mod tests {
     }
     fn raw(s: &str) -> Vec<u8> {
         base64::engine::general_purpose::STANDARD.decode(s).unwrap()
+    }
+    #[test]
+    fn sealed_native_image_is_cloexec_in_actual_descendant() {
+        use rustix::io::{fcntl_getfd, FdFlags};
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = PathBuf::from(format!(
+            "/tmp/subyard-native-image-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"original native image").unwrap();
+        let (image, _) = sealed_image(file).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(fcntl_getfd(&image).unwrap().contains(FdFlags::CLOEXEC));
+        let output = std::process::Command::new("/usr/bin/python3").args(["-c",
+            "import os; assert not any('memfd:subyard-frozen-codec' in os.readlink('/proc/self/fd/'+x) for x in os.listdir('/proc/self/fd') if int(x)>2 and os.path.exists('/proc/self/fd/'+x))"]).output().unwrap();
+        assert!(output.status.success());
     }
     #[test]
     fn held_custodian() {

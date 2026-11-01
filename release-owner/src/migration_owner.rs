@@ -63,6 +63,24 @@ pub fn builtin_catalog(include_ssh: bool, include_publication: bool) -> Result<r
     }
     record::Catalog::new(Some(descriptors))
 }
+// Current executable kinds come from their Rust definitions. Historical receipt
+// catalogs above stay byte-identical when another migration is authored.
+pub(crate) fn current_catalog() -> Result<record::Catalog> {
+    let historical = builtin_catalog(true, true)?;
+    let mut descriptors = historical
+        .descriptors()
+        .iter()
+        .flatten()
+        .filter(|descriptor| descriptor.domain != "settings")
+        .cloned()
+        .collect::<Vec<_>>();
+    descriptors.extend(
+        crate::settings::migrations()
+            .into_iter()
+            .map(|definition| definition.descriptor()),
+    );
+    record::Catalog::new(Some(descriptors))
+}
 pub(crate) fn ledger_bytes(authority: &history::Authority) -> Result<Vec<u8>> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -567,5 +585,26 @@ impl crate::store::Store {
         )?;
         receipt.retained_evidence(self)?;
         Ok(Some(receipt))
+    }
+}
+
+#[cfg(test)]
+mod author_catalog_tests {
+    #[test]
+    fn executable_settings_definitions_leave_historical_catalog_unchanged() {
+        let current = super::current_catalog().unwrap();
+        let historical = super::builtin_catalog(true, true).unwrap();
+        assert_eq!(
+            historical.digest(),
+            "4f1d72f204c77bffbb947684b3efbeefd8fc848740b836b4e306ea55c2ad0d8c"
+        );
+        for definition in crate::settings::migrations() {
+            assert!(current.supports(definition.kind, "settings"));
+            assert!(current
+                .descriptors()
+                .iter()
+                .flatten()
+                .any(|d| *d == definition.descriptor()));
+        }
     }
 }

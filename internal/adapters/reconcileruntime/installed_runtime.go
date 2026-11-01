@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,12 @@ func (runtime Runtime) installedGuestPresence(ctx context.Context) (ports.Runtim
 func installedRuntimeDigest(value any) string {
 	payload, _ := json.Marshal(value)
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
+}
+
+// installedCanonicalRecipeDigest accepts only bytes produced by Recipe or
+// already compared against the canonical encoding of an installed recipe.
+func installedCanonicalRecipeDigest(raw []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 
 func installedRuntimeObservation(ready bool, actual, desired any) ports.RuntimeObservation {
@@ -260,15 +267,25 @@ esac
 }
 
 func installedRuntimeFile(path string) (any, error) {
-	info, err := os.Lstat(path)
+	return installedRuntimeFileAt(nil, path)
+}
+
+// A nonnil root is only the already approved repository anchor for a builtin
+// source. Installed/custom paths keep their complete absolute ancestry checks.
+func installedRuntimeFileAt(root *os.Root, path string) (any, error) {
+	lstat := os.Lstat
+	if root != nil {
+		lstat = root.Lstat
+	}
+	info, err := lstat(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	for parent := filepath.Dir(path); parent != string(filepath.Separator); parent = filepath.Dir(parent) {
-		info, err := os.Lstat(parent)
+	for parent := filepath.Dir(path); parent != string(filepath.Separator) && parent != "."; parent = filepath.Dir(parent) {
+		info, err := lstat(parent)
 		if err != nil {
 			return nil, err
 		}
@@ -291,7 +308,24 @@ func installedRuntimeFile(path string) (any, error) {
 		Hash          string
 	}{Mode: info.Mode(), Size: info.Size(), Modified: info.ModTime().UnixNano(), Device: stat.Dev, Inode: stat.Ino, UID: stat.Uid, GID: stat.Gid, Changed: stat.Ctim}
 	if info.Mode().IsRegular() {
-		payload, err := (config.MaterializedAsset{Source: path}).ReadSource()
+		var payload []byte
+		if root == nil {
+			payload, err = (config.MaterializedAsset{Source: path}).ReadSource()
+		} else {
+			var file *os.File
+			file, err = root.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+			if err == nil {
+				var opened os.FileInfo
+				opened, err = file.Stat()
+				if err == nil && (!opened.Mode().IsRegular() || !os.SameFile(info, opened)) {
+					err = errors.New("source is not a regular file")
+				}
+				if err == nil {
+					payload, err = io.ReadAll(file)
+				}
+				file.Close()
+			}
+		}
 		if err != nil {
 			return nil, err
 		}

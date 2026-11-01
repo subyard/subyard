@@ -48,12 +48,110 @@ def has_foreign_producer(environment, inventory):
     return any((item.get("expanded_config") or item.get("config") or {}).get("user.subyard.test_vms_spool_schema") and item.get("project") not in projects for item in inventory)
 
 
+def migrated_producer_source(environment):
+    """Recognize the original producer only from this root's closed owner proof."""
+    def require(condition):
+        if not condition:
+            raise ValueError("owner migration does not prove the original producer")
+
+    def unique_object(pairs):
+        result = dict(pairs)
+        require(len(result) == len(pairs))
+        return result
+
+    root = environment.get("SUBYARD_CONFIG_HOME", "")
+    require(os.path.isabs(root) and os.path.normpath(root) == root)
+    uid = int(environment.get("SUBYARD_FULL_CLEANUP_OPERATOR_UID", os.getuid()))
+    facts = lambda item: (item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid, item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+
+    def read(relative):
+        # Pin every component; private proof files cannot be links or shared files.
+        with guard.artifact_parent(root + "/anchor") as (root_fd, _):
+            directories = [os.dup(root_fd)]
+            try:
+                for part in relative.split("/")[:-1]:
+                    directories.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directories[-1]))
+                for fd in directories:
+                    info = os.fstat(fd)
+                    require(info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o700)
+                parent, name = directories[-1], relative.split("/")[-1]
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                with os.fdopen(fd, "rb") as stream:
+                    before = os.fstat(stream.fileno())
+                    require(stat.S_ISREG(before.st_mode) and before.st_uid == uid and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1 and before.st_size <= 1024 * 1024)
+                    raw = stream.read(1024 * 1024 + 1)
+                    require(len(raw) <= 1024 * 1024 and facts(before) == facts(os.fstat(stream.fileno())) == facts(os.stat(name, dir_fd=parent, follow_symlinks=False)))
+                record = json.loads(raw, object_pairs_hook=unique_object)
+                require(isinstance(record, dict))
+                return record, raw
+            except OSError as error:
+                if isinstance(error, (FileNotFoundError, PermissionError)):
+                    raise
+                raise ValueError("unsafe owner migration proof") from None
+            finally:
+                for fd in reversed(directories):
+                    os.close(fd)
+
+    registry_raw = (ROOT / "config/release-transition.json").read_bytes()
+    registry = json.loads(registry_raw)
+    migrations = [item for item in registry["migrations"] if item["kind"] == "test-yard-owner-v1-to-v2"]
+    require(len(migrations) == 1)
+    migration = migrations[0]
+    require(migration["domain"] == "owner-registration" and migration["fromEpoch"] == 1 and migration["toEpoch"] == 2)
+    journal, original_journal = read("release-transition/v2/journal.json")
+    require(type(journal.get("schemaVersion")) is int and journal["schemaVersion"] == 2 and journal.get("checkpoint") == "complete" and journal.get("registryDigest") == hashlib.sha256(registry_raw).hexdigest())
+    tx = journal.get("transaction", "")
+    require(isinstance(tx, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", tx))
+    step_id = migration["id"] + ".test-yard-owner"
+    require(isinstance(journal.get("steps"), list) and len(journal["steps"]) <= 256)
+    steps = [item for item in journal["steps"] if isinstance(item, dict) and item.get("id") == step_id]
+    require(len(steps) == 1)
+    step = steps[0]
+    require(step.get("migration") == migration["id"] and step.get("resource") == "test-yard-owner" and step.get("decision") == "canonicalize" and step.get("checkpoint") == "verified")
+    ledger, _ = read("release-transition/v2/ledger.json")
+    require(type(ledger.get("schemaVersion")) is int and ledger["schemaVersion"] == 2 and isinstance(ledger.get("domains"), dict))
+    domain = ledger["domains"].get("owner-registration")
+    require(isinstance(domain, dict) and type(domain.get("epoch")) is int and domain["epoch"] == 2 and domain.get("applied") == [migration["id"]])
+    prefix = "release-transition/v2/transactions/" + tx
+    recovery, recovery_raw = read(prefix + "/recovery/" + step_id + ".json")
+    require(type(recovery.get("schemaVersion")) is int and recovery["schemaVersion"] == 1 and recovery.get("transaction") == tx and recovery.get("step") == step_id and recovery.get("migration") == migration["id"] and recovery.get("resource") == "test-yard-owner")
+    require(isinstance(recovery.get("token"), str) and re.fullmatch(r"[0-9a-f]{32}", recovery["token"]))
+    before = recovery.get("before")
+    require(isinstance(before, dict) and set(before) == {"state", "registration", "overrides", "controller", "sharedImages"})
+    require(isinstance(before["state"], str) and before["state"] in {"legacy-flat", "legacy-directory", "legacy-directory+projects", "legacy-directory+overrides", "legacy-directory+projects+overrides", "legacy-directory-adopt-current", "legacy-flat-adopt-current"} and type(before["sharedImages"]) is bool)
+    require(all(isinstance(before[key], str) and re.fullmatch(r"[0-9a-f]{64}", before[key]) for key in ("registration", "overrides", "controller")))
+    canonical = {key: before[key] for key in ("state", "registration", "overrides", "controller", "sharedImages")}
+    digest = lambda value: hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
+    expected, desired = digest(canonical), digest(dict(canonical, state="current"))
+    require(recovery.get("expectedFingerprint") == step.get("expectedFingerprint") == expected and step.get("desiredFingerprint") == desired)
+    common = dict(schemaVersion=2, transaction=tx, releases=journal.get("releases"), step=step_id, expectedFingerprint=expected, desiredFingerprint=desired, recoveryFingerprint=hashlib.sha256(recovery_raw).hexdigest())
+    require(isinstance(common["releases"], dict) and isinstance(common["releases"].get("from"), str) and isinstance(common["releases"].get("target"), str))
+    for phase in ("captured", "applied", "verified"):
+        evidence, _ = read(prefix + "/evidence/" + step_id + "." + phase + ".json")
+        require(type(evidence.get("schemaVersion")) is int and evidence == dict(common, checkpoint=phase, observedFingerprint=expected if phase == "captured" else desired))
+        if phase == "verified":
+            summary = step.get("evidence")
+            require(isinstance(summary, dict) and type(summary.get("schemaVersion")) is int and evidence == summary)
+    require(read("release-transition/v2/journal.json")[1] == original_journal)
+    return "e2e-yard"
+
+
 def verify_evidence(environment):
     """Read bounded ownership fields only, including private host companions."""
     roots = evidence_roots(environment["SUBYARD_HOME"])
     sources = set(json.loads(environment.get("SUBYARD_FULL_CLEANUP_SOURCES", "[]")))
     allowed_uids = {0, int(environment.get("SUBYARD_FULL_CLEANUP_OPERATOR_UID", os.getuid()))}
     count = 0
+
+    def approved(source):
+        if not isinstance(source, str):
+            return False
+        if source not in sources and source == "e2e-yard" and "test-yard" in sources:
+            try:
+                sources.add(migrated_producer_source(environment))
+            except FileNotFoundError:
+                pass  # Missing or collected history grants no producer authority.
+        return source in sources
 
     def read_record(path, maximum=2 * 1024 * 1024):
         nonlocal count
@@ -99,14 +197,14 @@ def verify_evidence(environment):
             if path.parent.name == "host":
                 if path.name not in incidents or not isinstance(record, dict) or "observed_at" not in record or "timing" not in record:
                     raise ValueError("host evidence has no approved parent incident")
-            elif not isinstance(record, dict) or record.get("source") not in sources:
+            elif not isinstance(record, dict) or not approved(record.get("source")):
                 raise ValueError("retained evidence has unproven producer ownership")
             elif root_index == 1:
                 incidents.add(path.name)
     materialized = pathlib.Path(roots[2])
     if os.path.lexists(materialized):
         for line in read_record(materialized, 128 * 1024 * 1024).splitlines():
-            if json.loads(line).get("source") not in sources:
+            if not approved(json.loads(line).get("source")):
                 raise ValueError("materialized evidence has unproven producer ownership")
     lock = pathlib.Path(roots[3])
     if os.path.lexists(lock) and read_record(lock) != b"":

@@ -23,17 +23,20 @@ import (
 
 type session struct {
 	ownerOrigins           map[string]*invocationObserver
+	ownerActions           map[Binding]OwnerActionReference
 	ownerCompleted         *Binding
 	ownerCompletedTerminal string
 	ownerResultsPayload    string
 	ownerResultsRecipe     string
 	ownerResultsSource     string
 	image                  string
+	self                   *nativeSelfExecutable
 	effectContext          context.Context
 	factory                Factory
 	context                *Context
 	root                   *os.File
 	repository             *os.File
+	interaction            *os.File
 	components             Components
 	leases                 []*os.File
 	binding                *Binding
@@ -53,12 +56,18 @@ func (s *session) releaseLeases() {
 }
 
 func (s *session) close() {
+	if s.self != nil {
+		defer s.self.Close()
+	}
 	if s.components != nil {
 		s.components.Close()
 	}
 	s.releaseLeases()
 	if s.root != nil {
 		s.root.Close()
+	}
+	if s.interaction != nil {
+		s.interaction.Close()
 	}
 	if s.repository != nil {
 		s.repository.Close()
@@ -87,6 +96,16 @@ func retain(file *os.File) (*os.File, error) {
 func regular(id Identity) bool {
 	return id.Mode&unix.S_IFMT == unix.S_IFREG && id.UID == uint32(os.Getuid()) && id.Mode&0o777 == 0o600 && id.Links == 1
 }
+func unavailable(err error) (Reply, error) {
+	if errors.Is(err, domain.ErrPlanStale) {
+		return Reply{Code: "stale", Diagnostic: componentDiagnostic(err)}, nil
+	}
+	if err != nil {
+		return Reply{Code: "unavailable", Diagnostic: componentDiagnostic(err)}, nil
+	}
+	return Reply{}, nil
+}
+
 func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Reply, error) {
 	var request Request
 	if err := strict(raw, &request); err != nil {
@@ -95,18 +114,20 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 	allowed := map[string][]string{
 		"capture-ingress": {"session", "bindingIngress", "legacyRust"}, "observe-ingress": {"session", "step"}, "verify-ingress": {"session", "step"}, "apply-ingress": {"binding", "step"},
 		"observe-legacy-checkpoint": {"session", "originalV1"},
-		"initialize":                {"context"}, "capture-inventory": {"session"}, "capture-yard": {"session", "yard", "resolved"}, "prepare-settings": {"session", "yard", "edits"}, "capture-owner": {"session"}, "capture-activation": {"session", "owner", "fresh"},
-		"claim-lease": {"binding", "update", "owner"}, "observe-settings": {"session", "recipe"}, "capture-settings": {"session", "recipe"}, "project-settings": {"session", "recipe", "edits"}, "apply-settings": {"binding", "recipe"}, "apply-owner": {"binding", "before", "token"}, "cleanup-owner": {"binding", "before", "token"}, "query-owner-cleanup": {"binding", "before", "token"}, "apply-activation": {"binding", "target"}, "query-invocation": {"binding"}, "release-lease": {"session"},
-		"fence-activation":         {"binding", "target", "successor"},
-		"capture-config-layout":    {"session"},
-		"observe-owner":            {"session", "before", "token"},
-		"project-activation":       {"session", "before"},
-		"capture-rollback-support": {"session", "rollbackRepositories", "targetOwners"},
-		"read-installed-recipe":    {"session", "recipeHash", "offset"},
-		"bind-installed-recipe":    {"session", "recipeHash", "offset", "total", "content", "target"},
-		"bind-owner-results":       {"session", "binding", "producer", "before", "token"},
-		"resolve-owner-target":     {"session", "binding", "target"},
-		"resolve-after-owner":      {"session", "binding", "target"},
+		"initialize":                {"context"}, "capture-inventory": {"session"}, "capture-yard": {"session", "yard", "resolved"}, "prepare-settings": {"session", "yard", "edits"}, "capture-owner": {"session", "completeSource"}, "capture-activation": {"session", "owner", "fresh"},
+		"claim-lease": {"binding", "update", "owner"}, "observe-settings": {"session", "recipe"}, "capture-settings": {"session", "recipe"}, "apply-settings": {"binding", "recipe"}, "apply-owner-action": {"binding", "before", "token", "action"}, "observe-owner-action": {"session", "before", "token", "action"}, "cleanup-owner": {"binding", "before", "token"}, "query-owner-cleanup": {"binding", "before", "token"}, "apply-activation": {"binding", "target"}, "query-invocation": {"binding", "target"}, "release-lease": {"session"},
+		"fence-activation":             {"binding", "target", "successor"},
+		"capture-config-layout":        {"session"},
+		"observe-owner":                {"session", "before", "token"},
+		"capture-owner-observation":    {"session"},
+		"project-activation":           {"session", "before"},
+		"capture-rollback-support":     {"session", "rollbackRepositories", "targetOwners"},
+		"read-installed-recipe":        {"session", "recipeHash", "offset"},
+		"bind-installed-recipe":        {"session", "recipeHash", "offset", "total", "content", "target"},
+		"bind-sealed-installed-recipe": {"session", "recipeHash", "total", "target"},
+		"bind-owner-results":           {"session", "binding", "producer", "before", "token", "action", "producerAction", "retainedOnly"},
+		"resolve-owner-target":         {"session", "binding", "target"},
+		"resolve-after-owner":          {"session", "binding", "target"},
 	}
 	keys, ok := allowed[request.Op]
 	if !ok {
@@ -129,7 +150,7 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 		}
 	}
 	if request.Op == "initialize" {
-		if s.context != nil || len(files) != 2 || request.Context == nil {
+		if s.context != nil || (len(files) != 2 && len(files) != 3) || request.Context == nil {
 			return Reply{}, errors.New("native initialization")
 		}
 		c := request.Context
@@ -152,14 +173,37 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 			return Reply{}, e
 		}
 		c.PhysicalRepositoryRoot = fmt.Sprintf("/proc/self/fd/%d", repository.Fd())
+		if s.self != nil {
+			c.PreparationExecutable = s.self
+		}
+		var interaction *os.File
+		if len(files) == 3 {
+			flags, err := unix.FcntlInt(files[2].Fd(), unix.F_GETFL, 0)
+			if err != nil || flags&unix.O_ACCMODE == unix.O_RDONLY {
+				root.Close()
+				repository.Close()
+				return Reply{}, errors.New("native interaction descriptor")
+			}
+			interaction, e = retain(files[2])
+			if e != nil {
+				root.Close()
+				repository.Close()
+				return Reply{}, e
+			}
+			c.Interaction = interaction
+		}
 		components, e := s.factory(ctx, *c, root)
 		if e != nil {
 			root.Close()
 			repository.Close()
+			if interaction != nil {
+				interaction.Close()
+			}
 			return Reply{Code: "unavailable"}, nil
 		}
 		s.root = root
 		s.repository = repository
+		s.interaction = interaction
 		s.components = components
 		s.context = c
 		return Reply{}, nil
@@ -172,7 +216,10 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 		return Reply{Code: "stale"}, nil
 	}
 
-	if request.Op != "claim-lease" && request.Op != "capture-rollback-support" && request.Op != "observe-legacy-checkpoint" && len(files) != 0 {
+	if request.Op == "bind-sealed-installed-recipe" && len(files) != 1 {
+		return Reply{}, errors.New("sealed installed recipe descriptor count")
+	}
+	if request.Op != "claim-lease" && request.Op != "capture-rollback-support" && request.Op != "observe-legacy-checkpoint" && request.Op != "bind-sealed-installed-recipe" && len(files) != 0 {
 		return Reply{}, errors.New("unexpected native descriptors")
 	}
 	if request.Binding == nil {
@@ -257,18 +304,11 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 			return Reply{}, errors.New("native mutation binding")
 		}
 	}
-	unavailable := func(err error) (Reply, error) {
-		if errors.Is(err, domain.ErrPlanStale) {
-			return Reply{Code: "stale", Diagnostic: componentDiagnostic(err)}, nil
-		}
-		if err != nil {
-			return Reply{Code: "unavailable", Diagnostic: componentDiagnostic(err)}, nil
-		}
-		return Reply{}, nil
-	}
 	switch request.Op {
 	case "read-installed-recipe", "bind-installed-recipe":
 		return s.installedRecipe(ctx, request)
+	case "bind-sealed-installed-recipe":
+		return s.bindSealedInstalledRecipe(ctx, request, files[0])
 	case "capture-config-layout":
 		value, err := config.ReadPersistentSnapshotAt(s.root, ".sync/manifest.json")
 		if err != nil {
@@ -342,8 +382,29 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 			return unavailable(e)
 		}
 		return Reply{Recipe: &value}, nil
+	case "capture-owner-observation":
+		reader, ok := s.components.(OwnerObservationReader)
+		if !ok {
+			return Reply{}, errors.New("missing read-only owner observation capability")
+		}
+		value, e := reader.CaptureOwnerObservation(ctx)
+		if e != nil {
+			return unavailable(e)
+		}
+		valid := value.State == "absent" && value.Registration == "" && value.Overrides == "" && value.Controller == "" && !value.SharedImages
+		switch value.State {
+		case "current", "legacy-flat", "legacy-directory", "legacy-directory+projects", "legacy-directory+overrides", "legacy-directory+projects+overrides", "legacy-directory-adopt-current", "legacy-flat-adopt-current":
+			valid = fingerprint(value.Registration) && fingerprint(value.Overrides) && fingerprint(value.Controller)
+		}
+		if !valid || value.PreparedRecipe != "" {
+			return Reply{}, errors.New("invalid read-only owner observation")
+		}
+		return Reply{Owner: &value}, nil
 	case "capture-owner":
-		value, e := s.components.CaptureOwner(ctx)
+		if request.CompleteSource != nil && !request.CompleteSource.Valid() {
+			return Reply{}, errors.New("invalid original COMPLETE source reference")
+		}
+		value, e := s.components.CaptureOwner(ctx, request.CompleteSource)
 		if e != nil {
 			return unavailable(e)
 		}
@@ -392,15 +453,6 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 			return Reply{}, errors.New("native target bound")
 		}
 		return Reply{Targets: targets}, nil
-	case "project-settings":
-		if request.Recipe == nil || len(request.Edits) == 0 || len(request.Edits) > 2 {
-			return Reply{}, errors.New("missing projection recipe")
-		}
-		actual, e := s.components.ProjectSettings(ctx, *request.Recipe, request.Edits)
-		if e != nil {
-			return unavailable(e)
-		}
-		return Reply{Actual: actual}, nil
 	case "capture-settings":
 		if request.Recipe == nil {
 			return Reply{}, errors.New("missing capture recipe")
@@ -424,11 +476,32 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 			return Reply{}, errors.New("missing settings recipe")
 		}
 		return s.apply(ctx, request, "settings", request.Recipe.Yard, func() error { return s.components.ApplySettings(s.effectContext, *request.Recipe) })
-	case "apply-owner":
-		if request.Before == nil {
-			return Reply{}, errors.New("missing owner recipe")
+	case "apply-owner-action", "observe-owner-action":
+		component, ok := s.components.(PreparedOwnerActions)
+		if !ok || request.Before == nil || len(request.Token) != 32 || !lowerHex(request.Token) || request.Action == nil {
+			return Reply{}, errors.New("missing prepared owner action")
 		}
-		return s.apply(ctx, request, "owner-registration", "test-yard", func() error { return s.components.ApplyOwner(s.effectContext, *request.Before, request.Token) })
+		if request.Op == "observe-owner-action" {
+			group := request.Action.Group
+			if !request.Action.valid(group) || group.Session != s.context.Session || group.Artifact != s.context.Artifact || group.Helper != s.image {
+				return Reply{}, errors.New("owner action observation scope")
+			}
+			actual, err := component.ObserveOwnerAction(ctx, *request.Before, request.Token, *request.Action)
+			if err != nil {
+				return unavailable(err)
+			}
+			return Reply{Actual: actual}, nil
+		}
+		if request.Binding == nil || !request.Action.valid(*request.Binding) || len(s.leases) != 2 || s.ownerRelease == nil {
+			return Reply{}, errors.New("owner action custody")
+		}
+		if s.ownerActions == nil {
+			s.ownerActions = map[Binding]OwnerActionReference{}
+		}
+		s.ownerActions[*request.Binding] = *request.Action
+		return s.apply(ctx, request, "owner-registration", "test-yard", func() error {
+			return component.ApplyOwnerAction(s.effectContext, *request.Before, request.Token, *request.Action)
+		})
 	case "cleanup-owner":
 		cleaner, ok := s.components.(OwnerArchiveCleaner)
 		if !ok || request.Before == nil || len(request.Token) != 32 || strings.Trim(request.Token, "0123456789abcdef") != "" || len(s.leases) != 2 || s.ownerRelease == nil {
@@ -488,6 +561,9 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 	case "bind-owner-results":
 		return s.bindOwnerResults(ctx, request)
 	case "query-invocation":
+		if request.Target != nil {
+			return s.queryMaterializedInvocation(ctx, request)
+		}
 		return s.queryInvocation(ctx, *request.Binding)
 	case "release-lease":
 		s.releaseLeases()
@@ -539,7 +615,7 @@ func (s *session) apply(ctx context.Context, request Request, owner, resource st
 	if err := s.writeFact(*request.Binding, "accepted", accepted); err != nil {
 		return Reply{}, err
 	}
-	observer := &invocationObserver{session: s, binding: *request.Binding, ownerToken: request.Token}
+	observer := &invocationObserver{session: s, binding: *request.Binding, ownerToken: request.Token, action: request.Action}
 	// Owner EOF closes admission but must not kill a local CLI transport while
 	// its remote script is still running. Accepted work keeps its own bounded
 	// drain budget. Release refresh already permits up to 75 minutes (the
@@ -555,12 +631,19 @@ func (s *session) apply(ctx context.Context, request Request, owner, resource st
 	bound, _ := json.Marshal(request.Binding)
 	ctx = ports.WithNativeInvocationKey(ctx, digest(bound))
 	ctx = ports.WithNativeOwnerHome(ctx, s.context.DataHome)
+	ctx = ports.WithNativeInteraction(ctx, s.interaction)
+	if s.self != nil {
+		ctx = ports.WithNativeSelfExecutable(ctx, s.self)
+	}
 	// The closure receives this context through the per-invocation argument.
 	s.effectContext = ctx
 	defer func() { s.effectContext = nil }()
 	if err := apply(); err != nil {
 		diagnostic := componentDiagnostic(err)
-		if observer.failed(err) || request.Op == "cleanup-owner" && observer.localOnly() {
+		if observer.failed(err) || request.Op == "cleanup-owner" && observer.localOnly() || request.Action != nil && localOwnerAction(request.Action.Action.Operation) && observer.closed() == nil {
+			if captureErr := s.captureOwnerPhysical(ctx, request, observer); captureErr != nil {
+				return Reply{Code: "unknown", Diagnostic: diagnostic}, nil
+			}
 			failed := Terminal{Version: 1, Binding: *request.Binding, Owner: owner, Resource: resource, State: "failed", Operations: observer.operations()}
 			if err := s.writeTerminal(failed); err == nil {
 				return Reply{Code: "failed", Diagnostic: diagnostic, Terminal: &failed}, nil
@@ -580,7 +663,7 @@ func (s *session) apply(ctx context.Context, request Request, owner, resource st
 			return Reply{Code: "unknown", Diagnostic: componentDiagnostic(err)}, nil
 		}
 	}
-	if request.Before != nil && request.Op != "cleanup-owner" {
+	if request.Before != nil && request.Op != "cleanup-owner" && request.Action == nil {
 		reader, ok := s.components.(OwnerProgressReader)
 		if !ok {
 			return Reply{Code: "unknown"}, nil
@@ -604,6 +687,9 @@ func (s *session) apply(ctx context.Context, request Request, owner, resource st
 	}
 	if err := observer.closed(); err != nil {
 		return Reply{Code: "unknown"}, nil
+	}
+	if err := s.captureOwnerPhysical(ctx, request, observer); err != nil {
+		return Reply{Code: "unknown", Diagnostic: componentDiagnostic(err)}, nil
 	}
 	terminal := Terminal{Version: 1, Binding: *request.Binding, Owner: owner, Resource: resource, State: "complete", Operations: observer.operations()}
 	if request.Target != nil {
@@ -648,6 +734,15 @@ func recipeFingerprint(request Request) (string, error) {
 			Before *OwnerBefore `json:"before"`
 			Token  string       `json:"token"`
 		}{request.Before, request.Token}
+	case "apply-owner-action":
+		if request.Binding == nil || !request.Action.valid(*request.Binding) {
+			return "", errors.New("owner action recipe")
+		}
+		value = struct {
+			Before *OwnerBefore          `json:"before"`
+			Token  string                `json:"token"`
+			Action *OwnerActionReference `json:"action"`
+		}{request.Before, request.Token, request.Action}
 	case "apply-ingress":
 		value = request.Step
 	default:

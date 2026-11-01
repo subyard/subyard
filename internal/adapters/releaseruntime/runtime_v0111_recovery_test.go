@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -104,142 +105,79 @@ func (v0111AbsentOwnerRegistration) Commit(
 	return nil
 }
 
-func TestSyntheticV0111ScopeRecoveryUsesPublicTransitionAcrossProcesses(t *testing.T) {
+func TestSyntheticV0111NewGoalRequiresBridgeAcrossProcesses(t *testing.T) {
 	fixture, bindings := newV0111ProcessFixture(t)
 	fixture = seedV0111PostActivationScopeJournal(t, fixture, bindings)
-
-	var oldOutput bytes.Buffer
-	oldRuntime := New(Config{
-		RepositoryRoot: fixture.source.root,
-		Inputs:         fixtureCommandInputs(fixture.environment()),
-		Installer:      fixture.installer,
-		Stdout:         &oldOutput,
-		Stderr:         &bytes.Buffer{},
-	})
-	oldPrepared, err := oldRuntime.PrepareTransition(
-		context.Background(),
-		[]string{"--check", "--offline", "--version", "0.11.1", "--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "recovery-yard",
-	)
-	if err != nil {
-		t.Fatalf("inspect unfinished source transition: %v", err)
-	}
-	if err := oldPrepared.Execute(context.Background()); err != nil {
-		t.Fatalf("render unfinished source transition: %v", err)
-	}
-	if err := oldRuntime.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var blocked releasetransition.Inspection
-	if err := json.Unmarshal(bytes.TrimSpace(oldOutput.Bytes()), &blocked); err != nil {
-		t.Fatalf("decode source inspection %q: %v", oldOutput.String(), err)
-	}
-	if len(blocked.Blockers) != 1 ||
-		blocked.Blockers[0].Resource != "transition.observation-scope" {
-		t.Fatalf("source inspection did not reproduce the scope blocker: %#v", blocked)
-	}
-
-	var candidateOutput bytes.Buffer
-	candidateRuntime := New(Config{
-		RepositoryRoot: fixture.candidate.root,
-		Inputs:         fixtureCommandInputs(fixture.environment()),
-		Installer:      fixture.installer,
-		Stdout:         &candidateOutput,
-		Stderr:         &bytes.Buffer{},
-	})
-	prepared, err := candidateRuntime.PrepareTransition(
-		context.Background(),
-		[]string{"--offline", "--version", "0.11.2", "--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "recovery-yard",
-	)
-	if err != nil {
-		t.Fatalf("prepare standalone candidate recovery: %v", err)
-	}
-	if !prepared.Changed {
-		t.Fatalf("candidate recovery preparation = %#v", prepared)
-	}
-	if err := prepared.Execute(context.Background()); err != nil {
-		t.Fatalf("execute standalone candidate recovery: %v", err)
-	}
-	if err := candidateRuntime.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	store, err := releasetransition.NewPOSIXV2Store(fixture.configHome)
 	if err != nil {
 		t.Fatal(err)
-	}
-	currentSnapshot, err := store.ReadCurrentJournal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, err := releasetransition.ParseJournal(currentSnapshot.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if current.Transaction != fixture.candidateTx ||
-		current.Checkpoint != releasetransition.JournalComplete || len(current.Steps) != 0 ||
-		current.ArtifactDigest != bindings.candidateArtifact ||
-		current.RegistryDigest != bindings.registry || current.CatalogDigest != bindings.catalog {
-		t.Fatalf("terminal candidate journal = %#v", current)
 	}
 	links, err := releasetransition.NewRuntimeLinkStore(fixture.runtimeRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	observedLinks, err := links.Observe()
+	beforeLinks, err := links.Observe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observedLinks.Active != fixture.candidate.release || observedLinks.Previous == nil ||
-		*observedLinks.Previous != fixture.source.release {
-		t.Fatalf("terminal runtime links = %#v", observedLinks)
-	}
-	archiveSnapshot, err := store.ReadSupersededJournal(fixture.candidateTx)
+	beforeJournal, err := store.ReadCurrentJournal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	archive, err := releasetransition.ParseSupersededJournal(archiveSnapshot.Payload)
+	beforeLedger, err := store.ReadLedger()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if archive.Journal.Transaction != fixture.sourceTx ||
-		archive.Replacement.Fingerprint != fixture.journal.Fingerprint ||
-		!bytes.Equal(mustReadFile(t, filepath.Join(
-			fixture.configHome, "release-transition", "v2", "ledger.json",
-		)), fixture.ledger) {
-		t.Fatalf("recovery did not retain the exact source archive and ledger: %#v", archive)
-	}
-	if _, err := os.Stat(filepath.Join(
-		fixture.configHome, "release-transition", "v2", "transactions", string(fixture.sourceTx),
-	)); err != nil {
-		t.Fatalf("source transaction evidence was not retained: %v", err)
-	}
-	if actual := releasetransition.Fingerprint(strings.TrimSpace(string(mustReadFile(t, fixture.statePath)))); actual != v0111FixtureFingerprint("candidate-scope") {
-		t.Fatalf("activation config fixed point = %q", actual)
-	}
-
-	candidateManifest := mustReadFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"))
-	candidateRegistry := mustReadFile(t, filepath.Join(
-		fixture.candidate.root, "config", "release-transition.json",
-	))
-	for _, repositoryRoot := range []string{fixture.source.root, fixture.candidate.root} {
-		response := inspectV0111ProcessRuntime(t, repositoryRoot, releasetransition.ProcessRequest{
-			SchemaVersion:  releasetransition.ProcessProtocolSchemaV1,
-			Mode:           releasetransition.ProcessInspect,
-			RuntimeRoot:    fixture.runtimeRoot,
-			ConfigHome:     fixture.configHome,
-			Yard:           "recovery-yard",
-			Target:         fixture.candidate.release,
-			Direction:      releasetransition.DirectionActivateTarget,
-			ArtifactDigest: v0111FixtureFingerprintBytes(candidateManifest),
-			RegistryDigest: v0111FixtureFingerprintBytes(candidateRegistry),
-		})
-		if response.Inspection == nil || response.Inspection.Outcome == nil ||
-			response.Inspection.Outcome.Status != releasetransition.StatusReady ||
-			!response.Inspection.Outcome.ReachedGoal {
-			t.Fatalf("same-version read from %s = %#v", repositoryRoot, response)
+	manifests := map[string][]byte{}
+	for _, candidate := range []publishedCandidate{fixture.source, fixture.candidate} {
+		for _, relative := range []string{"runtime-files.sha256", "bin/yard-engine", "config/release-transition.json"} {
+			path := filepath.Join(candidate.root, relative)
+			manifests[path] = mustReadFile(t, path)
 		}
+	}
+	var output bytes.Buffer
+	original := New(Config{RepositoryRoot: fixture.source.root, Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer, Stdout: &output, Stderr: &bytes.Buffer{}})
+	defer original.Close()
+	checked, err := original.PrepareTransition(context.Background(), []string{"--check", "--offline", "--version", "0.11.1", "--runtime-root", fixture.runtimeRoot}, fixture.configHome, "recovery-yard")
+	if err != nil {
+		t.Fatal("exact original owner inspection", err)
+	}
+	if err := checked.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var blocked releasetransition.Inspection
+	if err := json.Unmarshal(output.Bytes(), &blocked); err != nil || len(blocked.Blockers) != 1 || blocked.Blockers[0].Resource != "transition.observation-scope" {
+		t.Fatalf("original owner diagnostic=%s err=%v", output.String(), err)
+	}
+	candidate := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer, Stderr: &bytes.Buffer{}})
+	defer candidate.Close()
+	_, err = candidate.PrepareTransition(context.Background(), []string{"--offline", "--version", "0.11.2", "--runtime-root", fixture.runtimeRoot}, fixture.configHome, "recovery-yard")
+	if err == nil || err.Error() != SourceBridgeGuidance {
+		t.Fatalf("historical new-goal refusal=%v", err)
+	}
+	afterJournal, err := store.ReadCurrentJournal()
+	if err != nil || !sameProtectedSnapshot(beforeJournal, afterJournal) {
+		t.Fatal("refusal changed original journal", err)
+	}
+	afterLedger, err := store.ReadLedger()
+	if err != nil || !sameProtectedSnapshot(beforeLedger, afterLedger) {
+		t.Fatal("refusal changed original ledger", err)
+	}
+	afterLinks, err := links.Observe()
+	if err != nil || !reflect.DeepEqual(beforeLinks, afterLinks) {
+		t.Fatal("refusal changed runtime links", err)
+	}
+	for path, payload := range manifests {
+		if !bytes.Equal(payload, mustReadFile(t, path)) {
+			t.Fatal("refusal changed sealed runtime artifacts")
+		}
+	}
+	archive, err := store.ReadSupersededJournal(fixture.candidateTx)
+	if err != nil || archive.Exists {
+		t.Fatal("refusal manufactured supersession history", err)
+	}
+	if _, err := os.Stat(fixture.statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refusal executed candidate reconciliation", err)
 	}
 }
 

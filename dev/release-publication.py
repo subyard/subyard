@@ -36,6 +36,7 @@ PREPARATION_JOBS = frozenset({"validate", "native-engine-arm64", "paseo-headless
 PREPARATION_WORKFLOW_POLICIES = {
     "bb9852249013520480a165571dac6c604c487e86": PREPARATION_JOBS,
     "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4": PREPARATION_JOBS | {"host-free-verify"},
+    "0b3f3b0e9e40e868a423ea3cd29c53a90610e17b": PREPARATION_JOBS | {"host-free-verify"},
 }
 
 

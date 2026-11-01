@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 	"io"
@@ -21,7 +22,10 @@ import (
 type noEffects struct{}
 
 func (noEffects) Close() error { return nil }
-func (noEffects) CaptureInventory(context.Context) ([]string, []string, error) {
+func (noEffects) CaptureInventory(ctx context.Context) ([]string, []string, error) {
+	if ports.NativeSelfExecutableFrom(ctx) != nil {
+		return nil, nil, errors.New("preconsent capture acquired executable authority")
+	}
 	return []string{}, []string{}, nil
 }
 func (noEffects) CaptureYard(context.Context, string, bool) (YardSettings, error) {
@@ -30,16 +34,13 @@ func (noEffects) CaptureYard(context.Context, string, bool) (YardSettings, error
 func (noEffects) PrepareSettings(context.Context, string, []Edit) (PreparedSettings, error) {
 	return PreparedSettings{}, errors.New("fixture refuses effects")
 }
-func (noEffects) CaptureOwner(context.Context) (OwnerBefore, error) {
+func (noEffects) CaptureOwner(context.Context, *CompleteSourceReference) (OwnerBefore, error) {
 	return OwnerBefore{State: "absent"}, nil
 }
 func (noEffects) CaptureActivation(context.Context, string, bool) ([]Target, error) {
 	return []Target{}, nil
 }
 func (noEffects) CaptureSettings(context.Context, SettingsRecipe) (string, error) {
-	return "", errors.New("effects forbidden")
-}
-func (noEffects) ProjectSettings(context.Context, SettingsRecipe, []Edit) (string, error) {
 	return "", errors.New("effects forbidden")
 }
 func (noEffects) ObserveSettings(context.Context, SettingsRecipe) (string, error) {
@@ -60,8 +61,31 @@ func (noEffects) CaptureIngress(context.Context, *IngressBinding) (IngressFacts,
 func (noEffects) ObserveIngress(context.Context, IngressStep) (string, error) {
 	return "", errors.New("fixture refuses effects")
 }
-func (noEffects) ApplyIngress(context.Context, IngressStep) error {
-	return errors.New("fixture refuses effects")
+func (noEffects) ApplyIngress(ctx context.Context, step IngressStep) error {
+	if step.Kind != "self-proof" {
+		return errors.New("fixture refuses effects")
+	}
+	capability := ports.NativeSelfExecutableFrom(ctx)
+	if capability == nil {
+		return errors.New("admitted effect lost self capability")
+	}
+	file, image, err := capability.Borrow()
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFD, 0)
+	if err != nil || flags&unix.FD_CLOEXEC == 0 {
+		return errors.New("self image borrow is not CLOEXEC")
+	}
+	body, err := io.ReadAll(io.NewSectionReader(file, 0, 128<<20))
+	if err != nil {
+		return err
+	}
+	if image != digest(body) || image != step.Expected {
+		return errors.New("self capability adopted replacement executable")
+	}
+	return nil
 }
 func (noEffects) VerifyIngress(context.Context, IngressStep) error {
 	return errors.New("fixture refuses effects")
@@ -81,6 +105,7 @@ type nativeTestPeer struct {
 	t        *testing.T
 	socket   *os.File
 	sequence uint64
+	timeout  time.Duration
 }
 
 func (p *nativeTestPeer) frame(kind byte, value any, files ...*os.File) []byte {
@@ -112,7 +137,11 @@ func (p *nativeTestPeer) frame(kind byte, value any, files ...*os.File) []byte {
 		p.t.Fatal(err)
 	}
 	reply := make([]byte, 52)
-	end := time.Now().Add(5 * time.Second)
+	timeout := p.timeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	end := time.Now().Add(timeout)
 	if err = readSocket(p.socket, reply, end); err != nil {
 		p.t.Fatal(err)
 	}
@@ -185,6 +214,12 @@ func TestNativeCustodyTransfersSameOFDAndClosesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	originalImage, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable = filepath.Join(testkit.TempDir(t), "native-helper")
+	testkit.WriteFile(t, executable, originalImage, 0700)
 	cmd := exec.Command(executable, "-test.run=^TestNativeCustodianChild$")
 	cmd.Env = append(os.Environ(), "SUBYARD_NATIVE_CUSTODY_CHILD=1")
 	cmd.Stdin = child
@@ -228,6 +263,25 @@ func TestNativeCustodyTransfersSameOFDAndClosesOnly(t *testing.T) {
 	identity, _ := IdentityOf(update)
 	binding := Binding{Session: a, Transaction: "transaction", Plan: "plan-v1-" + a, Journal: a, Artifact: a, Helper: hex.EncodeToString(imageSum[:]), Ordinal: 1}
 	peer.request(Request{Op: "claim-lease", Binding: &binding, Update: &identity}, update)
+	// Replace the named executable only after Serve retained its own image.
+	replacement := executable + ".replacement"
+	testkit.WriteFile(t, replacement, []byte("#!/bin/sh\nexit 77\n"), 0700)
+	if err := os.Rename(replacement, executable); err != nil {
+		t.Fatal(err)
+	}
+	facts := filepath.Join(root, "migrations/native-custody/v1/transaction")
+	if err := os.MkdirAll(facts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	reservation, _ := json.Marshal(nativeReservation{Version: 1, Binding: binding, Files: 2570, Bytes: 16 << 20})
+	testkit.WriteFile(t, filepath.Join(facts, factName(binding.Ordinal, "reservation")), append(reservation, '\n'), 0600)
+	request := Request{Op: "apply-ingress", Binding: &binding, Step: &IngressStep{Kind: "self-proof", Expected: binding.Helper}}
+	recipe, _ := recipeFingerprint(request)
+	intent, _ := json.Marshal(Intent{Version: 1, Binding: binding, Owner: "source-ingress", Resource: "self-proof", Expected: a, Desired: a, Source: a, Recipe: recipe})
+	testkit.WriteFile(t, filepath.Join(facts, factName(binding.Ordinal, "intent")), append(intent, '\n'), 0600)
+	if reply := peer.request(request); reply.Terminal == nil || reply.Terminal.State != "complete" {
+		t.Fatal("actual Serve self proof did not complete", reply)
+	}
 	update.Close()
 	independent, err := os.OpenFile(filepath.Join(root, "migrations", "update.lock"), os.O_RDWR, 0)
 	if err != nil {
@@ -278,5 +332,38 @@ func TestNativeAncillaryRefusalClosesAllReceivedDescriptors(t *testing.T) {
 		}
 		sender.Close()
 		receiver.Close()
+	}
+}
+
+func TestNativeCommandOverrideWireClosed(t *testing.T) {
+	for _, value := range []struct {
+		raw     string
+		present bool
+		empty   bool
+	}{
+		{`{"commandOverrides":[{"name":"SSH_PORT","present":false,"value":null}]}`, false, false},
+		{`{"commandOverrides":[{"name":"ENVIRONMENT_PROFILES","present":true,"value":""}]}`, true, true},
+	} {
+		var context Context
+		if err := strict([]byte(value.raw), &context); err != nil {
+			t.Fatal(err)
+		}
+		if len(context.CommandOverrides) != 1 {
+			t.Fatal("lost command override")
+		}
+		override := context.CommandOverrides[0]
+		if override.Present != value.present || (override.Value != nil) != value.empty || len(override.Value) != 0 {
+			t.Fatal("absence/empty command bytes changed")
+		}
+	}
+	for _, raw := range []string{
+		`{"commandOverrides":[{"name":"SSH_PORT","present":true,"value":"%%%"}]}`,
+		`{"commandOverrides":[{"name":"SSH_PORT","present":false,"value":null,"unknown":true}]}`,
+		`{"commandOverrides":[{"name":"SSH_PORT","present":true,"value":{}}]}`,
+	} {
+		var context Context
+		if err := strict([]byte(raw), &context); err == nil {
+			t.Fatal("malformed command override accepted")
+		}
 	}
 }

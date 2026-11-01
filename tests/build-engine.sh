@@ -19,12 +19,27 @@ printf 'package main\nfunc main() {}\n' > "$fixture/cmd/yard/main.go"
 printf 'package sample\n' > "$fixture/internal/sample/sample_test.go"
 cat > "$fixture/.build/yard" <<'SH'
 #!/usr/bin/env bash
-printf 'yard 0.1.0-dev\n'
+case "$1" in
+  --version) printf 'yard 0.1.0-dev\n' ;;
+  _release-owner-variant-v1) printf 'go\n' ;;
+  *) exit 2 ;;
+esac
 SH
 chmod +x "$fixture/.build/yard"
 
 touch -r "$fixture/.build/yard" -d '+1 second' "$fixture/internal/sample/sample_test.go"
 PATH="$no_go_path" /bin/bash "$fixture/scripts/build-engine.sh"
+
+if PATH="$no_go_path" /bin/bash "$fixture/scripts/build-engine.sh" --experimental-release-owner >"$TMP/stdout" 2>"$TMP/stderr"; then
+  printf 'build-engine: changed variant did not require a rebuild\n' >&2; exit 1
+fi
+grep -Fq 'Go is required' "$TMP/stderr"
+sed -i "s/printf 'go/printf 'invalid/" "$fixture/.build/yard"
+if PATH="$no_go_path" /bin/bash "$fixture/scripts/build-engine.sh" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  printf 'build-engine: invalid compiled variant did not require a rebuild\n' >&2; exit 1
+fi
+grep -Fq 'Go is required' "$TMP/stderr"
+sed -i "s/printf 'invalid/printf 'go/" "$fixture/.build/yard"
 
 touch -r "$fixture/.build/yard" -d '+1 second' "$fixture/cmd/yard/main.go"
 if PATH="$no_go_path" /bin/bash "$fixture/scripts/build-engine.sh" >"$TMP/stdout" 2>"$TMP/stderr"; then
@@ -57,5 +72,16 @@ install -m 0755 "$ROOT/.build/yard" "$TMP/release-engine"
 expected_version="$("$ROOT/.build/yard" --version)"
 [ "$(PATH="$no_go_path" YARD_ENGINE_PATH="$TMP/release-engine" "$ROOT/bin/yard" --version)" = "$expected_version" ] \
   || { printf 'build-engine: explicit release engine did not run without Go\n' >&2; exit 1; }
+
+[ "$(PATH="$no_go_path" "$ROOT/.build/yard" _release-owner-variant-v1)" = go ]
+"$ROOT/dev/package-engine.sh" --runtime-dir "$TMP/runtime-go" --engine "$ROOT/.build/yard" --version "${expected_version#* }" >"$TMP/stage-go.stdout" 2>"$TMP/stage-go.stderr"
+[ -x "$TMP/runtime-go/current/bin/yard-engine" ]
+
+if "$ROOT/dev/package-engine.sh" --experimental-release-owner --runtime-dir "$TMP/runtime" --engine "$ROOT/.build/yard" --version "${expected_version#* }" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  printf 'build-engine: Go engine admitted as experimental Rust tooling\n' >&2; exit 1
+fi
+grep -Fq 'prebuilt engine compiled release owner differs' "$TMP/stderr" \
+  || { cat "$TMP/stderr" >&2; exit 1; }
+[ ! -e "$TMP/runtime" ] || { printf 'build-engine: mismatched engine published a tooling stage\n' >&2; exit 1; }
 
 printf 'ok: engine freshness is source-aware and the release launcher runs without Go\n'

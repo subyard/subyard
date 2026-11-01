@@ -4,27 +4,33 @@ import (
 	"bytes"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type historyControl struct {
-	Journal         string         `json:"journal"`
-	Runtime         string         `json:"runtime"`
-	Target          string         `json:"target"`
-	Source          string         `json:"source"`
-	Guest           string         `json:"guest"`
-	InitialDrift    string         `json:"initialDrift"`
-	Destination     string         `json:"destination"`
-	Migrations      []string       `json:"migrations"`
-	FailOnce        bool           `json:"failOnce"`
-	InventorySHA256 string         `json:"inventoryProgramSHA256"`
-	Skills          *historySkills `json:"skills,omitempty"`
+	Journal            string         `json:"journal"`
+	Runtime            string         `json:"runtime"`
+	Target             string         `json:"target"`
+	Source             string         `json:"source"`
+	PriorSource        string         `json:"priorSource"`
+	Guest              string         `json:"guest"`
+	InitialDrift       string         `json:"initialDrift"`
+	Destination        string         `json:"destination"`
+	Migrations         []string       `json:"migrations"`
+	FailOnce           bool           `json:"failOnce"`
+	InventorySHA256    string         `json:"inventoryProgramSHA256"`
+	ProjectHookProgram string         `json:"projectHookProgram"`
+	ProjectHookSHA256  string         `json:"projectHookSHA256"`
+	Skills             *historySkills `json:"skills,omitempty"`
 }
 
 type historySkills struct {
@@ -40,6 +46,27 @@ var historyMu sync.Mutex
 //go:embed config-write.sh
 var configWriteScript string
 
+// Guest metadata is part of this observation-only fixture's fixed dev identity;
+// host files remain private0600 and are not claimed as physical guest evidence.
+type historyConfigState struct {
+	Exists bool   `json:"exists"`
+	Digest string `json:"digest"`
+	UID    uint32 `json:"uid"`
+	GID    uint32 `json:"gid"`
+	Mode   uint32 `json:"mode"`
+}
+
+func historyConfigSnapshot(control historyControl) (historyConfigState, error) {
+	body, err := os.ReadFile(control.Guest)
+	if errors.Is(err, os.ErrNotExist) {
+		return historyConfigState{}, nil
+	}
+	if err != nil {
+		return historyConfigState{}, err
+	}
+	return historyConfigState{true, fmt.Sprintf("%x", sha256.Sum256(body)), 1000, 1000, 0644}, nil
+}
+
 func historyResponder(control historyControl, path string) func(testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 	return func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 		reject := func() testkit.IncusServerExecStep {
@@ -49,6 +76,38 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		}
 		if call.Project != "subyard" || call.Name != "yard" {
 			return reject()
+		}
+		if slices.Equal(call.Command, []string{"bash", "-s", "--", "--observe"}) {
+			if call.User != 1000 || call.Group != 1000 || len(call.Environment) != 0 {
+				return reject()
+			}
+			dispatcher, err := os.ReadFile(control.ProjectHookProgram)
+			if err != nil || control.ProjectHookSHA256 == "" || fmt.Sprintf("%x", sha256.Sum256(dispatcher)) != control.ProjectHookSHA256 {
+				return reject()
+			}
+			// This fixture declares no workspaces or installed hooks. Its existing
+			// convergence response declares the dispatcher, newline hook list and
+			// hook directory installed with these guest identities and modes.
+			wiring := sha256.New()
+			fmt.Fprint(wiring, "/usr/local/libexec/subyard/projects-changed\x00regular|755|0:0\x00")
+			wiring.Write(dispatcher)
+			fmt.Fprint(wiring, "\x00/etc/subyard/agent-project-hooks\x00regular|644|0:0\x00\n\x00/usr/local/libexec/subyard/projects-changed.d\x00directory|755|0:0")
+			output, _ := json.Marshal(struct {
+				Projects string            `json:"projects"`
+				Wiring   string            `json:"wiring"`
+				Facts    map[string]string `json:"facts"`
+				Resolved map[string]string `json:"resolved"`
+				Hooks    []string          `json:"hooks"`
+				Roots    []string          `json:"roots"`
+			}{fmt.Sprintf("%x", sha256.Sum256(nil)), fmt.Sprintf("%x", wiring.Sum(nil)), map[string]string{}, map[string]string{}, []string{}, []string{}})
+			return testkit.IncusServerExecStep{Stdout: output, AfterInput: func(actual testkit.IncusServerExecCall) int {
+				current, err := os.ReadFile(control.ProjectHookProgram)
+				if err != nil || !bytes.Equal(current, dispatcher) || !bytes.Equal(actual.Stdin, dispatcher) || actual.Project != call.Project || actual.Name != call.Name || actual.User != 1000 || actual.Group != 1000 || len(actual.Environment) != 0 || !slices.Equal(actual.Command, call.Command) {
+					reject()
+					return 99
+				}
+				return 0
+			}}
 		}
 		command := call.Command
 		programSHA := ""
@@ -105,30 +164,117 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			return testkit.IncusServerExecStep{}
 		}
 		if len(command) == 3 && command[0] == "sha256sum" && command[1] == "--" && command[2] == control.Destination {
-			if control.InitialDrift != "" {
-				historyMu.Lock()
-				if _, err := os.Stat(path + ".drift"); os.IsNotExist(err) && historyApplyBoundary(control) {
-					drift, err := os.ReadFile(control.InitialDrift)
-					if err == nil {
-						err = os.WriteFile(control.Guest, drift, 0o600)
-					}
-					if err == nil {
-						err = os.WriteFile(path+".drift", []byte("armed at verified activation boundary\n"), 0o600)
-					}
-					if err != nil {
-						historyMu.Unlock()
-						return reject()
-					}
-				}
-				historyMu.Unlock()
-			}
+
 			payload, err := os.ReadFile(control.Guest)
 			if err != nil {
 				return testkit.IncusServerExecStep{ExitCode: 1}
 			}
 			return testkit.IncusServerExecStep{Stdout: []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(payload), control.Destination))}
 		}
-		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && (programSHA == control.InventorySHA256 || programSHA == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e") && (command[4] == "configs-prepare" || command[4] == "configs-commit" || command[4] == "observe") {
+		// New original-current raw-file CAS grammar. No historical digest fallback,
+		// arbitrary guest Python, structured files or request-owned paths.
+		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.InventorySHA256 && (command[4] == "configs-observe" || command[4] == "configs-write") {
+			observe := command[4] == "configs-observe"
+			historyMu.Lock()
+			captured, stateErr := historyConfigSnapshot(control)
+			historyMu.Unlock()
+			if stateErr != nil {
+				return reject()
+			}
+			output := []byte(nil)
+			if observe {
+				output, _ = json.Marshal([]historyConfigState{captured})
+			}
+			return testkit.IncusServerExecStep{Stdout: output, Stderr: []byte("controlled materialized config CAS fixture\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
+				historyMu.Lock()
+				defer historyMu.Unlock()
+				var input struct {
+					Home    string `json:"home"`
+					UID     int    `json:"uid"`
+					Entries []struct {
+						ID      string `json:"id"`
+						Kind    string `json:"kind"`
+						Path    string `json:"path,omitempty"`
+						Digest  string `json:"digest"`
+						Content string `json:"content,omitempty"`
+					} `json:"entries"`
+					Before *historyConfigState `json:"before,omitempty"`
+				}
+				expected, err := os.ReadFile(control.Source)
+				if err != nil || len(expected) > 32<<20 || len(actual.Stdin) > 48<<20 || actual.Project != call.Project || actual.Name != call.Name || !slices.Equal(actual.Command, command) || json.Unmarshal(actual.Stdin, &input) != nil {
+					reject()
+					return 99
+				}
+				// Production uses json.Marshal. Exact roundtrip also refuses
+				// duplicate/unknown/case-substituted fields and trailing JSON.
+				canonical, _ := json.Marshal(input)
+				if !bytes.Equal(canonical, actual.Stdin) || input.Home != "/home/dev" || input.UID != 1000 || len(input.Entries) != 1 {
+					reject()
+					return 99
+				}
+				entry := input.Entries[0]
+				digest := fmt.Sprintf("%x", sha256.Sum256(expected))
+				if entry.ID != "fixture" || entry.Kind != "file" || entry.Path != control.Destination || entry.Digest != digest {
+					reject()
+					return 99
+				}
+				current, err := historyConfigSnapshot(control)
+				if err != nil {
+					reject()
+					return 99
+				}
+				if observe {
+					if input.Before != nil || entry.Content != "" || current != captured {
+						reject()
+						return 99
+					}
+					return 0
+				}
+				payload, err := base64.StdEncoding.Strict().DecodeString(entry.Content)
+				if err != nil || !bytes.Equal(payload, expected) || entry.Content != base64.StdEncoding.EncodeToString(expected) || input.Before == nil {
+					reject()
+					return 99
+				}
+				desired := historyConfigState{true, digest, 1000, 1000, 0644}
+				if current != *input.Before && current != desired {
+					reject()
+					return 99
+				}
+				if current == desired {
+					return 0
+				}
+				if !historyApplyBoundary(control) {
+					reject()
+					return 99
+				}
+				journal, err := os.ReadFile(control.Journal)
+				if err != nil {
+					reject()
+					return 99
+				}
+				code := 0
+				if _, err := os.Stat(path + ".failed"); control.FailOnce && os.IsNotExist(err) {
+					if os.WriteFile(path+".failed", []byte("failed once\n"), 0600) != nil {
+						return 99
+					}
+					code = 37
+				} else if os.WriteFile(control.Guest, payload, 0600) != nil {
+					code = 99
+				}
+				event := map[string]any{"command": actual.Command, "stdinSHA256": fmt.Sprintf("%x", sha256.Sum256(actual.Stdin)), "payloadSHA256": digest, "before": input.Before, "transaction": json.RawMessage(journal), "exit": code}
+				line, _ := json.Marshal(event)
+				file, err := os.OpenFile(path+".effects.jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err != nil {
+					return 99
+				}
+				_, writeErr := file.Write(append(line, '\n'))
+				if errors.Join(writeErr, file.Close()) != nil {
+					return 99
+				}
+				return code
+			}}
+		}
+		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && (programSHA == control.InventorySHA256 || programSHA == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e" || (programSHA == "3485c71b2390ed22b1546267da59921e2c9c989ba09ef45ed95eb3319173e273" && command[4] == "observe")) && (command[4] == "configs-prepare" || command[4] == "configs-commit" || command[4] == "observe") {
 			output := []byte(nil)
 			if command[4] == "observe" {
 				output = []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false,"facts":[]}`)
@@ -139,7 +285,11 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 					UID             int
 					Entries         []struct{ ID, Kind, Path, Digest string }
 				}
-				source, err := os.ReadFile(control.Source)
+				sourcePath := control.Source
+				if (programSHA == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e" || programSHA == "3485c71b2390ed22b1546267da59921e2c9c989ba09ef45ed95eb3319173e273") && command[4] == "observe" {
+					sourcePath = control.PriorSource
+				}
+				source, err := os.ReadFile(sourcePath)
 				if err != nil || json.Unmarshal(actual.Stdin, &input) != nil || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 {
 					reject()
 					return 99
@@ -223,8 +373,7 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 	}
 }
 
-// The initial known drift is armed only after the candidate's migration work;
-// it cannot make a released predecessor unready before ordinary update starts.
+// Only the controlled apply failure requires the verified migration boundary.
 func historyApplyBoundary(control historyControl) bool {
 	var journal struct {
 		Checkpoint string

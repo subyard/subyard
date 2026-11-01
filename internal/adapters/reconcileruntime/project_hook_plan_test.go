@@ -261,6 +261,37 @@ func TestPreparedProjectHooksRejectScopeExpansionBeforeInvocation(t *testing.T) 
 	}
 }
 
+func TestProjectHookDispatcherAcceptsPreparedEmptyScope(t *testing.T) {
+	root := testkit.TempDir(t)
+	source, err := os.ReadFile("../../../config/projects-changed.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source = []byte(strings.NewReplacer("/srv/workspaces", filepath.Join(root, "workspaces"), "/usr/local/libexec/subyard", filepath.Join(root, "libexec"), "/etc/subyard", filepath.Join(root, "etc")).Replace(string(source)))
+	dispatcher := filepath.Join(root, "libexec", "projects-changed")
+	if err := os.MkdirAll(filepath.Dir(dispatcher), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, dispatcher, source, 0700)
+	observed, err := exec.Command("bash", dispatcher, "--observe").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observation hookObservation
+	if err := json.Unmarshal(observed, &observation); err != nil {
+		t.Fatal(err)
+	}
+	plan := &ProjectHookPlan{current: observation}
+	command := exec.Command("bash", dispatcher)
+	command.Env = append(os.Environ(), "SUBYARD_PROJECT_HOOK_SCOPE="+plan.Environment()["SUBYARD_PROJECT_HOOK_SCOPE"])
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("empty scoped dispatcher: %v %s", err, output)
+	}
+	if plan.allowedHooks != nil {
+		t.Fatal("environment serialization changed the retained plan")
+	}
+}
+
 func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 	for _, scenario := range []string{"project added", "hook added", "source swapped", "large unrelated metadata", "command name", "command source swapped", "PATH shadow", "success", "hook failure"} {
 		t.Run(scenario, func(t *testing.T) {

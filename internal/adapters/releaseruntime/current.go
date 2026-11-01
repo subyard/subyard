@@ -66,7 +66,7 @@ type currentSnapshot struct {
 // InspectCurrentReadiness shares migrate --check's verified, read-only inspection.
 // Missing installation metadata or an unavailable owner never implies readiness.
 func (runtime *Runtime) InspectCurrentReadiness(ctx context.Context, configHome string) (releasetransition.Outcome, error) {
-	prepared, err := runtime.PrepareCurrentTransition(ctx, []string{"--check"}, configHome, "default")
+	prepared, err := runtime.prepareCurrentTransition(ctx, []string{"--check"}, configHome, "default", false)
 	if err != nil {
 		return releasetransition.Outcome{}, err
 	}
@@ -80,10 +80,26 @@ func (runtime *Runtime) InspectCurrentReadiness(ctx context.Context, configHome 
 // PrepareCurrentTransition inspects and completes the exact installed current
 // release. It never selects, downloads, or publishes a release.
 func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments []string, configHome, yard string) (Prepared, error) {
+	return runtime.prepareCurrentTransition(ctx, arguments, configHome, yard, true)
+}
+func (runtime *Runtime) prepareCurrentTransition(ctx context.Context, arguments []string, configHome, yard string, reportOnly bool) (Prepared, error) {
 	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	parsed, err := runtime.parseCurrent(arguments)
 	if err != nil {
 		return Prepared{}, err
+	}
+	if parsed.check && reportOnly {
+		reportRuntime := New(runtime.config)
+		defer reportRuntime.Close()
+		if runtime.pinnedCandidateRoot != nil {
+			reportRuntime.pinnedCandidateRoot, err = duplicateReleaseFile(runtime.pinnedCandidateRoot)
+			if err != nil {
+				return Prepared{}, err
+			}
+			reportRuntime.pinnedCandidateRelease = runtime.pinnedCandidateRelease
+		}
+		reportRuntime.relocatedCandidates = runtime.relocatedCandidates
+		runtime = reportRuntime
 	}
 	if parsed.help {
 		return Prepared{Action: "migrate.help", run: func(context.Context) error {
@@ -98,6 +114,9 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 	if err != nil {
 		return Prepared{}, redactReleaseInspectionError(err)
 	}
+	// Existing journals need the full retained admission pipeline (including
+	// completed cleanup tickets). Decide before dispatch, never after an error.
+	runtime.currentCheck = parsed.check && reportOnly && !before.journal.Exists
 	current := releaseLinksFromRuntimeSnapshot(before.links).Active
 	if current == "" {
 		return Prepared{}, errors.New("release-transition-uninitialized: current runtime is missing; use the verified bootstrap installer")
@@ -419,7 +438,13 @@ func readVerifiedTransitionRegistry(verified *verifiedPublishedCandidate) (relea
 	if err != nil {
 		return releasetransition.RegistryV2{}, "", err
 	}
-	registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	var registry releasetransition.RegistryV2
+	var digest releasetransition.Fingerprint
+	if verified.releaseOwner != nil {
+		registry, digest, err = releasetransition.ParseRegistryHistoryV2(payload)
+	} else {
+		registry, digest, err = releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	}
 	if err != nil {
 		return releasetransition.RegistryV2{}, "", err
 	}

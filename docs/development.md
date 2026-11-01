@@ -114,8 +114,13 @@ musl standard libraries with `rustup target add x86_64-unknown-linux-musl
 aarch64-unknown-linux-musl`. Normal runtime and tooling builds reject Go build tags;
 test-only oracle or fixture images cannot serve as development tooling.
 
-`make build-experimental-release-owner VERSION=0.22.0-test` stages the experimental runtime.
-It does not enable production routing. `dev/build-release-owner.sh` builds the owner for Linux amd64 or arm64 musl.
+`make build-experimental-release-owner VERSION=0.22.1-test` stages the experimental runtime.
+It compiles the Rust-owner variant into `.build/yard-experimental-release-owner` and
+stages it under `.build/runtime-experimental-release-owner/current`, separately from
+ordinary Go tooling. `dev/build-engine.sh --experimental-release-owner` selects the
+same compiled variant; runtime environment and requests cannot change it. Unknown
+compiled values refuse. Packaging checks the prebuilt engine through its private read-only variant query and rejects the other variant.
+`dev/build-release-owner.sh` builds the owner for Linux amd64 or arm64 musl.
 `dev/package-engine.sh` uses it when assembling a runtime. The manifest-listed build
 sidecar records the actual compiler, Cargo target, lockfile and source input hashes,
 features, executable digest and static ELF checks. The stable toolchain channel does
@@ -135,11 +140,19 @@ Standalone Go domain tests remain usable without building Rust; package and proc
 require both toolchains. Preserve absolute `CARGO_HOME` and `RUSTUP_HOME` when a test
 isolates `HOME`.
 
+`dev/release-acceptance.py prepare --experimental-release-owner --version VERSION --output DIR`
+freezes this explicit variant with its source fingerprint, package command and exact assets.
+Use separate versions and output directories for Go and Rust candidates, even when their
+source fingerprint is equal. Experimental `--prepared` CI import is refused because the
+existing strict prepared identity does not bind the compiled variant.
+
 The owning Rust checks compare production history directly against 70 generated cases
 from Go's independent bitset oracle. No separate history or native-owner pilot is built.
 The current owner/native process checks retain consent, source-CAS, custody and process-loss
 coverage. These checks do not replace normal packaged-owner, released-caller, component
-or VM acceptance. Production routing remains gated until the complete candidate passes.
+or VM acceptance. Default routing remains Go. Experimental packaging selects the Rust operation facade;
+Rust failures cannot fall back to Go. Historical Go transitions retain their exact sealed
+original engines. Full candidate and physical acceptance remain separate gates.
 
 ## Build and test
 
@@ -156,7 +169,7 @@ make verify
 `make build` writes the ignored developer candidate `.build/yard` atomically and builds declared
 profile binaries under `.build/profiles/<name>/`. It also publishes the complete Go tooling
 runtime under `.build/runtime/current`. `make test` and `make verify` stage a source-compatible test version before Go consumers;
-targeted source-repair tests require `make build VERSION=0.22.0-test` first. A delivery gate may instead supply its
+targeted source-repair tests require `make build VERSION=0.22.1-test` first. A delivery gate may instead supply its
 once-built normal runtime through `SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT`.
 `make verify` runs core and profile host-free
 checks together. Packaging builds the same declared binaries for the target architecture, excluding

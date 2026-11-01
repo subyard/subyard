@@ -124,6 +124,13 @@ EOF
     fail 'install did not prepare the network lock before enabling boot reconciliation'
   fi
   [ -f "$TEST_NETWORK_LOCK" ] || fail 'install left the upgraded host without a network lock'
+  passive_unit="$(dirname "$SUBYARD_POWER_UNIT_PATH")/subyard-publication-reconcile.service"
+  [ -f "$passive_unit" ] || fail 'passive publication unit was not installed'
+  grep -Fxq "ExecStart=:\"$SUBYARD_POWER_RECONCILER_PATH\" _publication-reconcile $(printf %s "$SUBYARD_POWER_RECONCILER_PATH" | base64 -w0) $(printf %s "$SUBYARD_POWER_UNIT_PATH" | base64 -w0)" "$passive_unit" \
+    || fail 'passive publication worker uses another engine or authority'
+  ! grep -Eq '^(enable|start) subyard-publication-reconcile.service$' "$TEST_SYSTEMCTL_LOG" \
+    || fail 'setup activated the passive publication worker'
+  systemd-analyze verify "$passive_unit" || fail 'real systemd parser rejected passive publication unit'
 
   # Model the operator handoff without host credentials: the query must inherit
   # its own root/engine handles, and replacing the source must not change either
@@ -156,6 +163,7 @@ EOF
   export SUBYARD_USER=root
   cp "$SUBYARD_POWER_RECONCILER_PATH" "$temporary/install/before-engine"
   cp "$SUBYARD_POWER_UNIT_PATH" "$temporary/install/before-unit"
+  cp "$passive_unit" "$temporary/install/before-passive"
   export TEST_READER_BOUNDARY_FAIL=1
   : > "$TEST_SYSTEMCTL_LOG"
   if bash "$ROOT/scripts/install-power-reconciler.sh" --yes > "$temporary/install/stdout" 2> "$temporary/install/stderr"; then
@@ -163,6 +171,7 @@ EOF
   fi
   cmp "$temporary/install/before-engine" "$SUBYARD_POWER_RECONCILER_PATH" || fail 'boundary refusal changed engine'
   cmp "$temporary/install/before-unit" "$SUBYARD_POWER_UNIT_PATH" || fail 'boundary refusal changed unit'
+  cmp "$temporary/install/before-passive" "$passive_unit" || fail 'boundary refusal changed passive unit'
   [ ! -s "$TEST_SYSTEMCTL_LOG" ] || fail 'boundary refusal changed service state'
   export TEST_READER_BOUNDARY_FAIL=0
 

@@ -4,7 +4,9 @@ import hashlib
 import ipaddress
 import json
 import os
+from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 
@@ -17,10 +19,15 @@ STARTUP = 'user.subyard.startup.' + DEVICE
 RUNTIME = '/usr/local/lib/subyard-amnezia/runtime.py'
 YARD = os.environ.get('YARD_INSTANCE_NAME', '')
 PROJECT = os.environ.get('INCUS_PROJECT', '')
+OWNER_BARRIER = Path(__file__).resolve().parents[5]/'scripts/lib/native-owner-barrier.py'
 
 
 def run(*args, check=True, timeout=None):
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+    inherited = ()
+    if os.environ.get('SUBYARD_NATIVE_OWNER_FD3'):
+        inherited = runpy.run_path(str(OWNER_BARRIER))['inherited_owner_descriptors']()
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=timeout, pass_fds=inherited)
     if check and result.returncode:
         operation = 'command'
         if args[:1] == ('incus',):
@@ -45,6 +52,11 @@ def incus(*args, check=True):
 
 
 def guest(*args, check=True, timeout=None):
+    if (os.environ.get('SUBYARD_RESOURCE_INGRESS_OWNER') == 'parent' and
+            args[:2] == ('python3', RUNTIME) and args[2:3] in (('up',), ('down',))):
+        # Parent-owned ingress skips remove_ingress's ordinary inspect. Pin the
+        # guest mutation itself, including the rollback-ingress shutdown path.
+        inspect()
     return run('incus', 'exec', YARD, '--project', PROJECT, '--', *args, check=check, timeout=timeout)
 
 
@@ -53,7 +65,12 @@ def query(path):
 
 
 def inspect():
-    return query(f'/1.0/instances/{YARD}?project={PROJECT}')
+    instance = query(f'/1.0/instances/{YARD}?project={PROJECT}')
+    if os.environ.get('SUBYARD_RESOURCE_INGRESS_OWNER') == 'parent':
+        original = os.environ.get('SUBYARD_RESOURCE_INSTANCE_UUID', '')
+        if not original or instance.get('config', {}).get('volatile.uuid') != original:
+            raise RuntimeError('original startup instance changed')
+    return instance
 
 
 def fingerprint(device):
@@ -190,6 +207,11 @@ def collisions(want):
 
 
 def remove_ingress(retain_pending=False):
+    # The original native parent owns UUID-bound host proxy CAS. Guest
+    # shutdown remains this handler's operation; ordinary Go calls retain the
+    # existing host ingress path.
+    if os.environ.get('SUBYARD_RESOURCE_INGRESS_OWNER') == 'parent':
+        return
     instance = inspect()
     device = owned(instance)
     marker = instance['config'].get(KEY, '')
@@ -384,8 +406,12 @@ def main():
         collisions(want)
         if not ADMIN:
             guest('python3', RUNTIME, 'up', '--endpoint', address, '--port', port)
-        ensure_ingress(want)
-        if not ready(inspect()):
+        parent_ingress = os.environ.get('SUBYARD_RESOURCE_INGRESS_OWNER') == 'parent'
+        if not parent_ingress:
+            ensure_ingress(want)
+        status = runtime_status(inspect(), management_only=ADMIN) if parent_ingress else None
+        converged = (status['management_ready'] if ADMIN else status['ready'] and status['enabled']) if parent_ingress else ready(inspect())
+        if not converged:
             remove_ingress(retain_pending=True)
             raise RuntimeError('VPN runtime or ingress did not converge')
     return 0

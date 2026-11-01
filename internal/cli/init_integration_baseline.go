@@ -78,6 +78,25 @@ func captureInitIntegrationBaseline(loaded config.Loaded) (*initIntegrationBasel
 	return baseline, nil
 }
 
+// Labels change only checked source spellings, never the captured evidence.
+func (baseline *initIntegrationBaseline) sourceLabels(from, to string) (*initIntegrationBaseline, error) {
+	result := *baseline
+	label := func(value string) string { return ownerSourcePathLabel(value, from, to) }
+	result.Selection.Provenance.Path = label(result.Selection.Provenance.Path)
+	result.Settings = ownerSettingsLabels(baseline.Settings, label)
+	if baseline.Sources != nil {
+		result.Sources = map[string]initIntegrationSource{}
+		for path, source := range baseline.Sources {
+			key := label(path)
+			if previous, present := result.Sources[key]; present && previous != source {
+				return nil, domain.ErrPlanStale
+			}
+			result.Sources[key] = source
+		}
+	}
+	return &result, nil
+}
+
 func initIntegrationSetting(name string) bool {
 	switch name {
 	case "CODING_TOOL_INTEGRATIONS", "ALLOWS_CODING_TOOLS", "YARD_TEMPLATE", "HOST_LINKS", "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD", "HOST_OPENCODE_AGENTS_MD":
@@ -136,7 +155,17 @@ func (execution *initExecution) checkIntegrationBaseline(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(current, execution.integrationBaseline) {
+	// Retained catalogs use child-safe current-PID paths, while the original
+	// capsule restores self-FD paths. Compare copies under this exact owned root.
+	current, err = current.sourceLabels(cli.options.RepositoryRoot, cli.options.RepositoryRoot)
+	if err != nil {
+		return err
+	}
+	original, err := execution.integrationBaseline.sourceLabels(cli.options.RepositoryRoot, cli.options.RepositoryRoot)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(current, original) {
 		return fmt.Errorf("%w: init integration configuration changed after planning", domain.ErrPlanStale)
 	}
 	return nil
@@ -145,11 +174,16 @@ func (execution *initExecution) checkIntegrationBaseline(cli *CLI) error {
 // A composed resource bootstrap may publish ENVIRONMENT_PROFILES before init.
 // Accept only the exact bytes from that already-authorized CAS, keeping all
 // other source and integration-setting observations unchanged.
-func (baseline *initIntegrationBaseline) acceptPublishedSource(path string, content []byte) error {
+func (baseline *initIntegrationBaseline) acceptPublishedSource(path string, content []byte, repositoryRoot string) error {
 	if baseline == nil {
 		return nil
 	}
-	if _, tracked := baseline.Sources[path]; !tracked {
+	canonical, err := baseline.sourceLabels(repositoryRoot, repositoryRoot)
+	if err != nil {
+		return err
+	}
+	key := ownerSourcePathLabel(path, repositoryRoot, repositoryRoot)
+	if _, tracked := canonical.Sources[key]; !tracked {
 		return nil
 	}
 	observed, err := readInitIntegrationSource(path)
@@ -159,6 +193,10 @@ func (baseline *initIntegrationBaseline) acceptPublishedSource(path string, cont
 	if !observed.Exists || observed.Digest != sha256.Sum256(content) {
 		return fmt.Errorf("%w: composed bootstrap settings changed", domain.ErrPlanStale)
 	}
-	baseline.Sources[path] = observed
+	for original := range baseline.Sources {
+		if ownerSourcePathLabel(original, repositoryRoot, repositoryRoot) == key {
+			baseline.Sources[original] = observed
+		}
+	}
 	return nil
 }

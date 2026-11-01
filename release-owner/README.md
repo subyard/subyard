@@ -1,8 +1,31 @@
 # Release owner
 
-This is the production release-owner crate. Its private operation entrypoint is not
-selected by the product facade and advertises no writer capability. Existing Go owners
-remain the default production readers, writers and recovery owners.
+This crate implements the experimental Rust release owner. Explicit experimental builds select
+its private operation entrypoint through the verified product facade. Go remains the production
+default. See the [ownership decision](../docs/reference/rust-release-owner-design.md) for the
+current boundary and the remaining owner-registration transfer.
+
+## Writing a settings migration
+
+Define a `settings::Migration` in the owning Rust module, register it in
+[`settings::migrations`](src/settings.rs), and add the domain edge to the release registry.
+The definition supplies metadata, read-only input preparation, conversion and validation of
+retained work. Profile modules are siblings of the engine module so the capture API keeps its
+owner handle private. The [test-VM definition](../config/profiles/test-vms/release_settings.rs)
+is a production example; the [authoring fixture](tests/fixtures/author_settings.rs) supplies an
+additional definition only when registered in an isolated test source copy.
+
+The shared engine prepares exact file CAS operations and owns consent, source revalidation,
+durable intents/results, verified evidence, ledger advancement and fresh-process Resume.
+Definitions do not implement those mechanisms or add Go migration kinds, callbacks or recovery
+serializers. Multiple changes to one file use the original contiguous file-digest chain and fresh
+source checks; they do not try to reconstruct earlier bytes by reversing assignment edits.
+Historical settings recovery encodings remain separate from current recipe validation.
+
+Keep conversion tests in the owning module and exercise the existing native settings and process
+cut fixtures. A new kind must pass the selected Rust route with Go's execution catalog unchanged.
+The foundation and runtime sections below describe additional contracts and their check owners;
+their individual passes do not establish whole-release readiness.
 
 Run `bash release-owner/check.sh` (or `make verify-release-owner-foundation`). It exports
 the existing Go constructors/codecs into ignored `.build/release-owner-foundation`,
@@ -51,7 +74,8 @@ replacement remains valid. Publication uses exact observation, exclusive pending
 prefix retry, file/directory fsync, reobservation and atomic rename (noreplace for absent
 records). Immutable same-byte retries succeed; different bytes collide. Closing a lease
 never explicitly unlocks an OFD that a supervised child might still hold. This library
-does not yet expose child delegation or prove async Incus quiescence.
+does not infer remote completion from a store write; native custody and terminal facts establish
+the separate operation boundary described below.
 
 Native `/tmp` tests cover byte-stale CAS, immutable collisions, pending prefixes and
 orphan CAS staging, permission/symlink/hardlink/FIFO/size refusal, absent-root reads,
@@ -63,13 +87,12 @@ The release reducer must still own when those decisions are authorized.
 
 | Contract | Current reader/writer and continuation |
 | --- | --- |
-| Existing ProcessV1, JournalV2/ArchiveV1, compatibility evidence, RegistryV2/catalog, LedgerV2/checkpointV1 | Exact Go owners remain active; Rust library admits frozen syntax through the bounded bridge and checks policy; no runtime route |
-| Recovery schema 2, activation receipts V1/V2, lifecycle/frontier V1, migration-owner receipt V1 | Checked Rust values, frozen record admission and protected local policy; existing Go owners remain active, no Rust capabilities advertised |
+| Existing ProcessV1, JournalV2/ArchiveV1, compatibility evidence, RegistryV2/catalog, LedgerV2/checkpointV1 | Go remains the default; the explicit Rust owner reads frozen syntax through the bounded bridge and owns its checked state |
+| Recovery schema 2, activation receipts V1/V2, lifecycle/frontier V1, migration-owner receipt V1 | Checked Rust values and protected local policy on the selected Rust route; exact historical Go owners remain available |
 | Private pilot record v1 | Pilot Rust owner only; never imported or promoted |
 
-Next work is the complete release observation/reducer and
-closed component-native recipes for every shipped activation owner, then verified
-manifest-bound facade/delivery/custody and same-candidate compatibility/VM acceptance.
+Remaining work includes native acceptance of current Rust operations and
+compensation, followed by final compatibility, physical and performance acceptance.
 This library does not establish full migration equivalence or production readiness.
 
 The recovery tranche is checked with `make verify-release-owner-recovery`. It extends
@@ -81,7 +104,8 @@ It neither runs a product helper nor calls Go policy on behalf of a Rust owner.
 
 Recovery contracts remain distinct: activation-only receipt V1, generation-bound V2
 with cancellation/frontier/completion witnesses, frozen 0.11.1 post-activation archive,
-and the exact affected 0.21.0 migration-owner replacement. Go byte slices use padded
+and typed history from the exact affected 0.21.0 migration-owner replacement. These retained
+formats do not authorize new adoption of that old owner. Go byte slices use padded
 base64, preserving null versus an empty string. Schema 2 has no LF, including its
 explicit empty runtime probe contract. Plan/resume and lifecycle bindings use their
 frozen separate digest structures. Semver parsing uses `semver`, additionally enforcing
@@ -126,7 +150,7 @@ production writer is enabled.
 The eventual owner route must preserve exact supported historical targets for fresh
 update/rollback as well as pending continuation. Target declaration selects the exact
 owner before inspection/consent; a Rust-declared target must never fall back after an
-error. This crate currently implements no owner dispatch route.
+error. The explicit experimental facade implements this selection while retaining the Go default.
 
 The store orchestration resolves exact V1/V2 recovery and frozen ordinary supersession
 identities, reuses matching reservations, cancels only unselected generations, compacts
@@ -314,7 +338,16 @@ the update lease, after checked bundle-reference reconstruction. Original recipe
 must match after reconstruction and before native bind/apply.
 The private owner-registration recipe can reference that same exact payload set;
 its payload pin is excluded from frozen semantic owner fingerprints and recovery
-records. The native owner callback extraction remains a separate acceptance step.
+records. Native component execution still requires its physical acceptance checks.
+
+Current owner-registration bundles also carry a finite Rust action programme.
+The existing executor journals each prepared action and closes compensation before
+publishing its typed group retry edges. New typed native actions publish a bounded
+`physical.json` output receipt before their terminal. Reconstruction checks that
+receipt against the full current physical observation while retaining original
+source capsules. A receipt never substitutes for SDK/command closure or a terminal.
+Synthetic components without a prepared payload retain their smaller test contract;
+they do not establish native recreation or compensation acceptance.
 
 The runtime check includes 224 settings vectors generated by the actual owning Go
 assignment policy, 33 owning Go activation metadata cases, 15 Go runtime-link topology/cut results checked with separate Rust
@@ -376,18 +409,38 @@ improvement is claimed by these checks.
 ## Experimental delivery
 
 Ordinary `make build`, `make package`, CI and release verification remain Go-only.
-`make build-experimental-release-owner VERSION=0.22.0-test` and
-`dev/package-engine.sh --experimental-release-owner` explicitly stage Rust assets;
-these commands do not enable production routing. A declared Rust runtime is refused
-by the held Go transition/recovery path, including completed-metadata fallback.
+`make build-experimental-release-owner VERSION=0.22.1-test` and
+`dev/package-engine.sh --experimental-release-owner` compile the explicit Rust-owner
+variant and stage its sealed Rust assets. The Make target uses separate engine and runtime
+outputs under `.build/yard-experimental-release-owner` and
+`.build/runtime-experimental-release-owner/current`. Packaging verifies a prebuilt
+engine's compiled variant through its private read-only query over the retained image descriptor. Runtime inputs cannot select authority;
+invalid compiled variants refuse, and selected Rust failures never fall back to Go.
+Ordinary Go tooling refuses declared Rust owners, including completed-metadata fallback.
+Historical Go transitions continue through their exact sealed original engines.
 
-The authentic predecessor / Rust candidate recovery scenario remains a separate gate:
+The sealed experimental engine answers only the fixed schema 2 `capabilities` and
+`lifecycle-capabilities` declarations without repository/configuration discovery.
+Inventory and migration-owner probes remain scoped Rust-owner queries. Migration-owner
+replacement capability syntax remains declared on Linux x86_64 for its retained record contract.
+It does not authorize new Rust admission from an unfinished old Go owner.
+`dev/release-acceptance.py prepare --experimental-release-owner` binds this variant,
+its source fingerprint and exact assets. Experimental prepared CI import is refused
+until that strict CI identity can bind the variant.
 
-```sh
-SUBYARD_RUST_PREDECESSOR_ASSETS=/path/to/verified/predecessors bash tests/engine-release.sh
-```
+Fresh Rust ingress requires a verified Go v0.22.0-or-newer source with completed metadata at its
+own registry head and the [bridge frontier](../docs/reference/legacy-migration-support.md).
+The released Go v0.22.0 updater refuses Rust routing: publish verified current tooling, then use
+the printed candidate frontend with fresh consent. Current exact-artifact Rust transactions keep
+their original same-transaction recovery; historical codecs and closed receipts remain readable.
 
-It uses exact published Go predecessors and the experimental packaging option.
-It is deferred while Rust production routing is held; its failure is never replaced
-by the ordinary synthetic Go-owner fixture. Existing `check*.sh` and delivery targets
-remain explicit experimental checks, with their Rust toolchain and input requirements.
+`make verify-release-owner-runtime` includes the existing sealed-source version/provenance
+refusal controls and the real-owner `TestRustOwnerResumeAfterCompensatedCheck`. The latter uses
+the synthetic component peer to prove durable compensated failure and fresh same-transaction
+resume; it does not establish physical recreation or Incus compensation. The gate no longer
+requires predecessor assets for a new Go v0.21.0 adoption positive. Generic current operation,
+process-cut, history, custody and frozen-format checks remain.
+
+Actual released-Go bridge and packaged current recovery acceptance belong to the
+[released compatibility check](../dev/verify-release-upgrades.py). Existing `check*.sh` and delivery
+targets remain explicit experimental checks with their Rust toolchain and input requirements.

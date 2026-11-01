@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -72,19 +73,31 @@ func TestCoreProducerCaptureRejectsDriftAndUsesOriginalArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"owned", "foreign-template", "unsafe-mode"} {
+	for _, kind := range []string{"owned", "retained-root", "invalid-root", "foreign-template", "unsafe-mode"} {
 		t.Run(kind, func(t *testing.T) {
 			home := testkit.TempDir(t)
 			directory := filepath.Join(home, "units")
 			if err := os.Mkdir(directory, 0700); err != nil {
 				t.Fatal(err)
 			}
+			captureRoot := root
+			if kind == "retained-root" {
+				retained, err := os.Open(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer retained.Close()
+				captureRoot = fmt.Sprintf("/proc/self/fd/%d", retained.Fd())
+			}
+			if kind == "invalid-root" {
+				captureRoot = "/proc/self/fd/not-a-descriptor"
+			}
 			unit := filepath.Join(directory, "subyard-keys-sync.service")
 			body, err := os.ReadFile(filepath.Join(root, "config/systemd/subyard-keys-sync.service.in"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			body = []byte(strings.ReplaceAll(string(body), "@YARD_BIN@", filepath.Join(root, "bin/yard")))
+			body = []byte(strings.ReplaceAll(string(body), "@YARD_BIN@", filepath.Join(captureRoot, "bin/yard")))
 			if kind == "foreign-template" {
 				body = append(body, []byte("\nExecStart=/foreign\n")...)
 			}
@@ -94,8 +107,11 @@ func TestCoreProducerCaptureRejectsDriftAndUsesOriginalArtifacts(t *testing.T) {
 			}
 			testkit.WriteFile(t, unit, body, mode)
 			plan := RecoveryPlan{Installation: Installation{OperatorUID: uint32(os.Getuid()), RuntimeRoot: filepath.Join(home, "runtime")}}
-			services, err := CaptureProducers(root, plan, map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_KEYS_SYSTEMD_DIR": directory}, []string{"keys"}, 0, ProducerEvidence{})
-			if kind != "owned" {
+			services, err := CaptureProducers(captureRoot, plan, map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_KEYS_SYSTEMD_DIR": directory}, []string{"keys"}, 0, ProducerEvidence{})
+			if kind == "invalid-root" && err != domain.ErrPlanStale {
+				t.Fatalf("invalid retained root was not refused: %v", err)
+			}
+			if kind != "owned" && kind != "retained-root" {
 				if err == nil {
 					t.Fatal("foreign producer was approved")
 				}
@@ -364,7 +380,7 @@ func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"original", "tampered-unit", "foreign-helper", "unbound-dispatcher", "mismatched-original-helper", "current-unit-retained-helper", "old-unit-current-helper", "unsafe-mode"} {
+	for _, kind := range []string{"original", "tampered-unit", "foreign-helper", "unbound-dispatcher", "mismatched-original-helper", "current-unit-retained-helper", "old-unit-current-helper", "unsafe-mode", "passive-current", "passive-historical", "passive-foreign"} {
 		t.Run(kind, func(t *testing.T) {
 			home := testkit.TempDir(t)
 			runtimeRoot := filepath.Join(home, "runtime")
@@ -405,6 +421,24 @@ func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) 
 			if kind == "mismatched-original-helper" {
 				original.EngineSHA256 = strings.Repeat("0", 64)
 			}
+			passive := strings.HasPrefix(kind, "passive-")
+			if passive {
+				template, err := os.ReadFile(filepath.Join(root, "config/systemd/subyard-publication-reconcile.service.in"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				original.Templates["subyard-publication-reconcile.service.in"] = "# historical passive declaration\n" + strings.ReplaceAll(string(template), "@SUBYARD_PUBLICATION_COMMAND@", "@SUBYARD_POWER_RECONCILER@ _publication-reconcile")
+				body := string(template)
+				if kind == "passive-historical" {
+					body = original.Templates["subyard-publication-reconcile.service.in"]
+				}
+				body = strings.ReplaceAll(body, "@SUBYARD_POWER_RECONCILER@", helper)
+				body = strings.ReplaceAll(body, "@SUBYARD_PUBLICATION_COMMAND@", ownerpublication.PublicationCommand(helper, unit))
+				if kind == "passive-foreign" {
+					body += "ExecStart=/foreign\n"
+				}
+				testkit.WriteFile(t, filepath.Join(home, "subyard-publication-reconcile.service"), []byte(body), 0644)
+			}
 			request := map[string]any{"Root": root, "Installation": Installation{RuntimeRoot: runtimeRoot}, "Environment": map[string]string{"SUBYARD_POWER_UNIT_PATH": unit, "SUBYARD_POWER_RECONCILER_PATH": helper, "SUBYARD_DISPATCHER_PATH": dispatcher}, "Owners": []string{"power"}, "Original": original}
 			payload, _ := json.Marshal(request)
 			// The actual guard is exercised with only its root-UID argument adapted to
@@ -417,15 +451,22 @@ print(json.dumps(m.core_producers(json.load(sys.stdin))))`
 			command := exec.Command("python3", "-B", "-c", script, filepath.Join(root, "scripts/lib/teardown-plan.py"))
 			command.Stdin = bytes.NewReader(payload)
 			output, err := command.Output()
-			if (err == nil) != (kind == "original" || kind == "current-unit-retained-helper" || kind == "old-unit-current-helper") {
+			if (err == nil) != (kind == "original" || kind == "current-unit-retained-helper" || kind == "old-unit-current-helper" || kind == "passive-current" || kind == "passive-historical") {
 				t.Fatalf("historical producer %s: %v", kind, err)
 			}
 			if err != nil {
 				return
 			}
 			var services []RecoveryService
-			if err := json.Unmarshal(output, &services); err != nil || len(services) != 1 || len(services[0].Artifacts) != 2 {
+			artifacts := 2
+			if passive {
+				artifacts = 3
+			}
+			if err := json.Unmarshal(output, &services); err != nil || len(services) != 1 || len(services[0].Artifacts) != artifacts {
 				t.Fatalf("missing bound original producer: %v", err)
+			}
+			if passive && len(services[0].Units) != 2 {
+				t.Fatal("passive producer was not captured for synchronous drain")
 			}
 			originalArtifact := Tree(services[0].Artifacts[0])
 			testkit.WriteFile(t, originalArtifact.Path, []byte("changed after capture"), 0644)

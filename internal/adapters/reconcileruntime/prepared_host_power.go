@@ -52,10 +52,7 @@ func (p *PreparedHostPower) NativeBefore() string {
 }
 
 func (runtime Runtime) hostPowerFiles() (string, error) {
-	return nativeInstalledFiles([]string{
-		runtime.environmentDefault("SUBYARD_POWER_RECONCILER_PATH", "/usr/local/libexec/subyard/yard-boot-reconcile"),
-		runtime.environmentDefault("SUBYARD_POWER_UNIT_PATH", "/etc/systemd/system/subyard-power-reconcile.service"),
-	})
+	return nativeInstalledFiles(runtime.hostPowerResourcePaths())
 }
 
 func nativeInstalledFiles(paths []string) (string, error) {
@@ -200,7 +197,7 @@ func (runtime Runtime) applyPreparedHostPowerRuntime(ctx context.Context, prepar
 	if len(cached) == 1 {
 		execution = cached[0]
 	}
-	if execution.powerReconcilerConverged(ctx) {
+	if execution.hostPowerCompletion == nil && execution.powerReconcilerConverged(ctx) {
 		return nil
 	}
 	before, err := runtime.hostPowerFiles()
@@ -220,7 +217,11 @@ func (runtime Runtime) applyPreparedHostPowerRuntime(ctx context.Context, prepar
 	environment["SUBYARD_NATIVE_INSTALLED_BEFORE"] = prepared.before
 	environment["SUBYARD_POWER_ENGINE_SOURCE"] = fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), prepared.engine.Fd())
 	environment["SUBYARD_NATIVE_ENGINE_SHA256"] = prepared.engineSHA
-	if err := execution.runScriptEnvironment(ctx, runtime.Stderr, environment, "install-power-reconciler.sh", "--yes"); err != nil {
+	arguments := []string{"--yes"}
+	if execution.hostPowerCompletion != nil {
+		arguments = append(arguments, "--native-installation-result")
+	}
+	if err := execution.runScriptEnvironment(ctx, runtime.Stderr, environment, "install-power-reconciler.sh", arguments...); err != nil {
 		return err
 	}
 	if !execution.powerReconcilerConverged(ctx) {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,6 +40,7 @@ def send(value):
  peer.sendall(json.dumps(value,separators=(',',':')).encode()+b'\n')
 request=json.loads(stream.readline());options=request['options']
 assert request['op']=='open' and secret
+assert os.getcwd()==options['runtimeRoot']+'/home'
 assert base64.b64decode(options['registryRaw'])==b'{}\n'
 assert options['repositoryRoot']==options['runtimeRoot']+'/releases/'+options['releases']['target']
 assert os.fstat(repository).st_ino==options['targetArtifact']['root']['inode']
@@ -71,6 +73,10 @@ while True:
 func transportRustSessionFixture(t *testing.T) (*Runtime, *verifiedPublishedCandidate, releasetransition.ProcessRequest) {
 	t.Helper()
 	root := testkit.TempDir(t)
+	if controlled := os.Getenv("SUBYARD_TRANSPORT_RELATIVE_BASE"); controlled != "" {
+		root = controlled
+	}
+
 	for _, relative := range []string{"data", "state", "home"} {
 		if err := os.Mkdir(filepath.Join(root, relative), 0o700); err != nil {
 			t.Fatal(err)
@@ -82,7 +88,7 @@ func transportRustSessionFixture(t *testing.T) (*Runtime, *verifiedPublishedCand
 	if err := os.Symlink("releases/1.2.3-old", filepath.Join(root, "current")); err != nil {
 		t.Fatal(err)
 	}
-	runtime := New(Config{Inputs: CaptureCommandInputs([]string{"HOME=" + filepath.Join(root, "home")}, nil), Context: RuntimeContext{DataHome: filepath.Join(root, "data")}, Stderr: io.Discard})
+	runtime := New(Config{WorkingDir: filepath.Join(root, "home"), Inputs: CaptureCommandInputs([]string{"HOME=" + filepath.Join(root, "home")}, nil), Context: RuntimeContext{DataHome: filepath.Join(root, "data")}, Stderr: io.Discard})
 	t.Cleanup(func() { runtime.Close() })
 	verified, err := runtime.verifyPublishedCandidate(context.Background(), target, root, nil)
 	if err != nil {
@@ -180,5 +186,33 @@ func TestRustSessionInvalidInheritedBarrierCannotUseRegistrySubstitute(t *testin
 		if err == nil {
 			t.Fatal("invalid supplied original barrier was replaced by registry borrower", descriptor)
 		}
+	}
+}
+
+// This is the real Go launcher boundary with a transport-only stand-in for
+// Rust. Actual Serve and retained SDK leaf CWD have separate process checks.
+func TestRustSessionRelativeOptionResolvesOnlyAtOriginalLaunch(t *testing.T) {
+	if base := os.Getenv("SUBYARD_TRANSPORT_RELATIVE_BASE"); base != "" {
+		runtime, verified, request := transportRustSessionFixture(t)
+		runtime.config.WorkingDir = "home"
+		session, err := runtime.startRustOwner(context.Background(), verified, verified, verified, request, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer session.Close()
+		if _, err := session.Inspect(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+		if cwd, err := os.Getwd(); err != nil || cwd != base {
+			t.Fatal("original parent cwd changed", err)
+		}
+		return
+	}
+	base := testkit.TempDir(t)
+	child := exec.Command(os.Args[0], "-test.run=^TestRustSessionRelativeOptionResolvesOnlyAtOriginalLaunch$")
+	child.Dir = base
+	child.Env = append(os.Environ(), "SUBYARD_TRANSPORT_RELATIVE_BASE="+base)
+	if output, err := child.CombinedOutput(); err != nil {
+		t.Fatalf("relative original launch %v: %s", err, output)
 	}
 }

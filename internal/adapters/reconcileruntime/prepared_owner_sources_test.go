@@ -13,6 +13,55 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestOwnerRuntimeSourcesRetainSharedWriterWithoutSelectedProfiles(t *testing.T) {
+	root := testkit.TempDir(t)
+	runtime, _ := materializedIntegrationFixture(t, root, true)
+	const relative = "internal/adapters/configmaterial/tomli_w.py"
+	path := filepath.Join(root, relative)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	approved := []byte("# approved shared writer\n")
+	testkit.WriteFile(t, path, approved, 0644)
+	ctx := t.Context()
+	p, err := runtime.PrepareOwnerRuntimeSources(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.FinishOwnerSources(nil)
+	originalRecipe, originalBinding := p.Recipe(), p.Binding()
+	shared := map[string][]byte{}
+	if err := p.ShareSources(func(payload []byte) ([]byte, error) {
+		key := materializedBlobPath(payload)
+		if shared[key] == nil {
+			shared[key] = bytes.Clone(payload)
+		}
+		return shared[key], nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(originalRecipe, p.Recipe()) || originalBinding != p.Binding() {
+		t.Fatal("source sharing changed original authority")
+	}
+	for _, payload := range p.executionFiles {
+		if len(payload) > 0 && &payload[0] != &shared[materializedBlobPath(payload)][0] {
+			t.Fatal("execution retained duplicate approved source bytes")
+		}
+	}
+	execution, err := runtime.OwnerSourceRuntime(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(filepath.Join(execution.RepositoryRoot, relative))
+	if err != nil || !bytes.Equal(actual, approved) {
+		t.Fatal("retained owner runtime lost the shared writer", err)
+	}
+	testkit.WriteFile(t, path, []byte("# changed shared writer\n"), 0644)
+	if _, err := runtime.OwnerSourceRuntime(ctx, p); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatal("changed shared source admitted", err)
+	}
+}
+
 func TestOwnerRuntimeSourcesRetainApprovedBytesAndCheckActualStage(t *testing.T) {
 	for _, change := range []string{"after-guard", "before-guard", "stage-bytes", "stage-inode", "environment"} {
 		t.Run(change, func(t *testing.T) {

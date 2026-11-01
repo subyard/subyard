@@ -10,9 +10,11 @@ import (
 	"testing"
 
 	"errors"
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releaseowner"
+	"github.com/Subyard/Subyard/internal/releaseowner/nativejson"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 	"reflect"
@@ -324,5 +326,103 @@ func TestNativeOwnerEmptyFingerprintRestoresAcrossFreshProcess(t *testing.T) {
 	process.Env = append(os.Environ(), "SUBYARD_OWNER_EMPTY_FP_RECORD="+root)
 	if output, err := process.CombinedOutput(); err != nil {
 		t.Fatalf("fresh process: %v %s", err, output)
+	}
+}
+
+type ownerInstallationTestReader struct {
+	ownerResultTestReader
+	result *ports.NativeHostPowerInstallation
+	lost   bool
+}
+
+func (r *ownerInstallationTestReader) RecordHostPowerInstallation(uint64, ports.NativeHostPowerInstallation) (ports.NativeHostPowerInstallation, error) {
+	return ports.NativeHostPowerInstallation{}, errors.New("restored observer cannot record")
+}
+func (r *ownerInstallationTestReader) ReadHostPowerInstallation(producer string) (*ports.NativeHostPowerInstallation, error) {
+	if r.lost || r.result == nil || producer != "" && producer != r.result.Producer {
+		return nil, errors.New("original installation unavailable")
+	}
+	return r.result, nil
+}
+func TestNativeOwnerInstallOnlyResultBindsOriginalCapsule(t *testing.T) {
+	for _, change := range []string{"valid", "lifecycle", "wrong-version", "foreign-source", "foreign-output", "missing-source-record", "plain-json-metadata", "malformed-native-metadata", "unknown-native-field", "noncanonical-native-metadata", "lost-producer", "lost-after-bind"} {
+		t.Run(change, func(t *testing.T) {
+			component, before, _ := ownerResultCapsuleFixture(t)
+			var record ownerChildrenRecord
+			if e := json.Unmarshal(component.ownerChildren.wire.Files[0].Content, &record); e != nil {
+				t.Fatal(e)
+			}
+			hash := strings.Repeat("a", 64)
+			publication := &reconcileruntime.OwnerPublicationRecord{OutputDigest: hash, Power: reconcileruntime.OwnerHostPowerRecord{Source: []byte(hash)}}
+			// The actual captured init descriptor uses the owning lossless codec;
+			// its string output digest must be decoded before comparing a producer.
+			description := ownerInitRecord{Version: 1, Publication: publication}
+			if change == "wrong-version" {
+				description.Version++
+			}
+			metadata, err := nativejson.EncodeLosslessNativeJSON(description, 32<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "plain-json-metadata":
+				metadata, _ = json.Marshal(description)
+			case "malformed-native-metadata":
+				metadata = append(metadata, []byte(`{}`)...)
+			case "unknown-native-field":
+				metadata = append(metadata[:len(metadata)-1], []byte(`,"Unexpected":true}`)...)
+			case "noncanonical-native-metadata":
+				metadata = append(metadata, '\n')
+			}
+			for i := range record.Inits {
+				record.Inits[i].Metadata = metadata
+			}
+			if change == "lifecycle" {
+				record.Inits[1].Kind = "lifecycle"
+				record.Inits[1].Power = &publication.Power
+				record.Inits[1].Volume.InstanceUUID = "original-legacy-uuid"
+				record.Inits[1].Metadata, err = nativejson.EncodeLosslessNativeJSON(ownerLifecycleChildMetadata{Publication: publication}, 32<<20)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if change == "missing-source-record" {
+				for i := range record.Inits {
+					record.Inits[i].Metadata = []byte(`{}`)
+				}
+			}
+			raw, _ := json.Marshal(record)
+			component.ownerChildren.wire.Files[0].Content = raw
+			component.ownerChildren.raw, _ = json.Marshal(component.ownerChildren.wire)
+			before.PreparedRecipe = component.ownerChildren.binding()
+			component.installedBound = map[string]bool{before.PreparedRecipe: true}
+			result := &ports.NativeHostPowerInstallation{Producer: hash, HostSource: hash, Output: hash}
+			reader := &ownerInstallationTestReader{result: result}
+			switch change {
+			case "foreign-source":
+				result.HostSource = strings.Repeat("b", 64)
+			case "foreign-output":
+				result.Output = strings.Repeat("b", 64)
+			case "lost-producer":
+				reader.lost = true
+			}
+			ctx := ports.WithNativeOperationObserver(context.Background(), reader)
+			e := component.BindOwnerResults(ctx, before, strings.Repeat("1", 32), nil)
+			if change != "valid" && change != "lifecycle" && change != "lost-after-bind" {
+				if e == nil || component.hostPowerInstallation != nil {
+					t.Fatal("foreign install-only result bound", e)
+				}
+				return
+			}
+			if e != nil || component.hostPowerInstallation == nil || len(component.ownerResults) != 0 {
+				t.Fatal("install-only result discarded", e)
+			}
+			if change == "lost-after-bind" {
+				reader.lost = true
+				if e = component.BindOwnerResults(ctx, before, strings.Repeat("1", 32), nil); e == nil {
+					t.Fatal("lost original installation retained")
+				}
+			}
+		})
 	}
 }

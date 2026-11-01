@@ -88,6 +88,15 @@ pub(crate) struct OwnerBefore {
     pub shared_images: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prepared_recipe: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<OwnerCapture>,
+    #[serde(skip)]
+    pub program: Option<crate::program::Program>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnerCapture {
+    pub instance: String,
 }
 impl OwnerBefore {
     pub(crate) fn validate(&self) -> Result<()> {
@@ -126,6 +135,8 @@ impl OwnerBefore {
     pub(crate) fn semantic(&self) -> Self {
         let mut value = self.clone();
         value.prepared_recipe.clear();
+        value.capture = None;
+        value.program = None;
         value
     }
     pub(crate) fn desired(&self) -> Self {
@@ -135,8 +146,10 @@ impl OwnerBefore {
     }
 }
 pub(crate) enum Recipe {
-    LocalSSHPortPin(SettingsRecipe),
-    TestVMSettingsMigration(SettingsRecipe),
+    Settings {
+        definition: &'static crate::settings::Migration,
+        recipe: SettingsRecipe,
+    },
     TestYardOwnerRegistration(OwnerBefore),
     LegacyV1Import {
         static_pin: String,
@@ -163,8 +176,8 @@ pub(crate) fn owner_payload_hashes(work: &[Work]) -> impl Iterator<Item = &str> 
 impl Work {
     pub(crate) fn settings(
         m: &Migration,
+        definition: &'static crate::settings::Migration,
         recipe: SettingsRecipe,
-        local: bool,
         decision: &str,
     ) -> Result<Self> {
         require(
@@ -179,15 +192,11 @@ impl Work {
                 && recipe.edits.len() <= 256,
         )?;
         require(
-            m.domain == "settings"
-                && m.kind
-                    == if local {
-                        "local-ssh-port-settings-v2-to-v3"
-                    } else {
-                        "test-vms-settings-v1-to-v2"
-                    }
-                && m.from_epoch == if local { 2 } else { 1 }
-                && m.to_epoch == if local { 3 } else { 2 },
+            m.kind == definition.kind
+                && m.domain == "settings"
+                && m.from_epoch == definition.from_epoch
+                && m.to_epoch == definition.to_epoch
+                && definition.decisions.contains(&decision),
         )?;
         require(
             record::fingerprint(&recipe.expected_file)
@@ -214,54 +223,7 @@ impl Work {
         if !recipe.expected_exists {
             require(recipe.expected_file == digest(b"") && recipe.target == "canonical")?;
         }
-        if local {
-            require(
-                recipe.edits.len() == 1
-                    && recipe.edits[0].setting == "SSH_PORT"
-                    && recipe.edits[0].value.as_ref().is_some_and(|v| {
-                        v.parse::<u16>().is_ok_and(|n| n > 0 && n.to_string() == *v)
-                    })
-                    && recipe.before.len() == 1
-                    && recipe.before[0].setting == "SSH_PORT"
-                    && !recipe.before[0].present
-                    && recipe.before[0].value.is_empty(),
-            )?;
-        } else {
-            require(
-                recipe.before.len() == 2
-                    && recipe.before[0].setting == "YARD_TEMPLATE"
-                    && recipe.before[0].present
-                    && ["e2e-vms", "test-vms"].contains(&recipe.before[0].value.as_str())
-                    && recipe.before[1].setting == "NESTED_E2E_VMS"
-                    && if recipe.before[1].present {
-                        ["0", "1"].contains(&recipe.before[1].value.as_str())
-                    } else {
-                        recipe.before[1].value.is_empty()
-                    },
-            )?;
-            let mut expected = vec![];
-            if recipe.before[0].value == "e2e-vms" {
-                expected.push(Edit {
-                    setting: "YARD_TEMPLATE".into(),
-                    value: Some("test-vms".into()),
-                })
-            };
-            if recipe.before[1].present && recipe.before[1].value == "0" {
-                expected.push(Edit {
-                    setting: "NESTED_E2E_VMS".into(),
-                    value: None,
-                })
-            };
-            require(
-                recipe.edits == expected
-                    && decision
-                        == if recipe.before[1].present && recipe.before[1].value == "0" {
-                            "reset"
-                        } else {
-                            "canonicalize"
-                        },
-            )?;
-        }
+        (definition.validate)(&recipe, decision)?;
         let intent = PlannerStepIntent {
             id: format!("{}.{}", m.id, recipe.yard),
             migration: m.id.clone(),
@@ -272,11 +234,7 @@ impl Work {
         };
         Ok(Self {
             intent,
-            recipe: if local {
-                Recipe::LocalSSHPortPin(recipe)
-            } else {
-                Recipe::TestVMSettingsMigration(recipe)
-            },
+            recipe: Recipe::Settings { definition, recipe },
         })
     }
     pub(crate) fn ingress(

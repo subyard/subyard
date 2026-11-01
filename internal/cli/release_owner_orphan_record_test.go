@@ -378,3 +378,39 @@ func TestOwnerOrphanRecordFreshProcessRestoresOriginal(t *testing.T) {
 		t.Fatalf("fresh process failed: %v\n%s", err, output)
 	}
 }
+
+func TestOwnerOrphanRecordPreservesOriginalPreparedPlan(t *testing.T) {
+	root := testkit.TempDir(t)
+	cli := ownerOrphanTestCLI(t, root, ownerOrphanTestDescriptor)
+	for _, steps := range [][]domain.OperationStep{nil, {}, {{ID: "original", Target: "original service", Preconditions: []string{}, DependsOn: nil}}} {
+		original := ownerOrphanTestPlan(t, cli)
+		original.uuid = "original-uuid"
+		original.nic = map[string]string{"type": "nic"}
+		original.entries[0].prepared = &resource.PrepareResult{Schema: resource.PrepareAssessmentSchemaV2, Binding: strings.Repeat("a", 64), Assessment: *original.entries[0].shutdown, Steps: steps}
+		raw, err := captureOwnerOrphanRecord(original, cli, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := restoreOwnerOrphanRecord(raw, cli, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(original, restored) {
+			t.Fatal("original prepared binding/steps or nil/empty shape changed")
+		}
+	}
+}
+
+func TestOwnerOrphanRecordRejectsChangedHandlerBytes(t *testing.T) {
+	root := testkit.TempDir(t)
+	cli := ownerOrphanTestCLI(t, root, ownerOrphanTestDescriptor)
+	original := ownerOrphanTestPlan(t, cli)
+	raw, err := captureOwnerOrphanRecord(original, cli, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, original.entries[0].definition.HandlerPath(), []byte("#!/bin/sh\nexit 0\n"), 0700)
+	if _, err := restoreOwnerOrphanRecord(raw, cli, root); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatal("replacement handler admitted", err)
+	}
+}

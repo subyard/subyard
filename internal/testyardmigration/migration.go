@@ -50,6 +50,8 @@ type Options struct {
 	syncOwnerDirectory        func(string, int) error
 	RecoveryToken             string
 	TerminalCleanup           bool
+	// Only a captured absent legacy project permits this source/preflight state.
+	AllowMissingLegacyProject bool
 }
 
 type State string
@@ -1673,6 +1675,9 @@ func ensureProject(ctx context.Context, options Options, yard string, sharedImag
 	}
 	return errors.New("shared image namespace creation requires the authenticated yard project creator")
 }
+
+// VerifyNoActiveOwnerLease checks the original broker's read-only status reply.
+func VerifyNoActiveOwnerLease(payload []byte) error { return ensureNoActiveLease(payload) }
 
 func ensureNoActiveLease(payload []byte) error {
 	for _, line := range strings.Split(string(payload), "\n") {

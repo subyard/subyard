@@ -25,6 +25,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/safewriter"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/blang/semver/v4"
 	"golang.org/x/sys/unix"
@@ -35,6 +36,7 @@ type Config struct {
 	Context                   RuntimeContext
 	Installer                 string
 	RepositoryRoot            string
+	WorkingDir                string `json:"-"`
 	Stdout                    io.Writer
 	Stderr                    io.Writer
 	Progress                  io.Writer
@@ -100,6 +102,7 @@ func (prepared Prepared) Check(ctx context.Context) (releasetransition.Inspectio
 }
 
 type Runtime struct {
+	currentCheck           bool
 	rustOwners             *rustOwnerSessions
 	config                 Config
 	pinnedCandidateRoot    *os.File
@@ -108,6 +111,8 @@ type Runtime struct {
 }
 
 func New(config Config) *Runtime {
+	outputs := safewriter.Outputs(config.Stdout, config.Stderr, config.Progress)
+	config.Stdout, config.Stderr, config.Progress = outputs[0], outputs[1], outputs[2]
 	if config.HTTPClient == nil {
 		config.HTTPClient = http.DefaultClient
 	}
@@ -251,6 +256,10 @@ func (runtime *Runtime) inspectProtectedTransition(
 	yard string,
 	inheritedSettingIDs []string,
 ) (result *protectedTransitionInspection, resultErr error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return nil, selectionErr
+	}
 	selectedRust := false
 	defer func() {
 		if selectedRust {
@@ -558,6 +567,10 @@ func (runtime *Runtime) PrepareTransition(
 	configHome string,
 	yard string,
 ) (Prepared, error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return Prepared{}, selectionErr
+	}
 	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	parsed, help, err := runtime.parse(arguments)
 	if err != nil {
@@ -584,6 +597,16 @@ func (runtime *Runtime) PrepareTransition(
 		runtime.progress(parsed, "Installed version: %s", version)
 	}
 	runtime.progress(parsed, "Inspecting the installed release...")
+	if err := runtime.checkFreshSourceVersion(ctx, parsed, configHome); err != nil {
+		var public publicReleaseInspectionError
+		if errors.As(err, &public) {
+			if parsed.check {
+				return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
+			}
+			return Prepared{}, transitionOutcomeError(public.outcome)
+		}
+		return Prepared{}, err
+	}
 	if prepared, selected, err := runtime.prepareMigrationOwnerReplacement(ctx, parsed, configHome, yard, inheritedSettingIDs); selected {
 		return prepared, err
 	}
@@ -1104,6 +1127,10 @@ func (runtime *Runtime) prepareRetainedTransition(
 	yard string,
 	inheritedSettingIDs []string,
 ) (Prepared, error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return Prepared{}, selectionErr
+	}
 	if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 		return Prepared{}, err
 	}
@@ -1195,7 +1222,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
 	}
 	if !supportedSourceVersion(verified.version) {
-		return Prepared{}, errors.New(LegacyReinstallGuidance)
+		return Prepared{}, errors.New(sourceVersionGuidance(verified.version))
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// Absence of the optional query advertises no profile owners. Identical
@@ -1407,6 +1434,10 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	request releasetransition.ProcessRequest,
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
+	releaseOwnerRoutingEnabled, selectionErr := CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		return Prepared{}, selectionErr
+	}
 	if !releaseOwnerRoutingEnabled && (owner.releaseOwner != nil || target.releaseOwner != nil) {
 		return Prepared{}, markSelectedRustOwnerError(errors.New("experimental Rust release ownership is disabled; use an ordinary Go runtime"))
 	}

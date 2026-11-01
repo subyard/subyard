@@ -509,7 +509,7 @@ func TestTeardownBatchUsesOneApprovedYardSetAndOneLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execution := &teardownExecution{full: true, revokeAgent: true}
+	execution := &teardownExecution{teardownOptions: teardownOptions{full: true, revokeAgent: true}}
 	for _, loaded := range []config.Loaded{first, second} {
 		if err := os.MkdirAll(loaded.Context.Paths.StateDir, 0700); err != nil {
 			t.Fatal(err)
@@ -587,7 +587,7 @@ func TestLifecycleOnlyManagedPathsWaitForInstallationCleanup(t *testing.T) {
 			program.options.ObserveCoreProducers = func(config.Loaded, uninstall.RecoveryPlan, []string, int) ([]uninstall.RecoveryService, error) {
 				return nil, nil
 			}
-			execution := &teardownExecution{full: full, revokeAgent: true}
+			execution := &teardownExecution{teardownOptions: teardownOptions{full: full, revokeAgent: true}}
 			ctx := context.Background()
 			if err := program.observeTeardownExecution(ctx, loaded, execution); err != nil {
 				t.Fatal(err)

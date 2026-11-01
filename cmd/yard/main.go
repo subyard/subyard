@@ -4,16 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/networkruntime"
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
@@ -28,6 +34,34 @@ import (
 )
 
 func main() {
+	rustOwner, selectionErr := releaseruntime.CompiledRustReleaseOwner()
+	if selectionErr != nil {
+		fmt.Fprintln(os.Stderr, selectionErr)
+		os.Exit(2)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_release-owner-variant-v1" {
+		if len(os.Args) != 2 {
+			os.Exit(2)
+		}
+		variant := "go"
+		if rustOwner {
+			variant = "rust"
+		}
+		fmt.Fprintln(os.Stdout, variant)
+		return
+	}
+	if marker := os.Getenv("SUBYARD_PRIVATE_OWNER_BROWSER"); marker != "" {
+		if len(os.Args) != 2 || incusclient.RunOwnerBrowserBridge(marker, os.Args[1]) != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_owner-source-v1" {
+		if len(os.Args) != 3 || incusclient.RunOwnerSourceLeaf(context.Background(), os.Args[2]) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_release-owner-native-v1" {
 		if len(os.Args) != 2 {
 			os.Exit(2)
@@ -57,6 +91,22 @@ func main() {
 		}
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_vm-cpu" {
+		if len(os.Args) == 9 && os.Args[2] == "native-apply" {
+			uid, parseErr := strconv.ParseUint(os.Args[7], 10, 32)
+			if parseErr != nil || strconv.FormatUint(uid, 10) != os.Args[7] || !domain.SafeName(os.Args[3]) || !domain.SafeName(os.Args[4]) || os.Args[6] == "" || os.Geteuid() != 0 || os.Args[5] != "" && !filepath.IsAbs(os.Args[5]) {
+				fmt.Fprintln(os.Stderr, "VM CPU scheduling: invalid native invocation")
+				os.Exit(2)
+			}
+			ready, err := incusclient.New(os.Args[5], "projects").VMCPUConvergedNative(ctx, os.Args[3], os.Args[4], os.Args[6], uint32(uid), os.Args[8])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "VM CPU scheduling: %v\n", err)
+				os.Exit(2)
+			}
+			if !ready {
+				os.Exit(1)
+			}
+			return
+		}
 		if (len(os.Args) != 5 && len(os.Args) != 6) || (os.Args[2] != "apply" && os.Args[2] != "check") ||
 			!domain.SafeName(os.Args[3]) || !domain.SafeName(os.Args[4]) {
 			fmt.Fprintln(os.Stderr, "usage: _vm-cpu <apply|check> PROJECT INSTANCE [SOCKET]")
@@ -309,6 +359,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_publication-reconcile" {
+		if len(os.Args) != 4 {
+			os.Exit(2)
+		}
+		os.Exit(runPublicationWorker(ctx))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_power-reconcile" {
 		client := incusclient.New(os.Getenv("SUBYARD_INCUS_SOCKET"), "projects")
 		var contracts []ownerpublication.Contract
@@ -343,6 +399,19 @@ func main() {
 				LocalAddresses:    hostruntime.LocalAddresses,
 			}))
 	}
+	var input io.Reader = os.Stdin
+	if len(os.Args) == 2 && os.Args[1] == "_release-transition" {
+		var handled bool
+		var err error
+		input, handled, err = cli.ReadRootlessReleaseCapabilities(input, os.Stdout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		if handled {
+			return
+		}
+	}
 	root, err := repositoryRoot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "yard: %v\n", err)
@@ -366,7 +435,7 @@ func main() {
 		Arguments:      os.Args[1:],
 		Environment:    os.Environ(),
 		WorkingDir:     workingDirectory,
-		Stdin:          os.Stdin,
+		Stdin:          input,
 		Stdout:         os.Stdout,
 		Stderr:         os.Stderr,
 	})
@@ -418,4 +487,71 @@ func reconcilePublications(ctx context.Context, client *incusclient.Client, cont
 	return ownerpublication.ReconcileAddresses(hostruntime.LocalAddresses, func(addresses []netip.Addr) ([]string, error) {
 		return client.ReconcilePublications(ctx, project, name, contracts, addresses, beforeWrite...)
 	})
+}
+
+func runPublicationWorker(ctx context.Context) int {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	encoded := os.Getenv("SUBYARD_PUBLICATION_CONTRACTS")
+	contracts, err := ownerpublication.Decode(encoded)
+	if err != nil {
+		return 1
+	}
+	engine, unit, err := ownerpublication.PublicationPaths(os.Args[2:])
+	if err != nil {
+		return 1
+	}
+	runtime := reconcileruntime.Runtime{RepositoryRoot: "/", Environment: []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "SUBYARD_POWER_RECONCILER_PATH=" + engine, "SUBYARD_POWER_UNIT_PATH=" + unit}}
+	consumer, err := runtime.PublicationWorkerConsumer(ctx, encoded)
+	if err != nil {
+		return 1
+	}
+	client := incusclient.New("", "projects")
+	policy := yardnetwork.Service{Host: client, Lock: networkruntime.HostLock{}, UseApprovedIngress: true}
+	check := func(call context.Context) error {
+		current, err := runtime.PublicationWorkerConsumer(call, encoded)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(current, consumer) {
+			return domain.ErrPlanStale
+		}
+		return nil
+	}
+	worker := ownerpublication.PublicationWorker{Contracts: contracts, Inventory: client.ListInstances,
+		Consumer: func(call context.Context, expected ownerpublication.Consumer) error {
+			if !reflect.DeepEqual(expected, consumer) {
+				return domain.ErrPlanStale
+			}
+			return check(call)
+		},
+		Ack: func(call context.Context, h ownerpublication.Handoff, before, after string) error {
+			return client.ExchangePublicationHandoff(call, h, contracts, before, after, func() error { return check(call) })
+		},
+		Restore: func(call context.Context, i ports.InstanceInfo) ([]string, error) {
+			var waiting []string
+			y := yardnetwork.Yard{Name: i.LocalConfig["user.subyard.name"], Project: i.Project, Instance: i.Name, Network: i.LocalConfig["user.subyard.bridge"]}
+			err := policy.WithStart(call, y, func() error {
+				if err := (hostruntime.NetworkGuard{}).Check(call, []string{y.Network}); err != nil {
+					return err
+				}
+				var err error
+				waiting, err = ownerpublication.ReconcileAddresses(hostruntime.LocalAddresses, func(addresses []netip.Addr) ([]string, error) {
+					return client.ReconcileRunningPublicationsIf(call, i.Project, i.Name, i.LocalConfig["volatile.uuid"], i.Type, contracts, addresses, func() error { return check(call) })
+				})
+				return err
+			})
+			return waiting, err
+		}}
+	waiting, err := worker.Run(ctx)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ports.ErrIncusUnavailable) {
+			return 75
+		}
+		return 1
+	}
+	if waiting {
+		return 75
+	}
+	return 0
 }

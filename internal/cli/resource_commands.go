@@ -14,9 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -436,12 +438,18 @@ func (cli *CLI) resourceEnvironment(
 	for _, name := range []string{
 		"ASSUME_YES", "SUBYARD_OPERATION_ID", "SUBYARD_RESOURCE_ACTION",
 		"SUBYARD_RESOURCE_MODE", "SUBYARD_RESOURCE_VERB", "SUBYARD_SUDO_PREAUTHORIZED",
+		"SUBYARD_RESOURCE_INSTANCE_UUID", "SUBYARD_RESOURCE_INGRESS_OWNER", "SUBYARD_NATIVE_OWNER_FD3",
 	} {
 		delete(values, name)
 	}
 	for name, value := range cli.handlerEnvironment(definition.Command, "") {
 		values[name] = value
 	}
+	for name, value := range cli.resourceSourceEnvironment {
+		values[name] = value
+	}
+	// Only the admitted observer-bearing launch may supply the fixed FD3 role.
+	delete(values, "SUBYARD_NATIVE_OWNER_FD3")
 	path := cli.baseEnv["PATH"]
 	if path == "" {
 		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -519,6 +527,7 @@ type resourceApplyRunner struct {
 	consequences   []string
 	ingress        *resourceIngress
 	startupIntent  *resourceStartupIntent
+	ownedIngress   *resourceOwnedIngress
 	exact          *resourceExecution
 	verify         *resourceExecution
 	skipHandler    bool
@@ -600,6 +609,9 @@ func (runner *resourceApplyRunner) Run(
 		command.Env = runner.cli.resourceApplyEnvironment(
 			runner.loaded, runner.definition, runner.localAction, request.OperationID, runner.effect,
 		)
+		if runner.ownedIngress != nil {
+			command.Env = environmentList(environmentMap(command.Env), map[string]string{"SUBYARD_RESOURCE_INGRESS_OWNER": "parent", "SUBYARD_RESOURCE_INSTANCE_UUID": runner.ownedIngress.uuid})
+		}
 		if runner.verify != nil {
 			steps, err := json.Marshal(runner.verify.current.Steps)
 			if err != nil {
@@ -635,7 +647,7 @@ func (runner *resourceApplyRunner) Run(
 		if runner.effect == domain.ActionSession {
 			runErr = runResourceSession(command, time.Minute)
 		} else {
-			runErr = command.Run()
+			runErr = shelladapter.RunNativeCommand(ctx, command, nil, nil, nil)
 		}
 		if restoreForeground != nil {
 			if err := restoreForeground(); err != nil {
@@ -643,7 +655,10 @@ func (runner *resourceApplyRunner) Run(
 			}
 		}
 		if runErr != nil {
-			if rollbackErr := runner.ingress.rollback(runner, request.OperationID); rollbackErr != nil {
+			if ports.NativeOperationObserverFrom(ctx) != nil {
+				return result, "", fmt.Errorf("run resource handler: %w", runErr)
+			}
+			if rollbackErr := runner.ingress.rollback(ctx, runner, request.OperationID); rollbackErr != nil {
 				return result, "", fmt.Errorf("run resource handler: %w; owned ingress rollback failed: %v", runErr, rollbackErr)
 			}
 			if ctx.Err() != nil {
@@ -659,8 +674,18 @@ func (runner *resourceApplyRunner) Run(
 			return result, "", fmt.Errorf("run resource handler: %w", runErr)
 		}
 	}
+	if runner.ownedIngress != nil {
+		if err := runner.ownedIngress.write(ctx, runner, false); err != nil {
+			return result, "", err
+		}
+	}
 	if runner.verify != nil {
 		if err := runner.verify.verify(ctx); err != nil {
+			if runner.ownedIngress != nil {
+				if rollbackErr := runner.ingress.rollback(ctx, runner, request.OperationID); rollbackErr != nil {
+					return result, "", fmt.Errorf("verify original startup: %w; rollback failed: %v", err, rollbackErr)
+				}
+			}
 			return result, "", err
 		}
 	}
@@ -668,8 +693,12 @@ func (runner *resourceApplyRunner) Run(
 		return result, "", err
 	}
 	if err := runner.startupIntent.commit(ctx, runner.cli); err != nil {
+		var terminal *ports.NativeOperationFailure
+		if ports.NativeOperationObserverFrom(ctx) != nil && !errors.Is(err, domain.ErrPlanStale) && !errors.As(err, &terminal) {
+			return result, "", err
+		}
 		if runner.ingress != nil && runner.ingress.up {
-			if rollbackErr := runner.ingress.rollback(runner, request.OperationID); rollbackErr != nil {
+			if rollbackErr := runner.ingress.rollback(ctx, runner, request.OperationID); rollbackErr != nil {
 				return result, "", fmt.Errorf("record startup intent: %w; owned ingress rollback failed: %v", err, rollbackErr)
 			}
 		}
@@ -702,7 +731,21 @@ func configureResourceProcess(command *exec.Cmd) {
 // the installation barrier. Delegate only that admitted OFD, never a caller FD.
 // Session/wire transports have independent lifetimes and receive no barrier.
 func (cli *CLI) resourceOwnerBarrier(ctx context.Context, loaded config.Loaded, command *exec.Cmd) (func(), error) {
-	if cli.ownerMutationLock == nil || cli.resourceWire != "" || cli.resourceSessionTransport != "" {
+	if cli.resourceWire != "" || cli.resourceSessionTransport != "" {
+		return func() {}, nil
+	}
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		home := ports.NativeOwnerHome(ctx)
+		if home == "" || home != loaded.Context.Paths.DataHome || len(command.ExtraFiles) != 0 {
+			return nil, domain.ErrPlanStale
+		}
+		release, err := resourceBorrowOwnerBarrier(home, command)
+		if err == nil {
+			command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_FD3=1")
+		}
+		return release, err
+	}
+	if cli.ownerMutationLock == nil {
 		return func() {}, nil
 	}
 	admission, err := cli.originalOwnerWrite(loaded)
@@ -718,7 +761,11 @@ func (cli *CLI) resourceOwnerBarrier(ctx context.Context, loaded config.Loaded, 
 		return nil, err
 	}
 	defer release()
-	owner, err := uninstall.BorrowOwnerLock(admission.home)
+	return resourceBorrowOwnerBarrier(admission.home, command)
+}
+
+func resourceBorrowOwnerBarrier(home string, command *exec.Cmd) (func(), error) {
+	owner, err := uninstall.BorrowOwnerLock(home)
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,76 @@
+name: Experimental Rust owner on native ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/rust-owner/**'
+
+permissions:
+  contents: read
+
+jobs:
+  native-release-owner-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      # Match the compiler used for the P1 candidate, independently of stable drift.
+      RUSTUP_TOOLCHAIN: '1.99.1'
+      CARGO_BUILD_JOBS: '2'
+      TMPDIR: /tmp
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install native test tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y binutils ca-certificates curl gcc jq python3 ripgrep
+      - name: Install the P1 Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update \
+            --component rustfmt,clippy \
+            --target x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          test "$(go env GOARCH)" = arm64
+          mkdir -p .build/release-owner-native-arm64
+      - name: Native Rust and Go SDK runtime contracts
+        run: |
+          unset GOTMPDIR
+          # Owning scripts use cargo_cache.py: shared homes/intermediates, run-owned outputs.
+          bash release-owner/check-runtime.sh 2>&1 | tee .build/release-owner-native-arm64/runtime.log
+      - name: Native legacy codec and Go corpus consumers
+        run: |
+          unset GOTMPDIR
+          sysroot="$(rustc --print sysroot)"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          linker="$sysroot/lib/rustlib/$host/bin/rust-lld"
+          test -x "$linker"
+          # Scope the cross linker/static flags to musl; native tests keep their host defaults.
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$linker"
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$linker"
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=+crt-static'
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=+crt-static'
+          # This script generates all required corpora before their Rust consumers.
+          bash release-owner/check-legacy.sh 2>&1 | tee .build/release-owner-native-arm64/legacy.log
+          git diff --check
+      - name: Normal packaged Rust dispatch on native ARM
+        run: |
+          unset GOTMPDIR
+          # Both architectures are built; the ARM package is installed and executed here.
+          # Build metadata requires features: []; fixture-cuts never enters this package.
+          bash dev/check-release-owner-delivery.sh 2>&1 | tee .build/release-owner-native-arm64/delivery.log
+      - name: Preserve native ARM diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-owner-native-arm64-${{ github.run_attempt }}
+          path: .build/release-owner-native-arm64/
+          retention-days: 7
+          if-no-files-found: ignore

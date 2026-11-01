@@ -2,10 +2,12 @@ package reconcileruntime
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,9 +32,15 @@ func newConfigInventoryFixture(t *testing.T) configInventoryFixture {
 	).Replace(integrationInventoryProgram)}
 }
 
-func (f configInventoryFixture) run(mode string, entries []map[string]any, wantError bool) {
+func (f configInventoryFixture) run(mode string, entries []map[string]any, wantError bool, options ...map[string]any) []byte {
 	f.t.Helper()
-	payload, err := json.Marshal(map[string]any{"home": f.home, "uid": os.Getuid(), "entries": entries})
+	request := map[string]any{"home": f.home, "uid": os.Getuid(), "entries": entries}
+	for _, extra := range options {
+		for key, value := range extra {
+			request[key] = value
+		}
+	}
+	payload, err := json.Marshal(request)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -42,6 +50,7 @@ func (f configInventoryFixture) run(mode string, entries []map[string]any, wantE
 	if (err != nil) != wantError {
 		f.t.Fatalf("%s: error=%v, output=%s", mode, err, output)
 	}
+	return output
 }
 
 func (f configInventoryFixture) save(entries []map[string]any, released []string) {
@@ -184,4 +193,113 @@ func TestConfigInventoryAcknowledgement(t *testing.T) {
 		f.write([]byte("new"), 0600)
 		f.run("configs-commit", desired, true)
 	})
+}
+
+func TestConfigInventoryPreviewMigrationCustody(t *testing.T) {
+	for _, scenario := range []string{"configs-lock", "selected", "retired", "retired-cut-pending", "retired-cut-first"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newConfigInventoryFixture(t)
+			path := filepath.Join(f.home, ".claude/CLAUDE.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			original := []byte("Host text.\n" + previewInstructions + "\n")
+			begin, end := strings.Index(string(original), "<!-- subyard-preview -->"), strings.Index(string(original), "<!-- /subyard-preview -->")+len("<!-- /subyard-preview -->")
+			stripped := append(append([]byte(nil), original[:begin]...), original[end:]...)
+			final := stripped
+			if scenario == "selected" {
+				final = append(append([]byte(nil), stripped...), []byte("Selected source suffix.\n")...)
+			}
+			testkit.WriteFile(t, path, original, 0644)
+			if err := os.Chown(path, -1, os.Getuid()); err != nil {
+				t.Fatal(err)
+			}
+			record := configInventoryEntry(f.home, "file", string(original))
+			record["path"] = path
+			records := []map[string]any{record}
+			if strings.HasPrefix(scenario, "retired-cut-") {
+				second := filepath.Join(f.home, ".codex/AGENTS.md")
+				if err := os.MkdirAll(filepath.Dir(second), 0755); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, second, original, 0644)
+				if err := os.Chown(second, -1, os.Getuid()); err != nil {
+					t.Fatal(err)
+				}
+				records = append(records, map[string]any{"id": "second", "kind": "file", "path": second, "digest": record["digest"]})
+			}
+			f.save(records, []string{})
+			options := map[string]any{"preview_skill_cutover": true}
+			if scenario == "configs-lock" {
+				f.run("configs-prepare", []map[string]any{{"id": "sample", "kind": "package", "digest": strings.Repeat("a", 64)}}, true, options)
+				if actual, err := os.ReadFile(path); err != nil || string(actual) != string(original) {
+					t.Fatal("invalid config request changed preview instructions")
+				}
+				f.program = strings.Replace(f.program, "    # Publish retry identities before replacing any file.", `    with open(ROOT + '/inventory.lock', 'rb') as probe:
+        try:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise AssertionError('migration has no stable exclusive lock')
+    # Publish retry identities before replacing any file.`, 1)
+				f.run("configs-prepare", nil, false, options)
+			} else {
+				desired := []map[string]any{{"id": "sample", "kind": "package", "digest": strings.Repeat("a", 64)}}
+				if scenario == "selected" {
+					desired = []map[string]any{{"id": record["id"], "kind": "file", "path": path, "digest": fmt.Sprintf("%x", sha256.Sum256(final)), "content": base64.StdEncoding.EncodeToString(final)}}
+				}
+				capture := map[string]any{}
+				if err := json.Unmarshal(f.run("observe", desired, false, map[string]any{"preview_skill_cutover": true, "after_owner": map[string]any{"capture": true}}), &capture); err != nil {
+					t.Fatal(err)
+				}
+				witness := capture["after_owner"].(map[string]any)
+				guarded := map[string]any{"preview_skill_cutover": true, "after_owner": witness}
+				if strings.HasPrefix(scenario, "retired-cut-") {
+					uncut := f.program
+					cutPath := f.state + "/inventory.json"
+					if scenario == "retired-cut-first" {
+						cutPath = path
+					}
+					f.program = strings.Replace(f.program, "        os.fsync(parent)\n", "        os.fsync(parent)\n        if path == "+fmt.Sprintf("%q", cutPath)+": raise SystemExit(75)\n", 1)
+					f.run("apply", desired, true, guarded)
+					raw, err := os.ReadFile(f.state + "/inventory.json")
+					if err != nil || fmt.Sprintf("%x", sha256.Sum256(raw)) != witness["pending"] {
+						t.Fatal("cut left an unapproved inventory receipt")
+					}
+					for i, entry := range records {
+						body, err := os.ReadFile(entry["path"].(string))
+						expected := original
+						if scenario == "retired-cut-first" && i == 0 {
+							expected = stripped
+						}
+						if err != nil || string(body) != string(expected) {
+							t.Fatal("cut did not reach expected preview write")
+						}
+					}
+					f.program = uncut
+				}
+				f.run("apply", desired, false, guarded)
+				raw, err := os.ReadFile(f.state + "/inventory.json")
+				if err != nil || fmt.Sprintf("%x", sha256.Sum256(raw)) != witness["pending"] {
+					t.Fatal("captured pending receipt differs")
+				}
+				f.run("apply", desired, false, guarded)
+				f.run("commit", desired, false, guarded)
+				raw, err = os.ReadFile(f.state + "/inventory.json")
+				if err != nil || fmt.Sprintf("%x", sha256.Sum256(raw)) != witness["committed"] {
+					t.Fatal("captured committed receipt differs")
+				}
+				f.run("observe", desired, false, guarded)
+				released := f.read()["released"].([]any)
+				if (len(released) == len(records) && released[0] == path) != strings.HasPrefix(scenario, "retired") {
+					t.Fatal("preview retirement tombstone differs")
+				}
+			}
+			body, err := os.ReadFile(path)
+			if err != nil || string(body) != string(final) {
+				t.Fatal("preview migration changed retained text")
+			}
+		})
+	}
 }

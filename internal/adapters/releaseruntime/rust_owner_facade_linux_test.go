@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,60 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
+
+func TestRustFreshRecoveryRefusalsPreserveFrozenProtocolAndOriginalErrors(t *testing.T) {
+	plan := releasetransition.PlanToken("plan-v1-" + strings.Repeat("a", 64))
+	tx := releasetransition.TransactionID("tx-original")
+	previous := releasetransition.ReleaseID("old")
+	request := releasetransition.RecoveryProcessRequest{SchemaVersion: 2, Mode: releasetransition.RecoveryProcessConverge,
+		RuntimeRoot: "/tmp/fixture-runtime", ConfigHome: "/tmp/fixture-config", Yard: "default", Target: "new", Direction: releasetransition.DirectionActivateTarget,
+		ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), RegistryDigest: releasetransition.Fingerprint(strings.Repeat("b", 64)), Contract: releasetransition.ActivationOnlyRecoveryContractV2,
+		Recovery: &releasetransition.ActivationOnlyRecoveryRequest{Transaction: tx, Fingerprint: releasetransition.Fingerprint(strings.Repeat("c", 64))}, Execution: &releasetransition.Execution{Plan: plan}}
+	response := releasetransition.ProcessResponse{SchemaVersion: 1, ActivationReconciliationOwned: true,
+		Inspection: &releasetransition.Inspection{Outcome: &releasetransition.Outcome{Status: releasetransition.StatusRecovering, Active: "new", Previous: &previous, Target: "new", Transaction: &tx}}}
+	before, _ := json.Marshal(response)
+	cause := errors.New("original guarded refusal")
+	for _, code := range []releasetransition.OutcomeCode{releasetransition.CodePlanStale, releasetransition.CodeConfirmationRequired} {
+		refused, err := rustFreshRecoveryRefusal(&request, response, code, "fresh recovery requires review", cause)
+		if err != nil || refused.Outcome == nil || refused.Inspection != nil || refused.Outcome.Code != code || refused.Outcome.Transaction == nil || *refused.Outcome.Transaction != tx || refused.Outcome.Active != "new" || refused.Outcome.Previous == nil || *refused.Outcome.Previous != previous {
+			t.Fatal("fresh recovery lost its typed refusal or inspected identities", err)
+		}
+		if err := releasetransition.ValidateProcessOutcome(releasetransition.Goal{Target: "new", Direction: releasetransition.DirectionActivateTarget}, *refused.Outcome); err != nil {
+			t.Fatal("refusal violated the frozen outcome contract", err)
+		}
+		wire := releasetransition.RecoveryProcessResponse{SchemaVersion: 2, ActivationReconciliationOwned: refused.ActivationReconciliationOwned, Outcome: refused.Outcome}
+		if _, err := releasetransition.MarshalRecoveryProcessResponse(wire); err != nil {
+			t.Fatal("typed refusal cannot cross the existing recovery codec", err)
+		}
+	}
+	for _, mode := range []string{"ordinary", "migration-owner", "malformed", "missing-inspection", "native-error"} {
+		t.Run(mode, func(t *testing.T) {
+			recovery, inspected, code := request, response, releasetransition.CodePlanStale
+			selected := &recovery
+			switch mode {
+			case "ordinary":
+				selected = nil
+			case "migration-owner":
+				recovery.Recovery = nil
+				recovery.MigrationOwner = &releasetransition.MigrationOwnerReplacementRequest{}
+			case "malformed":
+				recovery.SchemaVersion = 0
+			case "missing-inspection":
+				inspected.Inspection = nil
+			case "native-error":
+				code = releasetransition.CodeDependencyUnavailable
+			}
+			refused, err := rustFreshRecoveryRefusal(selected, inspected, code, "guarded refusal", cause)
+			if err != cause || refused.Outcome != nil {
+				t.Fatal("ordinary or unvalidated failure became a recovery outcome")
+			}
+		})
+	}
+	after, _ := json.Marshal(response)
+	if string(before) != string(after) {
+		t.Fatal("refusal presentation changed the retained inspection")
+	}
+}
 
 func TestRustPreparedRetainsOriginalSessionAcrossLaterInspection(t *testing.T) {
 	runtime, verified, request := transportRustSessionFixture(t)
@@ -82,10 +138,16 @@ while True:
 `
 
 func TestRustReceiptAdmissionRetainsScopeAndUsesNoFreshGrant(t *testing.T) {
-	for _, scenario := range []string{"valid", "wrong-plan", "wrong-transaction", "wrong-session", "cleanup-inspection", "missing-retention", "ticket-plan-mismatch", "ticket-transaction-mismatch"} {
+	for _, scenario := range []string{"valid", "ordinary-pending", "wrong-plan", "wrong-transaction", "wrong-session", "cleanup-inspection", "missing-retention", "ticket-plan-mismatch", "ticket-transaction-mismatch"} {
 		t.Run(scenario, func(t *testing.T) {
 			runtime, verified, request := transportRustSessionFixture(t)
 			script := strings.Split(transportOwnerPython, "\nplan=")[0] + receiptTransportPython
+			if scenario == "ordinary-pending" {
+				script = strings.Replace(script, "request['op']=='inspect-migration-owner'", "request['op']=='inspect'", 1)
+				script = strings.Replace(script, "admission=dict(plan=plan,transaction=transaction),", "", 1)
+				script = strings.Replace(script, "request['op']=='resume'", "request['op']=='execute'", 1)
+				script = strings.Replace(script, "assert 'authorization' not in request", "assert request['plan']==plan and request['authorization']==''", 1)
+			}
 			if scenario == "cleanup-inspection" {
 				script = strings.Replace(script, "request['op']=='inspect-migration-owner'", "request['op']=='inspect'", 1)
 			}
@@ -116,7 +178,7 @@ func TestRustReceiptAdmissionRetainsScopeAndUsesNoFreshGrant(t *testing.T) {
 			}
 			defer session.Close()
 			recovery := &releasetransition.RecoveryProcessRequest{MigrationOwner: &releasetransition.MigrationOwnerReplacementRequest{Transaction: "tx-predecessor", Fingerprint: releasetransition.Fingerprint(strings.Repeat("a", 64))}}
-			if scenario == "cleanup-inspection" {
+			if scenario == "cleanup-inspection" || scenario == "ordinary-pending" {
 				recovery = nil
 			}
 			inspection, err := session.Inspect(context.Background(), recovery)
@@ -128,6 +190,9 @@ func TestRustReceiptAdmissionRetainsScopeAndUsesNoFreshGrant(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			if scenario == "ordinary-pending" && (session.admission != nil || inspection.Resume == nil) {
+				t.Fatal("ordinary pending Resume acquired a special ticket or lost its transaction")
 			}
 			// Exercise the actual frozen PV1 codec and semantic validator, including
 			// Changed=true/Recovering plus an exact resume-v1 plan and transaction.
@@ -154,12 +219,58 @@ func TestRustReceiptAdmissionRetainsScopeAndUsesNoFreshGrant(t *testing.T) {
 			}
 			defer release()
 			outcome, err := session.Execute(context.Background(), inspection.Plan, "")
-			if scenario == "valid" || scenario == "cleanup-inspection" {
-				if err != nil || !outcome.ReachedGoal || outcome.Transaction == nil || *outcome.Transaction != session.admission.Transaction {
+			if scenario == "valid" || scenario == "cleanup-inspection" || scenario == "ordinary-pending" {
+				if err != nil || !outcome.ReachedGoal || outcome.Transaction == nil || *outcome.Transaction != *inspection.Resume {
 					t.Fatal("checked receipt did not resume without a fresh grant", outcome, err)
 				}
 			} else if err == nil {
 				t.Fatal("changed receipt admission scope was accepted", scenario)
+			}
+		})
+	}
+}
+
+func TestRustReportCheckNegotiatesBeforeDispatchAndRetainsNoSession(t *testing.T) {
+	for _, scenario := range []string{"absent-marker", "check-marker", "unsupported-check"} {
+		t.Run(scenario, func(t *testing.T) {
+			runtime, verified, request := transportRustSessionFixture(t)
+			runtime.currentCheck = true
+			verified.readOnlyCheck = scenario != "absent-marker"
+			capture := filepath.Join(request.RuntimeRoot, "check-dispatch.log")
+			script := strings.Replace(transportOwnerPython, " request=json.loads(line)", " request=json.loads(line)\n with open("+fmt.Sprintf("%q", capture)+",'a') as record:record.write(request['op']+'\\n')", 1)
+			if scenario == "check-marker" {
+				script = strings.Replace(script, "request['op']=='inspect'", "request['op']=='check'", 1)
+			}
+			path := filepath.Join(request.RuntimeRoot, "check-owner.py")
+			testkit.WriteFile(t, path, []byte(script), 0700)
+			image, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			verified.releaseOwner.Close()
+			verified.releaseOwner, err = sealVerifiedEngine(image, sha256.Sum256([]byte(script)))
+			image.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := runtime.invokeRustOwnerTransition(context.Background(), verified, verified, verified, request, nil, "")
+			if scenario == "unsupported-check" {
+				if err == nil {
+					t.Fatal("unsupported Check retried through Inspect")
+				}
+			} else if err != nil || response.Inspection == nil {
+				t.Fatal("report dispatch", err)
+			}
+			raw, readErr := os.ReadFile(capture)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			want := "check\n"
+			if scenario == "absent-marker" {
+				want = "inspect\n"
+			}
+			if string(raw) != want || len(runtime.rustOwners.sessions) != 0 {
+				t.Fatal("report retained authority or changed dispatch after an error")
 			}
 		})
 	}

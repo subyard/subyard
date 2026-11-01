@@ -105,7 +105,7 @@ func (runtime Runtime) PrepareOwnerRuntimeSources(ctx context.Context) (*Prepare
 	if _, _, err := p.stageUsage(); err != nil {
 		return nil, err
 	}
-	p.binding = installedRuntimeDigest(json.RawMessage(p.Recipe()))
+	p.binding = installedCanonicalRecipeDigest(p.Recipe())
 	return p, nil
 }
 

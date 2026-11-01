@@ -16,13 +16,100 @@ import (
 	"github.com/blang/semver/v4"
 )
 
-const MinimumSourceVersion = "0.11.0"
+const MinimumSourceVersion = "0.22.0"
 
 const LegacyReinstallGuidance = "Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately."
+
+const SourceBridgeGuidance = "Finish any unfinished transition with its exact retained runtime, then upgrade with the released Go v0.22.0 runtime and complete its migrations. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard update with fresh confirmation. Existing installation data must be preserved."
+
+func sourceVersionGuidance(version string) string {
+	parsed, err := semver.Parse(version)
+	if err == nil && parsed.GTE(semver.MustParse("0.11.0")) {
+		return SourceBridgeGuidance
+	}
+	return LegacyReinstallGuidance
+}
 
 func supportedSourceVersion(version string) bool {
 	parsed, err := semver.Parse(version)
 	return err == nil && parsed.GTE(semver.MustParse(MinimumSourceVersion))
+}
+
+// Check before selecting a replacement or historical rollback engine. Such an
+// engine must not bypass the current frontend's fresh-source policy. A matching
+// pending selection still goes through its independently verified exact owner.
+func (runtime *Runtime) checkFreshSourceVersion(ctx context.Context, parsed options, configHome string) error {
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return err
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil {
+		return newPublicReleaseInspectionError(
+			err, parsed.root, "unknown", nil, releasetransition.CodeJournalInvalid,
+			"the protected release transition journal cannot be inspected safely",
+			"restore protected release metadata from backup, then run yard update --check",
+		)
+	}
+	var original *releasetransition.JournalRecord
+	if snapshot.Exists {
+		journal, err := releasetransition.ParseJournal(snapshot.Payload)
+		if err != nil {
+			return newPublicReleaseInspectionError(
+				err, parsed.root, "unknown", nil, releasetransition.CodeJournalInvalid,
+				"the protected release transition journal is invalid",
+				"restore protected release metadata from backup, then run yard update --check",
+			)
+		}
+		if err := store.ValidateCurrentRecovery(journal); err != nil {
+			return newPublicReleaseInspectionError(err, parsed.root, journal.Goal.Target, &journal.Transaction,
+				releasetransition.CodeJournalInvalid, "the activation recovery receipt is missing or invalid",
+				"restore protected release metadata from backup, then run yard update --check")
+		}
+		original = &journal
+	}
+	links, err := releasetransition.NewRuntimeLinkStore(parsed.root)
+	if err != nil {
+		return err
+	}
+	observed, err := links.Observe()
+	if err != nil {
+		return err
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: observed.Active,
+		root: filepath.Join(parsed.root, "releases", string(observed.Active))}, parsed.root, nil)
+	if err != nil {
+		return err
+	}
+	defer verified.Close()
+	if verified.registryDigest == "" && sourceVersionGuidance(verified.version) != LegacyReinstallGuidance {
+		return errors.New("source release has invalid or missing V2 registry provenance")
+	}
+	if supportedSourceVersion(verified.version) {
+		return nil
+	}
+	if original != nil && original.Checkpoint != releasetransition.JournalComplete && !parsed.force && !parsed.rollback {
+		owner, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: original.Goal.Target,
+			root: filepath.Join(parsed.root, "releases", string(original.Goal.Target))}, parsed.root, &original.ArtifactDigest)
+		if err != nil {
+			return err
+		}
+		defer owner.Close()
+		if (parsed.version == "" || parsed.version == owner.version) && (parsed.tag == "" || parsed.tag == "v"+owner.version) {
+			return nil
+		}
+	}
+	// Preserve the existing narrow development self-bootstrap proof. This is
+	// never permission to select another release from an unversioned source.
+	if _, err := semver.Parse(verified.version); err != nil && parsed.version == verified.version && !parsed.rollback && !parsed.force {
+		ingress, err := sourceIngressRequestFromEnvironment(runtime.config.Inputs.values)
+		if err != nil {
+			return err
+		}
+		return CheckSourcePolicy(ctx, releasetransition.ProcessRequest{RuntimeRoot: parsed.root, ConfigHome: configHome,
+			Target: observed.Active, Direction: releasetransition.DirectionActivateTarget, SourceIngress: ingress})
+	}
+	return errors.New(sourceVersionGuidance(verified.version))
 }
 
 // VerifyLegacyUninstallSource recognizes the sealed historical project-creator
@@ -131,6 +218,7 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			return err
 		}
 		if journal.Checkpoint != releasetransition.JournalComplete &&
+			request.Replacement == nil && request.MigrationOwnerReplacement == nil &&
 			journal.Goal.Target == request.Target && journal.Goal.Direction == request.Direction &&
 			journal.ArtifactDigest == request.ArtifactDigest {
 			return nil
@@ -157,19 +245,12 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		return errors.New("source release identity does not match its sealed version")
 	}
 	if verified.registryDigest == "" {
-		return errors.New(LegacyReinstallGuidance)
+		if sourceVersionGuidance(verified.version) != LegacyReinstallGuidance {
+			return errors.New("source release has invalid or missing V2 registry provenance")
+		}
+		return errors.New(sourceVersionGuidance(verified.version))
 	}
-	registryFile, err := openCandidateFile(int(verified.root.Fd()), "config/release-transition.json")
-	if err != nil {
-		return err
-	}
-	registryPayload, err := io.ReadAll(io.LimitReader(registryFile, 1<<20+1))
-	registryFile.Close()
-	if err != nil {
-		return err
-	}
-	_, registryDigest, err := releasetransition.ParseRegistryV2(registryPayload, releasetransition.BuiltinCapabilityCatalog())
-	if err != nil || registryDigest != verified.registryDigest {
+	if _, _, err := readVerifiedTransitionRegistry(verified); err != nil {
 		return errors.New("source release has invalid or foreign V2 registry provenance")
 	}
 	// A just-installed development runtime has no predecessor or accepted state.
@@ -203,7 +284,7 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		}
 	}
 	if !supportedSourceVersion(verified.version) || verified.registryDigest == "" {
-		return errors.New(LegacyReinstallGuidance)
+		return errors.New(sourceVersionGuidance(verified.version))
 	}
 	return nil
 }

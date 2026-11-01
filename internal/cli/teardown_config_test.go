@@ -2,18 +2,22 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 func TestTeardownResetConfigRejectsKeepData(t *testing.T) {
@@ -55,9 +59,11 @@ func teardownResetFixture(t *testing.T) (*CLI, config.Loaded, *testkit.Incus, st
 func TestTeardownModesCrossShellAndElevatedContext(t *testing.T) {
 	for _, mode := range []struct {
 		name, reset string
+		holdShared  bool
 		arguments   []string
 	}{
 		{name: "purge", reset: "0"},
+		{name: "preserve-shared", reset: "0", holdShared: true},
 		{name: "keep-data", reset: "0", arguments: []string{"--keep-data"}},
 		{name: "reset-config", reset: "1", arguments: []string{"--reset-config"}},
 	} {
@@ -75,9 +81,15 @@ set -e
 subyard_elevated_context
 env -i "${SUBYARD_ELEVATED_ENV[@]}" /bin/bash -ec '
   test "$SUBYARD_TEARDOWN_RESET_CONFIG" = EXPECTED_RESET
+  test "$SUBYARD_TEARDOWN_KEEP_SHARED" = EXPECTED_SHARED
   rmdir "$SUBYARD_STATE_DIR"
 '
 `, "EXPECTED_RESET", mode.reset)
+			shared := "0"
+			if mode.holdShared {
+				shared = "1"
+			}
+			leaf = strings.ReplaceAll(leaf, "EXPECTED_SHARED", shared)
 			testkit.WriteFile(t, filepath.Join(root, "scripts", "teardown-physical.sh"), []byte(leaf), 0700)
 			if err := os.MkdirAll(loaded.Context.Paths.StateDir, 0700); err != nil {
 				t.Fatal(err)
@@ -92,6 +104,7 @@ env -i "${SUBYARD_ELEVATED_ENV[@]}" /bin/bash -ec '
 			if err != nil {
 				t.Fatal(err)
 			}
+			execution.holdShared = mode.holdShared
 			if _, err := program.executeTeardown(context.Background(), orchestrator, loaded, plan, execution, io.Discard); err != nil {
 				t.Fatal(err)
 			}
@@ -310,5 +323,131 @@ func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
 	}
 	if code := retry.Run(context.Background()); code != 0 {
 		t.Fatalf("completed public CLI retry failed: %d", code)
+	}
+}
+
+func TestOrdinaryTeardownCapturesSealedHistoricalPowerProducer(t *testing.T) {
+	for _, kind := range []string{"original", "current", "hold-shared", "foreign-unit", "foreign-helper", "foreign-source", "unsafe-mode"} {
+		t.Run(kind, func(t *testing.T) {
+			program, loaded, _, _ := teardownResetFixture(t)
+			root := program.options.RepositoryRoot
+			runtimeRoot := filepath.Join(root, "runtime")
+			release := "0.11.0-aaaaaaaaaaaa"
+			writeSealedRollbackTarget(t, runtimeRoot, release, "0.11.0", nil)
+			candidate := filepath.Join(runtimeRoot, "releases", release)
+			paths := map[string]string{
+				"scripts/02-create-project.sh":                      "../../internal/adapters/releaseruntime/testdata/historical-project-creators/0.11.0.txt",
+				"config/systemd/subyard-power-reconcile.service.in": "../../internal/adapters/releaseruntime/testdata/historical-project-creators/power-0.10.0.txt",
+				"config/systemd/subyard-keys-sync.service.in":       "../../tests/fixtures/systemd/subyard-keys-sync-v0.21.2.service.in",
+				"config/systemd/subyard-keys-sync.timer.in":         "../../tests/fixtures/systemd/subyard-keys-sync.timer-v0.19.0.in",
+			}
+			manifest, err := os.ReadFile(filepath.Join(candidate, "runtime-files.sha256"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var old []byte
+			for name, source := range paths {
+				body, err := os.ReadFile(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if name == "scripts/02-create-project.sh" && (kind == "foreign-source" || kind == "current") {
+					body = []byte("unknown project creator\n")
+				}
+				writeReleaseTransitionTestFile(t, filepath.Join(candidate, name), body, 0600)
+				manifest = append(manifest, []byte(fmt.Sprintf("%x  ./%s\n", sha256.Sum256(body), name))...)
+				if name == "config/systemd/subyard-power-reconcile.service.in" {
+					old = body
+				}
+			}
+			testkit.WriteFile(t, filepath.Join(candidate, "runtime-files.sha256"), manifest, 0600)
+			if err := os.Symlink("releases/"+release, filepath.Join(runtimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			current, err := os.ReadFile("../../config/systemd/subyard-power-reconcile.service.in")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeReleaseTransitionTestFile(t, filepath.Join(root, "config/systemd/subyard-power-reconcile.service.in"), current, 0644)
+			helper := filepath.Join(root, "power-helper")
+			engine, err := os.ReadFile(filepath.Join(candidate, "bin/yard-engine"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "foreign-helper" {
+				engine = []byte("foreign helper\n")
+			}
+			testkit.WriteFile(t, helper, engine, 0755)
+			unit := filepath.Join(root, "subyard-power-reconcile.service")
+			if kind == "current" {
+				old = current
+			}
+			body := []byte(strings.ReplaceAll(string(old), "@SUBYARD_POWER_RECONCILER@", helper))
+			if kind == "foreign-unit" {
+				body = append(body, []byte("ExecStart=/foreign\n")...)
+			}
+			mode := os.FileMode(0644)
+			if kind == "unsafe-mode" {
+				mode = 0666
+			}
+			testkit.WriteFile(t, unit, body, mode)
+			// Reuse the native producer fixture's sole root-UID adaptation; all template,
+			// source, mode, helper and artifact checks execute in the actual Python guard.
+			guard := filepath.Join(root, "scripts/lib/teardown-plan.py")
+			script, err := os.ReadFile(guard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script = []byte(strings.Replace(string(script), `add("system", units, files, {helper: owned}, 0)`, `add("system", units, files, {helper: owned}, os.getuid())`, 1))
+			testkit.WriteFile(t, guard, script, 0600)
+			uninstall.UseArtifactGuard(root)
+			defer uninstall.UseArtifactGuard(repositoryRoot(t))
+			loaded.Environment["YARD_RUNTIME_ROOT"] = runtimeRoot
+			loaded.Environment["SUBYARD_POWER_UNIT_PATH"] = unit
+			loaded.Environment["SUBYARD_POWER_RECONCILER_PATH"] = helper
+			evidence, sourceErr := releaseruntime.HistoricalUninstallProducerEvidence(context.Background(), runtimeRoot)
+			if kind != "foreign-source" && kind != "current" && (sourceErr != nil || evidence.EngineSHA256 == "" || len(evidence.Templates) != 3) {
+				t.Fatal("historical fixture was not genuinely admitted", sourceErr)
+			}
+			if (kind == "foreign-source" || kind == "current") && sourceErr == nil {
+				t.Fatal("unknown source was admitted")
+			}
+			execution, _ := prepareTeardownExecution([]string{"--yes"})
+			execution.holdShared = kind == "hold-shared"
+			err = program.observeTeardownExecution(context.Background(), loaded, execution)
+			allowed := kind == "original" || kind == "current" || kind == "hold-shared"
+			if (err == nil) != allowed {
+				t.Fatalf("ordinary historical producer %s: %v", kind, err)
+			}
+			if allowed {
+				services := execution.snapshot().Services
+				if kind == "hold-shared" {
+					if len(services) != 0 {
+						t.Fatal("preserve-shared teardown selected global power deletion")
+					}
+					found := false
+					for _, artifact := range execution.snapshot().Artifacts {
+						found = found || artifact.Path == loaded.Context.Paths.StateDir
+					}
+					if !found {
+						t.Fatal("preserve-shared teardown lost per-yard artifacts")
+					}
+					actual, err := os.ReadFile(unit)
+					if err != nil || string(actual) != string(body) {
+						t.Fatal("preserve-shared capture changed original power")
+					}
+					return
+				}
+				if len(services) != 1 || len(services[0].Artifacts) != 2 {
+					t.Fatal("original power artifacts were not retained")
+				}
+				testkit.WriteFile(t, unit, []byte("changed after capture"), 0644)
+				for _, artifact := range services[0].Artifacts {
+					if artifact.Path == unit && uninstall.Tree(artifact).Check() == nil {
+						t.Fatal("original producer drift escaped guard")
+					}
+				}
+			}
+		})
 	}
 }

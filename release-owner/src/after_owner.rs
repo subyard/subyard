@@ -418,12 +418,19 @@ impl Owner {
             .collect::<Vec<_>>();
         require(owners.len() == 1)?;
         let (n, work, before) = owners[0];
-        Ok(
-            owner_noop(before, &work.intent.expected, &work.intent.desired)?
-                && self
-                    .store
-                    .no_owner_invocation(&self.binding(journal, n as u64 + 1))?,
-        )
+        if !owner_noop(before, &work.intent.expected, &work.intent.desired)? {
+            return Ok(false);
+        }
+        let base = crate::program::ordinal(&bundle.work, n)?;
+        for slot in 0..crate::program::work_slots(work) {
+            if !self
+                .store
+                .no_owner_invocation(&self.binding(journal, base + slot as u64))?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
     pub(crate) fn after_owner_preflight(
         &self,
@@ -467,20 +474,30 @@ impl Owner {
         }
         self.store.after_owner_capacity(capacities)
     }
-    /// Read-only reconstruction installs the recorded physical observation view;
-    /// it never invokes the resolver or publishes a replacement baseline.
+    /// Restore original logical sources across approved registration publication
+    /// before binding the recorded physical view; never resolve a new baseline.
     pub(crate) fn restore_after_owner(
         &self,
         journal: &j::Record,
         bundle: &crate::bundle::Bundle,
-    ) -> Result<()> {
+    ) -> Result<Vec<native::Target>> {
+        self.project_owner_activation(&bundle.work)?;
+        let mut targets = bundle.targets.clone();
         for (index, original) in bundle
             .targets
             .iter()
             .enumerate()
             .filter(|(_, t)| !t.after_owner.is_empty())
         {
-            let binding = self.binding(journal, bundle.work.len() as u64 + index as u64 + 1);
+            self.bind_installed_recipe_target(
+                &original.prepared_recipe,
+                &bundle.installed,
+                Some(original),
+            )?;
+            let binding = self.binding(
+                journal,
+                crate::program::ordinal(&bundle.work, bundle.work.len())? + index as u64,
+            );
             let snap = self.store.read(&address(&binding)?)?;
             if let Some(raw) = snap.bytes() {
                 let fact = Resolution::checked(raw)?;
@@ -502,11 +519,7 @@ impl Owner {
                     .get(&original.prepared_recipe)
                     .ok_or(Error::Protected)?;
                 let (target, recipes) = fact.load(&self.store, original, capsule)?;
-                self.bind_installed_recipe_target(
-                    &original.prepared_recipe,
-                    &bundle.installed,
-                    Some(original),
-                )?;
+                targets[index] = target.clone();
                 self.bind_installed_recipe_target(
                     &target.prepared_recipe,
                     &recipes,
@@ -527,36 +540,20 @@ impl Owner {
                 )?;
             }
         }
-        Ok(())
+        Ok(targets)
     }
     pub(crate) fn after_owner_targets(
         &self,
-        lease: &UpdateLease<'_>,
         journal: &j::Record,
         bundle: &crate::bundle::Bundle,
     ) -> Result<Vec<native::Target>> {
-        let mut targets = bundle.targets.clone();
+        let targets = bundle.targets.clone();
         if targets.iter().any(|t| !t.after_owner.is_empty()) {
             if self.after_owner_noop(journal, bundle)? {
                 return Ok(targets);
             }
             require(self.restore_owner_results(journal, bundle, None)?)?;
-            for (index, target) in bundle
-                .targets
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| !t.after_owner.is_empty())
-            {
-                targets[index] = self
-                    .resolve_after_owner(
-                        lease,
-                        journal,
-                        bundle,
-                        bundle.work.len() as u64 + index as u64 + 1,
-                        target,
-                    )?
-                    .0;
-            }
+            return self.restore_after_owner(journal, bundle);
         }
         Ok(targets)
     }
@@ -587,11 +584,25 @@ impl Owner {
             .ok_or(Error::Unknown)?;
         require(step.checkpoint == "verified")?;
         let token = self.store.owner_progress_token(journal, step, before)?;
-        let base = self.binding(journal, index as u64 + 1);
-        let request = N::ApplyOwner {
-            binding: base.clone(),
-            before: before.clone(),
-            token,
+        let base = self.binding(
+            journal,
+            crate::program::completion_ordinal(&bundle.work, index)?,
+        );
+        let request = if let Some(program) = &before.program {
+            let group = self.binding(journal, crate::program::ordinal(&bundle.work, index)?);
+            self.verify_program_complete(&group, before, &token, program)?;
+            N::ApplyOwnerAction {
+                binding: base.clone(),
+                before: before.clone(),
+                token,
+                action: program.reference(&group, program.forward.len() - 1)?,
+            }
+        } else {
+            N::ApplyOwner {
+                binding: base.clone(),
+                before: before.clone(),
+                token,
+            }
         };
         let producers = self.store.owner_result_producers(
             &base,
@@ -1221,6 +1232,7 @@ mod tests {
                 std::slice::from_ref(&original),
                 &binding.session,
                 &Recipes::from([(original.prepared_recipe.clone(), capsule)]),
+                None,
             )
             .unwrap();
         drop(lease);
@@ -1261,6 +1273,7 @@ mod tests {
             controller: "c".repeat(64),
             shared_images: true,
             prepared_recipe: String::new(),
+            ..Default::default()
         };
         let hash = before.fingerprint().unwrap();
         assert!(owner_noop(&before, &hash, &hash).unwrap());
@@ -1287,6 +1300,7 @@ mod tests {
                 std::slice::from_ref(&original),
                 &binding.session,
                 &Recipes::from([(original.prepared_recipe.clone(), capsule)]),
+                None,
             )
             .unwrap();
         assert!(store

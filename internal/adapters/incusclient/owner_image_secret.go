@@ -39,6 +39,7 @@ type ownerImageSecret struct {
 	terminal   ports.NativeOperation
 	once       sync.Once
 	closeErr   error
+	finish     func() error
 }
 
 // beginOwnerImageSecret accepts already loaded static TLS arguments only. Its
@@ -52,7 +53,8 @@ func beginOwnerImageSecret(ctx context.Context, address string, args incus.Conne
 	validScope := observer != nil && ports.NativeInvocationKey(ctx) != "" && bounded && time.Until(deadline) > 0 && ownerImageSecretKind(expected.Kind) && domain.SafeName(expected.Project) && ownerImageHex(expected.Server, 64) && ownerImageHex(expected.Resource, 64) && expected.ID == "" && expected.Status == 0
 	validURL := err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && u.RawFragment == ""
 	staticTLS := (args.AuthType == "" || args.AuthType == api.AuthenticationMethodTLS) && args.TLSClientCert != "" && args.TLSClientKey != "" && args.OIDCTokens == nil && args.CookieJar == nil && (args.HTTPClient == nil || args.HTTPClient.Jar == nil) && args.TransportWrapper == nil && !args.InsecureSkipVerify && !args.IdenticalCertificate
-	if !validScope || !validURL || !staticTLS {
+	oidcAuth := args.AuthType == api.AuthenticationMethodOIDC && args.OIDCTokens != nil && args.CookieJar == nil && (args.HTTPClient == nil || args.HTTPClient.Jar == nil) && args.TransportWrapper == nil && !args.InsecureSkipVerify && !args.IdenticalCertificate
+	if !validScope || !validURL || !(staticTLS || oidcAuth && sourceLeaf(ctx) != nil) {
 		return nil, errOwnerImageSecret
 	}
 	// Survive ordinary cancellation only inside the original custody deadline.
@@ -119,6 +121,7 @@ func beginOwnerImageSecret(ctx context.Context, address string, args incus.Conne
 
 func (h *ownerImageSecret) armWatch(ctx context.Context, address string, args incus.ConnectionArgs, observer ports.NativeOperationObserver, accepted bool) (<-chan struct{}, error) {
 	ready := make(chan struct{})
+	deadline, bounded := ctx.Deadline()
 	base, err := url.Parse(address)
 	if err != nil {
 		return nil, errOwnerImageSecret
@@ -131,7 +134,8 @@ func (h *ownerImageSecret) armWatch(ctx context.Context, address string, args in
 	go func() {
 		defer close(h.done)
 		terminal, _, waitErr := h.watch.GetOperationWait(h.operation.ID, -1)
-		if waitErr != nil || ctx.Err() != nil || terminal == nil || !ownerImageSecretIdentity(*terminal, h.operation) || terminal.StatusCode != api.Cancelled || !accepted {
+		// The deadline timer may not have published cancellation yet.
+		if waitErr != nil || ctx.Err() != nil || !bounded || time.Until(deadline) <= 0 || terminal == nil || !ownerImageSecretIdentity(*terminal, h.operation) || terminal.StatusCode != api.Cancelled || !accepted {
 			h.err = errOwnerImageSecret
 		} else {
 			value := h.operation
@@ -181,10 +185,14 @@ func (h *ownerImageSecret) Close() error {
 		// eviction. Only its authenticated, published terminal reconciles 404.
 		terminal := h.operation
 		terminal.Status = int(api.Cancelled)
-		if errors.Is(h.closeErr, errOwnerImageSecretAbsent) && cleanup.Err() == nil && h.err == nil && h.terminal == terminal {
+		deadline, bounded := cleanup.Deadline()
+		if errors.Is(h.closeErr, errOwnerImageSecretAbsent) && cleanup.Err() == nil && bounded && time.Until(deadline) > 0 && h.err == nil && h.terminal == terminal {
 			h.closeErr = nil
 		}
 		h.closeErr = errors.Join(h.closeErr, h.err)
+		if h.finish != nil {
+			h.closeErr = errors.Join(h.closeErr, h.finish())
+		}
 		if h.closeErr != nil {
 			if observer := ports.NativeOperationObserverFrom(h.work); observer != nil {
 				observer.Uncertain()

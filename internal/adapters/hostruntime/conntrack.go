@@ -18,6 +18,10 @@ import (
 type ConntrackCleaner struct {
 	Lookup func(string) (string, error)
 	Run    func(context.Context, string, ...string) ([]byte, error)
+	// Delete lets a foreground custody runner decide command completion only
+	// after this cleaner's exact deletion postcondition. It must call settle
+	// once after Wait/stream completion, retaining unrelated transport errors.
+	Delete func(context.Context, string, []string, func(error) error) error
 }
 
 func (cleaner ConntrackCleaner) Clear(ctx context.Context, endpoint netip.AddrPort) error {
@@ -63,7 +67,10 @@ func (cleaner ConntrackCleaner) Clear(ctx context.Context, endpoint netip.AddrPo
 	if len(bytes.TrimSpace(entries)) == 0 {
 		return nil
 	}
-	if _, err := run(commandContext, binary, append([]string{"-D"}, filter...)...); err != nil {
+	settle := func(deleteErr error) error {
+		if deleteErr == nil {
+			return nil
+		}
 		if commandContext.Err() != nil {
 			return commandContext.Err()
 		}
@@ -74,7 +81,17 @@ func (cleaner ConntrackCleaner) Clear(ctx context.Context, endpoint netip.AddrPo
 		if recheckErr == nil && len(bytes.TrimSpace(remaining)) == 0 {
 			return nil // another owner removed the exact entry between list and delete
 		}
-		return fmt.Errorf("delete stale UDP conntrack entries: %w", sanitizedConntrackError(err))
+		return fmt.Errorf("delete stale UDP conntrack entries: %w", sanitizedConntrackError(deleteErr))
+	}
+	arguments := append([]string{"-D"}, filter...)
+	if cleaner.Delete != nil {
+		err = cleaner.Delete(commandContext, binary, arguments, settle)
+	} else {
+		_, deleteErr := run(commandContext, binary, arguments...)
+		err = settle(deleteErr)
+	}
+	if err != nil {
+		return err
 	}
 	if commandContext.Err() != nil {
 		return commandContext.Err()

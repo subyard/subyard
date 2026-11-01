@@ -86,7 +86,7 @@ func cleanupRecoveryCLIFixture(t *testing.T, arguments []string, scenarios ...st
 			raw, _ := json.Marshal(map[string]string{"Reason": "legacy integration artifact has no ownership evidence", "Path": "/home/dev/.codex/rules/repo.rules"})
 			return testkit.IncusServerExecStep{ExitCode: 1, Stderr: raw}
 		}
-		return completedSourceNativeObservation(program, readyMarker, call)
+		return completedSourceNativeObservation(t, program, readyMarker, call)
 	})
 	cleanup := &cleanupRecoveryRuntime{integrationCleanupFixture: &integrationCleanupFixture{integrationRuntimeFixture: &integrationRuntimeFixture{}, plan: reconcileruntime.IntegrationCleanupPlan{Fingerprint: strings.Repeat("b", 64), Changed: true, Steps: []string{"Archive only the captured synthetic service; preserve user data"}}}, conflict: "widget"}
 	cleanup.afterApply = func() {

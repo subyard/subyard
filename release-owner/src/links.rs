@@ -27,6 +27,10 @@ impl RuntimeLinks {
         links.current_root()?;
         Ok(links)
     }
+    pub(crate) fn source_identity(&self) -> Result<crate::native::Identity> {
+        self.current_root()?;
+        crate::native::Identity::capture(&self.root)
+    }
     pub(crate) fn source_inputs(&self) -> Result<crate::assets::Inputs> {
         self.current_root()?;
         let mut values = std::collections::BTreeMap::new();

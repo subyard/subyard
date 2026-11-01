@@ -192,6 +192,10 @@ import io
 import json
 from pathlib import Path
 import runpy
+import os
+import shlex
+import shutil
+import subprocess
 import signal
 import sys
 import tarfile
@@ -201,6 +205,83 @@ from unittest.mock import Mock, patch
 
 root = Path(sys.argv[1])
 helper = runpy.run_path(str(root / 'dev/verify-release-upgrades.py'))['history_materialized_fixture']
+with tempfile.TemporaryDirectory(prefix='subyard-skill-transport-', dir='/tmp') as temporary:
+    base = Path(temporary)
+    shims = base / 'commands'
+    shims.mkdir(mode=0o700)
+    unexpected = base / 'unexpected'
+    helper.__globals__['write_observation_incus'](shims, base/'control', unexpected)
+    env = {**os.environ, **dict.fromkeys(('SUBYARD_OPERATOR_HOME SUBYARD_CONFIG_DIR SUBYARD_CONFIG_HOME '
+           'SUBYARD_HOME STORAGE_PATH HOST_BASE RESTRICTED_DISK_PATHS ACCESS_KIND YARD_KIND '
+           'INCUS_BRIDGE SSH_HOST DEV_UID DEV_SUDO FORWARD_SSH_AGENT NESTED_E2E_VMS').split(), ''),
+           'SUBYARD_ENGINE_CONTEXT': '1', 'SUBYARD_ENGINE_CONTEXT_SCHEMA': '1', 'DEV_USER': 'dev',
+           'YARD_INSTANCE_NAME': 'yard', 'INCUS_PROJECT': 'subyard', 'ENVIRONMENT_PROFILES': '',
+           'ALLOWS_CODING_TOOLS': 'true', 'PATH': str(shims) + ':/usr/bin:/bin'}
+    result = subprocess.run(['bash', str(root/'scripts/refresh-agent-skills.sh'), 'apply'],
+                            env=env, capture_output=True)
+    assert result.returncode == 0 and not unexpected.exists(), 'native skill tar pipeline was rejected'
+    contracts = helper.__globals__['skills_transport_contract'](root)
+    arguments = list(next(command for command, _ in contracts if command[-1] == 'apply'))
+    program = arguments[-3]
+    payload = subprocess.check_output([sys.executable, '-B', str(root/'config/skills/package.py'), 'archive', str(root)])
+    check = next(command for command, _ in contracts if command[-1] == 'check')
+    assert subprocess.run([str(shims/'incus'), *check], input=payload, capture_output=True).returncode == 0
+    with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
+        files = [(member, archive.extractfile(member).read() if member.isfile() else None)
+                 for member in archive.getmembers()]
+        end = archive.offset
+    assert end % 512 == 0 and len(payload[end:]) >= 1024 and not any(payload[end:])
+    changed = io.BytesIO()
+    with tarfile.open(fileobj=changed, mode='w') as archive:
+        altered = False
+        for member, content in files:
+            if content and not altered:
+                content = bytes([content[0] ^ 1]) + content[1:]
+                altered = True
+            archive.addfile(member, io.BytesIO(content) if content is not None else None)
+    assert altered
+    variants = [('body', [*arguments[:14], program + '\n:', *arguments[15:]], payload),
+                ('mode', [*arguments[:-1], 'unknown'], payload),
+                ('identity', [*arguments[:5], 'DEV_USER=foreign', *arguments[6:]], payload),
+                ('archive', arguments, changed.getvalue()),
+                ('length', [*arguments, 'unexpected'], payload),
+                ('truncated', arguments, payload[:-1]),
+                ('missing-eof', arguments, payload[:end]),
+                ('one-eof-block', arguments, payload[:end] + bytes(512)),
+                ('first-eof-byte', arguments, payload[:end] + b'x' + payload[end+1:]),
+                ('trailer', arguments, payload[:-1] + b'x'),
+                ('appended', arguments, payload + b'x' * 512),
+                ('over-limit', arguments, payload.ljust((16 << 20) + 512, b'\0'))]
+    for name, argv, data in variants:
+        result = subprocess.run([str(shims/'incus'), *argv], input=data, capture_output=True)
+        assert result.returncode == 99 and unexpected.exists(), name
+        unexpected.unlink()
+    # Each admitted archive must come wholly from one package, even when the
+    # same guest program is shared by two versions with different skill bytes.
+    other = base/'other'
+    for relative in ('config/skills', 'config/profiles', 'scripts'):
+        shutil.copytree(root/relative, other/relative)
+    selected = [other/name for name, value in contracts[0][1].items()
+                if value[0] == 'file' and name.startswith('config/skills/')
+                and name != 'config/skills/refresh.sh'][:2]
+    assert len(selected) == 2
+    for path in selected:
+        path.write_bytes(path.read_bytes() + b'\n# alternate package\n')
+    helper.__globals__['write_observation_incus'](shims, base/'control', unexpected, [root, other])
+    alternate = subprocess.check_output([sys.executable, '-B', str(other/'config/skills/package.py'), 'archive', str(other)])
+    for data in (payload, alternate):
+        assert subprocess.run([str(shims/'incus'), *arguments], input=data, capture_output=True).returncode == 0
+    hybrid = io.BytesIO()
+    with tarfile.open(fileobj=hybrid, mode='w') as archive:
+        for member, content in files:
+            if member.name == str(selected[0].relative_to(other)):
+                content = selected[0].read_bytes()
+                member.size = len(content)
+            archive.addfile(member, io.BytesIO(content) if content is not None else None)
+    assert subprocess.run([str(shims/'incus'), *arguments], input=hybrid.getvalue(),
+                          capture_output=True).returncode == 99, 'mixed package archive was accepted'
+print('ok: skill transport drains the native tar pipeline and refuses changed body, arguments and archive')
+
 with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/tmp') as temporary:
     base = Path(temporary)
     for arch, foreign in (('amd64', 'arm64'), ('arm64', 'amd64')):
@@ -210,8 +291,22 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
             release.mkdir(parents=True)
             native = release / f'subyard-1.2.3-linux-{arch}.tar.gz'
             other = release / f'subyard-1.2.3-linux-{foreign}.tar.gz'
-            native.write_bytes(b'native runtime identity')
-            other.write_bytes(b'foreign runtime identity')
+            shipped = (root / 'config/agents.env').read_bytes()
+            for archive_path, content in ((native, shipped), (other, shipped + b'\n# foreign architecture fixture\n')):
+                with tarfile.open(archive_path, 'w:gz') as archive:
+                    member = tarfile.TarInfo('config/agents.env')
+                    member.size, member.mode = len(content), 0o644
+                    archive.addfile(member, io.BytesIO(content))
+                    directory = tarfile.TarInfo('config/skills')
+                    directory.type, directory.mode = tarfile.DIRTYPE, 0o755
+                    archive.addfile(directory)
+                    skill = tarfile.TarInfo('config/skills/fixture')
+                    skill.mode, skill.size = 0o644, 1
+                    archive.addfile(skill, io.BytesIO(b'x'))
+                    registry = json.dumps({'migrations': []}).encode()
+                    member = tarfile.TarInfo('config/release-transition.json')
+                    member.size, member.mode = len(registry), 0o644
+                    archive.addfile(member, io.BytesIO(registry))
             state = case / 'fixture'
             config = state / 'config'
             config.mkdir(parents=True)
@@ -219,18 +314,94 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
                                       journal=config/'journal.json', version='1.2.3', arch=arch,
                                       old_launcher=state/'old/bin/yard',
                                       env={'YARD_RELEASE_BASE_URL': release.as_uri()})
+            old_source = fixture.old_launcher.parent.parent / 'config/agents.env'
+            old_source.parent.mkdir(parents=True)
+            old_source.write_bytes(b'# original released fixture config\n')
+            old_source.chmod(0o600)
+            # Minimal synthetic completed-head inputs for this archive-selection control.
+            for path, value in ((fixture.journal, {'checkpoint': 'complete'}),
+                                (old_source.parent/'release-transition.json', {'currentEpochs': {}}),
+                                (config/'release-transition/v2/history-checkpoint.json', {'domains': {}})):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value))
+                path.chmod(0o600)
+            def show_source(command):
+                assert command == [str(fixture.old_launcher), '-Y', 'default', 'config', 'show', 'AGENT_fixture_CONFIG']
+                return 'effective: ' + str(old_source) + '\n'
+            fixture.run = show_source
             captured = []
+            def installed_skills(*args, **kwargs):
+                package = args[3][-1]
+                assert (package/'config/skills').stat().st_mode & 0o777 == 0o700
+                assert (package/'config/skills/fixture').stat().st_mode & 0o777 == 0o600
             with patch.dict(helper.__globals__, {
-                    'write_observation_incus': lambda *args, **kwargs: None,
+                    'write_observation_incus': installed_skills,
                     'set_fixture_observation': lambda *args, **kwargs: captured.append(kwargs['history'])}), \
                  patch.object(Path, 'glob', return_value=iter([native, other] if order == 'native-first' else [other, native])):
-                history, _, _, _ = helper(fixture, case, case/'control')
+                history, source, guest, _ = helper(fixture, case, case/'control')
+            assert source.read_bytes() == shipped and guest.read_bytes() == old_source.read_bytes()
+            assert history['priorSource'] == str(old_source) and source.read_bytes() != guest.read_bytes()
             expected = '1.2.3-' + hashlib.sha256(native.read_bytes()).hexdigest()[:12]
             assert history['target'] == expected, (arch, history['target'], expected)
             assert captured[0]['target'] == expected
 print('ok: migration-history apply control binds the selected architecture in a mixed release inventory')
 
 globals_ = helper.__globals__
+with tempfile.TemporaryDirectory(prefix='subyard-bridge-capture-', dir='/tmp') as temporary:
+    base = Path(temporary)
+    state = base / 'retained-history-legacy'; state.mkdir()
+    config = state / 'config'; config.mkdir()
+    journal = config / 'journal.json'
+    journal.write_text(json.dumps({'checkpoint': 'complete', 'transaction': 'tx',
+                                   'goal': {'target': 'source'}}))
+    projection = config / 'release-transition/v2/ledger.json'
+    projection.parent.mkdir(parents=True); projection.write_text('ledger')
+    evidence = base / 'evidence'; evidence.mkdir()
+    control = base / 'incus-observation.json'
+    marker = state / 'unexpected-host-command'
+    argv = state / 'unexpected-host-command.argv.json'
+    api = Path(str(control) + '.unexpected')
+    outside = base / 'outside'; outside.write_text('outside')
+    unsafe = state / 'unexpected-host-command.symlink'; unsafe.symlink_to(outside)
+    hardlink = state / 'unexpected-host-command.hardlink'; os.link(outside, hardlink)
+    large = state / 'unexpected-host-command.large'; large.write_bytes(b'x' * 65537)
+    fixture = SimpleNamespace(root=state, config=config, runtime=state/'runtime', journal=journal,
+                              old_launcher=state/'old/bin/yard')
+    calls = []
+    def run(command):
+        calls.append(command)
+        if '--check' not in command:
+            return ''
+        return json.dumps({'outcome': {'status': 'operator-action-required'}, 'blockers': [{}]})
+    fixture.run = run
+    def observe(*args):
+        marker.write_text('rejected')
+        argv.write_text('["incus"]')
+        api.write_text('api rejection')
+        return {}, base/'source', base/'guest', marker
+    def reset(path):
+        for item in (marker, argv, api): item.unlink()
+    stderr = io.StringIO()
+    with patch.dict(globals_, {'HISTORY_EVIDENCE': evidence,
+                               'history_links': lambda fixture: (('releases/source',), None),
+                               'history_materialized_fixture': observe,
+                               'set_fixture_observation': reset,
+                               'verify_observed_instance_removed': lambda fixture: None}), \
+         contextlib.redirect_stderr(stderr):
+        try:
+            globals_['verify_supported_bridge'](base, 'candidate', base, '0.22.0', 'amd64', base, fixture=fixture)
+            raise AssertionError('blocked source inspection passed')
+        except RuntimeError as error:
+            assert str(error) == 'released direct source is not current before candidate activation'
+    captured = list(evidence.glob('retained-history-legacy-observation-*'))
+    assert len(captured) == 1 and len(calls) == 2
+    assert (captured[0]/marker.name).read_text() == 'rejected'
+    assert (captured[0]/argv.name).read_text() == '["incus"]'
+    assert (captured[0]/api.name).read_text() == 'api rejection'
+    assert sorted(p.name for p in captured[0].iterdir()) == sorted((marker.name, argv.name, api.name))
+    assert outside.read_text() == 'outside' and 'bridge observation capture refused:' in stderr.getvalue()
+print('ok: failed bridge preserves bounded observation markers before cleanup and retains the original error')
+
 verify = globals_['verify']
 with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') as temporary:
     base = Path(temporary)
@@ -342,8 +513,27 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
     assert globals_['archive_footprint'](archive) == (32, 2)
     baseline = base / 'baseline'
     baseline.mkdir()
-    baseline_archive = baseline / 'subyard-0.19.0-linux-amd64.tar.gz'
+    baseline_archive = baseline / f"subyard-{globals_['DIRECT_BASELINE']}-linux-amd64.tar.gz"
     baseline_archive.write_bytes(archive.read_bytes())
+    history = base / 'history-baselines'
+    history.mkdir()
+    history_pins = {'0.19.0': {'amd64': hashlib.sha256(archive.read_bytes()).hexdigest()}}
+    history_dir = history / 'baseline-0.19.0'
+    history_dir.mkdir()
+    history_archive = history_dir / 'subyard-0.19.0-linux-amd64.tar.gz'
+    history_archive.write_bytes(archive.read_bytes())
+    args = SimpleNamespace(direct_baseline_dir=None, only_migration_history=True,
+                           only_direct_019=False, only_fresh_activation_recovery=False,
+                           only_legacy_retirement=False, migration_history_baselines=history,
+                           legacy_baseline_dir=None)
+    with patch.dict(globals_, {'HISTORY_BASELINES': history_pins}):
+        assert history_archive in globals_['selected_baseline_archives'](args, release, 'amd64')
+        history_archive.write_bytes(b'tampered')
+        try:
+            globals_['selected_baseline_archives'](args, release, 'amd64')
+            raise AssertionError('modified history baseline passed preflight')
+        except RuntimeError as error:
+            assert 'official baseline checksum' in str(error)
     process = Mock(side_effect=AssertionError('subprocess started before capacity refusal'))
     for resource, available in (
             ('bytes', SimpleNamespace(f_bavail=15, f_frsize=4, f_files=100, f_favail=100)),
@@ -365,7 +555,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
             statvfs.reset_mock()
             refused_root = base / 'refused-fixture'
             try:
-                globals_['Fixture'](refused_root, release, 'candidate', baseline, 'amd64', '0.19.0')
+                globals_['Fixture'](refused_root, release, 'candidate', baseline, 'amd64', globals_['DIRECT_BASELINE'])
                 raise AssertionError('fixture install ignored capacity shortage')
             except RuntimeError as error:
                 assert 'insufficient /tmp ' + resource in str(error)

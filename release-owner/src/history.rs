@@ -316,6 +316,34 @@ impl Registry {
         }
         Ok(())
     }
+    // Closed retained evidence only: no planning, publication or implicit edges.
+    pub(crate) fn closed_prefix(&self, observed: &Authority, ids: &[String]) -> Result<Trace> {
+        if !self.owns(observed) || ids.is_empty() {
+            return Err(Error::Trace);
+        }
+        let initial = self.baseline();
+        let mut cursor = initial.clone();
+        let mut edges = Vec::new();
+        let mut previous = None;
+        for id in ids {
+            let index = *self.data.ids.get(id).ok_or(Error::Trace)?;
+            let migration = &self.data.migrations[index];
+            if previous.is_some_and(|p| p >= index)
+                || !observed.domains[&migration.domain].applied.contains(id)
+            {
+                return Err(Error::Trace);
+            }
+            let edge = self.advance(&cursor, migration)?;
+            cursor = edge.after.clone();
+            edges.push(edge);
+            previous = Some(index);
+        }
+        Ok(Trace {
+            initial,
+            terminal: cursor,
+            edges,
+        })
+    }
     pub fn trace_from(&self, observed: &Authority, ids: &[String]) -> Result<Trace> {
         if !self.owns(observed) {
             return Err(Error::Foreign);
