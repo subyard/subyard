@@ -19,8 +19,10 @@ facade_request() {
   esac
 }
 configure_yard_scope() { :; }
-main --observe - | jq -e '.status == "ok" and .observation.events == []' >/dev/null
-if (main --observe invalid) >"$tmp/refusal" 2>&1; then exit 1; fi
+# Select the fixture route instead of discovering an installed owner service.
+main --yard test-yard --observe - | jq -e '.status == "ok" and .observation.events == []' >/dev/null
+if (main --yard test-yard --observe invalid) >"$tmp/refusal" 2>&1; then exit 1; fi
+grep -Fq 'invalid observer cursor' "$tmp/refusal"
 export SUBYARD_AGENT_RUN_ID=fixture-agent-run SUBYARD_TELEMETRY_DATA_DIR="$tmp/data"
 install -d -m 0700 "$SUBYARD_TELEMETRY_DATA_DIR"
 # Consumed by the native correlation function sourced above.
