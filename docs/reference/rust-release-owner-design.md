@@ -1,12 +1,13 @@
 ---
 title: Rust release-transition owner
-status: proposed architecture; selected boundary for gated evaluation
-updated: 2026-10-18
+status: evaluated; continuation stopped
+updated: 2026-11-01
 ---
 
 # Rust release-transition owner
 
-Status: experimental. Go remains the production default. Ordinary packages omit the
+Status: evaluation stopped; see the [evaluation result](rust-release-owner-evaluation.md).
+The Rust owner is scheduled for removal from `master`. Go remains the production default. Ordinary packages omit the
 Rust declaration and executable; use `dev/package-engine.sh --experimental-release-owner`
 for explicit owner experiments. Rust process and predecessor checks are opt-in targets.
 
