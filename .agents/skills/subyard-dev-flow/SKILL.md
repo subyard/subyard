@@ -59,11 +59,7 @@ coordinator, and do not create or close shared task files or start another full 
 3. Run the applicable checks against the final changes using the policy below.
    Planned checks on available allocated VMs are agent work: complete them before
    reporting readiness.
-4. Use `rg` and targeted excerpts. Set a total output budget before batching independent
-   reads/searches or short checks; run independent ones in parallel and inspect every
-   result/exit. Broaden reads for new evidence or insufficient excerpts, rather than rereading
-   truncated batches. Keep dependencies, edits, approvals and decisions sequential.
-5. Before handoff or compaction, update the concise task plan: remaining work, decisions,
+4. Before handoff or compaction, update the concise task plan: remaining work, decisions,
    evidence and candidate identities. Preserve required rules and relevant architecture,
    without a chat journal or full history.
 

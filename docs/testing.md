@@ -184,15 +184,17 @@ for roles and model settings. Preserve required coverage and candidate identity.
 ### Launch and observe long checks
 
 Start the prescribed runner once; retain its process/session handle and evidence paths.
-Set wait intervals explicitly, about once a minute within tool limits and applicable rules:
-`exec_command` initial `yield_time_ms=30000`, then `write_stdin` with empty `chars` and
-`yield_time_ms=55000`; an enclosing `functions.exec` uses `yield_time_ms=60000` to cover
-the inner wait and bounded reads. One enclosing call contains only one long process poll;
-do not serialize several long polls in it. Resume a yielded script cell before another
-process poll: its cell ID is distinct from the process session ID. On an unchanged timeout, continue
-the same wait without rereading plans, receipts or logs or sending an acknowledgement. Short
-default waits add model returns; explicit outer timed yields can still cause model returns.
-Each completed timed observation step also returns to the model; this protocol does not remove inference.
+Wait about once a minute with the client's supported background wait, as described in
+[Codex mechanics](#codex-mechanics) or [Claude Code mechanics](#claude-code-mechanics). On an
+unchanged wait, continue the same wait without rereading plans, receipts or logs or sending an
+acknowledgement. Each completed timed wait still returns to the model; this protocol does not
+remove inference.
+
+When the process ends, save the client's complete native completion result (exit code, output or
+output path, and duration) to a unique unused file under `.build/` before any final artifact or
+projection read. That result is authoritative for the process exit; a runner's JSON result cannot
+replace it. If saving fails, keep the result in the conversation or task and report the capture
+failure separately.
 
 For release CI, a requested interval for GitHub API snapshots or routine progress reports does not
 delay handling the existing release CLI process when it finishes. Keep awaiting its native completion
@@ -216,6 +218,37 @@ observation evidence. The anchor detects changes near the cursor, not arbitrary 
 the existing journal remains append-only evidence, not a writable observation state.
 A single record must fit the byte cap (8 KiB in the template); oversized lines are diagnostics.
 If a valid native record needs a larger cap, adjust projection and output budgets explicitly.
+
+For supplied GitHub run IDs, the same wake queries each `OWNER/REPO/RUN_ID` once through the
+existing authorized read-only path, `subyard-github run -- gh api repos/OWNER/REPO/actions/runs/RUN_ID`.
+Keep the full native query result and decoded response per run. API failure is an observation
+error; only the API's `status` and `conclusion` describe the workflow. Completed IDs close
+independently, so completion order does not cause serial watches.
+
+A concise handoff retains the candidate's source/bundle identity; each stable source ID, handle,
+journal, accepted cursor or cursor file, any pending EOF and native-result path or key; the operator's next wake time; and the
+last material result with its sidecar/log/native pointers. For example: `candidate=<source>/<bundle>;
+release: session=42, journal=.build/acceptance/events.jsonl, cursor=<accepted JSON>, pending=false;
+GitHub: owner/repo/123=queued; next-wake=<operator-selected UTC>; last=selected passed, overall incomplete;
+result=.build/acceptance/runs/<invocation>.json; native=.build/native-release.json`. Observation intervals
+are assigned per session; these templates do not define a global interval.
+
+For parallel acceptance, read new `check-result` events/current receipt as well as process
+completion. Report failed/blocked checks when observed, without waiting for `run-result`;
+keep observing the same controller through completion and cleanup unless the assigned developer
+directs an owned interruption. Then return the final report and end the bounded assignment.
+Make the native final summary/evidence available to both developer and coordinator; they need
+not rewrite it. Stopping an observer does not establish that its runner or lease has drained.
+
+#### Codex mechanics
+
+Set wait intervals explicitly, about once a minute within tool limits and applicable rules:
+`exec_command` initial `yield_time_ms=30000`, then `write_stdin` with empty `chars` and
+`yield_time_ms=55000`; an enclosing `functions.exec` uses `yield_time_ms=60000` to cover
+the inner wait and bounded reads. One enclosing call contains only one long process poll;
+do not serialize several long polls in it. Resume a yielded script cell before another
+process poll: its cell ID is distinct from the process session ID. Short default waits add
+model returns; explicit outer timed yields can still cause model returns.
 
 For tool-based observation, initialize `store("observer-sources", ids)` once with stable IDs.
 Each `store("observer-source:" + id, state)` contains `session_id`, absolute `journal`, unique
@@ -348,12 +381,10 @@ object remains authoritative for process exit; a producer JSON result cannot rep
 is an observation step, not a runner, receipt writer or replacement controller. Its host-free checks
 are `python3 -B dev/project-run-events-test.py` and `node dev/observer-poll-test.mjs`.
 
-For supplied GitHub run IDs, the same wake can query each ID once through the existing authorized
-read-only path below. Initialize `github-sources` with stable `REPOSITORY/RUN_ID` IDs and separate
+For GitHub runs, initialize `github-sources` with stable `REPOSITORY/RUN_ID` IDs and separate
 `github-source:ID` states containing `repository`, `run_id` and `closed: false`. The full native query
-and decoded API response have separate per-source keys. API failure is an observation error; only
-the API's `status` and `conclusion` describe the workflow. Completed IDs close independently, so
-completion order does not cause serial watches. This example adds no network behavior to the projector.
+and decoded API response have separate per-source keys. This example adds no network behavior to
+the projector.
 
 ```js
 // github-observer-template
@@ -385,20 +416,45 @@ await Promise.allSettled(githubIds.map(async id => {
 }));
 ```
 
-A concise handoff retains the candidate's source/bundle identity; each stable source ID, handle,
-journal, accepted cursor, pending EOF and native-result key; the operator's next wake time; and the
-last material result with its sidecar/log/native pointers. For example: `candidate=<source>/<bundle>;
-release: session=42, journal=.build/acceptance/events.jsonl, cursor=<accepted JSON>, pending=false;
-GitHub: owner/repo/123=queued; next-wake=<operator-selected UTC>; last=selected passed, overall incomplete;
-result=.build/acceptance/runs/<invocation>.json; native=.build/native-release.json`. Observation intervals
-are assigned per session; these templates do not define a global interval.
+#### Claude Code mechanics
 
-For parallel acceptance, read new `check-result` events/current receipt as well as process
-completion. Report failed/blocked checks when observed, without waiting for `run-result`;
-keep observing the same controller through completion and cleanup unless the assigned developer
-directs an owned interruption. Then return the final report and end the bounded assignment.
-Make the native final summary/evidence available to both developer and coordinator; they need
-not rewrite it. Stopping an observer does not establish that its runner or lease has drained.
+Launch the prescribed command once with the Bash tool and `run_in_background: true`. The harness
+notifies the session when the process exits, with its exit status and output file; that
+notification is the native completion result. Do not poll the output file or sleep in the
+foreground to detect completion.
+
+Follow journal progress with one Monitor whose command runs the projector loop below. Each stdout
+line becomes a notification, so only accepted material events and observation errors reach the
+model. The cursor file is written only after a successful projection, before its events are
+printed; a projection error keeps the accepted cursor, stops the loop and must be reported.
+Monitors expire after at most 30 minutes; re-arm the same loop with the same cursor file.
+
+```sh
+journal=.build/acceptance/events.jsonl   # the runner's journal
+state=.build/observe/release.cursor      # accepted cursor; absent before the first read
+interval=60                              # 0 = final drain: stop when no backlog remains
+mkdir -p "$(dirname "$state")"
+while :; do
+  args=(--compact --max-bytes 8192 "$journal")
+  [ -s "$state" ] && args+=(--cursor "$(cat "$state")")
+  if ! out=$(python3 dev/project-run-events.py "${args[@]}"); then
+    printf 'observation_error %s\n' "$out"; exit 1
+  fi
+  jq -c .cursor <<<"$out" > "$state.tmp" && mv "$state.tmp" "$state"
+  jq -c '.events[]' <<<"$out"
+  jq -e .backlog <<<"$out" >/dev/null && continue
+  [ "$interval" = 0 ] && { jq -c '{incomplete_bytes}' <<<"$out"; break; }
+  sleep "$interval"
+done
+```
+
+After the completion notification, save it as described above, stop the Monitor, and run the same
+loop once in the foreground with `interval=0` to drain to the final EOF. A nonzero
+`incomplete_bytes` there is an observation diagnostic. Native completion and journal completion
+remain separate facts.
+
+For GitHub runs, use a Monitor that queries each open run about every 60 seconds and prints one
+line per status change, including every terminal `conclusion`; it exits when all runs are completed.
 
 ### Evidence handoff and cache cleanup
 
