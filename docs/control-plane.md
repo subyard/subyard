@@ -432,48 +432,11 @@ authorization binding, protected evidence, per-domain epoch advancement, stable 
 forward recovery and post-activation reconciliation. A completed one-time migration is durable
 history and is never reopened to repair later drift.
 
-Rust release ownership is experimental and explicitly built/checked. Ordinary builds,
-packages, CI and releases continue to use the Go owner without Rust tooling.
-
-The Rust release owner in [`release-owner/`](../release-owner) implements the whole
-release operation: inspection, release policy, consent admission, update lease, protected
-history and journals, link publication, activation, recovery and retirement. Go retains
-CLI/RPC presentation, frozen format codecs, historical exact owners and the scoped native
-component helper. Component recipes and native observations carry their owning semantic
-contracts; the helper does not choose aggregate release eligibility or call the Go reducer.
-The frontend integration remains gated pending complete functional and candidate acceptance.
-
-A manifest-bound `config/release-owner.json` declares the exact Rust owner and Go helper.
-Verification checks the complete inventory and seals both executable images before any
-execution. A retained frontend preparation holds its original private owner session through
-consent or close; a public plan digest alone does not recreate execution authority. Late
-native admission transfers the original account lock open file description after consent
-or checked durable continuation. The helper retains that descriptor and the update lease
-through accepted native work and drain. All holders close descriptors without explicit
-unlock. Cancellation or owner death can leave an unknown native result; neither proves
-closure or permits automatic replay.
-
-A complete frozen journal can still have terminal owner archive cleanup pending. That
-continuation uses the original owner preparation, token, resume plan and transaction;
-it receives no new consent grant. Rust checks the original retained bundle and source
-artifacts under the update lease before cleanup. Missing original facts block pending
-cleanup, while already clean history does not require artifacts that normal retention
-has expired. Private checked release references protect pending evidence; a missing
-reference field is a protocol error, never an empty retention set. The frontend retains
-verified original directory descriptors through its session. The release frontend and installer
-currently perform no runtime-directory garbage collection; protected history and native transaction
-retirement remain owner responsibilities. A different requested goal must finish this original
-cleanup through its supported path before a fresh plan is admitted.
-
-Owner selection precedes inspection. A declared Rust runtime uses Rust, a supported
-historical target uses its exact sealed Go owner, and pending work retains its original
-owner and artifacts. No failure chooses a different reducer. Once a verified Rust contract is
-selected, image, admission, startup and protocol failures preserve that selection; they cannot
-enter the historical Go completed-metadata compatibility path. Frozen process protocol v1
-and its schema-2 recovery contracts remain unchanged; private owner/native messages are
-separate. The narrow historical registry-absent rollback and standalone delegate contracts
-retain their original scope and compatibility guards. See the
-[ownership and recovery design](reference/rust-release-owner-design.md).
+Go is the production release owner. Historical transitions retain their exact sealed
+owners and frozen process and recovery protocols. Unsupported experimental owner
+metadata is refused before executable probing and cannot enter historical metadata
+compatibility. The stopped [Rust owner evaluation](reference/rust-release-owner-evaluation.md)
+records the decision to keep release ownership in Go.
 
 When switching releases after source migrations are complete, materialized-config
 activation observes and reconciles all registered local yards, using the same scope
@@ -1743,41 +1706,6 @@ Ordinary apply, pause, resume and release refresh invalidate older native claims
 same lock before their first effect. An already current no-op does not change the generation.
 The deterministic native generation includes its observed predecessor, so a later fresh plan
 cannot restore an older generation after recovery has fenced it.
-
-The private native helper retains its own configuration and repository directory descriptors.
-Source reads use those retained descriptors; durable recipes use stable logical release labels.
-Accepted work retains the original update and account lock open file descriptions until native
-drain, including after its Rust owner exits. The two fixed host installers carry the original
-account descriptor through sudo as redirected stdin and validate its exact protected inode after
-privilege entry, before creating files. A replaced descriptor refuses installation. Their sorted
-locks derive from every actual installed file, remain outside replaced files, and cover the full
-installation or removal and verification. Ordinary installer calls also invalidate older claims.
-
-Native prepared payloads retain the approved bytes of the existing fixed installed helpers,
-registered profile packages and host installer dependencies. Recipe transfer uses bounded chunks;
-the original full recipe digest remains bound to the prepared target. Fresh helpers restore those
-bytes from the durable bundle and revalidate original source, resource and instance guards before
-execution. Configuration, data and operator roots retain their separate roles. Read-only script
-probes qualify the helper's retained repository descriptor with its PID; mutation wrappers consume
-a private immutable execution tree. A successful drained wrapper may remove its exact marked tree;
-unproved opaque work retains its bounded stage and pending invocation rather than replaying it.
-
-Owner-registration effect verification observes progress against the original preparation and
-recovery token. Preparing the newly current registration describes another state and cannot
-replace that original effect proof.
-
-Activation targets use the owning component's projection of that original preparation, including
-future yard names. This activation inventory stays separate from the original settings inventory.
-Fresh-process recovery reconstructs the same projection from the durable preparation before
-reobserving the actual installed state; it does not prepare a new target after the rename.
-
-Terminal owner-registration archive cleanup is a separate closed component operation. It consumes
-the original preparation and recovery token, reobserves the owning desired state, and deletes only
-the component's bound local archives. Fixed read-only inventory queries submit no mutations. A
-returned local failure proves quiescence while preserving the cleanup obligation; Rust owns its
-pending outcome and retains the original recovery proof. Recovery of an interrupted local cleanup
-requires newly held original account/configuration/update custody and exact cleanup facts. This
-contract cannot close a different operation's remote or opaque work.
 
 Native effects preserve the existing supported 75-minute component allowance, with a separate
 30-second drain and durable publication reserve. Component-specific shorter deadlines still apply.

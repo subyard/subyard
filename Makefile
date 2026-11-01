@@ -36,32 +36,3 @@ clean:
 
 package:
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/package-engine.sh
-
-# Experimental Rust tooling is explicit; ordinary build/package remain Go-only.
-.PHONY: build-release-owner
-build-release-owner:
-	./dev/build-release-owner.sh
-
-.PHONY: verify-release-owner-delivery
-verify-release-owner-delivery:
-	./dev/check-release-owner-delivery.sh
-
-.PHONY: verify-release-owner-foundation
-verify-release-owner-foundation:
-	bash release-owner/check.sh
-
-.PHONY: verify-release-owner-recovery
-verify-release-owner-recovery:
-	./release-owner/check-recovery.sh
-
-.PHONY: verify-release-owner-legacy
-verify-release-owner-legacy:
-	./release-owner/check-legacy.sh
-
-.PHONY: verify-release-owner-runtime
-verify-release-owner-runtime:
-	./release-owner/check-runtime.sh
-
-.PHONY: build-experimental-release-owner
-build-experimental-release-owner: build
-	./dev/package-engine.sh --experimental-release-owner --runtime-dir .build/runtime --engine .build/yard --version "$(VERSION)"

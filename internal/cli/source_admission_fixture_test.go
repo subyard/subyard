@@ -23,18 +23,16 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-// Source-repair callers execute the selected Go or experimental Rust tooling while their installed data may
-// still belong to a historical Go owner. Copy the complete normal build once
-// supplied by the owning gate; never add Rust declarations to the Go data.
+// Source repair executes the complete normal Go runtime supplied by the owning gate.
 func sourceAdmissionToolingFixture(t *testing.T, runtimeRoot string) string {
 	t.Helper()
-	stage := os.Getenv("SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT")
+	stage := os.Getenv("SUBYARD_SOURCE_QUERY_TOOLING_ROOT")
 	if stage == "" {
 		stage = filepath.Join(repositoryRoot(t), ".build/runtime/current")
 	}
 	stage, err := filepath.EvalSymlinks(stage)
 	if err != nil {
-		t.Fatal("source admission requires a normal runtime: run make build or supply SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT", err)
+		t.Fatal("source admission requires a normal runtime: run make build or supply SUBYARD_SOURCE_QUERY_TOOLING_ROOT", err)
 	}
 	for _, required := range []string{"runtime-files.sha256", "bin/yard-engine"} {
 		if _, err := os.Stat(filepath.Join(stage, required)); err != nil {
@@ -107,18 +105,14 @@ func sourceFixtureManifest(t *testing.T, root string) []byte {
 	return manifest
 }
 
-// This forms selected-owner history through the actual normal private facade.
-// Go stages produce Go history; explicit Rust stages must publish a retained
-// Rust bundle as well. Only the seed ledger uses the canonical Go writer. The owning
-// gate supplies a normal stage with an actual source-compatible version; the
-// helper version and release IDs are never relabeled to make a fixture pass.
-func completedRustSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string) (*CLI, string, string) {
+// Form history through the normal runtime and preserve its actual source-compatible version.
+func completedRuntimeSourceFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string) (*CLI, string, string) {
 	t.Helper()
-	program, ready, home, _ := completedRustSourceAuthoringRuntimeFixture(t, migrateSSH, extraAssets)
+	program, ready, home, _ := completedRuntimeSourceAuthoringFixture(t, migrateSSH, extraAssets)
 	return program, ready, home
 }
 
-func completedRustSourceAuthoringRuntimeFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string, directions ...releasetransition.Direction) (*CLI, string, string, *testkit.IncusServer) {
+func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string, directions ...releasetransition.Direction) (*CLI, string, string, *testkit.IncusServer) {
 	t.Helper()
 	original, environment, _ := nativeFixture(t)
 	detached, err := os.MkdirTemp("/tmp", "subyard-current-source-")
@@ -311,7 +305,7 @@ case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nAc
 		command.Stdout = &stdout
 		command.Stderr = &stderr
 		if err := command.Run(); err != nil {
-			t.Fatalf("normal Rust source %s: %v: %s", request.Mode, err, stderr.String())
+			t.Fatalf("normal Go source %s: %v: %s", request.Mode, err, stderr.String())
 		}
 		var response releasetransition.ProcessResponse
 		if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
@@ -333,11 +327,6 @@ case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nAc
 	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, filepath.Join(home, "release-transition/v2/journal.json")))
 	if err != nil || journal.Checkpoint != releasetransition.JournalComplete {
 		t.Fatal("real completed journal absent", err)
-	}
-	if _, declared := os.Stat(filepath.Join(root, "config/release-owner.json")); declared == nil {
-		if _, err := os.Stat(filepath.Join(home, "migrations/native-custody/v1", string(journal.Transaction), "bundle.json")); err != nil {
-			t.Fatal("real Rust bundle absent", err)
-		}
 	}
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 	for _, name := range []string{"default", "named"} {
@@ -364,7 +353,7 @@ case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nAc
 }
 
 func TestCompletedSourceAuthoringFixture(t *testing.T) {
-	program, _, home := completedRustSourceAuthoringFixture(t, false, nil)
+	program, _, home := completedRuntimeSourceFixture(t, false, nil)
 	reader := releaseruntime.NewSourceInspector(program.options.RepositoryRoot, io.Discard)
 	defer reader.Close()
 	proof, err := reader.InspectSourceAdmission(context.Background(), program.env["YARD_RUNTIME_ROOT"], home)

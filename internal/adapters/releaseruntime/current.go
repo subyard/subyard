@@ -270,7 +270,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 	prepared.RefreshConfigs = false
 	// A ready repeat has no historical activation scope to finish or widen.
 	// Keep fresh final inspection for repairs, recovery and source ingress.
-	reuseReady := protected != nil && !protected.rustOwner &&
+	reuseReady := protected != nil &&
 		protected.journal.Checkpoint == releasetransition.JournalComplete &&
 		inspection.Outcome.Status == releasetransition.StatusReady &&
 		!inspection.Assessment.Changed && inspection.Resume == nil &&

@@ -412,8 +412,8 @@ func completedSelectionAuthoringFixture(t *testing.T, migrateSSH ...bool) (*CLI,
 
 func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string) (*CLI, string, string) {
 	t.Helper()
-	if os.Getenv("SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT") != "" {
-		return completedRustSourceAuthoringFixture(t, migrateSSH, extraAssets)
+	if os.Getenv("SUBYARD_SOURCE_QUERY_TOOLING_ROOT") != "" {
+		return completedRuntimeSourceFixture(t, migrateSSH, extraAssets)
 	}
 	f := newConfigApplyRepairFixture(t, false)
 	oldRoot := f.cli.options.RepositoryRoot

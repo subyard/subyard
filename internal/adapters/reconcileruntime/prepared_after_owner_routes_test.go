@@ -33,7 +33,6 @@ func TestAfterOwnerRoutesRetainOriginalConsumerScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resolved.Close()
-	exportAfterOwnerAdapterPair(t, "routes", p, physical, current.UUID, routes.Before)
 	if len(physical) > AfterOwnerRoutePhysicalBound() {
 		t.Fatal("physical record exceeded original scope bound")
 	}

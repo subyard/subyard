@@ -57,7 +57,7 @@ func cleanupRecoveryCLIFixture(t *testing.T, arguments []string, scenarios ...st
 	if scenario == "required" {
 		agents += "AGENT_claude_DEPENDS=widget\n"
 	}
-	program, readyMarker, home, server := completedRustSourceAuthoringRuntimeFixture(t, false, map[string]string{
+	program, readyMarker, home, server := completedRuntimeSourceAuthoringFixture(t, false, map[string]string{
 		"config/agents.env": agents, "config/fixture.rules": "allow_rule()\n", "config/widget-cleanup.sh": "#!/bin/sh\nexit 99\n",
 	})
 	writeProfileTestFile(t, filepath.Join(home, "yards/default/config.env"), []byte("# persistent deselection\nCODING_TOOL_INTEGRATIONS=''\n"), 0600)
@@ -68,7 +68,7 @@ func cleanupRecoveryCLIFixture(t *testing.T, arguments []string, scenarios ...st
 			t.Fatal(err)
 		}
 		// This is a negative corruption of genuine completed history, not a
-		// manufactured resumable Rust transaction.
+		// manufactured resumable transaction.
 		journal.Checkpoint = releasetransition.JournalReconciling
 		raw, err := releasetransition.MarshalJournal(journal)
 		if err != nil {
@@ -80,7 +80,7 @@ func cleanupRecoveryCLIFixture(t *testing.T, arguments []string, scenarios ...st
 		testkit.WriteFile(t, filepath.Join(filepath.Dir(readyMarker), "physical-profile-unavailable"), nil, 0600)
 	}
 	// The SDK fixture returns only the owning guest command's conflict. The
-	// normal Rust process derives its whole inspection and blockers itself.
+	// normal Go process derives its whole inspection and blockers itself.
 	server.SetExecResponder(func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 		if _, err := os.Stat(readyMarker); os.IsNotExist(err) && scenario != "nonmaterialized" && len(call.Command) >= 5 && call.Command[0] == "python3" && strings.Contains(call.Command[3], "Version 1 records observed ownership only") {
 			raw, _ := json.Marshal(map[string]string{"Reason": "legacy integration artifact has no ownership evidence", "Path": "/home/dev/.codex/rules/repo.rules"})

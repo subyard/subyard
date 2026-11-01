@@ -2,7 +2,6 @@ package reconcileruntime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -92,80 +91,6 @@ if [ -f "$EFFECT" ]; then printf '{"state":"current","actual":"%s","desired":"%s
 	body, err := os.ReadFile(marker)
 	if err != nil || string(body) != "approved profile payload\n" {
 		t.Fatal("profile payload recaptured", err)
-	}
-}
-
-func TestPreparedRuntimeRecipeCorpus(t *testing.T) {
-	destination := os.Getenv("SUBYARD_RUST_INSTALLED_RECIPE_CORPUS")
-	if destination == "" {
-		t.Skip("optional owning canonical corpus")
-	}
-	type sample struct {
-		Name string `json:"name"`
-		Raw  []byte `json:"raw"`
-		SHA  string `json:"sha256"`
-	}
-	samples := []sample{}
-	for _, owner := range []string{"core-guest-runtime", "key-tools-runtime", "synthetic-runtime"} {
-		runtime := preparedProfileFixture(t)
-		source, err := filepath.Abs("../../..")
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, relative := range []string{"scripts/refresh-installed-guest-runtime.sh", "scripts/prepare-preview-route.sh", "config/preview/subyard-preview", "config/agents/ccusage/provision.sh"} {
-			body, err := os.ReadFile(filepath.Join(source, relative))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Dir(filepath.Join(runtime.RepositoryRoot, relative)), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, relative), body, 0o755)
-		}
-		runtime.Environment = append(runtime.Environment, "ALLOWS_CODING_TOOLS=false")
-		var p *PreparedInstalledRuntime
-		if owner == "synthetic-runtime" {
-			p, err = runtime.PrepareProfileRuntimeSources(context.Background(), owner)
-		} else {
-			p, err = runtime.PrepareInstalledRuntime(context.Background(), owner)
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw := p.Recipe()
-		samples = append(samples, sample{owner, raw, p.Binding()})
-		p.Close()
-	}
-	{
-		root := testkit.TempDir(t)
-		runtime, source := materializedConfigFixture(t, root)
-		testkit.WriteFile(t, source, []byte("approved corpus config\n"), 0o600)
-		prepared, err := runtime.PrepareConfigs(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		p, err := runtime.PrepareMaterializedConfigs(context.Background(), prepared)
-		if err != nil {
-			t.Fatal(err)
-		}
-		samples = append(samples, sample{"materialized-files", p.Recipe(), p.Binding()})
-		p.Close()
-	}
-	{
-		runtime, _ := materializedIntegrationFixture(t, testkit.TempDir(t), true)
-		p := prepareMaterializedIntegrationFixture(t, runtime)
-		samples = append(samples, sample{"materialized-integrations", p.Recipe(), p.Binding()})
-		p.Close()
-	}
-	raw, err := json.Marshal(samples)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(destination, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(destination, 0o600); err != nil {
-		t.Fatal(err)
 	}
 }
 

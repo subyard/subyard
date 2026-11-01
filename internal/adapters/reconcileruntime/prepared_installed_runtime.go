@@ -250,7 +250,7 @@ func (runtime Runtime) validateInstalledRecipe(p *PreparedInstalledRuntime) erro
 }
 
 // PreparedInstalledRuntime owns only the two existing installed helper recipes.
-// It retains their exact leaves and bytes; release ordering remains in Rust.
+// It retains their exact leaves and bytes; release ordering remains in the release owner.
 type PreparedInstalledRuntime struct {
 	owner, source, runtime, binding, directory string
 	leaves                                     []string

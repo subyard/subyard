@@ -22,7 +22,6 @@ ready() {
 }
 release_activation_cleanup() {
   local original=$? failed=0 yard project marker safe_units=1 unit path mutated_units=0
-  local cleanup_loss="${NATIVE_LOSS:-}"
   trap - EXIT INT TERM
   set +e
   if [ "$original" != 0 ]; then
@@ -63,12 +62,8 @@ PY
         failed=1
         continue
       fi
-      if [ -n "$cleanup_loss" ] && [ "$cleanup_loss" != owner ] && [ -f "$STATE/native-loss/after-cut.json" ]; then
-        printf 'release_activation_pending_fixture_cleanup=allocation-release yard=%s\n' "$yard"
-      else
-        fresh timeout --signal=TERM --kill-after=10 75 "$YARD_BIN" -Y "$yard" teardown --yes \
-          > "$STATE/cleanup-$yard.log" 2>&1 || failed=1
-      fi
+      fresh timeout --signal=TERM --kill-after=10 75 "$YARD_BIN" -Y "$yard" teardown --yes \
+        > "$STATE/cleanup-$yard.log" 2>&1 || failed=1
     fi
   done
   for unit in "$UNIT" "$NAMED_UNIT" subyard-keys-sync.timer subyard-keys-sync.service; do
@@ -91,7 +86,7 @@ PY
     printf 'release_activation_log=%s\n' "${log##*/}"
     cat "$log"
   done
-  if [ "$failed" = 0 ] && { [ -z "$cleanup_loss" ] || [ "$cleanup_loss" = owner ] || [ ! -f "$STATE/native-loss/after-cut.json" ]; }; then
+  if [ "$failed" = 0 ]; then
     [[ "$STATE" = /tmp/subyard-release-activation.* ]] && [ ! -L "$STATE" ] \
       && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || { [ "$original" != 0 ] && exit "$original"; exit 3; }
     find "$STATE" -depth -delete || { [ "$original" != 0 ] && exit "$original"; exit 3; }

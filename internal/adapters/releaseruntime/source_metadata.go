@@ -14,7 +14,6 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/migration"
-	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -80,118 +79,9 @@ func (err sourceAdmissionError) Error() string {
 }
 func (err sourceAdmissionError) Unwrap() error { return err.cause }
 
-// InspectSourceAdmission uses the selected production owner. Rust query failures
-// never fall back to Go; the experimental query remains explicitly callable.
+// InspectSourceAdmission validates protected history through the production Go owner.
 func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, configHome string) (SourceAdmission, error) {
-	if releaseOwnerRoutingEnabled {
-		return runtime.InspectRustSourceAdmission(ctx, root, configHome)
-	}
 	return runtime.inspectGoSourceAdmission(ctx, root, configHome)
-}
-
-// InspectRustSourceAdmission delegates the complete protected-history decision to
-// finite sealed Rust tooling. Go captures authenticated physical artifact facts
-// and decodes only the returned frozen journal; it does not inspect the graph.
-func (runtime *Runtime) InspectRustSourceAdmission(ctx context.Context, root, configHome string) (proof SourceAdmission, result error) {
-	phase := "assets"
-	defer func() {
-		if result != nil {
-			result = sourceAdmissionError{phase, result}
-		}
-	}()
-	tooling, revalidateTooling, err := runtime.sourceQueryTooling(ctx)
-	if err != nil {
-		return proof, err
-	}
-	defer tooling.Close()
-	configRoot, err := openSourceQueryRoot(configHome)
-	if err != nil {
-		return proof, err
-	}
-	defer configRoot.Close()
-	runtimeRoot, err := openSourceQueryRoot(root)
-	if err != nil {
-		return proof, err
-	}
-	defer runtimeRoot.Close()
-	configIdentity, err := releaseowner.IdentityOf(configRoot)
-	if err != nil {
-		return proof, err
-	}
-	runtimeIdentity, err := releaseowner.IdentityOf(runtimeRoot)
-	if err != nil {
-		return proof, err
-	}
-	links, err := runtime.inspectRuntimeLinks(root)
-	if err != nil {
-		return proof, err
-	}
-	actual := releaseLinksFromRuntimeSnapshot(links)
-	active, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: actual.Active, root: filepath.Join(root, "releases", string(actual.Active))}, root, nil)
-	if err != nil {
-		return proof, err
-	}
-	defer active.Close()
-	fact, err := verifiedRustArtifactFact(active)
-	if err != nil {
-		return proof, err
-	}
-	request := rustSourceQuery{ConfigHome: []byte(configHome), RuntimeRoot: []byte(root), ConfigIdentity: configIdentity, RuntimeIdentity: runtimeIdentity, Active: fact}
-	// The frozen codec yields IDs for optional physical capture. It does not
-	// authorize source repair or decide which owner/history is admissible.
-	store, err := releasetransition.NewPOSIXV2Store(configHome)
-	if err != nil {
-		return proof, err
-	}
-	snapshot, err := store.ReadCurrentJournal()
-	if err != nil {
-		return proof, err
-	}
-	if snapshot.Exists {
-		journal, err := releasetransition.ParseJournal(snapshot.Payload)
-		if err != nil {
-			return proof, err
-		}
-		capture := func(id releasetransition.ReleaseID) (*rustArtifactFact, error) {
-			candidate, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: id, root: filepath.Join(root, "releases", string(id))}, root, nil)
-			if err != nil {
-				return nil, err
-			}
-			defer candidate.Close()
-			value, err := verifiedRustArtifactFact(candidate)
-			return &value, err
-		}
-		if journal.RegistryDigest != active.registryDigest {
-			request.OriginalOwner, err = capture(journal.Releases.From)
-			if err != nil {
-				return proof, err
-			}
-		}
-		if source, err := capture(journal.Releases.From); err == nil {
-			request.OriginalSources = &rustMigrationSources{Source: *source}
-			if journal.Releases.Previous != nil {
-				request.OriginalSources.Previous, _ = capture(*journal.Releases.Previous)
-			}
-		}
-	}
-	phase = "protected metadata"
-	reply, err := runtime.queryRustSource(ctx, tooling, request, configRoot, runtimeRoot)
-	if err != nil {
-		return proof, err
-	}
-	if err := revalidateTooling(); err != nil {
-		return proof, err
-	}
-	if reply.JournalRaw != nil {
-		journal, err := releasetransition.ParseJournal(reply.JournalRaw)
-		if err != nil {
-			return proof, err
-		}
-		proof.Metadata.Journal = &journal
-	}
-	proof.Metadata.Binding = releasetransition.Fingerprint(reply.MetadataBinding)
-	proof.Binding = reply.Binding
-	return proof, nil
 }
 
 type sourceCandidateInput struct {
@@ -322,9 +212,6 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 		return proof, err
 	}
 	defer verified.Close()
-	if verified.releaseOwner != nil {
-		return proof, errors.New("experimental Rust owner cannot be admitted by the Go reader")
-	}
 	if !strings.HasPrefix(string(selected), verified.version+"-") {
 		return proof, errors.New("sealed release identity is inconsistent")
 	}
@@ -342,9 +229,6 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 			return proof, err
 		}
 		defer original.Close()
-		if original.releaseOwner != nil {
-			return proof, errors.New("experimental Rust owner cannot be admitted by the Go reader")
-		}
 		if original.registryDigest != journal.RegistryDigest || !strings.HasPrefix(string(owner), original.version+"-") {
 			return proof, errors.New("sealed original owner does not match protected history")
 		}

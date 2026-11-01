@@ -35,26 +35,10 @@ PY
   (cd "$runtime" && sha256sum -c runtime-files.sha256 >/dev/null) \
     || { printf 'release candidate runtime manifest mismatch\n' >&2; return 2; }
   [ -x "$runtime/bin/yard" ] && [ -x "$runtime/bin/yard-engine" ] || { printf 'release candidate yard executable is missing\n' >&2; return 2; }
-  if [ -e "$runtime/config/release-owner.json" ] || [ -L "$runtime/config/release-owner.json" ]; then
-    jq -e '. == {schemaVersion:1,kind:"rust-release-owner",protocolVersion:1,
-      owner:"bin/subyard-release-owner",helper:"bin/yard-engine",
-      schema:"config/release-owner.schema.json",buildInputs:"config/release-owner-build.json"}' \
-      "$runtime/config/release-owner.json" >/dev/null \
-      && [ -x "$runtime/bin/subyard-release-owner" ] \
-      && [ -f "$runtime/config/release-owner.schema.json" ] \
-      && [ -f "$runtime/config/release-owner-build.json" ] \
-      || { printf 'release candidate Rust owner assets are incomplete\n' >&2; return 2; }
-    for asset in config/release-owner.json config/release-owner.schema.json config/release-owner-build.json bin/subyard-release-owner; do
-      awk -v path="./$asset" '$2 == path && length($1) == 64 && $1 !~ /[^0-9a-f]/ { found++ } END { exit(found != 1) }' "$runtime/runtime-files.sha256" \
-        || { printf 'release candidate Rust owner asset is not manifest-bound\n' >&2; return 2; }
-    done
-    jq -e --arg image "$(sha256sum "$runtime/bin/subyard-release-owner" | awk '{print $1}')" \
-      '.schemaVersion == 1 and .kind == "rust-release-owner-build" and .features == [] and .locked == true and .imageSHA256 == $image' \
-      "$runtime/config/release-owner-build.json" >/dev/null \
-      || { printf 'release candidate Rust owner build declaration is invalid\n' >&2; return 2; }
-  elif [ -e "$runtime/bin/subyard-release-owner" ] || [ -e "$runtime/config/release-owner.schema.json" ] || [ -e "$runtime/config/release-owner-build.json" ]; then
-    printf 'release candidate Rust owner declaration is missing\n' >&2; return 2
-  fi
+  for asset in config/release-owner.json config/release-owner.schema.json config/release-owner-build.json bin/subyard-release-owner; do
+    [ ! -e "$runtime/$asset" ] && [ ! -L "$runtime/$asset" ] \
+      || { printf 'release candidate experimental owner metadata is unsupported\n' >&2; return 2; }
+  done
   printf '%s\n' "$runtime/bin/yard-engine"
 }
 

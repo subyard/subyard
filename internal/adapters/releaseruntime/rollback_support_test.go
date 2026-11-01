@@ -2,7 +2,6 @@ package releaseruntime
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,8 +11,7 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-// Export actual component leaf observations beside the historical aggregate
-// verdict. The Rust policy oracle consumes facts, never a runtime eligibility RPC.
+// Exercise component leaf observations beside the historical aggregate verdict.
 func TestRollbackSupportLeafOracle(t *testing.T) {
 	type entry struct {
 		Name         string                `json:"name"`
@@ -97,12 +95,5 @@ func TestRollbackSupportLeafOracle(t *testing.T) {
 			_, legacyErr := runtime.retainedRuntimeBinding(context.Background(), source, target, home, ownerMap)
 			corpus = append(corpus, entry{name, support, owners, legacyErr == nil})
 		})
-	}
-	if destination := os.Getenv("SUBYARD_RUST_ROLLBACK_CORPUS"); destination != "" {
-		raw, err := json.Marshal(corpus)
-		if err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, destination, raw, 0o600)
 	}
 }

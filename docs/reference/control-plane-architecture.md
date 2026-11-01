@@ -48,9 +48,9 @@ Architectural simplification should consolidate places that independently descri
 while preserving identity, confirmation, atomic state and recovery. A language change, daemon or
 general workflow framework does not by itself remove that duplication.
 
-The [Rust release-owner ADR](rust-release-owner-design.md) selects a complete release-transition
-boundary for gated evaluation and defines proposed authority/native-protocol contracts. It does
-not change the current Go implementation or establish production cutover readiness.
+The [Rust release-owner evaluation](rust-release-owner-evaluation.md) is stopped.
+Go remains the production release-transition owner; the reference branch retains the
+evaluation implementation.
 
 ## 2. System topology
 

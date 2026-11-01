@@ -55,6 +55,5 @@ profile rather than a generic Subyard service.
   ownership boundaries and resource budgets.
 - [Release transitions](reference/resumable-release-transition-design.md) — migration, activation
   and recovery invariants, decision matrices and design tradeoffs.
-- [Rust release owner](reference/rust-release-owner-design.md) — ownership and protocol design
-  that was evaluated; [evaluation result](reference/rust-release-owner-evaluation.md) — stopped,
-  Go remains the release owner.
+- [Rust release-owner evaluation](reference/rust-release-owner-evaluation.md) — stopped;
+  Go remains the production owner.

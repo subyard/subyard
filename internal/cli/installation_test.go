@@ -4,18 +4,18 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 func TestInstallationActivationOwnsCanonicalScope(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	runtimeRoot := filepath.Join(root, "runtime-installation")
+	root := repositoryRoot(t)
+	home := testkit.TempDir(t)
+	environment := []string{"HOME=" + home, "SUBYARD_HOME=" + filepath.Join(home, "data"), "SUBYARD_CONFIG_HOME=" + filepath.Join(home, "config")}
+	runtimeRoot := filepath.Join(testkit.TempDir(t), "runtime-installation")
 	if err := os.Mkdir(runtimeRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -23,28 +23,32 @@ func TestInstallationActivationOwnsCanonicalScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &releaseOwnerComponents{cli: program, context: releaseowner.Context{RuntimeRoot: runtimeRoot, ConfigHome: environmentValue(environment, "SUBYARD_CONFIG_HOME"), DataHome: environmentValue(environment, "SUBYARD_HOME"), Target: "release-b", Session: strings.Repeat("a", 64), Direction: releasetransition.DirectionActivateTarget}, activation: map[string]releaseActivationPrepared{}}
-	defer c.Close()
+	r := &installationActivationReconciler{cli: program, request: releasetransition.ProcessRequest{RuntimeRoot: runtimeRoot, ConfigHome: environmentValue(environment, "SUBYARD_CONFIG_HOME"), Target: "release-b"}}
 	ctx := context.Background()
-	before, err := c.captureCoreActivation(ctx, "installation-runtime-v1")
+	before, err := r.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if r.before != nil {
+			r.before.Close()
+		}
+	}()
 	path := filepath.Join(runtimeRoot, uninstall.ManifestName)
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatal("read-only capture wrote inventory")
 	}
-	if err := c.ApplyActivation(ctx, before[0]); err != nil {
+	if err := r.Reconcile(ctx, releasetransition.ReleaseLinks{}); err != nil {
 		t.Fatal(err)
 	}
-	after, err := c.captureCoreActivation(ctx, "installation-runtime-v1")
+	after, err := r.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after[0].State != "current" || before[0].Desired != after[0].Desired || before[0].Source == after[0].Source {
+	if !after.Converged || before.Desired != after.Desired || before.Binding == after.Binding {
 		t.Fatal("enrollment changed recovery scope or lost native binding")
 	}
-	if _, err := os.Lstat(filepath.Join(c.context.DataHome, uninstall.ManifestName)); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(home, "data", uninstall.ManifestName)); !os.IsNotExist(err) {
 		t.Fatal("runtime enrollment acquired full bootstrap scope")
 	}
 	content, err := os.ReadFile(path)
@@ -56,18 +60,18 @@ func TestInstallationActivationOwnsCanonicalScope(t *testing.T) {
 	}
 	testkit.WriteFile(t, path, content, 0600)
 	replacement, _ := os.Lstat(path)
-	if err := c.ApplyActivation(ctx, after[0]); err == nil {
+	if err := r.Reconcile(ctx, releasetransition.ReleaseLinks{}); err == nil {
 		t.Fatal("same-content concurrent replacement admitted")
 	}
 	current, _ := os.Lstat(path)
 	if !os.SameFile(replacement, current) {
 		t.Fatal("stale enrollment changed concurrent record")
 	}
-	fresh, err := c.captureCoreActivation(ctx, "installation-runtime-v1")
+	fresh, err := r.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh[0].Source == after[0].Source || fresh[0].Desired != after[0].Desired {
+	if fresh.Binding == after.Binding || fresh.Desired != after.Desired {
 		t.Fatal("replacement not bound independently of desired scope")
 	}
 }

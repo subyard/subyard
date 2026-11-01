@@ -12,5 +12,4 @@ bash "$ROOT/config/profiles/orca/tests/e2e-controller.sh"
 bash "$ROOT/config/profiles/orca/tests/release-preparation.sh"
 bash "$ROOT/config/profiles/orca/tests/resource-lifecycle.sh"
 
-python3 -B "$ROOT/config/profiles/orca/tests/native-loss-test.py"
 python3 -B "$ROOT/config/profiles/orca/tests/release-observation-test.py"

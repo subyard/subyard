@@ -115,7 +115,7 @@ func (runtime Runtime) bindOwnerRuntimeSources(ctx context.Context, r installedR
 		return nil, err
 	}
 	// Reconstructing a current descriptor is solely a guard. Its byte payloads
-	// never replace the original approved table supplied by the Rust bundle.
+	// never replace the original approved table supplied by the prepared bundle.
 	original := &PreparedInstalledRuntime{owner: r.Owner, source: r.Source, runtime: r.Runtime, resources: r.Resources, files: map[string][]byte{}}
 	previous := ""
 	for _, file := range r.Files {

@@ -3,13 +3,9 @@ package migrationhistory_test
 import (
 	"bytes"
 	"encoding/json"
-	"os"
-	"os/exec"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	mh "github.com/Subyard/Subyard/internal/migrationhistory"
 )
@@ -268,132 +264,11 @@ func canonical(t *testing.T, v any) []byte {
 	}
 	return b
 }
-func TestRustPilotCorpus(t *testing.T) {
+func TestHistoryPilotCorpus(t *testing.T) {
 	cases, expected := pilotCorpus()
 	for i, c := range cases {
 		if got, want := canonical(t, goPilot(c)), canonical(t, expected[i]); !bytes.Equal(got, want) {
 			t.Fatalf("Go case %d: got %s want %s", i, got, want)
 		}
-	}
-	binary := os.Getenv("SUBYARD_MIGRATIONHISTORY_RUST")
-	if binary == "" {
-		t.Logf("independent oracle checked against Go (%d cases); Rust comparison opt-in", len(cases))
-		return
-	}
-	iterations := 1
-	measure := os.Getenv("SUBYARD_MIGRATIONHISTORY_MEASURE") == "1"
-	if measure {
-		iterations = 100
-	}
-	start := time.Now()
-	for range iterations {
-		for _, c := range cases {
-			_ = goPilot(c)
-		}
-	}
-	goDuration := time.Since(start)
-	request := map[string]any{"cases": cases, "iterations": iterations}
-	input, err := json.Marshal(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(binary)
-	command.Stdin = bytes.NewReader(input)
-	output, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var response struct {
-		Results      []json.RawMessage `json:"results"`
-		ElapsedNanos int64             `json:"elapsedNanos"`
-		Iterations   int               `json:"iterations"`
-	}
-	if err = json.Unmarshal(output, &response); err != nil {
-		t.Fatal(err)
-	}
-	if len(response.Results) != len(expected) || response.Iterations != iterations {
-		t.Fatal("incomplete Rust batch")
-	}
-	for i, got := range response.Results {
-		if !bytes.Equal(canonical(t, got), canonical(t, expected[i])) {
-			t.Fatalf("Rust case %d: got %s want %s", i, canonical(t, got), canonical(t, expected[i]))
-		}
-	}
-	if measure {
-		t.Logf("%d cases, %d iterations: Go pure=%s Rust pure=%s (registry/history/results; excludes JSON and process startup)", len(cases), iterations, goDuration, time.Duration(response.ElapsedNanos))
-	} else {
-		t.Logf("%d cases match independent oracle in Go and Rust", len(cases))
-	}
-
-	// These small requests exercise amplification/repetition limits without
-	// constructing a large semantic result or consuming the allowed work budget.
-	wideCase := func(domains, traces int) pilotCase {
-		definition := &pilotRegistry{map[string]int{}, map[string]int{}, []mh.Migration{}, map[string]string{}}
-		states := map[string]mh.DomainState{}
-		for i := 0; i < domains; i++ {
-			name := "domain" + strconv.Itoa(i)
-			definition.Minimum[name] = 1
-			definition.Current[name] = 1
-			states[name] = mh.DomainState{Epoch: 1, Applied: []string{}}
-		}
-		paths := make([][]string, traces)
-		for i := range paths {
-			paths[i] = []string{}
-		}
-		return pilotCase{Op: "history", Registry: definition, States: states, Traces: paths}
-	}
-	for _, contract := range []struct {
-		name                        string
-		domains, traces, iterations int
-		code                        string
-	}{
-		{"small_expansion_control", 2, 2, 1, ""},
-		{"result_budget", 250, 100, 1, "result-budget"},
-		{"work_budget", 100, 1, 10000, "work-budget"},
-	} {
-		t.Run(contract.name, func(t *testing.T) {
-			document, err := json.Marshal(map[string]any{"cases": []pilotCase{wideCase(contract.domains, contract.traces)}, "iterations": contract.iterations})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(document) > 32768 {
-				t.Fatal("budget regression request is unexpectedly large")
-			}
-			cmd := exec.Command(binary)
-			cmd.Stdin = bytes.NewReader(document)
-			out, err := cmd.Output()
-			if contract.code == "" {
-				var control struct {
-					Results []struct {
-						Accepted bool `json:"accepted"`
-					} `json:"results"`
-				}
-				if err != nil || json.Unmarshal(out, &control) != nil || len(control.Results) != 1 || !control.Results[0].Accepted {
-					t.Fatalf("small request refused: %v %q", err, out)
-				}
-				return
-			}
-			exit, ok := err.(*exec.ExitError)
-			if !ok || len(out) != 0 || strings.TrimSpace(string(exit.Stderr)) != "migrationhistory-pilot: "+contract.code {
-				t.Fatalf("expected %s before evaluation, got error=%v stdout=%q stderr=%q", contract.code, err, out, func() string {
-					if ok {
-						return string(exit.Stderr)
-					}
-					return ""
-				}())
-			}
-		})
-	}
-	for name, input := range map[string]string{"malformed": "{", "trailing": string(input) + "{}", "unknown_field": `{"cases":[],"iterations":1,"extra":true}`, "unknown_tag": `{"cases":[{"op":"execute"}],"iterations":1}`, "nested_unknown": `{"cases":[{"op":"registry","registry":{"minimum":{"a":1},"current":{"a":1},"migrations":[],"extra":true}}],"iterations":1}`,
-		"epoch_overflow": `{"cases":[{"op":"registry","registry":{"minimum":{"a":9223372036854775808},"current":{"a":1},"migrations":[]}}],"iterations":1}`,
-		"fraction":       `{"cases":[],"iterations":1.5}`, "negative": `{"cases":[],"iterations":-1}`, "overflow": `{"cases":[],"iterations":18446744073709551616}`, "oversized": strings.Repeat(" ", 1_048_577), "zero": `{"cases":[],"iterations":0}`} {
-		t.Run(name, func(t *testing.T) {
-			cmd := exec.Command(binary)
-			cmd.Stdin = strings.NewReader(input)
-			out, err := cmd.Output()
-			if err == nil || len(out) != 0 {
-				t.Fatalf("invalid codec input accepted: %v %q", err, out)
-			}
-		})
 	}
 }

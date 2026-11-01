@@ -26,11 +26,10 @@ func (runtime *Runtime) inspectActivationRecovery(
 		return protected, nil
 	}
 	journal := protected.journal
-	rustOwner := releaseOwnerRoutingEnabled && verifiedOwner.releaseOwner != nil
-	if !rustOwner && (journal.Checkpoint != releasetransition.JournalReconciling ||
+	if journal.Checkpoint != releasetransition.JournalReconciling ||
 		journal.Goal.Direction != releasetransition.DirectionActivateTarget ||
 		journal.SourceIngress != nil || len(journal.Steps) != 0 || protected.owner != protected.target ||
-		!protected.activationReconciliationOwned || releasetransition.IsRecoveryTransaction(journal.Transaction)) {
+		!protected.activationReconciliationOwned || releasetransition.IsRecoveryTransaction(journal.Transaction) {
 		return protected, nil
 	}
 	observed, err := runtime.inspectRuntimeLinks(protected.request.RuntimeRoot)
@@ -43,15 +42,12 @@ func (runtime *Runtime) inspectActivationRecovery(
 		from := journal.Releases.From
 		expectedPrevious = &from
 	}
-	if !rustOwner && (actual.Active != journal.Goal.Target || !sameRecoveryReleaseIDs(actual.Previous, expectedPrevious)) {
+	if actual.Active != journal.Goal.Target || !sameRecoveryReleaseIDs(actual.Previous, expectedPrevious) {
 		return protected, nil
 	}
 	probe := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2,
 		Mode: releasetransition.RecoveryProcessLifecycleCapabilities}
 	capabilities, probeErr := runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
-	if rustOwner && probeErr != nil {
-		return nil, probeErr
-	}
 	if probeErr != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -136,10 +132,6 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	if owner == nil || owner.root == nil || owner.engine == nil || owner.registryDigest == "" {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("verified recovery owner is unavailable")
 	}
-	if !releaseOwnerRoutingEnabled && owner.releaseOwner != nil {
-		return releasetransition.RecoveryProcessResponse{}, markSelectedRustOwnerError(errors.New("experimental Rust release ownership is disabled; use an ordinary Go runtime"))
-	}
-
 	capabilityProbe := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities || request.Mode == releasetransition.RecoveryProcessRuntimeCapabilities || request.Mode == releasetransition.RecoveryProcessMigrationOwnerCapabilities
 	if !capabilityProbe &&
 		(request.RegistryDigest != owner.registryDigest || request.ArtifactDigest != owner.manifestDigest || request.Target != owner.candidate.release) {
@@ -147,9 +139,6 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	}
 	if err := runtime.pinCandidateRoot(owner); err != nil {
 		return releasetransition.RecoveryProcessResponse{}, err
-	}
-	if releaseOwnerRoutingEnabled && owner.releaseOwner != nil {
-		return runtime.invokeRustRecoveryTransition(ctx, owner, runtimeRoot, request, grant)
 	}
 	payload, err := releasetransition.MarshalRecoveryProcessRequest(request)
 	if err != nil {

@@ -40,7 +40,6 @@ func TestAfterOwnerBrokerRetainsSourceAndMeasuredNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resolved.Close()
-	exportAfterOwnerAdapterPair(t, "broker", p, physical, "original-created-uuid", "")
 	var value afterOwnerBrokerPhysical
 	if json.Unmarshal(physical, &value) != nil || value.Native == strings.Repeat("0", 64) || len(physical) > AfterOwnerBrokerPhysicalBound() {
 		t.Fatal("missing bounded physical record")

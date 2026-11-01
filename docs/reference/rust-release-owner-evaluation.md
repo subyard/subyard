@@ -6,11 +6,11 @@ updated: 2026-11-01
 
 # Rust release-owner evaluation result
 
-The [Rust release-transition owner](rust-release-owner-design.md) (boundary B: one Rust session
+The Rust release-transition owner (boundary B: one Rust session
 owns plan, consent, locks, journal, effect ordering and recovery; a scoped Go helper executes
 component work and the Incus SDK) was evaluated against the strengthened Go owner. The
-evaluation is stopped. Go remains the only production release owner, and the Rust owner will
-be removed from `master`.
+evaluation is stopped. Go remains the only production release owner, and the Rust owner is
+removed from `master`.
 
 ## What was shown
 
@@ -57,7 +57,7 @@ and IPC. Continuing is therefore not worthwhile.
 
 - The evaluation work in progress is preserved on the `rust_migration` branch for reference.
   It is not maintained against `master`.
-- The Rust owner, its packaging, opt-in routing and workflows will be removed from `master`.
+- The Rust owner, its packaging, opt-in routing and workflows are removed from `master`.
   Historical readers and retained exact owners that protect released installations stay.
 - Language-neutral fixes found during the evaluation are moved to `master` separately, with
   their own tests.

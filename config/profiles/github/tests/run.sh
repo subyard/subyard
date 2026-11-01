@@ -52,8 +52,6 @@ if required-passed or not count:
     raise SystemExit('FAIL: required GitHub protocol cases absent: '+','.join(sorted(required-passed)))
 print(f'GitHub Go tests: passed={count} required_protocol_cases={len(required)} skips=0(required)')
 PY
-bash "$ROOT/tests/profile-native-loss.sh"
-python3 -B "$ROOT/config/profiles/github/tests/native-loss-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/skills-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/owner-registration-test.py"
 python3 "$ROOT/config/profiles/github/tests/release-activation-test.py"

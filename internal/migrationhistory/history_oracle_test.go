@@ -3,13 +3,11 @@ package migrationhistory_test
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"slices"
 	"strings"
 	"testing"
 
 	mh "github.com/Subyard/Subyard/internal/migrationhistory"
-	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type historyRegistry struct {
@@ -267,31 +265,12 @@ func historyCanonical(t *testing.T, v any) []byte {
 	return b
 }
 
-// TestRustHistoryOracleCorpus always checks Go against the independent bitset
-// oracle. The required Rust gates export these exact cases before invoking the
-// production crate integration test; ordinary Go tests need no Rust executable.
-func TestRustHistoryOracleCorpus(t *testing.T) {
+// TestHistoryOracleCorpus checks Go against the independent bitset oracle.
+func TestHistoryOracleCorpus(t *testing.T) {
 	cases, expected := historyCorpus()
-	type row struct {
-		Input    historyCase    `json:"input"`
-		Expected map[string]any `json:"expected"`
-	}
-	rows := make([]row, len(cases))
 	for i, c := range cases {
 		if got, want := historyCanonical(t, goHistoryCase(c)), historyCanonical(t, expected[i]); !bytes.Equal(got, want) {
 			t.Fatalf("Go case %d: got %s want %s", i, got, want)
 		}
-		rows[i] = row{c, expected[i]}
 	}
-	if path := os.Getenv("SUBYARD_RUST_HISTORY_CORPUS"); path != "" {
-		payload, err := json.Marshal(struct {
-			SchemaVersion int   `json:"schemaVersion"`
-			Cases         []row `json:"cases"`
-		}{1, rows})
-		if err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, path, append(payload, '\n'), 0600)
-	}
-	t.Logf("%d independent history cases checked; history/trace, invalid registry/frontier, edge/completion binding and projection", len(rows))
 }

@@ -114,7 +114,6 @@ func TestAfterOwnerIntegrationRetainsOriginalPhysicalFacts(t *testing.T) {
 	if len(physical) > bound {
 		t.Fatal("physical record exceeded original scope bound")
 	}
-	exportAfterOwnerAdapterPair(t, "materialized-integrations", original, physical, "original-instance", resolved.PreparedIntegrations().Binding())
 	if path := os.Getenv("SUBYARD_AFTER_OWNER_MATERIALIZED-INTEGRATIONS_CORPUS"); path != "" {
 		d, _, err := decodeMaterializedMetadata(original)
 		if err != nil {

@@ -80,19 +80,16 @@ if [ "${1:-}" = --candidate-identity ]; then
   exit
 fi
 BASELINE=0.19.0
-NATIVE_LOSS=''
 MODE="${1:-normal}"
 if [ "$MODE" != --local-probe ]; then
   MODE=normal
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --baseline) [ "$#" -ge 2 ] || exit 2; BASELINE="$2"; shift 2 ;;
-      --native-loss) [ "$#" -ge 2 ] && [ -z "$NATIVE_LOSS" ] || exit 2; NATIVE_LOSS="$2"; shift 2 ;;
-      *) die 'guest takes --local-probe or --baseline VERSION [--native-loss owner|helper|group]' ;;
+      *) die 'guest takes --local-probe or --baseline VERSION' ;;
     esac
   done
 else [ "$#" = 1 ] || exit 2; fi
-case "$NATIVE_LOSS" in ''|owner|helper|group) ;; *) exit 2 ;; esac
 if [ "$MODE" = normal ]; then
   [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ -r /run/subyard-e2e-lease.json ] || die 'allocated disposable VM1 required'
   [ "$(id -un)" = dev ] || die 'allocated dev user required'
@@ -787,19 +784,11 @@ old_pid="$(systemctl_user show "$UNIT" -p MainPID --value)"
 old_hash="$(hash "/proc/$old_pid/exe")"
 wanted="$(hash "$FINAL_SOURCE/config/profiles/github/bin/broker")"
 [ "$old_hash" != "$wanted" ] || die 'predecessor fixture does not have old loaded broker code'
-if [ -f "$FINAL_SOURCE/config/release-owner.json" ]; then
-  # release_candidate_prepare has checked this explicit target declaration and
-  # its entire manifest. Actual Rust routing is proved by the separate loss case.
-  stage rust-normal-upgrade-without-opaque-interruption
-  touch "$STATE/allow-restart"
-  update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/recovery.log" 2>&1
-else
   interrupt_driver "$STATE" "$YARD_BIN" "$FINAL_RELEASE" "$CANDIDATE" "$UNIT" "$old_pid" "$old_hash" "$wanted"
   touch "$STATE/allow-restart"
   claim_units
   stage historical-go-native-recovery-with-fresh-consent
   PATH="$STATE/wrappers:$PATH" update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/recovery.log" 2>&1
-fi
 claim_units
 verify_runtime "$FINAL_SOURCE"
 ready
@@ -916,56 +905,3 @@ update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/absent-timer.log" 2>&1
   || die 'release activation recreated absent timer units'
 ready
 printf 'ok: authentic %s upgrade/recovery/refusal and synthetic B-to-A rollback; broker loaded identities, core helpers, deferred yard, credentials and disabled timer verified\n' "$BASELINE"
-if [ -n "$NATIVE_LOSS" ]; then
-  stage "separate-final-rust-native-loss-$NATIVE_LOSS"
-  loss_case="$STATE/native-loss"
-  install -d -m 0700 "$loss_case" "$loss_case/bin"
-  printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
-  python3 -B "${ROOT}/config/profiles/github/tests/e2e/native-loss-wrapper.py" "$loss_case" "$UNIT"
-  # Owned delivered bytes drift while the loaded broker remains usable. The
-  # ordinary runtime handler must restore them before its actual restart call.
-  printf '\nfixture-owned loss drift\n' >> "$SUBYARD_HOME/github-broker/default-engine"
-  loss_observe() {
-    fresh /usr/bin/python3 -B "$ROOT/tests/helpers/profile-native-loss.py" \
-      --runtime "$(readlink -f "$STATE/runtime/current")" \
-      --manifest-sha256 "$(hash "$FINAL_SOURCE/runtime-files.sha256")" \
-      --case-root "$loss_case" --mode "$NATIVE_LOSS" --successor "$SYNTHETIC_RELEASE" \
-      --current-version "$CANDIDATE" --activation-id github-runtime "$@"
-  }
-  PATH="$loss_case/bin:$PATH" loss_observe > "$STATE/native-loss.log" 2>&1
-  claim_units
-  loss_resources() {
-    hash "$SUBYARD_HOME/github-broker/default-engine"
-    hash "$UNIT_DIR/$UNIT"
-    systemctl_user show "$UNIT" --property=MainPID,ActiveState
-    readlink "$STATE/runtime/current"
-    readlink "$STATE/runtime/previous"
-    guest sha256sum /usr/local/libexec/subyard/github-client
-  }
-  loss_resources > "$loss_case/resources.before"
-  if [ "$NATIVE_LOSS" = owner ]; then
-    cp "$loss_case/calls" "$loss_case/calls.drained"
-    PATH="$loss_case/bin:$PATH" yard migrate --yes > "$STATE/native-loss-recover.log" 2>&1
-    cmp "$loss_case/calls.drained" "$loss_case/calls" || die 'owner recovery replayed the drained GitHub mutation'
-    loss_resources > "$loss_case/resources.after"
-    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'owner recovery changed the drained profile resources'
-    ready
-    verify_runtime "$FINAL_SOURCE"
-  else
-    loss_observe --verify-unknown >> "$STATE/native-loss.log" 2>&1
-    if PATH="$loss_case/bin:$PATH" yard migrate --yes > "$STATE/native-loss-same-goal.log" 2>&1; then
-      die 'opaque native loss replayed the original goal'
-    fi
-    loss_observe --verify-unchanged
-    loss_resources > "$loss_case/resources.after"
-    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'same-goal refusal changed GitHub resources'
-    if PATH="$loss_case/bin:$PATH" update "$SYNTHETIC" "$SYNTHETIC_RELEASE" --yes > "$STATE/native-loss-new-goal.log" 2>&1; then
-      die 'opaque native loss admitted a replacement goal'
-    fi
-    loss_observe --verify-unchanged
-    loss_resources > "$loss_case/resources.after"
-    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'replacement refusal changed GitHub resources'
-    loss_observe --verify-unknown >> "$STATE/native-loss.log" 2>&1
-  fi
-  printf 'ok: separate Rust GitHub %s loss kept native exit, original custody, no replay and exact final outcome\n' "$NATIVE_LOSS"
-fi

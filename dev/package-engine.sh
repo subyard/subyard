@@ -9,14 +9,12 @@ VERSION="${YARD_BUILD_VERSION:-0.1.0-dev}"
 TARGET_ARCH="$(go env GOARCH 2>/dev/null || true)"
 RUNTIME_DIR=""
 PREBUILT_ENGINE=""
-EXPERIMENTAL_RELEASE_OWNER=0
 MIGRATION_REGISTRY="$REPO/config/migrations.json"
 RELEASE_TRANSITION_REGISTRY="$REPO/config/release-transition.json"
 RUNTIME_INSTALLER="$REPO/scripts/install-runtime-release.sh"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --experimental-release-owner) EXPERIMENTAL_RELEASE_OWNER=1; shift ;;
     --runtime-dir) [ $# -ge 2 ] || exit 2; RUNTIME_DIR="$2"; shift 2 ;;
     --engine) [ $# -ge 2 ] || exit 2; PREBUILT_ENGINE="$2"; shift 2 ;;
     --output-dir) [ $# -ge 2 ] || { printf 'package-engine: --output-dir needs a path\n' >&2; exit 2; }; OUTPUT_DIR="$2"; shift 2 ;;
@@ -124,14 +122,6 @@ trap cleanup_bundle EXIT
 install -d "$bundle_stage/bin"
 install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
-if [ "$EXPERIMENTAL_RELEASE_OWNER" = 1 ]; then
-"$SCRIPT_DIR/build-release-owner.sh" --arch "$goarch" \
-  --output "$bundle_stage/bin/subyard-release-owner"
-install -d "$bundle_stage/config"
-mv "$bundle_stage/bin/subyard-release-owner.build.json" "$bundle_stage/config/release-owner-build.json"
-# Build locks are development coordination, never runtime assets.
-rm -f -- "$bundle_stage/bin/.release-owner-build.lock"
-fi
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   internal/adapters/configmaterial/tomli_w.py
@@ -161,11 +151,8 @@ runtime_extras=(
 } | sort -zu > "$runtime_list"
 while IFS= read -r -d '' relative; do
   [ -e "$REPO/$relative" ] || continue
-  if [ "$EXPERIMENTAL_RELEASE_OWNER" = 0 ]; then
-    case "$relative" in config/release-owner.json|config/release-owner.schema.json|config/release-owner-build.json) continue ;; esac
-  fi
   case "$relative" in
-    config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs|config/retired-integrations/*/tests/*) continue ;;
+    config/release-owner.json|config/release-owner.schema.json|config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs|config/retired-integrations/*/tests/*) continue ;;
   esac
   case "$relative" in
     scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;
@@ -210,11 +197,6 @@ for required in config/installation-capabilities.json \
   [ -f "$bundle_stage/$required" ] \
     || { printf 'package-engine: runtime allowlist omitted %s\n' "$required" >&2; exit 1; }
 done
-if [ "$EXPERIMENTAL_RELEASE_OWNER" = 1 ]; then
-  for required in config/release-owner.json config/release-owner.schema.json config/release-owner-build.json bin/subyard-release-owner; do
-    [ -f "$bundle_stage/$required" ] || { printf 'package-engine: experimental owner omitted %s\n' "$required" >&2; exit 1; }
-  done
-fi
 (
   cd "$bundle_stage"
   find . -type f ! -path './runtime-files.sha256' -print0 | sort -z | xargs -0 sha256sum \
