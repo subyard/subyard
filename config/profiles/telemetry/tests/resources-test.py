@@ -502,7 +502,8 @@ class Resources(unittest.TestCase):
                             monotonic_ns=second * 1000000000, counter_generation='qemu-generation', cpu_ns=cpu,
                             memory_bytes=1024**2)
             self.assertTrue(records.emit(data, 'run', dict(agent_run_id='agent-run', state='starting'),
-                                         source_id='run-fixture', source_time=NOW, event_id='run'))
+                                         source_time=NOW, event_id='run'))
+            config['source_id'] = records.read_private(data/'producer.json')['source_id']
             baseline = dict(event_id='baseline', timestamp='2026-10-24T00:00:01Z', kind='resource.observation',
                             allocation=allocation, observations=[sample(1, 100)])
             self.assertTrue(resources.emit_event(data, config, baseline))
@@ -515,8 +516,7 @@ class Resources(unittest.TestCase):
             self.assertTrue(resources.emit_event(data, config, stop))
             # A delayed open sample association must not reopen the confirmed end.
             self.assertTrue(resources.emit_sample(data, config, dict(sample(10, 600), acquired_at=NOW), 'late-periodic'))
-            for path in (data / 'outbox').glob('*.json'):
-                self.assertTrue(records.deliver(data, records.read_private(path)))
+            resource_observer.drain_outbox(data)
             result = json.loads(subprocess.check_output([str(binary), 'show-run', '--data-dir', str(data), '--run', 'agent-run']))
             self.assertEqual(len(result['selected_nonoverlapping']), 1)
             selected = result['selected_nonoverlapping'][0]
@@ -568,9 +568,31 @@ class Resources(unittest.TestCase):
             def retained(config):
                 cursors.append(config['cursor'])
                 return page
-            with patch.object(sources,'fetch',side_effect=retained), patch.dict(os.environ,SUBYARD_AGENT_RUN_ID='late-agent'), redirect_stdout(io.StringIO()):
+            # Force the collector's commit/unlink between directory snapshot
+            # and open, including when its background tick already removed it.
+            pending = data/'outbox'/'late-periodic-association.json'
+            original_glob, original_drain = Path.glob, resource_observer.drain_outbox
+            removed = []
+            def delayed_snapshot(directory, pattern):
+                paths = list(original_glob(directory, pattern))
+                if directory == pending.parent and pattern == '*.json':
+                    if pending not in paths:
+                        paths.append(pending)
+                    committed = json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
+                        "SELECT source_id,origin_id,encoding FROM records WHERE event_id='late-periodic-association'"]))
+                    self.assertEqual(committed,[dict(source_id=config['source_id'],
+                        origin_id='producer:'+config['source_id'],encoding='json')])
+                    pending.unlink(missing_ok=True)
+                    removed.append(pending.stem)
+                return iter(paths)
+            def drain_after_unlink(directory):
+                with patch.object(Path,'glob',delayed_snapshot):
+                    return original_drain(directory)
+            with patch.object(resource_observer,'drain_outbox',side_effect=drain_after_unlink), \
+                 patch.object(sources,'fetch',side_effect=retained), patch.dict(os.environ,SUBYARD_AGENT_RUN_ID='late-agent'), redirect_stdout(io.StringIO()):
                 resource_observer.capture(data,'vm')
                 resource_observer.assert_records(data,'vm','final')
+            self.assertEqual(removed,['late-periodic-association'])
             self.assertEqual(cursors,['-'])
             self.assertTrue(correlation.register(data,'late-agent',request))
             with patch.object(sources,'fetch',side_effect=retained):
@@ -580,8 +602,7 @@ class Resources(unittest.TestCase):
             with patch.object(sources,'fetch',side_effect=retained):
                 self.assertTrue(sources.poll(data))
             self.assertEqual(cursors,['-','-',EVENT])
-            for pending in (data/'outbox').glob('*.json'):
-                self.assertTrue(records.deliver(data,records.read_private(pending)))
+            resource_observer.drain_outbox(data)
             rows=json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
                 "SELECT count(*) AS edges,min(start_time) AS start,max(end_time) AS end FROM associations WHERE agent_run_id='late-agent'"]))
             self.assertEqual(rows[0],dict(edges=1,start='2026-10-24T00:00:00.000000000Z',end='2026-10-24T00:00:21.000000000Z'))
