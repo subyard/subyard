@@ -47,7 +47,7 @@ func (cli *CLI) initBatchEligible(ctx context.Context, execution *initExecution)
 	_, nativeExecutor := runtime.Executor.(*incusclient.Client)
 	return ok && nativeReader && nativeExecutor && cli.options.InitPlatform == nil && cli.options.Incus == nil && cli.options.Executor == nil && cli.options.NetworkPolicy == nil &&
 		cli.options.IntegrationRuntime == nil && cli.options.ProfileRuntime == nil && !cli.retainedAdapterCompatibility &&
-		!cli.releaseTransitionChild && cli.profileInitRepair == nil && execution.mode == initReconcile && execution.bootstrap == nil && execution.requestedProfile == "" && execution.resourceCommand == "" && execution.provisionProfile == "" && execution.legacyContinuation == nil && !runtime.AdoptLegacyIntegrations &&
+		!cli.releaseTransitionChild && cli.permits.profileInit == nil && execution.mode == initReconcile && execution.bootstrap == nil && execution.requestedProfile == "" && execution.resourceCommand == "" && execution.provisionProfile == "" && execution.legacyContinuation == nil && !runtime.AdoptLegacyIntegrations &&
 		runtime.SourceReader == nil && runtime.PreparedSources == nil && runtime.LegacyContinuation == nil && runtime.ACLToolsAvailable == nil && ports.NativeOperationObserverFrom(ctx) == nil
 }
 

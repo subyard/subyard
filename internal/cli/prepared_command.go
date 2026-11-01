@@ -605,7 +605,7 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	defer release()
 	// Abort before releasing the host barrier, including failures after reservation.
 	defer prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
-	if prepared.initExecution != nil && prepared.initExecution.hooksOnly() && prepared.CLI.profileInitRepair == nil {
+	if prepared.initExecution != nil && prepared.initExecution.hooksOnly() && prepared.CLI.permits.profileInit == nil {
 		var unlock func()
 		ctx, unlock, err = prepared.initExecution.lock(ctx)
 		if err != nil {
@@ -767,11 +767,11 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 				runErr = fmt.Errorf("yard registration is complete; initialization did not finish; rerun yard init --adopt: %w", runErr)
 			}
 		}()
-		if cli.profileInitRepair != nil {
+		if cli.permits.profileInit != nil {
 			if err := execution.validateProfileRepair(ctx, cli); err != nil {
 				return domain.AdapterResult{}, err
 			}
-			unlock, err := cli.lockConfigApplyRepair(ctx, cli.profileInitRepair)
+			unlock, err := cli.lockConfigApplyRepair(ctx, cli.permits.profileInit)
 			if err != nil {
 				return domain.AdapterResult{}, err
 			}
@@ -790,8 +790,8 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		if err == nil && execution.profileProvisionChanged() {
 			result, err = cli.executeInitProfileProvision(ctx, execution, orchestrator, prepared.Plan, diagnostics)
 		}
-		if err == nil && cli.profileInitRepair != nil {
-			err = cli.finishConfigApplyRepair(ctx, cli.profileInitRepair)
+		if err == nil && cli.permits.profileInit != nil {
+			err = cli.finishConfigApplyRepair(ctx, cli.permits.profileInit)
 		}
 		if err == nil && !cli.releaseTransitionChild {
 			err = cli.verifyInitReleaseReadiness(ctx, execution.loaded.Context.YardName)
@@ -1054,7 +1054,7 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 				return "", domain.ActionDelta{}, err
 			}
 			prepared.exactState = full.installationBinding()
-			if permit := prepared.CLI.teardownRepair; permit != nil {
+			if permit := prepared.CLI.permits.teardown; permit != nil {
 				prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
 			}
 			return "yard.teardown.full", domain.ActionDelta{Changed: true, Consequences: []string{"permanently remove this installation and all its local yards"}}, nil
@@ -1064,7 +1064,7 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 		}
 		if prepared.exactState == "" {
 			prepared.exactState = execution.binding()
-			if permit := prepared.CLI.teardownRepair; permit != nil {
+			if permit := prepared.CLI.permits.teardown; permit != nil {
 				prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
 			}
 		}
@@ -1078,7 +1078,7 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 		return execution.steps(prepared.Loaded.Context)
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-		permit := prepared.CLI.teardownRepair
+		permit := prepared.CLI.permits.teardown
 		if permit != nil {
 			unlock, err := prepared.CLI.lockConfigApplyRepair(ctx, permit)
 			if err != nil {

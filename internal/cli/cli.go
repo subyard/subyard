@@ -125,14 +125,10 @@ type CLI struct {
 	retainedAdapterCompatibility bool
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
-	configApplyRepair            *configApplyRepairPermit
+	permits                      recoveryPermits
 	allowResetYard               bool
 	resourceSessionTransport     string
 	resourceWire                 string
-	profileInitRepair            *configApplyRepairPermit
-	integrationCleanupRepair     *configApplyRepairPermit
-	teardownRepair               *configApplyRepairPermit
-	resourceShutdownRepair       *resourceShutdownPermit
 	fullTeardownRecovery         string
 	ownerMutationLock            *uninstall.Tree
 	ownerMutationLockExpected    *uninstall.Tree
@@ -152,8 +148,8 @@ func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation.env["SUBYARD_OPERATION_ID"] = operationID
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
 	operation.discoveredOwners = maps.Clone(cli.discoveredOwners)
-	operation.teardownRepair = nil
-	operation.resourceShutdownRepair = nil
+	operation.permits.teardown = nil
+	operation.permits.resourceShutdown = nil
 	return &operation
 }
 
@@ -193,10 +189,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.options.Stdout = stdout
 	operation.options.Stderr = stderr
 	operation.releaseTransitionChild = true
-	operation.configApplyRepair = nil
-	operation.profileInitRepair = nil
-	operation.integrationCleanupRepair = nil
-	operation.resourceShutdownRepair = nil
+	operation.permits = recoveryPermits{}
 	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
 		// Keep the native execution error in process. Only the outer command
 		// boundary renders it or converts it to an exit status.
@@ -452,7 +445,7 @@ func New(options Options) (*CLI, error) {
 func (cli *CLI) Run(ctx context.Context) int {
 	cli.localMetadataDiagnostics = !cli.releaseTransitionChild
 	cli.configResources, cli.configResourcesRoot = nil, ""
-	cli.resourceShutdownRepair = nil
+	cli.permits = recoveryPermits{}
 	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
 	yard, explicit, yes, remaining, err := parseGlobals(arguments, cli.env["SUBYARD_YARD"])
@@ -516,13 +509,20 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("unknown command %q\nTry %q.", name, cli.options.Program+" --help")
 		return 2
 	}
-	if core && definition.Handler == "@network" && commandHelpRequested(commandArguments) {
+	if core && (definition.Handler == "@service" || definition.Handler == "@test-vms" && !testVMLogsInvocation(commandArguments)) && !commandHelpRequested(commandArguments) {
+		selected, arguments, selectionErr := cli.selectServiceInvocation(ctx, definition, commandArguments)
+		if selectionErr != nil {
+			return cli.reportServiceError(commandArguments, selectionErr)
+		}
+		yard, explicit, commandArguments = selected, true, arguments
+	}
+	admission := cli.admission(definition, core, resourceDefinition, profileResource, commandArguments, explicit)
+	readOnlyInvocation := admission.readOnly
+	switch admission.early {
+	case earlyNetworkHelp:
 		cli.networkUsage()
 		return 0
-	}
-	// Profile completion needs only shipped native inventory, before owner,
-	// network, power or selected-yard observations.
-	if core && definition.Handler == "@list" && len(commandArguments) == 1 && commandArguments[0] == "--complete-profiles" {
+	case earlyProfileCompletion:
 		packages, err := profile.Packages(cli.options.RepositoryRoot)
 		if err != nil {
 			cli.errorf("profile catalog: %v", err)
@@ -533,165 +533,51 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return 0
 	}
-	if core && (definition.Handler == "@service" || definition.Handler == "@test-vms" && !testVMLogsInvocation(commandArguments)) && !commandHelpRequested(commandArguments) {
-		selected, arguments, selectionErr := cli.selectServiceInvocation(ctx, definition, commandArguments)
-		if selectionErr != nil {
-			return cli.reportServiceError(commandArguments, selectionErr)
-		}
-		yard, explicit, commandArguments = selected, true, arguments
-	}
-	configSync, configSyncCheck, configSyncStatus := false, false, false
-	registrationRepair := core && definition.Handler == "@config" && configRegistrationRepairInvocation(commandArguments)
-	if core && definition.Handler == "@config" {
-		configSync, configSyncCheck, configSyncStatus = configSyncInvocation(commandArguments)
-	}
-	resourceReadOnly := false
-	if profileResource {
-		invocation, parseErr := parseResourceInvocation(commandArguments)
-		resourceReadOnly = parseErr == nil && (invocation.help ||
-			cli.resources.VerbReadOnly(resourceDefinition.Command, invocation.verb))
-	}
-	keysReadOnly := false
-	if core && definition.Name == "keys" && definition.Handler == "@keys" && definition.Arg0 == "" {
-		arguments := keysWithoutConsent(commandArguments)
-		keysReadOnly = len(arguments) == 2 && arguments[0] == "check-exclusive"
-	}
-	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
-		(core && definition.Handler == "@client-projects") ||
-		(core && definition.Effect == command.EffectRead) ||
-		(core && definition.Handler == "@host" && hostReadOnlyInvocation(commandArguments)) ||
-		resourceReadOnly || keysReadOnly ||
-		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
-		(core && definition.Handler == "@test-vms" && (testVMStatusInvocation(commandArguments) || testVMLogsInvocation(commandArguments))) ||
-		(core && definition.Handler == "@integration" && integrationReadOnlyInvocation(commandArguments)) ||
-		(core && definition.Handler == "@profile" && profileReadOnlyInvocation(commandArguments)) ||
-		(core && definition.Handler == "@project-state" && len(commandArguments) > 0 &&
-			(commandArguments[0] == "check-role" || commandArguments[0] == "preview")) ||
-		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
-		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
-	if core && definition.Handler == "@ssh-agent" {
-		invocation, parseErr := parseSSHAgentArguments(commandArguments)
-		// Revocation must remain available during release recovery. Treat it
-		// like a reader only for preflight; its own typed action still audits
-		// the bounded mutation and never grants access.
-		readOnlyInvocation = parseErr != nil || invocation.verb != "unlock" || invocation.help
-	}
 	if explicit {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	}
 	cli.env["SUBYARD_YARD"] = yard
-	if core && definition.Handler == "@current-migration" {
+	switch admission.early {
+	case earlyCurrentMigration:
 		return cli.runCurrentMigration(ctx, definition, commandArguments, explicit, yes)
-	}
-	if core && definition.Handler == "@host" {
+	case earlyHostRename:
 		if code, handled := cli.runRegisteredHostRename(ctx, yard, commandArguments, yes); handled {
 			return code
 		}
-	}
-	if core && definition.Handler == "@config" {
-		if action, rest := configEarlyInvocation(commandArguments); action == "repair-alias" {
-			return cli.runConfigAliasRepair(ctx, yard, rest, yes)
-		} else if action == "reduce-selection" {
-			return cli.runSelectionSourceRepair(ctx, yard, rest, yes)
-		} else if action == "validate" {
-			return cli.runConfigValidate(yard, rest)
-		}
-	}
-	if core && definition.Handler == "@help" {
+	case earlyConfigRepairAlias:
+		return cli.runConfigAliasRepair(ctx, yard, admission.earlyArguments, yes)
+	case earlyConfigReduceSelection:
+		return cli.runSelectionSourceRepair(ctx, yard, admission.earlyArguments, yes)
+	case earlyConfigValidate:
+		return cli.runConfigValidate(yard, admission.earlyArguments)
+	case earlyHelp:
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, yard, "")
 		}
 		cli.usage()
 		return 0
-	}
-	if core && definition.Handler == "@rpc" {
+	case earlyRPC:
 		cli.localMetadataDiagnostics = false
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, yard, "")
 		}
 		return cli.serveRPC(ctx, yard, commandArguments)
-	}
-	if core && definition.Handler == "@migrate" {
+	case earlyMigrate:
 		return cli.runMigration(ctx, yard, commandArguments)
-	}
-	if core && definition.Handler == "@release-transition" {
+	case earlyReleaseTransition:
 		return cli.runReleaseTransition(ctx, commandArguments)
-	}
-	if core && definition.Handler == "@logs" && !explicit && hostLogInvocation(commandArguments) {
+	case earlyHostLogs:
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, "", "")
 		}
 		return cli.runHostLogs(commandArguments)
 	}
-	// Teardown checks release admission after scope selection: full uninstall
-	// uses its own ownership and cleanup guards without requiring migrations.
-	if !readOnlyInvocation && !registrationRepair && !cli.releaseTransitionChild &&
-		(!core || definition.Name != "update" && definition.Handler != "@teardown") {
-		outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
-		if gateErr != nil {
-			cli.errorf("inspect release transition: %v", gateErr)
-			return 1
+	if admission.gate == gateRequired && !cli.releaseTransitionChild {
+		permits, code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes)
+		if done {
+			return code
 		}
-		if outcome != nil && core && definition.Handler == "@config" {
-			if apply, allLocal := configApplyInvocation(commandArguments); apply {
-				permit, err := cli.prepareConfigApplyRepair(ctx, yard, allLocal, *outcome)
-				if err != nil {
-					cli.errorf("config apply: %v", err)
-					return 1
-				}
-				cli.configApplyRepair = permit
-				if permit != nil {
-					outcome = nil
-				}
-			}
-		}
-		if outcome != nil && core && definition.Handler == "@init" {
-			outcome, gateErr = cli.prepareInitAdmission(ctx, yard, commandArguments, *outcome)
-			if gateErr != nil {
-				cli.errorf("init release repair: %v", gateErr)
-				return 1
-			}
-		}
-		if outcome != nil && core && definition.Handler == "@integration" {
-			permit, err := cli.prepareIntegrationCleanupRecovery(ctx, yard, commandArguments, *outcome)
-			if err != nil {
-				cli.errorf("integration cleanup recovery: %v", err)
-				return 1
-			}
-			cli.integrationCleanupRepair = permit
-			if permit != nil {
-				outcome = nil
-			}
-		}
-		if outcome != nil && profileResource {
-			permit, err := cli.prepareResourceShutdownRepair(ctx, yard, resourceDefinition, commandArguments, *outcome)
-			if err != nil {
-				cli.errorf("resource shutdown recovery: %v", err)
-				return 1
-			}
-			cli.resourceShutdownRepair = permit
-			if permit != nil {
-				outcome = nil
-			}
-		}
-		if outcome != nil {
-			if core {
-				if definition.Handler == "@config" {
-					if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, commandArguments, yes, *outcome); handled {
-						return code
-					}
-				}
-				if handled, code := cli.runActivationSelectionRepair(ctx, yard, definition.Handler, commandArguments, yes, *outcome); handled {
-					return code
-				}
-			}
-			if encodeErr := json.NewEncoder(cli.options.Stderr).Encode(
-				publicInspectedMutationGateOutcome(outcome, gateInspection),
-			); encodeErr != nil {
-				cli.errorf("write release transition outcome: %v", encodeErr)
-			}
-			return 1
-		}
+		cli.permits = permits
 	}
 	ownerDataHome := cli.env["SUBYARD_HOME"]
 	if ownerDataHome == "" {
@@ -703,7 +589,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 			ownerDataHome = filepath.Join(operatorHome, ".subyard")
 		}
 	}
-	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile" || definition.Handler == "@teardown")) {
+	if ownerDataHome != "" && admission.ownerRecovery {
 		configHome, err := config.ResolveConfigHome(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), cli.env)
 		if err != nil {
 			cli.errorf("owner recovery context: %v", err)
@@ -736,7 +622,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	ctx = transport.WithSSHTrust(ctx, trust.Options)
 	configSyncPending := false
 	if core && definition.Handler == "@config" {
-		if configSync {
+		if admission.configSync {
 			operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
 			if operatorHome == "" {
 				operatorHome = cli.env["HOME"]
@@ -791,7 +677,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration" || definition.Handler == "@profile" || definition.Handler == "@teardown"))
+			readOnlyRoute := admission.readOnlyRoute
 			var results []ownerInventoryResult
 			if readOnlyInvocation && !commandHelpRequested(commandArguments) && !(core && definition.Handler == "@test-vms" && testVMLogsInvocation(commandArguments)) {
 				results = cli.allOwnerInventoriesForQueries(ctx, base, false)
@@ -854,14 +740,14 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return 2
 	}
-	if !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile" || definition.Handler == "@teardown")) {
+	if admission.ownerRecovery {
 		if err := cli.recoverLocalHostRename(ctx, loaded); err != nil {
 			cli.errorf("recover owner HostID rename: %v", err)
 			return 1
 		}
 	}
 	loadedContext := loaded.Context
-	if core && definition.Handler == "@teardown" && !commandHelpRequested(commandArguments) {
+	if admission.teardownScope {
 		commandArguments, err = cli.chooseTeardownScope(loaded.Context, commandArguments)
 		if err != nil {
 			cli.errorf("teardown: %v", err)
@@ -870,25 +756,11 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if slices.Contains(commandArguments, "--full") {
 			cli.env["SUBYARD_NO_AUDIT"] = "1"
 		} else if !cli.releaseTransitionChild {
-			outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
-			if gateErr != nil {
-				cli.errorf("inspect release transition: %v", gateErr)
-				return 1
+			permit, code, done := cli.admitTeardownGate(ctx, yard, loaded, commandArguments)
+			if done {
+				return code
 			}
-			if outcome != nil {
-				permit, err := cli.prepareTeardownRepair(ctx, loaded, commandArguments, *outcome)
-				if err != nil {
-					cli.errorf("teardown release admission: %v", err)
-					return 1
-				}
-				cli.teardownRepair = permit
-				if permit == nil {
-					if err := json.NewEncoder(cli.options.Stderr).Encode(publicInspectedMutationGateOutcome(outcome, gateInspection)); err != nil {
-						cli.errorf("write release transition outcome: %v", err)
-					}
-					return 1
-				}
-			}
+			cli.permits.teardown = permit
 		}
 	}
 	cli.ensureOperationID()
@@ -918,10 +790,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	if configSyncPending && loaded.Context.AccessKind == domain.AccessLocal {
 		switch {
-		case configSyncCheck:
+		case admission.syncCheck:
 			cli.errorf("config sync --check: interrupted transaction requires recovery by a normal config sync")
 			return 1
-		case configSyncStatus:
+		case admission.syncStatus:
 			return cli.runPendingConfigSyncStatus(ctx, configSyncHome, configSyncStatusArguments(commandArguments))
 		default:
 			if recoveryErr := resumeInterruptedConfigSync(configSyncHome); recoveryErr != nil {
@@ -1050,7 +922,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core && definition.Handler == "@logs" && hostLogInvocation(commandArguments) {
 		return cli.runHostLogs(commandArguments)
 	}
-	if configSync {
+	if admission.configSync {
 		configSyncTarget, configSyncRouteErr := application.Route(
 			loadedContext, domain.RemoteOnOwner,
 		)
@@ -4349,8 +4221,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 			if outcome != nil {
 				if definition.Handler == "@init" {
-					outcome, gateErr = operationCLI.prepareInitAdmission(
+					var permit *configApplyRepairPermit
+					permit, outcome, gateErr = operationCLI.prepareInitAdmission(
 						ctx, operationLoaded.Context.YardName, params.Arguments, *outcome)
+					operationCLI.permits.profileInit = permit
 					if gateErr != nil {
 						return nil, operationRPCError("mutation_gate_failed", gateErr)
 					}
@@ -4466,8 +4340,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
 			if outcome != nil {
-				if planned.Definition.Handler != "@init" || planned.CLI.profileInitRepair == nil ||
-					!sameConfigApplyGate(planned.CLI.profileInitRepair.gate, *outcome) {
+				if planned.Definition.Handler != "@init" || planned.CLI.permits.profileInit == nil ||
+					!sameConfigApplyGate(planned.CLI.permits.profileInit.gate, *outcome) {
 					return nil, mutationGateRPCError(outcome, gateInspection)
 				}
 			}

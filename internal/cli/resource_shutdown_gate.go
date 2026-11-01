@@ -147,7 +147,7 @@ func validateResourceShutdownAssessment(definition resource.Definition, assessme
 }
 
 func (cli *CLI) validateResourceShutdownRepair(definition resource.Definition, verb string, loaded config.Loaded, native resource.PrepareResult) error {
-	permit := cli.resourceShutdownRepair
+	permit := cli.permits.resourceShutdown
 	if permit == nil {
 		return nil
 	}
@@ -159,7 +159,7 @@ func (cli *CLI) validateResourceShutdownRepair(definition resource.Definition, v
 }
 
 func (cli *CLI) lockResourceShutdownRepair(ctx context.Context) (func(), error) {
-	permit := cli.resourceShutdownRepair
+	permit := cli.permits.resourceShutdown
 	if permit == nil {
 		return func() {}, nil
 	}
@@ -187,12 +187,12 @@ func (cli *CLI) lockResourceShutdownRepair(ctx context.Context) (func(), error) 
 }
 
 func (cli *CLI) finishResourceShutdownRepair(ctx context.Context) error {
-	if cli.resourceShutdownRepair == nil {
+	if cli.permits.resourceShutdown == nil {
 		return nil
 	}
 	operation := *cli
 	operation.env = maps.Clone(cli.baseEnv)
-	return operation.finishTeardownRepair(ctx, cli.resourceShutdownRepair.history)
+	return operation.finishTeardownRepair(ctx, cli.permits.resourceShutdown.history)
 }
 
 func (cli *CLI) checkResourceShutdownGate(ctx context.Context, permit *resourceShutdownPermit) error {

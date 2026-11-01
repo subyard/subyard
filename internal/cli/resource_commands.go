@@ -556,7 +556,7 @@ func (runner *resourceApplyRunner) Run(
 		runner.shutdownLocked = true
 		defer func() { runner.shutdownLocked = false }()
 	}
-	if runner.cli.resourceShutdownRepair != nil {
+	if runner.cli.permits.resourceShutdown != nil {
 		defer func() {
 			if checkErr := runner.cli.finishResourceShutdownRepair(ctx); checkErr != nil {
 				result.Status = "error"

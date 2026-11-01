@@ -112,9 +112,9 @@ func (consumers *configSyncConsumers) apply(ctx context.Context, cli *CLI, loade
 			if permit == nil {
 				return fmt.Errorf("materialized configuration refresh blocked by release transition: %s; %s", outcome.Code, outcome.Retry)
 			}
-			previous := cli.configApplyRepair
-			cli.configApplyRepair = permit
-			defer func() { cli.configApplyRepair = previous }()
+			previous := cli.permits.configApply
+			cli.permits.configApply = permit
+			defer func() { cli.permits.configApply = previous }()
 		}
 	}
 	consumers.execution.selector = func() ([]configTarget, error) {

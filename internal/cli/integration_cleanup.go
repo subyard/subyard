@@ -31,7 +31,7 @@ func (prepared *preparedCommand) prepareIntegrationCleanup(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	permit := cli.integrationCleanupRepair
+	permit := cli.permits.integrationCleanup
 	if permit != nil && (permit.yard != loaded.Context.YardName || permit.cleanupID != request.id || permit.cleanupPlanBinding != plan.StateBinding()) {
 		return domain.ErrPlanStale
 	}

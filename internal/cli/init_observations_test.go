@@ -156,7 +156,7 @@ func TestInitStageBatchEligibilityKeepsInjectedAndRepairCallersSerial(t *testing
 			case "child":
 				program.releaseTransitionChild = true
 			case "repair":
-				program.profileInitRepair = &configApplyRepairPermit{}
+				program.permits.profileInit = &configApplyRepairPermit{}
 			case "resource":
 				execution.resourceCommand = "sample"
 			case "reset":

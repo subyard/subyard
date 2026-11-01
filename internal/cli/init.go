@@ -775,7 +775,7 @@ func (execution *initExecution) actionFacts(action domain.ActionID) string {
 }
 
 func (execution *initExecution) validateProfileRepair(ctx context.Context, cli *CLI) error {
-	if cli.profileInitRepair == nil {
+	if cli.permits.profileInit == nil {
 		return nil
 	}
 	if execution.mode != initReconcile || execution.bootstrap != nil || execution.hostIDPending {
@@ -786,14 +786,14 @@ func (execution *initExecution) validateProfileRepair(ctx context.Context, cli *
 	if err != nil {
 		return err
 	}
-	if !cli.profileInitRepair.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
+	if !cli.permits.profileInit.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
 		return errors.New("init release repair requires the persisted yard configuration without overrides")
 	}
 	return nil
 }
 
 func (execution *initExecution) projectHooksApplicable(ctx context.Context, cli *CLI, allowNoWork bool) (bool, error) {
-	if allowNoWork && cli.profileInitRepair == nil && execution.hookPlan.NoProjectHookWork() {
+	if allowNoWork && cli.permits.profileInit == nil && execution.hookPlan.NoProjectHookWork() {
 		return false, nil
 	}
 	return execution.platform.ProjectHooksApplicable(ctx)

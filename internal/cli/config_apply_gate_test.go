@@ -633,7 +633,7 @@ func TestConfigApplyRepairRejectsDifferentCommandDesiredBeforeConfirmation(t *te
 	if permit.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
 		t.Fatal("command override matched persisted repair")
 	}
-	fixture.cli.configApplyRepair = permit
+	fixture.cli.permits.configApply = permit
 	appendMismatchedHashSteps(t, fixture.cli.options.Executor.(*testkit.Incus), loaded, "0")
 	var diagnostics bytes.Buffer
 	fixture.cli.options.Stderr = &diagnostics

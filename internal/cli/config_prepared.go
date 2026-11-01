@@ -305,7 +305,7 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 		}
 		execution.approved = append(execution.approved, assessment)
 	}
-	if cli.configApplyRepair != nil && !cli.configApplyRepair.matchesRequestedConfigs(execution.approved) {
+	if cli.permits.configApply != nil && !cli.permits.configApply.matchesRequestedConfigs(execution.approved) {
 		return nil, errors.New("config apply: release repair requires the persisted configuration; remove differing command overrides")
 	}
 	execution.current = slices.Clone(execution.approved)
@@ -393,8 +393,8 @@ func (prepared *preparedCommand) attachConfigApply(execution *configApplyExecuti
 func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyExecution, approvedSteps []domain.OperationStep, output io.Writer) error {
 	copyCLI := *cli
 	copyCLI.options.Stdout, copyCLI.options.Stderr = output, output
-	if cli.configApplyRepair != nil {
-		unlock, err := cli.lockConfigApplyRepair(ctx, cli.configApplyRepair)
+	if cli.permits.configApply != nil {
+		unlock, err := cli.lockConfigApplyRepair(ctx, cli.permits.configApply)
 		if err != nil {
 			return err
 		}
@@ -415,7 +415,7 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		}
 	}
 	applier := cli.options.Config
-	if applier == nil && cli.configApplyRepair != nil {
+	if applier == nil && cli.permits.configApply != nil {
 		applier = releaseTransitionConfigApplier{cli: &copyCLI}
 	}
 	if applier == nil {
@@ -441,8 +441,8 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 			fmt.Fprintln(output, "config apply: no running local yards to refresh")
 		}
 	}
-	if cli.configApplyRepair != nil {
-		return cli.finishConfigApplyRepair(ctx, cli.configApplyRepair)
+	if cli.permits.configApply != nil {
+		return cli.finishConfigApplyRepair(ctx, cli.permits.configApply)
 	}
 	return nil
 }

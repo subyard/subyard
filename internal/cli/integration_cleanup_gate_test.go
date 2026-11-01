@@ -116,7 +116,7 @@ func TestIntegrationCleanupRecoveryRepeatUsesOrdinaryReadyBoundary(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := repeat.Run(context.Background()); code != 0 || repeat.integrationCleanupRepair != nil || runtime.plan.Changed {
+	if code := repeat.Run(context.Background()); code != 0 || repeat.permits.integrationCleanup != nil || runtime.plan.Changed {
 		t.Fatalf("already retired repeat failed or reused repair authority: %d %s", code, output)
 	}
 	if !bytes.Equal(before, mustReadConfigFixture(t, filepath.Join(home, "release-transition/v2/journal.json"))) {
@@ -132,7 +132,7 @@ func TestIntegrationCleanupRecoveryRemainsLocalCLIOnly(t *testing.T) {
 	}
 	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "cleanup-recovery-rpc", Params: json.RawMessage(`{"command":"integration","arguments":["cleanup","widget"],"exact":true}`)}, nil)
-	if fault, ok := err.(*rpc.Error); !ok || fault.Code != string(releasetransition.CodeDependencyUnavailable) || runtime.applied != 0 || program.integrationCleanupRepair != nil {
+	if fault, ok := err.(*rpc.Error); !ok || fault.Code != string(releasetransition.CodeDependencyUnavailable) || runtime.applied != 0 || program.permits.integrationCleanup != nil {
 		t.Fatalf("RPC acquired local cleanup recovery authority: %v", err)
 	}
 }

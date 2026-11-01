@@ -153,7 +153,7 @@ func TestFullTeardownRecoveryAssessmentBindsReleaseRepairPermit(t *testing.T) {
 		t.Fatal(err)
 	}
 	program.fullTeardownRecovery = directory
-	program.teardownRepair = &configApplyRepairPermit{factsFingerprint: "approved-history"}
+	program.permits.teardown = &configApplyRepairPermit{factsFingerprint: "approved-history"}
 	definition, _ := program.manifest.Lookup("teardown")
 	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded, Definition: definition, Arguments: []string{"--full"}}
 	if err := prepared.prepareTeardown(context.Background(), nil); err != nil {
@@ -164,7 +164,7 @@ func TestFullTeardownRecoveryAssessmentBindsReleaseRepairPermit(t *testing.T) {
 		t.Fatalf("full recovery assessment unavailable: %s, %#v, %v", action, delta, err)
 	}
 	approved := prepared.exactState
-	program.teardownRepair.factsFingerprint = "changed-history"
+	program.permits.teardown.factsFingerprint = "changed-history"
 	if _, _, err := prepared.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}

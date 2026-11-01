@@ -177,6 +177,11 @@ CLI / operation.plan → manifest → resolveCoreCommand → prepareCommand
                                                       Close
 ```
 
+Before context loading, `internal/cli/admission.go` classifies each CLI invocation once: the
+manifest effect refined by verb-level readers, early dispatch, the release-gate policy and the
+bounded recovery that may replace a blocked gate. The gate returns recovery permits as one value
+that the invocation installs before dispatch; it does not decide policy itself.
+
 The handler-family resolver binds preparation and physical leaves in one place. Startup rejects
 unknown internal handlers. A prepared command owns canonical arguments, resolved context, the
 operation plan and one execution closure capturing its typed state. Plans with `confirmation:never`

@@ -1325,7 +1325,7 @@ func TestProfileRuntimeRepairValidationRejectsUnsafeInitShapes(t *testing.T) {
 		{name: "new host identity", execution: initExecution{mode: initReconcile, hostIDPending: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cli := &CLI{profileInitRepair: permit}
+			cli := &CLI{permits: recoveryPermits{profileInit: permit}}
 			if err := test.execution.validateProfileRepair(context.Background(), cli); err == nil {
 				t.Fatal("unsafe init shape was admitted by completed release repair")
 			}
@@ -1359,7 +1359,7 @@ func TestProfileRuntimeRepairValidationRejectsChangedEffectiveConfiguration(t *t
 	if err != nil || permit == nil {
 		t.Fatalf("prepare ProfileRuntime repair permit: permit=%#v err=%v", permit, err)
 	}
-	fixture.cli.profileInitRepair = permit
+	fixture.cli.permits.profileInit = permit
 	loaded.Context.DevUID++
 	execution := initExecution{loaded: loaded, mode: initReconcile}
 	if err := execution.validateProfileRepair(context.Background(), fixture.cli); err == nil ||
@@ -1713,7 +1713,7 @@ func TestPreparedEmptyInitSkipsDispatchAfterLockedRefresh(t *testing.T) {
 			if applicable, err := execution.projectHooksApplicable(context.Background(), program, false); err != nil || !applicable {
 				t.Fatalf("unlocked fallback omitted hooks: applicable=%t err=%v", applicable, err)
 			}
-			program.profileInitRepair = &configApplyRepairPermit{}
+			program.permits.profileInit = &configApplyRepairPermit{}
 			if applicable, err := execution.projectHooksApplicable(context.Background(), program, true); err != nil || !applicable {
 				t.Fatalf("repair completion omitted hooks: applicable=%t err=%v", applicable, err)
 			}
