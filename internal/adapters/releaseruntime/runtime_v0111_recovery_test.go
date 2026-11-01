@@ -533,6 +533,7 @@ func runV0111TransitionProcessHelper(input io.Reader, output io.Writer) error {
 		desired:   v0111FixtureFingerprint("candidate-scope"),
 	}
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+		RegisteredYards: []releasetransition.V2ActivationReconciler{}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{},
 		ConfigHome: request.ConfigHome, Releases: releases, Direction: request.Direction,
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
 			return links.Observe()

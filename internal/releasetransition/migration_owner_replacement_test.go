@@ -252,6 +252,11 @@ func migrationOwnerFixtureWithPrevious(t *testing.T, retainedPrevious bool) (*V2
 	}
 	old, _, _ := v2TransitionFixtureWithReleases(t, nil, pair, links)
 	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload = localSSHHistoricalRegistry(t, payload)
+	if fingerprintPayload(payload) != AffectedMigrationOwnerRegistry {
+		t.Fatal("historical owner fixture lost exact published registry bytes")
+	}
+	old.catalog = preRegisteredYardsCapabilityCatalog()
 	if err != nil {
 		t.Fatal(err)
 	}

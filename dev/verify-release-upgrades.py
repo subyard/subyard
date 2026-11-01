@@ -507,11 +507,23 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                     output.write(payload)
 
 
-def set_fixture_observation(control, status=None, journal=None, history=None):
+def set_fixture_observation(control, status=None, journal=None, history=None, owned_project=None):
     instances = [] if status is None else [{"project": "subyard", "name": "yard",
                                             "info": {"name": "yard", "status": status,
                                                      "type": "container", "config": {}, "devices": {}}}]
-    payload = json.dumps({"instances": instances, "holdJournal": str(journal) if journal else "", "migrationHistory": history})
+    if (history is not None or owned_project is not None) and instances:
+        # Explicit owned cases model an existing managed, disk-backed container;
+        # it exercises materialized activation, not physical legacy enrollment.
+        config = {"volatile.uuid": "history-owned-yard", "user.subyard.managed": "true",
+                  "user.subyard.name": "default", "user.subyard.bridge": "incusbr0",
+                  "user.subyard.desired_power": status.lower(), "user.subyard.disk_tmp": "v1"}
+        instances[0]["info"].update(config=config, expanded_config=config,
+                                    devices={}, expanded_devices={})
+    observation = {"instances": instances, "holdJournal": str(journal) if journal else "", "migrationHistory": history}
+    project_config = history.get("projectConfig") if history is not None else owned_project
+    if project_config is not None:
+        observation["projects"] = {"subyard": {"name": "subyard", "config": project_config}}
+    payload = json.dumps(observation)
     control.write_text(payload)
     control.chmod(0o600)
     applied = Path(str(control) + ".applied")
@@ -929,7 +941,7 @@ def verify_completed_activation_drift(fixture):
 
 def verify_power_rollback_refusal(fixture):
     checkpoint = json.loads((fixture.config / "release-transition/v2/history-checkpoint.json").read_text())
-    require(checkpoint["domains"]["power-metadata"]["epoch"] == 2,
+    require(checkpoint["domains"]["power-metadata"]["epoch"] == 3,
             "optional publication reader boundary did not commit")
     for launcher in (fixture.old_launcher, fixture.runtime / "current/bin/yard"):
         before = snapshot(fixture.config)
@@ -983,10 +995,22 @@ def compatible_power_release(release, version, arch, root):
     exact_settings = {"id": "localize-ssh-port-settings-v3", "domain": "settings",
                       "fromEpoch": 2, "toEpoch": 3, "kind": "local-ssh-port-settings-v2-to-v3",
                       "dependsOn": ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"]}
-    require(registry["currentEpochs"]["power-metadata"] == 2
+    exact_registered = {"id": "register-existing-local-yards-v3", "domain": "owner-registration",
+                        "fromEpoch": 2, "toEpoch": 3, "kind": "registered-yards-v2-to-v3",
+                        "dependsOn": ["canonicalize-test-yard-owner-v2", "localize-ssh-port-settings-v3"]}
+    exact_tmp = {"id": "complete-registered-guest-disk-tmp-v3", "domain": "power-metadata",
+                 "fromEpoch": 2, "toEpoch": 3, "kind": "registered-guest-disk-tmp-v2-to-v3",
+                 "dependsOn": ["register-existing-local-yards-v3", "introduce-owner-publication-state-v1"]}
+    require(registry["currentEpochs"]["power-metadata"] == 3
+            and registry["currentEpochs"]["owner-registration"] == 3
+            and registry["migrations"].count(exact_registered) == 1
+            and registry["migrations"].count(exact_tmp) == 1
             and registry["currentEpochs"]["settings"] == 3
             and registry["migrations"].count(exact) == 1
             and registry["migrations"].count(exact_settings) == 1, "fixture bridge boundary differs")
+    registry["migrations"].remove(exact_registered)
+    registry["migrations"].remove(exact_tmp)
+    registry["currentEpochs"]["owner-registration"] = 2
     registry["migrations"].remove(exact)
     registry["migrations"].remove(exact_settings)
     registry["currentEpochs"]["power-metadata"] = 1
@@ -1006,7 +1030,7 @@ def compatible_power_release(release, version, arch, root):
     require(built.returncode == 0, f"cannot package compatible fixture bridge: {built.stdout}{built.stderr}")
     bundle = destination / f"subyard-{bridge_version}-linux-{arch}.tar.gz"
     print(f"FIXTURE: sealed compatible power-1/settings-2 bridge {bridge_version} sha256={digest(bundle)}; "
-          "exact publication and SSH-settings migrations removed; production reader gate retained", flush=True)
+          "exact publication, SSH-settings and registered-yard migrations removed; production reader gate retained", flush=True)
     return destination, bridge_version
 
 
@@ -1099,8 +1123,12 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
 
     control = root / "incus-observation.json"
 
-    def observe(status, hold):
-        set_fixture_observation(control, status, fixture.journal if hold else None)
+    def observe(status, hold, *, owned=False):
+        project = {
+            "user.subyard.installation": "1", "user.subyard.operator_uid": str(os.getuid()),
+            "user.subyard.config_home": str(fixture.config), "user.subyard.data_home": str(fixture.data),
+            "features.profiles": "false", "features.storage.volumes": "false"} if owned else None
+        set_fixture_observation(control, status, fixture.journal if hold else None, owned_project=project)
 
     observe("Running", True)
     shims = fixture.root / "commands"
@@ -1150,6 +1178,9 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
                 "original owner did not complete its separately authorized replacement")
         ready = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
         require(ready["outcome"]["status"] == "ready", "original owner could not verify recovery readiness")
+        # Native enrollment is not this case's subject. Supply the owned stopped
+        # target only after the authentic original owner's recovery is complete.
+        observe("Stopped", False, owned=True)
         fixture.update("--version", version, "--yes")
         fixture.complete(old=False)
         print(f"PASS: actual {baseline_version} original owner separately authorizes source-repair recovery", flush=True)
@@ -1263,6 +1294,7 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
     require(ready["outcome"]["status"] == "ready", "original published owner cannot verify completed recovery")
     print(f"PASS: unmodified released {ACTIVATION_BASELINE} activation-only journal resumes with {recovery_version} code and original assets",
           flush=True)
+    observe("Stopped", False, owned=True)
     fixture.update("--version", version, "--yes")
     fixture.complete(old=False)
     require(os.readlink(fixture.runtime / "previous") == fixture.initial
@@ -1279,7 +1311,11 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
                 "ordinary update fixture differs from the declared settings migration")
         require(before_ledger["domains"]["power-metadata"] == {"epoch": 1, "applied": []}
                 and after_ledger["domains"]["power-metadata"] == {
-                    "epoch": 2, "applied": ["introduce-owner-publication-state-v1"]}
+                    "epoch": 3, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]}
+                and before_ledger["domains"]["owner-registration"]["epoch"] == 2
+                and after_ledger["domains"]["owner-registration"] == {
+                    "epoch": 3, "applied": before_ledger["domains"]["owner-registration"]["applied"]
+                    + ["register-existing-local-yards-v3"]}
                 and before_ledger["domains"]["settings"]["epoch"] == 2
                 and after_ledger["domains"]["settings"] == {
                     "epoch": 3, "applied": before_ledger["domains"]["settings"]["applied"]
@@ -1287,12 +1323,12 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
                 and {key: value for key, value in before_ledger.items() if key != "domains"}
                 == {key: value for key, value in after_ledger.items() if key != "domains"}
                 and {key: value for key, value in before_ledger["domains"].items()
-                     if key not in ("power-metadata", "settings")}
+                     if key not in ("power-metadata", "settings", "owner-registration")}
                 == {key: value for key, value in after_ledger["domains"].items()
-                    if key not in ("power-metadata", "settings")},
+                    if key not in ("power-metadata", "settings", "owner-registration")},
                 "ordinary update changed undeclared history or failed the publication/settings migrations")
-        print(f"PASS: separately authorized ordinary update reaches {version} publication epoch 2/settings epoch 3 "
-              "and preserves the settings prefix and every other original ledger domain", flush=True)
+        print(f"PASS: separately authorized ordinary update reaches {version} publication, owner and settings epoch 3 "
+              "and preserves completed prefixes and every other original ledger domain", flush=True)
     else:
         require(ledger.read_bytes() == ledger_before, "same-registry ordinary update changed migration ledger")
     print(f"PASS: released {ACTIVATION_BASELINE} ordinary updater reaches {version} after delegated recovery "
@@ -1926,25 +1962,43 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
     # The running fixture has no materialized guest config. Seed an empty
     # selection so the released owner can verify its completed source before
     # the candidate's independent post-migration activation failure.
-    host.write_text("CODING_TOOL_INTEGRATIONS=\n")
+    host.write_text("ENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=\n")
     host.chmod(0o600)
     fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
     source = json.loads(fixture.journal.read_text())
     require(source["checkpoint"] == "complete", "direct predecessor did not complete")
-    (fixture.root / "source-journal.json").write_bytes(fixture.journal.read_bytes())
-    source_transaction = source["transaction"]
     projection = fixture.config / "release-transition/v2/ledger.json"
-    projection_before = projection.read_bytes()
     registration = fixture.config / "yards/unrelated/config.env"
     registration.parent.mkdir(parents=True, mode=0o700)
     registration.write_text("YARD_TEMPLATE=''\nSSH_PORT=2226\n")
     registration.chmod(0o600)
+    source_registry = json.loads((fixture.old_launcher.parent.parent / "config/release-transition.json").read_text())
+    with tarfile.open(release / f"subyard-{version}-linux-{arch}.tar.gz", "r:gz") as archive:
+        target_registry = json.load(archive.extractfile("./config/release-transition.json"))
+        disk_tmp_sha256 = hashlib.sha256(archive.extractfile("./scripts/guest-disk-tmp.sh").read()).hexdigest()
+    expected_migrations = [entry["id"] for entry in target_registry["migrations"]
+                           if entry["toEpoch"] > source_registry["currentEpochs"][entry["domain"]]]
+    require(expected_migrations, "direct fixture has no independently declared pending migrations")
     control = root / "incus-observation.json"
+    failure_control = fixture.root / "activation-failure.json"
     def observe(status):
         value = ({"removeInstances": [{"project": "subyard", "name": "yard"}]} if status is None else
                  {"instances": [{"project": "subyard", "name": "yard",
                    "info": {"name": "yard", "status": status, "type": "container",
                             "config": {}, "devices": {}}}]})
+        if status is not None:
+            # This case explicitly models an owned Subyard, not arbitrary inventory.
+            config = {"volatile.uuid": "direct-owned-yard", "user.subyard.managed": "true",
+                      "user.subyard.name": "default", "user.subyard.bridge": "incusbr0",
+                      "user.subyard.desired_power": status.lower(), "user.subyard.disk_tmp": "v1"}
+            value["instances"][0]["info"].update(config=config, expanded_config=config,
+                                                  devices={}, expanded_devices={})
+            value["projects"] = {"subyard": {"name": "subyard", "config": {
+                "user.subyard.installation": "1", "user.subyard.operator_uid": str(os.getuid()),
+                "user.subyard.config_home": str(fixture.config), "user.subyard.data_home": str(fixture.data),
+                "features.profiles": "false", "features.storage.volumes": "false"}}}
+            value["diskTmpCheckSHA256"] = disk_tmp_sha256
+            value["activationFailure"] = str(failure_control)
         payload = json.dumps(value)
         control.write_text(payload)
         control.chmod(0o600)
@@ -1960,15 +2014,30 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
         shims = fixture.root / "commands"
         shims.mkdir()
         unexpected = fixture.root / "unexpected-host-command"
-        failure_control = fixture.root / "activation-failure.json"
         failure_marker = fixture.root / "activation-failure-observed"
-        write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent],
-                                activation_failure=failure_control)
+        write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
         fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+        # Introducing this explicit owned native scope requires the released
+        # owner's ordinary activation authorization before testing its updater.
+        prepared_source = run_process([str(fixture.old_launcher), "migrate", "--yes"], fixture.env, timeout=180)
+        rejected = Path(str(control) + ".unexpected")
+        require(prepared_source.returncode == 0, "owned source preparation failed: " + prepared_source.stdout + prepared_source.stderr + (rejected.read_text() if rejected.exists() else ""))
+        source = json.loads(fixture.journal.read_text())
+        require(source["checkpoint"] == "complete", "owned direct source did not complete")
+        (fixture.root / "source-journal.json").write_bytes(fixture.journal.read_bytes())
+        source_transaction = source["transaction"]
+        projection_before = projection.read_bytes()
         source_inspection = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
+        source_diagnostic = ""
+        if source_inspection.get("blockers"):
+            diagnostic = run_process([str(fixture.old_launcher), "integration", "status", "--json"], fixture.env, timeout=60)
+            source_diagnostic = diagnostic.stdout + diagnostic.stderr
+            rejected = Path(str(control) + ".unexpected")
+            if rejected.exists():
+                source_diagnostic += rejected.read_text()
         require(source_inspection["outcome"]["status"] == "ready" and not source_inspection.get("blockers")
                 and not unexpected.exists(),
-                "released direct source is not current before candidate activation")
+                "released direct source is not current before candidate activation: " + json.dumps(source_inspection) + source_diagnostic)
         failure_control.write_text(json.dumps({"journal": str(fixture.journal), "marker": str(failure_marker)}))
         transactions = fixture.config / "release-transition/v2/transactions"
         require((transactions / source_transaction).is_dir(), "direct fixture omitted retained terminal evidence")
@@ -1977,10 +2046,12 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
         (fixture.root / "post-effects-failure.log").write_text(result.stdout + result.stderr)
         require(result.returncode != 0 and failure_marker.is_file(),
                 "direct fixed update did not reach controlled post-effects failure: " + result.stdout + result.stderr)
+        require(failure_marker.read_text() == "controlled core activation observation failure after migration effects\n",
+                "direct fixture did not fail at its exact core read-only API boundary")
         failed = json.loads(fixture.journal.read_text())
         require(failed["checkpoint"] == "reconciling" and
                 [step["migration"] for step in failed["steps"]] ==
-                ["introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"] and
+                expected_migrations and
                 all(step["checkpoint"] == "verified" for step in failed["steps"]),
                 "controlled activation failure preceded migration verification")
         require(projection.read_bytes() == projection_before, "direct update rewrote frozen projection")
@@ -1996,7 +2067,7 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
                 "post-error reobservation lost its owning diagnostic or valid history")
         (fixture.root / "post-effects-inspection.json").write_text(json.dumps(reread) + "\n")
         failure_control.unlink()
-        observe("Stopped")
+        observe("Running")
         resumed = json.loads(fixture.run([str(candidate), "update", "--check", "--offline",
                                          "--version", version, "--json"]))
         (fixture.root / "resume-inspection.json").write_text(json.dumps(resumed) + "\n")
@@ -2181,13 +2252,22 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     yard.chmod(0o600)
     history = {"journal": str(fixture.journal), "runtime": str(fixture.runtime),
                "target": "", "source": str(source), "guest": str(guest), "initialDrift": str(drift),
-               "destination": "/home/dev/.subyard-fixture/config.txt", "failOnce": fail_once,
-               "migrations": ["introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"]}
+               "destination": "/home/dev/.subyard-fixture/config.txt", "failOnce": fail_once}
+    history["projectConfig"] = {"user.subyard.installation": "1", "user.subyard.operator_uid": str(os.getuid()),
+                                "user.subyard.config_home": str(fixture.config), "user.subyard.data_home": str(fixture.data),
+                                "features.profiles": "false", "features.storage.volumes": "false"}
     # The exact candidate identity comes from verified package bytes, not a
     # patched installed asset or a journal supplied by this fixture.
     bundle = (Path(fixture.env["YARD_RELEASE_BASE_URL"].removeprefix("file://")) /
               f"subyard-{fixture.version}-linux-{fixture.arch}.tar.gz")
     history["target"] = fixture.version + "-" + digest(bundle)[:12]
+    with tarfile.open(bundle, "r:gz") as archive:
+        history["diskTmpCheckSHA256"] = hashlib.sha256(archive.extractfile("./scripts/guest-disk-tmp.sh").read()).hexdigest()
+        target_registry = json.load(archive.extractfile("./config/release-transition.json"))
+    source_registry = json.loads((fixture.old_launcher.parent.parent / "config/release-transition.json").read_text())
+    history["migrations"] = [entry["id"] for entry in target_registry["migrations"]
+                             if entry["toEpoch"] > source_registry["currentEpochs"][entry["domain"]]]
+    require(history["migrations"], "history fixture has no independently declared pending migrations")
     inventory = (Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
     history["inventoryProgramSHA256"] = hashlib.sha256(inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0").encode()).hexdigest()
     package_root = Path(__file__).resolve().parent.parent
@@ -2202,6 +2282,12 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     set_fixture_observation(control, "Running", history=history)
     return history, source, guest, unexpected
+
+
+def history_migrations_verified(journal, migrations):
+    steps = journal["steps"]
+    return bool(migrations) and bool(steps) and {step["migration"] for step in steps} == set(migrations) and all(
+        step["checkpoint"] == "verified" for step in steps)
 
 
 def history_preserves_evidence(fixture, before):
@@ -2470,7 +2556,7 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
                     "materialized config did not fail at the actual post-migration apply: " + result.stdout + result.stderr)
             journal = json.loads(fixture.journal.read_text())
             require(journal["checkpoint"] == "reconciling" and os.readlink(fixture.runtime / "current") == "releases/" + history["target"]
-                    and len(journal["steps"]) == 2 and all(step["checkpoint"] == "verified" for step in journal["steps"]),
+                    and history_migrations_verified(journal, history["migrations"]),
                     "controlled apply error did not leave verified migrations and unfinished activation")
             diagnostic = result.stdout + result.stderr
             require("yard default: cannot apply materialized config for release activation" in diagnostic

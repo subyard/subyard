@@ -394,6 +394,10 @@ func (cli *CLI) initPlatformWithDispatcher(
 	}
 	environment["SUBYARD_DISPATCHER_PATH"] = dispatcherPath
 	environment["SUBYARD_POWER_ENGINE_SOURCE"] = dispatcherPath
+	networkYards := powerYards
+	if len(networkYards) == 0 {
+		networkYards = []domain.Context{loaded.Context}
+	}
 	incusPort, executor := cli.statusPorts()
 	configWriter, _ := incusPort.(ports.InstanceConfigWriter)
 	return reconcileruntime.Runtime{
@@ -406,7 +410,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 		Stdout:            cli.options.Stderr,
 		Stderr:            cli.options.Stderr,
 		Incus:             incusPort,
-		NetworkPolicy:     cli.networkService(powerYards),
+		NetworkPolicy:     cli.networkService(networkYards),
 		ConfigWriter:      configWriter,
 		Executor:          executor,
 		Yard:              loaded.Context,

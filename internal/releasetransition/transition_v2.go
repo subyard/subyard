@@ -77,10 +77,16 @@ type V2Options struct {
 	ObserveLinks              func(context.Context) (ReleaseLinks, error)
 	ActivateLinks             func(context.Context, ReleasePair) (ReleaseLinks, error)
 	Reconcilers               []V2ActivationReconciler
-	OwnerRegistration         V2OwnerRegistration
-	Ingress                   V2Ingress
-	RegistryPayload           []byte
-	ArtifactDigest            Fingerprint
+	RegisteredYards           []V2ActivationReconciler
+	// Compiled owning-runtime vocabulary; never caller environment or private declarations.
+	// Descriptor removal/renaming in a future release also requires the verified
+	// predecessor vocabulary for retained records. Nil refuses endpoint recovery.
+	RegisteredEndpointSettings []string
+	GuestDiskTmp               []V2ActivationReconciler
+	OwnerRegistration          V2OwnerRegistration
+	Ingress                    V2Ingress
+	RegistryPayload            []byte
+	ArtifactDigest             Fingerprint
 	// CandidateVersion is the trusted compiled runtime semver; ReleaseIDs remain opaque identities.
 	CandidateVersion          string
 	RollbackTarget            *RollbackTarget
@@ -137,6 +143,7 @@ type V2Transition struct {
 type v2WorkKind string
 
 const (
+	v2NativeWork   v2WorkKind = "registered-native"
 	v2SettingsWork v2WorkKind = "settings"
 	v2OwnerWork    v2WorkKind = "owner-registration"
 	v2LedgerWork   v2WorkKind = "ledger"
@@ -241,6 +248,8 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 	if err != nil {
 		return nil, err
 	}
+	options.RegisteredEndpointSettings = slices.Clone(options.RegisteredEndpointSettings)
+	store.endpointSettings = slices.Clone(options.RegisteredEndpointSettings)
 	catalog := BuiltinCapabilityCatalog()
 	journalSnapshot, err := store.ReadCurrentJournal()
 	if err != nil {
@@ -287,6 +296,9 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		return nil, err
 	}
 	for _, migration := range registry.Migrations {
+		if nativeMigration(migration) && (migration.Kind == registeredYardsMigration && options.RegisteredYards == nil || migration.Kind == guestDiskTmpMigration && options.GuestDiskTmp == nil) {
+			return nil, errors.New("v2 transition requires the registered yard migration owner")
+		}
 		if migration.Kind == "test-yard-owner-v1-to-v2" && options.OwnerRegistration == nil {
 			return nil, errors.New("v2 transition requires the owner-registration capability port")
 		}
@@ -1844,6 +1856,12 @@ func (transition *V2Transition) observeFresh(
 	ledgerSnapshot := observation.ledgerSnapshot
 	for _, migration := range pending {
 		switch migration.Kind {
+		case registeredYardsMigration, guestDiskTmpMigration:
+			var err error
+			settingsView, err = transition.appendNativeMigration(ctx, observation, migration, settingsView)
+			if err != nil {
+				return err
+			}
 		case "owner-publication-state-v1":
 			// Canonical power and owning receipt values retain their existing
 			// representation. The captured/applied/verified ledger transform
@@ -2030,6 +2048,8 @@ func (transition *V2Transition) observeResume(
 			capabilityPlan, err = capability.Inspect()
 		case localSSHPortMigration:
 			capabilityPlan, err = transition.inspectLocalSSHPorts(ownerSettingsView)
+		case registeredYardsMigration:
+			capabilityPlan, err = transition.inspectRegisteredSettings(ctx, migration, ownerSettingsView, observation.links)
 		default:
 			continue
 		}
@@ -2137,6 +2157,19 @@ func (transition *V2Transition) observeResume(
 			observation.work = append(observation.work, ledgerMigrationWork(intent, migration, edge.witness, authorityLedgerRevision{ledgerFrom}, ledgerTo))
 			continue
 		}
+		if nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") {
+			work := nativeMigrationWork(intent, migration)
+			actual, err := transition.nativeFingerprint(ctx, work, observation.links, ownerSettingsView)
+			if err != nil {
+				return err
+			}
+			if actual != step.Expected && actual != step.Desired {
+				return invalid("registered yard migration changed outside its bound plan")
+			}
+			observation.work = append(observation.work, work)
+			observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: actual})
+			continue
+		}
 		if migration.Kind == "test-yard-owner-v1-to-v2" {
 			if step.Resource != ownerRegistrationResource {
 				return invalid("journaled owner-registration intent is invalid")
@@ -2190,7 +2223,7 @@ func (transition *V2Transition) observeResume(
 			observation.work = append(observation.work, ownerMigrationWork(intent, migration, ownerRegistrationV2Plan{Before: before, ExpectedFingerprint: step.Expected, DesiredFingerprint: step.Desired}))
 			continue
 		}
-		if migration.Kind != "test-vms-settings-v1-to-v2" && migration.Kind != localSSHPortMigration {
+		if !settingsWorkMigration(migration) {
 			return invalid("journal references unsupported migration kind %q", migration.Kind)
 		}
 		journalSettings[migration.ID+":"+step.Resource] = struct{}{}
@@ -2293,6 +2326,33 @@ func (transition *V2Transition) observeResume(
 			})
 		}
 	}
+	for _, migration := range transition.registry.Migrations {
+		if !nativeMigration(migration) {
+			continue
+		}
+		pending := false
+		for _, step := range journal.Steps {
+			if step.Migration == migration.ID {
+				pending = true
+			}
+		}
+		if !pending {
+			continue
+		}
+		for _, owner := range transition.nativeOwners(migration) {
+			found := slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID && step.Resource == owner.ID() })
+			if !found {
+				actual, err := owner.Observe(ctx, transition.options.Releases, observation.links)
+				if err != nil {
+					return err
+				}
+				if !actual.Converged {
+					return invalid("registered yard target list expanded after authorization")
+				}
+			}
+		}
+	}
+	observation.prospectiveSettings = ownerSettingsView
 	transition.retainSourceActivationView(observation, ownerSettingsView)
 	return nil
 }
@@ -2375,6 +2435,10 @@ func (transition *V2Transition) convergeStep(
 		}
 		if actual == step.Expected || work.kind() == v2OwnerWork && actual == step.Desired {
 			switch work.kind() {
+			case v2NativeWork:
+				if err := transition.nativeOwner(work.migration, work.intent.Resource).Reconcile(ctx, links); err != nil {
+					return Outcome{}, err
+				}
 			case v2SettingsWork:
 				if work.settingsFile() == nil {
 					return v2OperatorOutcome(links, journal.Goal.Target,
@@ -2392,8 +2456,20 @@ func (transition *V2Transition) convergeStep(
 						"the settings resource changed before its protected update",
 						"run yard update --check"), nil
 				}
+				if work.migration.Kind == registeredYardsMigration {
+					plan, err := transition.inspectRegisteredSettings(ctx, work.migration, nil, links)
+					if err != nil {
+						return Outcome{}, err
+					}
+					matched := slices.ContainsFunc(plan.Files, func(file settingsV2FilePlan) bool {
+						return file.Path == path && file.ExpectedFingerprint == step.Expected && file.DesiredFingerprint == step.Desired
+					})
+					if !matched {
+						return Outcome{}, invalid("registered endpoint source changed before settings CAS")
+					}
+				}
 				publish := config.CompareAndSwapPersistentFile
-				if work.migration.Kind == localSSHPortMigration {
+				if work.migration.Kind == localSSHPortMigration || work.migration.Kind == registeredYardsMigration {
 					publish = config.CompareAndSwapLocalSettingsFile
 				}
 				if err := publish(transition.options.ConfigHome, work.settingsFile().Path, expected, work.settingsFile().Desired); err != nil && !errors.Is(err, config.ErrPersistentTargetStale) {
@@ -2491,7 +2567,7 @@ func (transition *V2Transition) convergeStep(
 		if err := transition.persistJournal(journal, journalSnapshot); err != nil {
 			return Outcome{}, err
 		}
-		if work.kind() == v2SettingsWork || work.kind() == v2OwnerWork {
+		if work.kind() == v2SettingsWork || work.kind() == v2OwnerWork || work.kind() == v2NativeWork {
 			if err := transition.inject("after-step-applied"); err != nil {
 				return Outcome{}, err
 			}
@@ -2695,8 +2771,11 @@ func (transition *V2Transition) ensureRecovery(
 		if err := validateSettingsRecovery(recovery, journal, step); err != nil {
 			return "", err
 		}
-		if work.migration.Kind == localSSHPortMigration && recovery.Kind != localSSHPortMigration || work.migration.Kind != localSSHPortMigration && recovery.Kind != "" {
+		if recovery.Kind != settingsRecoveryKind(work.migration) {
 			return "", invalid("settings recovery kind differs from its compiled migration")
+		}
+		if err := validateEndpointRecovery(recovery, transition.options.RegisteredEndpointSettings); err != nil {
+			return "", err
 		}
 		if work.settingsFile() != nil && !slices.Equal(recovery.Before, work.settingsFile().Before) {
 			return "", invalid("typed settings recovery does not match the inspected before state")
@@ -2712,10 +2791,13 @@ func (transition *V2Transition) ensureRecovery(
 		Expected: step.Expected,
 		Before:   slices.Clone(work.settingsFile().Before),
 	}
-	if work.migration.Kind == localSSHPortMigration {
-		recovery.SchemaVersion, recovery.Kind = 2, localSSHPortMigration
+	if kind := settingsRecoveryKind(work.migration); kind != "" {
+		recovery.SchemaVersion, recovery.Kind = 2, kind
 	}
 	if err := validateSettingsRecovery(recovery, journal, step); err != nil {
+		return "", err
+	}
+	if err := validateEndpointRecovery(recovery, transition.options.RegisteredEndpointSettings); err != nil {
 		return "", err
 	}
 	payload, err := json.Marshal(recovery)
@@ -2832,24 +2914,28 @@ func validateSettingsRecovery(
 	step JournalStep,
 ) error {
 	localSSH := recovery.SchemaVersion == 2 && recovery.Kind == localSSHPortMigration
+	endpoints := recovery.SchemaVersion == 2 && recovery.Kind == registeredYardsMigration
 	if localSSH && len(recovery.Before) != 1 {
 		return invalid("typed SSH port recovery must capture one setting")
 	}
-	if (!localSSH && (recovery.SchemaVersion != 1 || recovery.Kind != "")) || recovery.Transaction != journal.Transaction ||
+	if (!localSSH && !endpoints && (recovery.SchemaVersion != 1 || recovery.Kind != "")) || recovery.Transaction != journal.Transaction ||
 		recovery.Step != step.ID || recovery.Migration != step.Migration ||
 		recovery.Yard != step.Resource || recovery.Expected != step.Expected ||
-		!domain.SafeName(recovery.Yard) || len(recovery.Before) > 2 {
+		!domain.SafeName(recovery.Yard) || len(recovery.Before) > 32 || !endpoints && len(recovery.Before) > 2 || endpoints && len(recovery.Before) == 0 {
 		return invalid("typed settings recovery evidence is invalid")
 	}
 	seen := make(map[string]struct{}, len(recovery.Before))
 	for _, value := range recovery.Before {
-		if (!localSSH && !affectedSettingsV2ID(value.Setting)) || (localSSH && value.Setting != "SSH_PORT") {
+		if (!localSSH && !endpoints && !affectedSettingsV2ID(value.Setting)) || (localSSH && value.Setting != "SSH_PORT") {
 			return invalid("typed settings recovery references an unknown setting")
 		}
 		if _, duplicate := seen[value.Setting]; duplicate {
 			return invalid("typed settings recovery contains a duplicate setting")
 		}
 		seen[value.Setting] = struct{}{}
+		if endpoints && (value.Present || value.Value != "") {
+			return invalid("endpoint recovery must name an absent assignment")
+		}
 		if value.Present {
 			switch value.Setting {
 			case "YARD_TEMPLATE":
@@ -2878,6 +2964,8 @@ func (transition *V2Transition) workFingerprint(
 	journal JournalRecord,
 ) (Fingerprint, error) {
 	switch work.kind() {
+	case v2NativeWork:
+		return transition.nativeFingerprint(ctx, work, ReleaseLinks{})
 	case v2IngressWork:
 		step, err := transition.ingressStepForWork(work)
 		if err != nil {

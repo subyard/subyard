@@ -243,7 +243,7 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 		pending = append(pending, domain.Pending...)
 	}
 	slices.Sort(pending)
-	if !slices.Equal(pending, []string{"canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2", "introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"}) {
+	if !slices.Equal(pending, []string{"canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2", "complete-registered-guest-disk-tmp-v3", "introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3", "register-existing-local-yards-v3"}) {
 		t.Fatalf("pending migrations = %v: %s", pending, stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(fixture.configHome, "release-transition")); !errors.Is(err, os.ErrNotExist) {
@@ -773,6 +773,7 @@ func currentScopeTransition(request releasetransition.ProcessRequest, statePath 
 		}
 	}
 	return releasetransition.NewV2Transition(releasetransition.V2Options{
+		RegisteredYards: []releasetransition.V2ActivationReconciler{}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{},
 		ConfigHome: request.ConfigHome, Releases: releasetransition.ReleasePair{From: "0.11.1-source", Target: request.Target}, Direction: request.Direction,
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
 		ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {

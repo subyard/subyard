@@ -269,7 +269,7 @@ trap 'exit 143' TERM
 
 retire_minimal_owner() {
   [ "$MINIMAL_OWNER" = 1 ] || return 0
-  [ "$(incus project get "$PROJECT" user.subyard.p0-image-cache)" = "$MARKER" ] || return 1
+  [ "$(incus project get "$PROJECT" user.subyard-e2e.image-cache)" = "$MARKER" ] || return 1
   if [ "$BROKER_INSTALLED" = 1 ]; then
     verify_broker_installation && outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker drain-all || return 1
   fi
@@ -305,7 +305,7 @@ assert_owned_vm() {
 
 verify_broker_installation() {
   local expected actual
-  [ "$(timeout 5 incus project get "$PROJECT" user.subyard.p0-image-cache 2>/dev/null)" = "$MARKER" ] \
+  [ "$(timeout 5 incus project get "$PROJECT" user.subyard-e2e.image-cache 2>/dev/null)" = "$MARKER" ] \
     && [ "$(timeout 5 incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT" 2>/dev/null)" = true ] \
     && [ "$(timeout 5 incus config get "$INSTANCE" user.subyard.name --project "$PROJECT" 2>/dev/null)" = "$YARD" ] || return 1
   expected="$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d ' ' -f1)" || return
@@ -327,9 +327,9 @@ sample_cold_capacity() {
   fi
   read -r total used free extra <<<"$disk"
   if [[ "$total" =~ ^[0-9]{1,18}$ && "$used" =~ ^[0-9]{1,18}$ && "$free" =~ ^[0-9]{1,18}$ ]] && [ -z "$extra" ]; then
-    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","total_bytes":%s,"used_bytes":%s,"available_bytes":%s,"builder_peak_bytes":32212254720,"reserve_bytes":5368709120,"required_bytes":37580963840}\n' "$phase" "$total" "$used" "$free"
+    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","total_bytes":%s,"used_bytes":%s,"available_bytes":%s,"builder_peak_bytes":32212254720,"reserve_bytes":4294967296,"required_bytes":36507222016}\n' "$phase" "$total" "$used" "$free"
   else
-    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","error_kind":"telemetry_unavailable","required_bytes":37580963840}\n' "$phase"
+    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","error_kind":"telemetry_unavailable","required_bytes":36507222016}\n' "$phase"
     die 'cold builder storage telemetry unavailable'
   fi
   [ "$broker_known" = 1 ] || die 'cold builder broker telemetry unavailable'
@@ -877,7 +877,7 @@ func main() {
 	}
 	root, home, cpu, marker := os.Args[1], os.Args[2], os.Args[3], os.Args[4]
 	runner := testvmsruntime.ProcessRunner{}
-	actual, _, err := runner.Run(context.Background(), "incus", []string{"project", "get", "subyard-test-yard", "user.subyard.p0-image-cache"}, nil, nil)
+	actual, _, err := runner.Run(context.Background(), "incus", []string{"project", "get", "subyard-test-yard", "user.subyard-e2e.image-cache"}, nil, nil)
 	if err != nil || string(actual) != marker+"\n" {
 		panic("owner driver project ownership mismatch")
 	}
@@ -891,7 +891,7 @@ func main() {
 		RepositoryRoot: os.Args[5], DataHome: home, Dispatcher: root + "/bin/yard-engine",
 		Project: "subyard-test-yard", Instance: "yard-test-yard", YardName: "test-yard", DesiredPower: "running", Output: os.Stderr,
 		Environment: map[string]string{"NESTED_E2E_VMS": "1", "DEV_USER": "dev", "E2E_VM_IMAGE": "images:debian/13/cloud",
-			"E2E_VM_CPU": cpu, "E2E_VM_MEMORY": "2GiB", "E2E_VM_DISK": "10GiB", "E2E_VM_SLOT_COUNT": "1", "E2E_VM_BOOT_TIMEOUT": "300"},
+			"E2E_VM_CPU": cpu, "E2E_VM_MEMORY": "2GiB", "E2E_VM_DISK": "10GiB", "E2E_VM_SLOT_COUNT": "1", "E2E_VM_BOOT_TIMEOUT": "300", "E2E_DISK_RESERVE": "4GiB"},
 	}
 	if err := backend.Apply(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -913,8 +913,8 @@ GOSTAGINGOWNER
   grep -Fxq "$PROJECT" <<<"$inventory" || die 'owner bootstrap did not create its project'
   instances="$(incus list --project "$PROJECT" --format csv -c n)" || die 'cannot inspect owner project instances'
   [ -z "$instances" ] || die 'owner project was not empty'
-  incus project set "$PROJECT" features.images=false "user.subyard.p0-image-cache=$MARKER"
-  [ "$(incus project get "$PROJECT" user.subyard.p0-image-cache)" = "$MARKER" ] || die 'owner project ownership changed'
+  incus project set "$PROJECT" features.images=false "user.subyard-e2e.image-cache=$MARKER"
+  [ "$(incus project get "$PROJECT" user.subyard-e2e.image-cache)" = "$MARKER" ] || die 'owner project ownership changed'
   instances="$(incus list --project "$PROJECT" --format csv -c n)" || die 'cannot verify empty owner project'
   [ -z "$instances" ] || die 'owner project was not empty'
   MINIMAL_OWNER=1
@@ -968,7 +968,7 @@ CLOUDOWNER
 # This history uses authentic release bytes and the predecessor's own updater.
 # The normal staging fixture retains its independent synthetic owner history.
 prepare_supported_upgrade_owner() {
-  local baseline assets installer name suffix baseline_owner candidate_engine before_owner after_owner before_state after_state
+  local baseline assets installer name suffix baseline_owner candidate_engine before_owner after_owner before_state after_state info
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   candidate_engine="$(release_candidate_prepare "$ROOT")" || die 'verified frozen candidate required'
@@ -996,12 +996,33 @@ PYBASELINE
     bash "$installer" --version "$baseline" --yes
   baseline_owner="$SUBYARD_HOME/runtime/current/bin/yard"
   [ "$("$baseline_owner" --version)" = "yard $baseline" ] || die 'authentic predecessor was not installed'
-  # Reuse the focused owner bootstrap with the authentic predecessor assets.
-  # Its shipped provision hook invokes the predecessor's native reconcile-pool;
-  # unrelated core/Docker tooling is outside this broker acceptance contract.
-  prepare_minimal_owner
-  [ "$(runtime_yard --version)" = "yard $baseline" ] || die 'owner bootstrap replaced authentic predecessor'
+  # This upgrade starts from the authentic predecessor's complete ordinary init.
+  # The separate non-upgrade reliability lane retains its focused bootstrap.
+  p0_retry_init_after_plan_stale "$baseline_owner" -Y test-yard init --yes
+  [ "$(runtime_yard --version)" = "yard $baseline" ] || die 'owner init replaced authentic predecessor'
+  info="$("$baseline_owner" -Y test-yard _info)"
+  jq -e --arg project "$PROJECT" --arg instance "$INSTANCE" --arg version "$baseline" '
+    .yardName=="test-yard" and .accessKind=="local" and .incusProject==$project and
+    .yardInstanceName==$instance and .version==$version and .state=="RUNNING"' <<<"$info" >/dev/null \
+    || die 'predecessor public context differs from its protected registration'
+  [ "$(incus project get "$PROJECT" restricted)" = true ] \
+    && [ "$(incus project get "$PROJECT" features.profiles)" = true ] \
+    && [ "$(incus project get "$PROJECT" features.storage.volumes)" = true ] \
+    && [ "$(incus project get "$PROJECT" restricted.containers.privilege)" = unprivileged ] \
+    || die 'ordinary predecessor project differs from its historical policy'
+  before_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+  [[ "$before_owner" =~ ^[a-f0-9-]{36}$ ]] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT")" = true ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.name --project "$PROJECT")" = test-yard ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.bridge --project "$PROJECT")" = incusbr0 ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.initialized --project "$PROJECT")" = true ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
+    || die 'ordinary predecessor init did not finalize running power'
+  name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
+  [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'predecessor project has a foreign fixture marker'
+  incus project set "$PROJECT" "user.subyard-e2e.image-cache=$MARKER"
   verify_broker_installation || die 'predecessor broker does not match its runtime'
+  BROKER_INSTALLED=1
   outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status \
     | jq -e '.status=="ok" and .pool.resource_type=="agent-e2e" and
       .pool.resource_id=="test-vms" and (.pool.slots | length)==1 and
@@ -1026,9 +1047,11 @@ PYBASELINE
   for suffix in '' .sha256 .manifest.json .provenance.json; do
     install -m 0600 "$ROOT/.subyard-acceptance/release/$name$suffix" "$SUBYARD_HOME/releases/$P0_OWNER_VERSION/$name$suffix"
   done
-  env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
+  python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard test-yard --allow-no-prompt -- \
+    env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
     "$baseline_owner" update --version "$P0_OWNER_VERSION" --offline --yes
   [ "$(runtime_yard --version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not activated'
+  runtime_yard -Y test-yard check
   verify_broker_installation || die 'activated broker differs from candidate'
   [ "$(sha256sum "$candidate_engine" | cut -d' ' -f1)" = "$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)" ] \
     || die 'installed engine differs from frozen candidate'
@@ -1084,6 +1107,8 @@ install -d -m 0700 "$OWNER_YARD_DIR/test-yard"
 printf '# %s\n' "$MARKER" > "$registration"
 chmod 0600 "$registration"
 write_owner_registration test-yard test-vms 2224 1 "$diagnostic_cpu"
+# This 40GiB disposable fixture keeps an explicit 4GiB reserve; product defaults remain 5GiB.
+printf 'E2E_DISK_RESERVE=4GiB\n' >> "$registration"
 if [ "$SUPPORTED_UPGRADE" = 1 ]; then
   prepare_supported_upgrade_owner
 else
@@ -1120,9 +1145,11 @@ fi
 sample_disposable_capacity after_reclaim
 sample_disk_footprint
 sample_cold_capacity after_reclaim
-# A cold builder reserves 30GiB plus the normal 5GiB physical reserve.
-[ "$free" -ge $((35*1024*1024*1024)) ] \
-  || die 'cold builder cannot preserve normal disk reserve'
+# A cold builder reserves 30GiB plus this fixture's explicit 4GiB physical reserve.
+jq -e '.resources.budgets.disk_reserve_bytes == (4*1024*1024*1024)' <<<"$before" >/dev/null \
+  || die 'cold builder disk reserve differs from explicit fixture setting'
+[ "$free" -ge $((34*1024*1024*1024)) ] \
+  || die "cold builder cannot preserve this fixture's explicit disk reserve"
 jq -e '.resources.memory_admission | .physical_available_known==true and .headroom_bytes >= (2*1024*1024*1024+512*1024*1024)' <<<"$before" >/dev/null || die 'cold builder cannot preserve normal memory admission reserve'
 printf 'STAGING_RESOURCE_CONTRACT={"nested_cpu":%s,"memory":"2GiB","disk":"10GiB","boot_timeout_seconds":300,"historical_resource_match":false}\n' "$diagnostic_cpu"
 jq -e '(.resources.bases // []) | length == 0'  <<<"$before" >/dev/null || die 'cold base fixture already has a base'
@@ -1138,7 +1165,7 @@ printf 'STAGING_NATIVE_VERSIONS_END\n'
 # The watcher reads only verified QEMU proc state and parsed counters.
 timeout --signal=TERM --kill-after=10 6400 incus exec "$INSTANCE" --project "$PROJECT" -- \
   python3 - <<'PYTHON' > "$STATE_PARENT/boot-samples.jsonl" 2> "$STATE_PARENT/boot-samples.stderr" &
-import hashlib,json,math,pathlib,re,signal,subprocess,time
+import hashlib,json,math,os,pathlib,re,signal,subprocess,time
 P=pathlib.Path
 verified={}
 digests={}
@@ -1257,6 +1284,17 @@ def sample(project,name):
         r['cgroup']={'cpu':counters(cgroup/'cpu.stat'),'memory':counters(cgroup/'memory.events'),'pressure':{k:pressure(cgroup/(k+'.pressure')) for k in ['cpu','io','memory']}}
     except (OSError,ValueError,IndexError,StopIteration): r['unavailable'].append('verified_qemu_proc')
     return r
+filesystem_minimum,filesystem_errors=None,0
+def filesystem_sample():
+    global filesystem_minimum,filesystem_errors
+    try: fs=os.statvfs('/srv/incus-e2e/storage')
+    except OSError:
+        filesystem_errors+=1
+        return {'unavailable':True,'minimum_available_bytes':filesystem_minimum,'unavailable_samples':filesystem_errors}
+    available=fs.f_bavail*fs.f_frsize
+    filesystem_minimum=available if filesystem_minimum is None else min(filesystem_minimum,available)
+    return {'total_bytes':fs.f_blocks*fs.f_frsize,'used_bytes':(fs.f_blocks-fs.f_bfree)*fs.f_frsize,
+            'available_bytes':available,'minimum_available_bytes':filesystem_minimum,'unavailable_samples':filesystem_errors}
 running=True
 def terminate(_signum,_frame):
     global running
@@ -1264,7 +1302,7 @@ def terminate(_signum,_frame):
 signal.signal(signal.SIGTERM,terminate)
 until=time.monotonic()+6300
 while running and time.monotonic()<until:
-    result={'monotonic_seconds':time.monotonic(),'wall_seconds':time.time(),'allocation_pressure':{k:pressure('/proc/pressure/'+k) for k in ['cpu','io','memory']},'instances':[sample('subyard-e2e-vms-builder','e2e-base-1'),sample('subyard-e2e-vms-slot-1','e2e-vm-1')]}
+    result={'monotonic_seconds':time.monotonic(),'wall_seconds':time.time(),'filesystem':filesystem_sample(),'allocation_pressure':{k:pressure('/proc/pressure/'+k) for k in ['cpu','io','memory']},'instances':[sample('subyard-e2e-vms-builder','e2e-base-1'),sample('subyard-e2e-vms-slot-1','e2e-vm-1')]}
     print(json.dumps(result,separators=(',',':')),flush=True); time.sleep(5)
 # Incus debug logging may be absent; missing hook records are inconclusive.
 try:

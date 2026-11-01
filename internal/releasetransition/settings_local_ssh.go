@@ -142,6 +142,10 @@ func (transition *V2Transition) localSSHPortSnapshot(yard string, view V2Setting
 }
 
 func (transition *V2Transition) observeSettingsMigrationWork(migration MigrationDefinitionV2, yard string) (config.PersistentFileSnapshot, string, Fingerprint, error) {
+	if migration.Kind == registeredYardsMigration {
+		snapshot, path, inheritance, err := transition.registeredSettingsSnapshot(yard, nil)
+		return snapshot, path, settingsV2ResourceFingerprint(snapshot, inheritance), err
+	}
 	if migration.Kind != localSSHPortMigration {
 		return transition.observeSettingsWork(yard)
 	}
@@ -154,26 +158,26 @@ func (transition *V2Transition) observeSettingsMigrationWork(migration Migration
 	return snapshot, path, settingsV2ResourceFingerprint(snapshot, inheritance), err
 }
 
-// A later settings migration may publish to the same file. Verify the native
-// successor against its authorization before viewing the verified predecessor;
-// never remove a setting merely because it belongs to another migration.
+// Verify each same-file successor against its recorded native output and
+// captured recovery before reversing its absent-only additions. These views
+// prove a predecessor; they never authorize a filesystem write.
 func (transition *V2Transition) observeJournalSettingsWork(journal JournalRecord, step JournalStep, migration MigrationDefinitionV2) (config.PersistentFileSnapshot, string, Fingerprint, error) {
 	snapshot, path, actual, err := transition.observeSettingsMigrationWork(migration, step.Resource)
-	if err != nil || actual == step.Expected || actual == step.Desired ||
-		migration.Kind != "test-vms-settings-v1-to-v2" || step.Checkpoint != StepVerified {
+	if err != nil || actual == step.Expected || actual == step.Desired || step.Checkpoint != StepVerified {
 		return snapshot, path, actual, err
 	}
 	index := slices.IndexFunc(journal.Steps, func(candidate JournalStep) bool { return candidate.ID == step.ID })
 	if index < 0 {
 		return snapshot, path, actual, invalid("settings predecessor is not authorized")
 	}
-	for _, successor := range journal.Steps[index+1:] {
+	native := snapshot
+	for i := len(journal.Steps) - 1; i > index; i-- {
+		successor := journal.Steps[i]
 		definition, known := transition.migration(successor.Migration)
-		if !known || definition.Kind != localSSHPortMigration || successor.Resource != step.Resource {
+		if !known || successor.Resource != step.Resource || settingsRecoveryKind(definition) == "" {
 			continue
 		}
-		if successor.ID != definition.ID+"."+step.Resource || successor.Decision != DecisionCanonicalize ||
-			successor.Checkpoint == StepIntent || successor.Evidence == nil {
+		if successor.ID != definition.ID+"."+step.Resource || successor.Decision != DecisionCanonicalize || successor.Checkpoint == StepIntent || successor.Evidence == nil {
 			return snapshot, path, actual, invalid("settings successor has no authorized mutation evidence")
 		}
 		recoverySnapshot, err := transition.store.ReadRecovery(journal.Transaction, successor.ID)
@@ -187,44 +191,94 @@ func (transition *V2Transition) observeJournalSettingsWork(journal JournalRecord
 		if err := validateSettingsRecovery(recovery, journal, successor); err != nil {
 			return snapshot, path, actual, err
 		}
-		if recovery.Kind != localSSHPortMigration || recovery.Before[0].Present || successor.Evidence.Recovery != recoverySnapshot.Fingerprint {
-			return snapshot, path, actual, invalid("settings successor recovery does not bind an absent local SSH port")
+		if recovery.Kind != settingsRecoveryKind(definition) || successor.Evidence.Recovery != recoverySnapshot.Fingerprint {
+			return snapshot, path, actual, invalid("settings successor recovery differs from authorization")
 		}
-		captured, err := transition.store.ReadCheckpointEvidence(journal.Transaction, successor.ID, EvidenceCaptured)
-		if err != nil || !captured.Exists {
-			return snapshot, path, actual, invalid("settings successor captured evidence is unavailable")
+		if err := validateEndpointRecovery(recovery, transition.options.RegisteredEndpointSettings); err != nil {
+			return snapshot, path, actual, err
 		}
-		evidence, err := ParseEvidence(captured.Payload)
-		if err != nil || !evidenceRecordsEqual(evidence, evidenceFor(journal, successor, EvidenceCaptured, successor.Expected, recoverySnapshot.Fingerprint)) {
-			return snapshot, path, actual, invalid("settings successor captured evidence differs from its authorization")
+		for _, before := range recovery.Before {
+			if before.Present {
+				return snapshot, path, actual, invalid("settings successor cannot restore an unproved prior value")
+			}
 		}
-		view := posixV2SettingsSnapshotView{configHome: transition.options.ConfigHome}
-		loaded, err := transition.loadSSHPortYard(step.Resource, nil)
+		for _, checkpoint := range []EvidenceCheckpoint{EvidenceCaptured, EvidenceApplied, EvidenceVerified} {
+			if checkpoint != EvidenceCaptured && successor.Checkpoint == StepEvidence {
+				break
+			}
+			if checkpoint == EvidenceVerified && successor.Checkpoint != StepVerified {
+				break
+			}
+			captured, err := transition.store.ReadCheckpointEvidence(journal.Transaction, successor.ID, checkpoint)
+			if err != nil || !captured.Exists {
+				return snapshot, path, actual, invalid("settings successor checkpoint is unavailable")
+			}
+			evidence, err := ParseEvidence(captured.Payload)
+			fingerprint := successor.Desired
+			if checkpoint == EvidenceCaptured {
+				fingerprint = successor.Expected
+			}
+			if err != nil || !evidenceRecordsEqual(evidence, evidenceFor(journal, successor, checkpoint, fingerprint, recoverySnapshot.Fingerprint)) {
+				return snapshot, path, actual, invalid("settings successor checkpoint differs from authorization")
+			}
+		}
+		inheritance, err := transition.settingsInheritance(definition, step.Resource)
 		if err != nil {
 			return snapshot, path, actual, err
 		}
-		native, successorPath, inheritance, err := transition.localSSHPortSnapshot(step.Resource, view, loaded)
-		if err != nil || successorPath != path || settingsV2ResourceFingerprint(native, inheritance) != successor.Desired {
+		current := settingsV2ResourceFingerprint(native, inheritance)
+		if current == successor.Expected {
+			continue
+		}
+		if current != successor.Desired {
 			return snapshot, path, actual, invalid("settings successor differs from its authorized desired state")
 		}
-		content, err := config.EditPersistentAssignmentContent(path, native.Content, "SSH_PORT", nil)
-		if err != nil {
-			return snapshot, path, actual, err
+		content := native.Content
+		for _, before := range recovery.Before {
+			content, err = config.EditPersistentAssignmentContent(path, content, before.Setting, nil)
+			if err != nil {
+				return snapshot, path, actual, err
+			}
 		}
-		predecessor := config.PersistentFileSnapshot{Exists: true, Content: content}
-		// Appending the pin inserts one separator LF after an unterminated
-		// record. Its inverse is accepted only by the exact authorized input.
-		if settingsV2ResourceFingerprint(predecessor, inheritance) != successor.Expected && len(content) != 0 && content[len(content)-1] == '\n' {
-			predecessor.Content = content[:len(content)-1]
+		before := config.PersistentFileSnapshot{Exists: true, Content: content}
+		if settingsV2ResourceFingerprint(before, inheritance) != successor.Expected && len(content) > 0 && content[len(content)-1] == '\n' {
+			before.Content = content[:len(content)-1]
 		}
-		if settingsV2ResourceFingerprint(predecessor, inheritance) != successor.Expected {
+		if settingsV2ResourceFingerprint(before, inheritance) != successor.Expected {
+			before = config.PersistentFileSnapshot{}
+		}
+		if settingsV2ResourceFingerprint(before, inheritance) != successor.Expected {
 			return snapshot, path, actual, invalid("settings successor does not preserve its authorized input")
 		}
-		_, inheritance, blocker, err := newTestVMSettingsV2Capability(transition.options.ConfigHome, transition.options.InheritedSettingIDs).observeInheritedSettings()
-		if err != nil || blocker != nil || settingsV2ResourceFingerprint(predecessor, inheritance) != step.Desired {
-			return snapshot, path, actual, invalid("settings predecessor differs from its authorized desired state")
-		}
-		return predecessor, path, step.Desired, nil
+		native = before
 	}
-	return snapshot, path, actual, nil
+	inheritance, err := transition.settingsInheritance(migration, step.Resource)
+	if err != nil {
+		return snapshot, path, actual, err
+	}
+	if settingsV2ResourceFingerprint(native, inheritance) != step.Desired {
+		return snapshot, path, actual, invalid("settings predecessor differs from its authorized desired state")
+	}
+	return native, path, step.Desired, nil
+}
+
+func (transition *V2Transition) settingsInheritance(migration MigrationDefinitionV2, yard string) (Fingerprint, error) {
+	switch migration.Kind {
+	case registeredYardsMigration:
+		_, _, inheritance, err := transition.registeredSettingsSnapshot(yard, nil)
+		return inheritance, err
+	case localSSHPortMigration:
+		loaded, err := transition.loadSSHPortYard(yard, nil)
+		if err != nil {
+			return "", err
+		}
+		_, _, inheritance, err := transition.localSSHPortSnapshot(yard, posixV2SettingsSnapshotView{configHome: transition.options.ConfigHome}, loaded)
+		return inheritance, err
+	default:
+		_, inheritance, blocker, err := newTestVMSettingsV2Capability(transition.options.ConfigHome, transition.options.InheritedSettingIDs).observeInheritedSettings()
+		if blocker != nil {
+			return "", invalid("settings inheritance is blocked")
+		}
+		return inheritance, err
+	}
 }

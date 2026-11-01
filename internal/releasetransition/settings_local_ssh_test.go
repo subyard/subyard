@@ -1,10 +1,13 @@
 package releasetransition
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -34,6 +37,7 @@ func TestLocalSSHMigrationPinsAllPersistentYardsAndResumesCAS(t *testing.T) {
 				t.Fatal(err)
 			}
 			registry, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
+			registry = localSSHHistoricalRegistry(t, registry)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -118,6 +122,7 @@ func TestLocalSSHCheckpointResumeRetainsWideAndHistoricalNarrowGrants(t *testing
 				t.Fatal(err)
 			}
 			registryPayload, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
+			registryPayload = localSSHHistoricalRegistry(t, registryPayload)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -260,6 +265,7 @@ func TestLocalSSHMigrationCatalogPreservesKnownRetainedHistoryAndBlocksUnknown(t
 
 func TestLocalSSHMigrationHasNoLegacyRollbackCompatibility(t *testing.T) {
 	registryPayload, err := os.ReadFile(filepath.Join("..", "..", "config/release-transition.json"))
+	registryPayload = localSSHHistoricalRegistry(t, registryPayload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,6 +332,7 @@ func TestLocalSSHMigrationOverlappingSettingsResumeAndRejectDrift(t *testing.T) 
 							t.Fatal(err)
 						}
 						registry, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
+						registry = localSSHHistoricalRegistry(t, registry)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -463,4 +470,22 @@ func TestLocalSSHMigrationOverlappingSettingsResumeAndRejectDrift(t *testing.T) 
 			}
 		})
 	}
+}
+
+func localSSHHistoricalRegistry(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	var registry RegistryV2
+	if err := json.Unmarshal(payload, &registry); err != nil {
+		t.Fatal(err)
+	}
+	registry.CurrentEpochs["owner-registration"], registry.CurrentEpochs["power-metadata"] = 2, 2
+	registry.Migrations = slices.DeleteFunc(registry.Migrations, nativeMigration)
+	encoded, err := json.MarshalIndent(registry, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the exact published four-kind registry, including its inline
+	// SSH dependency array. Owner-replacement authority pins these bytes.
+	encoded = bytes.Replace(encoded, []byte("\"dependsOn\": [\n        \"canonicalize-test-vms-settings-v2\",\n        \"canonicalize-test-yard-owner-v2\"\n      ]"), []byte("\"dependsOn\": [\"canonicalize-test-vms-settings-v2\", \"canonicalize-test-yard-owner-v2\"]"), 1)
+	return append(encoded, '\n')
 }

@@ -252,7 +252,9 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	if adopt {
 		memoryPolicy = testvmsruntime.HostMemoryAdoptionPolicy
 	}
-	if err := memoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1"); err != nil {
+	// The enabled nested broker also owns this exact read-only procfs source.
+	hostMemorySelected := extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1" || (adopt && runtime.Yard.YardKind == domain.YardContainer && runtime.Yard.NestedE2EVMs)
+	if err := memoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, hostMemorySelected); err != nil {
 		return err
 	}
 	for key, setting := range map[string]string{"limits.cpu": "LIMITS_CPU", "limits.memory": "LIMITS_MEMORY"} {
@@ -286,7 +288,7 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 			if expected, ok := extraConfig[key]; ok && expected != "" && value == expected {
 				continue
 			}
-			if key == "user.subyard.host_memory" && extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1" {
+			if key == "user.subyard.host_memory" && hostMemorySelected {
 				continue
 			}
 			switch key {
@@ -382,6 +384,9 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		if runtime.Yard.NestedE2EVMs {
 			for name, source := range map[string]string{"e2e-vsock": "/dev/vsock", "e2e-vhost-vsock": "/dev/vhost-vsock", "e2e-tun": "/dev/net/tun"} {
 				desired[name] = map[string]string{"type": "unix-char", "source": source, "path": source}
+				if instance.LocalDevices[name]["mode"] == "0660" {
+					desired[name]["mode"] = "0660"
+				}
 			}
 		}
 	}

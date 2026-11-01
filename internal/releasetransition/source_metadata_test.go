@@ -68,6 +68,7 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 				t.Fatal(err)
 			}
 			options := transition.options
+			options.RegisteredYards, options.GuestDiskTmp = []V2ActivationReconciler{}, []V2ActivationReconciler{}
 			options.RegistryPayload = payload
 			options.MigrationCheckpoint, options.SourceMigrationCheckpoint = true, true
 			transition, err = NewV2Transition(options)

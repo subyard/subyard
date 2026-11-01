@@ -31,6 +31,33 @@ const (
 
 var profileRuntimeDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+func (runtime Runtime) profileObservationFailure(owner, reason string, cause error) error {
+	if reason == "" {
+		reason = "unclassified"
+		var exit *exec.ExitError
+		switch {
+		case errors.Is(cause, context.Canceled):
+			reason = "cancelled"
+		case errors.Is(cause, context.DeadlineExceeded):
+			reason = "deadline"
+		case errors.Is(cause, os.ErrPermission):
+			reason = "permission-denied"
+		case errors.Is(cause, os.ErrNotExist):
+			reason = "command-not-found"
+		case errors.As(cause, &exit):
+			reason = fmt.Sprintf("native-exit-%d", exit.ExitCode())
+		}
+	}
+	yard := runtime.Yard.YardName
+	if len(owner) > 63 || !domain.SafeID(owner) {
+		owner = "unknown"
+	}
+	if len(yard) > 63 || !domain.SafeName(yard) {
+		yard = "unknown"
+	}
+	return &integrationLifecycleError{cause: cause, message: fmt.Sprintf("yard %s: profile %s observation failed (%s)", yard, owner, reason), retry: "run yard update --check"}
+}
+
 func (runtime Runtime) ObserveProfileRuntimes(ctx context.Context) (map[string]ports.RuntimeObservation, error) {
 	definitions, err := runtime.profileRuntimeDefinitions()
 	if err != nil {
@@ -104,11 +131,11 @@ func (runtime Runtime) observeProfileRuntimes(
 	// order. Errors never leave sibling observations running into later effects.
 	for index, definition := range definitions {
 		if failures[index] != nil {
-			return nil, fmt.Errorf("observe profile runtime %s: %w", definition.Runtime.ActivationID, failures[index])
+			return nil, runtime.profileObservationFailure(definition.Runtime.ActivationID, "", failures[index])
 		}
 		observation, err := decodeProfileRuntimeObservation(outputs[index])
 		if err != nil {
-			return nil, fmt.Errorf("decode profile runtime %s observation: %w", definition.Runtime.ActivationID, err)
+			return nil, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", err)
 		}
 		observations[definition.Runtime.ActivationID] = observation
 	}

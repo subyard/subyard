@@ -194,8 +194,33 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 			if inspectErr != nil && !absent {
 				return releasetransition.V2SourceActivationPlan{}, inspectErr
 			}
-			if absent || !strings.EqualFold(instance.Status, "running") {
-				unavailable[name] = projectedIntegrationUnavailable{yard: loaded.Context, absent: absent, instance: instance}
+			proof := projectedIntegrationUnavailable{yard: loaded.Context, absent: absent, instance: instance}
+			pendingCleanup := false
+			if !absent && instance.Config["user.subyard.desired_power"] == "stopped" && (strings.EqualFold(instance.Status, "running") || strings.EqualFold(instance.Status, "stopped")) {
+				for _, candidate := range []struct {
+					guest   bool
+					desired map[string]releasetransition.Fingerprint
+				}{{false, view.RegisteredYards}, {true, view.GuestDiskTmp}} {
+					expected := candidate.desired["yard."+name]
+					if expected == "" {
+						continue
+					}
+					owner := reconciler.operation().registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: reconciler.configHome}, candidate.guest, name)
+					observed, err := owner.(releasetransition.V2ProspectiveActivationObserver).ObserveProspective(ctx, releases, releasetransition.ReleaseLinks{}, view.Settings)
+					if err != nil {
+						return releasetransition.V2SourceActivationPlan{}, err
+					}
+					if observed.Desired != expected {
+						return releasetransition.V2SourceActivationPlan{}, domain.ErrPlanStale
+					}
+					if !observed.Converged {
+						proof.owner, proof.desired = owner, expected
+						pendingCleanup = candidate.guest
+					}
+				}
+			}
+			if absent || !strings.EqualFold(instance.Status, "running") || pendingCleanup {
+				unavailable[name] = proof
 			} else {
 				platform := reconciler.operation().initPlatform(loaded, nil)
 				if native, ok := platform.(reconcileruntime.Runtime); ok {
@@ -296,6 +321,8 @@ type projectedIntegrationUnavailable struct {
 	yard     domain.Context
 	absent   bool
 	instance ports.InstanceInfo
+	owner    releasetransition.V2ActivationReconciler
+	desired  releasetransition.Fingerprint
 }
 
 func (reconciler *materializedConfigActivationReconciler) verifyProjectedUnavailable(ctx context.Context) error {
@@ -316,6 +343,15 @@ func (reconciler *materializedConfigActivationReconciler) verifyProjectedUnavail
 			original, _ := activationStageFingerprint(before.instance)
 			current, _ := activationStageFingerprint(fresh)
 			if original != current {
+				if before.owner != nil && fresh.Config["volatile.uuid"] == before.instance.Config["volatile.uuid"] && fresh.Config["user.subyard.desired_power"] == "stopped" && strings.EqualFold(fresh.Status, "stopped") {
+					observed, err := before.owner.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+					if err != nil {
+						return err
+					}
+					if observed.Converged && observed.Desired == before.desired {
+						continue
+					}
+				}
 				return fmt.Errorf("%w: yard %s unavailable integration backend changed", domain.ErrPlanStale, name)
 			}
 		}

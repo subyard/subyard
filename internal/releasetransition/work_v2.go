@@ -15,6 +15,10 @@ type v2Work struct {
 	recipe    v2WorkRecipe
 }
 type v2WorkRecipe interface{ migrationWorkRecipe() }
+type nativeWorkRecipe struct{}
+
+func (*nativeWorkRecipe) migrationWorkRecipe() {}
+
 type settingsWorkRecipe struct{ file settingsV2FilePlan }
 type recordedSettingsWork struct{ intent PlannerStepIntent }
 type ownerWorkRecipe struct{ plan ownerRegistrationV2Plan }
@@ -41,6 +45,10 @@ type compatibilityProjectionRevision struct{ snapshot ProtectedSnapshot }
 
 func (work v2Work) kind() v2WorkKind {
 	switch recipe := work.recipe.(type) {
+	case *nativeWorkRecipe:
+		if recipe != nil {
+			return v2NativeWork
+		}
 	case *settingsWorkRecipe:
 		if recipe != nil {
 			return v2SettingsWork
@@ -127,8 +135,12 @@ func (transition *V2Transition) validateWorkRecipe(work v2Work, journal JournalR
 	switch recipe := work.recipe.(type) {
 	case *ledgerWorkRecipe:
 		return transition.validateLedgerWork(work, step)
+	case *nativeWorkRecipe:
+		if !nativeMigration(work.migration) || transition.nativeOwner(work.migration, step.Resource) == nil || step.ID != work.migration.ID+"."+step.Resource || step.Decision != DecisionTransform {
+			return invalid("registered yard recipe differs from its journal intent")
+		}
 	case *settingsWorkRecipe:
-		if !settingsWorkMigration(work.migration) || recipe.file.LocalSSHPort != (work.migration.Kind == localSSHPortMigration) || recipe.file.validate() != nil || settingsIntent(work.migration, recipe.file) != expected {
+		if !settingsWorkMigration(work.migration) || recipe.file.LocalSSHPort != (work.migration.Kind == localSSHPortMigration) || recipe.file.RegisteredEndpoints != (work.migration.Kind == registeredYardsMigration) || recipe.file.validate() != nil || settingsIntent(work.migration, recipe.file) != expected {
 			return invalid("settings recipe differs from its journal intent")
 		}
 	case *recordedSettingsWork:
@@ -220,7 +232,7 @@ func (transition *V2Transition) validateObservationWork(observation v2Observatio
 }
 
 func settingsWorkMigration(migration MigrationDefinitionV2) bool {
-	return migration.Domain == "settings" && (migration.Kind == localSSHPortMigration || migration.Kind == "test-vms-settings-v1-to-v2")
+	return nativeMigration(migration) && migration.Kind == registeredYardsMigration || migration.Domain == "settings" && (migration.Kind == localSSHPortMigration || migration.Kind == "test-vms-settings-v1-to-v2")
 }
 
 // boundWorkStep is the checked recipe/phase intersection consumed by effects.

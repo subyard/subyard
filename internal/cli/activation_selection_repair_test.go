@@ -550,6 +550,7 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 		}
 		actor := &processDriftReconciler{converged: true}
 		transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+			RegisteredYards: []releasetransition.V2ActivationReconciler{}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{},
 			ConfigHome: home, OperatorHome: f.cli.env["HOME"], CandidateConfigDir: filepath.Join(root, "config"), RegistryPayload: mustReadConfigFixture(t, filepath.Join(root, "config/release-transition.json")), ArtifactDigest: journal.ArtifactDigest,
 			Releases: releasetransition.ReleasePair{From: actual.Active, Previous: actual.Previous, Target: actual.Active}, MigrationCheckpoint: true, SourceMigrationCheckpoint: true,
 			NewTransactionID:  func() releasetransition.TransactionID { return journal.Transaction },
@@ -572,7 +573,7 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 			t.Fatalf("actual SSH history: %#v %v", outcome, err)
 		}
 		journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, f.journalPath))
-		if err != nil || journal.Checkpoint != releasetransition.JournalComplete || len(journal.Steps) != 3 {
+		if err != nil || journal.Checkpoint != releasetransition.JournalComplete || len(journal.Steps) != 5 {
 			t.Fatalf("actual completed pin evidence: steps=%d err=%v", len(journal.Steps), err)
 		}
 		for _, step := range journal.Steps {

@@ -147,6 +147,54 @@ func TestDiskTmpGuestPolicy(t *testing.T) {
 	}
 }
 
+func TestDiskTmpAssessmentIsReadOnlyAndRejectsForeignPolicy(t *testing.T) {
+	root, _, run := diskTmpFixture(t)
+	sentinel := filepath.Join(root, "tmp", "active")
+	testkit.WriteFile(t, sentinel, []byte("retain active workload data"), 0600)
+	for _, filesystem := range []string{"ext4", "tmpfs", "ramfs", "unknown"} {
+		output, err := run("assess", "FILESYSTEM="+filesystem)
+		expected := 0
+		if filesystem == "tmpfs" || filesystem == "ramfs" {
+			expected = 10
+		}
+		if filesystem == "unknown" {
+			expected = 1
+		}
+		code := 0
+		var exit *exec.ExitError
+		if err != nil {
+			if !errors.As(err, &exit) {
+				t.Fatal(err)
+			}
+			code = exit.ExitCode()
+		}
+		if code != expected {
+			t.Fatalf("%s: exit %d want %d: %s", filesystem, code, expected, output)
+		}
+	}
+	for _, relative := range []string{"calls", "count", "etc/subyard-guest-tmpfiles.conf", "etc/systemd/system/tmp.mount"} {
+		if _, err := os.Lstat(filepath.Join(root, relative)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("assessment wrote or waited for boot", relative, err)
+		}
+	}
+	for _, relative := range []string{"etc/systemd/system/tmp.mount", "etc/subyard-guest-tmpfiles.conf"} {
+		path := filepath.Join(root, relative)
+		testkit.WriteFile(t, path, []byte("foreign policy\n"), 0644)
+		if output, err := run("assess"); err == nil {
+			t.Fatalf("foreign %s accepted: %s", relative, output)
+		}
+		if payload, _ := os.ReadFile(path); string(payload) != "foreign policy\n" {
+			t.Fatal("foreign policy changed")
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if payload, err := os.ReadFile(sentinel); err != nil || string(payload) != "retain active workload data" {
+		t.Fatal("assessment changed active data", err)
+	}
+}
+
 func TestDiskTmpPolicyWaitsForGuestBoot(t *testing.T) {
 	for _, completed := range []string{"running", "degraded"} {
 		t.Run(completed, func(t *testing.T) {

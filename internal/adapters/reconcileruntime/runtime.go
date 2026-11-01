@@ -2323,6 +2323,18 @@ func (runtime Runtime) runPathEnvironment(
 	if err != nil {
 		return err
 	}
+	// Resolve only the current engine's transport label after authorization.
+	// Keep symbolic roles in native records; the parent remains alive while its
+	// child uses the same executing image through this process-qualified path.
+	if self, err := os.Executable(); err == nil && strings.HasPrefix(self, "/memfd:") {
+		command.Env = append([]string(nil), command.Env...)
+		for index, entry := range command.Env {
+			key, value, _ := strings.Cut(entry, "=")
+			if value == self && (key == "SUBYARD_DISPATCHER_PATH" || key == "SUBYARD_POWER_ENGINE_SOURCE") {
+				command.Env[index] = key + "=" + fmt.Sprintf("/proc/%d/exe", os.Getpid())
+			}
+		}
+	}
 	if err := command.Run(); err != nil {
 		return finish(fmt.Errorf("reconcile adapter %s: %w", strings.Join(arguments, " "), err))
 	}

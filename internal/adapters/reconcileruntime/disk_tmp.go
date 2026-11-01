@@ -31,7 +31,10 @@ func (runtime Runtime) diskTmpReadiness(ctx context.Context, diagnostic bool) (b
 	if !state.InstanceFound {
 		return false, nil
 	}
-	instance := state.Instance
+	return runtime.diskTmpInstanceReadiness(ctx, state.Instance, diagnostic)
+}
+
+func (runtime Runtime) diskTmpInstanceReadiness(ctx context.Context, instance ports.InstanceInfo, diagnostic bool) (bool, error) {
 	if strings.EqualFold(instance.Status, "stopped") {
 		policy, _ := instance.EffectiveConfig("user.subyard.disk_tmp")
 		return instanceIntentionallyStopped(instance) && policy == "v1", nil

@@ -3,19 +3,244 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+type stoppedActivationNative struct {
+	*adoptionIncus
+	statusPath  string
+	markerPower string
+	inventory   nativeMaterializedState
+}
+
+func (native *stoppedActivationNative) Instance(ctx context.Context, project, name string) (ports.InstanceInfo, error) {
+	instance, err := native.Incus.Instance(ctx, project, name)
+	if err != nil {
+		return instance, err
+	}
+	body, _ := json.Marshal(instance)
+	instance = ports.InstanceInfo{}
+	_ = json.Unmarshal(body, &instance)
+	status, err := os.ReadFile(native.statusPath)
+	instance.Status = string(status)
+	return instance, err
+}
+func (native *stoppedActivationNative) ReconcileState(ctx context.Context, project, name, _, _, _ string) (ports.ReconcileState, error) {
+	state := native.Reconcile
+	var err error
+	state.Instance, err = native.Instance(ctx, project, name)
+	return state, err
+}
+func (native *stoppedActivationNative) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) == 4 && request.Command[0] == "sh" && request.Command[1] == "-s" {
+		return ports.InstanceExecResult{}, nil
+	}
+	return native.inventory.Exec(ctx, project, name, request)
+}
+func (native *stoppedActivationNative) AdoptRegisteredInstance(ctx context.Context, before ports.InstanceInfo, values map[string]string) error {
+	actual, err := native.Instance(ctx, before.Project, before.Name)
+	if err != nil {
+		return err
+	}
+	if values["user.subyard.disk_tmp"] != "" {
+		native.markerPower = actual.Status
+	}
+	for key, value := range values {
+		actual.Config[key], actual.LocalConfig[key] = value, value
+	}
+	native.Instances[before.Project+"/"+before.Name] = actual
+	return nil
+}
+
+func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *testing.T) {
+	for _, mode := range []string{"tmp-stopped", "tmp-running", "native-stopped", "combined-stopped", "no-proof", "tampered-proof"} {
+		t.Run(mode, func(t *testing.T) {
+			initial := "stopped"
+			if mode == "tmp-running" {
+				initial = "running"
+			}
+			nativePending := mode == "native-stopped" || mode == "combined-stopped"
+			program, execution, fixture := adoptionFixture(t)
+			root := program.options.RepositoryRoot
+			for _, path := range []string{"scripts/lib/project-config.sh", "scripts/guest-disk-tmp.sh", "config/projects-changed.sh"} {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(root, path), mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), path)), 0600)
+			}
+			status := filepath.Join(root, "physical-status")
+			testkit.WriteFile(t, status, []byte(initial), 0600)
+			instance := fixture.Reconcile.Instance
+			instance.Config["user.subyard.desired_power"], instance.LocalConfig["user.subyard.desired_power"] = "stopped", "stopped"
+			if mode == "native-stopped" {
+				instance.Config["user.subyard.disk_tmp"], instance.LocalConfig["user.subyard.disk_tmp"] = "v1", "v1"
+			}
+			if nativePending {
+				device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:32000", "connect": "tcp:127.0.0.1:9119"}
+				instance.LocalDevices["sample-server"], instance.Devices["sample-server"] = device, device
+				resourceDir := filepath.Join(root, "config/profiles/sample/resources/proxy")
+				if err := os.MkdirAll(resourceDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, resourceDir+".res", []byte("COMMAND=sample-server\nHANDLER=resources/proxy/handler.sh\nTITLE=sample\nPROXY=\"sample-server SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 owner-metadata-v1 loopback-or-tailscale\"\nACTION=\"up up security-change reversible\"\nACTION=\"down down security-change reversible\"\nBRINGUP=up\nSHUTDOWN=down\n"), 0600)
+				testkit.WriteFile(t, filepath.Join(resourceDir, "handler.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+			}
+			native := &stoppedActivationNative{adoptionIncus: fixture, statusPath: status, inventory: nativeMaterializedState{committed: true}}
+			native.Instances = map[string]ports.InstanceInfo{instance.Project + "/" + instance.Name: instance}
+			native.Reconcile.Instance = instance
+			options := program.options
+			options.InitPlatform, options.Incus, options.Executor = nil, native, native
+			policy, _ := yardnetwork.Decode(nil)
+			options.NetworkPolicy = &yardnetwork.Service{Host: &networkCLIHost{policy: policy, ready: true, instances: map[string]ports.InstanceInfo{"default": instance}}, Lock: testNetworkPolicyLock{}}
+			options.Environment = append(options.Environment, "STATE="+root)
+			options.Environment = append(options.Environment, "SAMPLE_HOST=127.0.0.1", "SAMPLE_PORT=32000")
+			program, err := New(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settingsPath := filepath.Join(execution.loaded.Context.Paths.ConfigHome, "yards/default/config.env")
+			body, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			profilePath := filepath.Join(root, "config/yards/profiles/migration-tools.env")
+			if err := os.MkdirAll(filepath.Dir(profilePath), 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, profilePath, []byte("ALLOWS_CODING_TOOLS=true\n"), 0600)
+			selection := ""
+			if nativePending {
+				selection = "sample"
+			}
+			for key, value := range map[string]string{"YARD_TEMPLATE": "migration-tools", "CODING_TOOL_INTEGRATIONS": "", "ENVIRONMENT_PROFILES": selection} {
+				body, err = config.EditPersistentAssignmentContent(settingsPath, body, key, &value)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			testkit.WriteFile(t, settingsPath, body, 0600)
+			testkit.WriteFile(t, filepath.Join(root, "scripts/lifecycle-guard.sh"), []byte("#!/bin/sh\ncase \"$1\" in start) printf running > \"$STATE/physical-status\";; stop) printf stopped > \"$STATE/physical-status\";; *) exit 90;; esac\n"), 0700)
+			program.options.Stdin = strings.NewReader("yes\n")
+			program.migrationOperatorInput = nil
+			program.openTerminal = func() (*os.File, error) { return nil, errors.New("test uses explicit prompt") }
+			request := releasetransition.ProcessRequest{ConfigHome: execution.loaded.Context.Paths.ConfigHome}
+			register := program.registeredYardMigration(request, false, "default")
+			registration, err := register.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !nativePending {
+				if err := register.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reconciler := &materializedConfigActivationReconciler{cli: program, configHome: request.ConfigHome, yard: "default"}
+			releases := releasetransition.ReleasePair{From: "release-a", Target: "release-b"}
+			view := preparedActivationSnapshotFixture{home: request.ConfigHome}
+			owner := program.registeredYardMigration(request, true, "default").(*migration.RegisteredYardMigration)
+			owner.Prompt = &testkit.Prompt{Answers: []bool{true}}
+			maintenance, err := owner.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceView := releasetransition.V2SourceActivationView{Settings: view, RegisteredYards: map[string]releasetransition.Fingerprint{}, GuestDiskTmp: map[string]releasetransition.Fingerprint{}}
+			if nativePending {
+				sourceView.RegisteredYards[register.ID()] = registration.Desired
+			}
+			if !maintenance.Converged && mode != "no-proof" {
+				sourceView.GuestDiskTmp[owner.ID()] = maintenance.Desired
+			}
+			if mode == "tampered-proof" {
+				sourceView.GuestDiskTmp[owner.ID()] = releasetransition.Fingerprint(strings.Repeat("b", 64))
+			}
+			_, err = reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, sourceView)
+			if mode == "tampered-proof" {
+				if !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatal("tampered intent accepted", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal("prepare", err)
+			}
+			if !reconciler.projectedUnavailable["default"].absent && len(reconciler.projectedUnavailable) == 0 {
+				t.Fatal("fixture did not capture unavailable integrations")
+			}
+			if nativePending {
+				if err := register.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := owner.Observe(context.Background(), releases, releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
+			}
+			if mode != "native-stopped" {
+				if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode != "native-stopped" && native.markerPower != "stopped" {
+				t.Error("completion marker published before stopped restoration", native.markerPower)
+			}
+			_, err = reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+			if mode == "no-proof" {
+				if !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatal("unplanned native drift authorized repair", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal("completed owned migration invalidated prepared availability", err)
+			}
+			for _, change := range []string{"uuid", "config", "device", "intent", "power", "missing", "private-input"} {
+				current, err := native.Instance(context.Background(), instance.Project, instance.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				saved := native.Instances[instance.Project+"/"+instance.Name]
+				switch change {
+				case "uuid":
+					current.Config["volatile.uuid"] = "foreign"
+				case "config":
+					current.Config["security.privileged"] = "true"
+				case "device":
+					current.LocalDevices["foreign"] = map[string]string{"type": "disk", "source": "/foreign", "path": "/foreign"}
+				case "intent":
+					current.Config["user.subyard.desired_power"], current.LocalConfig["user.subyard.desired_power"] = "running", "running"
+				case "power":
+					testkit.WriteFile(t, status, []byte("running"), 0600)
+				case "private-input":
+					testkit.WriteFile(t, filepath.Join(request.ConfigHome, "host-id"), []byte("different-owner\n"), 0600)
+				}
+				native.Instances[instance.Project+"/"+instance.Name] = current
+				if change == "missing" {
+					delete(native.Instances, instance.Project+"/"+instance.Name)
+				}
+				if _, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{}); err == nil {
+					t.Fatal("unapproved state reused completion proof", change)
+				}
+				native.Instances[instance.Project+"/"+instance.Name] = saved
+				if change == "power" {
+					testkit.WriteFile(t, status, []byte("stopped"), 0600)
+				}
+			}
+		})
+	}
+}
 
 func TestPreparedActivationRejectsWrongBoundOwnerRegistrationAndOverrides(t *testing.T) {
 	for _, field := range []string{"registration", "overrides"} {

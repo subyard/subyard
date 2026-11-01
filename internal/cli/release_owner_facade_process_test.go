@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -27,6 +28,18 @@ import (
 // shipped helper. Its exact bytes are manifest-bound, preserving the real
 // /proc/self/exe authentication at the staged frozen ingress.
 func TestMain(m *testing.M) {
+	if len(os.Args) >= 4 && os.Args[1] == "_profile-services" && os.Getenv("SUBYARD_TEST_DISPATCH_ROOT") != "" {
+		environment := map[string]string{}
+		for _, entry := range os.Environ() {
+			key, value, _ := strings.Cut(entry, "=")
+			environment[key] = value
+		}
+		if err := profile.RunServices(context.Background(), os.Args[2], os.Args[3:], environment, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "--version":

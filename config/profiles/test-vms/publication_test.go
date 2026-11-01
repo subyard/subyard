@@ -1,11 +1,13 @@
 package testvms_test
 
 import (
+	"maps"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
@@ -30,6 +32,50 @@ func TestDisabledBackendPublication(t *testing.T) {
 	old := "0:" + strings.Repeat("a", 64) + ":images:debian/13/cloud:2:4GiB:20GiB:2:300:default"
 	current := "0:" + strings.Repeat("b", 64) + ":images:debian/13/cloud:2:4GiB:20GiB:2:300:default:0GiB:24GiB:5GiB:4GiB:512MiB"
 	schemaKey, revisionKey := data.InstancePublication.SchemaKey, data.InstancePublication.RevisionKey
+	catalog, err := config.LoadCatalog("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"0", "1"} {
+		for _, recipe := range []string{old, current} {
+			t.Run("observed-mode-"+mode+"-"+strings.SplitN(recipe, ":", 3)[1][:1], func(t *testing.T) {
+				env := maps.Clone(environment)
+				env["NESTED_E2E_VMS"] = mode
+				marker := map[string]string{schemaKey: "1", revisionKey: mode + recipe[1:]}
+				validate := func(name, value string) error { return catalog.ValidateSetting(config.ScopeYard, name, value, false) }
+				observed, err := owner.ObserveInstancePublication(marker, marker, env, validate)
+				if err != nil || !strings.Contains(observed[revisionKey], `"Disabled":"`+mode+`"`) {
+					t.Fatalf("owned publication refused: %v", err)
+				}
+				if mode == "1" {
+					if _, err := owner.ProjectInstancePublication(marker, marker, env); err == nil {
+						t.Fatal("strict disabled projection admitted an enabled recipe")
+					}
+				}
+				for _, change := range []string{"mode", "partial", "identity", "unknown"} {
+					local, effective, changed := maps.Clone(marker), maps.Clone(marker), maps.Clone(env)
+					switch change {
+					case "mode":
+						changed["NESTED_E2E_VMS"] = "1"
+						if mode == "1" {
+							changed["NESTED_E2E_VMS"] = "0"
+						}
+					case "partial":
+						delete(local, schemaKey)
+					case "identity":
+						changed["YARD_NAME"] = "foreign"
+					case "unknown":
+						changed["NESTED_E2E_VMS"] = "2"
+						local[revisionKey] = "2" + recipe[1:]
+						effective[revisionKey] = local[revisionKey]
+					}
+					if _, err := owner.ObserveInstancePublication(local, effective, changed, validate); err == nil {
+						t.Fatal("unsafe observed publication accepted", change)
+					}
+				}
+			})
+		}
+	}
 	project := func(marker string, env map[string]string) (map[string]string, error) {
 		values := map[string]string{schemaKey: "1", revisionKey: marker}
 		return owner.ProjectInstancePublication(values, values, env)

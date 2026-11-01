@@ -8,23 +8,25 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type historyControl struct {
-	Journal         string         `json:"journal"`
-	Runtime         string         `json:"runtime"`
-	Target          string         `json:"target"`
-	Source          string         `json:"source"`
-	Guest           string         `json:"guest"`
-	InitialDrift    string         `json:"initialDrift"`
-	Destination     string         `json:"destination"`
-	Migrations      []string       `json:"migrations"`
-	FailOnce        bool           `json:"failOnce"`
-	InventorySHA256 string         `json:"inventoryProgramSHA256"`
-	Skills          *historySkills `json:"skills,omitempty"`
+	DiskTmpCheckSHA256 string         `json:"diskTmpCheckSHA256"`
+	Journal            string         `json:"journal"`
+	Runtime            string         `json:"runtime"`
+	Target             string         `json:"target"`
+	Source             string         `json:"source"`
+	Guest              string         `json:"guest"`
+	InitialDrift       string         `json:"initialDrift"`
+	Destination        string         `json:"destination"`
+	Migrations         []string       `json:"migrations"`
+	FailOnce           bool           `json:"failOnce"`
+	InventorySHA256    string         `json:"inventoryProgramSHA256"`
+	Skills             *historySkills `json:"skills,omitempty"`
 }
 
 type historySkills struct {
@@ -51,6 +53,9 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			return reject()
 		}
 		command := call.Command
+		if slices.Equal(command, []string{"sh", "-s", "--", "check"}) {
+			return diskTmpCheckResponse(control.DiskTmpCheckSHA256)
+		}
 		programSHA := ""
 		if len(command) > 3 {
 			programSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(command[3])))

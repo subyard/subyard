@@ -780,6 +780,16 @@ func completeConfigApplyGateFixture(
 case "${1:-}" in
 --version) printf 'yard-engine 1.2.3\n' ;;
 _release-transition)
+  request="$(cat)"
+  case "$request" in
+    *'"mode":"converge"'*)
+      if [ -e %q ]; then
+        printf '%%s\n' '{"schemaVersion":1,"activationReconciliationOwned":true,"outcome":{"status":"ready","reachedGoal":true,"active":"%s","previous":"release-a","target":"%s","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}'
+      else
+        printf '%%s\n' '{"schemaVersion":1,"activationReconciliationOwned":true,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"%s","previous":"release-a","target":"%s","code":"dependency-unavailable","message":"activation drift persists","retry":"repair fixture activation"}}'
+      fi
+      exit 0 ;;
+  esac
   if [ -e %q ]; then
     printf '%%s\n' '{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":"%s","previous":"release-a","target":"%s","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}}'
   else
@@ -787,7 +797,7 @@ _release-transition)
   fi ;;
 *) exit 64 ;;
 esac
-`, readyMarker, target, target, target, target)
+`, readyMarker, target, target, target, target, readyMarker, target, target, target, target)
 	writeCLIFile(t, engine, script, 0o700)
 	enginePayload, err := os.ReadFile(engine)
 	if err != nil {

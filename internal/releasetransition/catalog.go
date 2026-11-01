@@ -83,13 +83,25 @@ func NewCapabilityCatalog(descriptors []CapabilityDescriptor) (CapabilityCatalog
 	}, nil
 }
 
-func BuiltinCapabilityCatalog() CapabilityCatalog {
+func preRegisteredYardsCapabilityCatalog() CapabilityCatalog {
 	previous := PreviousBuiltinCapabilityCatalog()
 	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
 		CapabilityDescriptor{Kind: "local-ssh-port-settings-v2-to-v3", Domain: "settings", Version: 1},
 		// Epoch-1 owners cannot honor detached optional listener state.
 		// No backward-compatible policy means their rollback is forbidden.
 		CapabilityDescriptor{Kind: "owner-publication-state-v1", Domain: "power-metadata", Version: 1},
+	))
+	if err != nil {
+		panic(err)
+	}
+	return catalog
+}
+
+func BuiltinCapabilityCatalog() CapabilityCatalog {
+	previous := preRegisteredYardsCapabilityCatalog()
+	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
+		CapabilityDescriptor{Kind: registeredYardsMigration, Domain: "owner-registration", Version: 1},
+		CapabilityDescriptor{Kind: guestDiskTmpMigration, Domain: "power-metadata", Version: 1},
 	))
 	if err != nil {
 		panic(err)
@@ -119,7 +131,7 @@ func PreviousBuiltinCapabilityCatalog() CapabilityCatalog {
 
 func SupportedBuiltinCatalog(digest Fingerprint) (CapabilityCatalog, bool) {
 	current, previous := BuiltinCapabilityCatalog(), PreviousBuiltinCapabilityCatalog()
-	catalogs := []CapabilityCatalog{current, previous}
+	catalogs := []CapabilityCatalog{current, previous, preRegisteredYardsCapabilityCatalog()}
 	// Both independently introduced implementations may own sealed journals.
 	// Recognize only their exact compiled catalogs, never arbitrary subsets.
 	for _, kind := range []string{"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1"} {

@@ -28,6 +28,7 @@ type ProtectedSnapshot struct {
 }
 
 type POSIXV2Store struct {
+	endpointSettings        []string
 	configHome              string
 	fault                   func(string) error
 	retirementCaptureFailed bool

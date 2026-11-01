@@ -160,7 +160,8 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 			"internal/adapters/reconcileruntime/runtime.go",
 			"internal/cli/prepared_command.go",
 			"scripts/03-create-subyard.sh",
-		},
+
+			"internal/adapters/reconcileruntime/migration_physical.go"},
 		"teardown-physical.sh": {
 			"internal/adapters/reconcileruntime/runtime.go",
 			"internal/cli/prepared_command.go",

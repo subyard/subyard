@@ -4379,6 +4379,8 @@ func v2RegistryPayload(t *testing.T) []byte {
 	if err := json.Unmarshal(payload, &registry); err != nil {
 		t.Fatal(err)
 	}
+	registry.CurrentEpochs["owner-registration"] = 2
+	registry.Migrations = slices.DeleteFunc(registry.Migrations, func(m MigrationDefinitionV2) bool { return nativeMigration(m) })
 	registry.CurrentEpochs["power-metadata"] = 1
 	registry.Migrations = slices.DeleteFunc(registry.Migrations, func(m MigrationDefinitionV2) bool { return m.Kind == "owner-publication-state-v1" })
 	registry.CurrentEpochs["settings"] = 2

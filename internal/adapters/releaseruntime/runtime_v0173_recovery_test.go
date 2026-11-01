@@ -215,7 +215,10 @@ func newV0173RecoveryFixture(t *testing.T) v0111ProcessFixture {
 	t.Helper()
 	root := testkit.TempDir(t)
 	fixture := v0111ProcessFixture{runtimeRoot: filepath.Join(root, "runtime"), configHome: filepath.Join(root, "config"), statePath: filepath.Join(root, "activation-state"), sourceTx: "tx-activation-only"}
-	fixture.registry = mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json"))
+	fixture.registry = mustReadFile(t, filepath.Join("testdata", "v0.11.1-release-transition.json"))
+	if v0111FixtureFingerprintBytes(fixture.registry) != "4ab5f1ac2a664b9cc81863c33d1353b3efe3d4f38fd1ed0ede391beb499ad250" {
+		t.Fatal("published 0.17.3 registry changed")
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

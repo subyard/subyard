@@ -14,6 +14,47 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 )
 
+func TestSourceActivationCarriesOnlyUnverifiedNativeIntentDesired(t *testing.T) {
+	for _, scenario := range []string{"both", "verified", "ambiguous", "complete"} {
+		t.Run(scenario, func(t *testing.T) {
+			a, b := Fingerprint(strings.Repeat("a", 64)), Fingerprint(strings.Repeat("b", 64))
+			native := nativeMigrationWork(PlannerStepIntent{ID: "native", Resource: "yard.default", Desired: a}, MigrationDefinitionV2{Kind: registeredYardsMigration, Domain: "owner-registration", FromEpoch: 2, ToEpoch: 3})
+			guest := nativeMigrationWork(PlannerStepIntent{ID: "guest", Resource: "yard.default", Desired: b}, MigrationDefinitionV2{Kind: guestDiskTmpMigration, Domain: "power-metadata", FromEpoch: 2, ToEpoch: 3})
+			observation := v2Observation{work: []v2Work{native, guest}, journal: &JournalRecord{Checkpoint: JournalMigrating}}
+			if scenario == "verified" {
+				observation.journal.Steps = []JournalStep{{ID: "native", Checkpoint: StepVerified}}
+			}
+			if scenario == "complete" {
+				observation.journal.Checkpoint = JournalComplete
+			}
+			if scenario == "ambiguous" {
+				duplicate := native
+				duplicate.intent.Desired = b
+				observation.work = append(observation.work, duplicate, native)
+			}
+			transition := &V2Transition{}
+			transition.retainSourceActivationView(&observation, nil)
+			if scenario == "complete" {
+				if observation.sourceActivationView != nil {
+					t.Fatal("completed history supplied pending repair authority")
+				}
+				return
+			}
+			view := observation.sourceActivationView
+			if view == nil || view.GuestDiskTmp["yard.default"] != b {
+				t.Fatal("pending guest intent missing")
+			}
+			want := a
+			if scenario == "verified" || scenario == "ambiguous" {
+				want = ""
+			}
+			if view.RegisteredYards["yard.default"] != want {
+				t.Fatal("verified or ambiguous native work supplied repair authority")
+			}
+		})
+	}
+}
+
 type sourceProjectionBackend struct {
 	applied    map[string]Fingerprint
 	applies    int

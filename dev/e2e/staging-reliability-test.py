@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import os
 import sys
+import signal
+import time
 from unittest import mock
 
 fixture = pathlib.Path(__file__).with_name('staging-reliability.sh').read_text()
@@ -17,6 +19,23 @@ source = fixture.split("<<'PYTHON'", 1)[1].split('\n', 1)[1].split('\nPYTHON', 1
 compile(source, 'boot-observer', 'exec')
 namespace = {}
 exec(source.split('running=True', 1)[0], namespace)
+with mock.patch.object(namespace['os'], 'statvfs', side_effect=[
+        OSError('private path'),
+        os.statvfs_result((4096, 4096, 1000, 500, 400, 100, 50, 50, 0, 255)),
+        os.statvfs_result((4096, 4096, 1000, 450, 350, 100, 50, 50, 0, 255)),
+        os.statvfs_result((4096, 4096, 1000, 550, 450, 100, 50, 50, 0, 255)),
+        OSError('private path')]):
+    filesystem = namespace['filesystem_sample']
+    assert filesystem() == {'unavailable': True, 'minimum_available_bytes': None, 'unavailable_samples': 1}
+    first = filesystem()
+    assert first == {'total_bytes': 4096000, 'used_bytes': 2048000, 'available_bytes': 1638400,
+                     'minimum_available_bytes': 1638400, 'unavailable_samples': 1}
+    assert filesystem()['minimum_available_bytes'] == 1433600
+    recovered = filesystem()
+    assert recovered['available_bytes'] == 1843200 and recovered['minimum_available_bytes'] == 1433600
+    assert recovered['unavailable_samples'] == 1
+    assert filesystem() == {'unavailable': True, 'minimum_available_bytes': 1433600, 'unavailable_samples': 2}
+print('filesystem observations retain numeric sampled minimum and cumulative unavailable evidence')
 with tempfile.TemporaryDirectory(prefix='subyard-boot-observer-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
     pressure = root / 'pressure'
@@ -336,7 +355,7 @@ SUBYARD_HOME={directory!r}; PROJECT=subyard-test-yard; INSTANCE=yard-test-yard
 YARD=test-yard; MARKER=owned-fixture; WORKER_DIGEST={actual!r}
 timeout() {{
   case "$*" in
-    *user.subyard.p0-image-cache*) echo owned-fixture;;
+    *user.subyard-e2e.image-cache*) echo owned-fixture;;
     *user.subyard.managed*) echo true;;
     *user.subyard.name*) echo test-yard;;
     *sha256sum*) [ -n "$WORKER_DIGEST" ] || return 42; printf '%s  worker\\n' "$WORKER_DIGEST";;
@@ -348,14 +367,16 @@ timeout() {{
         assert result.returncode == result_code, result
 print('broker evidence requires matching installed candidate identity')
 
-# Capacity receipts survive refusal; only known headroom satisfies the unchanged guard.
+# Capacity receipts survive refusal; only the configured broker reserve and known headroom satisfy the guard.
 sample = re.search(r'^sample_cold_capacity\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
-guard = fixture.split('# A cold builder reserves 30GiB plus the normal 5GiB physical reserve.\n', 1)[1].split('\njq -e ', 1)[0]
+guard = fixture.split("# A cold builder reserves 30GiB plus this fixture's explicit 4GiB physical reserve.\n", 1)[1].split('\njq -e ', 1)[0]
 for available, broker, expected in [
-        ('37580963840', '{"resources":{}}', 0),
-        ('37580963839', '{"resources":{}}', 2),
-        ('unknown-private-value', '{"resources":{}}', 2),
-        ('37580963840', 'unknown-private-value', 2)]:
+        ('36507222016', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 0),
+        ('36507222015', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 2),
+        ('unknown-private-value', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 2),
+        ('36507222016', 'unknown-private-value', 2),
+        ('36507222016', '{"resources":{"budgets":{"disk_reserve_bytes":5368709120}}}', 2),
+        ('36507222016', '{"resources":{}}', 2)]:
     script = f'''set -euo pipefail
 outer_exec() {{ printf 'Size Used Avail\\n42949672960 100 {available}\\n'; }}
 status() {{ printf '%s\\n' '{broker}'; }}
@@ -366,12 +387,12 @@ die() {{ exit 2; }}
     rows = {line.split('=', 1)[0]: json.loads(line.split('=', 1)[1]) for line in result.stdout.splitlines()}
     assert rows['STAGING_COLD_CAPACITY']['phase'] == 'after_reclaim', rows
     disk = rows['STAGING_STORAGE_CAPACITY']
-    assert disk['required_bytes'] == 35 * 1024**3 and disk['phase'] == 'after_reclaim', disk
+    assert disk['required_bytes'] == 34 * 1024**3 and disk['phase'] == 'after_reclaim', disk
     if available.isdecimal():
-        assert disk['available_bytes'] == int(available) and disk['reserve_bytes'] == 5 * 1024**3, disk
+        assert disk['available_bytes'] == int(available) and disk['reserve_bytes'] == 4 * 1024**3, disk
     else:
         assert disk['error_kind'] == 'telemetry_unavailable', disk
-print('cold backing capacity receipts and unchanged refusal boundary checks passed')
+print('cold backing capacity receipts bind explicit fixture reserve and preserve strict refusal boundaries')
 
 measure = fixture.split("<<'PYDISPOSABLE'", 1)[1].split('\n', 1)[1].split('\nPYDISPOSABLE', 1)[0]
 with tempfile.TemporaryDirectory(prefix='subyard-disposable-sizes-', dir='/tmp') as directory:
@@ -489,12 +510,12 @@ incus() {{
         show) test -f "$PROJECT_STATE";;
         get)
           case "$4" in
-            user.subyard.p0-image-cache) [ "$(cat "$PROJECT_STATE")" = cache ] && echo "$MARKER";;
+            user.subyard-e2e.image-cache) [ "$(cat "$PROJECT_STATE")" = cache ] && echo "$MARKER";;
             *) return 42;;
           esac;;
         set)
           [ "$(cat "$PROJECT_STATE")" = owned ] || return 42
-          [ "$4" = features.images=false ] && [ "$5" = "user.subyard.p0-image-cache=$MARKER" ] || return 42
+          [ "$4" = features.images=false ] && [ "$5" = "user.subyard-e2e.image-cache=$MARKER" ] || return 42
           printf 'cache-after-create\\n' >> "$LOG"
           printf 'cache' > "$PROJECT_STATE";;
         *) return 42;;
@@ -588,6 +609,74 @@ print('minimal owner cleanup requires ownership and native drain before disposal
 # Exercise the actual EXIT trap and shared cleanup, which can also reclaim owners.
 shared_fixture = pathlib.Path(__file__).with_name('p0-guest.sh').read_text()
 shared_cleanup = re.search(r'^owner_cleanup\(\) \{\n.*?^\}', shared_fixture, re.MULTILINE | re.DOTALL)[0]
+residue = re.search(r'^reclaim_owner_project_residue\(\) \{\n.*?^\}', shared_fixture, re.MULTILINE | re.DOTALL)[0]
+for failed in ['instances', 'volumes', 'instance-delete', 'volume-delete', 'project-delete', '']:
+    script = f'''set +e
+set -o pipefail
+FAILED={failed!r}
+die() {{ exit 2; }}
+incus() {{
+  case "$*" in
+    'project get subyard-test-yard user.subyard-e2e.image-cache') echo subyard-p0-123;;
+    'list --project subyard-test-yard --format csv -c n') [ "$FAILED" != instances ] || return 42; echo yard-test-yard;;
+    'storage volume list default --project subyard-test-yard --format csv -c t,n') [ "$FAILED" != volumes ] || return 42; printf 'container,yard-test-yard\\ncustom,yard-srv-test-yard\\n';;
+    'config show yard-test-yard --project subyard-test-yard'|'storage volume show default yard-srv-test-yard --project subyard-test-yard') return 0;;
+    'delete yard-test-yard --project subyard-test-yard --force') echo instance-delete >&2; [ "$FAILED" != instance-delete ] || return 42;;
+    'storage volume delete default yard-srv-test-yard --project subyard-test-yard') echo volume-delete >&2; [ "$FAILED" != volume-delete ] || return 42;;
+    'project delete subyard-test-yard') echo project-delete >&2; [ "$FAILED" != project-delete ] || return 42;;
+    *) return 99;;
+  esac
+}}
+''' + residue + '\nif reclaim_owner_project_residue subyard-test-yard; then exit 0; else exit "$?"; fi\n'
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == (42 if failed else 0), result
+    mutations = [line for line in result.stderr.splitlines() if line.endswith('-delete')]
+    order = ['instance-delete', 'volume-delete', 'project-delete']
+    expected = [] if failed in ['instances', 'volumes'] else order[:order.index(failed)+1] if failed else order
+    assert mutations == expected and ('[ ok ]' in result.stdout) == (not failed), result
+print('actual owner residue helper propagates inventory and mutation failures under conditional set+e without false success or follow-up')
+
+with tempfile.TemporaryDirectory(prefix='subyard-owner-launcher-', dir='/tmp') as directory:
+    case = pathlib.Path(directory)
+    project = case/'project'; registration = case/'yards/test-yard/config.env'
+    registration.parent.mkdir(parents=True)
+    source_launcher = case/'bin/yard'; installed_launcher = case/'data/runtime/current/bin/yard'
+    wrapper = pathlib.Path(__file__).resolve().parents[2]/'bin/yard'
+    for launcher in [source_launcher, installed_launcher]:
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_bytes(wrapper.read_bytes()); launcher.chmod(0o700)
+    source_engine = case/'.build/yard'; source_engine.parent.mkdir()
+    source_engine.write_text('#!/bin/sh\nprintf "source-refused\\n" >> "$LOG"\nexit 42\n'); source_engine.chmod(0o700)
+    installed_engine = installed_launcher.with_name('yard-engine')
+    installed_engine.write_text('''#!/bin/sh
+[ "$*" = '-Y test-yard teardown --yes' ] || exit 99
+printf 'installed-teardown\n' >> "$LOG"
+[ "$FAIL_INSTALLED" = 0 ] || { printf 'fixture teardown refusal\n' >&2; exit 17; }
+find "$PROJECT_STATE" -delete
+'''); installed_engine.chmod(0o700)
+    for failed in [0, 1]:
+        for original in [0, 7]:
+            project.touch(); registration.write_text('# owned\n')
+            log = case/'calls'; log.write_text('')
+            script = f'''set +e
+TOKEN=123; MARKER=owned; OWNER_BASELINE_CAPTURED=0; OWNER_ROOT={str(case/'absent')!r}
+OWNER_YARD_DIR={str(case/'yards')!r}; SUBYARD_HOME={str(case/'data')!r}
+LOG={str(log)!r}; PROJECT_STATE={str(project)!r}; FAIL_INSTALLED={failed}; export LOG PROJECT_STATE FAIL_INSTALLED
+unset YARD_ENGINE_PATH
+./bin/yard -Y test-yard teardown --yes
+[ "$?" = 42 ] || exit 99
+clean_tree() {{ :; }}
+incus() {{ [ "$*" = 'project show subyard-test-yard' ] && test -f "$PROJECT_STATE"; }}
+reclaim_owner_project_if_present() {{ :; }}
+cleanup_owner_capacity_state() {{ :; }}
+''' + shared_cleanup + f'\n(exit {original})\nowner_cleanup\n'
+            result = subprocess.run(['bash', '-c', script], cwd=case, capture_output=True, text=True, timeout=5)
+            assert result.returncode == (original or (3 if failed else 0)), result
+            assert log.read_text().splitlines() == ['source-refused', 'installed-teardown'], result
+            assert project.exists() == registration.exists() == bool(failed), result
+            assert ('owner teardown failed (exit=17)' in result.stderr) == bool(failed), result
+print('actual source and installed launchers select current owner teardown and preserve primary failure plus native diagnostics')
+
 with tempfile.TemporaryDirectory(prefix='subyard-owner-cleanup-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
     for failed in ['ownership', 'identity', 'drain', 'reclaim', '']:
@@ -612,7 +701,7 @@ verify_broker_installation() {{ printf 'identity\\n' >> "$LOG"; [ "$FAILED" != i
 outer_exec() {{ printf 'drain\\n' >> "$LOG"; [ "$FAILED" != drain ]; }}
 incus() {{
   case "$*" in
-    'project get subyard-test-yard user.subyard.p0-image-cache')
+    'project get subyard-test-yard user.subyard-e2e.image-cache')
       if [ "$FAILED" = ownership ]; then echo foreign; else echo owned; fi;;
     'project show subyard-test-yard') test -f "$PROJECT_STATE";;
     'project show subyard-e2e-yard') return 1;;
@@ -1089,25 +1178,37 @@ for phase in ['before_acquire','released']:
             if phase=='released': assert observed['bases']==valid['resources']['bases'],observed
 print('native cold/final resource observations require typed complete evidence; unknown registry/memory/counts refuse and omitted idle builder passes')
 
-# Execute the predecessor's preparation boundary with physical peers replaced.
-# The real preparation function remains shared; it runs while 0.19 is installed,
-# and the native predecessor must publish an available broker before the update.
+# Execute the authentic full-init argv and verification boundary with physical
+# peers replaced. The unit models command dispatch, not actual provision readiness.
 predecessor = fixture.split('  baseline_owner="$SUBYARD_HOME/runtime/current/bin/yard"\n', 1)[1].split('  # Stage only verified frozen assets', 1)[0]
 predecessor = 'baseline_owner="$SUBYARD_HOME/runtime/current/bin/yard"\n' + predecessor
 with tempfile.TemporaryDirectory(prefix='subyard-predecessor-broker-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
     launcher = root / 'runtime/current/bin/yard'
     launcher.parent.mkdir(parents=True)
-    launcher.write_text('#!/bin/bash\nprintf "yard 0.19.0\\n"\n')
+    launcher.write_text('''#!/bin/bash
+if [ "$*" = --version ]; then printf 'yard 0.19.0\n'; exit; fi
+if [ "$*" = '-Y test-yard _info' ]; then
+  printf 'info\n' >> "$PREDECESSOR_CALLS"
+  project=fixture; [ "$PREDECESSOR_FAILURE" != context ] || project=foreign
+  printf '{"yardName":"test-yard","accessKind":"local","incusProject":"%s","yardInstanceName":"owner","version":"0.19.0","state":"RUNNING"}\n' "$project"
+  exit
+fi
+[ "$*" = '-Y test-yard init --yes' ] || exit 99
+printf 'init\n' >> "$PREDECESSOR_CALLS"
+[ "$PREDECESSOR_FAILURE" != init ]
+''')
     launcher.chmod(0o700)
     leaf = root / '.subyard-acceptance/runtime/config/profiles/github/git_wiring.py'
     leaf.parent.mkdir(parents=True)
     leaf.write_bytes(pathlib.Path('config/profiles/github/git_wiring.py').read_bytes())
-    for failure in ['', 'version', 'worker', 'native-state', 'git-operation']:
+    for failure in ['', 'init', 'version', 'context', 'project-shape', 'native-owner', 'bridge', 'initialized', 'power', 'identity', 'marker', 'worker', 'native-state', 'git-operation']:
         log = root / ('calls-' + (failure or 'success'))
         script = f"""set -euo pipefail
-ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; baseline=0.19.0; PROJECT=fixture; INSTANCE=owner
-prepare_minimal_owner() {{ printf 'minimal\n' >> '{log}'; }}
+ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME="$ROOT/config"; baseline=0.19.0; PROJECT=fixture; INSTANCE=owner; MARKER=owned
+export PREDECESSOR_CALLS={str(log)!r} PREDECESSOR_FAILURE={failure!r}
+p0_retry_init_after_plan_stale() {{ "$@"; }}
+prepare_minimal_owner() {{ exit 99; }}
 runtime_yard() {{ if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else "0.19.0"}'; else printf '%s\n' '{{"resources":{{"bases":[]}}}}'; fi; }}
 verify_broker_installation() {{ printf 'verified\n' >> '{log}'; return {1 if failure == 'worker' else 0}; }}
 outer_exec() {{
@@ -1118,18 +1219,36 @@ outer_exec() {{
     *) return 99 ;;
   esac
 }}
-incus() {{ printf '%s\n' '01234567-89ab-cdef-0123-456789abcdef'; }}
+incus() {{
+  case "$*" in
+    'project get fixture restricted'|'project get fixture features.profiles'|'project get fixture features.storage.volumes') printf '%s\n' '{'false' if failure == 'project-shape' else 'true'}' ;;
+    'project get fixture restricted.containers.privilege') printf 'unprivileged\n' ;;
+    'project get fixture user.subyard-e2e.image-cache') printf '%s' '{'foreign' if failure == 'marker' else ''}' ;;
+    'project set fixture user.subyard-e2e.image-cache=owned') printf 'marker\n' >> '{log}' ;;
+    'config get owner volatile.uuid --project fixture') printf '%s\n' '{'invalid' if failure == 'identity' else '01234567-89ab-cdef-0123-456789abcdef'}' ;;
+    'config get owner user.subyard.managed --project fixture') printf '%s\n' '{'false' if failure == 'native-owner' else 'true'}' ;;
+    'config get owner user.subyard.name --project fixture') printf 'test-yard\n' ;;
+    'config get owner user.subyard.bridge --project fixture') printf '%s\n' '{'foreign' if failure == 'bridge' else 'incusbr0'}' ;;
+    'config get owner user.subyard.initialized --project fixture') printf '%s\n' '{'false' if failure == 'initialized' else 'true'}' ;;
+    'config get owner user.subyard.desired_power --project fixture') printf '%s\n' '{'stopped' if failure == 'power' else 'running'}' ;;
+    *) return 99 ;;
+  esac
+}}
 die() {{ exit 2; }}
 """ + predecessor
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
         assert (result.returncode == 0) == (not failure), result
         calls = log.read_text().splitlines()
-        assert calls == {'version':['minimal'], 'worker':['minimal','verified'],
-                          'native-state':['minimal','verified','native-state'],
-                          'git-operation':['minimal','verified','native-state','git-operation'],
-                          '':['minimal','verified','native-state','git-operation']}[failure], calls
+        expected=['init']
+        if failure not in ['init','version']: expected += ['info']
+        if failure not in ['init','version','context','project-shape','native-owner','bridge','initialized','power','identity','marker']:
+            expected += ['marker','verified']
+            if failure != 'worker':
+                expected += ['native-state']
+                if failure != 'native-state': expected += ['git-operation']
+        assert calls == expected, (failure,calls)
         assert ('STAGING_BASELINE_BROKER=' in result.stdout) == (failure in ['', 'git-operation']), result
-print('shared minimal preparation retains authentic predecessor and requires native broker ownership before upgrade')
+print('authentic predecessor full-init argv and ownership/power/broker boundaries refuse incomplete setup')
 
 # Execute the candidate's real Git configuration function as the process user.
 # Physical preflight uses the same leaf's CLI, which drops to native guest dev.
@@ -1206,3 +1325,91 @@ reclaim_broker_recovery_capacity() {{ [ "$OWNER_BASE_IMAGE" = {fingerprint} ]; e
     assert ('consumed' in result.stdout)==(fault==''),(fault,result)
     assert ('STAGING_CONSUMED_OWNER_IMAGE=' in result.stdout)==(fault==''),(fault,result)
 print('verified consumed upgrade inputs reclaim allocated bytes; foreign/link/mount/digest/identity/image drift refuses before deletion')
+
+# The actual shared driver must wait for a complete, exact disclosure on a real
+# controlling terminal. No staged stdin or inherited product FD grants consent.
+late_helper = pathlib.Path(__file__).with_name('migration-late-consent.py')
+late_disclosure = ('yard test-yard: restart to finish disk-backed /tmp migration\nThis will:\n'
+                   '  - stop and start this yard; interrupt its active processes and connections; reset /tmp on boot\n'
+                   '  - retain persistent data and instance UUID; restore desired power running\n\nProceed? [y/N] ')
+def late_run(code, *arguments):
+    return subprocess.run([sys.executable, '-B', str(late_helper), '--yard', 'test-yard',
+                           '--timeout', '2', *arguments, '--', sys.executable, '-c', code],
+                          env={**os.environ, 'SUBYARD_MIGRATION_OPERATOR_INPUT_FD': '63'},
+                          capture_output=True, text=True, timeout=6)
+late_prefix = ("import os,sys,select; assert os.isatty(0); "
+               "assert 'SUBYARD_MIGRATION_OPERATOR_INPUT_FD' not in os.environ; "
+               "assert not select.select([0],[],[],0.1)[0]; ")
+for answer, value in [('yes', 'y\n'), ('no', 'n\n'), ('eof', '')]:
+    child = late_prefix + f"print({late_disclosure!r},end='',flush=True); assert sys.stdin.readline()=={value!r}; print('EXACT_RESPONSE'); sys.exit(37)"
+    result = late_run(child, '--answer', answer)
+    assert result.returncode == 37 and 'EXACT_RESPONSE' in result.stdout, (answer, result)
+# Force the real PTY child to exit before the helper's first, short read.
+# Reaping the child must not discard the remainder already queued by the kernel.
+late_tail = 'PTY_TAIL_AFTER_REAP\n'
+short_reads = """import os,pty,runpy,sys
+original_fork,original_read=pty.fork,os.read
+pid=None
+synchronized=False
+def tracked_fork():
+    global pid
+    pid,terminal=original_fork()
+    return pid,terminal
+def short_read(terminal,size):
+    global synchronized
+    if not synchronized:
+        os.waitid(os.P_PID,pid,os.WEXITED|os.WNOWAIT)
+        synchronized=True
+    return original_read(terminal,1)
+pty.fork,os.read=tracked_fork,short_read
+sys.argv=sys.argv[1:]
+runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+result = subprocess.run([sys.executable, '-B', '-c', short_reads, str(late_helper),
+                         '--yard', 'test-yard', '--timeout', '2', '--allow-no-prompt',
+                         '--', sys.executable, '-c', f'import os; os.write(1,{late_tail.encode()!r}); os._exit(37)'],
+                        capture_output=True, text=True, timeout=6)
+assert result.returncode == 37 and result.stdout == late_tail, result
+
+for disclosure in [late_disclosure.replace('test-yard:', 'foreign-yard:'),
+                   late_disclosure.replace('reset /tmp on boot', 'different consequence'),
+                   'Unknown operation\nProceed? [y/N] ', 'Unknown operation\nProceed? [maybe] ']:
+    result = late_run(late_prefix + f"print({disclosure!r},end='',flush=True); sys.stdin.readline(); print('UNSAFE_APPROVAL')", '--allow-no-prompt')
+    assert result.returncode == 97 and 'UNSAFE_APPROVAL' not in result.stdout, result
+repeated = late_prefix + f"print({late_disclosure!r},end='',flush=True); sys.stdin.readline(); print({late_disclosure!r},end='',flush=True); sys.stdin.readline(); print('SECOND_APPROVAL')"
+result = late_run(repeated)
+assert result.returncode == 97 and 'SECOND_APPROVAL' not in result.stdout, result
+assert late_run('pass').returncode == 97
+assert late_run('pass', '--allow-no-prompt').returncode == 0
+assert late_run('raise SystemExit(29)', '--allow-no-prompt').returncode == 29
+assert late_run('import os,signal; os.kill(os.getpid(),signal.SIGTERM)', '--allow-no-prompt').returncode == 143
+for invalid_timeout in ['nan', 'inf', '0']:
+    assert late_run('raise SystemExit(99)', '--timeout', invalid_timeout).returncode == 2
+with tempfile.TemporaryDirectory(prefix='subyard-late-consent-', dir='/tmp') as directory:
+    child_pid = pathlib.Path(directory) / 'pid'
+    result = late_run(f"import os,time; open({str(child_pid)!r},'w').write(str(os.getpid())); time.sleep(10)", '--timeout', '0.2')
+    assert result.returncode == 124, result
+    try:
+        os.kill(int(child_pid.read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError('timed-out PTY child was not reaped')
+    child_pid.unlink()
+    command = [sys.executable, '-B', str(late_helper), '--yard', 'test-yard', '--', sys.executable,
+               '-c', f"import os,time; open({str(child_pid)!r},'w').write(str(os.getpid())); time.sleep(10)"]
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 2
+    while not child_pid.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert child_pid.exists(), 'PTY child did not start'
+    child.send_signal(signal.SIGTERM)
+    child.communicate(timeout=5)
+    assert child.returncode == 143, child.returncode
+    try:
+        os.kill(int(child_pid.read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError('cancelled PTY child was not reaped')
+print('shared migration PTY waits for exact late disclosure, rejects foreign/repeated prompts, preserves exit and reaps timeout')

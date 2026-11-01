@@ -228,10 +228,12 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 			result := fixture.execute(releasetransition.ProcessConverge, initial.Inspection.Plan, fixture.reconciler(interrupt))
 			journal := fixture.journal()
 			ledgerMigrations := map[string]string{
-				"canonicalize-test-vms-settings-v2":    "settings",
-				"canonicalize-test-yard-owner-v2":      "owner-registration",
-				"introduce-owner-publication-state-v1": "power-metadata",
-				"localize-ssh-port-settings-v3":        "settings",
+				"canonicalize-test-vms-settings-v2":     "settings",
+				"canonicalize-test-yard-owner-v2":       "owner-registration",
+				"introduce-owner-publication-state-v1":  "power-metadata",
+				"localize-ssh-port-settings-v3":         "settings",
+				"register-existing-local-yards-v3":      "owner-registration",
+				"complete-registered-guest-disk-tmp-v3": "power-metadata",
 			}
 			if len(journal.Steps) != len(ledgerMigrations) {
 				t.Fatalf("expected only shipped ledger steps: %#v", journal.Steps)
@@ -254,8 +256,8 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 			}
 			for domain, expected := range map[string]releasetransition.DomainLedgerV2{
 				"settings":           {Epoch: 3, Applied: []string{"canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"}},
-				"owner-registration": {Epoch: 2, Applied: []string{"canonicalize-test-yard-owner-v2"}},
-				"power-metadata":     {Epoch: 2, Applied: []string{"introduce-owner-publication-state-v1"}},
+				"owner-registration": {Epoch: 3, Applied: []string{"canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"}},
+				"power-metadata":     {Epoch: 3, Applied: []string{"introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"}},
 			} {
 				state := ledger.Domains[domain]
 				if !reflect.DeepEqual(state, expected) {
@@ -381,8 +383,8 @@ func assertNativeSSHPins(t *testing.T, f *sourceScopeFixture) {
 		}
 	}
 	journal := f.journal()
-	if len(journal.Steps) != 3 {
-		t.Fatalf("expected two actual pin CAS steps and one ledger CAS: steps=%d", len(journal.Steps))
+	if len(journal.Steps) != 5 {
+		t.Fatalf("expected two actual pin CAS steps and three declared ledger CAS steps: steps=%d", len(journal.Steps))
 	}
 	for _, step := range journal.Steps {
 		if step.Checkpoint != releasetransition.StepVerified {

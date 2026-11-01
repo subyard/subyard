@@ -297,6 +297,20 @@ func (fake *IncusServer) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		writeIncusSync(writer, metadata)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/1.0/instances/") && strings.HasSuffix(request.URL.Path, "/snapshots"):
+		name := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/1.0/instances/"), "/snapshots")
+		project := request.URL.Query().Get("project")
+		if project == "" {
+			project = "default"
+		}
+		fake.mu.Lock()
+		_, found := fake.instances[project+"/"+name]
+		fake.mu.Unlock()
+		if !found {
+			writeIncusError(writer, http.StatusNotFound, "instance not found")
+			return
+		}
+		writeIncusSync(writer, []string{})
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/1.0/instances/"):
 		name := strings.TrimPrefix(request.URL.Path, "/1.0/instances/")
 		project := request.URL.Query().Get("project")
@@ -320,15 +334,24 @@ func (fake *IncusServer) ServeHTTP(writer http.ResponseWriter, request *http.Req
 }
 
 func (fake *IncusServer) listInstances(writer http.ResponseWriter, request *http.Request) {
-	if request.URL.Query().Get("all-projects") != "true" {
-		writeIncusError(writer, http.StatusBadRequest, "all-projects is required")
-		return
+	allProjects := request.URL.Query().Get("all-projects") == "true"
+	selectedProject := request.URL.Query().Get("project")
+	if selectedProject == "" {
+		selectedProject = "default"
 	}
 	fake.mu.Lock()
+	if _, found := fake.projects[selectedProject]; !allProjects && !found {
+		fake.mu.Unlock()
+		writeIncusError(writer, http.StatusNotFound, "project not found")
+		return
+	}
 	instances := make([]map[string]any, 0, len(fake.instances))
 	for key, source := range fake.instances {
-		instance := cloneAnyMap(source)
 		project, _, _ := strings.Cut(key, "/")
+		if !allProjects && project != selectedProject {
+			continue
+		}
+		instance := cloneAnyMap(source)
 		if _, ok := instance["project"]; !ok {
 			instance["project"] = project
 		}

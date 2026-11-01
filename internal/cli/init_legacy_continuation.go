@@ -167,7 +167,7 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 		}
 		return nil
 	}
-	if !snapshot.Exists && !request.continueLegacy && !request.adopt && (!state.ProjectFound || state.ProjectConfig["user.subyard.installation"] == "1" || state.ProjectConfig["user.subyard.installation"] == domain.AdoptedInstallation) {
+	if !snapshot.Exists && !request.continueLegacy && (!request.adopt || cli.registeredInitMigrated) && (!state.ProjectFound || state.ProjectConfig["user.subyard.installation"] == "1" || state.ProjectConfig["user.subyard.installation"] == domain.AdoptedInstallation) {
 		return nil
 	}
 	if snapshot.Exists && !request.adopt && state.ProjectConfig["user.subyard.installation"] == domain.AdoptedInstallation {

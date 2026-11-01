@@ -2175,7 +2175,14 @@ func TestReleaseTransitionRejectsTrailingRequestJSON(t *testing.T) {
 
 type releaseTransitionOwnerFixture struct{}
 
+// These release/config fixtures model no registered native migration targets.
+// Actual native ownership and guest-policy effects have concrete owner tests.
+func (releaseTransitionOwnerFixture) registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string) {
+	return []releasetransition.V2ActivationReconciler{}, []releasetransition.V2ActivationReconciler{}, nil
+}
+
 type interruptedRenameOwner struct {
+	releaseTransitionOwnerFixture
 	legacy, current string
 	preparer        releasetransition.V2OwnerRegistration
 	before          *releasetransition.OwnerRegistrationObservation
@@ -2273,6 +2280,7 @@ func (view prospectiveOwnerSettingsView) ReadSnapshot(
 }
 
 type trackedOwnerRegistration struct {
+	releaseTransitionOwnerFixture
 	delegate releasetransition.V2OwnerRegistration
 	commits  int
 }

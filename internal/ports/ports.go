@@ -3,6 +3,7 @@ package ports
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -66,6 +67,11 @@ type ProjectAdopter interface {
 	AdoptProject(context.Context, string, map[string]string, map[string]string) error
 }
 
+// RegisteredInstanceAdopter publishes only exact assessed native metadata.
+type RegisteredInstanceAdopter interface {
+	AdoptRegisteredInstance(context.Context, InstanceInfo, map[string]string) error
+}
+
 type InstanceInventory interface {
 	ListInstances(context.Context) ([]InstanceInfo, error)
 }
@@ -90,6 +96,13 @@ type InstanceExecResult struct {
 	Stdout   []byte `json:"stdout,omitempty"`
 	Stderr   []byte `json:"stderr,omitempty"`
 	ExitCode int    `json:"exitCode"`
+}
+
+// GuestExitError certifies a native guest exit, not a transport failure.
+type GuestExitError struct{ Code int }
+
+func (failure *GuestExitError) Error() string {
+	return fmt.Sprintf("instance command exited with status %d", failure.Code)
 }
 
 type InstanceExecutor interface {
