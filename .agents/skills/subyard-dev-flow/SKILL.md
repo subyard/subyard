@@ -138,14 +138,20 @@ conditions; this does not claim universal savings or promote the pilot to a glob
 second reviewer only for an explicit two-axis request or a concrete independent risk. Preserve
 the risk-based checks above; orchestration does not add acceptance runs.
 
-Role-specific obligations live in the [developer](agents/subyard_developer.toml),
-[reviewer](agents/subyard_reviewer.toml) and [observer](agents/subyard_observer.toml) contracts.
-Read the selected contract when assigning a role. These files are not automatically loaded as
-native custom agents; use their instructions in a self-contained assignment with supported
-model/effort/fork fields. Use `model="gpt-6.1-sol"`, `reasoning_effort="high"`,
-`fork_turns="none"` for developers and fresh reviewers; record a comparable available alternative
-if needed. A necessary long check may use one `gpt-6-luna`/`medium` observer with
-`fork_turns="none"`; run it directly if unavailable. Short checks stay with the developer.
+Role-specific obligations live in the client-neutral [developer](roles/developer.md),
+[reviewer](roles/reviewer.md) and [observer](roles/observer.md) contracts. They are not
+registered as native custom agents. Read the selected contract when assigning a role and include
+its instructions in a self-contained assignment to a fresh subagent without inherited conversation
+history. Spawn settings by client; record a comparable available alternative if needed:
+
+| Client | Developer and fresh reviewer | Long-check observer | Resume the same worker |
+| --- | --- | --- | --- |
+| Codex | `model="gpt-6.1-sol"`, `reasoning_effort="high"`, `fork_turns="none"` | `gpt-6-luna`/`medium`, `fork_turns="none"` | `followup_task` |
+| Claude Code | Agent tool, `general-purpose`, strongest available model | `general-purpose`, a faster model | `SendMessage` to the agent |
+
+Neither client enforces the reviewer's read-only rule through these settings; the contract text
+carries it. A necessary long check may use one observer; run it directly if unavailable.
+Short checks stay with the developer.
 
 The coordinator owns original requirements, editable scope, one shared task and final acceptance:
 
@@ -154,7 +160,7 @@ The coordinator owns original requirements, editable scope, one shared task and 
 2. After the writer stops and relevant checks reach native terminal outcomes, assign review of
    that exact dirty/untracked candidate. An observer handoff alone does not meet this condition.
    Preliminary review with incomplete checks cannot establish readiness.
-3. Resolve unsupported findings with a reason; return confirmed repairs via `followup_task` to
+3. Resolve unsupported findings with a reason; return confirmed repairs to
    the same developer while its context is relevant. Recheck affected claims after writing stops.
 4. Accept when original requirements, findings and required evidence match the final candidate.
    Read native receipts and concrete risky areas as needed, using the reviewer's independent
