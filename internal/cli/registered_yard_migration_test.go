@@ -7,6 +7,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 	"maps"
 )
 
@@ -159,6 +161,14 @@ func TestPlainInitMigrationProbePropagatesMissingNativeSocket(t *testing.T) {
 }
 
 func TestLateMigrationPromptUsesSharedTerminalOnlyWithoutProvidedFD(t *testing.T) {
+	if os.Getenv("SUBYARD_TEST_MIGRATION_INPUT_REUSE") == "" {
+		child := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+		child.Env = append(os.Environ(), "SUBYARD_TEST_MIGRATION_INPUT_REUSE=1")
+		if output, err := child.CombinedOutput(); err != nil {
+			t.Fatalf("isolated input ownership: %v\n%s", err, output)
+		}
+		return
+	}
 	t.Setenv("SUBYARD_MIGRATION_OPERATOR_INPUT_FD", "")
 	if err := os.Unsetenv("SUBYARD_MIGRATION_OPERATOR_INPUT_FD"); err != nil {
 		t.Fatal(err)
@@ -166,6 +176,11 @@ func TestLateMigrationPromptUsesSharedTerminalOnlyWithoutProvidedFD(t *testing.T
 	var output bytes.Buffer
 	calls := 0
 	cli := &CLI{options: Options{Stderr: &output}, openTerminal: func() (*os.File, error) { calls++; return nil, os.ErrNotExist }}
+	t.Cleanup(func() {
+		if cli.migrationOperatorInput != nil {
+			_ = cli.migrationOperatorInput.Close()
+		}
+	})
 	prompt := migrationLatePrompt{cli: cli}
 	request := domain.ConfirmationRequest{Summary: "late restart", Default: domain.ConfirmationDefaultNo}
 	if yes, err := prompt.Confirm(context.Background(), request); yes || !errors.Is(err, domain.ErrConfirmationRequired) || calls != 1 {
@@ -177,9 +192,43 @@ func TestLateMigrationPromptUsesSharedTerminalOnlyWithoutProvidedFD(t *testing.T
 	}
 	defer reader.Close()
 	_ = writer.Close()
-	t.Setenv("SUBYARD_MIGRATION_OPERATOR_INPUT_FD", strconv.Itoa(int(reader.Fd())))
+	sourceFD := int(reader.Fd())
+	// Exec transfers a distinct descriptor; the receiver owns its only wrapper.
+	inheritedFD, err := unix.FcntlInt(reader.Fd(), unix.F_DUPFD_CLOEXEC, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cli.migrationOperatorInput == nil {
+			_ = unix.Close(inheritedFD)
+		}
+	})
+	t.Setenv("SUBYARD_MIGRATION_OPERATOR_INPUT_FD", strconv.Itoa(inheritedFD))
 	if yes, err := prompt.Confirm(context.Background(), request); yes || !errors.Is(err, domain.ErrConfirmationRequired) || calls != 1 {
 		t.Fatalf("provided EOF fell back: %t %v %d", yes, err, calls)
+	}
+	// Reuse the caller's slot before closing the actual prompt-owned wrapper.
+	// This exercises its finalizer's close path without depending on GC timing.
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement != sourceFD {
+		err = unix.Dup3(replacement, sourceFD, unix.O_CLOEXEC)
+		_ = unix.Close(replacement)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeErr := cli.migrationOperatorInput.Close()
+	var info unix.Stat_t
+	statErr := unix.Fstat(sourceFD, &info)
+	_ = unix.Close(sourceFD)
+	if closeErr != nil || statErr != nil {
+		t.Fatalf("prompt close affected reused caller descriptor: close=%v stat=%v", closeErr, statErr)
 	}
 }
 
