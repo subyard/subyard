@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,14 +50,14 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 			}
 			loaded, err := cli.resolveReleaseTransitionContext(yard, request.ConfigHome, files)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("yard %s: %w", yard, err)
 			}
 			if loaded.Context.AccessKind == domain.AccessRemote {
 				return nil, nil
 			}
 			runtime, ok := cli.initPlatform(loaded, nil).(reconcileruntime.Runtime)
 			if !ok {
-				return nil, errors.New("registered yard native runtime is unavailable")
+				return nil, fmt.Errorf("yard %s: registered yard native runtime is unavailable", yard)
 			}
 			return []migration.RegisteredYardTarget{{Loaded: loaded, Runtime: runtime}}, nil
 		}}

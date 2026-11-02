@@ -8,8 +8,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestOwnerSourceDiagnosticKeepsLabelsAndOtherRefusals(t *testing.T) {
+	source := func(role string) error { return OwnerMetadataError("", role, "differs", "observed=local", nil) }
+	inner := domain.CollectRefusals(source("identity"), errors.New("zeta"))
+	err := domain.CollectRefusals(fmt.Errorf("yard one: %w", inner), fmt.Errorf("yard two: %w", source("settings")))
+	err = fmt.Errorf("verify yard adoption: %w: %w", err, domain.ErrPlanStale)
+	want := "verify yard adoption: yard one: identity: differs; observed=local; zeta; yard two: settings: differs; observed=local: " + domain.ErrPlanStale.Error()
+	if local, ok := OwnerSourceDiagnostic(err); !ok || local != want {
+		t.Fatalf("ok=%t\n got: %s\nwant: %s", ok, local, want)
+	}
+	if strings.Contains(err.Error(), "observed=local") {
+		t.Fatal("default rendering exposed owner-local details", err)
+	}
+	same := func(details string) error { return OwnerMetadataError("", "identity", "differs", details, nil) }
+	err = domain.CollectRefusals(fmt.Errorf("yard one: %w", same("observed=ONE")), fmt.Errorf("yard two: %w", same("observed=TWO")))
+	want = "yard one: identity: differs; observed=ONE; yard two: identity: differs; observed=TWO"
+	if local, ok := OwnerSourceDiagnostic(err); !ok || local != want {
+		t.Fatalf("same text swapped details: ok=%t\n got: %s\nwant: %s", ok, local, want)
+	}
+	remote := fmt.Errorf("verify: %w", domain.CollectRefusals(errors.New("one"), errors.New("two")))
+	if _, ok := OwnerSourceDiagnostic(remote); ok {
+		t.Fatal("aggregate without owner-local causes claimed local details")
+	}
+}
 
 func TestSourceDiagnosticDoesNotRenderMalformedInput(t *testing.T) {
 	const secret = "SYNTHETIC_PRIVATE_DIAGNOSTIC"

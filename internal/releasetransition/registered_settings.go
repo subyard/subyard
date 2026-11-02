@@ -57,10 +57,19 @@ func (t *V2Transition) inspectRegisteredSettings(ctx context.Context, m Migratio
 	if m.Kind != registeredYardsMigration {
 		return plan, nil
 	}
+	// One yard's refusal must not hide another's; these reads change nothing.
+	var refusals []error
 	for _, owner := range t.nativeOwners(m) {
-		if _, err := observeRegisteredOwner(ctx, owner, t.options.Releases, links, view); err != nil {
-			return plan, err
+		_, err := observeRegisteredOwner(ctx, owner, t.options.Releases, links, view)
+		refusals = append(refusals, err)
+		if ctx.Err() != nil {
+			break
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return plan, err
+	}
+	for _, owner := range t.nativeOwners(m) {
 		paths, ok := owner.(V2PreparedInputPaths)
 		if !ok {
 			continue

@@ -17,6 +17,9 @@ Readiness checks return state and diagnostics; the operation boundary renders th
 Expected drift is not a warning. Follow the
 [activation diagnostic contract](docs/control-plane.md#release-migrations).
 
+Checks report every refusal they can determine independently, in stable order, not only the first.
+Only a finding that depends on a failed read may be skipped.
+
 Before suggesting CLI commands, check the [generated CLI reference](docs/cli-reference.md)
 or the command's `--help`. Registry completion flags apply to whole command families,
 not every subcommand. Regenerate help changes with `make cli-docs` and verify with

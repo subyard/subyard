@@ -2084,3 +2084,23 @@ func TestPowerStageRefusesDifferentExplicitActorBeforeScript(t *testing.T) {
 		t.Fatal("power adapter executed before actor refusal")
 	}
 }
+
+func TestVMDeviceBoundaryReportsEveryFinding(t *testing.T) {
+	profile := map[string]map[string]string{
+		"root": {"type": "disk", "path": "/", "pool": "default"},
+		"eth0": {"type": "nic", "network": "incusbr0"},
+	}
+	state := ports.ReconcileState{ProfileDevices: profile, Instance: ports.InstanceInfo{
+		LocalDevices: map[string]map[string]string{"root": {"type": "disk", "path": "/", "pool": "default", "size": "99GiB"}},
+		Devices: map[string]map[string]string{
+			"root":    {"type": "disk", "path": "/", "pool": "default", "size": "99GiB"},
+			"eth0":    {"type": "nic", "network": "foreign"},
+			"foreign": {"type": "unix-char", "source": "/dev/ttyUSB0"},
+		},
+	}}
+	bounded, err := Runtime{Environment: []string{"ALLOWS_HOST_ACCESS=false"}}.vmDeviceBoundary(state)
+	want := `effective device "foreign" violates ALLOWS_HOST_ACCESS=false; effective eth0 differs from the managed project profile; local root disk overrides the managed project profile`
+	if bounded || err == nil || err.Error() != want {
+		t.Fatalf("bounded=%t err=%v", bounded, err)
+	}
+}

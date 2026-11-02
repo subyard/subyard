@@ -78,13 +78,16 @@ func TestRegisteredNestedBrokerRecognizesOwnedHostMemory(t *testing.T) {
 			}}
 			before := operationStateDigest(*instance)
 			_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
-			if (err == nil) != strings.HasPrefix(scenario, "selected") {
+			// Devices are taken as found, including memory ones in any state. Only the
+			// effective-device consistency check and nested privileges still refuse here.
+			admitted := scenario != "unselected" && scenario != "inherited" && scenario != "divergent" && scenario != "char-inherited" && scenario != "char-divergent"
+			if (err == nil) != admitted {
 				t.Fatalf("registered nested broker assessment: %v", err)
 			}
 			if fake.writes != 0 || operationStateDigest(*instance) != before {
 				t.Fatal("inspection mutated native state")
 			}
-			if strings.HasPrefix(scenario, "selected") {
+			if admitted {
 				if _, _, err := runtime.InspectLegacyContinuation(context.Background()); err == nil {
 					t.Fatal("strict continuation admitted nested broker")
 				}

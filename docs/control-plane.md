@@ -439,7 +439,15 @@ history and is never reopened to repair later drift.
 
 Registered local yards run missing compatibility migrations before ordinary init admission.
 Their native ownership and selected resource receipts use per-yard steps in the same release
-journal. Working resource endpoints are retained; explicit configuration conflicts refuse.
+journal. The migration cannot be rolled back, so existing state does not stop it: local devices
+are taken under management as they are and ordinary `yard init` owns later convergence. Device
+refusals remain for a missing or different `srv` device, because reattaching it would change
+persistent data, the `ALLOWS_HOST_ACCESS=false` boundary, a selected resource device that fails its
+recipe or receipt, and local and expanded devices that disagree. Identity, project policy,
+inventory, network and instance configuration stay checked. Working resource endpoints are retained: a native endpoint is imported only over a
+shipped default or unset setting, and an operator-set or saved value is never rewritten or
+compared. A refusing assessment, including `--continue-legacy`, reports every problem it can determine,
+for every registered yard.
 The guest temporary-storage step installs the existing next-boot policy, then asks separately
 for any required restart or temporary boot, even with `--yes`. Decline or EOF leaves the
 transition incomplete and resumable, retaining instance UUID, persistent data and desired power.

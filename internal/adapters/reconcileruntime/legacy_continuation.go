@@ -11,6 +11,7 @@ import (
 	"maps"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,9 +40,10 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 		!state.ProjectFound || !state.ProfileFound || !state.InstanceFound || !state.VolumeFound {
 		return state, nil, errors.New("legacy continuation requires an existing dedicated local project, profile, instance and volume")
 	}
+	var refusals []error
 	for _, key := range []string{"installation", "operator_uid", "data_home", "config_home", "context", "yard_name", "instance_name", "host_base", "srv_pool", "srv_volume", "storage_pool", "storage_path", "bridge"} {
 		if _, present := state.ProjectConfig["user.subyard."+key]; present {
-			return state, nil, errors.New("legacy continuation refuses partial or conflicting project ownership")
+			refusals = append(refusals, errors.New("legacy continuation refuses partial or conflicting project ownership"))
 		}
 	}
 
@@ -52,16 +54,16 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 	}
 	for key := range state.ProjectConfig {
 		if (key == "restricted" || strings.HasPrefix(key, "restricted.")) && !allowed[key] {
-			return state, nil, errors.New("legacy continuation refuses unknown project permissions")
+			refusals = append(refusals, errors.New("legacy continuation refuses unknown project permissions"))
 		}
 	}
 	if state.ProjectConfig["features.profiles"] == "false" || state.ProjectConfig["features.storage.volumes"] == "false" {
-		return state, nil, errors.New("legacy continuation requires dedicated project profiles and volumes")
+		refusals = append(refusals, errors.New("legacy continuation requires dedicated project profiles and volumes"))
 	}
 	// The supported historical default profile has no privileged config. Do not
 	// infer that arbitrary profile config was authorized by its resource name.
 	if len(state.ProfileConfig) != 0 {
-		return state, nil, errors.New("legacy continuation refuses unsupported default-profile configuration")
+		refusals = append(refusals, errors.New("legacy continuation refuses unsupported default-profile configuration"))
 	}
 
 	instance := state.Instance
@@ -89,45 +91,24 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 		identityDifferences = append(identityDifferences, "user.subyard.desired_power: observed="+legacyIdentityValue(power)+", required running or stopped")
 	}
 	if len(identityDifferences) != 0 {
-		return state, nil, config.OwnerMetadataError("", "legacy continuation native identity", "requires a complete matching managed native identity and UUID", strings.Join(identityDifferences, "; "), nil)
+		refusals = append(refusals, config.OwnerMetadataError("", "legacy continuation native identity", "requires a complete matching managed native identity and UUID", strings.Join(identityDifferences, "; "), nil))
 	}
 
-	if err := runtime.legacyInstancePolicy(ctx, state, adopt); err != nil {
-		return state, nil, err
+	// Policy findings about a different instance or kind would be meaningless.
+	if instance.Project == runtime.Yard.IncusProject && instance.Name == runtime.Yard.YardInstanceName && instance.Type == runtime.Yard.YardKind {
+		refusals = append(refusals, runtime.legacyInstancePolicy(ctx, state, adopt))
 	}
 	reporting, err := runtime.vmPageReporting()
-	if err != nil {
-		return state, nil, err
-	}
+	refusals = append(refusals, err)
 	pool, volume := runtime.volumeNames()
-	if len(state.ProfileDevices) != 2 || state.ProfileDevices["root"]["type"] != "disk" || state.ProfileDevices["root"]["path"] != "/" || state.ProfileDevices["root"]["pool"] != pool || state.ProfileDevices["root"]["source"] != "" || state.ProfileDevices["eth0"]["parent"] != "" || state.ProfileDevices["eth0"]["type"] != "nic" || state.ProfileDevices["eth0"]["network"] != runtime.Yard.IncusBridge || !runtime.projectPolicyConverged(state, reporting) {
-		return state, nil, errors.New("legacy project policy or profile is not already converged; continuation cannot create or repair project resources")
+	if err == nil && (len(state.ProfileDevices) != 2 || state.ProfileDevices["root"]["type"] != "disk" || state.ProfileDevices["root"]["path"] != "/" || state.ProfileDevices["root"]["pool"] != pool || state.ProfileDevices["root"]["source"] != "" || state.ProfileDevices["eth0"]["parent"] != "" || state.ProfileDevices["eth0"]["type"] != "nic" || state.ProfileDevices["eth0"]["network"] != runtime.Yard.IncusBridge || !runtime.projectPolicyConverged(state, reporting)) {
+		refusals = append(refusals, errors.New("legacy project policy or profile is not already converged; continuation cannot create or repair project resources"))
 	}
-	planner, ok := runtime.NetworkPolicy.(interface {
-		Prepare(context.Context, []yardnetwork.Yard, yardnetwork.Change) (yardnetwork.Plan, error)
-	})
-	if !ok {
-		return state, nil, errors.New("legacy continuation requires read-only native network policy assessment")
-	}
-	if service, ok := runtime.NetworkPolicy.(*yardnetwork.Service); ok && service == nil {
-		return state, nil, errors.New("legacy continuation requires native network policy assessment")
-	}
-	network, err := planner.Prepare(ctx, []yardnetwork.Yard{runtime.networkPolicyYard()}, yardnetwork.Change{})
-	if err != nil {
-		return state, nil, err
-	}
-	if network.Physical && len(network.Updates) == 0 {
-		return state, nil, errors.New("legacy network policy observation is incomplete")
-	}
-	for _, update := range network.Updates {
-		if update.Yard.Project == runtime.Yard.IncusProject {
-			return state, nil, errors.New("legacy project network policy must already be converged; run yard network reconcile for its separate assessed operation before continuing")
-		}
-	}
+	refusals = append(refusals, runtime.legacyNetworkPolicy(ctx))
 
 	resources, err := runtime.Incus.TeardownInventory(ctx, runtime.Yard.IncusProject)
 	if err != nil {
-		return state, nil, err
+		return state, nil, domain.CollectRefusals(append(refusals, err)...)
 	}
 	expected := map[string]bool{"project//" + runtime.Yard.IncusProject: false, "profile//default": false, "instance//" + runtime.Yard.YardInstanceName: false, "volume/" + pool + "/" + volume: false}
 	for _, entry := range resources {
@@ -143,16 +124,42 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 		}
 		seen, ok := expected[key]
 		if !ok || seen || entry.Binding == "" {
-			return state, nil, errors.New("legacy continuation refuses unknown or incomplete native inventory")
+			refusals = append(refusals, fmt.Errorf("legacy continuation refuses unknown or incomplete native inventory: %q", key))
+			continue
 		}
 		expected[key] = true
 	}
-	for _, seen := range expected {
+	for key, seen := range expected {
 		if !seen {
-			return state, nil, errors.New("legacy continuation native inventory is incomplete")
+			refusals = append(refusals, fmt.Errorf("legacy continuation native inventory is incomplete: %q", key))
 		}
 	}
-	return state, resources, nil
+	return state, resources, domain.CollectRefusals(refusals...)
+}
+
+func (runtime Runtime) legacyNetworkPolicy(ctx context.Context) error {
+	planner, ok := runtime.NetworkPolicy.(interface {
+		Prepare(context.Context, []yardnetwork.Yard, yardnetwork.Change) (yardnetwork.Plan, error)
+	})
+	if !ok {
+		return errors.New("legacy continuation requires read-only native network policy assessment")
+	}
+	if service, ok := runtime.NetworkPolicy.(*yardnetwork.Service); ok && service == nil {
+		return errors.New("legacy continuation requires native network policy assessment")
+	}
+	network, err := planner.Prepare(ctx, []yardnetwork.Yard{runtime.networkPolicyYard()}, yardnetwork.Change{})
+	if err != nil {
+		return err
+	}
+	if network.Physical && len(network.Updates) == 0 {
+		return errors.New("legacy network policy observation is incomplete")
+	}
+	for _, update := range network.Updates {
+		if update.Yard.Project == runtime.Yard.IncusProject {
+			return errors.New("legacy project network policy must already be converged; run yard network reconcile for its separate assessed operation before continuing")
+		}
+	}
+	return nil
 }
 
 func LegacyContinuationResources(resources []ports.TeardownResource) []string {
@@ -228,53 +235,65 @@ func (runtime Runtime) LegacyContinuationSecurityBinding(state ports.ReconcileSt
 	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
 }
 
-// Only the historical default container shape is eligible. The opt-in is not
-// authority to approve arbitrary devices or raw instance privileges.
+// Continuation admits only the historical default container shape; the opt-in is
+// not authority to approve arbitrary devices or raw instance privileges. Adoption
+// cannot be rolled back, so it takes existing devices as found and ordinary init
+// owns convergence. Here only srv refuses: reattaching it would change persistent
+// data. The host access boundary, resource receipts and consistency check also apply.
 func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.ReconcileState, adopt bool) error {
 	instance := state.Instance
 	if !adopt && (runtime.Yard.YardKind != domain.YardContainer || runtime.environmentValue("NESTED_E2E_VMS") == "1" || runtime.environmentValue("ALLOWS_HOST_ACCESS") == "false") {
 		return errors.New("legacy continuation supports only the canonical non-nested container policy")
 	}
-	extras, err := runtime.extrasContext()
-	if err != nil {
-		return err
-	}
-	extraDevices, extraConfig, err := runtime.extrasNativePolicy(state, extras, true, nil)
-	if err != nil {
-		return fmt.Errorf("legacy continuation native capability assessment: %w", err)
-	}
+	var refusals []error
+	extras, extrasErr := runtime.extrasContext()
+	refusals = append(refusals, extrasErr)
+	extraConfig := map[string]string{}
+	var extraDevices map[string]map[string]string
 	if adopt {
-		if err := runtime.adoptionKindPolicy(state, extraConfig); err != nil {
-			return err
+		if extrasErr == nil {
+			extraConfig = extrasCapabilityConfiguration(extras)
+			for key, value := range extraConfig {
+				if instance.Config[key] != value || instance.LocalConfig[key] != value {
+					refusals = append(refusals, fmt.Errorf("legacy continuation native capability assessment: profile capability configuration %q is not converged", key))
+				}
+			}
+		}
+		refusals = append(refusals, runtime.adoptionKindPolicy(state, extraConfig))
+	} else if extrasErr == nil {
+		extraDevices, extraConfig, extrasErr = runtime.extrasNativePolicy(state, extras, true, nil)
+		if extrasErr != nil {
+			refusals = append(refusals, fmt.Errorf("legacy continuation native capability assessment: %w", extrasErr))
 		}
 	}
-	memoryPolicy := testvmsruntime.HostMemoryPolicy
-	if adopt {
-		memoryPolicy = testvmsruntime.HostMemoryAdoptionPolicy
-	}
 	hostMemory := runtime.Yard.NestedE2EVMs || extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1"
-	if err := memoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, hostMemory); err != nil {
-		return err
+	if !adopt && extrasErr == nil {
+		refusals = append(refusals, testvmsruntime.HostMemoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, hostMemory))
 	}
 	for key, setting := range map[string]string{"limits.cpu": "LIMITS_CPU", "limits.memory": "LIMITS_MEMORY"} {
 		if want := runtime.environmentValue(setting); want != "" && instance.Config[key] != want {
-			return errors.New("legacy continuation requires already-converged configured instance limits")
+			refusals = append(refusals, errors.New("legacy continuation requires already-converged configured instance limits"))
 		}
 	}
 	if shift := runtime.environmentDefault("SHIFT_MODE", "shift"); shift != "shift" && shift != "acl" {
-		return errors.New("legacy continuation requires a supported host mount policy")
+		refusals = append(refusals, errors.New("legacy continuation requires a supported host mount policy"))
 	}
 	if !maps.Equal(instance.Config, instance.LocalConfig) {
-		return errors.New("legacy continuation refuses inconsistent local and expanded instance configuration")
+		refusals = append(refusals, errors.New("legacy continuation refuses inconsistent local and expanded instance configuration"))
 	}
-	publication, err := runtime.legacyPublicationPolicy(instance)
-	if err != nil {
-		return err
+	publication, publicationErr := runtime.legacyPublicationPolicy(instance)
+	refusals = append(refusals, publicationErr)
+	configurations := []map[string]string{instance.Config, instance.LocalConfig}
+	if extrasErr != nil || publicationErr != nil {
+		configurations = nil // Without these inputs every allowed key would look foreign.
 	}
-	for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
+	for _, values := range configurations {
 		for key, value := range values {
-			// Incus records the resolved VM disk bus here. The closed device checks
-			// below still verify the declared source, path and permissions.
+			// Volatile state of an accepted device describes that device.
+			if adopt && slices.ContainsFunc(slices.Collect(maps.Keys(instance.LocalDevices)), func(name string) bool { return strings.HasPrefix(key, "volatile."+name+".") }) {
+				continue
+			}
+			// Incus records the resolved bus of a profile disk here too.
 			if adopt && runtime.Yard.YardKind == domain.YardVM && strings.HasPrefix(key, "volatile.") && strings.HasSuffix(key, ".io.bus") {
 				name := strings.TrimSuffix(strings.TrimPrefix(key, "volatile."), ".io.bus")
 				if instance.Devices[name]["type"] == "disk" {
@@ -287,7 +306,7 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 			if expected, ok := extraConfig[key]; ok && expected != "" && value == expected {
 				continue
 			}
-			if key == "user.subyard.host_memory" && hostMemory {
+			if key == "user.subyard.host_memory" && (adopt || hostMemory) {
 				continue
 			}
 			switch key {
@@ -324,7 +343,7 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 				"volatile.uuid", "volatile.uuid.generation", "volatile.base_image", "volatile.cloud-init.instance-id", "volatile.idmap.base", "volatile.idmap.current", "volatile.idmap.next", "volatile.last_state.idmap", "volatile.apply_template", "volatile.last_state.power", "volatile.last_state.ready", "volatile.eth0.name", "volatile.eth0.hwaddr", "volatile.eth0.host_name", "volatile.eth0.last_state.ip_addresses":
 				continue
 			case previewroute.Key, ownerpublication.Prefix + previewroute.DeviceName:
-				if runtime.previewRouteConverged(ctx, instance) {
+				if adopt || runtime.previewRouteConverged(ctx, instance) {
 					continue
 				}
 			default:
@@ -336,32 +355,31 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 					continue
 				}
 			}
-			return fmt.Errorf("legacy continuation refuses unsupported instance configuration key %q", key)
+			refusals = append(refusals, fmt.Errorf("legacy continuation refuses unsupported instance configuration key %q", key))
 		}
 	}
-	if (runtime.Yard.YardKind == domain.YardContainer && instance.Config["security.nesting"] != "true") || !maps.Equal(instance.Config, instance.LocalConfig) {
-		return errors.New("legacy continuation requires canonical local container configuration without inherited overrides")
+	if runtime.Yard.YardKind == domain.YardContainer && instance.Config["security.nesting"] != "true" {
+		refusals = append(refusals, errors.New("legacy continuation requires canonical local container configuration without inherited overrides"))
 	}
 	if runtime.Yard.YardKind == domain.YardContainer {
 		if instance.Config["volatile.idmap.base"] != "0" {
-			return errors.New("legacy continuation requires the unprivileged default ID-map base")
+			refusals = append(refusals, errors.New("legacy continuation requires the unprivileged default ID-map base"))
 		}
 		current, err := legacyIDMap(instance.Config["volatile.idmap.current"])
-		if err != nil {
-			return err
-		}
-		next, err := legacyIDMap(instance.Config["volatile.idmap.next"])
-		if err != nil || !reflect.DeepEqual(current, next) {
-			return errors.New("legacy continuation requires matching canonical current and next unprivileged ID maps")
+		refusals = append(refusals, err)
+		if err == nil {
+			next, err := legacyIDMap(instance.Config["volatile.idmap.next"])
+			if err != nil || !reflect.DeepEqual(current, next) {
+				refusals = append(refusals, errors.New("legacy continuation requires matching canonical current and next unprivileged ID maps"))
+			}
 		}
 		if stored := instance.Config["volatile.last_state.idmap"]; stored != "" && stored != "[]" {
-			if _, err := legacyIDMap(stored); err != nil {
-				return err
-			}
+			_, err := legacyIDMap(stored)
+			refusals = append(refusals, err)
 		}
 	}
 	if initialized := instance.Config["user.subyard.initialized"]; initialized != "true" && initialized != "false" {
-		return errors.New("legacy continuation refuses invalid lifecycle state")
+		refusals = append(refusals, errors.New("legacy continuation refuses invalid lifecycle state"))
 	}
 	pool, volume := runtime.volumeNames()
 	desired := map[string]map[string]string{
@@ -370,111 +388,94 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		"ssh":                {"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:" + strconv.Itoa(runtime.Yard.SSHPort), "connect": "tcp:127.0.0.1:22"},
 	}
 	if adopt {
-		if runtime.Yard.YardKind == domain.YardVM {
-			delete(desired, "ssh")
-		}
-		if runtime.environmentValue("ALLOWS_HOST_ACCESS") == "false" {
-			delete(desired, "subyard-e2e-routes")
-		}
 		if runtime.environmentValue("SRV_VOLUME_TYPE") == "block" {
 			delete(desired["srv"], "path")
 			desired["srv"]["io.bus"] = "virtio-scsi"
 		}
-		if runtime.Yard.NestedE2EVMs {
-			for name, source := range map[string]string{"e2e-vsock": "/dev/vsock", "e2e-vhost-vsock": "/dev/vhost-vsock", "e2e-tun": "/dev/net/tun"} {
-				desired[name] = map[string]string{"type": "unix-char", "source": source, "path": source}
-				if instance.LocalDevices[name]["mode"] == "0660" {
-					desired[name]["mode"] = "0660"
-				}
-			}
+		if !maps.Equal(instance.LocalDevices["srv"], desired["srv"]) {
+			refusals = append(refusals, fmt.Errorf("yard adoption refuses srv device that is missing or differs from persistent volume %s/%s: reattaching it would change the data mounted in the yard", pool, volume))
 		}
-	}
-	for name, device := range extraDevices {
-		desired[name] = device
-	}
-	for _, entry := range strings.Fields(runtime.environmentValue("HOST_MOUNTS")) {
-		parts := strings.Split(entry, ":")
-		if len(parts) != 4 || parts[0] == "" || (parts[2] != "ro" && parts[2] != "rw") {
-			return errors.New("legacy continuation requires canonical host mount declarations")
+		_, err := runtime.YardAdoptionProjects(ctx, instance)
+		refusals = append(refusals, err)
+	} else if extrasErr == nil {
+		for name, device := range extraDevices {
+			desired[name] = device
 		}
-		device := map[string]string{"type": "disk", "source": filepath.Join(runtime.Yard.Paths.HostBase, parts[0]), "path": parts[1]}
-		if parts[2] == "ro" {
-			device["readonly"] = "true"
-		}
-		if runtime.environmentDefault("SHIFT_MODE", "shift") == "shift" {
-			device["shift"] = "true"
-		}
-		desired[parts[0]] = device
-	}
-	for name, device := range instance.LocalDevices {
-		if adopt && strings.HasPrefix(name, "ws-") {
-			// Registry authority is checked below; a prefix grants no ownership.
-			continue
-		}
-		switch name {
-		case "subyard-host-memory":
-			// The owning host-memory validator checked marker, shape and effective identity.
-			continue
-		case "eth0":
-			if adopt && runtime.Yard.YardKind == domain.YardVM {
+		for _, entry := range strings.Fields(runtime.environmentValue("HOST_MOUNTS")) {
+			parts := strings.Split(entry, ":")
+			if len(parts) != 4 || parts[0] == "" || (parts[2] != "ro" && parts[2] != "rw") {
+				refusals = append(refusals, errors.New("legacy continuation requires canonical host mount declarations"))
 				continue
 			}
-		case "subyard-docker-apparmor":
-			if runtime.Yard.YardKind != domain.YardContainer || !maps.Equal(device, legacyAppArmorDevice()) {
-				return errors.New("legacy continuation refuses noncanonical AppArmor compatibility device")
+			device := map[string]string{"type": "disk", "source": filepath.Join(runtime.Yard.Paths.HostBase, parts[0]), "path": parts[1]}
+			if parts[2] == "ro" {
+				device["readonly"] = "true"
 			}
-			continue
-		case "kvm":
-			// Historical mode omission is supported. The actual GID is checked
-			// against the guest once, then remains immutable without guest access.
-			copy := maps.Clone(device)
-			gid, hasGID := copy["gid"]
-			if hasGID {
-				value, err := strconv.ParseUint(gid, 10, 32)
-				if err != nil || value == 0 || value == 4294967295 || strconv.FormatUint(value, 10) != gid {
-					return errors.New("legacy continuation refuses unsupported KVM group mapping")
+			if runtime.environmentDefault("SHIFT_MODE", "shift") == "shift" {
+				device["shift"] = "true"
+			}
+			desired[parts[0]] = device
+		}
+		for name, device := range instance.LocalDevices {
+			switch name {
+			case "subyard-host-memory":
+				// The owning host-memory validator checked marker, shape and effective identity.
+				continue
+			case "subyard-docker-apparmor":
+				if runtime.Yard.YardKind != domain.YardContainer || !maps.Equal(device, legacyAppArmorDevice()) {
+					refusals = append(refusals, errors.New("legacy continuation refuses noncanonical AppArmor compatibility device"))
 				}
-				delete(copy, "gid")
-			}
-			if copy["mode"] == "0660" {
-				delete(copy, "mode")
-			}
-			if !maps.Equal(copy, map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm"}) {
-				return errors.New("legacy continuation refuses noncanonical KVM device")
-			}
-			if runtime.LegacyContinuation == nil && !adopt {
-				if runtime.Executor == nil || !strings.EqualFold(instance.Status, "running") {
-					return errors.New("legacy continuation requires read-only guest KVM group verification")
-				}
-				result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"getent", "group", "kvm"}})
-				parts := strings.Split(strings.TrimSpace(string(result.Stdout)), ":")
+				continue
+			case "kvm":
+				// Historical mode omission is supported. The actual GID is checked
+				// against the guest once, then remains immutable without guest access.
+				copy := maps.Clone(device)
+				gid, hasGID := copy["gid"]
 				if hasGID {
-					if err != nil || result.ExitCode != 0 || len(parts) != 4 || parts[0] != "kvm" || parts[2] != gid {
-						return errors.New("legacy continuation refuses an unverified KVM group mapping")
+					value, err := strconv.ParseUint(gid, 10, 32)
+					if err != nil || value == 0 || value == 4294967295 || strconv.FormatUint(value, 10) != gid {
+						refusals = append(refusals, errors.New("legacy continuation refuses unsupported KVM group mapping"))
+						continue
 					}
-				} else if result.ExitCode != 2 {
-					return errors.New("legacy continuation requires an already-converged or verifiably absent guest KVM group")
+					delete(copy, "gid")
 				}
+				if copy["mode"] == "0660" {
+					delete(copy, "mode")
+				}
+				if !maps.Equal(copy, map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm"}) {
+					refusals = append(refusals, errors.New("legacy continuation refuses noncanonical KVM device"))
+					continue
+				}
+				if runtime.LegacyContinuation == nil {
+					if runtime.Executor == nil || !strings.EqualFold(instance.Status, "running") {
+						refusals = append(refusals, errors.New("legacy continuation requires read-only guest KVM group verification"))
+						continue
+					}
+					result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"getent", "group", "kvm"}})
+					parts := strings.Split(strings.TrimSpace(string(result.Stdout)), ":")
+					if hasGID {
+						if err != nil || result.ExitCode != 0 || len(parts) != 4 || parts[0] != "kvm" || parts[2] != gid {
+							refusals = append(refusals, errors.New("legacy continuation refuses an unverified KVM group mapping"))
+						}
+					} else if result.ExitCode != 2 {
+						refusals = append(refusals, errors.New("legacy continuation requires an already-converged or verifiably absent guest KVM group"))
+					}
+				}
+				desired[name] = device
+			case previewroute.DeviceName:
+				if !runtime.previewRouteConverged(ctx, instance) {
+					refusals = append(refusals, errors.New("legacy continuation refuses a noncanonical preview route"))
+				}
+				continue
 			}
-			desired[name] = device
-		case previewroute.DeviceName:
-			if !runtime.previewRouteConverged(ctx, instance) {
-				return errors.New("legacy continuation refuses a noncanonical preview route")
+			if !maps.Equal(device, desired[name]) {
+				refusals = append(refusals, fmt.Errorf("legacy continuation refuses unsupported local device %q", name))
 			}
-			continue
 		}
-		if !maps.Equal(device, desired[name]) {
-			return fmt.Errorf("legacy continuation refuses unsupported local device %q", name)
-		}
-	}
-	if adopt {
-		if _, err := runtime.YardAdoptionProjects(ctx, instance); err != nil {
-			return err
-		}
-	}
-	for name, device := range desired {
-		if !maps.Equal(instance.LocalDevices[name], device) {
-			return fmt.Errorf("legacy continuation requires already-converged managed device %q", name)
+		for name, device := range desired {
+			if !maps.Equal(instance.LocalDevices[name], device) {
+				refusals = append(refusals, fmt.Errorf("legacy continuation requires already-converged managed device %q", name))
+			}
 		}
 	}
 	effective := make(map[string]map[string]string, len(instance.LocalDevices)+len(state.ProfileDevices))
@@ -482,15 +483,15 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		effective[name] = device
 	}
 	for name, device := range instance.LocalDevices {
-		if _, inherited := state.ProfileDevices[name]; inherited && !(adopt && runtime.Yard.YardKind == domain.YardVM && name == "eth0") {
-			return fmt.Errorf("legacy continuation refuses local override of profile device %q", name)
+		if _, inherited := state.ProfileDevices[name]; inherited && !adopt {
+			refusals = append(refusals, fmt.Errorf("legacy continuation refuses local override of profile device %q", name))
 		}
 		effective[name] = device
 	}
 	if !reflect.DeepEqual(effective, instance.Devices) {
-		return errors.New("legacy continuation refuses inconsistent expanded native devices")
+		refusals = append(refusals, errors.New("legacy continuation refuses inconsistent expanded native devices"))
 	}
-	return nil
+	return domain.CollectRefusals(refusals...)
 }
 
 func legacyAppArmorDevice() map[string]string {
@@ -519,8 +520,9 @@ func legacyStableDevices(values map[string]map[string]string) map[string]map[str
 	if result == nil {
 		result = map[string]map[string]string{}
 	}
-	// These exact current managed additions are independently shape-checked on
-	// every observation, including the first normal init after an old release.
+	// Continuation shape-checks these exact managed additions on every observation,
+	// including the first normal init after an old release. Adoption accepts them as
+	// found; its native digest, not this binding, pins their exact bytes before consent.
 	result["subyard-docker-apparmor"] = legacyAppArmorDevice()
 	delete(result, previewroute.DeviceName)
 	return result

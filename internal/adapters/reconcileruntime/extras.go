@@ -19,7 +19,6 @@ import (
 // evaluates declarations against observed native devices, never the reverse.
 func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map[string]string, complete bool, sources *[]any) (map[string]map[string]string, map[string]string, error) {
 	devices := map[string]map[string]string{}
-	configuration := map[string]string{"security.idmap.size": "", "security.syscalls.intercept.mknod": "", "security.syscalls.intercept.setxattr": ""}
 	for _, declaration := range strings.Fields(extras["SUBYARD_EXTRAS_MOUNTS"]) {
 		parts := strings.Split(declaration, ":") // extrasContext validated the declaration.
 		path := filepath.Join(runtime.Yard.Paths.HostBase, parts[0])
@@ -77,15 +76,8 @@ func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map
 		devices[name] = device
 		return nil
 	}
-	needFuse := false
-	for _, capability := range strings.Fields(extras["SUBYARD_EXTRAS_CAPABILITIES"]) {
-		if capability == "nesting" || capability == "rootless-docker" {
-			configuration["security.idmap.size"] = "1000000"
-			configuration["security.syscalls.intercept.mknod"] = "true"
-			configuration["security.syscalls.intercept.setxattr"] = "true"
-		}
-		needFuse = true
-	}
+	configuration := extrasCapabilityConfiguration(extras)
+	needFuse := len(strings.Fields(extras["SUBYARD_EXTRAS_CAPABILITIES"])) != 0
 	for _, device := range strings.Fields(extras["SUBYARD_EXTRAS_DEVICES"]) {
 		switch device {
 		case "kvm":
@@ -130,6 +122,20 @@ func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map
 		}
 	}
 	return devices, configuration, nil
+}
+
+// extrasCapabilityConfiguration declares selected capabilities' exact instance
+// configuration. An empty value means the key must be absent.
+func extrasCapabilityConfiguration(extras map[string]string) map[string]string {
+	configuration := map[string]string{"security.idmap.size": "", "security.syscalls.intercept.mknod": "", "security.syscalls.intercept.setxattr": ""}
+	for _, capability := range strings.Fields(extras["SUBYARD_EXTRAS_CAPABILITIES"]) {
+		if capability == "nesting" || capability == "rootless-docker" {
+			configuration["security.idmap.size"] = "1000000"
+			configuration["security.syscalls.intercept.mknod"] = "true"
+			configuration["security.syscalls.intercept.setxattr"] = "true"
+		}
+	}
+	return configuration
 }
 
 // ProfileProvisionReady uses the same native policy for the requested hook's
