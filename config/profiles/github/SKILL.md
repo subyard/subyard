@@ -1,11 +1,13 @@
 ---
 name: subyard-github
-description: Request temporary GitHub App authorization for commands.
+description: Request temporary GitHub App authorization for commands. Use for every GitHub CLI (gh) command, because gh without subyard-github run is not authorized.
 ---
 
 <!-- subyard-managed-v1 -->
 Request a temporary GitHub token for a command: `subyard-github run -- <command> [args...]`.
-Direct `gh` commands select the repository from `-R`/`--repo`, `gh repo view/clone`,
+`gh` (GitHub CLI) without `subyard-github run` is not authorized and asks for `gh auth login`.
+Run it as `subyard-github run -- gh ...` instead.
+`subyard-github run -- gh ...` selects the repository from `-R`/`--repo`, `gh repo view/clone`,
 repository API endpoints, `GH_REPO`, or the checkout's `origin`.
 For an arbitrary command or an ambiguous target, use
 `subyard-github run --repo owner/repo -- <command> [args...]`.
@@ -25,4 +27,4 @@ Backend selection stays fixed after ref discovery: never retry a failed/partial 
 under another identity automatically. Saved URLs stay unchanged; pre-push sees the
 helper URL as its second argument. LFS/custom URL-parsing hooks and fetch
 --negotiate-only are outside the first version's compatibility contract.
-Explicit `run` keeps HTTPS broker-only and SSH original, and `gh` behavior is unchanged.
+Explicit `run` keeps HTTPS broker-only and SSH original. Git modes do not authorize `gh`.
