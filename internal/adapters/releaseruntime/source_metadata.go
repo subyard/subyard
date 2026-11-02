@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 // SourceAdmission binds a read-only protected proof to exact installed assets
@@ -250,7 +252,11 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 		return proof, errors.New("unsupported original catalog")
 	}
 	phase = "protected metadata"
-	proof.Metadata, err = store.InspectSourceMetadata(registry, digest)
+	originalResources, resourceErr := resource.Load(fmt.Sprintf("/proc/self/fd/%d", verified.root.Fd()))
+	if resourceErr != nil {
+		return proof, resourceErr
+	}
+	proof.Metadata, err = store.InspectSourceMetadata(registry, digest, originalResources.EndpointSettingNames()...)
 	if err != nil {
 		return proof, err
 	}

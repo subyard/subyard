@@ -130,3 +130,73 @@ func TestPreparedFullIntegrationPlanRetainsNativeOwnershipAndAdoption(t *testing
 		}
 	}
 }
+
+func TestConvergedIntegrationPlanSurvivesNativeInterfaceRestart(t *testing.T) {
+	for _, kind := range []domain.YardKind{domain.YardContainer, domain.YardVM} {
+		t.Run(string(kind), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			if err := os.MkdirAll(filepath.Join(root, "config"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0644)
+			instructions := filepath.Join(root, "instructions.md")
+			testkit.WriteFile(t, instructions, []byte("instructions"), 0600)
+			instance := ports.InstanceInfo{Status: "Running", Config: map[string]string{"volatile.uuid": "same-uuid", "volatile.eth0.host_name": "veth-before"}, LocalConfig: map[string]string{"volatile.uuid": "same-uuid", "volatile.eth0.host_name": "veth-before"}, Devices: map[string]map[string]string{}, LocalDevices: map[string]map[string]string{}}
+			instance.Type = kind
+			if kind == domain.YardVM {
+				for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
+					values["volatile.vm.rtc_adjustment"], values["volatile.vm.rtc_offset"] = "0", "0"
+				}
+			}
+			native := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}
+			runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Incus: native, Executor: &preparedAdoptionExecutor{fingerprint: strings.Repeat("a", 64)}, Yard: domain.Context{YardKind: kind, IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + instructions}}
+			bindInstructionTestPackage(t, &runtime, root, "codex")
+			approved, err := runtime.IntegrationPlan(context.Background())
+			if err != nil || approved.Changed {
+				t.Fatalf("initial converged plan: changed=%t err=%v", approved.Changed, err)
+			}
+			for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
+				values["volatile.eth0.host_name"] = "veth-after"
+				if kind == domain.YardVM {
+					values["volatile.vm.rtc_adjustment"], values["volatile.vm.rtc_offset"] = "1", "-1"
+				}
+			}
+			fresh, err := runtime.IntegrationPlan(context.Background())
+			if err != nil || fresh.Changed || fresh.Scope != approved.Scope || fresh.Fingerprint != approved.Fingerprint || CheckIntegrationPlan(approved, fresh) != nil {
+				t.Fatalf("interface restart invalidated unchanged integration plan: changed=%t err=%v", fresh.Changed, err)
+			}
+			for _, key := range []string{"volatile.uuid", "volatile.eth0.hwaddr", "volatile.idmap.current", "volatile.uuid.generation", "volatile.vsock_id", "volatile.vm.rtc_offset.extra", "volatile.vm.rtc_offset", "noncanonical-clock", "foreign.owner", "device"} {
+				t.Run(key, func(t *testing.T) {
+					if key == "device" {
+						instance.Devices[key] = map[string]string{"type": "disk", "source": "/foreign", "path": "/foreign"}
+						defer delete(instance.Devices, key)
+					} else {
+						configKey := key
+						if key == "noncanonical-clock" {
+							configKey = "volatile.vm.rtc_offset"
+						}
+						before, exists := instance.Config[configKey]
+						instance.Config[configKey] = "changed"
+						if key == "noncanonical-clock" {
+							instance.Config[configKey] = "01"
+						}
+						if key == "volatile.vm.rtc_offset" && kind == domain.YardContainer {
+							instance.Config[key] = "1"
+						}
+						defer func() {
+							if exists {
+								instance.Config[configKey] = before
+							} else {
+								delete(instance.Config, configKey)
+							}
+						}()
+					}
+					fresh, err := runtime.IntegrationPlan(context.Background())
+					if err == nil && !errors.Is(CheckIntegrationPlan(approved, fresh), domain.ErrPlanStale) {
+						t.Fatal("security or ownership drift retained approval")
+					}
+				})
+			}
+		})
+	}
+}

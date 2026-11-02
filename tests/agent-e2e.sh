@@ -1723,7 +1723,7 @@ done
         if [ "$(cat "$state")" = absent ]; then printf '[]\n'; else printf '[{"name":"subyard-test-yard"}]\n'; fi ;;
       'project show subyard-test-yard') [ "$(cat "$state")" != absent ] ;;
       'project show subyard-e2e-yard') return 1 ;;
-      'project get subyard-test-yard user.subyard.p0-image-cache')
+      'project get subyard-test-yard user.subyard-e2e.image-cache')
         [ "$scenario" != marker-query-failure ] || return 1
         case "$(cat "$state")" in owned-*) printf '%s\n' "$MARKER";; *) printf '\n';; esac ;;
       'project delete subyard-test-yard')
@@ -1734,7 +1734,7 @@ done
       'config show yard-test-yard --project subyard-test-yard'|'storage volume show default yard-srv-test-yard --project subyard-test-yard') return 0 ;;
       'delete yard-test-yard --project subyard-test-yard --force') printf 'owned-empty\n' > "$state" ;;
       'storage volume delete default yard-srv-test-yard --project subyard-test-yard') return 0 ;;
-      'project create subyard-test-yard -c features.images=false -c user.subyard.p0-image-cache=subyard-p0-24') printf 'unmarked\n' > "$state" ;;
+      'project create subyard-test-yard -c features.images=false -c user.subyard-e2e.image-cache=subyard-p0-24') printf 'unmarked\n' > "$state" ;;
       *) fail "unexpected owner fixture Incus command: $*" ;;
     esac
   }
@@ -1949,8 +1949,8 @@ YARD
         "project get subyard-test-yard user.subyard.operator_uid") id -u;;
         "project get subyard-test-yard user.subyard.data_home") if [ "$SCENARIO" = foreign-identity ]; then echo /foreign; else echo "$SUBYARD_HOME"; fi;;
         "project get subyard-test-yard user.subyard.config_home") echo "$OWNER_CONFIG_HOME";;
-        "project get subyard-test-yard user.subyard.p0-image-cache") cat "$CASE_ROOT/marker";;
-        "project set subyard-test-yard user.subyard.p0-image-cache=$MARKER") printf "%s\n" "$MARKER" > "$CASE_ROOT/marker"; printf "marker\n" >> "$CASE_ROOT/calls";;
+        "project get subyard-test-yard user.subyard-e2e.image-cache") cat "$CASE_ROOT/marker";;
+        "project set subyard-test-yard user.subyard-e2e.image-cache=$MARKER") printf "%s\n" "$MARKER" > "$CASE_ROOT/marker"; printf "marker\n" >> "$CASE_ROOT/calls";;
         *) return 42;;
       esac
     }
@@ -5866,8 +5866,8 @@ assert_v2_transition_function="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
   jq -n '{
     schemaVersion: 2,
     domains: {
-      "owner-registration": {epoch: 2, applied: ["canonicalize-test-yard-owner-v2"]},
-      "power-metadata": {epoch: 2, applied: ["introduce-owner-publication-state-v1"]},
+      "owner-registration": {epoch: 3, applied: ["canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"]},
+      "power-metadata": {epoch: 3, applied: ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]},
       "project-state": {epoch: 1, applied: []},
       settings: {epoch: 3, applied: ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]}
     }

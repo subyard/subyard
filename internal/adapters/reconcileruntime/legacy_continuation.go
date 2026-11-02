@@ -383,6 +383,9 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		if runtime.Yard.NestedE2EVMs {
 			for name, source := range map[string]string{"e2e-vsock": "/dev/vsock", "e2e-vhost-vsock": "/dev/vhost-vsock", "e2e-tun": "/dev/net/tun"} {
 				desired[name] = map[string]string{"type": "unix-char", "source": source, "path": source}
+				if instance.LocalDevices[name]["mode"] == "0660" {
+					desired[name]["mode"] = "0660"
+				}
 			}
 		}
 	}

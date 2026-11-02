@@ -18,7 +18,7 @@ import (
 )
 
 func TestVerifiedCandidateRequiresExactManifestInventory(t *testing.T) {
-	for _, scenario := range []string{"exact", "extra-file", "omitted-entry", "unlisted-nested-manifest", "symlink", "fifo"} {
+	for _, scenario := range []string{"exact", "changed-content", "extra-file", "omitted-entry", "unlisted-nested-manifest", "symlink", "fifo"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			capture := filepath.Join(root, "engine-invoked")
@@ -41,6 +41,8 @@ func TestVerifiedCandidateRequiresExactManifestInventory(t *testing.T) {
 			testkit.WriteFile(t, filepath.Join(candidate.root, "config", "runtime-files.sha256"), payload, 0o600)
 			manifest = append(manifest, []byte(scriptEntry+nestedEntry)...)
 			switch scenario {
+			case "changed-content":
+				testkit.WriteFile(t, script, []byte("#!/bin/sh\nexit 7\n"), 0o700)
 			case "extra-file":
 				testkit.WriteFile(t, filepath.Join(candidate.root, "config", "extra.conf"), payload, 0o600)
 			case "omitted-entry":

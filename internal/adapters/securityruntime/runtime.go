@@ -388,6 +388,13 @@ func (runtime Runtime) checkIntegrationProxy(ctx context.Context, definition pro
 	return nil
 }
 
+// CheckResourceProxy applies the same owning resource policy used by security
+// readiness to an explicit native observation.
+func (runtime Runtime) CheckResourceProxy(ctx context.Context, contract resource.ProxyContract, instance ports.InstanceInfo) error {
+	runtime.ProxyContracts = []resource.ProxyContract{contract}
+	return runtime.checkOwnedProxy(ctx, contract.Device, instance.Devices[contract.Device], instance.Config, instance.Devices["eth0"], instance.LocalDevices[contract.Device])
+}
+
 func (runtime Runtime) checkOwnedProxy(
 	ctx context.Context,
 	name string,

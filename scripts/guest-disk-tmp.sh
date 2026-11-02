@@ -22,6 +22,15 @@ not_mountpoint() {
   [ "$result" = 32 ]
 }
 
+tmp_mount_guard() {
+  if [ -e /etc/systemd/system/tmp.mount ] || [ -L /etc/systemd/system/tmp.mount ]; then
+    [ -L /etc/systemd/system/tmp.mount ] \
+      && [ "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null ] \
+      && [ "$(stat -c '%u:%g' /etc/systemd/system/tmp.mount)" = 0:0 ] \
+      || { echo 'foreign or unsafe guest tmp.mount policy' >&2; return 1; }
+  fi
+}
+
 policy_content() {
   case "$1" in
     /etc/subyard-guest-tmpfiles.conf) cat <<'EOF'
@@ -249,15 +258,30 @@ wait_boot() {
 
 case "${1:-}" in
   wait-boot) wait_boot ;;
+  assess)
+    # Pre-consent observation: missing policy is eligible for installation.
+    # Never mask, reload, clean or wait for a boot from this read-only leaf.
+    [ -d /tmp ] && [ ! -L /tmp ]
+    [ "$(stat -c '%a:%u:%g' /tmp)" = 1777:0:0 ]
+    [ -w /tmp ]
+    tmp_mount_guard
+    policy_guard apply
+    filesystem=$(findmnt -n -T /tmp -o FSTYPE) || exit 1
+    case "$filesystem" in
+      tmpfs|ramfs)
+        result=0
+        mountpoint -q /tmp || result=$?
+        case "$result" in 0|32) exit 10 ;; *) exit 1 ;; esac
+        ;;
+      ext2|ext3|ext4|btrfs|xfs|zfs|overlay|virtiofs|9p) not_mountpoint /tmp ;;
+      *) exit 1 ;;
+    esac
+    ;;
   apply)
     wait_boot
     [ -d /tmp ] && [ ! -L /tmp ]
     [ "$(stat -c '%a:%u:%g' /tmp)" = 1777:0:0 ]
-    if [ -e /etc/systemd/system/tmp.mount ] || [ -L /etc/systemd/system/tmp.mount ]; then
-      [ -L /etc/systemd/system/tmp.mount ] \
-        && [ "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null ] \
-        && [ "$(stat -c '%u:%g' /etc/systemd/system/tmp.mount)" = 0:0 ]
-    fi
+    tmp_mount_guard
     policy_guard apply
     chmod 1777 /tmp
     systemctl mask tmp.mount

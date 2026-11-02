@@ -5626,6 +5626,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		"yards||@yards||local|read|never|public|lifecycle|simple|yards|yards|--help|",
 		"remote||@remote||local|mutate|dynamic|public|remote|remote|remote|remote|--yard --yes --help|add repair-key remove list",
 		"update||@update||local|mutate|dynamic|public|lifecycle|simple|update|update|--check --version --offline --rollback --force --yes --help|",
+		"migrate||@current-migration||deny|mutate|dynamic|public|lifecycle|simple|migrate|inspect or finish migrations for the installed release|--check --json --yes --help|",
 		"list||@list||local|read|never|public|projects|simple|list|list|--live --help|",
 		"_info||@info||local|read|never|hidden|internal|none|_info|info||",
 		"_authorize||@authorize||forward|mutate|dynamic|hidden|internal|none|_authorize|authorize||",

@@ -546,6 +546,11 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		command.Env = append(command.Env, fmt.Sprintf("SUBYARD_OWNER_LOCK_FD=%d", 3+len(command.ExtraFiles)))
 		command.ExtraFiles = append(command.ExtraFiles, owner)
 	}
+	// Operator input is distinct from the JSON protocol and never grants assent.
+	if grant != "" && runtime.config.OperatorInput != nil {
+		command.Env = append(command.Env, fmt.Sprintf("SUBYARD_MIGRATION_OPERATOR_INPUT_FD=%d", 3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, runtime.config.OperatorInput)
+	}
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, runtime.config.Stderr
 	err := command.Run()
 	if err != nil && ctx.Err() != nil {

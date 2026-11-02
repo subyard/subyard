@@ -635,11 +635,23 @@ def prepare(output, version, prepared=None):
         else:
             bundle(ROOT, source_archive)
         with tarfile.open(source_archive, "r:gz") as archive:
-            for member in archive.getmembers():
-                if member.name.startswith("/") or ".." in Path(member.name).parts or not (member.isfile() or member.isdir()):
+            members = archive.getmembers()
+            aliases = [member for member in members if member.name == ".claude/skills" and member.issym()]
+            if len(aliases) > 1:
+                raise ValueError("duplicate shared skill alias")
+            for member in members:
+                alias = member in aliases and member.linkname == "../.agents/skills"
+                if (member.name.startswith("/") or ".." in Path(member.name).parts
+                    or not (member.isfile() or member.isdir() or alias)
+                    or (aliases and ".claude/skills" in (str(parent) for parent in Path(member.name).parents))):
                     raise ValueError("unsafe source archive member")
+            if aliases and not any(member.isdir() and member.name == ".agents/skills"
+                                   or member.isfile() and member.name.startswith(".agents/skills/") for member in members):
+                raise ValueError("shared skill alias has no canonical directory")
             archive.extractall(root, filter="data")
-            for member in archive.getmembers():
+            for member in members:
+                if member.issym():
+                    continue
                 path = root / member.name
                 path.chmod(0o755 if member.isdir() or member.mode & 0o111 else 0o644)
     if source_fingerprint(root) != original or (not prepared and source_fingerprint(ROOT) != original):
@@ -1116,7 +1128,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
 
 def source_entries(root):
     entries = {}
-    paths = subprocess.check_output(["bash", "tests/helpers/source-files.sh"], cwd=root, stderr=subprocess.DEVNULL)
+    paths = subprocess.check_output(["bash", "tests/helpers/source-files.sh", ".", "--include-client-aliases"], cwd=root, stderr=subprocess.DEVNULL)
     for raw in filter(None, paths.split(b"\0")):
         name = os.fsdecode(raw)
         if name.startswith(".subyard-acceptance/"):
@@ -1599,17 +1611,21 @@ def validate_standalone_bundle(root, receipt, entries=None):
             # both our inventory and tarfile's header cache stay bounded.
             for member in archive:
                 name = member.name.removeprefix("./")
+                alias = member.issym() and name == ".claude/skills" and member.linkname == "../.agents/skills"
                 if (name.startswith("/") or ".." in Path(name).parts or name in members
-                    or not (member.isfile() and name in expected or member.isdir() and name in directories)):
+                    or not ((member.isfile() or alias) and name in expected or member.isdir() and name in directories)):
                     raise ValueError("unsafe standalone tested bundle member")
                 members[name] = member
-            if {name for name, member in members.items() if member.isfile()} != expected:
+            if {name for name, member in members.items() if member.isfile() or member.issym()} != expected:
                 raise ValueError("standalone tested bundle inventory differs")
             fingerprint = hashlib.sha256()
             for raw in paths:
                 member = members[os.fsdecode(raw)]
                 fingerprint.update(raw + b"\0")
                 fingerprint.update(f"{0o755 if member.mode & 0o111 else 0o644:o}\0".encode())
+                if member.issym():
+                    fingerprint.update(b"link\0" + os.fsencode(member.linkname))
+                    continue
                 with archive.extractfile(member) as stream:
                     fingerprint.update(bytes.fromhex(hashlib.file_digest(stream, "sha256").hexdigest()))
             if fingerprint.hexdigest() != receipt["source_fingerprint"]:

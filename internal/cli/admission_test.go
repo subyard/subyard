@@ -17,6 +17,8 @@ import (
 type runStage string
 
 const (
+	// stageCompatibility: registered-init migration admission precedes the strict gate.
+	stageCompatibility runStage = "compatibility"
 	// stageGate: the release mutation gate was consulted before dispatch.
 	stageGate runStage = "gate"
 	// stageLoad: passed admission without consulting the gate and reached context loading.
@@ -62,8 +64,8 @@ func TestRunAdmissionStages(t *testing.T) {
 		{[]string{"init", "-h"}, stageLoad, ""},
 		{[]string{"keys", "--help"}, stageLoad, ""},
 		// Mutating commands consult the gate.
-		{[]string{"init"}, stageGate, ""},
-		{[]string{"setup"}, stageGate, ""},
+		{[]string{"init"}, stageCompatibility, ""},
+		{[]string{"setup"}, stageCompatibility, ""},
 		{[]string{"start"}, stageGate, ""},
 		{[]string{"stop"}, stageGate, ""},
 		{[]string{"shell"}, stageGate, ""},
@@ -152,6 +154,8 @@ func TestRunAdmissionStages(t *testing.T) {
 			output := stderr.String()
 			got := stageUnknown
 			switch {
+			case strings.Contains(output, "init compatibility migrations: mutation gate runtime root"):
+				got = stageCompatibility
 			case strings.Contains(output, "inspect release transition: mutation gate runtime root"):
 				got = stageGate
 			case strings.Contains(output, "yard admission-missing, config inspection"):

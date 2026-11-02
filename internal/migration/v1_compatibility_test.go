@@ -379,6 +379,7 @@ func writeCompletedV2ImportProof(
 		static: imported.StaticDigest,
 	}
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+		RegisteredYards: []releasetransition.V2ActivationReconciler{}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{},
 		ConfigHome: options.ConfigHome,
 		Releases: releasetransition.ReleasePair{
 			From: from, Previous: &previous, Target: target,

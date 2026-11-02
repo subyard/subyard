@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -210,7 +211,7 @@ print(output)
 					}
 				}
 			case "ordered errors":
-				if observeErr == nil || !strings.Contains(observeErr.Error(), "decode profile runtime a-runtime observation") || active != 0 {
+				if observeErr == nil || !strings.Contains(observeErr.Error(), "profile a-runtime observation failed (invalid-schema)") || active != 0 {
 					t.Fatalf("batch lost original-order failure or drain: %v active=%d", observeErr, active)
 				}
 			case "cancel":
@@ -664,5 +665,92 @@ func profileRuntimeFixtureAt(t *testing.T, root, handler string) Runtime {
 			"subyard/yard": {Status: "Running"},
 		}},
 		Yard: yard,
+	}
+}
+
+func TestProfileRuntimeObservationFailuresHaveSafePublicDiagnostics(t *testing.T) {
+	for _, test := range []struct{ name, body, reason string }{
+		{"native-exit", "#!/bin/sh\nprintf private-handler-detail >&2\nexit 37\n", "native-exit-37"},
+		{"schema", "#!/bin/sh\nprintf private-handler-detail >&2\nprintf private-result-detail\n", "invalid-schema"},
+		{"cancel", "#!/bin/sh\nsleep 5\n", "cancelled"},
+		{"deadline", "#!/bin/sh\nsleep 5\n", "deadline"},
+		{"missing", "#!/missing/private-interpreter\n", "command-not-found"},
+		{"permission", "#!/forbidden\n", "permission-denied"},
+		{"source", "#!/bin/sh\nexit 1\n", "unclassified"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := profileRuntimeFixture(t, test.body)
+			runtime.Yard.YardName = "fixture-yard"
+			handler := filepath.Join(runtime.RepositoryRoot, "config/profiles/synthetic/runtime.sh")
+			if test.name == "permission" {
+				interpreter := filepath.Join(runtime.RepositoryRoot, "private-interpreter")
+				testkit.WriteFile(t, interpreter, []byte("#!/bin/sh\n"), 0600)
+				testkit.WriteFile(t, handler, []byte("#!"+interpreter+"\n"), 0700)
+			}
+			if test.name == "source" {
+				definitions, err := profile.Load(runtime.RepositoryRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runtime.Profiles = definitions
+				if err := os.Remove(handler); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if test.name == "cancel" {
+				cancel()
+			}
+			if test.name == "deadline" {
+				var closeDeadline context.CancelFunc
+				ctx, closeDeadline = context.WithTimeout(ctx, 20*time.Millisecond)
+				defer closeDeadline()
+			}
+			_, err := runtime.ObserveProfileRuntimes(ctx)
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if err == nil || !errors.As(err, &diagnostic) {
+				t.Fatal("observation lacks a safe public diagnostic", err)
+			}
+			message, retry := diagnostic.ActivationDiagnostic()
+			want := "yard fixture-yard: profile synthetic-runtime observation failed (" + test.reason + ")"
+			encoded, marshalErr := json.Marshal(err)
+			if marshalErr != nil || strings.Contains(string(encoded), "private-") {
+				t.Fatal("public error JSON leaked private native output")
+			}
+			var conflict interface{ ActivationConflict() bool }
+			if errors.As(err, &conflict) && conflict.ActivationConflict() {
+				t.Fatal("observation failure became an activation conflict")
+			}
+			if message != want || retry != "run yard update --check" || strings.Contains(message, "private-") || strings.Contains(message, runtime.RepositoryRoot) || strings.Contains(err.Error(), "private-") {
+				t.Fatal("imprecise or unsafe runtime observation diagnostic", message, retry)
+			}
+			if test.name == "native-exit" {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 37 {
+					t.Fatal("native cause lost", err)
+				}
+			}
+			if test.name == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Fatal("cancellation cause lost", err)
+			}
+			if test.name == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("deadline cause lost", err)
+			}
+		})
+	}
+}
+
+func TestProfileRuntimeDiagnosticRejectsUnsafeLabels(t *testing.T) {
+	runtime := Runtime{Yard: domain.Context{YardName: "private-yard\nvalue"}}
+	cause := errors.New("private-error-detail")
+	err := runtime.profileObservationFailure("private-owner/value", "invalid-schema", cause)
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) || !errors.Is(err, cause) {
+		t.Fatal("typed cause lost")
+	}
+	message, _ := diagnostic.ActivationDiagnostic()
+	if message != "yard unknown: profile unknown observation failed (invalid-schema)" || strings.Contains(err.Error(), "private-") {
+		t.Fatal("unsafe diagnostic label", message)
 	}
 }

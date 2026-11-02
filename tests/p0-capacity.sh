@@ -415,7 +415,7 @@ printf '%s\n' \
   '  "project show subyard-test-yard")' \
   '    [ "$P0_FAKE_INCUS_PROJECT_NAME" = subyard-test-yard ] && [ -e "$P0_FAKE_INCUS_PROJECT" ]' \
   '    ;;' \
-  '  "project get subyard-e2e-yard user.subyard.p0-image-cache"|"project get subyard-test-yard user.subyard.p0-image-cache")' \
+  '  "project get subyard-e2e-yard user.subyard-e2e.image-cache"|"project get subyard-test-yard user.subyard-e2e.image-cache")' \
   '    printf "%s\\n" "$P0_FAKE_INCUS_MARKER"' \
   '    ;;' \
   '  "project get subyard-e2e-yard user.subyard.p0-source"|"project get subyard-test-yard user.subyard.p0-source"|"project get subyard user.subyard.p0-source")' \

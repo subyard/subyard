@@ -199,9 +199,9 @@ assert_v2_transition() {
   operator_env jq -e '
     .schemaVersion == 2 and
     .domains["owner-registration"] == {
-      "epoch": 2, "applied": ["canonicalize-test-yard-owner-v2"]
+      "epoch": 3, "applied": ["canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"]
     } and
-    .domains["power-metadata"] == {"epoch": 2, "applied": ["introduce-owner-publication-state-v1"]} and
+    .domains["power-metadata"] == {"epoch": 3, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]} and
     .domains["project-state"] == {"epoch": 1, "applied": []} and
     .domains.settings == {
       "epoch": 3, "applied": ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]

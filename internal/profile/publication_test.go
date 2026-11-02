@@ -2,6 +2,8 @@ package profile
 
 import (
 	"encoding/json"
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -73,5 +75,47 @@ func TestRevisionedSettingsPublicationMetadata(t *testing.T) {
 	}
 	if _, claimed := projection["user.subyard.synthetic_foreign"]; claimed {
 		t.Fatal("prefix gained authority")
+	}
+}
+
+func TestObservedPublicationUsesTypedHistoricalRecipeAndProtectedIdentity(t *testing.T) {
+	legacyCPU := "2"
+	definition := Definition{Name: "synthetic", InstancePublication: &RevisionedSettingsPublication{
+		SchemaKey: "user.subyard.synthetic_schema", SchemaValue: "1", RevisionKey: "user.subyard.synthetic_revision", DisabledSetting: "SYN_ENABLED", LegacySettingsCount: 2,
+		Settings: []PublicationSetting{{Name: "SYN_IMAGE"}, {Name: "SYN_YARD", FallbackSetting: "YARD_NAME"}, {Name: "SYN_CPU", LegacyDefault: &legacyCPU}},
+	}}
+	environment := map[string]string{"SYN_ENABLED": "0", "YARD_NAME": "fixture", "SYN_IMAGE": "images:debian/13", "SYN_CPU": "8"}
+	for _, test := range []struct {
+		recipe, cpu string
+		valid       bool
+	}{
+		{"images:debian/13:fixture:4", "4", true}, {"images:debian/13:fixture", "2", true}, {"images:debian/13:foreign:4", "", false}, {"images:debian/13:fixture:bad", "", false},
+	} {
+		t.Run(test.recipe, func(t *testing.T) {
+			marker := map[string]string{definition.InstancePublication.SchemaKey: "1", definition.InstancePublication.RevisionKey: "0:" + strings.Repeat("a", 64) + ":" + test.recipe}
+			observed, err := definition.ObserveInstancePublication(marker, marker, environment, func(name, value string) error {
+				if name == "SYN_IMAGE" && !strings.HasPrefix(value, "images:") {
+					return errors.New("invalid image")
+				}
+				if name == "SYN_CPU" {
+					number, err := strconv.Atoi(value)
+					if err != nil || number < 1 || strconv.Itoa(number) != value {
+						return errors.New("invalid CPU")
+					}
+				}
+				return nil
+			})
+			if (err == nil) != test.valid {
+				t.Fatalf("observed=%#v err=%v", observed, err)
+			}
+			if test.valid && !strings.Contains(observed[definition.InstancePublication.RevisionKey], `"SYN_CPU":"`+test.cpu+`"`) {
+				t.Fatal("observation was replaced with current defaults")
+			}
+			if test.valid {
+				if _, err := definition.ProjectInstancePublication(marker, marker, environment); err == nil {
+					t.Fatal("strict continuation admitted desired recipe drift")
+				}
+			}
+		})
 	}
 }

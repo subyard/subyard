@@ -862,3 +862,16 @@ func defaultValue(value, fallback string) string {
 	}
 	return value
 }
+
+// EndpointSettingNames is the finite compiled vocabulary for resource proxies.
+// It carries no selection or mutation authority.
+func (registry Registry) EndpointSettingNames() []string {
+	names := []string{}
+	for _, definition := range registry.Definitions() {
+		if proxy := definition.Proxy; proxy != nil && proxy.OwnershipMetadata && !proxy.IsOwnerIPv4Ingress() {
+			names = append(names, proxy.AdvertiseHostSetting, proxy.HostPortSetting)
+		}
+	}
+	sort.Strings(names)
+	return slices.Compact(names)
+}

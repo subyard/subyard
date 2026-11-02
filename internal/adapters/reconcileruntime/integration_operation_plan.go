@@ -5,15 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-func cloneIntegrationConfig(config map[string]string) map[string]string {
+func cloneIntegrationConfig(config map[string]string, virtualMachine bool) map[string]string {
 	copy := maps.Clone(config)
-	for _, key := range []string{"user.subyard.ccusage_version"} {
+	// Incus replaces this host interface name during an approved restart.
+	for _, key := range []string{"user.subyard.ccusage_version", "volatile.eth0.host_name"} {
 		delete(copy, key)
+	}
+	if virtualMachine {
+		for _, key := range []string{"volatile.vm.rtc_adjustment", "volatile.vm.rtc_offset"} {
+			if parsed, err := strconv.ParseInt(copy[key], 10, 64); err == nil && strconv.FormatInt(parsed, 10) == copy[key] {
+				delete(copy, key)
+			}
+		}
 	}
 	return copy
 }

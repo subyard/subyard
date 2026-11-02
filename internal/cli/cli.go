@@ -105,6 +105,8 @@ type CLI struct {
 	serviceRemote        *config.Loaded
 	serviceSelection     *serviceSelection
 
+	registeredInitMigrated       bool
+	migrationOperatorInput       *os.File
 	catalog                      config.Catalog
 	provisionEndpointAddresses   func() ([]hostruntime.OwnerIPv4, error)
 	options                      Options
@@ -572,6 +574,19 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runHostLogs(commandArguments)
 	}
+	if !readOnlyInvocation && !cli.releaseTransitionChild && core && definition.Handler == "@init" {
+		code, err := cli.finishRegisteredInitMigrations(ctx, yard, commandArguments, yes)
+		if err != nil {
+			cli.errorf("init compatibility migrations: %v", err)
+			return 1
+		}
+		if code > 0 {
+			return code
+		}
+		if code == 0 {
+			cli.registeredInitMigrated = true
+		}
+	}
 	if admission.gate == gateRequired && !cli.releaseTransitionChild {
 		permits, code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes)
 		if done {
@@ -994,7 +1009,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	case "@init":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name> | --continue-legacy | --adopt] [--yes]\n", cli.options.Program)
 		fmt.Fprintln(cli.options.Stdout, "\nWith -Y <new-name>, plain init creates a local yard with no environment profiles or coding tools and chooses an available owner-local SSH port.\nExisting yards retain their saved settings and selections; --profile creates a new yard from a named-yard preset.")
-		fmt.Fprintln(cli.options.Stdout, "\n--adopt registers an assessed existing local yard, then completes ordinary initialization under the same reviewed plan and confirmation. Registration preserves workloads and power; approved init stages retain their normal effects. Unproven shared infrastructure and host namespaces remain preserved.\n--continue-legacy assesses a protected local legacy yard for normal reconciliation only; it grants no reset or full removal ownership.\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
+		fmt.Fprintln(cli.options.Stdout, "\n--adopt registers an assessed existing local yard, then completes ordinary initialization under the same reviewed plan and confirmation. Compatibility migrations retain persistent data and desired power; any required temporary restart asks for separate later confirmation. Unproven shared infrastructure and host namespaces remain preserved.\n--continue-legacy assesses a protected local legacy yard for normal reconciliation only; it grants no reset or full removal ownership.\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
 		return 0
 	case "@lifecycle":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)
@@ -3184,7 +3199,7 @@ func (prompt streamPrompt) Confirm(_ context.Context, request domain.Confirmatio
 	if prompt.interactive == nil || !prompt.interactive() {
 		return false, fmt.Errorf("%w: interactive terminal required", domain.ErrConfirmationRequired)
 	}
-	reader := bufio.NewReader(prompt.input)
+	reader := bufio.NewReader(promptLineInput{prompt.input})
 	for {
 		fmt.Fprintf(prompt.output, "\n%s\nThis will:\n", request.Summary)
 		for _, consequence := range request.Consequences {
@@ -3210,6 +3225,16 @@ func (prompt streamPrompt) Confirm(_ context.Context, request domain.Confirmatio
 			return false, domain.ErrOperationDeclined
 		}
 	}
+}
+
+// Do not read ahead into a later, separately authorized migration prompt.
+type promptLineInput struct{ io.Reader }
+
+func (input promptLineInput) Read(buffer []byte) (int, error) {
+	if len(buffer) > 1 {
+		buffer = buffer[:1]
+	}
+	return input.Reader.Read(buffer)
 }
 
 func confirmationPromptLabel(defaultValue domain.ConfirmationDefault) (string, bool) {

@@ -427,8 +427,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	var guardInstance ports.InstanceInfo
 	_ = json.Unmarshal(instanceBytes, &guardInstance)
 	guardInstance.Status = ""
-	guardInstance.Config = cloneIntegrationConfig(guardInstance.Config)
-	guardInstance.LocalConfig = cloneIntegrationConfig(guardInstance.LocalConfig)
+	virtualMachine := runtime.Yard.YardKind == domain.YardVM && guardInstance.Type == domain.YardVM
+	guardInstance.Config = cloneIntegrationConfig(guardInstance.Config, virtualMachine)
+	guardInstance.LocalConfig = cloneIntegrationConfig(guardInstance.LocalConfig, virtualMachine)
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return plan, observed, err

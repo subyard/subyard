@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
@@ -26,6 +27,17 @@ import (
 const releaseTransitionRequestLimit = 1 << 20
 
 func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) int {
+	// The verified launcher hands this role in explicitly; native helpers must
+	// not inherit the operator's unread maintenance consent stream.
+	if fd, valid := migrationOperatorInputDescriptor(os.Getenv("SUBYARD_MIGRATION_OPERATOR_INPUT_FD")); valid {
+		syscall.CloseOnExec(fd)
+	}
+	defer func() {
+		if cli.migrationOperatorInput != nil {
+			_ = cli.migrationOperatorInput.Close()
+			cli.migrationOperatorInput = nil
+		}
+	}()
 	if len(arguments) != 0 {
 		cli.errorf("internal: _release-transition accepts a JSON request on stdin")
 		return 2
@@ -165,7 +177,13 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 }
 
 type ownerRegistrationTransition struct {
-	options func() (testyardmigration.Options, error)
+	registeredYards, guestDiskTmp []releasetransition.V2ActivationReconciler
+	endpointSettings              []string
+	options                       func() (testyardmigration.Options, error)
+}
+
+func (transition *ownerRegistrationTransition) registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string) {
+	return transition.registeredYards, transition.guestDiskTmp, transition.endpointSettings
 }
 
 func (transition *ownerRegistrationTransition) Prepare(
@@ -237,7 +255,7 @@ func (transition *ownerRegistrationTransition) Observe(
 func (cli *CLI) ownerRegistrationTransition(
 	request releasetransition.ProcessRequest,
 ) releasetransition.V2OwnerRegistration {
-	return &ownerRegistrationTransition{options: func() (testyardmigration.Options, error) {
+	return &ownerRegistrationTransition{endpointSettings: cli.resources.EndpointSettingNames(), registeredYards: cli.registeredYardMigrations(request, false), guestDiskTmp: cli.registeredYardMigrations(request, true), options: func() (testyardmigration.Options, error) {
 		return cli.releaseTransitionTestYardOptions(request)
 	}}
 }
@@ -1424,6 +1442,11 @@ func executeReleaseTransitionRequest(
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
+	if owner, ok := ownerRegistration.(interface {
+		registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string)
+	}); ok {
+		transitionOptions.RegisteredYards, transitionOptions.GuestDiskTmp, transitionOptions.RegisteredEndpointSettings = owner.registeredMigrationOwners()
+	}
 	transitionOptions.MigrationOwnerReplacement = request.MigrationOwnerReplacement
 	if request.MigrationOwnerReplacement != nil {
 		transitionOptions.MigrationOwnerAssets = func(ctx context.Context) (releasetransition.MigrationOwnerAssetsProof, error) {

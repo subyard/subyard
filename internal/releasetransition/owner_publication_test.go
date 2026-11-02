@@ -14,6 +14,7 @@ func TestOwnerPublicationBoundaryCommitsBeforeActivationAndResumes(t *testing.T)
 	transition, _, settingsPath := v2TransitionFixtureWithReleases(t, nil,
 		ReleasePair{From: "release-a", Target: "release-b"}, ReleaseLinks{Active: "release-a"})
 	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload = localSSHHistoricalRegistry(t, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +108,7 @@ func (owner *powerReaderOwnerRegistration) Commit(ctx context.Context, before Ow
 
 func TestOwnerPublicationOrderPreservesCompletedHistoricalOwnerPrefix(t *testing.T) {
 	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload = localSSHHistoricalRegistry(t, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +185,7 @@ func TestOwnerPublicationRecoveryFromCompletedIndependentDomains(t *testing.T) {
 					transition, _, _ := v2TransitionFixtureWithReleases(t, nil,
 						ReleasePair{From: "release-a", Target: "release-b"}, links)
 					payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+					payload = localSSHHistoricalRegistry(t, payload)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -296,6 +299,7 @@ func TestOwnerPublicationRecoveryFromCompletedIndependentDomains(t *testing.T) {
 
 func TestOwnerPublicationBoundaryRefusesEpochOneRollbackBeforeMutation(t *testing.T) {
 	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload = localSSHHistoricalRegistry(t, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +323,7 @@ func TestOwnerPublicationOrderRefusesChangedAuthorizedRegistryWithoutMutation(t 
 		return nil
 	})
 	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload = localSSHHistoricalRegistry(t, payload)
 	if err != nil {
 		t.Fatal(err)
 	}

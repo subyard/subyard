@@ -210,15 +210,30 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
             release.mkdir(parents=True)
             native = release / f'subyard-1.2.3-linux-{arch}.tar.gz'
             other = release / f'subyard-1.2.3-linux-{foreign}.tar.gz'
-            native.write_bytes(b'native runtime identity')
-            other.write_bytes(b'foreign runtime identity')
+            # These host-free metadata archives are independent synthetic inputs.
+            for archive, archive_arch in ((native, arch), (other, foreign)):
+                files = {
+                    './scripts/guest-disk-tmp.sh': f'fixture {archive_arch} disk tmp policy\n'.encode(),
+                    './config/release-transition.json': json.dumps({
+                        'currentEpochs': {'fixture': 2},
+                        'migrations': [{'id': f'fixture-{archive_arch}-migration', 'domain': 'fixture',
+                                        'fromEpoch': 1, 'toEpoch': 2}]}).encode()}
+                with tarfile.open(archive, 'w:gz') as output:
+                    for name, payload in files.items():
+                        member = tarfile.TarInfo(name)
+                        member.size = len(payload)
+                        member.mode = 0o644
+                        output.addfile(member, io.BytesIO(payload))
             state = case / 'fixture'
             config = state / 'config'
             config.mkdir(parents=True)
-            fixture = SimpleNamespace(root=state, config=config, runtime=state/'runtime',
+            fixture = SimpleNamespace(root=state, config=config, data=state/'data', runtime=state/'runtime',
                                       journal=config/'journal.json', version='1.2.3', arch=arch,
                                       old_launcher=state/'old/bin/yard',
                                       env={'YARD_RELEASE_BASE_URL': release.as_uri()})
+            source_registry = fixture.old_launcher.parent.parent/'config/release-transition.json'
+            source_registry.parent.mkdir(parents=True)
+            source_registry.write_text(json.dumps({'currentEpochs': {'fixture': 1}}))
             captured = []
             with patch.dict(helper.__globals__, {
                     'write_observation_incus': lambda *args, **kwargs: None,
@@ -228,6 +243,9 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
             expected = '1.2.3-' + hashlib.sha256(native.read_bytes()).hexdigest()[:12]
             assert history['target'] == expected, (arch, history['target'], expected)
             assert captured[0]['target'] == expected
+            assert history['diskTmpCheckSHA256'] == hashlib.sha256(f'fixture {arch} disk tmp policy\n'.encode()).hexdigest()
+            assert history['migrations'] == [f'fixture-{arch}-migration']
+            assert history['projectConfig']['user.subyard.data_home'] == str(fixture.data)
 print('ok: migration-history apply control binds the selected architecture in a mixed release inventory')
 
 globals_ = helper.__globals__

@@ -51,6 +51,7 @@ func TestV2HistoricalDomainFrontierResumesAtDurableCuts(t *testing.T) {
 					t.Fatal(err)
 				}
 				payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+				payload = localSSHHistoricalRegistry(t, payload)
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -7,8 +7,8 @@
     "settings": 1
   },
   "currentEpochs": {
-    "owner-registration": 2,
-    "power-metadata": 2,
+    "owner-registration": 3,
+    "power-metadata": 3,
     "project-state": 1,
     "settings": 3
   },
@@ -43,7 +43,32 @@
       "fromEpoch": 2,
       "toEpoch": 3,
       "kind": "local-ssh-port-settings-v2-to-v3",
-      "dependsOn": ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"]
+      "dependsOn": [
+        "canonicalize-test-vms-settings-v2",
+        "canonicalize-test-yard-owner-v2"
+      ]
+    },
+    {
+      "id": "register-existing-local-yards-v3",
+      "domain": "owner-registration",
+      "fromEpoch": 2,
+      "toEpoch": 3,
+      "kind": "registered-yards-v2-to-v3",
+      "dependsOn": [
+        "canonicalize-test-yard-owner-v2",
+        "localize-ssh-port-settings-v3"
+      ]
+    },
+    {
+      "id": "complete-registered-guest-disk-tmp-v3",
+      "domain": "power-metadata",
+      "fromEpoch": 2,
+      "toEpoch": 3,
+      "kind": "registered-guest-disk-tmp-v2-to-v3",
+      "dependsOn": [
+        "register-existing-local-yards-v3",
+        "introduce-owner-publication-state-v1"
+      ]
     }
   ]
 }

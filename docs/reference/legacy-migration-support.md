@@ -48,14 +48,15 @@ The cutoff concerns legacy migration V1. Supported v0.11.0+ updates, process V1,
 recovery receipts and checkpoint-reader contracts retain their own compatibility requirements.
 The source-version cutoff does not raise the domain epoch floor or retire V2 checkpoint history.
 
-Supported historical updates do not invent project ownership labels. Plain `yard init` refuses
-an existing unlabelled project without proven authority, including one created by v0.11.0,
-even after its supported update succeeds. Explicit `yard init --adopt` can register the existing
-yard for normal management while preserving unproven shared and host creation ownership.
-This lifecycle operation is separate from release migration. Its metadata-only registration
-substep is followed by ordinary initialization under the same assessed plan and confirmation.
-If initialization fails after registration, rerun the same `yard init --adopt` to finish.
-Older releases refuse its versioned adopted ownership marker.
+Supported updates run versioned compatibility migrations for registered local yards through
+the release journal. Plain `yard init` finishes missing compatibility work before its strict
+ordinary initialization; `--adopt` remains a compatible explicit entry. Bounded registration
+and native identity checks precede project and selected-resource receipt publication. Working
+resource endpoints are retained, while unproven shared and host creation ownership is preserved.
+Guest temporary-storage policy installation never implies restart consent: a required restart
+or temporary boot asks separately after migration begins, even with `--yes`. Decline or EOF
+leaves the journal incomplete and resumable without restarting the yard. Persistent data,
+instance UUID and desired power remain protected. Completed migrations are not reopened for drift.
 Explicit `yard init --continue-legacy` can establish
 a separately confirmed, protected grant for bounded normal reconciliation of a supported,
 exactly assessed legacy resource. It does not relabel the project or authorize full removal.

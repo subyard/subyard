@@ -1437,10 +1437,15 @@ build_bundle() {
     if [ -L "$root/$path" ]; then
       resolved="$(realpath "$root/$path")" || die "cannot resolve symlink '$path'"
       case "$resolved" in "$root"/*) ;; *) die "refusing symlink outside the worktree: '$path'" ;; esac
+      if [ "$path" = .claude/skills ]; then
+        [ "$(readlink "$root/$path")" = ../.agents/skills ] \
+          && [ "$resolved" = "$root/.agents/skills" ] && [ -d "$resolved" ] \
+          || die "refusing noncanonical shared skill alias: '$path'"
+      fi
     fi
     paths+=("$path")
     count=$((count + 1))
-  done < <(worktree_paths "$root" --follow; if [ "$#" -gt 0 ]; then printf '%s\0' "$@"; fi)
+  done < <(worktree_paths "$root" --include-client-aliases --follow; if [ "$#" -gt 0 ]; then printf '%s\0' "$@"; fi)
   [ "$count" -gt 0 ] || die "public worktree is empty"
   printf '%s\0' "${paths[@]}" | LC_ALL=C sort -z | tar -C "$root" --null -T - -cf - | gzip -n > "$bundle"
 }

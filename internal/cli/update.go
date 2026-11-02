@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -108,7 +109,9 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 }
 
 func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContext) releaseruntime.Config {
+	operatorInput, _ := cli.options.Stdin.(*os.File)
 	return releaseruntime.Config{
+		OperatorInput:  operatorInput,
 		Inputs:         cli.commandInputs,
 		Context:        runtimeContext,
 		Installer:      filepath.Join(cli.options.RepositoryRoot, "scripts", "install-runtime-release.sh"),

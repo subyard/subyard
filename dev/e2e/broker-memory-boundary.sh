@@ -1150,11 +1150,11 @@ if [ "$TELEMETRY_ONLY" = 1 ]; then
     "$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | awk '{print $1}')" ] \
     || die 'telemetry resource backend differs from its installed candidate'
 fi
-project_marker="$(incus project get "$PROJECT" user.subyard.p0-image-cache)"
+project_marker="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
 [ -z "$project_marker" ] || [ "$project_marker" = "$MARKER" ] \
   || die 'broker fixture project has a foreign P0 marker'
-incus project set "$PROJECT" user.subyard.p0-image-cache="$MARKER"
-[ "$(incus project get "$PROJECT" user.subyard.p0-image-cache)" = "$MARKER" ] \
+incus project set "$PROJECT" user.subyard-e2e.image-cache="$MARKER"
+[ "$(incus project get "$PROJECT" user.subyard-e2e.image-cache)" = "$MARKER" ] \
   || die 'broker fixture project lost its P0 marker'
 assert_owned_device
 OUTER_BEFORE="$(outer_identity)"

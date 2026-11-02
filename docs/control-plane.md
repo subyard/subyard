@@ -437,6 +437,14 @@ authorization binding, protected evidence, per-domain epoch advancement, stable 
 forward recovery and post-activation reconciliation. A completed one-time migration is durable
 history and is never reopened to repair later drift.
 
+Registered local yards run missing compatibility migrations before ordinary init admission.
+Their native ownership and selected resource receipts use per-yard steps in the same release
+journal. Working resource endpoints are retained; explicit configuration conflicts refuse.
+The guest temporary-storage step installs the existing next-boot policy, then asks separately
+for any required restart or temporary boot, even with `--yes`. Decline or EOF leaves the
+transition incomplete and resumable, retaining instance UUID, persistent data and desired power.
+Read-only checks never migrate or request restart consent.
+
 Go is the production release owner. Historical transitions retain their exact sealed
 owners and frozen process and recovery protocols. Unsupported experimental owner
 metadata is refused before executable probing and cannot enter historical metadata

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -293,18 +294,18 @@ func (client *Client) exec(
 		if drainErr := drainExecData(ctx, dataDone); drainErr != nil {
 			return ports.InstanceExecResult{}, errors.Join(err, drainErr)
 		}
-		exitCode := 0
-		if value, ok := operation.Get().Metadata["return"].(float64); ok {
-			exitCode = int(value)
-		}
+		exitCode, validExit := nativeGuestExitCode(operation.Get().Metadata["return"])
 		result := ports.InstanceExecResult{
 			Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode,
 		}
 		if err != nil {
 			return result, normalizeOperationError("wait for instance command", operation.Get(), err)
 		}
+		if !validExit {
+			return result, errors.New("instance command returned malformed exit metadata")
+		}
 		if exitCode != 0 {
-			return result, fmt.Errorf("instance command exited with status %d", exitCode)
+			return result, &ports.GuestExitError{Code: exitCode}
 		}
 		return result, nil
 	}
@@ -674,4 +675,12 @@ func instanceInfo(project string, instance *api.Instance) ports.InstanceInfo {
 		Config: cloneMap(instance.ExpandedConfig), Devices: cloneDevices(instance.ExpandedDevices),
 		LocalConfig: cloneMap(instance.Config), LocalDevices: cloneDevices(instance.Devices),
 	}
+}
+
+func nativeGuestExitCode(raw any) (int, bool) {
+	value, ok := raw.(float64)
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 255 || value != math.Trunc(value) {
+		return 0, false
+	}
+	return int(value), true
 }

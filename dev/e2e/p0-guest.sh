@@ -109,9 +109,12 @@ clean_peer_data() {
 
 owner_cleanup() {
   local rc=$? source="/tmp/subyard-p0-project-$TOKEN" patch fingerprint yard registration vm
-  local cleanup_failed=0
+  local cleanup_failed=0 teardown=./bin/yard teardown_exit
   trap - EXIT
   set +e
+  if [ -x "${SUBYARD_HOME:-$HOME/.subyard}/runtime/current/bin/yard" ]; then
+    teardown="${SUBYARD_HOME:-$HOME/.subyard}/runtime/current/bin/yard"
+  fi
   clean_tree "$source" "$MARKER" || cleanup_failed=1
   if [ -d "${SUBYARD_HOME:-$HOME/.subyard}/exports" ]; then
     while IFS= read -r patch; do find "$patch" -delete || cleanup_failed=1; done \
@@ -137,7 +140,9 @@ owner_cleanup() {
             | tail -n 60 >&2
         done
       fi
-      if ! ./bin/yard -Y "$yard" teardown --yes >/dev/null 2>&1; then
+      if "$teardown" -Y "$yard" teardown --yes >/dev/null; then :; else
+        teardown_exit=$?
+        printf 'p0-guest: owner teardown failed (exit=%s)\n' "$teardown_exit" >&2
         cleanup_failed=1
         continue
       fi
@@ -165,7 +170,7 @@ owner_cleanup() {
   else
     cleanup_failed=1
   fi
-  [ "$cleanup_failed" = 0 ] || rc=3
+  [ "$rc" != 0 ] || [ "$cleanup_failed" = 0 ] || rc=3
   exit "$rc"
 }
 
@@ -496,12 +501,12 @@ owner_release_contract() {
     && [ "$(incus project get subyard-test-yard user.subyard.data_home)" = "$SUBYARD_HOME" ] \
     && [ "$(incus project get subyard-test-yard user.subyard.config_home)" = "$OWNER_CONFIG_HOME" ] \
     || die 'fresh owner project does not belong to this installation'
-  project_marker="$(incus project get subyard-test-yard user.subyard.p0-image-cache)" \
+  project_marker="$(incus project get subyard-test-yard user.subyard-e2e.image-cache)" \
     || die 'cannot inspect current owner fixture marker'
   [ -z "$project_marker" ] || [ "$project_marker" = "$MARKER" ] \
     || die 'fresh owner project has a foreign P0 marker'
-  incus project set subyard-test-yard user.subyard.p0-image-cache="$MARKER"
-  [ "$(incus project get subyard-test-yard user.subyard.p0-image-cache)" = "$MARKER" ] \
+  incus project set subyard-test-yard user.subyard-e2e.image-cache="$MARKER"
+  [ "$(incus project get subyard-test-yard user.subyard-e2e.image-cache)" = "$MARKER" ] \
     || die 'fresh owner project lost its P0 marker'
   owner_named_yard_contract "$yard"
   printf 'ok: supported broker update and rollback retained history and prepared a fresh current owner\n'
@@ -543,7 +548,7 @@ reclaim_owner_project_residue() {
       ;;
     *) die "unsafe owner residue project $project" ;;
   esac
-  marker="$(incus project get "$project" user.subyard.p0-image-cache 2>/dev/null)"
+  marker="$(incus project get "$project" user.subyard-e2e.image-cache 2>/dev/null)"
   if [ -n "$expected_marker" ]; then
     if [ "$marker" != "$expected_marker" ]; then
       [ -z "$marker" ] && [ -n "$markerless_registration" ] \
@@ -557,7 +562,7 @@ reclaim_owner_project_residue() {
       || die "refusing non-P0 owner project $project"
   fi
   unexpected="$(incus list --project "$project" --format csv -c n \
-    | awk -v expected="$instance" '$0 != expected { print }')"
+    | awk -v expected="$instance" '$0 != expected { print }')" || return
   [ -z "$unexpected" ] \
     || die "refusing owner project $project with an unexpected instance"
   unexpected="$(incus storage volume list default --project "$project" \
@@ -565,17 +570,17 @@ reclaim_owner_project_residue() {
     -v expected_volume="$volume" '
       ! (($1 == "container" && $2 == expected_instance) ||
          ($1 == "custom" && $2 == expected_volume)) { print }
-    ')"
+    ')" || return
   [ -z "$unexpected" ] \
     || die "refusing owner project $project with an unexpected storage volume"
   if incus config show "$instance" --project "$project" >/dev/null 2>&1; then
-    incus delete "$instance" --project "$project" --force >/dev/null
+    incus delete "$instance" --project "$project" --force >/dev/null || return
   fi
   if incus storage volume show default "$volume" --project "$project" \
     >/dev/null 2>&1; then
-    incus storage volume delete default "$volume" --project "$project" >/dev/null
+    incus storage volume delete default "$volume" --project "$project" >/dev/null || return
   fi
-  incus project delete "$project" >/dev/null
+  incus project delete "$project" >/dev/null || return
   printf '  [ ok ] removed interrupted P0 owner project %s (%s)\n' \
     "$project" "$marker"
 }
@@ -586,7 +591,7 @@ reclaim_owner_project_if_present() {
   jq -e 'type=="array" and all(.[]; type=="object" and (.name|type=="string"))' \
     <<<"$projects" >/dev/null || die 'owner project inventory is invalid'
   jq -e --arg name "$project" 'any(.[]; .name==$name)' <<<"$projects" >/dev/null || return 0
-  marker="$(incus project get "$project" user.subyard.p0-image-cache)" \
+  marker="$(incus project get "$project" user.subyard-e2e.image-cache)" \
     || die 'cannot inspect owner project marker'
   [[ "$marker" =~ ^subyard-p0-[0-9]+$ ]] || die "refusing non-P0 owner project $project"
   if incus project delete "$project" >/dev/null 2>&1; then

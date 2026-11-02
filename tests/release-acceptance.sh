@@ -370,6 +370,81 @@ class TestAcceptance(unittest.TestCase):
                 self.assertEqual(m.source_fingerprint(directory), expected.hexdigest())
             self.assertEqual(listing.call_count, 1)
 
+    def test_shared_skill_alias_is_preserved_and_bound_without_traversal(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            skills = checkout / ".agents/skills"
+            skills.mkdir(parents=True)
+            (skills / "SKILL.md").write_text("public skill instructions\n")
+            alias = checkout / ".claude/skills"
+            alias.parent.mkdir()
+            alias.symlink_to("../.agents/skills")
+            regular = subprocess.check_output(["bash", str(checkout / "tests/helpers/source-files.sh"), str(checkout)]).split(b"\0")
+            self.assertIn(b".agents/skills/SKILL.md", regular)
+            self.assertNotIn(b".claude/skills", regular)
+            self.assertFalse(any(path.startswith(b".claude/skills/") for path in regular))
+            entries = m.source_entries(checkout)
+            self.assertEqual(entries[".claude/skills"][1], "link:../.agents/skills")
+            self.assertIn(".agents/skills/SKILL.md", entries)
+            self.assertNotIn(".claude/skills/SKILL.md", entries)
+            archive = directory / "source.tar.gz"
+            m.bundle(checkout, archive)
+            copied = directory / "copied"
+            copied.mkdir()
+            with tarfile.open(archive) as bundle:
+                member = bundle.getmember(".claude/skills")
+                self.assertTrue(member.issym())
+                self.assertEqual(member.linkname, "../.agents/skills")
+                self.assertNotIn(".claude/skills/SKILL.md", bundle.getnames())
+                bundle.extractall(copied, filter="data")
+            self.assertEqual(m.source_fingerprint(checkout), m.source_fingerprint(copied))
+            self.assertEqual((copied / ".claude/skills/SKILL.md").read_bytes(), (skills / "SKILL.md").read_bytes())
+            frozen, receipt = prepare_fixture(checkout, directory / "prepared")
+            self.assertEqual(receipt["source_fingerprint"], m.source_fingerprint(checkout))
+            self.assertTrue((frozen / ".claude/skills").is_symlink())
+            self.assertEqual((frozen / ".claude/skills/SKILL.md").read_bytes(), (skills / "SKILL.md").read_bytes())
+            m.validate_standalone_bundle(frozen, receipt)
+            original = m.source_fingerprint(checkout)
+            private = checkout / "private"
+            private.mkdir()
+            (private / "secret").write_text("excluded fixture input")
+            for target in ("../private", "../../", "../.agents/../.agents/skills"):
+                with self.subTest(target=target):
+                    alias.unlink()
+                    alias.symlink_to(target)
+                    self.assertNotEqual(original, m.source_fingerprint(checkout))
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        m.bundle(checkout, directory / "refused.tar.gz")
+            alias.unlink()
+            alias.symlink_to("../.agents/skills")
+            # Ordinary directory aliases still hit the symlinked-parent guard.
+            (checkout / "private-alias").symlink_to("private")
+            with self.assertRaises(subprocess.CalledProcessError):
+                m.bundle(checkout, directory / "private-alias.tar.gz")
+
+    def test_prepare_refuses_unsafe_shared_alias_archive_members(self):
+        for fault in ("foreign-link", "private-target", "outside-target", "alias-child", "duplicate-alias", "missing-target", "hardlink"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                directory = Path(temporary)
+                checkout = fixture_checkout(directory)
+                def unsafe_bundle(_root, destination, *_extra):
+                    with tarfile.open(destination, "w:gz") as archive:
+                        alias = tarfile.TarInfo("other" if fault == "foreign-link" else ".claude/skills")
+                        alias.type = tarfile.LNKTYPE if fault == "hardlink" else tarfile.SYMTYPE
+                        alias.linkname = {"private-target": "../private", "outside-target": "../../outside"}.get(fault, "../.agents/skills")
+                        archive.addfile(alias)
+                        if fault == "duplicate-alias":
+                            archive.addfile(alias)
+                        if fault != "missing-target":
+                            archive.addfile(tarfile.TarInfo(".agents/skills/SKILL.md"), io.BytesIO())
+                        if fault == "alias-child":
+                            archive.addfile(tarfile.TarInfo(".claude/skills/injected"), io.BytesIO())
+                with patch.object(m, "ROOT", checkout), patch.object(m, "bundle", side_effect=unsafe_bundle), patch.object(m, "execute") as execute:
+                    with self.assertRaises(ValueError):
+                        m.prepare(directory / "refused", "test")
+                    execute.assert_not_called()
+
     def test_single_transfer_uses_shared_writer_without_batch_admission_guards(self):
         for version in (1, 2):
             with self.subTest(version=version), tempfile.TemporaryDirectory(dir="/tmp") as temporary:

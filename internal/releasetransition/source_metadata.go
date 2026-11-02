@@ -24,7 +24,15 @@ type SourceMetadata struct {
 // InspectSourceMetadata validates the finite protected namespaces without
 // publishing, cleaning up, observing historical resources, or changing history.
 // The adapter must separately verify the exact sealed owner, assets and links.
-func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fingerprint) (SourceMetadata, error) {
+// Endpoint names must come from that verified original/source runtime. Future
+// descriptor retirement must preserve its verified predecessor vocabulary too;
+// this finite grammar never admits arbitrary names from journal recovery.
+func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fingerprint, endpointSettings ...string) (SourceMetadata, error) {
+	copy := *store
+	copy.endpointSettings = append([]string(nil), endpointSettings...)
+	return copy.inspectSourceMetadata(registry, digest)
+}
+func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fingerprint) (SourceMetadata, error) {
 	before, err := store.sourceMetadataInventory()
 	if err != nil {
 		return SourceMetadata{}, err
@@ -301,8 +309,9 @@ func (store *POSIXV2Store) terminalStepArtifacts(journal JournalRecord, step Jou
 		}
 	} else {
 		supported := migration.Kind == "test-vms-settings-v1-to-v2" && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && (step.Decision == DecisionCanonicalize || step.Decision == DecisionReset)
-		supported = supported || migration.Kind == localSSHPortMigration && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && step.Decision == DecisionCanonicalize
+		supported = supported || (migration.Kind == localSSHPortMigration || migration.Kind == registeredYardsMigration) && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && step.Decision == DecisionCanonicalize
 		supported = supported || migration.Kind == "test-yard-owner-v1-to-v2" && step.Resource == ownerRegistrationResource && step.ID == migration.ID+"."+ownerRegistrationResource && step.Decision == DecisionCanonicalize
+		supported = supported || nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") && domain.SafeName(strings.TrimPrefix(step.Resource, "yard.")) && step.ID == migration.ID+"."+step.Resource && step.Decision == DecisionTransform
 		if !supported {
 			return errors.New("source repair requires a supported original terminal step grammar")
 		}
@@ -466,13 +475,19 @@ func (store *POSIXV2Store) sourceTransactionArtifacts(journal JournalRecord) err
 }
 
 func (store *POSIXV2Store) sourceTypedRecovery(journal JournalRecord, step JournalStep, migration MigrationDefinitionV2) error {
+	if nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") {
+		if step.Evidence == nil || step.Evidence.Recovery != "" {
+			return errors.New("native migration evidence cannot carry a recovery payload")
+		}
+		return nil
+	}
 	snapshot, err := store.ReadRecovery(journal.Transaction, step.ID)
 	if err != nil || !snapshot.Exists || snapshot.Fingerprint != step.Evidence.Recovery {
 		return errors.New("terminal typed recovery does not match journal evidence")
 	}
 	var canonical []byte
 	switch migration.Kind {
-	case "test-vms-settings-v1-to-v2", localSSHPortMigration:
+	case "test-vms-settings-v1-to-v2", localSSHPortMigration, registeredYardsMigration:
 		var recovery settingsRecoveryV1
 		if err := decodeBoundedRecord(snapshot.Payload, 4096, &recovery); err != nil {
 			return err
@@ -480,8 +495,11 @@ func (store *POSIXV2Store) sourceTypedRecovery(journal JournalRecord, step Journ
 		if err := validateSettingsRecovery(recovery, journal, step); err != nil {
 			return err
 		}
-		if migration.Kind == localSSHPortMigration && recovery.Kind != localSSHPortMigration || migration.Kind != localSSHPortMigration && recovery.Kind != "" {
+		if recovery.Kind != settingsRecoveryKind(migration) {
 			return errors.New("terminal settings recovery kind differs from its migration")
+		}
+		if err := validateEndpointRecovery(recovery, store.endpointSettings); err != nil {
+			return err
 		}
 		canonical, err = json.Marshal(recovery)
 	case "test-yard-owner-v1-to-v2":

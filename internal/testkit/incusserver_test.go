@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -193,5 +194,51 @@ func TestIncusInventorySnapshotRemovesStaleResourcesAndPreservesExecution(t *tes
 	check("/1.0/instances/prior-yard?project=prior-project", http.StatusNotFound)
 	if len(fake.execSteps) != 1 || string(fake.execSteps[0].Stdout) != "queued" || len(fake.execCalls) != 1 || fake.execCalls[0].Name != "prior-call" {
 		t.Fatal("replacing inventory changed queued execution or history")
+	}
+}
+
+func TestIncusInstanceInventoryRespectsProjectScope(t *testing.T) {
+	fake := &IncusServer{}
+	fake.SetInventory(map[string]map[string]any{"left": {"name": "left"}, "right": {"name": "right"}, "default": {"name": "default"}, "empty": {"name": "empty"}}, map[string]map[string]any{"left/yard": {"name": "yard"}, "right/yard": {"name": "yard"}, "default/plain": {"name": "plain"}})
+	for _, check := range []struct {
+		query    string
+		projects []string
+	}{
+		{"?recursion=1&project=left", []string{"left"}},
+		{"?recursion=1&project=right", []string{"right"}},
+		{"?recursion=1&project=empty", nil},
+		{"?recursion=1", []string{"default"}},
+		{"?recursion=1&all-projects=true", []string{"default", "left", "right"}},
+	} {
+		response := httptest.NewRecorder()
+		fake.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/1.0/instances"+check.query, nil))
+		var body struct{ Metadata []struct{ Project string } }
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != http.StatusOK {
+			t.Fatalf("list %s: %d %v", check.query, response.Code, err)
+		}
+		got := []string{}
+		for _, instance := range body.Metadata {
+			got = append(got, instance.Project)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, check.projects) {
+			t.Fatalf("%s: projects %v, want %v", check.query, got, check.projects)
+		}
+	}
+	for _, check := range []struct {
+		path   string
+		status int
+	}{
+		{"/1.0/instances/yard/snapshots?project=left", http.StatusOK},
+		{"/1.0/instances?recursion=1&project=absent", http.StatusNotFound},
+		{"/1.0/instances/plain/snapshots", http.StatusOK},
+		{"/1.0/instances/plain/snapshots?project=left", http.StatusNotFound},
+		{"/1.0/instances/yard/snapshots?project=absent", http.StatusNotFound},
+	} {
+		response := httptest.NewRecorder()
+		fake.ServeHTTP(response, httptest.NewRequest(http.MethodGet, check.path, nil))
+		if response.Code != check.status {
+			t.Fatalf("%s: status %d", check.path, response.Code)
+		}
 	}
 }

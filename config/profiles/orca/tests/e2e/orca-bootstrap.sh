@@ -1059,7 +1059,7 @@ if [ "$CODEX_PERMISSIONS" = 1 ]; then
     "$STATE/release/subyard-install.sh" --yes >/dev/null
   YARD_BIN="$HOME/.local/bin/yard"
   [ "$(yard --version)" = "yard $release_version" ] || die 'focused candidate release is not active'
-  jq -e '.domains["power-metadata"].epoch == 2' \
+  jq -e '.domains["power-metadata"].epoch == 3' \
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null \
     || die 'focused candidate release did not commit the publication reader boundary'
   stage 'focused native installer and publication reader prerequisite passed'

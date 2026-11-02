@@ -373,8 +373,16 @@ func TestProfileRuntimeActivationUnavailableGuestRetainsDeselectedObservation(t 
 			}
 			reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
 			observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
-			if err == nil || observation.Converged || !strings.Contains(err.Error(), "profile runtime handler observe failed") {
+			if err == nil || observation.Converged || !strings.Contains(err.Error(), "profile sample-runtime observation failed (native-exit-9)") {
 				t.Fatalf("unavailable running guest accepted: %#v %v", observation, err)
+			}
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &diagnostic) {
+				t.Fatal("activation wrapper lost safe native diagnostic")
+			}
+			message, _ := diagnostic.ActivationDiagnostic()
+			if message != "yard default: profile sample-runtime observation failed (native-exit-9)" {
+				t.Fatal("activation diagnostic lost native class", message)
 			}
 			if data, err := os.ReadFile(filepath.Join(home, "observed")); err != nil || string(data) != "called\n" {
 				t.Fatalf("actual handler not observed: %q %v", data, err)

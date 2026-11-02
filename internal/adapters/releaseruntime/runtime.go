@@ -35,6 +35,7 @@ type Config struct {
 	Context                   RuntimeContext
 	Installer                 string
 	RepositoryRoot            string
+	OperatorInput             *os.File
 	Stdout                    io.Writer
 	Stderr                    io.Writer
 	Progress                  io.Writer
