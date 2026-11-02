@@ -71,7 +71,7 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok",
-			Capabilities: []string{"attribution-v2", "environment-acquire-v3", "process-acquire-v4", DisposableLifecycle, "vm-count-v1", "lease-logs-v1", "resource-observe-v1", "service-admission-fence-v1"}, Pool: &pool, Resources: resources,
+			Capabilities: []string{"attribution-v2", "environment-acquire-v3", "process-acquire-v4", DisposableLifecycle, "vm-count-v1", "disk-size-v1", "lease-logs-v1", "resource-observe-v1", "service-admission-fence-v1"}, Pool: &pool, Resources: resources,
 		})
 	case "observe-v1":
 		if len(fields) != 4 || facade.Events == nil {
@@ -158,8 +158,8 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		if len(fields) == 10 {
 			return facade.writeAcquireError("invalid_request", "missing_slot_id", "acquire-v3 requires TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id")
 		}
-		if len(fields) != 11 && len(fields) != 12 {
-			return facade.writeError("invalid_request", "acquire-v3 requires TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id [vm_count]")
+		if len(fields) != 11 && len(fields) != 12 && len(fields) != 13 {
+			return facade.writeError("invalid_request", "acquire-v3 requires TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id [vm_count [disk_size]]")
 		}
 		resolve := facade.EnvironmentSpec
 		if resolve == nil {
@@ -173,7 +173,7 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		if err != nil {
 			return facade.writeAcquireError("invalid_request", "unsupported_environment", "unsupported environment type")
 		}
-		if len(fields) == 12 {
+		if len(fields) >= 12 {
 			if fields[11] != "1" && fields[11] != "2" {
 				return facade.writeAcquireError("invalid_request", "invalid_vm_count", "vm_count must be 1 or 2")
 			}
@@ -181,6 +181,14 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 			if err := spec.Validate(); err != nil {
 				return facade.writeAcquireError("invalid_request", "invalid_vm_count", "unsupported VM count for environment type")
 			}
+		}
+		if len(fields) == 13 {
+			requested, _ := sizeMiB("50GiB")
+			defaultDisk, err := sizeMiB(spec.Disk)
+			if fields[12] != "50GiB" || err != nil || defaultDisk > requested {
+				return facade.writeAcquireError("invalid_request", "invalid_disk_size", "disk_size must be 50GiB and at least the configured default")
+			}
+			spec.Disk = "50GiB"
 		}
 		publicKey := fields[8] + " " + fields[9]
 		if _, keyErr := normalizedPublicKey(publicKey); keyErr != nil || fields[8] != "ssh-ed25519" {

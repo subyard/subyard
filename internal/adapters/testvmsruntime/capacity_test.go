@@ -379,6 +379,55 @@ func TestCanceledProvisioningRetainsMemoryUntilCleanup(t *testing.T) {
 	}
 }
 
+func TestAdmissionReservesRequestedPairDisk(t *testing.T) {
+	for _, tc := range []struct {
+		budget  string
+		refused bool
+	}{{"60GiB", true}, {"100GiB", false}} {
+		t.Run(tc.budget, func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			cfg.DiskBudget = tc.budget
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
+			spec, err := cfg.EnvironmentSpec(EnvironmentPair)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec.Disk = "50GiB"
+			grant, err := store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "run", "capacity", "slot-001")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt := &Runtime{Config: cfg, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 64 << 30}, nil }, diskUsageProbe: func(context.Context) (uint64, error) { return 0, nil }, Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				if strings.Join(args, " ") == "query /1.0/storage-pools/default/resources" {
+					return []byte(`{"space":{"total":536870912000,"used":0}}`), nil, nil
+				}
+				return nil, nil, fmt.Errorf("unexpected command: %v", args)
+			}}}
+			slot, err := storeSlot(store, grant.SlotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, disk, err := rt.outstandingCommitment(context.Background(), slot, 0)
+			if err != nil || disk != 100<<30 {
+				t.Fatalf("pair commitment = %d, err = %v", disk, err)
+			}
+			err = rt.reserveEnvironment(context.Background(), store, grant)
+			var capacity *CapacityError
+			if tc.refused {
+				if !errors.As(err, &capacity) || capacity.Resource != "disk" {
+					t.Fatalf("expected disk budget refusal: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("100GiB budget refused: %v", err)
+			}
+			slot, err = storeSlot(store, grant.SlotID)
+			if err != nil || slot.Reserved == tc.refused {
+				t.Fatalf("incorrect reservation: %+v, %v", slot, err)
+			}
+		})
+	}
+}
+
 func TestAdmissionCreditsOnlyConfirmedExistingDisk(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
 	cfg := fixtureConfig(t)

@@ -380,7 +380,10 @@ func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseG
 		return result, err
 	}
 	buildKey := imageKey(recipe, upstream.Fingerprint, rt.Now().UTC().Format(time.RFC3339Nano))
-	spec := *grant.Environment
+	spec, err := rt.Config.EnvironmentSpec(grant.Environment.Name)
+	if err != nil {
+		return result, err
+	}
 	spec.Count = 1 // Builder is private, never an allocation or grant.
 	cfg := rt.Config.withEnvironment(spec)
 	cfg.Project = rt.Config.Project + "-builder"

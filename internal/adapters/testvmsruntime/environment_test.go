@@ -73,13 +73,17 @@ func TestNamedEnvironmentIncusResourceRequests(t *testing.T) {
 		{EnvironmentPair, 1, "4GiB", "20GiB"},
 		{EnvironmentPair, 2, "4GiB", "20GiB"},
 		{EnvironmentAndroid, 1, "8GiB", "40GiB"},
+		{EnvironmentPair, 1, "4GiB", "50GiB"},
+		{EnvironmentPair, 2, "4GiB", "50GiB"},
+		{EnvironmentAndroid, 1, "8GiB", "50GiB"},
 	} {
-		t.Run(test.name+"/"+strconv.Itoa(test.count), func(t *testing.T) {
+		t.Run(test.name+"/"+strconv.Itoa(test.count)+"/"+test.disk, func(t *testing.T) {
 			spec, err := base.environmentSpecForArch(test.name, "amd64")
 			if err != nil {
 				t.Fatal(err)
 			}
 			spec.Count = test.count
+			spec.Disk = test.disk
 			if err := spec.Validate(); err != nil {
 				t.Fatal(err)
 			}

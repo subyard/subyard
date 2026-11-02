@@ -216,7 +216,9 @@ These are initial type defaults; the broker reports the actual CPU, RAM and disk
 grant. Virtual capacity is distinct from physical storage usage and retained image/cache costs.
 `--vm-count 1` requests a single standard guest; omitted count preserves the type defaults
 (two standard guests or one Android guest). The historical `subyard-pair` type name is retained
-so singleton and pair allocations reuse the same prepared base.
+so singleton and pair allocations reuse the same prepared base. `--disk 50GiB` requests
+that size per VM for either type; omission preserves the configured default. The preset is
+refused if the configured default exceeds 50 GiB. Shared bases use the configured default size.
 
 On x86_64, broker-owned VMs expose ACPI S3 (`deep`) for real suspend with RTC wakeup.
 The broker applies a fixed `raw.qemu.conf` override to enable the q35 ICH9-LPC S3
@@ -476,10 +478,12 @@ The owning preflight covers JSON separators and bounded observer diagnostics. Ad
 runs unrelated pressure, update/rollback or held-expiry checks.
 
 Explicit `--vm-count` requests additionally require `vm-count-v1`. The facade accepts
-`acquire-v3 TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id [vm_count]`.
+`acquire-v3 TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id [vm_count [disk_size]]`.
 The optional count is exactly `1` or `2`; Android supports only `1`. Unsupported counts are
 rejected before slot acquisition. Older requests omit the count and preserve their type default.
-An older broker without the capability refuses explicit-count runs before acquisition; update
+Explicit disk requests require `disk-size-v1`, append the resolved count and exact `50GiB`
+preset, and verify the returned size. Other disk sizes are rejected before acquisition.
+An older broker without the relevant capability refuses explicit requests before acquisition; update
 and initialize it through the normal operator workflow before using the new acceptance controllers.
 
 Use redacted status to inspect the configured pool, explicitly choose an available slot number, then

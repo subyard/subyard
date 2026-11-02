@@ -231,6 +231,7 @@ func TestBuildBaseRejectsDisabledCloudInitBeforeAPT(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			spec.Disk = "50GiB" // A larger working lease must not enlarge the shared base.
 			attached, started, statusChecked, updated := false, false, false, false
 			var buildKey string
 			metadata := `{"architecture":"x86_64","creation_date":1,"expiry_date":0,"properties":{"unrelated":"preserved"},"templates":{"/etc/hostname":{"when":["start"],"template":"hostname.tpl"},"/var/lib/cloud/seed/nocloud-net/meta-data":{"when":["create"],"template":"meta.tpl"},"/var/lib/cloud/seed/nocloud-net/user-data":{"when":["create"],"template":"user.tpl"},"/var/lib/cloud/seed/nocloud-net/vendor-data":{"when":["create"],"template":"vendor.tpl"},"/var/lib/cloud/seed/nocloud-net/network-config":{"when":["create"],"template":"network.tpl"}}}`
@@ -317,6 +318,23 @@ func TestBuildBaseRejectsDisabledCloudInitBeforeAPT(t *testing.T) {
 			rt.prepareDefaults()
 			registry := &ImageRegistry{SchemaVersion: 1, Owner: strings.Repeat("b", 32)}
 			_, err = rt.buildBase(context.Background(), LeaseStore{Path: cfg.leaseState(), SlotCount: 2}, LeaseGrant{Environment: &spec}, registry, strings.Repeat("c", 64))
+			_, defaultDisk := environmentCommitment(EnvironmentSpec{Count: 1, Disk: cfg.Disk}, 0)
+			if registry.Build == nil || registry.Build.Disk != defaultDisk*3 {
+				t.Fatalf("builder admission must use default disk: %+v", registry.Build)
+			}
+			foundRoot := false
+			for _, call := range runner.calls {
+				if strings.Contains(strings.Join(call, " "), "root size "+cfg.Disk) {
+					foundRoot = true
+				}
+				if strings.Contains(strings.Join(call, " "), "root size 50GiB") {
+					t.Fatalf("requested disk poisoned shared base: %v", call)
+				}
+			}
+			if !foundRoot {
+				t.Fatal("default builder disk was not provisioned")
+			}
+
 			if err == nil || started != (failure == "disabled cloud-init") || statusChecked != started {
 				t.Fatalf("error=%v started=%v statusChecked=%v", err, started, statusChecked)
 			}

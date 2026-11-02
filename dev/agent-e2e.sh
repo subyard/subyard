@@ -48,6 +48,7 @@ LEASE_REQUESTED_SLOT=""
 ENVIRONMENT_TYPE=subyard-pair
 VM_COUNT=2
 VM_COUNT_REQUESTED=''
+DISK_REQUESTED=''
 BASE_FINGERPRINT=""
 GRANT_CPU_PER_VM=""
 GRANT_MEMORY_PER_VM=""
@@ -116,10 +117,10 @@ Usage:
   dev/agent-e2e.sh [--owner ID] [--pool ID] --logs [--slot N] [-n 1..200] [--json]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --observe CURSOR|-
   dev/agent-e2e.sh [--owner ID] [--pool ID] --incident ID
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--vm 1|2|both] -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh 1|2 [-- COMMAND [ARG...]]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh-stdin 1|2 -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] --verify-boundary
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--disk 50GiB] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] --ssh 1|2 [-- COMMAND [ARG...]]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] --ssh-stdin 1|2 -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] [--disk 50GiB] --verify-boundary
 
 The normal form copies the current tracked, dirty and non-ignored public worktree to each selected
 VM, runs COMMAND as dev, streams output and removes every run directory. A direct ./bin/yard command
@@ -139,6 +140,7 @@ Held leases expire twenty minutes after the last successful renewal or the initi
 The operator owns the outer test yard. Acquire creates disposable VMs from an immutable base;
 release fences access and deletes their disks. --type defaults to subyard-pair (two VMs);
 --vm-count 1 requests one standard VM instead. android-test supports only one larger VM.
+--disk 50GiB requests a 50 GiB disk per VM; omission uses the configured default.
 --vm selects the payload destination without changing the allocation count. The default VM
 selection includes every requested VM. e2e-vm-1 and e2e-vm-2 are
 lease-relative selectors, not physical slot names. Every invocation acquires a new lease; use one
@@ -560,7 +562,11 @@ lease_acquire_request() {
     "$LEASE_ACQUIRE_PROTOCOL" \
     "$ENVIRONMENT_TYPE" "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
     "$LEASE_PURPOSE" "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
-  [ -z "$VM_COUNT_REQUESTED" ] || printf ' %s' "$VM_COUNT_REQUESTED"
+  if [ -n "$DISK_REQUESTED" ]; then
+    printf ' %s %s' "$VM_COUNT" "$DISK_REQUESTED"
+  elif [ -n "$VM_COUNT_REQUESTED" ]; then
+    printf ' %s' "$VM_COUNT_REQUESTED"
+  fi
   printf '\n'
 }
 
@@ -871,6 +877,8 @@ parse_lease_grant() {
   GRANT_CPU_PER_VM="$(jq -r '.grant.environment.cpu_per_vm' <<<"$response")"
   GRANT_MEMORY_PER_VM="$(jq -r '.grant.environment.memory_per_vm' <<<"$response")"
   GRANT_DISK_PER_VM="$(jq -r '.grant.environment.disk_per_vm' <<<"$response")"
+  [ -z "$DISK_REQUESTED" ] || [ "$GRANT_DISK_PER_VM" = "$DISK_REQUESTED" ] \
+    || die "facade changed the requested disk size"
   BASE_FINGERPRINT="$(jq -r '.grant.base_fingerprint' <<<"$response")"
   count="$VM_COUNT"
   VM_IP=(); VM_HOST_KEY=()
@@ -980,6 +988,10 @@ acquire_lease() {
   if [ -n "$VM_COUNT_REQUESTED" ]; then
     jq -e '(.capabilities // []) | index("vm-count-v1") != null' <<<"$status_response" >/dev/null \
       || die 'broker does not support explicit VM counts (vm-count-v1)'
+  fi
+  if [ -n "$DISK_REQUESTED" ]; then
+    jq -e '(.capabilities // []) | index("disk-size-v1") != null' <<<"$status_response" >/dev/null \
+      || die 'broker does not support explicit disk size (disk-size-v1)'
   fi
   LEASE_ACQUIRE_PROTOCOL=acquire-v3
   if jq -e '(.capabilities // []) | index("process-acquire-v4") != null' <<<"$status_response" >/dev/null; then
@@ -1584,6 +1596,11 @@ main() {
       --type)
         [ "$#" -ge 2 ] || die "--type needs subyard-pair or android-test"
         ENVIRONMENT_TYPE="$2"; shift 2 ;;
+      --disk)
+        [ "$#" -ge 2 ] || die '--disk needs 50GiB'
+        [ -z "$DISK_REQUESTED" ] || die '--disk may be specified only once'
+        [ "$2" = 50GiB ] || die '--disk must be 50GiB'
+        DISK_REQUESTED="$2"; shift 2 ;;
       --vm-count)
         [ "$#" -ge 2 ] || die '--vm-count needs 1 or 2'
         [ -z "$VM_COUNT_REQUESTED" ] || die '--vm-count may be specified only once'
@@ -1674,12 +1691,12 @@ main() {
   [ "$log_count_set" = 0 ] || [ "$mode" = logs ] || die '-n is valid only with --logs'
   [ -z "$incident_id" ] || [ "$mode" = incident ] || die '--incident cannot be combined with another mode'
   if [ "$mode" = observe ]; then
-    [ "${#command[@]}" -eq 0 ] && [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] && [ -z "$LEASE_REQUESTED_SLOT" ] || die 'observer reads accept no allocation options'
+    [ "${#command[@]}" -eq 0 ] && [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] && [ -z "$LEASE_REQUESTED_SLOT" ] || die 'observer reads accept no allocation options'
     read_agent_observations "$observer_cursor"
     return
   fi
   if [ "$mode" = logs ] || [ "$mode" = incident ]; then
-    [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] \
+    [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] \
       || die 'diagnostic reads do not accept allocation options'
     [ "$mode" != incident ] || [ -z "$LEASE_REQUESTED_SLOT" ] || die '--slot is not valid with --incident'
     [ "${#command[@]}" -eq 0 ] || die 'diagnostic reads take no guest command'

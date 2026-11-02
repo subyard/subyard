@@ -584,6 +584,42 @@ func TestFacadeRequestedVMCount(t *testing.T) {
 	}
 }
 
+func TestFacadeRequestedDisk(t *testing.T) {
+	for _, tc := range []struct {
+		name, count, disk, configured string
+		valid                         bool
+	}{
+		{EnvironmentPair, "1", "50GiB", "20GiB", true}, {EnvironmentPair, "2", "50GiB", "20GiB", true},
+		{EnvironmentAndroid, "1", "50GiB", "20GiB", true}, {EnvironmentPair, "1", "51GiB", "20GiB", false},
+		{EnvironmentPair, "1", "50000MiB", "20GiB", false}, {EnvironmentPair, "1", "50GiB", "60GiB", false},
+	} {
+		t.Run(tc.name+"/"+tc.count+"/"+tc.disk+"/"+tc.configured, func(t *testing.T) {
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
+			var output bytes.Buffer
+			cfg := Config{CPU: 4, Memory: "4GiB", Disk: tc.configured}
+			called := false
+			facade := Facade{Store: store, Output: &output, EnvironmentSpec: func(name string) (EnvironmentSpec, error) { return cfg.environmentSpecForArch(name, "amd64") }, OnAcquire: func(_ context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
+				called = true
+				return grant, nil
+			}}
+			if err := facade.Run("acquire-v3 " + tc.name + " client SHA256:key yard Project run tests " + fixturePublicKey(t) + " slot-001 " + tc.count + " " + tc.disk); err != nil {
+				t.Fatal(err)
+			}
+			var response facadeResponse
+			if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if tc.valid {
+				if !called || response.Grant == nil || response.Grant.Environment.Disk != "50GiB" {
+					t.Fatalf("grant: %s", output.String())
+				}
+			} else if called || response.Reason != "invalid_disk_size" {
+				t.Fatalf("invalid request reached acquisition: %s", output.String())
+			}
+		})
+	}
+}
+
 func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
 	var output bytes.Buffer

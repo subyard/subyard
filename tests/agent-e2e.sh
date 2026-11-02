@@ -3551,7 +3551,7 @@ busy_mismatch='{"schema_version":1,"status":"error","code":"busy","state":"held"
 busy_unknown_schema='{"schema_version":2,"status":"error","code":"busy","state":"held","reason":"busy","message":"untrusted schema"}'
 invalid='{"schema_version":1,"status":"error","code":"invalid_request","reason":"invalid_slot","message":"invalid slot_id"}'
 quarantined='{"schema_version":1,"status":"error","code":"quarantined","message":"slot provisioning failed"}'
-status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1","vm-count-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
+status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1","vm-count-v1","disk-size-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
 status_without_v2='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"available"}]}}'
 grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-002","resource_generation":1,"lease_id":"aabbccdd","lease_epoch":2,"capability":"eeff0011","data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
 wrong_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":1,"lease_id":"badc0ffe","lease_epoch":3,"capability":"facefeed","data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
@@ -3562,13 +3562,15 @@ case "$command" in
       printf '%s\n' "$status_without_v2"
     elif [ "$FAKE_SCENARIO" = status-without-vm-count ]; then
       jq -c '.capabilities -= ["vm-count-v1"]' <<<"$status"
+    elif [ "$FAKE_SCENARIO" = status-without-disk ]; then
+      jq -c '.capabilities -= ["disk-size-v1"]' <<<"$status"
     else
       printf '%s\n' "$status"
     fi
     ;;
   acquire-v3\ *|acquire\ *)
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
-    read -r _ request_type _ _ request_yard request_project request_run request_purpose _ _ _ request_count <<<"$command"
+    read -r _ request_type _ _ request_yard request_project request_run request_purpose _ _ _ request_count request_disk <<<"$command"
     grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
       --arg run "$request_run" --arg purpose "$request_purpose" \
       '.grant.context = {schema_version:2, yard:$yard, project:$project, run:$run, purpose:$purpose}' \
@@ -3578,6 +3580,9 @@ case "$command" in
     fi
     if [ "$request_count" = 1 ] && [ "$FAKE_SCENARIO" != count-mismatch ]; then
       grant="$(jq -c '.grant.environment.vm_count = 1 | .grant.targets = [.grant.targets[0]]' <<<"$grant")"
+    fi
+    if [ "$request_disk" = 50GiB ] && [ "$FAKE_SCENARIO" != disk-mismatch ]; then
+      grant="$(jq -c '.grant.environment.disk_per_vm = "50GiB"' <<<"$grant")"
     fi
     wrong_grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
       --arg run "$request_run" --arg purpose "$request_purpose" \
@@ -3600,7 +3605,7 @@ case "$command" in
       late-grant) sleep 2; printf '%s\n' "$grant" ;;
       outcome-unknown) exit 255 ;;
       wrong-grant) printf '%s\n' "$wrong_grant" ;;
-      android-success|count-success|count-mismatch|phase-*) printf '%s\n' "$grant" ;;
+      android-success|count-success|count-mismatch|disk-success|disk-mismatch|phase-*) printf '%s\n' "$grant" ;;
       capacity) printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}' ;;
       capacity-snapshot|capacity-unsafe|capacity-state-unsafe)
         snapshot='{"effective_available_bytes":100,"reserve_bytes":20,"pending_vm_bytes":30,"pending_builder_bytes":10,"headroom_bytes":40,"required_bytes":50,"visible_available_bytes":110,"physical_available_bytes":100,"cgroup_headroom_bytes":120,"physical_available_known":true,"cgroup_limit_available":true,"limiting_source":"verified_physical_meminfo","type":"subyard-pair","vm_count":1,"slot_state":"provisioning"}'
@@ -3800,6 +3805,33 @@ run_runner_fixture count-mismatch --slot 2 --vm-count 1 --ssh 1 -- true \
 [ "$count_rc" = 2 ] && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
   && grep -q '^release ' "$RUNNER_FIXTURE/facade.log" \
   || fail 'mismatched VM count reached guest access or leaked its lease'
+disk_case=0
+for disk_args in '--disk 40GiB' '--disk 50GiB --disk 50GiB'; do
+  disk_case=$((disk_case + 1))
+  new_runner_fixture "invalid-disk-$disk_case"
+  disk_rc=0
+  # shellcheck disable=SC2086
+  run_runner_fixture disk-success --slot 2 $disk_args -- true >"$TMP/disk-invalid.log" 2>&1 || disk_rc=$?
+  [ "$disk_rc" = 2 ] && [ ! -s "$RUNNER_FIXTURE/facade.log" ] || fail 'invalid disk reached facade'
+done
+new_runner_fixture missing-disk
+disk_rc=0
+run_runner_fixture disk-success --slot 2 --disk >"$TMP/disk-missing.log" 2>&1 || disk_rc=$?
+[ "$disk_rc" = 2 ] && [ ! -s "$RUNNER_FIXTURE/facade.log" ] || fail 'missing disk reached facade'
+new_runner_fixture status-without-disk
+disk_rc=0
+run_runner_fixture status-without-disk --slot 2 --disk 50GiB --ssh 1 -- true >"$TMP/disk-capability.log" 2>&1 || disk_rc=$?
+[ "$disk_rc" = 2 ] && [ "$(cat "$RUNNER_FIXTURE/facade.log")" = status ] || fail 'old broker accepted explicit disk'
+for disk_type in subyard-pair android-test; do
+  new_runner_fixture "disk-success-$disk_type"
+  run_runner_fixture disk-success --type "$disk_type" --slot 2 --disk 50GiB --ssh 1 -- true >"$TMP/disk-success.log" 2>&1 || fail 'disk request failed'
+  expected_count=2; [ "$disk_type" != android-test ] || expected_count=1
+  awk -v count="$expected_count" '$1 == "acquire-v3" {found=1; if (NF != 13 || $12 != count || $13 != "50GiB") exit 1} END {if (!found) exit 1}' "$RUNNER_FIXTURE/facade.log" || fail 'disk wire request invalid'
+done
+new_runner_fixture disk-mismatch
+disk_rc=0
+run_runner_fixture disk-mismatch --slot 2 --disk 50GiB --ssh 1 -- true >"$TMP/disk-mismatch.log" 2>&1 || disk_rc=$?
+[ "$disk_rc" = 2 ] && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" && grep -q '^release ' "$RUNNER_FIXTURE/facade.log" || fail 'disk mismatch reached guest or leaked lease'
 new_runner_fixture capacity
 set +e
 capacity_output="$(run_runner_fixture capacity --slot 2 --wait 1s --ssh 1 -- true 2>&1)"
