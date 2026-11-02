@@ -32,6 +32,8 @@ Do not rely on umask for exact file modes. Preserve permission validation; use
 If `private/AGENTS.md` exists locally (it is gitignored and lives in the separate private repo),
 read and follow it **in addition** to this file. It carries private, non-public working rules
 
+@private/AGENTS.md
+
 ## Testing
 
 Before building, running, or changing tests, read and follow the

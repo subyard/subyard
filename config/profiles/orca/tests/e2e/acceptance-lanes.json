@@ -6,6 +6,7 @@
     {"id": "resource", "arguments": ["--lane", "resource"]},
     {"id": "projects", "arguments": ["--lane", "projects"]},
     {"id": "ssh-agent", "arguments": ["--lane", "ssh-agent"]},
-    {"id": "codex-permissions", "arguments": ["--lane", "codex-permissions"]}
+    {"id": "codex-permissions", "arguments": ["--lane", "codex-permissions"]},
+    {"id": "managed-agents", "arguments": ["--lane", "managed-agents"]}
   ]
 }

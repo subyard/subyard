@@ -561,6 +561,80 @@ def exercise(args):
     print('ok: native Codex and Claude tools acquired distinct '+args.kind+' allocations with explicit exported session bindings')
 
 
+def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, data):
+    """A running shared daemon must not take a managed run's tools or their identity."""
+    import fcntl, pty, struct, termios
+    root = state/'attribution'
+    home, codex_home, project = root/'home', root/'codex', root/'project'
+    for path in (root, home, codex_home, project):
+        path.mkdir(mode=0o700)
+    subprocess.run(['git', 'init', '--quiet', str(project)], check=True)
+    provider = http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.Provider)
+    provider.command, provider.failure, provider.workspace = None, None, project
+    threading.Thread(target=provider.serve_forever, daemon=True).start()
+    config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'sandbox_mode': 'danger-full-access', 'approval_policy': 'on-request',
+              'features': {'plugins': False, 'unified_exec': False}, 'otel': native.desired('codex', endpoint, token),
+              'projects': {str(project): {'trust_level': 'trusted'}},
+              'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
+                  'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
+    (codex_home/'config.toml').write_text(tomli_w.dumps(config))
+    (codex_home/'config.toml').chmod(0o600)
+    environment = dict(env, HOME=str(home), CODEX_HOME=str(codex_home), TERM='xterm-256color')
+
+    class Client(fixture.Terminal):
+        def __init__(self, argv):
+            self.pid, self.fd = pty.fork()
+            if self.pid == 0:
+                os.chdir(project)
+                os.execvpe(argv[0], argv, environment)
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 140, 0, 0))
+            self.buffer = ''
+
+    def runs():
+        return {row[0] for row in query(data, 'SELECT agent_run_id FROM runs')}
+
+    def traces(run):
+        # The collector stores spans as protobuf and writes the exporting run on their resource.
+        return query(data, "SELECT count(*) FROM records WHERE kind='otlp/traces' AND instr(protobuf,CAST(? AS BLOB))>0", (run,))[0][0]
+
+    def turn(name, argv):
+        known = runs()
+        counts = {run: traces(run) for run in known}
+        provider.command = f'printf %s "$SUBYARD_AGENT_RUN_ID" > {name}.run; readlink /proc/$PPID/exe > {name}.exe'
+        client = Client([*argv, str(binaries/'codex'), '--no-alt-screen', 'Run the fixture command.'])
+        try:
+            client.wait('Fixture complete.', provider)
+        finally:
+            client.close()
+        time.sleep(4)
+        tool_run = (project/(name+'.run')).read_text().strip()
+        deadline = time.monotonic()+30
+        while tool_run and not traces(tool_run) > counts.get(tool_run, 0) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        new = runs()-known
+        grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
+        result = dict(new=sorted(new), tool_run=tool_run, tool_exe=(project/(name+'.exe')).read_text().strip(), traces_grew_for=sorted(grown))
+        print('run-attribution '+name+': '+json.dumps(result, sort_keys=True), flush=True)
+        return result
+
+    telemetry = ['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--project-id', 'attribution', '--']
+    try:
+        turn('plain', [])
+        assert (codex_home/'app-server-daemon/daemon.pid').exists(), 'the plain client started no daemon'
+        for name in ('first', 'second'):
+            result = turn(name, telemetry)
+            assert result['new'] == [result['tool_run']], name+': tools carried another run identity'
+            assert 'app-server-daemon' not in result['tool_exe'], name+': a managed run reached the shared daemon'
+            assert result['traces_grew_for'] == [result['tool_run']], name+': spans did not carry only this run'
+    finally:
+        subprocess.run([str(binaries/'codex'), 'app-server', 'daemon', 'stop'], env=environment, cwd=home, timeout=120,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, check=False)
+        # The updater outlives a stopped daemon, and this fixture's delegated scope waits for its last process.
+        subprocess.run(['pkill', '-KILL', '-f', str(codex_home)], check=False)
+        provider.shutdown()
+        provider.server_close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--state', type=Path, required=True)
@@ -645,6 +719,7 @@ def main():
     wait_sessions(args.data_dir, 'claude', {session}, stderr=result.stderr)
     kinds = {row[0] for row in query(args.data_dir, "SELECT DISTINCT kind FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces')")}
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
+    assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir)
     print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence')
 
 

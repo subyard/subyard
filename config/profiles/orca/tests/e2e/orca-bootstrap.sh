@@ -16,6 +16,7 @@ YARD_BIN="$ROOT/.build/yard"
 EXISTING_YARD="${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}"
 CODEX_CONFIG="${SUBYARD_E2E_ORCA_CODEX_CONFIG:-0}"
 CODEX_PERMISSIONS="${SUBYARD_E2E_ORCA_CODEX_PERMISSIONS:-0}"
+MANAGED_AGENTS="${SUBYARD_E2E_ORCA_MANAGED_AGENTS:-0}"
 CODEX_APPROVALS_ONLY="${SUBYARD_E2E_ORCA_CODEX_APPROVALS_ONLY:-0}"
 SSH_AGENT="${SUBYARD_E2E_ORCA_SSH_AGENT:-0}"
 KEEP_FAILED="${SUBYARD_E2E_ORCA_KEEP_FAILED:-0}"
@@ -42,6 +43,15 @@ case "$CODEX_CONFIG" in
   0) ;;
   1) EXISTING_YARD=1 ;;
   *) die 'SUBYARD_E2E_ORCA_CODEX_CONFIG must be 0 or 1' ;;
+esac
+case "$MANAGED_AGENTS" in
+  0) ;;
+  # Shares the installed Codex and Claude yard prepared for Codex permissions.
+  1)
+    [ "$CODEX_PERMISSIONS" = 0 ] || die 'managed agents acceptance is separate from Codex permissions'
+    CODEX_PERMISSIONS=1
+    ;;
+  *) die 'SUBYARD_E2E_ORCA_MANAGED_AGENTS must be 0 or 1' ;;
 esac
 case "$CODEX_PERMISSIONS" in
   0) ;;
@@ -1175,6 +1185,11 @@ if [ "$CODEX_PERMISSIONS" = 1 ]; then
   pairing="$(yard orca pair --yes | tail -n1)"
   case "$pairing" in orca://pair\?code=*) ;; *) die 'Orca did not return a private pairing link' ;; esac
   client_status "$pairing" codex-permissions-client
+  if [ "$MANAGED_AGENTS" = 1 ]; then
+    # shellcheck source=config/profiles/orca/tests/e2e/managed-agents.sh
+    . "$ROOT/config/profiles/orca/tests/e2e/managed-agents.sh"
+    exit 0
+  fi
   # shellcheck source=config/profiles/orca/tests/e2e/codex-yard.sh
   . "$ROOT/config/profiles/orca/tests/e2e/codex-yard.sh"
   exit 0

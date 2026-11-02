@@ -371,11 +371,130 @@ verifies its platform SHA-256 against the versioned manifest, and atomically ins
 is preserved; an existing command owned by another installer is left unchanged and reported as a conflict.
 The package check verifies both the native CLI and the managed permission policy without downloading updates
 or accessing user authorization. When the Codex provisioning hook runs, it resolves the current
-stable official release and verifies the downloaded artifact against that release's SHA-256
-metadata before replacing the managed binary. A newer working installation is preserved.
+stable official release, verifies the `codex-package-<target>.tar.gz` asset against that release's SHA-256
+metadata, and installs the whole package under root-owned `/opt/subyard/codex/releases/<version>`.
+`/usr/local/bin/codex` points to `/opt/subyard/codex/codex`, a link to that release's `bin/codex`, which keeps
+the path a retained release's hook replaces on rollback. A newer working installation is preserved.
+Provisioning keeps the published release, the one it replaced and any release a running process uses, and
+removes the rest.
 Legacy `CODEX_VERSION` and `CODEX_SHA256_*` assignments are ignored when loading existing
 settings; new writes to these retired fields are rejected. Already-converged yards do not check for upstream updates
 on every `yard init`, and `yard status` does not install or update agents.
+
+In a yard selecting Claude or Codex, only provisioning replaces `/usr/local/bin/claude` and
+`/usr/local/bin/codex`. By process image, a paired Orca terminal and Orca's native chat run these
+managed binaries for both agents, and Orca's Codex launcher and a login shell resolve to the managed
+Codex. An explicit path to another executable runs that executable.
+
+- Claude: the managed drop-in sets `env.DISABLE_UPDATES = "1"`. `claude update` and `claude install`
+  each print that updates are disabled by the administrator and create no native installation, and an
+  interactive launch under Orca's data home installs nothing; with the lock removed, the same launch
+  installs a native link.
+- Codex: unlike Claude's locked binary, **Codex's daemon updates itself from OpenAI**, as upstream ships it.
+  Subyard does not change that. The command itself stays with provisioning:
+  `/etc/codex/requirements.toml` pins `check_for_update_on_startup = false`, because the startup notice
+  points to installation options that would shadow the managed command, and `codex update` does not change
+  the managed command.
+
+#### Where Codex runs
+
+An interactive `codex` from an SSH or VS Code shell prefers upstream's shared app-server daemon:
+
+- **Plain `codex`:** the client is `/usr/local/bin/codex`, but its turns, tools and model requests run on a
+  copy of the package in `~/.codex/packages/app-server-daemon`, owned by the developer. The first plain
+  client makes that copy and starts the daemon, which keeps running after the client exits. Later clients
+  join it. If the daemon is stopped, the next plain client starts it again from the selected copy, not from
+  `/usr/local/bin/codex`.
+- **`codex --no-daemon`:** runs entirely on the `/opt` release. So does `codex exec`, including while a daemon
+  runs.
+- **Orca:** terminal and native chat launches add `--no-daemon`, run the `/opt` release and do not start a
+  daemon. Its launcher skips that for `agents`, `queue` and `--remote` launches, and for every launch when the
+  server sets `ORCA_CODEX_ISOLATE=0`; those use the daemon as a plain client does.
+- **Disconnects:** when a plain client's terminal dies during a slow tool, the tool finishes on the daemon
+  and its result reaches the model. Under `--no-daemon` the tool stops with the client.
+
+#### Codex version drift
+
+The daemon and the command can run different versions. `codex app-server daemon version` reports both, as
+`appServerVersion` and `cliVersion`.
+
+- Provisioning a new release moves the command only. Open sessions and new plain clients stay on the running
+  daemon, and a newer client warns that the background service is older.
+- With no `~/.codex/app-server-daemon/settings.json`, the updater is on and replaces the daemon with OpenAI's
+  latest release, so the daemon can then be newer than the command. Open sessions survived this.
+- `updater.autoUpdateEnabled` in that file is yours to set. Provisioning does not read or change it, or stop
+  or remove the daemon. With `false`, the daemon stays on its version until `codex app-server daemon update`
+  installs the latest release.
+- A daemon update or restart waits for running work only briefly, so it can stop a long tool. Open sessions
+  stayed connected.
+
+See `codex app-server daemon --help` for the commands.
+
+The approval policy held on every daemon version tested (0.162.1, 0.165.0, 0.166.0): a `git commit` prompted
+and named the command, a declined one kept history, and an approved one added one commit. That includes a
+daemon started before the policy was installed and a client on a different version. It remains a Codex
+command policy, enforced by the Codex process, and plain turns run that process from a copy the developer owns.
+
+#### The shared Codex daemon environment
+
+All plain clients share one daemon, and their tools see the environment of the client that started it, not
+their own. A variable set for one client did not reach its tools, and every other client's tools saw the
+starter's value. Under `--no-daemon`, each client's tools see its own environment. Subyard's default
+credentials do not depend on this: the default `SSH_AUTH_SOCK` is the stable `~/.ssh/subyard-agent.sock`,
+GitHub tokens are per `subyard-github run` process, and Orca tokens go only to `--no-daemon` launches. A
+forwarded per-session agent socket (`FORWARD_SSH_AGENT=1`) is captured from the starter and can go stale
+when that session ends; use `codex --no-daemon` for work that needs it.
+
+To keep one client out of the shared daemon, use `codex --no-daemon`. To turn off daemon auto-start for a
+yard, `[features] daemon_auto_start = false` in the requirements file is honored and user configuration
+cannot override it, but Subyard does not ship that, it does not stop a running daemon, and `codex agents`
+still starts one.
+
+#### Codex disk use and daemon recovery
+
+Each release is about 430-520 MB under `/opt`. Each selected daemon copy adds about 470 MB in the developer's
+home under `~/.codex/packages/app-server-daemon/releases`. Replaced copies are not removed automatically.
+
+If `~/.codex/packages/app-server-daemon` is removed while its state files remain, plain `codex` fails and
+`--no-daemon` still works. Stop any daemon, then remove `~/.codex/app-server-daemon/daemon*` and
+`~/.codex/app-server-control`; the next plain client copies the package again.
+
+#### Converging existing yards
+
+Provisioning installs the approval policy before it publishes the binary and before it changes
+anything in the developer's home, so no state below can prevent the policy.
+
+A yard on an earlier release has a bare binary at `/opt/subyard/codex/codex` and a Claude drop-in without the
+update lock. `yard update` sees the changed provisioning hooks and converges both: a link to the package release
+replaces the bare binary, and the drop-in gains the lock. A session still running the bare binary keeps running, and
+`yard status` reads `release OK (ready)` afterwards. An upstream daemon package from earlier use stays, and plain
+clients keep using it.
+
+`yard update --rollback` runs the retained release's hooks, which put a bare binary back and remove the lock. The
+package stays under `releases` until a later upgrade prunes it, and updating forward again converges the same way.
+
+Readiness trusts the installed checks. Running an earlier release's hook by hand on a current yard removes what it
+does not know about, such as the Claude lock, and installs a check that still passes, so `yard status` stays ready.
+The same applies to Codex, where the earlier hook puts a bare binary back at `/opt/subyard/codex/codex`, and
+`yard init` repairs neither. Copying the current release's `config/agents/claude/provision.sh` and
+`config/agents/codex/provision.sh` into the yard and running them as root restores the link, the lock and both
+checks.
+
+`yard init` and release activation converge a yard that already has a self-installed link, even when
+provisioning is otherwise current. They remove only the exact native link: `~/.local/bin/claude` pointing
+to an absolute `.../claude/versions/X.Y.Z` owned by the developer, or `~/.local/bin/codex` pointing to
+`~/.codex/packages/standalone/current/bin/codex`, in a directory the developer owns and can write.
+Version directories, `~/.codex/packages` and unknown files stay, so a running session keeps working; the
+next session uses the managed binary. Until then `yard status` shows `release NOT OK (migration-required)`
+with next step `yard migrate`. `claude-policy-check` or `codex-policy-check`, run directly, names the link
+and says to run `yard init`; `yard status` does not show that check's output. Running an upstream
+installer by hand recreates the link, and the next `yard init` removes it again.
+
+Any other file at those link paths stays unchanged and does not fail readiness, because only the developer can
+decide it, though a login shell can run it instead of the managed binary. `yard status` stays
+`release OK (ready)` and does not show a `Conflict:` line for it. The line appears when you run the package
+check directly, and in `yard init` output only when provisioning runs, so a `yard init` with nothing to
+provision prints none.
 
 ### Codex permissions across projects
 
@@ -463,26 +582,51 @@ sessions. Installation checks do not certify an interactive approval UI:
 
 | Backend | Shipped yard setting | Limit of the evidence |
 | --- | --- | --- |
-| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and mandatory native managed commit/push ask rules. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. Actual IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
+| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and mandatory native managed commit/push ask rules. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. Those checks also cover `auto` with a synthetic classifier and the installed managed binary. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. The Orca `managed-agents` lane covers stock Orca terminal arguments and Orca's built-in Claude chat with a synthetic model. Other IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
 | OpenCode V1 | Global allow, with commit/push ask patterns under `permission.bash`. | **Unsupported for the strict single-use contract.** Native `once` prompts again; `always` permits a later matching command without another prompt. Project/agent/UI overrides can weaken the defaults. Direct launch remains available. |
 | pi | `defaultProjectTrust = "always"`. | Project trust is not a per-command approval gate; Subyard supplies no verified outer gate. |
 
+`bypassPermissions` is the standard Claude mode in a yard. Claude Code can offer on first launch to make
+auto mode the default, with **Yes** preselected; decline it. Accepting writes
+`permissions.defaultMode = "auto"` to `~/.claude/settings.json`, which `yard config status` reports as drift
+and `yard config apply` restores. Declining leaves `yard config status` clean.
+
 Claude provisioning installs its own root-owned drop-in at
-`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds only ask rules;
-it preserves other managed files and user/project denies, and refuses foreign files at its own
-managed path. It does not enable `allowManagedPermissionRulesOnly`, which would discard those
-user/project restrictions. `claude-policy-check` verifies installation and permissions only.
+`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds ask rules and the
+update lock described above; it preserves other managed files and user/project denies, and
+refuses foreign files at its own managed path. It does not enable `allowManagedPermissionRulesOnly`,
+which would discard those user/project restrictions. `claude-policy-check` verifies the managed
+runtime and its command link, the drop-in's contents and permissions, and the absence of a native
+self-installed link; it does not show that an active client loaded the policy. Both `claude-policy-check`
+and `codex-policy-check` report every refusal they can determine, not only the first.
 In a new client, inspect `/status` for the managed file/drop-ins source and `/permissions` for
 the effective rules. A higher-priority enterprise policy or a CLI without native drop-in support
 needs its own native acceptance; file presence does not prove that the client loaded it.
 Use `claude --permission-mode default` and one-time approval when inspecting native terminal behavior; the yard's
-existing bypass default is also covered by the SDK fixture. A native CLI terminal check using
+standard bypass mode is also covered by the SDK fixture. A native CLI terminal check using
 `--permission-mode default --settings <fixture>` offered only Yes/No, approved two separate
 commits only after two Yes responses, and retained the original HEAD after two No responses.
 This terminal check used explicit ask settings; the installed managed-drop-in precedence and
-session-update checks use the SDK. No actual Claude IDE selection has completed client
-acceptance, including when launched from Orca, so Subyard publishes no single-use guarantee
-for those clients.
+session-update checks use the SDK. In `auto`, the same checks prompt for commit, amend and push, and
+those commands appear in no request to the classifier.
+
+Claude launched from Orca has its own acceptance under the installed drop-in, with a synthetic
+model. A paired Orca terminal running the stock `claude --dangerously-skip-permissions` command shows
+a prompt naming each commit, amend and push. An approved commit adds exactly one commit and an approved
+amend adds none, a declined command keeps `HEAD` and the commit count, and the process image is the
+managed binary. Orca's built-in Claude chat raises a pending approval naming each Git command, with
+**Allow**, **Allow for session** and **Deny**, through Orca's agent session interface, with the same
+commit counts. **Allow for session** does not suppress the next commit or push prompt.
+
+Push is checked only as far as the prompt. The fixture remote is unreachable, so these checks show
+neither a completed push nor that a declined push would otherwise have reached a remote. They also do
+not cover real accounts or the rendering of Orca's desktop window. The prompt checks decline the auto mode
+offer; a separate launch accepts it only to read the drift it causes. No other IDE selection has completed client
+acceptance, so Subyard publishes no single-use guarantee for those clients.
+
+Orca's Claude hook install and terminal launch keep `autoMemoryDirectory` and `permissions` in
+`~/.claude/settings.json`. If those keys drift while Claude is selected, `yard config status` reports
+drift and `yard status` shows `release NOT OK (migration-required)`; `yard config apply` restores them.
 
 Claude's [SDK permission evaluation](https://code.claude.com/docs/en/agent-sdk/permissions)
 checks explicit ask rules before permission-mode defaults. Native managed rules still prompt after

@@ -10,6 +10,12 @@ ARCH="${CLAUDE_ARCH:-}"
 POLICY_DIR="${CLAUDE_POLICY_DIR:-/etc/claude-code/managed-settings.d}"
 CHECK_PATH="${CLAUDE_POLICY_CHECK_PATH:-/usr/local/bin/claude-policy-check}"
 MARKER='Subyard Claude permission policy'
+DEV_USER="${DEV_USER:-dev}"
+DEV_HOME="${CLAUDE_DEV_HOME:-}"
+# Hermetic non-root callers name their fixture home; only root provisioning resolves the account.
+if [ -z "$DEV_HOME" ] && [ "$(id -u)" = 0 ]; then
+  DEV_HOME="$(getent passwd "$DEV_USER" | cut -d: -f6 || true)"
+fi
 expected_owner="$(id -u):$(id -g)"
 die() { printf 'Claude policy: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || [ "${CLAUDE_POLICY_TEST_ALLOW_NON_ROOT:-0}" = 1 ] || die 'must run as root'
@@ -68,11 +74,50 @@ is_working_binary() {
   BINARY_VERSION="${BASH_REMATCH[1]}"
 }
 
+# Developer-tree repairs apply only where the developer can make them; anything else is a conflict.
+dev_owned_directory() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%U' "$1")" = "$DEV_USER" ] \
+    && (( (8#$(stat -c '%a' "$1") & 0200) != 0 ))
+}
+
+# Claude's native installer publishes <home>/.local/bin/claude -> <data home>/claude/versions/X.Y.Z
+# on its first update. Only that exact shape can be released: it shadows the managed runtime in
+# login shells, while its version files stay in place for any session still running them.
+native_shadow_state() {
+  local link="$DEV_HOME/.local/bin/claude" target
+  [ -n "$DEV_HOME" ] || { printf 'absent'; return; }
+  if [ ! -L "$link" ]; then
+    if [ -e "$link" ]; then printf 'foreign'; else printf 'absent'; fi
+    return
+  fi
+  target="$(readlink "$link")"
+  if [[ "$target" =~ ^/([^/]+/)*claude/versions/[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    && [[ "$target" != */../* ]] && [ "$(stat -c '%U' "$link")" = "$DEV_USER" ] \
+    && dev_owned_directory "$(dirname "$link")" \
+    && { [ ! -e "$target" ] || { [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c '%U' "$target")" = "$DEV_USER" ]; }; }; then
+    printf 'native'
+  else
+    printf 'foreign'
+  fi
+}
+release_native_shadow() {
+  [ "$(native_shadow_state)" = native ] || return 0
+  local -a remove=(rm -f -- "$DEV_HOME/.local/bin/claude")
+  [ "$(id -u)" != 0 ] || remove=(runuser -u "$DEV_USER" -- "${remove[@]}")
+  if "${remove[@]}"; then
+    printf 'Released the native self-installed claude link from %s/.local/bin\n' "$DEV_HOME"
+  else
+    printf 'Conflict: could not remove %s/.local/bin/claude.\n' "$DEV_HOME"
+  fi
+}
+
 tmp="$(mktemp -d)"
 stage=""
+runtime_stage=""
 cleanup() {
   rm -rf -- "$tmp"
   [ -z "$stage" ] || rm -f -- "$stage"
+  [ -z "$runtime_stage" ] || rm -f -- "$runtime_stage"
 }
 trap cleanup EXIT
 download() {
@@ -99,18 +144,17 @@ fi
 if [ "$current" = 0 ]; then
   download "$RELEASE_BASE_URL/$VERSION/$platform/claude" "$tmp/claude" || die 'release artifact download failed'
   [ "$(sha256sum "$tmp/claude" | cut -d' ' -f1)" = "$EXPECTED_SHA256" ] || die "checksum mismatch for Claude $VERSION ($ARCH)"
-  stage="$(mktemp "$INSTALL_ROOT/.claude.XXXXXX")"
-  install -m 0755 "$tmp/claude" "$stage"
-  is_working_binary "$stage" && [ "$BINARY_VERSION" = "$VERSION" ] || die 'staged CLI failed version validation'
-  mv -fT -- "$stage" "$RUNTIME_PATH"
-  stage=""
+  runtime_stage="$(mktemp "$INSTALL_ROOT/.claude.XXXXXX")"
+  install -m 0755 "$tmp/claude" "$runtime_stage"
+  is_working_binary "$runtime_stage" && [ "$BINARY_VERSION" = "$VERSION" ] || die 'staged CLI failed version validation'
 fi
-if [ ! -L "$BIN_LINK" ]; then ln -s "$RUNTIME_PATH" "$BIN_LINK"; fi
+# The approval policy precedes the binary it governs and every developer-tree repair.
 install -d -m 0755 "$(dirname "$POLICY_DIR")" "$POLICY_DIR" "$(dirname "$CHECK_PATH")"
 stage="$(mktemp "$POLICY_DIR/.subyard.XXXXXX")"
 cat > "$stage" <<'JSON'
 {
   "$comment": "Subyard Claude permission policy",
+  "env": {"DISABLE_UPDATES": "1"},
   "permissions": {
     "ask": ["Bash(git commit)", "Bash(git commit:*)", "Bash(git push)", "Bash(git push:*)"]
   }
@@ -118,26 +162,51 @@ cat > "$stage" <<'JSON'
 JSON
 chmod 0644 "$stage"
 mv -fT -- "$stage" "$policy"
+stage=""
+if [ -n "$runtime_stage" ]; then
+  mv -fT -- "$runtime_stage" "$RUNTIME_PATH"
+  runtime_stage=""
+fi
+if [ ! -L "$BIN_LINK" ]; then ln -s "$RUNTIME_PATH" "$BIN_LINK"; fi
 stage="$(mktemp "$(dirname "$CHECK_PATH")/.claude-policy-check.XXXXXX")"
 {
   printf '#!/usr/bin/env bash\n# %s\nset -euo pipefail\n' "$MARKER"
   printf 'policy=%q\npolicy_dir=%q\nexpected_owner=%q\n' "$policy" "$POLICY_DIR" "$(id -u):$(id -g)"
   printf 'runtime=%q\nlink=%q\n' "$RUNTIME_PATH" "$BIN_LINK"
-  declare -f is_working_binary
+  printf 'DEV_USER=%q\nDEV_HOME=%q\n' "$DEV_USER" "$DEV_HOME"
+  declare -f is_working_binary dev_owned_directory native_shadow_state
   cat <<'CHECK'
-for path in "$policy_dir" "$policy"; do
-  [ ! -L "$path" ] && [ "$(stat -c '%u:%g' "$path")" = "$expected_owner" ] || exit 1
-done
-[ "$(stat -c '%a' "$policy_dir")" = 755 ] && [ "$(stat -c '%a' "$policy")" = 644 ] || exit 1
-jq -e '. == {"$comment":"Subyard Claude permission policy","permissions":{"ask":["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]}}' "$policy" >/dev/null
-[ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] || exit 1
-is_working_binary "$runtime" || exit 1
-printf 'Claude %s ready. ' "$BINARY_VERSION"
-printf 'Managed Claude Git ask rules installed; inspect /status and /permissions in the active client.\n'
+# Report every refusal that does not depend on a failed read, in this order.
+refusals=0
+refuse() { printf 'claude-policy-check: %s\n' "$*" >&2; refusals=$((refusals + 1)); }
+[ ! -L "$policy_dir" ] && [ "$(stat -c '%a:%u:%g' "$policy_dir" 2>/dev/null)" = "755:$expected_owner" ] \
+  || refuse 'managed policy directory drifted; run yard init'
+if [ -f "$policy" ] && [ ! -L "$policy" ]; then
+  [ "$(stat -c '%a:%u:%g' "$policy")" = "644:$expected_owner" ] \
+    || refuse 'managed policy permissions drifted; run yard init'
+  jq -e '. == {"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"},"permissions":{"ask":["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]}}' "$policy" >/dev/null 2>&1 \
+    || refuse 'managed policy drifted or could not be read; run yard init'
+else
+  refuse 'managed policy is missing; run yard init'
+fi
+[ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] \
+  || refuse 'canonical command does not point to the managed runtime; run yard init'
+is_working_binary "$runtime" || refuse 'managed runtime failed validation; run yard init'
+shadow="$(native_shadow_state)" || shadow=foreign
+[ "$shadow" != native ] || refuse "a native self-installed link shadows $link; run yard init"
+if [ "$refusals" = 0 ]; then
+  printf 'Claude %s ready. ' "$BINARY_VERSION"
+  printf 'Managed Claude Git ask rules and update lock installed; inspect /status and /permissions in the active client.\n'
+fi
+if [ "$shadow" = foreign ]; then
+  printf 'Conflict: %s/.local/bin/claude is not Subyard-owned and was left unchanged; login shells can run it instead of %s.\n' "$DEV_HOME" "$link"
+fi
+[ "$refusals" = 0 ]
 CHECK
 } > "$stage"
 chmod 0755 "$stage"
 mv -fT -- "$stage" "$CHECK_PATH"
 stage=""
+release_native_shadow
 "$CHECK_PATH"
 

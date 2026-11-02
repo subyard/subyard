@@ -39,8 +39,14 @@ if [ "$result" = 0 ]; then
     "$fixture/venv/bin/python" -B "$ROOT/config/agents/claude/tests/e2e/permission-policy.py" \
     "$ROOT/config/agents/claude/settings.json" "$fixture/evidence" || result=$?
 fi
+if [ "$result" = 0 ]; then
+  # The SDK bundles its own CLI; yard sessions run the managed one.
+  PARITY_CLAUDE_CLI=/usr/local/bin/claude \
+    "$fixture/venv/bin/python" -B "$ROOT/config/agents/claude/tests/e2e/permission-policy.py" \
+    "$ROOT/config/agents/claude/settings.json" "$fixture/evidence-managed" || result=$?
+fi
 # These logs contain only fixture commands and the synthetic loopback model exchange.
-for log in "$fixture"/evidence/*.jsonl; do
+for log in "$fixture"/evidence/*.jsonl "$fixture"/evidence-managed/*.jsonl; do
   [ ! -f "$log" ] || cat "$log"
 done
 exit "$result"

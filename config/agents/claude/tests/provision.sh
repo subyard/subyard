@@ -148,6 +148,111 @@ rm "$policy"
 ln -s "$policy_dir/10-foreign.json" "$policy"
 if run_hook "$root" >/dev/null 2>&1; then fail 'policy symlink accepted'; fi
 
+# The managed drop-in locks every native update path and old policy files converge.
+rm -f "$policy"
+run_hook "$root" >/dev/null
+jq -e '.env == {DISABLE_UPDATES: "1"}' "$policy" >/dev/null || fail 'update lock missing from the managed policy'
+jq 'del(.env)' "$policy" > "$tmp/legacy-policy.json"
+cp "$tmp/legacy-policy.json" "$policy"
+if "$check" >/dev/null 2>&1; then fail 'policy without the update lock passed readiness'; fi
+run_hook "$root" >/dev/null
+jq -e '.env == {DISABLE_UPDATES: "1"}' "$policy" >/dev/null || fail 'legacy policy did not converge'
+
+# Only the native installer's exact link is released, and never the files it points to.
+dev_home="$tmp/dev-home"
+shadow="$dev_home/.local/bin/claude"
+run_shadow_hook() {
+  env PATH="$tmp/bin:$PATH" HOME="$tmp/home" TMPDIR=/tmp DEV_USER="$(id -un)" CLAUDE_DEV_HOME="$dev_home" \
+    CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ARCH=amd64 \
+    CLAUDE_INSTALL_ROOT="$root/opt/subyard/claude" CLAUDE_BIN_LINK="$link" \
+    CLAUDE_POLICY_DIR="$policy_dir" CLAUDE_POLICY_CHECK_PATH="$check" bash "$hook"
+}
+mkdir -p "$dev_home/.local/bin" "$dev_home/data/claude/versions"
+printf 'old\n' > "$dev_home/data/claude/versions/2.0.1"
+printf '{}\n' > "$dev_home/data/claude/.last-update-result.json"
+printf 'keep\n' > "$dev_home/data/unknown"
+versions_before="$(sha256sum "$dev_home/data/claude/versions/2.0.1" "$dev_home/data/unknown")"
+count="$(wc -l < "$tmp/fetch.log")"
+run_shadow_hook >/dev/null
+"$check" | grep -Fq 'Conflict:' && fail 'absent shadow reported a conflict'
+ln -s "$dev_home/data/claude/versions/2.0.1" "$shadow"
+if "$check" >"$tmp/shadow.out" 2>&1; then fail 'native shadow passed readiness'; fi
+grep -Fq 'run yard init' "$tmp/shadow.out" || fail 'native shadow readiness lacks its repair'
+run_shadow_hook >/dev/null
+[ ! -e "$shadow" ] && [ ! -L "$shadow" ] || fail 'current provisioning kept the native shadow'
+[ "$versions_before" = "$(sha256sum "$dev_home/data/claude/versions/2.0.1" "$dev_home/data/unknown")" ] \
+  || fail 'shadow repair changed installer files'
+[ -f "$dev_home/data/claude/.last-update-result.json" ] || fail 'shadow repair removed installer state'
+[ "$(( $(wc -l < "$tmp/fetch.log") - count ))" -eq 4 ] || fail 'current provisioning downloaded a binary'
+"$check" >/dev/null || fail 'released shadow did not restore readiness'
+ln -s "$dev_home/data/claude/versions/9.9.9" "$shadow"
+run_shadow_hook >/dev/null
+[ ! -L "$shadow" ] || fail 'dangling native shadow was kept'
+assert_foreign_shadow() {
+  run_shadow_hook >/dev/null
+  { [ -e "$shadow" ] || [ -L "$shadow" ]; } || fail "foreign shadow removed: $1"
+  "$check" >"$tmp/foreign.out" 2>&1 || fail "foreign shadow failed readiness: $1"
+  grep -Fq 'Conflict:' "$tmp/foreign.out" || fail "foreign shadow not reported: $1"
+  rm -f -- "$shadow"
+}
+# The approval policy never depends on the developer tree.
+if [ "$(id -u)" != 0 ]; then
+  ln -s "$dev_home/data/claude/versions/2.0.1" "$shadow"
+  chmod 0500 "$(dirname "$shadow")"
+  rm -f "$policy"
+  run_shadow_hook >"$tmp/unremovable.out" || fail 'unremovable native link blocked provisioning'
+  [ -f "$policy" ] || fail 'unremovable native link prevented the policy'
+  grep -Fq 'Conflict:' "$tmp/unremovable.out" || fail 'unremovable native link was not reported'
+  chmod 0700 "$(dirname "$shadow")"
+  rm -f -- "$shadow"
+fi
+printf '#!/bin/sh\n' > "$shadow"; assert_foreign_shadow 'regular file'
+ln -s /usr/bin/true "$shadow"; assert_foreign_shadow 'other program'
+ln -s "$dev_home/data/claude/versions/latest" "$shadow"; assert_foreign_shadow 'unversioned target'
+ln -s "data/claude/versions/2.0.1" "$shadow"; assert_foreign_shadow 'relative target'
+ln -s "$dev_home/data/claude/versions/../versions/2.0.1" "$shadow"; assert_foreign_shadow 'traversal target'
+mkdir "$dev_home/data/claude/versions/3.0.0"
+ln -s "$dev_home/data/claude/versions/3.0.0" "$shadow"; assert_foreign_shadow 'directory target'
+# Independent refusals are all reported, in order. Findings about a missing file are skipped.
+mv "$policy" "$policy.saved"
+rm -f "$link"
+ln -s "$dev_home/data/claude/versions/2.0.1" "$shadow"
+if "$check" >"$tmp/refusals.out" 2>"$tmp/refusals.err"; then fail 'readiness passed with refusals'; fi
+grep -Fq ' ready' "$tmp/refusals.out" && fail 'refused readiness still reported ready'
+sed -e 's/^claude-policy-check: //' -e 's/;.*//' "$tmp/refusals.err" > "$tmp/refusals.actual"
+cat > "$tmp/refusals.expected" <<REFUSALS
+managed policy is missing
+canonical command does not point to the managed runtime
+a native self-installed link shadows $link
+REFUSALS
+diff "$tmp/refusals.expected" "$tmp/refusals.actual" >&2 || fail 'refusals are incomplete or out of order'
+rm -f -- "$shadow"
+ln -s "$root/opt/subyard/claude/claude" "$link"
+# A missing policy alone still fails, and a conflict stays visible beside a refusal.
+if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'a missing policy passed readiness'; fi
+[ "$(cat "$tmp/refusals.err")" = 'claude-policy-check: managed policy is missing; run yard init' ] \
+  || fail 'a missing policy reported something else'
+ln -s /usr/bin/true "$shadow"
+if "$check" >"$tmp/refusals.out" 2>/dev/null; then fail 'a missing policy passed beside a conflict'; fi
+grep -Fq 'Conflict:' "$tmp/refusals.out" || fail 'a refusal hid a conflict'
+rm -f -- "$shadow"
+mv "$policy.saved" "$policy"
+# Permission and content drift of one present file are separate findings.
+chmod 0600 "$policy"
+cp "$policy" "$policy.saved"
+printf '{}\n' > "$policy"
+if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'policy drift passed readiness'; fi
+grep -Fq 'permissions drifted' "$tmp/refusals.err" || fail 'policy permission drift was not reported'
+grep -Fq 'managed policy drifted' "$tmp/refusals.err" || fail 'policy content drift was not reported'
+mv "$policy.saved" "$policy"
+chmod 0644 "$policy"
+"$check" >/dev/null || fail 'restored policy did not restore readiness'
+# Hermetic callers without an explicit fixture home must never reach the caller's own home.
+mkdir -p "$tmp/home/.local/bin"
+ln -s "$dev_home/data/claude/versions/2.0.1" "$tmp/home/.local/bin/claude"
+run_hook "$root" >/dev/null
+[ -L "$tmp/home/.local/bin/claude" ] || fail 'hook released a link without an explicit fixture home'
+
 # Both supported architecture names resolve their own artifact; execution remains host-native.
 run_hook "$tmp/arm" arm64 >/dev/null
 grep -Fq '/2.2.0/linux-arm64/claude' "$tmp/fetch.log" || fail 'arm64 artifact was not selected'
@@ -157,4 +262,4 @@ mkdir -p "$foreign/usr/local/bin"
 printf 'foreign install\n' > "$foreign/usr/local/bin/claude"
 if run_hook "$foreign" >/dev/null 2>&1; then fail 'foreign command was overwritten'; fi
 [ "$(cat "$foreign/usr/local/bin/claude")" = 'foreign install' ] || fail 'foreign command changed'
-printf 'ok: Claude latest CLI install, repeat, upgrade, checksum, readiness, ownership and managed policy\n'
+printf 'ok: Claude latest CLI install, repeat, upgrade, checksum, readiness, ownership, managed policy, update lock and native shadow release\n'

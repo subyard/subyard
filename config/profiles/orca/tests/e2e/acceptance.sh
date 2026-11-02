@@ -8,13 +8,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot) [ "$#" -ge 2 ] || { printf 'acceptance: --slot needs a value\n' >&2; exit 2; }; slot="$2"; shift 2 ;;
     --lane) [ "$#" -ge 2 ] || { printf 'acceptance: --lane needs a value\n' >&2; exit 2; }; lane="$2"; shift 2 ;;
-    *) printf 'usage: acceptance.sh --slot N [--lane full|bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals]\n' >&2; exit 2 ;;
+    *) printf 'usage: acceptance.sh --slot N [--lane full|bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals|managed-agents]\n' >&2; exit 2 ;;
   esac
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || { printf 'acceptance: --slot N is required\n' >&2; exit 2; }
 case "$lane" in
-  full) lanes=(bootstrap existing-yard resource projects ssh-agent codex-permissions) ;;
-  bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals) lanes=("$lane") ;;
+  full) lanes=(bootstrap existing-yard resource projects ssh-agent codex-permissions managed-agents) ;;
+  bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals|managed-agents) lanes=("$lane") ;;
   *) printf 'acceptance: invalid lane: %s\n' "$lane" >&2; exit 2 ;;
 esac
 
@@ -47,5 +47,8 @@ for lane in "${lanes[@]}"; do
     codex-permissions)
       bash "$runner" --slot "$slot" --vm-count 1 --purpose codex-permissions --vm 1 -- \
         env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 bash "$bootstrap" ;;
+    managed-agents)
+      bash "$runner" --slot "$slot" --vm-count 1 --purpose managed-agents --vm 1 -- \
+        env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_MANAGED_AGENTS=1 bash "$bootstrap" ;;
   esac
 done

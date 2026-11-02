@@ -1204,6 +1204,30 @@ yard sandbox default. It uses no real agent credentials
 or external model APIs. These checks do not replace interactive VS Code/Desktop acceptance or
 establish a security boundary against alternative Git commands.
 
+For managed Claude and Codex binaries and Claude Git prompts under stock Orca:
+
+```sh
+bash config/profiles/orca/tests/e2e/acceptance.sh --slot "$slot" --lane managed-agents
+```
+
+This focused mode selects both agents in a fresh installed yard. It checks by process image that login
+shells and the Orca Codex launcher reach the managed binaries, and that launches under the Orca server's
+`XDG_DATA_HOME` install nothing. As a positive control it removes the Claude update lock to obtain Claude's
+real native link, seeds the Codex standalone link shape, and converges both through `yard migrate` and through
+`yard init` while provisioning is current, keeping version files, unknown files, running legacy sessions of both
+agents and the Orca server. Links outside the proven shape stay through `yard init`. The Codex package tree must be
+root-owned and closed to group and other writes. From a login shell on the fresh yard it asserts by process image that
+a plain Codex client runs its turns on a daemon copy in its home and finds the package helper, that `--no-daemon` stays
+on the `/opt` release, that a Git prompt holds in both, and that a tool keeps running on the daemon after the client is
+killed and stops with a `--no-daemon` client. The upstream Codex installer and daemon bootstrap then create a real
+daemon package, which `yard init` must leave running while plain clients keep using it and the Git prompt holds.
+The lane then deletes Orca's hooks, restarts the service
+and requires the reinstalled hooks and a terminal launch to keep the managed Claude settings before any fixture
+snapshot, and reads settings drift before repairing it, including the drift from accepting Claude's auto mode offer. Finally it launches Codex from a paired Orca terminal and
+native chat, and drives Git prompts with a synthetic loopback model in stock Orca native Claude chat and in a
+paired Orca terminal running `claude --dangerously-skip-permissions`. It needs the upstream Claude and Codex
+downloads; it uses no agent account.
+
 For a focused recheck of stock native-chat approval/reconnect, the managed relay and
 native/paired terminals, use:
 

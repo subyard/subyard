@@ -551,6 +551,13 @@ effective client-policy reconstruction. Claude/OpenCode/pi approval enforcement 
 explicitly unverified where native probe is absent; lack of probe neither bans launch nor proves
 enforcement.
 
+Codex provisioning installs the official package as a root-owned release behind the existing
+`/opt/subyard/codex/codex` path, which a retained release's hook can replace on rollback, and leaves upstream's
+daemon and its updater as shipped, including its self-update from OpenAI; Orca stays on
+`--no-daemon`. Disconnect survival and upstream's update path outweigh one authoritative binary,
+because the approval policy held on every daemon version tested. Pinning `daemon_auto_start`
+off is the reversal. Details: [Where Codex runs](../configuration.md#where-codex-runs).
+
 One L1 backend server can serve many projects; same-user per-project servers are not an
 isolation boundary. Subyard may supply connection bootstrap, never app-session control plane.
 Disconnect does not cancel turns or autoapprove questions; first backend MVP promises no

@@ -239,8 +239,13 @@ Codex sandbox.
 Paired desktops can also send their own stock YOLO argument. In the yard's
 default Bash shell, an Orca-only login function removes that exact argument
 before executing the native Codex CLI. This keeps remote agent launches on the
-yard configuration too. SSH/VS Code shells and the installed Codex binary are
-unchanged. A desktop may still display its local YOLO preference; it does not
+yard configuration too. SSH/VS Code shells are unchanged. A paired Orca terminal and
+Orca's native chat run the managed Codex release under `/opt`, which only provisioning updates,
+and do not start the shared daemon, except `agents`, `queue` and `--remote` launches and any launch
+when the server sets `ORCA_CODEX_ISOLATE=0`. Outside Orca, a plain `codex` runs its turns on upstream's
+self-updating daemon; `codex --no-daemon` runs the managed release. See
+[Where Codex runs](configuration.md#where-codex-runs). A desktop may
+still display its local YOLO preference; it does not
 describe the effective server launch. Custom shells and explicit executable
 paths bypass this Bash integration, but the native Codex CLI still loads the yard's
 `/etc/codex/requirements.toml`. These managed requirements preserve user approval and
@@ -265,8 +270,8 @@ fails instead of guessing a permission mode.
 
 After updating this integration, start or reopen the chat. For a yard that was stopped
 during the update, run `yard init` after starting it to refresh the launch integration.
-The launcher belongs to the Orca server's login environment; SSH/VS Code launches
-and the installed Codex executable keep their existing behavior. An explicit Orca
+The launcher belongs to the Orca server's login environment and reaches the same managed
+executable; SSH/VS Code launches do not use it. An explicit Orca
 Command override bypasses this launcher and remains subject to native requirements.
 
 The **Run each Codex terminal on its own server** setting belongs to the Orca host

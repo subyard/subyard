@@ -42,14 +42,22 @@ class Model(BaseHTTPRequestHandler):
             self.wfile.write(b'{"input_tokens":100}')
             return
         main = any(t.get("name") == "Bash" for t in body.get("tools", []))
+        # Auto mode asks a native classifier about each action. This one allows everything, so
+        # any Git prompt comes from the managed ask rules rather than a synthetic refusal.
+        classifier = not main and "security monitor" in json.dumps(body.get("system"))
         index = STATE["step"]
         if main:
             STATE["step"] += 1
             emit("model_request", index=index, messages=body.get("messages"))
+        if classifier:
+            STATE["classifier"] += 1
+            STATE["classifier_text"] += json.dumps(body.get("messages"))
+            emit("classifier_request", messages=body.get("messages"))
         tool = main and index < len(COMMANDS)
         block = ({"type": "tool_use", "id": f"tool_{index}", "name": "Bash",
                   "input": {"command": COMMANDS[index], "description": "Permission parity probe"}}
-                 if tool else {"type": "text", "text": "Probe complete."})
+                 if tool else {"type": "text",
+                               "text": "<block>no</block>" if classifier else "Probe complete."})
         usage = {"input_tokens": 100, "output_tokens": 10}
         msg = dict(id=f"msg_{index}", type="message", role="assistant",
                    model=body.get("model", "claude-sonnet-4-6"), content=[block],
@@ -123,7 +131,7 @@ async def run_case(source, mode, decision, base, server):
     settings["autoMemoryDirectory"] = str(home / "memory")
     asks, native = [], []
     with (base / f"{case}.jsonl").open("w") as log:
-        STATE.update(step=0, log=log)
+        STATE.update(step=0, classifier=0, classifier_text="", log=log)
 
         async def permission(name, inputs, context):
             asks.append(inputs.get("command"))
@@ -154,13 +162,21 @@ async def run_case(source, mode, decision, base, server):
                 payload = dataclasses.asdict(message)
                 native.append(payload)
                 emit("native", message_type=type(message).__name__, payload=payload)
-        result = dict(case=case, fixture=str(root), asks=asks,
+        # A fallback to another mode must fail instead of passing as auto-mode coverage.
+        effective = [m["data"].get("permissionMode") for m in native if m.get("subtype") == "init"]
+        result = dict(case=case, fixture=str(root), asks=asks, effective_modes=effective,
+                      classifier_requests=STATE["classifier"],
                       ordinary=(repo / "ordinary.marker").exists(),
                       commits=int(git(repo, "rev-list", "--count", "HEAD")),
                       subject=git(repo, "log", "-1", "--format=%s"),
                       model_steps=STATE["step"], messages=len(native))
         emit("summary", **result)
         print(json.dumps(result), flush=True)
+        assert effective == [mode], result
+        assert (result["classifier_requests"] > 0) == (mode == "auto"), result
+        # Commit, amend and push must be decided by the ask rules, never by the classifier.
+        assert "git commit" not in STATE["classifier_text"], result
+        assert "git push" not in STATE["classifier_text"], result
         assert asks == ([COMMANDS[0], *COMMANDS[3:]] if host else COMMANDS[3:]), result
         assert result["ordinary"] == (not (host and decision == "deny")), result
         assert result["commits"] == (1 if decision == "deny" else 3), result
@@ -193,7 +209,7 @@ async def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         modes = (["default"] if os.environ.get("PARITY_HOST_PROBE") == "1" else
-                 [source["permissions"]["defaultMode"], "default"])
+                 [source["permissions"]["defaultMode"], "default", "auto"])
         for mode in modes:
             for decision in ["deny", "allow"]:
                 await run_case(source, mode, decision, base, server)

@@ -56,7 +56,8 @@ subyard-telemetry-run --agent claude --project-id example --task-id review-42 --
 ```
 
 The native command retains its terminal and exit status. Each invocation has a new
-`agent_run_id`; it is not the native conversation/session ID. The launcher passes
+`agent_run_id`; it is not the native conversation/session ID. A managed Codex run stays out of
+the [shared daemon](configuration.md#where-codex-runs), so its tools carry its own identity. The launcher passes
 that context to descendants and optional broker correlation hooks. Codex receives
 an explicit OTLP header; Claude receives an OTLP resource attribute. Native session
 attributes bind sessions to the registered run when received. The receiver accepts
