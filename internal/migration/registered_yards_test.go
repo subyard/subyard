@@ -195,6 +195,138 @@ func TestRegisteredOwnershipConsequencesDescribeOnlyNewAuthority(t *testing.T) {
 		t.Fatalf("project grant not disclosed: %#v %v", observed.Consequences, err)
 	}
 }
+func TestRegisteredDesiredIgnoresDeviceLifecycleOutputs(t *testing.T) {
+	owner, native, _ := registeredMigrationFixture(t)
+	instance := native.Instances["fixture/yard"]
+	nic := map[string]string{"type": "nic", "network": "fixture-br"}
+	instance.LocalDevices["eth1"], instance.Devices["eth1"] = nic, maps.Clone(nic)
+	set := func(key, value string) {
+		instance.LocalConfig[key], instance.Config[key] = value, value
+		native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	}
+	desired := func() releasetransition.Fingerprint {
+		t.Helper()
+		observed, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return observed.Desired
+	}
+	set("volatile.eth1.host_name", "vethAAAA")
+	set("volatile.eth1.last_state.created", "false")
+	set("volatile.eth0.host_name", "vethCCCC")
+	before := desired()
+	set("volatile.eth1.host_name", "vethBBBB")
+	if desired() != before {
+		t.Fatal("restart output of a retained NIC changed the pinned Desired")
+	}
+	set("volatile.eth1.last_state.created", "true")
+	if desired() != before {
+		t.Fatal("last_state of a retained NIC changed the pinned Desired")
+	}
+	set("volatile.eth0.host_name", "vethDDDD")
+	if desired() != before {
+		t.Fatal("eth0 lifecycle control changed the pinned Desired")
+	}
+	set("volatile.eth1.hwaddr", "00:16:3e:00:00:01")
+	if desired() == before {
+		t.Fatal("stable device identity left the pinned Desired")
+	}
+}
+
+func TestRegisteredEndpointKeepsOperatorSettingAndPublishesReceipt(t *testing.T) {
+	explicit := []config.SettingResolution{{Scope: "yard", Role: "local settings", Status: "effective"}}
+	saved := []config.SettingResolution{{Scope: "derived", Role: "derived", Status: "effective", Detail: "saved endpoint allocation for sample.server"}}
+	for name, test := range map[string]struct {
+		host, port string
+		trace      []config.SettingResolution
+	}{
+		"explicit-hostname":  {host: "fixture-host.example.test", port: "32000", trace: explicit},
+		"saved-hostname":     {host: "fixture-host.example.test", port: "32000", trace: saved},
+		"explicit-localhost": {host: "localhost", port: "32000", trace: explicit},
+		"saved-localhost":    {host: "localhost", port: "32000", trace: saved},
+		"explicit-different": {host: "fixture-other.example.test", port: "45000", trace: explicit},
+		"saved-different":    {host: "fixture-other.example.test", port: "45000", trace: saved},
+	} {
+		t.Run(name, func(t *testing.T) {
+			owner, native, path := registeredMigrationFixture(t)
+			content := fmt.Sprintf("ENVIRONMENT_PROFILES=sample\nSAMPLE_HOST=%s\nSAMPLE_PORT=%s\n", test.host, test.port)
+			testkit.WriteFile(t, path, []byte(content), 0600)
+			original := owner.LoadTargets
+			owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
+				targets, err := original(ctx, view)
+				for index := range targets {
+					loaded := targets[index].Loaded
+					loaded.Environment = maps.Clone(loaded.Environment)
+					loaded.Settings = maps.Clone(loaded.Settings)
+					loaded.Environment["SAMPLE_HOST"], loaded.Environment["SAMPLE_PORT"] = test.host, test.port
+					loaded.Settings["SAMPLE_HOST"] = config.SettingTrace{EffectiveValue: test.host, Resolutions: test.trace}
+					loaded.Settings["SAMPLE_PORT"] = config.SettingTrace{EffectiveValue: test.port, Resolutions: test.trace}
+					targets[index].Loaded = loaded
+				}
+				return targets, err
+			}
+			instance := native.Instances["fixture/yard"]
+			retained := map[string]string{"type": "unix-char", "source": "/dev/fixture", "path": "/dev/fixture"}
+			instance.LocalDevices["operator-char"], instance.Devices["operator-char"] = retained, maps.Clone(retained)
+			beforeDevices := fmt.Sprint(instance.LocalDevices)
+			initial, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			if err != nil || initial.Converged {
+				t.Fatalf("initial: %#v %v", initial, err)
+			}
+			prepared, present, err := owner.ReadPreparedInput(path)
+			if err != nil || !present || string(prepared.Content) != content {
+				t.Fatalf("operator setting prepared for rewrite: %q %v", prepared.Content, err)
+			}
+			if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
+			}
+			final, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			if err != nil || !final.Converged || final.Desired != initial.Desired || native.grants != 1 {
+				t.Fatalf("final: %#v grants=%d %v", final, native.grants, err)
+			}
+			written, err := os.ReadFile(path)
+			current := native.Instances["fixture/yard"]
+			if err != nil || string(written) != content || current.Config["volatile.uuid"] != "uuid-original" || fmt.Sprint(current.LocalDevices) != beforeDevices {
+				t.Fatalf("migration changed retained state: %q %v", written, err)
+			}
+			if current.LocalConfig["user.subyard.resource.sample-server"] == "" {
+				t.Fatal("receipt was not published for the retained native device")
+			}
+		})
+	}
+}
+
+func TestRegisteredEndpointImportsOverShippedDefault(t *testing.T) {
+	owner, _, path := registeredMigrationFixture(t)
+	if _, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	prepared, present, err := owner.ReadPreparedInput(path)
+	if err != nil || !present || !strings.Contains(string(prepared.Content), "SAMPLE_PORT='32000'") {
+		t.Fatalf("shipped default not imported: %q %v", prepared.Content, err)
+	}
+}
+
+func TestRegisteredMigrationCollectsResourceAndOwnerRefusals(t *testing.T) {
+	owner, native, _ := registeredMigrationFixture(t)
+	instance := native.Instances["fixture/yard"]
+	key := "user.subyard.resource.sample-server"
+	instance.LocalConfig[key], instance.Config[key] = "foreign", "foreign"
+	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	native.Reconcile.ProjectConfig["user.subyard.operator_uid"] = "foreign"
+	want := `yard default: registered project owner differs from protected operator identity; registered resource "sample-server": has foreign or inherited receipt`
+	for range 10 {
+		_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err == nil || err.Error() != want {
+			t.Fatalf("got %v, want %s", err, want)
+		}
+	}
+	if native.grants != 0 {
+		t.Fatal("refused observation published native grants")
+	}
+}
+
 func TestRegisteredNativeLimitProjectionPreservesCallerEnvironment(t *testing.T) {
 	owner, native, _ := registeredMigrationFixture(t)
 	targets, err := owner.LoadTargets(context.Background(), nil)

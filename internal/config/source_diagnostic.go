@@ -81,6 +81,25 @@ func OwnerMetadataContext(path, role string, cause error) error {
 // OwnerSourceDiagnostic is only for the local operation's stderr boundary.
 // RPC, activation and other remote consumers must use the default diagnostic.
 func OwnerSourceDiagnostic(err error) (string, bool) {
+	// An owner-local cause must not replace the other refusals or their labels.
+	var refusals *domain.Refusals
+	if errors.As(err, &refusals) {
+		messages, local := []string{}, false
+		for _, cause := range refusals.Unwrap() {
+			message := cause.Error()
+			if diagnostic, ok := OwnerSourceDiagnostic(cause); ok {
+				var source *SourceError
+				var nested *domain.Refusals
+				replaced := message
+				if errors.As(cause, &source) && !errors.As(cause, &nested) {
+					replaced = source.Error()
+				}
+				message, local = strings.Replace(message, replaced, diagnostic, 1), true
+			}
+			messages = append(messages, message)
+		}
+		return strings.Replace(err.Error(), refusals.Error(), strings.Join(messages, "; "), 1), local
+	}
 	var source *SourceError
 	if !errors.As(err, &source) || !source.ownerLocal {
 		return "", false

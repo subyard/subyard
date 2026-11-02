@@ -2,6 +2,8 @@ package releasetransition
 
 import (
 	"context"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 const registeredYardsMigration = "registered-yards-v2-to-v3"
@@ -73,13 +75,15 @@ func (t *V2Transition) appendNativeMigration(ctx context.Context, observation *v
 		observation.work = append(observation.work, settingsMigrationWork(intent, m, file))
 	}
 	view = settingsViewAfterPlan(t.options.ConfigHome, view, plan.Files)
+	var refusals []error
 	for _, owner := range t.nativeOwners(m) {
 		if nilV2Adapter(owner) {
 			return view, invalid("registered yard migration owner is unavailable")
 		}
 		observed, err := observeRegisteredOwner(ctx, owner, t.options.Releases, observation.links, view)
 		if err != nil {
-			return view, err
+			refusals = append(refusals, err)
+			continue
 		}
 		if err := validateActivationObservation(owner.ID(), observed); err != nil {
 			return view, err
@@ -95,5 +99,5 @@ func (t *V2Transition) appendNativeMigration(ctx context.Context, observation *v
 		observation.observations = append(observation.observations, ResourceObservation{Resource: intent.Resource, Class: m.Kind, Fingerprint: observed.Actual})
 		observation.work = append(observation.work, nativeMigrationWork(intent, m))
 	}
-	return view, nil
+	return view, domain.CollectRefusals(refusals...)
 }

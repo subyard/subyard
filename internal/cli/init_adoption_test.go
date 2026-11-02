@@ -16,7 +16,12 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migration"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/previewroute"
+	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -493,14 +498,14 @@ func TestYardAdoptionAdmitsConfiguredNativeKinds(t *testing.T) {
 }
 
 func TestYardAdoptionVMVerifiedDiskBusMetadata(t *testing.T) {
-	for _, scenario := range []string{"9p", "virtiofs", "stopped", "unknown-device", "undeclared-disk", "wrong-type", "unknown-suffix", "invalid-bus", "unresolved-bus", "container", "legacy", "disk-policy-drift"} {
+	for _, scenario := range []string{"9p", "virtiofs", "stopped", "unknown-device", "undeclared-disk", "wrong-type", "local-disk-any-state", "profile-disk", "profile-invalid-bus", "container-local-disk", "container-profile-disk", "legacy", "disk-policy-drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			_, execution, fake := adoptionFixture(t)
 			runtime := execution.platform.(reconcileruntime.Runtime)
 			runtime.Environment = append(runtime.Environment, "HOST_MOUNTS=fixture-mount:/mnt/fixture:ro:0755")
 			canonicalLegacyInstanceFixture(runtime, fake.Incus)
 			instance := &fake.Reconcile.Instance
-			if scenario != "container" && scenario != "legacy" {
+			if !strings.HasPrefix(scenario, "container") && scenario != "legacy" {
 				canonicalAdoptionVMFixture(&runtime, instance)
 			}
 			key, value := "volatile.fixture-mount.io.bus", "9p"
@@ -519,12 +524,12 @@ func TestYardAdoptionVMVerifiedDiskBusMetadata(t *testing.T) {
 				instance.Devices["unknown"] = maps.Clone(instance.LocalDevices["unknown"])
 			case "wrong-type":
 				key = "volatile.eth0.io.bus"
-			case "unknown-suffix":
-				key += ".extra"
-			case "invalid-bus":
-				value = "unrecognized"
-			case "unresolved-bus":
-				value = "auto"
+			case "local-disk-any-state":
+				key, value = key+".extra", "unrecognized"
+			case "profile-disk", "container-profile-disk":
+				key = "volatile.root.io.bus"
+			case "profile-invalid-bus":
+				key, value = "volatile.root.io.bus", "unrecognized"
 			case "disk-policy-drift":
 				instance.LocalDevices["fixture-mount"]["readonly"] = "false"
 				instance.Devices["fixture-mount"]["readonly"] = "false"
@@ -537,7 +542,9 @@ func TestYardAdoptionVMVerifiedDiskBusMetadata(t *testing.T) {
 				return
 			}
 			state, _, _, _, err := runtime.InspectYardAdoption(context.Background())
-			if scenario != "9p" && scenario != "virtiofs" && scenario != "stopped" {
+			// Volatile state of a local device is taken as found. Only a VM profile disk
+			// has a resolved bus here, and its value stays checked.
+			if scenario == "unknown-device" || scenario == "wrong-type" || scenario == "profile-invalid-bus" || scenario == "container-profile-disk" {
 				if err == nil {
 					t.Fatal("unverified disk bus metadata admitted")
 				}
@@ -660,7 +667,9 @@ func TestYardAdoptionSSHNativeBoundary(t *testing.T) {
 			} else {
 				_, _, _, _, err = runtime.InspectYardAdoption(context.Background())
 			}
-			allow := scenario == "vm-relay" || scenario == "container-proxy" || scenario == "legacy-proxy"
+			// Adoption retains the transport as found and init converges it; only
+			// non-adopt continuation still requires its exact closed shape.
+			allow := !strings.HasPrefix(scenario, "legacy-") || scenario == "legacy-proxy"
 			if allow && err != nil {
 				t.Fatal("normal transport shape refused", err)
 			}
@@ -748,15 +757,21 @@ func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
 			}
 			before := operationStateDigest(fake.Reconcile.Instance)
 			err = program.prepareLegacyContinuation(context.Background(), execution, initArguments{adopt: true})
-			success := scenario == "legacy" || scenario == "current" || scenario == "stale-record"
-			if (err == nil) != success {
-				t.Fatalf("eligible=%t: %v", success, err)
+			// Registry integrity and inconsistent effective devices still refuse.
+			refused := slices.Contains([]string{"expanded", "inherited", "collision", "symlink", "malformed", "unsafe-directory"}, scenario)
+			if (err != nil) != refused {
+				t.Fatalf("refused=%t: %v", refused, err)
 			}
-			if !success {
+			if refused {
 				if fake.writes != 0 {
 					t.Fatal("refusal mutated project")
 				}
 				return
+			}
+			selected, err := runtime.YardAdoptionProjects(context.Background(), fake.Reconcile.Instance)
+			proven := scenario == "legacy" || scenario == "current" || scenario == "stale-record"
+			if err != nil || (len(selected) == 1) != proven || !proven && len(selected) != 0 {
+				t.Fatalf("selected=%v proven=%t: %v", selected, proven, err)
 			}
 			if scenario == "stale-record" {
 				record.ImportedAt = "changed-after-assessment"
@@ -774,6 +789,255 @@ func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
 				t.Fatal("bind adoption changed workload")
 			}
 		})
+	}
+}
+
+// Old yards can hold devices from removed handlers, operators or older recipes.
+// The migration cannot be rolled back, so they are retained exactly as found.
+func TestYardAdoptionTakesExistingDevicesAsFound(t *testing.T) {
+	proxy := func(listen, connect string) map[string]string {
+		return map[string]string{"type": "proxy", "bind": "host", "listen": listen, "connect": connect}
+	}
+	for name, change := range map[string]func(*reconcileruntime.Runtime, *ports.InstanceInfo, *adoptionIncus){
+		"historical-proxies": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["adb-emu"] = proxy("tcp:127.0.0.1:15555", "tcp:127.0.0.1:5555")
+			instance.LocalDevices["adb-emu-console"] = proxy("tcp:127.0.0.1:15554", "tcp:127.0.0.1:5554")
+		},
+		"public-proxy": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["operator-web"] = proxy("tcp:0.0.0.0:8080", "tcp:127.0.0.1:80")
+		},
+		"unix-char": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["operator-char"] = map[string]string{"type": "unix-char", "source": "/dev/ttyUSB0", "path": "/dev/ttyUSB0", "mode": "0666"}
+		},
+		"noncanonical-kvm": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["kvm"] = map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm", "gid": "0", "mode": "0666"}
+		},
+		"noncanonical-apparmor": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["subyard-docker-apparmor"] = map[string]string{"type": "disk", "source": "/etc/fixture", "path": "/sys/module/apparmor/parameters/enabled"}
+		},
+		"noncanonical-preview": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices[previewroute.DeviceName] = proxy("tcp:127.0.0.1:18080", "tcp:127.0.0.1:80")
+		},
+		"local-root-override": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["root"] = map[string]string{"type": "disk", "path": "/", "pool": "default", "size": "99GiB"}
+		},
+		"local-root-override-with-sized-profile": func(runtime *reconcileruntime.Runtime, instance *ports.InstanceInfo, fake *adoptionIncus) {
+			runtime.Environment = append(runtime.Environment, "ROOT_DISK_SIZE=10GiB")
+			fake.Reconcile.ProfileDevices["root"]["size"] = "10GiB"
+			instance.Devices["root"]["size"] = "10GiB"
+			instance.LocalDevices["root"] = map[string]string{"type": "disk", "path": "/", "pool": "default", "size": "99GiB"}
+		},
+		"managed-device-missing": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			delete(instance.LocalDevices, "ssh")
+			delete(instance.Devices, "ssh")
+			delete(instance.LocalDevices, "subyard-e2e-routes")
+			delete(instance.Devices, "subyard-e2e-routes")
+		},
+		"leftover-memory-device": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["subyard-host-memory"] = map[string]string{"type": "disk", "source": "/tmp/meminfo", "path": "/var/lib/subyard/host-meminfo"}
+			instance.LocalConfig["user.subyard.host_memory"], instance.Config["user.subyard.host_memory"] = "v2", "v2"
+		},
+		"unselected-memory-marker-without-device": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalConfig["user.subyard.host_memory"], instance.Config["user.subyard.host_memory"] = "v1", "v1"
+		},
+		"accepted-device-volatile-state": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalDevices["operator-web"] = proxy("tcp:0.0.0.0:8080", "tcp:127.0.0.1:80")
+			instance.LocalConfig["volatile.operator-web.last_state.ready"], instance.Config["volatile.operator-web.last_state.ready"] = "true", "true"
+		},
+		"stale-preview-marker": func(_ *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			instance.LocalConfig[previewroute.Key], instance.Config[previewroute.Key] = "stale", "stale"
+			instance.LocalConfig[ownerpublication.Prefix+previewroute.DeviceName], instance.Config[ownerpublication.Prefix+previewroute.DeviceName] = "stale", "stale"
+		},
+		"vm-nic-override": func(runtime *reconcileruntime.Runtime, instance *ports.InstanceInfo, _ *adoptionIncus) {
+			canonicalAdoptionVMFixture(runtime, instance)
+			instance.LocalDevices["eth0"] = map[string]string{"type": "nic", "nictype": "macvlan", "parent": "fixture0"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, execution, fake := adoptionFixture(t)
+			runtime := execution.platform.(reconcileruntime.Runtime)
+			instance := &fake.Reconcile.Instance
+			change(&runtime, instance, fake)
+			for device, values := range instance.LocalDevices {
+				instance.Devices[device] = maps.Clone(values)
+			}
+			before := operationStateDigest(*instance)
+			if _, _, _, _, err := runtime.InspectYardAdoption(context.Background()); err != nil {
+				t.Fatal("existing device stopped adoption: ", err)
+			}
+			if _, _, err := runtime.InspectLegacyContinuation(context.Background()); err == nil {
+				t.Fatal("non-adopt continuation admitted the same device")
+			}
+			if operationStateDigest(*instance) != before || fake.writes != 0 || len(fake.ConfigUpdates) != 0 {
+				t.Fatal("inspection changed native state")
+			}
+		})
+	}
+}
+
+func TestYardAdoptionHistoricalDeviceRefusalRemainsOnlyInContinuation(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:15555", "connect": "tcp:127.0.0.1:5555"}
+	fake.Reconcile.Instance.LocalDevices["adb-emu"], fake.Reconcile.Instance.Devices["adb-emu"] = device, maps.Clone(device)
+	if _, _, _, _, err := runtime.InspectYardAdoption(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runtime.InspectLegacyContinuation(context.Background())
+	if err == nil || err.Error() != `legacy continuation refuses unsupported local device "adb-emu"` {
+		t.Fatalf("continuation lost its closed first refusal: %v", err)
+	}
+}
+
+func TestYardAdoptionRefusesPersistentVolumeIdentityDrift(t *testing.T) {
+	for _, scenario := range []string{"other-volume", "other-path", "extra-option", "missing"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, execution, fake := adoptionFixture(t)
+			runtime := execution.platform.(reconcileruntime.Runtime)
+			instance := &fake.Reconcile.Instance
+			switch scenario {
+			case "other-volume":
+				instance.LocalDevices["srv"]["source"] = "other-volume"
+			case "other-path":
+				instance.LocalDevices["srv"]["path"] = "/data"
+			case "extra-option":
+				instance.LocalDevices["srv"]["readonly"] = "true"
+			case "missing":
+				delete(instance.LocalDevices, "srv")
+				delete(instance.Devices, "srv")
+			}
+			if device := instance.LocalDevices["srv"]; device != nil {
+				instance.Devices["srv"] = maps.Clone(device)
+			}
+			_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "yard adoption refuses srv device") {
+				t.Fatalf("persistent data identity admitted: %v", err)
+			}
+			if fake.writes != 0 {
+				t.Fatal("refusal mutated project")
+			}
+		})
+	}
+}
+
+func registeredRefusalOwner(t *testing.T, execution *initExecution, fake *adoptionIncus) (*migration.RegisteredYardMigration, reconcileruntime.Runtime, resource.ProxyContract) {
+	t.Helper()
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	spec, err := resource.ParseResource("sample", "server", strings.NewReader("COMMAND=server\nHANDLER=handler.sh\nTITLE=sample\nPROXY=\"sample-server SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 owner-metadata-v1 loopback-or-tailscale\"\nACTION=\"up up security-change reversible\"\nACTION=\"down down security-change reversible\"\nBRINGUP=up\nSHUTDOWN=down\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := resource.BuildRegistry([]resource.ResourceSpec{spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := execution.loaded
+	loaded.Context = runtime.Yard
+	loaded.Environment = maps.Clone(loaded.Environment)
+	loaded.Environment["ENVIRONMENT_PROFILES"] = "sample"
+	loaded.Settings = maps.Clone(loaded.Settings)
+	owner := &migration.RegisteredYardMigration{Yard: loaded.Context.YardName, ConfigHome: loaded.Context.Paths.ConfigHome, Resources: resources, LoadTargets: func(context.Context, releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
+		return []migration.RegisteredYardTarget{{Loaded: loaded, Runtime: runtime}}, nil
+	}}
+	fake.Instances = map[string]ports.InstanceInfo{runtime.Yard.IncusProject + "/" + runtime.Yard.YardInstanceName: fake.Reconcile.Instance}
+	return owner, runtime, resources.ProxyContracts([]string{"sample"})[0]
+}
+
+// The labelled migration fixture short-circuits before InspectYardAdoption, so this
+// real adoption fixture owns the unlabelled path through the concrete migration.
+func TestRegisteredUnlabelledMigrationRetainsUnknownDeviceThroughConvergence(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	owner, _, _ := registeredRefusalOwner(t, execution, fake)
+	instance := &fake.Reconcile.Instance
+	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:15555", "connect": "tcp:127.0.0.1:5555"}
+	instance.LocalDevices["adb-emu"], instance.Devices["adb-emu"] = device, maps.Clone(device)
+	before, err := json.Marshal(*instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil || initial.Converged || len(initial.Consequences) != 1 || !strings.Contains(initial.Consequences[0], "all existing local devices enter management as found") {
+		t.Fatalf("initial: %#v %v", initial, err)
+	}
+	if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	final, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil || !final.Converged || final.Desired != initial.Desired || len(final.Consequences) != 0 || fake.writes != 1 {
+		t.Fatalf("final: %#v writes=%d %v", final, fake.writes, err)
+	}
+	after, err := json.Marshal(*instance)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("retained instance changed: %s %v", after, err)
+	}
+	if fake.Reconcile.ProjectConfig["user.subyard.installation"] != domain.AdoptedInstallation {
+		t.Fatal("project ownership was not published")
+	}
+}
+
+func TestRegisteredMigrationReportsEverySimultaneousRefusal(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	owner, _, contract := registeredRefusalOwner(t, execution, fake)
+	instance := &fake.Reconcile.Instance
+	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:32000", "connect": "tcp:127.0.0.1:9119"}
+	instance.LocalDevices[contract.Device], instance.Devices[contract.Device] = device, maps.Clone(device)
+	instance.LocalConfig[contract.OwnershipKey()], instance.Config[contract.OwnershipKey()] = "foreign", "foreign"
+	instance.LocalDevices["srv"]["source"], instance.Devices["srv"]["source"] = "other-volume", "other-volume"
+	instance.LocalConfig["security.privileged"], instance.Config["security.privileged"] = "true", "true"
+	fake.Reconcile.ProjectConfig["features.networks"] = "true"
+	fake.Reconcile.ProjectConfig["restricted.fixture"] = "allow"
+	fake.TeardownResources[2].SnapshotCount = 1
+	fake.TeardownResources = append(fake.TeardownResources, ports.TeardownResource{Kind: "bucket", Name: "unproven", Pool: "default", Binding: "bucket"})
+	want := []string{
+		`yard default: legacy continuation refuses unknown or incomplete native inventory: "bucket/default/unproven"`,
+		`legacy continuation refuses unknown project permissions`,
+		`legacy continuation refuses unsupported instance configuration key "security.privileged"`,
+		`yard adoption refuses srv device that is missing or differs from persistent volume default/yard-srv: reattaching it would change the data mounted in the yard`,
+		`yard adoption refuses an uninventoried project feature namespace`,
+		`yard adoption refuses unproven snapshots`,
+		`registered resource "sample-server": has foreign or inherited receipt`,
+	}
+	before := operationStateDigest(*instance)
+	first := ""
+	for run := range 20 {
+		_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err == nil {
+			t.Fatal("refusals admitted")
+		}
+		if run == 0 {
+			first = err.Error()
+		}
+		if err.Error() != first || err.Error() != strings.Join(want, "; ") {
+			t.Fatalf("run %d\n got: %s\nwant: %s", run, err, strings.Join(want, "; "))
+		}
+	}
+	if operationStateDigest(*instance) != before || fake.writes != 0 {
+		t.Fatal("assessment mutated native state")
+	}
+}
+
+func TestAdoptionRefusalsSurviveOperatorStderr(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	instance := &fake.Reconcile.Instance
+	delete(instance.LocalDevices, "srv")
+	delete(instance.Devices, "srv")
+	instance.Config["user.subyard.name"], instance.LocalConfig["user.subyard.name"] = "other", "other"
+	_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
+	if err == nil {
+		t.Fatal("refusals admitted")
+	}
+	for _, local := range []bool{false, true} {
+		var stderr bytes.Buffer
+		program := &CLI{options: Options{Program: "yard-engine", Stderr: &stderr}, env: map[string]string{}, localMetadataDiagnostics: local}
+		program.errorf("release transition: %v", err)
+		output := stderr.String()
+		if !strings.HasPrefix(output, "yard-engine: release transition: ") || strings.Count(output, "\n") != 1 || !strings.Contains(output, "legacy continuation native identity") || !strings.Contains(output, "yard adoption refuses srv device") {
+			t.Fatalf("local=%t lost a refusal: %q", local, output)
+		}
+		if strings.Contains(output, "user.subyard.name: observed") != local {
+			t.Fatalf("local=%t changed owner detail boundary: %q", local, output)
+		}
 	}
 }
 

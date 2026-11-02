@@ -78,90 +78,39 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("yard %s: %w", loaded.Context.YardName, err)
 		}
+		var refusals []error
 		if instance.Project != loaded.Context.IncusProject || instance.Name != loaded.Context.YardInstanceName || instance.Config["volatile.uuid"] == "" || instance.Config["user.subyard.name"] != loaded.Context.YardName || instance.Config["user.subyard.managed"] != "true" || instance.Config["user.subyard.bridge"] != loaded.Context.IncusBridge {
-			return nil, errors.New("registered yard native identity differs from protected registration")
+			refusals = append(refusals, errors.New("registered yard native identity differs from protected registration"))
 		}
 		for _, key := range []string{"volatile.uuid", "user.subyard.managed", "user.subyard.name", "user.subyard.bridge", "user.subyard.desired_power", "user.subyard.disk_tmp"} {
 			if instance.Config[key] != instance.LocalConfig[key] {
-				return nil, errors.New("registered yard identity or power is inherited or inconsistent")
+				refusals = append(refusals, errors.New("registered yard identity or power is inherited or inconsistent"))
 			}
 		}
 		if marker := instance.LocalConfig["user.subyard.disk_tmp"]; marker != "" && marker != "v1" {
-			return nil, errors.New("registered yard has foreign guest temporary policy metadata")
+			refusals = append(refusals, errors.New("registered yard has foreign guest temporary policy metadata"))
 		}
 		if power := instance.Config["user.subyard.desired_power"]; power != "running" && power != "stopped" {
-			return nil, errors.New("registered yard has no canonical desired power")
+			refusals = append(refusals, errors.New("registered yard has no canonical desired power"))
 		}
-		if _, _, err := configsync.ResolveHostID(m.ConfigHome, loaded.Environment); err != nil {
-			return nil, err
-		}
+		_, _, err = configsync.ResolveHostID(m.ConfigHome, loaded.Environment)
+		refusals = append(refusals, err)
 		plan := registeredYardPlan{loaded: loaded, runtime: runtime, instance: instance}
 		contracts := m.Resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]))
 		state, resources, metadata, before, receipts, err := inspectRegisteredYardMigration(ctx, runtime, contracts)
-		if err != nil {
-			return nil, fmt.Errorf("yard %s: %w", loaded.Context.YardName, err)
-		}
+		refusals = append(refusals, err)
 		plan.instance, plan.metadata, plan.before, plan.receipts = state.Instance, metadata, before, receipts
 		plan.state, plan.resources = state, resources
-		plan.settingsPath, err = registeredSettingsPath(loaded)
-		if err != nil {
-			return nil, err
-		}
-		plan.settingsBefore, err = config.ReadPersistentFileSnapshot(m.ConfigHome, plan.settingsPath)
-		if m.settingsView != nil {
-			plan.settingsBefore, err = m.settingsView.ReadSnapshot(plan.settingsPath)
-		}
-		if errors.Is(err, os.ErrNotExist) {
-			err = nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		plan.settingsDesired = slices.Clone(plan.settingsBefore.Content)
-		for _, contract := range contracts {
-			device := instance.LocalDevices[contract.Device]
-			if len(device) == 0 {
-				continue
-			}
-			host, port, _ := net.SplitHostPort(strings.TrimPrefix(device["listen"], "tcp:"))
-			for _, assignment := range []struct{ key, value string }{{contract.AdvertiseHostSetting, host}, {contract.HostPortSetting, port}} {
-				key, value := assignment.key, assignment.value
-				if loaded.Environment[key] == value {
-					continue
-				}
-				trace, declared := loaded.Settings[key]
-				if !declared || !registeredMigrationDefault(trace) {
-					return nil, fmt.Errorf("yard %s: explicit %s conflicts with working native endpoint", loaded.Context.YardName, key)
-				}
-				if err := loaded.Catalog.ValidateSetting(config.ScopeYard, key, value, false); err != nil {
-					return nil, err
-				}
-				plan.settingsDesired, err = config.EditPersistentAssignmentContent(plan.settingsPath, plan.settingsDesired, key, &value)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-		if string(plan.settingsBefore.Content) != string(plan.settingsDesired) {
-			if err := config.CheckLocalSettingsWritable(m.ConfigHome); err != nil {
-				return nil, err
-			}
-			if loaded.Context.YardName != "default" {
-				source, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, m.ConfigHome, loaded.Context.YardName)
-				if err != nil {
-					return nil, err
-				}
-				if source != plan.settingsPath {
-					return nil, errors.New("endpoint import requires a protected local yard registration; refusing to shadow the existing private or Git registration")
-				}
-			}
+		refusals = append(refusals, m.planEndpointSettings(&plan, instance, contracts))
+		if err := domain.CollectRefusals(refusals...); err != nil {
+			return nil, fmt.Errorf("yard %s: %w", loaded.Context.YardName, err)
 		}
 		if m.GuestTmp && plan.resources == nil {
 			plan.resources, err = runtime.Incus.TeardownInventory(ctx, loaded.Context.IncusProject)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("yard %s: %w", loaded.Context.YardName, err)
 			}
 		}
 		if !m.GuestTmp && (plan.settingsBefore.Exists || len(plan.settingsDesired) != 0) {
@@ -177,6 +126,66 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 	}
 	return plans, nil
 }
+
+// planEndpointSettings imports a working native endpoint only over a shipped default
+// or unset value. An operator-set or saved value is never compared or rewritten, so
+// a hostname keeps working beside its numeric listen address.
+func (m *RegisteredYardMigration) planEndpointSettings(plan *registeredYardPlan, instance ports.InstanceInfo, contracts []resource.ProxyContract) error {
+	loaded := plan.loaded
+	var err error
+	plan.settingsPath, err = registeredSettingsPath(loaded)
+	if err != nil {
+		return err
+	}
+	plan.settingsBefore, err = config.ReadPersistentFileSnapshot(m.ConfigHome, plan.settingsPath)
+	if m.settingsView != nil {
+		plan.settingsBefore, err = m.settingsView.ReadSnapshot(plan.settingsPath)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	plan.settingsDesired = slices.Clone(plan.settingsBefore.Content)
+	var refusals []error
+	for _, contract := range contracts {
+		device := instance.LocalDevices[contract.Device]
+		if len(device) == 0 {
+			continue
+		}
+		host, port, splitErr := net.SplitHostPort(strings.TrimPrefix(device["listen"], "tcp:"))
+		if splitErr != nil {
+			continue // The resource's own check reports this listener.
+		}
+		for _, assignment := range []struct{ key, value string }{{contract.AdvertiseHostSetting, host}, {contract.HostPortSetting, port}} {
+			key, value := assignment.key, assignment.value
+			trace, declared := loaded.Settings[key]
+			if loaded.Environment[key] == value || !declared || !registeredMigrationDefault(trace) {
+				continue
+			}
+			if err := loaded.Catalog.ValidateSetting(config.ScopeYard, key, value, false); err != nil {
+				refusals = append(refusals, err)
+				continue
+			}
+			plan.settingsDesired, err = config.EditPersistentAssignmentContent(plan.settingsPath, plan.settingsDesired, key, &value)
+			refusals = append(refusals, err)
+		}
+	}
+	if string(plan.settingsBefore.Content) != string(plan.settingsDesired) {
+		if err := config.CheckLocalSettingsWritable(m.ConfigHome); err != nil {
+			refusals = append(refusals, err)
+		} else if loaded.Context.YardName != "default" {
+			source, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, m.ConfigHome, loaded.Context.YardName)
+			refusals = append(refusals, err)
+			if err == nil && source != plan.settingsPath {
+				refusals = append(refusals, errors.New("endpoint import requires a protected local yard registration; refusing to shadow the existing private or Git registration"))
+			}
+		}
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
 func (m *RegisteredYardMigration) Observe(ctx context.Context, _ releasetransition.ReleasePair, _ releasetransition.ReleaseLinks) (releasetransition.V2ActivationObservation, error) {
 	m.settingsView = nil
 	return m.observe(ctx)
@@ -227,7 +236,7 @@ func (m *RegisteredYardMigration) observePlans(ctx context.Context, plans []regi
 			}
 			complete = complete && !projectGrant
 			if projectGrant {
-				consequences = append(consequences, fmt.Sprintf("yard %s: register ownership of project %s; allow normal management and full removal of this project and its assessed resources", plan.loaded.Context.YardName, plan.loaded.Context.IncusProject))
+				consequences = append(consequences, fmt.Sprintf("yard %s: register ownership of project %s; allow normal management and full removal of this project and its assessed resources; all existing local devices enter management as found", plan.loaded.Context.YardName, plan.loaded.Context.IncusProject))
 			}
 			for key, value := range plan.receipts {
 				if instance.LocalConfig[key] == value {
@@ -360,8 +369,15 @@ func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) 
 	expanded := maps.Clone(plan.instance.Config)
 	for _, values := range []map[string]string{configuration, expanded} {
 		// Only exact lifecycle outputs and independently validated producer results.
-		for _, key := range []string{"volatile.last_state.power", "volatile.last_state.ready", "volatile.eth0.host_name", "volatile.eth0.last_state.ip_addresses"} {
+		for _, key := range []string{"volatile.last_state.power", "volatile.last_state.ready"} {
 			delete(values, key)
+		}
+		// Every start rewrites these for an accepted device; the journal must not pin them.
+		for _, device := range append(slices.Collect(maps.Keys(plan.instance.LocalDevices)), "eth0") {
+			prefix := "volatile." + device + "."
+			maps.DeleteFunc(values, func(key, _ string) bool {
+				return key == prefix+"host_name" || strings.HasPrefix(key, prefix+"last_state.")
+			})
 		}
 		if plan.runtime.Yard.YardKind == domain.YardVM && plan.instance.Type == domain.YardVM {
 			for _, key := range []string{"volatile.vm.rtc_adjustment", "volatile.vm.rtc_offset"} {

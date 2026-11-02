@@ -6,7 +6,7 @@ if [ "${1:-}" = --preflight ]; then
   for command in go python3 bash; do command -v "$command" >/dev/null; done
   bash -n "$0"
   go test ./internal/cli ./internal/adapters/incusclient ./internal/config ./internal/adapters/testvmsruntime \
-    -run 'TestYardAdoption|TestHostMemoryAdoptionPolicy|TestProjectAdoption|TestTeardownInventoryProves|TestRemovePersistentFileSnapshot|TestFullTeardownClassifiesNativeOwnership' -count=1
+    -run 'TestYardAdoption|TestHostMemoryRecoverableStatesConverge|TestProjectAdoption|TestTeardownInventoryProves|TestRemovePersistentFileSnapshot|TestFullTeardownClassifiesNativeOwnership' -count=1
   exit
 fi
 RUN_ID="${SUBYARD_E2E_RUN_ID:?run through dev/agent-e2e.sh}"

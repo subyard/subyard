@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/Subyard/Subyard/internal/domain"
 	"testing"
 )
@@ -106,6 +107,68 @@ func TestRegisteredYardMigrationUsesDurableExistingJournal(t *testing.T) {
 				t.Fatalf("repeat: %#v %v", repeat, err)
 			}
 		})
+	}
+}
+
+type refusingRegisteredOwner struct {
+	*v2TestReconciler
+	refusal error
+}
+
+func (owner *refusingRegisteredOwner) Observe(ctx context.Context, releases ReleasePair, links ReleaseLinks) (V2ActivationObservation, error) {
+	if owner.refusal != nil {
+		return V2ActivationObservation{}, owner.refusal
+	}
+	return owner.v2TestReconciler.Observe(ctx, releases, links)
+}
+
+// One yard's refusal must not hide another's, in either fixed native migration.
+func TestRegisteredOwnersAllReportRefusalsBeforeAnyJournal(t *testing.T) {
+	stale := fmt.Errorf("yard beta: %w", domain.ErrPlanStale)
+	refused := errors.New("yard alpha: first refusal")
+	owners := []V2ActivationReconciler{
+		&refusingRegisteredOwner{v2TestReconciler: &v2TestReconciler{id: "yard.beta"}, refusal: stale},
+		&refusingRegisteredOwner{v2TestReconciler: &v2TestReconciler{id: "yard.ready"}},
+		&refusingRegisteredOwner{v2TestReconciler: &v2TestReconciler{id: "yard.alpha"}, refusal: refused},
+	}
+	transition, _, _ := v2TransitionFixture(t, nil)
+	var registry RegistryV2
+	if err := json.Unmarshal(transition.options.RegistryPayload, &registry); err != nil {
+		t.Fatal(err)
+	}
+	registry.CurrentEpochs["owner-registration"] = 3
+	registry.Migrations = append(registry.Migrations, MigrationDefinitionV2{ID: "registered-local-v3", Domain: "owner-registration", Kind: registeredYardsMigration, FromEpoch: 2, ToEpoch: 3, DependsOn: []string{"canonicalize-test-yard-owner-v2"}})
+	payload, _ := json.Marshal(registry)
+	transition.options.RegistryPayload = payload
+	transition.options.RegisteredYards = owners
+	transition, err := NewV2Transition(transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "yard alpha: first refusal; yard beta: " + domain.ErrPlanStale.Error()
+	for range 5 {
+		_, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+		if err == nil || err.Error() != want {
+			t.Fatalf("got %v, want %s", err, want)
+		}
+		if !errors.Is(err, domain.ErrPlanStale) || !errors.Is(err, refused) {
+			t.Fatalf("classification lost: %v", err)
+		}
+	}
+	snapshot, err := transition.store.ReadCurrentJournal()
+	if err != nil || snapshot.Exists {
+		t.Fatalf("refused inspection wrote a journal: %v", err)
+	}
+	guest := MigrationDefinitionV2{Kind: guestDiskTmpMigration, Domain: "power-metadata", FromEpoch: 2, ToEpoch: 3}
+	transition.options.GuestDiskTmp = owners
+	observation := &v2Observation{}
+	if _, err := transition.appendNativeMigration(context.Background(), observation, guest, nil); err == nil || err.Error() != want {
+		t.Fatalf("guest migration hid a yard: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := transition.inspectRegisteredSettings(canceled, MigrationDefinitionV2{Kind: registeredYardsMigration, Domain: "owner-registration", FromEpoch: 2, ToEpoch: 3}, nil, ReleaseLinks{}); err == nil || err.Error() != stale.Error() {
+		t.Fatalf("canceled inspection kept observing yards: %v", err)
 	}
 }
 

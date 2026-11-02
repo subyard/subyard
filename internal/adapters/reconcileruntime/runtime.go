@@ -666,17 +666,18 @@ func (runtime Runtime) vmDeviceBoundary(state ports.ReconcileState) (bool, error
 	if size != "" && profileRoot["size"] != size {
 		return false, nil
 	}
-	if _, overridden := state.Instance.LocalDevices["root"]; overridden {
-		return false, errors.New("local root disk overrides the managed project profile")
-	}
+	var findings []error
 	root := state.Instance.Devices["root"]
-	if profileRoot["type"] != "disk" || profileRoot["path"] != "/" ||
+	if _, overridden := state.Instance.LocalDevices["root"]; overridden {
+		findings = append(findings, errors.New("local root disk overrides the managed project profile"))
+	} else if profileRoot["type"] != "disk" || profileRoot["path"] != "/" ||
 		profileRoot["pool"] == "" || profileRoot["source"] != "" ||
 		!maps.Equal(root, profileRoot) {
-		return false, errors.New("effective root disk differs from the managed project profile")
+		findings = append(findings, errors.New("effective root disk differs from the managed project profile"))
 	}
 	if !noHost {
-		return true, nil
+		err := domain.CollectRefusals(findings...)
+		return err == nil, err
 	}
 	profileNIC := state.ProfileDevices["eth0"]
 	effectiveNIC := maps.Clone(state.Instance.Devices["eth0"])
@@ -687,7 +688,7 @@ func (runtime Runtime) vmDeviceBoundary(state ports.ReconcileState) (bool, error
 	}
 	if profileNIC["type"] != "nic" || profileNIC["network"] == "" ||
 		!maps.Equal(effectiveNIC, managedNIC) {
-		return false, errors.New("effective eth0 differs from the managed project profile")
+		findings = append(findings, errors.New("effective eth0 differs from the managed project profile"))
 	}
 	pool, volume := runtime.volumeNames()
 	for name, device := range state.Instance.Devices {
@@ -719,9 +720,10 @@ func (runtime Runtime) vmDeviceBoundary(state ports.ReconcileState) (bool, error
 				continue
 			}
 		}
-		return false, fmt.Errorf("effective device %q violates ALLOWS_HOST_ACCESS=false", name)
+		findings = append(findings, fmt.Errorf("effective device %q violates ALLOWS_HOST_ACCESS=false", name))
 	}
-	return true, nil
+	err := domain.CollectRefusals(findings...)
+	return err == nil, err
 }
 
 func (runtime Runtime) reconcileState(ctx context.Context) (ports.ReconcileState, error) {

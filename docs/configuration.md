@@ -969,21 +969,25 @@ only when `--adopt` is explicitly selected.
 
 Adoption verifies protected persisted configuration, owner HostID, installed
 source and completed release history, native instance UUID, dedicated project
-inventory and configured native capabilities. Supported containers, nested
-containers and VMs use the same generic capability validators as reconciliation.
-Unknown workloads, snapshots, uninventoried enabled namespaces, noncanonical
-devices, temporary configuration overrides and partial or foreign ownership
-are refused. The existing project policy must already be converged.
+inventory and the instance configuration keys of configured capabilities; ordinary
+init validates capability devices and host sources.
+Existing local devices are taken under management as they are, whatever their name, type or
+options; ordinary init owns any later convergence. Device refusals remain for a missing or
+different `srv` device, because reattaching it would change persistent data, the
+`ALLOWS_HOST_ACCESS=false` boundary, a selected resource device that fails its recipe or
+receipt, and local and expanded devices that disagree. Unknown workloads, snapshots,
+uninventoried enabled namespaces, temporary configuration overrides and partial or foreign
+ownership are refused. The existing project policy must already be converged. A refusal lists
+every problem the assessment can determine.
 
-Existing project bind devices are supported when the protected local registry
+Existing project bind devices are selected when the protected local registry
 ties their exact generated name, source, destination and options to the selected
-yard. Adoption binds those records before consent; an unknown `ws-` device name
-does not establish ownership. Selected physical-memory telemetry may be absent
-or retain a recognized interrupted installation state when its owning validator
-proves that ordinary init can finish safely. Unmarked existing mounts, foreign
-markers, inherited devices and occupied telemetry paths are refused. The registration
-substep leaves telemetry unchanged; the same command then reconciles it through
-the ordinary init stages.
+yard. Adoption binds those records before consent; other `ws-` devices are retained
+without establishing project ownership, and an unsafe registry still refuses. Physical-memory
+telemetry devices and markers are accepted in any state, as are volatile keys of existing local
+devices and preview route markers. The registration substep leaves telemetry unchanged; the
+same command then reconciles it through the ordinary init stages, which refuse what they cannot
+converge.
 
 The operation first atomically publishes complete project registration with
 adopted provenance, preserving instance identity, disks, workloads and desired

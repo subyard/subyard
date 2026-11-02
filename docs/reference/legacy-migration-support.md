@@ -1,7 +1,7 @@
 ---
 title: Legacy migration support and reinstall policy
 status: accepted policy
-updated: 2026-10-16
+updated: 2026-11-02
 ---
 
 # Legacy migration support and reinstall policy
@@ -51,15 +51,24 @@ The source-version cutoff does not raise the domain epoch floor or retire V2 che
 Supported updates run versioned compatibility migrations for registered local yards through
 the release journal. Plain `yard init` finishes missing compatibility work before its strict
 ordinary initialization; `--adopt` remains a compatible explicit entry. Bounded registration
-and native identity checks precede project and selected-resource receipt publication. Working
-resource endpoints are retained, while unproven shared and host creation ownership is preserved.
+and native identity checks precede project and selected-resource receipt publication. This
+adoption path cannot be rolled back, so it takes existing local devices under management as they
+are, including unknown names, memory devices and unregistered or changed `ws-*` devices, and its
+consent says so. Ordinary reconciliation owns any later convergence. Device refusals remain
+for a missing or different `srv` device, because reattaching it would change persistent data, the
+`ALLOWS_HOST_ACCESS=false` boundary, a selected resource device that fails its recipe or receipt,
+and local and expanded devices that disagree. Working
+resource endpoints are retained: only a shipped default or unset setting imports the native value,
+and an operator-set or saved value is left untouched, while unproven shared and host creation
+ownership is preserved. Refusals are reported together, per yard, before any journal exists.
 Guest temporary-storage policy installation never implies restart consent: a required restart
 or temporary boot asks separately after migration begins, even with `--yes`. Decline or EOF
 leaves the journal incomplete and resumable without restarting the yard. Persistent data,
 instance UUID and desired power remain protected. Completed migrations are not reopened for drift.
 Explicit `yard init --continue-legacy` can establish
 a separately confirmed, protected grant for bounded normal reconciliation of a supported,
-exactly assessed legacy resource. It does not relabel the project or authorize full removal.
+exactly assessed legacy resource. It keeps its closed device list while reporting every refusal
+together, does not relabel the project and does not authorize full removal.
 The power acceptance fixture exercises this opt-in, repeated plain init, two reboots and
 compatible rollback/forward while preserving the grant and native identity. Current-owned
 projects retain their ordinary repeatable initialization contract.
