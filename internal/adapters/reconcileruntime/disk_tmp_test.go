@@ -39,7 +39,8 @@ func diskTmpFixture(t *testing.T) (string, string, func(string, ...string) ([]by
 	script := filepath.Join(root, "policy.sh")
 	testkit.WriteFile(t, script, []byte(rewritten), 0700)
 	for name, body := range map[string]string{
-		"stat": `case "$2" in
+		"stat": `[ "${3:-}" != "${FOREIGN_PATH:-}" ] || OWNER=1000:1000
+case "$2" in
   %u:%g) printf '%s\n' "${OWNER:-0:0}" ;;
   %a:%u:%g) printf '%s:%s\n' "$(/usr/bin/stat -c %a "$3")" "${OWNER:-0:0}" ;;
   *) exec /usr/bin/stat "$@" ;;
@@ -344,5 +345,47 @@ func TestDiskTmpPostApplyAndStoppedPolicy(t *testing.T) {
 		if err != nil || ready != (policy == "v1") {
 			t.Fatalf("stopped policy=%q ready=%v err=%v", policy, ready, err)
 		}
+	}
+}
+
+func TestDiskTmpAssessmentReportsEveryIndependentFinding(t *testing.T) {
+	root, _, run := diskTmpFixture(t)
+	policy := filepath.Join(root, "etc/subyard-guest-tmpfiles.conf")
+	testkit.WriteFile(t, policy, []byte("foreign\n"), 0644)
+	if err := os.Symlink("/foreign", filepath.Join(root, "etc/systemd/system/tmp.mount")); err != nil {
+		t.Fatal(err)
+	}
+	environment := []string{"FOREIGN_PATH=" + filepath.Join(root, "usr/local/lib"), "FILESYSTEM=unknown"}
+	want := []string{
+		"foreign or unsafe guest tmp.mount policy",
+		"unsafe guest temporary policy directory: " + filepath.Join(root, "usr/local/lib") + " owner 1000:1000",
+		"foreign or unsafe guest temporary policy file: " + policy,
+		"unsupported " + filepath.Join(root, "tmp") + " filesystem: unknown",
+	}
+	output, err := run("assess", environment...)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("assessment: %v: %s", err, output)
+	}
+	position := 0
+	for _, finding := range want {
+		index := strings.Index(string(output[position:]), "guest-disk-tmp: "+finding)
+		if index < 0 {
+			t.Fatalf("finding %q missing or out of order:\n%s", finding, output)
+		}
+		position += index + len(finding)
+	}
+	if again, _ := run("assess", environment...); string(again) != string(output) {
+		t.Fatalf("finding order is unstable:\n%s\n%s", output, again)
+	}
+	if data, _ := os.ReadFile(policy); string(data) != "foreign\n" {
+		t.Fatal("assessment changed foreign policy")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "calls")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("assessment ran a host-changing command", err)
+	}
+	// A memory-backed guest with a real finding is refused, not offered a restart.
+	if output, err := run("assess", "FOREIGN_PATH="+filepath.Join(root, "usr/local/lib"), "FILESYSTEM=tmpfs"); !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("unsafe memory-backed guest: %v: %s", err, output)
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,11 +73,59 @@ func assessRegisteredDiskTmp(ctx context.Context, runtime reconcileruntime.Runti
 		return nil
 	}
 	var exit *ports.GuestExitError
-	if result.ExitCode == 10 && errors.As(err, &exit) && exit.Code == 10 && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	guestExit := errors.As(err, &exit) && exit.Code == result.ExitCode && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	if result.ExitCode == 10 && guestExit {
 		return nil
 	}
-	return errors.Join(fmt.Errorf("assess guest disk /tmp safety: exit %d", result.ExitCode), err)
+	if guestExit && result.ExitCode != 0 {
+		return &guestDiskTmpRefusal{yard: runtime.Yard.YardName, exit: result.ExitCode, findings: guestDiskTmpFindings(result.Stderr)}
+	}
+	return errors.Join(fmt.Errorf("yard %s: assess guest disk /tmp safety: exit %d", runtime.Yard.YardName, result.ExitCode), err)
 }
+
+// The guest is outside the host's trust boundary: only this leaf's own prefixed
+// findings in a closed alphabet reach the operator, and only a bounded number.
+const (
+	guestDiskTmpFindingPrefix = "guest-disk-tmp: "
+	guestDiskTmpFindingLimit  = 8
+)
+
+var guestDiskTmpFinding = regexp.MustCompile(`^[A-Za-z0-9 _./:'-]{1,120}$`)
+
+func guestDiskTmpFindings(stderr []byte) []string {
+	findings := []string{}
+	for line := range strings.SplitSeq(string(stderr), "\n") {
+		if finding, ok := strings.CutPrefix(line, guestDiskTmpFindingPrefix); ok && guestDiskTmpFinding.MatchString(finding) && !slices.Contains(findings, finding) {
+			findings = append(findings, finding)
+		}
+	}
+	return findings
+}
+
+// guestDiskTmpRefusal is a guest's safety verdict, not an unavailable dependency.
+type guestDiskTmpRefusal struct {
+	yard     string
+	exit     int
+	findings []string
+}
+
+func (refusal *guestDiskTmpRefusal) Error() string {
+	message, _ := refusal.ActivationDiagnostic()
+	return message
+}
+
+func (refusal *guestDiskTmpRefusal) ActivationDiagnostic() (string, string) {
+	reason := fmt.Sprintf("guest exit %d without a recognized reason", refusal.exit)
+	if count := len(refusal.findings); count > guestDiskTmpFindingLimit {
+		reason = fmt.Sprintf("%s; and %d more", strings.Join(refusal.findings[:guestDiskTmpFindingLimit], "; "), count-guestDiskTmpFindingLimit)
+	} else if count != 0 {
+		reason = strings.Join(refusal.findings, "; ")
+	}
+	return fmt.Sprintf("yard %s: guest disk /tmp policy refused: %s", refusal.yard, reason),
+		"correct the reported guest state, then run yard update --check"
+}
+
+func (*guestDiskTmpRefusal) MigrationRefusal() bool { return true }
 
 // MigrateRegisteredDiskTmp is one concrete migration leaf. Installing policy
 // does not authorize a reboot: each disruptive cycle needs separate late assent.

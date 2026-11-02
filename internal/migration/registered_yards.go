@@ -277,7 +277,9 @@ func (m *RegisteredYardMigration) observePlans(ctx context.Context, plans []regi
 			if projectGrant {
 				consequences = append(consequences, fmt.Sprintf("yard %s: register ownership of project %s; allow normal management and full removal of this project and its assessed resources; all existing local devices enter management as found", plan.loaded.Context.YardName, plan.loaded.Context.IncusProject))
 			}
-			for key, value := range plan.receipts {
+			// Consequences enter the plan token, so their order must be stable.
+			for _, key := range slices.Sorted(maps.Keys(plan.receipts)) {
+				value := plan.receipts[key]
 				if instance.LocalConfig[key] == value {
 					continue
 				}
@@ -408,28 +410,17 @@ func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) 
 	expanded := maps.Clone(plan.instance.Config)
 	for _, values := range []map[string]string{configuration, expanded} {
 		// Only exact lifecycle outputs and independently validated producer results.
-		for _, key := range []string{"volatile.last_state.power", "volatile.last_state.ready"} {
-			delete(values, key)
-		}
 		// Every start rewrites these for an accepted device; the journal must not pin them.
-		for _, device := range append(slices.Collect(maps.Keys(plan.instance.LocalDevices)), "eth0") {
-			prefix := "volatile." + device + "."
-			maps.DeleteFunc(values, func(key, _ string) bool {
-				return key == prefix+"host_name" || strings.HasPrefix(key, prefix+"last_state.")
-			})
-		}
-		if plan.runtime.Yard.YardKind == domain.YardVM && plan.instance.Type == domain.YardVM {
-			for _, key := range []string{"volatile.vm.rtc_adjustment", "volatile.vm.rtc_offset"} {
-				if parsed, err := strconv.ParseInt(values[key], 10, 64); err == nil && strconv.FormatInt(parsed, 10) == values[key] {
-					delete(values, key)
-				}
-			}
-		}
+		reconcileruntime.DeleteInstanceLifecycleOutputs(values, append(slices.Collect(maps.Keys(plan.instance.LocalDevices)), "eth0"), plan.runtime.Yard.YardKind == domain.YardVM && plan.instance.Type == domain.YardVM)
 		for key, value := range plan.receipts {
 			values[key] = value
 		}
+		// One durable journal holds both owners; neither may pin the other's result.
+		// A foreign marker value is refused separately and stays bound here.
 		if m.GuestTmp {
 			values["user.subyard.disk_tmp"] = "v1"
+		} else if values["user.subyard.disk_tmp"] == "v1" {
+			delete(values, "user.subyard.disk_tmp")
 		}
 	}
 	project := maps.Clone(plan.before)

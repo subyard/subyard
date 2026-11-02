@@ -159,13 +159,14 @@ func TestConvergedIntegrationPlanSurvivesNativeInterfaceRestart(t *testing.T) {
 				values["volatile.eth0.host_name"] = "veth-after"
 				if kind == domain.YardVM {
 					values["volatile.vm.rtc_adjustment"], values["volatile.vm.rtc_offset"] = "1", "-1"
+					values["volatile.vm.needs_reset"] = "true"
 				}
 			}
 			fresh, err := runtime.IntegrationPlan(context.Background())
 			if err != nil || fresh.Changed || fresh.Scope != approved.Scope || fresh.Fingerprint != approved.Fingerprint || CheckIntegrationPlan(approved, fresh) != nil {
 				t.Fatalf("interface restart invalidated unchanged integration plan: changed=%t err=%v", fresh.Changed, err)
 			}
-			for _, key := range []string{"volatile.uuid", "volatile.eth0.hwaddr", "volatile.idmap.current", "volatile.uuid.generation", "volatile.vsock_id", "volatile.vm.rtc_offset.extra", "volatile.vm.rtc_offset", "noncanonical-clock", "foreign.owner", "device"} {
+			for _, key := range []string{"volatile.vm.needs_reset", "volatile.vm.needs_reset.extra", "volatile.uuid", "volatile.eth0.hwaddr", "volatile.idmap.current", "volatile.uuid.generation", "volatile.vsock_id", "volatile.vm.rtc_offset.extra", "volatile.vm.rtc_offset", "noncanonical-clock", "foreign.owner", "device"} {
 				t.Run(key, func(t *testing.T) {
 					if key == "device" {
 						instance.Devices[key] = map[string]string{"type": "disk", "source": "/foreign", "path": "/foreign"}
@@ -182,6 +183,9 @@ func TestConvergedIntegrationPlanSurvivesNativeInterfaceRestart(t *testing.T) {
 						}
 						if key == "volatile.vm.rtc_offset" && kind == domain.YardContainer {
 							instance.Config[key] = "1"
+						}
+						if strings.HasPrefix(key, "volatile.vm.needs_reset") && kind == domain.YardContainer {
+							instance.Config[key] = "true"
 						}
 						defer func() {
 							if exists {

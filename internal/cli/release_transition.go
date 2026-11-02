@@ -1587,6 +1587,34 @@ func readReleaseTransitionGrant() (releasetransition.Authorization, error) {
 	return releasetransition.Authorization(payload), nil
 }
 
+// verifiedNativeMigrations reads this transaction's own durable evidence. Native
+// migrations run after the plan's approval and publish instance metadata, so their
+// verified steps explain exactly that change. Unavailable evidence explains nothing.
+func (reconciler *materializedConfigActivationReconciler) verifiedNativeMigrations(operation *CLI, yard string) reconcileruntime.VerifiedNativeMigrations {
+	store, err := releasetransition.NewPOSIXV2Store(reconciler.configHome)
+	if err != nil {
+		return reconcileruntime.VerifiedNativeMigrations{}
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return reconcileruntime.VerifiedNativeMigrations{}
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Goal != reconciler.goal || journal.ArtifactDigest != reconciler.artifactDigest {
+		return reconcileruntime.VerifiedNativeMigrations{}
+	}
+	payload, err := os.ReadFile(filepath.Join(operation.options.RepositoryRoot, "config", "release-transition.json"))
+	if err != nil {
+		return reconcileruntime.VerifiedNativeMigrations{}
+	}
+	registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil || digest != journal.RegistryDigest {
+		return reconcileruntime.VerifiedNativeMigrations{}
+	}
+	registered, guestDiskTmp := releasetransition.VerifiedNativeMigrationKinds(registry, journal, yard)
+	return reconcileruntime.VerifiedNativeMigrations{RegisteredYard: registered, GuestDiskTmp: guestDiskTmp}
+}
+
 func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTarget(ctx context.Context, operation *CLI, target configTarget) (err error) {
 	approved, selected := reconciler.integrationPlans[target.Name]
 	if !selected {
@@ -1623,7 +1651,11 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 		return err
 	}
 	comparison = &integrationComparison{approved.Fingerprint == plan.Fingerprint, approved.Scope == plan.Scope, approved.Changed, plan.Changed}
-	compared, err := runtime.ProjectIntegrationPlanAfterProfileActivation(ctx, approved, plan)
+	compared, err := reconcileruntime.ProjectIntegrationPlanAfterNativeMigrations(approved, plan, reconciler.verifiedNativeMigrations(operation, target.Name))
+	if err != nil {
+		return err
+	}
+	compared, err = runtime.ProjectIntegrationPlanAfterProfileActivation(ctx, approved, compared)
 	if err != nil {
 		return err
 	}

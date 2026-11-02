@@ -174,12 +174,13 @@ func TestBothConcreteRegisteredOwnersShareOneDurableJournal(t *testing.T) {
 					testkit.WriteFile(t, gitPath, []byte("SSH_PORT=2241\n"), 0600)
 				}
 				if cut == "vm-rtc-cut" {
-					// Incus updates its clock bookkeeping across a real VM stop/start.
-					// Model only those lifecycle outputs before a fresh process resumes
-					// the same durable migration; policy readiness uses the existing leaf fixture.
+					// Incus updates its clock bookkeeping and pending-reset flag across a real
+					// VM stop/start. Model only those lifecycle outputs before a fresh process
+					// resumes the same durable migration; policy readiness uses the existing leaf fixture.
 					instance := native.Instances["fixture/yard"]
 					for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
 						values["volatile.vm.rtc_adjustment"], values["volatile.vm.rtc_offset"] = "1", "-1"
+						values["volatile.vm.needs_reset"] = "true"
 					}
 					native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
 				}
@@ -593,10 +594,55 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 	}
 }
 
+func TestRegisteredDesiredIgnoresVMRestartOutputs(t *testing.T) {
+	for _, guest := range []bool{false, true} {
+		t.Run(fmt.Sprintf("guest-%t", guest), func(t *testing.T) {
+			owner, tmp, native, _ := pairedRegisteredOwners(t)
+			if guest {
+				owner = tmp
+			}
+			original := owner.LoadTargets
+			owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
+				targets, err := original(ctx, view)
+				for index := range targets {
+					targets[index].Loaded.Context.YardKind = domain.YardVM
+					targets[index].Runtime.Yard.YardKind = domain.YardVM
+				}
+				return targets, err
+			}
+			instance := native.Instances["fixture/yard"]
+			instance.Type = domain.YardVM
+			set := func(key, value string) {
+				instance.Config[key], instance.LocalConfig[key] = value, value
+				native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+			}
+			desired := func() releasetransition.Fingerprint {
+				t.Helper()
+				fresh := *owner
+				observed, err := fresh.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return observed.Desired
+			}
+			set("volatile.eth0.host_name", "tapBEFORE")
+			set("volatile.vm.rtc_adjustment", "-1")
+			before := desired()
+			set("volatile.eth0.host_name", "tapAFTER")
+			set("volatile.vm.rtc_adjustment", "-2")
+			set("volatile.vm.needs_reset", "true")
+			if desired() != before {
+				t.Fatal("VM restart outputs changed the pinned Desired")
+			}
+		})
+	}
+}
+
 func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 	for _, guest := range []bool{false, true} {
-		for _, change := range []string{"malformed-clock", "noncanonical-clock", "clock-suffix", "container-clock", "uuid", "generation", "vsock", "limits", "device"} {
+		for _, change := range []string{"malformed-clock", "noncanonical-clock", "clock-suffix", "container-clock", "reset-false", "reset-empty", "reset-suffix", "container-reset", "uuid", "generation", "vsock", "limits", "device"} {
 			t.Run(fmt.Sprintf("guest-%t/%s", guest, change), func(t *testing.T) {
+				container := strings.HasPrefix(change, "container-")
 				owner, tmp, native, _ := pairedRegisteredOwners(t)
 				if guest {
 					owner = tmp
@@ -604,7 +650,7 @@ func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 				original := owner.LoadTargets
 				owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
 					targets, err := original(ctx, view)
-					if change != "container-clock" {
+					if !container {
 						for index := range targets {
 							targets[index].Loaded.Context.YardKind = domain.YardVM
 							targets[index].Runtime.Yard.YardKind = domain.YardVM
@@ -613,7 +659,7 @@ func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 					return targets, err
 				}
 				instance := native.Instances["fixture/yard"]
-				if change != "container-clock" {
+				if !container {
 					instance.Type = domain.YardVM
 				}
 				for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
@@ -632,6 +678,14 @@ func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 					value = "01"
 				case "clock-suffix":
 					key = "volatile.vm.rtc_offset.extra"
+				case "reset-false":
+					key, value = "volatile.vm.needs_reset", "false"
+				case "reset-empty":
+					key, value = "volatile.vm.needs_reset", ""
+				case "reset-suffix":
+					key, value = "volatile.vm.needs_reset.extra", "true"
+				case "container-reset":
+					key, value = "volatile.vm.needs_reset", "true"
 				case "uuid":
 					key = "volatile.uuid"
 				case "generation":
@@ -721,5 +775,76 @@ func TestGuestTmpCompletionDoesNotRequireOrdinaryInitialization(t *testing.T) {
 				t.Fatal("invalid inspection caused effects")
 			}
 		})
+	}
+}
+
+type cutActivation struct{ cut bool }
+
+func (*cutActivation) ID() string { return "activation-cut" }
+func (activation *cutActivation) Observe(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks) (releasetransition.V2ActivationObservation, error) {
+	desired := releasetransition.Fingerprint(strings.Repeat("a", 64))
+	if activation.cut {
+		return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(strings.Repeat("b", 64)), Desired: desired}, nil
+	}
+	return releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true}, nil
+}
+func (activation *cutActivation) Reconcile(context.Context, releasetransition.ReleaseLinks) error {
+	if activation.cut {
+		return errors.New("activation cut")
+	}
+	return nil
+}
+
+// A later process must resume activation after both native steps were verified.
+// Each owner's recorded Desired has to hold after the other owner's published result.
+func TestFreshProcessResumesActivationAfterBothRegisteredOwnersVerified(t *testing.T) {
+	owner, tmp, native, _ := pairedRegisteredOwners(t)
+	candidate := registeredSSHConfigFixture(t)
+	payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":2,"power-metadata":2},"currentEpochs":{"owner-registration":3,"power-metadata":3},"migrations":[{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3"},{"id":"guest-tmp-v3","domain":"power-metadata","fromEpoch":2,"toEpoch":3,"kind":"registered-guest-disk-tmp-v2-to-v3","dependsOn":["registered-v3"]}]}`)
+	activation := &cutActivation{cut: true}
+	options := releasetransition.V2Options{CandidateConfigDir: candidate, ConfigHome: owner.ConfigHome, RegistryPayload: payload, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+		Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, Direction: releasetransition.DirectionActivateTarget,
+		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+			return releasetransition.ReleaseLinks{Active: "release-a"}, nil
+		},
+		RegisteredEndpointSettings: owner.Resources.EndpointSettingNames(),
+		RegisteredYards:            []releasetransition.V2ActivationReconciler{owner}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{tmp},
+		Reconcilers: []releasetransition.V2ActivationReconciler{activation},
+		VerifyAuthorization: func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool {
+			return grant == "confirmed"
+		},
+	}
+	transition, err := releasetransition.NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil || len(inspection.Blockers) != 0 {
+		t.Fatalf("inspect: %#v %v", inspection, err)
+	}
+	if outcome, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"}); err == nil && outcome.Status == releasetransition.StatusReady {
+		t.Fatal("cut activation reported ready")
+	}
+	if native.Instances["fixture/yard"].LocalConfig["user.subyard.disk_tmp"] != "v1" {
+		t.Fatal("guest migration did not publish its marker before the cut")
+	}
+	reopened, reopenedTmp := *owner, *tmp
+	reopened.prepared, reopened.observedActual, reopened.observedDesired = nil, "", ""
+	reopenedTmp.prepared, reopenedTmp.observedActual, reopenedTmp.observedDesired = nil, "", ""
+	options.RegisteredYards = []releasetransition.V2ActivationReconciler{&reopened}
+	options.GuestDiskTmp = []releasetransition.V2ActivationReconciler{&reopenedTmp}
+	activation.cut = false
+	transition, err = releasetransition.NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := transition.Inspect(context.Background(), goal)
+	if err != nil || len(resumed.Blockers) != 0 || resumed.Resume == nil {
+		t.Fatalf("fresh process could not resume: %#v %v", resumed.Blockers, err)
+	}
+	outcome, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: resumed.Plan, Authorization: "confirmed"})
+	if err != nil || outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("resume: %#v %v", outcome, err)
 	}
 }

@@ -119,3 +119,47 @@ func TestObservedPublicationUsesTypedHistoricalRecipeAndProtectedIdentity(t *tes
 		})
 	}
 }
+
+func TestAdoptionTakesHistoricalDisabledPublicationAsFound(t *testing.T) {
+	legacy := "one"
+	definition := Definition{Name: "synthetic", InstancePublication: &RevisionedSettingsPublication{
+		SchemaKey: "user.subyard.synthetic_schema", SchemaValue: "1", RevisionKey: "user.subyard.synthetic_revision", DisabledSetting: "SYN_ENABLED", LegacySettingsCount: 1,
+		Settings: []PublicationSetting{{Name: "SYN_IMAGE"}, {Name: "SYN_CPU", LegacyDefault: &legacy}},
+	}}
+	schema, revisionKey := definition.InstancePublication.SchemaKey, definition.InstancePublication.RevisionKey
+	first, second := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	historical := "0:" + first + ":" + second + ":4"
+	accept := func(string, string) error { return nil }
+	disabled := map[string]string{"SYN_ENABLED": "0", "SYN_IMAGE": "images:debian/13"}
+	marker := map[string]string{revisionKey: historical}
+
+	observed, err := definition.ObserveInstancePublication(marker, marker, disabled, accept)
+	if err != nil || len(observed) != 1 || observed[revisionKey] != historical {
+		t.Fatalf("historical disabled marker not taken as found: %#v %v", observed, err)
+	}
+	if _, err := definition.ProjectInstancePublication(marker, marker, disabled); err == nil {
+		t.Fatal("strict continuation admitted the historical marker")
+	}
+	for name, test := range map[string]struct {
+		local, effective, environment map[string]string
+	}{
+		"enabled mode":     {marker, marker, map[string]string{"SYN_ENABLED": "1"}},
+		"unset mode":       {marker, marker, map[string]string{}},
+		"enabled marker":   {map[string]string{revisionKey: "1:" + first + ":" + second + ":4"}, map[string]string{revisionKey: "1:" + first + ":" + second + ":4"}, map[string]string{"SYN_ENABLED": "1"}},
+		"mode conflict":    {map[string]string{revisionKey: "1:" + first + ":" + second + ":4"}, map[string]string{revisionKey: "1:" + first + ":" + second + ":4"}, disabled},
+		"schema present":   {map[string]string{revisionKey: historical, schema: "1"}, map[string]string{revisionKey: historical, schema: "1"}, disabled},
+		"inherited schema": {marker, map[string]string{revisionKey: historical, schema: "1"}, disabled},
+		"inherited marker": {map[string]string{}, marker, disabled},
+		"expanded differs": {marker, map[string]string{revisionKey: "0:" + second + ":" + first + ":4"}, disabled},
+		"short hash":       {map[string]string{revisionKey: "0:abc:" + second + ":4"}, map[string]string{revisionKey: "0:abc:" + second + ":4"}, disabled},
+		"no cpu":           {map[string]string{revisionKey: "0:" + first + ":" + second}, map[string]string{revisionKey: "0:" + first + ":" + second}, disabled},
+		"bad cpu":          {map[string]string{revisionKey: "0:" + first + ":" + second + ":0"}, map[string]string{revisionKey: "0:" + first + ":" + second + ":0"}, disabled},
+		"extra field":      {map[string]string{revisionKey: historical + ":5"}, map[string]string{revisionKey: historical + ":5"}, disabled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if observed, err := definition.ObserveInstancePublication(test.local, test.effective, test.environment, accept); err == nil {
+				t.Fatalf("accepted: %#v", observed)
+			}
+		})
+	}
+}

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Subyard/Subyard/internal/domain"
+	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 func TestRegisteredYardMigrationUsesDurableExistingJournal(t *testing.T) {
@@ -169,6 +171,114 @@ func TestRegisteredOwnersAllReportRefusalsBeforeAnyJournal(t *testing.T) {
 	cancel()
 	if _, err := transition.inspectRegisteredSettings(canceled, MigrationDefinitionV2{Kind: registeredYardsMigration, Domain: "owner-registration", FromEpoch: 2, ToEpoch: 3}, nil, ReleaseLinks{}); err == nil || err.Error() != stale.Error() {
 		t.Fatalf("canceled inspection kept observing yards: %v", err)
+	}
+}
+
+type registeredVerdict struct{ message string }
+
+func (verdict *registeredVerdict) Error() string { return verdict.message }
+func (verdict *registeredVerdict) ActivationDiagnostic() (string, string) {
+	return verdict.message, "correct the reported guest state, then run yard update --check"
+}
+func (*registeredVerdict) MigrationRefusal() bool { return true }
+
+// An owner's verdict about existing state is a blocker naming every yard, not a
+// failure of the engine that would be reported as a missing dependency.
+func TestRegisteredOwnerVerdictsBlockAndNameEveryYard(t *testing.T) {
+	transition, _, _ := v2TransitionFixture(t, nil)
+	var registry RegistryV2
+	if err := json.Unmarshal(transition.options.RegistryPayload, &registry); err != nil {
+		t.Fatal(err)
+	}
+	registry.CurrentEpochs["power-metadata"] = 3
+	registry.Migrations = append(registry.Migrations,
+		MigrationDefinitionV2{ID: "publication-v2", Domain: "power-metadata", Kind: "owner-publication-state-v1", FromEpoch: 1, ToEpoch: 2},
+		MigrationDefinitionV2{ID: "guest-tmp-v3", Domain: "power-metadata", Kind: guestDiskTmpMigration, FromEpoch: 2, ToEpoch: 3})
+	payload, _ := json.Marshal(registry)
+	transition.options.RegistryPayload = payload
+	beta := &refusingRegisteredOwner{v2TestReconciler: &v2TestReconciler{id: "yard.beta"}, refusal: &registeredVerdict{"yard beta: guest refused: second"}}
+	alpha := &refusingRegisteredOwner{v2TestReconciler: &v2TestReconciler{id: "yard.alpha"}, refusal: &registeredVerdict{"yard alpha: guest refused: first"}}
+	ready := &refusingRegisteredOwner{v2TestReconciler: &v2TestReconciler{id: "yard.ready"}}
+	transition.options.GuestDiskTmp = []V2ActivationReconciler{beta, ready, alpha}
+	transition, err := NewV2Transition(transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil {
+		t.Fatalf("verdict became an engine failure: %v", err)
+	}
+	if err := ValidateProcessInspection(goal, inspection); err != nil {
+		t.Fatalf("blocked inspection crosses no process boundary: %v", err)
+	}
+	if len(inspection.Blockers) != 1 || inspection.Blockers[0].Code != CodePreconditionBlocked ||
+		inspection.Blockers[0].Message != "yard alpha: guest refused: first; yard beta: guest refused: second" ||
+		inspection.Blockers[0].Retry != "correct the reported guest state, then run yard update --check" {
+		t.Fatalf("blockers: %#v", inspection.Blockers)
+	}
+	outcome := inspection.Outcome
+	if outcome == nil || outcome.Status != StatusOperatorActionRequired || !strings.Contains(outcome.Message, "yard beta") || strings.Contains(outcome.Retry, "install a compatible release") {
+		t.Fatalf("outcome: %#v", outcome)
+	}
+	if snapshot, err := transition.store.ReadCurrentJournal(); err != nil || snapshot.Exists {
+		t.Fatalf("refused inspection wrote a journal: %v", err)
+	}
+
+	// An unrelated inspection failure ends the observation and must carry the verdicts.
+	ready.refusal = errors.New("yard ready: registry unreadable")
+	_, err = transition.Inspect(context.Background(), goal)
+	for _, want := range []string{"yard alpha: guest refused", "yard beta: guest refused", "yard ready: registry unreadable"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%q hidden by another refusal: %v", want, err)
+		}
+	}
+}
+
+func TestRegisteredOwnerVerdictBlocksResumeWithoutFailingInspection(t *testing.T) {
+	transition, _, _ := v2TransitionFixture(t, nil)
+	var registry RegistryV2
+	if err := json.Unmarshal(transition.options.RegistryPayload, &registry); err != nil {
+		t.Fatal(err)
+	}
+	registry.CurrentEpochs["power-metadata"] = 3
+	registry.Migrations = append(registry.Migrations,
+		MigrationDefinitionV2{ID: "publication-v2", Domain: "power-metadata", Kind: "owner-publication-state-v1", FromEpoch: 1, ToEpoch: 2},
+		MigrationDefinitionV2{ID: "guest-tmp-v3", Domain: "power-metadata", Kind: guestDiskTmpMigration, FromEpoch: 2, ToEpoch: 3})
+	payload, _ := json.Marshal(registry)
+	transition.options.RegistryPayload = payload
+	owner := &refusingRegisteredOwner{v2TestReconciler: &v2TestReconciler{id: "yard.hermes"}}
+	transition.options.GuestDiskTmp = []V2ActivationReconciler{owner}
+	transition, err := NewV2Transition(transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition.options.fault = func(point string) error {
+		if point == "after-step-evidence" {
+			return errors.New("durable cut")
+		}
+		return nil
+	}
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil || len(inspection.Blockers) != 0 {
+		t.Fatalf("inspect: %#v %v", inspection, err)
+	}
+	if outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)}); err == nil && outcome.Status == StatusReady {
+		t.Fatal("cut marked ready")
+	}
+	snapshot, err := transition.store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		t.Fatalf("cut left no journal: %v", err)
+	}
+	owner.refusal = &registeredVerdict{"yard hermes: guest refused: unsafe"}
+	transition.options.fault = nil
+	resumed, err := transition.Inspect(context.Background(), goal)
+	if err != nil {
+		t.Fatalf("verdict failed resume inspection: %v", err)
+	}
+	if len(resumed.Blockers) != 1 || resumed.Blockers[0].Resource != "yard.hermes" || resumed.Blockers[0].Message != "yard hermes: guest refused: unsafe" {
+		t.Fatalf("resume blockers: %#v", resumed.Blockers)
 	}
 }
 

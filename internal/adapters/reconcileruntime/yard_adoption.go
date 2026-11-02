@@ -32,7 +32,8 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	if err != nil {
 		return state, nil, nil, nil, err
 	}
-	identity, err := json.Marshal(runtime.Yard)
+	// Verified asset handles are process-local labels; publish only persisted identity.
+	identity, err := json.Marshal(domain.ContinuationContext(runtime.Yard))
 	if err != nil {
 		return state, nil, nil, nil, err
 	}
@@ -65,6 +66,11 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	}
 	state.ProjectConfig = maps.Clone(before)
 	stamped := before["user.subyard.installation"] == domain.AdoptedInstallation
+	// A project stamped by an earlier release keeps its label as found: no consumer
+	// reads it, and retaining it keeps the ownership binding stable across processes.
+	if stamped && adoptedContextLabelsOnly(before[adoptedContextKey], metadata[adoptedContextKey]) {
+		metadata[adoptedContextKey] = before[adoptedContextKey]
+	}
 	for key, value := range before {
 		if strings.HasPrefix(key, "user.subyard.") {
 			if !stamped || value != metadata[key] {
@@ -110,6 +116,25 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 		return state, nil, nil, nil, err
 	}
 	return state, resources, metadata, before, nil
+}
+
+const adoptedContextKey = "user.subyard.context"
+
+// adoptedContextLabelsOnly accepts exactly a canonical stamped context whose only
+// differences from the rendered one are the released asset path roles.
+func adoptedContextLabelsOnly(stamped, rendered string) bool {
+	decoder := json.NewDecoder(strings.NewReader(stamped))
+	decoder.DisallowUnknownFields()
+	var value domain.Context
+	if err := decoder.Decode(&value); err != nil || decoder.More() {
+		return false
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil || string(canonical) != stamped {
+		return false
+	}
+	normalized, err := json.Marshal(domain.ContinuationContext(value))
+	return err == nil && string(normalized) == rendered
 }
 
 // YardAdoptionProjects selects the existing workspace devices the selected

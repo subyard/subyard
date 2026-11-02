@@ -10,10 +10,16 @@ policy_files='/etc/subyard-guest-tmpfiles.conf
 /etc/systemd/system/subyard-tmp-clean.service
 /etc/systemd/system/subyard-tmp-clean.timer'
 
+# The host shows only these prefixed lines to the operator.
+refuse() { echo "guest-disk-tmp: $*" >&2; }
+
 safe_directory() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%g' "$1")" = 0:0 ] \
-    && [ $((0$(stat -c '%a' "$1") & 022)) = 0 ] \
-    || { echo "unsafe guest temporary policy directory: $1" >&2; return 1; }
+  if [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%g' "$1")" = 0:0 ] \
+    && [ $((0$(stat -c '%a' "$1") & 022)) = 0 ]; then
+    return 0
+  fi
+  refuse "unsafe guest temporary policy directory: $1 owner $(stat -c '%u:%g' "$1" 2>/dev/null || echo unknown) mode $(stat -c '%a' "$1" 2>/dev/null || echo unknown)"
+  return 1
 }
 
 not_mountpoint() {
@@ -27,7 +33,7 @@ tmp_mount_guard() {
     [ -L /etc/systemd/system/tmp.mount ] \
       && [ "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null ] \
       && [ "$(stat -c '%u:%g' /etc/systemd/system/tmp.mount)" = 0:0 ] \
-      || { echo 'foreign or unsafe guest tmp.mount policy' >&2; return 1; }
+      || { refuse 'foreign or unsafe guest tmp.mount policy'; return 1; }
   fi
 }
 
@@ -147,9 +153,11 @@ EOF
   esac
 }
 
+# Reports every independent problem before refusing; nothing here writes.
 policy_guard() {
+  guard_failed=0
   for parent in / /etc /usr /usr/local /usr/local/lib /etc/systemd /etc/systemd/system; do
-    safe_directory "$parent" || return
+    safe_directory "$parent" || guard_failed=1
   done
   for file in $policy_files; do
     mode=644
@@ -158,21 +166,21 @@ policy_guard() {
       [ -f "$file" ] && [ ! -L "$file" ] \
         && [ "$(stat -c '%a:%u:%g' "$file")" = "$mode:0:0" ] \
         && policy_content "$file" | cmp -s - "$file" \
-        || { echo "foreign or unsafe guest temporary policy file: $file" >&2; return 1; }
+        || { refuse "foreign or unsafe guest temporary policy file: $file"; guard_failed=1; }
     elif [ "$1" = check ]; then
-      echo "guest temporary policy file missing: $file" >&2; return 1
+      refuse "guest temporary policy file missing: $file"; guard_failed=1
     fi
   done
   for unit in subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.service subyard-tmp-clean.timer; do
     overrides=$(systemctl show "$unit" -p DropInPaths --value) \
-      || { echo 'cannot inspect guest temporary policy unit' >&2; return 1; }
+      || { refuse "cannot inspect guest temporary policy unit: $unit"; guard_failed=1; continue; }
     case "$overrides" in
-      */subyard-*.d/*) echo "foreign guest temporary policy unit override: $unit" >&2; return 1 ;;
+      */subyard-*.d/*) refuse "foreign guest temporary policy unit override: $unit"; guard_failed=1 ;;
     esac
   done
   for target in sysinit.target timers.target; do
     directory=/etc/systemd/system/$target.wants
-    if [ -e "$directory" ] || [ -L "$directory" ]; then safe_directory "$directory" || return; fi
+    if [ -e "$directory" ] || [ -L "$directory" ]; then safe_directory "$directory" || guard_failed=1; fi
   done
   for unit in subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.timer; do
     target=sysinit.target
@@ -181,15 +189,18 @@ policy_guard() {
     if [ -e "$link" ] || [ -L "$link" ]; then
       [ -L "$link" ] && [ "$(stat -c '%u:%g' "$link")" = 0:0 ] \
         && [ "$(readlink -f "$link")" = "/etc/systemd/system/$unit" ] \
-        || { echo "foreign guest temporary policy boot link: $unit" >&2; return 1; }
-    elif [ "$1" = check ]; then return 1; fi
+        || { refuse "foreign guest temporary policy boot link: $unit"; guard_failed=1; }
+    elif [ "$1" = check ]; then
+      refuse "guest temporary policy boot link missing: $unit"; guard_failed=1
+    fi
   done
   if [ -e /tmp/subyard-disposable ] || [ -L /tmp/subyard-disposable ]; then
     [ -d /tmp/subyard-disposable ] && [ ! -L /tmp/subyard-disposable ] \
       && [ "$(stat -c '%a:%u:%g' /tmp/subyard-disposable)" = 1777:0:0 ] \
       && not_mountpoint /tmp/subyard-disposable \
-      || { echo 'unsafe guest disposable temporary directory' >&2; return 1; }
+      || { refuse 'unsafe guest disposable temporary directory'; guard_failed=1; }
   fi
+  return "$guard_failed"
 }
 
 unit_command() {
@@ -261,21 +272,39 @@ case "${1:-}" in
   assess)
     # Pre-consent observation: missing policy is eligible for installation.
     # Never mask, reload, clean or wait for a boot from this read-only leaf.
-    [ -d /tmp ] && [ ! -L /tmp ]
-    [ "$(stat -c '%a:%u:%g' /tmp)" = 1777:0:0 ]
-    [ -w /tmp ]
-    tmp_mount_guard
-    policy_guard apply
-    filesystem=$(findmnt -n -T /tmp -o FSTYPE) || exit 1
-    case "$filesystem" in
-      tmpfs|ramfs)
-        result=0
-        mountpoint -q /tmp || result=$?
-        case "$result" in 0|32) exit 10 ;; *) exit 1 ;; esac
-        ;;
-      ext2|ext3|ext4|btrfs|xfs|zfs|overlay|virtiofs|9p) not_mountpoint /tmp ;;
-      *) exit 1 ;;
-    esac
+    # Exit 0 is disk-backed, 10 is memory-backed; 1 follows every reported finding.
+    findings=0
+    if [ -d /tmp ] && [ ! -L /tmp ]; then
+      ownership=$(stat -c '%a:%u:%g' /tmp 2>/dev/null || echo unknown)
+      [ "$ownership" = 1777:0:0 ] || { refuse "/tmp mode and owner are $ownership not 1777:0:0"; findings=1; }
+      [ -w /tmp ] || { refuse '/tmp is not writable'; findings=1; }
+    else
+      refuse '/tmp is not a real directory'; findings=1
+    fi
+    tmp_mount_guard || findings=1
+    policy_guard apply || findings=1
+    memory=0
+    if filesystem=$(findmnt -n -T /tmp -o FSTYPE); then
+      result=0
+      mountpoint -q /tmp || result=$?
+      case "$filesystem" in
+        tmpfs|ramfs)
+          memory=1
+          case "$result" in
+            0|32) ;;
+            *) refuse "cannot inspect the /tmp mount: mountpoint exit $result"; findings=1 ;;
+          esac
+          ;;
+        ext2|ext3|ext4|btrfs|xfs|zfs|overlay|virtiofs|9p)
+          [ "$result" = 32 ] || { refuse "disk-backed /tmp is its own mount: mountpoint exit $result"; findings=1; }
+          ;;
+        *) refuse "unsupported /tmp filesystem: $filesystem"; findings=1 ;;
+      esac
+    else
+      refuse 'cannot read the /tmp filesystem'; findings=1
+    fi
+    [ "$findings" = 0 ] || exit 1
+    [ "$memory" = 0 ] || exit 10
     ;;
   apply)
     wait_boot

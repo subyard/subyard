@@ -11,20 +11,36 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-func cloneIntegrationConfig(config map[string]string, virtualMachine bool) map[string]string {
+func cloneIntegrationConfig(config map[string]string, devices []string, virtualMachine bool) map[string]string {
 	copy := maps.Clone(config)
-	// Incus replaces this host interface name during an approved restart.
-	for _, key := range []string{"user.subyard.ccusage_version", "volatile.eth0.host_name"} {
-		delete(copy, key)
+	delete(copy, "user.subyard.ccusage_version")
+	DeleteInstanceLifecycleOutputs(copy, devices, virtualMachine)
+	return copy
+}
+
+// DeleteInstanceLifecycleOutputs removes what Incus rewrites across an approved
+// stop or start, and nothing that identifies the instance or its devices.
+func DeleteInstanceLifecycleOutputs(values map[string]string, devices []string, virtualMachine bool) {
+	for _, key := range []string{"volatile.last_state.power", "volatile.last_state.ready"} {
+		delete(values, key)
+	}
+	for _, device := range devices {
+		prefix := "volatile." + device + "."
+		maps.DeleteFunc(values, func(key, _ string) bool {
+			return key == prefix+"host_name" || strings.HasPrefix(key, prefix+"last_state.")
+		})
 	}
 	if virtualMachine {
 		for _, key := range []string{"volatile.vm.rtc_adjustment", "volatile.vm.rtc_offset"} {
-			if parsed, err := strconv.ParseInt(copy[key], 10, 64); err == nil && strconv.FormatInt(parsed, 10) == copy[key] {
-				delete(copy, key)
+			if parsed, err := strconv.ParseInt(values[key], 10, 64); err == nil && strconv.FormatInt(parsed, 10) == values[key] {
+				delete(values, key)
 			}
 		}
+		// Incus records a pending VM reset with exactly this value; any other value stays bound.
+		if values["volatile.vm.needs_reset"] == "true" {
+			delete(values, "volatile.vm.needs_reset")
+		}
 	}
-	return copy
 }
 
 func (plan IntegrationPlan) StateBinding() string {
