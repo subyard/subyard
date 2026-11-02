@@ -89,12 +89,11 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 			refusals = append(refusals, errors.New("yard adoption refuses an uninventoried project feature namespace"))
 		}
 	}
+	// Only device identity refuses. A pinned address, hardware address or differing
+	// size enters management as found; ordinary init owns any later convergence.
 	pool, _ := runtime.volumeNames()
-	root := map[string]string{"type": "disk", "path": "/", "pool": pool}
-	if size := runtime.environmentValue("ROOT_DISK_SIZE"); size != "" {
-		root["size"] = size
-	}
-	if !maps.Equal(root, state.ProfileDevices["root"]) || !maps.Equal(map[string]string{"type": "nic", "network": runtime.Yard.IncusBridge}, state.ProfileDevices["eth0"]) {
+	root, nic := state.ProfileDevices["root"], state.ProfileDevices["eth0"]
+	if root["type"] != "disk" || root["path"] != "/" || root["pool"] != pool || nic["type"] != "nic" || nic["network"] != runtime.Yard.IncusBridge {
 		refusals = append(refusals, errors.New("yard adoption refuses noncanonical project root or NIC properties"))
 	}
 	// A verified prior publication may be followed by an interrupted ordinary

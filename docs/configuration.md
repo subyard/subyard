@@ -973,8 +973,11 @@ init validates capability devices and host sources.
 Existing local devices are taken under management as they are, whatever their name, type or
 options; ordinary init owns any later convergence. Device refusals remain for a missing or
 different `srv` device, because reattaching it would change persistent data, the
-`ALLOWS_HOST_ACCESS=false` boundary, a selected resource device that fails its recipe or
-receipt, and local and expanded devices that disagree. Unknown workloads, snapshots,
+`ALLOWS_HOST_ACCESS=false` boundary, a selected loopback or Tailscale resource device that fails
+its recipe, a foreign or inherited resource receipt, a project root or NIC with a different type,
+path, pool or network, and local and expanded devices that disagree. Selected owner-IPv4 routes,
+their pending receipts and startup intent, and other project root and NIC properties enter as
+found. Unknown workloads, snapshots,
 uninventoried enabled namespaces, temporary configuration overrides and partial or foreign
 ownership are refused. The existing project policy must already be converged. A refusal lists
 every problem the assessment can determine.

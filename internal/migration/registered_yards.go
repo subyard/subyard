@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -98,8 +99,15 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 		_, _, err = configsync.ResolveHostID(m.ConfigHome, loaded.Environment)
 		refusals = append(refusals, err)
 		plan := registeredYardPlan{loaded: loaded, runtime: runtime, instance: instance}
-		contracts := m.Resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]))
-		state, resources, metadata, before, receipts, err := inspectRegisteredYardMigration(ctx, runtime, contracts)
+		profiles := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
+		contracts := m.Resources.ProxyContracts(profiles)
+		startupDevices := map[string]bool{}
+		for _, definition := range m.Resources.Definitions() {
+			if definition.Startup && definition.Proxy != nil && slices.Contains(profiles, definition.Profile) {
+				startupDevices[definition.Proxy.Device] = true
+			}
+		}
+		state, resources, metadata, before, receipts, err := inspectRegisteredYardMigration(ctx, runtime, contracts, startupDevices)
 		refusals = append(refusals, err)
 		plan.instance, plan.metadata, plan.before, plan.receipts = state.Instance, metadata, before, receipts
 		plan.state, plan.resources = state, resources
@@ -149,19 +157,25 @@ func (m *RegisteredYardMigration) planEndpointSettings(plan *registeredYardPlan,
 	}
 	plan.settingsDesired = slices.Clone(plan.settingsBefore.Content)
 	var refusals []error
+	// Contracts can share a setting; differing listeners leave it to ordinary init.
+	observed, ambiguous := map[string]string{}, map[string]bool{}
 	for _, contract := range contracts {
-		device := instance.LocalDevices[contract.Device]
-		if len(device) == 0 {
-			continue
+		if host, port, ok := registeredListenEndpoint(contract, instance.LocalDevices[contract.Device]); ok {
+			for key, value := range map[string]string{contract.AdvertiseHostSetting: host, contract.HostPortSetting: port} {
+				ambiguous[key] = ambiguous[key] || observed[key] != "" && observed[key] != value
+				observed[key] = value
+			}
 		}
-		host, port, splitErr := net.SplitHostPort(strings.TrimPrefix(device["listen"], "tcp:"))
-		if splitErr != nil {
-			continue // The resource's own check reports this listener.
+	}
+	for _, contract := range contracts {
+		host, port, ok := registeredListenEndpoint(contract, instance.LocalDevices[contract.Device])
+		if !ok {
+			continue // The resource's own check reports this listener, or takes it as found.
 		}
 		for _, assignment := range []struct{ key, value string }{{contract.AdvertiseHostSetting, host}, {contract.HostPortSetting, port}} {
 			key, value := assignment.key, assignment.value
 			trace, declared := loaded.Settings[key]
-			if loaded.Environment[key] == value || !declared || !registeredMigrationDefault(trace) {
+			if ambiguous[key] || loaded.Environment[key] == value || !declared || !registeredMigrationDefault(trace) {
 				continue
 			}
 			if err := loaded.Catalog.ValidateSetting(config.ScopeYard, key, value, false); err != nil {
@@ -184,6 +198,31 @@ func (m *RegisteredYardMigration) planEndpointSettings(plan *registeredYardPlan,
 		}
 	}
 	return domain.CollectRefusals(refusals...)
+}
+
+// registeredListenEndpoint reads a device's listener in its contract's protocol. An
+// owner-IPv4 route is accepted as found, so an endpoint its own setting could not hold
+// is not read at all: importing it would make the yard's configuration unloadable.
+func registeredListenEndpoint(contract resource.ProxyContract, device map[string]string) (string, string, bool) {
+	if len(device) == 0 {
+		return "", "", false
+	}
+	protocol := "tcp:"
+	if contract.AddressPolicy == resource.ProxyAddressOwnerIPv4UDP {
+		protocol = "udp:"
+	}
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(device["listen"], protocol))
+	if err != nil {
+		return "", "", false
+	}
+	if contract.IsOwnerIPv4Ingress() {
+		address, addressErr := netip.ParseAddr(host)
+		number, portErr := strconv.Atoi(port)
+		if addressErr != nil || !resource.ExplicitOwnerIPv4(address) || portErr != nil || number < 1 || number > 65535 || strconv.Itoa(number) != port {
+			return "", "", false
+		}
+	}
+	return host, port, true
 }
 
 func (m *RegisteredYardMigration) Observe(ctx context.Context, _ releasetransition.ReleasePair, _ releasetransition.ReleaseLinks) (releasetransition.V2ActivationObservation, error) {
@@ -415,12 +454,9 @@ func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) 
 		environment[key] = value
 	}
 	for _, contract := range m.Resources.ProxyContracts(strings.Fields(environment["ENVIRONMENT_PROFILES"])) {
-		device := plan.instance.LocalDevices[contract.Device]
-		if len(device) == 0 {
-			continue
+		if host, port, ok := registeredListenEndpoint(contract, plan.instance.LocalDevices[contract.Device]); ok {
+			environment[contract.AdvertiseHostSetting], environment[contract.HostPortSetting] = host, port
 		}
-		host, port, _ := net.SplitHostPort(strings.TrimPrefix(device["listen"], "tcp:"))
-		environment[contract.AdvertiseHostSetting], environment[contract.HostPortSetting] = host, port
 	}
 	inputs := map[string]config.PersistentFileSnapshot{}
 	hostID, err := config.ReadPersistentFileSnapshot(m.ConfigHome, configsync.HostIDPath(m.ConfigHome))
@@ -431,6 +467,13 @@ func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) 
 	for _, layer := range plan.loaded.ConfigurationLayers {
 		if !filepath.IsAbs(layer.Path) || layer.Path == plan.settingsPath || !strings.HasPrefix(layer.Path, m.ConfigHome+string(filepath.Separator)) {
 			continue
+		}
+		// A file-settings layer names a directory of assets, which no fingerprint read
+		// can hold. An absent path or regular file stays recorded, keeping Desired stable.
+		if layer.Role == "file settings" || layer.Role == "Git file settings" {
+			if info, err := os.Lstat(layer.Path); err == nil && !info.Mode().IsRegular() {
+				continue
+			}
 		}
 		snapshot, err := config.ReadPersistentFileSnapshot(m.ConfigHome, layer.Path)
 		if err != nil {
