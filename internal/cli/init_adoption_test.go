@@ -128,7 +128,7 @@ func TestYardAdoptionPublishesOnlyMetadataAndRetiresExactContinuation(t *testing
 }
 
 func TestYardAdoptionRejectsDriftAndRecoversAfterPublication(t *testing.T) {
-	for _, scenario := range []string{"drift", "retirement-interrupted", "retirement-replaced", "foreign-metadata", "snapshot", "bucket", "root-extra", "feature-namespace", "shared-profile", "shared-volume", "bucket-alias", "image-alias", "invalid-feature"} {
+	for _, scenario := range []string{"drift", "retirement-interrupted", "retirement-replaced", "foreign-metadata", "snapshot", "bucket", "feature-namespace", "shared-profile", "shared-volume", "bucket-alias", "image-alias", "invalid-feature"} {
 		t.Run(scenario, func(t *testing.T) {
 			program, execution, fake := adoptionFixture(t)
 			for scenarioName, feature := range map[string]struct{ key, value string }{"bucket-alias": {"features.storage.buckets", "1"}, "image-alias": {"features.images", "yes"}, "invalid-feature": {"features.storage.buckets", "unexpected"}} {
@@ -162,9 +162,6 @@ func TestYardAdoptionRejectsDriftAndRecoversAfterPublication(t *testing.T) {
 			}
 			if scenario == "bucket" {
 				fake.TeardownResources = append(fake.TeardownResources, ports.TeardownResource{Kind: "bucket", Name: "unproven", Pool: "default", Binding: "bucket"})
-			}
-			if scenario == "root-extra" {
-				fake.Reconcile.ProfileDevices["root"]["raw.mount.options"] = "bind"
 			}
 			if scenario == "feature-namespace" {
 				fake.Reconcile.ProjectConfig["features.networks"] = "true"
@@ -915,6 +912,242 @@ func TestYardAdoptionRefusesPersistentVolumeIdentityDrift(t *testing.T) {
 			}
 			if fake.writes != 0 {
 				t.Fatal("refusal mutated project")
+			}
+		})
+	}
+}
+
+// A pinned VM and a bounded root leave their profile devices with more than the
+// creation recipe. Adoption keeps them; only the identity of each device refuses.
+func TestYardAdoptionTakesProfileDevicesAsFound(t *testing.T) {
+	const refusal = "yard adoption refuses noncanonical project root or NIC properties"
+	for name, test := range map[string]struct {
+		device, key, value string
+		refused            bool
+	}{
+		"nic-pinned-address": {device: "eth0", key: "ipv4.address", value: "10.20.30.40"},
+		"nic-hwaddr":         {device: "eth0", key: "hwaddr", value: "00:16:3e:00:00:01"},
+		"nic-filtering":      {device: "eth0", key: "security.ipv4_filtering", value: "true"},
+		"root-size":          {device: "root", key: "size", value: "99GiB"},
+		"root-extra":         {device: "root", key: "raw.mount.options", value: "bind"},
+		"nic-network":        {device: "eth0", key: "network", value: "foreign", refused: true},
+		"nic-type":           {device: "eth0", key: "type", value: "disk", refused: true},
+		"root-type":          {device: "root", key: "type", value: "nic", refused: true},
+		"root-path":          {device: "root", key: "path", value: "/other", refused: true},
+		"root-pool":          {device: "root", key: "pool", value: "foreign", refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, execution, fake := adoptionFixture(t)
+			runtime := execution.platform.(reconcileruntime.Runtime)
+			fake.Reconcile.ProfileDevices[test.device][test.key] = test.value
+			fake.Reconcile.Instance.Devices[test.device] = maps.Clone(fake.Reconcile.ProfileDevices[test.device])
+			_, _, metadata, _, err := runtime.InspectYardAdoption(context.Background())
+			if test.refused {
+				if err == nil || !strings.Contains(err.Error(), refusal) {
+					t.Fatalf("got %v, want %s", err, refusal)
+				}
+				return
+			}
+			if err != nil || metadata["user.subyard.installation"] != domain.AdoptedInstallation {
+				t.Fatalf("metadata=%v err=%v", metadata, err)
+			}
+		})
+	}
+}
+
+// adoptionIngressIncus also publishes a resource receipt the way the native CAS does.
+type adoptionIngressIncus struct {
+	*adoptionIncus
+	instanceWrites int
+}
+
+func (fake *adoptionIngressIncus) AdoptRegisteredInstance(_ context.Context, before ports.InstanceInfo, values map[string]string) error {
+	current := fake.Reconcile.Instance
+	if !maps.Equal(current.LocalConfig, before.LocalConfig) {
+		return domain.ErrPlanStale
+	}
+	for key, value := range values {
+		if current.LocalConfig[key] != "" && current.LocalConfig[key] != value {
+			return domain.ErrPlanStale
+		}
+		if current.LocalConfig[key] != value {
+			current.LocalConfig[key], current.Config[key] = value, value
+			fake.instanceWrites++
+		}
+	}
+	return nil
+}
+
+func registeredIngressOwner(t *testing.T) (*migration.RegisteredYardMigration, *adoptionIngressIncus, reconcileruntime.Runtime, map[string]resource.ProxyContract) {
+	t.Helper()
+	_, execution, base := adoptionFixture(t)
+	fake := &adoptionIngressIncus{adoptionIncus: base}
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	runtime.Incus = fake
+	specs := []resource.ResourceSpec{}
+	for _, row := range [][2]string{
+		{"udp", "sample-udp SAMPLE_HOST SAMPLE_PORT SAMPLE_IF udp:guest:host-port owner-metadata-v1 owner-ipv4-udp\"\nSTARTUP=\"bringup"},
+		{"tcp", "sample-tcp SAMPLE_HOST SAMPLE_ADMIN SAMPLE_IF tcp:guest:22 owner-metadata-v1 owner-ipv4-tcp"},
+	} {
+		spec, err := resource.ParseResource("sample", row[0], strings.NewReader("COMMAND="+row[0]+"\nHANDLER=handler.sh\nTITLE=sample\nPROXY=\""+row[1]+"\"\nACTION=\"up up public-ingress-change reversible\"\nACTION=\"down down public-ingress-change reversible\"\nBRINGUP=up\nSHUTDOWN=down\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		specs = append(specs, spec)
+	}
+	resources, err := resource.BuildRegistry(specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracts := map[string]resource.ProxyContract{}
+	for _, contract := range resources.ProxyContracts([]string{"sample"}) {
+		contracts[contract.Device] = contract
+	}
+	loaded := execution.loaded
+	loaded.Context = runtime.Yard
+	loaded.Environment = maps.Clone(loaded.Environment)
+	loaded.Environment["ENVIRONMENT_PROFILES"] = "sample"
+	fake.Instances = map[string]ports.InstanceInfo{runtime.Yard.IncusProject + "/" + runtime.Yard.YardInstanceName: fake.Reconcile.Instance}
+	owner := &migration.RegisteredYardMigration{Yard: loaded.Context.YardName, ConfigHome: loaded.Context.Paths.ConfigHome, Resources: resources, LoadTargets: func(context.Context, releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
+		return []migration.RegisteredYardTarget{{Loaded: loaded, Runtime: runtime}}, nil
+	}}
+	return owner, fake, runtime, contracts
+}
+
+func TestRegisteredOwnerIngressEntersManagementAsFound(t *testing.T) {
+	const udp, tcp = "sample-udp", "sample-tcp"
+	receiptKey := func(device string) string { return "user.subyard.resource." + device }
+	startupKey := "user.subyard.startup." + udp
+	pending := func(contract resource.ProxyContract, device map[string]string) string {
+		return strings.Replace(contract.OwnershipValue(device), "v1:", "v1:pending:", 1)
+	}
+	type fixture struct {
+		instance  *ports.InstanceInfo
+		contracts map[string]resource.ProxyContract
+	}
+	set := func(state fixture, key, value string) {
+		state.instance.LocalConfig[key], state.instance.Config[key] = value, value
+	}
+	remove := func(state fixture, device string) {
+		delete(state.instance.LocalDevices, device)
+		delete(state.instance.Devices, device)
+	}
+	receipts := func(state fixture) {
+		for device, contract := range state.contracts {
+			if local := state.instance.LocalDevices[device]; local != nil {
+				set(state, receiptKey(device), contract.OwnershipValue(local))
+			}
+		}
+	}
+	for name, test := range map[string]struct {
+		mutate  func(fixture)
+		publish int
+		want    string
+	}{
+		"receipts-match":  {mutate: receipts},
+		"receipts-absent": {mutate: func(fixture) {}, publish: 2},
+		"startup-enabled": {mutate: func(state fixture) { receipts(state); set(state, startupKey, "enabled") }},
+		"startup-pending": {mutate: func(state fixture) { remove(state, udp); remove(state, tcp); set(state, startupKey, "pending") }},
+		"interrupted-bringup": {mutate: func(state fixture) {
+			set(state, receiptKey(udp), pending(state.contracts[udp], state.instance.LocalDevices[udp]))
+			set(state, receiptKey(tcp), state.contracts[tcp].OwnershipValue(state.instance.LocalDevices[tcp]))
+			set(state, startupKey, "enabled")
+		}},
+		"stopped-with-pending-receipt": {mutate: func(state fixture) {
+			set(state, receiptKey(udp), pending(state.contracts[udp], state.instance.LocalDevices[udp]))
+			remove(state, udp)
+			set(state, startupKey, "disabled")
+			set(state, receiptKey(tcp), state.contracts[tcp].OwnershipValue(state.instance.LocalDevices[tcp]))
+		}},
+		"foreign-receipt":       {mutate: func(state fixture) { set(state, receiptKey(udp), "foreign") }, want: `registered resource "sample-udp": has foreign or inherited receipt`},
+		"other-pending-receipt": {mutate: func(state fixture) { set(state, receiptKey(udp), "v1:pending:"+strings.Repeat("0", 64)) }, want: `registered resource "sample-udp": has foreign or inherited receipt`},
+		"inherited-receipt": {mutate: func(state fixture) {
+			state.instance.Config[receiptKey(udp)] = state.contracts[udp].OwnershipValue(state.instance.LocalDevices[udp])
+		}, want: `registered resource "sample-udp": has foreign or inherited receipt`},
+		"divergent-device": {mutate: func(state fixture) { state.instance.Devices[udp]["listen"] = "udp:203.0.113.11:51820" }, want: `registered resource "sample-udp": has unsupported or inherited ownership`},
+		"not-a-proxy": {mutate: func(state fixture) {
+			state.instance.LocalDevices[udp]["type"], state.instance.Devices[udp]["type"] = "disk", "disk"
+		}, want: `registered resource "sample-udp": does not match its declared native proxy recipe`},
+		"deferred-publication": {mutate: func(state fixture) { set(state, ownerpublication.Prefix+udp, "value") }, want: `registered resource "sample-udp": has unresolved deferred publication`},
+		"stopped-with-final-receipt": {mutate: func(state fixture) {
+			set(state, receiptKey(udp), state.contracts[udp].OwnershipValue(state.instance.LocalDevices[udp]))
+			remove(state, udp)
+		}, want: `unsupported instance configuration key "user.subyard.resource.sample-udp"`},
+		"stopped-with-inherited-receipt": {mutate: func(state fixture) {
+			state.instance.Config[receiptKey(udp)] = pending(state.contracts[udp], state.instance.LocalDevices[udp])
+			remove(state, udp)
+		}, want: `unsupported instance configuration key "user.subyard.resource.sample-udp"`},
+		"startup-unknown-value": {mutate: func(state fixture) { set(state, startupKey, "unknown") }, want: `unsupported instance configuration key "user.subyard.startup.sample-udp"`},
+		"startup-inherited":     {mutate: func(state fixture) { state.instance.Config[startupKey] = "enabled" }, want: `unsupported instance configuration key "user.subyard.startup.sample-udp"`},
+		"startup-undeclared":    {mutate: func(state fixture) { set(state, "user.subyard.startup."+tcp, "enabled") }, want: `unsupported instance configuration key "user.subyard.startup.sample-tcp"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			owner, fake, _, contracts := registeredIngressOwner(t)
+			instance := &fake.Reconcile.Instance
+			for device, listen := range map[string][2]string{udp: {"udp:203.0.113.10:51820", "udp:10.20.30.40:51820"}, tcp: {"tcp:203.0.113.10:2226", "tcp:10.20.30.40:22"}} {
+				local := map[string]string{"type": "proxy", "bind": "host", "nat": "true", "listen": listen[0], "connect": listen[1]}
+				instance.LocalDevices[device], instance.Devices[device] = local, maps.Clone(local)
+			}
+			test.mutate(fixture{instance, contracts})
+			initial, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			if test.want != "" {
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("got %v, want %s", err, test.want)
+				}
+				if fake.writes != 0 || fake.instanceWrites != 0 {
+					t.Fatal("refused assessment wrote native state")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			devices, err := json.Marshal([]any{instance.LocalDevices, instance.Devices})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := maps.Clone(instance.LocalConfig)
+			if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
+			}
+			final, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			if err != nil || !final.Converged || final.Desired != initial.Desired || len(final.Consequences) != 0 {
+				t.Fatalf("final: %#v %v", final, err)
+			}
+			after, _ := json.Marshal([]any{instance.LocalDevices, instance.Devices})
+			if string(after) != string(devices) || fake.writes != 1 || fake.instanceWrites != test.publish {
+				t.Fatalf("native writes=%d instance=%d, want 1 and %d; devices changed=%t", fake.writes, fake.instanceWrites, test.publish, string(after) != string(devices))
+			}
+			for key, value := range before {
+				if instance.LocalConfig[key] != value {
+					t.Fatalf("metadata-only adoption rewrote %s", key)
+				}
+			}
+			if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal("repeat", err)
+			}
+			if fake.instanceWrites != test.publish {
+				t.Fatal("repeat wrote another receipt")
+			}
+		})
+	}
+}
+
+// Continuation has no owner-ingress concept: these keys stay unsupported on its path.
+func TestLegacyContinuationStaysClosedToOwnerIngressMetadata(t *testing.T) {
+	for _, key := range []string{"user.subyard.startup.sample-udp", "user.subyard.resource.sample-udp"} {
+		t.Run(key, func(t *testing.T) {
+			_, fake, runtime, _ := registeredIngressOwner(t)
+			instance := &fake.Reconcile.Instance
+			value := "enabled"
+			if strings.Contains(key, "resource") {
+				value = "v1:pending:" + strings.Repeat("0", 64)
+			}
+			instance.LocalConfig[key], instance.Config[key] = value, value
+			_, _, err := runtime.InspectLegacyContinuation(context.Background())
+			want := `legacy continuation refuses unsupported instance configuration key "` + key + `"`
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("got %v, want %s", err, want)
 			}
 		})
 	}

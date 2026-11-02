@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,10 +23,15 @@ import (
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
-// InspectRegisteredYardMigration recognizes only the selected profiles' exact
-// native resources. The returned projection is an ownership assessment, never a
-// substitute for the subsequent ordinary desired-state reconciliation.
-func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntime.Runtime, contracts []resource.ProxyContract) (ports.ReconcileState, []ports.TeardownResource, map[string]string, map[string]string, map[string]string, error) {
+var pendingResourceReceipt = regexp.MustCompile(`^v1:pending:[0-9a-f]{64}$`)
+
+// InspectRegisteredYardMigration recognizes only the selected profiles' native
+// resources. Loopback and Tailscale routes must match their recipe; an owner-IPv4
+// route enters management as found, because its address, interface and guest route
+// belong to ordinary reconciliation. startupDevices names the selected resources
+// that declare a startup intent. The returned projection is an ownership assessment,
+// never a substitute for the subsequent ordinary desired-state reconciliation.
+func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntime.Runtime, contracts []resource.ProxyContract, startupDevices map[string]bool) (ports.ReconcileState, []ports.TeardownResource, map[string]string, map[string]string, map[string]string, error) {
 	state, err := runtime.Incus.ReconcileState(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, runtime.SRVPool, runtime.SRVVolume, runtime.Yard.IncusBridge)
 	if err != nil {
 		return state, nil, nil, nil, nil, err
@@ -38,31 +44,55 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 	receipts := map[string]string{}
 	var refusals []error
 	for _, contract := range contracts {
+		// Any other value stays in the projection, where instance policy refuses it.
+		if intent := "user.subyard.startup." + contract.Device; startupDevices[contract.Device] {
+			if value := original.LocalConfig[intent]; (value == "pending" || value == "enabled" || value == "disabled") && original.Config[intent] == value {
+				delete(state.Instance.LocalConfig, intent)
+				delete(state.Instance.Config, intent)
+			}
+		}
+		key := contract.OwnershipKey()
+		marker := original.LocalConfig[key]
 		device, present := original.LocalDevices[contract.Device]
 		if !present {
+			// A stopped public route keeps only its pending receipt until the next bring-up.
+			if contract.IsOwnerIPv4Ingress() && pendingResourceReceipt.MatchString(marker) && original.Config[key] == marker {
+				delete(state.Instance.LocalConfig, key)
+				delete(state.Instance.Config, key)
+			}
 			continue
 		}
 		var findings []error
-		owned := !contract.IsOwnerIPv4Ingress() && contract.OwnershipMetadata && maps.Equal(device, original.Devices[contract.Device])
+		owned := contract.OwnershipMetadata && maps.Equal(device, original.Devices[contract.Device])
 		if !owned {
 			findings = append(findings, errors.New("has unsupported or inherited ownership"))
 		}
-		key, value := contract.OwnershipKey(), contract.OwnershipValue(device)
-		listen, ok := strings.CutPrefix(device["listen"], "tcp:")
-		host, port, splitErr := net.SplitHostPort(listen)
-		if !ok || splitErr != nil || !(ownerroute.TailscaleAddress(host) || host == "127.0.0.1" && contract.AddressPolicy == resource.ProxyAddressLoopbackOrTailscale) {
-			findings = append(findings, errors.New("does not match its declared native proxy recipe"))
-		} else if owned {
-			proposed := original
-			proposed.Config = maps.Clone(original.Config)
-			proposed.Config[key] = value
-			checker := securityruntime.Runtime{Yard: runtime.Yard, Environment: map[string]string{contract.AdvertiseHostSetting: host, contract.HostPortSetting: port}}
-			findings = append(findings, checker.CheckResourceProxy(ctx, contract, proposed))
+		value := contract.OwnershipValue(device)
+		// An interrupted bring-up holds the pending form until its owner finishes it.
+		pending := contract.IsOwnerIPv4Ingress() && marker == strings.Replace(value, "v1:", "v1:pending:", 1)
+		if contract.IsOwnerIPv4Ingress() {
+			if device["type"] != "proxy" {
+				findings = append(findings, errors.New("does not match its declared native proxy recipe"))
+			}
+		} else {
+			listen, ok := strings.CutPrefix(device["listen"], "tcp:")
+			host, port, splitErr := net.SplitHostPort(listen)
+			if !ok || splitErr != nil || !(ownerroute.TailscaleAddress(host) || host == "127.0.0.1" && contract.AddressPolicy == resource.ProxyAddressLoopbackOrTailscale) {
+				findings = append(findings, errors.New("does not match its declared native proxy recipe"))
+			} else if owned {
+				proposed := original
+				proposed.Config = maps.Clone(original.Config)
+				proposed.Config[key] = value
+				checker := securityruntime.Runtime{Yard: runtime.Yard, Environment: map[string]string{contract.AdvertiseHostSetting: host, contract.HostPortSetting: port}}
+				findings = append(findings, checker.CheckResourceProxy(ctx, contract, proposed))
+			}
 		}
-		if marker := original.LocalConfig[key]; marker != "" && marker != value || original.Config[key] != original.LocalConfig[key] {
+		if marker != "" && marker != value && !pending || original.Config[key] != marker {
 			findings = append(findings, errors.New("has foreign or inherited receipt"))
 		}
-		receipts[key] = value
+		if !pending {
+			receipts[key] = value
+		}
 		delete(state.Instance.LocalDevices, contract.Device)
 		delete(state.Instance.Devices, contract.Device)
 		delete(state.Instance.LocalConfig, key)

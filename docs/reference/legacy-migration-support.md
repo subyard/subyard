@@ -56,8 +56,10 @@ adoption path cannot be rolled back, so it takes existing local devices under ma
 are, including unknown names, memory devices and unregistered or changed `ws-*` devices, and its
 consent says so. Ordinary reconciliation owns any later convergence. Device refusals remain
 for a missing or different `srv` device, because reattaching it would change persistent data, the
-`ALLOWS_HOST_ACCESS=false` boundary, a selected resource device that fails its recipe or receipt,
-and local and expanded devices that disagree. Working
+`ALLOWS_HOST_ACCESS=false` boundary, a selected loopback or Tailscale resource device that fails its
+recipe, a foreign or inherited resource receipt, a project root or NIC with a different type, path,
+pool or network, and local and expanded devices that disagree. Selected owner-IPv4 routes, their
+pending receipts and startup intent, and other project root and NIC properties enter as found. Working
 resource endpoints are retained: only a shipped default or unset setting imports the native value,
 and an operator-set or saved value is left untouched, while unproven shared and host creation
 ownership is preserved. Refusals are reported together, per yard, before any journal exists.

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -338,7 +339,7 @@ func TestRegisteredNativeLimitProjectionPreservesCallerEnvironment(t *testing.T)
 	runtime.Environment = []string{"LIMITS_CPU=8"}
 	native.Reconcile.ProjectConfig = map[string]string{}
 	native.Reconcile.Instance.Config["limits.cpu"] = "2"
-	_, _, _, _, _, _ = inspectRegisteredYardMigration(context.Background(), runtime, nil)
+	_, _, _, _, _, _ = inspectRegisteredYardMigration(context.Background(), runtime, nil, nil)
 	if runtime.Environment[0] != "LIMITS_CPU=8" {
 		t.Fatal("observation changed caller environment", runtime.Environment)
 	}
@@ -365,5 +366,176 @@ func TestRegisteredMigrationDoesNotMistakeMissingSocketForMissingInstance(t *tes
 				t.Fatal("failed inspection published native grants")
 			}
 		})
+	}
+}
+
+func TestRegisteredBindingReadsOnlyFileBackedLayers(t *testing.T) {
+	owner, _, _ := registeredMigrationFixture(t)
+	layers := []config.ConfigurationLayer{}
+	for _, row := range [][2]string{
+		{"file settings", "overrides/host/agents"},
+		{"file settings", "overrides/shared/agents"},
+		{"file settings", "yards/default/overrides/agents"},
+		{"Git file settings", ".sync/settings/overrides/host/agents"},
+	} {
+		path := filepath.Join(owner.ConfigHome, row[1])
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		layers = append(layers, config.ConfigurationLayer{Scope: "host", Role: row[0], Path: path, Present: true})
+	}
+	absent := config.ConfigurationLayer{Scope: "host", Role: "file settings", Path: filepath.Join(owner.ConfigHome, "overrides/absent/agents")}
+	selected := append(slices.Clone(layers), absent)
+	original := owner.LoadTargets
+	owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
+		targets, err := original(ctx, view)
+		for index := range targets {
+			targets[index].Loaded.ConfigurationLayers = selected
+		}
+		return targets, err
+	}
+	desired := func() releasetransition.Fingerprint {
+		t.Helper()
+		observed, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return observed.Desired
+	}
+	before := desired()
+	selected = slices.Clone(layers)
+	if desired() == before {
+		t.Fatal("an absent file-settings layer left the pinned Desired")
+	}
+	regular := config.ConfigurationLayer{Scope: "host", Role: "file settings", Path: filepath.Join(owner.ConfigHome, "overrides/regular")}
+	if err := os.MkdirAll(filepath.Dir(regular.Path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, regular.Path, []byte("before\n"), 0600)
+	selected = append(slices.Clone(layers), regular)
+	regularBefore := desired()
+	testkit.WriteFile(t, regular.Path, []byte("after\n"), 0600)
+	if desired() == regularBefore {
+		t.Fatal("a regular file at a file-settings path left the pinned Desired")
+	}
+	scalar := config.ConfigurationLayer{Scope: "host", Role: "scalar settings", Path: layers[0].Path, Present: true}
+	selected = append(slices.Clone(layers), scalar)
+	if _, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err == nil || !strings.Contains(err.Error(), "regular non-symlink file") {
+		t.Fatalf("directory at a scalar settings layer: %v", err)
+	}
+}
+
+// Two owner-IPv4 routes share their address setting and differ by protocol.
+func registeredIngressFixture(t *testing.T, udpListen, tcpListen string, settings map[string]config.SettingTrace) (*RegisteredYardMigration, *registeredNativeFixture, string) {
+	t.Helper()
+	owner, native, path := registeredMigrationFixture(t)
+	declaration, err := profile.Decode("sample", []byte(`{"schema_version":1,"settings":[{"name":"SAMPLE_HOST","type":"string","scopes":["yard","shipped"],"application":"next-command","syncable":true},{"name":"SAMPLE_PORT","type":"port","minimum":1,"maximum":65535,"scopes":["yard","shipped"],"application":"next-command","syncable":true},{"name":"SAMPLE_ADMIN","type":"port","minimum":1,"maximum":65535,"scopes":["yard","shipped"],"application":"next-command","syncable":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := config.BuildCatalog([]profile.Metadata{declaration}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := []resource.ResourceSpec{}
+	for _, row := range [][2]string{
+		{"udp", "sample-udp SAMPLE_HOST SAMPLE_PORT SAMPLE_IF udp:guest:host-port owner-metadata-v1 owner-ipv4-udp"},
+		{"tcp", "sample-tcp SAMPLE_HOST SAMPLE_ADMIN SAMPLE_IF tcp:guest:22 owner-metadata-v1 owner-ipv4-tcp"},
+	} {
+		name, proxy := row[0], row[1]
+		spec, err := resource.ParseResource("sample", name, strings.NewReader("COMMAND="+name+"\nHANDLER=handler.sh\nTITLE=sample\nPROXY=\""+proxy+"\"\nACTION=\"up up public-ingress-change reversible\"\nACTION=\"down down public-ingress-change reversible\"\nBRINGUP=up\nSHUTDOWN=down\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		specs = append(specs, spec)
+	}
+	owner.Resources, err = resource.BuildRegistry(specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := owner.LoadTargets
+	owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
+		targets, err := original(ctx, view)
+		for index := range targets {
+			loaded := &targets[index].Loaded
+			loaded.Catalog = catalog
+			loaded.Environment = maps.Clone(loaded.Environment)
+			loaded.Settings = maps.Clone(settings)
+			for name, trace := range settings {
+				loaded.Environment[name] = trace.EffectiveValue
+			}
+		}
+		return targets, err
+	}
+	instance := native.Instances["fixture/yard"]
+	delete(instance.LocalDevices, "sample-server")
+	delete(instance.Devices, "sample-server")
+	for device, listen := range map[string]string{"sample-udp": udpListen, "sample-tcp": tcpListen} {
+		if listen == "" {
+			continue
+		}
+		value := map[string]string{"type": "proxy", "bind": "host", "nat": "true", "listen": listen, "connect": strings.SplitN(listen, ":", 2)[0] + ":10.20.30.40:22"}
+		instance.LocalDevices[device], instance.Devices[device] = value, maps.Clone(value)
+	}
+	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	return owner, native, path
+}
+
+func TestRegisteredOwnerIngressEndpointSettings(t *testing.T) {
+	shipped := []config.SettingResolution{{Scope: "default", Role: "shipped defaults", Status: "effective"}}
+	local := []config.SettingResolution{{Scope: "yard", Role: "local settings", Status: "effective"}}
+	defaults := map[string]config.SettingTrace{"SAMPLE_HOST": {Resolutions: shipped}, "SAMPLE_PORT": {EffectiveValue: "51820", Resolutions: shipped}, "SAMPLE_ADMIN": {EffectiveValue: "2226", Resolutions: shipped}}
+	explicit := map[string]config.SettingTrace{"SAMPLE_HOST": {EffectiveValue: "203.0.113.99", Resolutions: local}, "SAMPLE_PORT": {EffectiveValue: "51821", Resolutions: local}, "SAMPLE_ADMIN": {EffectiveValue: "2227", Resolutions: local}}
+	for name, test := range map[string]struct {
+		udp, tcp string
+		settings map[string]config.SettingTrace
+		want     []string
+	}{
+		"imports-over-defaults":      {"udp:203.0.113.10:51000", "tcp:203.0.113.10:2300", defaults, []string{"SAMPLE_HOST='203.0.113.10'", "SAMPLE_PORT='51000'", "SAMPLE_ADMIN='2300'"}},
+		"udp-only":                   {"udp:203.0.113.10:51000", "", defaults, []string{"SAMPLE_HOST='203.0.113.10'", "SAMPLE_PORT='51000'"}},
+		"equal-default-ports":        {"udp:203.0.113.10:51820", "tcp:203.0.113.10:2226", defaults, []string{"SAMPLE_HOST='203.0.113.10'"}},
+		"operator-settings-retained": {"udp:203.0.113.10:51000", "tcp:203.0.113.10:2300", explicit, nil},
+		"differing-hosts-not-chosen": {"udp:203.0.113.10:51000", "tcp:203.0.113.11:2300", defaults, []string{"SAMPLE_PORT='51000'", "SAMPLE_ADMIN='2300'"}},
+		"wildcard-not-imported":      {"udp:0.0.0.0:51000", "", defaults, nil},
+		"loopback-not-imported":      {"udp:127.0.0.1:51000", "", defaults, nil},
+		"port-range-not-imported":    {"udp:203.0.113.10:51000-51010", "", defaults, nil},
+		"other-protocol-not-read":    {"tcp:203.0.113.10:51000", "", defaults, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			owner, _, path := registeredIngressFixture(t, test.udp, test.tcp, test.settings)
+			if _, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
+			}
+			prepared, _, err := owner.ReadPreparedInput(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := []string{}
+			for _, line := range strings.Split(string(prepared.Content), "\n") {
+				if strings.HasPrefix(line, "SAMPLE_") {
+					got = append(got, line)
+				}
+			}
+			if !slices.Equal(got, test.want) && (len(got) != 0 || len(test.want) != 0) {
+				t.Fatalf("imported settings: %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRegisteredBindingRecordsOwnerIngressEndpoint(t *testing.T) {
+	settings := map[string]config.SettingTrace{"SAMPLE_HOST": {EffectiveValue: "203.0.113.10", Resolutions: []config.SettingResolution{{Scope: "yard", Role: "local settings", Status: "effective"}}}, "SAMPLE_PORT": {EffectiveValue: "51820"}, "SAMPLE_ADMIN": {EffectiveValue: "2226"}}
+	owner, _, _ := registeredIngressFixture(t, "udp:203.0.113.10:51820", "", settings)
+	plans, err := owner.plans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := owner.binding(plans[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := binding.([]any)[10].(map[string]string)
+	if environment["SAMPLE_HOST"] != "203.0.113.10" || environment["SAMPLE_PORT"] != "51820" {
+		t.Fatalf("UDP listener was recorded as %q:%q", environment["SAMPLE_HOST"], environment["SAMPLE_PORT"])
 	}
 }
