@@ -34,6 +34,7 @@ import (
 	"github.com/Subyard/Subyard/internal/systemdunit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
+	"golang.org/x/term"
 )
 
 type YardNetworkPolicy interface {
@@ -2312,6 +2313,11 @@ func (runtime Runtime) runPathEnvironment(
 		}
 	}
 	if ports.NativeOperationObserverFrom(ctx) != nil || ctx.Value(readOnlyProbeKey{}) != nil {
+		// The child's own group is a background group of the operator's terminal.
+		// Reading it or changing its modes, as `incus exec` does, stops the child.
+		if input, ok := command.Stdin.(*os.File); ok && term.IsTerminal(int(input.Fd())) {
+			command.Stdin = nil
+		}
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error {
 			if command.Process == nil {
