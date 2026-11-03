@@ -72,6 +72,11 @@ trap 'printf "paseo-retirement: line %s failed (exit %s)\n" "$LINENO" "$?" >&2' 
 seed_settings() {
   local name port selection
   operator_env bash -c 'sed -i "/^AGENTS=/d" "$1"' _ "$CONFIG_HOME/config.env"
+  # The rollback baseline creates its own project, which cannot see the default-project alias.
+  if [ "$SCENARIO" = rollback ]; then
+    operator_env bash -c 'sed -i "/^BASE_IMAGE=/d; /^BASE_IMAGE_FALLBACK=/d" "$1"
+      printf "BASE_IMAGE=images:debian/13/cloud\nBASE_IMAGE_FALLBACK=images:debian/13/cloud\n" >> "$1"' _ "$CONFIG_HOME/config.env"
+  fi
   for name in "${YARDS[@]}"; do
     case "$name" in
       default) port=2222; selection="'codex paseo'" ;;
@@ -95,8 +100,14 @@ create_yards() {
     ! incus project show "$project" >/dev/null 2>&1 || die 'fixture project already exists'
     if [ "$name" = default ]; then printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
     else printf '%s\n' "$MARKER" > "$STATE_ROOT/.$name-armed"; fi
-    incus project create "$project" -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
-    operator_yard -Y "$name" init --yes
+    # 0.25.4 refuses a pre-created unmarked project; the oldest baseline still accepts one.
+    if [ "$SCENARIO" = rollback ]; then
+      operator_yard -Y "$name" init --yes
+      incus project set "$project" user.subyard.p0-power-systemd "$MARKER"
+    else
+      incus project create "$project" -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+      operator_yard -Y "$name" init --yes
+    fi
     operator_yard -Y "$name" start --yes
   done
 }
