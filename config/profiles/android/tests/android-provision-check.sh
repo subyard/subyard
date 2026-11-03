@@ -299,4 +299,59 @@ for name in ('emulator-run.sh', 'emulator-control.sh'):
     assert (legacy / name).stat().st_mode & 0o777 == 0o755
 PYLEGACY
 
+# Execute the real SDK alias boundary; no full installer or privileged mounts.
+python3 -B - "$ROOT/config/profiles/android" "$tmp" <<'PYSDKTEST'
+import pathlib, subprocess, sys
+profile, fixture = map(pathlib.Path, sys.argv[1:])
+root = fixture / 'alias-root'
+(root / 'srv/workspaces/alpha/src').mkdir(parents=True)
+(root / 'srv/cache/android-sdk').mkdir(parents=True)
+(root / 'opt').mkdir()
+(root / 'opt/project-link').symlink_to(root / 'srv/workspaces/alpha/src')
+mountinfo = fixture / 'alias-mountinfo'
+mountinfo.write_text('1 0 0:1 / / rw - ext4 root rw\n2 1 0:2 / /srv rw - ext4 srv rw\n3 1 0:3 / /mnt/host rw - ext4 host rw\n')
+def reconcile(mode, alias):
+    result = subprocess.run(['bash', '-euc', '. "$1"; shift; android_reconcile_sdk_alias "$@"',
+                             'sdk-alias-fixture', str(profile/'provision-helpers.sh'), mode,
+                             '/srv/cache/android-sdk', alias, str(root), str(mountinfo)], capture_output=True)
+    return result.returncode
+for alias in ('/srv/workspaces/alpha/src/sdk', '/opt/project-link/sdk',
+              '/srv/workspaces/alpha/src/../sdk', 'relative/sdk', '/mnt/host/sdk'):
+    assert reconcile('check', alias) == 0
+    assert reconcile('apply', alias) == 0
+    assert not (root / 'srv/workspaces/alpha/src/sdk').exists()
+assert not (root/'mnt').exists()
+wrong = root/'srv/workspaces/alpha/src/wrong'
+wrong.symlink_to('/nonexistent-project-owned-target')
+assert reconcile('apply','/srv/workspaces/alpha/src/wrong') == 0
+assert wrong.readlink() == pathlib.Path('/nonexistent-project-owned-target')
+assert reconcile('check','/home/host/Android/Sdk') == 10
+assert reconcile('apply','/home/host/Android/Sdk') == 0
+alias = root/'home/host/Android/Sdk'
+assert alias.is_symlink() and alias.resolve() == root/'srv/cache/android-sdk'
+assert reconcile('check','/home/host/Android/Sdk') == 0
+before=alias.lstat()
+assert reconcile('apply','/home/host/Android/Sdk') == 0 and alias.lstat() == before
+alias.unlink();alias.symlink_to('/missing')
+identity = (alias.lstat().st_dev, alias.lstat().st_ino, alias.lstat().st_mode)
+for mode in ('check', 'apply'):
+    assert reconcile(mode,'/home/host/Android/Sdk') == 0
+    assert alias.readlink() == pathlib.Path('/missing')
+    assert (alias.lstat().st_dev, alias.lstat().st_ino, alias.lstat().st_mode) == identity
+# Untrusted sdk.dir=/bin must never replace an usrmerge or other rootfs link.
+(root/'usr/bin').mkdir(parents=True)
+(root/'bin').symlink_to('usr/bin')
+identity = (root/'bin').lstat().st_ino
+for mode in ('check', 'apply'):
+    assert reconcile(mode, '/bin') == 0
+    assert (root/'bin').readlink() == pathlib.Path('usr/bin')
+    assert (root/'bin').lstat().st_ino == identity
+alias.unlink();alias.mkdir();(alias/'user-data').write_text('keep')
+assert reconcile('check','/home/host/Android/Sdk') == 0
+assert reconcile('apply','/home/host/Android/Sdk') == 0 and (alias/'user-data').read_text() == 'keep'
+mountinfo.write_text('invalid')
+assert reconcile('apply','/home/other/Sdk') == 0 and not (root/'home/other').exists()
+print('ok: SDK alias reconciliation preserves project entries, parent links and external mounts')
+PYSDKTEST
+
 printf 'ok: Android provision check\n'

@@ -1872,3 +1872,28 @@ capability set and accepts only declared owner-service plan, execute and discard
 and mutations return `owner_configuration_invalid` before native effects. A service plan resolves its
 real runtime context before the existing release/admission gates; the restricted session does not
 bypass those gates. Remote status validates native service settings on the selected owner.
+
+## Selected-yard cleanup
+
+`cleanup` defaults to cache-only soft cleanup. Selected profiles own explicit
+`CLEANUP_CACHES` declarations; the core uses descriptor traversal that preserves
+roots, metadata and nested mounts without following symlinks. General temporary
+storage and runtime relocation are outside this operation.
+
+Hard cleanup keeps a private checkpoint under the owner data home's `cleanup/`
+directory and a token-owned independent native volume copy in the default Incus
+project. It stops the selected yard before copying. For inspection, it boots the
+original yard on its own disk, then attaches a read-only copy by explicit device
+identity; duplicate VM filesystem UUIDs are never used for mount selection.
+Native copy completion and project content verification precede destructive work.
+Existing reset teardown guards remove the old environment. Normal creation and
+provisioning restore a fresh environment from the known configuration; project
+wrappers are restored before provisioning/hooks, excluding every external bind
+source. Exact registrations, reservations, modes, symlinks and hardlink topology
+survive. Backup remains available until the result is verified.
+
+Interrupted cleanup resumes through `cleanup --hard` for the same selected yard.
+The original guest must support bounded backup inspection; an unbootable operating
+system requires separate recovery. A selected migration's old journal binding can
+be retired only by an exact receipt tied to the recreated native identity; shared
+history and other yards remain under the existing release-transition contract.

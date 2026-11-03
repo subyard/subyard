@@ -1182,3 +1182,14 @@ partial ownership, unsafe records and changed identities are refused without
 adoption. Configuration roots may be customized, but temporary scalar overrides
 must not redirect the persisted owner context. Do not add installation markers
 manually. Supported release rollback and roll-forward retain this narrow grant.
+
+### Disposable profile caches
+
+`CACHES` retains its project-environment sharing contract. A profile may opt a
+safe subset into `yard cleanup --soft` with `CLEANUP_CACHES`, a space-separated
+list of absolute directories referencing the same configured cache variables.
+Paths must be below `/srv/cache` or a private developer-home subdirectory;
+project, credential and runtime-state paths are rejected. Declare only data
+that can safely be regenerated during an active build. Installed Go toolchains,
+SDKs and browser runtimes must not be included, even when stored below a cache
+root. Cleanup does not acquire cache-writer locks; affected builds may need a retry.

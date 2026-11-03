@@ -236,6 +236,14 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryRecreatable,
 		},
 		{
+			Action: "yard.cleanup.soft", Summary: "Clear declared disposable yard data", Effect: domain.ActionDestruction,
+			Impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, Recovery: domain.RecoveryRecreatable,
+		},
+		{
+			Action: "yard.cleanup.hard", Summary: "Recreate yard environment and preserve projects", Effect: domain.ActionDestruction,
+			Impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactYardRuntime, domain.ImpactPersistentData}, Recovery: domain.RecoveryIrreversible,
+		},
+		{
 			Action: "yard.teardown.full", Summary: "Permanently remove Subyard and all local yards",
 			Effect:   domain.ActionDestruction,
 			Impacts:  []domain.ActionImpact{domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactHostOS, domain.ImpactSecurity, domain.ImpactTrust, domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime},

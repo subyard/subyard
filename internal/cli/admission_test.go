@@ -68,6 +68,11 @@ func TestRunAdmissionStages(t *testing.T) {
 		{[]string{"setup"}, stageCompatibility, ""},
 		{[]string{"start"}, stageGate, ""},
 		{[]string{"stop"}, stageGate, ""},
+		{[]string{"cleanup"}, stageGate, ""},
+		{[]string{"cleanup", "--soft"}, stageGate, ""},
+		// Hard recreation owns read-only preservation/ownership admission even
+		// when the old yard's migration gate cannot be inspected.
+		{[]string{"cleanup", "--hard"}, stageLoad, ""},
 		{[]string{"shell"}, stageGate, ""},
 		{[]string{"provision"}, stageGate, ""},
 		{[]string{"sync"}, stageGate, ""},
@@ -163,6 +168,34 @@ func TestRunAdmissionStages(t *testing.T) {
 			}
 			if got != test.want {
 				t.Fatalf("stage=%s want %s exit=%d stdout=%q stderr=%q", got, test.want, code, stdout.String(), output)
+			}
+		})
+	}
+}
+
+func TestHardCleanupFencesEarlyMutationPaths(t *testing.T) {
+	root, environment, _ := resourceCommandFixture(t)
+	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0600)
+	home := filepath.Join(root, "recovery-owner")
+	directory := filepath.Join(home, "cleanup", "pending")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(directory, "journal.json"), []byte("protected pending recovery\n"), 0600)
+	environment = append(environment, "SUBYARD_HOME="+home)
+	for _, arguments := range [][]string{{"update", "--yes"}, {"migrate", "--yes"}, {"host", "rename", "other"}, {"config", "apply", "--all-local", "--yes"}, {"teardown", "--full", "--yes"}} {
+		t.Run(strings.Join(arguments, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "hard cleanup is pending") {
+				t.Fatalf("early mutation escaped recovery fence: exit=%d %s", code, stderr.String())
 			}
 		})
 	}

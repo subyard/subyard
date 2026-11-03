@@ -52,6 +52,9 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 	case "@lifecycle":
 		behavior.prepare = (*preparedCommand).prepareLifecycle
 		behavior.shellActions = lifecycleShellActions
+	case "@cleanup":
+		behavior.prepare = (*preparedCommand).prepareCleanup
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@provision":
 		behavior.prepare = (*preparedCommand).prepareProvision
 		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
@@ -307,6 +310,11 @@ func (failure *commandCommitError) Error() string { return failure.err.Error() }
 func (failure *commandCommitError) Unwrap() error { return failure.err }
 
 func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandRequest) (_ *preparedCommand, err error) {
+	if request.Definition.Handler != "@cleanup" && !request.ReadOnly {
+		if err := pendingHardCleanup(request.Loaded.Context); err != nil {
+			return nil, err
+		}
+	}
 	if request.Definition.Handler == "@teardown" {
 		execution, parseErr := prepareTeardownExecution(request.Arguments)
 		if parseErr != nil {

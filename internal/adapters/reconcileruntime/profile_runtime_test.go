@@ -645,6 +645,77 @@ ssh_transport_identity_prepare "$SUBYARD_HOME" >/dev/null
 	}
 }
 
+func TestBaseProvisionDefersNestedIntegrationProjectHooksUntilRestore(t *testing.T) {
+	previewLoopbackFixture(t)
+	for _, scenario := range []string{"base-only", "full-stage-before-restore", "base-failure", "network-failure", "planning", "legacy-identity"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			for path, content := range map[string]string{
+				"scripts/prepare-preview-route.sh":  "#!/bin/sh\nexit 0\n",
+				"scripts/04-provision-subyard.sh":   "#!/bin/sh\nset -eu\n[ -n \"$SUBYARD_PREVIEW_ENDPOINT\" ]\n[ \"$FAIL_BASE\" = 0 ]\n: > \"$BASE_READY\"\n",
+				"scripts/07-ssh-access.sh":          "#!/bin/sh\nset -eu\n[ -e \"$BASE_READY\" ]\n: > \"$SSH_READY\"\n",
+				"scripts/reconcile-integrations.sh": "#!/bin/sh\nexit 0\n",
+				"config/projects-changed.sh":        "#!/bin/sh\nexit 0\n",
+			} {
+				full := filepath.Join(root, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, full, []byte(content), 0700)
+			}
+			restored := filepath.Join(root, "restored-project-wrapper")
+			executor := &retryableIntegrationExecutor{pending: true, hookReady: restored}
+			instance := ports.InstanceInfo{Status: "Running", LocalConfig: map[string]string{"user.subyard.preview_proxy": "v1:pending:100.101.102.103:32222"}}
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"test/yard": instance}, Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}
+			policy := &networkPolicyFixture{}
+			if scenario == "network-failure" {
+				policy.ensureErr = errors.New("network unavailable")
+			}
+			failBase := "0"
+			if scenario == "base-failure" {
+				failBase = "1"
+			}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, NetworkPolicy: policy,
+				Profiles: []profile.Definition{}, ownerInitPlanning: scenario == "planning",
+				Yard:        domain.Context{YardName: "example", IncusProject: "test", YardInstanceName: "yard", YardKind: domain.YardVM, DevUser: "dev", DevUID: os.Getuid()},
+				Environment: []string{"BASE_READY=" + filepath.Join(root, "base-ready"), "SSH_READY=" + filepath.Join(root, "ssh-ready"), "FAIL_BASE=" + failBase}}
+			if scenario == "legacy-identity" {
+				runtime.LegacyContinuation = &domain.LegacyContinuation{}
+			}
+			// Exercise the real stage -> integration reconciliation -> project
+			// hook chain, with a guest boundary that refuses a missing wrapper.
+			var err error
+			if scenario == "full-stage-before-restore" {
+				err = runtime.ApplyStage(context.Background(), ports.ReconcileStageProvision)
+				if err == nil || executor.hookAttempts != 1 || executor.commits != 0 {
+					t.Fatalf("full stage did not expose the nested hook: err=%v hooks=%d commits=%d", err, executor.hookAttempts, executor.commits)
+				}
+				return
+			}
+			err = runtime.ProvisionBase(context.Background())
+			if scenario != "base-only" {
+				if err == nil || executor.hookAttempts != 0 || executor.commits != 0 {
+					t.Fatalf("base failure entered hooks: err=%v hooks=%d commits=%d", err, executor.hookAttempts, executor.commits)
+				}
+				if _, err := os.Stat(filepath.Join(root, "base-ready")); !os.IsNotExist(err) {
+					t.Fatal("failed base guard published readiness")
+				}
+				return
+			}
+			if err != nil || executor.hookAttempts != 0 || executor.commits != 0 {
+				t.Fatalf("base setup reached projects before restore: err=%v hooks=%d commits=%d", err, executor.hookAttempts, executor.commits)
+			}
+			if _, err := os.Stat(filepath.Join(root, "ssh-ready")); !os.IsNotExist(err) {
+				t.Fatal("base setup reached later reconciliation")
+			}
+			testkit.WriteFile(t, restored, []byte("exact restored project\n"), 0600)
+			if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageProvision); err != nil || executor.hookAttempts != 1 || executor.commits != 1 {
+				t.Fatalf("restored project did not reach normal nested hooks: err=%v hooks=%d commits=%d", err, executor.hookAttempts, executor.commits)
+			}
+		})
+	}
+}
+
 func profileRuntimeFixture(t *testing.T, handler string) Runtime {
 	t.Helper()
 	return profileRuntimeFixtureAt(t, testkit.TempDir(t), handler)

@@ -2159,6 +2159,20 @@ func (transition *V2Transition) observeResume(
 		}
 		if nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") {
 			work := nativeMigrationWork(intent, migration)
+			retired, err := transition.retiredNativeBinding(ctx, migration, step.Resource, *journal)
+			if err != nil {
+				return err
+			}
+			if retired {
+				if (journal.Checkpoint == JournalAuthorized || journal.Checkpoint == JournalMigrating) && initialReleaseLinks(observation.links, journal.Releases) {
+					observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: step.Resource, Message: "the selected yard environment was explicitly recreated; migration requires a fresh plan and authorization", Retry: "run yard migrate --check"})
+				} else if step.Checkpoint != StepVerified {
+					observation.blockers = append(observation.blockers, Blocker{Code: CodeRecoveryAmbiguous, Resource: step.Resource, Message: "a recreated yard has an unverified post-activation native migration step", Retry: "run yard update --check"})
+				}
+				observation.work = append(observation.work, work)
+				observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
+				continue
+			}
 			if step.Checkpoint == StepVerified && (journal.Checkpoint != JournalMigrating || laterNativeRow(journal.Steps, step)) {
 				// A later row or activation legitimately changes what this finished row
 				// bound. The last row before activation still pins the yard's identity.
@@ -2358,6 +2372,14 @@ func (transition *V2Transition) observeResume(
 					return err
 				}
 				if !actual.Converged {
+					retired, err := transition.retiredNativeBinding(ctx, migration, owner.ID(), *journal)
+					if err != nil {
+						return err
+					}
+					if retired && (journal.Checkpoint == JournalAuthorized || journal.Checkpoint == JournalMigrating) && initialReleaseLinks(observation.links, journal.Releases) {
+						observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: owner.ID(), Message: "a recreated selected yard requires fresh migration authorization", Retry: "run yard migrate --check"})
+						continue
+					}
 					return invalid("registered yard target list expanded after authorization")
 				}
 			}

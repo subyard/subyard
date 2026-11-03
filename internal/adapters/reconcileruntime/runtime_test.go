@@ -257,6 +257,73 @@ func TestResetTeardownUsesNetworkPolicyBoundary(t *testing.T) {
 	}
 }
 
+type resetSharedInventoryFixture struct {
+	*testkit.Incus
+	before, after []ports.TeardownResource
+	reads         int
+}
+
+func (fixture *resetSharedInventoryFixture) TeardownSharedInventory(context.Context, string, string) ([]ports.TeardownResource, error) {
+	fixture.reads++
+	if fixture.reads == 1 {
+		return fixture.before, nil
+	}
+	return fixture.after, nil
+}
+
+func TestResetTeardownRetainsApprovedBackupPoolAndHostProfile(t *testing.T) {
+	pool := ports.TeardownResource{Kind: "pool", Name: "default", Binding: "pool-original", UsedBy: []string{"/1.0/storage-pools/default/volumes/custom/cleanup-backup?project=default"}}
+	profile := ports.TeardownResource{Kind: "host-profile", Name: "default", Binding: "profile-original", Bindings: []string{"root-removed", "nic-removed", "both-removed"}}
+	for _, test := range []struct {
+		name    string
+		change  func([]ports.TeardownResource) []ports.TeardownResource
+		wantErr bool
+	}{
+		{name: "unchanged"},
+		{name: "approved-device-removal", change: func(resources []ports.TeardownResource) []ports.TeardownResource {
+			resources[1].Binding = "both-removed"
+			return resources
+		}},
+		{name: "foreign-profile-change", wantErr: true, change: func(resources []ports.TeardownResource) []ports.TeardownResource {
+			resources[1].Binding = "foreign-profile"
+			return resources
+		}},
+		{name: "foreign-profile-added", wantErr: true, change: func(resources []ports.TeardownResource) []ports.TeardownResource {
+			resources[1].Name = "foreign"
+			return resources
+		}},
+		{name: "pool-changed", wantErr: true, change: func(resources []ports.TeardownResource) []ports.TeardownResource {
+			resources[0].Binding = "foreign-pool"
+			return resources
+		}},
+		{name: "selected-resource-remains", wantErr: true, change: func(resources []ports.TeardownResource) []ports.TeardownResource {
+			return append(resources, ports.TeardownResource{Kind: "project", Name: "selected", Binding: "project-original"})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			if err := os.Mkdir(filepath.Join(root, "scripts"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(root, "scripts", "teardown-physical.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+			approved := []ports.TeardownResource{pool, profile, {Kind: "project", Name: "selected", Binding: "project-original"}}
+			remaining := []ports.TeardownResource{pool, profile}
+			if test.change != nil {
+				remaining = test.change(remaining)
+			}
+			incus := &resetSharedInventoryFixture{Incus: &testkit.Incus{}, before: approved, after: remaining}
+			policy := &networkPolicyFixture{}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, NetworkPolicy: policy,
+				TeardownResources: approved, TeardownArtifacts: []ports.TeardownArtifact{},
+				Yard: domain.Context{YardName: "selected", IncusProject: "subyard-selected", YardInstanceName: "yard-selected"}}
+			err := runtime.Teardown(context.Background())
+			if (err != nil) != test.wantErr || incus.reads != 2 || len(policy.started) != 1 {
+				t.Fatalf("reset retention: err=%v wantErr=%v reads=%d starts=%d", err, test.wantErr, incus.reads, len(policy.started))
+			}
+		})
+	}
+}
+
 func TestTestVMBackendStartUsesNetworkPolicy(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "scripts"), 0o700); err != nil {

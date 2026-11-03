@@ -39,6 +39,14 @@ type RegisteredYardMigration struct {
 	Resources                       resource.Registry
 	GuestTmp                        bool
 	Prompt                          ports.Prompter
+	Retired                         func(context.Context, releasetransition.JournalRecord) (bool, error)
+}
+
+func (m *RegisteredYardMigration) RetiredJournalBinding(ctx context.Context, journal releasetransition.JournalRecord) (bool, error) {
+	if m.Retired == nil {
+		return false, nil
+	}
+	return m.Retired(ctx, journal)
 }
 
 func (m *RegisteredYardMigration) ID() string { return "yard." + m.Yard }

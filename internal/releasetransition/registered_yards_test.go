@@ -285,6 +285,162 @@ func TestRegisteredOwnerVerdictBlocksResumeWithoutFailingInspection(t *testing.T
 type nativeConsentOwner struct {
 	*v2TestReconciler
 	decline bool
+	retired func(JournalRecord) bool
+}
+
+func (owner *nativeConsentOwner) RetiredJournalBinding(_ context.Context, journal JournalRecord) (bool, error) {
+	return owner.retired != nil && owner.retired(journal), nil
+}
+
+func TestRegisteredYardRetirementRequiresExactPredecessorAndReauthorization(t *testing.T) {
+	for _, valid := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing-proof", true: "bound-proof"}[valid], func(t *testing.T) {
+			transition, _, _ := v2TransitionFixture(t, nil)
+			owner := &nativeConsentOwner{v2TestReconciler: &v2TestReconciler{id: "yard.selected"}}
+			neighbor := &nativeConsentOwner{v2TestReconciler: &v2TestReconciler{id: "yard.neighbor"}, decline: true}
+			var registry RegistryV2
+			if err := json.Unmarshal(transition.options.RegistryPayload, &registry); err != nil {
+				t.Fatal(err)
+			}
+			registry.CurrentEpochs["owner-registration"] = 3
+			registry.Migrations = append(registry.Migrations, MigrationDefinitionV2{ID: "registered-local-v3", Domain: "owner-registration", Kind: registeredYardsMigration, FromEpoch: 2, ToEpoch: 3, DependsOn: []string{"canonicalize-test-yard-owner-v2"}})
+			transition.options.RegistryPayload, _ = json.Marshal(registry)
+			transition.options.RegisteredYards = []V2ActivationReconciler{owner, neighbor}
+			var err error
+			transition, err = NewV2Transition(transition.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			plan, err := transition.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transition.options.fault = func(point string) error {
+				if point == "after-step-evidence" {
+					snapshot, _ := transition.store.ReadCurrentJournal()
+					journal, _ := ParseJournal(snapshot.Payload)
+					for _, step := range journal.Steps {
+						if step.Resource == owner.ID() && step.Checkpoint == StepEvidence {
+							return errors.New("cut before old guest effect")
+						}
+					}
+				}
+				return nil
+			}
+			_, _ = transition.Converge(context.Background(), Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
+			binding, err := transition.store.CaptureRegisteredYardBinding(owner.ID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := transition.store.ReadCurrentJournal()
+			ledgerBefore, _ := transition.store.ReadLedger()
+			owner.desired = digestC
+			owner.converged = true
+			if valid {
+				owner.retired = func(journal JournalRecord) bool { return binding.Matches(journal, owner.ID()) }
+			}
+			transition.options.fault = nil
+			fresh, err := NewV2Transition(transition.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inspection, err := fresh.Inspect(context.Background(), goal)
+			if !valid {
+				if err == nil {
+					t.Fatal("changed UUID/config binding accepted without retirement proof")
+				}
+			} else {
+				if err != nil || len(inspection.Blockers) != 0 || inspection.Plan == plan.Plan {
+					t.Fatalf("fresh authorization missing: %#v %v", inspection, err)
+				}
+				if owner.reconciles != 0 || neighbor.reconciles != 0 {
+					t.Fatal("read-only retirement inspection reconciled native work")
+				}
+			}
+			after, _ := transition.store.ReadCurrentJournal()
+			ledgerAfter, _ := transition.store.ReadLedger()
+			if !sameProtectedSnapshot(before, after) || !sameProtectedSnapshot(ledgerBefore, ledgerAfter) {
+				t.Fatal("retirement inspection changed shared history")
+			}
+		})
+	}
+}
+
+func TestRegisteredYardRetirementAfterVerifiedNativeWork(t *testing.T) {
+	for _, valid := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing", true: "verified"}[valid], func(t *testing.T) {
+			transition, _, _ := v2TransitionFixture(t, nil)
+			owner := &nativeConsentOwner{v2TestReconciler: &v2TestReconciler{id: "yard.selected"}}
+			var registry RegistryV2
+			if err := json.Unmarshal(transition.options.RegistryPayload, &registry); err != nil {
+				t.Fatal(err)
+			}
+			registry.CurrentEpochs["owner-registration"] = 3
+			registry.Migrations = append(registry.Migrations, MigrationDefinitionV2{ID: "registered-local-v3", Domain: "owner-registration", Kind: registeredYardsMigration, FromEpoch: 2, ToEpoch: 3, DependsOn: []string{"canonicalize-test-yard-owner-v2"}})
+			transition.options.RegistryPayload, _ = json.Marshal(registry)
+			transition.options.RegisteredYards = []V2ActivationReconciler{owner}
+			var err error
+			transition, err = NewV2Transition(transition.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			plan, err := transition.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transition.options.fault = func(point string) error {
+				if point == "after-reconciling" {
+					return errors.New("cut after native verification")
+				}
+				return nil
+			}
+			_, _ = transition.Converge(context.Background(), Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
+			binding, err := transition.store.CaptureRegisteredYardBinding(owner.ID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			old, err := ParseJournal(binding.Snapshot.Payload)
+			if err != nil || old.Checkpoint != JournalReconciling {
+				t.Fatalf("wrong cut: %s %v", old.Checkpoint, err)
+			}
+			owner.desired = digestC
+			owner.converged = true
+			if valid {
+				owner.retired = func(journal JournalRecord) bool { return binding.Matches(journal, owner.ID()) }
+			}
+			transition.options.fault = nil
+			fresh, err := NewV2Transition(transition.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inspection, err := fresh.Inspect(context.Background(), goal)
+			// Activation may change a verified native row's inputs. At this
+			// checkpoint it is history, with or without a retirement receipt;
+			// both paths must finish without replaying the old native work.
+			if err != nil || len(inspection.Blockers) != 0 {
+				t.Fatalf("verified native history: %#v %v", inspection, err)
+			}
+			outcome, err := fresh.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+			if err != nil || outcome.Status != StatusReady || owner.reconciles != 1 {
+				t.Fatalf("verified work replayed: %#v count=%d %v", outcome, owner.reconciles, err)
+			}
+			if binding.Matches(old, "yard.other") {
+				t.Fatal("wrong-yard receipt accepted")
+			}
+			tampered := old
+			tampered.AuthorizationPlan = PlanToken(digestC)
+			if binding.Matches(tampered, owner.ID()) {
+				t.Fatal("wrong authorization receipt accepted")
+			}
+			tampered = old
+			tampered.Transaction = "different-transaction"
+			if binding.Matches(tampered, owner.ID()) {
+				t.Fatal("wrong predecessor receipt accepted")
+			}
+		})
+	}
 }
 
 func (owner *nativeConsentOwner) Reconcile(ctx context.Context, links ReleaseLinks) error {

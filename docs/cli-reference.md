@@ -82,6 +82,16 @@ show disk usage for local yards.
 Usage: yard space [--refresh]
 ```
 
+## cleanup
+
+clear declared disposable caches or recreate the yard from an independent project backup.
+
+```text
+Usage: yard cleanup [--soft | --hard] [--yes]
+Default --soft clears only explicitly declared disposable profile caches in the selected live yard. Cache roots and permissions remain. An active build may need a retry.
+--hard independently backs up registered projects, deletes and recreates the selected environment, then restores projects and registrations. Other guest data is discarded. An interruption retains the backup and recovery checkpoint.
+```
+
 ## logs
 
 tail yard runtime logs or show host update/audit history.

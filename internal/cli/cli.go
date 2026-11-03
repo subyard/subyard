@@ -520,6 +520,14 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	admission := cli.admission(definition, core, resourceDefinition, profileResource, commandArguments, explicit)
 	readOnlyInvocation := admission.readOnly
+	if !readOnlyInvocation && !commandHelpRequested(commandArguments) && (slices.Contains([]string{"@update", "@current-migration", "@host", "@config"}, definition.Handler) || definition.Handler == "@teardown" && slices.Contains(commandArguments, "--full")) {
+		home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
+		pending, err := filepath.Glob(filepath.Join(home, "cleanup", "*", "journal.json"))
+		if err != nil || len(pending) > 0 {
+			cli.errorf("hard cleanup is pending; finish selected-yard recovery before changing shared owner configuration or runtime")
+			return 1
+		}
+	}
 	switch admission.early {
 	case earlyNetworkHelp:
 		cli.networkUsage()
@@ -677,6 +685,12 @@ func (cli *CLI) Run(ctx context.Context) int {
 		loaded, err = cli.resolveContextAllowPending(yard)
 	} else {
 		loaded, err = cli.loadContext(yard)
+	}
+	if err == nil && loaded.Context.AccessKind == domain.AccessLocal && !readOnlyInvocation && definition.Handler != "@cleanup" && !commandHelpRequested(commandArguments) {
+		if err := pendingHardCleanup(loaded.Context); err != nil {
+			cli.errorf("%v", err)
+			return 1
+		}
 	}
 	if core && (definition.Handler == "@list" || definition.Handler == "@status" ||
 		definition.Handler == "@yards") && strings.Contains(yard, "/") {
@@ -1033,6 +1047,11 @@ func (cli *CLI) Run(ctx context.Context) int {
 	case "@teardown":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s teardown [--keep-data | --reset-config | --full] [--yes]\n", cli.options.Program)
 		fmt.Fprintln(cli.options.Stdout, "  --reset-config  remove selected local settings after cleanup; suppress previous nonlocal yard fallback")
+		return 0
+	case "@cleanup":
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s cleanup [--soft | --hard] [--yes]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "Default --soft clears only explicitly declared disposable profile caches in the selected live yard. Cache roots and permissions remain. An active build may need a retry.")
+		fmt.Fprintln(cli.options.Stdout, "--hard independently backs up registered projects, deletes and recreates the selected environment, then restores projects and registrations. Other guest data is discarded. An interruption retains the backup and recovery checkpoint.")
 		return 0
 	}
 	if profileResource {
@@ -4237,7 +4256,15 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, &rpc.Error{Code: "owner_context_changed", Message: "bootstrap owner context changed; reconnect before planning"}
 			}
 		}
-		if !releaseRecoveryCommand(definition) {
+		cleanupRecovery := false
+		if definition.Handler == "@cleanup" {
+			_, err = operationCLI.boundHardCleanupRecovery(ctx, operationLoaded, params.Arguments)
+			cleanupRecovery, _ = cleanupMode(params.Arguments)
+			if err != nil {
+				return nil, operationRPCError("cleanup_recovery_failed", err)
+			}
+		}
+		if !releaseRecoveryCommand(definition) && !cleanupRecovery {
 			outcome, gateInspection, gateErr := operationCLI.inspectMutationGateInspection(
 				ctx, operationLoaded.Context.YardName,
 			)
@@ -4357,7 +4384,16 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
 			return nil, &rpc.Error{Code: "exact_plan_required", Message: "no exact plan is bound to this operation"}
 		}
-		if !releaseRecoveryCommand(planned.Definition) {
+		cleanupRecovery := false
+		if planned.Definition.Handler == "@cleanup" {
+			var err error
+			_, err = planned.CLI.boundHardCleanupRecovery(ctx, planned.Loaded, planned.Arguments)
+			cleanupRecovery, _ = cleanupMode(planned.Arguments)
+			if err != nil {
+				return nil, operationRPCError("cleanup_recovery_failed", err)
+			}
+		}
+		if !releaseRecoveryCommand(planned.Definition) && !cleanupRecovery {
 			outcome, gateInspection, gateErr := planned.CLI.inspectMutationGateInspection(
 				ctx, planned.Loaded.Context.YardName,
 			)

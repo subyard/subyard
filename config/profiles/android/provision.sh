@@ -112,10 +112,7 @@ PYCONFIG
     d="$(sed -n 's/^[[:space:]]*sdk\.dir[[:space:]]*=[[:space:]]*//p' "$lp" | tail -n1)"
     d="${d%$'\r'}"
     case "$d" in ""|"$ANDROID_SDK_ROOT") continue ;; esac
-    destination="$(rooted "$d")"
-    [ -L "$destination" ] \
-      && [ "$(readlink -f "$destination" 2>/dev/null)" = "$(readlink -f "$sdk_root")" ] \
-      || changed=1
+    android_reconcile_sdk_alias check "$ANDROID_SDK_ROOT" "$d" "$root_prefix" || changed=1
   done
   shopt -u nullglob
   [ "$changed" -eq 0 ] && exit 0
@@ -196,13 +193,7 @@ shopt -s nullglob
 for lp in /srv/workspaces/*/src/local.properties; do
   d="$(sed -n 's/^[[:space:]]*sdk\.dir[[:space:]]*=[[:space:]]*//p' "$lp" | tail -n1)"; d="${d%$'\r'}"
   case "$d" in ""|"$ANDROID_SDK_ROOT") continue ;; esac
-  if [ -L "$d" ]; then
-    [ "$(readlink -f "$d" 2>/dev/null)" = "$(readlink -f "$ANDROID_SDK_ROOT")" ] && continue
-  elif [ -e "$d" ]; then
-    echo "android provision: '$d' exists and is not our symlink — leaving as-is" >&2; continue
-  fi
-  install -d "$(dirname "$d")"; ln -sfn "$ANDROID_SDK_ROOT" "$d"
-  echo "android provision: sdk.dir reconciled  $d -> $ANDROID_SDK_ROOT"
+  android_reconcile_sdk_alias apply "$ANDROID_SDK_ROOT" "$d"
 done
 shopt -u nullglob
 

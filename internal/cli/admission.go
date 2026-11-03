@@ -141,6 +141,7 @@ var handlerAdmissions = map[string]handlerAdmission{
 	})},
 	"@init":     {recovery: recoveryProfileInit},
 	"@teardown": {ownsRecovery: true, readOnlyRoute: true},
+	"@cleanup":  {ownsRecovery: true, readOnlyRoute: true},
 	"@project":  {readOnlyRoute: true},
 }
 
@@ -197,6 +198,10 @@ func (cli *CLI) admission(
 	case result.registrationRepair:
 		result.gate = gateSkipRegistrationRepair
 	case core && definition.Name == "update":
+		result.gate = gateHandlerOwned
+	case core && definition.Handler == "@cleanup" && slices.Contains(arguments, "--hard"):
+		// The handler owns independent preservation/ownership admission for both
+		// first recovery of a broken old migration and its durable journal resume.
 		result.gate = gateHandlerOwned
 	case core && definition.Handler == "@teardown":
 		result.gate = gateAfterScope

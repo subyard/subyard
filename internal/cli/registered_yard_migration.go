@@ -34,6 +34,13 @@ func (cli *CLI) registeredYardMigrations(request releasetransition.ProcessReques
 func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest, guestTmp bool, yard string) releasetransition.V2ActivationReconciler {
 	prompt := migrationLatePrompt{cli: cli}
 	return &migration.RegisteredYardMigration{Yard: yard, ConfigHome: request.ConfigHome, Resources: cli.resources, GuestTmp: guestTmp, Prompt: prompt,
+		Retired: func(ctx context.Context, journal releasetransition.JournalRecord) (bool, error) {
+			loaded, err := cli.resolveReleaseTransitionContext(yard, request.ConfigHome)
+			if err != nil {
+				return false, err
+			}
+			return cli.hardRetiredBinding(ctx, loaded, journal)
+		},
 		LoadTargets: func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
 			var files *config.ProspectiveFiles
 			if view != nil {

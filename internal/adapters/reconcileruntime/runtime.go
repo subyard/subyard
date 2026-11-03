@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -295,13 +296,7 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSSH:
 		return runtime.runScript(ctx, runtime.Stderr, "07-ssh-access.sh", "--yes")
 	case ports.ReconcileStageProvision:
-		endpoint, err := runtime.preparePreview(ctx)
-		if err != nil {
-			return err
-		}
-		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr,
-			map[string]string{"SUBYARD_PREVIEW_ENDPOINT": string(endpoint)},
-			"04-provision-subyard.sh", "--yes"); err != nil {
+		if err := runtime.ProvisionBase(ctx); err != nil {
 			return err
 		}
 		// Native runtimes can consume the canonical authenticated SSH transport.
@@ -334,6 +329,25 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	default:
 		return fmt.Errorf("unknown reconcile stage %q", stage)
 	}
+}
+
+// ProvisionBase installs the generic guest substrate without entering profile,
+// integration or project-hook reconciliation. Callers may restore project data
+// before continuing with the ordinary provision stage.
+func (runtime Runtime) ProvisionBase(ctx context.Context) error {
+	if runtime.ownerInitPlanning {
+		return domain.ErrPlanStale
+	}
+	if err := runtime.checkLegacyContinuation(ctx); err != nil {
+		return err
+	}
+	endpoint, err := runtime.preparePreview(ctx)
+	if err != nil {
+		return err
+	}
+	return runtime.runScriptEnvironment(ctx, runtime.Stderr,
+		map[string]string{"SUBYARD_PREVIEW_ENDPOINT": string(endpoint)},
+		"04-provision-subyard.sh", "--yes")
 }
 
 func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -1044,7 +1058,26 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 	}
 	sharedRetained = sharedRetained || len(survivors) != 0
 	for _, resource := range remaining {
-		if (resource.Kind == "network" || resource.Kind == "pool") && sharedRetained {
+		if resource.Kind == "pool" || resource.Kind == "network" {
+			for _, consumer := range resource.UsedBy {
+				if !strings.HasPrefix(consumer, "/1.0/profiles/default") {
+					sharedRetained = true
+				}
+			}
+		}
+	}
+	for _, resource := range remaining {
+		index := slices.IndexFunc(runtime.TeardownResources, func(original ports.TeardownResource) bool {
+			return original.Kind == resource.Kind && original.Pool == resource.Pool && original.Name == resource.Name
+		})
+		if index < 0 {
+			return fmt.Errorf("%w: unapproved resource remains after reset teardown", domain.ErrPlanStale)
+		}
+		original := runtime.TeardownResources[index]
+		if resource.Binding != original.Binding && !(resource.Kind == "host-profile" && slices.Contains(original.Bindings, resource.Binding)) {
+			return fmt.Errorf("%w: retained reset resource changed outside approved removal", domain.ErrPlanStale)
+		}
+		if (resource.Kind == "network" || resource.Kind == "pool" || resource.Kind == "host-profile") && sharedRetained {
 			continue
 		}
 		return errors.New("reset teardown did not establish approved absence or shared retention")
