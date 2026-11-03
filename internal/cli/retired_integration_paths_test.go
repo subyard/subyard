@@ -10,9 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -120,6 +122,67 @@ func TestUpdateWarnsAboutStoppedRetiredYardWithoutSourceMigration(t *testing.T) 
 				t.Fatalf("update changed yard power: %s", instanceAfter.Status)
 			}
 		})
+	}
+}
+
+func TestUpdateWarnsAboutStoppedNonSelectedRetiredYardWithSourceMigration(t *testing.T) {
+	root, environment := retiredYardFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards/selected/config.env"), "SSH_PORT=2233\nCODING_TOOL_INTEGRATIONS=''\n")
+	writeCLIFile(t, filepath.Join(root, "config/release-transition.json"), string(mustReadConfigFixture(t,
+		filepath.Join(repositoryRoot(t), "config/release-transition.json"))), 0o600)
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": retiredInstance("Stopped", false)}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake,
+		InitPlatform: newInitPlatformFixture()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &materializedConfigActivationReconciler{cli: program, configHome: configHome, yard: "selected"}
+	releases := releasetransition.ReleasePair{From: "release-a", Target: "release-b"}
+	view := releasetransition.V2SourceActivationView{Settings: preparedActivationSnapshotFixture{home: configHome}}
+	plan, err := reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, view)
+	if err != nil || !slices.Equal(plan.Consequences, []string{retiredReminder}) || reconciler.allLocal {
+		t.Fatalf("selected source activation plan=%+v allLocal=%t err=%v", plan, reconciler.allLocal, err)
+	}
+	if _, included := reconciler.projectedUnavailable["default"]; included || len(reconciler.integrationPlans) != 0 || len(fake.ExecCalls) != 0 {
+		t.Fatal("reminder widened integration planning or entered a guest")
+	}
+	delete(fake.Instances, "subyard/yard")
+	if err := reconciler.verifyProjectedUnavailable(context.Background()); err != nil {
+		t.Fatalf("unselected yard affected the availability guard: %v", err)
+	}
+	for _, content := range []string{"CODING_TOOL_INTEGRATIONS='widget'\n", "CODING_TOOL_INTEGRATIONS='unterminated\n"} {
+		writeCLIFile(t, filepath.Join(configHome, "yards/default/config.env"), content, 0o600)
+		fresh, err := reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, view)
+		if err != nil || fresh.Desired != plan.Desired || len(fresh.Consequences) != 0 {
+			t.Fatalf("unreadable non-selected yard affected activation: plan=%+v err=%v", fresh, err)
+		}
+	}
+}
+
+func TestInitPreviewSurvivesRetiredHandlerReadFailure(t *testing.T) {
+	program, execution, fake := adoptionFixture(t)
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	packageRoot := filepath.Join(program.options.RepositoryRoot, "retired-widget")
+	if err := os.MkdirAll(packageRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	observed := filepath.Join(packageRoot, "observed")
+	writeCLIFile(t, filepath.Join(packageRoot, "integration.json"), `{"schema_version":1,"retired":true,"lifecycle":{"handler":"retire.sh","instance_config_keys":[],"instance_devices":[]}}`, 0o600)
+	writeCLIFile(t, filepath.Join(packageRoot, "retire.sh"), "#!/bin/sh\nprintf observed > '"+observed+"'\nexit 1\n", 0o700)
+	runtime.Integrations = []profile.IntegrationDefinition{{Name: "widget", Root: packageRoot, Retired: true,
+		Lifecycle: &profile.IntegrationLifecycle{Handler: "retire.sh"}}}
+	runtime.Executor = adoptionHookExecutor{}
+	runtime.ACLToolsAvailable = func() (bool, error) { return true, nil }
+	fake.ServerInfo.Version = "6.0.7"
+	fake.Reconcile.HostPoolFound, fake.Reconcile.HostNetworkFound = true, true
+	// init.go refuses on any error from this preview, so no error means no refusal.
+	retirements, warnings, err := runtime.RetiredIntegrationNotices(context.Background())
+	if err != nil || len(retirements) != 0 || len(warnings) != 0 {
+		t.Fatalf("handler preview would refuse init: retirements=%v warnings=%v err=%v", retirements, warnings, err)
+	}
+	if _, err := os.Stat(observed); err != nil {
+		t.Fatalf("fixture did not exercise the failing handler: %v", err)
 	}
 }
 

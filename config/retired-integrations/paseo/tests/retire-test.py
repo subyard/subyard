@@ -32,13 +32,16 @@ command = arguments[separator + 1:]
 if command[:3] != ['python3', '-B', '-c']:
     sys.exit(91)
 program = command[3].replace("ROOT = ''", 'ROOT = %r' % os.environ['FIXTURE_ROOT'], 1).replace('OWNER = 0', 'OWNER = %d' % os.getuid(), 1)
+if 'FIXTURE_MOUNTINFO' in os.environ:
+    program = program.replace("open('/proc/self/mountinfo', 'rb')", "open(os.environ['FIXTURE_MOUNTINFO'], 'rb')")
 os.execv(sys.executable, [sys.executable, '-B', '-c', program, *command[4:]])
 '''
 SYSTEMCTL_SHIM = r'''#!/bin/sh
 case "$*" in
   show*)
     [ -z "$FIXTURE_SYSTEMCTL_SHOW_FAILS" ] || exit 1
-    if [ -n "$FIXTURE_LOADED_FRAGMENT" ]; then load=loaded fragment=$FIXTURE_LOADED_FRAGMENT
+    if [ "$FIXTURE_LOAD_STATE" = not-found ]; then load=not-found fragment=
+    elif [ -n "$FIXTURE_LOADED_FRAGMENT" ]; then load=loaded fragment=$FIXTURE_LOADED_FRAGMENT
     elif [ -e "$FIXTURE_ROOT/etc/systemd/system/paseo.service" ]; then load=loaded fragment=/etc/systemd/system/paseo.service
     else load=not-found fragment=
     fi
@@ -245,6 +248,17 @@ class RetirementTest(unittest.TestCase):
         self.assertEqual((target / 'file').read_bytes(), b'keep')
         self.assert_state_kept_with_warning(applied)
 
+    def test_same_filesystem_bind_mount_on_state_is_kept(self):
+        self.install(worktree=False)
+        mountinfo = self.base / 'mountinfo'
+        mountinfo.write_text(f'123 1 8:1 /source {self.state} rw - ext4 /dev/root rw\n')
+        self.environment['FIXTURE_MOUNTINFO'] = str(mountinfo)
+        self.assertFalse(os.path.ismount(self.state))
+        observed, applied = self.retire()
+        self.assert_state_kept_with_warning(observed)
+        self.assert_state_kept_with_warning(applied)
+        self.assertEqual((self.state / 'chat/rooms.json').read_bytes(), b'{}')
+
     def test_already_removed_state_retires_the_rest(self):
         self.install(worktree=False)
         shutil.rmtree(self.state)
@@ -323,6 +337,33 @@ class RetirementTest(unittest.TestCase):
         self.install()
         self.write(self.unit, self.unit.read_bytes() + b'# edited\n', 0o644)
         self.assert_foreign()
+
+    def test_unit_drop_ins_preserve_receipted_and_template_proven_installations(self):
+        for receipt in (True, False):
+            for loaded in (True, False):
+                for parent in ('etc', 'run', 'usr/lib', 'lib'):
+                    with self.subTest(receipt=receipt, loaded=loaded, parent=parent):
+                        self.install(receipt=receipt, worktree=False)
+                        drop_in = self.root / parent / 'systemd/system/paseo.service.d/override.conf'
+                        self.write(drop_in, b'[Service]\nExecStart=\nExecStart=/bin/foreign\n', 0o644)
+                        self.environment['FIXTURE_LOAD_STATE'] = 'loaded' if loaded else 'not-found'
+                        self.assert_service_untouched('/etc/systemd/system/paseo.service')
+                        self.assertTrue(self.unit.exists() and self.runtime.exists() and self.state.exists())
+                        self.assertEqual(drop_in.read_bytes(), b'[Service]\nExecStart=\nExecStart=/bin/foreign\n')
+                        self.reset_guest()
+
+    def test_host_wide_drop_in_and_empty_unit_drop_in_directory_allow_retirement(self):
+        for directory in ('service.d', 'paseo.service.d'):
+            with self.subTest(directory=directory):
+                self.install(worktree=False)
+                path = self.unit.parent / directory
+                path.mkdir()
+                if directory == 'service.d':
+                    self.write(path / 'override.conf', b'[Service]\n', 0o644)
+                self.retire()
+                self.assertTrue(path.is_dir())
+                self.assertFalse(self.state.exists())
+                self.reset_guest()
 
     def test_changed_receipt_is_foreign(self):
         for name, mutate in (

@@ -85,7 +85,7 @@ seed_settings() {
       "$2" "$2" "$3" "$4" > "$1"; chmod 0600 "$1"' _ \
       "$CONFIG_HOME/yards/$name/config.env" "$OPERATOR_HOME/host-data-$name" "$port" "$selection"
   done
-  operator_env sha256sum "$CONFIG_HOME"/yards/*/config.env > "$STATE_ROOT/settings.before"
+  operator_env bash -c 'sha256sum "$1"/yards/*/config.env' _ "$CONFIG_HOME" > "$STATE_ROOT/settings.before"
 }
 
 create_yards() {

@@ -242,6 +242,22 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 		}
 		targets = append(targets, config.MaterializationActivationTarget{Name: name, Assessment: assessment, IntegrationScope: scope})
 	}
+	for _, name := range draft.names {
+		if slices.Contains(names, name) {
+			continue
+		}
+		loaded, err := draft.load(name)
+		if err != nil || loaded.Context.AccessKind == domain.AccessRemote {
+			continue
+		}
+		incus, _ := reconciler.cli.statusPorts()
+		instance, err := incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+		if err == nil {
+			if reminder := reconcileruntime.RetiredIntegrationReminder(loaded, instance); reminder != "" {
+				consequences = append(consequences, reminder)
+			}
+		}
+	}
 	reconciler.integrationPlans = plans
 	reconciler.projectedIntegrationPlans = true
 	reconciler.projectedUnavailable = unavailable

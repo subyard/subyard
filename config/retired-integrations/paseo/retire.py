@@ -13,10 +13,12 @@ UNIT_PATHS = ('/etc/systemd/system/paseo.service', '/run/systemd/system/paseo.se
 # Runs as root in the guest. Ownership comes from the provisioning receipt, or, for
 # releases before 0.15 that wrote none, from the exact bytes of a published template.
 GUEST = r'''
-import fcntl, hashlib, json, os, pwd, re, stat, subprocess, sys
+import fcntl, glob, hashlib, json, os, pwd, re, stat, subprocess, sys
 ROOT = ''
 OWNER = 0
 UNIT_PATH = '/etc/systemd/system/paseo.service'
+UNIT_PATHS = ('/etc/systemd/system/paseo.service', '/run/systemd/system/paseo.service',
+              '/usr/lib/systemd/system/paseo.service', '/lib/systemd/system/paseo.service')
 UNIT = ROOT + UNIT_PATH
 RECEIPT = ROOT + '/var/lib/subyard/paseo-ownership'
 RUNTIME = ROOT + '/opt/subyard/paseo'
@@ -112,6 +114,9 @@ def inspect_unit(receipt, recorded, user, home):
     if content is None:
         # disable --now precedes the unlink, so a retry never finds its own unit still running.
         return foreign if loaded.get('ActiveState', 'inactive') not in ('inactive', 'failed') else {'state': 'absent'}
+    # No release shipped a drop-in, and one can replace what this proven file runs.
+    if any(glob.glob(ROOT + path + '.d/*.conf') for path in UNIT_PATHS):
+        return foreign
     safe, data = content
     digest = sha256(data)
     if not safe or receipt['state'] == 'invalid':
@@ -193,7 +198,7 @@ def worktrees_empty():
 def mount_inside_state():
     prefix = STATE.encode() + b'/'
     with open('/proc/self/mountinfo', 'rb') as stream:
-        return any(line.split()[4].startswith(prefix) for line in stream)
+        return any(line.split()[4] == STATE.encode() or line.split()[4].startswith(prefix) for line in stream)
 
 def inspect_state(user, receipt, unit):
     """Delete only with receipt ownership; contents stay outside the binding."""

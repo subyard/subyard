@@ -739,6 +739,10 @@ func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retiremen
 	if !strings.EqualFold(state.Instance.Status, "running") || runtime.Executor == nil {
 		return nil, nil, nil
 	}
+	ready, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()})
+	if err != nil || !ready {
+		return nil, nil, nil
+	}
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return nil, nil, err
@@ -749,7 +753,7 @@ func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retiremen
 		}
 		observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
 		if err != nil {
-			return nil, nil, err
+			continue
 		}
 		if observation.Notice == "" {
 			continue
