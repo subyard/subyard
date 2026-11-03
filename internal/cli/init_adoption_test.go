@@ -1184,6 +1184,27 @@ func registeredRefusalOwner(t *testing.T, execution *initExecution, fake *adopti
 	return owner, runtime, resources.ProxyContracts([]string{"sample"})[0]
 }
 
+// Consequences enter the plan token, so several pending receipts must not make
+// an inspected plan stale before convergence.
+func TestRegisteredOwnerConsequenceOrderIsStable(t *testing.T) {
+	owner, fake, _, _ := registeredIngressOwner(t)
+	instance := &fake.Reconcile.Instance
+	for device, listen := range map[string][2]string{"sample-udp": {"udp:203.0.113.10:51820", "udp:10.20.30.40:51820"}, "sample-tcp": {"tcp:203.0.113.10:2226", "tcp:10.20.30.40:22"}} {
+		local := map[string]string{"type": "proxy", "bind": "host", "nat": "true", "listen": listen[0], "connect": listen[1]}
+		instance.LocalDevices[device], instance.Devices[device] = local, maps.Clone(local)
+	}
+	first, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil || len(first.Consequences) < 3 {
+		t.Fatalf("initial: %#v %v", first, err)
+	}
+	for range 32 {
+		next, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil || !slices.Equal(next.Consequences, first.Consequences) {
+			t.Fatalf("consequence order changed: %q vs %q: %v", next.Consequences, first.Consequences, err)
+		}
+	}
+}
+
 // The labelled migration fixture short-circuits before InspectYardAdoption, so this
 // real adoption fixture owns the unlabelled path through the concrete migration.
 func TestRegisteredUnlabelledMigrationRetainsUnknownDeviceThroughConvergence(t *testing.T) {
@@ -1313,5 +1334,168 @@ func TestYardAdoptionRebuildKeepsNormalInitAuthority(t *testing.T) {
 	runtime := execution.platform.(reconcileruntime.Runtime)
 	if runtime.LegacyContinuation != nil {
 		t.Fatal("adoption acquired a legacy continuation grant during privilege setup")
+	}
+}
+
+// Verified candidates run from a parent-pinned /proc/<pid>/fd/N label, so two
+// processes render different roots for one unchanged yard.
+func TestYardAdoptionContextIsStableAcrossProcessLabels(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	inspect := func(pid string) map[string]string {
+		t.Helper()
+		runtime := execution.platform.(reconcileruntime.Runtime)
+		runtime.Yard.Paths.RepositoryRoot = "/proc/" + pid + "/fd/7"
+		runtime.Yard.Paths.ConfigDir = "/proc/" + pid + "/fd/7/config"
+		_, _, metadata, _, err := runtime.InspectYardAdoption(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return metadata
+	}
+	first, second := inspect("111"), inspect("222")
+	if !maps.Equal(first, second) {
+		t.Fatalf("new adoption metadata differs across processes:\n%#v\n%#v", first, second)
+	}
+	if strings.Contains(first["user.subyard.context"], "/proc/") {
+		t.Fatalf("process-local path published: %s", first["user.subyard.context"])
+	}
+	if fake.writes != 0 {
+		t.Fatal("inspection wrote project metadata")
+	}
+}
+
+func TestYardAdoptionAcceptsOnlyProcessLabelsInStampedContext(t *testing.T) {
+	stamp := func(t *testing.T, change func(*domain.Context) string) (reconcileruntime.Runtime, *adoptionIncus, string) {
+		t.Helper()
+		_, execution, fake := adoptionFixture(t)
+		runtime := execution.platform.(reconcileruntime.Runtime)
+		_, _, metadata, _, err := runtime.InspectYardAdoption(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stamped domain.Context
+		if err := json.Unmarshal([]byte(metadata["user.subyard.context"]), &stamped); err != nil {
+			t.Fatal(err)
+		}
+		stamped.Paths.RepositoryRoot = "/proc/183242/fd/7"
+		stamped.Paths.ConfigDir = "/proc/183242/fd/7/config"
+		payload, err := json.Marshal(stamped)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value := string(payload)
+		if change != nil {
+			value = change(&stamped)
+		}
+		maps.Copy(fake.Reconcile.ProjectConfig, metadata)
+		fake.Reconcile.ProjectConfig["user.subyard.context"] = value
+		return runtime, fake, value
+	}
+	t.Run("labels as found", func(t *testing.T) {
+		runtime, fake, value := stamp(t, nil)
+		for _, pid := range []string{"111", "222"} {
+			runtime.Yard.Paths.RepositoryRoot = "/proc/" + pid + "/fd/9"
+			_, _, metadata, before, err := runtime.InspectYardAdoption(context.Background())
+			if err != nil {
+				t.Fatal("stamped label refused: ", err)
+			}
+			if metadata["user.subyard.context"] != value || before["user.subyard.context"] != value {
+				t.Fatalf("stamped context was not kept as found: %s", metadata["user.subyard.context"])
+			}
+		}
+		if fake.writes != 0 {
+			t.Fatal("accepting a label rewrote project metadata")
+		}
+	})
+	marshal := func(t *testing.T, context domain.Context) string {
+		t.Helper()
+		payload, err := json.Marshal(context)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(payload)
+	}
+	for name, change := range map[string]func(*testing.T, *domain.Context) string{
+		"project": func(t *testing.T, value *domain.Context) string {
+			value.IncusProject = "foreign"
+			return marshal(t, *value)
+		},
+		"yard": func(t *testing.T, value *domain.Context) string {
+			value.YardName = "foreign"
+			return marshal(t, *value)
+		},
+		"config home": func(t *testing.T, value *domain.Context) string {
+			value.Paths.ConfigHome = "/foreign"
+			return marshal(t, *value)
+		},
+		"unknown field": func(t *testing.T, value *domain.Context) string {
+			return strings.TrimSuffix(marshal(t, *value), "}") + `,"foreign":true}`
+		},
+		"trailing data": func(t *testing.T, value *domain.Context) string { return marshal(t, *value) + "{}" },
+		"not canonical": func(t *testing.T, value *domain.Context) string { return " " + marshal(t, *value) },
+		"empty":         func(*testing.T, *domain.Context) string { return "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			runtime, _, _ := stamp(t, func(value *domain.Context) string { return change(t, value) })
+			_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
+			for _, want := range []string{"partial, foreign or conflicting project ownership", "incomplete adopted project ownership"} {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal %q missing: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// The ownership binding a journal records must hold in every later process, for a
+// new adoption and for a project stamped by an earlier process as found.
+func TestRegisteredAdoptionBindingIsStableAcrossProcessLabels(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	reference, base, _ := registeredRefusalOwner(t, execution, fake)
+	load := reference.LoadTargets
+	observe := func(pid string) (releasetransition.Fingerprint, map[string]string) {
+		t.Helper()
+		runtime := base
+		runtime.Yard.Paths.RepositoryRoot = "/proc/" + pid + "/fd/7"
+		runtime.Yard.Paths.ConfigDir = "/proc/" + pid + "/fd/7/config"
+		owner := *reference
+		owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
+			targets, err := load(ctx, view)
+			for index := range targets {
+				targets[index].Runtime = runtime
+			}
+			return targets, err
+		}
+		observed, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, metadata, _, err := runtime.InspectYardAdoption(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return observed.Desired, metadata
+	}
+	unstamped, metadata := observe("111")
+	if again, _ := observe("222"); again != unstamped {
+		t.Fatal("new adoption Desired differs across processes")
+	}
+	maps.Copy(fake.Reconcile.ProjectConfig, metadata)
+	var stamped domain.Context
+	if err := json.Unmarshal([]byte(metadata["user.subyard.context"]), &stamped); err != nil {
+		t.Fatal(err)
+	}
+	stamped.Paths.RepositoryRoot = "/proc/183242/fd/7"
+	payload, err := json.Marshal(stamped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.Reconcile.ProjectConfig["user.subyard.context"] = string(payload)
+	first, _ := observe("333")
+	if second, _ := observe("444"); second != first {
+		t.Fatal("stamped adoption Desired differs across processes")
+	}
+	if fake.writes != 0 {
+		t.Fatal("observation wrote project metadata")
 	}
 }

@@ -3,10 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -150,6 +155,187 @@ func TestIntegrationActivationRetainsApprovalAcrossSiblingDashboardPublication(t
 			}
 		})
 	}
+}
+
+// A plan approved before native migrations must survive exactly what those verified
+// migrations and their restart published, and nothing else.
+func TestIntegrationActivationExplainsOnlyVerifiedNativeMigrations(t *testing.T) {
+	const (
+		guestStep      = "complete-registered-guest-disk-tmp-v3"
+		registeredStep = "register-existing-local-yards-v3"
+	)
+	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:32000", "connect": "tcp:127.0.0.1:9119"}
+	receiptKey, receipt := "user.subyard.resource.sample", (resource.ProxyContract{}).OwnershipValue(device)
+	both := func(instance *ports.InstanceInfo, key, value string) {
+		instance.Config[key], instance.LocalConfig[key] = value, value
+	}
+	restart := func(instance *ports.InstanceInfo) {
+		both(instance, "volatile.last_state.power", "RUNNING")
+		both(instance, "volatile.last_state.ready", "false")
+		both(instance, "volatile.eth0.host_name", "vethAFTER")
+		both(instance, "volatile.sample.last_state.created", "true")
+	}
+	marker := func(instance *ports.InstanceInfo) { both(instance, "user.subyard.disk_tmp", "v1") }
+	restartVM := func(instance *ports.InstanceInfo) {
+		restart(instance)
+		both(instance, "volatile.vm.rtc_adjustment", "-2")
+		both(instance, "volatile.vm.needs_reset", "true")
+	}
+	for _, test := range []struct {
+		name    string
+		steps   map[string]string
+		yard    string
+		goal    string
+		change  func(*ports.InstanceInfo)
+		allowed bool
+		vm      bool
+	}{
+		{name: "marker and restart", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) { marker(i); restart(i) }, allowed: true},
+		{name: "VM marker and restart", vm: true, steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) { marker(i); restartVM(i) }, allowed: true},
+		{name: "VM foreign reset value", vm: true, steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) { marker(i); both(i, "volatile.vm.needs_reset", "false") }},
+		{name: "container reset output", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) { marker(i); both(i, "volatile.vm.needs_reset", "true") }},
+		{name: "restart outputs need no evidence", change: restart, allowed: true},
+		{name: "receipt and marker", steps: map[string]string{registeredStep: "verified", guestStep: "verified"}, change: func(i *ports.InstanceInfo) { marker(i); both(i, receiptKey, receipt) }, allowed: true},
+		{name: "marker without journal", change: marker},
+		{name: "marker step unverified", steps: map[string]string{guestStep: "evidence"}, change: marker},
+		{name: "marker of another yard", steps: map[string]string{guestStep: "verified"}, yard: "other", change: marker},
+		{name: "marker of another goal", steps: map[string]string{guestStep: "verified"}, goal: "9.9.9-other", change: marker},
+		{name: "marker needs its own step", steps: map[string]string{registeredStep: "verified"}, change: marker},
+		{name: "receipt needs its own step", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) { both(i, receiptKey, receipt) }},
+		{name: "foreign marker", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) { both(i, "user.subyard.disk_tmp", "v2") }},
+		{name: "local marker only", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) { i.LocalConfig["user.subyard.disk_tmp"] = "v1" }},
+		{name: "foreign receipt", steps: map[string]string{registeredStep: "verified"}, change: func(i *ports.InstanceInfo) { both(i, receiptKey, "v1:foreign") }},
+		{name: "unrelated config beside marker", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) {
+			marker(i)
+			i.Config["security.privileged"] = "true"
+		}},
+		{name: "stable device identity beside marker", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) {
+			marker(i)
+			both(i, "volatile.sample.hwaddr", "00:16:3e:00:00:01")
+		}},
+		{name: "device beside marker", steps: map[string]string{guestStep: "verified"}, change: func(i *ports.InstanceInfo) {
+			marker(i)
+			i.Devices["foreign"] = map[string]string{"type": "disk", "source": "/", "path": "/host"}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, _, environment := configCommandFixture(t)
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			loaded.Integrations = config.IntegrationSelection{Present: true}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{
+				Name: "yard", Project: "subyard", Type: domain.YardContainer, Status: "Running",
+				Config: map[string]string{"volatile.sample.last_state.created": "false", "volatile.eth0.host_name": "vethBEFORE"}, LocalConfig: map[string]string{"volatile.sample.last_state.created": "false", "volatile.eth0.host_name": "vethBEFORE"},
+				Devices: map[string]map[string]string{"sample": device}, LocalDevices: map[string]map[string]string{"sample": device}}}}
+			instance := &incus.Reconcile.Instance
+			if test.vm {
+				loaded.Context.YardKind, instance.Type = domain.YardVM, domain.YardVM
+			}
+			key := loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName
+			incus.Instances = map[string]ports.InstanceInfo{key: *instance}
+			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: incus, Executor: activationIntegrationExecutor{},
+				Integrations: []profile.IntegrationDefinition{}, Environment: []string{}, Yard: loaded.Context}
+			approved, err := runtime.IntegrationPlan(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding := approved.StateBinding()
+			test.change(instance)
+			incus.Instances[key] = *instance
+
+			configHome := testkit.TempDir(t)
+			goal := releasetransition.Goal{Target: "1.2.3-owner", Direction: releasetransition.DirectionActivateTarget}
+			artifact := releasetransition.Fingerprint(strings.Repeat("a", 64))
+			if test.steps != nil {
+				journalGoal := goal
+				if test.goal != "" {
+					journalGoal.Target = releasetransition.ReleaseID(test.goal)
+				}
+				yard := test.yard
+				if yard == "" {
+					yard = "default"
+				}
+				writeNativeMigrationJournal(t, root, configHome, journalGoal, artifact, yard, test.steps)
+			}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler := &materializedConfigActivationReconciler{configHome: configHome, goal: goal, artifactDigest: artifact,
+				integrationPlans: map[string]reconcileruntime.IntegrationPlan{"default": approved}}
+			err = reconciler.reconcileIntegrationTarget(context.Background(), program, configTarget{Name: "default", Loaded: loaded})
+			if test.allowed && err != nil {
+				t.Fatalf("verified migration invalidated the approved plan: %v", err)
+			}
+			if !test.allowed && !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("unexplained change accepted or misclassified: %v", err)
+			}
+			if approved.StateBinding() != binding {
+				t.Fatal("comparison changed the original approval")
+			}
+		})
+	}
+}
+
+func writeNativeMigrationJournal(t *testing.T, root, configHome string, goal releasetransition.Goal, artifact releasetransition.Fingerprint, yard string, checkpoints map[string]string) {
+	t.Helper()
+	payload, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := releasetransition.BuiltinCapabilityCatalog()
+	_, registryDigest, err := releasetransition.ParseRegistryV2(payload, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := releasetransition.Fingerprint(strings.Repeat("c", 64))
+	journal := releasetransition.JournalRecord{
+		SchemaVersion: 2, Transaction: "tx-0123456789abcdef", Goal: goal,
+		Releases:          releasetransition.ReleasePair{From: goal.Target, Target: goal.Target},
+		AuthorizationPlan: releasetransition.PlanToken("plan-v1-" + string(digest)),
+		ResumePlan:        releasetransition.PlanToken("resume-v1-" + strings.Repeat("b", 64)),
+		ArtifactDigest:    artifact, RegistryDigest: registryDigest, CatalogDigest: catalog.Digest(),
+		ObservationScope: digest, AuthorizationDigest: digest,
+		Checkpoint: releasetransition.JournalReconciling, Steps: []releasetransition.JournalStep{},
+	}
+	type intentStep struct {
+		ID        string                        `json:"id"`
+		Migration string                        `json:"migration"`
+		Resource  string                        `json:"resource"`
+		Decision  releasetransition.Decision    `json:"decision"`
+		Expected  releasetransition.Fingerprint `json:"expected"`
+		Desired   releasetransition.Fingerprint `json:"desired"`
+	}
+	intents := []intentStep{}
+	migrations := slices.Sorted(maps.Keys(checkpoints))
+	for index, migration := range migrations {
+		step := releasetransition.JournalStep{ID: fmt.Sprintf("step-%d", index), Migration: migration, Resource: "yard." + yard,
+			Decision: releasetransition.DecisionTransform, Expected: digest, Desired: digest, Checkpoint: releasetransition.StepCheckpoint(checkpoints[migration])}
+		evidence := releasetransition.EvidenceRecord{SchemaVersion: 2, Transaction: journal.Transaction, Releases: journal.Releases, Step: step.ID,
+			Expected: digest, Desired: digest, Observed: digest, Checkpoint: releasetransition.EvidenceCaptured}
+		if step.Checkpoint == releasetransition.StepVerified {
+			evidence.Checkpoint = releasetransition.EvidenceVerified
+		} else {
+			journal.Checkpoint = releasetransition.JournalMigrating
+		}
+		step.Evidence = &evidence
+		journal.Steps = append(journal.Steps, step)
+		intents = append(intents, intentStep{step.ID, step.Migration, step.Resource, step.Decision, step.Expected, step.Desired})
+	}
+	intent, err := json.Marshal(struct {
+		AuthorizationPlan releasetransition.PlanToken   `json:"authorizationPlan"`
+		ResumePlan        releasetransition.PlanToken   `json:"resumePlan"`
+		ObservationScope  releasetransition.Fingerprint `json:"observationScope"`
+		Steps             []intentStep                  `json:"steps"`
+	}{journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, intents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.IntentDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(intent)))
+	encoded, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition/v2/journal.json"), encoded, 0o600)
 }
 
 type changedActivationInventory struct{ activationIntegrationExecutor }

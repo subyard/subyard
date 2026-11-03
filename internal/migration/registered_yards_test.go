@@ -235,6 +235,33 @@ func TestRegisteredDesiredIgnoresDeviceLifecycleOutputs(t *testing.T) {
 	}
 }
 
+// Both native owners share one durable journal. The registration step recorded
+// its Desired before the guest migration published the marker.
+func TestRegisteredDesiredIgnoresGuestTmpMarkerOnly(t *testing.T) {
+	owner, native, _ := registeredMigrationFixture(t)
+	instance := native.Instances["fixture/yard"]
+	set := func(value string) {
+		instance.LocalConfig["user.subyard.disk_tmp"], instance.Config["user.subyard.disk_tmp"] = value, value
+		native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	}
+	observe := func() (releasetransition.V2ActivationObservation, error) {
+		return owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	}
+	before, err := observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set("v1")
+	after, err := observe()
+	if err != nil || after.Desired != before.Desired {
+		t.Fatalf("guest migration result changed the registration Desired: %v", err)
+	}
+	set("foreign")
+	if _, err := observe(); err == nil || !strings.Contains(err.Error(), "foreign guest temporary policy metadata") {
+		t.Fatalf("foreign marker accepted: %v", err)
+	}
+}
+
 func TestRegisteredEndpointKeepsOperatorSettingAndPublishesReceipt(t *testing.T) {
 	explicit := []config.SettingResolution{{Scope: "yard", Role: "local settings", Status: "effective"}}
 	saved := []config.SettingResolution{{Scope: "derived", Role: "derived", Status: "effective", Detail: "saved endpoint allocation for sample.server"}}

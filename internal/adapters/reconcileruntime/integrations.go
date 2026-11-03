@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
@@ -423,8 +424,10 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	_ = json.Unmarshal(instanceBytes, &guardInstance)
 	guardInstance.Status = ""
 	virtualMachine := runtime.Yard.YardKind == domain.YardVM && guardInstance.Type == domain.YardVM
-	guardInstance.Config = cloneIntegrationConfig(guardInstance.Config, virtualMachine)
-	guardInstance.LocalConfig = cloneIntegrationConfig(guardInstance.LocalConfig, virtualMachine)
+	devices := append(slices.Collect(maps.Keys(guardInstance.Devices)), slices.Collect(maps.Keys(guardInstance.LocalDevices))...)
+	devices = append(devices, "eth0")
+	guardInstance.Config = cloneIntegrationConfig(guardInstance.Config, devices, virtualMachine)
+	guardInstance.LocalConfig = cloneIntegrationConfig(guardInstance.LocalConfig, devices, virtualMachine)
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return plan, observed, err
@@ -853,14 +856,59 @@ func (runtime Runtime) ProjectIntegrationPlanAfterProfileActivation(ctx context.
 			}
 		}
 	}
-	fresh.Scope = integrationInstanceScope(fresh.instanceScope, instance)
-	parts := slices.Clone(fresh.fingerprints)
+	return fresh.withInstance(instance)
+}
+
+// withInstance recomputes the comparison identity for a projected instance. A
+// projection exists only to be compared and may be projected again.
+func (plan IntegrationPlan) withInstance(instance ports.InstanceInfo) (IntegrationPlan, error) {
+	plan.instance = instance
+	plan.Scope = integrationInstanceScope(plan.instanceScope, instance)
+	parts := slices.Clone(plan.fingerprints)
 	if len(parts) == 0 {
-		return fresh, domain.ErrPlanStale
+		return plan, domain.ErrPlanStale
 	}
-	parts[0] = fresh.Scope
-	fresh.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
-	return fresh, nil
+	parts[0] = plan.Scope
+	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
+	return plan, nil
+}
+
+// VerifiedNativeMigrations names the native migrations a transition's own journal
+// proves were authorized and verified for this yard after its plan was approved.
+type VerifiedNativeMigrations struct{ RegisteredYard, GuestDiskTmp bool }
+
+// ProjectIntegrationPlanAfterNativeMigrations removes only the exact instance
+// metadata those verified migrations publish, and only where the approved plan
+// lacked it. A foreign value, a marker no verified migration explains, or any
+// other instance change stays in the comparison and refuses.
+func ProjectIntegrationPlanAfterNativeMigrations(approved, fresh IntegrationPlan, verified VerifiedNativeMigrations) (IntegrationPlan, error) {
+	if approved.Fingerprint == fresh.Fingerprint || !verified.RegisteredYard && !verified.GuestDiskTmp {
+		return fresh, nil
+	}
+	instance := fresh.instance
+	instance.Config, instance.LocalConfig = maps.Clone(instance.Config), maps.Clone(instance.LocalConfig)
+	published := func(key, value string) bool {
+		_, config := approved.instance.Config[key]
+		_, local := approved.instance.LocalConfig[key]
+		return !config && !local && value != "" && instance.Config[key] == value && instance.LocalConfig[key] == value
+	}
+	projected := false
+	for key, value := range fresh.instance.LocalConfig {
+		owned := verified.GuestDiskTmp && key == "user.subyard.disk_tmp" && value == "v1"
+		if name, receipt := strings.CutPrefix(key, "user.subyard.resource."); receipt && verified.RegisteredYard {
+			device := fresh.instance.LocalDevices[name]
+			owned = device["type"] == "proxy" && maps.Equal(device, fresh.instance.Devices[name]) && value == (resource.ProxyContract{}).OwnershipValue(device)
+		}
+		if owned && published(key, value) {
+			delete(instance.Config, key)
+			delete(instance.LocalConfig, key)
+			projected = true
+		}
+	}
+	if !projected {
+		return fresh, nil
+	}
+	return fresh.withInstance(instance)
 }
 
 // PrepareSourceIntegrationPlan retains the full native ownership, adoption and

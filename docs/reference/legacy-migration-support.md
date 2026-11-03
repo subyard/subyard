@@ -59,14 +59,26 @@ for a missing or different `srv` device, because reattaching it would change per
 `ALLOWS_HOST_ACCESS=false` boundary, a selected loopback or Tailscale resource device that fails its
 recipe, a foreign or inherited resource receipt, a project root or NIC with a different type, path,
 pool or network, and local and expanded devices that disagree. Selected owner-IPv4 routes, their
-pending receipts and startup intent, and other project root and NIC properties enter as found. Working
+pending receipts and startup intent, and other project root and NIC properties enter as found. Project
+ownership metadata contains no process-local path. Metadata stamped by an earlier release is kept as found
+when its context differs only in the repository root and configuration directory; any other difference
+refuses. A revision-only marker that an old disabled backend left on the instance also enters as found;
+an enabled backend, a schema key or a conflict with the protected mode still refuses, and strict
+continuation stays closed to it. Working
 resource endpoints are retained: only a shipped default or unset setting imports the native value,
 and an operator-set or saved value is left untouched, while unproven shared and host creation
 ownership is preserved. Refusals are reported together, per yard, before any journal exists.
 Guest temporary-storage policy installation never implies restart consent: a required restart
 or temporary boot asks separately after migration begins, even with `--yes`. Decline or EOF
-leaves the journal incomplete and resumable without restarting the yard. Persistent data,
+leaves the journal incomplete and resumable without restarting the yard. A guest that fails its
+read-only safety assessment reports every reason it can determine; the refusal names the yard and those
+reasons, and nothing is authorized or changed. Activation keeps its approved integration plan across
+exactly what these verified steps publish and their restart outputs; any other change still refuses as
+stale. Persistent data,
 instance UUID and desired power remain protected. Completed migrations are not reopened for drift.
+Resume pins instance configuration only while the journal is migrating. Activation legitimately writes
+that configuration afterwards, so from then on only the owners' identity refusals apply to verified
+steps: an instance replaced directly in Incus during that window completes the update as found.
 Explicit `yard init --continue-legacy` can establish
 a separately confirmed, protected grant for bounded normal reconciliation of a supported,
 exactly assessed legacy resource. It keeps its closed device list while reporting every refusal

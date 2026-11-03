@@ -2,6 +2,7 @@ package releasetransition
 
 import (
 	"context"
+	"errors"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -17,6 +18,23 @@ func nativeMigration(m MigrationDefinitionV2) bool {
 	return m.FromEpoch == 2 && m.ToEpoch == 3 &&
 		(m.Kind == registeredYardsMigration && m.Domain == "owner-registration" ||
 			m.Kind == guestDiskTmpMigration && m.Domain == "power-metadata")
+}
+
+// VerifiedNativeMigrationKinds reports which native migrations this journal proves
+// were authorized and verified for a yard. It confers no other authority.
+func VerifiedNativeMigrationKinds(registry RegistryV2, journal JournalRecord, yard string) (registered, guestDiskTmp bool) {
+	for _, step := range journal.Steps {
+		if step.Resource != "yard."+yard || step.Checkpoint != StepVerified {
+			continue
+		}
+		for _, migration := range registry.Migrations {
+			if migration.ID == step.Migration && nativeMigration(migration) {
+				registered = registered || migration.Kind == registeredYardsMigration
+				guestDiskTmp = guestDiskTmp || migration.Kind == guestDiskTmpMigration
+			}
+		}
+	}
+	return registered, guestDiskTmp
 }
 
 func (t *V2Transition) nativeOwners(m MigrationDefinitionV2) []V2ActivationReconciler {
@@ -35,6 +53,17 @@ func (t *V2Transition) nativeOwner(m MigrationDefinitionV2, resource string) V2A
 		}
 	}
 	return nil
+}
+
+func laterNativeRow(steps []JournalStep, row JournalStep) bool {
+	later := false
+	for _, step := range steps {
+		if later && step.Resource == row.Resource {
+			return true
+		}
+		later = later || step.ID == row.ID
+	}
+	return false
 }
 
 func nativeMigrationWork(intent PlannerStepIntent, m MigrationDefinitionV2) v2Work {
@@ -75,14 +104,18 @@ func (t *V2Transition) appendNativeMigration(ctx context.Context, observation *v
 		observation.work = append(observation.work, settingsMigrationWork(intent, m, file))
 	}
 	view = settingsViewAfterPlan(t.options.ConfigHome, view, plan.Files)
-	var refusals []error
+	var refusals, blocking []error
 	for _, owner := range t.nativeOwners(m) {
 		if nilV2Adapter(owner) {
 			return view, invalid("registered yard migration owner is unavailable")
 		}
 		observed, err := observeRegisteredOwner(ctx, owner, t.options.Releases, observation.links, view)
 		if err != nil {
-			refusals = append(refusals, err)
+			if nativeMigrationRefusal(err) {
+				blocking = append(blocking, err)
+			} else {
+				refusals = append(refusals, err)
+			}
 			continue
 		}
 		if err := validateActivationObservation(owner.ID(), observed); err != nil {
@@ -99,5 +132,40 @@ func (t *V2Transition) appendNativeMigration(ctx context.Context, observation *v
 		observation.observations = append(observation.observations, ResourceObservation{Resource: intent.Resource, Class: m.Kind, Fingerprint: observed.Actual})
 		observation.work = append(observation.work, nativeMigrationWork(intent, m))
 	}
-	return view, domain.CollectRefusals(refusals...)
+	// An inspection failure ends the observation, so every refusal must travel with it.
+	if len(refusals) != 0 {
+		return view, domain.CollectRefusals(append(refusals, blocking...)...)
+	}
+	if err := domain.CollectRefusals(blocking...); err != nil {
+		observation.blockers = append(observation.blockers, nativeRefusalBlocker("migration."+m.ID, err))
+	}
+	return view, nil
+}
+
+// nativeMigrationRefusal recognizes an owner's explicit verdict about existing state.
+// Other failures stay observation errors; a verdict is not a missing dependency.
+func nativeMigrationRefusal(err error) bool {
+	var refusal interface{ MigrationRefusal() bool }
+	return errors.As(err, &refusal) && refusal.MigrationRefusal()
+}
+
+func nativeRefusalBlocker(resource string, err error) Blocker {
+	message, retry := "", "run yard update --check"
+	for _, cause := range refusalCauses(err) {
+		text, action := publicActivationDiagnostic(cause, cause.Error(), retry)
+		retry = action
+		if message != "" {
+			message += "; "
+		}
+		message += text
+	}
+	return Blocker{Code: CodePreconditionBlocked, Resource: resource, Message: boundedFailureText(message, maxDiagnosticText), Retry: retry}
+}
+
+func refusalCauses(err error) []error {
+	var refusals *domain.Refusals
+	if errors.As(err, &refusals) {
+		return refusals.Unwrap()
+	}
+	return []error{err}
 }

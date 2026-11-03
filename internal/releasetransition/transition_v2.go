@@ -2159,7 +2159,18 @@ func (transition *V2Transition) observeResume(
 		}
 		if nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") {
 			work := nativeMigrationWork(intent, migration)
+			if step.Checkpoint == StepVerified && (journal.Checkpoint != JournalMigrating || laterNativeRow(journal.Steps, step)) {
+				// A later row or activation legitimately changes what this finished row
+				// bound. The last row before activation still pins the yard's identity.
+				observation.work = append(observation.work, work)
+				observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
+				continue
+			}
 			actual, err := transition.nativeFingerprint(ctx, work, observation.links, ownerSettingsView)
+			if nativeMigrationRefusal(err) {
+				observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err))
+				continue
+			}
 			if err != nil {
 				return err
 			}

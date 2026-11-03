@@ -30,6 +30,10 @@ var publicationSettingName = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 var publicationKey = regexp.MustCompile(`^[a-z0-9_.]+$`)
 var publicationRevision = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+// historicalDisabledRevision is the old revision-only form a disabled owner left:
+// mode, worker revision, agent key hash and CPU count.
+var historicalDisabledRevision = regexp.MustCompile(`^0:[a-f0-9]{64}:[a-f0-9]{64}:[1-9][0-9]{0,3}$`)
+
 func (publication RevisionedSettingsPublication) validate(owner string) error {
 	prefix := "user.subyard." + strings.ReplaceAll(owner, "-", "_") + "_"
 	for _, key := range []string{publication.SchemaKey, publication.RevisionKey} {
@@ -59,6 +63,10 @@ func (publication RevisionedSettingsPublication) validate(owner string) error {
 // requires mutable recipe settings to equal today's desired values. The caller
 // supplies the owning setting catalog's validator; identity aliases still bind
 // to the protected environment.
+//
+// Adoption cannot be rolled back, so a historical marker of a disabled owner is
+// taken as found. It describes no enabled backend and grants nothing. Any conflict
+// with the protected mode still refuses.
 func (definition Definition) ObserveInstancePublication(local, effective, environment map[string]string, validate func(string, string) error) (map[string]string, error) {
 	publication := definition.InstancePublication
 	if publication == nil {
@@ -67,6 +75,17 @@ func (definition Definition) ObserveInstancePublication(local, effective, enviro
 	if err := publication.validate(definition.Name); err != nil {
 		return nil, err
 	}
+	_, hasSchema := local[publication.SchemaKey]
+	_, effectiveHasSchema := effective[publication.SchemaKey]
+	revision, hasRevision := local[publication.RevisionKey]
+	if !hasSchema && !effectiveHasSchema && hasRevision && effective[publication.RevisionKey] == revision && environment[publication.DisabledSetting] == "0" && historicalDisabledRevision.MatchString(revision) {
+		return map[string]string{publication.RevisionKey: revision}, nil
+	}
+	return definition.observeRecipe(local, effective, environment, validate)
+}
+
+func (definition Definition) observeRecipe(local, effective, environment map[string]string, validate func(string, string) error) (map[string]string, error) {
+	publication := definition.InstancePublication
 	schema, hasSchema := local[publication.SchemaKey]
 	revision, hasRevision := local[publication.RevisionKey]
 	_, effectiveHasSchema := effective[publication.SchemaKey]
@@ -153,7 +172,14 @@ func reservedPublicationKey(key string) bool {
 // settings. Missing pairs confer no metadata authority. Only the release digest
 // and an explicitly compatible old serialization are publication-equivalent.
 func (definition Definition) ProjectInstancePublication(local, effective, environment map[string]string) (map[string]string, error) {
-	projection, err := definition.ObserveInstancePublication(local, effective, environment, func(name, value string) error {
+	if definition.InstancePublication == nil {
+		return nil, nil
+	}
+	if err := definition.InstancePublication.validate(definition.Name); err != nil {
+		return nil, err
+	}
+	// Continuation stays closed to the marker only adoption takes as found.
+	projection, err := definition.observeRecipe(local, effective, environment, func(name, value string) error {
 		if value != environment[name] {
 			return errors.New("native publication settings differ from the protected context")
 		}
