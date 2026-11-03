@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# A newer release replaces unfinished journals before and after activation, and
-# replaces its own failed replacement, on an already allocated disposable VM.
+# Refused yards report a named verdict without changing anything. A newer release
+# replaces unfinished journals before and after activation, replaces its own failed
+# replacement, and does so through the active launcher, on an allocated disposable VM.
 set -euo pipefail
 
 PREFLIGHT=0
@@ -121,6 +122,56 @@ require_fresh_plan() { # version
     "$FIXTURE_ROOT/plan-$1.json" >/dev/null || die "release $1 did not offer a fresh replacement plan"
 }
 
+journal_state() {
+  if [ -e "$JOURNAL" ]; then sha256sum "$JOURNAL"; else printf 'absent\n'; fi
+}
+
+# A refused yard reports its name and reason as a verdict, and nothing changes.
+require_refusal() { # case reason...
+  local name="$1" log="$FIXTURE_ROOT/refusal-$1" before active reason rc=0
+  shift
+  before="$(journal_state)"
+  active="$(readlink "$RUNTIME_ROOT/current")"
+  fixture_env "$LAUNCHER" update --check --offline --version "${VERSIONS[0]}" --json \
+    > "$log.json" 2> "$log.stderr" || rc=$?
+  printf 'refusal %s: exit=%s\n' "$name" "$rc"
+  jq -c '.blockers' "$log.json" || true
+  cat "$log.stderr"
+  # A failed native read can also block later inspections, so only migrations must be verdicts.
+  jq -e --arg yard "yard $YARD_NAME" 'any(.blockers[];.resource|startswith("migration.")) and
+    all(.blockers[];select(.resource|startswith("migration."))|.code=="precondition-blocked") and
+    all(.blockers[];(.message|contains($yard)) and (.retry|contains("install a compatible release")|not))' \
+    "$log.json" >/dev/null || die "$name: refusal is not a named verdict"
+  for reason in "$@"; do
+    jq -e --arg reason "$reason" 'any(.blockers[];.message|contains($reason))' "$log.json" >/dev/null \
+      || die "$name: verdict omits: $reason"
+    grep -Fq "release transition refusal: yard $YARD_NAME: " "$log.stderr" && grep -Fq "$reason" "$log.stderr" \
+      || die "$name: diagnostic stream omits: $reason"
+  done
+  [ "$(journal_state)" = "$before" ] || die "$name: refused check changed the journal"
+  [ "$(readlink "$RUNTIME_ROOT/current")" = "$active" ] || die "$name: refused check changed the active release"
+}
+
+check_refusals() {
+  local srv foreign=user.subyard.disk_tmp srv_reason='srv device that is missing or differs'
+  local foreign_reason='foreign guest temporary policy metadata'
+  srv="$(incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -c .devices.srv)"
+  [ "$srv" != null ] || die 'srv is not a local device'
+  [ -z "$(incus config get "$INSTANCE" "$foreign" --project "$PROJECT")" ] || die 'source already has temporary policy metadata'
+  local settings=()
+  mapfile -t settings < <(jq -r 'del(.type)|to_entries[]|"\(.key)=\(.value)"' <<<"$srv")
+
+  incus config set "$INSTANCE" "$foreign" foreign --project "$PROJECT"
+  require_refusal metadata "$foreign_reason"
+  incus config unset "$INSTANCE" "$foreign" --project "$PROJECT"
+
+  incus config device remove "$INSTANCE" srv --project "$PROJECT" >/dev/null
+  require_refusal srv "$srv_reason"
+  incus config device add "$INSTANCE" srv disk "${settings[@]}" --project "$PROJECT" >/dev/null
+  [ "$(incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -c .devices.srv)" = "$srv" ] \
+    || die 'srv device was not restored'
+}
+
 require_ready() { # version
   fixture_env "$LAUNCHER" update --check --offline --version "$1" --json > "$FIXTURE_ROOT/ready-$1.json"
   jq -e '.outcome.status=="ready" and .outcome.reachedGoal' "$FIXTURE_ROOT/ready-$1.json" >/dev/null \
@@ -175,6 +226,7 @@ main_newer_release() {
 
   # Before activation: the operator withholds the restart, so the migration stays unfinished.
   stage "${VERSIONS[0]}"
+  check_refusals
   rc=0
   fixture_env python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard "$YARD_NAME" --answer eof -- \
     "$LAUNCHER" update --offline --version "${VERSIONS[0]}" --yes > "$FIXTURE_ROOT/pre-stuck.log" 2>&1 || rc=$?
@@ -221,9 +273,15 @@ main_newer_release() {
   [ "$(active_version)" = "yard ${VERSIONS[3]}" ] || die 'interrupted replacement is not active'
   cp "$JOURNAL" "$FIXTURE_ROOT/chain-journal.json"
 
-  stage "${VERSIONS[4]}"
-  require_fresh_plan "${VERSIONS[4]}"
-  fixture_env "$LAUNCHER" update --offline --version "${VERSIONS[4]}" --yes
+  # The active launcher now carries this contract and fetches the fix itself.
+  LAUNCHER="$RUNTIME_ROOT/current/bin/yard"
+  fixture_env env YARD_RELEASE_BASE_URL="file://$ASSET_ROOT/${VERSIONS[4]}" \
+    "$LAUNCHER" update --check --version "${VERSIONS[4]}" --json > "$FIXTURE_ROOT/plan-${VERSIONS[4]}.json"
+  jq -e '.resume==null and (.blockers|length)==0 and
+    any(.assessment.consequences[];startswith("replace the unfinished release transition"))' \
+    "$FIXTURE_ROOT/plan-${VERSIONS[4]}.json" >/dev/null || die 'the active launcher did not offer a replacement'
+  fixture_env env YARD_RELEASE_BASE_URL="file://$ASSET_ROOT/${VERSIONS[4]}" \
+    "$LAUNCHER" update --version "${VERSIONS[4]}" --yes
   require_replaced "$FIXTURE_ROOT/chain-journal.json"
   local replaced
   for replaced in post chain; do
@@ -232,7 +290,7 @@ main_newer_release() {
   done
   jq -e '.checkpoint=="complete"' "$JOURNAL" >/dev/null || die 'final replacement did not close'
   require_ready "${VERSIONS[4]}"
-  printf 'ok: newer releases replaced unfinished journals before and after activation, and a failed replacement\n'
+  printf 'ok: refusals named their yard; newer releases replaced unfinished journals before and after activation, a failed replacement, and through the active launcher\n'
 }
 
 main_newer_release "$@"
