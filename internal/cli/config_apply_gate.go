@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
@@ -42,17 +43,14 @@ type configApplyRepairPermit struct {
 	selectedTargetNames []string
 	selectedRuntimes    map[string]ports.RuntimeObservation
 	profileInit         bool
-	cleanupID           string
 	sourceBinding       string
 	toolingBinding      string
-	cleanupPlanBinding  string
 	teardownInputs      *ownerInputBaseline
 }
 
 type configApplyRepairFacts struct {
 	CleanupSource    string                        `json:"cleanup_source,omitempty"`
 	CleanupTooling   string                        `json:"cleanup_tooling,omitempty"`
-	CleanupPlan      string                        `json:"cleanup_plan,omitempty"`
 	Journal          releasetransition.Fingerprint `json:"journal"`
 	Ledger           releasetransition.Fingerprint `json:"ledger"`
 	Target           releasetransition.ReleaseID   `json:"target"`
@@ -102,7 +100,7 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 	requireDrift bool,
 	selectedNames []string,
 ) (*configApplyRepairPermit, error) {
-	return cli.prepareActivationRepair(ctx, yard, allLocal, outcome, requireDrift, selectedNames, false, "")
+	return cli.prepareActivationRepair(ctx, yard, allLocal, outcome, requireDrift, selectedNames, false)
 }
 
 // Profile runtime init repair shares the completed-journal, ledger, link and lock guards of
@@ -114,7 +112,7 @@ func (cli *CLI) prepareProfileInitRepair(ctx context.Context, yard string, argum
 	if err != nil || request.mode != initReconcile || request.profile != "" {
 		return nil, err
 	}
-	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, nil, true, "")
+	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, nil, true)
 }
 
 // prepareInitAdmission returns the profile init repair permit, or the outcome of a fresh
@@ -150,12 +148,12 @@ func (cli *CLI) prepareTeardownRepair(ctx context.Context, loaded config.Loaded,
 		return nil, err
 	}
 	yard := loaded.Context.YardName
-	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, []string{yard}, false, "", inputs)
+	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, []string{yard}, false, inputs)
 }
 
 func (cli *CLI) prepareActivationRepair(
 	ctx context.Context, yard string, allLocal bool, outcome releasetransition.Outcome,
-	requireDrift bool, selectedNames []string, profileInit bool, cleanupID string,
+	requireDrift bool, selectedNames []string, profileInit bool,
 	teardownInputs ...*ownerInputBaseline,
 ) (*configApplyRepairPermit, error) {
 	var teardown *ownerInputBaseline
@@ -166,7 +164,7 @@ func (cli *CLI) prepareActivationRepair(
 	if err != nil {
 		return nil, err
 	}
-	if !available || cleanupID == "" && !configApplyRepairGateShape(outcome) {
+	if !available || !configApplyRepairGateShape(outcome) {
 		return nil, nil
 	}
 	// A V2 drift outcome can mask unfinished legacy migration metadata in the
@@ -189,14 +187,8 @@ func (cli *CLI) prepareActivationRepair(
 		return nil, nil
 	}
 	var sourceBinding, toolingBinding string
-	if cleanupID != "" {
-		sourceBinding, toolingBinding, err = cli.integrationCleanupRecoveryAuthority(ctx, cleanupID, outcome, journal)
-		if err != nil {
-			return nil, nil
-		}
-	}
 	if teardown != nil {
-		sourceBinding, toolingBinding, err = cli.integrationCleanupSourceBindings(ctx, journal)
+		sourceBinding, toolingBinding, err = cli.completedSourceBindings(ctx, journal)
 		if err != nil {
 			return nil, nil
 		}
@@ -294,31 +286,6 @@ func (cli *CLI) prepareActivationRepair(
 		facts.ConfigTargets = append(facts.ConfigTargets, targetFact)
 		if _, selected := requested[target.Name]; selected {
 			requestedDesired[target.Name] = assessment.DesiredFingerprint
-		}
-		if cleanupID != "" {
-			runtime := cli.integrationRuntime(target.Loaded)
-			plan, planErr := runtime.IntegrationPlan(ctx)
-			if target.Name != yard {
-				if planErr != nil || plan.Changed {
-					return nil, nil
-				}
-			} else {
-				var conflict interface{ IntegrationCleanupTarget() string }
-				if planErr == nil || !errors.As(planErr, &conflict) || conflict.IntegrationCleanupTarget() != cleanupID ||
-					!target.Loaded.Integrations.Present || slices.Contains(target.Loaded.Integrations.Effective, cleanupID) ||
-					target.Loaded.Environment["AGENT_"+cleanupID+"_CLEANUP"] == "" {
-					return nil, nil
-				}
-				cleanup, ok := runtime.(IntegrationCleanupRuntime)
-				if !ok {
-					return nil, nil
-				}
-				cleanupPlan, err := cleanup.IntegrationCleanupPlan(ctx, cleanupID)
-				if err != nil {
-					return nil, nil
-				}
-				facts.CleanupPlan = cleanupPlan.StateBinding()
-			}
 		}
 		changed := assessment.Changed
 		if profileInit && target.Loaded.Integrations.AllowsCodingTools &&
@@ -487,9 +454,8 @@ func (cli *CLI) prepareActivationRepair(
 		selectedTargetNames: slices.Clone(selectedNames),
 		selectedRuntimes:    selectedRuntimes,
 		profileInit:         profileInit,
-		cleanupID:           cleanupID, sourceBinding: sourceBinding, toolingBinding: toolingBinding,
-		cleanupPlanBinding: facts.CleanupPlan,
-		teardownInputs:     teardown,
+		sourceBinding:       sourceBinding, toolingBinding: toolingBinding,
+		teardownInputs: teardown,
 	}, nil
 }
 
@@ -558,7 +524,7 @@ func (cli *CLI) lockConfigApplyRepair(
 		}
 	}
 	refreshed, err := cli.prepareActivationRepair(
-		ctx, permit.yard, permit.allLocal, permit.gate, false, permit.selectedTargetNames, permit.profileInit, permit.cleanupID,
+		ctx, permit.yard, permit.allLocal, permit.gate, false, permit.selectedTargetNames, permit.profileInit,
 		permit.teardownInputs,
 	)
 	if err != nil || refreshed == nil ||
@@ -637,7 +603,7 @@ func (cli *CLI) finishTeardownRepair(ctx context.Context, permit *configApplyRep
 	if err != nil {
 		return domain.ErrPlanStale
 	}
-	source, tooling, err := cli.integrationCleanupSourceBindings(ctx, journal)
+	source, tooling, err := cli.completedSourceBindings(ctx, journal)
 	if err != nil || source != permit.sourceBinding || tooling != permit.toolingBinding {
 		return domain.ErrPlanStale
 	}
@@ -766,4 +732,24 @@ func configApplyFactsFingerprint(facts configApplyRepairFacts) (string, error) {
 	}
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// completedSourceBindings binds the current source authority and tooling to a completed journal.
+func (cli *CLI) completedSourceBindings(ctx context.Context, journal releasetransition.JournalRecord) (string, string, error) {
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return "", "", domain.ErrPlanStale
+	}
+	inspector := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
+	defer inspector.Close()
+	dir, tooling, err := inspector.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
+	if err != nil || dir != filepath.Join(options.RuntimeRoot, "releases", string(journal.Goal.Target), "config") {
+		return "", "", domain.ErrPlanStale
+	}
+	proof, err := cli.inspectConfigSourceAdmission(ctx, inspector)
+	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete ||
+		proof.Metadata.Journal.Transaction != journal.Transaction || proof.Metadata.Journal.ArtifactDigest != journal.ArtifactDigest {
+		return "", "", domain.ErrPlanStale
+	}
+	return proof.Binding, tooling, nil
 }

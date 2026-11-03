@@ -66,7 +66,7 @@ func BuildCatalog(profiles []profile.Metadata, agents []profile.IntegrationMetad
 		if err != nil {
 			return Catalog{}, err
 		}
-		integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Cleanup: data.Cleanup, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native, Artifacts: data.Artifacts})
+		integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native, Artifacts: data.Artifacts})
 	}
 	result := Catalog{profiles: make(map[string]SettingDefinition), declarations: definitions, integrations: integrations}
 	type settingsOwner struct {
@@ -183,6 +183,27 @@ func (settings Catalog) Integrations() []profile.IntegrationDefinition {
 		result[i] = settings.integrations[i].Clone()
 	}
 	return result
+}
+
+// RetiredIntegration reports a shipped package kept only for migration.
+func (settings Catalog) RetiredIntegration(id string) bool {
+	return slices.ContainsFunc(settings.integrations, func(definition profile.IntegrationDefinition) bool {
+		return definition.Retired && definition.Name == id
+	})
+}
+
+// CheckSelectableIntegrations refuses every retired ID in an explicit new selection.
+func (settings Catalog) CheckSelectableIntegrations(requested []string) error {
+	var retired []string
+	for _, id := range requested {
+		if settings.RetiredIntegration(id) && !slices.Contains(retired, id) {
+			retired = append(retired, id)
+		}
+	}
+	if len(retired) != 0 {
+		return fmt.Errorf("integration %s is retired and can no longer be selected", strings.Join(retired, ", "))
+	}
+	return nil
 }
 
 func (settings Catalog) retiredSetting(name string) bool {

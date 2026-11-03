@@ -237,7 +237,7 @@ contract, and storage roles; status/apply refers to materialized file consumers.
 Every yard initializes without mandatory tool parameters. Default/named yards inherit active
 profile/settings selection; shipped fallback is `claude codex opencode pi`. Init does
 not materialize inherited values or empty a fresh named yard. Remote access reaches owner
-authority; controller discovery never changes selection. Paseo remains optional.
+authority; controller discovery never changes selection.
 
 Requested set uses replacement semantics: unset inherits, explicit empty does not; legacy none
 normalizes to empty. Dependency closure is separate, with reasons/provenance. Disabling a
@@ -564,14 +564,19 @@ Disconnect does not cancel turns or autoapprove questions; first backend MVP pro
 in-flight survival across server/yard/host restart. Managed restarts must respect live work and
 upstream shutdown behavior.
 
-Paseo is an optional installed headless package, absent from shipped defaults: one L1 daemon and
-client-side multi-yard connections. It depends on current stable Codex, while its managed
-headless runtime is pinned. Hosted relay uses loopback local API/outbound WSS and an explicitly
-issued sensitive end-to-end pairing offer through short SSH command. No permanent controller
-tunnel or public yard listener is needed. Offer never enters state/logs/RPC. Relay sees
-transport metadata and remains availability dependency despite content encryption. Agent
-latest-version policy does not authorize hidden restarts during live work. Physical Desktop
-acceptance is distinct from package/VM readiness; see [Paseo](../paseo.md).
+Paseo support is retired because it cost too much to maintain and to test continuously: although
+optional and absent from shipped defaults, it needed a pinned native bundle, its own release jobs
+and an ownership branch in core. Subyard no longer builds, ships or tests it. A minimal
+[retired package](shipped-integration-contract.md#retired-package-compatibility) removes what
+Subyard can prove it installed during an ordinary update, with a warning and no manual pause.
+`/srv/agents/paseo` is deleted only when its receipt proves ownership and no worktree can be lost;
+otherwise the directory stays with a warning and the exact manual removal command, because
+worktrees can hold work that exists nowhere else. Published releases keep their bundles, so
+a rollback to a release that accepts the current migration ledger reprovisions Paseo, with new
+pairing if the directory is gone; an older release refuses it as `rollback-incompatible`. Updates never start a
+stopped yard, so init retires one through its existing temporary start and records host-readable
+proof that lets later inits skip the boot; updates and `yard start` only warn until then. The explicit
+`yard integration cleanup` command and `AGENT_<id>_CLEANUP` setting had no other consumer and are removed.
 
 <a id="github-app-token-broker"></a>
 

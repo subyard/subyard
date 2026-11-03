@@ -7,7 +7,6 @@ RUNNER='tests/real-host/adapter-contracts.sh'
 CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
 DEEP_WORKFLOW="$ROOT/.github/workflows/deep-ci.yml"
-PASEO_WORKFLOW="$ROOT/.github/workflows/paseo-headless.yml"
 
 fail() {
   printf 'workflow real-adapter gate: %s\n' "$*" >&2
@@ -46,13 +45,11 @@ done
 grep -Fxq '  verify:' "$CI_WORKFLOW" && grep -Fxq '  deep-go:' "$DEEP_WORKFLOW" \
   || fail 'core and deep CI must use distinct stable job names'
 
-for workflow in "$CI_WORKFLOW" "$PASEO_WORKFLOW"; do
-  grep -Fxq '  push:' "$workflow" && grep -Fxq '  pull_request:' "$workflow" \
-    && grep -Fxq '    branches:' "$workflow" && grep -Fxq "      - '**'" "$workflow" \
-    || fail "$(basename "$workflow") must run on branch pushes and pull requests"
-  ! grep -Eq '^[[:space:]]+tags(-ignore)?:' "$workflow" \
-    || fail "$(basename "$workflow") must not run on tag pushes"
-done
+grep -Fxq '  push:' "$CI_WORKFLOW" && grep -Fxq '  pull_request:' "$CI_WORKFLOW" \
+  && grep -Fxq '    branches:' "$CI_WORKFLOW" && grep -Fxq "      - '**'" "$CI_WORKFLOW" \
+  || fail 'core CI must run on branch pushes and pull requests'
+! grep -Eq '^[[:space:]]+tags(-ignore)?:' "$CI_WORKFLOW" \
+  || fail 'core CI must not run on tag pushes'
 
 grep -Fxq '  workflow_dispatch:' "$DEEP_WORKFLOW" \
   && grep -Fxq '  schedule:' "$DEEP_WORKFLOW" \
@@ -89,8 +86,8 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   ! grep -Fq 'scripts/install-key-tools.sh' "$workflow" \
     || fail "$(basename "$workflow") bypasses the prepared-context runner"
 done
-grep -Fxq '    needs: [host-free-verify, native-engine-arm64, paseo-headless]' "$RELEASE_WORKFLOW" \
-  || fail 'Release publication must require host-free, native ARM64 engine and Paseo checks'
+grep -Fxq '    needs: [host-free-verify, native-engine-arm64]' "$RELEASE_WORKFLOW" \
+  || fail 'Release publication must require host-free and native ARM64 engine checks'
 
 grep -Fq 'make verify 2>&1 | tee .build/ci-logs/verify.log' "$CI_WORKFLOW" \
   && grep -Fq 'shellcheck -x -S warning' "$CI_WORKFLOW" \
@@ -117,11 +114,7 @@ grep -Fq '2>&1 | tee .build/ci-logs/verify-release-upgrades.log' "$RELEASE_WORKF
   || fail 'Release must preserve failed released-updater compatibility diagnostics'
 ! grep -Fq 'runs-on: ubuntu-latest' "$RELEASE_WORKFLOW" \
   || fail 'Release must use the same explicit Ubuntu baseline as CI'
-for workflow in "$PASEO_WORKFLOW" "$RELEASE_WORKFLOW"; do
-  grep -Fq 'unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true' "$workflow" \
-    && grep -Fq 'artifact="$(dev/build-paseo-headless.sh --arch "${{ matrix.arch }}"' "$workflow" \
-    && grep -Fq 'tests/native/paseo-headless.sh --artifact "$artifact"' "$workflow" \
-    || fail "$(basename "$workflow") must preflight producer namespaces and smoke-test its native Paseo build"
-done
+grep -Fq 'unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true' "$RELEASE_WORKFLOW" \
+  || fail 'Release must preflight producer namespaces'
 
 printf 'ok: CI and Release share the prepared-context real-adapter gate\n'

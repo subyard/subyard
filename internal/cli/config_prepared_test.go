@@ -540,7 +540,7 @@ func TestConfigProspectiveDiagnosticsDoNotDiscloseInvalidNeighborValue(t *testin
 }
 
 func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
-	for _, input := range []string{"comment-only template", "owner service", "runtime handler", "guest handler", "credential stop handler", "resource handler", "integration declaration", "integration provision", "integration cleanup", "integration lifecycle handler", "integration source"} {
+	for _, input := range []string{"comment-only template", "owner service", "runtime handler", "guest handler", "credential stop handler", "resource handler", "integration declaration", "integration provision", "integration lifecycle handler", "integration source"} {
 		for _, change := range []string{"bytes", "mode", "same bytes inode"} {
 			t.Run(input+"/"+change, func(t *testing.T) {
 				root, environment, _ := nativeFixture(t)
@@ -568,7 +568,7 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 				case "resource handler":
 					initial += "ENVIRONMENT_PROFILES=sample\n"
 					writeConfigCommandFile(t, filepath.Join(root, "config/profiles/sample/resources/relay.res"), "COMMAND=relay\nHANDLER=handler.sh\nTITLE='Sample relay'\nACTION='up up public-ingress-change reversible'\nACTION='down down public-ingress-change reversible'\nBRINGUP=up\nSHUTDOWN=down\n")
-				case "integration declaration", "integration provision", "integration cleanup", "integration lifecycle handler", "integration source":
+				case "integration declaration", "integration provision", "integration lifecycle handler", "integration source":
 					packageRoot := filepath.Join(root, "config/agents/sample")
 					dependency = filepath.Join(packageRoot, "handler.sh")
 					integration := `{"schema_version":1}`
@@ -578,8 +578,6 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 						content, mode = integration, 0o600
 					case "integration provision":
 						integration = `{"schema_version":1,"provision":"handler.sh"}`
-					case "integration cleanup":
-						integration = `{"schema_version":1,"cleanup":"handler.sh"}`
 					case "integration lifecycle handler":
 						integration = `{"schema_version":1,"lifecycle":{"handler":"handler.sh"}}`
 					case "integration source":

@@ -260,12 +260,12 @@ func (runtime Runtime) captureMaterializedIntegrationSources(p *PreparedInstalle
 		}
 		d.Sources = append(d.Sources, materializedExecutionSource{path, key, identity, []byte(runtime.bindingPath(source)), projected})
 	}
-	// Only the existing owning provision/cleanup source settings are remapped.
+	// Only the existing owning provision source settings are remapped.
 	// Resource paths and arbitrary environment values are never rewritten.
 	var names []string
 	for _, entry := range runtime.Environment {
 		name, value, ok := strings.Cut(entry, "=")
-		if ok && value != "" && strings.HasPrefix(name, "AGENT_") && (strings.HasSuffix(name, "_PROVISION") || strings.HasSuffix(name, "_CLEANUP")) {
+		if ok && value != "" && strings.HasPrefix(name, "AGENT_") && strings.HasSuffix(name, "_PROVISION") {
 			names = append(names, name)
 		}
 	}

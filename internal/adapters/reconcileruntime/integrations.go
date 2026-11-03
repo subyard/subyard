@@ -30,21 +30,11 @@ var integrationInventoryProgram string
 // Only validated, source-owned destinations and fixed diagnostic text may cross
 // the release boundary. Guest stderr and file contents remain private.
 type integrationOwnershipError struct {
-	message       string
-	retry         string
-	cleanupTarget string
-	// Extra public-safe detail is for direct status, outside the bounded release diagnostic.
-	detail string
+	message string
+	retry   string
 }
 
-// IntegrationCleanupTarget identifies a usable explicit cleanup contract, never
-// authority to retire unknown state during ordinary integration reconciliation.
-func (err integrationOwnershipError) IntegrationCleanupTarget() string { return err.cleanupTarget }
-
 func (err integrationOwnershipError) Error() string {
-	if err.detail != "" {
-		return err.message + err.detail
-	}
 	return err.message + " Next, inspect on the owner host: " + err.retry
 }
 
@@ -55,9 +45,14 @@ func (err integrationOwnershipError) ActivationDiagnostic() (string, string) {
 // IntegrationPlan binds the candidate selection and live ownership evidence.
 // It contains no credentials or document contents.
 type IntegrationPlan struct {
-	Fingerprint         string   `json:"fingerprint"`
-	Changed             bool     `json:"changed"`
-	Steps               []string `json:"steps"`
+	Fingerprint string   `json:"fingerprint"`
+	Changed     bool     `json:"changed"`
+	Steps       []string `json:"steps"`
+	// Retirements repeats the lifecycle steps that remove a retired package.
+	// Warnings are persistent notices about state left in place. Both are public
+	// previews of bound observations, so they stay outside the plan binding.
+	Retirements         []string `json:"-"`
+	Warnings            []string `json:"-"`
 	Adoption            []string `json:"adoption,omitempty"`
 	AdoptionFingerprint string   `json:"adoption_fingerprint,omitempty"`
 	Scope               string   `json:"-"`
@@ -466,6 +461,13 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		fact := runtime.integrationLifecycleFact(definition, observation)
 		plan.facts = append(plan.facts, fact)
 		plan.Changed = plan.Changed || !fact.AtDesired
+		if observation.Notice != "" {
+			if fact.AtDesired {
+				plan.Warnings = append(plan.Warnings, observation.Notice)
+			} else {
+				plan.Retirements = append(plan.Retirements, observation.Notice)
+			}
+		}
 		fingerprints = append(fingerprints, observation.Actual, observation.Desired, fact.Desired)
 	}
 	files, err := runtime.guestConfigFilesWithSourceReader(reader)
@@ -567,7 +569,12 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		plan.Steps = []string{"reconcile selected integrations: " + strings.Join(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), " ")}
 		for _, entry := range observed.Retired {
 			if entry.Kind == "package" {
-				plan.Steps = append(plan.Steps, "disable managed startup for "+entry.ID+"; preserve binaries and user data")
+				// A retired package states its own removal through its lifecycle notice.
+				if !slices.ContainsFunc(definitions, func(definition profile.IntegrationDefinition) bool {
+					return definition.Retired && definition.Name == entry.ID
+				}) {
+					plan.Steps = append(plan.Steps, "disable managed startup for "+entry.ID+"; preserve binaries and user data")
+				}
 			} else {
 				plan.Steps = append(plan.Steps, "retire owned "+entry.Kind+" for "+entry.ID+": "+entry.Path)
 			}
@@ -578,7 +585,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
 			plan.Steps = append(plan.Steps, "remove ownership-proven ccusage utility for the special yard role")
 		}
-
+		plan.Steps = append(plan.Steps, plan.Retirements...)
 	}
 	return plan, observed, nil
 }
@@ -700,6 +707,57 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		return configmaterial.Observation{}, errors.New("integration structured configuration ownership conflict")
 	}
 	return configmaterial.ParseObservation(result.Stdout)
+}
+
+// RetiredIntegrationNotices previews retired package state for operations such as
+// init that do not render the complete integration plan.
+func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retirements, warnings []string, err error) {
+	if ready, err := runtime.incusReady(ctx); err != nil || !ready {
+		return nil, nil, err
+	}
+	state, err := runtime.reconcileState(ctx)
+	if err != nil || !state.InstanceFound {
+		return nil, nil, err
+	}
+	if strings.EqualFold(state.Instance.Status, "stopped") {
+		// The guest cannot report its state, so consent rests on the package's own text.
+		pending, err := runtime.pendingRetiredIntegrations(state.Instance)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, definition := range pending {
+			retirements = append(retirements, "temporarily start this stopped yard to retire integration "+definition.Name+", then restore its desired power")
+			if definition.Lifecycle.RetirementNotice != "" {
+				retirements = append(retirements, definition.Lifecycle.RetirementNotice)
+			}
+		}
+		return retirements, nil, nil
+	}
+	if !strings.EqualFold(state.Instance.Status, "running") || runtime.Executor == nil {
+		return nil, nil, nil
+	}
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, definition := range definitions {
+		if !definition.Retired || definition.Lifecycle == nil {
+			continue
+		}
+		observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
+		if err != nil {
+			return nil, nil, err
+		}
+		if observation.Notice == "" {
+			continue
+		}
+		if observation.State == ports.RuntimeStateStale {
+			retirements = append(retirements, observation.Notice)
+		} else {
+			warnings = append(warnings, observation.Notice)
+		}
+	}
+	return retirements, warnings, nil
 }
 
 func (runtime Runtime) IntegrationPlan(ctx context.Context) (IntegrationPlan, error) {
@@ -923,7 +981,7 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 		return err
 	}
 	if !fresh.Changed {
-		return nil
+		return runtime.recordRetiredIntegrations(ctx)
 	}
 	execution := runtime
 	executionCompleted := false
@@ -1031,5 +1089,5 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 			profile.IntegrationDefinition{}, "verify", "convergence-failed")
 	}
 	executionCompleted = true
-	return nil
+	return runtime.recordRetiredIntegrations(ctx)
 }

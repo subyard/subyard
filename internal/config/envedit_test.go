@@ -397,13 +397,13 @@ func TestReadPersistentFileSnapshotRejectsForeignOwnershipWhenSupported(t *testi
 }
 
 func TestSelectionAuthoringReplacesLegacyAlias(t *testing.T) {
-	value := "paseo"
+	value := "relay"
 	for _, initial := range []string{"AGENTS=codex\n", "AGENTS=none\nCODING_TOOL_INTEGRATIONS=\n"} {
 		content, err := EditPersistentAssignmentContent("config.env", []byte("SSH_PORT=2222\n"+initial), "CODING_TOOL_INTEGRATIONS", &value)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(content) != "SSH_PORT=2222\nCODING_TOOL_INTEGRATIONS='paseo'\n" {
+		if string(content) != "SSH_PORT=2222\nCODING_TOOL_INTEGRATIONS='relay'\n" {
 			t.Fatalf("canonical content = %s", content)
 		}
 		content, err = EditPersistentAssignmentContent("config.env", []byte(initial), "CODING_TOOL_INTEGRATIONS", nil)
@@ -472,7 +472,7 @@ func TestWritePersistentAssignmentCanonicalizesLegacyAliases(t *testing.T) {
 		{"BASE_IMAGE", "YARD_IMAGE", "images:debian/12", "images:debian/13"},
 		{"BASE_IMAGE_FALLBACK", "YARD_IMAGE_FALLBACK", "images:debian/12", "images:debian/13"},
 		{"YARD_PROFILES", "ENVIRONMENT_PROFILES", "neighbor", "neighbor fixture"},
-		{"AGENTS", "CODING_TOOL_INTEGRATIONS", "codex", "paseo"},
+		{"AGENTS", "CODING_TOOL_INTEGRATIONS", "codex", "relay"},
 	} {
 		for _, mixed := range []bool{false, true} {
 			initial := "export " + setting.legacy + "='" + setting.before + "'\n"

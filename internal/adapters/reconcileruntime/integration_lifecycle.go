@@ -1,6 +1,7 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -46,11 +48,7 @@ func (runtime Runtime) integrationPackageBindingWithSourceReader(definition prof
 	for _, input := range definition.Inputs {
 		values[input.Name] = runtime.bindingPath(input.Value)
 	}
-	for _, suffix := range []string{"PROVISION", "CLEANUP"} {
-		path := runtime.environmentValue("AGENT_" + definition.Name + "_" + suffix)
-		if path == "" {
-			continue
-		}
+	if path := runtime.environmentValue("AGENT_" + definition.Name + "_PROVISION"); path != "" {
 		var data []byte
 		var err error
 		if reader == nil {
@@ -61,7 +59,7 @@ func (runtime Runtime) integrationPackageBindingWithSourceReader(definition prof
 		if err != nil {
 			return "", err
 		}
-		values["AGENT_"+definition.Name+"_"+suffix] = fmt.Sprintf("%x", sha256.Sum256(data))
+		values["AGENT_"+definition.Name+"_PROVISION"] = fmt.Sprintf("%x", sha256.Sum256(data))
 	}
 	payload, _ := json.Marshal(struct {
 		Source string
@@ -134,16 +132,50 @@ func (runtime Runtime) integrationLifecycleEnvironmentWithSourceReader(definitio
 	}
 	return environment, nil
 }
-func (runtime Runtime) observeIntegrationLifecycle(ctx context.Context, definition profile.IntegrationDefinition) (ports.RuntimeObservation, error) {
+
+// integrationLifecycleObservation adds an optional public notice to the shared
+// runtime observation. Only retired packages may report one.
+type integrationLifecycleObservation struct {
+	ports.RuntimeObservation
+	Notice string
+}
+
+const integrationNoticeLimit = 440
+
+func decodeIntegrationLifecycleObservation(definition profile.IntegrationDefinition, payload []byte) (integrationLifecycleObservation, error) {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var wire struct {
+		ports.RuntimeObservation
+		Notice string `json:"notice"`
+	}
+	if err := decoder.Decode(&wire); err != nil {
+		return integrationLifecycleObservation{}, fmt.Errorf("decode lifecycle observation: %w", err)
+	}
+	if wire.Notice != "" && (!definition.Retired || wire.State == ports.RuntimeStateCurrent || len(wire.Notice) > integrationNoticeLimit || strings.TrimSpace(wire.Notice) != wire.Notice || strings.ContainsFunc(wire.Notice, unicode.IsControl)) {
+		return integrationLifecycleObservation{}, errors.New("lifecycle observation has an invalid notice")
+	}
+	canonical, err := json.Marshal(wire.RuntimeObservation)
+	if err != nil {
+		return integrationLifecycleObservation{}, err
+	}
+	observation, err := decodeProfileRuntimeObservation(append(canonical, payload[decoder.InputOffset():]...))
+	if err != nil {
+		return integrationLifecycleObservation{}, err
+	}
+	return integrationLifecycleObservation{RuntimeObservation: observation, Notice: wire.Notice}, nil
+}
+
+func (runtime Runtime) observeIntegrationLifecycle(ctx context.Context, definition profile.IntegrationDefinition) (integrationLifecycleObservation, error) {
 	return runtime.observeIntegrationLifecyclePhase(ctx, definition, "inspect")
 }
-func (runtime Runtime) observeIntegrationLifecyclePhase(ctx context.Context, definition profile.IntegrationDefinition, phase string) (ports.RuntimeObservation, error) {
+func (runtime Runtime) observeIntegrationLifecyclePhase(ctx context.Context, definition profile.IntegrationDefinition, phase string) (integrationLifecycleObservation, error) {
 	return runtime.observeIntegrationLifecycleWithSourceReader(ctx, definition, phase, runtime.SourceReader)
 }
-func (runtime Runtime) observeIntegrationLifecycleWithSourceReader(ctx context.Context, definition profile.IntegrationDefinition, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (ports.RuntimeObservation, error) {
+func (runtime Runtime) observeIntegrationLifecycleWithSourceReader(ctx context.Context, definition profile.IntegrationDefinition, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (integrationLifecycleObservation, error) {
 	environment, err := runtime.integrationLifecycleEnvironmentWithSourceReader(definition, reader)
 	if err != nil {
-		return ports.RuntimeObservation{}, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
+		return integrationLifecycleObservation{}, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 	}
 	started := time.Now()
 	stdout, stderr, err := runtime.runShippedHandler(ctx, profile.Definition{Root: definition.Root}, definition.Lifecycle.Handler, environment, integrationLifecycleObserveLimit, "observe")
@@ -152,16 +184,16 @@ func (runtime Runtime) observeIntegrationLifecycleWithSourceReader(ctx context.C
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			reason = "native-unavailable"
 		}
-		return ports.RuntimeObservation{}, runtime.integrationExecutionDiagnostic(err, definition, phase, "inspect", reason, stderr, time.Since(started), integrationLifecycleObserveLimit, ctx.Err())
+		return integrationLifecycleObservation{}, runtime.integrationExecutionDiagnostic(err, definition, phase, "inspect", reason, stderr, time.Since(started), integrationLifecycleObserveLimit, ctx.Err())
 	}
-	observation, err := decodeProfileRuntimeObservation(stdout)
+	observation, err := decodeIntegrationLifecycleObservation(definition, stdout)
 	selected := slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), definition.Name)
 	if err == nil && (observation.State == ports.RuntimeStateDeferred || observation.State == ports.RuntimeStateAbsent && selected || observation.HookBinding != "" || observation.State == ports.RuntimeStateStale && (observation.Actual == "" || observation.Actual == observation.Desired)) {
 		err = errors.New("invalid integration lifecycle state")
 	}
 	return observation, runtime.integrationDiagnostic(err, definition, phase, "invalid-schema")
 }
-func (runtime Runtime) integrationLifecycleFact(definition profile.IntegrationDefinition, observation ports.RuntimeObservation) integrationFact {
+func (runtime Runtime) integrationLifecycleFact(definition profile.IntegrationDefinition, observation integrationLifecycleObservation) integrationFact {
 	fact := integrationFact{Key: "lifecycle:" + definition.Name, Observed: observation.Actual, Desired: observation.Desired, AtDesired: observation.State == ports.RuntimeStateCurrent || observation.State == ports.RuntimeStateAbsent}
 	if !slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), definition.Name) {
 		fact.Desired = "absent"
@@ -216,7 +248,7 @@ func (runtime Runtime) applyIntegrationLifecycles(ctx context.Context, plan Inte
 			phase, reason := lifecycleFailure(stderr, "apply")
 			return runtime.integrationExecutionDiagnostic(err, definition, phase, "apply", reason, stderr, time.Since(started), integrationLifecycleApplyLimit, ctx.Err())
 		}
-		applied, err := decodeProfileRuntimeObservation(stdout)
+		applied, err := decodeIntegrationLifecycleObservation(definition, stdout)
 		if err != nil {
 			return runtime.integrationDiagnostic(err, definition, "verify", "invalid-schema")
 		}
@@ -230,6 +262,15 @@ func (runtime Runtime) applyIntegrationLifecycles(ctx context.Context, plan Inte
 		}
 		if verified != applied {
 			return runtime.integrationDiagnostic(errors.New("integration lifecycle independent verification failed"), definition, "verify", "convergence-failed")
+		}
+		// Unattended updates skip the confirmation preview, so the completed
+		// retirement is stated once more at this execution boundary.
+		if runtime.Stderr != nil {
+			for _, notice := range []string{observation.Notice, applied.Notice} {
+				if notice != "" {
+					fmt.Fprintf(runtime.Stderr, "Warning: yard %s: %s\n", runtime.Yard.YardName, notice)
+				}
+			}
 		}
 	}
 	return nil

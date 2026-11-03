@@ -83,6 +83,10 @@ func (cli *CLI) runConfigAuthoring(
 		}
 		if action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
 			requested := strings.Fields(request.value)
+			if err := loaded.Catalog.CheckSelectableIntegrations(requested); err != nil {
+				cli.errorf("config set: %v", err)
+				return 2
+			}
 			if _, err := config.ResolveIntegrationSelection(loaded.Environment, requested); err != nil {
 				cli.errorf("config set: %v", err)
 				return 2

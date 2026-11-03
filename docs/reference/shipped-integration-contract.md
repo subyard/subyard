@@ -117,7 +117,8 @@ compatibility entrypoints preserve the existing release coverage aggregation.
 
 Retirement-only declarations live under `config/retired-integrations/<id>/integration.json`.
 Their `retired` flag and `retired_settings` names normalize historical configuration inputs
-without mutating authored files or enabling another integration. Unknown unrelated IDs still
+without mutating authored files or enabling another integration. A package may list its own
+`AGENT_<id>_*` settings there. Unknown unrelated IDs still
 fail validation. These declarations have only a bounded cleanup lifecycle; provisioning,
 image/version inputs, settings, dashboard services and native executables are prohibited.
 The existing assessed integration lifecycle binds cleanup ownership, source and actual state.
@@ -128,3 +129,73 @@ The Observer compatibility package verifies exact predecessor routes, local owne
 managed control hashes and the labelled native container before disabling or removing them.
 A root-private control-hash receipt permits interrupted deletion to resume. Databases,
 session roots and credentials are outside its deletion inventory.
+
+A retired package's lifecycle observation may carry an optional public `notice`, bounded to 440
+characters without control characters. Active packages may not report one, and it stays outside
+the plan binding. On a `stale` observation it states the removal, which appears as a plan
+consequence and as one warning after a successful apply, because an unattended update does not
+print the preview. On `absent` it reports retained state as a persistent warning.
+
+A stopped guest cannot report its state, so a retired package may also declare a static
+`retirement_notice` with the same limits, and it is the retirement text of a stopped yard's plan.
+
+### Retirement proof
+
+`user.subyard.retired_integration.<id>=true` is the host-readable proof that a yard selecting this
+retired package has been observed at its desired state. Core publishes it at the end of integration
+apply, after that apply's own observation found every lifecycle at its desired state: `current` or
+`absent`, including a kept foreign unit and a guest that was already clean. A failed or interrupted
+apply publishes nothing. The key is reserved from profile publication and excluded from the
+integration plan binding and the legacy-continuation binding, because it is written after approval.
+
+Without proof, a selected retired package with a lifecycle changes two init stages:
+
+- On an intentionally stopped yard the instance stage is pending. Its existing guarded temporary
+  start runs after confirmation, the plan shows that start and the retirement, the provision stage
+  retires the package and publishes the proof, and finalization restores stopped. A repeat init
+  with the proof does not boot.
+- On a running yard the provision stage is pending once, including for an already clean guest, so
+  that a later stop needs no boot.
+
+If the boot or the retirement fails, the yard has no proof and stays running with its fenced
+`desired=stopped` until a retry of `yard init` finishes and stops it.
+
+Until the proof exists, these host-side surfaces name the action `yard -Y <name> init`, and they
+read no guest state: the warnings of `yard update --check` and the `Warning:` lines that end
+`yard update`, joined by a plan consequence while a source migration is pending,
+`yard integration status` on a stopped yard, and one line after a successful `yard start`.
+
+Known limits:
+
+- `ALLOWS_CODING_TOOLS=false` has no integration reconcile, so it neither boots nor warns.
+- Selection decides the warning and the boot. A stopped yard whose settings no longer select the
+  package gets neither, even with an enabled unit; a later init on the running yard still retires it.
+- Proof published before a rollback survives it. After rolling forward, a stopped yard reinstalled
+  by the old release stays silent and is not booted. A running yard still observes its guest.
+- A materialized activation whose runtime lacks the selection publishes no proof. The next init on
+  that yard does, with one extra temporary boot if it is stopped by then.
+
+The Paseo compatibility package removes the unit, helpers, `/opt/subyard/paseo`, `/srv/agents/paseo`
+and the ownership receipt, in that order, when each is proven. A unit is proven by its receipt, or,
+for releases before v0.15.0 that wrote none, by the exact published template. Helpers need the exact
+published template; the runtime needs its exact layout and manifest kind.
+`paseo.service.subyard-retired` is outside its deletion inventory.
+
+`/srv/agents/paseo` is deleted only with a valid receipt and a `worktrees/` entry that is absent or
+an empty plain directory, rechecked after the service stops. A symlink, another file type or an
+unreadable `worktrees/` counts as holding a worktree. Otherwise the whole directory stays, every other
+proven item is still removed, and a persistent warning gives the exact manual removal command. It also
+says that removal deletes chats, schedules, loops and uploads and that a compatible rollback must re-pair.
+A template-proven unit without a receipt keeps the directory. The binding covers this decision, not
+the directory contents, so a worktree added after approval makes the plan stale.
+
+Unlike other retired packages, foreign ownership is not an error here. A unit or receipt that
+cannot be proven leaves everything in place, reports `absent` with the exact manual removal
+command, and does not block activation. That includes a unit systemd loads from any other path and
+a service still running without its unit file, because disabling precedes the unlink and so a
+retry never finds its own unit running. Once the operator removes it, the remaining proven state
+retires on the next reconcile. A helper or runtime that cannot be proven stays with a warning, while
+everything proven is removed. A genuine removal failure stays a normal error with a safe retry.
+A stopped yard stays unchanged during an update. `yard start` does not converge integrations, so
+the old unit can run after start until `yard init` retires it, with or without that start; see
+[Retirement proof](#retirement-proof).

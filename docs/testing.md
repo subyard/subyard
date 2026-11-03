@@ -866,11 +866,10 @@ GitHub CI runs the full core gate, profile host-free checks, warning-level Shell
 release preparation and publication use explicit workflow dispatches, with no tag-triggered
 publication. Basic native ARM64 engine build,
 execution and Go tests run on GitHub's ARM runner in CI and gate Release publication. ARM requires
-no local agent access or workflow authorization. Native Paseo uses the same branch/PR trigger
-boundary, while Release builds its native artifacts independently.
+no local agent access or workflow authorization.
 The separate nightly/manual Deep CI runs repeated Go race tests and one minute of parser fuzzing.
 Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
-Veranda, native Paseo and live P0 acceptance remain separate checks.
+Veranda and live P0 acceptance remain separate checks.
 
 Agent compatibility regressions run locally with
 `go test ./internal/adapters/statusruntime` and `bash tests/codex-agent-provision.sh`.

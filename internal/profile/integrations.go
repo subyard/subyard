@@ -24,6 +24,8 @@ type IntegrationLifecycle struct {
 	SourceFiles        []string `json:"source_files"`
 	InstanceConfigKeys []string `json:"instance_config_keys"`
 	InstanceDevices    []string `json:"instance_devices"`
+	// RetirementNotice states the removal when a stopped guest cannot report it.
+	RetirementNotice string `json:"retirement_notice,omitempty"`
 }
 type IntegrationRoute struct {
 	MarkerKey  string `json:"marker_key"`
@@ -55,7 +57,6 @@ type IntegrationDefinition struct {
 	Command         string                `json:"command,omitempty"`
 	Check           string                `json:"check,omitempty"`
 	Health          string                `json:"health,omitempty"`
-	Cleanup         string                `json:"cleanup,omitempty"`
 	Depends         []string              `json:"depends,omitempty"`
 	Persist         string                `json:"persist,omitempty"`
 	Lifecycle       *IntegrationLifecycle `json:"lifecycle,omitempty"`
@@ -127,7 +128,7 @@ func (definition IntegrationDefinition) SourceBinding() (string, error) {
 			files = append(files, artifact.Source)
 		}
 	}
-	for _, path := range []string{definition.Provision, definition.Cleanup} {
+	for _, path := range []string{definition.Provision} {
 		if path != "" {
 			files = append(files, path)
 		}
@@ -213,7 +214,7 @@ func (definition *IntegrationDefinition) validatePackage() error {
 			definition.validationInputs = append(definition.validationInputs, path)
 		}
 	}
-	for _, path := range []string{definition.Provision, definition.Cleanup} {
+	for _, path := range []string{definition.Provision} {
 		if path != "" {
 			resolved, err := definition.ExecutablePath(path)
 			if err != nil {

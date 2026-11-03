@@ -17,6 +17,8 @@ func cloneIntegrationConfig(config map[string]string, virtualMachine bool) map[s
 	for _, key := range []string{"user.subyard.ccusage_version", "volatile.eth0.host_name"} {
 		delete(copy, key)
 	}
+	// Apply publishes this proof after approval; it is never desired integration state.
+	maps.DeleteFunc(copy, func(key, _ string) bool { return strings.HasPrefix(key, retiredIntegrationMarkerPrefix) })
 	if virtualMachine {
 		for _, key := range []string{"volatile.vm.rtc_adjustment", "volatile.vm.rtc_offset"} {
 			if parsed, err := strconv.ParseInt(copy[key], 10, 64); err == nil && strconv.FormatInt(parsed, 10) == copy[key] {
@@ -92,12 +94,4 @@ func (plan IntegrationPlan) OperationSteps(target string) []domain.OperationStep
 			Verify:        "native observation proves this captured fact reached its original desired state", Consequence: "converge " + label})
 	}
 	return steps
-}
-
-func (plan IntegrationCleanupPlan) StateBinding() string {
-	payload, _ := json.Marshal(struct {
-		Fingerprint, Hook, Scope string
-		Script                   []byte
-	}{plan.Fingerprint, plan.hookState, plan.scope, plan.script})
-	return fmt.Sprintf("%x", sha256.Sum256(payload))
 }

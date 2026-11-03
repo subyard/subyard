@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 func relative(path string) bool {
@@ -171,11 +172,16 @@ func (definition *IntegrationDefinition) validateSemantic() error {
 		return err
 	}
 	if definition.Retired {
-		if definition.Lifecycle == nil || definition.Provision != "" || definition.Cleanup != "" || definition.Persist != "" || len(definition.Depends) != 0 || definition.Command != "" || definition.Check != "" || definition.Health != "" || len(definition.Native) != 0 || len(definition.Inputs) != 0 || len(definition.Settings) != 0 || definition.Dashboard != nil {
+		if definition.Lifecycle == nil || definition.Provision != "" || definition.Persist != "" || len(definition.Depends) != 0 || definition.Command != "" || definition.Check != "" || definition.Health != "" || len(definition.Native) != 0 || len(definition.Inputs) != 0 || len(definition.Settings) != 0 || definition.Dashboard != nil {
 			return errors.New("retired integration permits only cleanup lifecycle metadata")
 		}
 		for _, name := range definition.RetiredSettings {
-			if !settingNamePattern.MatchString(name) {
+			// The package's own AGENT_<id>_* metadata keeps the integration ID's case.
+			suffix, owned := strings.CutPrefix(name, "AGENT_"+definition.Name+"_")
+			if !owned {
+				suffix = name
+			}
+			if !settingNamePattern.MatchString(suffix) {
 				return errors.New("invalid retired setting name")
 			}
 		}
@@ -203,7 +209,7 @@ func (definition *IntegrationDefinition) validateSemantic() error {
 			return errors.New("unsupported immutable input type")
 		}
 	}
-	for _, path := range []string{definition.Provision, definition.Cleanup} {
+	for _, path := range []string{definition.Provision} {
 		if path != "" {
 			if err := validateExecutableName(path); err != nil {
 				return err
@@ -224,6 +230,10 @@ func (definition *IntegrationDefinition) validateSemantic() error {
 		seen[dependency] = true
 	}
 	if lifecycle := definition.Lifecycle; lifecycle != nil {
+		if notice := lifecycle.RetirementNotice; notice != "" && (!definition.Retired || len(notice) > 440 || strings.TrimSpace(notice) != notice ||
+			strings.ContainsFunc(notice, unicode.IsControl)) {
+			return errors.New("retirement notice requires a retired package and bounded plain text")
+		}
 		if err := validateExecutableName(lifecycle.Handler); err != nil {
 			return err
 		}

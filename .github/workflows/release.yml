@@ -57,42 +57,6 @@ jobs:
       - name: Native engine tests
         run: go test -count=1 -timeout=20m ./cmd/... ./internal/...
 
-  paseo-headless:
-    name: paseo-headless-${{ matrix.arch }}
-    needs: validate
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    # Include slow public downloads and all bounded network retries.
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.commit }}
-          persist-credentials: false
-      - name: Install native bundle tools
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y binutils build-essential jq xz-utils
-          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
-      - name: Build pinned Paseo headless bundle
-        run: |
-          artifact="$(dev/build-paseo-headless.sh --arch "${{ matrix.arch }}" --output-dir .build/paseo)"
-          tests/native/paseo-headless.sh --artifact "$artifact"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: paseo-headless-${{ matrix.arch }}-${{ github.run_attempt }}
-          path: .build/paseo/*
-          if-no-files-found: error
-
   host-free-verify:
     needs: validate
     runs-on: ubuntu-24.04
@@ -137,7 +101,7 @@ jobs:
           if-no-files-found: ignore
 
   prepare:
-    needs: [host-free-verify, native-engine-arm64, paseo-headless]
+    needs: [host-free-verify, native-engine-arm64]
     runs-on: ubuntu-24.04
     # Package exact final assets and verify released-updater compatibility.
     timeout-minutes: 90
@@ -158,11 +122,6 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: paseo-headless-*-${{ github.run_attempt }}
-          path: .build/release
-          merge-multiple: true
       - name: Real local crypto and OpenSSH adapter contracts
         run: bash tests/real-host/adapter-contracts.sh
       - name: Build final-version release assets once

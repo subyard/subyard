@@ -964,7 +964,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	case "@update":
 		return cli.runUpdate(ctx, loaded, definition, commandArguments)
 	case "@integration":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]\n", cli.options.Program)
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | status [id] [--json]\n", cli.options.Program)
 		return 0
 	case "@profile":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s profile list [--json] | enable|disable|setup|status <id> [--yes] [--json]\n", cli.options.Program)

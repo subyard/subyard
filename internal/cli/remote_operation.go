@@ -300,25 +300,11 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 		Exact      bool     `json:"exact"`
 		StepSchema int      `json:"stepSchema"`
 	}{prepared.Definition.Name, keysWithoutConsent(prepared.Arguments), true, 1}
-	if request.check {
-		params.Arguments = slices.DeleteFunc(params.Arguments, func(value string) bool { return value == "--check" })
-	}
 	if err = session.call(planContext, "operation.plan", cli.ensureOperationID(), params, &exact); err != nil {
 		return err
 	}
 	if err := session.validatePlan(exact, cli.ensureOperationID(), prepared.Definition.Name); err != nil {
 		return err
-	}
-	if request.check {
-		prepared.displayOnly = func() {
-			for _, step := range exact.Plan.Consequences {
-				fmt.Fprintln(cli.options.Stdout, "  "+step)
-			}
-			if len(exact.Plan.Consequences) == 0 {
-				fmt.Fprintln(cli.options.Stdout, "  No cleanup needed.")
-			}
-		}
-		return nil
 	}
 	prepared.Plan = exact.Plan
 	prepared.ownerPlan = true

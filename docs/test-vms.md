@@ -116,8 +116,7 @@ the Subyard policy.
 
 The focused producer lifecycle lane exercises operation-owned disk scratch, PID
 namespace cancellation (including detached children), stale recovery, real Incus
-controller loss and profile status rendering. It also builds and smoke-tests the
-native amd64 Paseo artifact. Run its local prerequisites before allocation:
+controller loss and profile status rendering. Run its local prerequisites before allocation:
 
 ```sh
 bash tests/provision-profile-check.sh
@@ -129,7 +128,7 @@ dev/agent-e2e.sh --slot "$slot" --vm-count 1 --vm 1 --purpose producer-lifecycle
 
 This requires Linux user/mount/PID namespaces locally, one standard disposable VM,
 passwordless guest root helpers, and the existing Incus platform fixture. It creates
-one marker-owned nested container and removes it before the native build. It does
+one marker-owned nested container and removes it. It does
 not impose per-operation memory, byte or inode quotas, and does not cover ARM or
 release acceptance.
 
@@ -928,6 +927,21 @@ rollback with the retained config writer, and a forward retry:
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose integration-legacy-upgrade --vm 1 -- \
   bash dev/e2e/integration-legacy-upgrade.sh
+```
+
+The retained-lease disabled-components controller installs the published v0.18.6 baseline, updates
+to the frozen candidate and reboots once. Its default payload belongs to the Hermes profile; the
+retired Paseo package passes its own payloads. Its upgrade scenario starts from real published
+Paseo on v0.18.6 with a foreign unit and a stopped Paseo-only yard: init retires that yard without a
+start and keeps it stopped, and a rollback across the migration epochs is refused. Its `--rollback`
+scenario starts from v0.25.4, which shares the candidate's migration ledger: a fresh update warns
+about a stopped yard with no source migration pending, a start warns until init, and a rollback
+reprovisions Paseo before a forward update retires it again:
+
+```sh
+dev/e2e/disabled-components-release.sh --slot "$slot"
+config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot"
+config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot" --rollback
 ```
 
 The remote fixture runs a temporary loopback OpenSSH server with a synthetic key forced to the

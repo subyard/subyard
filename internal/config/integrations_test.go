@@ -1,27 +1,52 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func TestCleanupOnlyMetadataDeclaresKnownIntegration(t *testing.T) {
-	selection, err := ResolveIntegrationSelection(map[string]string{
+func TestRemovedCleanupMetadataDoesNotDeclareAnIntegration(t *testing.T) {
+	if _, err := ResolveIntegrationSelection(map[string]string{
 		"AGENT_legacy_CLEANUP": "/opt/subyard/legacy-cleanup",
-	}, []string{"legacy"})
+	}, []string{"legacy"}); err == nil {
+		t.Fatal("cleanup-only metadata still declares an integration")
+	}
+}
+
+func TestRetiredIntegrationSelectionIsRefused(t *testing.T) {
+	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
+	for _, id := range []string{"retired-one", "retired-two"} {
+		retired := filepath.Join(root, "config/retired-integrations", id)
+		if err := os.MkdirAll(retired, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(retired, "integration.json"), []byte(`{"schema_version":1,"retired":true,"retired_settings":["AGENT_`+id+`_COMMAND"],"lifecycle":{"handler":"retire.sh"}}`), 0o600)
+		testkit.WriteFile(t, filepath.Join(retired, "retire.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	}
+	catalog, err := LoadCatalog(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(selection.Effective, " "); got != "legacy" {
-		t.Fatalf("cleanup-only integration closure = %q", got)
+	if !catalog.RetiredIntegration("retired-one") || catalog.RetiredIntegration("sample") {
+		t.Fatal("retirement classification changed")
+	}
+	if err := catalog.CheckSelectableIntegrations([]string{"sample"}); err != nil {
+		t.Fatal(err)
+	}
+	err = catalog.CheckSelectableIntegrations([]string{"retired-one", "sample", "retired-two", "retired-one"})
+	if err == nil || err.Error() != "integration retired-one, retired-two is retired and can no longer be selected" {
+		t.Fatalf("retired selection refusal = %v", err)
 	}
 }
 
 func TestIntegrationSelectionKeepsRequestsAndPresence(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	for _, test := range []struct{ name, content, requested, effective string }{
-		{"dependency", "CODING_TOOL_INTEGRATIONS=paseo\n", "paseo", "codex paseo"},
+		{"dependency", "CODING_TOOL_INTEGRATIONS=relay\nAGENT_relay_COMMAND=relay\nAGENT_relay_DEPENDS=codex\n", "relay", "codex relay"},
 		{"empty", "CODING_TOOL_INTEGRATIONS=\n", "", ""},
 		{"legacy empty", "AGENTS=none\n", "", ""},
 		{"legacy equal empty", "AGENTS=none\nCODING_TOOL_INTEGRATIONS=\n", "", ""},
@@ -38,7 +63,7 @@ func TestIntegrationSelectionKeepsRequestsAndPresence(t *testing.T) {
 			if !selection.Present || strings.Join(selection.Requested, " ") != test.requested || strings.Join(selection.Effective, " ") != test.effective || selection.Provenance.Scope != "yard" || selection.Provenance.Path != path {
 				t.Fatalf("selection = %#v", selection)
 			}
-			if test.name == "dependency" && strings.Join(selection.DependencyReasons["codex"], " ") != "paseo" {
+			if test.name == "dependency" && strings.Join(selection.DependencyReasons["codex"], " ") != "relay" {
 				t.Fatalf("dependency reason = %#v", selection.DependencyReasons)
 			}
 			if got := loaded.Settings["CODING_TOOL_INTEGRATIONS"].Resolutions; len(got) == 0 {

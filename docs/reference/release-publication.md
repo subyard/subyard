@@ -59,9 +59,9 @@ and publication; they are not passing physical evidence. Once requested, incompl
 checks block the candidate, including after interruption or a later default invocation.
 
 `prepare` pins a full lowercase 40-character commit SHA and stable version. Release preparation
-runs native ARM64, Paseo builds and host-free verification in parallel after input validation.
+runs native ARM64 and host-free verification in parallel after input validation.
 Host-free verification retains core/profile checks, CLI freshness and profile inventory. Final preparation waits
-for all these same-attempt jobs before downloading Paseo assets, running
+for these same-attempt jobs before running
 local adapters and the complete released-caller compatibility matrix. It builds final-version assets
 once and uploads their source archive, exact inventory and SHA-256 identity manifest for 90 days.
 `CANDIDATE` prints the attempt-specific ID and local directory. Publication never rebuilds these assets.

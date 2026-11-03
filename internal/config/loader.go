@@ -189,13 +189,13 @@ func load(
 			delete(values, input.Name)
 			delete(commandEnvironment, input.Name)
 		}
-		metadata := map[string]string{"PROVISION": owner.Provision, "COMMAND": owner.Command, "CHECK": owner.Check, "HEALTH": owner.Health, "CLEANUP": owner.Cleanup, "DEPENDS": strings.Join(owner.Depends, " "), "PERSIST": owner.Persist}
-		for _, suffix := range []string{"PROVISION", "COMMAND", "CHECK", "HEALTH", "CLEANUP", "DEPENDS", "PERSIST"} {
+		metadata := map[string]string{"PROVISION": owner.Provision, "COMMAND": owner.Command, "CHECK": owner.Check, "HEALTH": owner.Health, "DEPENDS": strings.Join(owner.Depends, " "), "PERSIST": owner.Persist}
+		for _, suffix := range []string{"PROVISION", "COMMAND", "CHECK", "HEALTH", "DEPENDS", "PERSIST"} {
 			value := metadata[suffix]
 			if value == "" {
 				continue
 			}
-			if suffix == "PROVISION" || suffix == "CLEANUP" {
+			if suffix == "PROVISION" {
 				value = filepath.Join(owner.Root, value)
 			}
 			name := "AGENT_" + owner.Name + "_" + suffix
@@ -808,7 +808,7 @@ func sourceValuedAgentSetting(name string) bool {
 	if !strings.HasPrefix(name, "AGENT_") {
 		return false
 	}
-	for _, suffix := range []string{"_CONFIG", "_RULES", "_PROVISION", "_CLEANUP"} {
+	for _, suffix := range []string{"_CONFIG", "_RULES", "_PROVISION"} {
 		agent, found := strings.CutSuffix(strings.TrimPrefix(name, "AGENT_"), suffix)
 		if found && domain.SafeName(agent) {
 			return true
@@ -1069,7 +1069,9 @@ func isRetiredSetting(name string) bool {
 	case "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
 		return true
 	default:
-		return false
+		// The explicit integration cleanup hook no longer exists.
+		agent, cleanup := strings.CutSuffix(strings.TrimPrefix(name, "AGENT_"), "_CLEANUP")
+		return cleanup && strings.HasPrefix(name, "AGENT_") && domain.SafeName(agent)
 	}
 }
 

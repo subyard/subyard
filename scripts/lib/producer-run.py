@@ -328,9 +328,10 @@ def worker(kind, lock, data, original_ns, bindings, bridge, command):
 
 
 def launch(source, kind, root, command):
-    root = str(Path(root).resolve()) if root else ""
-    legacy_path = Path(root) / f".build/paseo-operation-{os.getuid()}" if kind == "paseo" else Path("/var/lib/subyard/profile-operation")
-    storage_path = legacy_path.with_name(f"paseo-operation-v4-{os.getuid()}" if kind == "paseo" else "profile-operation-v4")
+    if kind != "profile" or root:
+        raise ValueError("unknown producer kind")
+    legacy_path = Path("/var/lib/subyard/profile-operation")
+    storage_path = legacy_path.with_name("profile-operation-v4")
     parent = os.getppid()
     pdeath(parent)
     # The genuine v3 slot remains an interoperable lock and active-process fence.
@@ -344,24 +345,15 @@ def launch(source, kind, root, command):
     clear(data)
     original_ns = os.open("/proc/self/ns/pid", os.O_RDONLY)
     bindings = []
-    if root:
-        output = Path(command[command.index("--output-dir") + 1]).resolve()
-        output.mkdir(parents=True, exist_ok=True)
-        for path in sorted({root, str(output)}):
-            if path in ("/", "/tmp", "/var/tmp", "/dev/shm"):
-                raise ValueError("source/output would reopen a temporary root")
-            if any(path.startswith(prefix + "/") for prefix in ("/tmp", "/var/tmp", "/dev/shm")):
-                bindings.append((path, os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)))
-    else:
-        # Explicit migration directories stay visible; all other scratch is private.
-        for path in json.loads(command.pop(0)):
-            if str(Path(path)) != path or not any(path.startswith(prefix + "/") for prefix in ("/tmp", "/var/tmp", "/dev/shm")) or ".." in Path(path).parts:
-                raise ValueError("invalid shared temporary directory")
-            try:
-                fd = directory(path)
-            except FileNotFoundError:
-                continue
-            bindings.append((path, fd))
+    # Explicit migration directories stay visible; all other scratch is private.
+    for path in json.loads(command.pop(0)):
+        if str(Path(path)) != path or not any(path.startswith(prefix + "/") for prefix in ("/tmp", "/var/tmp", "/dev/shm")) or ".." in Path(path).parts:
+            raise ValueError("invalid shared temporary directory")
+        try:
+            fd = directory(path)
+        except FileNotFoundError:
+            continue
+        bindings.append((path, fd))
     bridge = legacy.bridge()
     inherited = (lock, data, original_ns, legacy.parent, legacy.control, legacy.lock, legacy.data, *(fd for _, fd in bindings))
     args = ["unshare", *(["--user", "--map-root-user"] if os.getuid() else []),

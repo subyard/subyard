@@ -153,6 +153,10 @@ func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServ
 				return testkit.IncusServerExecStep{}
 			}
 		}
+		if len(call.Command) == 7 && slices.Equal(call.Command[:3], []string{"sh", "-eu", "-c"}) && slices.Equal(call.Command[4:], []string{"subyard", "observe", "true"}) &&
+			fmt.Sprintf("%x", sha256.Sum256([]byte(call.Command[3]))) == "8195718501349e512581cbebc2b569cce3f86ab129873b6b5f78def1a99a9a2f" {
+			return testkit.IncusServerExecStep{Stdout: []byte("changed=0\n")}
+		}
 		if len(call.Command) == 8 && slices.Equal(call.Command[:3], []string{"sh", "-eu", "-c"}) && slices.Equal(call.Command[4:], []string{"subyard", "observe", "", "true"}) {
 			program := fmt.Sprintf("%x", sha256.Sum256([]byte(call.Command[3])))
 			if program == "a320d966cbd1e55825c506d7de86331caab144c3b18b5acc442191decd8531de" || program == "fb927909c321199bd8846421bc0e29fc2b62c8642fd0aa2d24c84323839037f2" || program == "4ba7a0856a03cb4fd293c9aa217be900b3f1e1df433b466cc5de94bd35ef6a26" {

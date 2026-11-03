@@ -9,7 +9,6 @@ init-extras-convergence.sh
 init-network-convergence.sh
 install-incus-data-home.sh
 opencode-agent-defaults.sh
-paseo-agent-contract.sh
 power-reconciler-systemd-255-launch.sh
 power-reconciler-systemd.sh
 prompt-contract.sh

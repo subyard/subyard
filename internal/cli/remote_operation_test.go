@@ -122,7 +122,7 @@ func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 }
 
 func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
-	for _, kind := range []string{"provision", "accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "exact-envelope-only", "disconnect", "status", "cleanup-check", "rpc-status", "rpc-status-wrong-yard", "rpc-status-invalid-health"} {
+	for _, kind := range []string{"provision", "accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "exact-envelope-only", "disconnect", "status", "rpc-status", "rpc-status-wrong-yard", "rpc-status-invalid-health"} {
 		t.Run(kind, func(t *testing.T) {
 			selection := "CODING_TOOL_INTEGRATIONS=\n"
 			if kind == "no-op" {
@@ -135,10 +135,6 @@ func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
 				runtime.plan.Steps = nil
 			}
 			ownerArgs := []string{"enable", "codex"}
-			if kind == "cleanup-check" {
-				cli, _, _, output = cleanupCLIFixture(t, selection)
-				ownerArgs = []string{"cleanup", "codex"}
-			}
 			owner, err := prepareIntegrationTest(t, cli, ownerArgs...)
 			if err != nil {
 				t.Fatal(err)
@@ -200,7 +196,7 @@ while True:
  if method=='rpc.negotiate':send(req,{'capabilities':[] if kind=='old-owner' else ['operation-exact-plan-v1'] if kind=='exact-envelope-only' else ['operation-exact-plan-v1','operation-steps-v1']})
  elif method=='operation.plan':
   with open(root+'/plan.json') as source:plan=json.load(source)
-  expected={'command':'provision','arguments':['sample'],'exact':True,'stepSchema':1} if kind=='provision' else {'command':'integration','arguments':['cleanup' if kind=='cleanup-check' else 'enable','codex'],'exact':True,'stepSchema':1}
+  expected={'command':'provision','arguments':['sample'],'exact':True,'stepSchema':1} if kind=='provision' else {'command':'integration','arguments':['enable','codex'],'exact':True,'stepSchema':1}
   if req['params']!=expected:sys.exit(4)
   send(req,plan)
   if kind=='disconnect':sys.exit(0)
@@ -253,9 +249,6 @@ while True:
 				return
 			}
 			args := ownerArgs
-			if kind == "cleanup-check" {
-				args = append(args, "--check")
-			}
 			if kind == "status" {
 				args = []string{"status"}
 			}
@@ -270,7 +263,7 @@ while True:
 				}
 				return []string{"-o", "HostKeyAlias=reviewed-owner"}, nil
 			})
-			prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: owner.Definition, Arguments: args, ReadOnly: kind == "status" || kind == "cleanup-check"})
+			prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: owner.Definition, Arguments: args, ReadOnly: kind == "status"})
 			if trustCalls != 1 {
 				t.Fatalf("SSH trust checks: %d", trustCalls)
 			}
@@ -318,13 +311,13 @@ while True:
 				t.Fatal("owner RPC lost verified SSH options")
 			}
 			wantPrompts := 1
-			if kind == "status" || kind == "no-op" || kind == "cleanup-check" {
+			if kind == "status" || kind == "no-op" {
 				wantPrompts = 0
 			}
 			if len(prompt.Requests) != wantPrompts || runtime.applied != 0 {
 				t.Fatalf("controller prompts=%d local applies=%d", len(prompt.Requests), runtime.applied)
 			}
-			if (kind == "decline" || kind == "cleanup-check") && strings.Contains(string(calls), "operation.execute") {
+			if kind == "decline" && strings.Contains(string(calls), "operation.execute") {
 				t.Fatal("declined plan executed")
 			}
 			if kind == "no-op" && !strings.Contains(string(calls), "operation.execute") {

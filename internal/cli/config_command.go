@@ -33,6 +33,8 @@ type configTargetAssessment struct {
 	Changed                 bool
 	DesiredFingerprint      string
 	MaterializedFingerprint string
+	// StoppedInstance is the read behind a "stopped" state; it reaches no fingerprint.
+	StoppedInstance *ports.InstanceInfo
 }
 
 type configTargetSelector func() ([]configTarget, error)
@@ -1056,7 +1058,9 @@ func (cli *CLI) assessConfigTarget(
 		return configTargetAssessment{}, err
 	}
 	if !strings.EqualFold(info.Status, "running") {
-		return finish("stopped")
+		assessment, err := finish("stopped")
+		assessment.StoppedInstance = &info
+		return assessment, err
 	}
 	if !check {
 		return finish("running")

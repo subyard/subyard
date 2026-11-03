@@ -864,7 +864,9 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 			}
 		}
 		if startup == nil {
-			return prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
+			result, err := prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
+			prepared.CLI.warnRetiredIntegrationsAfterStart(prepared.Loaded, execution, result, err, diagnostics)
+			return result, err
 		}
 		unlock, err := lockIntegrationYard(ctx, prepared.Loaded)
 		if err != nil {
@@ -883,6 +885,7 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 		if err != nil || result.Status != "ok" {
 			return result, err
 		}
+		prepared.CLI.warnRetiredIntegrationsAfterStart(prepared.Loaded, execution, result, err, diagnostics)
 		if err := startup.apply(ctx, prepared.CLI, prepared.Plan.OperationID); err != nil {
 			return result, fmt.Errorf("yard started but resource activation is pending: %w", err)
 		}

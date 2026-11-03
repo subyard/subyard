@@ -128,7 +128,6 @@ type IntegrationMetadataData struct {
 	Command         string                `json:"command,omitempty"`
 	Check           string                `json:"check,omitempty"`
 	Health          string                `json:"health,omitempty"`
-	Cleanup         string                `json:"cleanup,omitempty"`
 	Depends         []string              `json:"depends,omitempty"`
 	Persist         string                `json:"persist,omitempty"`
 	Lifecycle       *IntegrationLifecycle `json:"lifecycle,omitempty"`
@@ -168,7 +167,7 @@ func (metadata IntegrationMetadata) Data() (IntegrationMetadataData, error) {
 }
 func (metadata IntegrationMetadata) definition() IntegrationDefinition {
 	data := cloneIntegrationMetadataData(metadata.data)
-	return IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Cleanup: data.Cleanup, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native, Artifacts: data.Artifacts}
+	return IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native, Artifacts: data.Artifacts}
 }
 func cloneIntegrationMetadataData(data IntegrationMetadataData) IntegrationMetadataData {
 	data.RetiredRoutes = slices.Clone(data.RetiredRoutes)
@@ -315,7 +314,7 @@ func (declaration Definition) Clone() Definition {
 }
 
 func (declaration IntegrationDefinition) metadataData() IntegrationMetadataData {
-	return IntegrationMetadataData{SchemaVersion: declaration.SchemaVersion, Retired: declaration.Retired, RetiredRoutes: declaration.RetiredRoutes, RetiredSettings: declaration.RetiredSettings, Name: declaration.Name, Inputs: declaration.Inputs, Settings: declaration.Settings, Provision: declaration.Provision, Command: declaration.Command, Check: declaration.Check, Health: declaration.Health, Cleanup: declaration.Cleanup, Depends: declaration.Depends, Persist: declaration.Persist, Lifecycle: declaration.Lifecycle, Dashboard: declaration.Dashboard, Native: declaration.Native, Artifacts: declaration.Artifacts}
+	return IntegrationMetadataData{SchemaVersion: declaration.SchemaVersion, Retired: declaration.Retired, RetiredRoutes: declaration.RetiredRoutes, RetiredSettings: declaration.RetiredSettings, Name: declaration.Name, Inputs: declaration.Inputs, Settings: declaration.Settings, Provision: declaration.Provision, Command: declaration.Command, Check: declaration.Check, Health: declaration.Health, Depends: declaration.Depends, Persist: declaration.Persist, Lifecycle: declaration.Lifecycle, Dashboard: declaration.Dashboard, Native: declaration.Native, Artifacts: declaration.Artifacts}
 }
 
 // Clone returns an independent declaration, preserving its inspected package binding.

@@ -60,7 +60,6 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
     version = "1.2.3"
     names = ["subyard-install.sh", "subyard-install-runtime-release.sh", "subyard-install-runtime-release.sh.sha256"]
     for arch in ("amd64", "arm64"):
-        names += [f"paseo-headless-0.2.1-linux-{arch}.tar.gz", f"paseo-headless-0.2.1-linux-{arch}.tar.gz.sha256"]
         for artifact in (f"yard-{version}-linux-{arch}", f"subyard-{version}-linux-{arch}.tar.gz"):
             names += [artifact, artifact + ".sha256", artifact + ".manifest.json", artifact + ".provenance.json"]
     for name in names:
@@ -183,7 +182,10 @@ class FakeGitHub:
 
     def pages(self, path, key=None):
         if path.startswith("actions/runs/") and path.endswith("/jobs"):
-            names = ["validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"]
+            names = ["validate", "native-engine-arm64", "prepare"]
+            if self.workflow_blob in ("bb9852249013520480a165571dac6c604c487e86", "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"):
+                # Historical preparation inventory of a since retired integration.
+                names += ["paseo-headless-amd64", "paseo-headless-arm64"]
             if self.host_free_verify:
                 names.append("host-free-verify")
             if not self.complete_jobs:
@@ -263,7 +265,8 @@ class Contracts(unittest.TestCase):
     def test_preparation_workflow_revision_policies(self):
         legacy = "bb9852249013520480a165571dac6c604c487e86"
         current = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
-        for blob, host_free in ((legacy, False), (current, True)):
+        latest = m.git_blob_sha((ROOT / ".github/workflows/release.yml").read_bytes())
+        for blob, host_free in ((legacy, False), (current, True), (latest, True)):
             self.github.workflow_blob = blob
             self.github.host_free_verify = host_free
             self.assertEqual(m.verify_run(self.github, "r123-a1")["head_sha"], self.github.workflow_revision)
@@ -1514,12 +1517,12 @@ class Contracts(unittest.TestCase):
         prep = (ROOT / ".github/workflows/release.yml").read_text()
         publish = (ROOT / ".github/workflows/release-publish.yml").read_text()
         policy = m.PREPARATION_WORKFLOW_POLICIES.get(m.git_blob_sha((ROOT / ".github/workflows/release.yml").read_bytes()))
-        self.assertEqual(policy, {"validate", "host-free-verify", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"})
+        self.assertEqual(policy, {"validate", "host-free-verify", "native-engine-arm64", "prepare"})
         self.assertNotIn("  push:", prep)
         self.assertNotIn("git/refs", prep)
         self.assertIn("contents: read", prep)
         self.assertEqual(prep.count("uses: actions/checkout@"), prep.count("ref: ${{ inputs.commit }}"))
-        for gate in ("native-engine-arm64", "paseo-headless", "make verify", "make cli-docs-check",
+        for gate in ("native-engine-arm64", "make verify", "make cli-docs-check",
                      "dev/test-profiles.sh --e2e --list", "tests/real-host/adapter-contracts.sh", "dev/verify-release-upgrades.py"):
             self.assertIn(gate, prep)
         self.assertIn("release-candidate-${{ github.run_attempt }}", prep)
@@ -1529,7 +1532,7 @@ class Contracts(unittest.TestCase):
         for workflow in (prep, (ROOT / ".github/workflows/ci.yml").read_text()):
             self.assertNotIn("profile-go.sh openlit", workflow)
         self.assertIn("Preserve failed host-free diagnostics", verify)
-        self.assertIn("needs: [host-free-verify, native-engine-arm64, paseo-headless]", prep)
+        self.assertIn("needs: [host-free-verify, native-engine-arm64]", prep)
         self.assertIn("group: subyard-release-publication-stable", publish)
         self.assertIn("cancel-in-progress: false", publish)
         self.assertIn("queue: max", publish)

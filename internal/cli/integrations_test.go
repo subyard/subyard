@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -44,7 +46,7 @@ func integrationFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *
 		t.Fatal(err)
 	}
 	writeCLIFile(t, manifestPath, string(manifest)+"integration||@integration||forward|mutate|dynamic|public|lifecycle|simple|integration <command>|integrations|--json --yes --help|enable disable status\n", 0600)
-	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_paseo_COMMAND=paseo\nAGENT_paseo_DEPENDS=codex\n", 0600)
+	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_relay_COMMAND=relay\nAGENT_relay_DEPENDS=codex\n", 0600)
 	path := filepath.Join(root, "state", "yards", "default", "config.env")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
@@ -98,8 +100,8 @@ func TestIntegrationStoppedAndMissingRejectBeforePlanOrWrite(t *testing.T) {
 	}
 }
 func TestIntegrationDependencyDisableAndTemporaryOverrideRejected(t *testing.T) {
-	cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=paseo\n")
-	if _, err := prepareIntegrationTest(t, cli, "disable", "codex"); err == nil || !strings.Contains(err.Error(), "required by paseo") {
+	cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=relay\n")
+	if _, err := prepareIntegrationTest(t, cli, "disable", "codex"); err == nil || !strings.Contains(err.Error(), "required by relay") {
 		t.Fatalf("dependency error=%v", err)
 	}
 	cli, _, _, _, _ = integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
@@ -210,7 +212,7 @@ func TestIntegrationStoppedAfterPlanAndCASRacePreserveDesired(t *testing.T) {
 				instance.Status = "Stopped"
 				incus.Instances["subyard/yard"] = instance
 			case "cas":
-				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=paseo\n", 0600)
+				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=relay\n", 0600)
 			case "runtime":
 				runtime.plan.Fingerprint = "changed"
 			}
@@ -349,4 +351,123 @@ func TestIntegrationConcurrentHostSettingsChangeCannotReportReady(t *testing.T) 
 	if err != nil || !strings.Contains(string(content), "codex") {
 		t.Fatalf("lost saved intent: %q %v", content, err)
 	}
+}
+
+func TestRetiredIntegrationCommands(t *testing.T) {
+	fixture := func(t *testing.T, selection string) (*CLI, string) {
+		t.Helper()
+		cli, _, _, path, _ := integrationFixture(t, selection)
+		packageRoot := filepath.Join(cli.options.RepositoryRoot, "config", "retired-integrations", "widget")
+		if err := os.MkdirAll(packageRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(packageRoot, "integration.json"), `{"schema_version":1,"retired":true,"retired_settings":["AGENT_widget_COMMAND"],"lifecycle":{"handler":"retire.py","instance_config_keys":[],"instance_devices":[]}}`, 0o600)
+		writeCLIFile(t, filepath.Join(packageRoot, "retire.py"), "#!/bin/sh\n", 0o700)
+		reloaded, err := New(cli.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reloaded, path
+	}
+	t.Run("enable refuses", func(t *testing.T) {
+		cli, path := fixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := prepareIntegrationTest(t, cli, "enable", "widget"); err == nil || !strings.Contains(err.Error(), "integration widget is retired") {
+			t.Fatalf("enable error=%v", err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != string(before) {
+			t.Fatalf("refused enable changed selection: %q, %v", after, err)
+		}
+	})
+	t.Run("disable clears an authored selection", func(t *testing.T) {
+		cli, path := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
+		prepared, err := prepareIntegrationTest(t, cli, "disable", "widget")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 {
+			t.Fatalf("retired disable=%d", code)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || !strings.Contains(string(after), "CODING_TOOL_INTEGRATIONS='codex'") {
+			t.Fatalf("retired selection remains: %q, %v", after, err)
+		}
+	})
+	t.Run("status reports retired selection", func(t *testing.T) {
+		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
+		loaded, err := cli.loadContext("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(loaded.Integrations.Retired, " "); got != "widget" {
+			t.Fatalf("retired selection=%q", got)
+		}
+		if got := strings.Join(loaded.Integrations.Effective, " "); got != "codex" {
+			t.Fatalf("effective selection=%q", got)
+		}
+		if _, err := prepareIntegrationTest(t, cli, "status", "widget"); err != nil {
+			t.Fatalf("retired status refused: %v", err)
+		}
+	})
+	t.Run("init plan names the retirement beside its operation steps", func(t *testing.T) {
+		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
+		loaded, err := cli.loadContext("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var output bytes.Buffer
+		cli.options.Stdout = &output
+		execution := &initExecution{loaded: loaded, integrationRetirements: []string{"temporary start"}, integrationWarnings: []string{"kept state"}}
+		cli.printInitRetirements(execution)
+		for _, want := range []string{"[do  ] yard default: temporary start", "Warning: yard default: kept state"} {
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("init plan output=%q", output.String())
+			}
+		}
+	})
+	t.Run("host warnings stop at the proof", func(t *testing.T) {
+		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
+		loaded, err := cli.loadContext("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		incus := cli.options.Incus.(*testkit.Incus)
+		instance := incus.Instances["subyard/yard"]
+		instance.Status = "Stopped"
+		incus.Instances["subyard/yard"] = instance
+		want := "retired integration widget may still be installed in yard default; run: yard -Y default init"
+		check := func(wanted string) {
+			t.Helper()
+			status, err := cli.queryIntegrationStatus(context.Background(), loaded, "")
+			if err != nil || status.Observed != "stopped" || status.Detail != wanted {
+				t.Fatalf("status=%+v err=%v", status, err)
+			}
+			var started bytes.Buffer
+			execution := &lifecycleExecution{action: "start", observed: &instance}
+			cli.warnRetiredIntegrationsAfterStart(loaded, execution, domain.AdapterResult{Status: "ok"}, nil, &started)
+			line := ""
+			if wanted != "" {
+				line = "Warning: " + wanted + "\n"
+			}
+			if started.String() != line {
+				t.Fatalf("start=%q, want %q", started.String(), line)
+			}
+		}
+		check(want)
+		var failed bytes.Buffer
+		cli.warnRetiredIntegrationsAfterStart(loaded, &lifecycleExecution{action: "start", observed: &instance}, domain.AdapterResult{Status: "ok"}, errors.New("start failed"), &failed)
+		cli.warnRetiredIntegrationsAfterStart(loaded, &lifecycleExecution{action: "stop", observed: &instance}, domain.AdapterResult{Status: "ok"}, nil, &failed)
+		if failed.Len() != 0 {
+			t.Fatalf("warned outside a successful start: %q", failed.String())
+		}
+		instance.Config = maps.Clone(instance.Config)
+		instance.Config["user.subyard.retired_integration.widget"] = "true"
+		incus.Instances["subyard/yard"] = instance
+		check("")
+	})
 }

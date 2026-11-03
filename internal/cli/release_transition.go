@@ -1014,7 +1014,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}
 	}
 	activationTargets := make([]config.MaterializationActivationTarget, 0, len(targets))
-	consequences := []string{}
+	consequences, warnings := []string{}, []string{}
 	captureIntegrationPlans := reconciler.integrationPlans == nil
 	if captureIntegrationPlans {
 		reconciler.integrationPlans = map[string]reconcileruntime.IntegrationPlan{}
@@ -1059,6 +1059,9 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 				for _, path := range managedPaths {
 					consequences = append(consequences, fmt.Sprintf("yard %s: manage integration path (create if absent, adopt only exact matching legacy state): %s", target.Name, path))
 				}
+				for _, retirement := range integration.Retirements {
+					consequences = append(consequences, "yard "+target.Name+": "+retirement)
+				}
 			} else {
 				for _, step := range integration.Steps {
 					consequences = append(consequences, "yard "+target.Name+": "+step)
@@ -1066,13 +1069,25 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			}
 			consequences = append(consequences, "yard "+target.Name+": reconcile selected integration packages, configs, links, hooks and services")
 		}
+		for _, warning := range integration.Warnings {
+			warnings = append(warnings, "yard "+target.Name+": "+warning)
+		}
+		// An update leaves a stopped yard untouched. This reuses the assessment read,
+		// so the reminder adds no failure that could block the update.
+		if assessment.StoppedInstance != nil {
+			if reminder := reconcileruntime.RetiredIntegrationReminder(target.Loaded, *assessment.StoppedInstance); reminder != "" {
+				warnings = append(warnings, reminder)
+			}
+		}
 		activationTargets = append(activationTargets, config.MaterializationActivationTarget{
 			Name: target.Name, Assessment: config.MaterializationAssessment{State: assessment.State, Changed: assessment.Changed, DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint},
 			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integration.Changed,
 		})
 	}
 	assessed := config.AssessMaterializationActivation(activationTargets)
-	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences}, nil
+	// The frozen protocol requires a sorted warning list.
+	slices.Sort(warnings)
+	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings)}, nil
 }
 
 func (reconciler *materializedConfigActivationReconciler) resolveScope(

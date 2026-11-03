@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -19,9 +20,11 @@ type IntegrationSelection struct {
 	DependencyReasons map[string][]string `json:"dependency_reasons"`
 	AllowsCodingTools bool                `json:"allows_coding_tools"`
 	Suppressed        bool                `json:"suppressed"`
+	// Retired lists authored IDs ignored at load because their package is retired.
+	Retired []string `json:"retired,omitempty"`
 }
 
-var integrationMetadataSuffixes = [...]string{"COMMAND", "CHECK", "HEALTH", "CLEANUP", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST", "PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST"}
+var integrationMetadataSuffixes = [...]string{"COMMAND", "CHECK", "HEALTH", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST", "PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST"}
 
 func normalizeLegacySelection(name, value string) string {
 	if name == "AGENTS" && strings.TrimSpace(value) == "none" {
@@ -32,6 +35,7 @@ func normalizeLegacySelection(name, value string) string {
 
 func resolveLoadedIntegrations(values environment, tracker *settingTracker) error {
 	requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
+	var retired []string
 	for _, definition := range tracker.catalog.Integrations() {
 		if !definition.Retired {
 			continue
@@ -40,6 +44,8 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) erro
 		for _, id := range requested {
 			if id != definition.Name {
 				filtered = append(filtered, id)
+			} else if !slices.Contains(retired, id) {
+				retired = append(retired, id)
 			}
 		}
 		requested = filtered
@@ -53,6 +59,8 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) erro
 		return err
 	}
 	_, selection.Present = values["CODING_TOOL_INTEGRATIONS"]
+	slices.Sort(retired)
+	selection.Retired = retired
 	assignments := tracker.assignments["CODING_TOOL_INTEGRATIONS"]
 	if len(assignments) != 0 {
 		assignment := assignments[len(assignments)-1]
@@ -156,6 +164,7 @@ func WithIntegrationSelection(loaded Loaded, requested []string) (Loaded, error)
 	if !selection.AllowsCodingTools && len(requested) != 0 {
 		return Loaded{}, fmt.Errorf("yard role forbids non-empty CODING_TOOL_INTEGRATIONS")
 	}
+	selection.Retired = loaded.Integrations.Retired
 	loaded.Environment = cloneEnvironment(loaded.Environment)
 	loaded.Integrations = selection
 	loaded.Environment["CODING_TOOL_INTEGRATIONS"] = strings.Join(selection.Effective, " ")

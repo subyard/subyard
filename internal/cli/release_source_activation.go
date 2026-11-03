@@ -221,6 +221,9 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 			}
 			if absent || !strings.EqualFold(instance.Status, "running") || pendingCleanup {
 				unavailable[name] = proof
+				if reminder := reconcileruntime.RetiredIntegrationReminder(loaded, instance); !absent && reminder != "" {
+					consequences = append(consequences, reminder)
+				}
 			} else {
 				platform := reconciler.operation().initPlatform(loaded, nil)
 				if native, ok := platform.(reconcileruntime.Runtime); ok {

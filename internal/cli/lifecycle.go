@@ -8,9 +8,11 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -252,6 +254,16 @@ func (cli *CLI) executeLifecycle(
 		}
 	}
 	return result, err
+}
+
+// A start never retires a package, and it reads no guest state to say so.
+func (cli *CLI) warnRetiredIntegrationsAfterStart(loaded config.Loaded, execution *lifecycleExecution, result domain.AdapterResult, err error, diagnostics io.Writer) {
+	if err != nil || result.Status != "ok" || execution.action != "start" || execution.observed == nil {
+		return
+	}
+	if reminder := reconcileruntime.RetiredIntegrationReminder(loaded, *execution.observed); reminder != "" {
+		fmt.Fprintln(diagnostics, "Warning: "+reminder)
+	}
 }
 
 func (cli *CLI) prepareLifecycleVMCPUPrivileges(ctx context.Context, diagnostics io.Writer, yard domain.Context, execution *lifecycleExecution) error {

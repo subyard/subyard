@@ -95,8 +95,12 @@ func (loaded Loaded) IntegrationInventory() []ComponentSelection {
 
 func (loaded Loaded) IntegrationSelectionExplanation() string {
 	source, _, group := ComponentSelectionSource(loaded.Settings["CODING_TOOL_INTEGRATIONS"])
-	return fmt.Sprintf("yard %s: requested coding integrations [%s], effective [%s], from %s (%s scope, %s:%d)",
+	explanation := fmt.Sprintf("yard %s: requested coding integrations [%s], effective [%s], from %s (%s scope, %s:%d)",
 		loaded.Context.YardName, strings.Join(loaded.Integrations.Requested, " "), strings.Join(loaded.Integrations.Effective, " "), group, source.Scope, loaded.componentSelectionSourcePath(source), source.Line)
+	if len(loaded.Integrations.Retired) != 0 {
+		explanation += "; retired and ignored [" + strings.Join(loaded.Integrations.Retired, " ") + "]"
+	}
+	return explanation
 }
 
 func (loaded Loaded) componentSelectionSourcePath(source SettingResolution) string {

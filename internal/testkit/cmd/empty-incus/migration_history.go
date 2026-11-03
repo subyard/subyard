@@ -100,6 +100,9 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			return testkit.IncusServerExecStep{}
 		}
 
+		if len(command) == 7 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c" && programSHA == "8195718501349e512581cbebc2b569cce3f86ab129873b6b5f78def1a99a9a2f" && command[4] == "subyard" && command[5] == "observe" && command[6] == "true" {
+			return testkit.IncusServerExecStep{Stdout: []byte("changed=0\n")}
+		}
 		if len(command) == 8 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c" && (programSHA == "a320d966cbd1e55825c506d7de86331caab144c3b18b5acc442191decd8531de" || programSHA == "fb927909c321199bd8846421bc0e29fc2b62c8642fd0aa2d24c84323839037f2" || programSHA == "4ba7a0856a03cb4fd293c9aa217be900b3f1e1df433b466cc5de94bd35ef6a26") && command[4] == "subyard" && command[5] == "observe" && command[6] == "fixture" && command[7] == "true" {
 			return testkit.IncusServerExecStep{Stdout: []byte("changed=0\n")}
 		}

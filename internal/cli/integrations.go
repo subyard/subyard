@@ -27,15 +27,9 @@ type IntegrationRuntime interface {
 	ApplyIntegrations(context.Context, reconcileruntime.IntegrationPlan) error
 }
 
-type IntegrationCleanupRuntime interface {
-	IntegrationCleanupPlan(context.Context, string) (reconcileruntime.IntegrationCleanupPlan, error)
-	ApplyIntegrationCleanup(context.Context, string, reconcileruntime.IntegrationCleanupPlan) error
-}
-
 type integrationRequest struct {
 	verb, id string
 	json     bool
-	check    bool
 }
 
 func parseIntegrationArguments(arguments []string) (integrationRequest, error) {
@@ -46,28 +40,26 @@ func parseIntegrationArguments(arguments []string) (integrationRequest, error) {
 		case "--yes", "-y":
 		case "--json":
 			request.json = true
-		case "--check":
-			request.check = true
 		default:
 			positional = append(positional, argument)
 		}
 	}
 	if len(positional) == 0 {
-		return request, errors.New("usage: integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]")
+		return request, errors.New("usage: integration enable|disable <id> | status [id] [--json]")
 	}
 	request.verb = positional[0]
 	if len(positional) > 1 {
 		request.id = positional[1]
 	}
-	if len(positional) > 2 || (request.verb != "status" && request.verb != "enable" && request.verb != "disable" && request.verb != "cleanup") || (request.verb != "status" && (request.id == "" || request.json)) || (request.id != "" && !domain.SafeName(request.id)) || (request.check && request.verb != "cleanup") {
-		return request, errors.New("usage: integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]")
+	if len(positional) > 2 || (request.verb != "status" && request.verb != "enable" && request.verb != "disable") || (request.verb != "status" && (request.id == "" || request.json)) || (request.id != "" && !domain.SafeName(request.id)) {
+		return request, errors.New("usage: integration enable|disable <id> | status [id] [--json]")
 	}
 	return request, nil
 }
 
 func integrationReadOnlyInvocation(arguments []string) bool {
 	request, err := parseIntegrationArguments(arguments)
-	return err == nil && (request.verb == "status" || request.check)
+	return err == nil && request.verb == "status"
 }
 
 func (cli *CLI) integrationRuntime(loaded config.Loaded) IntegrationRuntime {
@@ -149,14 +141,18 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 	if err != nil {
 		return err
 	}
-	if request.verb == "cleanup" {
-		return prepared.prepareIntegrationCleanup(ctx, loaded, request)
-	}
 	if err = integrationSourceGuard(loaded); err != nil {
 		return err
 	}
-	if _, err = config.ResolveIntegrationSelection(loaded.Environment, []string{request.id}); err != nil {
-		return err
+	// A retired ID can only be removed from an authored selection.
+	retired := loaded.Catalog.RetiredIntegration(request.id)
+	if retired && request.verb == "enable" {
+		return loaded.Catalog.CheckSelectableIntegrations([]string{request.id})
+	}
+	if !retired {
+		if _, err = config.ResolveIntegrationSelection(loaded.Environment, []string{request.id}); err != nil {
+			return err
+		}
 	}
 	if !loaded.Integrations.Present {
 		return errors.New("existing yard has no trustworthy requested integration set; explicitly set CODING_TOOL_INTEGRATIONS with config set --scope yard first")
@@ -241,6 +237,9 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 	prepared.preview = func() {
 		for _, step := range consequences {
 			fmt.Fprintln(cli.options.Stdout, "  "+step)
+		}
+		for _, warning := range plan.Warnings {
+			fmt.Fprintln(cli.options.Stdout, "Warning: "+warning)
 		}
 	}
 	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
@@ -333,7 +332,7 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 	for _, component := range loaded.IntegrationInventory() {
 		status.Inventory = append(status.Inventory, integrationInventoryEntry{ComponentSelection: component, Observed: "not-inspected"})
 	}
-	if id != "" {
+	if id != "" && !loaded.Catalog.RetiredIntegration(id) {
 		if _, err := config.ResolveIntegrationSelection(loaded.Environment, []string{id}); err != nil {
 			return status, err
 		}
@@ -350,6 +349,7 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 	}
 	if !strings.EqualFold(instance.Status, "running") {
 		status.Observed = "stopped"
+		status.Detail = reconcileruntime.RetiredIntegrationReminder(loaded, instance)
 		return status, nil
 	}
 	runtime := cli.integrationRuntime(loaded)
@@ -374,6 +374,12 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 	if plan.Changed {
 		status.Observed = "pending"
 		status.Detail = strings.Join(plan.Steps, "; ")
+	}
+	if len(plan.Warnings) != 0 {
+		if status.Detail != "" {
+			status.Detail += "; "
+		}
+		status.Detail += strings.Join(plan.Warnings, "; ")
 	}
 	_, executor := cli.statusPorts()
 	healthEnvironment := loaded.Environment
@@ -415,6 +421,9 @@ func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool
 	}
 	if status.ID != "" {
 		fmt.Fprintf(cli.options.Stdout, "%s: requested=%t effective=%t required-by=%s\n", status.ID, slices.Contains(status.Selection.Requested, status.ID), slices.Contains(status.Selection.Effective, status.ID), strings.Join(status.Selection.DependencyReasons[status.ID], ", "))
+	}
+	if len(status.Selection.Retired) != 0 {
+		fmt.Fprintf(cli.options.Stdout, "Retired and ignored: %s\n", strings.Join(status.Selection.Retired, " "))
 	}
 	if !status.Selection.AllowsCodingTools {
 		fmt.Fprintln(cli.options.Stdout, "Coding tools: forbidden by yard role")

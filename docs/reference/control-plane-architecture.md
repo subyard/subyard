@@ -493,8 +493,8 @@ approval. Reconnection returns to the same session and shows accumulated results
 explicit cancellation remains separate. This initial disconnect contract assumes that the agent
 server, yard and owner-host keep running; it does not promise restart-safe execution or failover.
 Agent transcripts, turns, questions and approvals remain with the agent server/client rather than
-being added to Yard RPC or Veranda. For public backend and SSH access guidance, see
-[Paseo](../paseo.md) and [SSH agent transport](../ssh-agent.md).
+being added to Yard RPC or Veranda. For SSH access guidance, see
+[SSH agent transport](../ssh-agent.md).
 
 ## 10. Related documents
 

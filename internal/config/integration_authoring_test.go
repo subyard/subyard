@@ -25,13 +25,13 @@ func TestYardIntegrationWriteMigratesFullRegistration(t *testing.T) {
 			if source == "private" {
 				path = filepath.Join(root, "private/yards/demo.env")
 			}
-			original := "# operator settings\nSSH_PORT=2244\nHOST_LINKS=\nAGENTS=paseo\n"
+			original := "# operator settings\nSSH_PORT=2244\nHOST_LINKS=\nAGENTS=relay\n"
 			writeFixture(t, path, original)
 			if err := os.MkdirAll(configHome, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			loaded := Loaded{Context: domain.Context{YardName: "demo", Paths: domain.RuntimePaths{ConfigHome: configHome, ConfigDir: configDir}}}
-			plan, err := PlanYardIntegrationWrite(loaded, []string{"paseo", "pi"})
+			plan, err := PlanYardIntegrationWrite(loaded, []string{"relay", "pi"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestYardIntegrationWriteMigratesFullRegistration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(content) != "# operator settings\nSSH_PORT=2244\nHOST_LINKS=\nCODING_TOOL_INTEGRATIONS='paseo pi'\n" {
+			if string(content) != "# operator settings\nSSH_PORT=2244\nHOST_LINKS=\nCODING_TOOL_INTEGRATIONS='relay pi'\n" {
 				t.Fatalf("registration lost settings: %q", content)
 			}
 			preserved := path
@@ -59,7 +59,7 @@ func TestYardIntegrationWriteMigratesFullRegistration(t *testing.T) {
 			if err != nil || string(bytes) != original {
 				t.Fatalf("source lost: %q, %v", bytes, err)
 			}
-			again, err := PlanYardIntegrationWrite(loaded, []string{"paseo", "pi"})
+			again, err := PlanYardIntegrationWrite(loaded, []string{"relay", "pi"})
 			if err != nil || again.Changed() {
 				t.Fatalf("repeat=%#v, %v", again, err)
 			}

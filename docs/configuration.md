@@ -211,8 +211,9 @@ persistent configuration. Integration enable/disable writes a yard override in
 `yards/<name>/config.env`. An empty assignment explicitly selects no integrations;
 an absent assignment remains distinguishable from empty. The compatibility input
 `AGENTS=none` means empty. Unknown IDs, duplicate IDs and dependency cycles are errors.
-Dependencies are computed separately: enabling Paseo also makes Codex effective;
-disabling Codex while Paseo still requests it is rejected. Status reports the requested
+Dependencies declared with `AGENT_<id>_DEPENDS` are computed separately: enabling such an
+integration also makes its dependency effective, and disabling a dependency that a selected
+integration still requests is rejected. Status reports the requested
 set, effective set, dependency reasons, configuration source and observed yard readiness.
 An ID filters membership and dependency details; readiness describes the whole yard.
 
@@ -278,25 +279,16 @@ including unfinished inventory application. Stopped yards remain unchanged.
 Integration enable/disable does not perform this initial adoption. Interrupted
 release updates resume within the same approved desired artifact scope.
 
-An integration may declare an `AGENT_<name>_CLEANUP` hook for explicit recovery of
-installed state that is outside the normal ownership inventory. The hook is coding-integration
-profile metadata, distinct from environment-profile resources. It remains discoverable when the
-integration is not selected, so `yard integration cleanup <name>` can inspect or clean up a
-disabled integration without changing the requested set. Cleanup sources use the same trusted
-regular, non-symbolic-link file contract and scopes as provisioning hooks.
-
-To inspect recovery, run `yard -Y default integration cleanup <name> --check`. Run the same command
-without `--check` to review and confirm its consequences. Cleanup refuses integrations that are
-still selected, including dependencies of selected integrations. Hooks must keep cleanup bounded
-and reversible, preserve user data, and support safe retries after interruption.
-
-On the local owner CLI, a completed release whose sole readiness blocker is the matching
-integration ownership conflict can admit this explicit cleanup after verifying the sealed
-owner, protected history and other activation contracts. The confirmed native cleanup plan
-is rechecked under the protected release lock. It preserves selection and history; remaining
-materialized configuration drift still needs a separately authorized migration. Unfinished
-release history and unrelated blockers continue to require their original recovery path.
-This recovery admission is unavailable through RPC operation planning.
+A retired integration ID stays valid in authored settings: it is filtered at load, listed as
+retired and ignored in `yard integration status`, and its old settings are discarded without
+rewriting the file. `yard integration enable <id>` and `yard config set` refuse it, while
+`yard integration disable <id>` removes it from the yard's selection. A dependency that only the
+retired integration requested stops being effective, keeps its binaries and authorization, and
+can be selected again, for example with `yard integration enable codex`. While a selected retired
+integration has no recorded retirement, `yard init` also temporarily starts an intentionally stopped
+yard to remove it and then stops the yard again; updates and `yard start` only warn. Paseo is retired; see the
+[retired package contract](reference/shipped-integration-contract.md#retired-package-compatibility).
+A previously accepted `AGENT_<name>_CLEANUP` value is ignored in the same way.
 
 When an update is blocked before activation, its diagnostic names the downloaded candidate's
 `bin/yard-engine` directly. Use that printed command on the owner host: the active older `yard`
@@ -509,8 +501,6 @@ on the client's response behavior:
 | VS Code Codex extension | Select **Custom (config.toml)**. | Loads the yard defaults; client-specific denial and repeated single-use approval still need acceptance. |
 | Orca terminal | Use **Manual** with empty Codex arguments; Subyard also removes the stock YOLO argument. | The owning VM scenario exercises the paired terminal, including denial and repeated Git prompts. |
 | Orca built-in Codex chat | Use **Manual**; the Subyard adapter reads the effective Codex configuration for the chat directory. | The managed relay exposes only single-use choices and cancels session or rule-amendment responses. The owning fixture exercises the stock native-chat approval RPC and reconnect; the graphical Desktop UI is not separately certified. |
-| Paseo local SDK | Mode `auto` (**Default Permissions**) with explicit `on-request` and `danger-full-access`. | Native daemon checks cover denial, one approved commit, a new prompt for the repeat, and pending approval after reconnect. |
-| Paseo Desktop | No fully verified Desktop selection is published. | The preset alone uses `workspace-write`; Desktop delivery of the SDK overrides needs acceptance. **Auto-review** conflicts with the user-only requirements. |
 
 The terminal and Orca checks belong to the profile's
 [`codex-permissions` VM scenario](test-vms.md).

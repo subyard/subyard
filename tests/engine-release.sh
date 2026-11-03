@@ -792,18 +792,13 @@ tar -xOf "$release/subyard-1.0.0-test-linux-arm64.tar.gz" \
   ./config/agents/package-fixture/bin/worker > "$TMP/integration-arm64"
 [ "$(od -An -tu2 -j18 -N2 "$TMP/integration-arm64" | tr -d ' ')" = 183 ] \
   || fail 'native integration executable was not cross-compiled for arm64'
-for paseo_arch in amd64 arm64; do
-  paseo_asset="$release/paseo-headless-0.2.1-linux-$paseo_arch.tar.gz"
-  printf 'paseo test fixture for %s\n' "$paseo_arch" > "$paseo_asset"
-  (cd "$release" && sha256sum "$(basename "$paseo_asset")" > "$(basename "$paseo_asset").sha256")
-done
 printf 'must not be published\n' > "$release/unexpected-build-note"
 publish_list="$TMP/publish-assets.list"
 "$ROOT/dev/release-assets.sh" --release-dir "$release" --version 1.0.0-test > "$publish_list"
-[ "$(wc -l < "$publish_list")" -eq 23 ] \
+[ "$(wc -l < "$publish_list")" -eq 19 ] \
   && ! grep -Fq '.build.lock' "$publish_list" \
   && ! grep -Fq 'unexpected-build-note' "$publish_list" \
-  || fail 'release publishing does not use the exact 23-asset allowlist'
+  || fail 'release publishing does not use the exact 19-asset allowlist'
 while IFS= read -r publish_asset; do
   [ -f "$publish_asset" ] && [ ! -L "$publish_asset" ] \
     || fail "release allowlist contains an invalid asset: $publish_asset"

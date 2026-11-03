@@ -123,7 +123,7 @@ func TestPublicEnvironmentProfilesExampleIsCopyable(t *testing.T) {
 }
 
 func TestAgentDependencySettingAcceptsDeclaredScopes(t *testing.T) {
-	const name = "AGENT_paseo_DEPENDS"
+	const name = "AGENT_relay_DEPENDS"
 	for _, scope := range []SettingScope{ScopeShipped, ScopeHost, ScopeYard, ScopeCommand} {
 		if err := ValidateSetting(scope, name, "codex opencode", false); err != nil {
 			t.Errorf("ValidateSetting(%s, %s) returned %v", scope, name, err)
@@ -170,26 +170,19 @@ func TestPowerArtifactSettingsRemainHostLocal(t *testing.T) {
 	}
 }
 
-func TestAgentCleanupSettingUsesProvisionHookContract(t *testing.T) {
+func TestRemovedAgentCleanupSettingIsOnlyAcceptedAsARetiredValue(t *testing.T) {
 	const name = "AGENT_example_CLEANUP"
-	for _, scope := range []SettingScope{ScopeShipped, ScopeHost, ScopeYard, ScopeCommand} {
-		if err := ValidateSetting(scope, name, "/opt/subyard/example-cleanup", false); err != nil {
-			t.Errorf("ValidateSetting(%s, %s) returned %v", scope, name, err)
-		}
+	if _, err := ValidateSettingName(ScopeHost, name, false); err == nil {
+		t.Fatal("removed cleanup hook is still an authorable setting")
 	}
-	if err := ValidateSetting(ScopeShared, name, "/opt/subyard/example-cleanup", false); err == nil {
-		t.Error("shared cleanup hook override was accepted")
+	if sourceValuedAgentSetting(name) {
+		t.Fatal("removed cleanup hook is still a source-valued agent setting")
 	}
-	definition, err := ValidateSettingName(ScopeHost, name, false)
-	if err != nil {
-		t.Fatal(err)
+	if !isRetiredSetting(name) {
+		t.Fatal("an existing cleanup value must keep loading")
 	}
-	if definition.Kind != SettingFile || definition.Type != SettingRegularFilePath ||
-		definition.Application != SettingYardInit || definition.Syncable {
-		t.Fatalf("unexpected cleanup definition: %+v", definition)
-	}
-	if !sourceValuedAgentSetting(name) {
-		t.Fatal("cleanup hook was not classified as a source-valued agent setting")
+	if isRetiredSetting("AGENT_bad/name_CLEANUP") || isRetiredSetting("EXAMPLE_CLEANUP") {
+		t.Fatal("retired cleanup matching accepted an unrelated setting")
 	}
 }
 

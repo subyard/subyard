@@ -31,10 +31,6 @@ assets=(
   subyard-install-runtime-release.sh.sha256
 )
 for arch in amd64 arm64; do
-  assets+=(
-    "paseo-headless-0.2.1-linux-$arch.tar.gz"
-    "paseo-headless-0.2.1-linux-$arch.tar.gz.sha256"
-  )
   for prefix in "yard-$VERSION-linux-$arch" "subyard-$VERSION-linux-$arch.tar.gz"; do
     assets+=("$prefix" "$prefix.sha256" "$prefix.manifest.json" "$prefix.provenance.json")
   done

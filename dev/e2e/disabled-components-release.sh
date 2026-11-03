@@ -3,10 +3,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [ "${1:-}" = --help ]; then
-  printf 'Usage: dev/e2e/disabled-components-release.sh --slot N\nRequires a frozen packaged candidate transport bundle.\n'
+  printf 'Usage: dev/e2e/disabled-components-release.sh --slot N [--payload PATH]\nRequires a frozen packaged candidate transport bundle.\n'
   exit 0
 fi
-[ "$#" = 2 ] && [ "$1" = --slot ] || { printf 'expected --slot N\n' >&2; exit 2; }
+payload=config/profiles/hermes/tests/e2e/disabled-components-release.sh
+if [ "$#" = 4 ] && [ "${3:-}" = --payload ]; then payload="$4"; set -- "$1" "$2"; fi
+[ "$#" = 2 ] && [ "$1" = --slot ] || { printf 'expected --slot N [--payload PATH]\n' >&2; exit 2; }
+[ -f "$ROOT/$payload" ] || { printf 'unknown payload\n' >&2; exit 2; }
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 set_requested_slot "$2" --slot
@@ -17,7 +20,6 @@ VM_COUNT_REQUESTED=1 LEASE_PURPOSE=disabled-components-release
 LOCAL_TEMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXXXX)"
 install -d -m 0755 "$ROOT/.build/disabled-components-release"
 evidence="$(mktemp -d "$ROOT/.build/disabled-components-release/run.XXXXXXXX")"
-payload=config/agents/paseo/tests/e2e/disabled-components-release.sh
 prepared=0
 # Match the existing P0 controller clock without sourcing its execution dispatch.
 reboot_monotonic_seconds() {
@@ -99,4 +101,4 @@ guest 1 timeout --signal=TERM --kill-after=30 180 /usr/sbin/runuser -u dev -- en
   bash "${GUEST_DIRS[1]}/src/$payload" clean "$token"
 cleanup_guest 1
 prepared=0
-ok 'installed candidate retained disabled components through upgrade, recovery and reboot'
+ok "installed candidate passed $payload through upgrade, recovery and reboot"

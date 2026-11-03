@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "retired": true,
+  "retired_settings": [
+    "AGENT_paseo_CHECK",
+    "AGENT_paseo_CLEANUP",
+    "AGENT_paseo_COMMAND",
+    "AGENT_paseo_CONFIG",
+    "AGENT_paseo_CONFIG_DEST",
+    "AGENT_paseo_DEPENDS",
+    "AGENT_paseo_HEALTH",
+    "AGENT_paseo_PERSIST",
+    "AGENT_paseo_PROJECTS_CHANGED",
+    "AGENT_paseo_PROVISION",
+    "AGENT_paseo_RULES",
+    "AGENT_paseo_RULES_DEST"
+  ],
+  "lifecycle": {
+    "handler": "retire.py",
+    "instance_config_keys": [],
+    "instance_devices": [],
+    "retirement_notice": "retire integration paseo: remove paseo.service, its helpers and /opt/subyard/paseo when proven; /srv/agents/paseo, including chats, schedules, loops and uploads, is also deleted unless it holds a worktree; paired clients disconnect and a compatible rollback needs re-pairing."
+  }
+}

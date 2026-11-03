@@ -230,7 +230,7 @@ func TestResourceShutdownAdmitsCompletedHistoryUnavailableGuest(t *testing.T) {
 	}{{"v1", "", false}, {"v2", "v2", false}, {"installed-guest-v1", "", true}, {"installed-guest-v2", "v2", true}} {
 		t.Run(scenario.name, func(t *testing.T) {
 			program, home, output := shutdownGateFixture(t, scenario.protocol, scenario.installedGuest)
-			invariants := nativeCleanupRecoveryInvariants(t, program, home)
+			invariants := nativeRecoveryInvariants(t, program, home)
 			if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), "guest shutdown is unverified") {
 				t.Fatalf("declared shutdown blocked before guest cleanup: code=%d output=%s", code, output)
 			}
@@ -393,5 +393,39 @@ func TestProfileRuntimeActivationUnavailableGuestRetainsDeselectedObservation(t 
 				t.Fatalf("stopped runtime not deferred: %#v %v", observation, err)
 			}
 		})
+	}
+}
+
+func nativeRecoveryInvariants(t *testing.T, program *CLI, home string) func() {
+	t.Helper()
+	paths := []string{filepath.Join(home, "release-transition/v2/journal.json"), filepath.Join(home, "release-transition/v2/ledger.json"), filepath.Join(home, "release-transition/v2/history-checkpoint.json"), filepath.Join(home, "yards/default/config.env"), filepath.Join(program.options.RepositoryRoot, "runtime-files.sha256")}
+	before := map[string][]byte{}
+	for _, path := range paths {
+		before[path] = mustReadConfigFixture(t, path)
+	}
+	links := map[string]string{}
+	for _, name := range []string{"current", "previous"} {
+		path := filepath.Join(program.env["YARD_RUNTIME_ROOT"], name)
+		value, err := os.Readlink(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		links[path] = value
+	}
+	return func() {
+		for _, path := range paths {
+			if !bytes.Equal(before[path], mustReadConfigFixture(t, path)) {
+				t.Fatalf("native recovery changed source/history: %s", filepath.Base(path))
+			}
+		}
+		for path, value := range links {
+			if got, err := os.Readlink(path); err != nil || got != value {
+				t.Fatal("native recovery changed release links")
+			}
+		}
+		platform := sourceAuthoringPlatformFixture(t, program.options.InitPlatform)
+		if len(platform.applied) != 0 || platform.projectHooks != 0 {
+			t.Fatal("native recovery invoked activation/hooks")
+		}
 	}
 }

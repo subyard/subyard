@@ -30,13 +30,16 @@ ATTESTATION_BYTE_LIMIT = 4 << 20
 ATTESTATION_BLOB_BYTE_LIMIT = 2 << 20
 ATTESTATION_TRANSPORT = "subyard-attestation-zlib-v1"
 ATTESTATION_BLOB_TRANSPORT = "subyard-attestation-git-blob-v1"
-PREPARATION_JOBS = frozenset({"validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"})
+# Earlier candidates ran the bundle jobs of a since retired integration.
+HISTORICAL_PREPARATION_JOBS = frozenset({"validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"})
+PREPARATION_JOBS = frozenset({"validate", "host-free-verify", "native-engine-arm64", "prepare"})
 # Git blob identities of reviewed release.yml policies. Retain historical entries
 # so the first publication checkout can recover earlier successful candidates.
 PREPARATION_WORKFLOW_POLICIES = {
-    "bb9852249013520480a165571dac6c604c487e86": PREPARATION_JOBS,
-    "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4": PREPARATION_JOBS | {"host-free-verify"},
-    "dcc7d9d2cd7f1f20c41bb7993ffd279af644380f": PREPARATION_JOBS | {"host-free-verify"},
+    "bb9852249013520480a165571dac6c604c487e86": HISTORICAL_PREPARATION_JOBS,
+    "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4": HISTORICAL_PREPARATION_JOBS | {"host-free-verify"},
+    "dcc7d9d2cd7f1f20c41bb7993ffd279af644380f": HISTORICAL_PREPARATION_JOBS | {"host-free-verify"},
+    "e952002eada45e0d6f245fbc61f5403c7325ae5d": PREPARATION_JOBS,
 }
 
 

@@ -53,6 +53,43 @@ func TestIntegrationLifecycleExactApplyAndVerify(t *testing.T) {
 		t.Fatalf("verify = %+v, %v", observation, err)
 	}
 }
+
+func TestRetiredLifecycleWarnsOnceAtTheApplyBoundary(t *testing.T) {
+	for name, retained := range map[string]string{"nothing retained": "", "state retained": "left in place"} {
+		t.Run(name, func(t *testing.T) {
+			runtime, definition, actual, desired := lifecycleFixture(t)
+			definition.Retired = true
+			runtime.Integrations = []profile.IntegrationDefinition{definition}
+			runtime.Yard = domain.Context{YardName: "example"}
+			runtime.Environment[len(runtime.Environment)-1] = "CODING_TOOL_INTEGRATIONS="
+			var stderr strings.Builder
+			runtime.Stderr = &stderr
+			root := definition.Root
+			testkit.WriteFile(t, filepath.Join(root, "state"), []byte(`{"state":"stale","actual":"`+actual+`","desired":"`+desired+`","notice":"remove widget"}`), 0600)
+			next := `{"state":"absent","actual":"","desired":""}`
+			if retained != "" {
+				next = `{"state":"absent","actual":"","desired":"","notice":"` + retained + `"}`
+			}
+			testkit.WriteFile(t, filepath.Join(root, "next"), []byte(next), 0600)
+			sources, _, err := runtime.integrationSourceBindingsPhase("inspect")
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := IntegrationPlan{sources: sources, facts: []integrationFact{{Key: "lifecycle:sample", Observed: actual + ":" + desired, Desired: "absent"}}}
+			if err := runtime.applyIntegrationLifecycles(context.Background(), plan); err != nil {
+				t.Fatal(err)
+			}
+			want := "Warning: yard example: remove widget\n"
+			if retained != "" {
+				want += "Warning: yard example: " + retained + "\n"
+			}
+			if stderr.String() != want {
+				t.Fatalf("apply warnings = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
 func TestIntegrationLifecycleRejectsSourceAndReportDrift(t *testing.T) {
 	runtime, definition, actual, desired := lifecycleFixture(t)
 	sources, _, _ := runtime.integrationSourceBindingsPhase("inspect")

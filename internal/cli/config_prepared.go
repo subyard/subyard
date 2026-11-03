@@ -124,6 +124,9 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	}
 	if action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
 		requested := strings.Fields(request.value)
+		if err := loaded.Catalog.CheckSelectableIntegrations(requested); err != nil {
+			return fmt.Errorf("%w: %v", errConfigUsage, err)
+		}
 		if _, err := config.ResolveIntegrationSelection(loaded.Environment, requested); err != nil {
 			return fmt.Errorf("%w: %v", errConfigUsage, err)
 		}

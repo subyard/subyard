@@ -323,10 +323,10 @@ Inspect or complete migrations and runtime readiness for the installed current r
 
 ## integration
 
-select, reconcile or clean up coding tools for this yard.
+select and reconcile coding tools for this yard.
 
 ```text
-Usage: yard integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]
+Usage: yard integration enable|disable <id> | status [id] [--json]
 ```
 
 ## profile

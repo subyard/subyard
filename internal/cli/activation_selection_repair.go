@@ -93,9 +93,11 @@ func (cli *CLI) runActivationSelectionRepair(ctx context.Context, yard, handler 
 				cli.errorf("selection source repair: profile selection is unavailable")
 				return true, 1
 			}
-		} else if _, err := config.ResolveIntegrationSelection(loaded.Environment, []string{id}); err != nil {
-			cli.errorf("selection source repair: %v", err)
-			return true, 2
+		} else if !loaded.Catalog.RetiredIntegration(id) {
+			if _, err := config.ResolveIntegrationSelection(loaded.Environment, []string{id}); err != nil {
+				cli.errorf("selection source repair: %v", err)
+				return true, 2
+			}
 		}
 		selected = slices.DeleteFunc(slices.Clone(selected), func(value string) bool { return value == id })
 		if handler == "@integration" {

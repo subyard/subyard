@@ -95,7 +95,7 @@ func (cli *CLI) prepareResourceShutdownRepair(ctx context.Context, yard string, 
 			return nil, nil
 		}
 	}
-	source, tooling, err := cli.integrationCleanupSourceBindings(ctx, journal)
+	source, tooling, err := cli.completedSourceBindings(ctx, journal)
 	if err != nil {
 		return nil, nil
 	}

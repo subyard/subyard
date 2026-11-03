@@ -14,7 +14,6 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 		{Action: "host.remove", Summary: "Remove owner host registration", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust}, Recovery: domain.RecoveryReversible},
 		{Action: "host.rename", Summary: "Rename owner host identity", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata}, Recovery: domain.RecoveryReversible},
 		{Action: "integration.reconcile", Summary: "Reconcile yard coding tool integrations", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible},
-		{Action: "integration.cleanup", Summary: "Clean up an unselected integration using its declared handler", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible},
 		{
 			Action: "ssh.trust", Summary: "Trust an unknown SSH server key", Effect: domain.ActionMutation,
 			Impacts: []domain.ActionImpact{domain.ImpactTrust}, Recovery: domain.RecoveryReversible,

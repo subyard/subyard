@@ -152,16 +152,13 @@ leaf publishes recovery facts before importing config and later switches shell e
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
 
-Native Paseo builds share public npm downloads through `SUBYARD_NPM_PUBLIC_CACHE`
-when configured by the profile. HOME, npm configuration and logs remain isolated. Other
-downloads and temporary files stay in operation-owned disk scratch under `.build/paseo-operation-v4-<uid>`. A private temporary mount catches direct
-`/tmp`, `/var/tmp` and `/dev/shm` writes. One build runs per checkout and user;
+Profile provisioning keeps downloads and temporary files in operation-owned disk scratch under
+`/var/lib/subyard/profile-operation-v4`. A private temporary mount catches direct
+`/tmp`, `/var/tmp` and `/dev/shm` writes. One operation runs per guest;
 completion removes scratch, and the next invocation removes leftovers with a valid
 durable ownership receipt after SIGKILL or reboot. Incomplete initialization or
-ambiguous ownership is preserved and refused for inspection. Old `.build/paseo-npm-cache` and diagnostic directories are left
-untouched. Safe npm records go to stderr, capped at 8 KiB per attempt. Network
-retries remain bounded; version, integrity and native-module failures stop the build.
-The build needs Linux user/mount/PID namespace support and verified disk storage.
+ambiguous ownership is preserved and refused for inspection.
+The operation needs Linux mount/PID namespace support and verified disk storage.
 
 Profile extraction uses the same lifecycle in guest disk storage under
 `/var/lib/subyard/profile-operation-v4`, with one operation per guest. Controller stderr

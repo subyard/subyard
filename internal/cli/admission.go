@@ -40,7 +40,6 @@ const (
 	recoveryNone gateRecovery = iota
 	recoveryConfigApply
 	recoveryProfileInit
-	recoveryIntegrationCleanup
 	recoveryResourceShutdown
 )
 
@@ -117,8 +116,8 @@ var handlerAdmissions = map[string]handlerAdmission{
 		return testVMStatusInvocation(arguments) || testVMLogsInvocation(arguments)
 	})},
 	"@integration": {
-		readOnly: argumentsOnly(integrationReadOnlyInvocation),
-		recovery: recoveryIntegrationCleanup, ownsRecovery: true, readOnlyRoute: true,
+		readOnly:     argumentsOnly(integrationReadOnlyInvocation),
+		ownsRecovery: true, readOnlyRoute: true,
 	},
 	"@profile": {
 		readOnly:     argumentsOnly(profileReadOnlyInvocation),
@@ -274,11 +273,10 @@ func earlyDispatch(definition command.Definition, arguments []string, explicit, 
 // handlers read through their CLI. RPC operations and release-transition children copy
 // the CLI and clear the grants that do not apply to them.
 type recoveryPermits struct {
-	configApply        *configApplyRepairPermit
-	profileInit        *configApplyRepairPermit
-	integrationCleanup *configApplyRepairPermit
-	teardown           *configApplyRepairPermit
-	resourceShutdown   *resourceShutdownPermit
+	configApply      *configApplyRepairPermit
+	profileInit      *configApplyRepairPermit
+	teardown         *configApplyRepairPermit
+	resourceShutdown *resourceShutdownPermit
 }
 
 // admitReleaseGate consults the release mutation gate for an invocation that requires it.
@@ -319,16 +317,6 @@ func (cli *CLI) admitReleaseGate(
 			return permits, 1, true
 		}
 		outcome = remaining
-	case recoveryIntegrationCleanup:
-		permit, err := cli.prepareIntegrationCleanupRecovery(ctx, yard, arguments, *outcome)
-		if err != nil {
-			cli.errorf("integration cleanup recovery: %v", err)
-			return permits, 1, true
-		}
-		permits.integrationCleanup = permit
-		if permit != nil {
-			outcome = nil
-		}
 	case recoveryResourceShutdown:
 		permit, err := cli.prepareResourceShutdownRepair(ctx, yard, resourceDefinition, arguments, *outcome)
 		if err != nil {

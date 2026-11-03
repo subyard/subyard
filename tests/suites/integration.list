@@ -10,7 +10,6 @@ key-tools-install.sh
 init-project-convergence.sh
 install-runtime-release-rollback.sh
 opencode-agent-provision.sh
-paseo-project-sync.sh
 project-registry-convergence.sh
 remote-projects.sh
 vscode-remote-maintenance.sh

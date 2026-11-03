@@ -146,7 +146,7 @@ func reservedPublicationKey(key string) bool {
 	case "user.subyard.adopted_uuid", "user.subyard.managed", "user.subyard.name", "user.subyard.bridge", "user.subyard.initialized", "user.subyard.desired_power", "user.subyard.installation", "user.subyard.operator_uid", "user.subyard.data_home", "user.subyard.config_home", "user.subyard.context", "user.subyard.yard_name", "user.subyard.instance_name", "user.subyard.host_base", "user.subyard.srv_pool", "user.subyard.srv_volume", "user.subyard.storage_pool", "user.subyard.storage_path", "user.subyard.ccusage_version", "user.subyard.codex_version", "user.subyard.preview_sha256", "user.subyard.preview_endpoint_sha256", "user.subyard.preview_proxy", "user.subyard.host_memory":
 		return true
 	}
-	return strings.HasPrefix(key, "user.subyard.resource.") || strings.HasPrefix(key, "user.subyard.deferred_publication.")
+	return strings.HasPrefix(key, "user.subyard.resource.") || strings.HasPrefix(key, "user.subyard.deferred_publication.") || strings.HasPrefix(key, "user.subyard.retired_integration.")
 }
 
 // ProjectInstancePublication validates observations against trusted resolved

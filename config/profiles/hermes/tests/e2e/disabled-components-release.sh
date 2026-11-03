@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installed-runtime Paseo acceptance on one disposable worker, retained across one reboot.
+# Installed-runtime disabled-component acceptance on one disposable worker, retained across one reboot.
 set -Eeuo pipefail
 if [ "${1:-}" = --help ]; then
   printf 'Usage: disabled-components-release.sh prepare|resume|clean NUMERIC_TOKEN\nRun through dev/e2e/disabled-components-release.sh.\n'
@@ -14,10 +14,7 @@ cd "$ROOT"
 . "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
 CONFIG_HOME="$OPERATOR_HOME/.config/subyard"
 GIT_ROOT="/tmp/subyard-disabled-components-$TOKEN"
-BASE_IMAGE=subyard-e2e-debian-13-cloud-container
 EXTRA_PROJECT_ARMED="$STATE_ROOT/.hermes-project-armed"
-BASELINE_VERSION=0.18.6
-BASELINE_INSTALLER_SHA256=a78c10910c0886a8d01c0a2e77718b21ce58e45fa7f0de6064bc1f351d56028b
 FAULT_MARKER=/var/tmp/subyard-disabled-components-hook
 CANDIDATE_INSTALLED=0
 
@@ -45,12 +42,10 @@ fixture_cleanup() {
       # Preserve the bounded synthetic diagnostics before guarded fixture deletion.
       sudo -n tar --ignore-failed-read -C "$STATE_ROOT" -czf \
         "$ROOT/.build/disabled-components-release/failure.tar.gz" -- \
-        default-inventory.json hermes-inventory.json missing-receipt.json stale-receipt.json \
-        cleanup-plan.txt collision-plan.txt cleanup-repeat.txt \
+        default-inventory.json hermes-inventory.json \
         all-local-plan.json failure-plan.json selected-hook-failure.log reduction-plan.txt \
         reduction-decline.txt recovery-plan.json recovery-decline.txt recovery-receipt.json \
-        activation-journal.before activation-ledger.before postboot-ready.json baseline-readiness.txt \
-        default-disabled-native.txt hermes-disabled-native.txt upgrade-capture-status.txt \
+        activation-journal.before activation-ledger.before postboot-ready.json upgrade-capture-status.txt \
         upgrade-inspection.json upgrade-journal.json upgrade-ledger.json upgrade-identities.txt \
         inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt 2>/dev/null || failed=1
     fi
@@ -76,53 +71,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'printf "disabled-components-release: line %s failed (exit %s)\n" "$LINENO" "$?" >&2' ERR
 
-ensure_platform() {
-  p0_capacity_prepare_root
-  p0_capacity_prepare_platform_root
-  if ! incus info >/dev/null 2>&1 || ! incus storage show default --project default >/dev/null 2>&1; then
-    (
-      # shellcheck source=tests/helpers/test-context.sh
-      . "$ROOT/tests/helpers/test-context.sh"
-      setup_test_context "$P0_CAPACITY_STATE_ROOT/bootstrap"
-      export SUBYARD_USER SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_DIR="$ROOT/config"
-      SUBYARD_USER="$(id -un)"
-      export STORAGE_PATH="$P0_CAPACITY_PLATFORM_ROOT/incus/incus/storage"
-      set -a
-      # shellcheck source=config/host.env
-      . "$ROOT/config/host.env"
-      set +a
-      timeout --signal=TERM --kill-after=10 900 bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
-    )
-  fi
-  incus storage show default --project default >/dev/null
-  incus network show incusbr0 --project default >/dev/null
-  if ! incus image info "$BASE_IMAGE" --project default >/dev/null 2>&1; then
-    timeout --signal=TERM --kill-after=10 900 sudo -n /usr/bin/incus image copy \
-      images:debian/13/cloud local: --alias "$BASE_IMAGE" --project default >/dev/null
-  fi
-}
-
-install_baseline() {
-  # Exact published predecessor pins shared with reliable-migrations-recovery.sh.
-  local archive pin name baseline="$STATE_ROOT/baseline"
-  case "$(uname -m)" in
-    x86_64) archive="subyard-$BASELINE_VERSION-linux-amd64.tar.gz"; pin=458950eccd3831df8d4ed059ccc51a5dece6f8a85aedaae38f863b7252f635f2 ;;
-    aarch64) archive="subyard-$BASELINE_VERSION-linux-arm64.tar.gz"; pin=a3b52c39edfc4930f0e0ab4c697d60db6b39a00b022d344053bc4f4131fca4fa ;;
-    *) die 'unsupported predecessor architecture' ;;
-  esac
-  install -d -m 0755 "$baseline"
-  for name in "$archive" "$archive.sha256" "$archive.manifest.json" "$archive.provenance.json" \
-    subyard-install-runtime-release.sh subyard-install-runtime-release.sh.sha256 subyard-install.sh; do
-    curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
-      "https://github.com/Subyard/Subyard/releases/download/v$BASELINE_VERSION/$name" -o "$baseline/$name"
-  done
-  [ "$(sha256sum "$baseline/$archive" | awk '{print $1}')" = "$pin" ] || die 'predecessor runtime checksum mismatch'
-  [ "$(sha256sum "$baseline/subyard-install.sh" | awk '{print $1}')" = "$BASELINE_INSTALLER_SHA256" ] \
-    || die 'predecessor installer checksum mismatch'
-  chmod -R a+rX "$baseline"
-  chmod 0755 "$baseline/subyard-install.sh"
-  operator_env env YARD_RELEASE_BASE_URL="file://$baseline" "$baseline/subyard-install.sh" --version "$BASELINE_VERSION" --yes
-}
+# shellcheck source=dev/e2e/published-baseline.sh
+. "$ROOT/dev/e2e/published-baseline.sh"
 
 seed_sources() {
   local host_id host_base
@@ -135,7 +85,7 @@ seed_sources() {
     root=$1; host=$2
     install -d -m 0700 "$root/source/hosts/$host/yards/default" "$root/source/hosts/$host/yards/hermes"
     printf "{\"schemaVersion\":1}\n" > "$root/source/subyard-config.json"
-    printf "CODING_TOOL_INTEGRATIONS=\047codex paseo\047\nSSH_PORT=2228\n" > "$root/source/hosts/$host/config.env"
+    printf "CODING_TOOL_INTEGRATIONS=\047codex opencode\047\nSSH_PORT=2228\n" > "$root/source/hosts/$host/config.env"
     printf "CODING_TOOL_INTEGRATIONS=codex\nSSH_PORT=2222\n" > "$root/source/hosts/$host/yards/default/config.env"
     printf "SSH_PORT=2233\n" > "$root/source/hosts/$host/yards/hermes/config.env"
     find "$root/source" -type f -exec chmod 0600 {} +
@@ -164,36 +114,6 @@ seed_sources() {
     "$GIT_ROOT/source/hosts/$host_id/yards/hermes/config.env" > "$STATE_ROOT/source.before"
 }
 
-stage_native_bundle() {
-  local arch asset checksum
-  arch=amd64
-  [ "$(uname -m)" != aarch64 ] || arch=arm64
-  asset="paseo-headless-0.2.1-linux-$arch.tar.gz"
-  for name in "$asset" "$asset.sha256"; do
-    curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
-      "https://github.com/Subyard/Subyard/releases/download/v$BASELINE_VERSION/$name" -o "$STATE_ROOT/$name"
-  done
-  checksum="$(awk -v name="$asset" 'NF == 2 && $2 == name {print $1}' "$STATE_ROOT/$asset.sha256")"
-  [[ "$checksum" =~ ^[0-9a-f]{64}$ ]] \
-    && [ "$(sha256sum "$STATE_ROOT/$asset" | awk '{print $1}')" = "$checksum" ] || die 'native Paseo bundle checksum mismatch'
-  [ "$arch" != amd64 ] || [ "$checksum" = fbaf0c162b8e1ce811e0703f7293c25c1785c0dff5b7648c0a58fcf702421781 ] \
-    || die 'published native Paseo artifact differs from preflight pin'
-  printf 'evidence: native_paseo_bundle_sha256=%s published_baseline=%s\n' "$checksum" "$BASELINE_VERSION"
-  guest_yard hermes sh -euc 'test ! -e /usr/local/bin/bash; test ! -e /var/tmp/subyard-disabled-paseo.tar.gz'
-  incus file push "$STATE_ROOT/$asset" yard-hermes/var/tmp/subyard-disabled-paseo.tar.gz --project subyard-hermes
-  guest_yard hermes chmod 0644 /var/tmp/subyard-disabled-paseo.tar.gz
-  cat > "$STATE_ROOT/native-bash.sh" <<'SHIM'
-#!/bin/sh
-# subyard-disabled-components-bash-v1
-export PASEO_BUNDLE_FILE=/var/tmp/subyard-disabled-paseo.tar.gz
-exec /bin/bash "$@"
-SHIM
-  chmod 0755 "$STATE_ROOT/native-bash.sh"
-  incus file push "$STATE_ROOT/native-bash.sh" yard-hermes/usr/local/bin/bash --project subyard-hermes
-  guest_yard hermes sh -euc 'chown root:root /usr/local/bin/bash /var/tmp/subyard-disabled-paseo.tar.gz; chmod 0755 /usr/local/bin/bash; test "$(command -v bash)" = /usr/local/bin/bash'
-  # Its unchanged provisioner verifies the full manifest/dependencies/files before install.
-}
-
 create_yards() {
   local name project
   for name in default hermes; do
@@ -208,103 +128,12 @@ create_yards() {
   done
 }
 
-wait_for_baseline_paseo() {
-  local rc=0 probe_code
-  install -m 0600 /dev/null "$STATE_ROOT/baseline-readiness.txt"
-  # Incus agent access can precede the enabled unit's ExecStartPost completion.
-  # The native deadline and each probe are bounded; this only observes the unit.
-  probe_code='
-    set -euo pipefail
-    clock() { local uptime; read -r uptime _ < /proc/uptime; printf "%s\n" "${uptime%%.*}"; }
-    deadline=$(($(clock) + 90))
-    while true; do
-      remaining=$((deadline - $(clock)))
-      [ "$remaining" -gt 0 ] || { printf "outcome=readiness-deadline\n"; exit 1; }
-      budget=$remaining; [ "$budget" -le 5 ] || budget=5
-      snapshot=""; rc=0
-      snapshot=$(timeout --foreground --signal=KILL "$budget" systemctl show paseo.service \
-        -p LoadState -p ActiveState -p SubState -p UnitFileState -p Result -p MainPID \
-        -p ExecMainCode -p ExecMainStatus -p NRestarts -p Job -p InvocationID \
-        -p ActiveEnterTimestampMonotonic -p InactiveExitTimestampMonotonic \
-        -p ExecMainStartTimestampMonotonic 2>/dev/null) || rc=$?
-      printf "probe=unit-properties monotonic_seconds=%s exit_code=%s\n%s\n" "$(clock)" "$rc" "$snapshot"
-      [ "$rc" = 0 ] && grep -q "^LoadState=loaded$" <<< "$snapshot" \
-        && grep -q "^SubState=." <<< "$snapshot" && grep -q "^UnitFileState=enabled$" <<< "$snapshot" \
-        && grep -q "^Result=success$" <<< "$snapshot" \
-        || { printf "outcome=unit-unavailable-disabled-or-failed\n"; exit 1; }
-      case "$(sed -n "s/^ActiveState=//p" <<< "$snapshot")" in
-        active)
-          grep -q "^SubState=running$" <<< "$snapshot" \
-            && grep -Eq "^MainPID=[1-9][0-9]*$" <<< "$snapshot" \
-            || { printf "outcome=running-process-unavailable\n"; exit 1; }
-          for predicate in is-active is-enabled; do
-            remaining=$((deadline - $(clock)))
-            [ "$remaining" -gt 0 ] || { printf "outcome=readiness-deadline\n"; exit 1; }
-            budget=$remaining; [ "$budget" -le 5 ] || budget=5
-            rc=0
-            timeout --foreground --signal=KILL "$budget" systemctl "$predicate" --quiet paseo.service 2>/dev/null || rc=$?
-            printf "probe=%s monotonic_seconds=%s exit_code=%s\n" "$predicate" "$(clock)" "$rc"
-            [ "$rc" = 0 ] || exit 1
-          done
-          printf "outcome=active-and-enabled\n"; exit 0 ;;
-        activating|inactive) ;;
-        *) printf "outcome=unexpected-unit-state\n"; exit 1 ;;
-      esac
-      [ "$(clock)" -lt "$deadline" ] || { printf "outcome=readiness-deadline\n"; exit 1; }
-      sleep 1
-    done
-  '
-  (
-    export -f incus guest_yard
-    INCUS_COMMAND_TIMEOUT=90 INCUS_KILL_AFTER_SECONDS=1 \
-      timeout --foreground --signal=KILL 90 bash -c '
-        guest_yard hermes timeout --foreground --signal=KILL 90 bash -c "$1"
-      ' _ "$probe_code"
-  ) > "$STATE_ROOT/baseline-readiness.txt" 2>/dev/null || rc=$?
-  printf 'probe=readiness-transport exit_code=%s\n' "$rc" >> "$STATE_ROOT/baseline-readiness.txt"
-  [ "$rc" = 0 ] || die 'baseline Paseo did not become active and enabled within the passive readiness boundary'
-}
-
-capture_native_off() {
-  local name="$1" boundary="${2:-repeat}" rc=0
-  [ -f "$STATE_ROOT/$name-disabled-native.txt" ] \
-    || install -m 0600 /dev/null "$STATE_ROOT/$name-disabled-native.txt"
-  printf 'boundary=%s\n' "$boundary" >> "$STATE_ROOT/$name-disabled-native.txt"
-  (
-    export -f incus guest_yard
-    INCUS_COMMAND_TIMEOUT=15 INCUS_KILL_AFTER_SECONDS=1 \
-      timeout --foreground --signal=KILL 15 bash -c 'guest_yard "$@"' _ "$name" sh -euc '
-    snapshot="$(systemctl show paseo.service -p LoadState -p ActiveState -p SubState -p UnitFileState -p MainPID -p ControlPID 2>/dev/null)" \
-      || { printf "disabled Paseo unit state could not be read\n" >&2; exit 1; }
-    printf "%s\n" "$snapshot" | grep -q "^UnitFileState=" \
-      && printf "%s\n" "$snapshot" | grep -q "^MainPID=0$" \
-      && printf "%s\n" "$snapshot" | grep -q "^ControlPID=0$" \
-      || { printf "disabled Paseo unit state is incomplete\n" >&2; exit 1; }
-    load="$(printf "%s\n" "$snapshot" | sed -n "s/^LoadState=//p")"
-    active="$(printf "%s\n" "$snapshot" | sed -n "s/^ActiveState=//p")"
-    sub="$(printf "%s\n" "$snapshot" | sed -n "s/^SubState=//p")"
-    enabled="$(printf "%s\n" "$snapshot" | sed -n "s/^UnitFileState=//p")"
-    case "$load:$active:$sub:$enabled" in
-      loaded:inactive:dead:disabled|not-found:inactive:dead:) ;;
-      *) printf "Paseo unit is unavailable or retains activity/autostart\n" >&2; exit 1 ;;
-    esac
-    printf "%s\n" "$snapshot"
-    ! systemctl is-active --quiet paseo.service
-    ! systemctl is-enabled --quiet paseo.service
-    test ! -L /etc/systemd/system/multi-user.target.wants/paseo.service
-  '
-  ) >> "$STATE_ROOT/$name-disabled-native.txt" 2>/dev/null || rc=$?
-  printf 'probe=disabled-native exit_code=%s\n' "$rc" >> "$STATE_ROOT/$name-disabled-native.txt"
-  [ "$rc" = 0 ] || die 'disabled Paseo native state was unavailable or retained activity/autostart'
-}
-
 assert_disabled() {
   local name="$1"
-  capture_native_off "$name"
-  operator_yard -Y "$name" integration status paseo --json > "$STATE_ROOT/$name-status.json"
-  jq -e '.observed_scope == "yard" and (.selection.effective | index("paseo") == null) and
-    any(.inventory[]; .id == "paseo" and .effective == false and .observed == "not-inspected")' \
-    "$STATE_ROOT/$name-status.json" >/dev/null || die 'disabled inventory contradicts native state'
+  operator_yard -Y "$name" integration status opencode --json > "$STATE_ROOT/$name-status.json"
+  jq -e '.observed_scope == "yard" and (.selection.effective | index("opencode") == null) and
+    any(.inventory[]; .id == "opencode" and .effective == false and .observed == "not-inspected")' \
+    "$STATE_ROOT/$name-status.json" >/dev/null || die 'disabled inventory contradicts selection'
 }
 
 capture_upgrade_failure() {
@@ -413,77 +242,21 @@ assert_candidate() {
   done
 }
 
-exercise_legacy_cleanup() {
-  local backup_before backup_collision_before
-  # Native legacy/unowned state is separate from deselection; inspect before explicit cleanup.
-  guest_yard hermes sh -euc '
-    cp /var/lib/subyard/paseo-ownership /var/tmp/subyard-disabled-receipt.before
-    chmod 0600 /var/tmp/subyard-disabled-receipt.before
-    rm /var/lib/subyard/paseo-ownership
-  '
-  operator_yard -Y hermes integration status paseo --json > "$STATE_ROOT/missing-receipt.json"
-  jq -e '.observed == "conflict" and (.detail | contains("ownership"))' "$STATE_ROOT/missing-receipt.json" >/dev/null
-  guest_yard hermes sh -euc '
-    install -m 0600 /var/tmp/subyard-disabled-receipt.before /var/lib/subyard/paseo-ownership
-    printf "# stale native fixture\n" >> /etc/systemd/system/paseo.service
-  '
-  operator_yard -Y hermes integration status paseo --json > "$STATE_ROOT/stale-receipt.json"
-  jq -e '.observed == "conflict" and (.detail | contains("ownership"))' "$STATE_ROOT/stale-receipt.json" >/dev/null
-  operator_yard -Y hermes integration cleanup paseo --check > "$STATE_ROOT/cleanup-plan.txt"
-  operator_yard -Y hermes integration cleanup paseo --yes
-  guest_yard hermes sh -euc '
-    test ! -e /etc/systemd/system/paseo.service
-    test -f /etc/systemd/system/paseo.service.subyard-retired
-    install -m 0644 /etc/systemd/system/paseo.service.subyard-retired /etc/systemd/system/paseo.service
-    systemctl daemon-reload
-  '
-  backup_before="$(guest_yard hermes sha256sum /etc/systemd/system/paseo.service.subyard-retired)"
-  operator_yard -Y hermes integration cleanup paseo --check > "$STATE_ROOT/collision-plan.txt"
-  grep -Fq 'paseo.service.subyard-retired.1' "$STATE_ROOT/collision-plan.txt" || die 'cleanup did not preserve earlier backup'
-  operator_yard -Y hermes integration cleanup paseo --yes
-  [ "$(guest_yard hermes sha256sum /etc/systemd/system/paseo.service.subyard-retired)" = "$backup_before" ] \
-    || die 'cleanup overwrote earlier retirement backup'
-  guest_yard hermes test -f /etc/systemd/system/paseo.service.subyard-retired.1
-  backup_collision_before="$(guest_yard hermes sha256sum /etc/systemd/system/paseo.service.subyard-retired.1)"
-  operator_yard -Y hermes integration cleanup paseo --yes > "$STATE_ROOT/cleanup-repeat.txt"
-  grep -Fxq '  [skip] integration.cleanup: subyard-hermes/yard-hermes:integration paseo' "$STATE_ROOT/cleanup-repeat.txt" \
-    || die 'repeat cleanup did not report the converged native target'
-  [ "$(guest_yard hermes sha256sum /etc/systemd/system/paseo.service.subyard-retired)" = "$backup_before" ] \
-    || die 'repeat cleanup changed the earlier retirement backup'
-  [ "$(guest_yard hermes sha256sum /etc/systemd/system/paseo.service.subyard-retired.1)" = "$backup_collision_before" ] \
-    || die 'repeat cleanup changed the collision retirement backup'
-  guest_yard hermes sh -euc '
-    test ! -e /etc/systemd/system/paseo.service
-    test ! -L /etc/systemd/system/paseo.service
-    test ! -e /etc/systemd/system/paseo.service.subyard-retired.2
-    test ! -L /etc/systemd/system/paseo.service.subyard-retired.2
-  '
-  # Remove only stale fixture receipt, not auth/history/binaries, before explicit re-enable.
-  guest_yard hermes sh -euc 'rm /var/lib/subyard/paseo-ownership; rm /var/tmp/subyard-disabled-receipt.before'
-}
-
 exercise_recovery() {
   local rc=0 predecessor replacement current previous
-  operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS 'codex paseo' --scope yard --local --yes
-  guest_yard hermes sh -euc 'test ! -e /usr/local/bin/systemctl; test ! -e /var/tmp/subyard-disabled-components-hook'
-  cat > "$STATE_ROOT/native-systemctl.sh" <<'FAULT'
+  # Claude was never selected in this fixture, so selecting it reaches its real provisioner.
+  operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS 'codex claude' --scope yard --local --yes
+  guest_yard hermes sh -euc 'test ! -e /usr/local/bin/curl; test ! -e /var/tmp/subyard-disabled-components-hook'
+  cat > "$STATE_ROOT/native-curl.sh" <<'FAULT'
 #!/bin/sh
-# subyard-disabled-components-systemctl-v1
-set -eu
-case " $* " in
-  *' paseo.service '*)
-    case "${1:-}" in enable|restart)
-      printf '%s\n' hook-failed > /var/tmp/subyard-disabled-components-hook
-      chmod 0600 /var/tmp/subyard-disabled-components-hook
-      exit 75
-    esac
-    ;;
-esac
-exec /usr/bin/systemctl "$@"
+# subyard-disabled-components-curl-v1
+printf '%s\n' hook-failed > /var/tmp/subyard-disabled-components-hook
+chmod 0600 /var/tmp/subyard-disabled-components-hook
+exit 75
 FAULT
-  chmod 0755 "$STATE_ROOT/native-systemctl.sh"
-  incus file push "$STATE_ROOT/native-systemctl.sh" yard-hermes/usr/local/bin/systemctl --project subyard-hermes
-  guest_yard hermes sh -euc 'chown root:root /usr/local/bin/systemctl; chmod 0755 /usr/local/bin/systemctl; test "$(command -v systemctl)" = /usr/local/bin/systemctl'
+  chmod 0755 "$STATE_ROOT/native-curl.sh"
+  incus file push "$STATE_ROOT/native-curl.sh" yard-hermes/usr/local/bin/curl --project subyard-hermes
+  guest_yard hermes sh -euc 'chown root:root /usr/local/bin/curl; chmod 0755 /usr/local/bin/curl; test "$(command -v curl)" = /usr/local/bin/curl'
   operator_yard migrate --check --json > "$STATE_ROOT/failure-plan.json"
   operator_yard migrate --yes > "$STATE_ROOT/selected-hook-failure.log" 2>&1 || rc=$?
   [ "$rc" != 0 ] || die 'native selected provision fault was not reached'
@@ -503,7 +276,7 @@ FAULT
     printf '{"inspection_exit_code":%s,"filter_exit_code":%s}\n' "${codes[0]}" "${codes[1]}"
   ) | jq -s --argjson native_exit "$rc" '
     (map(select(has("inspection_exit_code")))[0]) as $probe |
-    {operation:"migrate",native_exit_code:$native_exit,resource:"paseo.service",injected_marker:"hook-failed",
+    {operation:"migrate",native_exit_code:$native_exit,resource:"claude provision",injected_marker:"hook-failed",
      checkpoint:"reconciling",migration_steps:0,same_release:true,
      diagnostic:(if ($probe.inspection_exit_code == 0 or $probe.inspection_exit_code == 1) and $probe.filter_exit_code == 0
        then (map(select(has("outcome")))[0] // null) else null end),probe:$probe}
@@ -527,9 +300,8 @@ FAULT
     && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$previous" ] \
     || die 'source-only reduction changed release links'
   guest_yard hermes sh -euc '
-    test "$(head -n 2 /usr/local/bin/systemctl | tail -n 1)" = "# subyard-disabled-components-systemctl-v1"
-    test "$(head -n 2 /usr/local/bin/bash | tail -n 1)" = "# subyard-disabled-components-bash-v1"
-    rm /usr/local/bin/systemctl /usr/local/bin/bash /var/tmp/subyard-disabled-components-hook /var/tmp/subyard-disabled-paseo.tar.gz
+    test "$(head -n 2 /usr/local/bin/curl | tail -n 1)" = "# subyard-disabled-components-curl-v1"
+    rm /usr/local/bin/curl /var/tmp/subyard-disabled-components-hook
   '
   operator_yard migrate --check --json > "$STATE_ROOT/recovery-plan.json"
   jq -e --arg transaction "$predecessor" '.outcome.code == "recovery-pending" and .outcome.transaction == $transaction and (.blockers | length) == 0' \
@@ -567,9 +339,7 @@ prepare_acceptance() {
   install_baseline
   seed_sources
   create_yards
-  wait_for_baseline_paseo
-  operator_yard -Y hermes integration disable paseo --yes
-  capture_native_off hermes baseline-disable
+  operator_yard -Y hermes integration disable opencode --yes
   operator_yard -Y default config set CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
   operator_yard migrate --yes
   install_candidate_with_evidence
@@ -580,7 +350,7 @@ prepare_acceptance() {
   assert_inventory hermes 'local overrides' '["codex"]' local-disabled
   # Supported resolver views prove absence restores host Git and explicit empty masks it.
   operator_yard -Y hermes config unset CODING_TOOL_INTEGRATIONS --scope yard --local --yes
-  assert_inventory hermes 'Git settings' '["codex","paseo"]' git-fallback
+  assert_inventory hermes 'Git settings' '["codex","opencode"]' git-fallback
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
   assert_inventory hermes 'local overrides' '[]' local-empty
   operator_yard migrate --check --json > "$STATE_ROOT/all-local-plan.json"
@@ -591,14 +361,10 @@ prepare_acceptance() {
   operator_yard migrate --yes
   assert_disabled default
   assert_disabled hermes
-  stage_native_bundle
-  operator_yard -Y hermes integration enable paseo --yes
-  guest_yard hermes systemctl is-active --quiet paseo.service
-  guest_yard hermes systemctl is-enabled --quiet paseo.service
-  printf 'ok: unchanged candidate native Paseo provision validated the published bundle and enabled its service\n'
-  operator_yard -Y hermes integration disable paseo --yes
+  operator_yard -Y hermes integration enable opencode --yes
+  guest_yard hermes sh -euc 'command -v opencode >/dev/null'
+  operator_yard -Y hermes integration disable opencode --yes
   assert_disabled hermes
-  exercise_legacy_cleanup
   # shellcheck source=config/profiles/hermes/tests/e2e/disabled-release-resource.sh
   . "$ROOT/config/profiles/hermes/tests/e2e/disabled-release-resource.sh"
   hermes_disabled_resource_prepare
@@ -610,7 +376,7 @@ prepare_acceptance() {
   write_fixture_value "$BOOT_ID_STATE" "$(cat /proc/sys/kernel/random/boot_id)"
   write_fixture_value "$PHASE_STATE" disabled-ready
   PRESERVE_FIXTURE=1
-  printf 'ok: predecessor upgrade, native cleanup and fresh activation recovery; reboot pending\n'
+  printf 'ok: predecessor upgrade and fresh activation recovery; reboot pending\n'
 }
 
 resume_acceptance() {
@@ -638,7 +404,7 @@ resume_acceptance() {
   assert_disabled hermes
   hermes_disabled_resource_assert repeat
   PRESERVE_FIXTURE=1
-  printf 'ok: installed final candidate retained disabled Paseo and Hermes route through reboot/repeat\n'
+  printf 'ok: installed final candidate retained disabled integration and Hermes route through reboot/repeat\n'
 }
 
 for command in sudo systemctl timeout cmp curl jq sha256sum python3 git; do
@@ -650,14 +416,12 @@ case "$MODE" in
   resume) resume_acceptance ;;
   evidence)
     assert_state_root
-    # Synthetic resolver diagnostics and allowlisted unit readiness; never pairing/auth/config state.
+    # Synthetic resolver diagnostics only; never auth or config state.
     sudo -n tar -C "$STATE_ROOT" -czf - -- \
       default-inventory.json hermes-inventory.json default-profiles.json hermes-profiles.json \
-      default-port.txt hermes-port.txt missing-receipt.json stale-receipt.json \
-      cleanup-plan.txt collision-plan.txt cleanup-repeat.txt all-local-plan.json failure-plan.json \
+      default-port.txt hermes-port.txt all-local-plan.json failure-plan.json \
       reduction-plan.txt reduction-decline.txt recovery-plan.json recovery-decline.txt \
-      recovery-receipt.json activation-journal.before activation-ledger.before postboot-ready.json baseline-readiness.txt \
-      default-disabled-native.txt hermes-disabled-native.txt \
+      recovery-receipt.json activation-journal.before activation-ledger.before postboot-ready.json \
       inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt
     PRESERVE_FIXTURE=1
     ;;

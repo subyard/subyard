@@ -2,6 +2,8 @@ package profile
 
 import (
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -136,6 +138,25 @@ func TestMetadataPreservesDashboardAndRetirementOwnership(t *testing.T) {
 	} {
 		if _, err := DecodeIntegration("synthetic", []byte(invalid)); err == nil {
 			t.Fatal("retired metadata gained active or foreign authority")
+		}
+	}
+}
+
+func TestRetirementNoticeRequiresRetiredPackageAndBoundedText(t *testing.T) {
+	declaration := func(retired, notice string) []byte {
+		return []byte(`{"schema_version":1,` + retired + `"lifecycle":{"handler":"hook.py","instance_config_keys":[],"instance_devices":[],"retirement_notice":` + strconv.Quote(notice) + `}}`)
+	}
+	if _, err := DecodeIntegration("synthetic", declaration(`"retired":true,`, "remove synthetic state")); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{
+		"active":   declaration("", "remove synthetic state"),
+		"long":     declaration(`"retired":true,`, strings.Repeat("x", 441)),
+		"control":  declaration(`"retired":true,`, "remove\nstate"),
+		"trimming": declaration(`"retired":true,`, " remove state"),
+	} {
+		if _, err := DecodeIntegration("synthetic", content); err == nil {
+			t.Fatalf("%s retirement notice accepted", name)
 		}
 	}
 }
