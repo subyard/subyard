@@ -162,7 +162,7 @@ func PrepareProspective(
 		return prepareObserved(ctx, options, actual, "")
 	}
 	if !selectsTestVMs(string(snapshot.Content)) {
-		return Prepared{}, errors.New("prospective owner registration does not select YARD_TEMPLATE=test-vms")
+		return Prepared{}, reservedRegistrationDiagnostic(observed.oldRegistration, LegacyYard)
 	}
 	digest := sha256.Sum256(snapshot.Content)
 	return prepareObserved(ctx, options, observed, fmt.Sprintf("%x", digest[:]))
@@ -972,15 +972,19 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 		return registrationSet{}, ownerStateDiagnostic(errors.New("multiple test-yard registrations exist"),
 			"multiple config-home-relative registrations yards/test-yard/config.env and yards/test-yard.env; both preserved")
 	}
+	var registrationErrors []error
+	if len(foundLegacy) > 0 {
+		registrationErrors = append(registrationErrors, inspectReservedRegistration(options, foundLegacy[0].path, LegacyYard))
+	}
+	if len(foundCurrent) > 0 {
+		registrationErrors = append(registrationErrors, inspectReservedRegistration(options, foundCurrent[0].path, CurrentYard))
+	}
+	if err := registrationRefusals(registrationErrors...); err != nil {
+		return registrationSet{}, err
+	}
 	result := registrationSet{}
 	if len(foundLegacy) > 0 {
-		payload, err := readRegistration(options, foundLegacy[0].path)
-		if err != nil {
-			return registrationSet{}, err
-		}
-		if !selectsTestVMs(string(payload)) {
-			return registrationSet{}, errors.New("e2e-yard does not select YARD_TEMPLATE=test-vms")
-		}
+		var err error
 		if foundLegacy[0].state == StateLegacyDirectory {
 			directory := filepath.Dir(foundLegacy[0].path)
 			if _, statErr := os.Lstat(directory); options.ProspectiveFiles == nil || !os.IsNotExist(statErr) {
@@ -995,24 +999,6 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 		result.oldRegistration = foundLegacy[0].path
 	}
 	if len(foundCurrent) > 0 {
-		payload, err := readRegistration(options, foundCurrent[0].path)
-		if err != nil {
-			return registrationSet{}, err
-		}
-		if !selectsTestVMs(string(payload)) {
-			// A local override may inherit its template from the Git yard layer.
-			// Keep the protected local registration as the migration resource.
-			if !filepath.IsAbs(options.RepositoryRoot) {
-				return registrationSet{}, errors.New("test-yard does not select YARD_TEMPLATE=test-vms")
-			}
-			loaded, err := loadBrokerYard(options, CurrentYard)
-			if err != nil {
-				return registrationSet{}, err
-			}
-			if loaded.Environment["YARD_TEMPLATE"] != "test-vms" {
-				return registrationSet{}, errors.New("test-yard does not select YARD_TEMPLATE=test-vms")
-			}
-		}
 		result.current = true
 		result.currentRegistration = foundCurrent[0].path
 	}

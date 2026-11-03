@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -217,4 +218,23 @@ func validateOwnerRecoveryToken(token string) error {
 		}
 	}
 	return nil
+}
+
+func ownerRegistrationDiagnosticBlocker(err error, contexts ...context.Context) (Blocker, bool) {
+	if len(contexts) > 0 {
+		recordMigrationDiagnostics(contexts[0], err)
+	}
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		return Blocker{}, false
+	}
+	message, retry := publicActivationDiagnostic(err, "", "install a compatible release, then run yard update --check")
+	if message == "" {
+		return Blocker{}, false
+	}
+	code := CodeDependencyUnavailable
+	if nativeMigrationRefusal(err) {
+		code = CodePreconditionBlocked
+	}
+	return Blocker{Code: code, Resource: "owner-registration." + ownerRegistrationResource, Message: message, Retry: retry}, true
 }

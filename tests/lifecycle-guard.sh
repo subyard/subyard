@@ -124,6 +124,8 @@ if "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1; then
 fi
 grep -Fq 'Close Remote Connection' "$TMP/out" \
   || fail "active-window failure has no repair guidance: $(tr '\n' ' ' < "$TMP/out")"
+grep -Fq "ssh-agent lock" "$TMP/out" \
+  || fail "active-session failure does not name the SSH agent forwarder: $(tr '\n' ' ' < "$TMP/out")"
 if grep -Fxq stop "$MOCK_INCUS_LOG"; then fail "active-window guard reached incus stop"; fi
 grep -Fxq ssh-restore "$MOCK_INCUS_LOG" || fail "blocked stop did not restore the SSH listener"
 grep -Fxq ssh-restore-order-ok "$MOCK_INCUS_LOG" \

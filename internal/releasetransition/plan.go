@@ -49,6 +49,7 @@ type JournalReplacementReason string
 const (
 	JournalReplacementPreActivationPlanStale   JournalReplacementReason = "pre-activation-plan-stale"
 	JournalReplacementPostActivationScopeV0111 JournalReplacementReason = "post-activation-scope-v0.11.1"
+	JournalReplacementNewerRelease             JournalReplacementReason = "newer-release-v1"
 )
 
 // JournalReplacement binds a newly assessed plan to the exact unfinished
@@ -173,6 +174,10 @@ func (replacement JournalReplacement) Validate() error {
 	case JournalReplacementPreActivationPlanStale:
 		if replacement.SourceVersion != "" {
 			return invalid("pre-activation journal replacement has a source version")
+		}
+	case JournalReplacementNewerRelease:
+		if replacement.SourceVersion != "" {
+			return invalid("newer release journal replacement has a source version")
 		}
 	case JournalReplacementPostActivationScopeV0111:
 		version, err := semver.Parse(replacement.SourceVersion)

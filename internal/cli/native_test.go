@@ -3385,7 +3385,7 @@ func TestRPCUpdateDifferentTargetIsGatedBeforePublication(t *testing.T) {
 	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, err := json.Marshal(map[string]any{
 		"command":   "update",
-		"arguments": []string{"--version", "9.9.9", "--runtime-root", runtimeRoot},
+		"arguments": []string{"--version", "0.0.1", "--runtime-root", runtimeRoot},
 	})
 	if err != nil {
 		t.Fatal(err)

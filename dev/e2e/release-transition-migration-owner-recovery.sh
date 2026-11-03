@@ -11,6 +11,10 @@ SOURCE_ASSETS="${4:-}"
 SOURCE_INPUT_VERSION="${5:-}"
 OWNER_ASSETS="${6:-}"
 HISTORY_ASSETS="${7:-}"
+# Optional later release, reached after the replacement closed. Replacement needs
+# the defective owner's registry, so a newer registry arrives through this step.
+FINAL_ASSETS="${8:-}"
+FINAL_VERSION="${9:-}"
 # Reuse its marked Incus project, isolated runtime paths, native environment and
 # bounded cleanup. Sourcing never runs the frozen v0.11.1 acceptance entrypoint.
 # shellcheck source=dev/e2e/release-transition-v0111-recovery.sh
@@ -27,6 +31,13 @@ OWNER_VERSION=0.21.0
 HISTORY_VERSION=0.19.0
 
 die() { printf 'release-transition-migration-owner-recovery: %s\n' "$*" >&2; exit 2; }
+
+# Adoption owns user.subyard.*. Keep fixture authority outside that namespace,
+# including every inherited cleanup guard that calls project_is_marked.
+project_is_marked() {
+  incus project show "$PROJECT" >/dev/null 2>&1 \
+    && [ "$(incus project get "$PROJECT" user.subyard-e2e.migration-owner 2>/dev/null)" = "$FIXTURE_MARKER" ]
+}
 
 install_bundle() { # directory version
   local directory="$1" version="$2" bundle
@@ -122,6 +133,25 @@ main_migration_owner() {
     [ -s "$directory/$bundle.manifest.json" ] && [ -s "$directory/$bundle.provenance.json" ] \
       || die 'missing authenticated bundle metadata'
   done
+  # The defective 0.21 owner needs two authentic retained generations whose
+  # registries match the frozen 0.19 projection. Newer sources can migrate before
+  # the candidate is reached and invalidate this scenario (use published 0.20.0).
+  python3 - "$HISTORY_ASSETS/subyard-$HISTORY_VERSION-linux-amd64.tar.gz" \
+    "$SOURCE_ASSETS/subyard-$SOURCE_VERSION-linux-amd64.tar.gz" <<'PYREGISTRY'
+import json, pathlib, sys, tarfile
+
+def registry(path):
+    with tarfile.open(path, "r:gz") as archive:
+        entries = [entry for entry in archive.getmembers()
+                   if pathlib.PurePosixPath(entry.name).parts[-2:] == ("config", "release-transition.json")]
+        if len(entries) != 1 or not entries[0].isfile():
+            raise SystemExit("missing or ambiguous authenticated release registry")
+        with archive.extractfile(entries[0]) as source:
+            return json.load(source)
+
+if registry(sys.argv[1]) != registry(sys.argv[2]):
+    raise SystemExit("source must share the frozen 0.19.0 history registry; use published 0.20.0 assets")
+PYREGISTRY
   if [ "$PREFLIGHT" = 1 ]; then
     bash -n "${BASH_SOURCE[0]}"
     shellcheck -x -S warning "${BASH_SOURCE[0]}"
@@ -146,7 +176,7 @@ main_migration_owner() {
   [ "$(fixture_env "$source_launcher" --version)" = "yard $HISTORY_VERSION" ] || die 'authentic official source unavailable'
   # Exact managed project marker fences all teardown, even after interrupted updates.
   ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'fixture project already exists'
-  incus project create "$PROJECT" -c features.images=false -c "user.subyard.p0=$FIXTURE_MARKER" >/dev/null
+  incus project create "$PROJECT" -c features.images=false -c "user.subyard-e2e.migration-owner=$FIXTURE_MARKER" >/dev/null
   fixture_env "$source_launcher" -Y "$YARD_NAME" init --yes
   fixture_env "$source_launcher" -Y "$YARD_NAME" start --yes
   fixture_env "$source_launcher" migrate --yes
@@ -269,6 +299,25 @@ PY
   cmp "$owner_root/runtime-files.sha256" "$FIXTURE_ROOT/owner-manifest.before"
   cmp "$source_root/runtime-files.sha256" "$FIXTURE_ROOT/source-manifest.before"
   cmp "$history_root/runtime-files.sha256" "$FIXTURE_ROOT/history-manifest.before"
+  if [ -n "$FINAL_VERSION" ]; then
+    fixture_env env YARD_RELEASE_BASE_URL="file://$FINAL_ASSETS" \
+      bash "$FINAL_ASSETS/subyard-install.sh" --publish-only --version "$FINAL_VERSION" \
+      > "$FIXTURE_ROOT/final-stage.log"
+    local final_root final_launcher
+    final_root="$(sed -n 's/^staged release=.* candidate=//p' "$FIXTURE_ROOT/final-stage.log")"
+    [ -d "$final_root" ] || die 'final release was not staged'
+    final_launcher="$final_root/bin/yard"
+    # A yard from before disk-backed /tmp needs its separately disclosed restart.
+    fixture_env python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard "$YARD_NAME" --allow-no-prompt -- \
+      "$final_launcher" update --offline --version "$FINAL_VERSION" --yes
+    fixture_env "$final_launcher" update --check --offline --version "$FINAL_VERSION" --json \
+      > "$FIXTURE_ROOT/final-ready.json"
+    jq -e '.outcome.status=="ready" and .outcome.reachedGoal' "$FIXTURE_ROOT/final-ready.json" >/dev/null \
+      || die 'final release did not reach ready after replacement'
+    fixture_env "$final_launcher" -Y "$YARD_NAME" check
+    incus exec "$INSTANCE" --project "$PROJECT" -- grep -Fxq "$FIXTURE_MARKER" \
+      /var/tmp/subyard-migration-retained
+  fi
   printf 'ok: authentic source and 0.21 owner -> fresh candidate supersession, real activation, interrupted resume and ordinary rollback assessment passed\n'
 
 }

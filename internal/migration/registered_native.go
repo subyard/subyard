@@ -65,20 +65,20 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 		var findings []error
 		owned := contract.OwnershipMetadata && maps.Equal(device, original.Devices[contract.Device])
 		if !owned {
-			findings = append(findings, errors.New("has unsupported or inherited ownership"))
+			findings = append(findings, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("has unsupported or inherited ownership"), "registered resource "+contract.Device+": has unsupported or inherited ownership"))
 		}
 		value := contract.OwnershipValue(device)
 		// An interrupted bring-up holds the pending form until its owner finishes it.
 		pending := contract.IsOwnerIPv4Ingress() && marker == strings.Replace(value, "v1:", "v1:pending:", 1)
 		if contract.IsOwnerIPv4Ingress() {
 			if device["type"] != "proxy" {
-				findings = append(findings, errors.New("does not match its declared native proxy recipe"))
+				findings = append(findings, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("does not match its declared native proxy recipe"), "registered resource "+contract.Device+": does not match its declared native proxy recipe"))
 			}
 		} else {
 			listen, ok := strings.CutPrefix(device["listen"], "tcp:")
 			host, port, splitErr := net.SplitHostPort(listen)
 			if !ok || splitErr != nil || !(ownerroute.TailscaleAddress(host) || host == "127.0.0.1" && contract.AddressPolicy == resource.ProxyAddressLoopbackOrTailscale) {
-				findings = append(findings, errors.New("does not match its declared native proxy recipe"))
+				findings = append(findings, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("does not match its declared native proxy recipe"), "registered resource "+contract.Device+": does not match its declared native proxy recipe"))
 			} else if owned {
 				proposed := original
 				proposed.Config = maps.Clone(original.Config)
@@ -88,7 +88,7 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 			}
 		}
 		if marker != "" && marker != value && !pending || original.Config[key] != marker {
-			findings = append(findings, errors.New("has foreign or inherited receipt"))
+			findings = append(findings, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("has foreign or inherited receipt"), "registered resource "+contract.Device+": has foreign or inherited receipt"))
 		}
 		if !pending {
 			receipts[key] = value
@@ -99,7 +99,7 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 		delete(state.Instance.Config, key)
 		deferred := ownerpublication.Prefix + contract.Device
 		if original.LocalConfig[deferred] != "" || original.Config[deferred] != "" {
-			findings = append(findings, errors.New("has unresolved deferred publication"))
+			findings = append(findings, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("has unresolved deferred publication"), "registered resource "+contract.Device+": has unresolved deferred publication"))
 		}
 		delete(state.Instance.LocalConfig, deferred)
 		delete(state.Instance.Config, deferred)
@@ -109,7 +109,7 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 	}
 	if state.ProjectConfig["user.subyard.installation"] == "1" {
 		if state.ProjectConfig["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) || state.ProjectConfig["user.subyard.config_home"] != runtime.Yard.Paths.ConfigHome || state.ProjectConfig["user.subyard.data_home"] != runtime.Yard.Paths.DataHome || state.ProjectConfig["user.subyard.adopted_uuid"] != "" {
-			refusals = append(refusals, errors.New("registered project owner differs from protected operator identity"))
+			refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("registered project owner differs from protected operator identity"), "registered project owner differs from protected operator identity"))
 		}
 		state.Instance = original
 		return state, nil, nil, state.ProjectConfig, receipts, domain.CollectRefusals(refusals...)
@@ -148,7 +148,7 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 		value := original.Config[key]
 		if value != "" {
 			if err := catalog.ValidateSetting(config.ScopeYard, setting, value, false); err != nil {
-				refusals = append(refusals, err)
+				refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, err, "existing instance limit is invalid", key))
 				// An invalid limit is not imported and not reported again as unconverged.
 				value = ""
 				delete(state.Instance.Config, key)

@@ -46,7 +46,7 @@ P0_CURRENT_PHASE='startup'
 P0_PHASE_STARTED=0
 P0_CHILD_PIDS=()
 P0_STARTED_PID=''
-FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup)
+FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd newer-release release-smoke peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
 # export and ensures every direct and bundled command addresses the same disposable allocation.
@@ -97,7 +97,7 @@ EOF
 list_lanes() {
   printf '%s\n' \
     smoke boundary nested-teardown full-uninstall transport dependencies real-incus profile-resource release source-upgrade \
-    power-systemd \
+    power-systemd newer-release \
     reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
   printf 'producer-reboot\tdiagnostic-only\n'
@@ -127,7 +127,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|newer-release|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -1325,6 +1325,11 @@ case "$P0_LANE" in
     run_phase producer-reboot run_power_systemd_vm 1 dev/e2e/bind-resource-profile.sh --producer-reboot
     run_phase cleanup run_vm 1 capacity-verify-cleanup
     ;;
+  newer-release)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase newer-release run_vm 1 newer-release
+    run_phase cleanup run_vm 1 capacity-verify-cleanup
+    ;;
   release)
     run_phase capacity-preflight preflight_lane
     start_capacity_monitors
@@ -1377,10 +1382,12 @@ case "$P0_LANE" in
     run_phase transport transport_probes
     if [ "$P0_LANE" = full ]; then
       run_full_matrix_phase
+      run_phase newer-release run_vm 1 newer-release
       run_phase release-smoke release_smoke_lane
       run_phase peer peer_lane
     else
       run_phase real-incus run_vm 1 real-incus
+      run_phase newer-release run_vm 1 newer-release
       run_phase release-smoke release_smoke_lane
       run_phase peer-smoke peer_lane smoke
     fi

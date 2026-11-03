@@ -909,3 +909,21 @@ func TestRetiredDashboardSecurityAllowsOnlyExactCleanupRoute(t *testing.T) {
 		t.Fatal("foreign retired route was accepted")
 	}
 }
+
+func TestResourceProxyMissingOwnerMetadataIsVerdict(t *testing.T) {
+	contract := resource.ProxyContract{Profile: "sample", Resource: "relay", Device: "sample-relay", AdvertiseHostSetting: "SAMPLE_HOST", HostPortSetting: "SAMPLE_PORT", Connect: "tcp:127.0.0.1:9119", AddressPolicy: resource.ProxyAddressLoopbackOrTailscale, OwnershipMetadata: true}
+	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:3111", "connect": contract.Connect}
+	runtime := Runtime{Yard: domain.Context{YardName: "fixture"}, Environment: map[string]string{"SAMPLE_HOST": "127.0.0.1", "SAMPLE_PORT": "3111"}}
+	err := runtime.CheckResourceProxy(context.Background(), contract, ports.InstanceInfo{Config: map[string]string{}, Devices: map[string]map[string]string{contract.Device: device}, LocalDevices: map[string]map[string]string{contract.Device: device}})
+	var refusal interface {
+		MigrationRefusal() bool
+		ActivationDiagnostic() (string, string)
+	}
+	if err == nil || !strings.Contains(err.Error(), "missing matching owner-side resource metadata") || !errors.As(err, &refusal) || !refusal.MigrationRefusal() {
+		t.Fatalf("missing metadata became a dependency: %v", err)
+	}
+	message, _ := refusal.ActivationDiagnostic()
+	if !strings.Contains(message, "sample-relay") || !strings.Contains(message, "missing matching owner-side resource metadata") {
+		t.Fatalf("missing resource identity/reason: %q", message)
+	}
+}

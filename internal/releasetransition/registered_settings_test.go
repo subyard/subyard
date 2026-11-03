@@ -3,7 +3,9 @@ package releasetransition
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -101,5 +103,58 @@ func TestRegisteredEndpointTerminalRecoveryRequiresOriginalVocabulary(t *testing
 				t.Fatal("uncompiled terminal setting accepted")
 			}
 		})
+	}
+}
+
+type transientRegisteredOutputOwner struct {
+	registeredOutputOwner
+	refuse bool
+}
+
+func (owner *transientRegisteredOutputOwner) Observe(ctx context.Context, releases ReleasePair, links ReleaseLinks) (V2ActivationObservation, error) {
+	if owner.refuse {
+		owner.refuse = false
+		return V2ActivationObservation{}, &registeredVerdict{"yard hermes: temporary endpoint refusal"}
+	}
+	return owner.nativeConsentOwner.Observe(ctx, releases, links)
+}
+
+func TestRegisteredSettingsCASVerdictRemainsRecoverable(t *testing.T) {
+	transition, home, _ := v2TransitionFixture(t, nil)
+	path := filepath.Join(home, "yards/hermes/config.env")
+	testkit.WriteFile(t, path, []byte("# retained\n"), 0600)
+	value := "127.0.0.1"
+	desired, err := config.EditPersistentAssignmentContent(path, []byte("# retained\n"), "OLD_SAMPLE_HOST", &value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := &transientRegisteredOutputOwner{registeredOutputOwner: registeredOutputOwner{nativeConsentOwner: &nativeConsentOwner{v2TestReconciler: &v2TestReconciler{id: "yard.hermes"}}, path: path, content: desired}}
+	transition.options.RegistryPayload = []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":2},"currentEpochs":{"owner-registration":3},"migrations":[{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3"}]}`)
+	transition.options.RegisteredYards = []V2ActivationReconciler{owner}
+	transition.options.RegisteredEndpointSettings = []string{"OLD_SAMPLE_HOST"}
+	transition, err = NewV2Transition(transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	armed := false
+	transition.options.fault = func(point string) error {
+		if point == "after-step-evidence" && !armed {
+			armed = true
+			owner.refuse = true
+		}
+		return nil
+	}
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	plan, err := transition.Inspect(context.Background(), goal)
+	if err != nil || len(plan.Blockers) != 0 {
+		t.Fatalf("plan: %#v %v", plan, err)
+	}
+	result, err := transition.Converge(context.Background(), Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
+	if err != nil || !armed || owner.refuse || result.Status != StatusRecovering || result.Code == CodeRecoveryAmbiguous || !strings.Contains(result.Message, "temporary endpoint refusal") {
+		t.Fatalf("CAS verdict worsened recovery: %#v %v", result, err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "# retained\n" {
+		t.Fatalf("refused CAS wrote settings: %q %v", content, err)
 	}
 }

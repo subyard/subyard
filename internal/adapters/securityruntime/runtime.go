@@ -405,26 +405,26 @@ func (runtime Runtime) checkOwnedProxy(
 ) error {
 	contract := runtime.proxyContract(name)
 	if contract == nil {
-		return fmt.Errorf("proxy device %q is not loopback-only or declared by an active resource: %s", name, device["listen"])
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q is not loopback-only or declared by an active resource: %s", name, device["listen"]), "proxy device is not loopback-only or declared by an active resource", name)
 	}
 	if contract.IsOwnerIPv4Ingress() {
 		return runtime.checkOwnedPublicIngressProxy(name, device, instanceConfig, guestNIC, localDevice, *contract)
 	}
 	if device["type"] != "proxy" {
-		return fmt.Errorf("device %q does not have the proxy type required by its typed resource contract", name)
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("device %q does not have the proxy type required by its typed resource contract", name), "device does not have the proxy type required by its typed resource contract", name)
 	}
 	if !exactProxyOptions(device) {
-		return fmt.Errorf("proxy device %q contains options outside its typed resource contract", name)
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q contains options outside its typed resource contract", name), "resource proxy contains options outside its typed resource contract", name)
 	}
 	if contract.OwnershipMetadata &&
 		instanceConfig[contract.OwnershipKey()] != contract.OwnershipValue(device) {
-		return fmt.Errorf("proxy device %q is missing matching owner-side resource metadata", name)
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q is missing matching owner-side resource metadata", name), "resource proxy is missing matching owner-side resource metadata", name)
 	}
 	host := runtime.Environment[contract.AdvertiseHostSetting]
 	portText := runtime.Environment[contract.HostPortSetting]
 	port, err := strconv.Atoi(portText)
 	if host == "" || err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
-		return fmt.Errorf("proxy device %q has incomplete typed owner endpoint settings", name)
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q has incomplete typed owner endpoint settings", name), "resource proxy has incomplete typed owner endpoint settings", name)
 	}
 	resolver := runtime.ResolveOwnerAddress
 	if resolver == nil {
@@ -436,20 +436,20 @@ func (runtime Runtime) checkOwnedProxy(
 	}
 	parsed := net.ParseIP(address)
 	if parsed == nil || parsed.To4() == nil || parsed.IsUnspecified() || parsed.IsMulticast() {
-		return fmt.Errorf("proxy device %q resolved to an unsafe owner address", name)
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q resolved to an unsafe owner address", name), "resource proxy resolved to an unsafe owner address", name)
 	}
 	switch contract.AddressPolicy {
 	case resource.ProxyAddressTailscaleOnly:
 		if parsed.IsLoopback() {
-			return fmt.Errorf("proxy device %q requires a non-loopback Tailscale owner address", name)
+			return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q requires a non-loopback Tailscale owner address", name), "resource proxy requires a non-loopback Tailscale owner address", name)
 		}
 	case resource.ProxyAddressLoopbackOrTailscale:
 	default:
-		return fmt.Errorf("proxy device %q has no valid typed owner-address policy", name)
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q has no valid typed owner-address policy", name), "resource proxy has no valid typed owner-address policy", name)
 	}
 	wantListen := "tcp:" + address + ":" + portText
 	if device["listen"] != wantListen || device["connect"] != contract.Connect || device["bind"] != "host" {
-		return fmt.Errorf("proxy device %q does not match its typed resource contract", name)
+		return domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("proxy device %q does not match its typed resource contract", name), "resource proxy does not match its typed resource contract", name)
 	}
 	return nil
 }

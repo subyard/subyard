@@ -113,7 +113,7 @@ The existing released baselines cover distinct contracts:
 | v0.18.6 | Actual completed and interrupted activation-only source-repair producer; original-owner schema-2 recovery and separately consented candidate upgrade |
 | v0.18.1 | Published caller using frozen process V1 and Ledger V2; update, interrupted resume, rollback, forward retry and checkpoint-reader bridge ordering |
 | v0.19.0 | Actual direct-upgrade caller with independent completed domain history; post-effects activation failure, reread and fresh-process resume on the fixed candidate |
-| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession; unknown artifacts fail closed |
+| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession through v0.25.1, whose registry matches, then an ordinary update; later candidates refuse the replacement and unknown artifacts fail closed |
 
 The [historical reader](../../internal/migration/v1_import.go) binds the exact retained runtime
 pair, registry, journal and observed postconditions. It does not admit arbitrary historical

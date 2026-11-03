@@ -1499,3 +1499,57 @@ func TestRegisteredAdoptionBindingIsStableAcrossProcessLabels(t *testing.T) {
 		t.Fatal("observation wrote project metadata")
 	}
 }
+
+func TestRegisteredMigrationOwnerStateDiagnostics(t *testing.T) {
+	for _, scenario := range []string{"adoption", "network", "dependency"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, execution, native := adoptionFixture(t)
+			owner, _, _ := registeredRefusalOwner(t, execution, native)
+			load := owner.LoadTargets
+			dependency := errors.New("private transport failure")
+			owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
+				targets, err := load(ctx, view)
+				if err != nil {
+					return nil, err
+				}
+				for index := range targets {
+					if scenario == "network" {
+						targets[index].Runtime.NetworkPolicy = legacyContinuationNetworkFixture{physical: true}
+					}
+					if scenario == "dependency" {
+						targets[index].Runtime.SourceReader = func(config.MaterializedAsset) ([]byte, error) { return nil, dependency }
+					}
+				}
+				return targets, nil
+			}
+			if scenario == "adoption" {
+				native.Reconcile.ProjectConfig["features.networks"] = "true"
+			}
+			_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			var refusal interface {
+				MigrationRefusal() bool
+				ActivationDiagnostic() (string, string)
+			}
+			if scenario == "dependency" {
+				if !errors.Is(err, dependency) || errors.As(err, &refusal) {
+					t.Fatalf("dependency became a state verdict: %v", err)
+				}
+				return
+			}
+			if !errors.As(err, &refusal) || !refusal.MigrationRefusal() {
+				t.Fatalf("owner verdict became dependency: %v", err)
+			}
+			message, retry := refusal.ActivationDiagnostic()
+			want := "yard adoption refuses an uninventoried project feature namespace"
+			if scenario == "network" {
+				want = "legacy project network policy must already be converged"
+			}
+			if !strings.Contains(message, "yard default:") || !strings.Contains(message, want) || strings.Contains(message, "private") || strings.Contains(retry, "install a compatible release") {
+				t.Fatalf("owner diagnostic: %q / %q", message, retry)
+			}
+			if native.writes != 0 {
+				t.Fatal("refused assessment wrote native state")
+			}
+		})
+	}
+}

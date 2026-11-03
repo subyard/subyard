@@ -329,6 +329,8 @@ func (transition *V2Transition) Inspect(ctx context.Context, goal Goal) (Inspect
 }
 
 func (transition *V2Transition) inspect(ctx context.Context, goal Goal, processV1 bool) (Inspection, error) {
+	ctx, flushDiagnostics := captureMigrationDiagnostics(ctx)
+	defer flushDiagnostics()
 	if transition == nil {
 		return Inspection{}, errors.New("v2 transition is required")
 	}
@@ -697,6 +699,8 @@ func (transition *V2Transition) Converge(
 	ctx context.Context,
 	execution Execution,
 ) (outcome Outcome, resultErr error) {
+	ctx, flushDiagnostics := captureMigrationDiagnostics(ctx)
+	defer flushDiagnostics()
 	if transition == nil {
 		return Outcome{}, errors.New("v2 transition is required")
 	}
@@ -885,6 +889,11 @@ func (transition *V2Transition) Converge(
 			return Outcome{}, marshalErr
 		}
 		journal = &created
+		if observation.replacement != nil && observation.replacement.Reason == JournalReplacementNewerRelease {
+			if err := transition.store.PreserveReplacedJournal(journalSnapshot, observation.replacement.Transaction); err != nil {
+				return Outcome{}, err
+			}
+		}
 		if requiresSupersededJournalArchive(observation.replacement) {
 			if observation.supersededJournal == nil {
 				return Outcome{}, invalid("replacement source journal is missing")
@@ -924,11 +933,13 @@ func (transition *V2Transition) Converge(
 			published, readErr := transition.store.ReadCurrentJournal()
 			if readErr == nil && published.Exists && bytes.Equal(published.Payload, payload) {
 				recoverableJournal = journal
+				transition.spendNewerReleaseReplacement()
 			}
 			return Outcome{}, err
 		}
 		recoverableJournal = journal
 		journalSnapshot = protectedSnapshotFromPayload(payload)
+		transition.spendNewerReleaseReplacement()
 		if observation.replacement != nil || observation.migrationOwnerReceipt != nil {
 			if err := transition.inject("after-replacement-journal-cas"); err != nil {
 				return Outcome{}, err
@@ -1175,6 +1186,10 @@ func (transition *V2Transition) cleanupReady(
 		return withActivationWarnings(outcome, []string{"recovery cleanup is pending"}), nil
 	}
 	if err := transition.inject("before-recovery-gc"); err == nil {
+		err = transition.store.RetireReplacedTransactions(transaction, transition.registry)
+		if err != nil {
+			return withActivationWarnings(outcome, []string{"recovery cleanup is pending"}), nil
+		}
 		err = transition.store.cleanupClosedMigrationTransactions(transaction, transition.registry, transition.registryDigest, ReleaseLinks{Active: outcome.Active, Previous: outcome.Previous})
 		if err == nil {
 			err = transition.store.CleanupRecovery(transaction)
@@ -1461,6 +1476,29 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		}
 		if replaceErr != nil {
 			return v2Observation{}, replaceErr
+		}
+		if request := transition.options.Replacement; !replaced && request != nil &&
+			request.Reason == JournalReplacementNewerRelease {
+			replaced = true
+			if blockers := transition.newerReleaseReplacementBlockers(observation); len(blockers) != 0 {
+				observation.blockers = blockers
+				observation.observationScope, err = transition.bindObservationScope(nil)
+				if err != nil {
+					return v2Observation{}, err
+				}
+			} else {
+				// The plan starts from the observed links, before or after activation.
+				journal = nil
+				observation = v2Observation{
+					goal: goal, links: links, ledger: ledger, ledgerSnapshot: ledgerSnapshot,
+					migrationLedgerSnapshot: migrationLedgerSnapshot,
+					checkpointSnapshot:      checkpointSnapshot, checkpointAuthority: checkpointAuthority,
+					journalSnapshot: journalSnapshot, replacement: cloneJournalReplacement(request),
+				}
+				if err := transition.observeFresh(ctx, &observation); err != nil {
+					return v2Observation{}, err
+				}
+			}
 		}
 		if !replaced && (journal.Goal != goal || !releasePairsEqual(journal.Releases, transition.options.Releases)) {
 			observation.blockers = []Blocker{{
@@ -1773,6 +1811,57 @@ func rollbackIncompatibleBlocker() *Blocker {
 	}
 }
 
+// spendNewerReleaseReplacement runs once the successor is published: this process
+// now owns an ordinary journal, so failure reobservation must report its real state.
+func (transition *V2Transition) spendNewerReleaseReplacement() {
+	if request := transition.options.Replacement; request != nil && request.Reason == JournalReplacementNewerRelease {
+		transition.options.Replacement = nil
+	}
+}
+
+// newerReleaseReplacementBlockers reports every reason this engine cannot take
+// over the current unfinished journal with a fresh plan.
+func (transition *V2Transition) newerReleaseReplacementBlockers(observation v2Observation) []Blocker {
+	request, journal := transition.options.Replacement, observation.journal
+	var blockers []Blocker
+	refuse := func(code OutcomeCode, message string) {
+		blockers = append(blockers, Blocker{
+			Code: code, Resource: "transition.active", Message: message, Retry: "run yard update --check",
+		})
+	}
+	if request.Transaction != journal.Transaction || request.Fingerprint != observation.journalSnapshot.Fingerprint {
+		refuse(CodePlanStale, "the journal selected for replacement changed after inspection")
+	}
+	if transition.options.SourceIngress != nil || journal.SourceIngress != nil {
+		refuse(CodeRecoveryAmbiguous, "a newer release cannot replace an unfinished source migration")
+	}
+	if transition.options.Direction != DirectionActivateTarget || journal.Goal.Direction != DirectionActivateTarget {
+		refuse(CodeRecoveryAmbiguous, "a newer release can replace only an unfinished forward update")
+	}
+	if IsRecoveryTransaction(journal.Transaction) ||
+		strings.HasPrefix(string(journal.Transaction), MigrationOwnerTransactionPrefixV1) {
+		refuse(CodeRecoveryAmbiguous, "a newer release cannot replace a recovery transaction")
+	}
+	archive, archiveErr := transition.store.ReadSupersededJournal(journal.Transaction)
+	if archiveErr != nil || archive.Exists {
+		refuse(CodeRecoveryAmbiguous, "a newer release cannot replace a journal that already superseded another")
+	}
+	reserved, reservedErr := transition.store.journalIsReserved(journal.Transaction)
+	if reservedErr != nil || reserved {
+		refuse(CodeRecoveryAmbiguous, "an interrupted recovery still reserves this journal")
+	}
+	source, sourceErr := ReleaseIDVersion(journal.Goal.Target)
+	candidate, candidateErr := semver.Parse(transition.options.CandidateVersion)
+	if sourceErr != nil || candidateErr != nil || !candidate.GT(source) {
+		refuse(CodeRecoveryAmbiguous, "only a release newer than the unfinished target can replace its journal")
+	}
+	if !initialReleaseLinks(observation.links, transition.options.Releases) ||
+		!journalLinksAllowed(*journal, observation.links) {
+		refuse(CodeActivationAmbiguous, "the release links do not match the unfinished activation")
+	}
+	return blockers
+}
+
 func (transition *V2Transition) canReplacePreActivationJournal(
 	observation v2Observation,
 ) bool {
@@ -1813,7 +1902,12 @@ func (transition *V2Transition) checkpointSourceCompatibilityBlocker(observation
 func (transition *V2Transition) observeFresh(
 	ctx context.Context,
 	observation *v2Observation,
-) error {
+) (resultErr error) {
+	defer func() {
+		if resultErr != nil && len(observation.blockers) > 0 {
+			resultErr = &blockedInspectionError{cause: resultErr, blockers: slices.Clone(observation.blockers)}
+		}
+	}()
 	// Exact authorized resume keeps its original bindings. A fresh replan after
 	// replacing a stale incomplete journal must prove source compatibility again.
 	blocker, err := transition.checkpointSourceCompatibilityBlocker(*observation)
@@ -1927,7 +2021,11 @@ func (transition *V2Transition) observeFresh(
 				ctx, transition.options.OwnerRegistration, settingsView,
 			)
 			if inspectErr != nil {
-				return inspectErr
+				if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
+					observation.blockers = append(observation.blockers, blocker)
+				} else {
+					return inspectErr
+				}
 			}
 			if plan != nil {
 				intent := PlannerStepIntent{
@@ -2181,8 +2279,8 @@ func (transition *V2Transition) observeResume(
 				continue
 			}
 			actual, err := transition.nativeFingerprint(ctx, work, observation.links, ownerSettingsView)
-			if nativeMigrationRefusal(err) {
-				observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err))
+			if hasMigrationRefusal(err) {
+				observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err, ctx))
 				continue
 			}
 			if err != nil {
@@ -2204,11 +2302,14 @@ func (transition *V2Transition) observeResume(
 				ctx, *journal, step, ownerSettingsView,
 			)
 			if bindErr != nil {
-				observation.blockers = append(observation.blockers, Blocker{
+				blocker := Blocker{
 					Code: CodeMigrationStale, Resource: "owner-registration." + step.Resource,
 					Message: "the journaled owner registration identity changed outside the authorized transition",
 					Retry:   "run yard update --check",
-				})
+				}
+				blocker.Message, blocker.Retry = publicActivationDiagnostic(bindErr, blocker.Message, blocker.Retry)
+				recordMigrationDiagnostics(ctx, bindErr)
+				observation.blockers = append(observation.blockers, blocker)
 				continue
 			}
 			progress := OwnerRegistrationExpected
@@ -2217,11 +2318,14 @@ func (transition *V2Transition) observeResume(
 				progress, observeErr = transition.options.OwnerRegistration.Observe(ctx, before)
 			}
 			if observeErr != nil {
-				observation.blockers = append(observation.blockers, Blocker{
+				blocker := Blocker{
 					Code: CodeMigrationStale, Resource: "owner-registration." + step.Resource,
 					Message: "the journaled owner registration cannot be observed safely",
 					Retry:   "repair the test-yard owner topology, then run yard update",
-				})
+				}
+				blocker.Message, blocker.Retry = publicActivationDiagnostic(observeErr, blocker.Message, blocker.Retry)
+				recordMigrationDiagnostics(ctx, observeErr)
+				observation.blockers = append(observation.blockers, blocker)
 				continue
 			}
 			actual, progressErr := ownerRegistrationProgressFingerprint(
@@ -2336,7 +2440,11 @@ func (transition *V2Transition) observeResume(
 	if journalOwnerMigration && !journalOwner {
 		plan, inspectErr := inspectOwnerRegistrationV2(ctx, transition.options.OwnerRegistration, nil)
 		if inspectErr != nil {
-			return inspectErr
+			if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
+				observation.blockers = append(observation.blockers, blocker)
+			} else {
+				return inspectErr
+			}
 		}
 		if plan != nil {
 			code := CodePlanStale
@@ -2493,6 +2601,9 @@ func (transition *V2Transition) convergeStep(
 					plan, err := transition.inspectRegisteredSettings(ctx, work.migration, nil, links)
 					if err != nil {
 						return Outcome{}, err
+					}
+					if len(plan.Blockers) != 0 {
+						return Outcome{}, migrationBlockerError{plan.Blockers[0]}
 					}
 					matched := slices.ContainsFunc(plan.Files, func(file settingsV2FilePlan) bool {
 						return file.Path == path && file.ExpectedFingerprint == step.Expected && file.DesiredFingerprint == step.Desired
@@ -3860,6 +3971,15 @@ func evidenceFor(
 
 func initialReleaseLinks(links ReleaseLinks, pair ReleasePair) bool {
 	return links.Active == pair.From && releaseIDsEqual(links.Previous, pair.Previous)
+}
+
+// ReleaseIDVersion returns the version a published release ID starts with.
+func ReleaseIDVersion(release ReleaseID) (semver.Version, error) {
+	index := strings.LastIndex(string(release), "-")
+	if index <= 0 {
+		return semver.Version{}, invalid("release ID %q has no version", release)
+	}
+	return semver.Parse(string(release)[:index])
 }
 
 func protectedSnapshotFromPayload(payload []byte) ProtectedSnapshot {

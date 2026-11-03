@@ -72,6 +72,7 @@ const (
 
 	JournalReplacementPreActivationPlanStale   = "pre-activation-plan-stale"
 	JournalReplacementPostActivationScopeV0111 = "post-activation-scope-v0.11.1"
+	JournalReplacementNewerRelease             = "newer-release-v1"
 )
 
 type SourceIngressRequest struct {

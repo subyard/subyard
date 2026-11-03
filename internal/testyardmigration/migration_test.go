@@ -3188,3 +3188,98 @@ func read(t *testing.T, path string) string {
 	}
 	return string(payload)
 }
+
+func TestReservedRegistrationReportsPublicRepair(t *testing.T) {
+	for _, yard := range []string{LegacyYard, CurrentYard} {
+		for _, shape := range []string{yard + "/config.env", yard + ".env"} {
+			t.Run(shape, func(t *testing.T) {
+				root := testkit.TempDir(t)
+				home := filepath.Join(root, "config")
+				path := filepath.Join(home, "yards", filepath.FromSlash(shape))
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, path, []byte("YARD_TEMPLATE=private-value\n"), 0600)
+				_, err := inspectRegistration(Options{ConfigHome: home})
+				var diagnostic interface{ ActivationDiagnostic() (string, string) }
+				if !errors.As(err, &diagnostic) {
+					t.Fatalf("no public diagnostic: %v", err)
+				}
+				message, retry := diagnostic.ActivationDiagnostic()
+				if !strings.Contains(message, "reserved yard name "+yard) || !strings.Contains(message, "yards/"+shape) || !strings.Contains(retry, "set YARD_TEMPLATE=test-vms") || !strings.Contains(retry, "rename") || strings.Contains(message+retry, root) || strings.Contains(message+retry, "private-value") {
+					t.Fatalf("unsafe or incomplete diagnostic: %q / %q", message, retry)
+				}
+				if got := read(t, path); got != "YARD_TEMPLATE=private-value\n" {
+					t.Fatal("refusal changed registration")
+				}
+			})
+		}
+	}
+	t.Run("prospective", func(t *testing.T) {
+		root := testkit.TempDir(t)
+		_, err := PrepareProspective(context.Background(), Options{Executable: filepath.Join(root, "yard"), ConfigHome: filepath.Join(root, "config"), DataHome: filepath.Join(root, "data")}, func(string) (config.PersistentFileSnapshot, error) {
+			return config.PersistentFileSnapshot{Exists: true, Content: []byte("YARD_TEMPLATE=private-value\n")}, nil
+		})
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		if !errors.As(err, &diagnostic) {
+			t.Fatalf("prospective diagnostic lost: %v", err)
+		}
+		message, retry := diagnostic.ActivationDiagnostic()
+		if !strings.Contains(message, "yards/e2e-yard/config.env") || !strings.Contains(retry, "YARD_TEMPLATE=test-vms") {
+			t.Fatalf("prospective repair: %q / %q", message, retry)
+		}
+	})
+}
+
+func TestReservedRegistrationReportsBothNames(t *testing.T) {
+	root := testkit.TempDir(t)
+	home := filepath.Join(root, "config")
+	for _, yard := range []string{LegacyYard, CurrentYard} {
+		path := filepath.Join(home, "yards", yard+".env")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, []byte("YARD_TEMPLATE=unrelated\n"), 0600)
+	}
+	_, err := inspectRegistration(Options{ConfigHome: home})
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("no public refusals: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	for _, yard := range []string{LegacyYard, CurrentYard} {
+		if !strings.Contains(message, "yards/"+yard+".env") {
+			t.Fatalf("hidden refusal for %s: %s", yard, message)
+		}
+	}
+	if !strings.Contains(retry, "YARD_TEMPLATE=test-vms") || strings.Contains(message, root) {
+		t.Fatalf("unsafe or incomplete repair: %q / %q", message, retry)
+	}
+}
+
+func TestRegistrationRefusalsPreserveConfigurationRepair(t *testing.T) {
+	for _, alias := range []bool{false, true} {
+		t.Run(fmt.Sprint(alias), func(t *testing.T) {
+			home := testkit.TempDir(t)
+			settings := &routeActivationDiagnostic{cause: errors.New("private parser value"), message: "yard test-yard: settings need repair", retry: "run yard -Y test-yard config validate"}
+			if alias {
+				cause := &config.SourceError{Path: filepath.Join(home, "yards/test-yard/config.env"), Key: "ENVIRONMENT_PROFILES", Reason: "conflicting legacy and canonical settings"}
+				var ok bool
+				settings, ok = routeConfigDiagnostic(cause, "settings need repair", CurrentYard, home).(*routeActivationDiagnostic)
+				if !ok || !strings.Contains(settings.retry, "config repair-alias ENVIRONMENT_PROFILES") {
+					t.Fatal("alias fixture did not produce its supported repair")
+				}
+			}
+			reserved := reservedRegistrationDiagnostic("e2e-yard.env", LegacyYard)
+			err := registrationRefusals(settings, reserved)
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &diagnostic) {
+				t.Fatal(err)
+			}
+			message, retry := diagnostic.ActivationDiagnostic()
+			if !strings.Contains(retry, settings.retry) || !strings.Contains(retry, reserved.retry) || len(retry) > 512 || strings.Contains(message+retry, "private") {
+				t.Fatalf("lost configuration repair: %q / %q", message, retry)
+			}
+		})
+	}
+}

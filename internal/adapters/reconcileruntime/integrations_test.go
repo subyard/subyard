@@ -1601,3 +1601,15 @@ func TestStructuredInventoryPreservesIndependentFieldChanges(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcileIntegrationsStepIsSafePlanText(t *testing.T) {
+	for selection, want := range map[string]string{
+		"":             "reconcile selected integrations: none",
+		"  ":           "reconcile selected integrations: none",
+		" codex  orca": "reconcile selected integrations: codex orca",
+	} {
+		if got := reconcileIntegrationsStep(selection); got != want || strings.TrimSpace(got) != got {
+			t.Fatalf("reconcileIntegrationsStep(%q) = %q, want %q", selection, got, want)
+		}
+	}
+}

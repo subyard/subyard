@@ -569,7 +569,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
 	plan.fingerprints = slices.Clone(fingerprints)
 	if plan.Changed {
-		plan.Steps = []string{"reconcile selected integrations: " + strings.Join(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), " ")}
+		plan.Steps = []string{reconcileIntegrationsStep(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))}
 		for _, entry := range observed.Retired {
 			if entry.Kind == "package" {
 				// A retired package states its own removal through its lifecycle notice.
@@ -591,6 +591,16 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		plan.Steps = append(plan.Steps, plan.Retirements...)
 	}
 	return plan, observed, nil
+}
+
+// reconcileIntegrationsStep names the selection. Release plans refuse text with
+// surrounding whitespace, so an empty selection must not end in a separator.
+func reconcileIntegrationsStep(selection string) string {
+	selected := strings.Fields(selection)
+	if len(selected) == 0 {
+		return "reconcile selected integrations: none"
+	}
+	return "reconcile selected integrations: " + strings.Join(selected, " ")
 }
 
 // PrepareLegacyIntegrationAdoption returns an opt-in runtime only for an

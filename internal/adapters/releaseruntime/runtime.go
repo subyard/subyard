@@ -562,6 +562,12 @@ func (runtime *Runtime) PrepareTransition(
 			protected = nil
 		}
 	}
+	var newerRelease *releasetransition.JournalReplacement
+	if err != nil {
+		if newerRelease = newerReleaseAfterInspectionError(parsed, configHome, err); newerRelease != nil {
+			err, protected = nil, nil
+		}
+	}
 	if err != nil {
 		var public publicReleaseInspectionError
 		if errors.As(err, &public) {
@@ -587,9 +593,14 @@ func (runtime *Runtime) PrepareTransition(
 					ctx, parsed, recovery.candidate, recovery.request, recovery.revalidation,
 				)
 			}
-			runtime.setV0111StandaloneRetry(ctx, parsed.root, protected)
-			runtime.setV0173StandaloneRetry(ctx, parsed.root, protected)
-			return runtime.prepareProtectedTransition(parsed, protected)
+			if unfinished {
+				newerRelease = newerReleaseReplacement(parsed, configHome)
+			}
+			if newerRelease == nil {
+				runtime.setV0111StandaloneRetry(ctx, parsed.root, protected)
+				runtime.setV0173StandaloneRetry(ctx, parsed.root, protected)
+				return runtime.prepareProtectedTransition(parsed, protected)
+			}
 		}
 	}
 	if parsed.rollback {
@@ -600,6 +611,27 @@ func (runtime *Runtime) PrepareTransition(
 	sourceIngress, err := sourceIngressRequestFromEnvironment(runtime.config.Inputs.values)
 	if err != nil {
 		return Prepared{}, err
+	}
+	if newerRelease != nil && parsed.offline {
+		if verified, standalone := runtime.verifiedStandaloneCandidateRoot(ctx, parsed.root); standalone {
+			defer verified.Close()
+			if verified.version == parsed.version {
+				linksBefore, err := runtime.inspectRuntimeLinks(parsed.root)
+				if err != nil {
+					return Prepared{}, err
+				}
+				parsed.expectedLinks = &linksBefore
+				return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, releasetransition.ProcessRequest{
+					SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+					Mode:          releasetransition.ProcessInspect,
+					RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
+					Target: verified.candidate.release, Direction: releasetransition.DirectionActivateTarget,
+					ArtifactDigest:      verified.manifestDigest,
+					InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
+					SourceIngress:       sourceIngress, Replacement: newerRelease,
+				}, nil)
+			}
+		}
 	}
 	current, err := inspectRuntimeLink(parsed.root, "current")
 	if err != nil {
@@ -711,7 +743,7 @@ func (runtime *Runtime) PrepareTransition(
 		Target: candidate.release, Direction: releasetransition.DirectionActivateTarget,
 		ArtifactDigest:      verified.manifestDigest,
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
-		SourceIngress:       sourceIngress,
+		SourceIngress:       sourceIngress, Replacement: newerRelease,
 	}
 	runtime.progress(parsed, "Checking update requirements...")
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
@@ -856,6 +888,86 @@ type replacementRevalidation struct {
 }
 
 const v0111RecoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
+
+const newerReleaseConsequence = "replace the unfinished release transition with this release's plan, keeping its journal as evidence; completed effects stay in place"
+
+// negotiatedRecoveryRelease names published owners whose unfinished journals
+// keep their own exact recovery contracts.
+func negotiatedRecoveryRelease(target releasetransition.ReleaseID) bool {
+	version, err := releasetransition.ReleaseIDVersion(target)
+	if err != nil {
+		return false
+	}
+	switch version.String() {
+	case "0.11.1", "0.17.3", "0.21.0":
+		return true
+	}
+	return false
+}
+
+// newerReleaseAfterInspectionError lets a newer release take over from an owner
+// that cannot inspect its own journal. Historical compatibility still never
+// adopts experimental owner metadata.
+func newerReleaseAfterInspectionError(
+	parsed options,
+	configHome string,
+	inspection error,
+) *releasetransition.JournalReplacement {
+	var experimental unsupportedReleaseOwnerError
+	if errors.As(inspection, &experimental) {
+		return nil
+	}
+	return newerReleaseReplacement(parsed, configHome)
+}
+
+// withNewerReleaseConsequence discloses the replacement only when it can happen.
+func withNewerReleaseConsequence(
+	request releasetransition.ProcessRequest,
+	inspection releasetransition.Inspection,
+) (releasetransition.Inspection, bool) {
+	if request.Replacement == nil || request.Replacement.Reason != releasetransition.JournalReplacementNewerRelease ||
+		len(inspection.Blockers) != 0 {
+		return inspection, false
+	}
+	inspection.Assessment.Consequences = append(
+		[]string{newerReleaseConsequence}, inspection.Assessment.Consequences...,
+	)
+	return inspection, true
+}
+
+// newerReleaseReplacement reads the journal directly, because its pinned owner
+// may be the broken release. The candidate engine decides whether it qualifies.
+func newerReleaseReplacement(parsed options, configHome string) *releasetransition.JournalReplacement {
+	if !parsed.versionExplicit || parsed.rollback || parsed.force ||
+		(parsed.tag != "" && parsed.tag != "v"+parsed.version) {
+		return nil
+	}
+	requested, err := semver.Parse(parsed.version)
+	if err != nil {
+		return nil
+	}
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return nil
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return nil
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Checkpoint == releasetransition.JournalComplete {
+		return nil
+	}
+	pinned, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)
+	if err != nil || !requested.GT(pinned) || negotiatedRecoveryRelease(journal.Goal.Target) ||
+		journal.SourceIngress != nil {
+		return nil
+	}
+	return &releasetransition.JournalReplacement{
+		Transaction: journal.Transaction, Fingerprint: snapshot.Fingerprint,
+		Reason: releasetransition.JournalReplacementNewerRelease,
+	}
+}
 
 func (runtime *Runtime) qualifyV0111StandaloneRecovery(
 	ctx context.Context,
@@ -1432,6 +1544,12 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 		)
 		if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
 			return Prepared{}, fmt.Errorf("augmented recovery inspection is invalid: %w", err)
+		}
+	}
+	if disclosed, changed := withNewerReleaseConsequence(request, inspection); changed {
+		inspection = disclosed
+		if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
+			return Prepared{}, fmt.Errorf("augmented replacement inspection is invalid: %w", err)
 		}
 	}
 	if parsed.check {

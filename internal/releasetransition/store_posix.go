@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -143,6 +144,102 @@ func (store *POSIXV2Store) CreateSupersededJournal(
 		[]string{"release-transition", "v2", "transactions", string(transaction)},
 		"superseded-journal.json", payload,
 	)
+}
+
+var replacedJournalParts = []string{"release-transition-replaced-journals", "v1"}
+
+// PreserveReplacedJournal keeps the exact bytes of an unfinished journal that a
+// newer release replaces. The record stays outside release-transition/, whose
+// inventory older engines refuse to extend, and outside the transaction graph,
+// so another replacement remains possible.
+func (store *POSIXV2Store) PreserveReplacedJournal(snapshot ProtectedSnapshot, transaction TransactionID) error {
+	if err := validateTransactionID(transaction); err != nil {
+		return err
+	}
+	if err := validateFingerprint(snapshot.Fingerprint, "replaced journal fingerprint"); err != nil {
+		return err
+	}
+	return store.createImmutable(
+		replacedJournalParts,
+		string(transaction)+"-"+string(snapshot.Fingerprint)+".json", snapshot.Payload,
+	)
+}
+
+// RetireReplacedTransactions moves the transaction directories of replaced
+// journals next to their preserved bytes. An unclosed transaction inside the
+// graph would block cleanup and source admission for every engine, including
+// older ones. Closed evidence stays under ordinary retention: it may belong to a
+// journal whose replacement never published, or be retained by a later receipt.
+func (store *POSIXV2Store) RetireReplacedTransactions(current TransactionID, registry RegistryV2) error {
+	destination, present, err := store.openParent(replacedJournalParts, false)
+	if err != nil || !present {
+		return err
+	}
+	defer unix.Close(destination)
+	source, present, err := store.openParent([]string{"release-transition", "v2", "transactions"}, false)
+	if err != nil || !present {
+		return err
+	}
+	defer unix.Close(source)
+	entries, err := os.ReadDir(filepath.Join(append([]string{store.configHome}, replacedJournalParts...)...))
+	if err != nil {
+		return err
+	}
+	moved := false
+	for _, entry := range entries {
+		record, isRecord := strings.CutSuffix(entry.Name(), ".json")
+		index := strings.LastIndex(record, "-")
+		if !isRecord || index <= 0 {
+			continue
+		}
+		transaction := record[:index]
+		if validateTransactionID(TransactionID(transaction)) != nil || TransactionID(transaction) == current {
+			continue
+		}
+		if _, err := store.closedTransactionEvidence(TransactionID(transaction), registry); err == nil {
+			continue
+		}
+		switch err := unix.Renameat2(source, transaction, destination, transaction+".transaction", unix.RENAME_NOREPLACE); {
+		case err == nil:
+			moved = true
+		case !errors.Is(err, unix.ENOENT):
+			return err
+		}
+	}
+	if !moved {
+		return nil
+	}
+	return errors.Join(unix.Fsync(source), unix.Fsync(destination))
+}
+
+// journalIsReserved reports a live recovery or owner receipt that names the
+// transaction as its predecessor. Only the predecessor can close such a receipt.
+func (store *POSIXV2Store) journalIsReserved(transaction TransactionID) (bool, error) {
+	lifecycle, err := store.readRecoveryReceiptsAt(recoveryLifecycleParts)
+	if err != nil {
+		return false, err
+	}
+	legacy, err := store.readRecoveryReceipts()
+	if err != nil {
+		return false, err
+	}
+	for _, receipts := range []map[TransactionID]RecoveryReceiptV1{lifecycle, legacy} {
+		for _, receipt := range receipts {
+			if receipt.Replacement.Transaction == transaction {
+				return true, nil
+			}
+		}
+	}
+	owners, err := store.migrationOwnerReceipts()
+	if err != nil {
+		return false, err
+	}
+	for _, receipt := range owners {
+		if receipt.Predecessor.Transaction == transaction {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ResolveSupersededJournalTransaction admits a proposed successor only after

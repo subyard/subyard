@@ -349,6 +349,23 @@ func TestRegisteredMigrationCollectsResourceAndOwnerRefusals(t *testing.T) {
 		if err == nil || err.Error() != want {
 			t.Fatalf("got %v, want %s", err, want)
 		}
+		var refusals *domain.Refusals
+		if !errors.As(err, &refusals) {
+			t.Fatalf("independent verdicts were lost: %v", err)
+		}
+		for _, cause := range refusals.Unwrap() {
+			var verdict interface {
+				MigrationRefusal() bool
+				ActivationDiagnostic() (string, string)
+			}
+			if !errors.As(cause, &verdict) || !verdict.MigrationRefusal() {
+				t.Fatalf("state verdict is unclassified: %v", cause)
+			}
+			message, _ := verdict.ActivationDiagnostic()
+			if !strings.Contains(message, "yard default:") {
+				t.Fatalf("invalid public verdict: %q", message)
+			}
+		}
 	}
 	if native.grants != 0 {
 		t.Fatal("refused observation published native grants")
@@ -564,5 +581,139 @@ func TestRegisteredBindingRecordsOwnerIngressEndpoint(t *testing.T) {
 	environment := binding.([]any)[10].(map[string]string)
 	if environment["SAMPLE_HOST"] != "203.0.113.10" || environment["SAMPLE_PORT"] != "51820" {
 		t.Fatalf("UDP listener was recorded as %q:%q", environment["SAMPLE_HOST"], environment["SAMPLE_PORT"])
+	}
+}
+
+func TestRegisteredProxyVerdictRetainsOtherYardsAndDependencies(t *testing.T) {
+	for _, dependency := range []bool{false, true} {
+		t.Run(fmt.Sprint(dependency), func(t *testing.T) {
+			owner, native, _ := registeredMigrationFixture(t)
+			native.Reconcile.ProjectConfig["user.subyard.operator_uid"] = "private-owner-value"
+			native.Instances["fixture/yard"].LocalDevices["sample-server"]["nat"] = "true"
+			owners := []releasetransition.V2ActivationReconciler{owner}
+			if dependency {
+				owners = append(owners, &RegisteredYardMigration{Yard: "unavailable", LoadTargets: func(context.Context, releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
+					return nil, errors.New("private transport value")
+				}})
+			}
+			payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":2},"currentEpochs":{"owner-registration":3},"migrations":[{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3"}]}`)
+			transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: owner.ConfigHome, RegistryPayload: payload, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+				return releasetransition.ReleaseLinks{Active: "release-a"}, nil
+			}, RegisteredYards: owners, VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
+			plan, err := transition.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatalf("inspection escaped: %v", err)
+			}
+			if err := releasetransition.ValidateProcessInspection(goal, plan); err != nil {
+				t.Fatal(err)
+			}
+			code := releasetransition.CodePreconditionBlocked
+			if dependency {
+				code = releasetransition.CodeDependencyUnavailable
+			}
+			if plan.Outcome == nil || plan.Outcome.Code != code {
+				t.Fatalf("wrong outcome: %#v", plan)
+			}
+			for _, want := range []string{"yard default:", "options outside its typed resource contract", "registered project owner differs"} {
+				if !strings.Contains(plan.Outcome.Message, want) {
+					t.Fatalf("hidden %q: %#v", want, plan.Outcome)
+				}
+			}
+			if strings.Contains(plan.Outcome.Message, "private") || strings.Contains(plan.Outcome.Retry, "install a compatible release") != dependency {
+				t.Fatalf("unsafe/misleading outcome: %#v", plan.Outcome)
+			}
+			result, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: plan.Plan, Authorization: "confirmed"})
+			if err != nil || result.Code != code || native.grants != 0 {
+				t.Fatalf("refused update: %#v %v grants=%d", result, err, native.grants)
+			}
+		})
+	}
+}
+
+func TestRegisteredEndpointVerdicts(t *testing.T) {
+	for _, scenario := range []string{"value", "shadow"} {
+		t.Run(scenario, func(t *testing.T) {
+			owner, native, _ := registeredMigrationFixture(t)
+			targets, err := owner.LoadTargets(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded := targets[0].Loaded
+			instance := native.Instances["fixture/yard"]
+			if scenario == "value" {
+				instance.LocalDevices["sample-server"]["listen"] = "tcp:127.0.0.1:70000"
+			} else {
+				owner.Yard = "named"
+				loaded.Context.YardName = "named"
+				loaded.Context.Paths.ConfigDir = filepath.Join(owner.ConfigHome, "source-config")
+				source := filepath.Join(owner.ConfigHome, config.GitSettingsRelativePath, "yards/named/config.env")
+				if err := os.MkdirAll(filepath.Dir(source), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, source, []byte("YARD_NAME=named\n"), 0600)
+			}
+			err = owner.planEndpointSettings(&registeredYardPlan{loaded: loaded}, instance, owner.Resources.ProxyContracts([]string{"sample"}))
+			var verdict interface {
+				MigrationRefusal() bool
+				ActivationDiagnostic() (string, string)
+			}
+			if !errors.As(err, &verdict) || !verdict.MigrationRefusal() {
+				t.Fatalf("endpoint verdict is a dependency: %v", err)
+			}
+			message, _ := verdict.ActivationDiagnostic()
+			want := "SAMPLE_PORT"
+			if scenario == "shadow" {
+				want = "refusing to shadow"
+			}
+			if !strings.Contains(message, want) || strings.Contains(message, owner.ConfigHome) {
+				t.Fatalf("endpoint diagnostic: %q", message)
+			}
+		})
+	}
+}
+
+func TestRegisteredInvalidLimitIsVerdict(t *testing.T) {
+	owner, native, _ := registeredMigrationFixture(t)
+	targets, err := owner.LoadTargets(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := targets[0].Runtime
+	runtime.RepositoryRoot = "../.."
+	native.Reconcile.ProjectConfig = map[string]string{}
+	native.Reconcile.Instance.Config["limits.cpu"] = "private-invalid-limit"
+	_, _, _, _, _, err = inspectRegisteredYardMigration(context.Background(), runtime, nil, nil)
+	found := false
+	var visit func(error)
+	visit = func(err error) {
+		if err == nil {
+			return
+		}
+		if details, ok := err.(interface {
+			MigrationRefusalDetails() (string, string, []string)
+		}); ok {
+			_, reason, names := details.MigrationRefusalDetails()
+			if reason == "existing instance limit is invalid" {
+				found = true
+				if !slices.Contains(names, "limits.cpu") {
+					t.Fatal("missing limit key")
+				}
+			}
+		}
+		if group, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, cause := range group.Unwrap() {
+				visit(cause)
+			}
+		} else if wrapper, ok := err.(interface{ Unwrap() error }); ok {
+			visit(wrapper.Unwrap())
+		}
+	}
+	visit(err)
+	if !found {
+		t.Fatalf("existing limit was not a verdict: %v", err)
 	}
 }

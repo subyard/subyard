@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"errors"
+	"github.com/Subyard/Subyard/internal/domain"
 	"regexp"
 	"strconv"
 	"strings"
@@ -95,14 +96,14 @@ func (definition Definition) observeRecipe(local, effective, environment map[str
 	}
 	mode := environment[publication.DisabledSetting]
 	if !hasSchema || !hasRevision || !effectiveHasSchema || !effectiveHasRevision || schema != effective[publication.SchemaKey] || revision != effective[publication.RevisionKey] || schema != publication.SchemaValue || (mode != "0" && mode != "1") || len(revision) > 8192 {
-		return nil, errors.New("native publication is partial, inconsistent or differs from its protected mode")
+		return nil, domain.MigrationStateRefusal(environment["YARD_NAME"], errors.New("native publication is partial, inconsistent or differs from its protected mode"), "native publication is partial, inconsistent or differs from its protected mode", definition.Name)
 	}
 	if validate == nil {
 		return nil, errors.New("native publication has no supported observation codec")
 	}
 	parts := strings.SplitN(revision, ":", 3)
 	if len(parts) != 3 || parts[0] != mode || !publicationRevision.MatchString(parts[1]) {
-		return nil, errors.New("native publication revision is malformed or differs from its protected mode")
+		return nil, domain.MigrationStateRefusal(environment["YARD_NAME"], errors.New("native publication revision is malformed or differs from its protected mode"), "native publication revision is malformed or differs from its protected mode", definition.Name)
 	}
 	var observed map[string]string
 	for _, count := range []int{len(publication.Settings), publication.LegacySettingsCount} {
@@ -145,13 +146,13 @@ func (definition Definition) observeRecipe(local, effective, environment map[str
 		}
 		if valid {
 			if observed != nil {
-				return nil, errors.New("native publication serialization is ambiguous")
+				return nil, domain.MigrationStateRefusal(environment["YARD_NAME"], errors.New("native publication serialization is ambiguous"), "native publication serialization is ambiguous", definition.Name)
 			}
 			observed = candidate
 		}
 	}
 	if observed == nil {
-		return nil, errors.New("native publication recipe is malformed or has conflicting protected identity")
+		return nil, domain.MigrationStateRefusal(environment["YARD_NAME"], errors.New("native publication recipe is malformed or has conflicting protected identity"), "native publication recipe is malformed or has conflicting protected identity", definition.Name)
 	}
 	canonical, _ := json.Marshal(struct {
 		Disabled, Schema string
@@ -186,7 +187,7 @@ func (definition Definition) ProjectInstancePublication(local, effective, enviro
 		return nil
 	})
 	if err == nil && len(projection) != 0 && environment[definition.InstancePublication.DisabledSetting] != "0" {
-		return nil, errors.New("native publication is not supported while enabled")
+		return nil, domain.MigrationStateRefusal(environment["YARD_NAME"], errors.New("native publication is not supported while enabled"), "native publication is not supported while enabled", definition.Name)
 	}
 	return projection, err
 }

@@ -62,7 +62,7 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	// Incus initializes these flags true; an unset flag has default false and
 	// inherits the default project's namespace instead of proving dedication.
 	if before["features.profiles"] != "true" || before["features.storage.volumes"] != "true" {
-		refusals = append(refusals, errors.New("yard adoption requires explicitly dedicated project profile and volume namespaces"))
+		refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires explicitly dedicated project profile and volume namespaces"))
 	}
 	state.ProjectConfig = maps.Clone(before)
 	stamped := before["user.subyard.installation"] == domain.AdoptedInstallation
@@ -74,7 +74,7 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	for key, value := range before {
 		if strings.HasPrefix(key, "user.subyard.") {
 			if !stamped || value != metadata[key] {
-				refusals = append(refusals, errors.New("yard adoption refuses partial, foreign or conflicting project ownership"))
+				refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses partial, foreign or conflicting project ownership"))
 			}
 			delete(state.ProjectConfig, key)
 		}
@@ -82,17 +82,17 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	if stamped {
 		for key, value := range metadata {
 			if before[key] != value {
-				refusals = append(refusals, errors.New("yard adoption refuses incomplete adopted project ownership"))
+				refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses incomplete adopted project ownership"))
 			}
 		}
 	}
 	// These namespaces are not represented by the bounded teardown inventory.
 	for key, value := range state.ProjectConfig {
 		if strings.HasPrefix(key, "features.") && value != "true" && value != "false" {
-			refusals = append(refusals, errors.New("yard adoption requires canonical project feature booleans"))
+			refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires canonical project feature booleans"))
 		}
 		if strings.HasPrefix(key, "features.") && value != "false" && key != "features.profiles" && key != "features.storage.volumes" && key != "features.storage.buckets" && key != "features.images" {
-			refusals = append(refusals, errors.New("yard adoption refuses an uninventoried project feature namespace"))
+			refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses an uninventoried project feature namespace"))
 		}
 	}
 	// Only device identity refuses. A pinned address, hardware address or differing
@@ -100,7 +100,7 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	pool, _ := runtime.volumeNames()
 	root, nic := state.ProfileDevices["root"], state.ProfileDevices["eth0"]
 	if root["type"] != "disk" || root["path"] != "/" || root["pool"] != pool || nic["type"] != "nic" || nic["network"] != runtime.Yard.IncusBridge {
-		refusals = append(refusals, errors.New("yard adoption refuses noncanonical project root or NIC properties"))
+		refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses noncanonical project root or NIC properties"))
 	}
 	// A verified prior publication may be followed by an interrupted ordinary
 	// init, which marks the instance uninitialized until finalization. Only the
@@ -109,7 +109,7 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	refusals = append(refusals, err)
 	for _, resource := range resources {
 		if resource.SnapshotCount != 0 {
-			refusals = append(refusals, errors.New("yard adoption refuses unproven snapshots"))
+			refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses unproven snapshots"))
 		}
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil {
@@ -165,7 +165,7 @@ func (runtime Runtime) YardAdoptionProjects(ctx context.Context, instance ports.
 		}
 		name := state.WorkspaceDeviceFor(record)
 		if _, duplicate := byDevice[name]; duplicate {
-			refusals = append(refusals, fmt.Errorf("yard adoption project registry has ambiguous device %q", name))
+			refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("yard adoption project registry has ambiguous device %q", name), "yard adoption project registry has ambiguous device identity"))
 		}
 		byDevice[name] = record
 	}
@@ -178,7 +178,7 @@ func (runtime Runtime) YardAdoptionProjects(ctx context.Context, instance ports.
 			continue
 		}
 		if !filepath.IsAbs(record.HostPath) || filepath.Clean(record.HostPath) != record.HostPath {
-			refusals = append(refusals, fmt.Errorf("yard adoption refuses noncanonical registered bind source for %q", name))
+			refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("yard adoption refuses noncanonical registered bind source for %q", name), "yard adoption refuses noncanonical registered bind source"))
 			continue
 		}
 		desired := map[string]string{"type": "disk", "source": record.HostPath, "path": record.YardPath, "shift": "true"}
@@ -191,13 +191,13 @@ func (runtime Runtime) YardAdoptionProjects(ctx context.Context, instance ports.
 
 func (runtime Runtime) adoptionKindPolicy(state ports.ReconcileState, configuration map[string]string) error {
 	if runtime.Yard.YardKind != domain.YardContainer && runtime.Yard.YardKind != domain.YardVM {
-		return errors.New("unsupported adoption instance kind")
+		return runtime.adoptionRefusal("unsupported adoption instance kind")
 	}
 	var refusals []error
 	// Only a restricted role still forbids devices; its profile size is checked by the caller.
 	if runtime.environmentValue("ALLOWS_HOST_ACCESS") == "false" {
 		if _, err := runtime.vmDeviceBoundary(state); err != nil {
-			refusals = append(refusals, fmt.Errorf("yard adoption requires converged configured native device boundaries: %w", err))
+			refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("yard adoption requires converged configured native device boundaries: %w", err), "yard adoption requires converged configured native device boundaries"))
 		}
 	}
 	if runtime.Yard.NestedE2EVMs {
@@ -206,23 +206,27 @@ func (runtime Runtime) adoptionKindPolicy(state ports.ReconcileState, configurat
 	}
 	for _, key := range []string{"security.syscalls.intercept.bpf", "security.syscalls.intercept.bpf.devices"} {
 		if state.Instance.Config[key] != configuration[key] || state.Instance.LocalConfig[key] != configuration[key] {
-			refusals = append(refusals, errors.New("yard adoption requires converged nested device privileges"))
+			refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires converged nested device privileges"))
 		}
 	}
 	if runtime.Yard.YardKind == domain.YardVM {
 		if runtime.environmentValue("VM_FREE_PAGE_REPORTING") == "1" {
 			if ready, err := vmRawQEMUConverged(state.Instance); err != nil || !ready {
-				refusals = append(refusals, errors.New("yard adoption requires converged VM raw policy"))
+				refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires converged VM raw policy"))
 			}
 			configuration["raw.qemu.conf"] = vmPageReportingConfig
 		}
 		configuration["user.subyard.vm_cpu_weight"] = runtime.environmentValue("VM_CPU_WEIGHT")
 		if state.Instance.Config["user.subyard.vm_cpu_weight"] != configuration["user.subyard.vm_cpu_weight"] {
-			refusals = append(refusals, errors.New("yard adoption requires converged configured VM CPU policy"))
+			refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires converged configured VM CPU policy"))
 		}
 		if state.Instance.Config["security.nesting"] != "" {
-			refusals = append(refusals, errors.New("yard adoption refuses container privileges on a VM"))
+			refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses container privileges on a VM"))
 		}
 	}
 	return domain.CollectRefusals(refusals...)
+}
+
+func (runtime Runtime) adoptionRefusal(reason string) error {
+	return domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New(reason), reason)
 }

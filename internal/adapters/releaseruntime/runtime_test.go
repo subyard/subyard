@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2042,7 +2043,25 @@ func TestPrepareTransitionReportsProtectedInspectionFailuresAsPublicOutcomes(t *
 	}
 }
 
-func TestPrepareTransitionRejectsDifferentTargetBeforePublication(t *testing.T) {
+func TestPrepareTransitionRoutesNewerTargetToReplacement(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	runtime := New(Config{
+		Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	_, err := runtime.PrepareTransition(
+		context.Background(), []string{"--version", "9.9.9", "--runtime-root", fixture.runtimeRoot},
+		fixture.configHome, "default",
+	)
+	if err == nil || !strings.Contains(err.Error(), "release download failed") {
+		t.Fatalf("newer-target update did not reach candidate download: %v", err)
+	}
+	if _, err := os.Lstat(fixture.publicationCapture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("newer-target update published before confirmation: %v", err)
+	}
+}
+
+func TestPrepareTransitionRejectsOlderTargetBeforePublication(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
 	runtime := New(Config{
 		Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
@@ -2051,12 +2070,12 @@ func TestPrepareTransitionRejectsDifferentTargetBeforePublication(t *testing.T) 
 
 	_, err := runtime.PrepareTransition(
 		context.Background(), []string{
-			"--version", "9.9.9", "--runtime-root", fixture.runtimeRoot,
+			"--version", "0.0.1", "--runtime-root", fixture.runtimeRoot,
 		},
 		fixture.configHome, "default",
 	)
 	if err == nil || !strings.Contains(err.Error(), "exact") {
-		t.Fatalf("different-target update error = %v", err)
+		t.Fatalf("older-target update error = %v", err)
 	}
 	if _, err := os.Lstat(fixture.publicationCapture); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("different-target update invoked publication: %v", err)
@@ -3292,5 +3311,96 @@ func TestRuntimeEngineDiagnosticsDistinguishReadAndMode(t *testing.T) {
 	diagnostic, ok := config.OwnerSourceDiagnostic(err)
 	if !ok || !strings.Contains(diagnostic, "mode=0600") || !strings.Contains(diagnostic, "mask=0111") || strings.Contains(diagnostic, "PRIVATE_ENGINE_BYTES") {
 		t.Fatal(diagnostic, err)
+	}
+}
+
+func TestNewerReleaseReplacementSelectsOnlyExplicitNewerVersion(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	store, err := releasetransition.NewPOSIXV2Store(fixture.configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, older := pinned, pinned
+	newer.Major++
+	older.Patch, older.Minor, older.Major = 0, 0, 0
+	explicit := options{version: newer.String(), versionExplicit: true}
+	selected := newerReleaseReplacement(explicit, fixture.configHome)
+	if selected == nil || selected.Transaction != journal.Transaction ||
+		selected.Fingerprint != snapshot.Fingerprint ||
+		selected.Reason != releasetransition.JournalReplacementNewerRelease {
+		t.Fatalf("selected replacement = %#v", selected)
+	}
+	for name, parsed := range map[string]options{
+		"implicit": {version: newer.String()},
+		"same":     {version: pinned.String(), versionExplicit: true},
+		"older":    {version: older.String(), versionExplicit: true},
+		"rollback": {version: newer.String(), versionExplicit: true, rollback: true},
+		"force":    {version: newer.String(), versionExplicit: true, force: true},
+		"tag":      {version: newer.String(), versionExplicit: true, tag: "v0.0.0"},
+		"invalid":  {version: "newest", versionExplicit: true},
+	} {
+		if selected := newerReleaseReplacement(parsed, fixture.configHome); selected != nil {
+			t.Fatalf("%s selected %#v", name, selected)
+		}
+	}
+	for _, source := range []string{"0.11.1-aaaaaaaaaaaa", "0.17.3-aaaaaaaaaaaa", "0.21.0-aaaaaaaaaaaa"} {
+		if !negotiatedRecoveryRelease(releasetransition.ReleaseID(source)) {
+			t.Fatalf("%s keeps its own recovery contract", source)
+		}
+	}
+	if negotiatedRecoveryRelease(journal.Goal.Target) {
+		t.Fatalf("%s has no recovery contract of its own", journal.Goal.Target)
+	}
+	if selected := newerReleaseReplacement(explicit, testkit.TempDir(t)); selected != nil {
+		t.Fatalf("absent journal selected %#v", selected)
+	}
+	complete := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	if selected := newerReleaseReplacement(explicit, complete.configHome); selected != nil {
+		t.Fatalf("completed journal selected %#v", selected)
+	}
+}
+
+func TestNewerReleaseAfterInspectionErrorKeepsExperimentalRefusal(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	parsed := options{version: "9.9.9", versionExplicit: true}
+	if selected := newerReleaseAfterInspectionError(parsed, fixture.configHome, errors.New("owner failed")); selected == nil {
+		t.Fatal("a failed owner inspection blocked the newer release")
+	}
+	wrapped := fmt.Errorf("inspect owner: %w", unsupportedReleaseOwnerError{})
+	if selected := newerReleaseAfterInspectionError(parsed, fixture.configHome, wrapped); selected != nil {
+		t.Fatalf("experimental owner selected %#v", selected)
+	}
+}
+
+func TestNewerReleaseConsequenceOnlyWhenReplacementCanHappen(t *testing.T) {
+	request := releasetransition.ProcessRequest{Replacement: &releasetransition.JournalReplacement{
+		Reason: releasetransition.JournalReplacementNewerRelease,
+	}}
+	inspection := releasetransition.Inspection{}
+	inspection.Assessment.Consequences = []string{"existing"}
+	disclosed, changed := withNewerReleaseConsequence(request, inspection)
+	if !changed || !slices.Equal(disclosed.Assessment.Consequences, []string{newerReleaseConsequence, "existing"}) {
+		t.Fatalf("disclosed consequences = %#v", disclosed.Assessment.Consequences)
+	}
+	inspection.Blockers = []releasetransition.Blocker{{Code: releasetransition.CodePlanStale}}
+	if blocked, changed := withNewerReleaseConsequence(request, inspection); changed ||
+		!slices.Equal(blocked.Assessment.Consequences, []string{"existing"}) {
+		t.Fatalf("blocked consequences = %#v", blocked.Assessment.Consequences)
+	}
+	inspection.Blockers = nil
+	if _, changed := withNewerReleaseConsequence(releasetransition.ProcessRequest{}, inspection); changed {
+		t.Fatal("ordinary update disclosed a replacement")
 	}
 }

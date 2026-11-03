@@ -141,6 +141,10 @@ func (replacement JournalReplacement) Validate() error {
 		if replacement.SourceVersion != "" {
 			return invalid("pre-activation journal replacement has a source version")
 		}
+	case JournalReplacementNewerRelease:
+		if replacement.SourceVersion != "" {
+			return invalid("newer release journal replacement has a source version")
+		}
 	case JournalReplacementPostActivationScopeV0111:
 		if !validCanonicalSemver(replacement.SourceVersion) {
 			return invalid("post-activation journal replacement has an invalid source version")

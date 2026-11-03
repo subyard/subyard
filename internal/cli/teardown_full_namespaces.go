@@ -32,7 +32,7 @@ func fullRootNamespaces(root string, installation uninstall.Installation, execut
 		}
 	case installation.ConfigHome:
 		scoped = true
-		owned = []string{"config.env", "settings.env", "host.env", "overrides.env", "hosts", "host", "yards", "generated", "projects", "keys", "tools", "git", "recovery", "migrations", "owner-inventory", "host-id", "host-id.json", "configuration-source.json", "config-source.json", "source.json", "settings", ".sync", "overrides", "secrets", "release-transition", "host-id-rename.json", "reconcile"}
+		owned = []string{"release-transition-replaced-journals", "config.env", "settings.env", "host.env", "overrides.env", "hosts", "host", "yards", "generated", "projects", "keys", "tools", "git", "recovery", "migrations", "owner-inventory", "host-id", "host-id.json", "configuration-source.json", "config-source.json", "source.json", "settings", ".sync", "overrides", "secrets", "release-transition", "host-id-rename.json", "reconcile"}
 	case installation.RuntimeRoot:
 		scoped = true
 		owned = []string{"current", "previous", "releases", uninstall.ManifestName, "update.lock"}

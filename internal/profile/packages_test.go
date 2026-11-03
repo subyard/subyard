@@ -219,7 +219,9 @@ func TestPackagesBindDescriptorlessSourcesAndCompleteProvisionBundle(t *testing.
 	if err := binding.Check(); err == nil {
 		t.Fatal("new bundle file accepted")
 	}
-	if err := os.Remove(filepath.Join(dir, "profile.conf")); err != nil {
+	// Keep the old inode allocated: the filesystem may otherwise reuse it within
+	// one timestamp tick, leaving the replacement with an identical identity.
+	if err := os.Rename(filepath.Join(dir, "profile.conf"), filepath.Join(testkit.TempDir(t), "replaced.conf")); err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(dir, "profile.conf"), []byte("PROFILE_NAME=sample\n"), 0o644)

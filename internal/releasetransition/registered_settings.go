@@ -61,12 +61,16 @@ func (t *V2Transition) inspectRegisteredSettings(ctx context.Context, m Migratio
 	var refusals []error
 	for _, owner := range t.nativeOwners(m) {
 		_, err := observeRegisteredOwner(ctx, owner, t.options.Releases, links, view)
-		refusals = append(refusals, err)
+		refusals = append(refusals, scopedNativeRefusals(owner.ID(), err))
 		if ctx.Err() != nil {
 			break
 		}
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil {
+		if hasMigrationRefusal(err) {
+			plan.Blockers = append(plan.Blockers, nativeRefusalBlocker("migration."+m.ID, err, ctx))
+			return plan, nil
+		}
 		return plan, err
 	}
 	for _, owner := range t.nativeOwners(m) {

@@ -43,33 +43,9 @@ func (store *POSIXV2Store) cleanupClosedMigrationTransactions(current Transactio
 			if _, protected := graph.protected[string(transaction)]; protected {
 				continue
 			}
-			journal, err := store.sourceRetainedTerminalEvidence(transaction, registry)
+			journal, err := store.closedTransactionEvidence(transaction, registry)
 			if err != nil {
 				return err
-			}
-			if err := store.sourceTransactionArtifacts(journal); err != nil {
-				return err
-			}
-			advanced := make(map[string]bool)
-			for _, step := range journal.Steps {
-				if step.ID == step.Migration+".ledger" {
-					advanced[step.Migration] = true
-				}
-			}
-			for _, step := range journal.Steps {
-				var migration MigrationDefinitionV2
-				for _, definition := range registry.Migrations {
-					if definition.ID == step.Migration {
-						migration = definition
-						break
-					}
-				}
-				if migration.ID == "" || !advanced[step.Migration] {
-					return errors.New("retained migration artifacts have no supported closed ledger step")
-				}
-				if err := store.terminalStepArtifacts(journal, step, migration); err != nil {
-					return err
-				}
 			}
 			// Closure is not a retention reference. Only live verified runtime
 			// endpoints or the validated frozen projection retain an otherwise
@@ -99,4 +75,38 @@ func (store *POSIXV2Store) cleanupClosedMigrationTransactions(current Transactio
 		}
 		return nil
 	})
+}
+
+// closedTransactionEvidence proves a transaction directory holds complete terminal
+// evidence, the condition for it to stay under ordinary retention.
+func (store *POSIXV2Store) closedTransactionEvidence(transaction TransactionID, registry RegistryV2) (JournalRecord, error) {
+	journal, err := store.sourceRetainedTerminalEvidence(transaction, registry)
+	if err != nil {
+		return journal, err
+	}
+	if err := store.sourceTransactionArtifacts(journal); err != nil {
+		return journal, err
+	}
+	advanced := make(map[string]bool)
+	for _, step := range journal.Steps {
+		if step.ID == step.Migration+".ledger" {
+			advanced[step.Migration] = true
+		}
+	}
+	for _, step := range journal.Steps {
+		var migration MigrationDefinitionV2
+		for _, definition := range registry.Migrations {
+			if definition.ID == step.Migration {
+				migration = definition
+				break
+			}
+		}
+		if migration.ID == "" || !advanced[step.Migration] {
+			return journal, errors.New("retained migration artifacts have no supported closed ledger step")
+		}
+		if err := store.terminalStepArtifacts(journal, step, migration); err != nil {
+			return journal, err
+		}
+	}
+	return journal, nil
 }

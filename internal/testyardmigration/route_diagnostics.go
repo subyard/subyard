@@ -3,6 +3,8 @@ package testyardmigration
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -18,6 +20,7 @@ type routeActivationDiagnostic struct {
 func (failure *routeActivationDiagnostic) Error() string            { return failure.cause.Error() }
 func (failure *routeActivationDiagnostic) Unwrap() error            { return failure.cause }
 func (failure *routeActivationDiagnostic) ActivationConflict() bool { return failure.conflict }
+func (failure *routeActivationDiagnostic) MigrationRefusal() bool   { return failure.conflict }
 func (failure *routeActivationDiagnostic) ActivationDiagnostic() (string, string) {
 	return failure.message, failure.retry
 }
@@ -87,4 +90,80 @@ func ownerStateDiagnostic(cause error, reason string) error {
 		retry:    "inspect and repair the conflicting owner registration or controller state, then run yard update",
 		conflict: true,
 	}
+}
+
+func reservedRegistrationDiagnostic(path, yard string) *routeActivationDiagnostic {
+	relative := "yards/" + yard + "/config.env"
+	if filepath.Base(path) == yard+".env" {
+		relative = "yards/" + yard + ".env"
+	}
+	return &routeActivationDiagnostic{
+		cause:    fmt.Errorf("%s does not select YARD_TEMPLATE=test-vms", yard),
+		message:  "reserved yard name " + yard + ": config-home-relative " + relative + " must select YARD_TEMPLATE=test-vms",
+		retry:    "set YARD_TEMPLATE=test-vms in " + relative + ", or rename the unrelated yard registration, then run yard update --check",
+		conflict: true,
+	}
+}
+
+// Inspect the two reserved registrations independently; neither refusal hides
+// the other. Inheritance remains supported only for the current registration.
+func inspectReservedRegistration(options Options, path, yard string) error {
+	payload, err := readRegistration(options, path)
+	if err == nil && selectsTestVMs(string(payload)) {
+		return nil
+	}
+	if err == nil && yard == CurrentYard && filepath.IsAbs(options.RepositoryRoot) {
+		var loaded config.Loaded
+		loaded, err = loadBrokerYard(options, CurrentYard)
+		if err != nil {
+			return routeConfigDiagnostic(err, "owner registration settings cannot be loaded", yard, options.ConfigHome)
+		}
+		if loaded.Environment["YARD_TEMPLATE"] == "test-vms" {
+			return nil
+		}
+	}
+	if err != nil {
+		// Paths are derived from fixed names; never copy parser or filesystem text.
+		diagnostic := reservedRegistrationDiagnostic(path, yard)
+		diagnostic.cause = err
+		diagnostic.message = strings.TrimSuffix(diagnostic.message, " must select YARD_TEMPLATE=test-vms") + " cannot be read safely"
+		diagnostic.retry = "inspect and repair the named registration settings, then run yard update --check"
+		diagnostic.conflict = false
+		return diagnostic
+	}
+	return reservedRegistrationDiagnostic(path, yard)
+}
+
+func registrationRefusals(findings ...error) error {
+	cause := domain.CollectRefusals(findings...)
+	if _, public := cause.(interface{ ActivationDiagnostic() (string, string) }); public {
+		return cause
+	}
+	var refusals *domain.Refusals
+	if !errors.As(cause, &refusals) {
+		return cause
+	}
+	var messages []string
+	conflict := true
+	actions := []string{}
+	for _, finding := range refusals.Unwrap() {
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		if !errors.As(finding, &diagnostic) {
+			return cause
+		}
+		message, action := diagnostic.ActivationDiagnostic()
+		actions = append(actions, action)
+		if len(message) > 254 {
+			message = message[:251]
+			for !utf8.ValidString(message) {
+				message = message[:len(message)-1]
+			}
+			message += "..."
+		}
+		messages = append(messages, message)
+		var ambiguous interface{ ActivationConflict() bool }
+		conflict = conflict && errors.As(finding, &ambiguous) && ambiguous.ActivationConflict()
+	}
+	retry := strings.Join(actions, ", then ")
+	return &routeActivationDiagnostic{cause: cause, message: strings.Join(messages, "; "), conflict: conflict, retry: retry}
 }

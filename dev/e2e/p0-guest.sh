@@ -2004,6 +2004,14 @@ capacity_verify_cleanup() {
     p0_capacity_remove_build_cache
     p0_capacity_remove_root_if_empty
     ;;
+  newer-release)
+    p0_capacity_use_build_cache
+    ensure_owner_incus newer-release
+    bash dev/e2e/p0-real-incus.sh --prepare-only
+    bash dev/e2e/release-transition-newer-release-replacement.sh "$TOKEN"
+    p0_capacity_remove_build_cache
+    p0_capacity_remove_root_if_empty
+    ;;
   profile-resource)
     p0_capacity_use_build_cache
     ensure_owner_incus profile-resource

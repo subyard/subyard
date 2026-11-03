@@ -7,6 +7,8 @@ pool contains one or more shared slots and defaults to two. Each lease selects `
 each acquire creates fresh VM disks from a versioned immutable base. Release fences access and
 deletes the disposable disks. No guest state survives a lease as a supported continuation mechanism.
 
+The yard names `test-yard` and `e2e-yard` are reserved for registrations selecting `YARD_TEMPLATE=test-vms`; use another name for unrelated yards.
+
 The outer yard remains operator-owned. Agents can acquire inner slots, but cannot start a stopped
 outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycle commands.
 
@@ -850,6 +852,7 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1 when targeted/smoke and in the full owner chain; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
+| `newer-release` | VM1; published v0.19.0 download, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |

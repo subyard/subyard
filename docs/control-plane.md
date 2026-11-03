@@ -542,6 +542,7 @@ Activation observers do not print diagnostics. Return expected drift as
 failures as errors. The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
+Registered-migration summaries drop names before reason classes when the frozen message bound is reached. Full filtered verdict details are available on the stderr of `yard update --check`; `yard status` and resource-shutdown probes discard this diagnostic stream. Mixed dependency failures retain their original stderr detail and yard identity; raw dependency text does not enter the JSON report.
 Mutation refusals retain the verified inspection’s public decisions and blockers;
 a later readiness observation does not replace the refused resource or reason.
 
@@ -783,7 +784,9 @@ retained terminal artifacts may belong only to its journal's exact source or pre
 The previous release is independently sealed and must have the identical verified source registry.
 Receipt replay validates these identities and evidence; recorded transaction IDs remain protected
 from cleanup. Other earlier releases and arbitrary same-registry targets are unsupported, and
-unknown artifacts and graphs remain blocked. A fresh grant publishes immutable typed predecessor
+unknown artifacts and graphs remain blocked. The candidate registry must equal the predecessor's,
+which holds through v0.25.1: a host interrupted on v0.21.0 is replaced by standalone v0.25.1 and
+then updates normally, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
 and initial-successor evidence under `release-transition/migration-owner/v1/transactions` before
 current-journal CAS. The original activation remains unfinished superseded evidence; ordinary V2
 resume belongs to the candidate successor. This exception does not widen either activation-only
@@ -919,6 +922,35 @@ cleanup does not preserve data or automatically reinstall. See [full removal](co
 and the [support inventory](reference/legacy-migration-support.md).
 
 ### Interrupted release recovery
+
+An unfinished forward update pins its exact target, so a plain `yard update` only resumes it. To
+leave a failed update, publish a fixed release and select it explicitly: a release newer than the
+pinned target replaces the unfinished journal, before or after activation. A host whose active
+launcher predates this contract refuses a different version, so it uses the new release's own launcher:
+
+```bash
+VERSION=<fixed version>
+curl -fsSL --proto '=https' --tlsv1.2 \
+  "https://github.com/Subyard/Subyard/releases/download/v${VERSION}/subyard-install.sh" \
+  | bash -s -- --publish-only --version "$VERSION"
+# Run the launcher in the candidate directory that the installer printed:
+<candidate>/bin/yard update --offline --version "$VERSION" --check
+<candidate>/bin/yard update --offline --version "$VERSION"
+```
+
+A launcher that has this contract accepts `yard update --version "$VERSION"` directly.
+
+The newer release plans from the links it observes and requires fresh consent; the earlier grant
+authorizes nothing. It does not undo completed effects: restarts, guest policy and rewritten settings stay
+as they are, and it migrates from them. If those effects refuse the new plan, correct the named setting
+by hand and retry. The replaced journal stays byte-exact under
+`release-transition-replaced-journals/v1/` in the configuration directory. An unclosed transaction directory joins it when
+the successor closes, and closed evidence stays under ordinary retention, so a fix that also fails can be replaced by a
+later release. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
+
+An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
+migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate itself refuses a recovery
+successor, a journal that already superseded another or that a live recovery reserves, and links the journal does not allow.
 
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone

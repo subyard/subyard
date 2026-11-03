@@ -46,24 +46,12 @@ func (client *Client) VMCPUConverged(ctx context.Context, project, name string, 
 		if ready, err := client.VMCPUConverged(ctx, project, name, false); err != nil || ready {
 			return ready, err
 		}
-		// Re-read Incus and the process inside the privileged helper rather than
-		// accepting a caller-supplied PID, UUID or scheduling value.
-		engine, err := os.Executable()
-		if err != nil {
-			return false, err
-		}
 		socket := client.socket
 		if socket == "" {
 			socket = os.Getenv("INCUS_SOCKET")
 		}
-		command := exec.CommandContext(ctx, "sudo", "-n", "--", engine, "_vm-cpu", "apply", project, name, socket)
-		var diagnostic bytes.Buffer
-		command.Stderr = &diagnostic
-		if err := command.Run(); err != nil {
-			if message := strings.TrimSpace(diagnostic.String()); strings.HasPrefix(message, "VM CPU scheduling: ") {
-				return false, fmt.Errorf("%s: %w", message, err)
-			}
-			return false, fmt.Errorf("apply VM CPU weight requires noninteractive root authorization: %w", err)
+		if err := runVMCPUHelper(ctx, project, name, socket); err != nil {
+			return false, err
 		}
 		return client.VMCPUConverged(ctx, project, name, false)
 	}
@@ -79,6 +67,49 @@ func (client *Client) VMCPUConverged(ctx context.Context, project, name string, 
 		return false, errors.New("VM power changed before host CPU scheduling")
 	}
 	return hostruntime.VMCPUWeight(ctx, state.Pid, instance.Config["volatile.uuid"], weight, apply)
+}
+
+// runVMCPUHelper re-reads Incus and the process inside the privileged helper
+// rather than accepting a caller-supplied PID, UUID or scheduling value.
+func runVMCPUHelper(ctx context.Context, project, name, socket string) error {
+	engine, err := vmCPUHelperPath()
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, "sudo", "-n", "--", engine, "_vm-cpu", "apply", project, name, socket)
+	var diagnostic bytes.Buffer
+	command.Stderr = &diagnostic
+	err = command.Run()
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(diagnostic.String())
+	if strings.HasPrefix(message, "VM CPU scheduling: ") {
+		return fmt.Errorf("%s: %w", message, err)
+	}
+	// The helper reports an unconverged weight only through its exit status;
+	// sudo always explains its own refusals, so do not guess at their cause.
+	if message == "" {
+		return fmt.Errorf("VM host CPU weight did not converge: %w", err)
+	}
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	return fmt.Errorf("apply VM CPU weight as root: %s: %w", message, err)
+}
+
+// vmCPUHelperPath names an image sudo can resolve. A release transition runs a
+// sealed memfd, whose reported path does not exist; this waiting process keeps
+// the same verified image reachable through its process-qualified path.
+func vmCPUHelperPath() (string, error) {
+	engine, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(engine, "/memfd:") {
+		return fmt.Sprintf("/proc/%d/exe", os.Getpid()), nil
+	}
+	return engine, nil
 }
 
 func (client *Client) applyVMCPU(ctx context.Context, project, name string) error {

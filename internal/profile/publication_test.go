@@ -108,6 +108,19 @@ func TestObservedPublicationUsesTypedHistoricalRecipeAndProtectedIdentity(t *tes
 			if (err == nil) != test.valid {
 				t.Fatalf("observed=%#v err=%v", observed, err)
 			}
+			if !test.valid {
+				var verdict interface {
+					MigrationRefusal() bool
+					ActivationDiagnostic() (string, string)
+				}
+				if !errors.As(err, &verdict) || !verdict.MigrationRefusal() {
+					t.Fatalf("publication verdict became dependency: %v", err)
+				}
+				message, _ := verdict.ActivationDiagnostic()
+				if !strings.Contains(message, "yard fixture:") || !strings.Contains(message, "synthetic") || strings.Contains(message, test.recipe) {
+					t.Fatalf("unsafe publication diagnostic: %q", message)
+				}
+			}
 			if test.valid && !strings.Contains(observed[definition.InstancePublication.RevisionKey], `"SYN_CPU":"`+test.cpu+`"`) {
 				t.Fatal("observation was replaced with current defaults")
 			}
@@ -159,6 +172,44 @@ func TestAdoptionTakesHistoricalDisabledPublicationAsFound(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if observed, err := definition.ObserveInstancePublication(test.local, test.effective, test.environment, accept); err == nil {
 				t.Fatalf("accepted: %#v", observed)
+			}
+		})
+	}
+}
+
+func TestObservedPublicationRefusalBranches(t *testing.T) {
+	legacy := "one"
+	definition := Definition{Name: "synthetic", InstancePublication: &RevisionedSettingsPublication{SchemaKey: "user.subyard.synthetic_schema", SchemaValue: "1", RevisionKey: "user.subyard.synthetic_revision", DisabledSetting: "SYN_ENABLED", LegacySettingsCount: 1, Settings: []PublicationSetting{{Name: "SYN_IMAGE"}, {Name: "SYN_CPU", LegacyDefault: &legacy}}}}
+	for _, branch := range []string{"revision malformed", "enabled"} {
+		t.Run(branch, func(t *testing.T) {
+			mode := "0"
+			revision := "0:not-a-hash:images:debian/13:8"
+			if branch == "enabled" {
+				mode = "1"
+				revision = "1:" + strings.Repeat("a", 64) + ":images:debian/13:8"
+			}
+			environment := map[string]string{"YARD_NAME": "fixture", "SYN_ENABLED": mode, "SYN_IMAGE": "images:debian/13", "SYN_CPU": "8"}
+			marker := map[string]string{definition.InstancePublication.SchemaKey: "1", definition.InstancePublication.RevisionKey: revision}
+			var err error
+			if branch == "enabled" {
+				_, err = definition.ProjectInstancePublication(marker, marker, environment)
+			} else {
+				_, err = definition.ObserveInstancePublication(marker, marker, environment, func(string, string) error { return nil })
+			}
+			expected := "native publication revision is malformed or differs from its protected mode"
+			if branch == "enabled" {
+				expected = "native publication is not supported while enabled"
+			}
+			var refusal interface {
+				MigrationRefusal() bool
+				ActivationDiagnostic() (string, string)
+			}
+			if err == nil || err.Error() != expected || !errors.As(err, &refusal) || !refusal.MigrationRefusal() {
+				t.Fatalf("branch %s did not retain its verdict: %v", branch, err)
+			}
+			message, _ := refusal.ActivationDiagnostic()
+			if !strings.Contains(message, expected) || !strings.Contains(message, "yard fixture") || strings.Contains(message, revision) {
+				t.Fatalf("unsafe/missing publication reason: %q", message)
 			}
 		})
 	}

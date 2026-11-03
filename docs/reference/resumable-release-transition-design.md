@@ -266,6 +266,12 @@ Before activation, errors leave the previous runtime active. A published candida
 change stable links. An unstarted valid plan reports `migration-required`; a valid authorized
 unfinished transaction reports `recovering`; ambiguous actual state requires operator action.
 
+An explicitly selected release newer than the pinned target may replace an unfinished forward journal
+at any checkpoint, with a fresh plan and fresh consent. This is forward recovery: nothing is undone, and
+no previous runtime runs. The plan binds the exact journal fingerprint. Its bytes and, once the successor closes, an
+unclosed transaction directory leave the transaction graph, so replacements may repeat and older engines read a clean graph. See
+[Interrupted release recovery](../control-plane.md#interrupted-release-recovery).
+
 Activation recognizes only the exact enumerated link checkpoints. Unknown/foreign link pairs yield
 `operator-action-required/activation-ambiguous` without heuristic switching. Once the candidate is
 active, recovery proceeds forward to its verified fixed point; the owner does not blindly run a
@@ -367,6 +373,8 @@ its registry to equal the verified source registry, then validates every retaine
 against the frozen projection. The receipt records these asset identities and transaction references;
 cleanup preserves the referenced artifacts. An ordinary zero-step source update needs no fabricated
 transaction directory. Other earlier releases and arbitrary same-registry targets remain unsupported.
+The candidate registry must equal the predecessor's, so supersession runs through v0.25.1, the last
+release with that registry, and an ordinary update continues from there.
 Unrecognized state, conflicting publication, ingress and recovery chains refuse supersession.
 
 A fresh candidate assessment and grant bind these facts and current activation consequences.

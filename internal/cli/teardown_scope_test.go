@@ -639,3 +639,14 @@ func TestLifecycleOnlyManagedPathsWaitForInstallationCleanup(t *testing.T) {
 		})
 	}
 }
+
+func TestFullTeardownOwnsReplacedJournalEvidence(t *testing.T) {
+	const root = "/config-home"
+	namespaces, scoped, err := fullRootNamespaces(root, uninstall.Installation{ConfigHome: root}, &fullTeardown{}, nil)
+	if err != nil || !scoped {
+		t.Fatalf("namespaces scoped=%v err=%v", scoped, err)
+	}
+	if !slices.Contains(namespaces, "release-transition-replaced-journals") {
+		t.Fatalf("namespaces = %v", namespaces)
+	}
+}

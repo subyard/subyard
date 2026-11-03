@@ -91,18 +91,18 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 		}
 		var refusals []error
 		if instance.Project != loaded.Context.IncusProject || instance.Name != loaded.Context.YardInstanceName || instance.Config["volatile.uuid"] == "" || instance.Config["user.subyard.name"] != loaded.Context.YardName || instance.Config["user.subyard.managed"] != "true" || instance.Config["user.subyard.bridge"] != loaded.Context.IncusBridge {
-			refusals = append(refusals, errors.New("registered yard native identity differs from protected registration"))
+			refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("registered yard native identity differs from protected registration"), "registered yard native identity differs from protected registration"))
 		}
 		for _, key := range []string{"volatile.uuid", "user.subyard.managed", "user.subyard.name", "user.subyard.bridge", "user.subyard.desired_power", "user.subyard.disk_tmp"} {
 			if instance.Config[key] != instance.LocalConfig[key] {
-				refusals = append(refusals, errors.New("registered yard identity or power is inherited or inconsistent"))
+				refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("registered yard identity or power is inherited or inconsistent"), "registered yard identity or power is inherited or inconsistent"))
 			}
 		}
 		if marker := instance.LocalConfig["user.subyard.disk_tmp"]; marker != "" && marker != "v1" {
-			refusals = append(refusals, errors.New("registered yard has foreign guest temporary policy metadata"))
+			refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("registered yard has foreign guest temporary policy metadata"), "registered yard has foreign guest temporary policy metadata"))
 		}
 		if power := instance.Config["user.subyard.desired_power"]; power != "running" && power != "stopped" {
-			refusals = append(refusals, errors.New("registered yard has no canonical desired power"))
+			refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("registered yard has no canonical desired power"), "registered yard has no canonical desired power"))
 		}
 		_, _, err = configsync.ResolveHostID(m.ConfigHome, loaded.Environment)
 		refusals = append(refusals, err)
@@ -187,7 +187,7 @@ func (m *RegisteredYardMigration) planEndpointSettings(plan *registeredYardPlan,
 				continue
 			}
 			if err := loaded.Catalog.ValidateSetting(config.ScopeYard, key, value, false); err != nil {
-				refusals = append(refusals, err)
+				refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, err, "registered endpoint value is invalid", key))
 				continue
 			}
 			plan.settingsDesired, err = config.EditPersistentAssignmentContent(plan.settingsPath, plan.settingsDesired, key, &value)
@@ -201,7 +201,7 @@ func (m *RegisteredYardMigration) planEndpointSettings(plan *registeredYardPlan,
 			source, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, m.ConfigHome, loaded.Context.YardName)
 			refusals = append(refusals, err)
 			if err == nil && source != plan.settingsPath {
-				refusals = append(refusals, errors.New("endpoint import requires a protected local yard registration; refusing to shadow the existing private or Git registration"))
+				refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("endpoint import requires a protected local yard registration; refusing to shadow the existing private or Git registration"), "endpoint import requires a protected local yard registration; refusing to shadow the existing private or Git registration"))
 			}
 		}
 	}

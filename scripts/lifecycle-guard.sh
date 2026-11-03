@@ -114,7 +114,7 @@ case "$action" in
         case "$vcstate" in
           active)
             ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
-            die "VS Code Remote-SSH or another SSH session is still connected to '$SSH_HOST' — close every remote window (File > Close Remote Connection) and shell, then retry; use '$(yard_cmd_hint) stop --force' only for emergency shutdown"
+            die "VS Code Remote-SSH, the SSH agent forwarder or another SSH session is still connected to '$SSH_HOST' — if the SSH agent is unlocked, run '$(yard_cmd_hint) ssh-agent lock'; close every remote window (File > Close Remote Connection) and shell, then retry; use '$(yard_cmd_hint) stop --force' only for emergency shutdown"
             ;;
           unknown)
             ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"

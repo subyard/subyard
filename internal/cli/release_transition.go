@@ -119,6 +119,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	reconcilers := cli.activationReconcilers(request)
 	ownerRegistration := cli.ownerRegistrationTransition(request)
 	ingressFactory := cli.releaseTransitionIngressFactory(request)
+	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
 	response, err := executeReleaseTransitionRequest(
 		ctx, cli.options.RepositoryRoot, request,
 		func(plan releasetransition.PlanToken, authorization releasetransition.Authorization) bool {

@@ -99,7 +99,7 @@ done
     [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
   done
   for P0_LANE in boundary nested-teardown transport dependencies real-incus profile-resource producer-reboot release \
-    source-upgrade power-systemd reboot-verify peer-cleanup cleanup full-uninstall; do
+    source-upgrade power-systemd newer-release reboot-verify peer-cleanup cleanup full-uninstall; do
     [ "$(lane_vm_count)" = 1 ] || fail "single-host P0 lane requested a pair: $P0_LANE"
   done
   P0_LANE=nested-teardown P0_NESTED_VM=2
@@ -1552,7 +1552,7 @@ while IFS= read -r lane; do
   grep -Fq "\`$lane\`" <<<"$lane_table" \
     || fail "public P0 lane table omitted $lane"
 done <<<"$lane_inventory"
-grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup' <<<"$lane_inventory" \
+grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power-systemd newer-release release-smoke peer cleanup' <<<"$lane_inventory" \
   || fail 'continuous P0 gate lost a mandatory public-contract phase'
 
 (
@@ -4666,6 +4666,7 @@ for full_failure in success cleanup final-boundary; do
       }
       transport_probes() { :; }
       run_full_matrix_phase() { :; }
+      run_vm() { :; }
       release_smoke_lane() { :; }
       peer_lane() { :; }
       cleanup_lane() {
