@@ -2,6 +2,7 @@
 """Give a fixture one separate, fully disclosed migration confirmation."""
 import argparse
 import errno
+import json
 import math
 import os
 import pty
@@ -15,11 +16,25 @@ parser.add_argument('--yard', required=True)
 parser.add_argument('--answer', choices=('yes', 'no', 'eof'), default='yes')
 parser.add_argument('--timeout', type=float, default=900)
 parser.add_argument('--allow-no-prompt', action='store_true')
+parser.add_argument('--journal', help='journal observed for --interrupt-at')
+parser.add_argument('--interrupt-at', metavar='CHECKPOINT', help='kill the command once the journal reaches it')
 parser.add_argument('command', nargs=argparse.REMAINDER)
 args = parser.parse_args()
 command = args.command[1:] if args.command[:1] == ['--'] else args.command
 if not command or not math.isfinite(args.timeout) or args.timeout <= 0:
     parser.error('a command and positive timeout are required')
+if bool(args.journal) != bool(args.interrupt_at):
+    parser.error('--journal and --interrupt-at are required together')
+
+
+def reached_checkpoint():
+    try:
+        with open(args.journal, encoding='utf-8') as journal:
+            return json.load(journal).get('checkpoint') == args.interrupt_at
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+
 disclosure = (f'yard {args.yard}: restart to finish disk-backed /tmp migration\nThis will:\n'
               '  - stop and start this yard; interrupt its active processes and connections; reset /tmp on boot\n'
               '  - retain persistent data and instance UUID; restore desired power running\n\nProceed? [y/N]').encode()
@@ -54,6 +69,10 @@ try:
                     sys.exit(97)
                 os.write(terminal, {'yes': b'y\n', 'no': b'n\n', 'eof': b'\x04'}[args.answer])
                 answered, tail = True, b''
+        if status is None and args.interrupt_at and reached_checkpoint():
+            os.killpg(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            os._exit(0)
         if status is None:
             exited, observed = os.waitpid(pid, os.WNOHANG)
             if exited:

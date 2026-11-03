@@ -153,7 +153,7 @@ require_refusal() { # case reason...
 }
 
 check_refusals() {
-  local srv foreign=user.subyard.disk_tmp srv_reason='srv device that is missing or differs'
+  local srv foreign=user.subyard.disk_tmp srv_reason='a missing or different srv device'
   local foreign_reason='foreign guest temporary policy metadata'
   srv="$(incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -c .devices.srv)"
   [ "$srv" != null ] || die 'srv is not a local device'
@@ -247,29 +247,29 @@ main_newer_release() {
     > "$FIXTURE_ROOT/decline.log" 2>&1 || rc=$?
   [ "$rc" != 0 ] && grep -Eiq 'confirm' "$FIXTURE_ROOT/decline.log" || die 'replacement did not ask for fresh consent'
   cmp "$JOURNAL" "$FIXTURE_ROOT/pre-journal.json"
-  fixture_env python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard "$YARD_NAME" --allow-no-prompt -- \
-    "$LAUNCHER" update --offline --version "${VERSIONS[1]}" --yes
+  # The migration finishes and activates, and only reconciliation stops: its journal holds real steps.
+  fixture_env python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard "$YARD_NAME" --allow-no-prompt \
+    --journal "$JOURNAL" --interrupt-at reconciling -- \
+    "$LAUNCHER" update --offline --version "${VERSIONS[1]}" --yes > "$FIXTURE_ROOT/migrated-stuck.log" 2>&1 \
+    || { tail -40 "$FIXTURE_ROOT/migrated-stuck.log"; die 'migrated update did not stop at reconciliation'; }
   require_replaced "$FIXTURE_ROOT/pre-journal.json"
-  # This leg replaces a journal that holds evidence, so its directory must leave the graph.
-  local pre_transaction
-  pre_transaction="$(jq -er .transaction "$FIXTURE_ROOT/pre-journal.json")"
-  [ ! -e "$CONFIG_HOME/release-transition/v2/transactions/$pre_transaction" ] \
-    && [ -d "$CONFIG_HOME/release-transition-replaced-journals/v1/$pre_transaction.transaction" ] \
-    || die 'replaced transaction stayed in the graph'
-  require_ready "${VERSIONS[1]}"
 
-  # After activation: the new release is already active and its transition stopped.
-  stage "${VERSIONS[2]}"
-  interrupt_at_reconciling "${VERSIONS[2]}"
-  jq -e '.checkpoint=="reconciling"' "$JOURNAL" >/dev/null || die 'activated journal shape differs'
-  [ "$(active_version)" = "yard ${VERSIONS[2]}" ] || die 'interrupted release is not active'
+  # After activation: the migrated release is already active and its transition stopped.
+  jq -e '.checkpoint=="reconciling" and (.steps|length)>0' "$JOURNAL" >/dev/null || die 'activated journal shape differs'
+  [ "$(active_version)" = "yard ${VERSIONS[1]}" ] || die 'interrupted release is not active'
   cp "$JOURNAL" "$FIXTURE_ROOT/post-journal.json"
+  stage "${VERSIONS[2]}"
+  require_fresh_plan "${VERSIONS[2]}"
+  interrupt_at_reconciling "${VERSIONS[2]}"
+  require_replaced "$FIXTURE_ROOT/post-journal.json"
+  [ "$(active_version)" = "yard ${VERSIONS[2]}" ] || die 'interrupted replacement is not active'
+  cp "$JOURNAL" "$FIXTURE_ROOT/first-fix-journal.json"
 
   # The first fix stops the same way; a later fix must still be able to take over.
   stage "${VERSIONS[3]}"
   require_fresh_plan "${VERSIONS[3]}"
   interrupt_at_reconciling "${VERSIONS[3]}"
-  require_replaced "$FIXTURE_ROOT/post-journal.json"
+  require_replaced "$FIXTURE_ROOT/first-fix-journal.json"
   [ "$(active_version)" = "yard ${VERSIONS[3]}" ] || die 'interrupted replacement is not active'
   cp "$JOURNAL" "$FIXTURE_ROOT/chain-journal.json"
 
@@ -284,13 +284,20 @@ main_newer_release() {
     "$LAUNCHER" update --version "${VERSIONS[4]}" --yes
   require_replaced "$FIXTURE_ROOT/chain-journal.json"
   local replaced
-  for replaced in post chain; do
+  # Only the closing update sweeps. Unclosed evidence moves out of the graph, while the
+  # activated journal with complete evidence stays under ordinary retention.
+  local pre_transaction
+  pre_transaction="$(jq -er .transaction "$FIXTURE_ROOT/pre-journal.json")"
+  [ ! -e "$CONFIG_HOME/release-transition/v2/transactions/$pre_transaction" ] \
+    && [ -d "$CONFIG_HOME/release-transition-replaced-journals/v1/$pre_transaction.transaction" ] \
+    || die 'replaced transaction with unclosed evidence stayed in the graph'
+  for replaced in first-fix chain; do
     [ ! -e "$CONFIG_HOME/release-transition/v2/transactions/$(jq -er .transaction "$FIXTURE_ROOT/$replaced-journal.json")" ] \
       || die "$replaced transaction stayed in the graph"
   done
   jq -e '.checkpoint=="complete"' "$JOURNAL" >/dev/null || die 'final replacement did not close'
   require_ready "${VERSIONS[4]}"
-  printf 'ok: refusals named their yard; newer releases replaced unfinished journals before and after activation, a failed replacement, and through the active launcher\n'
+  printf 'ok: refusals named their yard; newer releases replaced unfinished journals before and after activation with migration steps, a failed replacement, and through the active launcher\n'
 }
 
 main_newer_release "$@"

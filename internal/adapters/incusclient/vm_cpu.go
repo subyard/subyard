@@ -87,10 +87,17 @@ func runVMCPUHelper(ctx context.Context, project, name, socket string) error {
 	if strings.HasPrefix(message, "VM CPU scheduling: ") {
 		return fmt.Errorf("%s: %w", message, err)
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("apply VM CPU weight as root: %w", ctxErr)
+	}
 	// The helper reports an unconverged weight only through its exit status;
 	// sudo always explains its own refusals, so do not guess at their cause.
-	if message == "" {
+	var exit *exec.ExitError
+	if message == "" && errors.As(err, &exit) {
 		return fmt.Errorf("VM host CPU weight did not converge: %w", err)
+	}
+	if message == "" {
+		return fmt.Errorf("apply VM CPU weight as root: %w", err)
 	}
 	if len(message) > 2048 {
 		message = message[:2048]

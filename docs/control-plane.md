@@ -945,8 +945,10 @@ authorizes nothing. It does not undo completed effects: restarts, guest policy a
 as they are, and it migrates from them. If those effects refuse the new plan, correct the named setting
 by hand and retry. The replaced journal stays byte-exact under
 `release-transition-replaced-journals/v1/` in the configuration directory. An unclosed transaction directory joins it when
-the successor closes, and closed evidence stays under ordinary retention, so a fix that also fails can be replaced by a
-later release. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
+the successor closes, so a fix that also fails can be replaced by a later release. Re-running the installer selects this
+contract too when it picks a newer release, and `--yes` consents without showing the replacement line. A directory whose evidence is already
+complete counts as closed even if its journal stopped earlier: it stays under ordinary retention, and after that only the
+journal copy remains. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
 
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
 migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate itself refuses a recovery

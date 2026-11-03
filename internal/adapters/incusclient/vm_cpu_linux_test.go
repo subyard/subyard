@@ -2,12 +2,14 @@ package incusclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -82,6 +84,39 @@ func TestVMCPUHelperReachesSealedEngineThroughSudo(t *testing.T) {
 	if want := " _vm-cpu apply subyard yard /run/incus.sock\n"; !strings.HasSuffix(string(invocation), want) {
 		t.Fatalf("helper invocation = %q", invocation)
 	}
+}
+
+func TestVMCPUHelperPathKeepsOrdinaryEngine(t *testing.T) {
+	want, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := vmCPUHelperPath()
+	if err != nil || got != want {
+		t.Fatalf("vmCPUHelperPath() = %q, %v, want %q", got, err, want)
+	}
+}
+
+func TestVMCPUHelperFailureWithoutHelperIsNotConvergence(t *testing.T) {
+	t.Run("sudo is missing", func(t *testing.T) {
+		t.Setenv("PATH", testkit.TempDir(t))
+		err := runVMCPUHelper(context.Background(), "subyard", "yard", "")
+		var missing *exec.Error
+		if !errors.As(err, &missing) || strings.Contains(err.Error(), "did not converge") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("deadline stays identifiable", func(t *testing.T) {
+		root := testkit.TempDir(t)
+		testkit.WriteFile(t, filepath.Join(root, "sudo"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o700)
+		t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		err := runVMCPUHelper(ctx, "subyard", "yard", "")
+		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "did not converge") {
+			t.Fatalf("err = %v", err)
+		}
+	})
 }
 
 func TestVMCPUHelperFailureNamesTheActualCause(t *testing.T) {

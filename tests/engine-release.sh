@@ -30,7 +30,7 @@ chmod 0600 "$ROOT/config/preview/instructions.md"
 release="$TMP/release"
 # Release activation observes a reachable native API with an absent instance,
 # rather than confusing a missing transport with an absent managed yard.
-go build -o "$TMP/empty-incus" ./internal/testkit/cmd/empty-incus
+go build -buildvcs=false -o "$TMP/empty-incus" ./internal/testkit/cmd/empty-incus
 "$TMP/empty-incus" "$TMP" > "$TMP/empty-incus.log" 2>&1 &
 incus_pid=$!
 for ((attempt = 0; attempt < 100; attempt++)); do
@@ -1004,7 +1004,7 @@ cp "$TMP/release-transition.historical.json" "$ROOT/config/release-transition.js
 "$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.2 >/dev/null
 )
 recovery_fixture="$TMP/release-transition-fixture"
-go build -o "$recovery_fixture" "$ROOT/tests/helpers/release-transition-fixture"
+go build -buildvcs=false -o "$recovery_fixture" "$ROOT/tests/helpers/release-transition-fixture"
 recovery_home="$TMP/v0111-recovery-home"
 recovery_runtime="$recovery_home/runtime"
 recovery_config="$recovery_home/config"
@@ -1325,8 +1325,24 @@ for recovery_mutation in $recovery_negative_mutations; do
     SUBYARD_POWER_RECONCILER_PATH="$negative_power_reconciler" \
     SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
     "$recovery_release/subyard-install.sh" --yes > "$negative_run_output" 2>&1; then
-    fail "ineligible v0.11.1 $recovery_mutation fixture was recovered"
+    # This journal is outside the negotiated v0.11.1 recovery, so the general
+    # contract applies: an explicit newer release replaces it and keeps its bytes.
+    [ "$recovery_mutation" = source-version ] \
+      || fail "ineligible v0.11.1 $recovery_mutation fixture was recovered"
+    find "$negative_config/release-transition-replaced-journals/v1" -maxdepth 1 -type f \
+      -name 'tx-source-v0111-*.json' -print -quit | grep -q . \
+      || fail 'newer release did not keep the journal it replaced'
+    jq -e '.checkpoint == "complete"' "$negative_config/release-transition/v2/journal.json" >/dev/null \
+      || fail 'newer release did not close its replacement'
+    case "$(readlink "$negative_runtime/current")" in
+      releases/0.11.2-*) ;;
+      *) fail 'newer release is not active after its replacement' ;;
+    esac
+    rm -rf -- "$negative_root"
+    continue
   fi
+  [ "$recovery_mutation" != source-version ] \
+    || fail 'an explicit newer release could not replace an unfinished journal'
   find "$negative_runtime/releases" -mindepth 1 -maxdepth 1 -type d \
     -name "$negative_release_version-*" -print -quit | grep -q . \
     || fail "ineligible v0.11.1 $recovery_mutation fixture was not publication-only"
