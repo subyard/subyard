@@ -265,7 +265,7 @@ func TestFreshInitConvergesAfterFailedTemporaryStartRetirement(t *testing.T) {
 
 func TestRetiredProofStaysOutsideIntegrationBinding(t *testing.T) {
 	config := map[string]string{"limits.cpu": "2", retiredMarkerKey: "true"}
-	bound := cloneIntegrationConfig(config, false)
+	bound := cloneIntegrationConfig(config, nil, false)
 	if _, present := bound[retiredMarkerKey]; present || bound["limits.cpu"] != "2" {
 		t.Fatalf("bound config=%v", bound)
 	}

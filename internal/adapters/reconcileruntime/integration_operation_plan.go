@@ -14,6 +14,8 @@ import (
 func cloneIntegrationConfig(config map[string]string, devices []string, virtualMachine bool) map[string]string {
 	copy := maps.Clone(config)
 	delete(copy, "user.subyard.ccusage_version")
+	// Apply publishes this proof after approval; it is never desired integration state.
+	maps.DeleteFunc(copy, func(key, _ string) bool { return strings.HasPrefix(key, retiredIntegrationMarkerPrefix) })
 	DeleteInstanceLifecycleOutputs(copy, devices, virtualMachine)
 	return copy
 }
@@ -30,8 +32,6 @@ func DeleteInstanceLifecycleOutputs(values map[string]string, devices []string, 
 			return key == prefix+"host_name" || strings.HasPrefix(key, prefix+"last_state.")
 		})
 	}
-	// Apply publishes this proof after approval; it is never desired integration state.
-	maps.DeleteFunc(copy, func(key, _ string) bool { return strings.HasPrefix(key, retiredIntegrationMarkerPrefix) })
 	if virtualMachine {
 		for _, key := range []string{"volatile.vm.rtc_adjustment", "volatile.vm.rtc_offset"} {
 			if parsed, err := strconv.ParseInt(values[key], 10, 64); err == nil && strconv.FormatInt(parsed, 10) == values[key] {
