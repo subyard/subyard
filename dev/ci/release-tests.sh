@@ -137,6 +137,7 @@ install_runtime() {
 }
 
 # One slot per job. The reserve leaves a 9 GiB pair admissible on a 16 GiB runner.
+# Service installation needs a running Incus, and this process predates its admin group.
 install_pool() {
   install -d -m 0700 "$HOME/.config/subyard"
   cat >> "$HOME/.config/subyard/config.env" <<'CONFIG'
@@ -144,8 +145,8 @@ CODING_TOOL_INTEGRATIONS=''
 E2E_VM_SLOT_COUNT=1
 E2E_MEMORY_RESERVE=2GiB
 CONFIG
-  "$HOME/.local/bin/yard" service install test-vms --yes </dev/null
-  "$HOME/.local/bin/yard" test-vms status
+  sg incus-admin -c '"$HOME/.local/bin/yard" service install test-vms --yes </dev/null'
+  sg incus-admin -c '"$HOME/.local/bin/yard" test-vms status </dev/null'
 }
 
 controller_env() {
@@ -172,7 +173,8 @@ check_probes() {
   probe docker-removed drop_docker
   probe_after prepare-host candidate install_candidate "$BUNDLE"
   probe_after candidate candidate-runtime install_runtime
-  probe_after candidate-runtime test-vms-service install_pool
+  probe_after candidate-runtime incus-on-runner incus_platform
+  probe_after incus-on-runner test-vms-service install_pool
   probe_after test-vms-service "check:$id" run_check "$@"
   probe facts-after facts
   write_summary
@@ -230,16 +232,29 @@ vm_reboot() {
   printf 'boot id changed: %s -> %s\n' "$before" "$after"
 }
 
-# A VM inside the runner's VM: the depth YARD_KIND=vm fixtures need.
+# A VM inside the runner's VM: the depth YARD_KIND=vm fixtures need. Incus comes from the
+# product installer with the broker base recipe's context, the same stack the fixtures use.
 nested_vm() {
   local vm="$1"
-  incus_root exec "$vm" --env DEBIAN_FRONTEND=noninteractive -- sh -euc '
+  incus_root file push -r -p "$ROOT/scripts" "$vm/var/tmp/l3-recipe/"
+  incus_root exec "$vm" --env DEBIAN_FRONTEND=noninteractive --env SUBYARD_ENGINE_CONTEXT=1 \
+    --env SUBYARD_ENGINE_CONTEXT_SCHEMA=1 --env ASSUME_YES=1 --env SUBYARD_USER=dev \
+    --env SUBYARD_OPERATOR_HOME=/home/dev --env SUBYARD_CONFIG_DIR=/etc/subyard \
+    --env SUBYARD_CONFIG_HOME=/etc/subyard --env SUBYARD_HOME=/home/dev/.local/share/subyard \
+    --env STORAGE_PATH=/var/lib/incus/storage-pools/default --env HOST_BASE=/srv/subyard \
+    --env RESTRICTED_DISK_PATHS= --env ACCESS_KIND=local --env YARD_KIND=container \
+    --env YARD_INSTANCE_NAME=base --env INCUS_PROJECT=default --env INCUS_BRIDGE=incusbr0 \
+    --env SSH_HOST= --env DEV_USER=dev --env DEV_UID=1000 --env DEV_SUDO=1 \
+    --env FORWARD_SSH_AGENT=0 --env NESTED_E2E_VMS=0 -- sh -euc '
     apt-get -o Acquire::Retries=3 update -qq
-    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends dnsmasq-base incus qemu-system-x86
+    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends ca-certificates curl jq
+    bash /var/tmp/l3-recipe/scripts/01-install-incus.sh --upgrade-only --yes --zabbly
+    incus --version
     incus admin init --auto
     ls -l /dev/kvm
     incus launch images:debian/13/cloud l3 --vm -c limits.cpu=1 -c limits.memory=1GiB \
-      -c security.secureboot=false </dev/null
+      -c security.secureboot=false </dev/null \
+      || { journalctl -u incus --no-pager -n 40 </dev/null; exit 1; }
     deadline=$(( $(date +%s) + 600 ))
     until incus exec l3 -- true </dev/null >/dev/null 2>&1; do
       [ "$(date +%s)" -lt "$deadline" ] || { incus info l3 --show-log </dev/null | tail -n 30; exit 1; }
