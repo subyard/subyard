@@ -201,3 +201,33 @@ esac
 `, 0700)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+func TestReservedYardInitNamesConfigurationAndRepair(t *testing.T) {
+	for _, yard := range []string{"e2e-yard", "test-yard"} {
+		t.Run(yard, func(t *testing.T) {
+			root, env, _ := nativeFixture(t)
+			home := environmentValue(env, "SUBYARD_CONFIG_HOME")
+			path := filepath.Join(home, "yards", yard, "config.env")
+			writeConfigCommandFile(t, path, "SSH_PORT=2240\n")
+			program, err := New(Options{RepositoryRoot: root, Environment: env})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext(yard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, _ := program.manifest.Lookup("init")
+			prepared := &preparedCommand{CLI: program, Loaded: loaded, Definition: definition}
+			err = prepared.prepareInit(context.Background(), nil)
+			for _, required := range []string{"reserved yard name " + yard, "yards/" + yard + "/config.env", "another yard name", "set YARD_TEMPLATE=test-vms"} {
+				if err == nil || !strings.Contains(err.Error(), required) {
+					t.Fatalf("init lost public refusal %q: %v", required, err)
+				}
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != "SSH_PORT=2240\n" {
+				t.Fatal("refusal changed registration", err)
+			}
+		})
+	}
+}

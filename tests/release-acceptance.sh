@@ -78,6 +78,27 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_release_smoke_is_required_even_without_optional_vm_selection(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory, optional_vms=True)
+            output = directory / "candidate"
+            _, receipt = prepare_fixture(checkout, output)
+            self.assertEqual(receipt["checks"]["p0-release-smoke"], {"status": "pending"})
+            self.assertFalse(m.optional_vm_not_run("p0-release-smoke", m.OPTIONAL_VM_NOT_RUN))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                report = m.preflight(output, slots=[1])
+                with self.assertRaisesRegex(ValueError, "p0-release-smoke.*required"):
+                    m.preflight(output, exclude=["p0-release-smoke"])
+                with patch.object(m, "execution_environment", return_value=receipt["environment"]), self.assertRaisesRegex(ValueError, "p0-release-smoke.*required"):
+                    m.run_checks(output, [], [], False, exclude=["p0-release-smoke"])
+            smoke = next(item for item in report["checks"] if item["id"] == "p0-release-smoke")
+            self.assertTrue(smoke["required"])
+            receipt["checks"]["p0-release-smoke"] = m.OPTIONAL_VM_NOT_RUN.copy()
+            m.save(output, receipt)
+            with self.assertRaises(ValueError):
+                m.load_bound(output)
+
     def test_owning_preflight_reuses_only_validated_local_receipt(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             directory = Path(temporary)
@@ -112,7 +133,7 @@ class TestAcceptance(unittest.TestCase):
             checkout = fixture_checkout(directory, optional_vms=True)
             output = directory / "candidate"
             source, receipt = prepare_fixture(checkout, output)
-            live = [name for name in receipt["checks"] if m.is_live(name)]
+            live = [name for name in receipt["checks"] if m.is_live(name) and name != "p0-release-smoke"]
             self.assertTrue(live)
             self.assertTrue(all(receipt["checks"][name] == m.OPTIONAL_VM_NOT_RUN for name in live))
             frozen = (output / "receipt.json").read_bytes()
@@ -120,7 +141,7 @@ class TestAcceptance(unittest.TestCase):
                 report = m.preflight(output, slots=[1])
                 requested = m.preflight(output, slots=[1], with_vms=True)
             self.assertEqual((output / "receipt.json").read_bytes(), frozen)
-            self.assertTrue(all(not item["selected"] and not item["required"] for item in report["checks"] if item["physical"]))
+            self.assertTrue(all(not item["selected"] and not item["required"] for item in report["checks"] if item["physical"] and item["id"] != "p0-release-smoke"))
             self.assertTrue(all(item["selected"] and item["required"] for item in requested["checks"] if item["physical"]))
             self.assertEqual(report["capacity_summary"]["planning"], "not-required")
             calls, execute = [], m.execute
@@ -131,12 +152,12 @@ class TestAcceptance(unittest.TestCase):
                 result["command"] = m.command_identity(command, root)
                 return result
             with patch.object(m, "execution_environment", return_value=receipt["environment"]), patch.object(m, "execute", side_effect=local):
-                self.assertEqual(m.run_checks(output, [1], [], False), 0)
-                self.assertEqual(m.run_checks(output, [1], [], False, exclude=live), 0)
-                self.assertEqual(m.run_checks(output, [], ["verify"], False), 0)
+                self.assertEqual(m.run_checks(output, [1], [], False), 1)
+                self.assertEqual(m.run_checks(output, [1], [], False, exclude=live), 1)
+                self.assertEqual(m.run_checks(output, [], ["verify"], False), 1)
             self.assertEqual(calls, ["verify", "shellcheck", "local-adapters", "compatibility"])
             _, receipt = m.load_bound(output)
-            self.assertEqual(receipt["result"], "passed")
+            self.assertEqual(receipt["result"], "incomplete")
             self.assertTrue(all(receipt["checks"][name] == m.OPTIONAL_VM_NOT_RUN for name in live))
             self.assertEqual(set(receipt["profile_results"].values()), {"not-run"})
             for name, broken in ((live[0], {**m.OPTIONAL_VM_NOT_RUN, "log_sha256": "a" * 64}),
@@ -221,7 +242,7 @@ class TestAcceptance(unittest.TestCase):
         for mode in ("only", "with-vms", "first", "excluded", "failed", "blocked", "running", "malformed"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
-                name = "p0-release-smoke"
+                name = "profile:sample/one"
                 vm = m.OPTIONAL_VM_NOT_RUN.copy()
                 if mode in ("failed", "blocked", "running"):
                     vm = {"status": mode}
@@ -255,7 +276,7 @@ class TestAcceptance(unittest.TestCase):
             source, receipt = prepare_fixture(checkout, output)
             self.assertEqual(receipt["checks"]["process-coverage"], m.PROCESS_COVERAGE_DIAGNOSTIC)
             with patch.object(m, "execution_environment", return_value=receipt["environment"]), patch.object(m, "execute", side_effect=AssertionError("default diagnostic ran")):
-                m.run_checks(output, [], [], False, exclude=[name for name in m.commands(source, "test", receipt["profiles"]) if name != "process-coverage"])
+                m.run_checks(output, [], [], False, exclude=[name for name in m.commands(source, "test", receipt["profiles"]) if name not in ("process-coverage", "p0-release-smoke")])
             # Historical pending remains required, and load is read-only.
             receipt["checks"]["process-coverage"] = {"status": "pending"}
             m.save(output, receipt)

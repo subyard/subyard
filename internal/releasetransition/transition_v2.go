@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -24,6 +25,7 @@ const v2RollbackBlockedActionID domain.ActionID = "release.transition.v2.rollbac
 
 const v2ChangedConsequence = "apply the exact typed migration and release activation plan"
 const v2RollbackNoOpConsequence = "preserve applied migrations as backward-compatible no-ops"
+const newerReleaseConsequence = "replace the unfinished release transition with this release's plan, keeping its journal as evidence; completed effects stay in place"
 
 func newV2ActionPolicy() (*domain.ActionRegistry, error) {
 	return domain.NewActionRegistry([]domain.ActionDefinition{
@@ -890,6 +892,9 @@ func (transition *V2Transition) Converge(
 		}
 		journal = &created
 		if observation.replacement != nil && observation.replacement.Reason == JournalReplacementNewerRelease {
+			if writer, _ := ctx.Value(migrationDiagnosticWriterKey{}).(io.Writer); writer != nil {
+				fmt.Fprintln(writer, newerReleaseConsequence)
+			}
 			if err := transition.store.PreserveReplacedJournal(journalSnapshot, observation.replacement.Transaction); err != nil {
 				return Outcome{}, err
 			}
@@ -1600,6 +1605,10 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 			observation.observations = append(observation.observations, ResourceObservation{Resource: "transition.source-metadata", Class: "completed-metadata-v1", Fingerprint: binding})
 			observation.decisions = append(observation.decisions, RedactedDecision{Resource: "transition.source-metadata", Decision: DecisionPreserve, Result: string(binding)})
 		}
+	}
+	if observation.replacement != nil && observation.replacement.Reason == JournalReplacementNewerRelease && len(observation.blockers) == 0 {
+		observation.decisions = append(observation.decisions, RedactedDecision{Resource: "transition.journal", Scope: "migration-history", Decision: DecisionTransform, Result: newerReleaseConsequence})
+		observation.assessment.Consequences = append([]string{newerReleaseConsequence}, observation.assessment.Consequences...)
 	}
 	return observation, nil
 }

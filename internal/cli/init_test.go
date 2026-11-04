@@ -921,6 +921,11 @@ esac
 func TestMigrationPowerReconcileIsBoundedToPowerStage(t *testing.T) {
 	root := repositoryRoot(t)
 	home := t.TempDir()
+	legacy := filepath.Join(home, ".config", "subyard", "yards", testyardmigration.LegacyYard, "config.env")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, legacy, "YARD_TEMPLATE=test-vms\nSSH_PORT=2223\n", 0o600)
 	environment := []string{
 		"HOME=" + home,
 		"SUBYARD_OPERATOR_HOME=" + home,

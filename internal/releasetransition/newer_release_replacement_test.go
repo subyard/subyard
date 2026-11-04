@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -62,6 +63,14 @@ func requireNewerReleasePlan(t *testing.T, fixture *v2PostActivationRecoveryFixt
 	if after := snapshotV2ProtectedTree(t, fixture.configHome); !bytes.Equal(before, after) {
 		t.Fatalf("inspection changed protected state\nbefore:\n%s\nafter:\n%s", before, after)
 	}
+	const disclosure = "replace the unfinished release transition with this release's plan, keeping its journal as evidence; completed effects stay in place"
+	found := false
+	for _, row := range inspection.Decisions {
+		found = found || row.Resource == "transition.journal" && row.Result == disclosure
+	}
+	if !found || !slices.Contains(inspection.Assessment.Consequences, disclosure) {
+		t.Fatal("replacement missing from printable plan", inspection)
+	}
 	return inspection
 }
 
@@ -73,10 +82,15 @@ func TestNewerReleaseReplacesActivatedJournalAndKeepsItsBytes(t *testing.T) {
 				journal.Checkpoint = checkpoint
 			})
 			inspection := requireNewerReleasePlan(t, fixture)
-			if _, err := fixture.transition.Converge(context.Background(), Execution{
+			var diagnostics bytes.Buffer
+			ctx := WithMigrationDiagnosticWriter(context.Background(), &diagnostics)
+			if _, err := fixture.transition.Converge(ctx, Execution{
 				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
 			}); err != nil {
 				t.Fatal(err)
+			}
+			if strings.Count(diagnostics.String(), "replace the unfinished release transition") != 1 {
+				t.Fatal("convergence lost replacement disclosure for immutable callers", diagnostics.String())
 			}
 			current, err := fixture.transition.store.ReadCurrentJournal()
 			if err != nil {

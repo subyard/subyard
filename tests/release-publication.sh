@@ -89,7 +89,7 @@ def accepted(directory, prepared, identity, external_passed=True, with_vms=True)
         m.a.prepare(output, identity["version"], prepared)
     root, receipt = m.a.load_bound(output)
     for name, command in m.a.commands(root, identity["version"], receipt["profiles"]).items():
-        if command and (with_vms or not m.a.is_live(name)):
+        if command and (with_vms or name == "p0-release-smoke" or not m.a.is_live(name)):
             log = output / (name.replace(":", "-").replace("/", "-") + ".log")
             log.write_text("synthetic passing evidence fixture\n")
             receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name,
@@ -519,14 +519,15 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source fingerprint"):
             m.attestation(self.output, self.identity)
 
-    def test_fast_default_accepts_and_publishes_honest_unrun_vm_inventory(self):
+    def test_release_requires_passed_smoke_but_allows_unrun_optional_profiles(self):
         directory = self.directory / "r123-a1"
         directory.mkdir()
         _, prepared, identity = fixture(directory, external_required=False, optional_vms=True)
         output, frozen, document = accepted(directory, prepared, identity, external_passed=False, with_vms=False)
         live = [name for name in document["checks"] if m.a.is_live(name)]
         self.assertEqual(set(live), {"p0-release-smoke", "profile:sample"})
-        self.assertTrue(all(document["checks"][name] == m.a.OPTIONAL_VM_NOT_RUN for name in live))
+        self.assertEqual(document["checks"]["p0-release-smoke"]["status"], "passed")
+        self.assertEqual(document["checks"]["profile:sample"], m.a.OPTIONAL_VM_NOT_RUN)
         self.assertEqual(document["schema_version"], 1)
         github = FakeGitHub(identity)
         captured = io.StringIO()
@@ -549,7 +550,7 @@ class Contracts(unittest.TestCase):
             mutations = [{"status": status} for status in ("pending", "failed", "blocked", "running", "unknown")]
             mutations += [{**m.a.OPTIONAL_VM_NOT_RUN, key: value} for key, value in
                           (("exit_code", 0), ("log_sha256", "c" * 64), ("original_attempt", {}), ("environments", []))]
-            if name == "verify":
+            if name in ("verify", "p0-release-smoke"):
                 mutations.append(m.a.OPTIONAL_VM_NOT_RUN.copy())
             for result in mutations:
                 invalid = copy.deepcopy(document)
@@ -569,7 +570,7 @@ class Contracts(unittest.TestCase):
         legacy["checks"]["p0-release-smoke"] = m.a.OPTIONAL_VM_NOT_RUN.copy()
         with self.assertRaises(ValueError):
             m.validate_attestation(legacy, self.identity, self.output / "source")
-        for option in (["--with-vms"], ["--only", live[0]]):
+        for option in (["--with-vms"], ["--only", "profile:sample"]):
             with patch.object(m, "GitHub", return_value=github), \
                  patch.object(m.a, "execution_environment", return_value=document["environment"]), \
                  patch.object(m.signal, "signal"), \

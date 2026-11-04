@@ -64,7 +64,9 @@ func TestBrokerRuntimeRejectsLocalTemplateOverrideOverGit(t *testing.T) {
 			}
 			testkit.WriteFile(t, filepath.Join(gitYard, "config.env"), []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
 			if state, _, err := PrepareBrokerRuntimeTarget(context.Background(), options); err == nil ||
-				!strings.Contains(err.Error(), "test-yard does not select YARD_TEMPLATE=test-vms") {
+				!strings.Contains(err.Error(), "reserved yard name test-yard:") ||
+				!strings.Contains(err.Error(), "yards/test-yard/config.env") ||
+				!strings.Contains(err.Error(), "set YARD_TEMPLATE=test-vms") {
 				t.Fatalf("local template %q: state=%q err=%v", template, state, err)
 			}
 		})

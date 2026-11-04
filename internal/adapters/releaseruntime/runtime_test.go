@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3381,26 +3380,5 @@ func TestNewerReleaseAfterInspectionErrorKeepsExperimentalRefusal(t *testing.T) 
 	wrapped := fmt.Errorf("inspect owner: %w", unsupportedReleaseOwnerError{})
 	if selected := newerReleaseAfterInspectionError(parsed, fixture.configHome, wrapped); selected != nil {
 		t.Fatalf("experimental owner selected %#v", selected)
-	}
-}
-
-func TestNewerReleaseConsequenceOnlyWhenReplacementCanHappen(t *testing.T) {
-	request := releasetransition.ProcessRequest{Replacement: &releasetransition.JournalReplacement{
-		Reason: releasetransition.JournalReplacementNewerRelease,
-	}}
-	inspection := releasetransition.Inspection{}
-	inspection.Assessment.Consequences = []string{"existing"}
-	disclosed, changed := withNewerReleaseConsequence(request, inspection)
-	if !changed || !slices.Equal(disclosed.Assessment.Consequences, []string{newerReleaseConsequence, "existing"}) {
-		t.Fatalf("disclosed consequences = %#v", disclosed.Assessment.Consequences)
-	}
-	inspection.Blockers = []releasetransition.Blocker{{Code: releasetransition.CodePlanStale}}
-	if blocked, changed := withNewerReleaseConsequence(request, inspection); changed ||
-		!slices.Equal(blocked.Assessment.Consequences, []string{"existing"}) {
-		t.Fatalf("blocked consequences = %#v", blocked.Assessment.Consequences)
-	}
-	inspection.Blockers = nil
-	if _, changed := withNewerReleaseConsequence(releasetransition.ProcessRequest{}, inspection); changed {
-		t.Fatal("ordinary update disclosed a replacement")
 	}
 }

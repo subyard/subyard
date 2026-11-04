@@ -889,8 +889,6 @@ type replacementRevalidation struct {
 
 const v0111RecoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
 
-const newerReleaseConsequence = "replace the unfinished release transition with this release's plan, keeping its journal as evidence; completed effects stay in place"
-
 // negotiatedRecoveryRelease names published owners whose unfinished journals
 // keep their own exact recovery contracts.
 func negotiatedRecoveryRelease(target releasetransition.ReleaseID) bool {
@@ -918,21 +916,6 @@ func newerReleaseAfterInspectionError(
 		return nil
 	}
 	return newerReleaseReplacement(parsed, configHome)
-}
-
-// withNewerReleaseConsequence discloses the replacement only when it can happen.
-func withNewerReleaseConsequence(
-	request releasetransition.ProcessRequest,
-	inspection releasetransition.Inspection,
-) (releasetransition.Inspection, bool) {
-	if request.Replacement == nil || request.Replacement.Reason != releasetransition.JournalReplacementNewerRelease ||
-		len(inspection.Blockers) != 0 {
-		return inspection, false
-	}
-	inspection.Assessment.Consequences = append(
-		[]string{newerReleaseConsequence}, inspection.Assessment.Consequences...,
-	)
-	return inspection, true
 }
 
 // newerReleaseReplacement reads the journal directly, because its pinned owner
@@ -1562,12 +1545,6 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 		)
 		if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
 			return Prepared{}, fmt.Errorf("augmented recovery inspection is invalid: %w", err)
-		}
-	}
-	if disclosed, changed := withNewerReleaseConsequence(request, inspection); changed {
-		inspection = disclosed
-		if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
-			return Prepared{}, fmt.Errorf("augmented replacement inspection is invalid: %w", err)
 		}
 	}
 	if parsed.check {

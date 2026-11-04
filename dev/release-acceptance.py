@@ -255,7 +255,7 @@ def vm_checks_optional(root):
 
 
 def optional_vm_not_run(name, result):
-    return is_live(name) and result == OPTIONAL_VM_NOT_RUN
+    return name.startswith("profile:") and result == OPTIONAL_VM_NOT_RUN
 
 
 def validate_optional_vm_history(output, names):
@@ -670,7 +670,7 @@ def prepare(output, version, prepared=None):
     receipt["checks"]["process-coverage"] = PROCESS_COVERAGE_DIAGNOSTIC.copy()
     if vm_checks_optional(root):
         for name, command in commands(root, version, inventory).items():
-            if command and is_live(name):
+            if command and optional_vm_not_run(name, OPTIONAL_VM_NOT_RUN):
                 receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     if prepared:
         assets = prepared / "assets"
@@ -849,11 +849,13 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
         receipt["checks"]["process-coverage"] = PROCESS_COVERAGE_DIAGNOSTIC.copy()
         if vm_checks_optional(root):
             for name, command in commands(root, "preflight", inventory).items():
-                if command and is_live(name):
+                if command and optional_vm_not_run(name, OPTIONAL_VM_NOT_RUN):
                     receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     checks = receipt["checks"]
     selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
     excluded = select_checks(checks, exclude)
+    if "p0-release-smoke" in excluded:
+        raise ValueError("p0-release-smoke is required and cannot be excluded")
     readiness = {}
     if external_readiness:
         if external_readiness.stat().st_size > 1024 * 1024:
@@ -1001,6 +1003,8 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
     selected |= prioritized
     requested = selected.copy()
     excluded = select_checks(checks, exclude)
+    if "p0-release-smoke" in excluded:
+        raise ValueError("p0-release-smoke is required and cannot be excluded")
     selected -= excluded
     priority_order = [name for selector in first for name in checks
                       if name in prioritized and (name == selector or name.startswith(selector + "/"))]

@@ -3211,7 +3211,7 @@ func TestReservedRegistrationReportsPublicRepair(t *testing.T) {
 					t.Fatalf("reserved-role refusal became a deferrable owner conflict: %v", err)
 				}
 				message, retry := diagnostic.ActivationDiagnostic()
-				if !strings.Contains(message, "reserved yard name "+yard) || !strings.Contains(message, "yards/"+shape) || !strings.Contains(retry, "set YARD_TEMPLATE=test-vms") || !strings.Contains(retry, "rename") || strings.Contains(message+retry, root) || strings.Contains(message+retry, "private-value") {
+				if !strings.Contains(message, "reserved yard name "+yard) || !strings.Contains(message, "yards/"+shape) || !strings.Contains(retry, "set YARD_TEMPLATE=test-vms") || !strings.Contains(retry, "use another yard name") || strings.Contains(message+retry, root) || strings.Contains(message+retry, "private-value") {
 					t.Fatalf("unsafe or incomplete diagnostic: %q / %q", message, retry)
 				}
 				if got := read(t, path); got != "YARD_TEMPLATE=private-value\n" {
@@ -3303,5 +3303,29 @@ func TestObserveProgressRechecksNativeCurrentAfterOwnerPublication(t *testing.T)
 	progress, err := ObserveProgress(context.Background(), options, before)
 	if err != nil || progress != ProgressInProgress {
 		t.Fatalf("public observation reused an earlier native check: %v %v", progress, err)
+	}
+}
+
+func TestReservedRegistrationParsesWholeFile(t *testing.T) {
+	for _, yard := range []string{LegacyYard, CurrentYard} {
+		for _, content := range []string{"YARD_TEMPLATE='unfinished\n", "YARD_TEMPLATE=test-vms\nBROKEN='unfinished\n"} {
+			t.Run(yard+"/"+content, func(t *testing.T) {
+				home := testkit.TempDir(t)
+				path := filepath.Join(home, "yards", yard, "config.env")
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, path, []byte(content), 0600)
+				_, err := inspectRegistration(Options{ConfigHome: home})
+				var diagnostic interface{ ActivationDiagnostic() (string, string) }
+				if !errors.As(err, &diagnostic) {
+					t.Fatal("malformed registration accepted", err)
+				}
+				message, _ := diagnostic.ActivationDiagnostic()
+				if !strings.Contains(message, "cannot be parsed") || !strings.Contains(message, yard) {
+					t.Fatal("malformed registration became a role mismatch", message)
+				}
+			})
+		}
 	}
 }

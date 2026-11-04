@@ -279,7 +279,9 @@ Agents preparing a release apply the
   released-caller compatibility check in [Development](../development.md).
   Long VM smoke and shipped-profile VM checks run only on explicit operator request:
   `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
-  Available slots alone do not request a VM run. Unrequested VM checks remain `not-run`,
+  Available slots alone do not request a VM run. Core `p0-release-smoke` is mandatory:
+  local-only acceptance remains incomplete until it passes, and it cannot be excluded
+  or waived as optional. Unrequested shipped-profile VM checks remain `not-run`,
   never passed; requested incomplete or failed checks block acceptance/publication.
   Optional external checks follow [external checks](#external-checks).
   Existing CI/merge checks and risk-based development validation are unchanged.

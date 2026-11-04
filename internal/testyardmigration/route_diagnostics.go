@@ -107,20 +107,33 @@ func reservedRegistrationDiagnostic(path, yard string) *routeActivationDiagnosti
 	if filepath.Base(path) == yard+".env" {
 		relative = "yards/" + yard + ".env"
 	}
-	return &routeActivationDiagnostic{
-		cause:   fmt.Errorf("%s does not select YARD_TEMPLATE=test-vms", yard),
-		message: "reserved yard name " + yard + ": config-home-relative " + relative + " must select YARD_TEMPLATE=test-vms",
-		retry:   "set YARD_TEMPLATE=test-vms in " + relative + ", or rename the unrelated yard registration, then run yard update --check",
-		refusal: true,
-	}
+	message := "reserved yard name " + yard + ": config-home-relative " + relative + " must select YARD_TEMPLATE=test-vms"
+	retry := "use another yard name for an unrelated yard, or set YARD_TEMPLATE=test-vms in " + relative + " if this is the test owner, then run yard update --check"
+	return &routeActivationDiagnostic{cause: errors.New(message + "; " + retry), message: message, retry: retry, refusal: true}
 }
 
 // Inspect the two reserved registrations independently; neither refusal hides
-// the other. Inheritance remains supported only for the current registration.
+// the other. Parse the entire file before accepting its selected owner role.
 func inspectReservedRegistration(options Options, path, yard string) error {
 	payload, err := readRegistration(options, path)
-	if err == nil && selectsTestVMs(string(payload)) {
-		return nil
+	if err == nil {
+		assignments, parseErr := config.ParsePersistentAssignments(path, payload)
+		if parseErr != nil {
+			return routeConfigDiagnostic(parseErr, "owner registration settings cannot be parsed", yard, options.ConfigHome)
+		}
+		for index := len(assignments) - 1; index >= 0; index-- {
+			assignment := assignments[index]
+			if assignment.Name != "YARD_TEMPLATE" {
+				continue
+			}
+			if assignment.Direct && !assignment.Dynamic {
+				if assignment.Value == "test-vms" {
+					return nil
+				}
+				return reservedRegistrationDiagnostic(path, yard)
+			}
+			break
+		}
 	}
 	if err == nil && yard == CurrentYard && filepath.IsAbs(options.RepositoryRoot) {
 		var loaded config.Loaded

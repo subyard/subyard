@@ -8,6 +8,7 @@ each acquire creates fresh VM disks from a versioned immutable base. Release fen
 deletes the disposable disks. No guest state survives a lease as a supported continuation mechanism.
 
 The yard names `test-yard` and `e2e-yard` are reserved for registrations selecting `YARD_TEMPLATE=test-vms`; use another name for unrelated yards.
+An unrelated registration using either name refuses update and init with a diagnostic naming its configuration file and how to choose another name or select the test-owner template.
 
 The outer yard remains operator-owned. Agents can acquire inner slots, but cannot start a stopped
 outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycle commands.
