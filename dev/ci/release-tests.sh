@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs release VM checks on a disposable GitHub-hosted runner. The runner becomes an ordinary
-# owner: the published runtime installs the test-vms service, and unchanged controllers lease
+# owner: the candidate runtime installs the test-vms service, and unchanged controllers lease
 # from it. A failing check is a result; the probes here only establish that it could run.
 set -uo pipefail
 umask 022
@@ -14,7 +14,6 @@ VM_MEMORY=4GiB
 VM_DISK=20GiB
 AGENT_WAIT_SECONDS=420
 PACKAGES=(build-essential ca-certificates curl expect git jq make openssh-client openssh-server ripgrep shellcheck tar xz-utils zsh)
-INSTALLER_URL=https://github.com/Subyard/Subyard/releases/latest/download/subyard-install.sh
 CLOUD_CONFIG='#cloud-config
 users:
   - name: dev
@@ -128,10 +127,12 @@ install_candidate() {
   jq -er .version "$WORKSPACE/.subyard-acceptance/candidate.json"
 }
 
+# Through the public installer, like an operator's install. The published 0.25.5 has no
+# `yard service`, so the pool comes from the candidate itself.
 install_runtime() {
-  local installer="${RUNNER_TEMP:-/var/tmp}/subyard-install.sh"
-  curl -fsSL --proto '=https' --tlsv1.2 "$INSTALLER_URL" -o "$installer"
-  bash "$installer" --yes
+  local release="$WORKSPACE/.subyard-acceptance/release" version
+  version="$(jq -er .version "$WORKSPACE/.subyard-acceptance/candidate.json")"
+  env YARD_RELEASE_BASE_URL="file://$release" bash "$release/subyard-install.sh" --version "$version" --yes
   "$HOME/.local/bin/yard" --version
 }
 
@@ -170,8 +171,8 @@ check_probes() {
   probe prepare-host prepare_host
   probe docker-removed drop_docker
   probe_after prepare-host candidate install_candidate "$BUNDLE"
-  probe_after candidate published-runtime install_runtime
-  probe_after published-runtime test-vms-service install_pool
+  probe_after candidate candidate-runtime install_runtime
+  probe_after candidate-runtime test-vms-service install_pool
   probe_after test-vms-service "check:$id" run_check "$@"
   probe facts-after facts
   write_summary
@@ -234,7 +235,7 @@ nested_vm() {
   local vm="$1"
   incus_root exec "$vm" --env DEBIAN_FRONTEND=noninteractive -- sh -euc '
     apt-get -o Acquire::Retries=3 update -qq
-    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends incus qemu-system-x86
+    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends dnsmasq-base incus qemu-system-x86
     incus admin init --auto
     ls -l /dev/kvm
     incus launch images:debian/13/cloud l3 --vm -c limits.cpu=1 -c limits.memory=1GiB \
