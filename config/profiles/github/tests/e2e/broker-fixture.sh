@@ -31,7 +31,7 @@ verify_boot_registration_recovery() {
     case " $wants " in *" $UNIT "*) die 'drift fixture unexpectedly loaded the boot dependency' ;; esac
     yard profile status github --json | jq -e '.enabled and .configured and (.ready == false) and .runtime == "pending"' >/dev/null \
       || die 'read-only profile status missed broker registration drift'
-    yard profile status github | grep -Fxq 'diagnostic: boot-dependency-unloaded' \
+    yard profile status github | grep -Fx 'diagnostic: boot-dependency-unloaded' >/dev/null \
       || die 'profile status did not explain unloaded boot registration'
     # Release admission detects the same drift; repair through its approved
     # activation boundary rather than bypassing that guard with scoped enable.

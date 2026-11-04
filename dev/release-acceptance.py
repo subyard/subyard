@@ -468,7 +468,7 @@ def execute(name, command, root, output, env, slot=None):
     process, code, capture_error = None, None, False
     try:
         with private_file(log, "wb") as stream:
-            process = subprocess.Popen(argv, cwd=root, env=env, stdout=stream,
+            process = subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=stream,
                                        stderr=subprocess.STDOUT, start_new_session=True)
             while process.poll() is None:
                 if STOP.wait(0.2):

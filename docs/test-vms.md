@@ -176,6 +176,9 @@ and republish the owner metadata with a new registration generation. Existing le
 local owner. `--pool ID` selects an exact registered pool. One registration is automatic; multiple
 registrations return `service_ambiguous` until an exact pool is supplied. `service_absent` and
 `service_unavailable` distinguish a missing registration from an unavailable runtime/publication.
+On a host whose installed release has no `yard service register` yet, set
+`SUBYARD_E2E_ROLLOUT_YARD=test-yard` for `dev/agent-e2e.sh` and the lanes it runs: it selects that
+outer route instead of owner resolution, unless `--owner` or `--pool` is given.
 Status JSON includes `service` with owner, service/pool, yard/project/instance, native UUID and
 registration generation. Error JSON contains the same safe candidate identities. Resolution never
 selects another owner, pool or workspace after failure.
@@ -947,8 +950,11 @@ dev/agent-e2e.sh --slot "$slot" --purpose integration-legacy-upgrade --vm 1 -- \
 The retained-lease disabled-components controller installs the published v0.18.6 baseline, updates
 to the frozen candidate and reboots once. Its default payload belongs to the Hermes profile.
 The Paseo removal payload verifies removal of both a packaged and a foreign service, retention
-of only non-empty worktrees, and init's temporary start and stopped-power restoration for a
-Paseo-only yard. Repeated init must not boot that yard again.
+of only non-empty worktrees, and the printed `start` then `migrate` sequence for a stopped
+Paseo-only yard with pending disk-backed `/tmp`. Both policies must converge and publish their
+proofs. After start has completed disk-backed `/tmp`, the stopped-yard init path must disclose
+removal before consent, leave an unconfirmed yard untouched, retire after confirmation and restore
+stopped power. Repeated init of the proven, stopped yard must not boot it again.
 
 ```sh
 dev/e2e/disabled-components-release.sh --slot "$slot"

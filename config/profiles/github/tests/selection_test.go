@@ -199,11 +199,11 @@ func TestPeerFixturePersistsGitHubConsumerRoot(t *testing.T) {
   exit 23
 }
 [ "$SUBYARD_CONFIG_HOME" = "$PEER_ROOT/config" ] && [ "$SUBYARD_HOME" = "$PEER_DATA_ROOT" ] || exit 24
+[ "${SUBYARD_KEYS_SYSTEMD_DIR:-}" = "$PEER_KEYS_SYSTEMD_DIR" ] && [ "${SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE:-}" = 1 ] || exit 25
 printf '%s\n' "$*" >> "$CALLS"
 case "$1" in remote) exec "$PEER_NATIVE_ENGINE" "$@" ;; esac
 `), 0o700)
 	script := string(source)[wrapperStart:wrapperEnd] + string(source)[start:start+end] + string(source)[cleanupStart:cleanupEnd] + `
-cleanup_peer_snapshot_fixture() { :; }
 remove_peer_authorization() { :; }
 cleanup_peer_incus() { :; }
 clean_tree() { :; }
@@ -241,7 +241,7 @@ peer_clean
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "EXPECTED_HOME=" + home,
 		"SUBYARD_REPOSITORY_ROOT=" + repository, "SUBYARD_NO_AUDIT=1", "PEER_NATIVE_ENGINE=" + engine, "PEER_CONFIG_STATE=" + filepath.Join(peer, "ssh-config-state"), "PEER_CONFIG_BACKUP=" + filepath.Join(peer, "ssh-config-backup"),
 		"SUBYARD_E2E_VM=2", "PEER_ROOT=" + peer, "PEER_REAL_YARD_MARKER=" + filepath.Join(peer, "marker"), "MARKER=peer-fixture", "OWNER_BASE_IMAGE=fixture", "PEER_YARD_ENTRY=" + entry, "PEER_KEYS_CONSUMER_ROOT=" + consumer, "CALLS=" + calls,
-		"PEER_DATA_ROOT=" + filepath.Join(root, "data"), "PEER_HOST_BASE=" + filepath.Join(root, "host"), "PEER_KEYS_ROOT=" + filepath.Join(root, "keys"), "PEER_KEYS_TOOLS=" + filepath.Join(root, "tools"),
+		"PEER_DATA_ROOT=" + filepath.Join(root, "data"), "PEER_HOST_BASE=" + filepath.Join(root, "host"), "PEER_KEYS_ROOT=" + filepath.Join(root, "keys"), "PEER_KEYS_TOOLS=" + filepath.Join(root, "tools"), "PEER_KEYS_SYSTEMD_DIR=" + filepath.Join(root, "key units"),
 		"PEER_YARD_STATE=" + filepath.Join(peer, "yard-state"), "PEER_YARD_BACKUP=" + filepath.Join(peer, "yard-backup"), "PEER_PROFILE_STATE=" + filepath.Join(peer, "profile-state"), "PEER_PROFILE_BACKUP=" + filepath.Join(peer, "profile-backup")}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("peer fixture: %v: %s", err, output)
@@ -353,11 +353,11 @@ PEER_CONFIG_STATE=$PEER_ROOT/ssh-config-state PEER_CONFIG_BACKUP=$PEER_ROOT/ssh-
 PEER_REAL_YARD_MARKER=$PEER_ROOT/yard-marker
 PEER_DATA_ROOT=$PEER_ROOT/data PEER_HOST_BASE=$PEER_ROOT/host
 PEER_KEYS_ROOT=$PEER_ROOT/keys PEER_KEYS_TOOLS=$PEER_ROOT/tools PEER_KEYS_CONSUMER_ROOT=$PEER_ROOT/consumer
+PEER_KEYS_SYSTEMD_DIR=$PEER_ROOT/key-units
 SUBYARD_E2E_VM=2 MARKER=peer-fixture
 die() { printf '%s\n' "$*" >&2; exit 2; }
 bash() { printf '%s\n' "$PEER_YARD_ENTRY"; }
 timeout() { shift 2; "$@"; }
-cleanup_peer_snapshot_fixture() { :; }
 remove_peer_authorization() { :; }
 cleanup_peer_incus() { :; }
 clean_peer_data() { :; }

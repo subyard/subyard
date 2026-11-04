@@ -163,7 +163,7 @@ func TestIntegrationApplyPublishesProofOnlyAfterVerifiedRetirement(t *testing.T)
 		runtime, incus := retiredApplyFixture(t, `{"state":"absent","actual":"","desired":""}`)
 		testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "state"), []byte(`{"state":"absent","actual":"","desired":"","notice":"foreign unit stays"}`), 0o600)
 		plan, err := runtime.IntegrationPlan(context.Background())
-		if err != nil || plan.Changed || len(plan.Warnings) != 1 {
+		if err != nil || plan.Changed || !plan.NeedsRetirementProof() || len(plan.Warnings) != 1 {
 			t.Fatalf("plan=%+v err=%v", plan, err)
 		}
 		if err := runtime.ApplyIntegrations(context.Background(), plan); err != nil {
@@ -175,6 +175,10 @@ func TestIntegrationApplyPublishesProofOnlyAfterVerifiedRetirement(t *testing.T)
 		instance := incus.Instances["test/yard"]
 		instance.Config = map[string]string{proof: "true"}
 		incus.Instances["test/yard"] = instance
+		fresh, err := runtime.IntegrationPlan(context.Background())
+		if err != nil || fresh.NeedsRetirementProof() || fresh.Changed || fresh.Fingerprint != plan.Fingerprint || fresh.Scope != plan.Scope || fresh.StateBinding() != plan.StateBinding() {
+			t.Fatalf("receipt changed integration equality: fresh=%+v err=%v", fresh, err)
+		}
 		if err := runtime.recordRetiredIntegrations(context.Background()); err != nil || len(incus.ConfigUpdates) != 1 {
 			t.Fatalf("proven yard rewrote proof: %+v, %v", incus.ConfigUpdates, err)
 		}
@@ -286,9 +290,19 @@ func TestRetiredIntegrationReminderStopsAtProof(t *testing.T) {
 	}
 	loaded.Catalog = catalog
 	instance := ports.InstanceInfo{Status: "Stopped", Config: map[string]string{}}
-	want := "retired integration widget may still be installed in yard example; run: yard -Y example init"
+	want := "retired integration widget may still be installed in yard example; run: yard -Y example start; then run yard migrate"
 	if got := RetiredIntegrationReminder(loaded, instance); got != want {
 		t.Fatalf("reminder=%q", got)
+	}
+	instance.Config["user.subyard.disk_tmp"] = "v1"
+	want = "retired integration widget may still be installed in yard example; run: yard -Y example init"
+	if got := RetiredIntegrationReminder(loaded, instance); got != want {
+		t.Fatalf("disk-backed stopped reminder=%q", got)
+	}
+	instance.Status = "Running"
+	want = "retired integration widget may still be installed in yard example; run: yard migrate"
+	if got := RetiredIntegrationReminder(loaded, instance); got != want {
+		t.Fatalf("running reminder=%q", got)
 	}
 	instance.Config[retiredMarkerKey] = "true"
 	if got := RetiredIntegrationReminder(loaded, instance); got != "" {

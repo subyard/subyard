@@ -150,8 +150,8 @@ integration plan binding and the legacy-continuation binding, because it is writ
 
 Without proof, a selected retired package with a lifecycle changes two init stages:
 
-- On an intentionally stopped yard the instance stage is pending. Its existing guarded temporary
-  start runs after confirmation, the plan shows that start and the retirement, the provision stage
+- On an intentionally stopped yard with disk-backed `/tmp` already complete, the instance stage
+  is pending. Its existing guarded temporary start runs after confirmation, the plan shows that start and the retirement, the provision stage
   retires the package and publishes the proof, and finalization restores stopped. A repeat init
   with the proof does not boot.
 - On a running yard the provision stage is pending once, including for an already clean guest, so
@@ -160,10 +160,12 @@ Without proof, a selected retired package with a lifecycle changes two init stag
 If the boot or the retirement fails, the yard has no proof and stays running with its fenced
 `desired=stopped` until a retry of `yard init` finishes and stops it.
 
-Until the proof exists, these host-side surfaces name the action `yard -Y <name> init`, and they
-read no guest state: the warnings of `yard update --check` and the `Warning:` lines that end
-`yard update`, joined by a plan consequence while a source migration is pending,
-`yard integration status` on a stopped yard, and one line after a successful `yard start`.
+For pending stopped-yard work, run `yard -Y NAME start`, then `yard migrate`. Start completes any
+pending disk-backed `/tmp` policy; migrate retires the package and repairs the running guest.
+When disk-backed `/tmp` is already complete, `yard -Y NAME init` is also supported: it temporarily
+starts the yard, retires the package and restores stopped power. Until proof exists, host-only
+update warnings and stopped integration status name the applicable sequence or init; after a
+successful start the reminder names `yard migrate`. These reminders read no guest state.
 
 Known limits:
 
@@ -184,6 +186,8 @@ with only those worktrees left changes nothing.
 
 Removal never follows a leaf or ancestor symlink outside the fixed paths and refuses mounted
 removal targets. Genuine removal failures remain errors and partial removal is safe to retry.
-A stopped yard stays unchanged during an update, with `run: yard -Y NAME init` in its warning.
-Init temporarily starts it, removes Paseo and restores stopped power; `yard start` only warns until
-then. See [Retirement proof](#retirement-proof). To use Paseo, install an older release.
+A stopped yard stays unchanged during an update. Run `yard -Y NAME start`, then `yard migrate`
+to finish pending disk-backed `/tmp`, remove Paseo and repair runtimes. If disk-backed `/tmp` is
+already complete, `yard -Y NAME init` can instead temporarily start it for retirement and restore
+stopped power. Start alone does not retire Paseo. See [Retirement proof](#retirement-proof).
+To use Paseo, install an older release.

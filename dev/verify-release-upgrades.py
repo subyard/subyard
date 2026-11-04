@@ -2390,7 +2390,7 @@ def verify_history_source_admission(fixture, control, checkpointed, phase, mutat
         require(supported and "source repair has not been applied" in result.stdout,
                 "checkpoint history must support source admission: " + result.stdout + result.stderr)
     else:
-        expected = ("yard: config repair-alias: release source admission: protected metadata is unsupported or unresolved; "
+        expected = ("yard: config repair-alias: release source admission: protected metadata is unsupported or unresolved (V2 history); "
                     "finish pending publications or recovery intent with the exact sealed original owner before source repair")
         require(result.returncode == 1 and result.stderr.strip() == expected,
                 "legacy history must retain the exact known historical-anchor refusal: " + result.stdout + result.stderr)

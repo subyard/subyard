@@ -183,7 +183,7 @@ prepare_smoke() {
   operator_env bash -c 'printf "\n# Release smoke retained operator setting\n" >> "$1"' _ \
     "$OPERATOR_HOME/.config/subyard/config.env"
   operator_yard sync "$SMOKE_SOURCE" --name "$SMOKE_PROJECT" --yes
-  operator_yard list --live | grep -Fq "$SMOKE_PROJECT" \
+  operator_yard list --live | grep -F "$SMOKE_PROJECT" >/dev/null \
     || die 'release smoke project is absent from live inventory'
   operator_yard shell "$SMOKE_PROJECT" --yes -- sh -c 'printf "guest-change\n" >> retained.txt'
   verify_smoke_state "$OLD_VERSION"

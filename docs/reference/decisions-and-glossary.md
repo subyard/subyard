@@ -575,9 +575,10 @@ an ordinary update. Only a non-empty real `/srv/agents/paseo/worktrees/` directo
 one warning naming it; chats, schedules, loops and uploads are removed. Path safety and actual
 operation failures remain enforced. To use Paseo, install an older release.
 
-Updates leave stopped yards untouched and warn with `run: yard -Y NAME init`. Init uses its
-existing temporary start to remove Paseo, restores stopped power and records the retirement proof
-that lets repeated init skip the boot. `yard start` only warns until removal is complete.
+Updates leave stopped yards untouched. Run `yard -Y NAME start`, then `yard migrate` to complete
+pending disk-backed `/tmp`, remove Paseo and repair runtimes. If disk-backed `/tmp` is already
+complete, `yard -Y NAME init` also supports retirement through a temporary start, restores stopped
+power and records proof so repeated init skips the boot. Start alone does not remove Paseo.
 
 <a id="github-app-token-broker"></a>
 

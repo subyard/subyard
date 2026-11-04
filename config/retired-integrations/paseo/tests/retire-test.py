@@ -58,6 +58,105 @@ exit 0
 
 
 class FixtureCreationTest(unittest.TestCase):
+    def test_stopped_path_requires_disclosure_and_power_restoration(self):
+        source = (PACKAGE/'tests/e2e/owner.sh').read_text()
+        functions = ''.join(name+'() {'+source.split(name+'() {', 1)[1].split('\n}\n', 1)[0]+'\n}\n'
+                            for name in ('report_failure', 'check_json', 'run_checked', 'stop_owned_solo', 'assert_stopped_yard_finishes')
+                            if name+'() {' in source)
+        for scenario, error in (('healthy', None), ('restore-fails', 'did not restore stopped power'),
+                                ('no-disclosure', 'destructive retirement disclosure'),
+                                ('foreign-project', 'refusing unmarked project'),
+                                ('uuid-changed', 'solo instance identity changed'),
+                                ('stop-fails', 'native_exit=23')):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                script = r'''
+set -euo pipefail
+STATE_ROOT=$1 ROOT=$2 scenario=$3 MARKER=fixture
+printf '%s\n' "$MARKER" > "$STATE_ROOT/.solo-armed"
+printf 'stopped\n' > "$STATE_ROOT/intent"
+printf 'STOPPED\n' > "$STATE_ROOT/power"
+: > "$STATE_ROOT/proof"
+printf '0\n' > "$STATE_ROOT/boot"
+die() { printf '%s\n' "$1" >&2; exit 1; }
+yard_power() { cat "$STATE_ROOT/power"; }
+retired_proof() { cat "$STATE_ROOT/proof"; }
+last_boot() { cat "$STATE_ROOT/boot"; }
+assert_state_root() { [ -d "$STATE_ROOT" ]; }
+assert_project_owned() {
+  [ "$(incus project get "$PROJECT" user.p0-power-systemd)" = "$MARKER" ] || die "refusing unmarked project $PROJECT"
+}
+incus() {
+  case "$*" in
+    'config get yard-solo user.subyard.disk_tmp --project subyard-solo') printf 'v1\n' ;;
+    'config get yard-solo volatile.uuid --project subyard-solo')
+      if [ "$scenario" = uuid-changed ] && [ -e "$STATE_ROOT/started" ]; then printf 'replaced\n'
+      else printf 'solo-uuid\n'; fi ;;
+    'config get yard-solo user.subyard.managed --project subyard-solo') printf 'true\n' ;;
+    'project get subyard-solo user.p0-power-systemd')
+      if [ "$scenario" = foreign-project ]; then printf 'foreign\n'; else printf '%s\n' "$MARKER"; fi ;;
+    'stop yard-solo --project subyard-solo')
+      [ "$scenario" != stop-fails ] || return 23
+      printf 'STOPPED\n' > "$STATE_ROOT/power" ;;
+    'config set yard-solo user.subyard.desired_power stopped --project subyard-solo') printf 'stopped\n' > "$STATE_ROOT/intent" ;;
+    *) die "unexpected native operation: $*" ;;
+  esac
+}
+guest_yard() { cat >/dev/null; }
+operator_yard() {
+  local proof
+  proof=$(retired_proof)
+  case "$*" in
+    '-Y solo integration status --json')
+      if [ -z "$proof" ]; then
+        printf '%s\n' '{"observed":"stopped","detail":"run: yard -Y solo start; then run yard migrate"}'
+      else printf '%s\n' '{"observed":"stopped","detail":""}'; fi ;;
+    '-Y solo start'|'-Y solo start --yes')
+      touch "$STATE_ROOT/started"
+      printf 'running\n' > "$STATE_ROOT/intent"
+      printf 'RUNNING\n' > "$STATE_ROOT/power"
+      printf '%s\n' "$(( $(last_boot) + 1 ))" > "$STATE_ROOT/boot"
+      [ -n "$proof" ] || printf 'Warning: retired integration paseo may still be installed in yard solo; run: yard migrate\n' ;;
+    '-Y solo stop --yes')
+      if [ ! -f "$STATE_ROOT/runtime-ready" ]; then
+        printf '%s\n' '{"status":"migration-required","code":"transition-required","action":"run yard migrate"}'
+        return 1
+      fi
+      printf 'STOPPED\n' > "$STATE_ROOT/power"
+      printf 'stopped\n' > "$STATE_ROOT/intent" ;;
+    '-Y solo init')
+      [ "$(yard_power)" = STOPPED ] && [ "$(cat "$STATE_ROOT/intent")" = stopped ] || die 'init did not capture stopped intent'
+      printf 'temporarily start this stopped yard to retire integration paseo\n'
+      [ "$scenario" = no-disclosure ] || printf 'chats, schedules, loops and uploads\n'
+      return 1 ;;
+    '-Y solo init --yes')
+      if [ -z "$proof" ]; then
+        printf 'true\n' > "$STATE_ROOT/proof"
+        printf '%s\n' "$(( $(last_boot) + 1 ))" > "$STATE_ROOT/boot"
+        if [ "$scenario" = restore-fails ] || [ "$(cat "$STATE_ROOT/intent")" != stopped ]; then
+          printf 'RUNNING\n' > "$STATE_ROOT/power"
+        fi
+      fi ;;
+    'migrate --yes') touch "$STATE_ROOT/runtime-ready" ;;
+    'migrate --check --json')
+      [ -f "$STATE_ROOT/runtime-ready" ] || { [ "$(yard_power)" = STOPPED ] && [ "$(cat "$STATE_ROOT/intent")" = stopped ]; } || die 'runtime is pending'
+      printf '%s\n' '{"outcome":{"status":"ready","code":"ready","reachedGoal":true},"blockers":[]}' ;;
+    *) die "unexpected operation: $*" ;;
+  esac
+}
+'''
+                script += functions+'assert_stopped_yard_finishes\n'
+                result = subprocess.run(['bash', '-c', script, 'fixture', temporary,
+                                         str(PACKAGE.parents[2]), scenario], stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, timeout=10)
+                if error:
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn(error, result.stderr)
+                    if scenario in ('foreign-project', 'uuid-changed', 'stop-fails'):
+                        self.assertEqual((Path(temporary)/'power').read_text().strip(), 'RUNNING')
+                        self.assertEqual((Path(temporary)/'intent').read_text().strip(), 'running')
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+
     def test_candidate_update_preserves_arguments_and_native_exit(self):
         source = (PACKAGE/'tests/e2e/owner.sh').read_text()
         function = 'update_candidate() {'+source.split('update_candidate() {', 1)[1].split('\n}\n', 1)[0]+'\n}\n'
@@ -72,6 +171,29 @@ class FixtureCreationTest(unittest.TestCase):
                     command = ['env', 'YARD_RELEASE_BASE_URL=file:///release', '/operator/.local/bin/yard',
                                'update', '--version', 'candidate', *arguments]
                     self.assertEqual((Path(temporary)/'calls').read_text().splitlines(), command)
+
+    def test_failure_capture_names_native_and_json_failures(self):
+        source = (PACKAGE/'tests/e2e/owner.sh').read_text()
+        functions = ''.join(name+'() {'+source.split(name+'() {', 1)[1].split('\n}\n', 1)[0]+'\n}\n'
+                            for name in ('report_failure', 'check_json', 'run_checked'))
+        for code in (0, 23):
+            with self.subTest(native=code), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                script = 'set -euo pipefail\nSTATE_ROOT=$1\n'+functions
+                body = 'printf %s ' + shlex.quote('{"native":true}') + '; exit "$1"'
+                script += 'run_checked native.json ' + shlex.join(['solo operation', 'sh', '-c', body, 'fixture', str(code)]) + '\n'
+                result = subprocess.run(['bash', '-c', script, 'fixture', temporary, str(code)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                if code:
+                    self.assertIn('solo operation native_exit=23', result.stderr)
+                    self.assertIn('{"native":true}', result.stderr)
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            path = Path(temporary)/'ready.json'
+            path.write_text('{"outcome":{"status":"recovering"}}\n')
+            script = 'set -euo pipefail\n'+functions+'check_json '+shlex.join([str(path), 'final readiness failed', '.outcome.status == "ready"'])+'\n'
+            result = subprocess.run(['bash', '-c', script, 'fixture', str(path)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('final readiness failed', result.stderr)
+            self.assertIn(path.read_text().strip(), result.stderr)
 
     def test_image_is_resolvable_in_baseline_created_projects(self):
         source = (PACKAGE/'tests/e2e/owner.sh').read_text()
@@ -322,10 +444,22 @@ class RetirementTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         for arguments, expected in module.read_only_commands(PACKAGE):
-            arguments[arguments.index('dev')] = 'synthetic'
             result = subprocess.run(['incus', *arguments], env=self.environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, expected)
+            # Check the actual host handler against the same exact-command
+            # table used by compatibility, not just the guest program in isolation.
+            shim = ("#!/usr/bin/env python3\nimport sys\n"
+                    f"expected = {arguments!r}\n"
+                    "if sys.argv[1:] != expected: sys.exit(99)\n"
+                    f"sys.stdout.write({expected!r})\n")
+            self.write(self.bin/'incus', shim.encode(), 0o755)
+            observed = self.run_handler('observe')
+            self.assertEqual(observed.returncode, 0, observed.stderr)
+            self.assertEqual(json.loads(observed.stdout), {'state': 'absent', 'actual': '', 'desired': ''})
+            for refused in (arguments + ['dev'], arguments[:-1] + ['apply'], arguments[:1] + ['foreign'] + arguments[2:]):
+                result = subprocess.run(['incus', *refused], env=self.environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 99)
 
 
 if __name__ == '__main__':

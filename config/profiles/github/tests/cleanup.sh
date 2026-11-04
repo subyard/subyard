@@ -104,7 +104,7 @@ sys.exit(code)
 PY
   chmod 0755 "$TMP/bin/incus"
   export PATH="$TMP/bin:$PATH"
-  bash "$ROOT/config/profiles/github/owner.sh" --check
+  bash "$ROOT/config/profiles/github/owner.sh" --check </dev/null
   python3 - "$GITHUB_RELEASE_FIXTURE_LOG" <<'PY'
 import json,pathlib,sys
 calls=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/blang/semver/v4"
 )
 
 func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
@@ -23,6 +24,10 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 		{"inclusive floor", "0.11.0", "", true, false, true},
 		{"missing provenance", "0.11.0", "", false, false, false},
 		{"unparseable source", "development", "", true, false, false},
+		{"invalid fixture version", "0.26.0.next", "", true, false, false},
+		{"invalid without registry", "0.26.0.next", "", false, false, false},
+		{"fixture successor", "0.26.1-p0.next", "", true, false, true},
+		{"prerelease fixture", "0.26.0-p0.15.next", "", true, false, true},
 		{"fresh development bootstrap", "development", "", true, true, true},
 		{"raw V1 is not fresh", "development", "migrations/state.json", true, true, false},
 		{"raw journal is not fresh", "development", "migrations/transactions/unknown/transaction.json", true, true, false},
@@ -65,8 +70,14 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 			if (err == nil) != scenario.allowed {
 				t.Fatalf("source policy allowed=%t: %v", scenario.allowed, err)
 			}
-			if !scenario.allowed && !strings.Contains(err.Error(), "uninstall --full") {
-				t.Fatalf("missing removal guidance: %v", err)
+			if !scenario.allowed {
+				if _, parseErr := semver.Parse(scenario.version); parseErr != nil {
+					if !strings.Contains(err.Error(), "source release version is invalid") || strings.Contains(err.Error(), "uninstall") {
+						t.Fatalf("invalid version became destructive pre-floor guidance: %v", err)
+					}
+				} else if !strings.Contains(err.Error(), "uninstall --full") {
+					t.Fatalf("missing removal guidance: %v", err)
+				}
 			}
 		})
 	}
@@ -138,7 +149,7 @@ func TestHistoricalUninstallSourceIgnoresMigrationReadiness(t *testing.T) {
 				manifest += fmt.Sprintf("%x  ./scripts/02-create-project.sh\n", sha256.Sum256(creator))
 			}
 			// A V2 registry does not imply ownership and does not prevent cleanup.
-			if supportedSourceVersion(scenario.version) {
+			if sourceVersionError(scenario.version) == nil {
 				registry := []byte("invalid registry is irrelevant to uninstall\n")
 				write(filepath.Join(candidate, "config", "release-transition.json"), registry, 0o600)
 				manifest += fmt.Sprintf("%x  ./config/release-transition.json\n", sha256.Sum256(registry))
@@ -174,6 +185,28 @@ func TestHistoricalUninstallSourceIgnoresMigrationReadiness(t *testing.T) {
 				got, err := os.ReadFile(filepath.Join(root, "config", path))
 				if err != nil || string(got) != string(data) {
 					t.Fatalf("migration evidence changed: %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSourceVersionRefusalsDistinguishInvalidFromUnsupported(t *testing.T) {
+	for _, version := range []string{"0.10.0", "development", "0.26.0.next", "0.11.0", "0.26.0", "0.26.0-p0.15", "0.26.1-p0.next"} {
+		t.Run(version, func(t *testing.T) {
+			err := sourceVersionError(version)
+			switch version {
+			case "0.10.0":
+				if err == nil || err.Error() != LegacyReinstallGuidance {
+					t.Fatal("lost supported floor refusal", err)
+				}
+			case "development", "0.26.0.next":
+				if err == nil || !strings.Contains(err.Error(), "source release version is invalid") || strings.Contains(err.Error(), "uninstall") {
+					t.Fatal("invalid version became uninstall guidance", err)
+				}
+			default:
+				if err != nil {
+					t.Fatal("supported version refused", err)
 				}
 			}
 		})

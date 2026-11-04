@@ -128,7 +128,7 @@ class MainTests(unittest.TestCase):
         fixture = COMPONENT.parents[2] / "tests" / "orca-profile-resource.sh"
         # This batch includes multiple observations, drift checks and helper repair.
         result = subprocess.run(["bash", str(fixture), "--source-observer-fixture", str(output)],
-                                env=environment, cwd=cwd, capture_output=True, text=True, timeout=60)
+                                env=environment, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
         self.assertFalse(marker.exists(), "source observer executed an untrusted import")
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         observations = [json.loads((output / (name + ".json")).read_text())

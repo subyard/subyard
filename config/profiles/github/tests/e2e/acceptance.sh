@@ -354,7 +354,7 @@ assert_wiring() {
     >/dev/null 2>&1; then
     die 'persistent GitHub credential helper was installed'
   fi
-  guest_dev /usr/local/bin/subyard-github --help | grep -Fq 'Git HTTPS authorization' \
+  guest_dev /usr/local/bin/subyard-github --help | grep -F 'Git HTTPS authorization' >/dev/null \
     || die 'GitHub helper contract is missing from the client'
 }
 assert_removed() {

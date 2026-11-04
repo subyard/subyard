@@ -396,7 +396,7 @@ guest sh -eu -c '
 for key in user.subyard.ai_observer_provision user.subyard.ai_observer_proxy; do
   [ -z "$(incus config get "$INSTANCE" "$key" --project "$PROJECT")" ] || die 'retirement retained Observer receipt'
 done
-! incus config device list "$INSTANCE" --project "$PROJECT" | grep -Fxq ai-observer || die 'retirement retained Observer route'
+! incus config device list "$INSTANCE" --project "$PROJECT" | grep -Fx ai-observer >/dev/null || die 'retirement retained Observer route'
 
 [ "$(guest sha256sum /usr/local/libexec/subyard/projects-changed | awk '{print $1}')" = \
   "$(sha256sum "$ROOT/config/projects-changed.sh" | awk '{print $1}')" ] \

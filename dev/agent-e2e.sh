@@ -1674,6 +1674,12 @@ main() {
   case "$mode" in
     run|ssh|verify) [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease" ;;
   esac
+  # A host whose installed release predates service registration has no owner route yet.
+  if [ "$E2E_LEGACY_ROUTE" = 0 ] && [ -n "${SUBYARD_E2E_ROLLOUT_YARD:-}" ] \
+    && [ -z "$E2E_OWNER" ] && [ -z "$E2E_POOL" ]; then
+    E2E_YARD="$SUBYARD_E2E_ROLLOUT_YARD"
+    E2E_LEGACY_ROUTE=1
+  fi
   if [ "$E2E_LEGACY_ROUTE" = 0 ] && [ "$mode" != prepare ]; then
     local service_route _runtime_uuid route_generation
     service_route="$(python3 "$REPO_ROOT/config/profiles/test-vms/service-route.py" \

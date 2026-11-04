@@ -20,9 +20,15 @@ const MinimumSourceVersion = "0.11.0"
 
 const LegacyReinstallGuidance = "Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately."
 
-func supportedSourceVersion(version string) bool {
+func sourceVersionError(version string) error {
 	parsed, err := semver.Parse(version)
-	return err == nil && parsed.GTE(semver.MustParse(MinimumSourceVersion))
+	if err != nil {
+		return errors.New("the sealed source release version is invalid; restore a runtime with a valid semantic version, then run yard update --check")
+	}
+	if parsed.LT(semver.MustParse(MinimumSourceVersion)) {
+		return errors.New(LegacyReinstallGuidance)
+	}
+	return nil
 }
 
 // VerifyLegacyUninstallSource recognizes the sealed historical project-creator
@@ -157,6 +163,9 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		return errors.New("source release identity does not match its sealed version")
 	}
 	if verified.registryDigest == "" {
+		if err := sourceVersionError(verified.version); err != nil {
+			return err
+		}
 		return errors.New(LegacyReinstallGuidance)
 	}
 	registryFile, err := openCandidateFile(int(verified.root.Fd()), "config/release-transition.json")
@@ -202,8 +211,5 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			return nil
 		}
 	}
-	if !supportedSourceVersion(verified.version) || verified.registryDigest == "" {
-		return errors.New(LegacyReinstallGuidance)
-	}
-	return nil
+	return sourceVersionError(verified.version)
 }

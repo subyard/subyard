@@ -19,8 +19,40 @@ FOREIGN_UNIT=/etc/systemd/system/paseo.service
 FOREIGN_DATA=/srv/agents/paseo/data/foreign-sentinel
 LOGS=(update-check.json update-check.txt update.log status-default.json status-solo.json status-foreign.json
   stopped-status.json stopped-plan.log stopped-init.log stopped-repeat-init.log stopped-proven-status.json solo-start.log
+  solo-stop.log stopped-before-init.json stopped-migrate.log stopped-ready.json solo-restart.log
+  solo-final-stop.log solo-final-start.log
   repeat-init.log repeat-migrate.log enable-refused.log disable.log postboot.json
-  final-check.json final-journal.json final-repair.log final-ready.json)
+  final-check.json final-journal.json final-repair.log final-ready.json disable-ready.json)
+
+report_failure() { # message, captured files...
+  local message="$1" file
+  shift
+  printf 'paseo-removal: %s\n' "$message" >&2
+  for file; do
+    [ -f "$file" ] || continue
+    printf '\n== %s ==\n' "${file##*/}" >&2
+    case "$file" in *.json) cat "$file" >&2 ;; *) tail -c 16384 "$file" >&2 ;; esac
+  done
+  return 1
+}
+
+check_json() { # captured file, message, jq arguments...
+  local file="$1" message="$2"
+  shift 2
+  jq -e "$@" "$file" >/dev/null || report_failure "$message" "$file"
+}
+
+run_checked() { # log name, operation label, command...
+  local file="$STATE_ROOT/$1" label="$2" rc=0
+  shift 2
+  case "$file" in
+    *.json) "$@" > "$file" || rc=$? ;;
+    *) "$@" > "$file" 2>&1 || rc=$? ;;
+  esac
+  if [ "$rc" != 0 ]; then
+    report_failure "$label native_exit=$rc" "$file" || return "$rc"
+  fi
+}
 
 project_of() { if [ "$1" = default ]; then printf subyard; else printf 'subyard-%s' "$1"; fi; }
 instance_of() { if [ "$1" = default ]; then printf yard; else printf 'yard-%s' "$1"; fi; }
@@ -110,7 +142,7 @@ seed_guests() {
   done
   guest_yard default test -f /var/lib/subyard/paseo-ownership
   guest_yard default sh -eu -c 'install -d "$(dirname "$1")"; printf "%s\n" "$2" > "$1"' subyard "$SENTINEL" "$MARKER"
-  # A retired package never adopts a service it cannot prove it installed, nor its data.
+  # Removal also deletes this unrelated same-name service and its non-worktree data.
   guest_yard foreign sh -eu -c '
     [ ! -e /var/lib/subyard/paseo-ownership ]
     install -d "$(dirname "$2")"
@@ -132,8 +164,10 @@ assert_removed() {
       /usr/local/bin/paseo-rotate-identity /usr/local/bin/paseo-sync-projects; do
       [ ! -e "$path" ] && [ ! -L "$path" ]
     done
-    command -v codex >/dev/null
-  ' || die "yard $name kept a removable Paseo file or lost Codex"
+  ' || die "yard $name kept a removable Paseo file"
+  if [ "$name" != solo ]; then
+    guest_yard "$name" sh -c 'command -v codex >/dev/null' || die "yard $name lost selected Codex"
+  fi
 }
 
 yard_power() { incus list "$(instance_of "$1")" --project "$(project_of "$1")" -f csv -c s; }
@@ -142,9 +176,9 @@ last_boot() { incus query "/1.0/instances/$(instance_of "$1")?project=$(project_
 
 assert_status() {
   local name="$1" effective="$2"
-  operator_yard -Y "$name" integration status --json > "$STATE_ROOT/status-$name.json"
-  jq -e --argjson effective "$effective" '.observed == "ready" and .selection.effective == $effective' \
-    "$STATE_ROOT/status-$name.json" >/dev/null || die "yard $name did not converge after retirement"
+  run_checked "status-$name.json" "yard $name integration status" operator_yard -Y "$name" integration status --json
+  check_json "$STATE_ROOT/status-$name.json" "yard $name did not converge after retirement" \
+    --argjson effective "$effective" '.observed == "ready" and .selection.effective == $effective'
 }
 
 assert_converged() {
@@ -155,8 +189,8 @@ assert_converged() {
     [ "$(find /srv/agents/paseo -mindepth 1 -maxdepth 1 -printf "%f\n")" = worktrees ]
   ' subyard "$SENTINEL" "$MARKER" || die 'removal lost worktrees or retained other state'
   assert_status default '["codex"]'
-  jq -e '.selection.retired == ["paseo"] and (.detail | contains("/srv/agents/paseo/worktrees"))' \
-    "$STATE_ROOT/status-default.json" >/dev/null || die 'status omitted retained worktrees'
+  check_json "$STATE_ROOT/status-default.json" 'status omitted retained worktrees' \
+    '.selection.retired == ["paseo"] and (.detail | contains("/srv/agents/paseo/worktrees"))'
   operator_env sha256sum -c "$STATE_ROOT/settings.before" >/dev/null || die 'removal rewrote authored settings'
   for name in solo foreign; do
     guest_yard "$name" sh -eu -c '[ ! -e /srv/agents/paseo ] && [ ! -L /srv/agents/paseo ]' || die "removal retained state: $name"
@@ -172,29 +206,32 @@ update_candidate() {
 
 finish_known_final_check() {
   local original="$1" current rc=0
-  [ "$original" = 1 ] || return 1
+  [ "$original" = 1 ] || report_failure "unexpected released caller native_exit=$original" "$STATE_ROOT/update.log" || return 1
   tr -d '\r' < "$STATE_ROOT/update.log" | grep -Fx \
-    'yard: update: final update check: the inspected release transition has not started; next: run yard update' >/dev/null || return 1
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || return 1
-  current="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" || return 1
-  [[ "$current" = "releases/$CANDIDATE_VERSION-"* ]] || return 1
+    'yard: update: final update check: the inspected release transition has not started; next: run yard update' >/dev/null \
+    || report_failure 'released caller did not report the exact known final-check refusal' "$STATE_ROOT/update.log" || return 1
+  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || report_failure 'candidate is not active after released caller' || return 1
+  current="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" || report_failure 'cannot read active candidate link' || return 1
+  [[ "$current" = "releases/$CANDIDATE_VERSION-"* ]] || report_failure "unexpected active release: $current" || return 1
   current="${current#releases/}"
-  operator_yard migrate --check --json > "$STATE_ROOT/final-check.json" || return 1
-  operator_env cat "$CONFIG_HOME/release-transition/v2/journal.json" > "$STATE_ROOT/final-journal.json" || return 1
+  run_checked final-check.json 'known final-check inspection' operator_yard migrate --check --json || return 1
+  run_checked final-journal.json 'known final-check journal capture' operator_env cat "$CONFIG_HOME/release-transition/v2/journal.json" || return 1
   # The retained old-caller log has no fresh decision JSON. Keep the exact shared
   # materialized-only allowlist; disclose and refuse any different decision set.
   jq '{outcome: (.outcome | {status,code,active,target}), decisions, blockers}' "$STATE_ROOT/final-check.json"
   known_materialized_final_check "$STATE_ROOT/final-check.json" "$STATE_ROOT/final-journal.json" \
-    "$current" "${OLD_RELEASE_TARGET#releases/}" || return 1
+    "$current" "${OLD_RELEASE_TARGET#releases/}" \
+    || report_failure 'candidate state is not the exact known materialized-only refusal' "$STATE_ROOT/final-check.json" "$STATE_ROOT/final-journal.json" || return 1
   printf 'paseo-removal: released caller native_exit=%s; one candidate materialized-config repair\n' "$original"
   update_candidate --yes > "$STATE_ROOT/final-repair.log" 2>&1 || rc=$?
   cat "$STATE_ROOT/final-repair.log"
   printf 'paseo-removal: candidate follow-up native_exit=%s\n' "$rc"
-  [ "$rc" = 0 ] || return 1
-  operator_yard migrate --check --json > "$STATE_ROOT/final-ready.json" || return 1
-  jq -e --arg target "$current" '.outcome.status == "ready" and .outcome.code == "ready" and
+  [ "$rc" = 0 ] || report_failure "candidate follow-up failed native_exit=$rc" "$STATE_ROOT/final-repair.log" || return 1
+  run_checked final-ready.json 'final readiness inspection' operator_yard migrate --check --json || return 1
+  check_json "$STATE_ROOT/final-ready.json" 'candidate follow-up final readiness is not ready' \
+    --arg target "$current" '.outcome.status == "ready" and .outcome.code == "ready" and
     .outcome.reachedGoal == true and .outcome.active == $target and .outcome.target == $target and
-    (.blockers // []) == []' "$STATE_ROOT/final-ready.json" >/dev/null
+    (.blockers // []) == []'
 }
 
 prepare_acceptance() {
@@ -219,7 +256,7 @@ prepare_acceptance() {
   update_candidate --check > "$STATE_ROOT/update-check.txt" 2>&1 || true
   grep -Fq 'retire integration paseo' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
     || die 'old updater preview omitted the retirement'
-  grep -Fq 'run: yard -Y solo init' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
+  grep -Fq 'run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
     || die 'update check omitted the stopped yard action'
   update_candidate --yes > "$STATE_ROOT/update.log" 2>&1 || {
     local rc=$?
@@ -229,13 +266,13 @@ prepare_acceptance() {
   grep -Fq 'Warning: yard default: retire integration paseo' "$STATE_ROOT/update.log" \
     || die 'unattended update omitted the retirement warning'
   [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate was not activated'
-  grep -Fq 'Warning: retired integration paseo may still be installed in yard solo; run: yard -Y solo init' "$STATE_ROOT/update.log" \
+  grep -Fq 'Warning: retired integration paseo may still be installed in yard solo; run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update.log" \
     || die 'unattended update omitted the stopped yard warning'
   [ "$(yard_power solo)" = STOPPED ] || die 'update started the stopped yard'
-  assert_stopped_init_retires
+  assert_stopped_yard_finishes
   assert_converged
-  operator_yard -Y default init --yes > "$STATE_ROOT/repeat-init.log" 2>&1
-  operator_yard migrate --yes > "$STATE_ROOT/repeat-migrate.log" 2>&1
+  run_checked repeat-init.log 'repeat default init' operator_yard -Y default init --yes
+  run_checked repeat-migrate.log 'repeat migration' operator_yard migrate --yes
   ! grep -Fq 'retire integration paseo' "$STATE_ROOT/repeat-init.log" "$STATE_ROOT/repeat-migrate.log" \
     || die 'repeat reconcile planned another retirement'
   assert_converged
@@ -249,29 +286,84 @@ prepare_acceptance() {
   printf 'ok: Paseo removal passed; reboot pending\n'
 }
 
-assert_stopped_init_retires() {
-  local booted
-  operator_yard -Y solo integration status --json > "$STATE_ROOT/stopped-status.json"
-  jq -e '.observed == "stopped" and (.detail | contains("run: yard -Y solo init"))' "$STATE_ROOT/stopped-status.json" >/dev/null \
-    || die 'stopped status omitted the action'
-  if operator_yard -Y solo init </dev/null > "$STATE_ROOT/stopped-plan.log" 2>&1; then die 'EOF accepted the temporary start'; fi
+# A fixture-only native stop reaches the externally stopped state without passing
+# the release gate. Bind both physical stop and stopped intent to our project/UUID.
+stop_owned_solo() { # captured UUID
+  (
+    local PROJECT=subyard-solo INSTANCE=yard-solo
+    assert_state_root
+    [ -f "$STATE_ROOT/.solo-armed" ] && [ ! -L "$STATE_ROOT/.solo-armed" ] \
+      && [ "$(cat "$STATE_ROOT/.solo-armed")" = "$MARKER" ] || die 'refusing unarmed solo stop'
+    assert_project_owned
+    [ "$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT")" = true ] \
+      || die 'refusing foreign solo instance'
+    [ -n "$1" ] && [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$1" ] \
+      || die 'solo instance identity changed before native stop'
+    incus stop "$INSTANCE" --project "$PROJECT" || exit $?
+    [ "$(yard_power solo)" = STOPPED ] || die 'native stop did not stop solo'
+    [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$1" ] \
+      || die 'solo instance identity changed after native stop'
+    # Init restores desired power, not just observed power. Preserve stopped intent too.
+    incus config set "$INSTANCE" user.subyard.desired_power stopped --project "$PROJECT"
+  )
+}
+
+assert_stopped_yard_finishes() {
+  local booted uuid
+  uuid="$(incus config get yard-solo volatile.uuid --project subyard-solo)"
+  [ -n "$uuid" ] || die 'solo instance UUID is missing'
+  run_checked stopped-status.json 'stopped solo integration status' operator_yard -Y solo integration status --json
+  check_json "$STATE_ROOT/stopped-status.json" 'stopped status omitted the combined action' \
+    '.observed == "stopped" and (.detail | contains("run: yard -Y solo start; then run yard migrate"))'
+  # Ordinary start has confirmation=never; EOF must not be mistaken for a decline.
+  run_checked solo-start.log 'noninteractive solo start' operator_yard -Y solo start </dev/null
+  [ "$(yard_power solo)" = RUNNING ] || die 'start did not leave solo running'
+  [ -z "$(retired_proof solo)" ] || die 'start unexpectedly published retirement proof'
+  grep -Fq 'retired integration paseo may still be installed in yard solo; run: yard migrate' "$STATE_ROOT/solo-start.log" \
+    || { report_failure 'start did not name the remaining migrate step' "$STATE_ROOT/solo-start.log"; return 1; }
+  [ "$(incus config get yard-solo user.subyard.disk_tmp --project subyard-solo)" = v1 ] \
+    || die 'start did not complete the disk-/tmp marker'
+  guest_yard solo sh -s -- check < "$ROOT/scripts/guest-disk-tmp.sh" || die 'start left active /tmp memory-backed'
+  # Ordinary stop is gated until migrate repairs this now-running guest. Simulate an
+  # external shutdown only inside our owned namespace to test stopped retirement.
+  run_checked solo-stop.log 'prepare unproven stopped disk-backed solo' stop_owned_solo "$uuid"
+  run_checked stopped-before-init.json 'stopped readiness before retirement init' operator_yard migrate --check --json
+  check_json "$STATE_ROOT/stopped-before-init.json" 'stopped deferral did not leave init admissible' \
+    '.outcome.status == "ready" and .outcome.code == "ready" and (.blockers // []) == []'
+  booted="$(last_boot solo)"
+  if operator_yard -Y solo init </dev/null > "$STATE_ROOT/stopped-plan.log" 2>&1; then
+    die 'EOF accepted the temporary retirement start'
+  fi
   grep -Fq 'temporarily start this stopped yard to retire integration paseo' "$STATE_ROOT/stopped-plan.log" \
     && grep -Fq 'chats, schedules, loops and uploads' "$STATE_ROOT/stopped-plan.log" \
-    || die 'init plan omitted the temporary start or the retirement'
-  [ "$(yard_power solo)" = STOPPED ] || die 'declined init started the yard'
-  [ -z "$(retired_proof solo)" ] || die 'declined init published retirement proof'
-  operator_yard -Y solo init --yes > "$STATE_ROOT/stopped-init.log" 2>&1
-  [ "$(yard_power solo)" = STOPPED ] || die 'init did not restore the stopped yard'
-  [ "$(retired_proof solo)" = true ] || die 'init did not publish retirement proof'
+    || { report_failure 'init plan omitted the temporary start or destructive retirement disclosure' "$STATE_ROOT/stopped-plan.log"; return 1; }
+  [ "$(yard_power solo)" = STOPPED ] && [ "$(last_boot solo)" = "$booted" ] || die 'unconfirmed init booted solo'
+  [ -z "$(retired_proof solo)" ] || die 'unconfirmed init published retirement proof'
+  run_checked stopped-init.log 'retire unproven stopped solo' operator_yard -Y solo init --yes
+  [ "$(yard_power solo)" = STOPPED ] || die 'retirement init did not restore stopped power'
+  [ "$(retired_proof solo)" = true ] || die 'retirement init did not publish proof'
+  # Once proven, ordinary stopped init must not boot the yard again.
   booted="$(last_boot solo)"
-  operator_yard -Y solo init --yes > "$STATE_ROOT/stopped-repeat-init.log" 2>&1
-  [ "$(yard_power solo)" = STOPPED ] && [ "$(last_boot solo)" = "$booted" ] || die 'repeat init booted a proven yard'
-  ! grep -Fq 'temporarily start' "$STATE_ROOT/stopped-repeat-init.log" || die 'repeat init planned another temporary start'
-  operator_yard -Y solo integration status --json > "$STATE_ROOT/stopped-proven-status.json"
-  jq -e '.observed == "stopped" and (.detail // "" | contains("yard -Y solo init") | not)' "$STATE_ROOT/stopped-proven-status.json" >/dev/null \
-    || die 'proven yard still warns'
-  operator_yard -Y solo start --yes > "$STATE_ROOT/solo-start.log" 2>&1
-  ! grep -Fq 'retired integration paseo' "$STATE_ROOT/solo-start.log" || die 'start warned about a proven yard'
+  run_checked stopped-repeat-init.log 'repeat init proven stopped solo' operator_yard -Y solo init --yes
+  [ "$(yard_power solo)" = STOPPED ] && [ "$(last_boot solo)" = "$booted" ] || die 'proven init booted solo'
+  ! grep -Fq 'temporarily start' "$STATE_ROOT/stopped-repeat-init.log" || die 'repeat init planned a temporary start'
+  run_checked stopped-proven-status.json 'proven stopped solo status' operator_yard -Y solo integration status --json
+  check_json "$STATE_ROOT/stopped-proven-status.json" 'proven stopped yard still has a retirement reminder' \
+    '.observed == "stopped" and (.detail // "" | contains("retired integration paseo") | not)'
+  run_checked solo-restart.log 'restart proven solo' operator_yard -Y solo start --yes
+  ! grep -Fq 'retired integration paseo' "$STATE_ROOT/solo-restart.log" || die 'start warned about proven solo'
+  run_checked stopped-migrate.log 'solo runtime repair after retirement' operator_yard migrate --yes
+  # The printed repair sequence must leave ordinary stop usable again.
+  run_checked solo-final-stop.log 'ordinary solo stop after repair' operator_yard -Y solo stop --yes
+  [ "$(yard_power solo)" = STOPPED ] || die 'ready solo was not stoppable'
+  run_checked solo-final-start.log 'ordinary solo start after repair' operator_yard -Y solo start --yes
+  [ "$(yard_power solo)" = RUNNING ] || die 'ready solo did not restart for reboot coverage'
+  run_checked stopped-ready.json 'solo final readiness' operator_yard migrate --check --json
+  check_json "$STATE_ROOT/stopped-ready.json" 'start, retirement and migrate did not reach ready' \
+    '.outcome.status == "ready" and .outcome.code == "ready" and .outcome.reachedGoal == true and
+    (.blockers // []) == [] and all(.outcome.warnings[]?; contains("yard solo") | not)'
+  [ "$(incus config get yard-solo volatile.uuid --project subyard-solo)" = "$uuid" ] \
+    || die 'solo identity changed through retirement and repair'
 }
 
 resume_acceptance() {
@@ -286,14 +378,18 @@ resume_acceptance() {
       [ "$(yard_power "$name")" = RUNNING ] && break
       sleep 1
     done
+    [ "$(yard_power "$name")" = RUNNING ] || die "yard $name did not return running after reboot"
   done
   assert_converged
-  operator_yard migrate --check --json > "$STATE_ROOT/postboot.json"
-  jq -e '.outcome.code == "ready" and (.blockers | length) == 0' "$STATE_ROOT/postboot.json" >/dev/null \
-    || die 'rebooted host is not ready'
-  operator_yard -Y default integration disable paseo --yes > "$STATE_ROOT/disable.log" 2>&1
+  run_checked postboot.json 'postboot readiness' operator_yard migrate --check --json
+  check_json "$STATE_ROOT/postboot.json" 'rebooted host is not ready' \
+    '.outcome.status == "ready" and .outcome.code == "ready" and .outcome.reachedGoal == true and (.blockers // []) == []'
+  run_checked disable.log 'disable retired selection' operator_yard -Y default integration disable paseo --yes
   operator_env grep -Fq "CODING_TOOL_INTEGRATIONS='codex'" "$CONFIG_HOME/yards/default/config.env" \
     || die 'retired disable did not clear the selection'
+  run_checked disable-ready.json 'readiness after retired disable' operator_yard migrate --check --json
+  check_json "$STATE_ROOT/disable-ready.json" 'retired disable left release unready' \
+    '.outcome.status == "ready" and .outcome.code == "ready" and .outcome.reachedGoal == true and (.blockers // []) == []'
   PRESERVE_FIXTURE=1
   printf 'ok: Paseo removal survived the reboot\n'
 }

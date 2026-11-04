@@ -31,8 +31,8 @@ cat > "$tmp/source-version_test.go" <<'GO'
 package releaseruntime
 import ("os"; "testing")
 func TestAndroidFixtureSourceVersion(t *testing.T) {
-    if supportedSourceVersion("0.1.0-android.e2e") { t.Fatal("retired fixture version was admitted") }
-    if !supportedSourceVersion(os.Getenv("ANDROID_CANDIDATE_FIXTURE_VERSION")) { t.Fatal("Android fixture version is below the supported source floor") }
+    if sourceVersionError("0.1.0-android.e2e") == nil { t.Fatal("retired fixture version was admitted") }
+    if sourceVersionError(os.Getenv("ANDROID_CANDIDATE_FIXTURE_VERSION")) != nil { t.Fatal("Android fixture version is below the supported source floor") }
 }
 GO
 python3 - "$ROOT" "$tmp" <<'PY'

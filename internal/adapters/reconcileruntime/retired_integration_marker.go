@@ -82,5 +82,11 @@ func RetiredIntegrationReminder(loaded config.Loaded, instance ports.InstanceInf
 		return ""
 	}
 	yard := loaded.Context.YardName
-	return fmt.Sprintf("retired integration %s may still be installed in yard %s; run: yard -Y %s init", strings.Join(names, " "), yard, yard)
+	action := "yard -Y " + yard + " init"
+	if strings.EqualFold(instance.Status, "running") {
+		action = "yard migrate"
+	} else if marker, _ := instance.EffectiveConfig("user.subyard.disk_tmp"); marker == "" && strings.EqualFold(instance.Status, "stopped") {
+		action = "yard -Y " + yard + " start; then run yard migrate"
+	}
+	return fmt.Sprintf("retired integration %s may still be installed in yard %s; run: %s", strings.Join(names, " "), yard, action)
 }

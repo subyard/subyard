@@ -1147,7 +1147,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		}
 		activationTargets = append(activationTargets, config.MaterializationActivationTarget{
 			Name: target.Name, Assessment: config.MaterializationAssessment{State: assessment.State, Changed: assessment.Changed, DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint},
-			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integration.Changed,
+			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integration.Changed || integration.NeedsRetirementProof(),
 		})
 	}
 	assessed := config.AssessMaterializationActivation(activationTargets)

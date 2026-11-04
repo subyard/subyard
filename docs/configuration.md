@@ -293,8 +293,11 @@ rewriting the file. `yard integration enable <id>` and `yard config set` refuse 
 `yard integration disable <id>` removes it from the yard's selection. A dependency that only the
 retired integration requested stops being effective, keeps its binaries and authorization, and
 can be selected again, for example with `yard integration enable codex`. While a selected retired
-integration has no recorded retirement, `yard init` also temporarily starts an intentionally stopped
-yard to remove it and then stops the yard again; updates and `yard start` only warn. Paseo removal
+integration has no recorded retirement, `yard init` can temporarily start a stopped yard
+whose disk-backed `/tmp` policy is complete, remove it and restore stopped power. If both
+retirement and disk-backed `/tmp` are pending, run `yard -Y NAME start`, then `yard migrate`;
+the same sequence finishes both and records verified retirement, including an already-clean guest.
+An update does not boot a stopped yard. Paseo removal
 also removes foreign units and all state except a non-empty real `/srv/agents/paseo/worktrees/`
 directory, which stays with one warning. To use Paseo, install an older release. See the
 [retired package contract](reference/shipped-integration-contract.md#retired-package-compatibility).

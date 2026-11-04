@@ -67,7 +67,7 @@ valid_token() { [[ "$1" =~ ^[0-9]+$ ]]; }
 assert_state_root() {
   if [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
     && [ "$(cat "$STATE_ROOT/.subyard-p0-marker" 2>/dev/null)" = "$MARKER" ]; then
-    return
+    return 0
   fi
   die "refusing unmarked state root $STATE_ROOT"
 }
@@ -122,6 +122,7 @@ fixture_env() { # command [args...]
     HOME="$HOME_ROOT" USER="$(id -un)" LOGNAME="$(id -un)" SHELL=/bin/bash \
     PATH="$BIN_ROOT:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     SUBYARD_OPERATOR_HOME="$HOME_ROOT" SUBYARD_HOME="$DATA_ROOT" \
+    SUBYARD_KEYS_SYSTEMD_DIR="$HOME_ROOT/.config/systemd/user" \
     SUBYARD_CONFIG_HOME="$CONFIG_HOME" SUBYARD_YARD="$YARD_NAME" \
     YARD_RUNTIME_ROOT="$RUNTIME_ROOT" YARD_RELEASE_CACHE="$CACHE_ROOT" \
     YARD_BIN_DIR="$BIN_ROOT" YARD_SHELL_RC="$HOME_ROOT/.bashrc" \
@@ -486,7 +487,7 @@ require_absent_legacy_power() {
     [ -z "$POWER_COORDINATION_BINDING" ] || continue
     for artifact in "${path%/*}/.${path##*/}.native-install.lock" "${path%/*}/.${path##*/}.native-custody.json"; do
       [ ! -e "$artifact" ] && [ ! -L "$artifact" ] \
-        || die 'historical recovery requires absent default power artifacts and custody'
+        || die "historical recovery requires absent default power artifacts and custody: $artifact"
     done
   done
   if [ -n "$POWER_COORDINATION_BINDING" ]; then
@@ -904,7 +905,7 @@ PY
 
 prepare_recovery_logs() { # <descriptor-variable> <fixed-log-name>
   local destination="$1" name="$2" directory_fd log_fd rc=0 restore_clobber=0
-  case "$name" in resume.log|resume.stderr|first-process.log) ;; *) return 2 ;; esac
+  case "$name" in resume.log|resume.stderr|resume-retry.log|resume-retry.stderr|first-process.log) ;; *) return 2 ;; esac
   exec {directory_fd}< "$FIXTURE_ROOT/." || return
   python3 - "$STATE_ROOT" "$MARKER" "$FIXTURE_ROOT" "$FIXTURE_MARKER" "$BASHPID" "$directory_fd" <<'PY' || rc=$?
 import os, stat, sys
@@ -968,12 +969,14 @@ def private_root(path, marker):
         raise
 
 failed = False
-if len(sys.argv) != 10 or not all(value.isdecimal() for value in sys.argv[5:6] + sys.argv[7:10]):
+if len(sys.argv) not in (10, 11) or not all(value.isdecimal() for value in sys.argv[5:6] + sys.argv[7:10]):
     print('RELEASE_RECOVERY_CAPTURE {"state":"refused"}', flush=True)
     sys.exit(23)
 action = sys.argv[6]
 assert action in ('replay', 'export')
-held = dict(zip(('resume-stdout', 'resume-stderr', 'first-process'), sys.argv[7:10]))
+stem = sys.argv[10] if len(sys.argv) == 11 else 'resume'
+assert stem in ('resume', 'resume-retry')
+held = dict(zip((stem + '-stdout', stem + '-stderr', 'first-process'), sys.argv[7:10]))
 try:
     os.close(private_root(sys.argv[1], sys.argv[2]))
     root = private_root(sys.argv[3], sys.argv[4])
@@ -982,12 +985,12 @@ except (OSError, AssertionError):
     sys.exit(23)
 try:
     for name, relative, limit in (
-        ('resume-stdout', 'resume.log', 65536), ('resume-stderr', 'resume.stderr', 16384),
+        (stem + '-stdout', stem + '.log', 65536), (stem + '-stderr', stem + '.stderr', 16384),
         ('journal', 'config/release-transition/v2/journal.json', 65536),
         ('cas-marker', 'post-cas-link-observed.json', 4096),
         ('first-process', 'first-process.log', 65536),
     ):
-        if action == 'replay' and name != 'resume-stderr':
+        if action == 'replay' and name != stem + '-stderr':
             continue
         opened = []
         try:
@@ -1043,21 +1046,49 @@ capture_post_cas_resume_failure() {
   recovery_log_artifacts export "$@"
 }
 
+post_cas_resume_needs_next() { # held stderr descriptor; never classify a replaced pathname
+  local previous
+  previous="$(readlink "$RUNTIME_ROOT/previous")" || return 1
+  case "$previous" in releases/"$SOURCE_VERSION"-*) ;; *) return 1 ;; esac
+  python3 - "$BASHPID" "$1" "$CANDIDATE_RELEASE" "${previous#releases/}" <<'PY_NEXT'
+import re, sys
+try:
+    with open('/proc/' + sys.argv[1] + '/fd/' + sys.argv[2], 'rb') as stream:
+        text = stream.read(16385).decode('ascii').strip()
+except (OSError, UnicodeError):
+    sys.exit(1)
+expected = ('yard: update: execute prepared release: release transition recovering: '
+            'code=verification-failed active=' + sys.argv[3] + ' previous=' + sys.argv[4] +
+            ' target=' + sys.argv[3] + ' transaction=')
+pattern = (re.escape(expected) + r'tx-[a-f0-9]{32}' + re.escape(
+    '; the release transition was interrupted after a durable mutation checkpoint; next: run yard update'))
+sys.exit(0 if re.fullmatch(pattern, text) else 1)
+PY_NEXT
+}
+
 resume_post_cas_candidate() {
-  local output="$1" first_fd="$2" output_fd errors_fd rc=0 capture_rc=0 replay_rc=0
-  [ "$output" = "$FIXTURE_ROOT/resume.log" ] || return 2
-  prepare_recovery_logs output_fd resume.log || return
-  prepare_recovery_logs errors_fd resume.stderr || rc=$?
+  local output="$1" first_fd="$2" output_fd errors_fd rc=0 capture_rc=0 replay_rc=0 stem
+  case "$output" in "$FIXTURE_ROOT/resume.log"|"$FIXTURE_ROOT/resume-retry.log") ;; *) return 2 ;; esac
+  stem="${output##*/}"; stem="${stem%.log}"
+  POST_CAS_FOLLOW_NEXT=0
+  prepare_recovery_logs output_fd "$stem.log" || return
+  prepare_recovery_logs errors_fd "$stem.stderr" || rc=$?
   if [ "$rc" != 0 ]; then exec {output_fd}>&-; return "$rc"; fi
   fixture_env "$RUNTIME_ROOT/current/bin/yard" update --offline \
     --version "$CANDIDATE_VERSION" --runtime-root "$RUNTIME_ROOT" </dev/null \
     1>&"$output_fd" 2>&"$errors_fd" || rc=$?
-  recovery_log_artifacts replay "$output_fd" "$errors_fd" "$first_fd" || replay_rc=$?
+  recovery_log_artifacts replay "$output_fd" "$errors_fd" "$first_fd" "$stem" || replay_rc=$?
   if [ "$rc" != 0 ]; then
     recovery_inspection_diagnostics "/proc/$BASHPID/fd/$output_fd" || true
     cleanup_failure_diagnostics "/proc/$BASHPID/fd/$output_fd" || true
-    capture_post_cas_resume_failure "$output_fd" "$errors_fd" "$first_fd" || capture_rc=$?
+    capture_post_cas_resume_failure "$output_fd" "$errors_fd" "$first_fd" "$stem" || capture_rc=$?
     printf 'release-recovery resume native_status=%s capture_status=%s replay_status=%s\n' "$rc" "$capture_rc" "$replay_rc" >&2
+    if [ "$stem:$capture_rc:$replay_rc" = resume:0:0 ] && post_cas_resume_needs_next "$errors_fd"; then
+      POST_CAS_FOLLOW_NEXT=1
+    fi
+  elif [ "$stem" = resume-retry ]; then
+    # Retain both attempts even when the one permitted retry succeeds.
+    capture_post_cas_resume_failure "$output_fd" "$errors_fd" "$first_fd" "$stem" || rc=$?
   elif [ "$replay_rc" != 0 ]; then
     printf 'release-recovery resume native_status=0 replay_status=%s\n' "$replay_rc" >&2
   fi
@@ -1223,6 +1254,7 @@ run_post_cas_resume() { # post-cas
     HOME="$HOME_ROOT" USER="$(id -un)" LOGNAME="$(id -un)" SHELL=/bin/bash \
     PATH="$BIN_ROOT:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     SUBYARD_OPERATOR_HOME="$HOME_ROOT" SUBYARD_HOME="$DATA_ROOT" \
+    SUBYARD_KEYS_SYSTEMD_DIR="$HOME_ROOT/.config/systemd/user" \
     SUBYARD_CONFIG_HOME="$CONFIG_HOME" SUBYARD_YARD="$YARD_NAME" \
     YARD_RUNTIME_ROOT="$RUNTIME_ROOT" YARD_RELEASE_CACHE="$CACHE_ROOT" \
     YARD_BIN_DIR="$BIN_ROOT" YARD_SHELL_RC="$HOME_ROOT/.bashrc" \
@@ -1264,9 +1296,15 @@ run_post_cas_resume() { # post-cas
     '.transaction != $source and .checkpoint != "complete"' "$JOURNAL" >/dev/null \
     || die 'post-CAS interruption did not retain resumable candidate state'
   output="$FIXTURE_ROOT/resume.log"
-  resume_post_cas_candidate "$output" "$first_process_fd"
+  resume_post_cas_candidate "$output" "$first_process_fd" || {
+    local resume_rc=$?
+    [ "$POST_CAS_FOLLOW_NEXT" = 1 ] || return "$resume_rc"
+    printf 'release-recovery resume-followed-next native_status=%s next="run yard update" retry=1\n' "$resume_rc"
+    output="$FIXTURE_ROOT/resume-retry.log"
+    resume_post_cas_candidate "$output" "$first_process_fd" || return
+  }
   exec {first_process_fd}>&-
-  ! grep -Eiq 'confirm|proceed' "$output" \
+  ! grep -Eiq 'confirm|proceed' "$FIXTURE_ROOT/resume.log" "$output" \
     || die 'ordinary post-CAS resume requested a second confirmation'
   assert_terminal "$FIXTURE_ROOT/source-ledger.json" "$FIXTURE_ROOT/recovery-plan"
   output="$FIXTURE_ROOT/repeat-check.json"

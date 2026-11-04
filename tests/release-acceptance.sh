@@ -78,6 +78,24 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_release_check_gets_eof_and_preserves_operator_input(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            reader, writer = os.pipe()
+            saved = os.dup(0)
+            try:
+                os.write(writer, b"retained operator input\n")
+                os.dup2(reader, 0)
+                child = [sys.executable, "-c", "import os,sys; sys.exit(0 if os.read(0, 1) == b'' else 37)"]
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = m.execute("stdin", child, output, output, m.clean_environment())
+                self.assertEqual(result["exit_code"], 0, result)
+                self.assertEqual(os.read(reader, 128), b"retained operator input\n")
+            finally:
+                os.dup2(saved, 0)
+                for descriptor in (saved, reader, writer):
+                    os.close(descriptor)
+
     def test_release_smoke_is_required_even_without_optional_vm_selection(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)

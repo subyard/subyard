@@ -465,7 +465,7 @@ chmod 644 "$HOME/.config/systemd/user/$1"' _ "$foreign_unit"
     incus profile device add default eth0 nic network=incusbr0 --project "$foreign" >/dev/null
     incus launch subyard-e2e-debian-13-cloud-container control --project "$foreign" >/dev/null
     incus storage volume create "$pool" "foreign-$token" --project default >/dev/null
-    relay_ip="$(incus list yard --project "subyard-full-$token" -f json | jq -er '.[0].state.network.eth0.addresses[] | select(.family=="inet" and .scope=="global") | .address' | head -1)"
+    relay_ip="$(incus list yard --project "subyard-full-$token" -f json | jq -er 'first(.[0].state.network.eth0.addresses[] | select(.family=="inet" and .scope=="global") | .address)')"
     operator_env env SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 SUBYARD_CONFIG_DIR="$state/runtime/current/config" \
       SUBYARD_OPERATOR_HOME="$home" STORAGE_PATH="$state/storage" HOST_BASE="$state/host" RESTRICTED_DISK_PATHS="$state/host" \
       ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard INCUS_PROJECT="subyard-full-$token" INCUS_BRIDGE="$bridge" \

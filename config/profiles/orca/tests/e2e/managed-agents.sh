@@ -426,26 +426,52 @@ value["env"] = {**value.get("env", {}), "ANTHROPIC_AUTH_TOKEN": "synthetic-local
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:" + port}
 settings.write_text(json.dumps(value))
 ' "$workspace" "$model_port"
-claude_terminal_ready() { # title
+claude_terminal_ready() { # title, accept|decline (default: decline)
+  local choice="${2:-decline}" screen offered=0 accepted=0 ready_since=0 deadline=$((SECONDS + 65))
   orca_terminal_open 'claude --dangerously-skip-permissions' "$1"
-  # The dialog defaults to exit and has no numeric shortcut, so move to the accept option first.
-  if terminal_wait 'Yes, I accept' 20; then
-    terminal_press $'\x1b[B'
-  fi
-  terminal_wait 'bypass permissions on' 45 || terminal_fail 'stock-argument Claude did not reach bypass mode'
+  while ((SECONDS < deadline)); do
+    screen="$(terminal_screen)" || terminal_fail 'cannot read Claude startup screen'
+    # A status line may appear behind the dialog. Resolve the offer before sending any prompt.
+    if [[ "$screen" = *'Make auto mode'* ]]; then
+      if [ "$offered" = 0 ]; then
+        case "$choice" in
+          accept)
+            printf 'managed-agents-status: auto mode offer: accepting through the real dialog\n'
+            # Yes is preselected; Enter is intentional only in this acceptance case.
+            terminal_send --text $'\r' ;;
+          decline)
+            printf 'managed-agents-status: auto mode offer: explicitly declining\n'
+            terminal_press $'\x1b[B' ;;
+          *) terminal_fail "invalid auto mode offer choice: $choice" ;;
+        esac
+        offered=1
+      fi
+    elif [[ "$screen" = *'Yes, I accept'* ]]; then
+      if [ "$accepted" = 0 ]; then
+        # The bypass disclaimer defaults to exit; select its accept option explicitly.
+        terminal_press $'\x1b[B'
+        accepted=1
+      fi
+    elif [ "$offered" = 1 ]; then
+      if { [ "$choice" = accept ] && [[ "$screen" = *'auto mode on'* ]]; } \
+        || { [ "$choice" = decline ] && [[ "$screen" = *'bypass permissions on'* ]]; }; then
+        return 0
+      fi
+    elif [[ "$screen" = *'bypass permissions on'* ]]; then
+      [ "$ready_since" != 0 ] || ready_since=$SECONDS
+      # Older clients may not offer auto mode; allow the existing 15-second offer window.
+      if [ "$choice" = decline ] && ((SECONDS - ready_since >= 15)); then return 0; fi
+    else
+      ready_since=0
+    fi
+    sleep 1
+  done
+  terminal_fail "Claude startup did not finish the $choice auto mode choice"
 }
 # bypassPermissions is the standard mode, so an accepted auto mode offer must read as drift.
 yard config status >/dev/null 2>&1 || die 'the Claude terminal fixture settings already read as drift'
 guest_root runuser -u dev -- sh -c 'cp /home/dev/.claude.json /tmp/subyard-managed-claude-state.saved && cp /home/dev/.claude/settings.json /tmp/subyard-managed-fixture-settings.saved'
-claude_terminal_ready subyard-managed-claude-offer
-if terminal_wait 'Make auto mode' 15; then
-  printf 'managed-agents-status: auto mode offer: accepting through the real dialog\n'
-  terminal_send --text $'\r'
-  terminal_wait 'auto mode on' 20 || terminal_fail 'accepting the offer did not enable auto mode'
-else
-  printf 'managed-agents-status: auto mode offer: not shown, so this applies its recorded settings write\n'
-  guest_root runuser -u dev -- sh -c "jq '.permissions.defaultMode = \"auto\" | .skipDangerousModePermissionPrompt = true' $settings_file > $settings_file.stage && cat $settings_file.stage > $settings_file && rm -f $settings_file.stage"
-fi
+claude_terminal_ready subyard-managed-claude-offer accept
 terminal_close
 [ "$(guest_root jq -r .permissions.defaultMode "$settings_file")" = auto ] || die 'the accepted offer did not set auto mode'
 if yard config status >"$STATE/managed-offer-status.out" 2>&1; then
@@ -457,13 +483,9 @@ yard config status >/dev/null || die 'an accepted auto mode offer stayed in drif
 [ "$(guest_root jq -r .permissions.defaultMode "$settings_file")" = bypassPermissions ] \
   || die 'yard config apply restored another Claude mode'
 guest_root runuser -u dev -- sh -c 'cat /tmp/subyard-managed-claude-state.saved > /home/dev/.claude.json; cat /tmp/subyard-managed-fixture-settings.saved > /home/dev/.claude/settings.json; rm -f /tmp/subyard-managed-claude-state.saved /tmp/subyard-managed-fixture-settings.saved'
-claude_terminal_ready subyard-managed-claude
-# This offer preselects auto mode, so an Enter meant for the prompt would change the mode.
-if terminal_wait 'Make auto mode' 15; then
-  printf 'managed-agents: Claude showed the auto mode default offer with Yes preselected; this fixture declines it\n'
-  terminal_press $'\x1b[B'
-fi
-terminal_wait 'bypass permissions on' 20 || terminal_fail 'stock-argument Claude left bypass mode'
+claude_terminal_ready subyard-managed-claude decline
+[ "$(guest_root jq -r .permissions.defaultMode "$settings_file")" = bypassPermissions ] \
+  || die 'declining the auto mode offer changed the managed mode'
 terminal_run 'git commit --allow-empty -m terminal-denied' deny same 0
 terminal_run 'git commit --allow-empty -m terminal-first' allow changed 1
 terminal_run 'git commit --allow-empty -m terminal-repeated' allow changed 1

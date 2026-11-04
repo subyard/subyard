@@ -19,6 +19,7 @@ PEER_DATA_ROOT="$PEER_STATE_ROOT/subyard"
 PEER_HOST_BASE="$PEER_STATE_ROOT/host-data"
 PEER_KEYS_ROOT="$PEER_STATE_ROOT/keys"
 PEER_KEYS_TOOLS="$PEER_STATE_ROOT/tools"
+PEER_KEYS_SYSTEMD_DIR="$PEER_STATE_ROOT/key-units"
 PEER_KEYS_CONSUMER_ROOT="$PEER_STATE_ROOT/consumer"
 MARKER="subyard-p0-$TOKEN"
 PEER_INCUS_MARKER="$PEER_STATE_ROOT/.subyard-p0-incus-init"
@@ -191,6 +192,8 @@ prepare_owner_go_cache() {
   p0_capacity_prepare_subtree "$OWNER_ROOT"
   export SUBYARD_HOME="$OWNER_DATA_ROOT"
   export SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME"
+  export SUBYARD_KEYS_SYSTEMD_DIR="$OWNER_ROOT/key-units"
+  export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
   export SUBYARD_TEST_VMS_SINK_PATH="$OWNER_TEST_VMS_SINK"
   export SUBYARD_TEST_VMS_SINK_SERVICE_PATH="$OWNER_TEST_VMS_SINK_SERVICE"
   export SUBYARD_TEST_VMS_SINK_TIMER_PATH="$OWNER_TEST_VMS_SINK_TIMER"
@@ -400,7 +403,7 @@ canonical_broker_release_migration_contract() {
 
 owner_named_yard_contract() (
   local yard="$1" name="empty-$TOKEN" tools registration project instance original cleanup
-  local peer_before default_before port uuid instance_before registration_before
+  local peer_before default_before port uuid instance_before registration_before selection_output selection_rc
   local -a result
   project="subyard-$name" instance="yard-$name" registration="$OWNER_YARD_DIR/$name/config.env"
   [ ! -e "$registration" ] && [ ! -L "$registration" ] \
@@ -428,9 +431,20 @@ owner_named_yard_contract() (
   [ -f "$registration" ] && [ ! -L "$registration" ] && [ -O "$registration" ] \
     && [ "$(stat -c %a "$registration")" = 600 ] || die 'named registration is not protected'
   for selection in YARD_TEMPLATE ENVIRONMENT_PROFILES CODING_TOOL_INTEGRATIONS; do
-    grep -Fxq "$selection=''" "$registration" \
-      && "$yard" -Y "$name" config show "$selection" | grep -Fxq 'effective: <unset>' \
-      || die 'named init did not preserve explicit empty selections'
+    selection_rc=0
+    selection_output="$("$yard" -Y "$name" config show "$selection" 2>&1)" || selection_rc=$?
+    if [ "$selection_rc" != 0 ]; then
+      printf '%s\n' "$selection_output" >&2
+      die "named init $selection: config show failed (exit $selection_rc)"
+    fi
+    if ! grep -Fxq "$selection=''" "$registration"; then
+      printf '%s\n' "$selection_output" >&2
+      die "named init $selection: registration lacks explicit empty assignment"
+    fi
+    if ! grep -Fxq 'effective: <unset>' <<<"$selection_output"; then
+      printf '%s\n' "$selection_output" >&2
+      die "named init $selection: effective selection is not unset"
+    fi
   done
   port="$("$yard" -Y "$name" _info | jq -er .sshPort)"
   [ "$port" != 2224 ] && [ "$port" != "$(jq -r .sshPort <<<"$default_before")" ] \
@@ -799,7 +813,8 @@ install_peer_wrapper() {
       "$PEER_DATA_ROOT" "$PEER_HOST_BASE" "$PEER_HOST_BASE"
     printf 'export SUBYARD_KEYS_ROOT=%q SUBYARD_KEYS_TOOLS_DIR=%q SUBYARD_KEYS_CONSUMER_ROOT=%q\n' \
       "$PEER_KEYS_ROOT" "$PEER_KEYS_TOOLS" "$PEER_KEYS_CONSUMER_ROOT"
-    printf 'export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 SUBYARD_NO_AUDIT=1\n'
+    printf 'export SUBYARD_KEYS_SYSTEMD_DIR=%q SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 SUBYARD_NO_AUDIT=1\n' \
+      "$PEER_KEYS_SYSTEMD_DIR"
     printf 'case "${1:-}" in keys|_keys-exchange)\n'
     printf '  export YARD_ENGINE_PATH=%q\n' "$PEER_DATA_ROOT/runtime/current/bin/yard-engine"
     printf '  exec %q "$@"\n' "$PEER_ROOT/credentials/runtime/bin/yard"
@@ -880,6 +895,7 @@ bootstrap_peer_keys() {
     SUBYARD_CONFIG_HOME="$PEER_ROOT/config" SUBYARD_HOME="$PEER_DATA_ROOT" \
     HOST_BASE="$PEER_HOST_BASE" RESTRICTED_DISK_PATHS="$PEER_HOST_BASE" \
     SUBYARD_KEYS_ROOT="$PEER_KEYS_ROOT" SUBYARD_KEYS_TOOLS_DIR="$PEER_KEYS_TOOLS" \
+    SUBYARD_KEYS_SYSTEMD_DIR="$PEER_KEYS_SYSTEMD_DIR" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
     "$PEER_ROOT/bin/yard" _keys-init >/dev/null
 }
 
@@ -1013,34 +1029,6 @@ ensure_peer_incus() {
   reconcile_p0_incus_apparmor_compat
 }
 
-ensure_peer_snapshot_fixture() {
-  if incus project show subyard >/dev/null 2>&1; then
-    [ "$(incus project get subyard user.subyard.p0)" = "$MARKER" ] \
-      || die "Incus project 'subyard' is not the peer fixture"
-    [ "$(incus config get yard user.subyard.p0 --project subyard)" = "$MARKER" ] \
-      || die "Incus instance 'subyard/yard' is not the peer fixture"
-    return
-  fi
-  install -d -m 0700 "$PEER_STATE_ROOT/incus-pool"
-  incus storage create "$PEER_INCUS_POOL" dir source="$PEER_STATE_ROOT/incus-pool" \
-    --project default >/dev/null
-  incus project create subyard -c features.images=false -c features.profiles=false \
-    -c features.storage.volumes=false -c user.subyard.p0="$MARKER" >/dev/null
-  incus init --empty yard --project subyard --storage "$PEER_INCUS_POOL" --no-profiles \
-    -c user.subyard.p0="$MARKER" >/dev/null
-}
-
-cleanup_peer_snapshot_fixture() {
-  incus project show subyard >/dev/null 2>&1 || return 0
-  [ "$(incus project get subyard user.subyard.p0)" = "$MARKER" ] \
-    || die "refusing to clean unrelated Incus project 'subyard'"
-  [ "$(incus config get yard user.subyard.p0 --project subyard)" = "$MARKER" ] \
-    || die "refusing to clean unrelated Incus instance 'subyard/yard'"
-  incus delete yard --project subyard --force >/dev/null
-  incus project delete subyard >/dev/null
-  incus storage delete "$PEER_INCUS_POOL" --project default >/dev/null
-}
-
 cleanup_peer_incus() {
 	local fingerprint source
   [ -e "$PEER_INCUS_MARKER" ] || return 0
@@ -1057,10 +1045,10 @@ cleanup_peer_incus() {
 				return
 				;;
 		esac
-		if incus profile device list default --project default 2>/dev/null | grep -qx eth0; then
+		if incus profile device list default --project default 2>/dev/null | grep -x eth0 >/dev/null; then
 			incus profile device remove default eth0 --project default >/dev/null
 		fi
-		if incus profile device list default --project default 2>/dev/null | grep -qx root; then
+		if incus profile device list default --project default 2>/dev/null | grep -x root >/dev/null; then
 			incus profile device remove default root --project default >/dev/null
 		fi
 		while IFS= read -r fingerprint; do
@@ -1102,7 +1090,6 @@ peer_prepare_finish() {
   p0_capacity_use_build_cache
 	[ -r "$PEER_ROOT/src/tests/helpers/source-control-plane.sh" ] \
 		|| die 'stable peer source is incomplete after incus-admin resume'
-	ensure_peer_snapshot_fixture
   install -d -m 0700 "$PEER_SSH_DIR"
   if [ ! -e "$PEER_SSH_DIR/id_ed25519" ] && [ ! -e "$PEER_SSH_DIR/id_ed25519.pub" ]; then
     ssh-keygen -q -t ed25519 -N '' -C "$MARKER-vm$SUBYARD_E2E_VM" \
@@ -1120,7 +1107,9 @@ peer_prepare_finish() {
   else
     "$PEER_ROOT/src/dev/package-engine.sh" --output-dir "$release" --version "$version" >/dev/null
   fi
+  printf 'p0-guest: peer stage=install-release vm=%s\n' "$SUBYARD_E2E_VM"
   HOME="$PEER_ROOT/home" SUBYARD_HOME="$PEER_DATA_ROOT" \
+    SUBYARD_KEYS_SYSTEMD_DIR="$PEER_KEYS_SYSTEMD_DIR" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
     SUBYARD_CONFIG_HOME="$PEER_ROOT/config" YARD_BIN_DIR="$PEER_ROOT/bin" \
     YARD_SHELL_RC="$PEER_ROOT/home/.bashrc" YARD_LOGIN_RC="$PEER_ROOT/home/.profile" \
     YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION="$version" \
@@ -1149,6 +1138,7 @@ peer_prepare_finish() {
     SUBYARD_HOME="$PEER_DATA_ROOT" SUBYARD_KEYS_TOOLS_DIR="$PEER_KEYS_TOOLS" \
       bash "$PEER_DATA_ROOT/runtime/current/scripts/install-key-tools.sh" -y >/dev/null
   )
+  printf 'p0-guest: peer stage=keys-bootstrap vm=%s\n' "$SUBYARD_E2E_VM"
   bootstrap_peer_keys
   install_peer_wrapper
   printf 'ok: VM%s local cross-owner fixture staged\n' "$SUBYARD_E2E_VM"
@@ -1162,7 +1152,6 @@ peer_yard_start() {
     [ "$(cat "$PEER_REAL_YARD_MARKER" 2>/dev/null)" = "$MARKER" ] \
       || die 'real peer yard resume marker is invalid'
   else
-    cleanup_peer_snapshot_fixture
     printf '%s\n' "$MARKER" > "$PEER_REAL_YARD_MARKER"
   fi
   install -d -m 0700 "$PEER_ROOT/config"
@@ -1509,7 +1498,6 @@ peer_clean() {
   cleanup_peer_yard
   remove_peer_ssh_include
   remove_peer_wrapper
-  cleanup_peer_snapshot_fixture
   cleanup_peer_incus
   clean_peer_data
   clean_tree "$PEER_ROOT" "$MARKER"

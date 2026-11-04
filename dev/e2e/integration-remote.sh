@@ -519,7 +519,7 @@ for name in RemoteExactCopy RemoteExactCopy-2; do
     "/srv/workspaces/$name/.subyard-meta.json" >/dev/null
   guest test -L "/srv/workspaces/$name/src/link"
   guest grep -Fxq synthetic-hidden "/srv/workspaces/$name/src/.hidden"
-  owner list --complete-projects | grep -Fxq "$name" || die 'owner finalized copy is absent from registry'
+  owner list --complete-projects | grep -Fx "$name" >/dev/null || die 'owner finalized copy is absent from registry'
 done
 guest grep -Fxq 'first snapshot' /srv/workspaces/RemoteExactCopy/src/result.txt
 guest grep -Fxq 'second snapshot' /srv/workspaces/RemoteExactCopy-2/src/result.txt
@@ -585,7 +585,7 @@ controller_logged "$STATE/clone.log" clone "file://$git_root/origin.git" --name 
   || die 'public remote clone did not verify its pinned native revision'
 guest jq --arg yard "$YARD_NAME" -e '.identityVersion == 2 and .projectId == "RemoteExactClone" and .yard == $yard' \
   /srv/workspaces/RemoteExactClone/.subyard-meta.json >/dev/null
-owner list --complete-projects | grep -Fxq RemoteExactClone || die 'remote clone did not finalize owner registry'
+owner list --complete-projects | grep -Fx RemoteExactClone >/dev/null || die 'remote clone did not finalize owner registry'
 [ "$(sha256sum "$controller_registration")" = "$controller_before" ] || die 'remote clone changed controller registration'
 printf 'ok: public remote clone native revision, owner metadata/registry and controller isolation\n'
 
@@ -703,7 +703,7 @@ OWNER_SELECTOR
 PATH="$STATE/client-bin:$PATH" SUBYARD_CONFIG_HOME="$CONTROLLER_CONFIG" SUBYARD_HOME="$STATE/controller-data" SUBYARD_HOST_ID="integration-controller-$token" \
   "$ROOT/.build/yard" -Y "$owner_selector" remove RemoteExactCopy-2 --yes >/dev/null
 guest test ! -e /srv/workspaces/RemoteExactCopy-2
-if owner list --complete-projects | grep -Fxq RemoteExactCopy-2; then die 'removed copy remains owner-registered'; fi
+if owner list --complete-projects | grep -Fx RemoteExactCopy-2 >/dev/null; then die 'removed copy remains owner-registered'; fi
 controller_logged "$STATE/projects-after-remove.log" list --live
 if grep -Eq '(^|[[:space:]])RemoteExactCopy-2([[:space:]]|$)' "$STATE/projects-after-remove.log"; then die 'authoritative controller inventory retained removed ghost'; fi
 controller_logged "$STATE/projects-cached-after-remove.log" list

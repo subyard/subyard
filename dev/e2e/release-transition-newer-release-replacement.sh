@@ -34,6 +34,25 @@ project_is_marked() {
     && [ "$(incus project get "$PROJECT" user.subyard-e2e.newer-release 2>/dev/null)" = "$FIXTURE_MARKER" ]
 }
 
+# Public cleanup retains native coordination files. Bind only that validated,
+# unchanged metadata; the historical fixture still requires absent power artifacts.
+prepare_newer_fixture() {
+  local path artifact
+  select_fixture success
+  if [ -z "$POWER_COORDINATION_BINDING" ]; then
+    for path in "$POWER_RECONCILER" "$POWER_UNIT"; do
+      for artifact in "${path%/*}/.${path##*/}.native-install.lock" "${path%/*}/.${path##*/}.native-custody.json"; do
+        if [ -e "$artifact" ] || [ -L "$artifact" ]; then
+          POWER_COORDINATION_BINDING="$(power_coordination_binding)" \
+            || die 'cannot bind retained power coordination before newer-release fixture'
+          break 2
+        fi
+      done
+    done
+  fi
+  prepare_fixture success
+}
+
 cleanup_newer_release() {
   local rc=$? teardown_rc=0 cleanup_rc=0 launcher evidence="$ROOT/.build/newer-release-$TOKEN"
   set +e
@@ -205,7 +224,7 @@ main_newer_release() {
   for version in "${VERSIONS[@]}"; do
     bash "$ROOT/dev/package-engine.sh" --version "$version" --output-dir "$ASSET_ROOT/$version" >/dev/null
   done
-  prepare_fixture success
+  prepare_newer_fixture
   local installed="$SOURCE_ASSETS/$SOURCE_BUNDLE"
   fixture_env bash "$SOURCE_ASSETS/subyard-install-runtime-release.sh" --runtime-root "$RUNTIME_ROOT" \
     --bundle "$installed" --checksum "$installed.sha256" \
@@ -224,7 +243,7 @@ main_newer_release() {
   local rc source_active
   source_active="$(readlink "$RUNTIME_ROOT/current")"
 
-  # Before activation: the operator withholds the restart, so the migration stays unfinished.
+  # Before activation: interrupt the real migration, leaving its journal unfinished.
   stage "${VERSIONS[0]}"
   check_refusals
   interrupt_at_reconciling "${VERSIONS[0]}" migrating

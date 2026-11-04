@@ -586,7 +586,7 @@ wait_guest() {
   for _ in $(seq 1 120); do
     if guest "$name" true >/dev/null 2>&1 \
       && guest "$name" ip -4 address show dev eth0 scope global \
-        | grep -q 'inet '; then
+        | grep 'inet ' >/dev/null; then
       return 0
     fi
     sleep 1
@@ -776,7 +776,7 @@ for name in "${YARDS[@]}"; do
   expected="$(address "$name")"
   expected_mac="$(mac "$name")"
   guest "$name" ip -4 -o address show dev eth0 scope global \
-    | awk '{sub(/\/.*/, "", $4); print $4}' | grep -Fxq "$expected" \
+    | awk '{sub(/\/.*/, "", $4); print $4}' | grep -Fx "$expected" >/dev/null \
     || die "yard $name did not receive its policy-pinned DHCP address"
   incus network list-leases incusbr0 --project "$(project "$name")" --format json \
     | jq -e --arg address "$expected" --arg mac "$expected_mac" '

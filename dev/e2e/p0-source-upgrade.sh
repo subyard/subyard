@@ -38,11 +38,17 @@ IFS=$'\t' read -r BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA2
 BASELINE_ARM64_SHA256=''
 BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
 FIXTURE_DEV_UID=1001
-VERSION_A=''
+source_next_version() {
+  local core="${1%%[-+]*}" major minor patch
+  IFS=. read -r major minor patch <<<"$core"
+  printf '%s.%s.%s-p0.next\n' "$major" "$minor" "$((10#$patch + 1))"
+}
+
+VERSION_A='' VERSION_B=''
 if [ "$MODE" != clean ]; then
   VERSION_A="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+  VERSION_B="$(source_next_version "$VERSION_A")"
 fi
-VERSION_B="$VERSION_A.next"
 POWER_RETRY_RUNTIME="subyard-p0-source-power-retry-$TOKEN"
 POWER_RETRY_PROBE="/run/$POWER_RETRY_RUNTIME/failed-once"
 POWER_RETRY_DROPIN="/etc/systemd/system/subyard-power-reconcile.service.d/p0-source-$TOKEN.conf"

@@ -263,7 +263,7 @@ wait_guest_ready() {
 
 device_present() {
   incus config device list "$INSTANCE" --project "$PROJECT" \
-    | grep -Fxq subyard-docker-apparmor
+    | grep -Fx subyard-docker-apparmor >/dev/null
 }
 
 assert_mask_absent() {

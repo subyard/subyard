@@ -4,6 +4,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$(mktemp -d /tmp/subyard-full-uninstall.XXXXXX)"
 trap '/bin/rm -rf -- "$fixture"' EXIT
+# Begin relay address selection contract.
+python3 - "$ROOT" <<'PY_RELAY_ADDRESS'
+import json,pathlib,re,subprocess,sys
+source=(pathlib.Path(sys.argv[1])/'dev/e2e/full-uninstall.sh').read_text()
+query=re.search(r"relay_ip=.*?jq -er '([^']+)'", source).group(1)
+for addresses, expected in [([{"family":"inet","scope":"global","address":"192.0.2.1"},
+                             {"family":"inet","scope":"global","address":"192.0.2.2"}], "192.0.2.1\n"), ([], None)]:
+    payload=json.dumps([{"state":{"network":{"eth0":{"addresses":addresses}}}}])
+    result=subprocess.run(['jq','-er',query],input=payload,capture_output=True,text=True)
+    if expected is None:
+        assert result.returncode != 0, "missing relay address was accepted"
+    else:
+        assert result.returncode == 0 and result.stdout == expected, result
+PY_RELAY_ADDRESS
+# End relay address selection contract.
 python3 - "$ROOT" "$fixture" <<'PY_SIGNING_PTY'
 import json,os,pathlib,subprocess,sys,time
 root,temporary=map(pathlib.Path,sys.argv[1:])

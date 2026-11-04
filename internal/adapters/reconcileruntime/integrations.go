@@ -61,12 +61,17 @@ type IntegrationPlan struct {
 	facts               []integrationFact
 	sources             string
 	// Attribution only; the existing aggregate source binding remains the guard.
-	packageSources map[string]string
-	instance       ports.InstanceInfo
-	instanceScope  string
-	fingerprints   []string
-	profileRoutes  []integrationProfileRoute
+	packageSources         map[string]string
+	instance               ports.InstanceInfo
+	instanceScope          string
+	fingerprints           []string
+	profileRoutes          []integrationProfileRoute
+	retirementProofPending bool
 }
+
+// NeedsRetirementProof requests the existing guarded apply even for a clean
+// guest. The proof is an apply receipt, outside integration equality and Desired.
+func (plan IntegrationPlan) NeedsRetirementProof() bool { return plan.retirementProofPending }
 
 type integrationProfileRoute struct {
 	Owner, MarkerKey, DeviceName, Marker string
@@ -439,6 +444,8 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	if err != nil {
 		return plan, observed, err
 	}
+	plan.retirementProofPending = runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" &&
+		len(pendingRetiredIntegrations(runtime.RetiredSelection, definitions, instance)) != 0
 	for _, definition := range definitions {
 		if definition.Lifecycle == nil {
 			continue

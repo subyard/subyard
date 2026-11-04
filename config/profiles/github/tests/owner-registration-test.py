@@ -103,7 +103,7 @@ elif action!='show-environment': raise AssertionError([action,*args])
         self.save(state)
 
     def run_owner(self, argument, success=True):
-        result = subprocess.run(['bash', str(self.owner), argument], env=self.environment,
+        result = subprocess.run(['bash', str(self.owner), argument], env=self.environment, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=10)
         if success:
             self.assertEqual(result.returncode, 0, result.stderr)

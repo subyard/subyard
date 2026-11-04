@@ -440,7 +440,7 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 		instance := incus.Instances["subyard/yard"]
 		instance.Status = "Stopped"
 		incus.Instances["subyard/yard"] = instance
-		want := "retired integration widget may still be installed in yard default; run: yard -Y default init"
+		want := "retired integration widget may still be installed in yard default; run: yard -Y default start; then run yard migrate"
 		check := func(wanted string) {
 			t.Helper()
 			status, err := cli.queryIntegrationStatus(context.Background(), loaded, "")
@@ -452,7 +452,7 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 			cli.warnRetiredIntegrationsAfterStart(loaded, execution, domain.AdapterResult{Status: "ok"}, nil, &started)
 			line := ""
 			if wanted != "" {
-				line = "Warning: " + wanted + "\n"
+				line = "Warning: retired integration widget may still be installed in yard default; run: yard migrate\n"
 			}
 			if started.String() != line {
 				t.Fatalf("start=%q, want %q", started.String(), line)

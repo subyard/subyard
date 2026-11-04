@@ -101,7 +101,7 @@ assert_retired() {
   for key in user.subyard.ai_observer_provision user.subyard.ai_observer_proxy; do
     [ -z "$(incus config get "$INSTANCE" "$key" --project "$PROJECT")" ] || die 'retirement retained an Observer receipt'
   done
-  ! incus config device list "$INSTANCE" --project "$PROJECT" | grep -Fxq ai-observer || die 'retirement retained an Observer route'
+  ! incus config device list "$INSTANCE" --project "$PROJECT" | grep -Fx ai-observer >/dev/null || die 'retirement retained an Observer route'
   operator_yard integration status --json | jq -e '.observed=="ready" and .selection.effective==["codex"]' >/dev/null
   [ "$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/config.env")" = "$config_before" ] || die 'retirement rewrote source-owned settings'
 }

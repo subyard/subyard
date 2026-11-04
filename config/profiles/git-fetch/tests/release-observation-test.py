@@ -59,7 +59,7 @@ class ReleaseObservationTest(unittest.TestCase):
             # A failed observation transport must never become runtime absence.
             (root / 'incus').write_text('#!/bin/sh\ncat >/dev/null\nexit 1\n')
             result = subprocess.run(['bash', str(PROFILE / 'runtime.sh'), 'observe'],
-                                    env=environment, capture_output=True, timeout=10)
+                                    env=environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b'')
 

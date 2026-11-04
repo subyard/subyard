@@ -177,7 +177,7 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 				if err != nil {
 					t.Fatal("prepare", err)
 				}
-				reminder := "retired integration widget may still be installed in yard default; run: yard -Y default init"
+				reminder := "retired integration widget may still be installed in yard default; run: yard -Y default start; then run yard migrate"
 				if slices.Contains(projected.Consequences, reminder) != (mode == "retired-stopped") {
 					t.Fatalf("update check consequences=%q", projected.Consequences)
 				}

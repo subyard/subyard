@@ -166,6 +166,8 @@ def launch(arguments):
     fcntl.ioctl(terminal, termios.TIOCSWINSZ, struct.pack('HHHH', 50, 160, 0, 0))
     deadline = time.monotonic() + arguments.seconds
     sent = False
+    startup_output = b''
+    offer_declined = False
     last_output = time.monotonic()
     executable = None
     while time.monotonic() < deadline:
@@ -177,11 +179,21 @@ def launch(arguments):
                 break
             if not data:
                 break
+            startup_output = (startup_output + data)[-65536:]
             last_output = time.monotonic()
             if b'\x1b[6n' in data:
                 os.write(terminal, b'\x1b[1;1R')
         executable = resolved_exe(pid) or executable
         if not sent and time.monotonic() - last_output > 3:
+            if not offer_declined and b'Make auto mode' in startup_output:
+                # Never let the prompt's Enter accept the preselected Yes offer.
+                os.write(terminal, b'\x1b[B')
+                time.sleep(0.4)
+                os.write(terminal, b'\r')
+                offer_declined = True
+                startup_output = b''
+                last_output = time.monotonic()
+                continue
             os.write(terminal, b'hello')
             time.sleep(0.4)
             os.write(terminal, b'\r')

@@ -53,6 +53,7 @@ func retiredInstance(status string, proven bool) ports.InstanceInfo {
 	if instance.LocalConfig == nil {
 		instance.LocalConfig = map[string]string{}
 	}
+	instance.Config["user.subyard.disk_tmp"], instance.LocalConfig["user.subyard.disk_tmp"] = "v1", "v1"
 	if proven {
 		instance.Config[retiredProofKey], instance.LocalConfig[retiredProofKey] = "true", "true"
 	}
@@ -63,18 +64,24 @@ func retiredInstance(status string, proven bool) ports.InstanceInfo {
 // observation can carry the reminder for a stopped yard into --check and --yes.
 func TestUpdateWarnsAboutStoppedRetiredYardWithoutSourceMigration(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		status string
-		proven bool
-		want   []string
+		name        string
+		status      string
+		proven      bool
+		diskPending bool
+		want        []string
 	}{
-		{"stopped without proof", "Stopped", false, []string{retiredReminder}},
-		{"stopped with proof", "Stopped", true, nil},
-		{"running without proof", "Running", false, nil},
+		{"stopped without proof", "Stopped", false, false, []string{retiredReminder}},
+		{"stopped with pending disk tmp", "Stopped", false, true, []string{"retired integration widget may still be installed in yard default; run: yard -Y default start; then run yard migrate"}},
+		{"stopped with proof", "Stopped", true, false, nil},
+		{"running without proof", "Running", false, false, nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, environment := retiredYardFixture(t)
 			instance := retiredInstance(test.status, test.proven)
+			if test.diskPending {
+				delete(instance.Config, "user.subyard.disk_tmp")
+				delete(instance.LocalConfig, "user.subyard.disk_tmp")
+			}
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": instance}}
 			for range 8 {
 				fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 0}})
@@ -115,8 +122,13 @@ func TestUpdateWarnsAboutStoppedRetiredYardWithoutSourceMigration(t *testing.T) 
 			}
 			stdout.Reset()
 			program.printUpdateResult(&releaseExecution{prepared: releaseruntime.Prepared{Action: "update.activate"}, inspection: &inspection}, true)
-			if got := strings.Count(stdout.String(), "Warning: "+retiredReminder); got != len(test.want) {
+			if got := strings.Count(stdout.String(), "Warning: retired integration widget"); got != len(test.want) {
 				t.Fatalf("update --yes result=%q", stdout.String())
+			}
+			for _, warning := range test.want {
+				if !strings.Contains(stdout.String(), "Warning: "+warning) {
+					t.Fatalf("update output omitted %q", warning)
+				}
 			}
 			if instanceAfter := fake.Instances["subyard/yard"]; instanceAfter.Status != test.status {
 				t.Fatalf("update changed yard power: %s", instanceAfter.Status)
@@ -217,7 +229,7 @@ func TestStartWarnsThroughTheRealCommandUntilProven(t *testing.T) {
 			if len(runner.Requests) != 1 || runner.Requests[0].Action != "start" {
 				t.Fatalf("start adapter requests=%+v", runner.Requests)
 			}
-			if got := strings.Count(output.String(), "Warning: "+retiredReminder+"\n"); (got == 1) != test.warned || got > 1 {
+			if got := strings.Count(output.String(), "Warning: retired integration widget may still be installed in yard default; run: yard migrate\n"); (got == 1) != test.warned || got > 1 {
 				t.Fatalf("start output=%q", output.String())
 			}
 		})
@@ -252,5 +264,52 @@ func TestInitPlanNamesStoppedRetirementThroughTheRealCommand(t *testing.T) {
 				t.Fatalf("unconfirmed init touched the stopped yard: %+v", incus.ExecCalls)
 			}
 		})
+	}
+}
+
+// An already-clean guest still needs the host-readable proof so stopping it
+// again cannot revive the retirement reminder after the advertised migrate.
+func TestMaterializedActivationPublishesAlreadyCleanRetirementProof(t *testing.T) {
+	root, environment := retiredYardFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config/retired-integrations/widget/retire.py"), "#!/bin/sh\nprintf '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}\\n'\n", 0700)
+	instance := retiredInstance("Running", false)
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": instance},
+		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Incus: fake, Executor: adoptionHookExecutor{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &materializedConfigActivationReconciler{cli: program,
+		configHome: environmentValue(environment, "SUBYARD_CONFIG_HOME")}
+	releases := releasetransition.ReleasePair{From: "release-a", Target: "release-a"}
+	before, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Converged {
+		t.Fatal("missing retirement proof skipped the materialized activation row")
+	}
+	if len(fake.ConfigUpdates) != 0 {
+		t.Fatal("read-only inspection published proof")
+	}
+	if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+	if err != nil || !after.Converged || after.Desired != before.Desired {
+		t.Fatalf("after=%+v err=%v", after, err)
+	}
+	if len(fake.ConfigUpdates) != 1 || fake.ConfigUpdates[0].Values[retiredProofKey] != "true" {
+		t.Fatalf("proof updates=%+v", fake.ConfigUpdates)
+	}
+	stopped := fake.Instances["subyard/yard"]
+	stopped.Status = "Stopped"
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reconcileruntime.RetiredIntegrationReminder(loaded, stopped); got != "" {
+		t.Fatalf("proof reminder returned: %s", got)
 	}
 }

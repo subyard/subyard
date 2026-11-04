@@ -1689,7 +1689,75 @@ for invalid_delay in 00 61 18446744073709551616; do
   [ "$invalid_delay_rc" = 2 ] \
     || fail "P0 stale-init retry accepted unbounded retry delay $invalid_delay"
 done
-# Fresh peer init must own project creation after the snapshot fixture is removed.
+# Host credential unit files belong to the fixture, not the shared account manager.
+# Globals below are consumed by the extracted fixture helper.
+# shellcheck disable=SC2034
+(
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" prepare_owner_go_cache)"
+  OWNER_ROOT="$TMP/owner-key-units" OWNER_DATA_ROOT="$TMP/owner-key-units/data"
+  OWNER_CONFIG_HOME="$TMP/owner-key-units/config"
+  OWNER_TEST_VMS_SINK=sink OWNER_TEST_VMS_SINK_SERVICE=service OWNER_TEST_VMS_SINK_TIMER=timer
+  p0_capacity_reset_build_cache() { :; }
+  p0_capacity_prepare_subtree() { install -d -m 0700 "$1"; }
+  unset SUBYARD_KEYS_SYSTEMD_DIR SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE
+  prepare_owner_go_cache
+  [ "${SUBYARD_KEYS_SYSTEMD_DIR:-}" = "$OWNER_ROOT/key-units" ] \
+    && [ "${SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE:-}" = 1 ] \
+    || fail 'owner fixture leaks credential timer files into the shared account'
+)
+# Independent historical homes must not inherit the owner fixture's unit directory.
+bash -euo pipefail -c '
+  export SUBYARD_KEYS_SYSTEMD_DIR=/unrelated-fixture-units
+  source "$1/dev/e2e/release-transition-v0111-recovery.sh" 123
+  select_fixture success
+  [ "$(fixture_env printenv SUBYARD_KEYS_SYSTEMD_DIR)" = "$HOME_ROOT/.config/systemd/user" ]
+' fixture-units "$ROOT" || fail 'historical fixture inherited another installation credential timer'
+# End fixture credential unit isolation contract.
+# Peer release installation sees no fabricated native yard; init owns it later.
+# Globals below are consumed by the extracted fixture functions.
+# shellcheck disable=SC2034
+(
+  peer_probe="$TMP/peer-release-install"
+  install -d -m 0700 "$peer_probe/src/tests/helpers" \
+    "$peer_probe/src/.subyard-acceptance/release" "$peer_probe/ssh" "$peer_probe/config"
+  : > "$peer_probe/src/tests/helpers/source-control-plane.sh"
+  printf 'release_candidate_prepare() { :; }\n' > "$peer_probe/src/tests/helpers/release-candidate.sh"
+  printf '{"version":"1.0.0-peer-fixture"}\n' > "$peer_probe/src/.subyard-acceptance/candidate.json"
+  printf 'synthetic key\n' > "$peer_probe/ssh/id_ed25519"
+  printf 'synthetic public key\n' > "$peer_probe/ssh/id_ed25519.pub"
+  cat > "$peer_probe/src/.subyard-acceptance/release/subyard-install.sh" <<'EOF_PEER_INSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+[ ! -e "$PEER_NATIVE_STATE" ] || { printf 'peer installer encountered a fabricated yard\n' >&2; exit 83; }
+[ "$*" = --yes ] || exit 84
+[ "${SUBYARD_KEYS_SYSTEMD_DIR:-}" = "$PEER_EXPECTED_UNITS" ] && [ "${SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE:-}" = 1 ] || exit 86
+printf 'installed without a native yard\n' > "$SUBYARD_CONFIG_HOME/installer-observation"
+exit 37
+EOF_PEER_INSTALL
+  chmod 0700 "$peer_probe/src/.subyard-acceptance/release/subyard-install.sh"
+  peer_rc=0
+  bash -euo pipefail -c '
+    eval "$(sed -n "/^peer_prepare_finish() {/,/^}/p" "$1/dev/e2e/p0-guest.sh")"
+    PEER_ROOT=$2 PEER_STATE_ROOT=$2/state PEER_SSH_DIR=$2/ssh
+    PEER_DATA_ROOT=$2/data PEER_INCUS_POOL=peer-contract MARKER=peer-contract SUBYARD_E2E_VM=1
+    export PEER_NATIVE_STATE=$2/native-yard PEER_EXPECTED_UNITS=$2/state/key-units
+    PEER_KEYS_SYSTEMD_DIR=$PEER_EXPECTED_UNITS
+    p0_capacity_use_build_cache() { :; }
+    incus() {
+      case "$*" in
+        "project show subyard") [ -e "$PEER_NATIVE_STATE" ] ;;
+        "storage create "*|"project create "*) return 0 ;;
+        "init --empty "*) touch "$PEER_NATIVE_STATE" ;;
+        *) exit 85 ;;
+      esac
+    }
+    peer_prepare_finish
+  ' peer-install "$ROOT" "$peer_probe" > "$peer_probe/log" 2>&1 || peer_rc=$?
+  [ "$peer_rc" = 37 ] && [ -e "$peer_probe/config/installer-observation" ] \
+    || { cat "$peer_probe/log" >&2; fail "peer release did not install before native yard creation: exit=$peer_rc"; }
+)
+# End peer release installation contract.
+# Fresh peer init must let the installed release own project creation.
 # Globals below are consumed by the extracted function.
 # shellcheck disable=SC2034
 (
@@ -1698,27 +1766,14 @@ done
   PEER_REAL_YARD_MARKER="$PEER_ROOT/real-yard"
   PEER_KEYS_CONSUMER_ROOT="$PEER_ROOT/consumer"
   PEER_YARD_ENTRY=peer_contract_yard
-  OWNER_BASE_IMAGE='fixture-base'
   P0_PEER_YARD_TIMEOUT=1800
   SUBYARD_E2E_VM=2
   MARKER=peer-fixture
   install -d -m 0700 "$PEER_ROOT"
   peer_state="$PEER_ROOT/project"
   peer_calls="$PEER_ROOT/calls"
-  printf 'snapshot\n' > "$peer_state"
-  cleanup_peer_snapshot_fixture() {
-    [ "$(cat "$peer_state")" = snapshot ] || fail 'wrong peer snapshot state'
-    printf 'absent\n' > "$peer_state"
-    printf 'snapshot-cleanup\n' >> "$peer_calls"
-  }
-  incus() {
-    case "$*" in
-      'project show subyard') [ "$(cat "$peer_state")" != absent ] ;;
-      'project create subyard -c features.images=false') printf 'unmarked\n' > "$peer_state" ;;
-      'image info fixture-base --project default') return 0 ;;
-      *) fail "unexpected peer Incus command: $*" ;;
-    esac
-  }
+  printf 'absent\n' > "$peer_state"
+  incus() { fail 'peer fixture bypassed installed init for native yard creation'; }
   timeout() {
     [ "$1" = --foreground ] && [ "$2" = 1800 ] || fail 'wrong peer init timeout'
     shift 2
@@ -1743,7 +1798,7 @@ done
     esac
   }
   peer_yard_start
-  [ "$(cat "$peer_calls")" = "$(printf '%s\n' snapshot-cleanup \
+  [ "$(cat "$peer_calls")" = "$(printf '%s\n' \
     'init --yes absent' 'init --yes owned' 'check owned' 'start --yes owned')" ] \
     || fail 'peer startup did not preserve fresh init, repeated init, check and start'
 )
@@ -1951,6 +2006,18 @@ P0ORDER
 )
 # End canonical reader prerequisite ordering contract.
 
+# Begin source successor version contract.
+eval "$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" source_next_version)"
+source_version_assignment="$(sed -n '/^[[:space:]]*VERSION_B=.*VERSION_A/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+[ -n "$source_version_assignment" ] || fail 'source fixture successor assignment is missing'
+for source_version_case in 0.26.0=0.26.1-p0.next 0.26.0-p0.15=0.26.1-p0.next \
+  0.26.0+build.1=0.26.1-p0.next 0.26.0-p0.15+build.1=0.26.1-p0.next 0.25.5=0.25.6-p0.next; do
+  VERSION_A="${source_version_case%%=*}"
+  eval "$source_version_assignment"
+  [ "$VERSION_B" = "${source_version_case#*=}" ] || fail "invalid or non-newer fixture successor: $VERSION_A -> $VERSION_B"
+done
+# End source successor version contract.
+
 # Begin current owner return-state contract.
 (
   SOURCE_FILE="$ROOT/dev/e2e/p0-guest.sh"
@@ -2028,6 +2095,52 @@ done
 
 )
 # End current owner return-state contract.
+
+# Begin named selection output contract.
+named_selection_check="$(sed -n '/^  for selection in YARD_TEMPLATE ENVIRONMENT_PROFILES CODING_TOOL_INTEGRATIONS; do$/,/^  done$/p' "$ROOT/dev/e2e/p0-guest.sh")"
+[ -n "$named_selection_check" ] || fail 'named selection assertion is missing'
+for named_failure in success registration command effective; do
+  named_root="$TMP/named-selection-$named_failure"
+  mkdir -m 0700 "$named_root"
+  printf "%s=''\n" YARD_TEMPLATE ENVIRONMENT_PROFILES CODING_TOOL_INTEGRATIONS > "$named_root/config.env"
+  if [ "$named_failure" = registration ]; then
+    sed -i '/^ENVIRONMENT_PROFILES=/d' "$named_root/config.env"
+  fi
+  named_rc=0
+  NAMED_SELECTION_CHECK="$named_selection_check" NAMED_FAILURE="$named_failure" \
+    bash -c '
+      set -euo pipefail
+      registration="$1/config.env" name=synthetic-empty yard=named_selection_yard
+      die() { printf "%s\n" "$*" >&2; exit 2; }
+      named_selection_yard() {
+        python3 - "$NAMED_FAILURE" "$5" <<'"'"'PY_NAMED_OUTPUT'"'"'
+import sys
+failure, selection = sys.argv[1:]
+print("effective: different" if failure == "effective" and selection == "ENVIRONMENT_PROFILES" else "effective: <unset>", flush=True)
+# Force writes after an early match, beyond the pipe buffer.
+print("trailing fixture output " * 8192)
+print("selection-output-complete")
+if failure == "command" and selection == "ENVIRONMENT_PROFILES":
+    sys.exit(37)
+PY_NAMED_OUTPUT
+      }
+      eval "$NAMED_SELECTION_CHECK"
+    ' named-fixture "$named_root" > "$named_root/output" 2>&1 || named_rc=$?
+  if [ "$named_failure" = success ]; then
+    [ "$named_rc" = 0 ] || { cat "$named_root/output" >&2; fail 'named selection lost a successful multiline CLI exit'; }
+  else
+    [ "$named_rc" = 2 ] || fail "named selection $named_failure lost refusal: $named_rc"
+    case "$named_failure" in
+      registration) named_reason='registration lacks explicit empty assignment' ;;
+      command) named_reason='config show failed (exit 37)' ;;
+      effective) named_reason='effective selection is not unset' ;;
+    esac
+    grep -Fq "named init ENVIRONMENT_PROFILES: $named_reason" "$named_root/output" \
+      && grep -Fxq selection-output-complete "$named_root/output" \
+      || fail "named selection $named_failure lost its distinct diagnosis or complete output"
+  fi
+done
+# End named selection output contract.
 
 p0_incus_root="$TMP/p0-incus-bootstrap/platform"
 p0_incus_storage="$p0_incus_root/incus/incus/storage"
@@ -2656,7 +2769,8 @@ v0111_observer="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
 assert_v0111_resume_capture_contract() {
   local scenario output result probe
   for scenario in failure capture-failure success foreign stdout-symlink \
-    stderr-symlink stderr-hardlink stderr-foreign oversized-inspection; do
+    stderr-symlink stderr-hardlink stderr-foreign oversized-inspection \
+    follow-next repeat-recovering other-refusal wrong-next; do
     probe="$TMP/v0111-resume-capture-$scenario"
     install -d -m 0700 "$probe"
     output="$probe/controller.log"
@@ -2683,6 +2797,7 @@ assert_v0111_resume_capture_contract() {
       chmod 0600 "$JOURNAL"
       touch "$POST_CAS_OBSERVER"
       ln -s releases/0.11.2-candidate "$RUNTIME_ROOT/current"
+      ln -s releases/0.11.1-source "$RUNTIME_ROOT/previous"
       python3 - "$2" "$scenario" <<"PY"
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -2720,7 +2835,19 @@ PY
         if [ "$2" = update ] && [ "$3" = --offline ]; then
           [ "$*" = "$RUNTIME_ROOT/current/bin/yard update --offline --version 0.11.2 --runtime-root $RUNTIME_ROOT" ] || return 98
           [ -z "$(cat)" ] || return 99
+          count=$(cat "$FIXTURE_ROOT/resume.calls" 2>/dev/null || printf 0)
+          printf "%s\n" "$((count + 1))" > "$FIXTURE_ROOT/resume.calls"
           cat "$probe_stdout"
+          case "$scenario" in
+            follow-next|repeat-recovering|other-refusal|wrong-next)
+              if [ "$scenario:$count" = follow-next:1 ]; then return 0; fi
+              code=verification-failed next="run yard update"
+              [ "$scenario" != other-refusal ] || code=dependency-unavailable
+              [ "$scenario" != wrong-next ] || next="run yard migrate"
+              printf "yard: update: execute prepared release: release transition recovering: code=%s active=%s previous=%s target=%s transaction=tx-0123456789abcdef0123456789abcdef; the release transition was interrupted after a durable mutation checkpoint; next: %s\n" \
+                "$code" "$CANDIDATE_RELEASE" "$SOURCE_VERSION-source" "$CANDIDATE_RELEASE" "$next" >&2
+              return 17 ;;
+          esac
           cat "$probe_stderr" >&2
           case "$scenario" in
             stderr-symlink|stderr-hardlink|stderr-foreign)
@@ -2760,6 +2887,21 @@ PY
       upgrade_to_current_candidate() { :; }
       run_post_cas_resume post-cas
     ' _ "$v0111_recovery" "$probe" "$scenario" >"$output" 2>&1; then result=0; else result=$?; fi
+    case "$scenario" in
+      follow-next|repeat-recovering)
+        expected=17; [ "$scenario" != follow-next ] || expected=0
+        [ "$result" = "$expected" ] && [ "$(cat "$probe/state/post-cas/resume.calls")" = 2 ] \
+          && grep -q '^release-recovery resume-followed-next' "$output" \
+          && [ -f "$probe/state/post-cas/resume.log" ] && [ -f "$probe/state/post-cas/resume-retry.log" ] \
+          && grep -q '"name": "resume-retry-stdout"' "$output" \
+          || fail "historical resume did not bound/preserve its next-command retry: $scenario/$result"
+        continue ;;
+      other-refusal|wrong-next)
+        [ "$result" = 17 ] && [ "$(cat "$probe/state/post-cas/resume.calls")" = 1 ] \
+          && ! grep -q '^release-recovery resume-followed-next' "$output" \
+          || fail "historical resume retried an unrelated refusal: $scenario/$result"
+        continue ;;
+    esac
     if [ "$scenario" = success ]; then
       [ "$result" = 0 ] && ! grep -q 'RELEASE_RECOVERY_\|inspection-attempted' "$output" \
         || fail 'successful historical resume emitted failure capture'
@@ -3336,6 +3478,81 @@ bash -c '
   rm "$POWER_RECONCILER"
 ' _ "$v0111_recovery" "$TMP/v0111-default-power" \
   || fail 'historical recovery power boundary did not preserve exact coordination custody'
+# Begin newer fixture handoff contract.
+for newer_case in empty retained partial helper unit enablement; do
+  newer_probe="$TMP/newer-handoff-$newer_case"
+  mkdir -m 0700 "$newer_probe"
+  newer_rc=0
+  bash -c '
+    set -euo pipefail
+    source "$1/dev/e2e/release-transition-v0111-recovery.sh" 123
+    newer="$1/dev/e2e/release-transition-newer-release-replacement.sh"
+    probe=$2 scenario=$3
+    STATE_ROOT="$probe/state" SUCCESS_ROOT="$probe/state/success"
+    MARKER=newer-handoff CLEANUP_ARMED=1
+    install -d -m 0700 "$STATE_ROOT" "$probe/defaults"
+    printf "%s\n" "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
+    eval "$(declare -f select_fixture | sed "1s/select_fixture/select_fixture_native/")"
+    select_fixture() {
+      select_fixture_native "$1"
+      POWER_RECONCILER="$probe/defaults/helper" POWER_UNIT="$probe/defaults/unit"
+      POWER_UNIT_ENABLEMENT="$probe/defaults/enablement"
+    }
+    if [ "$scenario" != empty ]; then
+      for resource in helper unit; do
+        install -m 0600 /dev/null "$probe/defaults/.$resource.native-install.lock"
+        printf "{\"generation\":\"%064d\",\"owner\":\"host-power\",\"version\":1}\n" 1 > "$probe/defaults/.$resource.native-custody.json"
+        chmod 0644 "$probe/defaults/.$resource.native-custody.json"
+      done
+    fi
+    case "$scenario" in
+      partial) rm "$probe/defaults/.unit.native-custody.json" ;;
+      helper|unit) printf "unrelated native resource\n" > "$probe/defaults/$scenario" ;;
+      enablement) ln -s absent "$probe/defaults/enablement" ;;
+    esac
+    find "$probe/defaults" -type f -exec sha256sum {} + | sort > "$probe/before"
+    sudo() { [ "$1" = -n ] && shift; "$@"; }
+    systemctl() { printf "not-found\n"; return 4; }
+    write_fixture_config() { :; }
+    prepare_operator_user_bus() { :; }
+    eval "$(sed -n "/^prepare_newer_fixture() {/,/^}/p" "$newer")"
+    setup="$(sed -n "/^main_newer_release() {/,/^}/p" "$newer" | sed -n "/^  prepare_.*fixture/p")"
+    [ -n "$setup" ]
+    eval "$setup"
+    [ "$SUCCESS_ARMED" = 1 ] && fixture_root_is_marked
+    if [ "$scenario" = retained ]; then [ -n "$POWER_COORDINATION_BINDING" ]; fi
+  ' handoff "$ROOT" "$newer_probe" "$newer_case" > "$newer_probe/log" 2>&1 || newer_rc=$?
+  newer_expected=2
+  case "$newer_case" in empty|retained) newer_expected=0 ;; esac
+  [ "$newer_rc" = "$newer_expected" ] || { cat "$newer_probe/log" >&2; fail "newer fixture $newer_case handoff exit=$newer_rc"; }
+  find "$newer_probe/defaults" -type f -exec sha256sum {} + | sort > "$newer_probe/after"
+  cmp "$newer_probe/before" "$newer_probe/after" || fail 'newer fixture rewrote inherited native custody or artifacts'
+done
+# Early failure precedes creation of a yard. EXIT cleanup removes only the marked
+# assets and preserves both the original failure and unrelated custody outside it.
+for newer_original in 0 2 23; do
+  newer_probe="$TMP/newer-early-$newer_original"
+  mkdir -m 0700 "$newer_probe"
+  printf 'retained coordination\n' > "$newer_probe/custody"
+  newer_rc=0
+  bash -c '
+    set -euo pipefail
+    source "$1/dev/e2e/release-transition-v0111-recovery.sh" 123
+    eval "$(sed -n "/^cleanup_newer_release() {/,/^}/p" "$1/dev/e2e/release-transition-newer-release-replacement.sh")"
+    STATE_ROOT="$2/state" SUCCESS_ROOT="$2/state/success" POST_CAS_ROOT="$2/state/unused"
+    MARKER=newer-early CLEANUP_ARMED=1
+    install -d -m 0700 "$STATE_ROOT/assets"
+    printf "%s\n" "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
+    printf "downloaded assets\n" > "$STATE_ROOT/assets/input"
+    trap cleanup_newer_release EXIT
+    exit "$3"
+  ' cleanup "$ROOT" "$newer_probe" "$newer_original" > "$newer_probe/log" 2>&1 || newer_rc=$?
+  [ "$newer_rc" = "$newer_original" ] && [ ! -e "$newer_probe/state" ] \
+    && [ "$(cat "$newer_probe/custody")" = 'retained coordination' ] \
+    || { cat "$newer_probe/log" >&2; fail "newer early cleanup lost exit $newer_original or retained owned assets"; }
+done
+# End newer fixture handoff contract.
+
 # Exercise the actual EXIT cleanup and yard alias with shared default power paths.
 for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enablement loaded active main-pid control-pid late-unit absent; do
   bash -c '
@@ -3753,6 +3970,34 @@ run_runner_fixture() {
     FAKE_BUNDLE_HASH="$candidate_hash" \
     "$RUNNER_UNDER_TEST" --yard test-yard "$@"
 }
+
+# The explicit rollout route replaces owner resolution; an explicit owner still resolves its own route.
+new_runner_fixture rollout-route
+route_status() {
+  PATH="$RUNNER_FIXTURE/bin:$PATH" SUBYARD_E2E_TEST_MODE=1 SUBYARD_E2E_STATE_DIR="$RUNNER_FIXTURE/client" \
+    SUBYARD_E2E_ROUTE_REGISTRY="$RUNNER_FIXTURE/absent-routes" FAKE_FACADE_LOG="$RUNNER_FIXTURE/facade.log" \
+    FAKE_ACQUIRE_COUNT="$RUNNER_FIXTURE/acquire-count" FAKE_SCENARIO=rollout-route \
+    FAKE_BUNDLE_HASH="$candidate_hash" "$@"
+}
+route_refused='owner service resolution failed'
+set +e
+route_output="$(route_status env -u SUBYARD_E2E_ROLLOUT_YARD "$RUNNER_UNDER_TEST" --status 2>&1)"
+route_status_code=$?
+set -e
+if [ "$route_status_code" = 0 ] || ! grep -Fq "$route_refused" <<<"$route_output"; then
+  fail "an unregistered default route must refuse: $route_output"
+fi
+set +e
+route_output="$(route_status env SUBYARD_E2E_ROLLOUT_YARD=test-yard "$RUNNER_UNDER_TEST" --status 2>&1)"
+set -e
+if grep -Fq "$route_refused" <<<"$route_output"; then
+  fail "the explicit rollout route still required owner registration: $route_output"
+fi
+set +e
+route_output="$(route_status env SUBYARD_E2E_ROLLOUT_YARD=test-yard "$RUNNER_UNDER_TEST" --owner fixture-owner --status 2>&1)"
+set -e
+grep -Fq "$route_refused" <<<"$route_output" \
+  || fail "the rollout route replaced an explicit owner: $route_output"
 
 # The lease invariant must survive sourcing: no key creation or facade probe without an exact slot.
 new_runner_fixture source-invariant

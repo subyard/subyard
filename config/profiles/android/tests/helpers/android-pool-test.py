@@ -1707,7 +1707,9 @@ os.write(1, result.stdout)
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     try:
                         deadline = time.monotonic() + 5
-                        while not marker.exists() and command.poll() is None and time.monotonic() < deadline:
+                        # The payload writes the marker non-atomically; an empty read means not ready yet.
+                        while not (marker.exists() and marker.read_text()) and command.poll() is None \
+                                and time.monotonic() < deadline:
                             time.sleep(0.02)
                         self.assertTrue(marker.exists())
                         pid = int(marker.read_text())

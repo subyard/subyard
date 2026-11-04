@@ -1216,8 +1216,8 @@ func (runtime *Runtime) prepareRetainedTransition(
 		defer active.Close()
 		owner = active
 	}
-	if !supportedSourceVersion(verified.version) {
-		return Prepared{}, errors.New(LegacyReinstallGuidance)
+	if err := sourceVersionError(verified.version); err != nil {
+		return Prepared{}, err
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// Absence of the optional query advertises no profile owners. Identical

@@ -53,7 +53,7 @@ class ReleaseObservationTest(unittest.TestCase):
 
             def observe():
                 result = subprocess.run(['bash', str(package / 'runtime.sh'), 'observe'],
-                                        env=environment, capture_output=True, text=True, timeout=30)
+                                        env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 return json.loads(result.stdout)
 
@@ -79,20 +79,20 @@ class ReleaseObservationTest(unittest.TestCase):
             for selected in ('', 'github'):
                 trace_log = root/('selected-trace.log' if selected else 'absent-trace.log')
                 plain_env = dict(environment, ENVIRONMENT_PROFILES=selected)
-                plain = subprocess.run(['bash', str(package/'runtime.sh'), 'observe'], env=plain_env,
+                plain = subprocess.run(['bash', str(package/'runtime.sh'), 'observe'], env=plain_env, stdin=subprocess.DEVNULL,
                                        capture_output=True, text=True, timeout=30)
                 trace_env = dict(plain_env, PATH=str(trace_commands)+':'+environment['PATH'],
                                  SUBYARD_TRACE_REAL_PYTHON=sys.executable,
                                  SUBYARD_TRACE_GITHUB_SOURCE=str(package/'runtime.py'),
                                  SUBYARD_TRACE_GITHUB_LOG=str(trace_log), GH_TOKEN='synthetic-private-marker-do-not-log')
                 traced = subprocess.run([sys.executable, str(tracer), str(package/'runtime.py'), 'observe'],
-                                        env=trace_env, capture_output=True, text=True, timeout=30)
+                                        env=trace_env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
                 self.assertEqual((traced.returncode, traced.stdout, traced.stderr),
                                  (plain.returncode, plain.stdout, plain.stderr))
                 alias = root/('selected-alias' if selected else 'absent-alias')
                 alias.symlink_to(package, target_is_directory=True)
                 traced_alias = subprocess.run([sys.executable, str(tracer), str(alias/'runtime.py'), 'observe'],
-                                              env=trace_env, capture_output=True, text=True, timeout=30)
+                                              env=trace_env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
                 self.assertEqual((traced_alias.returncode, traced_alias.stdout, traced_alias.stderr),
                                  (plain.returncode, plain.stdout, plain.stderr))
                 self.assertEqual((package/'runtime.py').read_bytes(), original_source)
@@ -121,9 +121,9 @@ class ReleaseObservationTest(unittest.TestCase):
                              (plain.returncode, plain.stdout, plain.stderr))
             unavailable_core = dict(trace_env, SUBYARD_TRACE_CORE_PROBE_STATUS='79')
             plain = subprocess.run([sys.executable, str(package/'runtime.py'), 'observe'],
-                                   env=unavailable_core, capture_output=True, text=True, timeout=10)
+                                   env=unavailable_core, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             traced = subprocess.run([sys.executable, str(tracer), str(package/'runtime.py'), 'observe'],
-                                    env=unavailable_core, capture_output=True, text=True, timeout=10)
+                                    env=unavailable_core, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             self.assertEqual((traced.returncode, traced.stdout, traced.stderr),
                              (plain.returncode, plain.stdout, plain.stderr))
             last = json.loads(Path(trace_env['SUBYARD_TRACE_GITHUB_LOG']).read_text().splitlines()[-1])

@@ -124,7 +124,7 @@ cleanup_fixture_pool() {
     *) return 1 ;;
   esac
   [ -z "$(incus list --all-projects --format csv -c n)" ] || return 1
-  if incus profile device list default --project default 2>/dev/null | grep -qx root; then
+  if incus profile device list default --project default 2>/dev/null | grep -x root >/dev/null; then
     incus profile device remove default root --project default >/dev/null || return 1
   fi
   while IFS= read -r fingerprint; do
@@ -350,7 +350,7 @@ if PATH="$STATE/faultbin:$PATH" yard "$YARD" dashboard up --yes \
   >"$STATE/readiness-failure.out" 2>&1; then
   die "injected owner-endpoint readiness failure was accepted"
 fi
-if incus config device list "$instance" --project "$project" | grep -qx hermes-dashboard; then
+if incus config device list "$instance" --project "$project" | grep -x hermes-dashboard >/dev/null; then
   die "readiness failure left the owned browser proxy attached"
 fi
 if [ -n "$(incus config get "$instance" user.subyard.resource.hermes-dashboard \
@@ -393,7 +393,7 @@ PATH="$STATE/fakebin:$PATH" yard "$YARD" security --require-live --quiet
 yard "$YARD" config unset HERMES_DASHBOARD_ADVERTISE_HOST --scope yard --yes
 yard "$YARD" config unset HERMES_DASHBOARD_HOST_PORT --scope yard --yes
 PATH="$STATE/fakebin:$PATH" yard "$YARD" dashboard down --yes
-if incus config device list "$instance" --project "$project" | grep -qx hermes-dashboard; then
+if incus config device list "$instance" --project "$project" | grep -x hermes-dashboard >/dev/null; then
   die "dashboard down left the owned proxy device"
 fi
 if [ -n "$(incus config get "$instance" user.subyard.resource.hermes-dashboard \

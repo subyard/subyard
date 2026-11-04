@@ -262,7 +262,10 @@ func (cli *CLI) warnRetiredIntegrationsAfterStart(loaded config.Loaded, executio
 	if err != nil || result.Status != "ok" || execution.action != "start" || execution.observed == nil {
 		return
 	}
-	if reminder := reconcileruntime.RetiredIntegrationReminder(loaded, *execution.observed); reminder != "" {
+	// The successful start has already happened; name the remaining guarded repair.
+	instance := *execution.observed
+	instance.Status = "Running"
+	if reminder := reconcileruntime.RetiredIntegrationReminder(loaded, instance); reminder != "" {
 		fmt.Fprintln(diagnostics, "Warning: "+reminder)
 	}
 }

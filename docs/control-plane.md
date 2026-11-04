@@ -452,7 +452,10 @@ The guest temporary-storage step lists each unmarked yard in the read-only updat
 A running yard restarts: active agent sessions, processes and connections are lost, `/tmp`
 is reset, and persistent data is kept. A stopped yard stays stopped and finishes at its
 next start; run `yard -Y NAME start`, then `yard migrate` to repair any deferred core
-and profile runtimes. The normal update confirmation, or `--yes`, authorizes the listed restarts
+and profile runtimes. This guarded migrate also removes selected retired integrations and records
+proof, including an already-clean guest. A stopped yard with both jobs pending receives the
+same sequence in its retirement reminder.
+The normal update confirmation, or `--yes`, authorizes the listed restarts
 before any migration or journal write. Decline or non-terminal input without `--yes`
 executes nothing; a changed restart set requires a fresh plan. Read-only checks never restart.
 An update already interrupted on a released version finishes under its exact sealed owner's

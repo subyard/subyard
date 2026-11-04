@@ -477,7 +477,7 @@ assert_outer_vm_ssh_address() {
   [ "$eth0" != "$foreign" ] || die "$stage: primary and foreign interfaces share an IPv4"
   [ "$pinned" = "$eth0" ] || die "$stage: eth0 pinned $pinned instead of $eth0"
   ! incus config device list "$OUTER_INSTANCE" --project "$OUTER_PROJECT" \
-    | grep -qx ssh || die "$stage: unsupported Incus VM proxy device is still attached"
+    | grep -x ssh >/dev/null || die "$stage: unsupported Incus VM proxy device is still attached"
   relay_unit="subyard-ssh-relay-$ssh_port.socket"
   relay_service="/etc/systemd/system/subyard-ssh-relay-$ssh_port.service"
   systemctl is-active --quiet "$relay_unit" \

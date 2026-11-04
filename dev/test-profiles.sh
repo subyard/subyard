@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run tests owned by each profile, separately from the core suite.
 set -euo pipefail
+# Host-free profile tests must not inherit the outer allocation route of a live collector.
+unset SUBYARD_E2E_ROLLOUT_YARD
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 suite=run.sh
 list=0

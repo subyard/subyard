@@ -763,7 +763,7 @@ esac
 assert_paired_desktop_smoke "$desktop_pair"
 
 run_orca down
-if "${incus[@]}" config device list "$instance" | grep -qx orca-server; then
+if "${incus[@]}" config device list "$instance" | grep -x orca-server >/dev/null; then
   die 'owned proxy survived down'
 fi
 "${incus[@]}" exec "$instance" -- test -d /srv/agents/orca/state
