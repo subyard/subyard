@@ -1,0 +1,159 @@
+name: Release tests
+
+# Long release VM checks on hosted runners, ahead of a release. A red check here is a finding to
+# fix early; this workflow does not replace release acceptance. It holds no secrets and never
+# runs pull request code, because the jobs run the checked out source as root.
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci-probe/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tests-${{ github.ref }}
+  # A probe branch's new push replaces its run; master always finishes the run it started.
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/ci-probe/') }}
+
+env:
+  CANDIDATE_VERSION: 1.0.0-ci.release-tests
+
+jobs:
+  # The schedule runs only for a commit no finished run has covered. A failed commit is not
+  # repeated automatically; use Re-run or a manual dispatch.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.compare.outputs.run }}
+    steps:
+      - name: Compare with the last finished run
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref_name }}
+          HEAD: ${{ github.sha }}
+        run: |
+          run=true
+          if [ "$EVENT" = schedule ]; then
+            last="$(gh run list --workflow release-tests.yml --branch "$REF" --status completed \
+              --limit 1 --json headSha --jq '.[0].headSha // ""')"
+            [ "$last" != "$HEAD" ] || run=false
+          fi
+          printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
+
+  candidate:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      checks: ${{ steps.plan.outputs.checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install packaging tools
+        run: sudo apt-get update -qq && sudo apt-get install -y binutils jq ripgrep
+      - name: Freeze the candidate
+        run: python3 dev/release-acceptance.py prepare --version "$CANDIDATE_VERSION" --output .build/candidate
+      - name: Plan the checks from their owners
+        id: plan
+        run: |
+          checks="$(python3 -B dev/ci/plan-release-checks.py)"
+          printf 'checks=%s\n' "$checks" >> "$GITHUB_OUTPUT"
+          jq -r '.include[].id' <<<"$checks" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-bundle
+          path: .build/candidate/candidate-bundle.tar.gz
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
+
+  # Explains a pool failure layer by layer. Its own failures do not stop the checks.
+  layers:
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Probe each virtualization layer
+        run: bash dev/ci/release-tests.sh layers
+
+  # One real lease first: if the pool cannot run here, the matrix would only repeat that failure.
+  pool:
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: candidate-bundle
+          path: ${{ runner.temp }}/candidate
+      - name: Install the pool and hold one lease
+        run: >-
+          bash dev/ci/release-tests.sh check pool-boundary
+          "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz"
+          bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1
+
+  check:
+    name: ${{ matrix.id }}
+    needs: [candidate, pool]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      # Leaves room in the account-wide 20-job pool for ordinary CI and release preparation.
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.candidate.outputs.checks) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: candidate-bundle
+          path: ${{ runner.temp }}/candidate
+      - name: Run the check
+        env:
+          CHECK_ID: ${{ matrix.id }}
+          CHECK_COMMAND: ${{ toJSON(matrix.command) }}
+        run: |
+          mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
+          bash dev/ci/release-tests.sh check "$CHECK_ID" \
+            "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"

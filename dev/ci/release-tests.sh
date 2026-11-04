@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# Runs release VM checks on a disposable GitHub-hosted runner. The runner becomes an ordinary
+# owner: the published runtime installs the test-vms service, and unchanged controllers lease
+# from it. A failing check is a result; the probes here only establish that it could run.
+set -uo pipefail
+umask 022
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESULTS="${RUNNER_TEMP:-/var/tmp}/release-tests-results.tsv"
+# Controllers attribute leases from the managed workspace path.
+WORKSPACE=/srv/workspaces/Subyard/src
+VM_IMAGE=subyard-ci-debian-13-vm
+VM_MEMORY=4GiB
+VM_DISK=20GiB
+AGENT_WAIT_SECONDS=420
+PACKAGES=(build-essential ca-certificates curl expect git jq make openssh-client openssh-server ripgrep shellcheck tar xz-utils zsh)
+INSTALLER_URL=https://github.com/Subyard/Subyard/releases/latest/download/subyard-install.sh
+CLOUD_CONFIG='#cloud-config
+users:
+  - name: dev
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+ssh_pwauth: false
+'
+
+die() { printf 'release-tests: %s\n' "$*" >&2; exit 2; }
+
+require_runner() {
+  [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
+    || die 'refusing to run outside a disposable GitHub-hosted runner'
+}
+
+incus_root() { sudo -n /usr/bin/incus "$@" </dev/null; }
+
+# Each probe runs in its own subshell so one failure cannot hide the independent ones after it.
+probe() {
+  local name="$1" start=$SECONDS rc=0 result=pass
+  shift
+  printf '::group::%s\n' "$name"
+  (set -e; "$@") &
+  wait "$!" || rc=$?
+  printf '::endgroup::\n'
+  [ "$rc" = 0 ] || { result="fail($rc)"; printf '::error title=%s::exit %s\n' "$name" "$rc"; }
+  printf '%s\t%s\t%s\n' "$name" "$result" "$((SECONDS - start))" >> "$RESULTS"
+  printf '%s: %s in %ss\n' "$name" "$result" "$((SECONDS - start))"
+}
+
+passed() { grep -q "^$1"$'\tpass\t' "$RESULTS" 2>/dev/null; }
+
+# A probe whose prerequisite failed is recorded as skipped instead of adding a misleading failure.
+probe_after() {
+  local needed="$1" name="$2"
+  shift 2
+  if passed "$needed"; then
+    probe "$name" "$@"
+  else
+    printf '%s\tskip (needs %s)\t0\n' "$name" "$needed" >> "$RESULTS"
+  fi
+}
+
+write_summary() {
+  local failed=0 name result seconds
+  {
+    printf '| Step | Result | Seconds |\n| --- | --- | ---: |\n'
+    while IFS=$'\t' read -r name result seconds; do
+      printf '| %s | %s | %s |\n' "$name" "$result" "$seconds"
+    done < "$RESULTS"
+  } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  grep -q $'\tfail(' "$RESULTS" && failed=1
+  return "$failed"
+}
+
+facts() {
+  local module
+  uname -a
+  . /etc/os-release && printf 'os: %s\n' "$PRETTY_NAME"
+  printf 'cpus: %s\n' "$(nproc)"
+  lscpu | grep -E '^(Model name|Virtualization|Hypervisor vendor)' || true
+  free -h
+  df -h / /mnt /var/tmp 2>/dev/null || true
+  ls -l /dev/kvm 2>&1 || true
+  for module in kvm_intel kvm_amd; do
+    [ ! -r "/sys/module/$module/parameters/nested" ] \
+      || printf '%s nested: %s\n' "$module" "$(cat "/sys/module/$module/parameters/nested")"
+  done
+  systemctl is-active docker || true
+  sudo -n iptables -S FORWARD 2>&1 | head -5 || true
+  command -v incus lxc lxd 2>/dev/null || true
+  stat -c '%a %U %n' "$HOME" || true
+}
+
+enable_kvm() {
+  printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
+    | sudo -n tee /etc/udev/rules.d/99-subyard-ci-kvm.rules >/dev/null
+  sudo -n udevadm control --reload-rules
+  sudo -n udevadm trigger --name-match=kvm
+  udevadm settle --timeout=30 || true
+  [ -r /dev/kvm ] && [ -w /dev/kvm ]
+  ls -l /dev/kvm
+}
+
+prepare_host() {
+  sudo -n apt-get update -qq
+  sudo -n apt-get install -y -qq --no-install-recommends "${PACKAGES[@]}"
+  if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+    sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+  fi
+  # Unprivileged guests must traverse storage paths under this home.
+  sudo -n chmod 0711 "$HOME"
+}
+
+drop_docker() {
+  sudo -n systemctl stop docker.socket docker.service containerd.service
+  sudo -n systemctl disable docker.socket docker.service containerd.service
+  sudo -n ip link delete docker0 2>/dev/null || true
+  sudo -n iptables -P FORWARD ACCEPT
+  sudo -n iptables -F DOCKER-USER 2>/dev/null || true
+  sudo -n iptables -S FORWARD | head -5
+}
+
+install_candidate() {
+  local bundle="$1"
+  sudo -n install -d -o "$(id -un)" -g "$(id -gn)" -m 0755 /srv/workspaces /srv/workspaces/Subyard "$WORKSPACE"
+  tar -xzf "$bundle" -C "$WORKSPACE"
+  [ -f "$WORKSPACE/.subyard-acceptance/candidate.json" ]
+  jq -er .version "$WORKSPACE/.subyard-acceptance/candidate.json"
+}
+
+install_runtime() {
+  local installer="${RUNNER_TEMP:-/var/tmp}/subyard-install.sh"
+  curl -fsSL --proto '=https' --tlsv1.2 "$INSTALLER_URL" -o "$installer"
+  bash "$installer" --yes
+  "$HOME/.local/bin/yard" --version
+}
+
+# One slot per job. The reserve leaves a 9 GiB pair admissible on a 16 GiB runner.
+install_pool() {
+  install -d -m 0700 "$HOME/.config/subyard"
+  cat >> "$HOME/.config/subyard/config.env" <<'CONFIG'
+CODING_TOOL_INTEGRATIONS=''
+E2E_VM_SLOT_COUNT=1
+E2E_MEMORY_RESERVE=2GiB
+CONFIG
+  "$HOME/.local/bin/yard" service install test-vms --yes </dev/null
+  "$HOME/.local/bin/yard" test-vms status
+}
+
+controller_env() {
+  env SUBYARD_E2E_ROUTE_REGISTRY="$HOME/.subyard/e2e/routes" \
+    SUBYARD_E2E_CANDIDATE_BUNDLE="$BUNDLE" \
+    SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum "$BUNDLE" | awk '{print $1}')" \
+    SUBYARD_E2E_CONTROLLER_WORKSPACE="$WORKSPACE" \
+    PYTHONDONTWRITEBYTECODE=1 "$@"
+}
+
+run_check() {
+  cd "$WORKSPACE"
+  controller_env "$@" </dev/null
+}
+
+check_probes() {
+  local id="$1"
+  BUNDLE="$2"
+  shift 2
+  : > "$RESULTS"
+  probe facts facts
+  probe kvm-udev enable_kvm
+  probe prepare-host prepare_host
+  probe docker-removed drop_docker
+  probe_after prepare-host candidate install_candidate "$BUNDLE"
+  probe_after candidate published-runtime install_runtime
+  probe_after published-runtime test-vms-service install_pool
+  probe_after test-vms-service "check:$id" run_check "$@"
+  probe facts-after facts
+  write_summary
+}
+
+# Diagnostics that explain a pool failure: each virtualization layer on its own.
+vm_image() {
+  incus_root image copy images:debian/13/cloud local: --vm --alias "$VM_IMAGE" --project default
+  incus_root image list --project default --format csv -c lfs
+}
+
+incus_platform() {
+  cd "$ROOT"
+  env SUBYARD_E2E_VM=1 timeout --signal=TERM --kill-after=60 1800 \
+    bash dev/e2e/p0-guest.sh fixture-platform "$(date +%s)" </dev/null
+  incus_root image list --project default --format csv -c lfs
+}
+
+wait_agent() {
+  local vm="$1" deadline=$((SECONDS + AGENT_WAIT_SECONDS))
+  until incus_root exec "$vm" -- true >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || { incus_root info "$vm" --show-log | tail -n 30; return 1; }
+    sleep 3
+  done
+}
+
+launch_vm() {
+  local vm="$1"
+  incus_root init "$VM_IMAGE" "$vm" --vm --project default --storage default \
+    -c limits.cpu=2 -c "limits.memory=$VM_MEMORY" -c security.secureboot=false \
+    -c cloud-init.user-data="$CLOUD_CONFIG" -d "root,size=$VM_DISK"
+  incus_root config device add "$vm" subyard-cloud-init disk source=cloud-init:config
+  incus_root start "$vm"
+  wait_agent "$vm"
+  incus_root exec "$vm" -- cloud-init status --wait || true
+  incus_root exec "$vm" -- runuser -u dev -- sudo -n true
+}
+
+guest_network() {
+  local vm="$1"
+  incus_root exec "$vm" -- sh -c 'ip -4 route show default; getent hosts github.com'
+  incus_root exec "$vm" -- timeout 30 bash -c 'exec 3<>/dev/tcp/github.com/443'
+}
+
+vm_reboot() {
+  local vm="$1" before after deadline=$((SECONDS + AGENT_WAIT_SECONDS))
+  before="$(incus_root exec "$vm" -- cat /proc/sys/kernel/random/boot_id)"
+  incus_root exec "$vm" -- systemctl reboot || true
+  while :; do
+    after="$(incus_root exec "$vm" -- cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    [ -z "$after" ] || [ "$after" = "$before" ] || break
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 3
+  done
+  printf 'boot id changed: %s -> %s\n' "$before" "$after"
+}
+
+# A VM inside the runner's VM: the depth YARD_KIND=vm fixtures need.
+nested_vm() {
+  local vm="$1"
+  incus_root exec "$vm" --env DEBIAN_FRONTEND=noninteractive -- sh -euc '
+    apt-get -o Acquire::Retries=3 update -qq
+    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends incus qemu-system-x86
+    incus admin init --auto
+    ls -l /dev/kvm
+    incus launch images:debian/13/cloud l3 --vm -c limits.cpu=1 -c limits.memory=1GiB \
+      -c security.secureboot=false </dev/null
+    deadline=$(( $(date +%s) + 600 ))
+    until incus exec l3 -- true </dev/null >/dev/null 2>&1; do
+      [ "$(date +%s)" -lt "$deadline" ] || { incus info l3 --show-log </dev/null | tail -n 30; exit 1; }
+      sleep 5
+    done
+    incus exec l3 -- uname -r </dev/null
+    incus delete --force l3 </dev/null'
+}
+
+two_vms() {
+  local address
+  launch_vm vm2
+  address="$(incus_root exec vm2 -- sh -c \
+    "ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | head -n1")"
+  [ -n "$address" ]
+  incus_root exec vm2 -- sh -c 'apt-get update -qq && apt-get install -y -qq openssh-server'
+  incus_root exec vm1 -- timeout 30 bash -c "exec 3<>/dev/tcp/$address/22"
+  free -h
+}
+
+layer_probes() {
+  : > "$RESULTS"
+  probe facts facts
+  probe kvm-udev enable_kvm
+  probe prepare-host prepare_host
+  probe_after prepare-host incus-on-runner incus_platform
+  probe_after incus-on-runner vm-image-copy vm_image
+  probe_after vm-image-copy vm-start launch_vm vm1
+  probe_after vm-start vm-network-docker-present guest_network vm1
+  probe docker-removed drop_docker
+  probe_after vm-start vm-network-docker-removed guest_network vm1
+  probe_after vm-start vm-reboot vm_reboot vm1
+  probe_after vm-start l3-nested-vm nested_vm vm1
+  probe_after vm-start two-vms two_vms
+  probe facts-after facts
+  write_summary
+}
+
+require_runner
+case "${1:-}" in
+  layers) [ "$#" = 1 ] || die 'usage: release-tests.sh layers'; layer_probes ;;
+  check)
+    [ "$#" -ge 4 ] || die 'usage: release-tests.sh check ID BUNDLE COMMAND...'
+    shift
+    check_probes "$@"
+    ;;
+  *) die 'usage: release-tests.sh layers | check ID BUNDLE COMMAND...' ;;
+esac
