@@ -268,13 +268,48 @@ nested_vm() {
     incus launch images:debian/13/cloud l3 --vm -c limits.cpu=1 -c limits.memory=1GiB \
       -c security.secureboot=false </dev/null \
       || { journalctl -u incus --no-pager -n 40 </dev/null; exit 1; }
-    deadline=$(( $(date +%s) + 600 ))
+    start=$(date +%s)
+    reported=$start
     until incus exec l3 -- true </dev/null >/dev/null 2>&1; do
-      [ "$(date +%s)" -lt "$deadline" ] || { incus info l3 --show-log </dev/null | tail -n 30; exit 1; }
+      now=$(date +%s)
+      if [ $(( now - reported )) -ge 60 ]; then
+        reported=$now
+        incus console l3 --show-log </dev/null > /tmp/l3-console 2>&1 || true
+        printf "l3 t=%ss console_lines=%s last: %s\n" "$(( now - start ))" \
+          "$(wc -l < /tmp/l3-console)" "$(grep -v "^[[:space:]]*$" /tmp/l3-console | tail -n 1 | cut -c1-120)"
+      fi
+      if [ $(( now - start )) -ge 900 ]; then
+        tail -n 60 /tmp/l3-console
+        incus info l3 --show-log </dev/null | tail -n 30
+        grep -m1 -o -w -E "svm|vmx" /proc/cpuinfo || true
+        grep -H . /sys/module/kvm_amd/parameters/* /sys/module/kvm_intel/parameters/nested 2>/dev/null || true
+        dmesg | grep -i -E "kvm|svm" | tail -n 20 || true
+        uptime
+        top -b -n 1 | head -n 15
+        exit 1
+      fi
       sleep 5
     done
+    printf "l3 agent after %ss\n" "$(( $(date +%s) - start ))"
     incus exec l3 -- uname -r </dev/null
+    incus exec l3 -- systemd-analyze </dev/null || true
     incus delete --force l3 </dev/null'
+}
+
+runner_kernel() {
+  sudo -n dmesg | grep -i -E 'kvm|svm|nested' | tail -n 20 || true
+}
+
+# How much of the 144 GiB disk the preinstalled tools hold, and what removing them leaves.
+runner_disk() {
+  local paths=(/usr/local/lib/android /opt/hostedtoolcache /usr/share/dotnet /usr/local/.ghcup
+    /usr/share/swift /usr/lib/jvm /usr/lib/google-cloud-sdk /usr/local/share/powershell
+    /usr/local/share/chromium /usr/local/lib/node_modules /opt/microsoft /opt/google /opt/az
+    /usr/share/miniconda /var/lib/docker)
+  sudo -n du -xh --max-depth=3 / 2>/dev/null | sort -h | tail -n 30
+  df -h /
+  time sudo -n rm -rf "${paths[@]}"
+  df -h /
 }
 
 two_vms() {
@@ -301,8 +336,10 @@ layer_probes() {
   probe_after vm-start vm-network-docker-removed guest_network vm1
   probe_after vm-start vm-reboot vm_reboot vm1
   probe_after vm-start l3-nested-vm nested_vm vm1
+  probe l3-runner-kernel runner_kernel
   probe_after vm-start two-vms two_vms
   probe facts-after facts
+  probe runner-disk runner_disk
   write_summary
 }
 

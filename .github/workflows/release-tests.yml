@@ -85,11 +85,17 @@ jobs:
           if-no-files-found: error
 
   # Explains a pool failure layer by layer. Its own failures do not stop the checks.
+  # Several jobs, because the runner's CPU vendor varies and nested VMs behave differently on each.
   layers:
+    name: layers-${{ matrix.sample }}
     needs: candidate
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -134,7 +140,7 @@ jobs:
     strategy:
       fail-fast: false
       # Leaves room in the account-wide 20-job pool for ordinary CI and release preparation.
-      max-parallel: 8
+      max-parallel: 14
       matrix: ${{ fromJSON(needs.candidate.outputs.checks) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
