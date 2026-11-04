@@ -29,6 +29,7 @@ export ORCA_TEST_SERVICE="$TMP/service" ORCA_TEST_INGRESS="$TMP/ingress"
 export ORCA_TEST_CLEANUP_FAILED="$TMP/cleanup-failed"
 mkdir -p "$HOME" "$TMP/bin" "$ORCA_TEST_CAPTURE" "$ORCA_TEST_GUEST/tmp"
 touch "$ORCA_TEST_GUEST/tmp/unrelated"
+cp "$ROOT/config/profiles/orca/tests/daemon-manager-fixture.bash" "$TMP/daemon-manager-fixture.bash"
 
 cat >"$TMP/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
@@ -125,6 +126,46 @@ case "${1:-}" in
       case " $* " in *' bash -s'*|*' /usr/bin/python3 -I -B - '*) ;; *) cat >/dev/null ;; esac
     fi
     case " $* " in
+      *' bash -se -- dev list '*|*' bash -se -- dev stop '*)
+        . "$state_root/daemon-manager-fixture.bash"
+        daemon_manager_fixture "$state_root" "${*: -1}"
+        ;;
+      *' bash -se -- subyard-orca.service '*)
+        cat >/dev/null
+        [ ! -e "$state_root/fail-service-scan" ] || exit 1
+        if [ -e "$state_root/daemon-in-service" ]; then printf service; else printf absent; fi ;;
+      *' systemctl show user@1234.service --property=ActiveState --value '*)
+        [ ! -e "$state_root/fail-manager-state" ] || exit 1
+        if [ -e "$state_root/no-user-manager" ]; then printf 'inactive\n'; else printf 'active\n'; fi ;;
+      *' test -e /etc/systemd/system/subyard-orca.service '*)
+        [ ! -e "$state_root/no-orca-unit" ] ;;
+      *' grep -Eq '*'/etc/systemd/system/subyard-orca.service '*)
+        [ ! -e "$state_root/legacy-unit-ordering" ] ;;
+      *' id -u dev '*) printf '1234\n' ;;
+      *' loginctl show-user dev --property=Linger --value '*)
+        if [ -e "$state_root/linger" ]; then printf 'yes\n'; else printf 'no\n'; fi ;;
+      *' loginctl enable-linger dev '*)
+        [ ! -e "$state_root/fail-linger" ] || exit 1
+        [ -e "$state_root/ignore-linger" ] || touch "$state_root/linger" ;;
+      *' bash -se -- /usr/local/libexec/subyard/orca-contract.sha256 '*)
+        arguments=("$@")
+        for index in "${!arguments[@]}"; do
+          [ "${arguments[$index]}" = -- ] && command=("${arguments[@]:$((index + 1))}")
+        done
+        mapped=("$guest${command[0]}" "${command[1]}")
+        for source in "${command[@]:2}"; do mapped+=("$guest$source"); done
+        /bin/bash -se -- "${mapped[@]}"
+        ;;
+      *' bash -se ')
+        dpkg-query() {
+          [ "${*: -1}" != dbus-user-session ] || [ ! -e "$ORCA_TEST_MANAGER_ROOT/missing-dbus" ] || return 1
+          printf 'install ok installed'
+        }
+        export ORCA_TEST_MANAGER_ROOT="$state_root"
+        export -f dpkg-query
+        /bin/bash -se
+        ;;
+      *' apt-get install -y -qq dbus-user-session '*) rm -f "$state_root/missing-dbus" ;;
       *' bash -se -- '*'orca-registration.sha256'*)
         arguments=("$@")
         command=()
@@ -623,6 +664,42 @@ observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-c
 jq -e '.state == "absent" and .actual == "" and .desired == ""' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation did not distinguish an absent Orca installation'
 run_orca up --yes >"$TMP/up.out"
+[ -e "$TMP/linger" ] || fail 'up did not enable lingering'
+linger_count="$(count_log 'loginctl enable-linger dev')"
+run_orca up --yes >/dev/null
+[ "$(count_log 'loginctl enable-linger dev')" -eq "$linger_count" ] || fail 'converged up enabled lingering again'
+rm -f "$TMP/linger"
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/linger-drift.json"
+jq -e '.steps | any(.id == "runtime-contract" and .decision == "apply")' "$TMP/linger-drift.json" >/dev/null \
+  || fail 'disabled lingering did not make the runtime contract unready'
+touch "$TMP/ignore-linger"
+if run_orca up --yes >"$TMP/linger-failed.out" 2>&1; then fail 'up accepted ineffective enable-linger'; fi
+grep -Fq 'lingering is disabled for dev after reconciliation' "$TMP/linger-failed.out" || fail 'linger readback failure lacks a diagnostic'
+rm -f "$TMP/ignore-linger"
+touch "$TMP/fail-linger"
+if run_orca up --yes >"$TMP/linger-error.out" 2>&1; then fail 'up accepted failed enable-linger'; fi
+grep -Fq 'could not enable lingering for dev' "$TMP/linger-error.out" || fail 'linger failure lacks a diagnostic'
+rm -f "$TMP/fail-linger"
+touch "$TMP/missing-dbus"
+run_orca up --yes >/dev/null
+[ -e "$TMP/linger" ] && [ ! -e "$TMP/missing-dbus" ] || fail 'up did not repair linger and the user bus dependency'
+# An existing service without manager ordering must be replaced and restarted.
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+sed -i 's/ user@1234.service//' "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service"
+printf '6:legacy-runtime\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-contract.sha256"
+run_orca up --yes >/dev/null
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
+  || fail 'up did not restart the existing service after ordering repair'
+cmp -s "$ORCA_TEST_CAPTURE/subyard-orca.service" "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service" \
+  || fail 'up did not replace the stale installed service unit'
+python3 - "$ORCA_TEST_CAPTURE/subyard-orca.service" <<'PY'
+from pathlib import Path
+import sys
+unit = dict(line.split('=', 1) for line in Path(sys.argv[1]).read_text().splitlines() if '=' in line)
+for directive in ('Wants', 'After'):
+    assert 'user@1234.service' in unit[directive].split(), f'{directive} does not order the actual guest user manager'
+PY
 ready_file="$ORCA_TEST_GUEST/srv/agents/orca/ready.json"
 mobile_request="$ready_file.mobile-request"
 [ "$(stat -c %a "$ready_file")" = 600 ] || fail 'captured readiness file is not mode 0600'
@@ -768,11 +845,13 @@ rm -f "$TMP/fail-registration-marker"
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'interrupted runtime contract apply appeared current without its marker'
+rm -f "$TMP/linger"
 "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-applied.json"
 jq -e '.state == "current" and .actual == .desired' "$TMP/runtime-applied.json" >/dev/null \
   || fail 'runtime contract apply did not verify the repaired helper'
+[ -e "$TMP/linger" ] || fail 'runtime contract repair did not enable lingering on an existing yard'
 [ "$(stat -c %a "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca")" = 755 ] \
   || fail 'runtime contract repair did not restore the hook mode'
 [ "$(stat -c %a "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.lock")" = 644 ] \
@@ -922,6 +1001,35 @@ grep -Fq 'checkouts registered: 2/2' "$TMP/status.out" \
 if grep -Fq 'orca://pair?' "$TMP/status.out"; then
   fail 'status exposed a pairing capability'
 fi
+survival_status() { ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/survival.out"; }
+survival_has() { grep -Fq "$1" "$TMP/survival.out" || fail "$2: $(cat "$TMP/survival.out")"; }
+survival_lacks() { if grep -Fq "$1" "$TMP/survival.out"; then fail "$2: $(cat "$TMP/survival.out")"; fi; }
+survival_status
+survival_has 'agents will survive logout and restart' 'status did not confirm protection without a daemon'
+touch "$TMP/daemon-scope"
+survival_status
+survival_has 'agents survive logout and restart' 'status did not confirm a daemon in its scope'
+rm -f "$TMP/linger"
+touch "$TMP/legacy-unit-ordering" "$TMP/daemon-in-service"
+survival_status
+survival_has 'lingering disabled' 'status hid disabled lingering next to other gaps'
+survival_has 'service ordering pending' 'status hid a legacy unit next to other gaps'
+survival_has 'daemon runs inside the service' 'status hid a daemon inside the service next to other gaps'
+survival_lacks 'agents survive logout and restart' 'status confirmed protection despite gaps'
+touch "$TMP/linger"
+rm -f "$TMP/legacy-unit-ordering" "$TMP/daemon-in-service" "$TMP/daemon-scope"
+for fault in fail-service-scan fail-manager-state no-user-manager fail-user-bus; do
+  touch "$TMP/$fault"
+  survival_status
+  survival_has 'agent survival unknown' "status hid $fault"
+  survival_lacks 'will survive logout and restart' "status confirmed protection under $fault"
+  rm -f "$TMP/$fault"
+done
+touch "$TMP/no-orca-unit"
+survival_status
+survival_lacks 'survive' 'status reported agent survival without an Orca unit'
+survival_lacks 'lingering disabled' 'status warned about lingering without an Orca unit'
+rm -f "$TMP/no-orca-unit"
 ENVIRONMENT_PROFILES='' run_orca status >"$TMP/status-unselected.out"
 grep -Fq 'Orca profile is not selected in ENVIRONMENT_PROFILES' "$TMP/status-unselected.out" \
   || fail 'status did not warn that yard init will omit the Orca profile'

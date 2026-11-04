@@ -16,6 +16,7 @@ mkdir -p "$HOME" "$TMP/bin"
 # shellcheck source=config/profiles/orca/release.env
 . "$ROOT/config/profiles/orca/release.env"
 export ORCA_TEST_VERSION="$ORCA_VERSION"
+cp "$ROOT/config/profiles/orca/tests/daemon-manager-fixture.bash" "$TMP/daemon-manager-fixture.bash"
 cat > "$TMP/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -73,6 +74,10 @@ case "${1:-}" in
   exec)
     [ -e "$state_root/up" ] || exit 1
     case " $* " in
+      *' bash -se -- dev list '*|*' bash -se -- dev stop '*)
+        . "$state_root/daemon-manager-fixture.bash"
+        daemon_manager_fixture "$state_root" "${*: -1}"
+        ;;
       *' systemctl show -p InvocationID --value subyard-orca.service '*)
         printf '%032x\n' 1 ;;
       *' systemctl is-active --quiet subyard-orca.service '*)
@@ -212,4 +217,43 @@ printf '%s' "$saved" >"$TMP/config-user.subyard.deferred_publication.orca-server
   && [ -e "$TMP/missing-orca-route" ] || fail 'native down left restorable canceled intent'
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/deferred-down-noop.json"
 jq -e '.changed == false' "$TMP/deferred-down-noop.json" >/dev/null || fail 'canceled down was not idempotent'
+
+# Detached scopes still require down when the system service and route are gone.
+touch "$TMP/daemon-scope" "$TMP/foreign-scope" "$TMP/linger"
+SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/scope-down.json"
+jq -e '.changed and (.steps | any(.id == "daemon-scopes" and .decision == "apply" and (.consequence | contains("running agent terminals"))))' \
+  "$TMP/scope-down.json" >/dev/null || fail 'scope-only down omitted terminal stop consent'
+for fault in fail-scope-stop ignore-scope-stop fail-user-bus fail-manager-state; do
+  touch "$TMP/$fault" "$TMP/service-active" "$TMP/ingress"
+  if "$ROOT/bin/yard" orca down --yes >"$TMP/$fault.out" 2>&1; then fail "down accepted $fault"; fi
+  [ -e "$TMP/daemon-scope" ] || fail "$fault unexpectedly removed the scope"
+  [ ! -e "$TMP/service-active" ] && [ ! -e "$TMP/ingress" ] \
+    || fail "$fault kept the service or ingress published: $(cat "$TMP/$fault.out")"
+  rm -f "$TMP/$fault"
+done
+touch "$TMP/fail-scope-verify"
+if "$ROOT/bin/yard" orca down --yes >"$TMP/fail-scope-verify.out" 2>&1; then fail 'down accepted failed scope readback'; fi
+grep -Fq 'could not be stopped and verified' "$TMP/fail-scope-verify.out" \
+  || fail 'scope readback failure lost its diagnostic'
+rm -f "$TMP/fail-scope-verify" "$TMP/fail-user-bus"
+# A terminal collected before its stop fails the call, but the readback is clean.
+touch "$TMP/daemon-scope" "$TMP/collected-scope-stop"
+"$ROOT/bin/yard" orca down --yes >/dev/null || fail 'down rejected a terminal that exited before its stop'
+[ ! -e "$TMP/daemon-scope" ] || fail 'collected-terminal down left the scope running'
+rm -f "$TMP/collected-scope-stop"
+touch "$TMP/daemon-scope"
+"$ROOT/bin/yard" orca down --yes >"$TMP/scope-down.out"
+[ ! -e "$TMP/daemon-scope" ] && [ -e "$TMP/foreign-scope" ] && [ -e "$TMP/linger" ] \
+  || fail 'down did not stop exactly Orca scopes while retaining lingering'
+if grep -Fq 'already down' "$TMP/scope-down.out"; then fail 'scope-only down reported already down'; fi
+for manager in present absent; do
+  [ "$manager" = present ] || touch "$TMP/no-user-manager"
+  SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/no-scope-down.json"
+  jq -e '.changed == false and (.steps | any(.id == "daemon-scopes" and .decision == "skip"))' \
+    "$TMP/no-scope-down.json" >/dev/null || fail "empty $manager manager requires changes"
+  "$ROOT/bin/yard" orca down --yes >"$TMP/no-scope-down.out"
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=down SUBYARD_OPERATION_ID=empty-manager-down \
+    "$orca_handler" down >"$TMP/no-scope-handler.out"
+  grep -Fq 'already down' "$TMP/no-scope-handler.out" || fail 'empty manager down was not idempotent'
+done
 printf 'ok: Orca prepare, silent probes and dispatcher reverse lifecycle\n'

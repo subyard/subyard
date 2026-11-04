@@ -1361,14 +1361,24 @@ For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to a
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
 This mode starts Orca on a converged published release with two local yards, changes the candidate's
 managed Claude defaults, then runs the public update command. It checks all-local config convergence, release
-readiness, Orca restart, the saved client grant, endpoint and runtime JSON before cleanup.
+readiness, lingering enabled without an Orca restart, Orca restart, a service restart on the next `up`,
+the saved client grant, endpoint and runtime JSON before cleanup.
 If the update command fails, the fixture reports its marked temporary state path and retains the
 test yards for diagnosis on the disposable VM. Clean up those exact yards and marked state after
 the investigation.
 The existing-yard variant completes release activation with Claude and Pi selected before starting
 Orca, then checks release convergence and materialized settings. The resource fixture verifies
 paired stock clients, terminal input/output, service lifecycle, exact owner/loopback routes and a
-paired desktop under Xvfb. A bounded loopback DevTools driver uses the installed client's preload
+paired desktop under Xvfb. It also opens a real guest SSH login, verifies the daemon
+and a live native PTY in their scopes under the development user's manager, closes all
+that user's logins, and waits beyond logind's user-stop delay. It checks unchanged daemon,
+PTY and user-manager processes, terminal I/O across logout and service restart, verified
+scope shutdown through `down`, retained lingering and subsequent `up` convergence. New
+terminals must keep the daemon's environment across `restart` and pick up a service
+environment change after `down` and `up`. A yard reboot must place the daemon in its scope.
+`status` must report the daemon in its scope, a process in the service's cgroup, disabled
+lingering, and its repair through `up`.
+A bounded loopback DevTools driver uses the installed client's preload
 API, reloads the renderer, verifies the remote project in its sidebar and requests normal closure.
 Pairing capabilities stay in protected temporary files. Owner-address discovery is synthetic;
 the fixture does not verify a real Tailscale account. Projects covers production local and SSH-remote

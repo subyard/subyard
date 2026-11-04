@@ -1335,6 +1335,8 @@ EOF
     || die 'secondary yard must be running and converged before the upgrade'
 
   stage "updating published Subyard $UPGRADE_FROM through the public update command"
+  guest_root test ! -e /var/lib/systemd/linger/dev || die 'predecessor already enabled lingering'
+  upgrade_orca_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
   YARD_RELEASE_BASE_URL="file://$STATE/release" yard update --version "$release_version" --yes \
     >"$STATE/upgrade.out" 2>"$STATE/upgrade.err" \
     || {
@@ -1365,12 +1367,23 @@ PY_UPGRADE_ERROR
   [ "$(readlink "$SUBYARD_HOME/runtime/previous")" = "$published_target" ] \
     || die 'upgrade did not retain the published predecessor'
   release_ready upgraded || { print_release_state upgraded; die 'upgraded release is not ready'; }
+  [ "$(guest_root loginctl show-user dev --property=Linger --value)" = yes ] \
+    || die 'upgrade did not enable lingering on the running yard'
+  [ "$(guest_root systemctl show -p MainPID --value subyard-orca.service)" = "$upgrade_orca_pid" ] \
+    || die 'enabling lingering during the upgrade restarted Orca'
   yard config status --all-local >"$STATE/upgrade-config.out" 2>"$STATE/upgrade-config.err" \
     || die 'upgrade left materialized config drift in a local yard'
   rg -Fxq 'yard secondary materialized-config: converged' "$STATE/upgrade-config.out" \
     || die 'secondary yard must remain running and converged after the upgrade'
   yard orca restart --yes >"$STATE/upgrade-restart.out" 2>"$STATE/upgrade-restart.err" \
     || die 'Orca restart was blocked after the upgrade'
+  upgrade_orca_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
+  yard orca up --yes >"$STATE/upgrade-up.out" 2>"$STATE/upgrade-up.err" \
+    || die 'Orca up failed to apply the upgraded service ordering'
+  guest_root grep -Eqx 'After=.* user@[0-9]+\.service' /etc/systemd/system/subyard-orca.service \
+    || die 'up did not apply the user manager ordering'
+  [ "$(guest_root systemctl show -p MainPID --value subyard-orca.service)" != "$upgrade_orca_pid" ] \
+    || die 'up did not restart Orca to apply the service ordering'
   yard orca status >"$STATE/upgrade-status.out" 2>"$STATE/upgrade-status.err" \
     || die 'upgraded Orca status failed'
   [ "$(setting_value ORCA_HOST_PORT)" = "$ORCA_PORT" ] || die 'upgrade changed the Orca endpoint'

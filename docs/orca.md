@@ -43,6 +43,22 @@ the required yard initialization, installs Orca and registers existing projects.
 It shows one combined plan before applying changes. Repeating it converges the same
 configuration and preserves server state.
 
+The profile enables systemd user lingering for the yard's development user and
+orders Orca after that user's manager. Running agents and their terminals survive
+closing every SSH or other login session, including a temporary SSH outage. A yard
+reboot still ends those processes.
+
+On an existing running yard, `yard update` enables lingering without restarting Orca;
+a stopped yard gets it at its next `yard init` or `yard orca up`. The next `yard orca
+up` applies the service ordering and restarts the service once. Agents whose daemon
+still runs inside the service end with that restart, so run it at a quiet moment.
+Repeating `up` also repairs lingering if it was disabled later.
+
+`yard orca status` reports this protection. It warns separately when lingering is
+disabled, when the service ordering is pending, when the daemon runs inside the service,
+and when the user manager is unavailable. It changes nothing; the warning names the
+repair where `up` provides one.
+
 `yard update` also refreshes the project-registration files of existing Orca
 installations in all running local yards, including named yards. The refresh includes
 the Codex chat launcher and its login environment, so updated chat permission helpers
@@ -439,12 +455,18 @@ yard orca logs --follow
 yard orca down
 ```
 
-`restart` recovers the existing service without returning a pairing link. `logs`
+`restart` recovers the existing service without returning a pairing link. With the
+service ordering in place, running agent terminals and their daemon keep running
+through it. New terminals then keep the environment the daemon started with: to apply
+a service environment change to them, or to restart the terminal host, run `down` and
+then `up`, which stops running agents. `logs`
 prints at most the latest 18,000 journal lines; `--follow` prints the same bounded
 history and then follows new entries.
 
-`down` removes the owner proxy and stops Orca while preserving the installed package,
-projects, sessions, and paired-client state.
+`down` removes the owner proxy and stops Orca together with every Orca daemon and agent
+terminal of the development user, including those of another Orca instance that user
+started. It preserves the installed package, projects, saved session data and
+paired-client state. User lingering stays enabled after `down`.
 
 The profile pins Orca 1.4.244. Its [upstream release notes](https://github.com/stablyai/orca/releases/tag/v1.4.244)
 say it shares 1.4.243's terminal host, preserving attached terminals when updating from

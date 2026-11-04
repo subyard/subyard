@@ -34,11 +34,13 @@ work="$(mktemp -d)"
 fakebin="$work/bin"
 artifact="$work/orca.deb"
 mkdir -p "$fakebin"
+login_pid=
 
 stage() { printf 'orca-resource: %s\n' "$1" >&2; }
 die() { printf 'orca-resource: %s\n' "$1" >&2; exit 1; }
 
 cleanup() {
+  if [ -n "$login_pid" ]; then kill "$login_pid" 2>/dev/null || true; wait "$login_pid" 2>/dev/null || true; fi
   "${incus[@]}" delete -f "$instance" >/dev/null 2>&1 || true
   "${incus[@]}" network delete "$network" >/dev/null 2>&1 || true
   sudo incus project delete "$project" >/dev/null 2>&1 || true
@@ -558,6 +560,170 @@ assert_no_pairing_journal() {
   esac
 }
 
+# Logind also lists the user manager's own session. It stays while lingering, and
+# terminating it would stop the manager this check expects to survive.
+login_sessions() {
+  "${incus[@]}" exec "$instance" -- bash -se <<'YARD'
+set -euo pipefail
+for session in $(loginctl show-user dev --property=Sessions --value); do
+  case "$(loginctl show-session "$session" --property=Class --value)" in
+    manager*) ;;
+    *) printf '%s\n' "$session" ;;
+  esac
+done
+YARD
+}
+
+assert_daemon_lifetime() {
+  stage 'holding a real dev SSH login and a native PTY across the last logout'
+  # incus exec bypasses PAM/logind. Only this synthetic key opens a real login.
+  ssh-keygen -q -t ed25519 -N '' -f "$work/login-key"
+  "${incus[@]}" exec "$instance" -- bash -se <<'YARD'
+set -euo pipefail
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server libpam-systemd >/dev/null
+install -d -o dev -g dev -m 0700 /home/dev/.ssh
+install -o dev -g dev -m 0600 /dev/null /home/dev/.ssh/authorized_keys
+# The fixture account needs an unlocked shadow entry for public-key SSH.
+usermod -p '*' dev
+systemctl start ssh
+YARD
+  "${incus[@]}" file push "$work/login-key.pub" "$instance/home/dev/.ssh/authorized_keys" --mode 0600
+  "${incus[@]}" exec "$instance" -- chown dev:dev /home/dev/.ssh/authorized_keys
+  local guest_ip handle selector deadline delay_usec wait_seconds
+  guest_ip="$("${incus[@]}" exec "$instance" -- hostname -I | awk '{print $1}')"
+  ssh -T -i "$work/login-key" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$work/login-hosts" \
+    -o ConnectTimeout=10 "dev@$guest_ip" 'printf "login-ready\n"; exec sleep 600' \
+    >"$work/login.out" 2>"$work/login.err" &
+  login_pid=$!
+  deadline=$((SECONDS + 30))
+  until grep -Fqx login-ready "$work/login.out"; do
+    kill -0 "$login_pid" 2>/dev/null || die 'real dev SSH login failed'
+    [ "$SECONDS" -lt "$deadline" ] || die 'real dev SSH login timed out'
+    sleep 0.1
+  done
+  [ -n "$(login_sessions)" ] || die 'SSH did not establish a logind session'
+  client_cli "$first_pair" client-a repo list --json >"$work/lifetime-repos.json"
+  selector="$(jq -er '.result.repos[] | select(.path == "/srv/workspaces/alpha-12345678/src") | "id:" + .id + "::" + .path' "$work/lifetime-repos.json")"
+  client_cli "$first_pair" client-a terminal create --worktree "$selector" --title lifetime-fixture \
+    --command 'printf "%s\n" "$$" >/tmp/orca-lifetime-pty.pid; while IFS= read -r value; do printf "lifetime-echo:%s\n" "$value"; done' \
+    --json >"$work/lifetime-terminal.json"
+  handle="$(jq -er 'select(.ok == true) | .result.terminal.handle' "$work/lifetime-terminal.json")"
+  "${incus[@]}" file push "$ROOT/config/profiles/orca/tests/e2e/orca-daemon-lifetime.py" \
+    "$instance/tmp/orca-daemon-lifetime.py" --mode 0755
+  "${incus[@]}" exec "$instance" -- python3 -B /tmp/orca-daemon-lifetime.py capture
+  assert_survival_status() {
+    run_orca status >"$work/survival-status.out" || die 'Orca status failed'
+    rg -Fq "$1" "$work/survival-status.out" || { cat "$work/survival-status.out" >&2; die "status lacks: $1"; }
+  }
+  assert_survival_status 'agents survive logout and restart'
+  # A real cgroup member proves detection of the service placement, which this lane cannot reach naturally.
+  "${incus[@]}" exec "$instance" -- bash -ec '
+    echo $$ >"/sys/fs/cgroup$(systemctl show subyard-orca.service --property=ControlGroup --value)/cgroup.procs"
+    exec -a /srv/agents/orca/daemon-entry.js sleep 300' &
+  fake_daemon=$!
+  deadline=$((SECONDS + 15))
+  until "${incus[@]}" exec "$instance" -- pgrep -f '^/srv/agents/orca/daemon-entry.js 300$' >/dev/null; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'fixture daemon did not start in the service'
+    sleep 0.2
+  done
+  assert_survival_status 'daemon runs inside the service'
+  "${incus[@]}" exec "$instance" -- pkill -f '^/srv/agents/orca/daemon-entry.js 300$'
+  wait "$fake_daemon" || true
+  assert_survival_status 'agents survive logout and restart'
+  delay_usec="$("${incus[@]}" exec "$instance" -- busctl get-property org.freedesktop.login1 \
+    /org/freedesktop/login1 org.freedesktop.login1.Manager UserStopDelayUSec | awk '{print $2}')"
+  [[ "$delay_usec" =~ ^[0-9]+$ ]] && [ "$delay_usec" -le 60000000 ] \
+    || die 'fixture requires a finite UserStopDelaySec of at most 60 seconds'
+  wait_seconds=$((delay_usec / 1000000 + 3))
+  # End every login in this fixture account, without stopping its lingering manager.
+  local session
+  for session in $(login_sessions); do
+    "${incus[@]}" exec "$instance" -- loginctl terminate-session "$session"
+  done
+  wait "$login_pid" 2>/dev/null || true
+  login_pid=
+  deadline=$((SECONDS + 30))
+  while [ -n "$(login_sessions)" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'dev login sessions did not close'
+    sleep 1
+  done
+  sleep "$wait_seconds"
+  [ -z "$(login_sessions)" ] || die 'a login session reappeared during the lifetime check'
+  "${incus[@]}" exec "$instance" -- python3 -B /tmp/orca-daemon-lifetime.py check
+  client_cli "$first_pair" client-a terminal send --terminal "$handle" --text after-logout --enter --json \
+    >"$work/lifetime-send.json"
+  jq -e '.ok and .result.send.accepted' "$work/lifetime-send.json" >/dev/null
+  assert_lifetime_echo() {
+    local text="$1" end=$((SECONDS + 15))
+    while [ "$SECONDS" -lt "$end" ]; do
+      client_cli "$first_pair" client-a terminal read --terminal "$handle" --json >"$work/lifetime-read.json"
+      if jq -e --arg text "lifetime-echo:$text" '.ok and (.result.terminal.tail | any(contains($text)))' \
+        "$work/lifetime-read.json" >/dev/null; then return; fi
+      sleep 0.1
+    done
+    die 'native PTY did not echo after lifecycle transition'
+  }
+  assert_lifetime_echo after-logout
+  stage "last logout survived with no sessions for ${wait_seconds}s (UserStopDelay=${delay_usec}us); checking restart"
+  # The documented contract: restart leaves the daemon, so new terminals keep its environment.
+  assert_new_terminal_env() {
+    local expected="$1" env_handle end=$((SECONDS + 15))
+    client_cli "$first_pair" client-a terminal create --worktree "$selector" --title "lifetime-env-$expected" \
+      --command 'printf "lifetime-env:%s\n" "${SUBYARD_E2E_ENV_PROBE:-unset}"; exec sleep 300' \
+      --json >"$work/lifetime-env.json"
+    env_handle="$(jq -er 'select(.ok == true) | .result.terminal.handle' "$work/lifetime-env.json")"
+    while [ "$SECONDS" -lt "$end" ]; do
+      client_cli "$first_pair" client-a terminal read --terminal "$env_handle" --json >"$work/lifetime-env-read.json"
+      if jq -e --arg text "lifetime-env:$expected" '.ok and (.result.terminal.tail | any(contains($text)))' \
+        "$work/lifetime-env-read.json" >/dev/null; then return; fi
+      sleep 0.1
+    done
+    die "new terminal environment was not $expected"
+  }
+  "${incus[@]}" exec "$instance" -- sh -ec '
+    install -d -m 0755 /etc/systemd/system/subyard-orca.service.d
+    printf "[Service]\nEnvironment=SUBYARD_E2E_ENV_PROBE=set\n" >/etc/systemd/system/subyard-orca.service.d/lifetime-probe.conf
+    systemctl daemon-reload'
+  run_orca restart
+  "${incus[@]}" exec "$instance" -- python3 -B /tmp/orca-daemon-lifetime.py check
+  assert_new_terminal_env unset
+  client_cli "$first_pair" client-a terminal send --terminal "$handle" --text after-restart --enter --json \
+    >"$work/lifetime-send.json"
+  jq -e '.ok and .result.send.accepted' "$work/lifetime-send.json" >/dev/null
+  assert_lifetime_echo after-restart
+  run_orca down
+  "${incus[@]}" exec "$instance" -- python3 -B /tmp/orca-daemon-lifetime.py stopped
+  assert_survival_status 'agents will survive logout and restart'
+  "${incus[@]}" exec "$instance" -- loginctl disable-linger dev
+  assert_survival_status 'lingering disabled'
+  run_orca up
+  # The running service may already have started its daemon in the scope.
+  assert_survival_status 'survive logout and restart'
+  SUBYARD_RESOURCE_MODE=verify "$RUNTIME_ROOT/config/profiles/orca/resources/orca/handler.sh" up \
+    >"$work/lifetime-up.json"
+  jq -e '.changed == false and all(.steps[]; .decision == "skip")' "$work/lifetime-up.json" >/dev/null \
+    || die 'up did not converge after daemon scope shutdown'
+  assert_new_terminal_env set
+  "${incus[@]}" exec "$instance" -- sh -ec '
+    rm -f /etc/systemd/system/subyard-orca.service.d/lifetime-probe.conf
+    systemctl daemon-reload'
+  stage 'rebooting the yard to check daemon placement without a login'
+  "${incus[@]}" restart "$instance"
+  deadline=$((SECONDS + 60))
+  until "${incus[@]}" exec "$instance" -- systemctl is-active --quiet subyard-orca.service; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'Orca did not start after the yard reboot'
+    sleep 1
+  done
+  # Guest /tmp does not survive the reboot.
+  "${incus[@]}" file push "$ROOT/config/profiles/orca/tests/e2e/orca-daemon-lifetime.py" \
+    "$instance/tmp/orca-daemon-lifetime.py" --mode 0755
+  "${incus[@]}" exec "$instance" -- python3 -B /tmp/orca-daemon-lifetime.py boot
+  run_orca up
+  stage 'last-login, restart, scope stop, boot placement, lingering retention and subsequent up verified'
+}
+
 stage 'installing and starting the production handler'
 run_orca up
 "${incus[@]}" exec "$instance" -- systemctl is-active --quiet subyard-orca.service
@@ -656,6 +822,7 @@ first_pair="$("${incus[@]}" exec "$instance" -- \
 client_status "$first_pair" client-a
 stage 'exercising terminal input and output through the paired stock client'
 assert_paired_terminal_io "$first_pair" client-a
+assert_daemon_lifetime
 stage 'checking server isolation opt-out and preservation through repeated up'
 set_server_isolation false
 run_orca up

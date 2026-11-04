@@ -879,7 +879,7 @@ done
 for pending_selector in "${pending_selectors[@]}"; do
   guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal absent "$pending_selector"
 done
-# Restart stops this bare PTY; its missing checkout now has only a stale layout.
+# This terminal's checkout is gone, so reconciling removes its record and layout.
 # Reconcile explicitly so the assertion does not race periodic discovery.
 yard orca sync --yes >/dev/null
 assert_absent_repo "$saved_gone"

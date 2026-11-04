@@ -36,7 +36,7 @@ ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
 ORCA_DISCOVERY_UNIT=subyard-orca-discovery.service
 ORCA_DISCOVERY_TIMER=subyard-orca-discovery.timer
-ORCA_CONTRACT_VERSION=6
+ORCA_CONTRACT_VERSION=7
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
@@ -261,7 +261,7 @@ download_release() {
 
 dependencies_ready() {
   yexec bash -se <<'YARD'
-for package in file git python3 jq nftables zlib1g-dev \
+for package in dbus-user-session file git python3 jq nftables zlib1g-dev \
   libasound2t64 libgbm1 libgtk-3-0t64 libnss3; do
   [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" = 'install ok installed' ] || exit 1
 done
@@ -273,7 +273,7 @@ ensure_dependencies() {
   info "installing Orca headless dependencies"
   yexec apt-get update -qq
   yexec env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    file git python3 jq nftables zlib1g-dev \
+    dbus-user-session file git python3 jq nftables zlib1g-dev \
     libasound2t64 libgbm1 libgtk-3-0t64 libnss3 >/dev/null
   dependencies_ready || die "Orca headless dependencies did not converge"
 }
@@ -369,12 +369,15 @@ YARD
 }
 
 stage_runtime_contract() {
+  ensure_linger
   ORCA_TMP_DIR="${ORCA_TMP_DIR:-$(mktemp -d)}"
   local ingress="$ORCA_TMP_DIR/orca-ingress"
   local capture="$ORCA_TMP_DIR/orca-capture-ready"
   local sync="$ORCA_TMP_DIR/orca-sync"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
-  local source contract_version
+  local source contract_version guest_uid
+  guest_uid="$(yexec id -u "${DEV_USER:-dev}")" || die 'Orca development user UID unavailable'
+  [[ "$guest_uid" =~ ^[0-9]+$ ]] || die 'Orca development user UID is invalid'
   local -a helpers=()
   mapfile -t helpers < <(registration_files)
   contract_version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
@@ -435,8 +438,8 @@ CAPTURE
   cat >"$unit" <<UNIT
 [Unit]
 Description=Subyard Orca remote server
-After=network-online.target
-Wants=network-online.target
+After=network-online.target user@$guest_uid.service
+Wants=network-online.target user@$guest_uid.service
 
 [Service]
 Type=simple
@@ -629,7 +632,20 @@ codex_defaults_ready() {
     "$ORCA_REGISTRATION/settings.py" --check >/dev/null 2>&1
 }
 
+linger_ready() {
+  [ "$(yexec loginctl show-user "${DEV_USER:-dev}" --property=Linger --value 2>/dev/null)" = yes ]
+}
+
+ensure_linger() {
+  if ! linger_ready; then
+    yexec loginctl enable-linger "${DEV_USER:-dev}" \
+      || die "Orca could not enable lingering for ${DEV_USER:-dev}"
+  fi
+  linger_ready || die "Orca lingering is disabled for ${DEV_USER:-dev} after reconciliation"
+}
+
 runtime_contract_ready() {
+  linger_ready || return 1
   local contract_version
   local -a helpers=()
   mapfile -t helpers < <(registration_files)
@@ -863,6 +879,68 @@ cmd_restart() {
   ok "Orca service restarted"
 }
 
+# Print scope, none, service or unavailable. A daemon inside the service survives
+# logout without the user manager, but any service restart ends it and its agents.
+daemon_placement() {
+  local in_service state scopes
+  in_service="$(yexec bash -se -- "$ORCA_UNIT" <<'YARD'
+set -euo pipefail
+cgroup="$(systemctl show "$1" --property=ControlGroup --value)"
+path="/sys/fs/cgroup$cgroup"
+if [ -n "$cgroup" ] && [ -d "$path" ]; then
+  while IFS= read -r pid; do
+    # A process can exit during this scan.
+    if cmdline="$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline")" && [[ "$cmdline" == *daemon-entry* ]]; then
+      printf service
+      exit 0
+    fi
+  done < <(find "$path" -name cgroup.procs -exec cat {} +)
+fi
+printf absent
+YARD
+)" || in_service=""
+  case "$in_service" in
+    service) printf service; return ;;
+    absent) ;;
+    *) printf unavailable; return ;;
+  esac
+  state="$(yexec systemctl show "user@$(yexec id -u "${DEV_USER:-dev}").service" --property=ActiveState --value)" || state=""
+  [ "$state" = active ] || { printf unavailable; return; }
+  scopes="$(daemon_scopes)" || { printf unavailable; return; }
+  if [ -n "$scopes" ]; then printf scope; else printf none; fi
+}
+
+# Report every independent gap in what keeps agents alive; only 'up' repairs them.
+report_agent_survival() {
+  local placement protected=1
+  yexec test -e "/etc/systemd/system/$ORCA_UNIT" || return 0
+  if ! linger_ready; then
+    protected=0
+    warn "lingering disabled: agents in the user manager stop after the last logout; run '$(yard_cmd_hint) orca up'"
+  fi
+  if ! yexec grep -Eq '^After=.* user@[0-9]+\.service( |$)' "/etc/systemd/system/$ORCA_UNIT"; then
+    protected=0
+    warn "service ordering pending: a new daemon can start inside the service; run '$(yard_cmd_hint) orca up'"
+  fi
+  placement="$(daemon_placement)"
+  case "$placement" in
+    service)
+      protected=0
+      warn "daemon runs inside the service: agents survive logout, but the next restart ends them"
+      ;;
+    unavailable)
+      protected=0
+      warn "user manager unavailable: agent survival unknown"
+      ;;
+  esac
+  [ "$protected" -eq 1 ] || return 0
+  if [ "$placement" = scope ]; then
+    ok "agents survive logout and restart"
+  else
+    ok "agents will survive logout and restart"
+  fi
+}
+
 cmd_status() {
   local report registered total diagnostic service_is_ready=0
   select_release
@@ -881,6 +959,7 @@ cmd_status() {
   else
     warn "owner route absent"
   fi
+  report_agent_survival
   if automatic_project_hook_ready; then
     ok "automatic project hook ready"
   elif project_dispatcher_ready; then
@@ -935,12 +1014,59 @@ cmd_logs() {
   esac
 }
 
+# The daemon escapes the system service into this user's manager, and each PTY
+# gets its own scope in a per-daemon slice, so stopping the daemon scope alone
+# leaves agents running. Never stop unrelated user units, and distinguish an
+# absent manager from a failed bus call.
+daemon_scopes() {
+  yexec bash -se -- "${DEV_USER:-dev}" "${1:-list}" <<'YARD'
+set -euo pipefail
+dev_user="$1"; action="$2"
+uid="$(id -u "$dev_user")"
+state="$(systemctl show "user@$uid.service" --property=ActiveState --value)"
+case "$state" in
+  inactive|failed) exit 0 ;;
+  active|activating|reloading|deactivating) ;;
+  *) printf 'Orca user manager state unavailable for %s\n' "$dev_user" >&2; exit 1 ;;
+esac
+user_systemctl() {
+  runuser -u "$dev_user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" systemctl --user "$@"
+}
+list_scopes() {
+  user_systemctl list-units --all --plain --no-legend --type=scope,slice \
+    --state=active,activating,reloading,deactivating \
+    'orca-daemon-*.scope' 'orca_pty_orca_daemon_*.scope' 'orca_ptys_orca_daemon_*.slice' | awk '{print $1}'
+}
+scopes="$(list_scopes)"
+if [ "$action" = stop ]; then
+  # A terminal can exit and be collected between the listing and its stop, which
+  # fails the whole call with "not loaded". Only the readback decides the result.
+  stop_output=
+  for _ in 1 2 3; do
+    [ -n "$scopes" ] || break
+    mapfile -t units <<<"$scopes"
+    stop_output="$(user_systemctl stop -- "${units[@]}" 2>&1)" || true
+    scopes="$(list_scopes)"
+  done
+  [ -z "$scopes" ] || {
+    printf 'Orca daemon scopes are still running for %s after stop: %s\n' "$dev_user" "$stop_output" >&2
+    exit 1
+  }
+else
+  printf '%s' "$scopes"
+fi
+YARD
+}
+
 cmd_down() {
-  local active=0 guarded=0 route
+  local active=0 guarded=0 route scopes
   route="$(orca_route_state)" || die 'Orca route cancellation metadata is invalid'
+  # An unreadable user manager must not keep the route and service published.
+  scopes="$(daemon_scopes)" || scopes=unknown
   yexec systemctl is-active --quiet "$ORCA_UNIT" && active=1
   ingress_active && guarded=1
-  if [ "$active" -eq 0 ] && [ "$guarded" -eq 0 ] && [ "$route" = absent ]; then
+  if [ "$active" -eq 0 ] && [ "$guarded" -eq 0 ] && [ "$route" = absent ] && [ -z "$scopes" ]; then
     stop_discovery
     ok "Orca already down"
     return 0
@@ -951,6 +1077,8 @@ cmd_down() {
   if yexec test -x "$ORCA_INGRESS"; then
     yexec "$ORCA_INGRESS" down
   fi
+  # Last, so a failed stop cannot leave the ingress published. A repeated down retries it.
+  daemon_scopes stop || die 'Orca daemon scopes could not be stopped and verified'
   ok "Orca stopped and unpublished; state preserved"
 }
 
@@ -1119,6 +1247,15 @@ emit_down_assessment() {
       decision:(if $observed == "stopped" then "skip" else "apply" end),preconditions:["selected profile-owned unit"],verify:"native systemd unit is inactive",
       consequence:("stop the captured Orca unit " + $unit + " while retaining its persistent data")}]')"
   done
+  # Terminals open and close while a plan waits for consent, so bind to the state, not the unit list.
+  if ! observed="$(daemon_scopes)"; then observed=unknown
+  elif [ -n "$observed" ]; then observed=running
+  else observed=stopped; fi
+  steps="$(jq -cn --argjson steps "$steps" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/user/${DEV_USER:-dev}/orca-daemon-and-terminal-scopes" --arg observed "$observed" \
+    '$steps + [{id:"daemon-scopes",target:$target,observed:$observed,desired:"stopped",
+    decision:(if $observed == "stopped" then "skip" elif $observed == "unknown" then "conditional" else "apply" end),preconditions:["only Orca daemon and terminal units in the development user manager"],
+    verify:"no running Orca daemon or terminal units remain in the development user manager",
+    consequence:"stop the Orca daemon and running agent terminals; keep user lingering enabled"}]')"
   observed=absent
   if ingress_active; then observed=present; fi
   steps="$(jq -cn --argjson steps "$steps" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/inet/subyard_orca" --arg observed "$observed" \
@@ -1130,10 +1267,10 @@ emit_down_assessment() {
     '$steps + [{id:"route",target:$target,observed:$observed,desired:"absent",
     decision:(if $observed == "absent" then "skip" else "apply" end),preconditions:["captured selected proxy and validated ownership metadata unchanged"],verify:"selected proxy device, saved publication and ownership receipt are absent",
     consequence:"remove the captured Orca proxy device and cancel its saved publication"}]')"
-  binding="$(printf '%s\n' "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$ORCA_UNIT" "$ORCA_DEVICE" | sha256sum | awk '{print $1}')"
+  binding="$(printf '%s\n' "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$ORCA_UNIT" "$ORCA_DEVICE" "${DEV_USER:-dev}" | sha256sum | awk '{print $1}')"
   jq -cn --argjson steps "$steps" --arg binding "$binding" \
     '{schema:"yard.resource-action-assessment.v2",action:"down",binding:$binding,
-    changed:any($steps[];.decision == "apply"),consequences:[$steps[]|select(.decision != "skip")|.consequence],steps:$steps}'
+    changed:any($steps[];.decision != "skip"),consequences:[$steps[]|select(.decision != "skip")|.consequence],steps:$steps}'
 }
 
 emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
@@ -1251,6 +1388,8 @@ if [ "$sub" = _runtime-contract ]; then
         absent) printf '%s\n' "$observation" ;;
         current) printf '%s\n' "$observation" ;;
         stale)
+          # Protects running agents on update: this restarts nothing, unlike the unit change `up` applies.
+          ensure_linger
           stage_registration_contract
           cleanup_guest || die "Orca guest staging directory could not be removed"
           observe_registration_contract | jq -e --arg desired "$4" \
@@ -1308,7 +1447,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
             all(range(0; $approved|length); . as $i |
               $approved[$i] as $a | $current[$i] as $c |
               $a.id == $c.id and $a.target == $c.target and $a.desired == $c.desired and
-              (($c.decision == "skip") or ($a.decision == "apply" and $a.observed == $c.observed)))' >/dev/null \
+              (($c.decision == "skip") or ($a.decision == "conditional") or ($a.decision == "apply" and $a.observed == $c.observed)))' >/dev/null \
             || die "plan_stale: Orca down native scope changed"
         fi
         cmd_down
