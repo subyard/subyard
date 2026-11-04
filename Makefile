@@ -3,7 +3,7 @@ PYTHON ?= python3
 VERSION ?= 0.1.0-dev
 TEST_VERSION ?= 0.22.0-test
 
-.PHONY: build package test verify verify-veranda clean cli-docs cli-docs-check
+.PHONY: build package test lint verify verify-veranda clean cli-docs cli-docs-check
 
 build:
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/build-engine.sh
@@ -23,8 +23,12 @@ cli-docs: build
 cli-docs-check: build
 	python3 dev/generate-cli-docs.py --check
 
+lint:
+	bash dev/lint-go.sh
+
 verify:
 	bash dev/test-profiles.sh --permissions-only
+	$(MAKE) lint
 	./tests/run.sh
 	bash dev/test-profiles.sh --after-permissions
 

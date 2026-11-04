@@ -63,12 +63,15 @@ PROFILE_RESTORE_NEEDED=0
 paused_profiles=""
 
 restore_ssh_listener_on_exit() {
-  ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
+  local restore_failed=0
+  ssh_listener_restore || { warn "could not restore the yard SSH listener after cancelling stop"; restore_failed=1; }
   if [ "$PROFILE_RESTORE_NEEDED" = 1 ]; then
-    "$SCRIPT_DIR/profile-services.sh" --resume "$paused_profiles" || warn 'could not resume profile owner services'
+    "$SCRIPT_DIR/profile-services.sh" --resume "$paused_profiles" || { warn 'could not resume profile owner services'; restore_failed=1; }
   fi
+  [ "$restore_failed" = 0 ] || exit 1
 }
 trap restore_ssh_listener_on_exit EXIT
+
 
 case "$action" in
   start)

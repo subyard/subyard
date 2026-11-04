@@ -23,7 +23,7 @@ func TestPreparedRouteDevicesUseOnlyOriginalResourceAuthority(t *testing.T) {
 	for _, change := range []string{"none", "before", "source", "duplicate", "missing"} {
 		t.Run(change, func(t *testing.T) {
 			options, state := routeConsumerFixture(t, StateCurrent, true)
-			before, err := PrepareRouteConsumersActivation(context.Background(), options)
+			before, err := PrepareRouteConsumers(context.Background(), options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -68,7 +68,7 @@ func TestPreparedRouteDevicesUseOnlyOriginalResourceAuthority(t *testing.T) {
 				write(t, path, "correct\n")
 				return nil
 			}
-			err = CommitRouteConsumersActivation(context.Background(), options, before)
+			err = CommitRouteConsumers(context.Background(), options, before)
 			if change == "none" {
 				if err != nil || applied != 1 {
 					t.Fatal("original prepared device did not execute", err)

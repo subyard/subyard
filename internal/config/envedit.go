@@ -150,7 +150,9 @@ func openPersistentFileAt(
 	fd, err := syscall.Openat(
 		int(current.Fd()),
 		parts[len(parts)-1],
-		syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
+		// All callers require regular files. Do not wait for a FIFO writer
+		// before the caller can fstat and reject the unexpected leaf type.
+		syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK,
 		0,
 	)
 	current.Close()

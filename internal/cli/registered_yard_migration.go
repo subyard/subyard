@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -32,8 +31,7 @@ func (cli *CLI) registeredYardMigrations(request releasetransition.ProcessReques
 }
 
 func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest, guestTmp bool, yard string) releasetransition.V2ActivationReconciler {
-	prompt := migrationLatePrompt{cli: cli}
-	return &migration.RegisteredYardMigration{Yard: yard, ConfigHome: request.ConfigHome, Resources: cli.resources, GuestTmp: guestTmp, Prompt: prompt,
+	return &migration.RegisteredYardMigration{Yard: yard, ConfigHome: request.ConfigHome, Resources: cli.resources, GuestTmp: guestTmp,
 		Retired: func(ctx context.Context, journal releasetransition.JournalRecord) (bool, error) {
 			loaded, err := cli.resolveReleaseTransitionContext(yard, request.ConfigHome)
 			if err != nil {
@@ -55,14 +53,25 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 				}
 				files = &config.ProspectiveFiles{Root: request.ConfigHome, Yards: names, ReadSnapshot: view.ReadSnapshot}
 			}
-			loaded, err := cli.resolveReleaseTransitionContext(yard, request.ConfigHome, files)
+			if yard == "test-yard" || yard == "e2e-yard" {
+				warning, err := cli.releaseTestYardRecreation(ctx, request.ConfigHome, files)
+				if err != nil {
+					return nil, err
+				}
+				if warning != "" {
+					return nil, nil
+				}
+			}
+			// An older parent passes its own resolved settings; they are not overrides.
+			operation := cli.releaseActivationOperation()
+			loaded, err := operation.resolveReleaseTransitionContext(yard, request.ConfigHome, files)
 			if err != nil {
 				return nil, fmt.Errorf("yard %s: %w", yard, err)
 			}
 			if loaded.Context.AccessKind == domain.AccessRemote {
 				return nil, nil
 			}
-			runtime, ok := cli.initPlatform(loaded, nil).(reconcileruntime.Runtime)
+			runtime, ok := operation.initPlatform(loaded, nil).(reconcileruntime.Runtime)
 			if !ok {
 				return nil, fmt.Errorf("yard %s: registered yard native runtime is unavailable", yard)
 			}
@@ -132,36 +141,4 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 	}
 	definition, _ := cli.manifest.Lookup("migrate")
 	return cli.runCurrentMigration(ctx, definition, nil, false, yes || slices.Contains(arguments, "--yes") || slices.Contains(arguments, "-y")), nil
-}
-
-type migrationLatePrompt struct{ cli *CLI }
-
-func migrationOperatorInputDescriptor(value string) (int, bool) {
-	fd, err := strconv.Atoi(value)
-	return fd, err == nil && fd >= 3 && fd <= 64
-}
-
-func (prompt migrationLatePrompt) Confirm(ctx context.Context, request domain.ConfirmationRequest) (bool, error) {
-	cli := prompt.cli
-	if cli.migrationOperatorInput == nil {
-		value, provided := os.LookupEnv("SUBYARD_MIGRATION_OPERATOR_INPUT_FD")
-		if provided {
-			fd, valid := migrationOperatorInputDescriptor(value)
-			if !valid {
-				return false, domain.ErrConfirmationRequired
-			}
-			cli.migrationOperatorInput = os.NewFile(uintptr(fd), "migration-operator-input")
-		} else {
-			if cli.openTerminal == nil {
-				return false, domain.ErrConfirmationRequired
-			}
-			input, err := cli.openTerminal()
-			if err != nil {
-				return false, domain.ErrConfirmationRequired
-			}
-			cli.migrationOperatorInput = input
-		}
-	}
-	input := cli.migrationOperatorInput
-	return (streamPrompt{input: input, output: cli.options.Stderr, interactive: func() bool { return terminalStream(input) }}).Confirm(ctx, request)
 }

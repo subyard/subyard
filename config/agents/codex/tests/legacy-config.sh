@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Verify initial adoption of real Codex schema1 configs from supported published templates.
+# Verify initial adoption of real Codex configs from supported published templates.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-for version in v0.13.11 v0.14.0; do
+[ "$(cat "$ROOT/config/agents/codex/legacy-config/repo.rules.sha256")" = \
+  173dc6094c13c0710d34ee2ff3952b9ef88a2feca5d6d631ebcb58c3192c4da0 ] \
+  || { printf 'FAIL: shipped v0.11.0 Codex rules digest changed\n' >&2; exit 1; }
+for version in v0.11.0 v0.13.11 v0.14.0; do
 python3 - "$ROOT" "$version" <<'PY'
 import hashlib
 import json
@@ -23,7 +26,7 @@ writer_path = root / "internal/adapters/configmaterial/tomli_w.py"
 license_path = root / "internal/adapters/configmaterial/TOMLI_W_LICENSE"
 
 historical = historical_path.read_bytes()
-expected_hashes = {"v0.13.11": "9581b77258b2ffb73d54403a7efa494989b4e8acc5caad732206e11fdb9d717c", "v0.14.0": "a32a59cf613724d54dcdfd9780450be62f8ba2bef125f76750aabf9ff9109ec0"}
+expected_hashes = {"v0.11.0": "c7c933cb5b894f679e32f901969de0c86f1826811f35564aa22b2f6574c27f36", "v0.13.11": "9581b77258b2ffb73d54403a7efa494989b4e8acc5caad732206e11fdb9d717c", "v0.14.0": "a32a59cf613724d54dcdfd9780450be62f8ba2bef125f76750aabf9ff9109ec0"}
 if hashlib.sha256(historical).hexdigest() != expected_hashes[version]:
     raise SystemExit("FAIL: shipped " + version + " Codex template bytes changed")
 desired = desired_path.read_bytes()
@@ -109,6 +112,32 @@ with tempfile.TemporaryDirectory(prefix="subyard-codex-legacy-", dir="/tmp") as 
             return json.loads(result.stdout)
         except Exception:
             raise SystemExit("FAIL: Codex legacy config returned invalid observation")
+
+    if version == "v0.11.0":
+        # v0.11.0's native writer installed exactly these bytes, mode 0644,
+        # without any materialization baseline, lock or ownership receipt.
+        baseline_path.unlink()
+        lock_path.unlink()
+        destination.write_bytes(historical)
+        before = destination.stat()
+        assessment = run("assess-adopt")
+        after = destination.stat()
+        if (assessment.get("adoptable") is not True or assessment.get("converged") is not False
+                or destination.read_bytes() != historical
+                or (before.st_ino, before.st_mode, before.st_uid, before.st_gid, before.st_mtime_ns)
+                != (after.st_ino, after.st_mode, after.st_uid, after.st_gid, after.st_mtime_ns)
+                or any(state_root.iterdir())):
+            raise SystemExit("FAIL: pre-baseline adoption refused or changed native state")
+        run("apply", expect_observation=False)
+        if tomllib.loads(destination.read_text()) != tomllib.loads(desired.decode()):
+            raise SystemExit("FAIL: pre-baseline Codex config did not reach the current defaults")
+        if not baseline_path.is_file() or not receipt_path.is_file() or not run("observe").get("converged"):
+            raise SystemExit("FAIL: pre-baseline apply did not publish converged ownership")
+        if any(path.stat().st_uid != uid or path.stat().st_mode & 0o777 != 0o600
+               for path in (baseline_path, receipt_path)):
+            raise SystemExit("FAIL: pre-baseline apply published unsafe ownership evidence")
+        print("ok: Codex pre-baseline TOML adoption")
+        sys.exit(0)
 
     for problem in ("managed-value", "unknown-baseline"):
         if problem == "managed-value":

@@ -101,12 +101,13 @@ type Options struct {
 }
 
 type CLI struct {
+	// A direct update follow-up may repair only this already active release.
+	releaseRepairTarget  releasetransition.ReleaseID
 	serviceExpectedOwner string
 	serviceRemote        *config.Loaded
 	serviceSelection     *serviceSelection
 
 	registeredInitMigrated       bool
-	migrationOperatorInput       *os.File
 	catalog                      config.Catalog
 	provisionEndpointAddresses   func() ([]hostruntime.OwnerIPv4, error)
 	options                      Options
@@ -173,6 +174,9 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	stderr io.Writer,
 	arguments ...string,
 ) error {
+	if err := validateMigrationChildInvocation(ctx, yard, arguments); err != nil {
+		return err
+	}
 	operationID := cli.ensureOperationID()
 	operation := cli.rpcOperation(operationID)
 	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
@@ -511,7 +515,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("unknown command %q\nTry %q.", name, cli.options.Program+" --help")
 		return 2
 	}
-	if core && (definition.Handler == "@service" || definition.Handler == "@test-vms" && !testVMLogsInvocation(commandArguments)) && !commandHelpRequested(commandArguments) {
+	// A migration child addresses its exact yard; registration may not exist yet.
+	if core && !cli.releaseTransitionChild && (definition.Handler == "@service" || definition.Handler == "@test-vms" && !testVMLogsInvocation(commandArguments)) && !commandHelpRequested(commandArguments) {
 		selected, arguments, selectionErr := cli.selectServiceInvocation(ctx, definition, commandArguments)
 		if selectionErr != nil {
 			return cli.reportServiceError(commandArguments, selectionErr)
@@ -639,7 +644,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 	}
 	configSyncHome := ""
-	trust := cli.sshTrust(ownerDataHome, yes || cli.env["ASSUME_YES"] == "1" || sshTrustConsent(commandArguments))
+	trust := cli.sshTrust(ownerDataHome, yes || cli.env["ASSUME_YES"] == "1" || commandAssumeYes(commandArguments))
 	trust.ReadOnly = core && definition.Handler == "@client-projects"
 	defer trust.Close()
 	ctx = transport.WithSSHTrust(ctx, trust.Options)
@@ -838,6 +843,17 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 	}
 	if core && !commandHelpRequested(commandArguments) {
+		if definition.Handler == "@update" && loaded.Context.AccessKind == domain.AccessRemote {
+			// The owner must assess and confirm each update phase. A controller
+			// prompt cannot become general --yes consent for a later owner plan.
+			if (yes || cli.env["ASSUME_YES"] == "1") && !commandAssumeYes(commandArguments) {
+				commandArguments = append(slices.Clone(commandArguments), "--yes")
+			}
+			if cli.env["SUBYARD_NO_AUDIT"] == "" {
+				cli.audit(name, commandArguments, yard, loaded.Context.OwnerEndpoint)
+			}
+			return cli.forwardRemote(ctx, loaded.Context, definition.Name, commandArguments)
+		}
 		behavior, resolveErr := resolveCoreCommand(definition)
 		if resolveErr != nil {
 			cli.errorf("%v", resolveErr)
@@ -2510,6 +2526,12 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		cli.errorf("state migration %s: %s", arguments[0], releaseruntime.LegacyReinstallGuidance)
 		return 2
 	}
+	if migrationHelperAction(arguments[0]) {
+		if err := requireMigrationChildAuthority(ctx, yard, arguments[0]); err != nil {
+			cli.errorf("state migration %s: %v", arguments[0], err)
+			return 1
+		}
+	}
 	repositoryRoot := cli.options.RepositoryRoot
 	if arguments[0] == "reconcile-power-reconciler" {
 		payloadRepositoryRoot, payloadErr := powerMigrationRepositoryRoot(
@@ -2584,10 +2606,6 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		return 0
 	}
 	if arguments[0] == "reconcile-test-vm-broker" {
-		if migrationEnvironment["SUBYARD_INTERNAL_MIGRATION_CHILD"] != "1" {
-			cli.errorf("internal: test VM broker migration child is required")
-			return 1
-		}
 		if !loaded.Context.NestedE2EVMs ||
 			loaded.Context.YardKind != domain.YardContainer {
 			cli.errorf("state migration test VM broker context is not active")
@@ -2610,10 +2628,6 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		return 0
 	}
 	if arguments[0] == "reconcile-power-reconciler" {
-		if migrationEnvironment["SUBYARD_INTERNAL_MIGRATION_CHILD"] != "1" {
-			cli.errorf("internal: power reconciler migration child is required")
-			return 1
-		}
 		platform := cli.options.InitPlatform
 		if platform == nil {
 			if err := cli.prepareSudoPrivileges(
@@ -4419,6 +4433,12 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		result, err := planned.Execute(ctx, orchestrator, planned.CLI.options.Stderr)
 		if err != nil {
+			var pending *activationRepairRequiredError
+			if errors.As(err, &pending) {
+				// One RPC execution authorizes one plan, even when the original
+				// invocation included --yes. The controller must prepare again.
+				return nil, operationRPCError("transition_required", err)
+			}
 			var commitErr *commandCommitError
 			if errors.As(err, &commitErr) {
 				return nil, &rpc.Error{Code: "state_commit_failed", Message: err.Error()}

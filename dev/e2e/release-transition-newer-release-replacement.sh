@@ -89,15 +89,15 @@ active_version() {
 }
 
 interrupt_at_reconciling() { # version
-  local version="$1" marker="$FIXTURE_ROOT/interrupted-$1"
-  fixture_env python3 - "$ROOT" "$LAUNCHER" "$version" "$marker" "$JOURNAL" "$RUNTIME_ROOT" <<'PY'
+  local version="$1" marker="$FIXTURE_ROOT/interrupted-$1" checkpoint="${2:-reconciling}"
+  fixture_env python3 - "$ROOT" "$LAUNCHER" "$version" "$marker" "$JOURNAL" "$RUNTIME_ROOT" "$checkpoint" <<'PY'
 import os, pathlib, runpy, sys
-root, launcher, version, marker, journal, runtime = sys.argv[1:]
+root, launcher, version, marker, journal, runtime, checkpoint = sys.argv[1:]
 module = runpy.run_path(str(pathlib.Path(root) / "dev/verify-release-upgrades.py"))
 result = module["run_process"](
     [launcher, "update", "--offline", "--version", version, "--yes", "--runtime-root", runtime],
     os.environ.copy(), timeout=600,
-    interrupt_checkpoint=(pathlib.Path(journal), "reconciling", pathlib.Path(marker)),
+    interrupt_checkpoint=(pathlib.Path(journal), checkpoint, pathlib.Path(marker)),
     allow_failed_checkpoint=True)
 pathlib.Path(marker + ".stdout").write_text(result.stdout)
 pathlib.Path(marker + ".stderr").write_text(result.stderr)
@@ -227,11 +227,8 @@ main_newer_release() {
   # Before activation: the operator withholds the restart, so the migration stays unfinished.
   stage "${VERSIONS[0]}"
   check_refusals
-  rc=0
-  fixture_env python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard "$YARD_NAME" --answer eof -- \
-    "$LAUNCHER" update --offline --version "${VERSIONS[0]}" --yes > "$FIXTURE_ROOT/pre-stuck.log" 2>&1 || rc=$?
-  [ "$rc" != 0 ] || die 'withheld restart did not leave the update unfinished'
-  jq -e '.checkpoint!="complete"' "$JOURNAL" >/dev/null || die 'update did not stay unfinished'
+  interrupt_at_reconciling "${VERSIONS[0]}" migrating
+  jq -e '.checkpoint=="migrating"' "$JOURNAL" >/dev/null || die 'update did not stay unfinished'
   [ "$(readlink "$RUNTIME_ROOT/current")" = "$source_active" ] || die 'unfinished update changed the active release'
   cp "$JOURNAL" "$FIXTURE_ROOT/pre-journal.json"
   rc=0
@@ -248,10 +245,7 @@ main_newer_release() {
   [ "$rc" != 0 ] && grep -Eiq 'confirm' "$FIXTURE_ROOT/decline.log" || die 'replacement did not ask for fresh consent'
   cmp "$JOURNAL" "$FIXTURE_ROOT/pre-journal.json"
   # The migration finishes and activates, and only reconciliation stops: its journal holds real steps.
-  fixture_env python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard "$YARD_NAME" --allow-no-prompt \
-    --journal "$JOURNAL" --interrupt-at reconciling -- \
-    "$LAUNCHER" update --offline --version "${VERSIONS[1]}" --yes > "$FIXTURE_ROOT/migrated-stuck.log" 2>&1 \
-    || { tail -40 "$FIXTURE_ROOT/migrated-stuck.log"; die 'migrated update did not stop at reconciliation'; }
+  interrupt_at_reconciling "${VERSIONS[1]}"
   require_replaced "$FIXTURE_ROOT/pre-journal.json"
 
   # After activation: the migrated release is already active and its transition stopped.

@@ -668,6 +668,20 @@ class Leases(unittest.TestCase):
         with self.assertRaisesRegex(poolmod.PoolError, 'invalid memory'):
             runtime.memory_capacity()
 
+    def test_status_projects_pending_memory_and_saturates_headroom(self):
+        self.runtime.budget = poolmod.Runtime.budget
+        request = self.pool.normalize({})
+        pending = self.runtime.budget(request)
+        self.pool.slots[0].update(state='provisioning', request=request)
+        self.pool.slots[1].update(state='held', request=request)
+        for available, expected in ((pending + poolmod.MEMORY_RESERVE + 123, 123), (0, 0)):
+            with self.subTest(available=available):
+                self.runtime.memory_capacity = lambda: dict(available_bytes=available,
+                                                            reserve_bytes=poolmod.MEMORY_RESERVE)
+                memory = self.pool.status()['memory']
+                self.assertEqual(memory['pending_bytes'], pending)
+                self.assertEqual(memory['admission_headroom_bytes'], expected)
+
     def test_pending_starts_are_atomic_and_held_memory_is_not_subtracted_twice(self):
         self.runtime.budget = poolmod.Runtime.budget
         self.runtime.memory_capacity = lambda: dict(total_bytes=16*1024**3, available_bytes=8*1024**3,

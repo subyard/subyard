@@ -9,7 +9,12 @@
     },
     "code": {"type": "string", "maxLength": 8192},
     "message": {"type": "string", "maxLength": 8192},
-    "next": {"type": "string", "maxLength": 8192}
+    "next": {"type": "string", "maxLength": 8192},
+    "warnings": {
+      "type": "array",
+      "maxItems": 33,
+      "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    }
   },
   "required": ["status"],
   "additionalProperties": false

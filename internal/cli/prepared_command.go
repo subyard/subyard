@@ -341,7 +341,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 			return nil, err
 		}
 	}
-	if request.Definition.Handler == "@test-vms" && request.Loaded.Context.AccessKind == domain.AccessLocal {
+	if request.Definition.Handler == "@test-vms" && request.Loaded.Context.AccessKind == domain.AccessLocal && !cli.releaseTransitionChild {
 		selection, resolveErr := cli.resolveServiceCommand(request.Definition.Name, request.Arguments)
 		if resolveErr != nil {
 			return nil, resolveErr
@@ -684,6 +684,15 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		return nil
 	}
 	cli := prepared.CLI
+	if prepared.Loaded.Context.YardName == "e2e-yard" || prepared.Loaded.Context.YardName == "test-yard" {
+		warning, err := cli.releaseTestYardRecreation(ctx, prepared.Loaded.Context.Paths.ConfigHome, prepared.Loaded.ProspectiveFiles)
+		if err != nil {
+			return err
+		}
+		if warning != "" {
+			return errors.New(warning)
+		}
+	}
 	execution, err := cli.prepareInitExecutionPlan(ctx, prepared.Loaded, prepared.Arguments, bootstrap, true)
 	if err != nil {
 		return err
@@ -871,26 +880,26 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 				return domain.AdapterResult{}, fmt.Errorf("%w: startup resource scope changed", domain.ErrPlanStale)
 			}
 		}
-		if startup == nil {
-			result, err := prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
-			prepared.CLI.warnRetiredIntegrationsAfterStart(prepared.Loaded, execution, result, err, diagnostics)
-			return result, err
-		}
-		unlock, err := lockIntegrationYard(ctx, prepared.Loaded)
-		if err != nil {
-			return domain.AdapterResult{}, err
-		}
-		defer unlock()
-		if err := startup.refresh(ctx, prepared.CLI); err != nil {
-			return domain.AdapterResult{}, err
-		}
-		if prepared.CLI.options.NetworkPolicy == nil {
-			if err := prepared.CLI.prepareSudoPrivileges(ctx, diagnostics, prepared.CLI.effectiveUID(), execution.action); err != nil {
+		if startup != nil {
+			unlock, err := lockIntegrationYard(ctx, prepared.Loaded)
+			if err != nil {
 				return domain.AdapterResult{}, err
+			}
+			defer unlock()
+			if err := startup.refresh(ctx, prepared.CLI); err != nil {
+				return domain.AdapterResult{}, err
+			}
+			if prepared.CLI.options.NetworkPolicy == nil {
+				if err := prepared.CLI.prepareSudoPrivileges(ctx, diagnostics, prepared.CLI.effectiveUID(), execution.action); err != nil {
+					return domain.AdapterResult{}, err
+				}
 			}
 		}
 		result, err := prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
 		if err != nil || result.Status != "ok" {
+			return result, err
+		}
+		if err = prepared.CLI.finishDiskTmpStart(ctx, prepared.Loaded, execution, result, err, diagnostics); err != nil {
 			return result, err
 		}
 		prepared.CLI.warnRetiredIntegrationsAfterStart(prepared.Loaded, execution, result, err, diagnostics)
@@ -1153,6 +1162,14 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	if err != nil {
 		return err
 	}
+	if expected := prepared.CLI.releaseRepairTarget; expected != "" {
+		if execution.prepared.Action != "update.activate" || !execution.prepared.RepairCurrent ||
+			execution.prepared.SourceRelease != string(expected) || execution.prepared.TargetRelease != string(expected) {
+			_ = execution.Close()
+			return fmt.Errorf("%w: follow-up must repair the exact active release %s", domain.ErrPlanStale, expected)
+		}
+		execution.followup = true
+	}
 	prepared.closeResource = execution.Close
 	prepared.release = execution
 	prepared.exactState = execution.prepared.Binding
@@ -1172,7 +1189,7 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 		result, runErr := prepared.CLI.executeRelease(ctx, orchestrator, prepared.Plan, execution)
 		return result, prepared.CLI.finishUpdateHistory(ctx, execution, result, runErr)
 	}
-	return nil
+	return prepared.CLI.prepareDiskTmpRetry(ctx, prepared)
 }
 
 func (prepared *preparedCommand) prepareProject(ctx context.Context, _ *initBootstrap) error {

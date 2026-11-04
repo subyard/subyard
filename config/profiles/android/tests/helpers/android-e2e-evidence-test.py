@@ -187,6 +187,7 @@ with tempfile.TemporaryDirectory(prefix='android-repeat-provision-', dir='/tmp')
                   else 'android provision: component=jdk state=reused')
         prelude = ('set -euo pipefail\nstate="$1"\n'
                    'android_phase_begin() { :; }; android_phase_end() { :; }; android_network_received() { :; }\n'
+                   'android_toolchain_signature() { printf unchanged; }\n'
                    'yard() { [ "$*" = "provision --yes" ]; printf "%s\\n" "$REPEAT_OUTPUT"; }\n')
         result = subprocess.run(['bash', '-c', prelude + repeat_function
                                  + '\nandroid_repeat_provision "$2" "$3"\n', '_', directory, phase, label],

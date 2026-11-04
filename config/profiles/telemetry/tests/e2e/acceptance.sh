@@ -6,7 +6,7 @@ if [ "${1:-}" = --preflight ] && [ "$#" = 1 ]; then
   for script in "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/dev/e2e/broker-memory-boundary.sh"; do
     bash -n "$script"
   done
-  shellcheck -S warning "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/dev/e2e/broker-memory-boundary.sh"
+  shellcheck -x -S warning "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/dev/e2e/broker-memory-boundary.sh"
   python3 -B - "$ROOT/config/profiles/telemetry/tests/e2e" <<'PY'
 import ast, json, os, pathlib, sqlite3, subprocess, sys, tempfile, time
 from unittest import mock
@@ -37,12 +37,13 @@ with tempfile.TemporaryDirectory(prefix='telemetry-budget-', dir='/tmp') as temp
 mode="$1"; ROOT=/fixture; set -- --slot 3
 bash() { printf '%s\\0' "$@"; }
 '''
-            result = subprocess.run(['bash', '-c', probe+controller, 'probe', mode],
-                                    capture_output=True, check=True)
-            assert result.stdout.split(b'\0')[:-1] == [value.encode() for value in [
-                '/fixture/dev/agent-e2e.sh', '--slot', '3', '--type', 'android-test', '--vm-count', '1',
-                '--purpose', 'telemetry-acceptance', '--vm', '1', '--', 'timeout', '--signal=TERM',
-                '--kill-after=120s', timeout, 'bash', 'config/profiles/telemetry/tests/e2e/owner.sh', mode]]
+            for route in ('', 'fixture-route'):
+                result = subprocess.run(['bash', '-c', probe+controller, 'probe', mode],
+                                        capture_output=True, check=True, env={**os.environ, 'SUBYARD_E2E_ROLLOUT_YARD': route})
+                assert result.stdout.split(b'\0')[:-1] == [value.encode() for value in [
+                    '/fixture/dev/agent-e2e.sh', *(['--yard', route] if route else []), '--slot', '3', '--type', 'android-test', '--vm-count', '1',
+                    '--purpose', 'telemetry-acceptance', '--vm', '1', '--', 'timeout', '--signal=TERM',
+                    '--kill-after=120s', timeout, 'bash', 'config/profiles/telemetry/tests/e2e/owner.sh', mode]]
         for memory, limit in (('4GiB', '3G'), ('8GiB', '6G')):
             environment['SUBYARD_E2E_MEMORY_PER_VM'] = memory
             probe = 'set -eu; delegated=0; mode="$1"; ROOT=/fixture\n'
@@ -78,7 +79,7 @@ assert result.stdout.splitlines() == ['managed', 'finals', 'disabled', 'history'
 broker = (pathlib.Path(sys.argv[1]).parents[4]/'dev/e2e/broker-memory-boundary.sh').read_text()
 dispatch = broker.split('TELEMETRY_ONLY=0\n',1)[1].split('\nTOKEN=',1)[0]
 for flag, expected in [('--telemetry-resources','1 0 --telemetry-resources'), ('--telemetry-held-diagnostic','1 1 --telemetry-held-diagnostic')]:
-    script = 'TELEMETRY_ONLY=0; SUBYARD_E2E_RESOURCE_OBSERVER=fixture; SUBYARD_AGENT_RUN_ID=fixture; SUBYARD_TELEMETRY_DATA_DIR=/fixture\n'+dispatch+'\nprintf "%s %s %s\\n" "$TELEMETRY_ONLY" "$HELD_DIAGNOSTIC" "$TELEMETRY_FLAG"'
+    script = 'PREGRANT_ONLY=0; PREGRANT_WORKING_ONLY=0; TELEMETRY_ONLY=0; SUBYARD_E2E_RESOURCE_OBSERVER=fixture; SUBYARD_AGENT_RUN_ID=fixture; SUBYARD_TELEMETRY_DATA_DIR=/fixture\n'+dispatch+'\nprintf "%s %s %s\\n" "$TELEMETRY_ONLY" "$HELD_DIAGNOSTIC" "$TELEMETRY_FLAG"'
     result = subprocess.run(['bash','-eu','-c',script,'probe',flag], text=True, capture_output=True, check=True)
     assert result.stdout.strip() == expected
 assert '"$TELEMETRY_FLAG" "$TOKEN"' in broker
@@ -200,5 +201,7 @@ fixture_timeout=70m
 [ "$mode" != all ] || fixture_timeout=125m
 [ "$mode" != --held-diagnostic ] || fixture_timeout=20m
 [ "$mode" != --native-only ] || fixture_timeout=10m
-bash "$ROOT/dev/agent-e2e.sh" --slot "$2" --type android-test --vm-count 1 --purpose telemetry-acceptance --vm 1 -- \
+allocation_route=()
+[ -z "${SUBYARD_E2E_ROLLOUT_YARD:-}" ] || allocation_route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
+bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$2" --type android-test --vm-count 1 --purpose telemetry-acceptance --vm 1 -- \
   timeout --signal=TERM --kill-after=120s "$fixture_timeout" bash config/profiles/telemetry/tests/e2e/owner.sh "$mode"

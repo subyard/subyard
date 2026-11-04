@@ -58,16 +58,21 @@ func (transition *V2Transition) retainSourceActivationView(observation *v2Observ
 }
 
 func pendingSourceActivationWork(observation v2Observation) bool {
-	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete {
-		return false
+	journal := observation.journal
+	if journal != nil && journal.Checkpoint == JournalComplete {
+		if journal.Goal == observation.goal {
+			return false
+		}
+		// Foreign completed work is history, not verification of this fresh plan.
+		journal = nil
 	}
 	for _, work := range observation.work {
 		if work.kind() != v2SettingsWork && work.kind() != v2OwnerWork && work.kind() != v2IngressWork && work.kind() != v2NativeWork {
 			continue
 		}
 		verified := false
-		if observation.journal != nil {
-			for _, step := range observation.journal.Steps {
+		if journal != nil {
+			for _, step := range journal.Steps {
 				if step.ID == work.intent.ID {
 					verified = step.Checkpoint == StepVerified
 					break
@@ -82,11 +87,14 @@ func pendingSourceActivationWork(observation v2Observation) bool {
 }
 
 func (transition *V2Transition) prepareSourceActivationScope(ctx context.Context, observation *v2Observation, checkpointSource Fingerprint) error {
-	if observation.sourceActivationView == nil || len(observation.blockers) != 0 ||
-		transition.options.Direction != DirectionActivateTarget {
+	if observation.sourceActivationView == nil || len(observation.blockers) != 0 {
 		return nil
 	}
 	journal := observation.journal
+	if journal != nil && journal.Checkpoint == JournalComplete && journal.Goal != observation.goal {
+		// A new goal binds its own prospective scope; the old grant stays history.
+		journal = nil
+	}
 	activation := slices.Clone(observation.activationScope)
 	var consequences []string
 	prepared := false

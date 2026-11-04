@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 2,
+  "minimumEpochs": {
+    "owner-registration": 1,
+    "power-metadata": 1,
+    "project-state": 1,
+    "settings": 1
+  },
+  "currentEpochs": {
+    "owner-registration": 2,
+    "power-metadata": 2,
+    "project-state": 1,
+    "settings": 3
+  },
+  "migrations": [
+    {
+      "id": "canonicalize-test-vms-settings-v2",
+      "domain": "settings",
+      "fromEpoch": 1,
+      "toEpoch": 2,
+      "kind": "test-vms-settings-v1-to-v2"
+    },
+    {
+      "id": "introduce-owner-publication-state-v1",
+      "domain": "power-metadata",
+      "fromEpoch": 1,
+      "toEpoch": 2,
+      "kind": "owner-publication-state-v1"
+    },
+    {
+      "id": "canonicalize-test-yard-owner-v2",
+      "domain": "owner-registration",
+      "fromEpoch": 1,
+      "toEpoch": 2,
+      "kind": "test-yard-owner-v1-to-v2",
+      "dependsOn": [
+        "canonicalize-test-vms-settings-v2"
+      ]
+    },
+    {
+      "id": "localize-ssh-port-settings-v3",
+      "domain": "settings",
+      "fromEpoch": 2,
+      "toEpoch": 3,
+      "kind": "local-ssh-port-settings-v2-to-v3",
+      "dependsOn": ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"]
+    }
+  ]
+}

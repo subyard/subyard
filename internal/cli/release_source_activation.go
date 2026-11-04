@@ -168,6 +168,15 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 	plans := map[string]reconcileruntime.IntegrationPlan{}
 	unavailable := map[string]projectedIntegrationUnavailable{}
 	for _, name := range names {
+		if name == "test-yard" || name == "e2e-yard" {
+			warning, err := reconciler.cli.releaseTestYardRecreation(ctx, reconciler.configHome, draft.inputs)
+			if err != nil {
+				return releasetransition.V2SourceActivationPlan{}, err
+			}
+			if warning != "" {
+				continue
+			}
+		}
 		loaded, err := draft.load(name)
 		if err != nil {
 			return releasetransition.V2SourceActivationPlan{}, err
@@ -195,17 +204,11 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 				return releasetransition.V2SourceActivationPlan{}, inspectErr
 			}
 			proof := projectedIntegrationUnavailable{yard: loaded.Context, absent: absent, instance: instance}
-			pendingCleanup := false
-			if !absent && instance.Config["user.subyard.desired_power"] == "stopped" && (strings.EqualFold(instance.Status, "running") || strings.EqualFold(instance.Status, "stopped")) {
-				for _, candidate := range []struct {
-					guest   bool
-					desired map[string]releasetransition.Fingerprint
-				}{{false, view.RegisteredYards}, {true, view.GuestDiskTmp}} {
-					expected := candidate.desired["yard."+name]
-					if expected == "" {
-						continue
-					}
-					owner := reconciler.operation().registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: reconciler.configHome}, candidate.guest, name)
+			// Only registration work can change a stopped target's native
+			// ownership. Disk-/tmp work never temporarily boots or restores it.
+			if !absent && instance.Config["user.subyard.desired_power"] == "stopped" {
+				if expected := view.RegisteredYards["yard."+name]; expected != "" {
+					owner := reconciler.operation().registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: reconciler.configHome}, false, name)
 					observed, err := owner.(releasetransition.V2ProspectiveActivationObserver).ObserveProspective(ctx, releases, releasetransition.ReleaseLinks{}, view.Settings)
 					if err != nil {
 						return releasetransition.V2SourceActivationPlan{}, err
@@ -215,11 +218,11 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 					}
 					if !observed.Converged {
 						proof.owner, proof.desired = owner, expected
-						pendingCleanup = candidate.guest
 					}
 				}
 			}
-			if absent || !strings.EqualFold(instance.Status, "running") || pendingCleanup {
+
+			if absent || !strings.EqualFold(instance.Status, "running") {
 				unavailable[name] = proof
 				if reminder := reconcileruntime.RetiredIntegrationReminder(loaded, instance); !absent && reminder != "" {
 					consequences = append(consequences, reminder)
@@ -269,6 +272,14 @@ func (cli *CLI) projectedOwnerApplicability(ctx context.Context, request release
 	options, err := cli.releaseTransitionTestYardOptions(request)
 	if err != nil {
 		return "", "", err
+	}
+	options.ProspectiveFiles = &config.ProspectiveFiles{Root: request.ConfigHome, ReadSnapshot: view.Settings.ReadSnapshot}
+	warning, err := testYardRecreation(ctx, options)
+	if err != nil {
+		return "", "", err
+	}
+	if warning != "" {
+		return testyardmigration.BrokerRuntimeAbsent, testyardmigration.StateAbsent, nil
 	}
 	var before testyardmigration.Prepared
 	if bound := view.OwnerRegistration; bound != nil {

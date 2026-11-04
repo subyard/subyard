@@ -14,18 +14,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func sshTrustConsent(arguments []string) bool {
-	for _, argument := range arguments {
-		if argument == "--" {
-			break
-		}
-		if argument == "--yes" || argument == "-y" {
-			return true
-		}
-	}
-	return false
-}
-
 func (cli *CLI) sshTrust(dataHome string, assumeYes bool) *sshtrust.Manager {
 	manager := &sshtrust.Manager{Environment: environmentList(cli.env, nil)}
 	manager.Pin = func(target string) (*ownerinventory.SSHHostTrust, error) {

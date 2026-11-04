@@ -24,13 +24,16 @@ func (t *V2Transition) registeredSettingsSnapshot(yard string, view V2SettingsSn
 	if err != nil {
 		return snapshot, path, "", err
 	}
-	flatPath := filepath.Join(t.options.ConfigHome, "yards", yard+".env")
-	flat, err := view.ReadSnapshot(flatPath)
-	if err != nil || snapshot.Exists && flat.Exists {
-		return snapshot, path, "", invalid("ambiguous registered local settings")
-	}
-	if flat.Exists {
-		snapshot, path = flat, flatPath
+	// The loader has never read a flat file for the default yard.
+	if yard != "default" {
+		flatPath := filepath.Join(t.options.ConfigHome, "yards", yard+".env")
+		flat, err := view.ReadSnapshot(flatPath)
+		if err != nil || snapshot.Exists && flat.Exists {
+			return snapshot, path, "", invalid("ambiguous registered local settings")
+		}
+		if flat.Exists {
+			snapshot, path = flat, flatPath
+		}
 	}
 	inputs := map[string]Fingerprint{}
 	for _, relative := range []string{"host.env", "config.env", filepath.Join(config.GitSettingsRelativePath, "host.env"), filepath.Join(config.GitSettingsRelativePath, "config.env"), filepath.Join(config.GitSettingsRelativePath, "yards", yard, "config.env")} {

@@ -1641,8 +1641,11 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertEqual(m.run_checks(output, [1, 2], [], False,
                     first=["profile:sample/one", "profile:sample/two"], exclude=["profile:sample/three"], with_vms=True), 1)
                 self.assertEqual([name for name, slot in started[:2]], ["verify", "compatibility"])
-                self.assertEqual([name for name, slot in started[2:]], ["profile:sample/one", "profile:sample/two", "p0-release-smoke"])
-                self.assertEqual(started[3][1], started[4][1])
+                # The two first-order checks start concurrently, so only their set is ordered.
+                self.assertEqual(sorted(name for name, slot in started[2:4]), ["profile:sample/one", "profile:sample/two"])
+                self.assertEqual(started[4][0], "p0-release-smoke")
+                slots_by_name = dict(started[2:])
+                self.assertEqual(slots_by_name["profile:sample/two"], slots_by_name["p0-release-smoke"])
                 started.clear()
                 self.assertEqual(m.run_checks(output, [1], ["profile:sample"], False), 0)
                 self.assertEqual(started, [("profile:sample/three", 1)])

@@ -22,6 +22,17 @@ import (
 func pairedRegisteredOwners(t *testing.T) (*RegisteredYardMigration, *RegisteredYardMigration, *registeredNativeFixture, string) {
 	t.Helper()
 	owner, native, path := registeredMigrationFixture(t)
+	physicalRoot := testkit.TempDir(t)
+	policy, err := os.ReadFile("../../scripts/guest-disk-tmp.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(physicalRoot, "scripts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{"guest-disk-tmp.sh": policy, "06-network.sh": []byte("#!/bin/sh\nexit 0\n"), "lifecycle-guard.sh": []byte("#!/bin/sh\nexit 0\n")} {
+		testkit.WriteFile(t, filepath.Join(physicalRoot, "scripts", name), body, 0700)
+	}
 	original := owner.LoadTargets
 	owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
 		targets, err := original(ctx, view)
@@ -63,7 +74,8 @@ func pairedRegisteredOwners(t *testing.T) (*RegisteredYardMigration, *Registered
 			}
 			loaded.ConfigurationLayers = []config.ConfigurationLayer{{Path: path, Present: true}}
 			targets[index].Loaded = loaded
-			targets[index].Runtime.RepositoryRoot = "../.."
+			targets[index].Runtime.RepositoryRoot = physicalRoot
+			targets[index].Runtime.NetworkPolicy = restartNetwork{}
 			targets[index].Runtime.Executor = native
 		}
 		return targets, nil
@@ -155,7 +167,10 @@ func TestBothConcreteRegisteredOwnersShareOneDurableJournal(t *testing.T) {
 			if strings.HasSuffix(cut, "-after-endpoint") {
 				activeCut = "after-endpoint"
 			}
-			outcome, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			native.cancelTmp = cancel
+			outcome, err := transition.Converge(ctx, releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
 			if cut != "complete" && !implicit {
 				if err == nil && outcome.Status == releasetransition.StatusReady {
 					t.Fatal("cut was completed")
@@ -347,7 +362,7 @@ func TestRegisteredEndpointSettingsRetainActiveFlatRegistration(t *testing.T) {
 
 }
 
-func TestGuestTmpCompletionRequiresRestoredDesiredPower(t *testing.T) {
+func TestGuestTmpMarkerDoesNotRewriteDesiredPower(t *testing.T) {
 	_, tmp, native, _ := pairedRegisteredOwners(t)
 	instance := native.Instances["fixture/yard"]
 	for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
@@ -357,8 +372,8 @@ func TestGuestTmpCompletionRequiresRestoredDesiredPower(t *testing.T) {
 	native.Instances["fixture/yard"] = instance
 	native.Reconcile.Instance = instance
 	observed, err := tmp.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
-	if err != nil || observed.Converged {
-		t.Fatalf("temporary running state was marked complete: %#v %v", observed, err)
+	if err != nil || !observed.Converged {
+		t.Fatalf("completed marker reopened power intent: %#v %v", observed, err)
 	}
 }
 
@@ -412,12 +427,19 @@ func registeredSSHConfigFixture(t *testing.T) string {
 type aliasRetryNative struct {
 	*registeredNativeFixture
 	applies int
+	cancel  context.CancelFunc
 }
 
 func (n *aliasRetryNative) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	action := request.Command[len(request.Command)-1]
 	if action == "apply" {
 		n.applies++
+		if n.cancel != nil {
+			cancel := n.cancel
+			n.cancel = nil
+			cancel()
+			return ports.InstanceExecResult{}, context.Canceled
+		}
 	}
 	if action == "check" || action == "assess" {
 		return ports.InstanceExecResult{ExitCode: 10}, &ports.GuestExitError{Code: 10}
@@ -435,6 +457,8 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(root, "scripts/guest-disk-tmp.sh"), policy, 0600)
+	testkit.WriteFile(t, filepath.Join(root, "scripts/06-network.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+	testkit.WriteFile(t, filepath.Join(root, "scripts/lifecycle-guard.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
 	first, err := os.Open(root)
 	if err != nil {
 		t.Fatal(err)
@@ -462,11 +486,11 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			runtime := reconcileruntime.Runtime{RepositoryRoot: alias, Incus: native, Executor: executor, Yard: loaded.Context}
+			runtime := reconcileruntime.Runtime{RepositoryRoot: alias, Incus: native, Executor: executor, NetworkPolicy: restartNetwork{}, Yard: loaded.Context}
 			return []RegisteredYardTarget{{Loaded: loaded, Runtime: runtime}}, nil
 		}
 		owner := &RegisteredYardMigration{Yard: "default", ConfigHome: base.ConfigHome, Resources: base.Resources, LoadTargets: load}
-		tmp := &RegisteredYardMigration{Yard: "default", ConfigHome: base.ConfigHome, Resources: base.Resources, LoadTargets: load, GuestTmp: true, Prompt: prompt}
+		tmp := &RegisteredYardMigration{Yard: "default", ConfigHome: base.ConfigHome, Resources: base.Resources, LoadTargets: load, GuestTmp: true}
 		return owner, tmp, prompt
 	}
 	owner, tmp, prompt := makeOwners(aliases[0])
@@ -483,9 +507,12 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 	if err != nil || len(inspection.Blockers) != 0 {
 		t.Fatalf("initial inspect: %#v %v", inspection, err)
 	}
-	_, _ = transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
-	if len(prompt.Requests) != 1 || executor.applies != 1 {
-		t.Fatalf("did not reach first late refusal: prompts=%d apply=%d", len(prompt.Requests), executor.applies)
+	ctx, cancel := context.WithCancel(context.Background())
+	executor.cancel = cancel
+	_, _ = transition.Converge(ctx, releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
+	cancel()
+	if len(prompt.Requests) != 0 || executor.applies != 1 {
+		t.Fatalf("did not reach first interruption: prompts=%d apply=%d", len(prompt.Requests), executor.applies)
 	}
 	store, err := releasetransition.NewPOSIXV2Store(base.ConfigHome)
 	if err != nil {
@@ -493,7 +520,7 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 	}
 	before, err := store.ReadCurrentJournal()
 	if err != nil || !before.Exists {
-		t.Fatal("missing durable declined journal", err)
+		t.Fatal("missing durable interrupted journal", err)
 	}
 	owner, tmp, prompt = makeOwners(aliases[1])
 	// Only immutable asset labels may disappear from the descriptive binding.
@@ -577,8 +604,8 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 		t.Fatalf("reopened inspect: %#v %v", inspection, err)
 	}
 	_, _ = transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
-	if len(prompt.Requests) != 1 || executor.applies != 2 {
-		t.Fatalf("did not reach next late prompt: prompts=%d apply=%d", len(prompt.Requests), executor.applies)
+	if len(prompt.Requests) != 0 || executor.applies != 2 {
+		t.Fatalf("did not reach resumed native attempt: prompts=%d apply=%d", len(prompt.Requests), executor.applies)
 	}
 	after, err := store.ReadCurrentJournal()
 	if err != nil {
@@ -590,7 +617,7 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 	}
 	newJournal, err := releasetransition.ParseJournal(after.Payload)
 	if err != nil || oldJournal.Transaction != newJournal.Transaction {
-		t.Fatal("retry replaced declined transaction", err)
+		t.Fatal("retry replaced interrupted transaction", err)
 	}
 }
 

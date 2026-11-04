@@ -53,7 +53,8 @@ import pathlib,sys,tarfile
 target=pathlib.Path(sys.argv[2]); target.mkdir()
 with tarfile.open(sys.argv[1],'r:gz') as bundle:
     for member in bundle.getmembers():
-        if member.name.startswith('/') or '..' in member.name.split('/') or not (member.isfile() or member.isdir()):
+        # The data filter below refuses a link whose target leaves the bundle.
+        if member.name.startswith('/') or '..' in member.name.split('/') or not (member.isfile() or member.isdir() or member.issym()):
             raise SystemExit('unsafe frozen public bundle')
     bundle.extractall(target,filter='data')
 PY
@@ -92,6 +93,12 @@ remaining=$((3600 - $(date +%s) + STARTED))
 [ "$remaining" -ge 300 ] || { printf 'release-activation: work deadline exhausted before VM allocation\n' >&2; exit 2; }
 printf 'release_activation_budget work_seconds=3600 controller_elapsed_seconds=%s guest_timeout_seconds=%s guest_kill_after_seconds=360 snapshot=before-allocation\n' \
   "$((3600 - remaining))" "$remaining"
-bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --vm-count 1 --vm 1 \
+allocation_route=()
+if [ -n "${SUBYARD_E2E_ROLLOUT_YARD:-}" ]; then
+  [[ "$SUBYARD_E2E_ROLLOUT_YARD" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+    || { printf 'release-activation: invalid rollout yard\n' >&2; exit 2; }
+  allocation_route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
+fi
+bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$slot" --vm-count 1 --vm 1 \
   --purpose github-release-activation -- timeout --signal=TERM --kill-after=360 "$remaining" \
   bash config/profiles/github/tests/e2e/release-activation-guest.sh --baseline "$baseline"

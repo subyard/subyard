@@ -477,7 +477,7 @@ for kind in container vm; do
     systemctl add-wants local-fs.target tmp.mount
   ' _ "$wants"
   restart_yard
-  [ "$(guest findmnt -n -T /tmp -o FSTYPE)" = tmpfs ] || die 'rollback did not restore native tmpfs'
+  [ "$(guest findmnt -n --uniq -T /tmp -o FSTYPE)" = tmpfs ] || die 'rollback did not restore native tmpfs'
   if [ "$wants_present" = 0 ]; then
     # Remove only the exact link this fixture added. This changes next-boot
     # dependencies without touching the running tmpfs or its native unit.
@@ -512,7 +512,7 @@ while True:
   [ "$rc" != 0 ] || die 'active tmpfs was incorrectly reported ready'
   grep -Fq 'the active /tmp is memory-backed' "$output" || die 'reboot diagnostic was lost'
   [ "$(restart_identity)" = "$before" ] || die 'repeat provisioning restarted the active yard'
-  [ "$(guest findmnt -n -T /tmp -o FSTYPE)" = tmpfs ] || die 'repeat provisioning unmounted active tmpfs'
+  [ "$(guest findmnt -n --uniq -T /tmp -o FSTYPE)" = tmpfs ] || die 'repeat provisioning unmounted active tmpfs'
   probe_holder
   guest systemctl stop subyard-disk-tmp-fixture
   restart_yard

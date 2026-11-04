@@ -33,10 +33,11 @@ type StatusFacts struct {
 
 // ReleaseReadiness describes the owner host's installed release, shared by its yards.
 type ReleaseReadiness struct {
-	Status  string `json:"status"`
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
-	Next    string `json:"next,omitempty"`
+	Status   string   `json:"status"`
+	Code     string   `json:"code,omitempty"`
+	Message  string   `json:"message,omitempty"`
+	Next     string   `json:"next,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type YardStatus struct {

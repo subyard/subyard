@@ -76,7 +76,7 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	} else if prepared.preview != nil {
 		prepared.preview()
 	}
-	assumeYes = assumeYes || slices.Contains(prepared.Arguments, "--yes") || slices.Contains(prepared.Arguments, "-y")
+	assumeYes = assumeYes || commandAssumeYes(prepared.Arguments)
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
 	plan, err := prepared.Confirm(ctx, orchestrator, assumeYes)
 	if err != nil {
@@ -96,6 +96,14 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 			if historyErr := cli.recordUpdateTerminal(
 				prepared.Arguments, prepared.Plan.OperationID,
 				"confirmation", "interrupted", "context_cancelled", prepared.release,
+			); historyErr != nil {
+				cli.errorf("update history: %v", historyErr)
+			}
+			cli.errorf("plan %s: %v", prepared.Definition.Name, err)
+		case prepared.Definition.Handler == "@update" && cli.releaseRepairTarget != "" && errors.Is(err, domain.ErrConfirmationRequired):
+			if historyErr := cli.recordUpdateTerminal(
+				prepared.Arguments, prepared.Plan.OperationID,
+				"confirmation", "declined", "confirmation_required", prepared.release,
 			); historyErr != nil {
 				cli.errorf("update history: %v", historyErr)
 			}
@@ -126,13 +134,26 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 				return 1
 			}
 		}
-		if !slices.Contains(arguments, "--yes") && !slices.Contains(arguments, "-y") {
+		if !commandAssumeYes(arguments) {
 			arguments = append([]string{"--yes"}, arguments...)
 		}
 		return cli.forwardRemote(ctx, prepared.Loaded.Context, prepared.Definition.Name, arguments)
 	}
 	result, err := prepared.Execute(ctx, orchestrator, cli.options.Stdout)
+	if _, ok := err.(*activationRepairRequiredError); ok && cli.releaseRepairTarget == "" {
+		cli.printUpdateResult(prepared.release, false)
+		if closeErr := prepared.Close(); closeErr != nil {
+			cli.errorf("close completed update: %v", closeErr)
+			return 1
+		}
+		return cli.runActivationRepair(ctx, prepared.release, assumeYes)
+	}
 	if prepared.release != nil {
+		// A separate history/admission failure is not the eligible repair-only
+		// boundary and retains ordinary failure presentation.
+		if _, pending := err.(*activationRepairRequiredError); !pending {
+			prepared.release.repairPending = false
+		}
 		cli.printUpdateResult(prepared.release, err == nil && result.Status == "ok")
 	}
 	if err != nil {

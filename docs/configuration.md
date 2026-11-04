@@ -189,6 +189,13 @@ so initial integration adoption can verify an unchanged older document after the
 The historical file must match the baseline's SHA-256 and owned paths, and the document must still
 match all historical owned values. Runtime additions remain untouched. Unknown templates and
 changed owned fields remain conflicts; the new template alone is not proof of prior ownership.
+For releases that wrote JSON/TOML before baselines existed, the complete file must instead match a
+shipped historical template byte for byte. It must be a developer-owned regular file with mode
+`0644`, one hard link, no prior lock or receipt, and no historical owned paths missing from the
+current template. Assessment is read-only; ordinary application then publishes ownership evidence.
+JSON predecessors use `legacy-config/*.json` in the owning integration. A raw config can pin one
+historical digest in `legacy-config/<destination-basename>.sha256`; it is accepted only during
+confirmed initial adoption with the usual file metadata checks, and is not persisted as ownership.
 
 Subyard serializes its own writes per asset and atomically replaces the destination before updating
 the baseline. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
@@ -269,7 +276,8 @@ Ordinary legacy yards can establish their first inventory through a confirmed
 `init` or release update when the persistent selection is unchanged. The plan
 lists the paths it will manage. Existing plain files and links must match the
 selected templates, targets and metadata exactly; existing JSON/TOML documents
-also need a protected matching materialization baseline. Unrelated fields and
+also need a protected matching materialization baseline or the exact pre-baseline JSON/TOML proof
+described above. Unrelated fields and
 session targets remain preserved. Unknown or changed state fails before adoption.
 `yard integration status` assesses this same initial adoption without changing files or
 creating inventory. Matching legacy artifacts appear as pending work; a conflict identifies
@@ -286,7 +294,9 @@ rewriting the file. `yard integration enable <id>` and `yard config set` refuse 
 retired integration requested stops being effective, keeps its binaries and authorization, and
 can be selected again, for example with `yard integration enable codex`. While a selected retired
 integration has no recorded retirement, `yard init` also temporarily starts an intentionally stopped
-yard to remove it and then stops the yard again; updates and `yard start` only warn. Paseo is retired; see the
+yard to remove it and then stops the yard again; updates and `yard start` only warn. Paseo removal
+also removes foreign units and all state except a non-empty real `/srv/agents/paseo/worktrees/`
+directory, which stays with one warning. To use Paseo, install an older release. See the
 [retired package contract](reference/shipped-integration-contract.md#retired-package-compatibility).
 A previously accepted `AGENT_<name>_CLEANUP` value is ignored in the same way.
 
@@ -647,6 +657,14 @@ the consumer:
 - `config apply` means a file setting can be refreshed in a running local yard with
   `yard config apply`.
 
+Changing `ENVIRONMENT_PROFILES` takes effect for project admission on the next
+command. Retained project cleanup, yard stop and shell access remain available
+when only the saved guest-facts selection awaits application. A valid current
+facts snapshot with a different `selected_profiles` list does not make the release
+unready. Run `yard init` to apply the selection and refresh the snapshot; saving a
+setting does not write guest facts. Version, identity, integrity and incomplete
+helper-refresh failures remain release readiness failures.
+
 `yard config status [--all-local]` checks only materialized file settings in running local yards.
 `yard config apply [--all-local]` refreshes those consumers after confirmation. Neither command is a
 Git transport command. Configuration readers (`fields`, `show`, `paths`, `status`) remain available
@@ -867,7 +885,12 @@ means fallback, while an explicit empty local assignment remains effective.
 
 The next sync migrates an older whole-file import: files matching the recorded digest move to the
 Git cache, and changed files remain local to preserve operator edits. Before changing a legacy
-managed local file, complete this migration with `yard config sync`. Runtime rollback verifies
+managed local file, complete this migration with `yard config sync` for a registered source, or
+`yard config sync <checkout>` for an existing committed checkout imported directly. Restore that
+checkout first if it is unavailable. Sync prints its plan and requires confirmation; `--yes`
+provides explicit automation consent. Neither `--apply` nor a network pull is needed to separate
+the storage roles. Test-yard recreation guidance includes this prerequisite only while the old
+Git ownership remains. Runtime rollback verifies
 that the retained release supports the installed Git cache before planning or executing the rollback.
 
 Release installation and migration never ask for a Git URL or require network access. Connect the

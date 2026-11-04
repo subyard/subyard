@@ -47,6 +47,7 @@ fixture_cleanup() {
         reduction-decline.txt recovery-plan.json recovery-decline.txt recovery-receipt.json \
         activation-journal.before activation-ledger.before postboot-ready.json upgrade-capture-status.txt \
         upgrade-inspection.json upgrade-journal.json upgrade-ledger.json upgrade-identities.txt \
+        installer.log installer-ready.json installer-config-status.txt \
         inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt 2>/dev/null || failed=1
     fi
     # shellcheck source=config/profiles/hermes/tests/e2e/disabled-release-resource.sh
@@ -122,7 +123,7 @@ create_yards() {
     ! incus project show "$project" >/dev/null 2>&1 || die 'fixture project already exists'
     [ "$name" != default ] || printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
     [ "$name" != hermes ] || printf '%s\n' "$MARKER" > "$EXTRA_PROJECT_ARMED"
-    incus project create "$project" -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+    incus project create "$project" -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
     operator_yard -Y "$name" init --yes
     operator_yard -Y "$name" start --yes
   done
@@ -186,8 +187,11 @@ capture_upgrade_failure() {
 
 install_candidate_with_evidence() {
   local installer_rc=0 capture_rc=0
+  install -m 0600 /dev/null "$STATE_ROOT/installer.log"
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes \
+    > "$STATE_ROOT/installer.log" 2>&1 \
     || installer_rc=$?
+  cat "$STATE_ROOT/installer.log"
   if [ "$installer_rc" != 0 ]; then
     capture_upgrade_failure "$installer_rc" || capture_rc=$?
     printf 'candidate installer failed: installer_exit_code=%s capture_exit_code=%s\n' "$installer_rc" "$capture_rc" >&2
@@ -195,6 +199,23 @@ install_candidate_with_evidence() {
     CANDIDATE_INSTALLED=1
   fi
   return "$installer_rc"
+}
+
+assert_one_run_ready() {
+  grep -Fq 'Release is active; additional activation repair requires a fresh plan.' "$STATE_ROOT/installer.log" \
+    || die 'installer did not assess the follow-up activation repair'
+  grep -Fq 'Current release repaired successfully' "$STATE_ROOT/installer.log" \
+    || die 'installer did not complete the follow-up activation repair'
+  # Inspect the installed release without another update or release lookup.
+  operator_yard migrate --check --json > "$STATE_ROOT/installer-ready.json"
+  jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true and
+    .outcome.active == .outcome.target and (.blockers | length) == 0' \
+    "$STATE_ROOT/installer-ready.json" >/dev/null || die 'one installer run did not reach release readiness'
+  operator_yard config status --all-local > "$STATE_ROOT/installer-config-status.txt"
+  for name in default hermes; do
+    grep -Fxq "yard $name materialized-config: converged" "$STATE_ROOT/installer-config-status.txt" \
+      || die "one installer run left yard $name unconverged"
+  done
 }
 
 assert_inventory() {
@@ -343,6 +364,7 @@ prepare_acceptance() {
   operator_yard -Y default config set CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
   operator_yard migrate --yes
   install_candidate_with_evidence
+  assert_one_run_ready
   assert_candidate
   assert_disabled default
   assert_disabled hermes
@@ -422,6 +444,7 @@ case "$MODE" in
       default-port.txt hermes-port.txt all-local-plan.json failure-plan.json \
       reduction-plan.txt reduction-decline.txt recovery-plan.json recovery-decline.txt \
       recovery-receipt.json activation-journal.before activation-ledger.before postboot-ready.json \
+      installer.log installer-ready.json installer-config-status.txt \
       inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt
     PRESERVE_FIXTURE=1
     ;;

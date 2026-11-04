@@ -27,15 +27,19 @@ type releaseAdapter struct {
 }
 
 type releaseExecution struct {
-	prepared     releaseruntime.Prepared
-	yard         string
-	runtime      *releaseruntime.Runtime
-	history      *audit.UpdateRecorder
-	phase        string
-	failurePhase string
-	failureCode  string
-	inspection   *releasetransition.Inspection
-	outcome      *releasetransition.Outcome
+	prepared      releaseruntime.Prepared
+	configHome    string
+	yard          string
+	runtime       *releaseruntime.Runtime
+	history       *audit.UpdateRecorder
+	phase         string
+	failurePhase  string
+	failureCode   string
+	inspection    *releasetransition.Inspection
+	outcome       *releasetransition.Outcome
+	repairPending bool
+	followup      bool
+	retryDiskTmp  func(context.Context) error
 }
 
 func (execution *releaseExecution) Close() error {
@@ -104,7 +108,8 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 	}
 	return &releaseExecution{
 		prepared: prepared, yard: loaded.Context.YardName, runtime: runtime,
-		phase: "execute",
+		configHome: loaded.Context.Paths.ConfigHome,
+		phase:      "execute",
 	}, nil
 }
 
@@ -181,6 +186,15 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 			execution.outcome = &outcome
 		}
 	}
+	// Retiring a pending marker can reveal ordinary activation drift. Finish
+	// the bound release execution first, then let its fresh final check select
+	// the existing separately assessed activation follow-up where necessary.
+	if runErr == nil && result.Status == "ok" && execution.retryDiskTmp != nil {
+		runErr = execution.retryDiskTmp(ctx)
+		if runErr != nil {
+			execution.failurePhase, execution.failureCode = "disk-tmp", "migration_failed"
+		}
+	}
 	if result.Status == "ok" && execution.prepared.RefreshConfigs {
 		runErr = errors.Join(runErr, cli.refreshReleaseConfig(ctx, execution))
 	}
@@ -197,11 +211,20 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 			execution.inspection = &inspection
 			if inspection.Outcome.Status != releasetransition.StatusReady {
 				checkErr = fmt.Errorf("%s; next: %s", inspection.Outcome.Message, inspection.Outcome.Retry)
+				if execution.needsActivationRepair() {
+					execution.repairPending = true
+					checkErr = &activationRepairRequiredError{inspection: inspection}
+				}
 			}
 		}
 		if checkErr != nil {
 			execution.failurePhase, execution.failureCode = execution.phase, "final_check_failed"
-			runErr = fmt.Errorf("final update check: %w", checkErr)
+			if execution.repairPending {
+				// Retain the typed boundary only for this exact completed result.
+				runErr = checkErr
+			} else {
+				runErr = fmt.Errorf("final update check: %w", checkErr)
+			}
 		}
 	}
 	return result, runErr
@@ -212,13 +235,17 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 		return
 	}
 	output := cli.options.Stdout
-	if execution.prepared.RepairCurrent {
+	if execution.repairPending && !execution.followup {
+		fmt.Fprintln(output, "\n  Release is active; additional activation repair requires a fresh plan.")
+	} else if execution.prepared.RepairCurrent {
 		if success {
 			fmt.Fprintln(output, "\n  [ ok ] Current release repaired successfully")
 		} else {
 			fmt.Fprintln(output, "\n  [FAIL] Current release repair did not complete successfully")
 		}
-		fmt.Fprintln(output, "  No newer release was checked or installed.")
+		if !execution.followup {
+			fmt.Fprintln(output, "  No newer release was checked or installed.")
+		}
 	} else if success {
 		fmt.Fprintln(output, "\n  [ ok ] Update completed successfully")
 	} else {
@@ -226,6 +253,11 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 	}
 	outcome := execution.outcome
 	if execution.inspection != nil {
+		if execution.repairPending {
+			for _, consequence := range execution.inspection.Assessment.Consequences {
+				fmt.Fprintf(output, "  Remaining plan: %s\n", consequence)
+			}
+		}
 		outcome = execution.inspection.Outcome
 	} else {
 		fmt.Fprintln(output, "  Final readiness: not verified")
@@ -250,9 +282,11 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 	for _, warning := range outcome.Warnings {
 		fmt.Fprintf(output, "  Warning: %s\n", warning)
 	}
-	if outcome.Retry != "" {
+	if execution.repairPending && !execution.followup {
+		fmt.Fprintln(output, "  Next: run yard update to assess and authorize the remaining repair")
+	} else if outcome.Retry != "" {
 		fmt.Fprintf(output, "  Next: %s\n", outcome.Retry)
-	} else if success && execution.prepared.RepairCurrent {
+	} else if success && execution.prepared.RepairCurrent && !execution.followup {
 		fmt.Fprintln(output, "  Next: run yard update again to check for and install a newer release")
 	}
 }
@@ -337,6 +371,9 @@ func (cli *CLI) finishUpdateHistory(ctx context.Context, execution *releaseExecu
 	historyErr := execution.history.Finish(terminalPhase, status, code, "", "")
 	if historyErr != nil {
 		historyErr = fmt.Errorf("persist update history: %w", historyErr)
+	}
+	if historyErr == nil {
+		return runErr
 	}
 	return errors.Join(runErr, historyErr)
 }

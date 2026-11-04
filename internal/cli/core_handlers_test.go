@@ -1076,40 +1076,6 @@ func TestLifecycleStartFailsClosedWithoutNetworkPolicyAdapter(t *testing.T) {
 	}
 }
 
-func TestObserveLifecycleExecutionDetectsStoppedNoOp(t *testing.T) {
-	for _, test := range []struct {
-		status  string
-		changed bool
-	}{
-		{status: "Stopped"},
-		{status: "Running", changed: true},
-	} {
-		t.Run(test.status, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			incus := lifecycleIncus()
-			instance := incus.Instances["subyard/yard"]
-			instance.Status = test.status
-			incus.Instances["subyard/yard"] = instance
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Environment: environment,
-				WorkingDir: root, Incus: incus,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			execution := &lifecycleExecution{action: "stop"}
-			if err := program.observeLifecycleExecution(context.Background(), domain.Context{
-				IncusProject: "subyard", YardInstanceName: "yard",
-			}, execution); err != nil {
-				t.Fatal(err)
-			}
-			if execution.changed != test.changed {
-				t.Fatalf("changed=%t, want %t", execution.changed, test.changed)
-			}
-		})
-	}
-}
-
 func TestTeardownExecutionBuildsTypedActionDelta(t *testing.T) {
 	for _, test := range []struct {
 		name      string

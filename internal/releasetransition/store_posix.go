@@ -378,6 +378,28 @@ func (store *POSIXV2Store) ReadRecovery(
 	)
 }
 
+// Released source admission refuses unknown namespaces under release-transition,
+// and a rollback must still pass it.
+func nativeIdentityParts(transaction TransactionID) []string {
+	return []string{"reconcile", "native-identities", string(transaction)}
+}
+
+func (store *POSIXV2Store) ReadNativeIdentity(transaction TransactionID, step string) (ProtectedSnapshot, error) {
+	name, err := recoveryName(transaction, step)
+	if err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	return store.readRecord(nativeIdentityParts(transaction), name)
+}
+
+func (store *POSIXV2Store) CreateNativeIdentity(transaction TransactionID, step string, payload []byte) error {
+	name, err := recoveryName(transaction, step)
+	if err != nil {
+		return err
+	}
+	return store.createImmutable(nativeIdentityParts(transaction), name, payload)
+}
+
 func (store *POSIXV2Store) CreateRecovery(
 	transaction TransactionID,
 	step string,

@@ -917,7 +917,7 @@ func TestInspectRegistrationReportsDuplicateRegistrationShapes(t *testing.T) {
 			for _, relative := range []string{"yards/" + yard + "/config.env", "yards/" + yard + ".env"} {
 				testkit.WriteFile(t, filepath.Join(configHome, filepath.FromSlash(relative)), []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
 			}
-			_, err := inspectRegistration(Options{ConfigHome: configHome})
+			_, err := inspectRegistration(Options{ConfigHome: configHome, DataHome: filepath.Join(root, "data")})
 			assertOwnerStateDiagnostic(t, err, root, "config-home-relative", "yards/"+yard+"/config.env", "yards/"+yard+".env")
 		})
 	}
@@ -937,7 +937,7 @@ func assertOwnerStateDiagnostic(t *testing.T, err error, privateRoot string, exp
 		}
 	}
 	if strings.Contains(message+retry, privateRoot) || len(message) > 512 ||
-		retry != "inspect and repair the conflicting owner registration or controller state, then run yard update" {
+		retry != "test-yard requires recreation; preserve other sessions' VMs; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms" {
 		t.Fatalf("unsafe owner state diagnostic: message=%q retry=%q", message, retry)
 	}
 }
@@ -3205,6 +3205,11 @@ func TestReservedRegistrationReportsPublicRepair(t *testing.T) {
 				if !errors.As(err, &diagnostic) {
 					t.Fatalf("no public diagnostic: %v", err)
 				}
+				var refusal interface{ MigrationRefusal() bool }
+				var conflict interface{ ActivationConflict() bool }
+				if !errors.As(err, &refusal) || !refusal.MigrationRefusal() || !errors.As(err, &conflict) || conflict.ActivationConflict() {
+					t.Fatalf("reserved-role refusal became a deferrable owner conflict: %v", err)
+				}
 				message, retry := diagnostic.ActivationDiagnostic()
 				if !strings.Contains(message, "reserved yard name "+yard) || !strings.Contains(message, "yards/"+shape) || !strings.Contains(retry, "set YARD_TEMPLATE=test-vms") || !strings.Contains(retry, "rename") || strings.Contains(message+retry, root) || strings.Contains(message+retry, "private-value") {
 					t.Fatalf("unsafe or incomplete diagnostic: %q / %q", message, retry)
@@ -3246,6 +3251,11 @@ func TestReservedRegistrationReportsBothNames(t *testing.T) {
 	if !errors.As(err, &diagnostic) {
 		t.Fatalf("no public refusals: %v", err)
 	}
+	var refusal interface{ MigrationRefusal() bool }
+	var conflict interface{ ActivationConflict() bool }
+	if !errors.As(err, &refusal) || !refusal.MigrationRefusal() || !errors.As(err, &conflict) || conflict.ActivationConflict() {
+		t.Fatalf("combined role refusals became deferrable: %v", err)
+	}
 	message, retry := diagnostic.ActivationDiagnostic()
 	for _, yard := range []string{LegacyYard, CurrentYard} {
 		if !strings.Contains(message, "yards/"+yard+".env") {
@@ -3281,5 +3291,17 @@ func TestRegistrationRefusalsPreserveConfigurationRepair(t *testing.T) {
 				t.Fatalf("lost configuration repair: %q / %q", message, retry)
 			}
 		})
+	}
+}
+
+func TestObserveProgressRechecksNativeCurrentAfterOwnerPublication(t *testing.T) {
+	options, before := controllerFaultFixture(t)
+	if err := commitForTest(context.Background(), options, before); err != nil {
+		t.Fatal(err)
+	}
+	options.Environment = withEnvironment(options.Environment, "MIGRATION_FAIL", "test-yard:check")
+	progress, err := ObserveProgress(context.Background(), options, before)
+	if err != nil || progress != ProgressInProgress {
+		t.Fatalf("public observation reused an earlier native check: %v %v", progress, err)
 	}
 }

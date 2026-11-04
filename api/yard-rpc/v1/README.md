@@ -78,6 +78,14 @@ engine compatibility surface, not a client fallback.
 | `host.sync.status` | `{}` | `host-sync-status.schema.json`, capability `host-sync-status-v1` |
 | `session.prepare` | `kind`, optional `scope`, optional `projectId` | `session-prepare.schema.json`, capability `session-prepare-v1` |
 
+`release.readiness` may include `warnings`: at most 33 strings, each bounded to
+512 characters. Larger combined lists retain 32 diagnostics plus an overflow
+summary. The full warnings remain in
+`yard migrate --check`. This optional response member preserves the core readiness
+fields for older Go clients, which ignore unknown members and omit the new details.
+Clients validating an older closed schema need the updated contract; the matched
+Veranda product-version policy still applies.
+
 `profile.list` includes unselected profiles. Its `eligibility` reason can be
 `allowed`, `dedicated-role-required`, `exclusive-role`, `lifecycle-only` or
 `policy-disabled`; clients retain the owner's `eligible` decision and reason.

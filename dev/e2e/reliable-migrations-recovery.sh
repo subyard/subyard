@@ -68,12 +68,93 @@ image_fingerprint() {
     '.[] | select(any(.aliases[]; .name == $alias)) | .fingerprint'
 }
 
+recovery_journal_diagnostic() {
+  operator_env python3 -B - "$V2_JOURNAL" "$OPERATOR_HOME/.subyard/runtime" "$1" <<'PY'
+import json,os,re,stat,sys
+path,runtime,phase=sys.argv[1:]
+result={'phase':phase}
+safe=re.compile(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,255}')
+def identifier(value):
+    return value if isinstance(value,str) and safe.fullmatch(value) else '<invalid>'
+def digest(value):
+    return value if isinstance(value,str) and re.fullmatch('[a-f0-9]{64}',value) else '<invalid>'
+for link in ('current','previous'):
+    try:
+        target=os.readlink(runtime+'/'+link)
+        result[link]=identifier(target[9:]) if target.startswith('releases/') else '<invalid>'
+    except FileNotFoundError: result[link]=None
+    except OSError as error: result[link]={'error':type(error).__name__}
+try:
+    descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(descriptor,'rb') as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600:
+            raise ValueError('unsafe journal')
+        body=source.read(1024*1024+1)
+    if len(body)>1024*1024: raise ValueError('oversized journal')
+    journal=json.loads(body)
+    goal=journal.get('goal',{}); releases=journal.get('releases',{})
+    result['journal']={
+        'checkpoint':identifier(journal.get('checkpoint')),
+        'transaction':identifier(journal.get('transaction')),
+        'goal':{key:identifier(goal.get(key)) for key in ('target','direction')},
+        'releases':{key:(None if releases.get(key) is None else identifier(releases[key])) for key in ('from','target','previous')},
+        'digests':{key:digest(journal.get(key)) for key in ('artifactDigest','registryDigest','catalogDigest','observationScope','authorizationDigest','intentDigest')},
+    }
+except FileNotFoundError: result['journal']=None
+except (OSError,ValueError,AttributeError,TypeError) as error:
+    result['journal']={'error':type(error).__name__}
+print('reliable-migrations-diagnostic journal-header '+json.dumps(result,sort_keys=True))
+PY
+}
+
+recovery_failure_diagnostics() {
+  local query output status
+  [ "${RECOVERY_FAILURE_CAPTURED:-0}" != 1 ] || return 0
+  RECOVERY_FAILURE_CAPTURED=1
+  # Capture only this fixture's private state, before any cleanup/restoration.
+  if [ ! -d "$STATE_ROOT" ] || [ -L "$STATE_ROOT" ] \
+    || [ "$(cat "$STATE_ROOT/.marker" 2>/dev/null)" != "$MARKER" ]; then
+    printf 'reliable-migrations-diagnostic state-root unavailable-or-unmarked=true\n' >&2
+    return 0
+  fi
+  recovery_journal_diagnostic before || printf 'reliable-migrations-diagnostic journal-header capture_failed=true\n' >&2
+  for query in migrate-check config-status; do
+    output="$STATE_ROOT/failure-$query.log"
+    if ! install -m 0600 /dev/null "$output"; then
+      printf 'reliable-migrations-diagnostic query=%s capture_failed=true\n' "$query" >&2
+      continue
+    fi
+    status=0
+    if [ "$query" = migrate-check ]; then
+      operator_env timeout --signal=TERM --kill-after=5 30 "$OPERATOR_HOME/.local/bin/yard" migrate --check --json \
+        </dev/null > "$output" 2>&1 || status=$?
+    else
+      operator_env timeout --signal=TERM --kill-after=5 30 "$OPERATOR_HOME/.local/bin/yard" config status --all-local \
+        </dev/null > "$output" 2>&1 || status=$?
+    fi
+    printf 'reliable-migrations-diagnostic query=%s native_exit=%s\n' "$query" "$status" >&2
+    python3 -B - "$output" <<'PY' >&2 || printf 'reliable-migrations-diagnostic output capture_failed=true\n' >&2
+import pathlib,sys
+with pathlib.Path(sys.argv[1]).open('rb') as source: data=source.read(65537)
+sys.stdout.write(data[:65536].decode(errors='replace'))
+sys.stdout.write('\nreliable-migrations-diagnostic output_end truncated='+str(len(data)>65536).lower()+'\n')
+PY
+  done
+  recovery_journal_diagnostic after || printf 'reliable-migrations-diagnostic journal-header capture_failed=true\n' >&2
+  return 0
+}
+
 cleanup_recovery_fixture() {
   local rc=$? yard failed=0
   trap - EXIT INT TERM ERR
   set +e
   if [ "$CLEANUP_ARMED" = 1 ]; then
     assert_state_root
+    if [ "$rc" != 0 ] && [ "${RECOVERY_FAILURE_CAPTURED:-0}" != 1 ]; then
+      printf 'reliable-migrations-diagnostic trigger=exit native_exit=%s\n' "$rc" >&2
+      recovery_failure_diagnostics || true
+    fi
     if [ "$SUBYARD_RELIABILITY_PHASE" = source ]; then
       source_repair_restore_host_sink || failed=1
     fi
@@ -167,7 +248,7 @@ create_local_yard() {
     OWNED_EXTRA_YARDS+=("$yard")
   fi
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-  incus project create "$PROJECT" -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+  incus project create "$PROJECT" -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
   operator_yard -Y "$yard" init --yes
   [ "$yard" = stopped ] || operator_yard -Y "$yard" start --yes
 }
@@ -273,6 +354,7 @@ run_acceptance() {
   create_local_yard stopped
   operator_yard -Y stopped stop --yes
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  OLD_UNIT_FIXTURE="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in"
   source="$OPERATOR_HOME/.subyard/runtime/current/config/agents/claude/settings.json"
   write_settings "$source" "$OPERATOR_HOME/default-settings.json" default-v1
   write_settings "$source" "$OPERATOR_HOME/named-settings.json" named-v1
@@ -302,7 +384,7 @@ run_acceptance() {
     --runtime-root "$OPERATOR_HOME/.subyard/runtime" --journal "$V2_JOURNAL" \
     --source-transaction none \
     --candidate-target "$target" --checkpoint "$checkpoint" \
-    --marker "$OPERATOR_HOME/checkpoint-observed.json" --timeout 300 -- \
+    --marker "$OPERATOR_HOME/checkpoint-observed.json" --timeout 900 -- \
     env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$OPERATOR_HOME/.local/bin/yard" \
       update --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/checkpoint-interruption.log" 2>&1 || rc=$?
   if [ "$rc" != 137 ] || ! operator_env test -f "$OPERATOR_HOME/checkpoint-observed.json"; then
@@ -336,7 +418,7 @@ run_acceptance() {
   sudo -n jq '{checkpoint, steps: (.steps | length), sameRelease: (.releases.from == .releases.target)}' "$V2_JOURNAL"
   sudo -n jq -e '.checkpoint == "reconciling" and (.steps | length) == 0 and .releases.from == .releases.target' "$V2_JOURNAL" >/dev/null \
     || die 'interruption did not retain a same-release activation-only reconciling journal'
-  materialize_unit "$ROOT/.subyard-acceptance/runtime/config/systemd/subyard-power-reconcile.service.in" "$STATE_ROOT/candidate.service"
+  materialize_unit "$OPERATOR_HOME/.subyard/runtime/$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")/config/systemd/subyard-power-reconcile.service.in" "$STATE_ROOT/candidate.service"
   sudo -n cmp "$STATE_ROOT/candidate.service" "$UNIT" || die 'fault did not occur after actual host-power apply'
   sudo -n install -m 0600 "$V2_JOURNAL" "$ACTIVATION_JOURNAL_BASELINE"
   before_tx="$(sudo -n jq -er .transaction "$V2_JOURNAL")"

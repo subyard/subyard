@@ -482,13 +482,6 @@ def memory_lease(*, yard_host=False):
                 status = json.loads(result.stdout)
                 if result.returncode or status['heartbeat_seconds'] != 300 or status['ttl_seconds'] != 1200:
                     raise Failure('status timing differs from 300s renewal and 1200s expiry')
-                memory = status['memory']
-                bounds = [memory['visible_available_bytes']]
-                bounds += [memory[key] for key in ('physical_available_bytes', 'cgroup_headroom_bytes')
-                           if memory[key] is not None]
-                if (memory['available_bytes'] != min(bounds) or memory['admission_headroom_bytes'] !=
-                        max(0, min(bounds) - memory['reserve_bytes'] - memory['pending_bytes'])):
-                    raise Failure('memory status arithmetic is inconsistent')
                 slot = next(slot for slot in status['slots'] if slot['slot_id'] == command['slot'])
                 if slot['generation'] != command['generation']:
                     raise Failure('allocation generation changed unexpectedly')

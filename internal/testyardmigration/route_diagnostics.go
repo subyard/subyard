@@ -4,23 +4,29 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerservice"
 )
 
 type routeActivationDiagnostic struct {
 	cause          error
 	message, retry string
 	conflict       bool
+	refusal        bool
 }
 
 func (failure *routeActivationDiagnostic) Error() string            { return failure.cause.Error() }
 func (failure *routeActivationDiagnostic) Unwrap() error            { return failure.cause }
 func (failure *routeActivationDiagnostic) ActivationConflict() bool { return failure.conflict }
-func (failure *routeActivationDiagnostic) MigrationRefusal() bool   { return failure.conflict }
+func (failure *routeActivationDiagnostic) MigrationRefusal() bool {
+	return failure.conflict || failure.refusal
+}
 func (failure *routeActivationDiagnostic) ActivationDiagnostic() (string, string) {
 	return failure.message, failure.retry
 }
@@ -77,19 +83,23 @@ func routeConfigDiagnostic(cause error, reason, yard, configHome string) error {
 	return err
 }
 
-func ownerProjectDiagnostic(cause error, reason string, conflict bool) error {
+func ownerProjectDiagnostic(options Options, cause error, reason string, conflict bool) error {
+	retry := "incus project list --format=json"
+	if conflict {
+		return ownerStateDiagnostic(options, cause, reason)
+	}
 	return &routeActivationDiagnostic{
 		cause: cause, message: "route consumer activation for yard test-yard: " + reason,
-		retry: "incus project list --format=json", conflict: conflict,
+		retry: retry, conflict: conflict,
 	}
 }
 
-func ownerStateDiagnostic(cause error, reason string) error {
-	return &routeActivationDiagnostic{
-		cause: cause, message: "route consumer activation for yard test-yard: " + reason,
-		retry:    "inspect and repair the conflicting owner registration or controller state, then run yard update",
-		conflict: true,
+func ownerStateDiagnostic(options Options, cause error, reason string) error {
+	retry, err := RecreationHint(options, true)
+	if err != nil {
+		return err
 	}
+	return &routeActivationDiagnostic{cause: cause, message: "route consumer activation for yard test-yard: " + reason, retry: retry, conflict: true}
 }
 
 func reservedRegistrationDiagnostic(path, yard string) *routeActivationDiagnostic {
@@ -98,10 +108,10 @@ func reservedRegistrationDiagnostic(path, yard string) *routeActivationDiagnosti
 		relative = "yards/" + yard + ".env"
 	}
 	return &routeActivationDiagnostic{
-		cause:    fmt.Errorf("%s does not select YARD_TEMPLATE=test-vms", yard),
-		message:  "reserved yard name " + yard + ": config-home-relative " + relative + " must select YARD_TEMPLATE=test-vms",
-		retry:    "set YARD_TEMPLATE=test-vms in " + relative + ", or rename the unrelated yard registration, then run yard update --check",
-		conflict: true,
+		cause:   fmt.Errorf("%s does not select YARD_TEMPLATE=test-vms", yard),
+		message: "reserved yard name " + yard + ": config-home-relative " + relative + " must select YARD_TEMPLATE=test-vms",
+		retry:   "set YARD_TEMPLATE=test-vms in " + relative + ", or rename the unrelated yard registration, then run yard update --check",
+		refusal: true,
 	}
 }
 
@@ -128,7 +138,7 @@ func inspectReservedRegistration(options Options, path, yard string) error {
 		diagnostic.cause = err
 		diagnostic.message = strings.TrimSuffix(diagnostic.message, " must select YARD_TEMPLATE=test-vms") + " cannot be read safely"
 		diagnostic.retry = "inspect and repair the named registration settings, then run yard update --check"
-		diagnostic.conflict = false
+		diagnostic.refusal = false
 		return diagnostic
 	}
 	return reservedRegistrationDiagnostic(path, yard)
@@ -144,7 +154,7 @@ func registrationRefusals(findings ...error) error {
 		return cause
 	}
 	var messages []string
-	conflict := true
+	conflict, refusal := true, true
 	actions := []string{}
 	for _, finding := range refusals.Unwrap() {
 		var diagnostic interface{ ActivationDiagnostic() (string, string) }
@@ -152,7 +162,9 @@ func registrationRefusals(findings ...error) error {
 			return cause
 		}
 		message, action := diagnostic.ActivationDiagnostic()
-		actions = append(actions, action)
+		if !slices.Contains(actions, action) {
+			actions = append(actions, action)
+		}
 		if len(message) > 254 {
 			message = message[:251]
 			for !utf8.ValidString(message) {
@@ -160,10 +172,52 @@ func registrationRefusals(findings ...error) error {
 			}
 			message += "..."
 		}
+		const ownerPrefix = "route consumer activation for yard test-yard"
+		if len(messages) > 0 && strings.HasPrefix(messages[0], ownerPrefix) {
+			message = strings.TrimSpace(strings.TrimPrefix(message, ownerPrefix))
+			message = strings.TrimPrefix(message, ": ")
+		}
 		messages = append(messages, message)
 		var ambiguous interface{ ActivationConflict() bool }
 		conflict = conflict && errors.As(finding, &ambiguous) && ambiguous.ActivationConflict()
+		var blocked interface{ MigrationRefusal() bool }
+		refusal = refusal && errors.As(finding, &blocked) && blocked.MigrationRefusal()
 	}
 	retry := strings.Join(actions, ", then ")
-	return &routeActivationDiagnostic{cause: cause, message: strings.Join(messages, "; "), conflict: conflict, retry: retry}
+	return &routeActivationDiagnostic{cause: cause, message: strings.Join(messages, "; "), conflict: conflict, refusal: refusal, retry: retry}
+}
+
+// RecreationHint names only executable commands for the actual service registration.
+func RecreationHint(options Options, legacy bool) (string, error) {
+	records, err := (ownerservice.Registry{Root: filepath.Join(options.DataHome, "services")}).List("test-vms")
+	if err != nil {
+		return "", err
+	}
+	next := "yard service remove test-vms, then yard service install test-vms"
+	if len(records) == 0 {
+		yard := CurrentYard
+		if legacy {
+			yard = LegacyYard
+		}
+		next = "yard -Y " + yard + " teardown --reset-config, then yard service install test-vms"
+	} else if legacy {
+		next = "yard -Y e2e-yard teardown --reset-config, then " + next
+	}
+	note := ""
+	if err := config.CheckLocalSettingsWritable(options.ConfigHome); errors.Is(err, config.ErrLegacyGitSettingsMigration) {
+		_, registered, err := configsync.ReadSourceRecord(options.ConfigHome)
+		if err != nil {
+			return "", err
+		}
+		if registered {
+			next = "yard config sync, then " + next
+			note = "; restore the registered configuration checkout first if unavailable"
+		} else {
+			next = "yard config sync <checkout>, then " + next
+			note = "; replace <checkout> with your existing committed configuration checkout; restore it first if unavailable"
+		}
+	} else if err != nil {
+		return "", err
+	}
+	return "test-yard requires recreation; preserve other sessions' VMs; run " + next + note, nil
 }

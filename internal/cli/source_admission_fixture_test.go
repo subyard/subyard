@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/blang/semver/v4"
 )
 
 // Source repair executes the complete normal Go runtime supplied by the owning gate.
@@ -153,6 +154,10 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 	versionFields := strings.Fields(string(versionBytes))
 	if len(versionFields) != 2 {
 		t.Fatal("normal helper has invalid version")
+	}
+	version, err := semver.Parse(versionFields[1])
+	if err != nil || version.LT(semver.MustParse(releaseruntime.MinimumSourceVersion)) {
+		t.Fatalf("source-authoring fixture needs normal tooling >= %s, got %q; build VERSION=0.22.0-test or supply a supported SUBYARD_SOURCE_QUERY_TOOLING_ROOT", releaseruntime.MinimumSourceVersion, versionFields[1])
 	}
 	targetID := versionFields[1] + "-aaaaaaaaaaaa"
 	root := filepath.Join(runtimeRoot, "releases", targetID)

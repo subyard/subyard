@@ -1071,8 +1071,7 @@ PYBASELINE
   for suffix in '' .sha256 .manifest.json .provenance.json; do
     install -m 0600 "$ROOT/.subyard-acceptance/release/$name$suffix" "$SUBYARD_HOME/releases/$P0_OWNER_VERSION/$name$suffix"
   done
-  python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard test-yard --allow-no-prompt -- \
-    env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
+  env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
     "$baseline_owner" update --version "$P0_OWNER_VERSION" --offline --yes
   [ "$(runtime_yard --version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not activated'
   runtime_yard -Y test-yard check

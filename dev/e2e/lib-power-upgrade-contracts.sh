@@ -333,17 +333,19 @@ capture_legacy_native_policy() {
   chmod 0600 "$output" "$output.project" "$output.profile" "$output.instance"
 }
 
+assert_upgrade_ownership() { assert_registered_ownership; }
+
 assert_legacy_native_policy() {
   capture_legacy_native_policy "$STATE_ROOT/native-policy.current"
   cmp -s "$STATE_ROOT/native-policy.before" "$STATE_ROOT/native-policy.current" \
     || die 'compatible transition changed the exact legacy native policy or identity'
-  assert_legacy_continuation
+  assert_upgrade_ownership
 }
 
 verify_legacy_rollback_refusal() {
-  local path index=0 grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+  local path index=0
   local -a paths=("$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"
-    "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$grant")
+    "$OPERATOR_HOME/.config/subyard/migrations/state.json")
   capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
   for path in "${paths[@]}"; do
     # V2 predecessors may lack V1 evidence: preserve it when present, never manufacture it.
@@ -395,7 +397,7 @@ finish_candidate_flow() {
   local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
   load_release_targets
   verify_legacy_rollback_refusal
-  info 'retaining the authentic published v0.21.0 runtime through verified public updates'
+  info "retaining the authentic published $COMPATIBLE_VERSION runtime through verified public updates"
   check_compatible_transition "$COMPATIBLE_VERSION" "$COMPATIBLE_RELEASE_ROOT" \
     "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
@@ -415,7 +417,7 @@ finish_candidate_flow() {
   assert_legacy_native_policy
   rollback_catalog="$(operator_env jq -er '.catalogDigest | select(type == "string" and test("^[a-f0-9]{64}$"))' "$V2_JOURNAL")"
   rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')"
-  info 'rolling back to the exact compatible published v0.21.0 runtime'
+  info "rolling back to the exact compatible published $COMPATIBLE_VERSION runtime"
   operator_yard update --rollback --yes
   assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_state "$COMPATIBLE_VERSION" \
@@ -435,10 +437,8 @@ finish_candidate_flow() {
   assert_legacy_native_policy
   operator_yard init --yes
   assert_legacy_native_policy
-  verify_legacy_full_removal_refusal
-  assert_legacy_native_policy
   assert_published_v1_history_unchanged
-  ok 'authentic compatible rollback and candidate roll-forward retained limited legacy authority'
+  ok 'authentic compatible rollback and candidate roll-forward retained upgrade ownership'
 }
 
 verify_compatible_capabilities() {
@@ -447,8 +447,8 @@ verify_compatible_capabilities() {
     && jq -e 'keys == ["activationOwners", "activationReconciliationOwned", "schemaVersion"] and
       .activationReconciliationOwned == false and .schemaVersion == 2 and
       (.activationOwners | sort) == ["core-guest-runtime", "git-fetch-runtime", "github-runtime",
-        "host-power", "key-tools-runtime", "openlit-runtime", "orca-runtime",
-        "test-vm-broker", "test-yard-route-consumers"]' \
+        "host-power", "installation-runtime-v1", "key-tools-runtime", "openlit-runtime", "orca-runtime",
+        "telemetry-runtime", "test-vm-broker", "test-yard-route-consumers"]' \
       "$response" >/dev/null \
     || die 'published compatible runtime lacks exact activation capabilities'
 }

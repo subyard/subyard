@@ -16,7 +16,7 @@ set -- run "$TOKEN"
 
 OLD_VERSION=0.14.0
 OLD_INSTALLER_SHA256=a78c10910c0886a8d01c0a2e77718b21ce58e45fa7f0de6064bc1f351d56028b
-CANDIDATE_VERSION="0.14.1-legacy.upgrade.$TOKEN"
+CANDIDATE_VERSION="0.25.6-legacy.upgrade.$TOKEN"
 INSTALLER="$STATE_ROOT/subyard-install-v0.14.0.sh"
 HOST_CONFIG="$OPERATOR_HOME/.config/subyard/config.env"
 YARD_CONFIG="$OPERATOR_HOME/.config/subyard/yards/default/config.env"
@@ -227,7 +227,7 @@ chmod 0755 "$INSTALLER"
 operator_env "$INSTALLER" --version "$OLD_VERSION" --yes
 printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
 incus project create "$PROJECT" \
-  -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+  -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
 operator_yard init --yes
 operator_yard start --yes
 assert_old_active
@@ -299,15 +299,13 @@ assert_unadopted "$BASELINE_FINGERPRINT"
 find_candidate_launcher \
   || die 'could not identify the one verified published candidate launcher'
 
-info 'refusing candidate init without installed-owner legacy continuation'
+info 'refusing candidate init before the published update activates it'
 set +e
-operator_env "$CANDIDATE_LAUNCHER" init >"$STATE_ROOT/init-continuation-required.log" 2>&1
+operator_env "$CANDIDATE_LAUNCHER" init >"$STATE_ROOT/init-before-update.log" 2>&1
 init_rc=$?
 set -e
-[ "$init_rc" -eq 1 ] \
-  && grep -Fq 'existing unmarked project has no continuation consent; use yard init --adopt to assess registration and initialization together; alternatively, use yard init --continue-legacy to assess limited normal reconciliation without deletion ownership' \
-    "$STATE_ROOT/init-continuation-required.log" \
-  || die 'candidate init did not refuse the exact missing-continuation boundary'
+cat "$STATE_ROOT/init-before-update.log"
+[ "$init_rc" -ne 0 ] || die 'candidate init ran before the published update activated it'
 assert_unadopted "$BASELINE_FINGERPRINT"
 
 info 'rejecting a changed legacy plain file without claiming or replacing it'
@@ -461,7 +459,7 @@ func main() {
  root,home,marker:=os.Args[1],os.Args[2],os.Args[3]
  ctx:=context.Background()
  runner:=testvmsruntime.ProcessRunner{}
- actual,_,err:=runner.Run(ctx,"incus",[]string{"project","get","subyard","user.subyard.p0-power-systemd"},nil,nil)
+ actual,_,err:=runner.Run(ctx,"incus",[]string{"project","get","subyard","user.p0-power-systemd"},nil,nil)
  if err!=nil || string(actual)!=marker+"\n" {panic("native fixture project marker differs")}
  loaded,err:=config.Load(config.LoadOptions{RepositoryRoot:root,OperatorHome:home,YardName:"default",Environment:map[string]string{"HOME":home,"SUBYARD_HOME":filepath.Join(home,".subyard"),"SUBYARD_CONFIG_HOME":filepath.Join(home,".config/subyard")}})
  if err!=nil {panic(err)}
@@ -500,30 +498,13 @@ operator_env test -f "$OPERATOR_HOME/.subyard/runtime/installation.json" \
   || die 'candidate-owned enrollment changed activation or adopted state'
 operator_env test ! -e "$continuation_grant" && operator_env test ! -L "$continuation_grant" \
   || die 'candidate-owned enrollment granted legacy continuation'
-[ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
-  || die 'candidate-owned enrollment acquired destructive installation ownership'
+info 'activating the newly selected profiles before ordinary init'
+operator_yard migrate --yes
 
-info 'declining installed-owner continuation without changing the adopted state'
-run_declined "$STATE_ROOT/continuation-declined.log" "file://$RELEASE_ROOT" \
-  "$OPERATOR_HOME/.local/bin/yard" init --continue-legacy
-grep -Fq '[apply] init.legacy-continuation:' "$STATE_ROOT/continuation-declined.log" \
-  || die 'continuation decline did not assess its explicit typed grant'
-operator_env test ! -e "$continuation_grant" && operator_env test ! -L "$continuation_grant" \
-  || die 'declined continuation wrote a protected grant'
-[ "$(guest sha256sum "$INVENTORY")" = "$inventory_before" ] \
-  && [ "$(yard_config_fingerprint)" = "$config_before" ] \
-  && [ "$(legacy_fingerprint)" = "$state_before" ] \
-  && [ "$(operator_env sha256sum "$HOST_CONFIG")" = "$continuation_host_before" ] \
-  || die 'declined continuation changed adopted artifacts or settings'
-[ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
-  || die 'declined continuation acquired destructive installation ownership'
+info 'keeping the ownership registered by the authentic update'
+establish_registered_ownership
 
-info 'establishing limited continuation through the active installed owner'
-# This shared helper also owns any required disk-/tmp restart and the exact
-# activation-only repair, while proving no full removal ownership is acquired.
-establish_legacy_continuation
-
-info 'provisioning only the requested selected hook after exact native continuation'
+info 'provisioning only the requested selected hook after registered ownership'
 run_declined "$STATE_ROOT/named-provision-declined.log" "file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" provision lifecycle-native
 guest test ! -e /srv/subyard-lifecycle-native-provisioned
@@ -599,7 +580,7 @@ verify_legacy_rollback_refusal
   && [ "$(legacy_fingerprint)" = "$state_before" ] \
   || die 'refused rollback changed integration artifacts or settings'
 assert_preserved_user_state
-assert_legacy_continuation
+assert_registered_ownership
 
 info 'retrying the active candidate after incompatible rollback refusal'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
@@ -612,6 +593,6 @@ jq -e '.observed == "ready" and .selection.requested == ["codex","opencode","pi"
     die 'candidate did not remain converged after refused rollback and update retry'
   }
 assert_preserved_user_state
-assert_legacy_continuation
+assert_registered_ownership
 
 ok 'pinned v0.14.0 adoption, refusal, decline, lifecycle preservation, rollback refusal and candidate retry passed'

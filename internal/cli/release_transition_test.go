@@ -20,10 +20,12 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 func TestComponentRegistryIncludesProfileActivationOwner(t *testing.T) {
@@ -102,6 +104,7 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 			authorizations++
 			return false
 		}}
+	stateBefore := nativeTreeSnapshot(t, root)
 	transition, err := releasetransition.NewV2Transition(options)
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +117,24 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 	fresh, err := releasetransition.NewV2Transition(options)
 	if err != nil {
 		t.Fatal(err)
+	}
+	freshInspection, err := fresh.Inspect(context.Background(), goal)
+	if err != nil || len(freshInspection.Blockers) != 0 {
+		t.Fatalf("fresh inspect: blockers=%v err=%v", freshInspection.Blockers, err)
+	}
+	firstJSON, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(freshInspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstJSON, secondJSON) {
+		t.Fatalf("pinned aliases changed the complete inspection:\nfirst=%s\nsecond=%s", firstJSON, secondJSON)
+	}
+	if !slices.Equal(stateBefore, nativeTreeSnapshot(t, root)) {
+		t.Fatal("inspection changed persisted config or state")
 	}
 	outcome, err := fresh.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan})
 	if err != nil || outcome.Code != releasetransition.CodeConfirmationRequired || authorizations != 1 {
@@ -478,7 +499,7 @@ esac
 	assertStoppedDeferred := func() {
 		t.Helper()
 		owner := reconciler.(*profileRuntimeActivationReconciler)
-		operation, targets, err := owner.targets()
+		operation, targets, err := owner.targets(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -763,31 +784,17 @@ func TestReleaseTransitionIngressSkipsUnboundLegacyLeaf(t *testing.T) {
 	}
 }
 
-func TestRouteConsumerActivationReconcilerConvergesForwardAfterLegacyOwner(t *testing.T) {
-	port := &routeConsumerActivationFixture{
-		owner:     string(testyardmigration.StateLegacyDirectory),
-		before:    `{"schemaVersion":1,"active":true,"consumers":[]}`,
-		verifyErr: errors.New("route device is absent"),
-	}
-	reconciler := &routeConsumerActivationReconciler{port: port}
-	releases := releasetransition.ReleasePair{From: "release-a", Target: "release-b"}
-	links := releasetransition.ReleaseLinks{Active: "release-a"}
-	legacy, err := reconciler.Observe(context.Background(), releases, links)
-	if err != nil || legacy.Converged || port.commits != 0 {
-		t.Fatalf("legacy route observation = %#v port=%#v err=%v", legacy, port, err)
-	}
-
-	port.owner = string(testyardmigration.StateCurrent)
-	drift, err := reconciler.Observe(context.Background(), releases, links)
-	if err != nil || drift.Converged {
-		t.Fatalf("route drift observation = %#v err=%v", drift, err)
-	}
-	if err := reconciler.Reconcile(context.Background(), links); err != nil {
-		t.Fatal(err)
-	}
-	ready, err := reconciler.Observe(context.Background(), releases, links)
-	if err != nil || !ready.Converged || port.commits != 1 {
-		t.Fatalf("reconciled route observation = %#v port=%#v err=%v", ready, port, err)
+func TestRouteConsumerActivationWarnsWithoutRepairingOwner(t *testing.T) {
+	for _, owner := range []string{string(testyardmigration.StateLegacyDirectory), string(testyardmigration.StateCurrent)} {
+		port := &routeConsumerActivationFixture{owner: owner, before: `{"schemaVersion":1,"active":true,"consumers":[]}`, verifyErr: routeRecreationConflict{}}
+		reconciler := &routeConsumerActivationReconciler{port: port}
+		observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{From: "release-a", Target: "release-b"}, releasetransition.ReleaseLinks{Active: "release-a"})
+		if err != nil || !observed.Converged || len(observed.Warnings) != 1 || observed.Warnings[0] != "test-yard registration or routes require recreation; preserve other sessions' VMs and confirm removal explicitly; run yard update --check for the registered-owner recreation commands" {
+			t.Fatalf("missing recreation warning: %+v %v", observed, err)
+		}
+		if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err == nil || port.commits != 0 {
+			t.Fatalf("repair executed: %d %v", port.commits, err)
+		}
 	}
 }
 
@@ -795,20 +802,22 @@ func TestRouteConsumerActivationObservesRegisteredBackendWithoutRecreatingIt(t *
 	owner := `{"name":"yard-test-yard","project":"subyard-test-yard","status":"RUNNING","config":{"user.subyard.managed":"true","user.subyard.name":"test-yard"}}`
 	for _, test := range []struct {
 		name, projects, instances string
-		absent, rejected          bool
+		absent, rejected, warning bool
 	}{
 		{name: "removed", projects: `[]`, instances: `[]`, absent: true},
 		{name: "default-remains", projects: `[{"name":"subyard"}]`, instances: `[{"project":"subyard","name":"yard","status":"RUNNING","config":{"user.subyard.managed":"true","user.subyard.name":"default"}}]`, absent: true},
 		{name: "keep-data", projects: `[{"name":"subyard-test-yard"}]`, instances: `[]`, absent: true},
-		{name: "running", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + owner + `]`},
-		{name: "stopped", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + strings.ReplaceAll(owner, "RUNNING", "STOPPED") + `]`},
-		{name: "foreign", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + strings.ReplaceAll(owner, `"true"`, `"false"`) + `]`, rejected: true},
-		{name: "wrong-name", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + strings.ReplaceAll(owner, `"yard-test-yard"`, `"foreign"`) + `]`, rejected: true},
+		{name: "running", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + owner + `]`, warning: true},
+		{name: "stopped", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + strings.ReplaceAll(owner, "RUNNING", "STOPPED") + `]`, warning: true},
+		{name: "foreign", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + strings.ReplaceAll(owner, `"true"`, `"false"`) + `]`, warning: true},
+		{name: "wrong-name", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + strings.ReplaceAll(owner, `"yard-test-yard"`, `"foreign"`) + `]`, warning: true},
 		{name: "duplicate", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + owner + `,` + owner + `]`, rejected: true},
-		{name: "conflict", projects: `[{"name":"subyard-test-yard"},{"name":"subyard-e2e-yard"}]`, instances: `[]`, rejected: true},
-		{name: "orphan", projects: `[]`, instances: `[` + owner + `]`, rejected: true},
+		{name: "conflict", projects: `[{"name":"subyard-test-yard"},{"name":"subyard-e2e-yard"}]`, instances: `[]`, warning: true},
+		{name: "orphan", projects: `[]`, instances: `[` + owner + `]`, warning: true},
 		{name: "malformed", projects: `[]`, instances: `{`, rejected: true},
 		{name: "null", projects: `[]`, instances: `null`, rejected: true},
+		{name: "duplicate-projects", projects: `[{"name":"subyard-test-yard"},{"name":"subyard-test-yard"}]`, instances: `[]`, rejected: true},
+		{name: "conflict-then-malformed", projects: `[{"name":"subyard-test-yard"}]`, instances: `[` + strings.ReplaceAll(owner, `"true"`, `"false"`) + `,{}]`, rejected: true},
 		{name: "null-projects", projects: `null`, instances: `[]`, rejected: true},
 		{name: "incomplete-projects", projects: `[{}]`, instances: `[]`, rejected: true},
 		{name: "incomplete", projects: `[]`, instances: `[{}]`, rejected: true},
@@ -864,6 +873,15 @@ esac
 			pair := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
 			links := releasetransition.ReleaseLinks{Active: "release-b"}
 			observation, err := reconciler.Observe(context.Background(), pair, links)
+			if mutations != 0 {
+				t.Fatalf("owner observation mutated %d times", mutations)
+			}
+			if test.warning {
+				if err != nil || !observation.Converged || observation.Actual != observation.Desired || len(observation.Warnings) != 1 || !strings.Contains(observation.Warnings[0], "yard -Y test-yard teardown --reset-config, then yard service install test-vms") {
+					t.Fatalf("conflicting owner lost warning or blocked release: %+v %v", observation, err)
+				}
+				return
+			}
 			if test.rejected {
 				if err == nil {
 					t.Fatalf("unsafe backend accepted: %#v", observation)
@@ -1421,6 +1439,7 @@ esac
 
 func TestForwardMaterializedConfigResumeKeepsScopeAcrossLegacyRename(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	installCanonicalOwnerInventory(t, root)
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
 	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
 	if err != nil {
@@ -1879,6 +1898,7 @@ printf '%s\n' '[{"name":"yard-isolated","project":"subyard-isolated","status":"S
 
 func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	installCanonicalOwnerInventory(t, root)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
@@ -2584,6 +2604,7 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 
 func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	installCanonicalOwnerInventory(t, root)
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
 	// This fixture authors its selection in subyard.env below.
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "", 0600)
@@ -3148,6 +3169,45 @@ func (v2PublicStageTestError) ActivationDiagnostic() (string, string) {
 	return "sample runtime service is inactive", "run yard init"
 }
 
+func TestRegisteredMigrationIgnoresParentResolvedSettings(t *testing.T) {
+	repositoryRoot := repositoryRoot(t)
+	home := t.TempDir()
+	configHome := filepath.Join(home, ".config", "subyard")
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "config.env"), []byte("AGENTS=none\n"), 0o600)
+	program, err := New(Options{
+		RepositoryRoot: repositoryRoot,
+		Environment: []string{
+			"HOME=" + home,
+			"SUBYARD_OPERATOR_HOME=" + home,
+			"SUBYARD_CONFIG_HOME=" + configHome,
+			"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),
+			// v0.11.0 resolves AGENTS=none to this value and passes it on.
+			"CODING_TOOL_INTEGRATIONS=none",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, ok := program.registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: configHome}, false, "default").(*migration.RegisteredYardMigration)
+	if !ok {
+		t.Fatal("registered yard migration owner is unavailable")
+	}
+	targets, err := owner.LoadTargets(context.Background(), nil)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %d, err = %v", len(targets), err)
+	}
+	if slices.Contains(targets[0].Runtime.Environment, "CODING_TOOL_INTEGRATIONS=none") {
+		t.Fatal("registered migration runtime kept the parent's resolved setting")
+	}
+	service, ok := targets[0].Runtime.NetworkPolicy.(*yardnetwork.Service)
+	if !ok {
+		t.Fatalf("network policy = %T", targets[0].Runtime.NetworkPolicy)
+	}
+	if _, err := service.ContractSource(networkYard(targets[0].Loaded.Context)); err != nil {
+		t.Fatalf("resource contracts: %v", err)
+	}
+}
+
 func TestBrokerActivationPlatformIgnoresInheritedDefaultContext(t *testing.T) {
 	repositoryRoot := repositoryRoot(t)
 	home := t.TempDir()
@@ -3159,6 +3219,9 @@ set -eu
 case "$*" in
   "project list --format=json")
     printf '%s\n' '[{"name":"subyard-test-yard"}]'
+    ;;
+  "list --all-projects --format=json")
+    printf '%s\n' '[{"name":"yard-test-yard","project":"subyard-test-yard","status":"RUNNING","config":{"user.subyard.managed":"true","user.subyard.name":"test-yard"}}]'
     ;;
   "list yard-test-yard --project subyard-test-yard --format=json")
     printf '%s\n' '[{"name":"yard-test-yard","status":"RUNNING","config":{"user.subyard.desired_power":"running"}}]'
@@ -3308,7 +3371,7 @@ func TestBrokerActivationProspectiveRegistrationPreservesDesired(t *testing.T) {
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, filepath.Join(bin, "incus"), "#!/bin/sh\ncase \"$*\" in 'project list --format=json') printf '[]\\n';; *) exit 2;; esac\n", 0o700)
+	writeCLIFile(t, filepath.Join(bin, "incus"), "#!/bin/sh\ncase \"$*\" in 'project list --format=json'|'list --all-projects --format=json') printf '[]\\n';; *) exit 2;; esac\n", 0o700)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: newInitPlatformFixture(), Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
@@ -3510,4 +3573,19 @@ func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
 	}
 	// Fixture acceptance and sanitized diagnostics have a distinct runnable
 	// contract in tests/agent-e2e.sh; native Ready owns pending-work semantics.
+}
+
+type routeRecreationConflict struct{}
+
+func (routeRecreationConflict) Error() string            { return "route device is absent" }
+func (routeRecreationConflict) ActivationConflict() bool { return true }
+
+func TestRouteConsumerActivationKeepsUncertainFailuresBlocking(t *testing.T) {
+	for _, cause := range []error{errors.New("transport disconnected"), context.Canceled, context.DeadlineExceeded} {
+		port := &routeConsumerActivationFixture{owner: string(testyardmigration.StateCurrent), before: `{"schemaVersion":1,"active":true,"consumers":[]}`, verifyErr: cause}
+		_, err := (&routeConsumerActivationReconciler{port: port}).Observe(context.Background(), releasetransition.ReleasePair{Target: "release-b"}, releasetransition.ReleaseLinks{})
+		if !errors.Is(err, cause) || port.commits != 0 {
+			t.Fatalf("uncertain owner failure was suppressed: %v", err)
+		}
+	}
 }

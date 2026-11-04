@@ -287,6 +287,17 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	}
 	publication, publicationErr := runtime.legacyPublicationPolicy(instance)
 	refusals = append(refusals, publicationErr)
+	retiredKeys := map[string]bool{}
+	if adopt {
+		// The retired integration's own handler removes these after activation.
+		for _, definition := range runtime.Integrations {
+			if definition.Retired && definition.Lifecycle != nil {
+				for _, key := range definition.Lifecycle.InstanceConfigKeys {
+					retiredKeys[key] = true
+				}
+			}
+		}
+	}
 	configurations := []map[string]string{instance.Config, instance.LocalConfig}
 	if extrasErr != nil || publicationErr != nil {
 		configurations = nil // Without these inputs every allowed key would look foreign.
@@ -311,6 +322,9 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 				continue
 			}
 			if key == "user.subyard.host_memory" && (adopt || hostMemory) {
+				continue
+			}
+			if retiredKeys[key] {
 				continue
 			}
 			switch key {

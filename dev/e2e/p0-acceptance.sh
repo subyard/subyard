@@ -15,10 +15,6 @@ VM1_YARD_ENTRY=''
 VM2_YARD_ENTRY=''
 VM1_SSH_STATE=''
 VM2_SSH_STATE=''
-SOURCE_ARCHIVE=''
-SOURCE_ARCHIVE_REMOTE=''
-SOURCE_HASH=''
-SOURCE_COMMIT=''
 SOURCE_HOST_STARTED=0
 SOURCE_LANE_VM=1
 POWER_SYSTEMD_STARTED=0
@@ -46,7 +42,7 @@ P0_CURRENT_PHASE='startup'
 P0_PHASE_STARTED=0
 P0_CHILD_PIDS=()
 P0_STARTED_PID=''
-FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd newer-release release-smoke peer cleanup)
+FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd legacy-continuation newer-release release-smoke peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
 # export and ensures every direct and bundled command addresses the same disposable allocation.
@@ -97,7 +93,7 @@ EOF
 list_lanes() {
   printf '%s\n' \
     smoke boundary nested-teardown full-uninstall transport dependencies real-incus profile-resource release source-upgrade \
-    power-systemd newer-release \
+    power-systemd newer-release legacy-continuation yard-maintenance \
     reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
   printf 'producer-reboot\tdiagnostic-only\n'
@@ -127,7 +123,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|newer-release|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|newer-release|legacy-continuation|yard-maintenance|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -436,10 +432,6 @@ cleanup_full_source_arm() {
   local vm
   vm="$(armed_fixture_vm "$FULL_SOURCE_ARM_FILE")" || return $?
   clean_source_host "$vm" || return $?
-  p0_guest "$vm" sh -c '[ ! -e "$1" ] || find "$1" -delete' \
-    _ "/tmp/subyard-p0-source-$TOKEN.tar.gz" || return $?
-  [ -z "$SOURCE_ARCHIVE" ] || [ ! -e "$SOURCE_ARCHIVE" ] \
-    || find "$SOURCE_ARCHIVE" -delete || return $?
   find "$FULL_SOURCE_ARM_FILE" -delete
 }
 cleanup_full_power_arm() {
@@ -501,14 +493,6 @@ cleanup() {
     || cleanup_failed=1
   [ "$POWER_SYSTEMD_STARTED" = 0 ] \
     || clean_power_systemd_host "$POWER_SYSTEMD_LANE_VM" >/dev/null 2>&1 \
-    || cleanup_failed=1
-  if [ -n "$SOURCE_ARCHIVE_REMOTE" ]; then
-    p0_guest "$SOURCE_LANE_VM" \
-      sh -c '[ ! -e "$1" ] || find "$1" -delete' _ "$SOURCE_ARCHIVE_REMOTE" \
-      >/dev/null 2>&1 || cleanup_failed=1
-  fi
-  [ -z "$SOURCE_ARCHIVE" ] || [ ! -e "$SOURCE_ARCHIVE" ] \
-    || find "$SOURCE_ARCHIVE" -delete >/dev/null 2>&1 \
     || cleanup_failed=1
   [ -z "$PROBE_LOG" ] || find "$PROBE_LOG" -delete >/dev/null 2>&1 || cleanup_failed=1
   [ -z "$CAPACITY_LOG_DIR" ] || find "$CAPACITY_LOG_DIR" -depth -delete \
@@ -647,25 +631,6 @@ verify_cache_lifecycle() {
   done
 }
 
-prepare_source_archive() {
-  local vm="$1" revision commit hash remote_hash history_root
-  revision="${SUBYARD_P0_SOURCE_REVISION:-7c67ee3}"
-  history_root="${SUBYARD_E2E_CONTROLLER_WORKSPACE:-$ROOT}"
-  commit="$(git -C "$history_root" rev-parse --verify "$revision^{commit}")" \
-    || die "source revision $revision is unavailable"
-  SOURCE_ARCHIVE="$(mktemp /tmp/subyard-p0-source.XXXXXX.tar.gz)"
-  git -C "$history_root" archive --format=tar "$commit" | gzip -n > "$SOURCE_ARCHIVE"
-  hash="$(sha256sum "$SOURCE_ARCHIVE" | cut -d' ' -f1)"
-  SOURCE_ARCHIVE_REMOTE="/tmp/subyard-p0-source-$TOKEN.tar.gz"
-  p0_guest "$vm" \
-    sh -c 'umask 077; dd of="$1" status=none' _ "$SOURCE_ARCHIVE_REMOTE" \
-    < "$SOURCE_ARCHIVE"
-  remote_hash="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
-    sha256sum "$SOURCE_ARCHIVE_REMOTE" | awk '{print $1}')"
-  [ "$remote_hash" = "$hash" ] || die 'source archive changed in transport'
-  SOURCE_HASH="$hash"
-  SOURCE_COMMIT="$commit"
-}
 
 power_reconcile_ssh() {
   timeout --foreground "$POWER_RECONCILE_PROBE_TIMEOUT" \
@@ -947,9 +912,6 @@ run_full_aux_stage() {
 full_aux_cleanup() {
   local rc=0
   cleanup_armed_full_fixtures >/dev/null 2>&1 || rc=1
-  [ -z "$SOURCE_ARCHIVE" ] || [ ! -e "$SOURCE_ARCHIVE" ] \
-    || find "$SOURCE_ARCHIVE" -delete >/dev/null 2>&1 \
-    || rc=1
   return "$rc"
 }
 
@@ -970,9 +932,10 @@ full_aux_lane() (
   trap 'exit 143' TERM
   run_full_aux_stage nested-teardown run_vm 2 nested-teardown
   run_full_aux_stage fixture-platform run_vm 2 fixture-platform
-  run_full_aux_stage source-upgrade source_upgrade_lane 2 prepared
+  run_full_aux_stage source-upgrade source_upgrade_lane 2
   find "$FULL_SOURCE_ARM_FILE" -delete
   run_full_aux_stage power-systemd power_systemd_lane 2
+  run_full_aux_stage legacy-continuation legacy_continuation_lane 2
   find "$FULL_POWER_ARM_FILE" -delete
 )
 
@@ -1052,7 +1015,6 @@ run_full_matrix_phase() {
   POWER_SYSTEMD_LANE_VM=2
   arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
   arm_full_fixture "$FULL_POWER_ARM_FILE" 2
-  prepare_source_archive 2
   printf '  [ .. ] phase=parallel-matrix bundle=%s timeout=%ss\n' \
     "$P0_BUNDLE_HASH" "$FULL_MATRIX_TIMEOUT_SECONDS"
   full_parallel_matrix
@@ -1087,24 +1049,10 @@ nested_teardown_lane() {
 }
 
 source_upgrade_lane() {
-  local vm="${1:-1}" archive_state="${2:-create}"
+  local vm="${1:-1}"
   SOURCE_LANE_VM="$vm"
   SOURCE_HOST_STARTED=1
-  case "$archive_state" in
-    create) prepare_source_archive "$vm" ;;
-    prepared)
-      [ -n "$SOURCE_ARCHIVE" ] && [ -r "$SOURCE_ARCHIVE" ] \
-        && [ -n "$SOURCE_ARCHIVE_REMOTE" ] \
-        && [ -n "$SOURCE_HASH" ] && [ -n "$SOURCE_COMMIT" ] \
-        || die 'prepared source archive state is incomplete'
-      ;;
-    *) die "unknown source archive state: $archive_state" ;;
-  esac
-  run_source_vm "$vm" prepare "$SOURCE_ARCHIVE_REMOTE" "$SOURCE_HASH" "$SOURCE_COMMIT"
-  p0_guest "$vm" sh -c '[ ! -e "$1" ] || find "$1" -delete' _ "$SOURCE_ARCHIVE_REMOTE"
-  SOURCE_ARCHIVE_REMOTE=''
-  find "$SOURCE_ARCHIVE" -delete
-  SOURCE_ARCHIVE=''
+  run_source_vm "$vm" prepare
   reboot_vm "$vm"
   run_source_vm "$vm" resume
   reboot_vm "$vm"
@@ -1117,6 +1065,22 @@ power_systemd_lane() {
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd-255.sh
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd.sh
   reboot_verify_lane "$vm"
+}
+
+yard_maintenance_lane() {
+  run_power_systemd_vm 1 dev/e2e/yard-maintenance-upgrade.sh "$TOKEN"
+}
+
+legacy_continuation_lane() {
+  local vm="${1:-1}"
+  POWER_SYSTEMD_LANE_VM="$vm"
+  POWER_SYSTEMD_STARTED=1
+  run_power_systemd_vm "$vm" dev/e2e/legacy-continuation-upgrade.sh prepare "$TOKEN"
+  reboot_vm "$vm"
+  run_power_systemd_vm "$vm" dev/e2e/legacy-continuation-upgrade.sh resume "$TOKEN"
+  reboot_vm "$vm"
+  run_power_systemd_vm "$vm" dev/e2e/legacy-continuation-upgrade.sh finish "$TOKEN"
+  POWER_SYSTEMD_STARTED=0
 }
 
 reboot_verify_lane() {
@@ -1349,6 +1313,18 @@ case "$P0_LANE" in
     run_phase capacity-preflight run_vm 1 capacity-preflight
     run_phase power-systemd-platform run_vm 1 fixture-platform
     run_phase power-systemd power_systemd_lane 1
+    run_phase cleanup cleanup_lane
+    ;;
+  yard-maintenance)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase yard-maintenance-platform run_vm 1 fixture-platform
+    run_phase yard-maintenance yard_maintenance_lane
+    run_phase cleanup cleanup_lane
+    ;;
+  legacy-continuation)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase legacy-continuation-platform run_vm 1 fixture-platform
+    run_phase legacy-continuation legacy_continuation_lane 1
     run_phase cleanup cleanup_lane
     ;;
   reboot-verify)

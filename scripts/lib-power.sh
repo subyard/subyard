@@ -205,7 +205,8 @@ power_guest_start_failed() { # <project> <instance> <error>
       if incus stop "$instance" --project "$project" --force >/dev/null 2>&1; then
         err="$err; $project/$instance was stopped fail-closed"
       else
-        err="$err; FAILED to stop $project/$instance"
+        power_fail "$err; FAILED to stop $project/$instance"
+        return 1
       fi
     fi
   fi

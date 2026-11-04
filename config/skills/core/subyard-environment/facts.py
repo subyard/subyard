@@ -10,6 +10,8 @@ import tempfile
 
 FACTS = Path('/etc/subyard/guest-runtime.json')
 MACHINE = Path('/etc/machine-id')
+# check-only result: the saved helper refresh is valid, but selection awaits init.
+PROFILES_PENDING = 11
 
 
 def identity(machine=MACHINE):
@@ -130,7 +132,14 @@ def main():
     if sys.argv[1:] == ['check']:
         target = snapshot(json.load(sys.stdin))
         value = read()
-        return 0 if value['status'] == 'current' and value['target'] == target else 10
+        if value['status'] != 'current':
+            return 10
+        if value['target'] == target:
+            return 0
+        if (value['target']['version'] == target['version'] and
+                value['target']['yard'] == target['yard']):
+            return PROFILES_PENDING
+        return 10
     if len(sys.argv) == 2 and sys.argv[1] in ('begin', 'commit') and os.geteuid() == 0:
         apply(sys.argv[1], json.load(sys.stdin))
         return 0

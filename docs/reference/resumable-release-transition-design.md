@@ -323,6 +323,15 @@ recovery mutation. Inspection exits `0` when inspection itself succeeds, includi
 readiness comes from the structured outcome. Apply succeeds only after verified readiness.
 Current command-specific guidance is in [Release migrations](../control-plane.md#release-migrations).
 
+Fresh rollback with declared mutating source work requires the exact optional process-schema-2
+`rollback-source-activation-v1` capability from its verified retained owner before consent. Typed
+settings, owner-registration and source-install decisions require it; unknown mutating scopes also
+require it. Known activation, power-metadata, migration-history and legacy-V1 identity scopes do
+not establish source work. Preserve decisions and ledger-only plans keep the ordinary compatibility
+path. An absent or unsupported probe refuses with `rollback-incompatible` before mutations. A
+version number alone cannot establish the capability. Registryless targets keep their verified
+active-owner path, and an already-authorized transaction keeps its original pinned owner.
+
 ## Internal seams and adapters
 
 The external seam stays `ReleaseTransition.Inspect/Converge`. Internal physical responsibilities

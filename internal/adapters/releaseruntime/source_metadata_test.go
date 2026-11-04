@@ -345,3 +345,13 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 		})
 	}
 }
+
+func TestSourceAdmissionErrorNamesProtectedMetadataOperation(t *testing.T) {
+	cause := errors.New("private source value must not appear")
+	for _, phase := range []string{"resource declarations", "V2 history", "journal consistency", "legacy history"} {
+		err := sourceAdmissionError{phase: phase, cause: cause}
+		if !strings.Contains(err.Error(), "("+phase+")") || strings.Contains(err.Error(), cause.Error()) || !errors.Is(err, cause) {
+			t.Fatalf("unsafe or ambiguous admission diagnostic for %s: %v", phase, err)
+		}
+	}
+}

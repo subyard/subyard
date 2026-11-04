@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	ownerRegistrationResource   = "test-yard-owner"
-	legacyOwnerRegistrationYard = "e2e-yard"
+	ownerRegistrationResource    = "test-yard-owner"
+	legacyOwnerRegistrationYard  = "e2e-yard"
+	currentOwnerRegistrationYard = "test-yard"
 )
 
 // OwnerRegistrationState is a closed, redacted description of the persisted

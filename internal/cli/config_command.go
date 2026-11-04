@@ -831,7 +831,20 @@ func configPathScope(path string, values map[string]string) string {
 }
 
 func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]configTarget, error) {
+	return cli.configTargets(context.Background(), loaded, allLocal, false)
+}
+
+func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLocal, release bool) ([]configTarget, error) {
 	if !allLocal {
+		if release && (loaded.Context.YardName == "test-yard" || loaded.Context.YardName == "e2e-yard") {
+			warning, err := cli.releaseTestYardRecreation(ctx, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
+			if err != nil {
+				return nil, err
+			}
+			if warning != "" {
+				return nil, nil
+			}
+		}
 		return []configTarget{{Name: loaded.Context.YardName, Loaded: loaded}}, nil
 	}
 	names, err := config.YardNames(
@@ -852,6 +865,15 @@ func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]confi
 	}
 	targets := make([]configTarget, 0, len(names))
 	for _, name := range names {
+		if release && (name == "test-yard" || name == "e2e-yard") {
+			warning, err := cli.releaseTestYardRecreation(ctx, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
+			if err != nil {
+				return nil, err
+			}
+			if warning != "" {
+				continue
+			}
+		}
 		var targetLoaded config.Loaded
 		var err error
 		if loaded.ProspectiveFiles != nil {

@@ -8,9 +8,14 @@ case "$KIND" in container|cold|vm|special|default|upgrade|local-first) ;; *) pri
 die() { printf 'integration-selection: %s\n' "$*" >&2; exit 1; }
 trap 'printf "integration-selection: failure at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run through dev/agent-e2e.sh on an allocated VM'
+[ -f "$ROOT/.subyard-acceptance/candidate.json" ] || die 'a frozen candidate bundle is required'
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
 for command in jq python3 sudo ss sg; do command -v "$command" >/dev/null || die "$command is required"; done
 if [ "$KIND" = local-first ]; then command -v git >/dev/null || die 'git is required'; fi
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
+# Enroll the operator before the installed engine first inspects Incus.
+bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
 if [ "$KIND" = cold ]; then
   # Only a fresh allocated host with no Incus workloads may become a cold fixture.
   # Keep the baseline state aside; package removal alone can retain the database.
@@ -40,7 +45,6 @@ if [ "$KIND" = vm ] && ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
   sudo -n apt-get update >/dev/null
   sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 >/dev/null
 fi
-[ -x "$ROOT/.build/yard" ] || "$ROOT/dev/build-engine.sh"
 STATE="$(mktemp -d /var/tmp/subyard-integration-selection.XXXXXX)"
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
 MARKER="subyard-integration-selection-v1-$token"
@@ -50,9 +54,10 @@ PROJECT="subyard-$YARD_NAME"
 INSTANCE="yard-$YARD_NAME"
 [ "$KIND" != default ] || YARD_NAME=default
 printf '%s\n' "$MARKER" > "$STATE/.marker"
-export SUBYARD_OPERATOR_HOME="$HOME"
+export SUBYARD_OPERATOR_HOME="$STATE/home"
 export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
+export YARD_RUNTIME_ROOT="$STATE/candidate/runtime"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 incus() {
@@ -63,20 +68,22 @@ incus() {
   fi
 }
 incus_stopped=0
-yard() {
+command_with_group() {
   # First init can enroll this user, but cannot update its parent shell's groups.
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
     local command
-    printf -v command '%q ' "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    printf -v command '%q ' "$@"
     sg incus-admin -c "exec $command"
   else
-    "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    "$@"
   fi
 }
+yard() { command_with_group "$launcher" -Y "$YARD_NAME" "$@"; }
+host_yard() { command_with_group "$launcher" "$@"; }
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 cleanup() {
-  local rc=$? managed=''
+  local rc=$? managed='' cleanup_rc=0
   trap - EXIT INT TERM ERR
   set +e
   if [ "$incus_stopped" = 1 ]; then sudo -n systemctl start incus.socket incus.service; fi
@@ -89,7 +96,12 @@ cleanup() {
       install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
       printf 'SSH_PORT=64997\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
       chmod 0600 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
-      yard teardown --yes >"$STATE/cleanup.log" 2>&1 || rc=3
+      yard teardown --yes >"$STATE/cleanup.log" 2>&1 || {
+        cleanup_rc=$?
+        printf 'integration-selection: cleanup native_exit=%s bounded_log=true\n' "$cleanup_rc" >&2
+        tail -c 16384 "$STATE/cleanup.log" >&2
+        rc=3
+      }
     else
       printf 'integration-selection: refusing to teardown unowned target\n' >&2
       rc=3
@@ -104,6 +116,9 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+install -d -m 0700 "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME" "$SUBYARD_HOME"
+launcher="$(command_with_group bash -c \
+  '. "$1/tests/helpers/release-candidate.sh"; release_candidate_install "$1" "$2"' _ "$ROOT" "$STATE/candidate")"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 port=$((33000 + ($$ % 1000)))
 while ss -Hln "sport = :$port" 2>/dev/null | grep -q .; do port=$((port + 1)); done
@@ -281,11 +296,39 @@ guest sh -eu -c '
   cp /home/dev/.claude/settings.json /tmp/subyard-selection-settings.json
   python3 -c '\''import json; p="/home/dev/.claude/settings.json"; x=json.load(open(p)); x["permissions"]["defaultMode"]="plan"; open(p,"w").write(json.dumps(x))'\''
 ' subyard "$history_path"
+# Installed completed history permits only a source reduction here. Releasing
+# guest ownership remains a separate operation and must refuse the drift.
+guest sha256sum /home/dev/.claude/settings.json /var/lib/subyard/integrations/inventory.json \
+  /home/dev/.claude/auth.json "$history_path" > "$STATE/drift-guest.before"
+guest sha256sum /home/dev/.claude/auth.json "$preserved_history" > "$STATE/retained-data.before"
+yard integration disable claude --yes > "$STATE/drift.log" 2>&1
+yard integration status --json > "$STATE/drift-status.json"
+jq -e '.selection.requested == [] and .selection.effective == [] and .observed == "conflict" and
+  (.detail | contains("ownership conflict"))' "$STATE/drift-status.json" >/dev/null \
+  || die 'source-only disable did not retain the owned configuration conflict'
+guest sha256sum -c - < "$STATE/drift-guest.before" >/dev/null \
+  || die 'source-only disable changed guest settings, inventory, auth or history'
 before="$(sha256sum "$config")"
-if yard integration disable claude --yes > "$STATE/drift.log" 2>&1; then die 'owned configuration drift was silently deleted'; fi
-[ "$(sha256sum "$config")" = "$before" ] || die 'assessment conflict changed desired selection'
+if host_yard migrate --yes > "$STATE/drift-migrate.log" 2>&1; then die 'owned configuration drift was silently retired'; fi
+host_yard migrate --check --json > "$STATE/drift-migrate.json"
+yard integration status --json > "$STATE/drift-status.json"
+jq -e '.outcome.status == "operator-action-required" and .outcome.code == "dependency-unavailable" and
+  any(.blockers[]?; .resource == "activation.materialized-config" and .code == "dependency-unavailable")' \
+  "$STATE/drift-migrate.json" >/dev/null || die 'retirement failed outside the owning materialized configuration boundary'
+jq -e '.observed == "conflict" and (.detail | contains("ownership conflict"))' "$STATE/drift-status.json" >/dev/null \
+  || die 'retirement refusal did not report the owned configuration conflict'
+[ "$(sha256sum "$config")" = "$before" ] || die 'applying ownership refusal changed desired selection'
+guest sha256sum -c - < "$STATE/drift-guest.before" >/dev/null \
+  || die 'applying ownership refusal changed guest settings, inventory, auth or history'
 guest cp /tmp/subyard-selection-settings.json /home/dev/.claude/settings.json
+host_yard migrate --yes
+yard integration status --json | jq -e '.observed == "ready" and .selection.requested == [] and .selection.effective == []' >/dev/null \
+  || die 'restored owned configuration did not converge'
+guest sha256sum -c - < "$STATE/retained-data.before" >/dev/null \
+  || die 'retirement changed auth or history'
 yard integration disable claude --yes
+guest sha256sum -c - < "$STATE/retained-data.before" >/dev/null \
+  || die 'repeated disable changed auth or history'
 guest sh -eu -c '
   [ "$(cat /home/dev/.claude/auth.json)" = synthetic-auth ]
   [ ! -L /home/dev/.claude/projects ]

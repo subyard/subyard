@@ -40,7 +40,7 @@ curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
 chmod 0755 "$INSTALLER"
 operator_env "$INSTALLER" --version "$OLD_VERSION" --yes
 printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-incus project create "$PROJECT" -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+incus project create "$PROJECT" -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
 operator_yard init --yes
 operator_yard start --yes
 history=/srv/agents/ai-observer/data/.retirement-history

@@ -157,6 +157,7 @@ func TestConvergedIntegrationPlanSurvivesNativeInterfaceRestart(t *testing.T) {
 			}
 			for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
 				values["volatile.eth0.host_name"] = "veth-after"
+				values["volatile.last_state.ready"] = "false"
 				if kind == domain.YardVM {
 					values["volatile.vm.rtc_adjustment"], values["volatile.vm.rtc_offset"] = "1", "-1"
 					values["volatile.vm.needs_reset"] = "true"

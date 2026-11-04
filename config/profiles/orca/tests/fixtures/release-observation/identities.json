@@ -54,5 +54,99 @@
       "transport.py": "c96e97b9a058f846d65f2b6aeb5f0d831be6a92352ca7b55068e70236f1ec1e9"
     },
     "contract": "0.19.0"
+  },
+  "0.22.0": {
+    "handler": "58d479af530d55a31dd68f562ac7881fe4ca4df763a5377c5503f7ace9e2d9bc",
+    "registration": {
+      "codex_appserver.py": "6ce80deb39b1a5bd886ce72030e019f25307c07ef455ee9fedceae7a34a7f52f",
+      "codex_launch.py": "84c910f74f8a6d6155b25ed1dfcacec29cbba617a100d212bd4b998ebe18988f",
+      "discovery.py": "2edfbb0cf70bd12d4d603ff55b8d7b12227b7a359d2e965b3bc320906b8f8712",
+      "inventory.py": "b39cb19f0fb2a9501a354cd84bf594ea6f9e35be6d8e524a96651bd2ef8c8f46",
+      "main.py": "456767fd1e840e6027e68ced11414bd633943404f9d3d0885082bfed3d7e7ef9",
+      "reconcile.py": "302c89afb7bddf57d750cd18601ab8af6e7a38d8a93d93288983d4f965eb0194",
+      "settings.py": "b0f2c4c238efb4a5c7ddfa95591befcb826e692d6632c425c7bcd284b6dc3868",
+      "state.py": "7c617760a5d7ea2cadd02f527be34397893e3f0067ebead856162f775f5a1568",
+      "transport.py": "c96e97b9a058f846d65f2b6aeb5f0d831be6a92352ca7b55068e70236f1ec1e9"
+    },
+    "contract": "0.22.0",
+    "observer": "0.22.0",
+    "codexPaths": true
+  },
+  "0.17.0": {
+    "handler": "c3562d0f34b4fb1ac35d7c41d0beb987639d8bbedb92501d951b4abf12f55655",
+    "registration": {
+      "codex_launch.py": "674ac419a6dd6d9818e450b7f232a01d5a4587f98d5f4be14e44dbc2732c98ff",
+      "discovery.py": "bd36082a11efbd45ec36848e732897707566abd44e5117b35ba11bc6a9f35b6b",
+      "inventory.py": "b6f8c978129d4f2364bbfdaf8be4a63c3794133c1166424f1ced3f649f4c6ca5",
+      "main.py": "456767fd1e840e6027e68ced11414bd633943404f9d3d0885082bfed3d7e7ef9",
+      "reconcile.py": "a4ceaa4fe9d8b0e394f4891171e45021355eaa8fdefc3a4b3ffe9e649a0ee0d7",
+      "settings.py": "b0f2c4c238efb4a5c7ddfa95591befcb826e692d6632c425c7bcd284b6dc3868",
+      "state.py": "7eecaa7b94522bab5265dd147a61823d53647177121049bdef0688f05b574018",
+      "transport.py": "6b5c9ee990b5d3538449dcf521ce213640c74a4594cd76d60bff40af7256bb7a"
+    },
+    "contract": "0.17.3"
+  },
+  "0.20.0": {
+    "handler": "0ac85141c980ff76c2328203ed769ab609b0535528afa782bead481c178b3d6d",
+    "registration": {
+      "codex_launch.py": "84c910f74f8a6d6155b25ed1dfcacec29cbba617a100d212bd4b998ebe18988f",
+      "discovery.py": "2edfbb0cf70bd12d4d603ff55b8d7b12227b7a359d2e965b3bc320906b8f8712",
+      "inventory.py": "b39cb19f0fb2a9501a354cd84bf594ea6f9e35be6d8e524a96651bd2ef8c8f46",
+      "main.py": "456767fd1e840e6027e68ced11414bd633943404f9d3d0885082bfed3d7e7ef9",
+      "reconcile.py": "302c89afb7bddf57d750cd18601ab8af6e7a38d8a93d93288983d4f965eb0194",
+      "settings.py": "b0f2c4c238efb4a5c7ddfa95591befcb826e692d6632c425c7bcd284b6dc3868",
+      "state.py": "7c617760a5d7ea2cadd02f527be34397893e3f0067ebead856162f775f5a1568",
+      "transport.py": "c96e97b9a058f846d65f2b6aeb5f0d831be6a92352ca7b55068e70236f1ec1e9"
+    },
+    "contract": "0.19.0"
+  },
+  "0.21.0": {
+    "handler": "94cb8a0798043cac2aff07533965eda0e46e1285075e04336f712e536a767ee2",
+    "registration": {
+      "codex_appserver.py": "6ce80deb39b1a5bd886ce72030e019f25307c07ef455ee9fedceae7a34a7f52f",
+      "codex_launch.py": "84c910f74f8a6d6155b25ed1dfcacec29cbba617a100d212bd4b998ebe18988f",
+      "discovery.py": "2edfbb0cf70bd12d4d603ff55b8d7b12227b7a359d2e965b3bc320906b8f8712",
+      "inventory.py": "b39cb19f0fb2a9501a354cd84bf594ea6f9e35be6d8e524a96651bd2ef8c8f46",
+      "main.py": "456767fd1e840e6027e68ced11414bd633943404f9d3d0885082bfed3d7e7ef9",
+      "reconcile.py": "302c89afb7bddf57d750cd18601ab8af6e7a38d8a93d93288983d4f965eb0194",
+      "settings.py": "b0f2c4c238efb4a5c7ddfa95591befcb826e692d6632c425c7bcd284b6dc3868",
+      "state.py": "7c617760a5d7ea2cadd02f527be34397893e3f0067ebead856162f775f5a1568",
+      "transport.py": "c96e97b9a058f846d65f2b6aeb5f0d831be6a92352ca7b55068e70236f1ec1e9"
+    },
+    "contract": "0.19.0"
+  },
+  "0.21.2": {
+    "handler": "66676b4823effe2fc854b45058273b285e421c556f6ef70aee29a2358942ff73",
+    "registration": {
+      "codex_appserver.py": "6ce80deb39b1a5bd886ce72030e019f25307c07ef455ee9fedceae7a34a7f52f",
+      "codex_launch.py": "84c910f74f8a6d6155b25ed1dfcacec29cbba617a100d212bd4b998ebe18988f",
+      "discovery.py": "2edfbb0cf70bd12d4d603ff55b8d7b12227b7a359d2e965b3bc320906b8f8712",
+      "inventory.py": "b39cb19f0fb2a9501a354cd84bf594ea6f9e35be6d8e524a96651bd2ef8c8f46",
+      "main.py": "456767fd1e840e6027e68ced11414bd633943404f9d3d0885082bfed3d7e7ef9",
+      "reconcile.py": "302c89afb7bddf57d750cd18601ab8af6e7a38d8a93d93288983d4f965eb0194",
+      "settings.py": "b0f2c4c238efb4a5c7ddfa95591befcb826e692d6632c425c7bcd284b6dc3868",
+      "state.py": "7c617760a5d7ea2cadd02f527be34397893e3f0067ebead856162f775f5a1568",
+      "transport.py": "c96e97b9a058f846d65f2b6aeb5f0d831be6a92352ca7b55068e70236f1ec1e9"
+    },
+    "contract": "0.22.0",
+    "observer": "0.21.2",
+    "codexPaths": true
+  },
+  "0.23.0": {
+    "handler": "58d479af530d55a31dd68f562ac7881fe4ca4df763a5377c5503f7ace9e2d9bc",
+    "registration": {
+      "codex_appserver.py": "415ccf6d099e7662344c91f84b07e533a94ccb6603511466d121635c403b5020",
+      "codex_launch.py": "84c910f74f8a6d6155b25ed1dfcacec29cbba617a100d212bd4b998ebe18988f",
+      "discovery.py": "2edfbb0cf70bd12d4d603ff55b8d7b12227b7a359d2e965b3bc320906b8f8712",
+      "inventory.py": "b39cb19f0fb2a9501a354cd84bf594ea6f9e35be6d8e524a96651bd2ef8c8f46",
+      "main.py": "456767fd1e840e6027e68ced11414bd633943404f9d3d0885082bfed3d7e7ef9",
+      "reconcile.py": "302c89afb7bddf57d750cd18601ab8af6e7a38d8a93d93288983d4f965eb0194",
+      "settings.py": "b0f2c4c238efb4a5c7ddfa95591befcb826e692d6632c425c7bcd284b6dc3868",
+      "state.py": "7c617760a5d7ea2cadd02f527be34397893e3f0067ebead856162f775f5a1568",
+      "transport.py": "c96e97b9a058f846d65f2b6aeb5f0d831be6a92352ca7b55068e70236f1ec1e9"
+    },
+    "contract": "0.22.0",
+    "observer": "0.22.0",
+    "codexPaths": true
   }
 }

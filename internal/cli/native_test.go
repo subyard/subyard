@@ -1128,7 +1128,7 @@ case "${1:-}" in
 esac
 `, 0o700)
 		writeCLIFile(t, filepath.Join(bin, "yard"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ACTIVE_CAPTURE\"\n", 0o700)
-		registry := []byte("{}\n")
+		registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
 		if err := os.MkdirAll(filepath.Join(releaseRoot, "config"), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -4842,40 +4842,6 @@ func TestObserveProjectBindDetectsConvergenceAndConflicts(t *testing.T) {
 				t.Fatalf("changed=%t err=%v", execution.ActionChanged, err)
 			}
 		})
-	}
-}
-
-func TestAssessStructuredActionUsesTypedCoreAssessment(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	incus := lifecycleIncus()
-	instance := incus.Instances["subyard/yard"]
-	instance.Status = "Running"
-	incus.Instances["subyard/yard"] = instance
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
-		Incus: incus,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := program.loadContext("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	definition, ok := program.manifest.Lookup("stop")
-	if !ok {
-		t.Fatal("stop definition is missing")
-	}
-	lifecycle, err := prepareLifecycleExecution(definition, []string{"--force"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := program.observeLifecycleExecution(context.Background(), loaded.Context, lifecycle); err != nil {
-		t.Fatal(err)
-	}
-	action, delta, err := lifecycle.actionPlan(definition, loaded.Context)
-	if err != nil || action != "yard.stop-force" || !delta.Changed {
-		t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
 	}
 }
 

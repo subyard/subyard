@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -219,6 +220,12 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 		entry.SourceDigest, err = file.legacySourceHash()
 		if err != nil {
 			return nil, err
+		}
+		if file.ownedFormat == "" && entry.SourceDigest == "" {
+			entry.SourceDigest, err = runtime.legacyIntegrationConfigDigest(file)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if file.ownedFormat != "" {
 			entry.Kind = "structured"
@@ -681,22 +688,18 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 
 func (runtime Runtime) observeIntegrationConfigFile(ctx context.Context, mode string, file guestConfigFile, payload []byte) (configmaterial.Observation, error) {
 	var templates [][]byte
-	if mode == configmaterial.ModeAssessAdopt && file.ownedFormat == "toml" {
-		root := filepath.Join(runtime.RepositoryRoot, "config", "agents", file.integration, "legacy-config")
-		info, err := os.Lstat(root)
-		if err != nil && !os.IsNotExist(err) {
+	if mode == configmaterial.ModeAssessAdopt {
+		root, err := runtime.legacyIntegrationConfigDirectory(file.integration)
+		if err != nil {
 			return configmaterial.Observation{}, err
 		}
-		if err == nil {
-			if !info.IsDir() {
-				return configmaterial.Observation{}, errors.New("legacy config templates must be a real directory")
-			}
+		if root != "" {
 			entries, err := os.ReadDir(root)
 			if err != nil {
 				return configmaterial.Observation{}, err
 			}
 			for _, entry := range entries {
-				if filepath.Ext(entry.Name()) != ".toml" {
+				if filepath.Ext(entry.Name()) != "."+file.ownedFormat {
 					continue
 				}
 				template, err := (config.MaterializedAsset{Source: filepath.Join(root, entry.Name())}).ReadSource()
@@ -710,6 +713,49 @@ func (runtime Runtime) observeIntegrationConfigFile(ctx context.Context, mode st
 	return runtime.observeIntegrationConfig(ctx, file.ownedFormat, mode, file.destination, payload, templates...)
 }
 
+func (runtime Runtime) legacyIntegrationConfigDirectory(integration string) (string, error) {
+	if integration == "" {
+		return "", nil
+	}
+	if !domain.SafeName(integration) {
+		return "", errors.New("invalid legacy config owner")
+	}
+	root := filepath.Join(runtime.RepositoryRoot, "config", "agents", integration, "legacy-config")
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("legacy config templates must be a real directory")
+	}
+	return root, nil
+}
+
+// A single package-owned historical raw digest reuses initial source evidence.
+// It is bound by the plan and never persisted as ownership in the inventory.
+func (runtime Runtime) legacyIntegrationConfigDigest(file guestConfigFile) (string, error) {
+	root, err := runtime.legacyIntegrationConfigDirectory(file.integration)
+	if err != nil || root == "" {
+		return "", err
+	}
+	payload, err := file.readSourceAsset(config.MaterializedAsset{Source: filepath.Join(root, filepath.Base(file.destination)+".sha256")})
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	digest := strings.TrimSpace(string(payload))
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) != sha256.Size || strings.ToLower(digest) != digest {
+		return "", errors.New("invalid historical config digest")
+	}
+	return digest, nil
+}
+
 func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mode, path string, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
 	request, err := configmaterial.Request(format, mode, runtime.devUser(), path, runtime.Yard.DevUID, payload, legacyTemplates...)
 	if err != nil {
@@ -717,6 +763,25 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err != nil || result.ExitCode != 0 {
+		var completed *ports.GuestExitError
+		detail := ""
+		switch strings.TrimSpace(string(result.Stderr)) {
+		case "config materialization: adoption ownership evidence unavailable":
+			detail = "no protected baseline or exact recognized legacy template"
+		case "config materialization: adoption owned fields or evidence changed":
+			detail = "owned fields or protected evidence changed"
+		case "config materialization: invalid current JSON":
+			detail = "invalid current JSON"
+		case "config materialization: invalid current TOML":
+			detail = "invalid current TOML"
+		}
+		if detail != "" && result.ExitCode == 2 && (err == nil || (errors.As(err, &completed) && completed.Code == 2)) {
+			return configmaterial.Observation{}, integrationOwnershipError{
+				message: fmt.Sprintf("integration ownership conflict in yard %s at %q: %s; file preserved. Compare with the integration's shipped legacy templates before retrying", runtime.Yard.YardName, path, detail),
+				retry: shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject,
+					"--", "sha256sum", "--", path}),
+			}
+		}
 		return configmaterial.Observation{}, errors.New("integration structured configuration ownership conflict")
 	}
 	return configmaterial.ParseObservation(result.Stdout)

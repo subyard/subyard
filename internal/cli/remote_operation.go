@@ -299,7 +299,7 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 		Arguments  []string `json:"arguments"`
 		Exact      bool     `json:"exact"`
 		StepSchema int      `json:"stepSchema"`
-	}{prepared.Definition.Name, keysWithoutConsent(prepared.Arguments), true, 1}
+	}{prepared.Definition.Name, withoutCommandConsent(prepared.Arguments), true, 1}
 	if err = session.call(planContext, "operation.plan", cli.ensureOperationID(), params, &exact); err != nil {
 		return err
 	}

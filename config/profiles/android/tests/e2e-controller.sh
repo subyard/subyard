@@ -16,6 +16,9 @@ done
 bash "$tmp/$controller" --slot 7 --lane skills > "$tmp/calls"
 grep -Fxq -- '--slot 7 --type subyard-pair --vm-count 1 --purpose android-pool-runtime --vm 1 -- bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane skills' "$tmp/calls"
 assert_controller_failure --slot 7 --lane skills
+SUBYARD_E2E_ROLLOUT_YARD=fixture-route bash "$tmp/$controller" --slot 7 --lane projects > "$tmp/calls"
+grep -Fxq -- '--yard fixture-route --slot 7 --type android-test --vm-count 1 --purpose android-pool-runtime --vm 1 -- bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane projects' "$tmp/calls"
+SUBYARD_E2E_ROLLOUT_YARD=fixture-route assert_controller_failure --slot 7 --lane projects
 for arguments in '--slot' '--slot 0' '--slot 7 --lane' '--slot 7 --lane unknown' '--slot 7 --unknown' '--slot 7 --lane projects extra'; do
   read -r -a argv <<< "$arguments"
   assert_controller_rejects 2 "${argv[@]}"

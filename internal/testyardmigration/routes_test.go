@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/ownerservice"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 )
@@ -237,11 +238,12 @@ func TestRouteConsumersActivationUsesEffectiveHostAccessPolicy(t *testing.T) {
 	if err := VerifyRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), "lacks the shared") {
 		t.Fatalf("allowed missing mount did not produce drift: %v", err)
 	}
-	if err := CommitRouteConsumersActivation(ctx, options, before); err != nil {
-		t.Fatal(err)
-	}
+	// Explicit recreation supplies the missing native route. The activation
+	// reader must observe it, rather than repair it during release activation.
+	write(t, state.defaultDevice, "correct\n")
+
 	if got := strings.TrimSpace(read(t, state.defaultDevice)); got != "correct" {
-		t.Fatalf("allowed consumer was not repaired: %q", got)
+		t.Fatalf("allowed recreated consumer is missing: %q", got)
 	}
 	if got := strings.TrimSpace(read(t, state.extraDevice)); got != "missing" {
 		t.Fatalf("denied consumer received a host mount: %q", got)
@@ -303,11 +305,6 @@ func TestRouteConsumersActivationRejectsExcludedDeviceConflicts(t *testing.T) {
 			} else {
 				assertRouteConflictDiagnostic(t, err, "demo", "subyard-demo/yard-demo", "subyard-e2e-routes")
 			}
-			if err := CommitRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), expected) {
-				t.Fatalf("excluded route-device commit: %v", err)
-			} else {
-				assertRouteConflictDiagnostic(t, err, "demo", "subyard-demo/yard-demo", "subyard-e2e-routes")
-			}
 			if strings.Contains(read(t, state.calls), "config device") {
 				t.Fatal("conflicting device reached mutation")
 			}
@@ -328,9 +325,80 @@ func assertRouteConflictDiagnostic(t *testing.T, err error, expected ...string) 
 			t.Fatalf("public conflict omitted %q: %q", fragment, message)
 		}
 	}
-	if !strings.HasPrefix(retry, "incus ") || strings.Contains(message+retry, "\n") || strings.ContainsAny(retry, ";&|$") ||
+	if (!strings.HasPrefix(retry, "incus ") && retry != "test-yard requires recreation; preserve other sessions' VMs; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms") || strings.Contains(message+retry, "\n") || strings.ContainsAny(retry, "&|$") || strings.HasPrefix(retry, "incus ") && strings.Contains(retry, ";") ||
 		strings.Contains(message+retry, `"source":"/foreign"`) || strings.Contains(message+retry, "private-sentinel") {
 		t.Fatalf("unsafe route diagnostic: message=%q retry=%q", message, retry)
+	}
+}
+
+func TestRouteConsumerActivationAfterLegacyReset(t *testing.T) {
+	for _, scenario := range []string{"absent-backend", "current-backend", "no-marker", "malformed-marker", "unsafe-marker", "nonempty", "unsafe-directory", "symlink"} {
+		t.Run(scenario, func(t *testing.T) {
+			options, state := routeConsumerFixture(t, StateCurrent, true)
+			before, err := Prepare(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy := filepath.Join(options.ConfigHome, "yards", LegacyYard)
+			if scenario == "symlink" {
+				if err := os.Symlink(testkit.TempDir(t), legacy); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(legacy, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := config.YardResetMarkerPath(options.ConfigHome, LegacyYard)
+			if scenario != "no-marker" {
+				payload, mode := "subyard-yard-reset-v1\n", os.FileMode(0o600)
+				if scenario == "malformed-marker" {
+					payload = "foreign\n"
+				}
+				if scenario == "unsafe-marker" {
+					mode = 0o644
+				}
+				testkit.WriteFile(t, marker, []byte(payload), mode)
+			}
+			switch scenario {
+			case "nonempty":
+				testkit.WriteFile(t, filepath.Join(legacy, "retained"), []byte("keep\n"), 0o600)
+			case "unsafe-directory":
+				if err := os.Chmod(legacy, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "absent-backend":
+				// A failed install can publish registration/project before the instance.
+				testkit.WriteFile(t, options.Incus, []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$ROUTE_INCUS_CALLS"
+case "$*" in
+  'project list --format=json') printf '[{"name":"subyard-test-yard"}]\n' ;;
+  'project get subyard-test-yard features.images') printf 'false\n' ;;
+  'list --all-projects --format=json') printf '[]\n' ;;
+  *) exit 2 ;;
+esac
+`), 0o700)
+			}
+			_, prepareErr := Prepare(context.Background(), options)
+			verifyErr := Verify(options, before)
+			observed, activationErr := PrepareRouteConsumerActivation(context.Background(), options)
+			if scenario == "absent-backend" || scenario == "current-backend" {
+				want := StateCurrent
+				if scenario == "absent-backend" {
+					want = StateAbsent
+				}
+				if prepareErr != nil || verifyErr != nil || activationErr != nil || observed != want {
+					t.Fatalf("completed reset blocks install/retry: prepare=%v verify=%v activation=%s/%v", prepareErr, verifyErr, observed, activationErr)
+				}
+				entries, err := os.ReadDir(legacy)
+				if err != nil || len(entries) != 0 || read(t, marker) != "subyard-yard-reset-v1\n" {
+					t.Fatal("read-only activation changed reset state")
+				}
+			} else if prepareErr == nil || verifyErr == nil || activationErr == nil {
+				t.Fatalf("unsafe legacy state accepted: prepare=%v verify=%v activation=%v", prepareErr, verifyErr, activationErr)
+			}
+			if strings.Contains(read(t, state.calls), "config device") || strings.Contains(read(t, state.calls), "exec ") {
+				t.Fatal("owner inspection mutated native state")
+			}
+		})
 	}
 }
 
@@ -342,7 +410,7 @@ func TestRouteConsumerActivationReportsOwnerTopologyConflicts(t *testing.T) {
 		{"legacy-project", `[{"name":"subyard-test-yard"},{"name":"subyard-e2e-yard"}]`, `[]`, "both legacy subyard-e2e-yard and current subyard-test-yard"},
 		{"foreign-owner", `[{"name":"subyard-test-yard"}]`, `[` + strings.ReplaceAll(owner, "yard-test-yard", "foreign-owner") + `]`, "conflicting or foreign identity"},
 		{"duplicate-owner", `[{"name":"subyard-test-yard"}]`, `[` + owner + `,` + owner + `]`, "duplicated or incomplete"},
-		{"unsafe-owner-name", `[{"name":"subyard-test-yard"}]`, `[` + strings.ReplaceAll(owner, "yard-test-yard", `private-sentinel\nunsafe`) + `]`, "conflicting or foreign identity"},
+		{"unsafe-owner-name", `[{"name":"subyard-test-yard"}]`, `[` + strings.ReplaceAll(owner, "yard-test-yard", `private-sentinel\nunsafe`) + `]`, "duplicated or incomplete"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			options, state := routeConsumerFixture(t, StateCurrent, true)
@@ -356,7 +424,14 @@ case "$*" in
 esac
 `, test.projects, test.instances)), 0o700)
 			_, err := PrepareRouteConsumerActivation(context.Background(), options)
-			assertRouteConflictDiagnostic(t, err, "test-yard", test.reason)
+			if test.name == "duplicate-owner" || test.name == "unsafe-owner-name" {
+				var conflict interface{ ActivationConflict() bool }
+				if err == nil || !strings.Contains(err.Error(), test.reason) || !errors.As(err, &conflict) || conflict.ActivationConflict() {
+					t.Fatalf("invalid inventory must remain an uncertain failure: %v", err)
+				}
+			} else {
+				assertRouteConflictDiagnostic(t, err, "test-yard", test.reason)
+			}
 			if strings.Contains(read(t, state.calls), "config device") {
 				t.Fatal("owner conflict reached mutation")
 			}
@@ -464,35 +539,6 @@ func TestRouteConsumersHistoricalMigrationPreservesConsumerContract(t *testing.T
 	}
 	if got := strings.TrimSpace(read(t, state.extraDevice)); got != "correct" {
 		t.Fatalf("historical mount contract changed: %q", got)
-	}
-}
-
-func TestRouteConsumersActivationRejectsEligibilityChangeBeforeCommit(t *testing.T) {
-	for _, template := range []string{"", "isolated"} {
-		t.Run(template, func(t *testing.T) {
-			options, state := routeConsumerFixture(t, StateCurrent, true)
-			write(t, state.extra, "1\n")
-			writeIsolatedRouteTemplate(t, options)
-			registration := filepath.Join(options.ConfigHome, "yards", "demo", "config.env")
-			settings := "SSH_PORT=2233\nYARD_TEMPLATE="
-			write(t, registration, settings+template+"\n")
-			ctx := context.Background()
-			before, err := PrepareRouteConsumersActivation(ctx, options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			next := "isolated"
-			if template == "isolated" {
-				next = ""
-			}
-			write(t, registration, settings+next+"\n")
-			if err := CommitRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), "inventory changed") {
-				t.Fatalf("changed eligibility was not fenced: %v", err)
-			}
-			if strings.Contains(read(t, state.calls), "config device") {
-				t.Fatal("stale eligibility reached consumer mutation")
-			}
-		})
 	}
 }
 
@@ -778,5 +824,66 @@ func TestRouteActivationProspectiveRegistrationKeepsActualBackend(t *testing.T) 
 	observed, err = PrepareRouteConsumerActivation(context.Background(), options)
 	if err != nil || observed != StateAbsent {
 		t.Fatalf("ordinary absent route owner=%s: %v", observed, err)
+	}
+}
+
+func TestRouteInventoryReportsIndependentFailuresInStableOrder(t *testing.T) {
+	options, _ := routeConsumerFixture(t, StateCurrent, true)
+	foreign := `{"name":"foreign-owner","project":"subyard-test-yard","status":"BROKEN","config":{"user.subyard.name":"test-yard"}}`
+	var previous string
+	for _, instances := range []string{`[` + foreign + `,{}]`, `[{},` + foreign + `]`} {
+		testkit.WriteFile(t, options.Incus, []byte(fmt.Sprintf(`#!/bin/sh
+case "$*" in
+ 'project list --format=json') printf '%%s\n' '[{"name":"subyard-e2e-yard"},{"name":"subyard-e2e-yard"},{"name":"subyard-test-yard"},{"name":"subyard-test-yard"}]' ;;
+ 'list --all-projects --format=json') printf '%%s\n' '%s' ;;
+ *) exit 2 ;;
+esac
+`, instances)), 0700)
+		_, err := prepareCanonicalRouteActivationBackend(context.Background(), options)
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		var conflict interface{ ActivationConflict() bool }
+		if !errors.As(err, &diagnostic) || !errors.As(err, &conflict) || conflict.ActivationConflict() {
+			t.Fatalf("uncertain inventory became a warning: %v", err)
+		}
+		message, _ := diagnostic.ActivationDiagnostic()
+		if len(message) > 512 {
+			t.Fatal("independent findings exceed public diagnostic limit", message)
+		}
+		for _, want := range []string{"duplicate Incus project subyard-e2e-yard", "duplicate Incus project subyard-test-yard", "unsupported instance state", "legacy project subyard-e2e-yard", "conflicting or foreign identity", "duplicated or incomplete"} {
+			if !strings.Contains(message, want) {
+				t.Fatalf("lost independent refusal %q: %s", want, message)
+			}
+		}
+		if previous != "" && message != previous {
+			t.Fatalf("inventory order changed diagnostics: %s / %s", previous, message)
+		}
+		previous = message
+	}
+}
+
+func TestOwnerDiagnosticUsesRegistryAwareRecreationCommands(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		t.Run(fmt.Sprint(registered), func(t *testing.T) {
+			options, _ := routeConsumerFixture(t, StateCurrent, true)
+			if registered {
+				record := ownerservice.Registration{Public: ownerservice.Public{SchemaVersion: 1, Owner: "local", Service: "test-vms", Pool: "default", Yard: CurrentYard, Project: "subyard-test-yard", Instance: "yard-test-yard", UUID: "native-uuid", Generation: strings.Repeat("a", 64)}, Ownership: strings.Repeat("b", 64)}
+				if err := os.MkdirAll(options.DataHome, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := (ownerservice.Registry{Root: filepath.Join(options.DataHome, "services")}).Save(record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ownerStateDiagnostic(options, errors.New("retained legacy state"), "retained legacy state")
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &diagnostic) {
+				t.Fatal(err)
+			}
+			_, retry := diagnostic.ActivationDiagnostic()
+			want, err := RecreationHint(options, true)
+			if err != nil || retry != want || strings.Contains(retry, "service remove test-vms") != registered || !strings.Contains(retry, "yard -Y e2e-yard teardown --reset-config") {
+				t.Fatalf("unexecutable recreation: %s %v", retry, err)
+			}
+		})
 	}
 }

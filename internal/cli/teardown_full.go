@@ -391,10 +391,6 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	}
 	projectPayload, _ := json.Marshal(ownedProjects)
 	sourcePayload, _ := json.Marshal(ownedSources)
-	profileContext["SUBYARD_FULL_CLEANUP_PROJECTS"] = string(projectPayload)
-	profileContext["SUBYARD_FULL_CLEANUP_SOURCES"] = string(sourcePayload)
-	profileContext["SUBYARD_FULL_CLEANUP_OPERATOR_UID"] = strconv.Itoa(os.Getuid())
-	profileContext["SUBYARD_FULL_CLEANUP_OPERATOR_GID"] = strconv.Itoa(os.Getgid())
 	if cold {
 		profileContext["SUBYARD_FULL_CLEANUP_INCUS_ABSENT"] = "1"
 	}
@@ -409,6 +405,11 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 			}
 		}
 	}
+	// Generated ownership facts must never be replaced by raw profile overrides.
+	profileContext["SUBYARD_FULL_CLEANUP_PROJECTS"] = string(projectPayload)
+	profileContext["SUBYARD_FULL_CLEANUP_SOURCES"] = string(sourcePayload)
+	profileContext["SUBYARD_FULL_CLEANUP_OPERATOR_UID"] = strconv.Itoa(os.Getuid())
+	profileContext["SUBYARD_FULL_CLEANUP_OPERATOR_GID"] = strconv.Itoa(os.Getgid())
 	profilePlans, err := profile.AssessFullCleanup(ctx, cli.options.RepositoryRoot, profileContext)
 	if err != nil {
 		return err

@@ -369,6 +369,7 @@ func TestReleaseReadinessCapabilitySkew(t *testing.T) {
 		wantError    bool
 	}{
 		{"new ready owner", []string{ReleaseReadinessCapability}, json.RawMessage(`{"status":"ready"}`), "ready", false},
+		{"ready owner with warnings", []string{ReleaseReadinessCapability}, json.RawMessage(`{"status":"ready","warnings":["yard sample needs maintenance"]}`), "ready", false},
 		{"new recovering owner", []string{ReleaseReadinessCapability}, json.RawMessage(`{"status":"recovering","next":"yard update"}`), "recovering", false},
 		{"old owner", []string{Capability}, json.RawMessage(`{"status":"ready"}`), "", false},
 		{"invalid response", []string{ReleaseReadinessCapability}, json.RawMessage(`[]`), "", true},
@@ -386,6 +387,9 @@ func TestReleaseReadinessCapabilitySkew(t *testing.T) {
 			readiness, err := (Client{Transport: &responseTransport{payload: output.Bytes()}}).ReleaseReadiness(context.Background())
 			if (err != nil) != test.wantError {
 				t.Fatalf("readiness=%+v err=%v", readiness, err)
+			}
+			if test.name == "ready owner with warnings" && (readiness == nil || len(readiness.Warnings) != 1 || readiness.Warnings[0] != "yard sample needs maintenance") {
+				t.Fatalf("owner readiness lost warnings: %+v", readiness)
 			}
 			if test.wantStatus == "" {
 				if readiness != nil {

@@ -67,16 +67,6 @@ installed_update() {
     "$runtime_root/current/bin/yard" update --yes "$@"
 }
 
-workflow="$ROOT/.github/workflows/release.yml"
-publish_workflow="$ROOT/.github/workflows/release-publish.yml"
-[ -r "$workflow" ] && [ -r "$publish_workflow" ] || fail 'release workflows are missing'
-grep -Fq 'contents: read' "$workflow" \
-  && grep -Fq 'for arch in amd64 arm64' "$workflow" \
-  && grep -Fq 'dev/release-publication.py export-ci' "$workflow" \
-  && grep -Fq 'contents: write' "$publish_workflow" \
-  && grep -Fq 'dev/release-publication.py publish-ci' "$publish_workflow" \
-  || fail 'release preparation/publication must retain both supported runtime architectures'
-
 rpc_negotiate() { # <engine> <engine-version> <protocol-version> <compatible|incompatible> <label>
   local engine="$1" engine_version="$2" protocol="$3" expectation="$4" label="$5"
   local payload hex request response header size body

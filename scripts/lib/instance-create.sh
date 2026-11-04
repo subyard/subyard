@@ -152,6 +152,10 @@ yard_instance_create() (
     if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
       warn "instance '$YARD_INSTANCE_NAME' was created with an initialization warning (incus init exit $rc)"
     else
+      # Expose a recognized public reason, never arbitrary private CLI stderr.
+      if LC_ALL=C grep -Fxq -- "Error: Image \"$selected_image\" not found" "$metadata/error"; then
+        printf 'Error: Image "%s" not found (Incus project "%s")\n' "$selected_image" "$INCUS_PROJECT" >&2
+      fi
       printf 'instance creation failed (incus init exit %s)\n' "$rc" >&2
       exit "$rc"
     fi

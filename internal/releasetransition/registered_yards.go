@@ -59,6 +59,51 @@ func (t *V2Transition) nativeOwner(m MigrationDefinitionV2, resource string) V2A
 	return nil
 }
 
+// V2ResumeIdentityObserver names what a finished row must still apply to. Unlike
+// the row's fingerprints, it survives later rows and activation.
+type V2ResumeIdentityObserver interface {
+	ResumeIdentity(context.Context, V2SettingsSnapshotView) (Fingerprint, error)
+}
+
+func (t *V2Transition) nativeResumeIdentity(ctx context.Context, work v2Work, view V2SettingsSnapshotView) (string, bool, error) {
+	observer, ok := t.nativeOwner(work.migration, work.intent.Resource).(V2ResumeIdentityObserver)
+	if !ok {
+		return "", false, nil
+	}
+	identity, err := observer.ResumeIdentity(ctx, view)
+	if err != nil {
+		return "", false, err
+	}
+	if err := validateFingerprint(identity, "native resume identity"); err != nil {
+		return "", false, err
+	}
+	return string(identity) + "\n", true, nil
+}
+
+// pinNativeIdentity is a sibling record: released readers refuse recovery data on native rows.
+func (t *V2Transition) pinNativeIdentity(ctx context.Context, journal JournalRecord, step JournalStep, work v2Work) error {
+	if work.kind() != v2NativeWork {
+		return nil
+	}
+	identity, ok, err := t.nativeResumeIdentity(ctx, work, nil)
+	if err != nil || !ok {
+		return err
+	}
+	return t.store.CreateNativeIdentity(journal.Transaction, step.ID, []byte(identity))
+}
+
+func (t *V2Transition) nativeIdentityReplaced(ctx context.Context, journal JournalRecord, step JournalStep, work v2Work, view V2SettingsSnapshotView) (bool, error) {
+	pinned, err := t.store.ReadNativeIdentity(journal.Transaction, step.ID)
+	if err != nil || !pinned.Exists {
+		return false, err
+	}
+	identity, ok, err := t.nativeResumeIdentity(ctx, work, view)
+	if err != nil || !ok {
+		return false, err
+	}
+	return identity != string(pinned.Payload), nil
+}
+
 func laterNativeRow(steps []JournalStep, row JournalStep) bool {
 	later := false
 	for _, step := range steps {
@@ -131,6 +176,15 @@ func (t *V2Transition) appendNativeMigration(ctx context.Context, observation *v
 			return view, err
 		}
 		observation.activationConsequences = append(observation.activationConsequences, observed.Consequences...)
+		if m.Kind == guestDiskTmpMigration {
+			for _, text := range observed.Consequences {
+				decision := DecisionTransform
+				if observed.Converged {
+					decision = DecisionPreserve
+				}
+				observation.decisions = append(observation.decisions, RedactedDecision{Resource: owner.ID(), Scope: "guest-disk-tmp", Decision: decision, Result: text})
+			}
+		}
 		if observed.Converged {
 			continue
 		}

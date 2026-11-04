@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
-	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -1034,13 +1033,6 @@ func TestMigrationOperatorInputDoesNotLeakToNativeHelpers(t *testing.T) {
 	child.ExtraFiles = []*os.File{input}
 	if err := child.Run(); err != nil {
 		t.Fatal("explicit verified handoff lost operator terminal", err)
-	}
-	if _, err := master.Write([]byte("yes\n")); err != nil {
-		t.Fatal(err)
-	}
-	program.migrationOperatorInput = input
-	if accepted, err := (migrationLatePrompt{cli: program}).Confirm(context.Background(), domain.ConfirmationRequest{Summary: "separate maintenance consent", Default: domain.ConfirmationDefaultNo}); err != nil || !accepted {
-		t.Fatal("engine lost its late terminal input", accepted, err)
 	}
 }
 

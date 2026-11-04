@@ -45,7 +45,10 @@ case "$2" in
   %a:%u:%g) printf '%s:%s\n' "$(/usr/bin/stat -c %a "$3")" "${OWNER:-0:0}" ;;
   *) exec /usr/bin/stat "$@" ;;
 esac`,
-		"findmnt":    `echo "${FILESYSTEM:-ext4}"`,
+		"findmnt": `filesystem=${FILESYSTEM:-ext4}
+case " $* " in *" --uniq "*) filesystem=$(printf '%s\n' "$filesystem" | tail -n 1) ;; esac
+printf '%s\n' "$filesystem"
+[ "${FINDMNT_FAIL:-0}" = 0 ]`,
 		"mountpoint": `exit "${MOUNT_EXIT:-32}"`,
 		"systemd-tmpfiles": `printf '%s\n' "$*" >> "$FIXTURE_ROOT/calls"
 case "$1" in --create) mkdir -p "$FIXTURE_ROOT/tmp/subyard-disposable"; chmod 1777 "$FIXTURE_ROOT/tmp/subyard-disposable" ;; esac`,
@@ -145,6 +148,73 @@ func TestDiskTmpGuestPolicy(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(policy); string(data) != "foreign\n" {
 		t.Fatal("foreign policy was changed")
+	}
+}
+
+// findmnt --uniq skips overmounted entries; the final row models the visible
+// filesystem. A failed query must refuse even if it emitted plausible output.
+func TestDiskTmpStackedMountsUseVisibleFilesystem(t *testing.T) {
+	for _, test := range []struct {
+		name, filesystems, mountExit, queryFailure string
+		want                                       int
+	}{
+		{"stacked-memory", "tmpfs\ntmpfs", "0", "0", 10},
+		{"visible-memory", "ext4\ntmpfs", "0", "0", 10},
+		{"visible-disk-root", "tmpfs\next4", "32", "0", 0},
+		{"visible-disk-mount", "tmpfs\next4", "0", "0", 1},
+		{"failed-query", "tmpfs\next4", "32", "1", 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, run := diskTmpFixture(t)
+			// Only /tmp is mounted; the disposable child stays an ordinary directory.
+			testkit.WriteFile(t, filepath.Join(root, "bin/mountpoint"), []byte("#!/bin/sh\n"+
+				`[ "$2" != "$FIXTURE_ROOT/tmp" ] || exit "${MOUNT_EXIT:-32}"`+"\nexit 32\n"), 0700)
+			payload := filepath.Join(root, "tmp/active")
+			testkit.WriteFile(t, payload, []byte("retain active workload data"), 0600)
+			environment := []string{"FILESYSTEM=" + test.filesystems, "MOUNT_EXIT=" + test.mountExit, "FINDMNT_FAIL=" + test.queryFailure}
+			assertExit := func(operation string, want int) []byte {
+				t.Helper()
+				output, err := run(operation, environment...)
+				code := 0
+				if err != nil {
+					var exit *exec.ExitError
+					if !errors.As(err, &exit) {
+						t.Fatal(err)
+					}
+					code = exit.ExitCode()
+				}
+				if code != want {
+					t.Fatalf("%s: exit %d, want %d: %s", operation, code, want, output)
+				}
+				return output
+			}
+			output := assertExit("assess", test.want)
+			if test.name == "visible-disk-mount" && !strings.Contains(string(output), "disk-backed "+filepath.Join(root, "tmp")+" is its own mount") {
+				t.Fatalf("wrong refusal for visible disk mount: %s", output)
+			}
+			if test.name == "failed-query" && !strings.Contains(string(output), "cannot read the "+filepath.Join(root, "tmp")+" filesystem") {
+				t.Fatalf("query failure became a filesystem verdict: %s", output)
+			}
+			if _, err := os.Stat(filepath.Join(root, "calls")); !os.IsNotExist(err) {
+				t.Fatalf("assessment wrote: %v", err)
+			}
+			if test.want == 10 {
+				if output, err := run("apply", environment...); err != nil {
+					t.Fatalf("live apply: %v: %s", err, output)
+				}
+			} else if output, err := run("apply"); err != nil {
+				t.Fatalf("policy setup: %v: %s", err, output)
+			}
+			assertExit("check", test.want)
+			if data, err := os.ReadFile(payload); err != nil || string(data) != "retain active workload data" {
+				t.Fatalf("live data changed: %q %v", data, err)
+			}
+			// A native restart drops the transient stack; the masked mount and
+			// installed cleanup policy then converge on the ordinary disk root.
+			if output, err := run("check", "FILESYSTEM=ext4", "MOUNT_EXIT=32"); err != nil {
+				t.Fatalf("after restart: %v: %s", err, output)
+			}
+		})
 	}
 }
 

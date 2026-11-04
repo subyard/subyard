@@ -38,7 +38,8 @@ type RegisteredYardMigration struct {
 	ConfigHome                      string
 	Resources                       resource.Registry
 	GuestTmp                        bool
-	Prompt                          ports.Prompter
+	attempted                       bool
+	restartAllowed                  bool // Per-owner approval: a newly running yard requires a fresh plan.
 	Retired                         func(context.Context, releasetransition.JournalRecord) (bool, error)
 }
 
@@ -252,6 +253,25 @@ func (m *RegisteredYardMigration) observe(ctx context.Context) (releasetransitio
 	}
 	return observed, err
 }
+
+// ResumeIdentity reads only what no migration effect may change.
+func (m *RegisteredYardMigration) ResumeIdentity(ctx context.Context, view releasetransition.V2SettingsSnapshotView) (releasetransition.Fingerprint, error) {
+	targets, err := m.LoadTargets(ctx, view)
+	if err != nil {
+		return "", err
+	}
+	identities := []any{m.ID()}
+	for _, target := range targets {
+		yard := target.Loaded.Context
+		instance, err := target.Runtime.Incus.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
+		if err != nil && !errors.Is(err, ports.ErrInstanceNotFound) {
+			return "", fmt.Errorf("yard %s: %w", yard.YardName, err)
+		}
+		identities = append(identities, []string{yard.IncusProject, yard.YardInstanceName, instance.Config["volatile.uuid"]})
+	}
+	return migrationFingerprint(identities), nil
+}
+
 func (m *RegisteredYardMigration) observePlans(ctx context.Context, plans []registeredYardPlan) (releasetransition.V2ActivationObservation, error) {
 	identities, err := m.boundIdentities(plans)
 	if err != nil {
@@ -262,20 +282,15 @@ func (m *RegisteredYardMigration) observePlans(ctx context.Context, plans []regi
 	for _, plan := range plans {
 		instance := plan.instance
 		if m.GuestTmp {
-			ready, err := registeredDiskTmpReady(ctx, plan.runtime)
-			if err != nil {
-				return releasetransition.V2ActivationObservation{}, err
+			pending := instance.LocalConfig["user.subyard.disk_tmp"] != "v1"
+			running := strings.EqualFold(instance.Status, "running")
+			m.restartAllowed = pending && running
+			complete = complete && (!pending || !running || m.attempted)
+			if pending {
+				text := DiskTmpDisclosure(plan.loaded.Context.YardName, running)
+				consequences = append(consequences, text)
 			}
-			if strings.EqualFold(instance.Status, "running") && (!ready || instance.LocalConfig["user.subyard.disk_tmp"] != "v1") {
-				if err := assessRegisteredDiskTmp(ctx, plan.runtime); err != nil {
-					return releasetransition.V2ActivationObservation{}, err
-				}
-			}
-			powerMatches := strings.EqualFold(instance.Status, instance.LocalConfig["user.subyard.desired_power"])
-			complete = complete && ready && powerMatches && instance.LocalConfig["user.subyard.disk_tmp"] == "v1"
-			if !ready || instance.LocalConfig["user.subyard.disk_tmp"] != "v1" {
-				consequences = append(consequences, "yard "+plan.loaded.Context.YardName+": install disk-backed /tmp policy; clear /tmp at later stops and boots; any necessary restart requires separate later confirmation")
-			}
+
 		} else {
 			projectGrant := false
 			for key, value := range plan.metadata {
@@ -350,11 +365,27 @@ func (m *RegisteredYardMigration) Reconcile(ctx context.Context, _ releasetransi
 	}
 	for _, plan := range plans {
 		if m.GuestTmp {
-			if err := migrateRegisteredDiskTmp(ctx, plan.runtime, func(request domain.ConfirmationRequest) (bool, error) { return m.confirmMaintenance(ctx, request) }, checkFresh); err != nil {
+			if strings.EqualFold(plan.instance.Status, "running") && plan.instance.LocalConfig["user.subyard.disk_tmp"] != "v1" && !m.restartAllowed {
+				return domain.ErrPlanStale
+			}
+			err := CompleteRegisteredDiskTmp(ctx, plan.runtime, checkFresh)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, domain.ErrPlanStale) {
 				return err
 			}
+			if err != nil && plan.runtime.Stderr != nil {
+				power := "unknown"
+				if actual, readErr := plan.runtime.Incus.Instance(ctx, plan.instance.Project, plan.instance.Name); readErr == nil {
+					power = actual.Status
+				}
+				fmt.Fprintf(plan.runtime.Stderr, "warning: yard %s: disk-/tmp migration pending: %v; run %s\n", plan.loaded.Context.YardName, err, DiskTmpRetry(plan.loaded.Context.YardName, power))
+			}
+			m.attempted = true
 			continue
 		}
+
 		if len(plan.metadata) != 0 {
 			adopter, ok := plan.runtime.Incus.(ports.ProjectAdopter)
 			if !ok {
@@ -379,12 +410,6 @@ func (m *RegisteredYardMigration) Reconcile(ctx context.Context, _ releasetransi
 
 	}
 	return nil
-}
-func (m *RegisteredYardMigration) confirmMaintenance(ctx context.Context, request domain.ConfirmationRequest) (bool, error) {
-	if m.Prompt == nil {
-		return false, domain.ErrConfirmationRequired
-	}
-	return m.Prompt.Confirm(ctx, request)
 }
 func registeredSettingsPath(loaded config.Loaded) (string, error) {
 	if !domain.SafeName(loaded.Context.YardName) {
@@ -519,4 +544,12 @@ func (m *RegisteredYardMigration) PreparedInputPaths() ([]string, error) {
 	}
 	slices.Sort(paths)
 	return paths, nil
+}
+
+// DiskTmpDisclosure fits the frozen Process V1 Result limit even for a 63-byte yard name.
+func DiskTmpDisclosure(yard string, running bool) string {
+	if !running {
+		return "yard " + yard + ": stopped; no restart now; disk-backed /tmp finishes at next start"
+	}
+	return "yard " + yard + ": restarts now; active agent sessions, processes and connections are lost; /tmp is reset; persistent data is kept"
 }

@@ -164,6 +164,20 @@ class RetirementTest(unittest.TestCase):
                 with self.assertRaises(ValueError): self.apply(observed)
                 self.assertEqual(self.effects,[])
 
+    def test_docker_empty_value_rewrite_preserves_observation(self):
+        self.container['Config']['Env']=None
+        self.container['HostConfig']={'Dns':None,'Binds':[],'Tmpfs':None,'ReadonlyRootfs':False,'Memory':0}
+        observed,_=retirement.observe()
+        self.container['Config']['Env']=[]
+        self.container['HostConfig']={'Dns':[],'Binds':None,'Tmpfs':{},'ReadonlyRootfs':False,'Memory':0}
+        self.assertEqual(retirement.observe()[0],observed)
+        for change in ({'Dns':['192.0.2.1']},{'ReadonlyRootfs':True},{'Memory':1}):
+            with self.subTest(change=change):
+                changed=dict(self.container['HostConfig'],**change)
+                current,self.container['HostConfig']=self.container['HostConfig'],changed
+                self.assertNotEqual(retirement.observe()[0],observed)
+                self.container['HostConfig']=current
+
     def test_stale_container_or_route_refuses_apply(self):
         observed,_=retirement.observe()
         self.container['Id']='different'

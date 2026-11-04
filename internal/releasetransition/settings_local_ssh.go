@@ -72,7 +72,7 @@ func (transition *V2Transition) inspectLocalSSHPorts(view V2SettingsSnapshotView
 		if loaded.Context.AccessKind != domain.AccessLocal {
 			continue
 		}
-		if previous, exists := ports[loaded.Context.SSHPort]; exists && loaded.Context.SSHPort != 0 {
+		if previous, exists := ports[loaded.Context.SSHPort]; exists && loaded.Context.SSHPort != 0 && !ownerMigrationPair(previous, yard) {
 			return plan, fmt.Errorf("SSH port is used by both yard %s and yard %s", previous, yard)
 		}
 		ports[loaded.Context.SSHPort] = yard
@@ -100,6 +100,13 @@ func (transition *V2Transition) inspectLocalSSHPorts(view V2SettingsSnapshotView
 	return plan, nil
 }
 
+// An interrupted owner migration legitimately leaves both of its yards on one
+// port until the owner step finishes; that step owns refusing a real conflict.
+func ownerMigrationPair(left, right string) bool {
+	return left == legacyOwnerRegistrationYard && right == currentOwnerRegistrationYard ||
+		left == currentOwnerRegistrationYard && right == legacyOwnerRegistrationYard
+}
+
 func (transition *V2Transition) loadSSHPortYard(yard string, files *config.ProspectiveFiles) (config.Loaded, error) {
 	operator := transition.options.OperatorHome
 	if operator == "" {
@@ -116,13 +123,16 @@ func (transition *V2Transition) localSSHPortSnapshot(yard string, view V2Setting
 	if err != nil {
 		return expected, path, "", err
 	}
-	legacy := filepath.Join(transition.options.ConfigHome, "yards", yard+".env")
-	flat, err := view.ReadSnapshot(legacy)
-	if err != nil || expected.Exists && flat.Exists {
-		return expected, path, "", errors.New("SSH port migration requires unambiguous local yard settings")
-	}
-	if flat.Exists {
-		expected, path = flat, legacy
+	// The loader has never read a flat file for the default yard.
+	if yard != "default" {
+		legacy := filepath.Join(transition.options.ConfigHome, "yards", yard+".env")
+		flat, err := view.ReadSnapshot(legacy)
+		if err != nil || expected.Exists && flat.Exists {
+			return expected, path, "", errors.New("SSH port migration requires unambiguous local yard settings")
+		}
+		if flat.Exists {
+			expected, path = flat, legacy
+		}
 	}
 	inputs := map[string]Fingerprint{}
 	for _, layer := range loaded.ConfigurationLayers {

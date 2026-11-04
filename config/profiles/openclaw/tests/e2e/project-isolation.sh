@@ -149,9 +149,13 @@ openclaw_project_isolation() {
   if yard up "$name_a" --yes > "$STATE/isolation-deselected-up.log" 2>&1; then
     die 'deselected profile admitted a project startup'
   fi
+  grep -Fq "project target \"openclaw\" is not active on yard \"$YARD_NAME\"" "$STATE/isolation-deselected-up.log" \
+    || die 'deselected startup failed without the profile admission refusal'
   if yard sync "$root/a" --name "Rejected$TOKEN" --target openclaw --yes > "$STATE/isolation-deselected-import.log" 2>&1; then
     die 'deselected profile admitted a new project'
   fi
+  grep -Fq "project target \"openclaw\" is not active on yard \"$YARD_NAME\"" "$STATE/isolation-deselected-import.log" \
+    || die 'deselected import failed without the profile admission refusal'
   yard down "$name_a" --yes >/dev/null
   yard remove "$name_a" --yes >/dev/null
   yard down "$name_b" --yes >/dev/null

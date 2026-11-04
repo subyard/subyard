@@ -133,6 +133,7 @@ func configLayoutRollbackFixture(t *testing.T, metadata string) (*Runtime, optio
 	response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"transition-required","message":"pending","retry":"run yard update --rollback"}}}`
 	payload := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n--version) printf 'yard-engine 1.2.3\\n' ;;\n--command-options) printf '%%s\\n' %q ;;\n_release-transition) cat >/dev/null; printf 'called\\n' >> %q; printf '%%s\\n' %q ;;\n*) exit 64 ;;\nesac\n", metadata, called, response)
 	candidate := writeRuntimeCandidatePayload(t, runtimeRoot, payload)
+	bindRollbackFixtureRegistry(t, candidate, []byte(sourceAdmissionRegistry))
 	registry := []byte("config||@config||local|mutate|dynamic|public|lifecycle|config|config <command>|configuration settings|" + metadata + "|set unset import edit\n")
 	testkit.WriteFile(t, filepath.Join(candidate.root, "config", "commands.registry"), registry, 0o600)
 	manifestPath := filepath.Join(candidate.root, "runtime-files.sha256")

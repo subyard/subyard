@@ -17,10 +17,16 @@ def read_only_stdin_commands(package):
     observer = resource / 'registration-observer.bash'
     historical = None
     if contract.is_file() and observer.is_file():
-        current_handler = Path(__file__).parents[1] / 'resources/orca/handler.sh'
+        current_resource = Path(__file__).parents[1] / 'resources/orca'
+        current_handler = current_resource / 'handler.sh'
         if (resource / 'handler.sh').read_bytes() != current_handler.read_bytes():
             return []
+        if any(path.is_symlink() or path.read_bytes() != (current_resource/path.name).read_bytes()
+               for path in (contract, observer)):
+            return []
     if not contract.is_file() or not observer.is_file():
+        if contract.exists() or contract.is_symlink() or observer.exists() or observer.is_symlink():
+            return []
         handler = resource / 'handler.sh'
         if not handler.is_file():
             return []
@@ -34,9 +40,9 @@ def read_only_stdin_commands(package):
                     hashlib.sha256((actual / name).read_bytes()).hexdigest() != digest
                     for name, digest in expected.items()):
                 continue
-            historical = version
+            historical = identity
             contract = FIXTURES / f"contract-{identity['contract']}.txt"
-            observer = FIXTURES / 'observer.txt'
+            observer = FIXTURES / (f"observer-{identity['observer']}.txt" if 'observer' in identity else 'observer.txt')
             break
         if historical is None:
             return []
@@ -73,7 +79,7 @@ registration_desired_digest
                '/etc/systemd/system/subyard-orca.service',
                '/etc/systemd/system/subyard-orca-discovery.service',
                '/etc/systemd/system/subyard-orca-discovery.timer',
-               *([] if historical else ['/etc/profile.d/subyard-orca-codex.sh',
-                                       '/usr/local/libexec/subyard/orca-codex/codex']), *names]
+               *(['/etc/profile.d/subyard-orca-codex.sh', '/usr/local/libexec/subyard/orca-codex/codex']
+                 if not historical or historical.get('codexPaths', False) else []), *names]
     return [(command, observer.read_bytes(), '{"state":"absent","actual":"","desired":""}\n', 0,
              ['bash', '-c', script, 'orca-observation', str(resource), str(contract)])]

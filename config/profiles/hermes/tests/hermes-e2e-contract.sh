@@ -19,12 +19,6 @@ if grep -Eq '^export (ENVIRONMENT_PROFILES|CODING_TOOL_INTEGRATIONS|DEV_SUDO|FOR
   fail 'Hermes E2E masks the shipped preset with command environment values'
 fi
 
-for forbidden in \
-  backup-to-restic.sh hermes-backup-create hermes-backup-finalize hermes-provider-ready \
-  hermes-release-update hermes-restore hermes-runtime-check hermes-serve.service \
-  hermes-dashboard.service hermes-dashboard-ingress; do
-  [ ! -e "$PROFILE/$forbidden" ] || fail "application-aware profile helper remains: $forbidden"
-done
 
 # Execute the owning setup with native effects replaced at their boundary.
 fixture="$(mktemp -d /tmp/subyard-hermes-bootstrap.XXXXXX)"
@@ -58,6 +52,7 @@ for scenario in free busy occupied-address; do
     sudo() { [ "$1" = -n ]; shift; "$@"; }
     ss() { if [ "$scenario" = busy ]; then printf 'LISTEN\n'; fi; }
     incus() { :; }
+    setting() { printf fixture; }
     yard() {
       shift
       [ -f "$STATE/address-added" ] || fail 'init ran before the owner address existed'

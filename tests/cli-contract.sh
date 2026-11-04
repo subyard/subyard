@@ -181,3 +181,59 @@ zsh_profiles="$(TEST_ROOT="$ROOT" zsh -fc '
 [ "$zsh_profiles" = "$profiles" ] || fail "Zsh completion joined profile records: $zsh_profiles"
 
 printf 'ok: CLI help, globals and profile completion contract\n'
+
+# Shared-only onboarding uses the real CLI and a terminal, without a VM/SSH server.
+(
+  set -euo pipefail
+  shared_root="$(mktemp -d /tmp/subyard-shared-source.XXXXXX)"
+  trap 'rm -rf -- "$shared_root"' EXIT
+  source="$shared_root/source" operator="$shared_root/operator" asset_root="$shared_root/tooling"
+  config_home="$operator/.config/subyard" data_home="$operator/.subyard"
+  checkout="$operator/.local/share/subyard-config"
+  install -d -m 0700 "$source/shared" "$config_home" "$data_home" "$asset_root/bin"
+  # Use current assets and launcher; exclude any checkout-private operator config.
+  cp -a "$ROOT/config" "$asset_root/config"
+  install -m 0755 "$ROOT/bin/yard" "$asset_root/bin/yard"
+  install -m 0600 /dev/null "$config_home/config.env"
+  printf 'local sentinel\n' > "$config_home/local-only.keep"
+  chmod 0600 "$config_home/local-only.keep"
+  printf '{"schemaVersion":1}\n' > "$source/subyard-config.json"
+  printf 'YARD_IMAGE=images:debian/13\n' > "$source/shared/config.env"
+  git -C "$source" init -q -b main
+  git -C "$source" add subyard-config.json shared/config.env
+  git -C "$source" -c user.name='CLI fixture' -c user.email='fixture@invalid' \
+    -c commit.gpgsign=false commit -qm 'Create shared source'
+  original_head="$(git -C "$source" rev-parse HEAD)"
+  for path in source operator; do cp -a "$shared_root/$path" "$shared_root/$path.before"; done
+  config_environment=(env -i "PATH=$PATH" "HOME=$operator" "SUBYARD_OPERATOR_HOME=$operator"
+    "SUBYARD_CONFIG_HOME=$config_home" "SUBYARD_HOME=$data_home" "SUBYARD_NO_AUDIT=1"
+    "YARD_ENGINE_PATH=${YARD_ENGINE_PATH:-$ROOT/.build/yard}" "GIT_TERMINAL_PROMPT=0")
+  shared_yard() { "${config_environment[@]}" "$asset_root/bin/yard" "$@"; }
+  shared_terminal() {
+    local command_line
+    printf -v command_line '%q ' "${config_environment[@]}" "$asset_root/bin/yard" "$@"
+    (cd "$shared_root"; SHELL=/bin/bash script --echo never -qefc "$command_line" /dev/null)
+  }
+  if printf 'n\n' | shared_terminal config sync connect "$source" --host-id shared-fixture \
+    > "$shared_root/decline.log" 2>&1; then fail 'declined shared source connected'; fi
+  grep -Fq 'operation declined' "$shared_root/decline.log" || { cat "$shared_root/decline.log"; fail 'wrong decline refusal'; }
+  [ "$(grep -Fc 'Proceed? [Y/n]' "$shared_root/decline.log")" = 1 ] || fail 'decline prompt count'
+  for path in source operator; do diff -r "$shared_root/$path.before" "$shared_root/$path"; done
+  [ ! -e "$checkout" ] && [ ! -e "$config_home/host-id" ] \
+    && [ ! -e "$config_home/.sync/source.json" ] || fail 'decline published source state'
+  if shared_yard config sync path >/dev/null 2>&1; then fail 'decline registered a source'; fi
+  printf 'y\n' | shared_terminal config sync connect "$source" --host-id shared-fixture \
+    > "$shared_root/accept.log" 2>&1 || { cat "$shared_root/accept.log"; fail 'shared source accept failed'; }
+  [ "$(grep -Fc 'Proceed? [Y/n]' "$shared_root/accept.log")" = 1 ] || fail 'accept prompt count'
+  grep -Fq '.sync/settings/overrides/shared/config.env' "$shared_root/accept.log" \
+    && grep -Fq 'config sync: connected' "$shared_root/accept.log" || fail 'shared source preview/result missing'
+  ! grep -Fq 'images:debian/13' "$shared_root/accept.log" || fail 'source preview disclosed a setting'
+  [ "$(cat "$config_home/host-id")" = shared-fixture ] || fail 'local HostID missing'
+  cmp "$source/shared/config.env" "$config_home/.sync/settings/overrides/shared/config.env"
+  cmp "$operator.before/.config/subyard/config.env" "$config_home/config.env"
+  cmp "$operator.before/.config/subyard/local-only.keep" "$config_home/local-only.keep"
+  [ ! -e "$checkout/hosts" ] && [ -z "$(git -C "$checkout" status --porcelain=v1 --untracked-files=all)" ] \
+    && [ "$(git -C "$source" rev-parse HEAD)" = "$original_head" ] || fail 'shared onboarding changed Git inputs'
+  [ "$(shared_yard config sync path)" = "$checkout" ] || fail 'wrong authoritative checkout'
+  shared_yard config sync --check >/dev/null
+)

@@ -516,3 +516,48 @@ func TestResourceExactRPCRefusesV1Mutation(t *testing.T) {
 		t.Fatalf("unsupported plan applied resource: %v", err)
 	}
 }
+
+func TestResourceExactConsentStopsAtArgumentSeparator(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		automated bool
+	}{
+		{"decline without flags", []string{"demo", "run"}, false},
+		{"long payload flag", []string{"demo", "run", "--", "--yes"}, false},
+		{"short payload flag", []string{"demo", "run", "--", "-y"}, false},
+		{"repeated separator", []string{"demo", "run", "--", "--", "--yes"}, false},
+		{"prefix and payload flags", []string{"demo", "run", "--yes", "--", "--yes"}, true},
+		{"global and payload flags", []string{"--yes", "demo", "run", "--", "--yes"}, true},
+		{"short prefix and payload flags", []string{"demo", "run", "-y", "--", "-y"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, applyLog := resourceExactFixture(t)
+			prompt := &testkit.Prompt{Answers: []bool{false}}
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
+				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if test.automated {
+				if code != 0 || len(prompt.Requests) != 0 {
+					t.Fatalf("prefix consent failed: code=%d prompts=%#v stderr=%s", code, prompt.Requests, stderr.String())
+				}
+				if got := readResourceApplyLog(t, applyLog); got != "first\nsecond\n" {
+					t.Fatalf("prefix consent did not apply the native plan: %q", got)
+				}
+				return
+			}
+			if code != 1 || len(prompt.Requests) != 1 || !strings.Contains(stderr.String(), "declined") {
+				t.Fatalf("payload granted consent: code=%d prompts=%#v stderr=%s", code, prompt.Requests, stderr.String())
+			}
+			for _, path := range []string{applyLog, filepath.Join(root, "unit-first"), filepath.Join(root, "unit-second")} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("declined payload invocation had effects: %s: %v", path, err)
+				}
+			}
+		})
+	}
+}

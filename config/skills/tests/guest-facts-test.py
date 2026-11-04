@@ -44,6 +44,13 @@ class Facts(unittest.TestCase):
     def apply(self, mode, target=None):
         facts.apply(mode, target or self.target, self.path, self.machine)
 
+    def check(self, target):
+        original_read = facts.read
+        with patch.object(facts, 'read', side_effect=lambda: original_read(self.path, self.machine)), \
+             patch.object(facts.sys, 'argv', ['facts.py', 'check']), \
+             patch.object(facts.sys, 'stdin', io.StringIO(json.dumps(target))):
+            return facts.main()
+
     def test_empty_success_noop_and_profile_selection_snapshot(self):
         self.apply('begin')
         self.assertIsNone(self.read()['last_success'])
@@ -108,13 +115,53 @@ class Facts(unittest.TestCase):
         self.apply('begin'); self.apply('commit')
         original_read = facts.read
         with patch.object(facts, 'read', side_effect=lambda: original_read(self.path, self.machine)), patch.object(facts.sys, 'argv', ['facts.py', 'check']), patch.object(facts.json, 'load', return_value=dict(self.target, selected_profiles=['synthetic'])):
-            self.assertEqual(facts.main(), 10)
+            self.assertEqual(facts.main(), 11)
         self.apply('begin', dict(self.target, version='0.23.0-test'))
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.object(facts, 'read', side_effect=lambda: original_read(self.path, self.machine)), patch.object(facts.sys, 'argv', ['facts.py']), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             self.assertEqual(facts.main(), 1)
         self.assertEqual(json.loads(stdout.getvalue())['last_success']['version'], self.target['version'])
         self.assertIn('incomplete', stderr.getvalue())
+
+    def test_check_distinguishes_pending_profiles_from_every_other_target_difference(self):
+        self.apply('begin'); self.apply('commit')
+        self.assertEqual(self.check(self.target), 0)
+        before = self.path.read_bytes()
+        pending = dict(self.target, selected_profiles=['synthetic'])
+        self.assertEqual(self.check(pending), 11)
+        self.assertEqual(self.path.read_bytes(), before, 'checking must not apply configuration')
+        targets = [dict(self.target, version='0.23.0-test'), dict(pending, version='0.23.0-test')]
+        for key in ('name', 'project', 'instance'):
+            targets.append(dict(pending, yard=dict(self.target['yard'], **{key: 'different'})))
+            targets.append(dict(self.target, yard=dict(self.target['yard'], **{key: 'different'})))
+        for target in targets:
+            with self.subTest(target=target):
+                self.assertEqual(self.check(target), 10)
+        self.apply('begin', pending)
+        self.assertEqual(self.check(pending), 10)
+        self.assertEqual(self.check(self.target), 10)
+        self.assertEqual(self.read()['last_success'], self.target)
+        self.apply('commit', pending)
+        self.assertEqual(self.check(pending), 0)
+        self.assertEqual(self.read()['last_success'], pending)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o644)
+
+    def test_pending_profiles_never_hides_invalid_facts_or_invalid_target(self):
+        self.apply('begin'); self.apply('commit')
+        pending = dict(self.target, selected_profiles=['synthetic'])
+        for target in (None, {}, dict(pending, version='invalid version'),
+                       dict(pending, yard={}), dict(pending, selected_profiles=None),
+                       dict(pending, selected_profiles=['synthetic', 'synthetic'])):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                self.check(target)
+        self.path.chmod(0o666)
+        with self.assertRaisesRegex(ValueError, 'unsafe'): self.check(pending)
+        self.path.chmod(0o644)
+        self.machine.write_text('b'*32)
+        with self.assertRaisesRegex(ValueError, 'another guest'): self.check(pending)
+        self.machine.write_text('a'*32)
+        self.path.write_text('{broken')
+        with self.assertRaises(ValueError): self.check(pending)
 
     def test_symlink_unsafe_mode_and_invalid_shape(self):
         self.apply('begin'); self.apply('commit')

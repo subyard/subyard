@@ -284,7 +284,8 @@ case "${1:-}" in
     tmp_mount_guard || findings=1
     policy_guard apply || findings=1
     memory=0
-    if filesystem=$(findmnt -n -T /tmp -o FSTYPE); then
+    # Ignore hidden over-mounted entries; classify only the visible filesystem.
+    if filesystem=$(findmnt -n --uniq -T /tmp -o FSTYPE); then
       result=0
       mountpoint -q /tmp || result=$?
       case "$filesystem" in
@@ -326,7 +327,7 @@ case "${1:-}" in
     for unit in subyard-tmp-shutdown.service subyard-tmp-clean.timer; do
       systemctl is-active --quiet "$unit"
     done
-    filesystem=$(findmnt -n -T /tmp -o FSTYPE)
+    filesystem=$(findmnt -n --uniq -T /tmp -o FSTYPE)
     case "$filesystem" in
       tmpfs|ramfs) exit 10 ;; # Installed policy needs the next native boot.
       ext2|ext3|ext4|btrfs|xfs|zfs|overlay|virtiofs|9p) ;;

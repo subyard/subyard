@@ -68,7 +68,10 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 				t.Fatal(err)
 			}
 			options := transition.options
-			options.RegisteredYards, options.GuestDiskTmp = []V2ActivationReconciler{}, []V2ActivationReconciler{}
+			// The historical prefix has real native rows in both epoch-3 migrations.
+			// A later same-release journal must not change their terminal grammar.
+			options.RegisteredYards = []V2ActivationReconciler{&v2TestReconciler{id: "yard.first"}, &v2TestReconciler{id: "yard.second"}}
+			options.GuestDiskTmp = []V2ActivationReconciler{&v2TestReconciler{id: "yard.first"}, &v2TestReconciler{id: "yard.second"}}
 			options.RegistryPayload = payload
 			options.MigrationCheckpoint, options.SourceMigrationCheckpoint = true, true
 			transition, err = NewV2Transition(options)
@@ -92,13 +95,37 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
+			nativeRows := 0
+			for _, step := range journal.Steps {
+				if strings.HasPrefix(step.Resource, "yard.") {
+					nativeRows++
+					if step.Decision != DecisionTransform || step.Checkpoint != StepVerified {
+						t.Fatalf("fixture lost verified native transform: %+v", step)
+					}
+				}
+			}
+			if nativeRows != 4 {
+				t.Fatalf("fixture has %d native rows, want two yards in both migrations", nativeRows)
+			}
 			if retained {
 				transition, store = interruptSourceMetadataActivation(t, transition, store)
+				transition.options.fault = nil
+				inspection, err = transition.Inspect(context.Background(), goal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				outcome, err = transition.Converge(context.Background(), Execution{Plan: inspection.Plan})
+				if err != nil || outcome.Status != StatusReady {
+					t.Fatalf("same-release follow-up: %+v %v", outcome, err)
+				}
 			}
 			before := snapshotStoreV2Tree(t, home)
 			proof, err := store.InspectSourceMetadata(registry, digest)
 			if err != nil {
 				t.Fatalf("authenticated historical prefix refused: %v", err)
+			}
+			if !proof.Ledger.Checkpointed {
+				t.Fatal("fixture lost the compacted historical prefix")
 			}
 			for index := range journal.Steps {
 				if journal.Steps[index].Resource == "ledger.power-metadata" {
@@ -110,6 +137,26 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			}
 			if string(snapshotStoreV2Tree(t, home)) != string(before) {
 				t.Fatal("source admission changed protected history")
+			}
+			if retained {
+				var captured string
+				for _, step := range journal.Steps {
+					if strings.HasPrefix(step.Resource, "yard.") {
+						captured, err = checkpointEvidenceName(journal.Transaction, step.ID, EvidenceCaptured)
+						break
+					}
+				}
+				if err != nil || captured == "" {
+					t.Fatal("native captured receipt not found", err)
+				}
+				testkit.WriteFile(t, filepath.Join(home, "release-transition/v2/transactions", string(journal.Transaction), "evidence", captured), []byte("{}\n"), 0600)
+				damaged := snapshotStoreV2Tree(t, home)
+				if _, err := store.InspectSourceMetadata(registry, digest); err == nil {
+					t.Fatal("corrupt retained native receipt accepted")
+				}
+				if string(snapshotStoreV2Tree(t, home)) != string(damaged) {
+					t.Fatal("corrupt receipt refusal changed history")
+				}
 			}
 		})
 	}

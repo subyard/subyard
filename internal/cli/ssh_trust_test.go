@@ -35,7 +35,7 @@ func TestSSHTrustUsesTypedConsentAndDoesNotConsumeCommandPayload(t *testing.T) {
 				t.Fatal(err)
 			}
 			cli.promptInputTerminal = func() bool { return test.tty }
-			manager := cli.sshTrust(t.TempDir(), test.automation || sshTrustConsent(test.arguments))
+			manager := cli.sshTrust(t.TempDir(), test.automation || commandAssumeYes(test.arguments))
 			defer manager.Close()
 			err = manager.Confirm(context.Background(), []sshtrust.Proposal{{Target: "yard-example", Namespace: "subyard-remote-example", File: "/state/known_hosts", Algorithm: "ssh-ed25519", Fingerprint: "SHA256:example"}})
 			if !errors.Is(err, test.want) {

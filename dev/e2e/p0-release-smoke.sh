@@ -9,7 +9,7 @@ set -euo pipefail
 # Advance this checksum-pinned baseline when the supported release baseline changes.
 OLD_VERSION=0.14.0
 OLD_INSTALLER_SHA256=a78c10910c0886a8d01c0a2e77718b21ce58e45fa7f0de6064bc1f351d56028b
-CANDIDATE_VERSION="0.14.1-p0.smoke.$TOKEN"
+CANDIDATE_VERSION="0.25.6-p0.smoke.$TOKEN"
 if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
   CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
@@ -23,7 +23,7 @@ verify_smoke_state() {
   local version="$1"
   [ "$(operator_yard --version)" = "yard $version" ] \
     || die "unexpected active release, expected $version"
-  if [ "$version" != "$OLD_VERSION" ]; then assert_legacy_continuation; fi
+  if [ "$version" != "$OLD_VERSION" ]; then assert_registered_ownership; fi
   operator_yard check
   [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ] \
     || die 'release smoke yard is not running'
@@ -39,14 +39,13 @@ verify_smoke_state() {
   fi
 }
 
-establish_smoke_continuation() {
-  local phase state="$STATE_ROOT/continuation-enrollment" runtime="$OPERATOR_HOME/.subyard/runtime"
+establish_smoke_ownership() {
+  local phase state="$STATE_ROOT/ownership-enrollment" runtime="$OPERATOR_HOME/.subyard/runtime"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  [ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
-    || die 'release smoke predecessor acquired installation ownership'
+  assert_registered_ownership
   # Historical public installers predate the runtime ownership inventory.
   # Stage the same verified release through the current public installer only
-  # after the authentic update is ready; this grants no yard ownership.
+  # after the authentic update is ready; this changes no yard ownership.
   for phase in before after; do
     {
       sudo -n stat -c '%n:%f:%u:%g:%N' "$runtime/current" "$runtime/previous"
@@ -63,9 +62,7 @@ establish_smoke_continuation() {
   cmp -s "$state.before.metadata" "$state.after.metadata" \
     && cmp -s "$state.before.sha256" "$state.after.sha256" \
     || die 'release smoke ownership enrollment changed protected history or runtime links'
-  [ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
-    || die 'release smoke ownership enrollment acquired installation ownership'
-  establish_legacy_continuation
+  establish_registered_ownership
 }
 
 interrupt_checkpoint_update() {
@@ -176,7 +173,7 @@ prepare_smoke() {
   operator_env "$INSTALLER" --version "$OLD_VERSION" --yes
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
   incus project create "$PROJECT" \
-    -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+    -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
   operator_yard init --yes
   operator_yard start --yes
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
@@ -203,7 +200,7 @@ prepare_smoke() {
   write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   if [ "$phase" = smoke-ready ]; then
-    establish_smoke_continuation
+    establish_smoke_ownership
     operator_yard init --yes
     verify_smoke_state "$CANDIDATE_VERSION"
   fi
@@ -231,7 +228,7 @@ finish_smoke() {
   if [ "$phase" = smoke-checkpoint-interrupted ]; then
     resume_checkpoint_update
     assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-    establish_smoke_continuation
+    establish_smoke_ownership
     operator_yard init --yes
   fi
   verify_smoke_state "$CANDIDATE_VERSION"

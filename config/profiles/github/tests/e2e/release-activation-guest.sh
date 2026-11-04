@@ -170,11 +170,11 @@ unit_owned() {
 cleanup_image_probe() {
   [ "$IMAGE_PROBE_CLAIMED" = 1 ] || return 0
   local marker instances
-  marker="$(incus project get "$IMAGE_PROBE_PROJECT" user.subyard.activation-fixture)" || return 1
+  marker="$(incus project get "$IMAGE_PROBE_PROJECT" user.activation-fixture)" || return 1
   [ "$marker" = "$STATE" ] || return 1
   instances="$(incus list --project "$IMAGE_PROBE_PROJECT" -f json)" || return 1
   jq -e --arg marker "$STATE" 'type=="array" and length<=1 and
-    all(.[]; .name=="uid-probe" and .config["user.subyard.activation-fixture"]==$marker)' \
+    all(.[]; .name=="uid-probe" and .config["user.activation-fixture"]==$marker)' \
     <<< "$instances" >/dev/null || return 1
   if [ "$(jq length <<< "$instances")" = 1 ]; then
     incus delete uid-probe --project "$IMAGE_PROBE_PROJECT" --force || return 1
@@ -230,6 +230,7 @@ process=None
 ownership=None
 foreign=None
 probe_cancelled=False
+drained=False
 
 def received(signum, _frame):
     global pending
@@ -251,20 +252,36 @@ def same(record):
     except (ProcessLookupError,FileNotFoundError):
         return False
 
+def assert_loaded_predecessor(unit, oldhash, wanted):
+    command=['/usr/bin/systemctl','--user','show',unit,'-p','MainPID','--value']
+    pid=int(subprocess.check_output(command,text=True,timeout=15).strip())
+    assert pid>0, 'broker has no running MainPID at delivery checkpoint'
+    before=info(pid)
+    actual=hashlib.sha256(Path('/proc/'+str(pid)+'/exe').read_bytes()).hexdigest()
+    after=info(pid)
+    assert before['start']==after['start'] and before['uid']==after['uid']==os.getuid(), 'broker identity changed'
+    assert int(subprocess.check_output(command,text=True,timeout=15).strip())==pid, 'broker MainPID changed'
+    assert actual==oldhash and actual!=wanted, 'checkpoint broker did not retain predecessor code'
+    print('release_activation_checkpoint_broker=current-predecessor identity=verified',flush=True)
+
 def save():
     target=root/'updater.json'; temporary=root/'updater.json.next'
     temporary.write_text(json.dumps(ownership)); temporary.chmod(0o600); temporary.replace(target)
 
 def capture():
-    if not same(ownership): return
+    # A PTY updater has its own session. Previously captured groups remain
+    # authority anchors even if their supervisor exits and they are reparented.
+    anchors={record['pid']:record for record in [ownership,*ownership['groups']] if same(record)}
+    if not anchors: return
     for path in Path('/proc').glob('[0-9]*/stat'):
         try:
             item=info(int(path.parent.name))
             if item['pid']!=item['group'] or item['pid']==process.pid or item['uid']!=os.getuid(): continue
+            if any(v['pid']==item['pid'] and v['start']==item['start'] for v in ownership['groups']): continue
             ancestor=item['pid']
-            while ancestor>1 and ancestor!=process.pid:
+            while ancestor>1 and ancestor not in anchors:
                 ancestor=info(ancestor)['parent']
-            if ancestor==process.pid and not any(v['pid']==item['pid'] for v in ownership['groups']):
+            if ancestor in anchors and same(anchors[ancestor]):
                 ownership['groups'].append({'pid':item['pid'],'start':item['start']})
         except (ProcessLookupError,FileNotFoundError,PermissionError):
             continue
@@ -273,19 +290,30 @@ def capture():
 def cancel():
     if pending: raise SystemExit(128+pending)
 
+def signal_owned(record, signum):
+    if same(record):
+        try: os.killpg(record['pid'],signum)
+        except ProcessLookupError: pass
+
 def drain():
+    global drained
     if process is None: return
     # Freeze the proven updater first; then capture/freeze its separate native
-    # groups before the parent disappears. A second pass closes the fork window.
-    if same(ownership):
-        os.killpg(process.pid,signal.SIGSTOP)
-        for _ in range(2):
-            capture()
-            for group in ownership['groups']:
-                if same(group): os.killpg(group['pid'],signal.SIGSTOP)
+    # groups until a scan adds none, before any parent can disappear.
+    signal_owned(ownership,signal.SIGSTOP)
+    deadline=time.monotonic()+5
+    quiescent=False
+    while time.monotonic()<deadline:
+        before=len(ownership['groups'])
+        capture()
+        for group in ownership['groups']:
+            signal_owned(group,signal.SIGSTOP)
+        if len(ownership['groups'])==before:
+            quiescent=True
+            break
     for group in ownership['groups']:
-        if same(group): os.killpg(group['pid'],signal.SIGKILL)
-    if same(ownership): os.killpg(process.pid,signal.SIGKILL)
+        signal_owned(group,signal.SIGKILL)
+    signal_owned(ownership,signal.SIGKILL)
     process.wait(timeout=10)
     deadline=time.monotonic()+5
     while time.monotonic()<deadline:
@@ -296,13 +324,21 @@ def drain():
         time.sleep(.05)
     else: raise RuntimeError('owned native process group did not drain')
     (root/'updater.json').unlink(missing_ok=True)
+    drained=True
+    if not quiescent: raise RuntimeError('owned process capture did not reach a frozen fixed point')
 
 try:
     if probe:
         # Same ancestry/cancellation machinery, with a separate-session child
         # before the delivery marker and an unrelated process that must survive.
         foreign=subprocess.Popen(['sleep','30'],start_new_session=True)
-        child_code="import pathlib,subprocess,time,sys; p=subprocess.Popen(['sleep','30'],start_new_session=True); pathlib.Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(30)"
+        child_code="""import os,pathlib,subprocess,time,sys
+print('native updater started', flush=True)
+p=subprocess.Popen(['sleep','30'],start_new_session=True)
+pathlib.Path(sys.argv[1]).write_text(str(p.pid))
+pathlib.Path(sys.argv[1]).with_name('probe-updater').write_text(str(os.getpid()))
+time.sleep(30)
+"""
         command=[sys.executable,'-c',child_code,str(root/'probe-child')]
         env=os.environ.copy()
     else:
@@ -329,7 +365,9 @@ try:
         assert journal['checkpoint']=='reconciling'
         def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
         assert sha(root/'data/github-broker/default-engine')==wanted
-        assert sha('/proc/'+oldpid+'/exe')==oldhash
+        # Disk /tmp migration may legitimately restart the predecessor broker.
+        # Bind the process running now, before the paused candidate restart.
+        assert_loaded_predecessor(unit,oldhash,wanted)
         wrapper=int((root/'delivery-paused').read_text()); native=info(wrapper)['group']
         assert any(group['pid']==native and same(group) for group in ownership['groups'])
         assert same(ownership) and process.poll() is None
@@ -341,7 +379,7 @@ except SystemExit as error:
     if not probe or error.code!=143: raise
     probe_cancelled=True
 finally:
-    if process is not None and process.poll() is None: drain()
+    if process is not None and not drained: drain()
     if foreign is not None:
         assert foreign.poll() is None, 'cancellation killed an unrelated process'
         foreign.terminate(); foreign.wait(timeout=5)
@@ -506,7 +544,7 @@ SH
           'list --project')
             [ "$probe_case" != unavailable ] || return 99
             probe_name=uid-probe; [ "$probe_case" != foreign-instance ] || probe_name=foreign
-            jq -n --arg name "$probe_name" --arg marker "$STATE" '[{name:$name,config:{"user.subyard.activation-fixture":$marker}}]' ;;
+            jq -n --arg name "$probe_name" --arg marker "$STATE" '[{name:$name,config:{"user.activation-fixture":$marker}}]' ;;
           'delete uid-probe'|'project delete') printf '%s\n' "$*" >> "$mutations" ;;
           *) return 99 ;;
         esac
@@ -588,9 +626,9 @@ printf 'release_activation_creation_context uid=%s gid=%s validation_gid=%s\n' "
 stage cached-image-dev-uid
 ! incus project show "$IMAGE_PROBE_PROJECT" >/dev/null 2>&1 || die 'UID probe project already exists'
 IMAGE_PROBE_CLAIMED=1
-incus project create "$IMAGE_PROBE_PROJECT" -c features.images=false -c "user.subyard.activation-fixture=$STATE"
+incus project create "$IMAGE_PROBE_PROJECT" -c features.images=false -c "user.activation-fixture=$STATE"
 incus launch subyard-e2e-debian-13-cloud-container uid-probe --project "$IMAGE_PROBE_PROJECT" --storage default \
-  -c "user.subyard.activation-fixture=$STATE" -c limits.memory=512MiB -c limits.cpu=1
+  -c "user.activation-fixture=$STATE" -c limits.memory=512MiB -c limits.cpu=1
 incus exec uid-probe --project "$IMAGE_PROBE_PROJECT" -- sh -s -- "$FIXTURE_DEV_UID" < "$STATE/check-dev-uid.sh" \
   || die 'configured fixture DEV_UID is occupied, mismatched or unavailable in the cached image'
 cleanup_image_probe || die 'UID probe cleanup failed'
@@ -704,15 +742,13 @@ for target in default "$NAMED"; do
   ! incus project show "$project" >/dev/null 2>&1 || die 'fixture project already exists'
   CREATED_YARDS+=("$target")
   # Claim exact random fixture project before product init; native product retains it.
-  incus project create "$project" -c features.images=false -c "user.subyard.activation-fixture=$STATE"
+  incus project create "$project" -c features.images=false -c "user.activation-fixture=$STATE"
   yard -Y "$target" init --yes > "$STATE/init-$target.log" 2>&1
   instance="$INSTANCE"; [ "$target" = default ] || instance="$NAMED_INSTANCE"
   claim_units
   yard -Y "$target" start --yes > "$STATE/start-$target.log" 2>&1
   [ "$(incus exec "$instance" --project "$project" -- id -u dev)" = "$FIXTURE_DEV_UID" ] || die 'published baseline created an unexpected dev UID'
 done
-incus config set "$INSTANCE" user.subyard.activation-fixture "$STATE" --project "$PROJECT"
-incus config set "$NAMED_INSTANCE" user.subyard.activation-fixture "$STATE" --project "$NAMED_PROJECT"
 # The genuine predecessor created and recorded these composed instructions.
 # Bind the unmarked bytes before current activation retires their missing source.
 preview_instruction_hash="$(guest python3 - <<'PY'

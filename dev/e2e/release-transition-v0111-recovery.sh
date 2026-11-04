@@ -141,7 +141,7 @@ yard() { fixture_env "$BIN_ROOT/yard" "$@"; }
 
 project_is_marked() {
   incus project show "$PROJECT" >/dev/null 2>&1 \
-    && [ "$(incus project get "$PROJECT" user.subyard.p0 2>/dev/null)" = "$FIXTURE_MARKER" ]
+    && [ "$(incus project get "$PROJECT" user.p0-release-recovery 2>/dev/null)" = "$FIXTURE_MARKER" ]
 }
 
 assert_project_marker() {
@@ -332,9 +332,17 @@ fence_reaped_post_cas_transition() { # observed-status
 }
 
 cleanup() {
-  local rc=$? cleanup_failed=0
+  local rc=$? cleanup_failed=0 fixture
   trap - EXIT INT TERM
   set +e
+  if [ "$rc" != 0 ]; then
+    for fixture in success post-cas; do
+      select_fixture "$fixture"
+      if fixture_root_is_marked; then
+        capture_fixture_failure_logs || printf 'release-recovery fixture=%s failure-log capture_failed=true\n' "$fixture" >&2
+      fi
+    done
+  fi
   if ! stop_post_cas_transition; then
     printf 'release-transition-v0111-recovery: post-CAS process group did not stop\n' >&2
     printf 'release-recovery cleanup stage=post-cas-process original_status=%s final_status=3\n' "$rc" >&2
@@ -408,47 +416,64 @@ write_fixture_config() {
     "$CONFIG_HOME/yards/$YARD_NAME/config.env" "$HOME_ROOT/host/AGENTS.md"
 }
 
-power_coordination_binding() {
-  sudo -n python3 -B - "$ROOT/scripts/lib/native-install-custody.py" "$POWER_RECONCILER" "$POWER_UNIT" <<'PY'
+native_coordination_binding() { # owner resource...
+  sudo -n python3 -B - "$ROOT/scripts/lib/native-install-custody.py" "$@" <<'PY'
 import importlib.util, os, pathlib, sys
 spec = importlib.util.spec_from_file_location('native_custody', sys.argv[1])
 native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
 held, paths, records = [], [], []
 try:
-    resources = sorted(map(pathlib.Path, sys.argv[2:]))
-    if len(resources) != 2 or len(set(resources)) != 2:
-        raise ValueError('invalid power coordination roles')
+    owner = sys.argv[2]
+    resources = sorted(map(pathlib.Path, sys.argv[3:]))
+    count = {'host-power': 2, 'test-vms-host-sink': 3}[owner]
+    if len(resources) != count or len(set(resources)) != count:
+        raise ValueError('invalid native coordination roles')
     for resource in resources:
-        native.safe_parent(resource.parent)
         lock = resource.parent / ('.' + resource.name + '.native-install.lock')
         record = resource.parent / ('.' + resource.name + '.native-custody.json')
+        paths.extend((str(lock), str(record)))
+        try:
+            native.safe_parent(resource.parent)
+        except FileNotFoundError:
+            if owner == 'host-power':
+                raise
+            continue
+        if owner == 'test-vms-host-sink' and not os.path.lexists(lock) and not os.path.lexists(record):
+            continue
         fd = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
         held.append((lock, fd))
         native.validate_lock(lock, fd)
         if os.fstat(fd).st_size != 0:
             raise ValueError('nonempty coordination lock')
-        generation = native.observe(record, 'host-power')
+        generation = native.observe(record, owner)
         if generation == '0':
             raise ValueError('missing coordination generation')
         records.append((record, generation))
-        paths.extend((str(lock), str(record)))
     binding = native.installed_files(paths)
     for lock, fd in held:
         native.validate_lock(lock, fd)
     for record, generation in records:
-        if native.observe(record, 'host-power') != generation:
+        if native.observe(record, owner) != generation:
             raise ValueError('coordination generation changed')
     if native.installed_files(paths) != binding:
         raise ValueError('coordination identity changed')
     print(binding)
 except (OSError, ValueError, KeyError, TypeError):
-    print('release-recovery: unsafe, busy or changed power coordination state', file=sys.stderr)
+    print('release-recovery: unsafe, busy or changed native coordination state', file=sys.stderr)
     sys.exit(1)
 finally:
     for _, fd in held:
         os.close(fd)
 PY
+}
+
+power_coordination_binding() {
+  native_coordination_binding host-power "$POWER_RECONCILER" "$POWER_UNIT"
+}
+
+sink_coordination_binding() {
+  native_coordination_binding test-vms-host-sink "$TEST_VMS_SINK" "$TEST_VMS_SINK_SERVICE" "$TEST_VMS_SINK_TIMER"
 }
 
 require_absent_legacy_power() {
@@ -476,7 +501,7 @@ require_absent_legacy_power() {
 }
 
 assert_native_resources_absent() {
-  local kind path unit target artifact
+  local kind path unit target
   for kind in power-helper power-unit sink-helper sink-service sink-timer; do
     case "$kind" in
       power-helper) path="$POWER_RECONCILER" ;;
@@ -489,16 +514,6 @@ assert_native_resources_absent() {
       printf 'release-recovery cleanup resource_kind=%s artifact_kind=installed-resource present=true\n' "$kind" >&2
       die 'successful current uninstall retained an installed fixture resource'
     fi
-    case "$kind" in
-      sink-*)
-        for artifact in native-install.lock native-custody.json; do
-          if [ -e "${path%/*}/.${path##*/}.$artifact" ] || [ -L "${path%/*}/.${path##*/}.$artifact" ]; then
-            printf 'release-recovery cleanup resource_kind=%s artifact_kind=%s present=true\n' "$kind" "$artifact" >&2
-            die 'successful current uninstall retained token-specific sink coordination state'
-          fi
-        done
-        ;;
-    esac
     case "$kind" in
       *-helper) continue ;;
     esac
@@ -570,7 +585,7 @@ reproduce_official_dead_end() { # success|post-cas
   info "creating independent official v0.9.1 -> v0.11.1 $FIXTURE history"
   install_official "$OLD_INSTALLER" "$OLD_VERSION" >/dev/null
   incus project create "$PROJECT" \
-    -c features.images=false -c user.subyard.p0="$FIXTURE_MARKER" >/dev/null
+    -c features.images=false -c user.p0-release-recovery="$FIXTURE_MARKER" >/dev/null
   assert_project_marker
   yard -Y "$YARD_NAME" init --yes >/dev/null
   assert_project_marker
@@ -604,8 +619,10 @@ prepare_recovery_bridge() {
     "$CANDIDATE_VERSION" "$RELEASE_ROOT"
   bridge_registry="$(tar -xOzf "$CANDIDATE_BUNDLE" ./config/release-transition.json | sha256sum | awk '{print $1}')"
   [ "$bridge_registry" = "$digest" ] || die 'published bridge registry differs from the exact recovery source'
-  cp "$CURRENT_RELEASE_ROOT/subyard-install.sh" \
-    "$CURRENT_RELEASE_ROOT/subyard-install-runtime-release.sh" \
+  # v0.11.2 published the same installer bytes as v0.11.1; a current installer
+  # requires the installation inventory that this bridge does not have.
+  cp "$SOURCE_INSTALLER" "$RELEASE_ROOT/subyard-install.sh"
+  cp "$CURRENT_RELEASE_ROOT/subyard-install-runtime-release.sh" \
     "$CURRENT_RELEASE_ROOT/subyard-install-runtime-release.sh.sha256" "$RELEASE_ROOT/"
   chmod -R a+rX "$RELEASE_ROOT"
   printf 'release-recovery artifact role=historical-bridge engine_source=official-published version=%s runtime_sha256=%s registry_sha256=%s\n' \
@@ -686,14 +703,20 @@ prepare_operator_user_bus() {
 }
 
 upgrade_to_current_candidate() {
-  local output active manifest status power_coordination
+  local output active manifest status power_coordination sink_coordination
   prepare_current_fixture_inputs
   printf 'release-recovery artifact role=current-candidate version=%s runtime_sha256=%s\n' \
     "$CURRENT_VERSION" "$CURRENT_RUNTIME_SHA256"
+  status=0
   fixture_env env YARD_RELEASE_BASE_URL="file://$CURRENT_RELEASE_ROOT" \
     YARD_RELEASE_VERSION="$CURRENT_VERSION" \
     bash "$CURRENT_RELEASE_ROOT/subyard-install.sh" --version "$CURRENT_VERSION" --yes \
-    > "$FIXTURE_ROOT/current-upgrade.log"
+    > "$FIXTURE_ROOT/current-upgrade.log" 2>&1 || status=$?
+  if [ "$status" != 0 ]; then
+    printf 'release-recovery fixture=%s stage=current-upgrade native_status=%s\n' "$FIXTURE" "$status" >&2
+    capture_fixture_failure_logs || printf 'release-recovery failure-log capture_failed=true\n' >&2
+    return "$status"
+  fi
   [ "$("$RUNTIME_ROOT/current/bin/yard" --version)" = "yard $CURRENT_VERSION" ] \
     || die 'true current candidate is not active after the historical bridge'
   manifest="$(sha256sum "$RUNTIME_ROOT/current/runtime-files.sha256" | awk '{print $1}')"
@@ -722,6 +745,8 @@ upgrade_to_current_candidate() {
   CURRENT_UNINSTALL_REFUSED="$FIXTURE"
   power_coordination="$(power_coordination_binding)" \
     || die 'current power coordination state could not be bound before cleanup'
+  sink_coordination="$(sink_coordination_binding)" \
+    || die 'current sink coordination state could not be bound before cleanup'
   if fixture_env "$RUNTIME_ROOT/current/bin/yard" -Y "$YARD_NAME" teardown --yes \
     > "$FIXTURE_ROOT/current-yard-teardown.log" 2>&1; then
     status=0
@@ -751,10 +776,30 @@ upgrade_to_current_candidate() {
   assert_native_resources_absent
   [ "$(power_coordination_binding)" = "$power_coordination" ] \
     || die 'public cleanup changed the bound power coordination state'
+  [ "$(sink_coordination_binding)" = "$sink_coordination" ] \
+    || die 'public cleanup changed the bound sink coordination state'
   POWER_COORDINATION_BINDING="$power_coordination"
   require_absent_legacy_power
   printf 'release-recovery fixture=%s stage=current-cleanup resources_absent=true coordination_unchanged=true\n' "$FIXTURE"
   CURRENT_UNINSTALL_REFUSED=
+}
+
+capture_fixture_failure_logs() {
+  local name path failed=0
+  fixture_root_is_marked || return 1
+  for name in source-install.log candidate-recovery.log current-upgrade.log first-process.log resume.log resume.stderr \
+    cleanup-yard.log current-yard-teardown.log current-uninstall.log; do
+    path="$FIXTURE_ROOT/$name"
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    if [ "$(stat -c %h "$path")" != 1 ]; then
+      printf 'release-recovery fixture=%s failure-log=%s unsafe=true\n' "$FIXTURE" "$name" >&2
+      failed=1
+      continue
+    fi
+    printf 'release-recovery fixture=%s failure-log=%s bounded_tail=true\n' "$FIXTURE" "$name" >&2
+    cleanup_failure_diagnostics "$path" >&2 || failed=1
+  done
+  return "$failed"
 }
 
 cleanup_failure_diagnostics() { # bounded operation errors, never plans or config contents
@@ -1088,24 +1133,16 @@ assert_materialized_fixed_point() {
   actual="$(sha256sum "$HOME_ROOT/host/AGENTS.md" | awk '{print $1}')"
   [ "$actual" = "$expected" ] \
     || die 'candidate recovery changed the configured host instructions'
-  # Independent byte oracle: selected instructions preserve the configured text
-  # and append this documented managed block, not the raw host digest.
-  if [ "$stage" = current ]; then
-    expected="$({
-    cat "$HOME_ROOT/host/AGENTS.md"
-    printf '\n\n'
-    cat <<'PREVIEW'
-<!-- subyard-preview -->
-For a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. Owner URLs require network reachability (and Tailnet policy access for Tailscale). A loopback URL is local to the yard; provide the operator-machine tunnel recipe from `subyard-preview --help` only when the operator requests it. The helper must stay running.
-<!-- /subyard-preview -->
-PREVIEW
-    } | sha256sum | awk '{print $1}')"
-  fi
+  # Independent byte oracle: this fixture's literal two-line source is delivered
+  # unchanged. Current preview guidance is a separate shared capability skill.
   actual="$(incus exec "$INSTANCE" --project "$PROJECT" -- \
     sha256sum /home/dev/.codex/AGENTS.md | awk '{print $1}')" \
     || die 'candidate recovery Codex target is unavailable'
-  [ "$actual" = "$expected" ] \
-    || die 'candidate recovery did not materialize the configured Codex target'
+  if [ "$actual" != "$expected" ]; then
+    printf 'release-recovery materialized-codex stage=%.16s expected_sha256=%.64s actual_sha256=%.64s\n' \
+      "$stage" "$expected" "$actual" >&2
+    die 'candidate recovery did not materialize the configured Codex target'
+  fi
   [ "$stage" = current ] || return 0
   status="$(fixture_env "$RUNTIME_ROOT/current/bin/yard" -Y "$YARD_NAME" \
     integration status codex --json)" \

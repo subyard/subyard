@@ -58,6 +58,18 @@ for unit in ('subyard-telemetry.service','subyard-telemetry-runs.service'):
 print(json.dumps(dict(schema='subyard.telemetry.profile-unit-facts/v1',units=units)),flush=True)
 '''
 
+REPEAT_FACTS = '''import hashlib,json,pathlib,subprocess
+facts=[]
+for unit in ('subyard-telemetry.service','subyard-telemetry-runs.service'):
+    fields=dict(line.split('=',1) for line in subprocess.run(['systemctl','show',unit,'--property=MainPID,ActiveState,FragmentPath,DropInPaths'],capture_output=True,text=True,timeout=10,check=True).stdout.splitlines())
+    ticks=None
+    if int(fields['MainPID'])>1:
+        ticks=pathlib.Path('/proc',fields['MainPID'],'stat').read_text().rsplit(') ',1)[1].split()[19]
+    digest=hashlib.sha256(pathlib.Path(fields['FragmentPath']).read_bytes()).hexdigest()
+    facts.append(dict(unit=unit,active=fields['ActiveState'],pid=fields['MainPID'],ticks=ticks,dropins=fields['DropInPaths'],digest=digest))
+print(json.dumps(facts,sort_keys=True))
+'''
+
 PREPARE = '''from contextlib import closing
 import json,os,pathlib,sqlite3,subprocess,sys,tempfile,time
 data=pathlib.Path('/var/lib/subyard/telemetry')
@@ -398,6 +410,10 @@ except BaseException as error:
             raise
         status = json.loads(cli('profile', 'status', 'telemetry', '--json'))
         assert status['enabled'] and status['ready'] and status['runtime'] == 'ready'
+        # A repeated owner enable must keep the same running processes and unit files.
+        repeat_facts = guest(REPEAT_FACTS, timeout=25)
+        cli('profile', 'enable', 'telemetry', '--yes')
+        assert guest(REPEAT_FACTS, timeout=25) == repeat_facts, 'repeated enable changed telemetry units'
         unit_requested = True
         output = guest(START, json.dumps(fixture), str(before['gid']), before['home'], timeout=840)
         for line in output.splitlines():

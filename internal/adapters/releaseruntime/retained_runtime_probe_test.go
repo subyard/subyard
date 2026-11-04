@@ -17,7 +17,7 @@ import (
 )
 
 func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
-	for _, scenario := range []string{"failed-query", "malformed-query", "invalid-inspection", "invalid-payload", "history", "profile-owner-loss", "changed-core", "execute-recheck"} {
+	for _, scenario := range []string{"failed-query", "malformed-query", "invalid-inspection", "invalid-payload", "history", "profile-owner-loss", "changed-core", "execute-recheck", "source-work-refusal"} {
 		t.Run(scenario, func(t *testing.T) {
 			runtime, active, target, home, installed := retainedRuntimeFixture(t)
 			defer runtime.Close()
@@ -27,6 +27,9 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"0.19.1-active","previous":"0.11.2-target","target":"0.11.2-target","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`
+			if scenario == "source-work-refusal" {
+				inspection = strings.Replace(inspection, `"outcome":`, `"decisions":[{"resource":"setting.YARD_TEMPLATE","scope":"yard.example","decision":"canonicalize","result":"test-vms"}],"outcome":`, 1)
+			}
 			if scenario == "invalid-inspection" {
 				inspection = `{}`
 			}
@@ -42,7 +45,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 				}
 				engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine %s\\n' ;;\n _release-transition) request=$(cat); case \"$request\" in\n *runtime-activation-capabilities*) %s ;;\n *) printf '%%s\\n' %q ;;\n esac ;;\n *) exit 64 ;;\nesac\n", candidate.version, probe, inspection)
 				testkit.WriteFile(t, filepath.Join(candidate.path, "bin/yard-engine"), []byte(engine), 0o700)
-				testkit.WriteFile(t, filepath.Join(candidate.path, "config/release-transition.json"), []byte("{}\n"), 0o600)
+				testkit.WriteFile(t, filepath.Join(candidate.path, "config/release-transition.json"), []byte(sourceAdmissionRegistry), 0o600)
 				helper := "identical public core helper"
 				if scenario == "changed-core" && candidate.path == target {
 					helper = "different public core helper"
@@ -92,6 +95,12 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 			want := scenario == "failed-query" || scenario == "malformed-query" || scenario == "execute-recheck"
 			if (err == nil) != want {
 				t.Fatalf("independent rollback proof: prepared=%v err=%v", prepared.Changed, err)
+			}
+			if scenario == "source-work-refusal" {
+				var refusal publicReleaseInspectionError
+				if !errors.As(err, &refusal) || refusal.outcome.Message != "the retained release cannot safely bind pending source work to rollback activation" || refusal.outcome.Retry != "run yard migrate to complete current-release migrations, then retry yard update --rollback; otherwise retain a release with compatible rollback source planning" {
+					t.Fatalf("specific source rollback guidance was masked: %v", err)
+				}
 			}
 			if scenario == "execute-recheck" {
 				testkit.WriteFile(t, installed, []byte("new installed profile runtime"), 0o700)

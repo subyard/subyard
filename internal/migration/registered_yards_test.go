@@ -24,12 +24,17 @@ import (
 
 type registeredNativeFixture struct {
 	*testkit.Incus
-	grants  int
-	failTmp bool
+	grants    int
+	failTmp   bool
+	cancelTmp context.CancelFunc
 }
 
 func (native *registeredNativeFixture) AdoptRegisteredInstance(_ context.Context, before ports.InstanceInfo, values map[string]string) error {
 	if native.failTmp && values["user.subyard.disk_tmp"] == "v1" {
+		if native.cancelTmp != nil {
+			native.cancelTmp()
+			return context.Canceled
+		}
 		return fmt.Errorf("injected tmp marker cut")
 	}
 	current := native.Instances[before.Project+"/"+before.Name]

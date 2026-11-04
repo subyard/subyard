@@ -79,9 +79,11 @@ hermes_configure_dashboard_route
 
 
 def check_repeat_init_diagnostic():
-    repeat = 'hermes_repeat_init\n'
+    repeat = 'setting() { printf fixture; }\nROOT=$REPEAT_ROOT SUBYARD_CONFIG_HOME=$REPEAT_ROOT\nhermes_repeat_init\n'
     with tempfile.TemporaryDirectory(prefix='subyard-hermes-readiness-', dir='/tmp') as temporary:
         root = Path(temporary)
+        (root/'dev/e2e').mkdir(parents=True)
+        (root/'dev/e2e/lib-repeat-init-signature.sh').write_text('repeat_init_signature() { printf stable; }\n')
         engine = root/'yard'
         engine.write_text('''#!/usr/bin/python3
 import json, os, pathlib, sys, time
@@ -133,7 +135,7 @@ yard() {
             (root/'called').unlink(missing_ok=True)
             (root/'response').write_text('PRIVATE_SENTINEL' if mode == 'invalid' else json.dumps(report))
             result = subprocess.run(['bash', '-c', script, 'fixture', str(SOURCE/'failure-capture.sh'), str(engine)],
-                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode,
+                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, REPEAT_ROOT=str(root),
                          REPEAT_EXIT=str(original)), capture_output=True, text=True, timeout=5)
             assert result.returncode == original, 'repeat-init failure was replaced'
             assert 'PRIVATE_SENTINEL' not in result.stdout+result.stderr, 'private inspection bytes escaped'
@@ -164,7 +166,7 @@ yard() { printf '%s\\n' "$*" >>"$YARD_BIN.route-calls"; return 23; }
             started = time.monotonic()
             result = subprocess.run(['bash', '-c', script + (route if mode == 'route-failure' else wait),
                 'fixture', str(SOURCE/'failure-capture.sh'), str(engine)], capture_output=True, text=True,
-                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, WAIT_ONLY='1'), timeout=7)
+                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, REPEAT_ROOT=str(root), WAIT_ONLY='1'), timeout=7)
             assert result.returncode == {'reconnect': 0, 'timeout': 124, 'route-failure': 23}[mode]
             assert time.monotonic() - started < 5, 'reconnect wait was not bounded'
             assert 'PRIVATE_SENTINEL' not in result.stdout+result.stderr

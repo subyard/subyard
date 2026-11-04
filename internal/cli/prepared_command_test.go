@@ -375,18 +375,6 @@ func secureTempDirectory(t *testing.T) string {
 	return directory
 }
 
-func TestPreparedCommandResolverRejectsUnknownHandler(t *testing.T) {
-	definition := command.Definition{
-		Name:       "future",
-		Handler:    "@future",
-		Effect:     command.EffectMutate,
-		Visibility: command.VisibilityPublic,
-	}
-	if _, err := resolveCoreCommand(definition); err == nil {
-		t.Fatal("unknown internal handler was accepted")
-	}
-}
-
 func TestPreparedCommandManifestCompletenessRejectsUnownedMutation(t *testing.T) {
 	manifest, err := command.Parse(strings.NewReader(
 		"future||@future||local|mutate|dynamic|public|lifecycle|simple|future|future command||\n",

@@ -2,6 +2,7 @@ package configmaterial
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -386,6 +387,142 @@ func TestJSONObservationRejectsUnsafeStateRootWithoutMutation(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o777 {
 		t.Fatalf("observation changed state root: mode=%v", info.Mode().Perm())
+	}
+}
+
+func TestPreBaselineJSONAdoptionRequiresExactPublishedFile(t *testing.T) {
+	previous := []byte("{\"managed\":\"old\"}\n")
+	desired := []byte(`{"managed":"new","added":true}`)
+	for _, problem := range []string{"none", "unknown", "edited", "reformatted", "added"} {
+		t.Run(problem, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.legacyTemplates = [][]byte{previous}
+			payload := previous
+			switch problem {
+			case "unknown":
+				h.legacyTemplates = nil
+			case "edited":
+				payload = []byte(`{"managed":"private-value"}`)
+			case "reformatted":
+				payload = []byte(`{ "managed": "old" }`)
+			case "added":
+				payload = []byte(`{"managed":"old","custom":"private-value"}`)
+			}
+			testkit.WriteFile(t, h.destination, payload, 0644)
+			before := snapshotMaterialization(t, h.root)
+			if problem == "none" {
+				observed := h.observeMode(t, desired, ModeAssessAdopt)
+				if !observed.Adoptable || observed.Converged {
+					t.Fatal("exact published JSON was not pending adoption")
+				}
+				if h.observeMode(t, []byte(`{"managed":"next","added":true}`), ModeAssessAdopt).Fingerprint == observed.Fingerprint {
+					t.Fatal("adoption did not bind the desired JSON")
+				}
+			} else {
+				stderr, err := h.run(desired, ModeAssessAdopt)
+				if err == nil || strings.Contains(stderr, "private-value") {
+					t.Fatal("unrecognized JSON was accepted or leaked content")
+				}
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("read-only JSON assessment changed state")
+			}
+		})
+	}
+}
+
+func TestPreBaselineTOMLAdoptionRequiresExactPublishedFile(t *testing.T) {
+	previous := []byte("# Published template\nmanaged = 'old'\n")
+	desired := []byte("managed = 'new'\nadded = true\n")
+	for _, problem := range []string{"none", "unknown", "edited", "added", "mode", "owner", "symlink", "hardlink", "receipt", "lock", "removed-field"} {
+		t.Run(problem, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format, h.legacyTemplates = "toml", [][]byte{previous}
+			testkit.WriteFile(t, h.destination, previous, 0644)
+			payload := desired
+			switch problem {
+			case "unknown":
+				h.legacyTemplates = nil
+			case "edited":
+				testkit.WriteFile(t, h.destination, []byte("managed = 'private-value'\n"), 0644)
+			case "added":
+				testkit.WriteFile(t, h.destination, append(bytes.Clone(previous), []byte("custom = 'private-value'\n")...), 0644)
+			case "mode":
+				if err := os.Chmod(h.destination, 0666); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Rename(h.destination, h.destination+".original"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(h.destination+".original", h.destination); err != nil {
+					t.Fatal(err)
+				}
+			case "hardlink":
+				if err := os.Link(h.destination, h.destination+".linked"); err != nil {
+					t.Fatal(err)
+				}
+			case "receipt", "lock":
+				if err := os.Mkdir(h.state, 0700); err != nil {
+					t.Fatal(err)
+				}
+				identity := fmt.Sprintf("%x", sha256.Sum256([]byte("dev\x00"+h.destination)))
+				suffix := ".ownership"
+				if problem == "lock" {
+					suffix = ".lock"
+				}
+				testkit.WriteFile(t, filepath.Join(h.state, identity+suffix), []byte("{}\n"), 0600)
+			case "removed-field":
+				payload = []byte("added = true\n")
+			}
+			request, err := h.request(payload, ModeAssessAdopt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if problem == "owner" {
+				request.Command[7] = fmt.Sprint(os.Getuid() + 1)
+			}
+			before := snapshotMaterialization(t, h.root)
+			info, err := os.Lstat(h.destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(request.Command[0], request.Command[1:]...)
+			command.Stdin = bytes.NewReader(request.Stdin)
+			var stdout, stderr bytes.Buffer
+			command.Stdout, command.Stderr = &stdout, &stderr
+			err = command.Run()
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("assessment changed protected state")
+			}
+			after, statErr := os.Lstat(h.destination)
+			if statErr != nil || !os.SameFile(info, after) || info.Mode() != after.Mode() || !info.ModTime().Equal(after.ModTime()) {
+				t.Fatal("assessment changed destination metadata")
+			}
+			if problem == "none" {
+				observation, parseErr := ParseObservation(stdout.Bytes())
+				if err != nil || parseErr != nil || !observation.Adoptable || observation.Converged {
+					t.Fatalf("exact published file was not adoptable: %v %v %s", err, parseErr, stderr.String())
+				}
+				evolved := h.observeMode(t, []byte("managed = 'next'\nadded = true\n"), ModeAssessAdopt)
+				if evolved.Fingerprint == observation.Fingerprint {
+					t.Fatal("desired template was not bound")
+				}
+				// A different recognized template with identical parsed values also
+				// changes the binding: the exact observed bytes are the evidence.
+				alternate := append([]byte("# Another published comment\n"), previous...)
+				h.legacyTemplates = append(h.legacyTemplates, alternate)
+				testkit.WriteFile(t, h.destination, alternate, 0644)
+				if h.observeMode(t, payload, ModeAssessAdopt).Fingerprint == observation.Fingerprint {
+					t.Fatal("historical template bytes were not bound")
+				}
+				testkit.WriteFile(t, h.destination, previous, 0644)
+				return
+			}
+			if err == nil || strings.Contains(stderr.String(), "private-value") {
+				t.Fatalf("unsafe unrecorded adoption accepted or leaked content: %v %s", err, stderr.String())
+			}
+		})
 	}
 }
 

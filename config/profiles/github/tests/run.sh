@@ -56,7 +56,6 @@ python3 -B "$ROOT/config/profiles/github/tests/skills-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/owner-registration-test.py"
 python3 "$ROOT/config/profiles/github/tests/release-activation-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/e2e/runtime-hook-trace-test.py"
-go -C "$ROOT" test ./config/profiles/github/tests/e2e -run '^TestRuntimeHookTraceNativeLauncher$' -count=1
 if [ "$preflight" = 1 ]; then
   bash "$ROOT/tests/installed-runtime-refresh.sh"
   if bash "$ROOT/tests/install-incus-data-home.sh" >"$log" 2>&1; then

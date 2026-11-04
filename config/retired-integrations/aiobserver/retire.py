@@ -73,6 +73,14 @@ def incus(*args):
 def digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
+def without_empty_values(value):
+    # Docker rewrites empty settings between null, [] and {} when its daemon restarts.
+    if isinstance(value,dict):
+        kept=((key,without_empty_values(item)) for key,item in value.items())
+        return {key:item for key,item in kept if item not in (None,[],{})}
+    if isinstance(value,list): return [without_empty_values(item) for item in value]
+    return value
+
 def observe():
     snapshot=json.loads(run('incus','query',f'/1.0/instances/{INSTANCE}?project={PROJECT}'))
     config,devices=snapshot['config'],snapshot['devices']
@@ -111,10 +119,10 @@ def observe():
         if not service or row['Name']!='/subyard-ai-observer' or row['Config']['Labels'].get('org.subyard.managed')!='ai-observer-v1': raise ValueError('foreign-ownership')
         # Do not hash credentials from native Env. Bind complete config locally via a
         # private digest; only the opaque outer CAS value crosses the lifecycle port.
-        identity={k:row.get(k) for k in ('Id','Image','Config','HostConfig','Mounts')}
+        identity=without_empty_values({k:row.get(k) for k in ('Id','Image','Config','HostConfig','Mounts')})
         # Docker mount enumeration order carries no ownership meaning. Keep every
         # complete record, including duplicates; all other arrays remain exact.
-        if isinstance(identity['Mounts'],list):
+        if isinstance(identity.get('Mounts'),list):
             identity['Mounts']=sorted(identity['Mounts'],key=lambda mount:json.dumps(mount,sort_keys=True,separators=(',',':')))
         container={'id':row['Id'],'running':row['State']['Running'],'identity':digest(identity)}
     facts={'service':service,'container':container,'marker':marker,'device':device,'provision':config.get(PROVISION,''),'deferred':saved}

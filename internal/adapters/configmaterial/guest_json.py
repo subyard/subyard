@@ -554,9 +554,23 @@ def main():
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination) if parent_exists else ({}, None)
         if mode == "assess-adopt" and original is not None:
-            raise MaterializationError("adoption ownership evidence unavailable")
-        report = {"converged": False,
-                  "fingerprint": fingerprint(current, desired, "missing", "baseline-missing", [])}
+            # Pre-baseline releases wrote complete shipped JSON/TOML files. Only
+            # their exact bytes and safe native metadata prove this case; a
+            # missing baseline from an interrupted or damaged write does not.
+            info = os.lstat(destination)
+            if (info.st_uid != uid or
+                    stat.S_IMODE(info.st_mode) != 0o644 or info.st_nlink != 1 or
+                    os.path.lexists(receipt_path) or os.path.lexists(lock_path) or
+                    not any(original == payload.encode() for payload in globals().get("LEGACY_TEMPLATES", [])) or
+                    any(entry not in wanted_owned for entry in ownership(current))):
+                raise MaterializationError("adoption ownership evidence unavailable")
+            report = {"converged": False, "adoptable": True,
+                      "fingerprint": fingerprint(current, desired,
+                                                 hashlib.sha256(original).hexdigest() + ":" + desired_digest,
+                                                 "legacy-template", ownership(current))}
+        else:
+            report = {"converged": False,
+                      "fingerprint": fingerprint(current, desired, "missing", "baseline-missing", [])}
         print(json.dumps(report, separators=(",", ":"), sort_keys=True))
         return
 

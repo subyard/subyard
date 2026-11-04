@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import re
 import shutil
@@ -27,6 +28,88 @@ def source_fixture(name):
 spec = importlib.util.spec_from_file_location('connection_diagnostic', GUEST.with_name('connection-diagnostic.py'))
 diagnostic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(diagnostic)
+
+
+class MigrationConsentTest(unittest.TestCase):
+    def guest_function(self, name):
+        match = re.search(r'^'+name+r'\(\) \{\n.*?^}\n', GUEST.read_text(), re.M | re.S)
+        self.assertIsNotNone(match, name)
+        return match.group()
+
+    def test_updates_preserve_arguments_and_native_exit_without_a_terminal(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            engine = Path(temporary)/'engine'
+            engine.write_text('#!/bin/sh\n[ "$*" = \'update --version candidate --offline --yes\' ] || exit 91\nexit 23\n')
+            engine.chmod(0o700)
+            script = 'set -euo pipefail\nYARD_BIN=$1\nfresh() { "$@"; }\n'
+            script += self.guest_function('update')+'\nupdate candidate fixture-release --yes\n'
+            result = subprocess.run(['bash', '-c', script, 'fixture', str(engine)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 23, result.stdout+result.stderr)
+
+    def test_checkpoint_binds_current_predecessor_after_migration_restart(self):
+        code = self.guest_function('interrupt_driver')
+        code = code.split('def assert_loaded_predecessor(', 1)[1].split('\ndef save():', 1)[0]
+        namespace = dict(subprocess=subprocess, hashlib=hashlib, Path=Path, os=os)
+        exec('def assert_loaded_predecessor('+code, namespace)
+        predecessor = hashlib.sha256(b'predecessor').hexdigest()
+        candidate = hashlib.sha256(b'candidate').hexdigest()
+        identity = dict(start='42', uid=os.getuid())
+        for fault in ('', 'absent', 'candidate', 'identity', 'unit-changed'):
+            with self.subTest(fault=fault):
+                # The original PID has exited; systemd now owns a replacement.
+                replies = [dict(identity), dict(identity, start='43' if fault == 'identity' else '42')]
+                namespace['info'] = mock.Mock(side_effect=FileNotFoundError() if fault == 'absent' else replies)
+                with mock.patch.object(subprocess, 'check_output', side_effect=['1234\n', '5678\n' if fault == 'unit-changed' else '1234\n']), \
+                     mock.patch.object(Path, 'read_bytes', return_value=b'candidate' if fault == 'candidate' else b'predecessor'):
+                    if fault:
+                        with self.assertRaises((AssertionError, FileNotFoundError)):
+                            namespace['assert_loaded_predecessor']('fixture.service', predecessor, candidate)
+                    else:
+                        namespace['assert_loaded_predecessor']('fixture.service', predecessor, candidate)
+
+    def drain_receipt(self, root):
+        receipt = root/'updater.json'
+        if not receipt.exists():
+            return
+        record = json.loads(receipt.read_text())
+        for item in [record, *record['groups']]:
+            try:
+                path = Path('/proc')/str(item['pid'])/'stat'
+                fields = path.read_text().rsplit(') ', 1)[1].split()
+                if path.stat().st_uid == os.getuid() and fields[19] == item['start'] and int(fields[2]) == item['pid']:
+                    os.killpg(item['pid'], signal.SIGKILL)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+
+    def test_interrupt_tracks_pty_and_native_groups_even_after_wrapper_exit(self):
+        for early_exit in (False, True):
+            with self.subTest(early_exit=early_exit), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                root = Path(temporary)
+                function = self.guest_function('interrupt_driver')
+                if early_exit:
+                    # Record all current descendants, then simulate loss of the
+                    # PTY supervisor before the driver's finally block runs.
+                    before = 'os.kill(os.getpid(),signal.SIGTERM)'
+                    self.assertIn(before, function)
+                    function = function.replace(before,
+                        "capture(); os.kill(process.pid,signal.SIGKILL); process.wait(timeout=5); raise RuntimeError('fixture supervisor exited')")
+                script = 'set -euo pipefail\nROOT=$1 NAMED=synthetic-stopped\nfresh() { "$@"; }\n'
+                script += function+'\ninterrupt_driver "$2" --probe\n'
+                try:
+                    result = subprocess.run(['bash', '-c', script, 'fixture', str(GUEST.parents[5]), str(root)],
+                                            capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 1 if early_exit else 0, result.stdout+result.stderr)
+                    if early_exit:
+                        self.assertIn('fixture supervisor exited', result.stderr)
+                    self.assertFalse((root/'updater.json').exists(), 'owned groups were not drained')
+                    self.assertIn('native updater started', (root/'interrupted-update.log').read_text())
+                    for name in ('probe-updater', 'probe-child'):
+                        pid = int((root/name).read_text())
+                        stat = Path('/proc')/str(pid)/'stat'
+                        if stat.exists():
+                            self.assertEqual(stat.read_text().rsplit(') ', 1)[1].split()[0], 'Z', name+' survived cancellation')
+                finally:
+                    self.drain_receipt(root)
 
 
 

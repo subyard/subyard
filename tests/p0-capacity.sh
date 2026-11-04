@@ -418,7 +418,7 @@ printf '%s\n' \
   '  "project get subyard-e2e-yard user.subyard-e2e.image-cache"|"project get subyard-test-yard user.subyard-e2e.image-cache")' \
   '    printf "%s\\n" "$P0_FAKE_INCUS_MARKER"' \
   '    ;;' \
-  '  "project get subyard-e2e-yard user.subyard.p0-source"|"project get subyard-test-yard user.subyard.p0-source"|"project get subyard user.subyard.p0-source")' \
+  '  "project get subyard-e2e-yard user.p0-source"|"project get subyard-test-yard user.p0-source"|"project get subyard user.p0-source")' \
   '    printf "\\n"' \
   '    ;;' \
   '  "project get subyard-e2e-yard restricted"|"project get subyard-test-yard restricted") printf "true\\n" ;;' \

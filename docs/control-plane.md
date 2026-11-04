@@ -448,10 +448,33 @@ inventory, network and instance configuration stay checked. Working resource end
 shipped default or unset setting, and an operator-set or saved value is never rewritten or
 compared. A refusing assessment, including `--continue-legacy`, reports every problem it can determine,
 for every registered yard.
-The guest temporary-storage step installs the existing next-boot policy, then asks separately
-for any required restart or temporary boot, even with `--yes`. Decline or EOF leaves the
-transition incomplete and resumable, retaining instance UUID, persistent data and desired power.
-Read-only checks never migrate or request restart consent.
+The guest temporary-storage step lists each unmarked yard in the read-only update plan.
+A running yard restarts: active agent sessions, processes and connections are lost, `/tmp`
+is reset, and persistent data is kept. A stopped yard stays stopped and finishes at its
+next start; run `yard -Y NAME start`, then `yard migrate` to repair any deferred core
+and profile runtimes. The normal update confirmation, or `--yes`, authorizes the listed restarts
+before any migration or journal write. Decline or non-terminal input without `--yes`
+executes nothing; a changed restart set requires a fresh plan. Read-only checks never restart.
+An update already interrupted on a released version finishes under its exact sealed owner's
+rules, including that version's separate restart confirmation where required.
+
+Each running yard applies the existing guest policy, restarts and verifies it before setting
+`user.subyard.disk_tmp=v1`. Host and guest safety checks run before stopping the yard.
+A yard-local failure warns and leaves its marker absent while the remaining yards and release
+update continue. Readiness and sorted warnings read the marker and actual power state. Pending yards do not hold profile/core runtime readiness;
+host key-tools and host-wide owners remain strict, so a pending route-owning test-yard can
+still prevent activation. Desired power stays running after a failed restart, allowing the
+ordinary boot reconciler to retry it. A plain candidate `yard update` prepares only pending
+running yards for retry with the normal confirmation. For a stopped pending yard, run
+`yard -Y NAME start`, then `yard migrate`; update never boots it. Start completes the
+marker with the normal restart and does not repair installed runtimes. Start reports pending completion as a warning
+if the same yard remains running, and as an error if it does not. The physical migration
+also prints its restart consequence immediately before stopping each yard, including
+when a released caller omits plan output with `--yes`.
+If an update retry reveals runtime drift, its existing activation follow-up prints a fresh
+repair plan and obtains that plan's ordinary confirmation. After an explicit start,
+`yard migrate` provides that guarded repair instead; readiness remains strict until it completes.
+Persistent data and instance identity are retained. Read-only checks never retry.
 
 Go is the production release owner. Historical transitions retain their exact sealed
 owners and frozen process and recovery protocols. Unsupported experimental owner
@@ -467,7 +490,33 @@ settings, registration or ingress mutations retain their selected-yard scope acr
 recovery because they can change configuration or rename registrations. Historical
 journals keep their recorded scope; a reconstructed all-local scope may resume only
 when its complete observation binding matches that journal exactly. Config
-reconciliation leaves stopped or absent yards untouched.
+reconciliation leaves stopped or absent yards untouched; a saved running integration
+plan is skipped if its target has stopped; target and integration scope remain in the plan.
+
+After selected-scope source work completes, a fresh readiness inspection can find
+activation drift in another local yard. In that case, one `yard update` prepares
+at most one follow-up repair of the exact active release. The first transaction
+and its authorization retain their original scope. The follow-up reloads persisted
+configuration, performs a fresh read-only assessment, prints its own operation plan
+and requests its own effect-selected confirmation before execution. `--yes`
+answers that prompt; it does not bypass guards or verification. No newer release
+is selected for this phase.
+
+This follow-up requires a complete journal, no blockers, and a final inspection
+with status `migration-required`, code `transition-required`, and the expected
+release both active and targeted. Other failures retain ordinary failure handling.
+Decline, EOF or non-terminal input without explicit consent leaves the release
+active and the remaining yards unrepaired: the command explains the remaining
+plan and `yard update` retry, retains `migration-required`, and exits nonzero.
+A second non-ready inspection is reported as a failure without another follow-up.
+Each phase retains its own update-history attempt. An interruption between phases
+is recoverable with ordinary `yard update`.
+
+Remote CLI updates use the same owner-side flow. An RPC execution, including an
+exact pinned plan, authorizes only its stored plan and never extends consent to
+the follow-up. It returns `transition_required` with the active release, pending
+readiness and remaining plan; the controller must request and authorize a fresh
+operation plan. `update --check --json` remains read-only.
 
 Activation plans explain each affected yard's optional selection from that yard's loaded resolver
 snapshot, including inherited host Git selection and local empty overrides. Read-only component
@@ -504,8 +553,12 @@ removes it. The historical one-time route migration retains its frozen contract.
 Ordinary `init`, including profile provisioning, checks host-wide release readiness after
 all lifecycle effects and before reporting successful completion. Remaining drift returns
 the release outcome and safe continuation; it does not reopen completed migrations or run
-an automatic migration from `start`. A later activation repair requires a fresh assessment
-and authorization.
+an automatic migration from `start`. An explicit normal `init` can repair its selected
+yard's core guest and profile runtime drift through a fresh bound assessment;
+host key-tools and unselected runtime drift remain strict. A selected init still assesses
+and applies the exact guest facts, including a yard whose disk-/tmp marker is pending.
+Other activation repair requires
+a fresh assessment and authorization.
 
 The standalone installer completes the supported current-release transition after creating
 the first runtime link and before publishing CLI entrypoints. Its initial installation
@@ -720,6 +773,19 @@ same-version retry, source import and explicit rollback all use the candidate-ow
 `_release-transition` process contract. Rollback is a newly inspected `activate-previous` goal and
 requires an intact retained runtime within its compatibility horizon.
 
+Fresh rollback with pending settings, owner-registration or source-install changes also requires
+the retained owner to advertise safe prospective source activation. An unsupported owner refuses
+with `rollback-incompatible` before consent or mutation. Complete current-release migrations
+with `yard migrate`, then retry `yard update --rollback`; otherwise retain an owner with
+compatible rollback source planning. Retrying the unchanged retained owner cannot add that support. Compatible rollback without source work remains available. An already-authorized
+transaction continues with its original pinned owner rather than acquiring a new grant.
+Retained inspections can omit registered-yard and guest-disk work from their Decisions.
+For these opaque kinds, the caller checks the exact retained registry and authoritative
+ledger/checkpoint. Pending opaque work requires the same capability even when it may
+ultimately be a no-op; completed opaque work does not. A stopped yard with an absent disk-/tmp
+marker alone does not block rollback once these ledger epochs are complete. Unverifiable
+history refuses rollback.
+
 An installed runtime whose bundled installer predates immutable `--publish-only` cannot be changed
 retroactively. Re-running the verified standalone bootstrap is its one-time bridge: the downloaded
 installer publishes the candidate without touching stable links, then the candidate performs the
@@ -906,6 +972,16 @@ upgrade or migrate the old installation. The full removal preview identifies own
 asks for destructive confirmation. Full uninstall removes the installation's owned yard data,
 settings, credentials, sessions, backups and runtime. Unknown or foreign ownership refuses the
 relevant deletion; names and an old version alone do not prove ownership.
+
+Full teardown accepts retained producers only from the current approved source. A reserved
+owner name or a former registration does not widen that source's labels; an unproved producer
+refuses removal. A legacy or conflicting test-yard is preserved across release activation,
+with a warning and exact recreation commands; it does not prevent ordinary yards from updating.
+Its own `init` refuses until it is recreated. Registered owners use `yard service remove test-vms`,
+then `yard service install test-vms`. An unregistered legacy owner instead uses
+`yard -Y e2e-yard teardown --reset-config`, then `yard service install test-vms`. These operations retain
+their ownership checks and confirmation; recreation never automatically deletes another
+session's running VMs. Unconflicted test-yard installations continue across updates.
 
 Legacy installations may lack creation receipts for host directories. Exact native association
 can establish a registered legacy yard's bounded project/instance/volume scope; unrelated native
@@ -1568,6 +1644,15 @@ An absent setting uses eligible descriptor-declared defaults, and an explicitly 
 selects nothing. Project-owned requests cannot expand the yard set. Import and `up` recheck
 membership before mutation; `down` and removal remain available after deselection.
 
+A valid, current guest-facts snapshot differing from the desired snapshot only in
+`selected_profiles` represents pending configuration application. That difference
+does not require a release transition or block ordinary commands. `config set`
+saves the selection without touching the guest; normal `yard init` applies it and
+publishes matching facts through the existing helper-refresh begin/commit sequence.
+Version or yard-identity differences, unsafe or invalid facts, incomplete refreshes
+and unfinished release transitions retain their strict readiness checks. Other
+helper or profile runtime drift is still assessed independently.
+
 The native `internal/profile` package inventory binds shipped config, provision hooks, presets,
 resource descriptors and optional profile declarations. It includes descriptorless and resource-only
 packages. Provisioning evaluates the assignment layer in Go, forwards only its declared public
@@ -1779,6 +1864,16 @@ consumers impose no payload or pin requirement. Each installed local yard uses i
 pins and tool roots; stopped guests remain conservative when absence cannot be proved. Unavailable
 observations refuse rollback. Refusal happens before runtime-link mutation, and installed presence,
 metadata and effective settings are rechecked after consent.
+
+The separate input-free schema-2 `rollback-source-activation-capabilities` probe advertises the
+exact `rollback-source-activation-v1` tuple: process schema 2, journal schema 2 and receipt schema 0.
+It grants no execution or recovery authority. Before offering a fresh affected rollback for
+confirmation, the caller validates the ordinary typed inspection and this capability from the
+verified retained engine. Mutating source decisions, including unknown source scopes, require it;
+known activation, metadata and legacy-V1 identity-only work does not. Preserve-only and ledger-only
+plans keep the ordinary compatibility path. Missing, malformed or mismatched probes refuse;
+release versions alone do not establish support. Execution rechecks the exact sealed owner.
+Completed history for a different goal does not supply or suppress the new goal's source plan.
 
 Optional `runtime.projects_changed_hooks` declares installed hooks owned by that runtime.
 Entries must be unique, clean absolute paths directly inside

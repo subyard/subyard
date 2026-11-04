@@ -104,7 +104,14 @@ require_root "$why"
 [ "$(id -u "$operator_user")" = "$operator_uid" ] \
   || die "operator numeric identity changed before the network access grant"
 lock_arguments=(ensure)
-[ -z "$APPROVED_OPERATOR_UID" ] || lock_arguments+=("$APPROVED_OPERATOR_UID")
+if [ -n "$APPROVED_OPERATOR_UID" ]; then
+  lock_arguments+=("$APPROVED_OPERATOR_UID")
+  # A host from an older release may not have the tools behind the operator grant.
+  if [ ! -x /usr/bin/setfacl ] || [ ! -x /usr/bin/getfacl ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends acl \
+      || die "POSIX ACL tools could not be installed"
+  fi
+fi
 "$SUBYARD_DISPATCHER_PATH" _network-lock "${lock_arguments[@]}" \
   || die "could not initialize the host network policy lock"
 "$SUBYARD_DISPATCHER_PATH" _network-lock check \

@@ -2017,9 +2017,7 @@ func (transition *V2Transition) observeFresh(
 				transition.options.ConfigHome, settingsView, plan.Files,
 			)
 		case "test-yard-owner-v1-to-v2":
-			plan, inspectErr := inspectOwnerRegistrationV2(
-				ctx, transition.options.OwnerRegistration, settingsView,
-			)
+			plan, inspectErr := transition.inspectUnjournaledOwnerRegistration(ctx, observation, settingsView)
 			if inspectErr != nil {
 				if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
 					observation.blockers = append(observation.blockers, blocker)
@@ -2101,6 +2099,24 @@ func (transition *V2Transition) appendFreshIngressWork(
 	observation.work = append(observation.work, ingressMigrationWork(intent, operation, V2IngressBinding{}))
 }
 
+// Preserve excluded owners consistently before and after authorization. An
+// existing journaled owner effect retains its exact recorded recovery contract.
+func (transition *V2Transition) inspectUnjournaledOwnerRegistration(ctx context.Context, observation *v2Observation, view V2SettingsSnapshotView) (*ownerRegistrationV2Plan, error) {
+	if guard, ok := transition.options.OwnerRegistration.(interface {
+		FreshWarning(context.Context, V2SettingsSnapshotView) (string, error)
+	}); ok {
+		warning, err := guard.FreshWarning(ctx, view)
+		if err != nil {
+			return nil, err
+		}
+		if warning != "" {
+			observation.activationWarnings = append(observation.activationWarnings, warning)
+			return nil, nil
+		}
+	}
+	return inspectOwnerRegistrationV2(ctx, transition.options.OwnerRegistration, view)
+}
+
 func (transition *V2Transition) observeResume(
 	ctx context.Context,
 	observation *v2Observation,
@@ -2134,6 +2150,7 @@ func (transition *V2Transition) observeResume(
 	}
 	ownerSettingsView := ingressPlan.Prospective
 	planned := map[string]settingsV2FilePlan{}
+	settingsPredecessorPending := map[string]bool{}
 	for _, migration := range transition.registry.Migrations {
 		if !slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID }) {
 			continue
@@ -2176,6 +2193,7 @@ func (transition *V2Transition) observeResume(
 	migrationStarted := false
 	sourceImportPending := false
 	ownerRegistrationDeferred := false
+	replacedNative := map[string]bool{}
 	for _, step := range journal.Steps {
 		if step.Checkpoint == StepApplied || step.Checkpoint == StepVerified {
 			migrationStarted = true
@@ -2256,6 +2274,10 @@ func (transition *V2Transition) observeResume(
 			continue
 		}
 		if nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") {
+			// Later rows for a replaced instance require the same fresh assessment.
+			if replacedNative[step.Resource] {
+				continue
+			}
 			work := nativeMigrationWork(intent, migration)
 			retired, err := transition.retiredNativeBinding(ctx, migration, step.Resource, *journal)
 			if err != nil {
@@ -2271,12 +2293,33 @@ func (transition *V2Transition) observeResume(
 				observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
 				continue
 			}
-			if step.Checkpoint == StepVerified && (journal.Checkpoint != JournalMigrating || laterNativeRow(journal.Steps, step)) {
-				// A later row or activation legitimately changes what this finished row
-				// bound. The last row before activation still pins the yard's identity.
-				observation.work = append(observation.work, work)
-				observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
-				continue
+			if step.Checkpoint == StepVerified {
+				// Activation legitimately changes finished rows. Preserve the released
+				// completion boundary: native identity pins apply while migrating.
+				if journal.Checkpoint != JournalMigrating {
+					observation.work = append(observation.work, work)
+					observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
+					continue
+				}
+				replaced, err := transition.nativeIdentityReplaced(ctx, *journal, step, work, ownerSettingsView)
+				if err != nil {
+					return err
+				}
+				if replaced {
+					code, retry := CodeMigrationStale, "inspect release links with yard update --check; recover the original owner before retrying"
+					if initialReleaseLinks(observation.links, journal.Releases) {
+						code, retry = CodePlanStale, "run yard update for a fresh plan and confirmation"
+						replacedNative[step.Resource] = true
+					}
+					observation.blockers = append(observation.blockers, Blocker{Code: code, Resource: step.Resource,
+						Message: "the yard instance of a finished migration row was replaced outside the authorized transition", Retry: retry})
+					continue
+				}
+				if laterNativeRow(journal.Steps, step) {
+					observation.work = append(observation.work, work)
+					observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
+					continue
+				}
 			}
 			actual, err := transition.nativeFingerprint(ctx, work, observation.links, ownerSettingsView)
 			if hasMigrationRefusal(err) {
@@ -2370,9 +2413,11 @@ func (transition *V2Transition) observeResume(
 			})
 			continue
 		}
-		deferred := false
+		// A same-file successor describes the output of a predecessor that has not
+		// written yet. Its current bytes may not even load under the target release.
+		deferred := settingsPredecessorPending[step.Resource] && step.Checkpoint == StepIntent
 		var observeErr error
-		if sourceImportPending && file != nil {
+		if !deferred && sourceImportPending && file != nil {
 			deferred, observeErr = transition.settingsAwaitSourceImport(*file)
 		}
 		var actual Fingerprint
@@ -2388,6 +2433,9 @@ func (transition *V2Transition) observeResume(
 				Retry:   "repair the named yard settings, then run yard update",
 			})
 			continue
+		}
+		if actual == step.Expected && step.Expected != step.Desired {
+			settingsPredecessorPending[step.Resource] = true
 		}
 		if step.Checkpoint == StepEvidence && actual == step.Desired {
 			migrationStarted = true
@@ -2438,7 +2486,7 @@ func (transition *V2Transition) observeResume(
 		}
 	}
 	if journalOwnerMigration && !journalOwner {
-		plan, inspectErr := inspectOwnerRegistrationV2(ctx, transition.options.OwnerRegistration, nil)
+		plan, inspectErr := transition.inspectUnjournaledOwnerRegistration(ctx, observation, nil)
 		if inspectErr != nil {
 			if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
 				observation.blockers = append(observation.blockers, blocker)
@@ -2549,6 +2597,9 @@ func (transition *V2Transition) convergeStep(
 		}
 	}
 	if step.Checkpoint == StepIntent {
+		if err := transition.pinNativeIdentity(ctx, *journal, *step, work); err != nil {
+			return Outcome{}, err
+		}
 		if work.kind() == v2SettingsWork || work.kind() == v2OwnerWork {
 			if err := transition.inject("after-recovery"); err != nil {
 				return Outcome{}, err
@@ -3109,7 +3160,20 @@ func (transition *V2Transition) workFingerprint(
 ) (Fingerprint, error) {
 	switch work.kind() {
 	case v2NativeWork:
-		return transition.nativeFingerprint(ctx, work, ReleaseLinks{})
+		actual, err := transition.nativeFingerprint(ctx, work, ReleaseLinks{})
+		if err != nil {
+			return "", err
+		}
+		if work.migration.Kind == guestDiskTmpMigration {
+			for _, step := range journal.Steps {
+				// Applied evidence proves the authorized attempt, not that every
+				// yard succeeded. Marker-derived activation warnings retain pending work.
+				if step.ID == work.intent.ID && (step.Checkpoint == StepApplied || step.Checkpoint == StepVerified) {
+					return step.Desired, nil
+				}
+			}
+		}
+		return actual, nil
 	case v2IngressWork:
 		step, err := transition.ingressStepForWork(work)
 		if err != nil {

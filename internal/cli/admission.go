@@ -40,6 +40,7 @@ const (
 	recoveryNone gateRecovery = iota
 	recoveryConfigApply
 	recoveryProfileInit
+	recoveryIntegrationRetry
 	recoveryResourceShutdown
 )
 
@@ -116,6 +117,7 @@ var handlerAdmissions = map[string]handlerAdmission{
 		return testVMStatusInvocation(arguments) || testVMLogsInvocation(arguments)
 	})},
 	"@integration": {
+		recovery:     recoveryIntegrationRetry,
 		readOnly:     argumentsOnly(integrationReadOnlyInvocation),
 		ownsRecovery: true, readOnlyRoute: true,
 	},
@@ -280,6 +282,7 @@ func earlyDispatch(definition command.Definition, arguments []string, explicit, 
 type recoveryPermits struct {
 	configApply      *configApplyRepairPermit
 	profileInit      *configApplyRepairPermit
+	integrationRetry *configApplyRepairPermit
 	teardown         *configApplyRepairPermit
 	resourceShutdown *resourceShutdownPermit
 }
@@ -322,6 +325,16 @@ func (cli *CLI) admitReleaseGate(
 			return permits, 1, true
 		}
 		outcome = remaining
+	case recoveryIntegrationRetry:
+		permit, err := cli.prepareIntegrationRetryRepair(ctx, yard, arguments, *outcome)
+		if err != nil {
+			cli.errorf("integration retry release repair: %v", err)
+			return permits, 1, true
+		}
+		permits.integrationRetry = permit
+		if permit != nil {
+			outcome = nil
+		}
 	case recoveryResourceShutdown:
 		permit, err := cli.prepareResourceShutdownRepair(ctx, yard, resourceDefinition, arguments, *outcome)
 		if err != nil {

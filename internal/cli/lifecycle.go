@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 )
@@ -322,6 +323,11 @@ func (execution *lifecycleExecution) steps(yard domain.Context) []domain.Operati
 	}
 	target := "incus/" + yard.IncusProject + "/instance/" + yard.YardInstanceName
 	steps := []domain.OperationStep{{ID: "power", Target: target, Observed: strings.ToLower(execution.status), Desired: desired, Decision: decision, Preconditions: []string{"captured instance configuration and ownership remain unchanged"}, Verify: "instance " + desired + " before desired power commit", Consequence: execution.action + " yard instance"}}
+	// Consequences belong to the captured plan, including when its conditional
+	// power work has already converged before execution.
+	if execution.action == "start" && !strings.EqualFold(execution.observed.Status, "running") && execution.observed.Config["user.subyard.disk_tmp"] == "" {
+		steps[0].Consequence += "; " + migration.DiskTmpDisclosure(yard.YardName, true)
+	}
 	if weight := execution.observed.Config["user.subyard.vm_cpu_weight"]; execution.action == "start" && weight != "" {
 		observed, decision := "drift", domain.StepApply
 		if execution.changed {

@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -42,7 +43,6 @@ type Options struct {
 	ApplyRouteDevice          func(context.Context, ports.PreparedReadOnlyDisk) error
 	CheckRouteDevices         func(context.Context, *PreparedRouteDevices) error
 	EnsureImageProject        func(context.Context, string, bool) error
-	RestoreLegacyStop         func(context.Context) error
 	RecordRegistrationRestore func(PreparedOwnerMember) error
 	fault                     func(string) error
 	syncRegistrationFile      func(*os.File) error
@@ -98,6 +98,22 @@ type registrationSet struct {
 	legacyState         State
 	oldRegistration     string
 	currentRegistration string
+}
+
+// RecreationState classifies the owner without requiring its leases to drain.
+// A release that preserves this namespace has no authority to stop its VMs.
+func RecreationState(ctx context.Context, options Options) (State, error) {
+	if err := validateOptions(&options); err != nil {
+		return "", err
+	}
+	observed, err := inspectRegistration(options)
+	if err != nil || observed.state == StateAbsent {
+		return observed.state, err
+	}
+	if observed.state == StateCurrent {
+		_, err = prepareCanonicalRouteActivationBackend(ctx, options)
+	}
+	return observed.state, err
 }
 
 // Prepare validates registration, Incus topology and live lease state without
@@ -182,7 +198,7 @@ func prepareObserved(
 		return Prepared{}, err
 	}
 	if projects.legacy && projects.current {
-		return Prepared{}, ownerProjectDiagnostic(errors.New("both legacy and current test-yard Incus projects exist; refusing migration"),
+		return Prepared{}, ownerProjectDiagnostic(options, errors.New("both legacy and current test-yard Incus projects exist; refusing migration"),
 			"both legacy subyard-e2e-yard and current subyard-test-yard projects exist; refusing migration", true)
 	}
 	switch observed.state {
@@ -191,7 +207,7 @@ func prepareObserved(
 			return Prepared{}, err
 		}
 		if projects.legacy {
-			return Prepared{}, ownerProjectDiagnostic(errors.New("legacy test-yard Incus project conflicts with current registration"),
+			return Prepared{}, ownerProjectDiagnostic(options, errors.New("legacy test-yard Incus project conflicts with current registration"),
 				"legacy subyard-e2e-yard project conflicts with current registration", true)
 		}
 		prepared, prepareErr := preparedObservedRegistration(
@@ -324,6 +340,10 @@ func bindPreparedAuxiliaryFacts(
 // available only with that durable before-state binding; fresh inspection
 // continues to use Prepare and rejects mixed registrations.
 func ObserveProgress(ctx context.Context, options Options, before Prepared) (Progress, error) {
+	return observeProgress(ctx, options, before, false)
+}
+
+func observeProgress(ctx context.Context, options Options, before Prepared, currentAlreadyChecked bool) (Progress, error) {
 	if err := validateOptions(&options); err != nil {
 		return "", err
 	}
@@ -408,8 +428,10 @@ func ObserveProgress(ctx context.Context, options Options, before Prepared) (Pro
 	if !projects.current {
 		return ProgressInProgress, nil
 	}
-	if err := run(ctx, options, CurrentYard, io.Discard, "check"); err != nil {
-		return ProgressInProgress, nil
+	if !currentAlreadyChecked {
+		if err := run(ctx, options, CurrentYard, io.Discard, "check"); err != nil {
+			return ProgressInProgress, nil
+		}
 	}
 	legacyController := filepath.Join(options.DataHome, "e2e", "controllers", LegacyYard)
 	if exists, err := pathExists(legacyController); err != nil {
@@ -638,9 +660,12 @@ func Commit(ctx context.Context, options Options, before Prepared) error {
 		if err := repairPreparedRegistrationArchive(options, before); err != nil {
 			return err
 		}
-		return finishCurrent(
+		if err := finishCurrent(
 			runYard, options, !adoptCurrent, oldRegistration, currentRegistration, before,
-		)
+		); err != nil {
+			return err
+		}
+		return verifyDesiredOwner(ctx, options, before)
 	}
 	if !adoptCurrent && projects.legacy && observed.legacy && !observed.current {
 		_, instanceExists, inspectErr := legacyInstanceStatus(ctx, options)
@@ -755,6 +780,9 @@ func Commit(ctx context.Context, options Options, before Prepared) error {
 		}
 		return recover(err)
 	}
+	if err := verifyDesiredOwner(ctx, options, before); err != nil {
+		return err
+	}
 	fmt.Fprintln(options.Stdout, "migrated test VM yard e2e-yard -> test-yard")
 	return nil
 }
@@ -815,6 +843,21 @@ func verifyState(options Options, before State) error {
 		return fmt.Errorf("test-yard migration did not converge: found %s", observed.state)
 	}
 	return validateNoLegacyOwnerState(options)
+}
+
+func verifyDesiredOwner(ctx context.Context, options Options, before Prepared) error {
+	// Both callers just completed finishCurrent's native check. Its remaining
+	// work only archives auxiliary metadata; it never mutates the current yard.
+	// Reuse that check while freshly proving every filesystem/project postcondition.
+	// Public observations and terminal cleanup always perform their own check.
+	progress, err := observeProgress(ctx, options, before, true)
+	if err != nil {
+		return err
+	}
+	if progress != ProgressDesired {
+		return errors.New("owner migration requires verified desired state")
+	}
+	return nil
 }
 
 // VerifyRollback checks that rollback restored the exact registration shape.
@@ -885,7 +928,7 @@ func inspectRegistration(options Options) (registration, error) {
 	if found.legacy && found.current {
 		legacyPath, _ := filepath.Rel(options.ConfigHome, found.oldRegistration)
 		currentPath, _ := filepath.Rel(options.ConfigHome, found.currentRegistration)
-		return registration{}, ownerStateDiagnostic(errors.New("test-yard already exists; refusing to replace either yard"),
+		return registration{}, ownerStateDiagnostic(options, errors.New("test-yard already exists; refusing to replace either yard"),
 			"conflicting config-home-relative registrations "+filepath.ToSlash(legacyPath)+" and "+filepath.ToSlash(currentPath)+"; both preserved")
 	}
 	if found.legacy {
@@ -965,11 +1008,11 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 		}
 	}
 	if len(foundLegacy) > 1 {
-		return registrationSet{}, ownerStateDiagnostic(errors.New("multiple e2e-yard registrations exist"),
+		return registrationSet{}, ownerStateDiagnostic(options, errors.New("multiple e2e-yard registrations exist"),
 			"multiple config-home-relative registrations yards/e2e-yard/config.env and yards/e2e-yard.env; both preserved")
 	}
 	if len(foundCurrent) > 1 {
-		return registrationSet{}, ownerStateDiagnostic(errors.New("multiple test-yard registrations exist"),
+		return registrationSet{}, ownerStateDiagnostic(options, errors.New("multiple test-yard registrations exist"),
 			"multiple config-home-relative registrations yards/test-yard/config.env and yards/test-yard.env; both preserved")
 	}
 	var registrationErrors []error
@@ -1050,9 +1093,12 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 }
 
 // Reset removes authored files after native teardown and keeps its ownership
-// marker outside the yard directory. That protected intent plus an already
-// validated empty directory is retired state, not an incomplete registration.
+// marker outside the yard directory. That protected intent plus a safe empty
+// directory is retired state, not an incomplete registration or owner conflict.
 func resetEmptyYardDirectory(options Options, name, directory string) (bool, error) {
+	if err := ownedDirectory(directory); err != nil {
+		return false, err
+	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return false, err
@@ -1536,9 +1582,6 @@ func temporarilyStartStoppedLegacyYard(
 		return nil, false, fmt.Errorf("temporarily start legacy test yard: %w", err)
 	}
 	return func() error {
-		if options.RestoreLegacyStop != nil {
-			return options.RestoreLegacyStop(ctx)
-		}
 		// The guarded start preserves desired=running. Stop only the live
 		// instance here so the preflight restores the exact inconsistent state
 		// it inspected; the product stop command would also persist
@@ -1615,42 +1658,40 @@ func runIncus(ctx context.Context, options Options, arguments ...string) ([]byte
 func inspectProjects(ctx context.Context, options Options) (projectSet, error) {
 	payload, err := runIncus(ctx, options, "project", "list", "--format=json")
 	if err != nil {
-		return projectSet{}, ownerProjectDiagnostic(fmt.Errorf("list test-yard Incus projects: %w", err),
+		return projectSet{}, ownerProjectDiagnostic(options, fmt.Errorf("list test-yard Incus projects: %w", err),
 			"owner project inventory inspection failed", false)
 	}
 	var projects []struct {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(payload, &projects); err != nil {
-		return projectSet{}, ownerProjectDiagnostic(fmt.Errorf("decode test-yard Incus projects: %w", err),
+		return projectSet{}, ownerProjectDiagnostic(options, fmt.Errorf("decode test-yard Incus projects: %w", err),
 			"owner project inventory is invalid", false)
 	}
 	if projects == nil {
-		return projectSet{}, ownerProjectDiagnostic(errors.New("test-yard Incus project inventory must be a JSON array"),
+		return projectSet{}, ownerProjectDiagnostic(options, errors.New("test-yard Incus project inventory must be a JSON array"),
 			"owner project inventory must be a JSON array", false)
 	}
 	result := projectSet{}
+	seen := map[string]bool{}
+	var findings []error
 	for _, project := range projects {
-		if project.Name == "" {
-			return projectSet{}, ownerProjectDiagnostic(errors.New("test-yard Incus project inventory has an incomplete identity"),
-				"owner project inventory has an incomplete identity", false)
+		if project.Name == "" || len(project.Name) > 96 || !domain.SafeID(project.Name) {
+			findings = append(findings, ownerProjectDiagnostic(options, errors.New("incomplete or malformed project identity"), "owner project inventory has an incomplete or malformed identity", false))
+			continue
 		}
-		switch project.Name {
-		case "subyard-" + LegacyYard:
-			if result.legacy {
-				return projectSet{}, ownerProjectDiagnostic(errors.New("duplicate legacy test-yard Incus project"),
-					"duplicate legacy subyard-e2e-yard project", true)
-			}
+		if seen[project.Name] {
+			findings = append(findings, ownerProjectDiagnostic(options, fmt.Errorf("duplicate project identity %s", project.Name), "duplicate Incus project "+project.Name, false))
+		}
+		seen[project.Name] = true
+		if project.Name == "subyard-"+LegacyYard {
 			result.legacy = true
-		case "subyard-" + CurrentYard:
-			if result.current {
-				return projectSet{}, ownerProjectDiagnostic(errors.New("duplicate current test-yard Incus project"),
-					"duplicate current subyard-test-yard project", true)
-			}
+		}
+		if project.Name == "subyard-"+CurrentYard {
 			result.current = true
 		}
 	}
-	return result, nil
+	return result, registrationRefusals(findings...)
 }
 
 func sharedImageNamespace(ctx context.Context, options Options, yard string) (bool, error) {
@@ -2047,7 +2088,16 @@ func validateNoLegacyOwnerState(options Options) error {
 			return err
 		}
 		if exists {
-			return ownerStateDiagnostic(errors.New("legacy owner state remains beside the canonical registration"),
+			if resource.root == options.ConfigHome && resource.relative == "yards/e2e-yard" {
+				reset, err := resetEmptyYardDirectory(options, LegacyYard, path)
+				if err != nil {
+					return err
+				}
+				if reset {
+					continue
+				}
+			}
+			return ownerStateDiagnostic(options, errors.New("legacy owner state remains beside the canonical registration"),
 				"legacy owner state remains at "+resource.role+" "+resource.relative+" beside the canonical registration")
 		}
 	}

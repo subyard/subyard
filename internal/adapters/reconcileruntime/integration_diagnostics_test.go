@@ -5,16 +5,65 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/ports"
-	"github.com/Subyard/Subyard/internal/profile"
-	"github.com/Subyard/Subyard/internal/testkit"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testing.T) {
+	for _, kind := range []string{"completed", "exit-only", "edited", "invalid-json", "invalid-toml", "transport", "unknown-stderr"} {
+		t.Run(kind, func(t *testing.T) {
+			incus := runningIncus(1)
+			step := &incus.ExecSteps[0]
+			step.Result.ExitCode = 2
+			step.Result.Stderr = []byte("config materialization: adoption ownership evidence unavailable\n")
+			step.Err = &ports.GuestExitError{Code: 2}
+			wantDetail := "recognized legacy template"
+			switch kind {
+			case "exit-only":
+				step.Err = nil
+			case "transport":
+				step.Err = errors.New("PRIVATE transport failure")
+			case "unknown-stderr":
+				step.Result.Stderr = []byte("PRIVATE guest content")
+			case "edited":
+				wantDetail = "owned fields or protected evidence changed"
+				step.Result.Stderr = []byte("config materialization: adoption owned fields or evidence changed\n")
+			case "invalid-json", "invalid-toml":
+				wantDetail = "invalid current " + strings.ToUpper(strings.TrimPrefix(kind, "invalid-"))
+				step.Result.Stderr = []byte("config materialization: " + wantDetail + "\n")
+			}
+			runtime := Runtime{Executor: incus, Yard: domain.Context{
+				DevUser: "dev", DevUID: 1000, YardName: "sample", IncusProject: "sample-project", YardInstanceName: "sample-instance",
+			}}
+			_, err := runtime.observeIntegrationConfig(context.Background(), "toml", configmaterial.ModeAssessAdopt,
+				"/home/dev/.fixture/config.toml", []byte("managed = 'new'\n"))
+			if err == nil || strings.Contains(err.Error(), "PRIVATE") {
+				t.Fatal("ownership refusal lost or leaked private data")
+			}
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			public := errors.As(err, &diagnostic)
+			if public != (kind != "transport" && kind != "unknown-stderr") {
+				t.Fatal("uncertain or arbitrary native error became a public ownership diagnosis")
+			}
+			if public {
+				message, retry := diagnostic.ActivationDiagnostic()
+				if !strings.Contains(message, wantDetail) || !strings.Contains(message, "/home/dev/.fixture/config.toml") ||
+					retry != "'incus' 'exec' 'sample-instance' '--project' 'sample-project' '--' 'sha256sum' '--' '/home/dev/.fixture/config.toml'" {
+					t.Fatalf("unactionable ownership diagnostic: %s; %s", message, retry)
+				}
+			}
+		})
+	}
+}
 
 func TestLifecycleFailureRecordIsClosedAndPhaseAware(t *testing.T) {
 	for _, test := range []struct{ output, phase, wantPhase, wantReason string }{

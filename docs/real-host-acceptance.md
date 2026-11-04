@@ -43,16 +43,10 @@ inside each selected running instance.
 
 ## Versioned configuration source
 
-Run the shared-only source gate on an allocated VM:
-
-```sh
-dev/agent-e2e.sh --slot "$slot" --vm 1 -- bash ./dev/e2e/config-source-shared-only.sh
-```
-
-The gate uses a marked temporary root and a loopback OpenSSH Git remote. It verifies declined and
-confirmed onboarding, local HostID persistence, shared and host provenance, explicit external Git
-transport, idempotent sync and safe host-overlay removal. Its trap removes the Git remote, checkout,
-live configuration and SSH process; it never changes the outer yard lifecycle.
+Shared-only onboarding, terminal confirmation, declined-operation immutability and local
+HostID persistence are covered by `tests/cli-contract.sh` and the configuration-source Go
+tests. Installed authenticated SSH/Git transport and bidirectional convergence are covered
+by `dev/e2e/config-sync-acceptance.sh`.
 
 ## Platform and release checks
 
@@ -100,12 +94,13 @@ offline and incomplete-download behavior, atomic upgrade/rollback layout, stdio 
 supported/unsupported protocol negotiation. On the E2E lane, install two versioned runtimes on VM1,
 connect from VM2 over SSH stdio, upgrade the owner while the controller stays on the previous
 version, and then run `yard update --rollback`. The upgrade path
-also retains the [source-upgrade lane](../dev/e2e/p0-source-upgrade.sh) for recognized
-source-install layouts (historically called pre-0.1/v0.1 paths) through supported V2
-source ingress: real import, reboots, old-path removal and rollback/roll-forward for
-default and named yards. These layout names do not extend published-release support:
-[the minimum published predecessor is v0.11.0, inclusive](reference/legacy-migration-support.md);
-earlier published releases require full uninstall and a separate clean installation.
+also retains the [source-upgrade lane](../dev/e2e/p0-source-upgrade.sh) from a checksum-pinned
+installed v0.11.0 predecessor. Its legacy `e2e-yard` remains intact until the operator
+executes the printed recreation commands; the ordinary yard retains its data, identity
+and power state. Two reboots, a second candidate update and rollback/roll-forward
+exercise the resulting installed runtime. This lane starts at
+[the v0.11.0 support floor](reference/legacy-migration-support.md); earlier installations
+require full uninstall and a separate clean installation.
 
 If guarded yard restoration fails during an owner-host boot, inspect the bounded host-side journal
 before running `yard init` or manually starting the yard:

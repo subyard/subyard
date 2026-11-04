@@ -315,6 +315,11 @@ metadata fails closed. Required sequence is read-only assessment/plan → one pr
 answers only prompt, never stale/destructive guards or verification. Empty Enter accepts yes
 only on interactive TTY; EOF/non-TTY without explicit consent rejects. Root reexec follows
 consent and never repeats it; profile handlers do not add child prompts.
+An update lists each pending disk-/tmp restart before this confirmation, including session,
+process and connection loss, `/tmp` reset and persistent-data retention. `--yes` prints the
+same list and answers the one prompt; stopped yards are not booted by update. For a stopped pending yard, run
+`yard -Y NAME start`, then `yard migrate` to repair deferred runtimes.
+An update interrupted under a released owner retains that owner's confirmation rules.
 
 `OperationPlan` is a cloned preview/wire value; its `Confirmed` field does not grant execution.
 The prepared command owns a private approval snapshot and one shared lifecycle across Go copies.
@@ -564,19 +569,15 @@ Disconnect does not cancel turns or autoapprove questions; first backend MVP pro
 in-flight survival across server/yard/host restart. Managed restarts must respect live work and
 upstream shutdown behavior.
 
-Paseo support is retired because it cost too much to maintain and to test continuously: although
-optional and absent from shipped defaults, it needed a pinned native bundle, its own release jobs
-and an ownership branch in core. Subyard no longer builds, ships or tests it. A minimal
-[retired package](shipped-integration-contract.md#retired-package-compatibility) removes what
-Subyard can prove it installed during an ordinary update, with a warning and no manual pause.
-`/srv/agents/paseo` is deleted only when its receipt proves ownership and no worktree can be lost;
-otherwise the directory stays with a warning and the exact manual removal command, because
-worktrees can hold work that exists nowhere else. Published releases keep their bundles, so
-a rollback to a release that accepts the current migration ledger reprovisions Paseo, with new
-pairing if the directory is gone; an older release refuses it as `rollback-incompatible`. Updates never start a
-stopped yard, so init retires one through its existing temporary start and records host-readable
-proof that lets later inits skip the boot; updates and `yard start` only warn until then. The explicit
-`yard integration cleanup` command and `AGENT_<id>_CLEANUP` setting had no other consumer and are removed.
+Paseo is removed. The [retired package](shipped-integration-contract.md#retired-package-compatibility)
+removes its service, including a foreign unit, helper commands, runtime, receipt and state during
+an ordinary update. Only a non-empty real `/srv/agents/paseo/worktrees/` directory survives, with
+one warning naming it; chats, schedules, loops and uploads are removed. Path safety and actual
+operation failures remain enforced. To use Paseo, install an older release.
+
+Updates leave stopped yards untouched and warn with `run: yard -Y NAME init`. Init uses its
+existing temporary start to remove Paseo, restores stopped power and records the retirement proof
+that lets repeated init skip the boot. `yard start` only warns until removal is complete.
 
 <a id="github-app-token-broker"></a>
 

@@ -220,14 +220,33 @@ android_network_received() {
   [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=unknown
   printf 'android network_received phase=%s state=%s bytes=%s scope=nested-yard-eth0\n' "$1" "$2" "$bytes"
 }
+# Toolchain contents and the running pool process that repeated provisioning must keep.
+android_toolchain_signature() {
+  # shellcheck disable=SC2016 # The guest shell expands its own variables.
+  incus --project "$project" exec "$instance" -- sh -eu -c '
+    pid="$(systemctl show subyard-android-pool.service -p MainPID --value)"
+    printf "%s %s\n" "$pid" "$(cut -d" " -f22 "/proc/$pid/stat")"
+    systemctl show subyard-android-pool.service -p FragmentPath -p DropInPaths --value
+    sha256sum /etc/systemd/system/subyard-android-pool.service
+    for path in "/opt/jdk-"* /srv/cache/android-sdk /srv/cache/gradle/wrapper; do
+      [ ! -e "$path" ] || find "$path" -xdev -maxdepth 3 -printf "%p %y %m %s %T@\n"
+    done | LC_ALL=C sort | sha256sum
+  '
+}
+
 android_repeat_provision() {
-  local phase="$1" label="$2" log="$state/$1.log"
+  local phase="$1" label="$2" log="$state/$1.log" signature
   android_phase_begin "$phase"
   android_network_received "$phase" before
+  signature="$(android_toolchain_signature)"
   yard provision --yes 2>&1 | tee "$log"
   android_network_received "$phase" after
   if grep -Eq 'android provision: download stage=.* state=start' "$log"; then
     printf 'android repeated provisioning downloaded a toolchain archive\n' >&2
+    return 1
+  fi
+  if [ "$(android_toolchain_signature)" != "$signature" ]; then
+    printf 'android repeated provisioning changed the toolchain or restarted the pool\n' >&2
     return 1
   fi
   printf 'android %s=PASS archive_downloads=0\n' "$label"

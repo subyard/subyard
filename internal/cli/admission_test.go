@@ -316,7 +316,7 @@ func TestAdmissionPolicy(t *testing.T) {
 		{[]string{"config", "sync", "--check"}, false, reader},
 		{[]string{"config", "repair-registration", "default"}, false, want{gate: gateSkipRegistrationRepair, readOnlyRoute: true}},
 		{[]string{"config", "validate"}, false, with(writer, func(w *want) { w.early = earlyConfigValidate })},
-		{[]string{"integration", "enable", "tool"}, false, want{gate: gateRequired, readOnlyRoute: true}},
+		{[]string{"integration", "enable", "tool"}, false, want{gate: gateRequired, recovery: recoveryIntegrationRetry, readOnlyRoute: true}},
 		{[]string{"integration", "status"}, false, reader},
 		{[]string{"profile", "enable", "fixture"}, false, want{gate: gateRequired, readOnlyRoute: true}},
 		{[]string{"update"}, false, want{gate: gateHandlerOwned, ownerRecovery: true}},

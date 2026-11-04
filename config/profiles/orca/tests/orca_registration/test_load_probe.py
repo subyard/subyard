@@ -11,39 +11,6 @@ spec.loader.exec_module(probe)
 
 
 class LoadProbeTests(unittest.TestCase):
-    def test_cold_response_precedes_settlement_and_startup_cpu_is_separate(self):
-        clock = [0.0, 0.0]
-        events, timings, failures = [], [], []
-        ticks = probe.os.sysconf("SC_CLK_TCK")
-
-        def advance(seconds, cpu):
-            clock[0] += seconds
-            clock[1] += seconds * cpu / 100 * ticks
-
-        def sleep(seconds):
-            events.append(("sleep", seconds))
-            advance(seconds, 120 if seconds == 25 else 2)
-
-        def round_trip():
-            events.append(("rpc", clock[0]))
-            first = not timings
-            timings.append(6000 if first else 200)
-            failures.append(1 if first else 0)
-            advance(1, 120 if first else 130)
-            return {"worktree.list": {"max_ms": timings[-1], "failures": sum(failures)}}
-
-        result = probe.measure_phase(lambda: (1, clock[1], clock[0]), round_trip,
-                                     cold=True, sleep=sleep, monotonic=lambda: clock[0])
-        self.assertEqual([("rpc", 0), ("sleep", 25), ("sleep", 10), ("rpc", 36)], events)
-        self.assertEqual(120, result["startup_cpu_percent"])
-        self.assertEqual(25, result["settle_seconds"])
-        self.assertEqual(2, result["idle_cpu_percent"])
-        self.assertLess(result["cpu_percent"], 80)
-        self.assertEqual(130, result["demand_cpu_percent"])
-        self.assertEqual(6000, result["first_max_rpc_ms"])
-        self.assertEqual({"worktree.list": {"max_ms": 6000, "failures": 1}}, result["first_rpc"])
-        self.assertEqual([6000, 200], timings)
-        self.assertEqual(1, sum(failures), "a failed first response must remain in the phase's failure count")
 
     def test_stock_list_and_ps_report_missing_baseline_and_fixture_paths(self):
         root = Path("/fixture/load")

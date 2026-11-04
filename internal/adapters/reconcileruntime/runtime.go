@@ -1998,6 +1998,14 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if ok, err := runtime.previewConverged(ctx); err != nil || !ok {
 		return false, err
 	}
+	if runtime.guestFactsAvailable() {
+		// Init applies the selection snapshot even when profiles-only drift
+		// does not require a release transition. Provision writes begin/commit.
+		exit, err := runtime.guestFactsCheck(ctx)
+		if err != nil || exit != 0 {
+			return false, err
+		}
+	}
 	if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
 		plan, err := runtime.IntegrationPlan(ctx)
 		if err != nil || plan.Changed {

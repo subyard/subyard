@@ -16,6 +16,8 @@ case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-d
 vm_type=android-test
 # Skill discovery provisions the SDK and pool, but never allocates an emulator.
 [ "$lane" != skills ] || vm_type=subyard-pair
-bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --type "$vm_type" --vm-count 1 \
+allocation_route=()
+[ -z "${SUBYARD_E2E_ROLLOUT_YARD:-}" ] || allocation_route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
+bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$slot" --type "$vm_type" --vm-count 1 \
   --purpose android-pool-runtime --vm 1 -- \
   bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane "$lane"

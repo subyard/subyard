@@ -36,6 +36,7 @@ export MOCK_CAPTURE_FILE="$TMP/metadata-root"
 export MOCK_CATALOG_MODE=success MOCK_INIT_EXIT=0
 export MOCK_INIT_CREATED_ON_FAILURE=0
 export MOCK_INIT_SIGNAL=0
+export MOCK_INIT_IMAGE_MISSING=0
 export MOCK_CATALOG_REMOTE=images:
 export MOCK_TMP_CHECK_FILE="$TMP/tmp-checks" MOCK_REBOOT=0
 export MOCK_BOOT_AFTER_RESTART=0
@@ -96,7 +97,11 @@ case "${1:-} ${2:-} ${3:-}" in
     fi
     if [ "$2" = images:debian/13 ] && [ "$MOCK_INIT_EXIT" != 0 ]; then
       [ "$MOCK_INIT_CREATED_ON_FAILURE" != 1 ] || printf '1\n' > "$MOCK_INSTANCE_FILE"
-      printf 'Error: Failed getting image: lookup image.invalid: no such host private-sentinel\n' >&2
+      if [ "$MOCK_INIT_IMAGE_MISSING" = 1 ]; then
+        printf 'Error: Image "%s" not found\nprivate-sentinel\n' "$2" >&2
+      else
+        printf 'Error: Failed getting image: lookup image.invalid: no such host private-sentinel\n' >&2
+      fi
       exit "$MOCK_INIT_EXIT"
     fi
     printf '1\n' > "$MOCK_INSTANCE_FILE" ;;
@@ -278,6 +283,7 @@ reset_creation() {
   printf '0\n' > "$MOCK_INSTANCE_FILE"
   printf '0\n' > "$MOCK_CATALOG_ATTEMPTS"
   MOCK_CATALOG_MODE=success MOCK_INIT_EXIT=0 MOCK_INIT_CREATED_ON_FAILURE=0 MOCK_INIT_SIGNAL=0
+  MOCK_INIT_IMAGE_MISSING=0
   MOCK_PROBE_EXIT=0 MOCK_INCUS_APPARMOR_ENV=''
   printf '[{"fingerprint":"%064d","type":"container","aliases":[{"name":"debian/13"}]}]\n' 1 > "$MOCK_CATALOG_FILE"
 }
@@ -290,6 +296,16 @@ run_create || rc=$?
 [ "$(grep -c '^init ' "$MOCK_INCUS_LOG")" = 1 ] || fail 'mutating init was retried'
 ! grep -q '^init images:ubuntu/24.04 ' "$MOCK_INCUS_LOG" || fail 'mutating failure selected fallback'
 ! grep -q private-sentinel "$TMP/output" || fail 'private init stderr leaked'
+
+reset_creation
+MOCK_INIT_EXIT=1 MOCK_INIT_IMAGE_MISSING=1
+rc=0
+run_create || rc=$?
+[ "$rc" = 1 ] && [ "$(grep -c '^init ' "$MOCK_INCUS_LOG")" = 1 ] \
+  || fail 'missing image changed native status or retried creation'
+grep -Fxq 'Error: Image "images:debian/13" not found (Incus project "subyard")' "$TMP/output" \
+  || fail 'missing image lost its actionable native reason'
+! grep -q private-sentinel "$TMP/output" || fail 'missing image leaked unrelated private stderr'
 
 reset_creation
 MOCK_INIT_EXIT=130

@@ -412,6 +412,8 @@ func (store *POSIXV2Store) sourceRetainedTerminalEvidence(transaction Transactio
 			decision := DecisionCanonicalize
 			if resource == "ledger" {
 				resource, decision = "ledger."+migration.Domain, DecisionTransform
+			} else if nativeMigration(migration) && strings.HasPrefix(resource, "yard.") {
+				decision = DecisionTransform
 			}
 			bound.Steps = append(bound.Steps, JournalStep{ID: id, Migration: migration.ID, Resource: resource, Decision: decision, Expected: evidence.Expected, Desired: evidence.Desired, Checkpoint: StepVerified, Evidence: &evidence})
 			delete(verified, id)

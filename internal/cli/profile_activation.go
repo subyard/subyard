@@ -43,14 +43,14 @@ func (reconciler *profileRuntimeActivationReconciler) failure(yard, phase string
 	return materializedConfigActivationError{cause, yard, owner, "status", phase, reconciler.request.ConfigHome}
 }
 
-func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configTarget, error) {
+func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Context) (*CLI, []configTarget, error) {
 	operation := reconciler.cli.releaseActivationOperation()
 	// Host-wide inventory must not require the caller's yard to exist.
 	loaded, err := operation.resolveReleaseTransitionContext("default", reconciler.request.ConfigHome)
 	if err != nil {
 		return nil, nil, reconciler.failure("default", "inspect", err)
 	}
-	targets, err := operation.localConfigTargets(loaded, true)
+	targets, err := operation.releaseConfigTargets(ctx, loaded, true)
 	if err != nil {
 		return operation, nil, err
 	}
@@ -108,9 +108,17 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 			Actual: actual, Desired: desiredDigest, Converged: false,
 		}, err
 	}
-	operation, targets, err := reconciler.targets()
+	operation, targets, err := reconciler.targets(ctx)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
+	}
+	deferred, err := operation.deferredDiskTmpTargets(ctx, targets, reconciler.id == "core-guest-runtime" || slices.Contains(reconciler.cli.profileRuntimeIDs(), reconciler.id))
+	if err != nil {
+		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
+	}
+	warnings := []string{}
+	if reconciler.id == "core-guest-runtime" {
+		warnings = diskTmpWarnings(deferred, targets)
 	}
 	type observation struct {
 		Yard, Project, Instance, State, Digest, Desired string
@@ -118,6 +126,9 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	actual := make([]observation, 0, len(targets))
 	converged := true
 	for _, target := range targets {
+		if _, ok := deferred[target.Name]; ok {
+			continue
+		}
 		state, err := observeProfileRuntime(ctx, profileActivationPlatform(operation, target), reconciler.id)
 		if err != nil {
 			return releasetransition.V2ActivationObservation{}, reconciler.failure(target.Name, "inspect", err)
@@ -135,7 +146,7 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	if !converged {
 		actualDigest, err = activationStageFingerprint(actual)
 	}
-	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged}, err
+	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Warnings: warnings}, err
 }
 
 func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Context, _ releasetransition.ReleaseLinks) error {
@@ -146,7 +157,11 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 	if !complete {
 		return fmt.Errorf("profile runtime refresh requires completed source migrations")
 	}
-	operation, targets, err := reconciler.targets()
+	operation, targets, err := reconciler.targets(ctx)
+	if err != nil {
+		return err
+	}
+	deferred, err := operation.deferredDiskTmpTargets(ctx, targets, reconciler.id == "core-guest-runtime" || slices.Contains(reconciler.cli.profileRuntimeIDs(), reconciler.id))
 	if err != nil {
 		return err
 	}
@@ -154,6 +169,9 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		return domain.ErrPlanStale
 	}
 	for _, target := range targets {
+		if _, ok := deferred[target.Name]; ok {
+			continue
+		}
 		platform := profileActivationPlatform(operation, target)
 		state, err := observeProfileRuntime(ctx, platform, reconciler.id)
 		if err != nil {
@@ -223,7 +241,7 @@ func (reconciler *profileRuntimeActivationReconciler) PrepareActivationRecovery(
 	if !complete {
 		return "", fmt.Errorf("runtime recovery requires completed source migrations")
 	}
-	operation, targets, err := reconciler.targets()
+	operation, targets, err := reconciler.targets(ctx)
 	if err != nil {
 		return "", err
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -219,7 +220,7 @@ func TestDirectOwnedObservationRequiresExactReadOnlyEmptyScope(t *testing.T) {
 	}
 }
 
-func TestHistoryRegisteredDiskTmpReadinessUsesExactPolicySource(t *testing.T) {
+func TestHistoryDiskTmpCompletionAndPolicyCheckContract(t *testing.T) {
 	root := testkit.TempDir(t)
 	payload, err := os.ReadFile("../../../../scripts/guest-disk-tmp.sh")
 	if err != nil {
@@ -248,8 +249,16 @@ func TestHistoryRegisteredDiskTmpReadinessUsesExactPolicySource(t *testing.T) {
 	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: client, Executor: client, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if ready, err := runtime.RegisteredDiskTmpReady(ctx); err != nil || !ready {
-		t.Fatalf("actual policy readiness: ready=%t err=%v", ready, err)
+	// Completed migration work trusts the marker and never enters the guest.
+	if err := migration.CompleteRegisteredDiskTmp(ctx, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if len(server.ExecCalls()) != 0 || len(server.PowerCalls()) != 0 {
+		t.Fatal("completed migration invoked guest execution or lifecycle")
+	}
+	result, err := client.Exec(ctx, "subyard", "yard", ports.InstanceExecRequest{Command: []string{"sh", "-s", "--", "check"}, Stdin: payload})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("exact read-only policy check refused: %#v %v", result, err)
 	}
 	for _, action := range []string{"apply", "assess", "wait-boot"} {
 		result, err := client.Exec(ctx, "subyard", "yard", ports.InstanceExecRequest{Command: []string{"sh", "-s", "--", action}, Stdin: payload})
@@ -258,10 +267,15 @@ func TestHistoryRegisteredDiskTmpReadinessUsesExactPolicySource(t *testing.T) {
 		}
 	}
 	testkit.WriteFile(t, policy, append(append([]byte(nil), payload...), []byte("\n# changed source\n")...), 0600)
-	if ready, err := runtime.RegisteredDiskTmpReady(ctx); ready {
+	// Ordinary provision verification still sends the actual policy source and
+	// refuses changed bytes before proceeding to any other provision checks.
+	if ready, err := runtime.VerifyStageWithDiagnostic(ctx, ports.ReconcileStageProvision); ready {
 		t.Fatalf("altered policy accepted: %v", err)
 	}
-	if len(server.ExecCalls()) != 5 {
-		t.Fatalf("native readiness/negative probes not reached: %d", len(server.ExecCalls()))
+	if err := migration.CompleteRegisteredDiskTmp(ctx, runtime); err != nil {
+		t.Fatalf("source change replayed completed migration: %v", err)
+	}
+	if len(server.ExecCalls()) != 5 || len(server.PowerCalls()) != 0 {
+		t.Fatalf("policy probes/lifecycle calls: exec=%d power=%d", len(server.ExecCalls()), len(server.PowerCalls()))
 	}
 }

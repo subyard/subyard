@@ -1134,6 +1134,52 @@ esac
 
 type provisionLifecycleExecutor struct{ *retryableIntegrationExecutor }
 
+type provisionFactsExecutor struct {
+	provisionLifecycleExecutor
+	exit          int
+	factsRequests []ports.InstanceExecRequest
+}
+
+func (fixture *provisionFactsExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) == 5 && request.Command[0] == "python3" && request.Command[4] == "check" {
+		fixture.factsRequests = append(fixture.factsRequests, request)
+		if fixture.exit != 0 {
+			return ports.InstanceExecResult{ExitCode: fixture.exit}, &ports.GuestExitError{Code: fixture.exit}
+		}
+		return ports.InstanceExecResult{}, nil
+	}
+	return fixture.provisionLifecycleExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestProvisionRequiresExactFactsAfterProfileSelectionChanges(t *testing.T) {
+	previewLoopbackFixture(t)
+	runtime, definition, _, desired := lifecycleFixture(t)
+	testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, desired, desired)), 0o600)
+	runtime.RepositoryRoot = "../../.."
+	runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=", "CCUSAGE_VERSION=1.2.3", "ENVIRONMENT_PROFILES=", "YARD_VERSION=0.25.6-test")
+	runtime.Yard = domain.Context{YardName: "synthetic", IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: 1000}
+	runtime.Incus = &testkit.Incus{ServerInfo: ports.ServerInfo{Environment: "incus"}, Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{"user.subyard.ccusage_version": "1.2.3"}}}}
+	executor := &provisionFactsExecutor{provisionLifecycleExecutor: provisionLifecycleExecutor{&retryableIntegrationExecutor{}}}
+	runtime.Executor = executor
+	if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); err != nil || !ready {
+		t.Fatalf("otherwise converged fixture: ready=%v err=%v", ready, err)
+	}
+	executor.exit = 11
+	executor.factsRequests = nil
+	if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); err != nil || ready {
+		t.Fatalf("pending selection skipped ordinary provisioning: ready=%v err=%v", ready, err)
+	}
+	if len(executor.factsRequests) != 1 || string(executor.factsRequests[0].Stdin) != string(runtime.guestRuntimeFacts()) {
+		t.Fatalf("init did not assess its exact target facts: %#v", executor.factsRequests)
+	}
+	// After the ordinary provision writer's begin/commit, only exact match
+	// permits stage completion. The Python contract exercises that real writer.
+	executor.exit = 0
+	if ready, err := runtime.VerifyStage(context.Background(), ports.ReconcileStageProvision); err != nil || !ready {
+		t.Fatalf("applied facts did not verify: ready=%v err=%v", ready, err)
+	}
+}
+
 func (fixture provisionLifecycleExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	command := request.Command
 	if slices.Equal(command, provisionPasswdProbe("dev")) {
@@ -1194,7 +1240,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		return []testkit.IncusExecStep{
 			{}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}}, usage,
 			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
-			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {},
+			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {}, {},
 		}
 	}
 	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
@@ -1224,8 +1270,11 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	bindArtifactTestPackages(t, &runtime, filepath.Dir(instructions))
 	assertStage(t, runtime, "provision", true, "matching running provision state")
-	if len(incus.ExecCalls) != 10 {
-		t.Fatalf("running provision observations = %d, want ten", len(incus.ExecCalls))
+	if len(incus.ExecCalls) != 11 {
+		t.Fatalf("running provision observations = %d, want eleven including exact guest facts", len(incus.ExecCalls))
+	}
+	if call := incus.ExecCalls[9].Request; len(call.Command) != 5 || call.Command[0] != "python3" || call.Command[4] != "check" || string(call.Stdin) != string(runtime.guestRuntimeFacts()) {
+		t.Fatalf("provision did not check its exact guest facts: %#v", call)
 	}
 	if command := incus.ExecCalls[4].Request.Command; len(command) != 3 ||
 		command[0] != "sha256sum" || command[2] != "/home/dev/.config/opencode/AGENTS.md" {
@@ -1286,8 +1335,25 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	assertStage(t, runtime, "provision", false, "wrong ccusage mode")
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
 	assertStage(t, runtime, "provision", true, "other provisioning facts remain ready")
+
+	factsTransport := errors.New("guest facts transport unavailable")
+	for _, scenario := range []struct {
+		name string
+		step testkit.IncusExecStep
+		want error
+	}{
+		{"guest facts drift", testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 10}, Err: &ports.GuestExitError{Code: 10}}, nil},
+		{"guest facts unavailable", testkit.IncusExecStep{Err: factsTransport}, factsTransport},
+	} {
+		incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
+		incus.ExecSteps[9] = scenario.step
+		ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision)
+		if ready || !errors.Is(err, scenario.want) {
+			t.Fatalf("%s: ready=%v err=%v", scenario.name, ready, err)
+		}
+	}
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
-	incus.ExecSteps[len(incus.ExecSteps)-2] = testkit.IncusExecStep{
+	incus.ExecSteps[7] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1},
 		Err:    errors.New("dispatcher drift"),
 	}

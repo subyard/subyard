@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/rpc"
@@ -173,23 +172,11 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 	}
 }
 
-func TestCoreManifestPreparationSupportBaseline(t *testing.T) {
+func TestCoreManifestPreparationRPCRefusalsBaseline(t *testing.T) {
 	root, environment, _ := preparationParityFixture(t)
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, name := range []string{
-		"init", "start", "provision", "test-vms", "stop", "teardown", "sync", "bind",
-		"clone", "code", "export", "remove", "up", "down", "info", "remote",
-	} {
-		definition, ok := program.manifest.Lookup(name)
-		if !ok || !baselinePreparedSupport(definition) {
-			t.Errorf("core command %q is not supported: definition=%#v", name, definition)
-		}
-	}
-	if definition, ok := program.manifest.Lookup("svc"); !ok || baselinePreparedSupport(definition) {
-		t.Fatalf("profile resources entered the core resolver: %#v", definition)
 	}
 
 	loaded, err := program.loadContext("default")
@@ -297,9 +284,4 @@ func preparationConvergedInit(
 		platform.converged[stage] = true
 	}
 	return environment, lifecycleIncus(), preparationParityProbe{exitCode: 1}, platform
-}
-
-func baselinePreparedSupport(definition command.Definition) bool {
-	behavior, err := resolveCoreCommand(definition)
-	return err == nil && behavior.prepare != nil
 }

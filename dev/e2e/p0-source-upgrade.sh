@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
+# Published v0.11.0 owner recreation, retained ordinary yard and installed-runtime recovery.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE="${1:-}"
 TOKEN="${2:-}"
-ARCHIVE="${3:-}"
-ARCHIVE_SHA256="${4:-}"
-SOURCE_REVISION="${5:-}"
 # shellcheck source=dev/e2e/lib-p0-capacity.sh
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
 # shellcheck source=dev/e2e/lib-p0-init-retry.sh
@@ -16,9 +14,9 @@ p0_capacity_init "$TOKEN"
 MARKER="subyard-p0-source-$TOKEN"
 OPERATOR="subyardp0$TOKEN"
 SOURCE_STATE_ROOT="$P0_CAPACITY_STATE_ROOT/source-upgrade"
+CONFIG_CHECKOUT=''
 OPERATOR_HOME="/home/$OPERATOR"
 OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-source-home"
-SOURCE_ROOT="$OPERATOR_HOME/src"
 SHARED_ROOT="/var/tmp/subyard-p0-source-$TOKEN"
 RELEASE_ROOT="$SHARED_ROOT/releases"
 CANDIDATE_A_REPOSITORY="$SHARED_ROOT/candidate-a-runtime"
@@ -29,9 +27,22 @@ PROJECT="subyard-e2e-yard"
 INSTANCE="yard-e2e-yard"
 DEFAULT_PROJECT="subyard"
 DEFAULT_INSTANCE="yard"
+# Reuse the exact published-release download/verification helper.
+# shellcheck source=dev/e2e/published-baseline.sh
+. "$ROOT/dev/e2e/published-baseline.sh"
+STATE_ROOT="$SHARED_ROOT"
+IFS=$'\t' read -r BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256 < <(
+  awk -F '\t' '$1 == "0.11.0"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
+)
+# The existing published-upgrade pins and local P0 VM matrix are amd64.
+BASELINE_ARM64_SHA256=''
 BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
-VERSION_A="0.11.2-p0.source.a.run$TOKEN"
-VERSION_B="0.11.2-p0.source.b.run$TOKEN"
+FIXTURE_DEV_UID=1001
+VERSION_A=''
+if [ "$MODE" != clean ]; then
+  VERSION_A="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+fi
+VERSION_B="$VERSION_A.next"
 POWER_RETRY_RUNTIME="subyard-p0-source-power-retry-$TOKEN"
 POWER_RETRY_PROBE="/run/$POWER_RETRY_RUNTIME/failed-once"
 POWER_RETRY_DROPIN="/etc/systemd/system/subyard-power-reconcile.service.d/p0-source-$TOKEN.conf"
@@ -59,9 +70,9 @@ incus() {
 }
 
 select_current_test_yard() {
-  YARD_NAME=test-yard
-  PROJECT=subyard-test-yard
-  INSTANCE=yard-test-yard
+  YARD_NAME="test-yard"
+  PROJECT="subyard-test-yard"
+  INSTANCE="yard-test-yard"
 }
 
 operator_uid() { id -u "$OPERATOR"; }
@@ -101,22 +112,9 @@ operator_yard() {
   operator_no_go "$OPERATOR_HOME/.local/bin/yard" "$@"
 }
 
-relax_fixture_init_deadline() {
-  local timeout_file="$SOURCE_ROOT/internal/cli/cli.go"
-  [ "$(operator_env grep -Fc $'\t\t\tTimeout:        10 * time.Minute,' "$timeout_file")" = 1 ] \
-    && [ "$(operator_env grep -Fc $'\t\t\tTimeout:        30 * time.Minute,' "$timeout_file")" = 0 ] \
-    || die 'source-upgrade adapter timeout fixture no longer matches its source'
-  operator_env sed -i \
-    $'s/^\t\t\tTimeout:        10 \\* time.Minute,$/\t\t\tTimeout:        30 * time.Minute,/' \
-    "$timeout_file"
-  [ "$(operator_env grep -Fc $'\t\t\tTimeout:        10 * time.Minute,' "$timeout_file")" = 0 ] \
-    && [ "$(operator_env grep -Fc $'\t\t\tTimeout:        30 * time.Minute,' "$timeout_file")" = 1 ] \
-    || die 'source-upgrade adapter timeout fixture was not applied'
-}
-
 assert_fixture_project() {
   local project="${1:-$PROJECT}" marker
-  marker="$(incus project get "$project" user.subyard.p0-source 2>/dev/null)"
+  marker="$(incus project get "$project" user.p0-source 2>/dev/null)"
   [ "$marker" = "$MARKER" ] && return 0
   [ -z "$marker" ] && is_markerless_migrated_fixture_project "$project" \
     || die "refusing unmarked Incus project $project"
@@ -306,75 +304,64 @@ prepare_operator() {
     sleep 1
   done
   sudo -n test -S "/run/user/$uid/bus" || die 'fixture user bus did not start'
-  operator_env install -d -m 0700 "$SOURCE_ROOT"
-  sudo -n install -o "$OPERATOR" -g "$OPERATOR" -m 0600 \
-    "$ARCHIVE" "$OPERATOR_HOME/source.tar.gz"
-  operator_env tar -xzf "$OPERATOR_HOME/source.tar.gz" -C "$SOURCE_ROOT"
-  operator_env find "$OPERATOR_HOME/source.tar.gz" -delete
-  operator_env install -d -m 0700 \
-    "$SOURCE_ROOT/private/yards" "$SOURCE_ROOT/private/agents/codex" \
-    "$SOURCE_ROOT/config/profiles/openclaw" "$SOURCE_ROOT/config/staging" \
-    "$SOURCE_ROOT/config/qa-pool" \
-    "$OPERATOR_HOME/.local/bin"
-  # This fixture verifies the private Codex asset migration without downloading
-  # unrelated agent CLIs from the network.
-  operator_env bash -c 'printf "%s" "$2" > "$1"' _ "$SOURCE_ROOT/private/config.env" \
-    $'DEV_SUDO=1\nAGENTS=codex\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES="$SUBYARD_CONFIG_DIR/../private/agents/codex/repo.rules"\n'
-  operator_env bash -c \
-    'printf "YARD_TEMPLATE=e2e-vms\nSSH_PORT=2223\nDEV_UID=1001\nYARD_IMAGE=%s\nYARD_IMAGE_FALLBACK=%s\n" "$2" "$2" > "$1"' \
-    _ "$SOURCE_ROOT/private/yards/e2e-yard.env" "$BASE_IMAGE"
-  operator_env bash -c 'printf "source-upgrade-fixture\n" > "$1"' _ \
-    "$SOURCE_ROOT/private/agents/codex/repo.rules"
-  operator_env bash -c 'printf "PROFILE_TOKEN=source-profile-fixture\n" > "$1"' _ \
-    "$SOURCE_ROOT/config/profiles/openclaw/profile.env"
-  operator_env bash -c \
-    'printf "PROFILE=openclaw\n" > "$1"; printf "STAGING_TOKEN=source-staging-fixture\n" > "$2"' _ \
-    "$SOURCE_ROOT/config/staging/canonical.conf" "$SOURCE_ROOT/config/staging/canonical.env"
-  operator_env bash -c \
-    'printf "source-fingerprint\n" > "$1"; printf "CLOUD_PORT=3210\n" > "$2"; printf "QA_SECRET=source-qa-fixture\n" > "$3"; printf "{\"fixture\":true}\n" > "$4"; printf "retain-me\n" > "$5"' _ \
-    "$SOURCE_ROOT/config/prod-fingerprints" \
-    "$SOURCE_ROOT/config/qa-pool/broker.conf" \
-    "$SOURCE_ROOT/config/qa-pool/secrets.env" \
-    "$SOURCE_ROOT/config/qa-pool/pool.jsonl" \
-    "$SOURCE_ROOT/config/qa-pool/operator-note.local"
-  operator_env chmod 0600 \
-    "$SOURCE_ROOT/private/config.env" "$SOURCE_ROOT/private/yards/e2e-yard.env" \
-    "$SOURCE_ROOT/private/agents/codex/repo.rules" \
-    "$SOURCE_ROOT/config/profiles/openclaw/profile.env" \
-    "$SOURCE_ROOT/config/staging/canonical.conf" "$SOURCE_ROOT/config/staging/canonical.env" \
-    "$SOURCE_ROOT/config/prod-fingerprints" \
-    "$SOURCE_ROOT/config/qa-pool/broker.conf" \
-    "$SOURCE_ROOT/config/qa-pool/secrets.env" \
-    "$SOURCE_ROOT/config/qa-pool/pool.jsonl" \
-    "$SOURCE_ROOT/config/qa-pool/operator-note.local"
-  # Clean network provisioning can exceed the production ten-minute adapter
-  # deadline under the full parallel matrix. Relax only this disposable source
-  # build; the shipped CLI keeps its production deadline.
-  relax_fixture_init_deadline
-  operator_env env YARD_BUILD_VERSION="source-$SOURCE_REVISION" \
-    "$SOURCE_ROOT/scripts/build-engine.sh" --force
-  operator_env ln -s "$SOURCE_ROOT/bin/yard" "$OPERATOR_HOME/.local/bin/yard"
-  operator_env ln -s "$SOURCE_ROOT/bin/yard" "$OPERATOR_HOME/.local/bin/sy"
-  operator_env bash -c \
-    'printf "# Subyard CLI\nexport PATH=\"%s/.local/bin:\\$PATH\"\n# Subyard CLI completion\n[ -f \"%s/completions/yard.bash\" ] && source \"%s/completions/yard.bash\"\n" "$1" "$2" "$2" > "$1/.bashrc"; printf "# Subyard CLI login PATH\nexport PATH=\"%s/.local/bin:\\$PATH\"\n" "$1" > "$1/.profile"' \
-    _ "$OPERATOR_HOME" "$SOURCE_ROOT" "$OPERATOR_HOME"
+  operator_env install -d -m 0700 "$OPERATOR_HOME/.local/bin"
   operator_env bash -c \
     'printf "#!/bin/sh\nprintf invoked > \"%s/go-invoked\"\nexit 127\n" "$1" > "$1/no-go"; chmod 0700 "$1/no-go"' \
     _ "$OPERATOR_HOME"
 }
 
-seed_previous_migration_inputs() {
-  operator_env install -d -m 0700 \
-    "$OPERATOR_HOME/.subyard/operator-overlay/private/agents/codex" \
-    "$OPERATOR_HOME/.subyard/operator-overlay/private/agents/claude"
-  operator_env cp "$SOURCE_ROOT/private/config.env" "$OPERATOR_HOME/.subyard/config.env"
-  operator_env cp "$SOURCE_ROOT/private/agents/codex/repo.rules" \
-    "$OPERATOR_HOME/.subyard/operator-overlay/private/agents/codex/repo.rules"
-  operator_env bash -c 'printf "{\"fixture\":true}\n" > "$1"' _ \
-    "$OPERATOR_HOME/.subyard/operator-overlay/private/agents/claude/settings.json"
-  operator_env chmod 0600 "$OPERATOR_HOME/.subyard/config.env" \
-    "$OPERATOR_HOME/.subyard/operator-overlay/private/agents/codex/repo.rules" \
-    "$OPERATOR_HOME/.subyard/operator-overlay/private/agents/claude/settings.json"
+prepare_baseline_yards() {
+  local checkout
+  install_baseline
+  [ "$(operator_yard --version)" = "yard $BASELINE_VERSION" ] || die 'published baseline is not active'
+  # v0.11.0 has no yard-add command. Its config sync creates the local named
+  # registration from a committed configuration checkout; no runtime state is seeded.
+  checkout="$(operator_env mktemp -d /tmp/subyard-p0-owner-config.XXXXXX)"
+  # Direct v0.11.0 sync does not register this source. Keep the real checkout
+  # for the candidate's later, explicitly confirmed ownership migration.
+  CONFIG_CHECKOUT="$checkout"
+  operator_env bash -s -- "$checkout" <<'BASELINE_CONFIG'
+set -euo pipefail
+cd "$1"
+install -d -m 0700 hosts/p0-owner/yards/e2e-yard
+printf '{"schemaVersion":1}\n' > subyard-config.json
+printf 'SSH_PORT=2223\nYARD_TEMPLATE=test-vms\n' > hosts/p0-owner/yards/e2e-yard/config.env
+chmod 0600 subyard-config.json hosts/p0-owner/yards/e2e-yard/config.env
+git init -q
+git add subyard-config.json hosts
+git -c user.name=Fixture -c user.email=fixture@example.invalid -c core.hooksPath=/dev/null commit -qm 'Configure fixture test owner'
+BASELINE_CONFIG
+  operator_env env SUBYARD_HOST_ID=p0-owner "$OPERATOR_HOME/.local/bin/yard" config sync "$checkout" --yes
+  operator_env test -f "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env"
+  # These are normal published CLI settings, not hand-authored registration state.
+  operator_yard config set DEV_SUDO 1 --scope host --yes
+  operator_yard config set DEV_UID "$FIXTURE_DEV_UID" --scope host --yes
+  operator_yard config set YARD_IMAGE "$BASE_IMAGE" --scope host --yes
+  operator_yard config set YARD_IMAGE_FALLBACK "$BASE_IMAGE" --scope host --yes
+  operator_yard config set CODING_TOOL_INTEGRATIONS codex --scope host --yes
+  operator_yard -Y e2e-yard config set E2E_VM_SLOT_COUNT 1 --scope yard --yes
+  operator_yard -Y e2e-yard config set E2E_VM_CPU 1 --scope yard --yes
+  operator_yard -Y e2e-yard config set E2E_VM_MEMORY 1GiB --scope yard --yes
+  operator_yard -Y e2e-yard config set E2E_VM_DISK 10GiB --scope yard --yes
+  # An authored file-setting override survives upgrade and later activation repair.
+  operator_env install -d -m 0700 "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/rules"
+  operator_env bash -c 'printf "# installed owner fixture\n" > "$1"; chmod 0600 "$1"' _ \
+    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/rules/repo.rules"
+  prepare_project
+  operator_yard -Y e2e-yard init --yes
+  operator_yard -Y e2e-yard start --yes
+  operator_yard -Y e2e-yard check
+  prepare_project "$DEFAULT_PROJECT"
+  operator_yard init --yes
+  operator_yard start --yes
+  operator_yard check
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- sh -c \
+    'printf "ordinary retained data\n" > /srv/source-upgrade-retained'
+  ORDINARY_BEFORE="$(ordinary_yard_facts)"
+  install -m 0600 /dev/null "$SHARED_ROOT/ordinary-before"
+  printf '%s\n' "$ORDINARY_BEFORE" > "$SHARED_ROOT/ordinary-before"
+  # Preserve the stopped legacy owner until the explicitly advertised teardown.
+  incus stop "$INSTANCE" --project "$PROJECT"
 }
 
 package_candidates() {
@@ -386,10 +373,8 @@ package_candidates() {
     tmpfs | ramfs) die "release fixture must survive reboot" ;;
   esac
   printf '%s\n' "$MARKER" > "$RELEASE_ROOT/.subyard-p0-marker"
-  printf '%s\n' "$SOURCE_REVISION" > "$RELEASE_ROOT/source-revision"
-  candidate_a_artifact="$(
-    "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/a" --version "$VERSION_A"
-  )" || die 'could not package candidate A'
+  cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/a/"
+  candidate_a_artifact="$RELEASE_ROOT/a/yard-$VERSION_A-linux-amd64"
   [ -f "$candidate_a_artifact" ] && [ ! -L "$candidate_a_artifact" ] \
     && [ -x "$candidate_a_artifact" ] \
     || die 'candidate A artifact is not an executable regular file'
@@ -421,9 +406,11 @@ package_candidates() {
 }
 
 bootstrap_failure_diagnostics() {
-  local launcher="$OPERATOR_HOME/.subyard/runtime/current/bin/yard" report status=0
+  # The active predecessor may predate migrate --check; inspect with the
+  # retained candidate even when bootstrap failed before publishing its launcher.
+  local launcher="$CANDIDATE_A_REPOSITORY/bin/yard" report status=0
   if ! operator_env test -x "$launcher" 2>/dev/null; then
-    launcher="$CANDIDATE_A_REPOSITORY/bin/yard"
+    launcher="$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
   fi
   if ! operator_env test -x "$launcher" 2>/dev/null; then
     printf '  [ .. ] bootstrap failure readiness inspection unavailable: no runtime launcher\n' >&2
@@ -493,89 +480,22 @@ bootstrap_candidate() {
     || die 'standalone installer invoked Go'
 }
 
-verify_migrated_yard_registration() {
-  operator_env bash -c '
-    set -euo pipefail
-    sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$1" | cmp - "$2"
-  ' _ "$SOURCE_ROOT/private/yards/e2e-yard.env" \
-    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
-}
-
-verify_migration() {
-  local runtime="$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
-  [ "$(operator_env readlink "$OPERATOR_HOME/.local/bin/yard")" = "$runtime" ] \
-    && [ "$(operator_env readlink "$OPERATOR_HOME/.local/bin/sy")" = "$runtime" ] \
-    || die 'source entrypoints did not switch to the immutable runtime'
-  operator_env test -x "$SOURCE_ROOT/.build/yard" \
-    || die 'source checkout was changed or removed'
-  operator_env cmp "$SOURCE_ROOT/private/config.env" "$OPERATOR_HOME/.config/subyard/config.env" \
-    || die 'host settings were not migrated'
-  verify_migrated_yard_registration \
-    || die 'named test yard registration differs from its authorized migration'
-  operator_env cmp "$SOURCE_ROOT/private/agents/codex/repo.rules" \
-    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" \
-    || die 'private agent asset was not migrated'
-  operator_env test -f \
-    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/claude/settings.json" \
-    || die 'transitional operator overlay was not migrated'
-  operator_env cmp "$SOURCE_ROOT/config/profiles/openclaw/profile.env" \
-    "$OPERATOR_HOME/.config/subyard/secrets/profiles/openclaw/profile.env" \
-    || die 'profile secret was not migrated'
-  operator_env cmp "$SOURCE_ROOT/config/staging/canonical.conf" \
-    "$OPERATOR_HOME/.config/subyard/overrides/host/staging/canonical.conf" \
-    || die 'staging config was not migrated'
-  operator_env cmp "$SOURCE_ROOT/config/staging/canonical.env" \
-    "$OPERATOR_HOME/.config/subyard/secrets/legacy/staging/canonical.env" \
-    || die 'legacy staging secret was not retained'
-  operator_env cmp "$SOURCE_ROOT/config/qa-pool/operator-note.local" \
-    "$OPERATOR_HOME/.config/subyard/secrets/legacy/unclassified/qa-pool/operator-note.local" \
-    || die 'unclassified ignored input was not retained'
-  operator_env test ! -e "$OPERATOR_HOME/.subyard/config.env" \
-    || die 'legacy host settings remained under the data home'
-  operator_env test ! -e "$OPERATOR_HOME/.subyard/operator-overlay" \
-    || die 'legacy operator overlay remained under the data home'
-  operator_env test -x "$OPERATOR_HOME/.subyard/recovery/pre-go-source/restore.sh" \
-    || die 'guarded source recovery was not retained'
-}
-
 verify_v2_release_transition() { # <version>
   local expected="$1"
   [ "$(operator_yard --version)" = "yard $expected" ] \
     || die "release transition did not activate $expected"
   operator_env jq -e --slurpfile registry \
     "$OPERATOR_HOME/.subyard/runtime/current/config/release-transition.json" '
-    .schemaVersion == 2 and
-    (.domains | keys) == ($registry[0].currentEpochs | keys) and
-    all(.domains | to_entries[]; .key as $domain |
-      .value.epoch == $registry[0].currentEpochs[$domain] and
-      .value.applied == [$registry[0].migrations[] | select(.domain == $domain) | .id])
-  ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
-    || die 'release transition domain ledger is not at the verified fixed point'
+    .schemaVersion == 1 and
+    (.domains | with_entries(.value |= .epoch)) == $registry[0].currentEpochs
+  ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/history-checkpoint.json" >/dev/null \
+    || die 'release transition checkpoint is not at the verified fixed point'
   jq -e --arg version "$expected" '
     .schemaVersion == 2 and .checkpoint == "complete" and
     (.goal.target | startswith($version + "-"))
   ' < <(operator_env cat \
     "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json") >/dev/null \
     || die 'release transition journal is not complete for the expected runtime'
-}
-
-verify_authorized_source_ingress() {
-  operator_env jq -e \
-    --arg source "$SOURCE_ROOT" \
-    --arg data "$OPERATOR_HOME/.subyard" \
-    --arg bin "$OPERATOR_HOME/.local/bin" \
-    --arg rc "$OPERATOR_HOME/.bashrc" \
-    --arg login "$OPERATOR_HOME/.profile" '
-    . as $journal |
-    .schemaVersion == 2 and .checkpoint == "complete" and
-    .sourceIngress == {
-      schemaVersion: 1, kind: "pre-go-source-v1", sourceRoot: $source,
-      dataHome: $data, binDir: $bin, rc: $rc, loginRC: $login
-    } and
-    all(["source-install.import", "source-install.entrypoints"][];
-      . as $id | any($journal.steps[]; .id == $id and .checkpoint == "verified"))
-  ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json" >/dev/null \
-    || die 'normalized source state was not committed by the authorized outer ingress'
 }
 
 verify_config_workflow() {
@@ -595,23 +515,10 @@ verify_config_workflow() {
   operator_yard config apply --all-local --yes
   operator_yard config status --all-local
   host_hash="$(sudo -n sha256sum \
-    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" | awk '{print $1}')"
-  guest_hash="$(incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
+    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/rules/repo.rules" | awk '{print $1}')"
+  guest_hash="$(incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user "$FIXTURE_DEV_UID" --group "$FIXTURE_DEV_UID" -- \
     sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')"
-  [ "$host_hash" = "$guest_hash" ] || die 'migrated Codex rules were not applied to the yard'
-}
-
-verify_without_source_checkout() {
-  local unavailable="$OPERATOR_HOME/src.unavailable"
-  operator_env mv "$SOURCE_ROOT" "$unavailable"
-  if ! operator_yard config paths >/dev/null \
-    || ! operator_yard config status --all-local \
-    || ! operator_yard check \
-    || ! operator_yard -Y "$YARD_NAME" check; then
-    operator_env mv "$unavailable" "$SOURCE_ROOT"
-    die 'installed runtime still depends on the source checkout'
-  fi
-  operator_env mv "$unavailable" "$SOURCE_ROOT"
+  [ "$host_hash" = "$guest_hash" ] || die 'configured Codex rules were not applied to the yard'
 }
 
 wait_for_desired_yards() {
@@ -705,7 +612,7 @@ prepare_project() {
   incus image info "$BASE_IMAGE" --project default >/dev/null 2>&1 \
     || die "test base image $BASE_IMAGE is unavailable"
   incus project create "$project" \
-    -c features.images=false -c user.subyard.p0-source="$MARKER" >/dev/null
+    -c features.images=false -c user.p0-source="$MARKER" >/dev/null
 }
 
 read_default_project_property() { # <output-variable> <property>
@@ -716,7 +623,7 @@ read_default_project_property() { # <output-variable> <property>
 }
 
 mark_created_default_project() {
-  local uid key expected actual marker empty own
+  local uid key expected actual marker empty own yard="${1:-default}"
   uid="$(operator_uid)" || return
   [[ "$uid" =~ ^[0-9]+$ ]] || return 1
   while IFS='=' read -r key expected; do
@@ -728,36 +635,97 @@ user.subyard.installation=1
 user.subyard.operator_uid=$uid
 user.subyard.data_home=$OPERATOR_HOME/.subyard
 user.subyard.config_home=$OPERATOR_HOME/.config/subyard
-user.subyard.yard_name=default
+user.subyard.yard_name=$yard
 user.subyard.instance_name=$DEFAULT_INSTANCE
 OWNER
   empty="$(printf '\n' | base64 -w0)" || return
   own="$(printf '%s\n' "$MARKER" | base64 -w0)" || return
-  read_default_project_property marker user.subyard.p0-source || return
+  read_default_project_property marker user.p0-source || return
   [ "$marker" != "$own" ] || return 0
   [ "$marker" = "$empty" ] || return 1
-  incus project set "$DEFAULT_PROJECT" user.subyard.p0-source="$MARKER" >/dev/null || return
-  read_default_project_property marker user.subyard.p0-source || return
+  incus project set "$DEFAULT_PROJECT" user.p0-source="$MARKER" >/dev/null || return
+  read_default_project_property marker user.p0-source || return
   [ "$marker" = "$own" ]
 }
 
-prepare_default_yard() {
+install_current_test_yard() {
   local inventory init_rc=0 marker_rc=0
   inventory="$(incus project list --format csv -c n)" \
-    || die 'cannot inspect default fixture project inventory'
+    || die 'cannot inspect fresh fixture project inventory'
   ! grep -Fxq "$DEFAULT_PROJECT" <<<"$inventory" \
-    || die 'default fixture requires an absent project'
-  # Ordinary init creates authentic ownership and its normal private image namespace.
-  # The historical named yard retains its separate shared-image migration fixture.
-  p0_retry_init_after_plan_stale operator_yard init --yes || init_rc=$?
-  mark_created_default_project || marker_rc=$?
+    || die 'fresh fixture requires an absent project'
+  # Service init creates ownership before any fixture cache fallback is allowed.
+  p0_retry_init_after_plan_stale operator_yard service install test-vms --yes || init_rc=$?
+  mark_created_default_project "${YARD_NAME:-test-yard}" || marker_rc=$?
+  [ "$marker_rc" = 0 ] || die 'fresh fixture project ownership could not be proved'
   [ "$init_rc" = 0 ] || return "$init_rc"
-  [ "$marker_rc" = 0 ] || die 'default fixture project ownership could not be proved'
-  operator_yard start --yes
-  operator_yard check
-  [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
-    --project "$DEFAULT_PROJECT")" = running ] \
-    || die 'default yard did not persist desired=running before update'
+}
+
+ordinary_yard_facts() {
+  incus config get "$DEFAULT_INSTANCE" volatile.uuid --project "$DEFAULT_PROJECT"
+  incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power --project "$DEFAULT_PROJECT"
+  incus list "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -f csv -c s
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- sha256sum /srv/source-upgrade-retained
+}
+
+recreate_legacy_test_owner() {
+  local before after report init_rc=0
+  before="$(operator_env tar -C "$OPERATOR_HOME/.config/subyard" -cf - . | sha256sum)"
+  before+="$(incus config show "$INSTANCE" --project "$PROJECT" --expanded)"
+  # Init has no check mode. Inspect the active release's public warning before
+  # executing its exact recreation commands, without mutating either yard.
+  report="$(operator_yard migrate --check --json)"
+  jq -e '
+    .schemaVersion == 1 and .outcome.status == "ready" and .outcome.reachedGoal == true and
+    any(.outcome.warnings[]?; contains("test-yard requires recreation") and
+      contains("yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"))
+  ' <<<"$report" >/dev/null || {
+    printf '%s\n' "$report" >&2
+    die 'legacy owner readiness did not name executable recreation commands'
+  }
+  after="$(operator_env tar -C "$OPERATOR_HOME/.config/subyard" -cf - . | sha256sum)"
+  after+="$(incus config show "$INSTANCE" --project "$PROJECT" --expanded)"
+  [ "$before" = "$after" ] || die 'owner inspection mutated protected configuration or native state'
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'owner inspection changed the ordinary yard'
+
+  # Supply the original checkout for the advertised argument; sync's --yes is
+  # fresh consent for its own guarded plan. No --apply or guest refresh is needed.
+  operator_yard config sync "$CONFIG_CHECKOUT" --yes
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'settings migration changed the ordinary yard'
+  report="$(operator_yard migrate --check --json)"
+  jq -e '
+    .outcome.status == "ready" and .outcome.reachedGoal == true and
+    any(.outcome.warnings[]?; contains("test-yard requires recreation") and
+      contains("yard -Y e2e-yard teardown --reset-config, then yard service install test-vms") and
+      (contains("config sync") | not))
+  ' <<<"$report" >/dev/null || die 'settings migration did not clear its recreation prerequisite'
+  # Direct sync needs no registered checkout for later offline cache use.
+  operator_env find "$CONFIG_CHECKOUT" -depth -delete
+  CONFIG_CHECKOUT=''
+
+  # Execute the advertised commands. Fresh fixture configuration selects its cached
+  # image; it does not carry the legacy broker's identities, data or registration.
+  operator_yard -Y e2e-yard teardown --reset-config --yes
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'legacy teardown changed the ordinary yard'
+  select_current_test_yard
+  # Modern init owns project creation. Its private image namespace may not have
+  # the fixture alias yet; share the cache only after proving this exact ownership.
+  DEFAULT_PROJECT="$PROJECT" DEFAULT_INSTANCE="$INSTANCE" install_current_test_yard || init_rc=$?
+  if [ "$init_rc" != 0 ]; then
+    [ -z "$(incus list --project "$PROJECT" --format csv -c n)" ] \
+      || die 'fresh service install failed after image lookup'
+    incus project set "$PROJECT" features.images=false
+    incus image info "$BASE_IMAGE" --project "$PROJECT" >/dev/null \
+      || die 'fresh test-yard cannot access the shared fixture image'
+    p0_retry_init_after_plan_stale operator_yard service install test-vms --yes
+  fi
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'fresh test-yard installation changed the ordinary yard'
+  operator_yard test-vms status --json
+  operator_yard -Y test-yard check
+  operator_yard migrate --check --json | jq -e '
+    .schemaVersion == 1 and .outcome.status == "ready" and
+    all(.outcome.warnings[]?; contains("test-yard requires recreation") | not)' >/dev/null \
+    || die 'fresh test-yard is not ready'
 }
 
 run_incus_installer() {
@@ -784,13 +752,8 @@ run_incus_installer() {
 }
 
 prepare() {
-  [[ "$ARCHIVE" =~ ^/tmp/subyard-p0-source-[0-9]+\.tar\.gz$ ]] \
-    || die 'source archive path is invalid'
-  [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die 'source archive hash is invalid'
-  [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || die 'source revision is invalid'
-  [ "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" = "$ARCHIVE_SHA256" ] \
-    || die 'source archive checksum mismatch'
-  command -v go >/dev/null 2>&1 || die 'fixture preparation needs Go'
+  [ "$(uname -m)" = x86_64 ] || die 'the published v0.11.0 pin requires an amd64 P0 worker'
+  command -v git >/dev/null 2>&1 || die 'Git is required for the published configuration import'
   command -v unshare >/dev/null 2>&1 || die 'unshare is required'
   p0_capacity_reset_build_cache
   if ! incus info >/dev/null 2>&1 \
@@ -809,28 +772,27 @@ prepare() {
   printf '%s\n' "$MARKER" > "$SHARED_ROOT/.subyard-p0-marker"
   prepare_operator
   package_candidates
-  prepare_project
-
-  [ "$(operator_no_go "$SOURCE_ROOT/bin/yard" --version)" = "yard source-$SOURCE_REVISION" ] \
-    || die 'exact source-linked CLI is not operational without Go'
-  p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
-  operator_yard -Y "$YARD_NAME" start --yes
-  operator_yard -Y "$YARD_NAME" check
-  seed_previous_migration_inputs
-  [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
-    || die 'legacy yard did not persist desired=running before the stopped-upgrade fixture'
-  incus stop "$INSTANCE" --project "$PROJECT"
-  [ "$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)" = STOPPED ] \
-    || die 'legacy yard did not enter the stopped desired-running upgrade fixture'
-
-  bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"
-  select_current_test_yard
-  incus project set "$PROJECT" user.subyard.p0-source="$MARKER"
-  verify_migration
+  prepare_baseline_yards
+  local update_rc=0 legacy_before
+  legacy_before="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+  if bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
+    cat "$SHARED_ROOT/first-update.log"
+  else
+    update_rc=$?
+    cat "$SHARED_ROOT/first-update.log" >&2
+    return "$update_rc"
+  fi
+  grep -Fq 'yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
+    "$SHARED_ROOT/first-update.log" || die 'update did not print its exact recreation commands'
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'update changed ordinary yard data, identity or power'
+  [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \
+    && [ "$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)" = STOPPED ] \
+    || die 'update changed the retained legacy owner'
+  recreate_legacy_test_owner
+  incus project set "$PROJECT" user.p0-source="$MARKER"
   [ "$(operator_yard --version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'
   verify_v2_release_transition "$VERSION_A"
-  verify_authorized_source_ingress
   bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"
   [ "$(operator_env grep -Fc '# Subyard CLI completion' "$OPERATOR_HOME/.bashrc")" = 1 ] \
     || die 'repeated bootstrap duplicated shell integration'
@@ -840,9 +802,8 @@ prepare() {
     || die 'test-yard migration did not establish desired=running'
   operator_yard -Y "$YARD_NAME" check
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
-  prepare_default_yard
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'repeated init changed the ordinary yard'
   verify_config_workflow
-  verify_without_source_checkout
   operator_yard stop --yes
 
   verify_v2_release_transition "$VERSION_A"
@@ -856,16 +817,12 @@ prepare() {
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'production operator cycle invoked Go'
   require_operator_password_sudo
-  printf 'ok: exact source-linked %s upgraded without Go; migration is prepared for reboot\n' \
-    "$SOURCE_REVISION"
+  printf 'ok: published v%s owner recreation preserved the ordinary yard; prepared for reboot\n' "$BASELINE_VERSION"
 }
 
 load_rebooted_fixture() {
   select_current_test_yard
-  SOURCE_REVISION="$(cat "$RELEASE_ROOT/source-revision" 2>/dev/null)" \
-    || die 'source revision metadata disappeared after reboot'
-  [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] \
-    || die 'source revision metadata is invalid'
+  ORDINARY_BEFORE="$(cat "$SHARED_ROOT/ordinary-before")" || die 'ordinary yard baseline disappeared after reboot'
   id "$OPERATOR" >/dev/null 2>&1 || die 'fixture operator disappeared after reboot'
   assert_fixture_project
   assert_fixture_project "$DEFAULT_PROJECT"
@@ -892,6 +849,26 @@ resume() {
   verify_v2_release_transition "$VERSION_B"
   operator_yard -Y "$YARD_NAME" stop --yes
   operator_yard start --yes
+  # Start waits for the agent, but profile services can become ready between
+  # planning and convergence. Every plan-stale retry prepares a fresh plan.
+  local attempt report migrate_rc
+  for attempt in $(seq 1 60); do
+    if report="$(operator_yard migrate --yes 2>&1)"; then
+      printf '%s\n' "$report"
+      break
+    else
+      migrate_rc=$?
+    fi
+    printf '%s\n' "$report" >&2
+    if ! grep -Eq '^yard: migrate: .*release transition [^:]+: code=plan-stale([[:space:];]|$)' \
+        <<<"${report##*$'\n'}"; then
+      return "$migrate_rc"
+    fi
+    printf 'source-upgrade: migrate after start plan-stale attempt=%s/60 native_exit=%s\n' \
+      "$attempt" "$migrate_rc" >&2
+    if [ "$attempt" = 60 ]; then return "$migrate_rc"; fi
+    sleep 1
+  done
   verify_config_workflow
   operator_env chmod 0600 \
     "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
@@ -903,10 +880,10 @@ resume() {
       --project "$DEFAULT_PROJECT")" = false ] \
     || die 'named stopped and default running desired power is not persisted before committed-state reboot'
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
-    || die 'v0.1-style update invoked Go'
+    || die 'installed update invoked Go'
   install_power_retry_probe
   require_operator_password_sudo
-  printf 'ok: prepared migration resumed through the v0.1 installer and is committed for reboot\n'
+  printf 'ok: second candidate update is committed for reboot\n'
 }
 
 current_migration_ready() {
@@ -985,7 +962,7 @@ finish() {
   fi
   # Remove an owned artifact to exercise repair without replaying completed migrations.
   # Edited artifacts must instead fail closed to preserve user changes.
-  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user "$FIXTURE_DEV_UID" --group "$FIXTURE_DEV_UID" -- \
     rm /home/dev/.codex/rules/repo.rules
   verify_v2_release_transition "$VERSION_B"
   operator_env cat "$transition_root/ledger.json" > "$ledger_before"
@@ -1008,7 +985,7 @@ finish() {
   }
   operator_env cat "$transition_root/journal.json" | cmp "$journal_before" - \
     || die 'current migration check changed the journal'
-  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user "$FIXTURE_DEV_UID" --group "$FIXTURE_DEV_UID" -- \
     test ! -e /home/dev/.codex/rules/repo.rules \
     || die 'current migration check repaired materialized configuration'
   operator_no_go env YARD_RELEASE_BASE_URL="file://$SHARED_ROOT/forbidden-release" \
@@ -1026,8 +1003,8 @@ finish() {
     && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$previous_before" ] \
     || die 'post-reboot activation repair changed the runtime pair'
   host_hash="$(sudo -n sha256sum \
-    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" | awk '{print $1}')"
-  guest_hash="$(incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
+    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/rules/repo.rules" | awk '{print $1}')"
+  guest_hash="$(incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user "$FIXTURE_DEV_UID" --group "$FIXTURE_DEV_UID" -- \
     sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')"
   [ "$host_hash" = "$guest_hash" ] || die 'current migration did not repair the materialized rules'
   report="$(operator_yard migrate --check --json)"
@@ -1060,13 +1037,7 @@ finish() {
   verify_v2_release_transition "$VERSION_B"
   verify_config_workflow
 
-  if operator_no_go \
-    "$OPERATOR_HOME/.subyard/recovery/pre-go-source/restore.sh" >/dev/null 2>&1; then
-    die 'committed source import allowed a restore that invalidates v2 history'
-  fi
-  [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
-    || die 'rejected source restore changed the active runtime'
-  verify_migration
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'updates, rollback or reboots changed the ordinary yard'
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   operator_yard -Y "$YARD_NAME" check
   verify_config_workflow
@@ -1079,7 +1050,7 @@ finish() {
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'post-reboot operator cycle invoked Go'
   cleanup_fixture
-  printf 'ok: source upgrade survived reboot, rollback and sealed recovery\n'
+  printf 'ok: published owner upgrade survived two reboots, rollback and activation repair\n'
 }
 
 case "$MODE" in

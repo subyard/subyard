@@ -66,6 +66,15 @@ When a selected check needs real GNU/Linux hosts, use an allocated `test-vms` sl
 The operator owns outer-yard start, stop and teardown; the
 root broker owns inner slot create, start and stop; agents acquire leases only.
 
+The independent continuation-grant lane is
+`dev/e2e/p0-acceptance.sh --slot "$slot" --lane legacy-continuation`.
+It reuses the power fixture's marked operator, authenticated published upgrade,
+host-runtime restoration and two-reboot transport. After the installed upgrade,
+it explicitly seeds a synthetic unmarked native project, confirms
+`init --continue-legacy`, and verifies the unchanged protected grant, native UUID
+and policy through repeated init and compatible rollback/forward. It is separate
+from `reboot-verify` and is also included in the full P0 matrix.
+
 The focused temporary-storage fixture uses one standard disposable VM and creates
 its container and 1 GiB nested VM sequentially. It needs nested KVM, passwordless
 root helpers in that allocation, and at least 10 GiB free on `/var/tmp`. Run its
@@ -854,9 +863,11 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
 | `newer-release` | VM1; published v0.19.0 download, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
-| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
+| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | pinned installed v0.11.0 update, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.11.0 upgrade, incompatible rollback refusal and authentic v0.21.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
+| `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full |
+| `yard-maintenance` | VM1, frozen candidate and pinned published 0.21.3 → 0.25.1; two containers and one bounded weighted VM | upfront restart disclosure and decline, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
 | `release-smoke` | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton targeted checkpoint/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -933,18 +944,34 @@ dev/agent-e2e.sh --slot "$slot" --purpose integration-legacy-upgrade --vm 1 -- \
 ```
 
 The retained-lease disabled-components controller installs the published v0.18.6 baseline, updates
-to the frozen candidate and reboots once. Its default payload belongs to the Hermes profile; the
-retired Paseo package passes its own payloads. Its upgrade scenario starts from real published
-Paseo on v0.18.6 with a foreign unit and a stopped Paseo-only yard: init retires that yard without a
-start and keeps it stopped, and a rollback across the migration epochs is refused. Its `--rollback`
-scenario starts from v0.25.4, which shares the candidate's migration ledger: a fresh update warns
-about a stopped yard with no source migration pending, a start warns until init, and a rollback
-reprovisions Paseo before a forward update retires it again:
+to the frozen candidate and reboots once. Its default payload belongs to the Hermes profile.
+The Paseo removal payload verifies removal of both a packaged and a foreign service, retention
+of only non-empty worktrees, and init's temporary start and stopped-power restoration for a
+Paseo-only yard. Repeated init must not boot that yard again.
 
 ```sh
 dev/e2e/disabled-components-release.sh --slot "$slot"
 config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot"
-config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot" --rollback
+```
+
+The published-baseline matrix installs one exact release from
+`dev/e2e/published-upgrade-baselines.tsv` with its own init and start, then updates that yard to the
+frozen candidate through the public installer. It requires Ready at the candidate's current epochs,
+the same instance and its guest data. Use a fresh lease per baseline and keep the installer and
+archive digests pinned to the immutable release assets:
+
+The optional second argument selects `claude`, `codex`, `opencode`, `pi`, a quoted list of those
+names, or `all`; omission and `none` retain the no-agent matrix. Published init must materialize
+its own defaults before the update. For selected-agent coverage without duplicating the matrix,
+run `all` at 0.11.0 (no ownership evidence), 0.17.1 (structured receipts and inventory), 0.22.1
+(artifact manifests), and 0.25.5 (latest baseline). Add Claude-only jobs at 0.23.0 (provision/check)
+and 0.24.0 (native command installation). Use a fresh lease for every job.
+
+```sh
+SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
+SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
+  dev/agent-e2e.sh --slot "$slot" --purpose published-upgrade --vm-count 1 --vm 1 -- \
+  bash dev/e2e/published-upgrade.sh 0.11.0 all
 ```
 
 The remote fixture runs a temporary loopback OpenSSH server with a synthetic key forced to the
@@ -1093,6 +1120,8 @@ SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
   bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.20.0
 ```
+
+`SUBYARD_E2E_ROLLOUT_YARD=NAME` passes the same explicit outer route as the test-vms lanes.
 
 The controller packages its explicitly synthetic compatible successor (the next patch version
 with an `activation-fixture` suffix) before lease acquisition; the original candidate's verified
@@ -1344,19 +1373,17 @@ was torn down, when the power service may be absent. This adds release installat
 to the two reboots; the fixture restores the previous host runtime afterward. It does not run the
 additional systemd parser fixtures from `power-systemd`. The exact published v0.11.0,
 the inclusive supported migration floor, remains the genuine legacy-upgrade baseline.
-After its verified update, explicit `yard init --continue-legacy --yes` establishes only
-bounded normal-reconcile authority; repeated plain init and both reboots must retain that
-grant without adding installation ownership. Its incompatible
-rollback must refuse without changing release links, protected V2 checkpoint/history,
-ledger, journal, native identity or grant, including retained V1 evidence or its absence.
+Its verified update registers the local yard through the release journal, so repeated plain
+init and both reboots must retain that ownership without a legacy continuation grant. Its
+incompatible rollback must refuse without changing release links, protected V2 checkpoint/history,
+ledger, journal or native identity, including retained V1 evidence or its absence.
 Fresh sources below v0.11.0 remain refused; accepted completed V2 history and recovery
 retain their separate supported contracts.
-The guest verifies checksum-pinned official v0.21.0 assets and compiled activation
-capabilities before creating the cold legacy baseline. Public update checks must identify
-the exact unblocked target before installing v0.21.0, restoring the candidate, then
-performing a real compatible rollback and candidate roll-forward. Both passages preserve
-the limited grant, native policy and absence of installation ownership; final normal init
-and full-removal refusal verify that the grant never acquires destructive authority.
+The guest verifies checksum-pinned official v0.25.4 assets, the newest published runtime at the
+candidate's migration epochs, and compiled activation capabilities before creating the cold
+legacy baseline. Public update checks must identify the exact unblocked target before installing
+v0.25.4, restoring the candidate, then performing a real compatible rollback and candidate
+roll-forward. Both passages preserve native policy and the registered ownership.
 
 List or run one lane:
 
@@ -1385,12 +1412,12 @@ The cache fill and local launch both emit progress. Their independent positive-i
 operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
 The full matrix keeps the historical owner, real-Incus contract, release and broker-migration chain on VM1.
-VM2 independently runs nested teardown, container-image preparation, source upgrade and power-systemd in that order.
-Independent source-upgrade, power-systemd, reboot-verify and release-smoke lanes reconcile Incus and cache
+VM2 independently runs nested teardown, container-image preparation, source upgrade, power-systemd and legacy-continuation in that order.
+Independent source-upgrade, power-systemd, legacy-continuation, reboot-verify and release-smoke lanes reconcile Incus and cache
 their container image without repeating the real-Incus contract's container/VM launches and Go tests.
 The owner fixture packages its candidate once and reuses those exact assets across its independent
 predecessor installations, active/inactive broker checks and rollback scenarios.
-The two chains join before the shared release-smoke phase and full peer checks, followed by cleanup
+The two chains join before the newer-release replacement lane on VM1 and the shared release-smoke phase and full peer checks, followed by cleanup
 and final boundary verification. Host-free `./tests/run.sh`, prepared loopback SSH/crypto contracts
 and the owner engine-release contract run in their own required gates and are not repeated here.
 The parallel matrix passes only after both chains pass. It has a

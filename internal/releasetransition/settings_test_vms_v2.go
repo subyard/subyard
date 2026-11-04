@@ -488,7 +488,12 @@ func observeSettingsV2Yard(home string, view V2SettingsSnapshotView, yard string
 	nestedLabel, legacyLabel := settingsV2YardLabels(yard)
 	nestedPath, legacyPath := filepath.Join(home, filepath.FromSlash(nestedLabel)), filepath.Join(home, filepath.FromSlash(legacyLabel))
 	nested, nestedErr := view.ReadSnapshot(nestedPath)
-	legacy, legacyErr := view.ReadSnapshot(legacyPath)
+	var legacy config.PersistentFileSnapshot
+	var legacyErr error
+	// The loader has never read a flat file for the default yard.
+	if yard != "default" {
+		legacy, legacyErr = view.ReadSnapshot(legacyPath)
+	}
 	if nestedErr != nil {
 		return settingsV2YardSnapshot{}, nestedPath, errors.Join(nestedErr, legacyErr)
 	}

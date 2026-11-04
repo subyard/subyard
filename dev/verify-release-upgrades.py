@@ -668,6 +668,7 @@ def verify_checkpoint_source(release, version, baseline, arch, root, baseline_ve
     boundary.update("--version", version, "--yes")
     boundary.complete()
     verify_power_rollback_refusal(boundary)
+    shutil.rmtree(boundary.root)
     # Preserve matching-epoch rollback and future settings/reader-bridge coverage
     # independently of the real candidate's irreversible power reader boundary.
     release, version = compatible_power_release(release, version, arch, root)
@@ -826,6 +827,9 @@ def verify_checkpoint_source(release, version, baseline, arch, root, baseline_ve
                     for word in ("rollback", "checkpoint")) and
                 snapshot(fixture.config) == before and links() == prior_links,
                 "caller rolled back or changed protected state using a stale epoch-2 projection")
+    shutil.rmtree(fixture.root)
+    shutil.rmtree(future_source)
+    shutil.rmtree(future_release)
     capability_path = "uses its sealed reader" if source_reader else "requires the sealed reader bridge"
     print(f"PASS: released {baseline_version} caller {capability_path} before synthetic "
           "epoch 3; both callers refuse rollback to epoch 2 and preserve the pinned projection", flush=True)
@@ -883,6 +887,7 @@ def verify_legacy(release, version, baseline, arch, root, baseline_version=LEGAC
     require(result.returncode == 0, f"separate clean install failed: {result.stdout}{result.stderr}")
     require(not fixture.retained.exists() and not fixture.project_marker.exists(),
             "clean installation reused retired settings or data")
+    shutil.rmtree(fixture.root)
     print(f"PASS: actual released {baseline_version} refuses upgrade, stages cleanup without activation, "
           "fully uninstalls and permits a separate clean install", flush=True)
 
@@ -893,6 +898,7 @@ def verify_minimum_source(release, version, baseline, arch, root):
             "actual v0.11.0 lower-bound caller cannot inspect the update")
     fixture.update("--version", version, "--yes")
     fixture.complete()
+    shutil.rmtree(fixture.root)
     print(f"PASS: actual released v0.11.0 inclusive lower-bound update -> {version}", flush=True)
 
 
@@ -965,6 +971,7 @@ def verify_power_publication_boundary(release, version, baseline, arch, root, ba
     fixture.update("--version", version, "--yes")
     fixture.complete()
     verify_power_rollback_refusal(fixture)
+    shutil.rmtree(fixture.root)
 
 
 def compatible_power_release(release, version, arch, root):
@@ -1183,6 +1190,7 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
         observe("Stopped", False, owned=True)
         fixture.update("--version", version, "--yes")
         fixture.complete(old=False)
+        shutil.rmtree(fixture.root)
         print(f"PASS: actual {baseline_version} original owner separately authorizes source-repair recovery", flush=True)
         return
     blocked = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
@@ -1331,6 +1339,9 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
               "and preserves completed prefixes and every other original ledger domain", flush=True)
     else:
         require(ledger.read_bytes() == ledger_before, "same-registry ordinary update changed migration ledger")
+    if registry_advanced:
+        shutil.rmtree(contract.root)
+    shutil.rmtree(fixture.root)
     print(f"PASS: released {ACTIVATION_BASELINE} ordinary updater reaches {version} after delegated recovery "
           f"({time.monotonic() - started:.1f}s)", flush=True)
 
@@ -1729,6 +1740,7 @@ def verify_completed_source_repair(release, version, baseline, arch, root):
     fixture.update("--version", version, "--yes")
     fixture.complete()
     verify_completed_source_selection(fixture, root)
+    shutil.rmtree(fixture.root)
 
 
 def verify_completed_source_selection(fixture, root):
@@ -2743,6 +2755,7 @@ def main():
                                 protected = fixture_root / "home/.config/subyard/release-transition"
                                 if protected.is_dir():
                                     shutil.copytree(protected, evidence / "protected-state", dirs_exist_ok=True)
+                        shutil.rmtree(root / ("direct-" + baseline_version))
                     return
                 if args.only_migration_owner_replacement:
                     require(arch in MIGRATION_OWNER_SHA256, "no verified affected owner artifact is pinned for this architecture")
@@ -2840,6 +2853,7 @@ def main():
                     direct = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
                                              DIRECT_BASELINE_SHA256, arch)
                     verify_direct_019(release, args.version, direct, DIRECT_BASELINE, arch, root)
+                    shutil.rmtree(root / ("direct-" + DIRECT_BASELINE))
                 if not args.only_activation_recovery:
                     for baseline_version, hashes, directory in (
                             (BASELINE, BASELINE_SHA256, args.baseline_dir),

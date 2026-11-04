@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 const (
@@ -60,18 +61,15 @@ func PrepareRouteConsumerActivation(ctx context.Context, options Options) (state
 }
 
 func prepareCanonicalRouteActivationBackend(ctx context.Context, options Options) (State, error) {
-	projects, err := inspectProjects(ctx, options)
-	if err != nil {
-		return "", err
-	}
+	projects, projectErr := inspectProjects(ctx, options)
+	findings := []error{projectErr}
 	if projects.legacy {
-		return "", ownerProjectDiagnostic(errors.New("legacy project conflicts with canonical route activation"),
-			"legacy project subyard-e2e-yard conflicts with canonical route activation", true)
+		findings = append(findings, ownerProjectDiagnostic(options, errors.New("legacy project conflicts with canonical route activation"), "legacy project subyard-e2e-yard conflicts with canonical route activation", true))
 	}
 	payload, err := runIncus(ctx, options, "list", "--all-projects", "--format=json")
 	if err != nil {
-		return "", routeDiagnostic(fmt.Errorf("inspect route activation backend: %w", err),
-			"backend inventory inspection failed", CurrentYard, "", "", false)
+		return "", registrationRefusals(append(findings, routeDiagnostic(fmt.Errorf("inspect route activation backend: %w", err),
+			"backend inventory inspection failed", CurrentYard, "", "", false))...)
 	}
 	var instances []struct {
 		Name    string            `json:"name"`
@@ -80,35 +78,35 @@ func prepareCanonicalRouteActivationBackend(ctx context.Context, options Options
 		Config  map[string]string `json:"config"`
 	}
 	if err := json.Unmarshal(payload, &instances); err != nil || instances == nil {
-		return "", routeDiagnostic(errors.New("route activation backend inventory must be a JSON array"),
-			"backend inventory must be a JSON array", CurrentYard, "", "", false)
+		return "", registrationRefusals(append(findings, routeDiagnostic(errors.New("route activation backend inventory must be a JSON array"),
+			"backend inventory must be a JSON array", CurrentYard, "", "", false))...)
 	}
 	found := false
 	seenInstances := make(map[string]bool)
 	for _, instance := range instances {
 		key := consumerKey(instance.Project, instance.Name)
-		if instance.Project == "" || instance.Name == "" || seenInstances[key] {
-			return "", routeDiagnostic(errors.New("route activation backend inventory is duplicated or incomplete"),
-				"backend inventory is duplicated or incomplete", CurrentYard, instance.Project, instance.Name, true)
+		if instance.Project == "" || instance.Name == "" || len(instance.Project) > 96 || len(instance.Name) > 96 || !domain.SafeID(instance.Project) || !domain.SafeID(instance.Name) {
+			findings = append(findings, routeDiagnostic(errors.New("route activation backend inventory is duplicated or incomplete"), "backend inventory is duplicated or incomplete", CurrentYard, "", "", false))
+			continue
+		}
+		if seenInstances[key] {
+			findings = append(findings, routeDiagnostic(fmt.Errorf("route activation backend inventory is duplicated or incomplete: %s/%s", instance.Project, instance.Name), "backend inventory is duplicated or incomplete", CurrentYard, instance.Project, instance.Name, false))
 		}
 		seenInstances[key] = true
 		yard := instance.Config["user.subyard.name"]
-		if instance.Project != "subyard-test-yard" && instance.Project != "subyard-e2e-yard" &&
-			instance.Name != "yard-test-yard" && instance.Name != "yard-e2e-yard" &&
-			yard != CurrentYard && yard != LegacyYard {
+		if instance.Project != "subyard-test-yard" && instance.Project != "subyard-e2e-yard" && instance.Name != "yard-test-yard" && instance.Name != "yard-e2e-yard" && yard != CurrentYard && yard != LegacyYard {
 			continue
 		}
-		if found || !projects.current || instance.Project != "subyard-test-yard" ||
-			instance.Name != "yard-test-yard" || yard != CurrentYard ||
-			instance.Config["user.subyard.managed"] != "true" {
-			return "", routeDiagnostic(errors.New("route activation backend has a conflicting or foreign identity"),
-				"backend has a conflicting or foreign identity; expected subyard-test-yard/yard-test-yard", CurrentYard, instance.Project, instance.Name, true)
+		if projectErr == nil && !projects.current || instance.Project != "subyard-test-yard" || instance.Name != "yard-test-yard" || yard != CurrentYard || instance.Config["user.subyard.managed"] != "true" {
+			findings = append(findings, routeDiagnostic(errors.New("route activation backend has a conflicting or foreign identity"), "backend has a conflicting or foreign identity; expected subyard-test-yard/yard-test-yard", CurrentYard, instance.Project, instance.Name, true))
 		}
 		if !strings.EqualFold(instance.Status, "running") && !strings.EqualFold(instance.Status, "stopped") {
-			return "", routeDiagnostic(errors.New("route activation backend has an unsupported instance state"),
-				"backend has an unsupported instance state", CurrentYard, instance.Project, instance.Name, false)
+			findings = append(findings, routeDiagnostic(errors.New("route activation backend has an unsupported instance state"), "backend has an unsupported instance state", CurrentYard, instance.Project, instance.Name, false))
 		}
 		found = true
+	}
+	if err := registrationRefusals(findings...); err != nil {
+		return "", err
 	}
 	if !found {
 		return StateAbsent, nil
@@ -172,17 +170,6 @@ func prepareRouteConsumers(ctx context.Context, options Options, activation bool
 // CommitRouteConsumers publishes the canonical route when needed and
 // live-attaches the shared read-only route registry to every prepared consumer.
 func CommitRouteConsumers(ctx context.Context, options Options, before string) error {
-	return commitRouteConsumers(ctx, options, before, false)
-}
-
-// CommitRouteConsumersActivation repairs only consumers whose effective policy
-// permits host access. It retains native ownership and prepared-inventory guards.
-func CommitRouteConsumersActivation(ctx context.Context, options Options, before string) error {
-	return routeDiagnostic(commitRouteConsumers(ctx, options, before, true),
-		"consumer reconciliation failed", "", "", "", false)
-}
-
-func commitRouteConsumers(ctx context.Context, options Options, before string, activation bool) error {
 	if err := validateOptions(&options); err != nil {
 		return err
 	}
@@ -202,9 +189,9 @@ func commitRouteConsumers(ctx context.Context, options Options, before string, a
 		}
 	}
 	if !prepared.Active {
-		return verifyRouteConsumers(ctx, options, false, prepared, activation)
+		return verifyRouteConsumers(ctx, options, false, prepared, false)
 	}
-	yards, err := validateCommitInventory(ctx, options, prepared, false, activation)
+	yards, err := validateCommitInventory(ctx, options, prepared, false, false)
 	if err != nil {
 		return err
 	}
@@ -231,7 +218,7 @@ func commitRouteConsumers(ctx context.Context, options Options, before string, a
 	if err := validateRouteSource(options); err != nil {
 		return err
 	}
-	yards, err = validateCommitInventory(ctx, options, prepared, true, activation)
+	yards, err = validateCommitInventory(ctx, options, prepared, true, false)
 	if err != nil {
 		return err
 	}
@@ -273,7 +260,7 @@ func commitRouteConsumers(ctx context.Context, options Options, before string, a
 			)
 		}
 	}
-	if err := verifyRouteConsumers(ctx, options, true, prepared, activation); err != nil {
+	if err := verifyRouteConsumers(ctx, options, true, prepared, false); err != nil {
 		return err
 	}
 	fmt.Fprintln(options.Stdout, "reconciled shared E2E routes in existing local yards")
@@ -337,6 +324,13 @@ func verifyRouteConsumers(
 	prepared routeConsumersState,
 	activation bool,
 ) error {
+	conflict := func(err error) error {
+		if activation {
+			return routeDiagnostic(err, "test-yard requires recreation", CurrentYard, "", "", true)
+		}
+		return err
+	}
+
 	registration, err := inspectRegistration(options)
 	if err != nil {
 		return err
@@ -361,17 +355,17 @@ func verifyRouteConsumers(
 		return err
 	}
 	if !routeReady {
-		return errors.New("canonical test-yard route is unavailable")
+		return conflict(errors.New("canonical test-yard route is unavailable"))
 	}
 	yards, err := inspectRouteConsumerYards(ctx, options, activation)
 	if err != nil {
 		return err
 	}
 	if hasManagedYard(yards, LegacyYard) {
-		return errors.New("legacy e2e-yard instance remains in the managed yard inventory")
+		return conflict(errors.New("legacy e2e-yard instance remains in the managed yard inventory"))
 	}
 	if !hasManagedYard(yards, CurrentYard) {
-		return errors.New("canonical test-yard instance is absent from the managed yard inventory")
+		return conflict(errors.New("canonical test-yard instance is absent from the managed yard inventory"))
 	}
 	if managedYardRunning(yards, CurrentYard) {
 		if err := validateCurrentRouteIdentity(ctx, options); err != nil {
@@ -388,11 +382,11 @@ func verifyRouteConsumers(
 			continue
 		}
 		if !yard.Mounted {
-			return fmt.Errorf(
+			return conflict(fmt.Errorf(
 				"managed yard %s/%s lacks the shared E2E route mount",
 				yard.Project,
 				yard.Instance,
-			)
+			))
 		}
 		if strings.EqualFold(yard.Status, "running") {
 			if _, err := runIncus(

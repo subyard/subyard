@@ -76,7 +76,12 @@ func (err sourceAdmissionError) Error() string {
 	case "links":
 		return "release source admission: runtime links do not match protected history; restore the exact active and previous releases before source repair"
 	default:
-		return "release source admission: protected metadata is unsupported or unresolved; finish pending publications or recovery intent with the exact sealed original owner before source repair"
+		detail := ""
+		switch err.phase {
+		case "resource declarations", "V2 history", "journal consistency", "legacy history":
+			detail = " (" + err.phase + ")"
+		}
+		return "release source admission: protected metadata is unsupported or unresolved" + detail + "; finish pending publications or recovery intent with the exact sealed original owner before source repair"
 	}
 }
 func (err sourceAdmissionError) Unwrap() error { return err.cause }
@@ -251,15 +256,17 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 	if journal != nil && !releasetransition.BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) {
 		return proof, errors.New("unsupported original catalog")
 	}
-	phase = "protected metadata"
+	phase = "resource declarations"
 	originalResources, resourceErr := resource.Load(fmt.Sprintf("/proc/self/fd/%d", verified.root.Fd()))
 	if resourceErr != nil {
 		return proof, resourceErr
 	}
+	phase = "V2 history"
 	proof.Metadata, err = store.InspectSourceMetadata(registry, digest, originalResources.EndpointSettingNames()...)
 	if err != nil {
 		return proof, err
 	}
+	phase = "journal consistency"
 	if proof.Metadata.Journal != nil {
 		payload, marshalErr := releasetransition.MarshalJournal(*proof.Metadata.Journal)
 		if marshalErr != nil || !snapshot.Exists || !bytes.Equal(payload, snapshot.Payload) {
@@ -268,6 +275,7 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 	} else if snapshot.Exists {
 		return proof, releasetransition.ErrProtectedStoreStale
 	}
+	phase = "legacy history"
 	legacy, err := migration.InspectSourceHistory(ctx, migration.ReleaseOptions{RuntimeRoot: root, ConfigHome: configHome, Version: verified.version, RegistryPath: filepath.Join(verified.candidate.root, "config", "release-transition.json")})
 	if err != nil {
 		return proof, err

@@ -1535,7 +1535,7 @@ source_upgrade_project_marker() {
   local project="$1" query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}" marker rc
   set +e
   marker="$(timeout --foreground "$query_timeout" \
-    incus project get "$project" user.subyard.p0-source 2>/dev/null)"
+    incus project get "$project" user.p0-source 2>/dev/null)"
   rc=$?
   set -e
   case "$rc" in

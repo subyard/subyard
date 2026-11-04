@@ -159,7 +159,7 @@ func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, re
 	}
 	// Integration provisioning or services can drift while config files remain
 	// current. A source-only reduction does not apply either kind of drift.
-	permit, err := cli.prepareConfigApplyRepairMode(ctx, yard, true, outcome, false, nil)
+	permit, err := cli.prepareActivationRepair(ctx, yard, true, outcome, activationRepairMode{})
 	if err != nil || permit == nil {
 		// The source-only fallback independently requires an interrupted journal.
 		return false, 0

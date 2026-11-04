@@ -148,7 +148,7 @@ proxy_cleanup() {
     # A stopped or inaccessible guest is removed by the owning project cleanup.
     # Never start it for cleanup; a running guest permits exact payload removal.
     if [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s 2>/dev/null)" = RUNNING ]; then
-      if [ "$(incus project get "$PROJECT" user.subyard.p0-power-systemd)" = "$MARKER" ]; then
+      if [ "$(incus project get "$PROJECT" user.p0-power-systemd)" = "$MARKER" ]; then
         cleanup_preview_payload || failed=1
       else failed=1; fi
     fi
@@ -478,7 +478,7 @@ prepare_proxy() {
     "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
   incus project create "$PROJECT" -c features.images=false \
-    -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+    -c user.p0-power-systemd="$MARKER" >/dev/null
   operator_yard init --yes
   operator_yard start --yes
   sudo -n ip link add "$INTERFACE" type dummy

@@ -352,7 +352,8 @@ func TestIntegrationActivationFailureBoundaries(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			loaded.Integrations = config.IntegrationSelection{Present: true}
-			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}}
+			instance := ports.InstanceInfo{Project: loaded.Context.IncusProject, Name: loaded.Context.YardInstanceName, Status: "Running"}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}, Instances: map[string]ports.InstanceInfo{instance.Project + "/" + instance.Name: instance}}
 			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: incus, Executor: activationIntegrationExecutor{},
 				Integrations: []profile.IntegrationDefinition{}, Environment: []string{}, Yard: loaded.Context}
 			approved, err := runtime.IntegrationPlan(context.Background())

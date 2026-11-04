@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/testyardmigration"
 	"golang.org/x/sys/unix"
 )
 
@@ -814,7 +815,7 @@ func TestMigrationBrokerReconcileIsBoundedToTestVMStage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code := program.Run(context.Background()); code == 0 ||
-		!strings.Contains(stderr.String(), "migration child is required") {
+		!strings.Contains(stderr.String(), "requires its owning parent") {
 		t.Fatalf("broker reconcile accepted a public invocation: code=%d stderr=%q",
 			code, stderr.String())
 	}
@@ -861,7 +862,7 @@ esac
 		return os.OpenFile(terminalPath, os.O_RDWR, 0)
 	}
 	program.effectiveUID = func() int { return 1000 }
-	_ = program.Run(context.Background())
+	_ = program.Run(routeMigrationChildContext(context.Background()))
 	sudoCalls, err := os.ReadFile(sudoLog)
 	if err != nil {
 		t.Fatal(err)
@@ -884,7 +885,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 0 {
+	if code := program.Run(routeMigrationChildContext(context.Background())); code != 0 {
 		t.Fatalf("broker reconcile failed: code=%d stderr=%q", code, stderr.String())
 	}
 	if !slices.Equal(platform.applied, []ports.ReconcileStageID{
@@ -908,7 +909,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 0 {
+	if code := program.Run(routeMigrationChildContext(context.Background())); code != 0 {
 		t.Fatalf("converged broker reconcile failed: code=%d stderr=%q",
 			code, stderr.String())
 	}
@@ -939,7 +940,7 @@ func TestMigrationPowerReconcileIsBoundedToPowerStage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code := program.Run(context.Background()); code == 0 ||
-		!strings.Contains(stderr.String(), "migration child is required") {
+		!strings.Contains(stderr.String(), "requires its owning parent") {
 		t.Fatalf("power reconcile accepted a public invocation: code=%d stderr=%q",
 			code, stderr.String())
 	}
@@ -947,7 +948,7 @@ func TestMigrationPowerReconcileIsBoundedToPowerStage(t *testing.T) {
 	stderr.Reset()
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard",
-		Arguments: []string{"_migrate", "reconcile-power-reconciler"},
+		Arguments: []string{"-Y", testyardmigration.LegacyYard, "_migrate", "reconcile-power-reconciler"},
 		Environment: append(
 			environment,
 			"SUBYARD_INTERNAL_MIGRATION_CHILD=1",
@@ -957,7 +958,7 @@ func TestMigrationPowerReconcileIsBoundedToPowerStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 0 {
+	if code := program.Run(ownerMigrationChildContext(context.Background())); code != 0 {
 		t.Fatalf("power reconcile failed: code=%d stderr=%q", code, stderr.String())
 	}
 	if !slices.Equal(platform.applied, []ports.ReconcileStageID{ports.ReconcileStagePower}) {
@@ -1017,6 +1018,11 @@ printf 'retained-adapter-ok\n' > "@MARKER@"
 	}
 
 	activeDispatcher := filepath.Join(active, "bin", "yard-engine")
+	legacy := filepath.Join(home, ".config", "subyard", "yards", testyardmigration.LegacyYard, "config.env")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, legacy, "YARD_TEMPLATE=test-vms\nSSH_PORT=2223\n", 0o600)
 	var stderr bytes.Buffer
 	environment := []string{
 		"HOME=" + home,
@@ -1031,7 +1037,7 @@ printf 'retained-adapter-ok\n' > "@MARKER@"
 		RepositoryRoot: active,
 		DispatcherPath: activeDispatcher,
 		Program:        "yard",
-		Arguments:      []string{"_migrate", "reconcile-power-reconciler"},
+		Arguments:      []string{"-Y", testyardmigration.LegacyYard, "_migrate", "reconcile-power-reconciler"},
 		Environment:    append(environment, "SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT="+previous),
 		Stderr:         &stderr,
 	})
@@ -1040,7 +1046,7 @@ printf 'retained-adapter-ok\n' > "@MARKER@"
 	}
 	program.effectiveUID = func() int { return 0 }
 
-	if code := program.Run(context.Background()); code != 0 {
+	if code := program.Run(ownerMigrationChildContext(context.Background())); code != 0 {
 		t.Fatalf("power reconcile failed: code=%d stderr=%q", code, stderr.String())
 	}
 	if program.options.RepositoryRoot != active || program.options.DispatcherPath != activeDispatcher {
@@ -1085,14 +1091,14 @@ printf 'retained-adapter-ok\n' > "@MARKER@"
 		RepositoryRoot: active,
 		DispatcherPath: activeDispatcher,
 		Program:        "yard",
-		Arguments:      []string{"_migrate", "reconcile-power-reconciler"},
+		Arguments:      []string{"-Y", testyardmigration.LegacyYard, "_migrate", "reconcile-power-reconciler"},
 		Environment:    append(environment, "SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT="+foreign),
 		Stderr:         &stderr,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code == 0 ||
+	if code := program.Run(ownerMigrationChildContext(context.Background())); code == 0 ||
 		!strings.Contains(stderr.String(), "not the retained previous release") {
 		t.Fatalf("foreign power payload accepted: code=%d stderr=%q", code, stderr.String())
 	}

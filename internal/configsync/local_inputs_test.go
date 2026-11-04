@@ -48,6 +48,10 @@ func TestConfigSyncMigratesLegacySettingsWithoutLosingLocalChanges(t *testing.T)
 			fixture.writeSource("hosts/owner-a/overrides/agents/codex/rules/repo.rules", "old rule\n")
 			fixture.commit("legacy source")
 			installLegacySync(t, fixture)
+			fresh := filepath.Join(fixture.configHome, "yards/fresh/config.env")
+			if err := config.CreatePersistentFile(fixture.configHome, fresh, []byte("SSH_PORT=2236\n")); !errors.Is(err, config.ErrLegacyGitSettingsMigration) {
+				t.Fatalf("legacy ownership admitted a new local yard: %v", err)
+			}
 			scalar := filepath.Join(fixture.configHome, "config.env")
 			localAsset := filepath.Join(fixture.configHome, asset)
 			retained := state == "edited" || state == "mode-changed"
@@ -109,6 +113,9 @@ func TestConfigSyncMigratesLegacySettingsWithoutLosingLocalChanges(t *testing.T)
 			converged, err := BuildPlan(fixture.options(false))
 			if err != nil || converged.NeedsApply() {
 				t.Fatalf("migration did not converge: %#v %v", converged, err)
+			}
+			if err := config.CreatePersistentFile(fixture.configHome, fresh, []byte("SSH_PORT=2236\n")); err != nil {
+				t.Fatalf("ordinary sync did not unblock new local yard authoring: %v", err)
 			}
 		})
 	}

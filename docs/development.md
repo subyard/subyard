@@ -23,6 +23,12 @@ directive selects Go 1.26.6 for development and CI. A recent Go bootstrap can fe
 automatically. CI uses `actions/setup-go` with `go-version-file: go.mod`; it does not carry a second
 version constant.
 
+`make lint` checks closed release-transition states and their consumers with golangci-lint
+v2.15.0 and its `exhaustive` linter. `make verify` and the existing CI verification job
+include this gate. The runner downloads checksum-pinned official Linux amd64/arm64
+binaries into `.build/tools/`; Go build and module caches remain shared. A fail-closed
+`default` branch does not satisfy exhaustiveness when a checkpoint state is added.
+
 On Debian, install the normal build prerequisites with:
 
 ```sh

@@ -56,7 +56,7 @@ PY
     [ "$safe_units" = 1 ] || continue
     project="$PROJECT"; [ "$yard" = default ] || project="$NAMED_PROJECT"
     if incus project show "$project" >/dev/null 2>&1; then
-      marker="$(incus project get "$project" user.subyard.activation-fixture 2>/dev/null)"
+      marker="$(incus project get "$project" user.activation-fixture 2>/dev/null)"
       if [ "$marker" != "$STATE" ]; then
         printf 'release-activation: cleanup refused unmarked project %s\n' "$project" >&2
         failed=1

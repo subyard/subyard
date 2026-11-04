@@ -63,20 +63,27 @@ func CheckIntegrationPlan(approved, fresh IntegrationPlan) error {
 	if approved.Scope == "" || fresh.Scope != approved.Scope || len(approved.facts) == 0 || !approved.Changed {
 		return fmt.Errorf("%w: integration scope or runtime changed", domain.ErrPlanStale)
 	}
-	before := make(map[string]integrationFact, len(approved.facts))
+	// Inventory and structured writers may both report one path; each plan keeps their order.
+	before := make(map[string][]integrationFact, len(approved.facts))
 	for _, fact := range approved.facts {
-		before[fact.Key] = fact
+		before[fact.Key] = append(before[fact.Key], fact)
 	}
 	for _, fact := range fresh.facts {
-		old, exists := before[fact.Key]
-		if !exists || old.Desired != fact.Desired || (!fact.AtDesired && (old.AtDesired || old.Observed != fact.Observed)) {
+		occurrences := before[fact.Key]
+		if len(occurrences) == 0 {
 			return fmt.Errorf("%w: integration target requires unapproved work", domain.ErrPlanStale)
 		}
-		delete(before, fact.Key)
+		old := occurrences[0]
+		if old.Desired != fact.Desired || (!fact.AtDesired && (old.AtDesired || old.Observed != fact.Observed)) {
+			return fmt.Errorf("%w: integration target requires unapproved work", domain.ErrPlanStale)
+		}
+		before[fact.Key] = occurrences[1:]
 	}
-	for _, fact := range before {
-		if fact.Desired != "absent" {
-			return fmt.Errorf("%w: integration target set changed", domain.ErrPlanStale)
+	for _, occurrences := range before {
+		for _, fact := range occurrences {
+			if fact.Desired != "absent" {
+				return fmt.Errorf("%w: integration target set changed", domain.ErrPlanStale)
+			}
 		}
 	}
 	return nil

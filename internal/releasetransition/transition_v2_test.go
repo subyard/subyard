@@ -4438,3 +4438,59 @@ func TestSupportedBuiltinCatalogRetainsIndependentIntroductions(t *testing.T) {
 		}
 	}
 }
+
+type v2RefusingFreshOwner struct{ *v2TestOwnerRegistration }
+
+func (*v2RefusingFreshOwner) FreshWarning(context.Context, V2SettingsSnapshotView) (string, error) {
+	return "test-yard requires recreation; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms", nil
+}
+
+func TestV2FreshOwnerWarningPreservesAssessmentWithoutWriting(t *testing.T) {
+	interrupted := false
+	transition, _, _ := v2TransitionFixture(t, func(point string) error {
+		if point == "after-settings-cas" && !interrupted {
+			interrupted = true
+			return errors.New("interrupt before owner ledger completion")
+		}
+		return nil
+	})
+	owner := &v2RefusingFreshOwner{&v2TestOwnerRegistration{state: OwnerRegistrationLegacyDirectory}}
+	transition.options.OwnerRegistration = owner
+	warning, _ := owner.FreshWarning(context.Background(), nil)
+	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{converged: true, warnings: []string{warning}}}
+	before, err := transition.store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+	if err != nil || len(inspection.Blockers) != 0 || (inspection.Outcome == nil || len(inspection.Outcome.Warnings) == 0) {
+		t.Fatalf("fresh warning hid assessment: %+v %v", inspection, err)
+	}
+	after, err := transition.store.ReadCurrentJournal()
+	if err != nil || after.Exists != before.Exists || owner.commits != 0 {
+		t.Fatal("inspection wrote protected state", err)
+	}
+	outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+	if err != nil || outcome.Status != StatusRecovering || outcome.Transaction == nil || !interrupted || owner.commits != 0 {
+		t.Fatalf("did not interrupt the preserved-owner transaction: %+v %v", outcome, err)
+	}
+	// Reopen durable state after source mutation. A deliberately excluded owner
+	// is still excluded; a journaled owner effect must never use this policy.
+	transition, err = NewV2Transition(transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+	if err != nil || len(resume.Blockers) != 0 || resume.Resume == nil || *resume.Resume != *outcome.Transaction {
+		t.Fatalf("preserved owner became a new impact on resume: %+v %v", resume, err)
+	}
+	outcome, err = transition.Converge(context.Background(), Execution{Plan: resume.Plan})
+	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) == 0 || owner.commits != 0 {
+		t.Fatalf("preserved owner prevented resumed activation: %+v %v", outcome, err)
+	}
+	inspected, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+	if err != nil || inspected.Outcome == nil || inspected.Outcome.Status != StatusReady || len(inspected.Outcome.Warnings) == 0 {
+		t.Fatalf("fresh check lost ready warning: %+v %v", inspected, err)
+	}
+
+}

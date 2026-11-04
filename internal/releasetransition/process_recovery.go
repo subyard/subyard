@@ -16,6 +16,7 @@ const (
 	RecoveryProcessLifecycleCapabilities      RecoveryProcessMode = "lifecycle-capabilities"
 	RecoveryProcessRuntimeCapabilities        RecoveryProcessMode = "runtime-activation-capabilities"
 	RecoveryProcessMigrationOwnerCapabilities RecoveryProcessMode = "migration-owner-capabilities"
+	RecoveryProcessRollbackSourceCapabilities RecoveryProcessMode = "rollback-source-activation-capabilities"
 	RecoveryProcessInspect                    RecoveryProcessMode = "inspect"
 	RecoveryProcessConverge                   RecoveryProcessMode = "converge"
 )
@@ -41,8 +42,15 @@ func MigrationOwnerReplacementCapabilities() RecoveryCapabilities {
 	return RecoveryCapabilities{MigrationOwnerReplacementContractV1, ProcessRecoverySchemaV2, JournalSchemaV2, MigrationOwnerReceiptSchemaV1}
 }
 
+// RollbackSourceActivationCapabilities promises prospective post-source activation
+// planning for fresh rollback, including native settings and owner registration.
+// It grants no migration, recovery or execution authority.
+func RollbackSourceActivationCapabilities() RecoveryCapabilities {
+	return RecoveryCapabilities{"rollback-source-activation-v1", ProcessRecoverySchemaV2, JournalSchemaV2, 0}
+}
+
 func (capabilities RecoveryCapabilities) Validate() error {
-	if capabilities != ActivationOnlyRecoveryCapabilities() && capabilities != ActivationRecoveryLifecycleCapabilities() && capabilities != MigrationOwnerReplacementCapabilities() {
+	if capabilities != ActivationOnlyRecoveryCapabilities() && capabilities != ActivationRecoveryLifecycleCapabilities() && capabilities != MigrationOwnerReplacementCapabilities() && capabilities != RollbackSourceActivationCapabilities() {
 		return invalid("unsupported activation recovery capabilities")
 	}
 	return nil
@@ -80,7 +88,7 @@ func (request RecoveryProcessRequest) Validate() error {
 	if request.SchemaVersion != ProcessRecoverySchemaV2 {
 		return invalid("unsupported recovery process schema")
 	}
-	if request.Mode == RecoveryProcessCapabilities || request.Mode == RecoveryProcessLifecycleCapabilities || request.Mode == RecoveryProcessRuntimeCapabilities || request.Mode == RecoveryProcessMigrationOwnerCapabilities {
+	if request.Mode == RecoveryProcessCapabilities || request.Mode == RecoveryProcessLifecycleCapabilities || request.Mode == RecoveryProcessRuntimeCapabilities || request.Mode == RecoveryProcessRollbackSourceCapabilities || request.Mode == RecoveryProcessMigrationOwnerCapabilities {
 		if request.RuntimeRoot != "" || request.ConfigHome != "" || request.Yard != "" || request.Target != "" ||
 			request.Direction != "" || request.ArtifactDigest != "" || request.RegistryDigest != "" ||
 			len(request.InheritedSettingIDs) != 0 || request.Recovery != nil || request.Execution != nil || request.Contract != "" || request.MigrationOwner != nil {

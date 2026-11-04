@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+// ErrLegacyGitSettingsMigration preserves the old shared storage until sync
+// separates Git ownership from local authoring transactionally.
+var ErrLegacyGitSettingsMigration = errors.New("run yard config sync [checkout] to migrate Git settings before saving local settings")
+
 // CheckLocalSettingsWritable prevents authoring into the old shared local/Git
 // storage before sync has transactionally separated its ownership.
 func CheckLocalSettingsWritable(configHome string) error {
@@ -41,7 +45,7 @@ func CheckLocalSettingsWritable(configHome string) error {
 	switch manifest.SchemaVersion {
 	case 1:
 		if len(manifest.Files) != 0 {
-			return errors.New("run yard config sync to migrate Git settings before saving local settings")
+			return ErrLegacyGitSettingsMigration
 		}
 	case 2:
 	default:

@@ -12,7 +12,6 @@ fixture_functions() { # source file, then function names
   for name; do sed -n "/^$name() {/,/^}$/p" "$source"; done
 }
 bash "$ROOT/tests/helpers/vm-page-reporting.sh"
-bash "$ROOT/tests/proxy-address-boot-controller.sh"
 export SUBYARD_E2E_STATE_DIR="$TMP/client"
 
 grep -Fq 'SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes' \
@@ -99,7 +98,7 @@ done
     [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
   done
   for P0_LANE in boundary nested-teardown transport dependencies real-incus profile-resource producer-reboot release \
-    source-upgrade power-systemd newer-release reboot-verify peer-cleanup cleanup full-uninstall; do
+    source-upgrade power-systemd newer-release legacy-continuation yard-maintenance reboot-verify peer-cleanup cleanup full-uninstall; do
     [ "$(lane_vm_count)" = 1 ] || fail "single-host P0 lane requested a pair: $P0_LANE"
   done
   P0_LANE=nested-teardown P0_NESTED_VM=2
@@ -537,8 +536,6 @@ set +e
   FULL_SOURCE_ARM_FILE="$p0_source_arm"
   FULL_POWER_ARM_FILE=
   SOURCE_LANE_VM=2
-  SOURCE_ARCHIVE=
-  SOURCE_ARCHIVE_REMOTE=
   P0_EVIDENCE="$TMP/p0-evidence.json"
   P0_FAILURE_LOG="$TMP/p0-failure.log"
   P0_CURRENT_PHASE=fixture
@@ -555,7 +552,7 @@ set +e
   LEASE_KEEPER_PID=
   LOCAL_TEMP=
   export P0_BUNDLE P0_BUNDLE_HASH TOKEN FULL_SOURCE_ARM_FILE FULL_POWER_ARM_FILE \
-    SOURCE_LANE_VM SOURCE_ARCHIVE SOURCE_ARCHIVE_REMOTE P0_EVIDENCE P0_FAILURE_LOG \
+    SOURCE_LANE_VM P0_EVIDENCE P0_FAILURE_LOG \
     P0_CURRENT_PHASE P0_PHASE_STARTED PROBE_PID PROBE_NAME PROBE_MARKER PEERS_READY \
     SOURCE_HOST_STARTED POWER_SYSTEMD_STARTED POWER_SYSTEMD_LANE_VM PROBE_LOG \
     CAPACITY_LOG_DIR
@@ -1542,6 +1539,64 @@ set -e
   [ "$(eval "$dispatch")" = $'producer-reboot-platform run_vm 1 fixture-platform\nproducer-reboot run_power_systemd_vm 1 dev/e2e/bind-resource-profile.sh --producer-reboot\ncleanup run_vm 1 capacity-verify-cleanup' ] \
     || fail 'producer reboot controller changed its one-VM setup or cleanup'
 ) || fail 'producer reboot lane dispatch failed'
+(
+  calls=''
+  run_power_systemd_vm() { calls+="$*"$'\n'; }
+  TOKEN=123
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" yard_maintenance_lane)"
+  yard_maintenance_lane
+  [ "$calls" = $'1 dev/e2e/yard-maintenance-upgrade.sh 123\n' ] \
+    || fail 'yard maintenance did not run its single published-history scenario'
+  run_phase() { printf '%s\n' "$*"; }
+  dispatch="$(sed -n '/^  yard-maintenance)/,/^    ;;/p' "$ROOT/dev/e2e/p0-acceptance.sh" | sed '1d;$d')"
+  [ "$(eval "$dispatch")" = $'capacity-preflight run_vm 1 capacity-preflight\nyard-maintenance-platform run_vm 1 fixture-platform\nyard-maintenance yard_maintenance_lane\ncleanup cleanup_lane' ] \
+    || fail 'yard maintenance controller lost platform or cleanup'
+) || fail 'yard maintenance lane contract failed'
+# Maintenance cleanup releases only its marker-owned named yards.
+for maintenance_cleanup_case in success teardown-failure absent foreign; do
+  maintenance_cleanup_root="$TMP/maintenance-cleanup-$maintenance_cleanup_case"
+  install -d -m 0700 "$maintenance_cleanup_root"
+  maintenance_cleanup_rc=0
+  MAINTENANCE_CLEANUP_FUNCTIONS="$(fixture_functions "$ROOT/dev/e2e/yard-maintenance-upgrade.sh" \
+    project_for instance_for maintenance_cleanup)
+$(fixture_functions "$ROOT/dev/e2e/power-reconciler-upgrade.sh" assert_project_owned)" \
+    bash -c '
+      set -euo pipefail
+      scenario=$1 STATE_ROOT=$2 TRACE=$2/trace MARKER=fixture
+      EXTRA_PROJECTS=(weighted z-last)
+      eval "$MAINTENANCE_CLEANUP_FUNCTIONS"
+      die() { printf "%s\n" "$*" >&2; exit 2; }
+      project_presence() { [ "$scenario:$PROJECT" != absent:subyard-weighted ]; }
+      incus() {
+        [ "$*" = "project get $PROJECT user.p0-power-systemd" ] || exit 94
+        printf "guard:%s\n" "$PROJECT" >> "$TRACE"
+        if [ "$scenario:$PROJECT" = foreign:subyard-weighted ]; then printf "foreign\n"; else printf "%s\n" "$MARKER"; fi
+      }
+      operator_yard() {
+        [ "$*" = "-Y ${PROJECT#subyard-} teardown --yes" ] || exit 95
+        printf "teardown:%s\n" "$PROJECT" >> "$TRACE"
+        [ "$scenario:$PROJECT" != teardown-failure:subyard-weighted ]
+      }
+      delete_owned_project() { printf "fallback:%s\n" "$PROJECT" >> "$TRACE"; }
+      cleanup() { local rc=$?; printf "default:%s/%s:%s\n" "$PROJECT" "$INSTANCE" "$rc" >> "$TRACE"; exit "$rc"; }
+      maintenance_cleanup
+    ' fixture "$maintenance_cleanup_case" "$maintenance_cleanup_root" > "$maintenance_cleanup_root/log" 2>&1 || maintenance_cleanup_rc=$?
+  maintenance_cleanup_expected=0
+  case "$maintenance_cleanup_case" in teardown-failure) maintenance_cleanup_expected=3 ;; foreign) maintenance_cleanup_expected=2 ;; esac
+  [ "$maintenance_cleanup_rc" = "$maintenance_cleanup_expected" ] || fail "maintenance cleanup masked $maintenance_cleanup_case ($maintenance_cleanup_rc)"
+  maintenance_cleanup_trace="$(cat "$maintenance_cleanup_root/trace")"
+  case "$maintenance_cleanup_case" in
+    foreign)
+      [ "$maintenance_cleanup_trace" = 'guard:subyard-weighted' ] \
+        || fail 'maintenance cleanup changed a foreign project or its host relay' ;;
+    *)
+      maintenance_cleanup_named=$'guard:subyard-weighted\nteardown:subyard-weighted\nfallback:subyard-weighted'
+      [ "$maintenance_cleanup_case" != absent ] || maintenance_cleanup_named='fallback:subyard-weighted'
+      [ "$maintenance_cleanup_trace" = "$maintenance_cleanup_named"$'\nguard:subyard-z-last\nteardown:subyard-z-last\nfallback:subyard-z-last\ndefault:subyard/yard:'"$maintenance_cleanup_expected" ] \
+        || fail 'maintenance cleanup omitted named teardown, continued unsafely, or lost the native failure' ;;
+  esac
+done
+
 lane_inventory="$("$ROOT/dev/e2e/p0-acceptance.sh" --list-lanes)"
 lane_table="$(sed -n '/^| Lane |/,/^$/p' "$ROOT/docs/test-vms.md")"
 while IFS= read -r lane; do
@@ -1552,7 +1607,7 @@ while IFS= read -r lane; do
   grep -Fq "\`$lane\`" <<<"$lane_table" \
     || fail "public P0 lane table omitted $lane"
 done <<<"$lane_inventory"
-grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power-systemd newer-release release-smoke peer cleanup' <<<"$lane_inventory" \
+grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power-systemd legacy-continuation newer-release release-smoke peer cleanup' <<<"$lane_inventory" \
   || fail 'continuous P0 gate lost a mandatory public-contract phase'
 
 (
@@ -2811,12 +2866,13 @@ For a static web preview, run `subyard-preview <relative-static-dir>` from the G
 <!-- /subyard-preview -->
 PREVIEW
       } > "$guest"
+      [ "$scenario" = composed ] || cp "$HOME_ROOT/host/AGENTS.md" "$guest"
       chmod 0600 "$HOME_ROOT/host/AGENTS.md" "$guest"
       case "$scenario" in
         raw-only) cp "$HOME_ROOT/host/AGENTS.md" "$guest" ;;
         missing) guest="$HOME_ROOT/missing-AGENTS.md" ;;
         wrong-source) sed -i "1s/success/other/" "$guest" ;;
-        body-drift) sed -i "s/foreground/other/;s/static web preview/modified web preview/" "$guest" ;;
+        body-drift) sed -i "s/The v0.11.1/The changed v0.11.1/" "$guest" ;;
         extra) printf "unowned content\n" >> "$guest" ;;
         host-mutated) printf "changed host input\n" >> "$HOME_ROOT/host/AGENTS.md" ;;
       esac
@@ -2838,11 +2894,11 @@ PREVIEW
       }
       assert_materialized_fixed_point
     ' _ "$v0111_recovery" "$scenario" "$TMP/v0111-materialized" >"$output" 2>&1; then
-      [ "$scenario" = composed ] \
+      [ "$scenario" = raw-only ] \
         || fail "v0.11.1 materialization oracle accepted $scenario"
     else
       case "$scenario" in
-        composed) fail 'v0.11.1 materialization oracle rejected exact composed instructions' ;;
+        raw-only) fail 'v0.11.1 materialization oracle rejected exact configured instructions' ;;
         host-mutated) expected_error='changed the configured host instructions' ;;
         missing) expected_error='Codex target is unavailable' ;;
         pending|conflict|unselected) expected_error='Codex integration is not at its native fixed point' ;;
@@ -2851,6 +2907,11 @@ PREVIEW
       esac
       grep -Fq "$expected_error" "$output" \
         || fail "v0.11.1 materialization oracle did not check $scenario"
+      case "$scenario" in
+        composed|wrong-source|body-drift|extra)
+          [ "$(grep -Ec '^release-recovery materialized-codex stage=current expected_sha256=[a-f0-9]{64} actual_sha256=[a-f0-9]{64}$' "$output")" = 1 ] \
+            || fail 'materialization mismatch did not retain one bounded digest diagnostic' ;;
+      esac
     fi
   done
 }
@@ -3181,7 +3242,7 @@ for v0111_stop_case in cancel normal reaped; do
   fi
 done
 grep -Fq 'STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"' "$v0111_recovery" \
-  && grep -Fq -- '-c features.images=false -c user.subyard.p0="$FIXTURE_MARKER"' "$v0111_recovery" \
+  && grep -Fq -- '-c features.images=false -c user.p0-release-recovery="$FIXTURE_MARKER"' "$v0111_recovery" \
   && grep -Fq 'assert_state_root' "$v0111_recovery" \
   && grep -Fq 'assert_fixture_root' "$v0111_recovery" \
   && grep -Fq 'assert_project_marker' "$v0111_recovery" \
@@ -3241,7 +3302,33 @@ bash -c '
   TEST_VMS_SINK="$2/sink"
   TEST_VMS_SINK_SERVICE="$2/sink.service"
   TEST_VMS_SINK_TIMER="$2/sink.timer"
+  sink_before="$(sink_coordination_binding)"
   assert_native_resources_absent
+  [ "$(sink_coordination_binding)" = "$sink_before" ]
+  for resource in sink sink.service sink.timer; do
+    install -m 0600 /dev/null "$2/.$resource.native-install.lock"
+    printf "{\"generation\":\"%064d\",\"owner\":\"test-vms-host-sink\",\"version\":1}\n" 0 > "$2/.$resource.native-custody.json"
+    chmod 0644 "$2/.$resource.native-custody.json"
+  done
+  [ "$(sink_coordination_binding)" != "$sink_before" ]
+  sink_before="$(sink_coordination_binding)"
+  assert_native_resources_absent
+  [ "$(sink_coordination_binding)" = "$sink_before" ]
+  for resource in "$TEST_VMS_SINK" "$TEST_VMS_SINK_SERVICE" "$TEST_VMS_SINK_TIMER"; do
+    printf "foreign survivor\n" > "$resource"
+    if (assert_native_resources_absent) >/dev/null 2>&1; then exit 1; fi
+    [ "$(cat "$resource")" = "foreign survivor" ]
+    rm "$resource"
+  done
+  printf "{\"generation\":\"%064d\",\"owner\":\"test-vms-host-sink\",\"version\":1}\n" 1 > "$2/.sink.native-custody.json"
+  [ "$(sink_coordination_binding)" != "$sink_before" ]
+  chmod 0664 "$2/.sink.native-custody.json"
+  if (sink_coordination_binding) >/dev/null 2>&1; then exit 1; fi
+  chmod 0644 "$2/.sink.native-custody.json"
+  exec {sink_fd}<"$2/.sink.native-install.lock"
+  flock -n "$sink_fd"
+  if (sink_coordination_binding) >/dev/null 2>&1; then exit 1; fi
+  exec {sink_fd}<&-
   printf "foreign survivor\n" > "$POWER_RECONCILER"
   if (assert_native_resources_absent) > "$2/survivor.log" 2>&1; then exit 1; fi
   grep -Fq "resource_kind=power-helper artifact_kind=installed-resource" "$2/survivor.log"
@@ -4695,11 +4782,13 @@ for full_failure in success cleanup final-boundary; do
 done
 reboot_lane_function="$(sed -n '/^reboot_verify_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
-for reboot_scenario in reboot-verify:none power-systemd:none reboot-verify:prepare reboot-verify:reboot reboot-verify:resume reboot-verify:finish; do
+legacy_continuation_lane_function="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" legacy_continuation_lane)"
+for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation:none reboot-verify:prepare reboot-verify:reboot reboot-verify:resume reboot-verify:finish legacy-continuation:prepare legacy-continuation:reboot legacy-continuation:resume legacy-continuation:finish; do
   reboot_failure="${reboot_scenario#*:}"
   reboot_fixture_log="$TMP/reboot-fixture-$reboot_scenario.log"
   set +e
   REBOOT_LANE_DISPATCH="$reboot_lane_dispatch" REBOOT_LANE_FUNCTION="$reboot_lane_function" \
+    LEGACY_CONTINUATION_LANE_FUNCTION="$legacy_continuation_lane_function" \
     POWER_LANE_FUNCTION="$power_systemd_lane_body" REBOOT_FAILURE="$reboot_failure" \
     REBOOT_LANE="${reboot_scenario%%:*}" bash -c '
       set -euo pipefail
@@ -4723,7 +4812,9 @@ for reboot_scenario in reboot-verify:none power-systemd:none reboot-verify:prepa
           "1 dev/e2e/power-reconciler-systemd-255.sh") printf "systemd255\n"; return ;;
           "1 dev/e2e/power-reconciler-systemd.sh") printf "systemd\n"; return ;;
         esac
-        [ "$1" = 1 ] && [ "$2" = dev/e2e/power-reconciler-upgrade.sh ] && [ "$4" = 123 ] || exit 42
+        expected_script=dev/e2e/power-reconciler-upgrade.sh
+        [ "$REBOOT_LANE" != legacy-continuation ] || expected_script=dev/e2e/legacy-continuation-upgrade.sh
+        [ "$1" = 1 ] && [ "$2" = "$expected_script" ] && [ "$4" = 123 ] || exit 42
         [ "$platform" = 1 ] && [ "$POWER_SYSTEMD_STARTED" = 1 ] || exit 43
         printf "%s\n" "$3"
         [ "$REBOOT_FAILURE" != "$3" ] || exit 45
@@ -4746,6 +4837,7 @@ for reboot_scenario in reboot-verify:none power-systemd:none reboot-verify:prepa
         printf "cleanup\n"
       }
       trap '\''printf "exit=%s armed=%s\n" "$?" "$POWER_SYSTEMD_STARTED"'\'' EXIT
+      eval "$LEGACY_CONTINUATION_LANE_FUNCTION"
       eval "$REBOOT_LANE_FUNCTION"
       eval "$POWER_LANE_FUNCTION"
       eval "$REBOOT_LANE_DISPATCH"
@@ -4818,12 +4910,159 @@ for release_smoke_failure in success prepare reboot finish; do
   fi
 done
 
+# Failed current installers retain their native result and print bounded evidence.
+for current_capture_case in native-one native-seventeen capture-fails; do
+  current_capture_root="$TMP/current-capture-$current_capture_case"
+  install -d -m 0700 "$current_capture_root"
+  set +e
+  CURRENT_CAPTURE_CASE="$current_capture_case" CURRENT_CAPTURE_ROOT="$current_capture_root" \
+    CURRENT_CAPTURE_FUNCTIONS="$(fixture_functions "$ROOT/dev/e2e/release-transition-v0111-recovery.sh" \
+      upgrade_to_current_candidate capture_fixture_failure_logs cleanup_failure_diagnostics fixture_root_is_marked)" \
+    ROOT="$ROOT" bash -c '
+      set -euo pipefail
+      eval "$CURRENT_CAPTURE_FUNCTIONS"
+      FIXTURE=success FIXTURE_ROOT="$CURRENT_CAPTURE_ROOT" FIXTURE_MARKER=capture-synthetic YARD_NAME=synthetic
+      printf "%s\n" "$FIXTURE_MARKER" > "$FIXTURE_ROOT/.subyard-p0-marker"
+      CURRENT_VERSION=candidate CURRENT_RUNTIME_SHA256=fixture CURRENT_RELEASE_ROOT="$FIXTURE_ROOT/release"
+      prepare_current_fixture_inputs() { :; }
+      fixture_env() {
+        [ "$#" = 8 ] && [ "$1" = env ] \
+          && [ "$2" = "YARD_RELEASE_BASE_URL=file://$CURRENT_RELEASE_ROOT" ] \
+          && [ "$3" = "YARD_RELEASE_VERSION=$CURRENT_VERSION" ] \
+          && [ "$4" = bash ] && [ "$5" = "$CURRENT_RELEASE_ROOT/subyard-install.sh" ] \
+          && [ "$6:$7:$8" = "--version:$CURRENT_VERSION:--yes" ] || exit 99
+        printf "Status: migration-required\n" >&2
+        printf "PRIVATE_FIXTURE_VALUE=must-not-print\n"
+        printf "retained source install failure\n" > "$FIXTURE_ROOT/source-install.log"
+        [ "$CURRENT_CAPTURE_CASE" != native-seventeen ] || return 17
+        return 1
+      }
+      if [ "$CURRENT_CAPTURE_CASE" = capture-fails ]; then capture_fixture_failure_logs() { return 23; }; fi
+      upgrade_to_current_candidate
+      exit 98
+    ' > "$current_capture_root/output" 2>&1
+  current_capture_rc=$?
+  set -e
+  current_capture_expected=1
+  [ "$current_capture_case" != native-seventeen ] || current_capture_expected=17
+  [ "$current_capture_rc" = "$current_capture_expected" ] \
+    || fail "current installer lost native exit to capture: $current_capture_case exit=$current_capture_rc"
+  grep -Fq "stage=current-upgrade native_status=$current_capture_expected" "$current_capture_root/output" \
+    || fail 'current installer failure did not identify its stage and native status'
+  if [ "$current_capture_case" = capture-fails ]; then
+    grep -Fq 'failure-log capture_failed=true' "$current_capture_root/output" || fail 'capture failure disappeared'
+  else
+    grep -Fq 'Status: migration-required' "$current_capture_root/output" \
+      && grep -Fq 'retained source install failure' "$current_capture_root/output" \
+      && ! grep -Fq 'must-not-print' "$current_capture_root/output" \
+      || fail 'current installer did not print bounded operation diagnostics safely'
+  fi
+done
+
+# Installer inspection needs the same fresh group as subsequent yard commands.
+(
+  eval "$(fixture_functions "$ROOT/dev/e2e/integration-selection.sh" command_with_group)"
+  for group_mode in current stale; do
+    id() {
+      case "$*" in
+        -un) printf 'operator\n' ;;
+        '-nG operator') printf 'users incus-admin\n' ;;
+        -nG) if [ "$group_mode" = current ]; then printf 'users incus-admin\n'; else printf 'users\n'; fi ;;
+        *) return 91 ;;
+      esac
+    }
+    sg() { [ "$1" = incus-admin ] && [ "$2" = -c ] || return 92; bash -c "$3"; }
+    [ "$(command_with_group printf '%s\n' 'value with spaces' '$(literal)')" = $'value with spaces\n$(literal)' ] \
+      || fail 'selection group refresh changed command arguments'
+  done
+) || fail 'selection installer group contract failed'
+# Continuation-only ownership has its own live fixture, separate from registration.
+# shellcheck disable=SC2034 # globals are consumed by the extracted owning helpers
+legacy_continuation_fixture_contract() (
+  set -euo pipefail
+  scenario="$1"
+  STATE_ROOT="$TMP/continuation-$scenario" OPERATOR_HOME="$TMP/continuation-$scenario/operator"
+  PROJECT=legacy INSTANCE=yard
+  grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+  install -d -m 0700 "${grant%/*}"
+  printf 'fixture-uuid\n' > "$STATE_ROOT/uuid"
+  for name in assert_legacy_continuation establish_legacy_continuation verify_legacy_full_removal_refusal verify_continuation_init; do
+    eval "$(fixture_functions "$ROOT/dev/e2e/legacy-continuation-upgrade.sh" "$name")"
+  done
+  die() { printf '%s\n' "$*" >&2; exit 2; }
+  operator_uid() { id -u; }
+  operator_env() { "$@"; }
+  write_fixture_value() { printf '%s\n' "$2" > "$1"; }
+  assert_project_owned() { :; }
+  assert_candidate_state() { :; }
+  incus() {
+    case "$*" in
+      'project get legacy user.subyard.installation') cat "$STATE_ROOT/ownership" 2>/dev/null || true ;;
+      'config get yard volatile.uuid --project legacy') cat "$STATE_ROOT/uuid" ;;
+      'info yard --project legacy') [ ! -e "$STATE_ROOT/removed" ] ;;
+      *) die 'unexpected continuation native operation' ;;
+    esac
+  }
+  operator_yard() {
+    case "$*" in
+      'init --continue-legacy --yes')
+        [ "$scenario" != enrollment-fail ] || return 45
+        jq -n --argjson uid "$(id -u)" '{schema:1,scope:"normal-reconcile",operatorUid:$uid,instanceUuid:"fixture-uuid"}' > "$grant"
+        chmod 0600 "$grant"
+        ;;
+      'init --yes')
+        [ "$scenario" != init-fail ] || return 47
+        printf 'init\n' >> "$STATE_ROOT/inits"
+        case "$scenario" in
+          grant-change) printf 'changed\n' >> "$grant" ;;
+          mode-change) chmod 0644 "$grant" ;;
+          ownership-change) printf 'adopted-v1\n' > "$STATE_ROOT/ownership" ;;
+          uuid-change) printf 'replacement\n' > "$STATE_ROOT/uuid" ;;
+        esac
+        ;;
+      'teardown --full --yes')
+        [ "$scenario" != full-removal-accepted ] || return 0
+        if [ "$scenario" = full-removal-wrong-reason ]; then printf 'different refusal\n'; return 1; fi
+        if [ "$scenario" = full-removal-change ]; then touch "$STATE_ROOT/removed"; fi
+        printf 'legacy continuation grants no full removal ownership\n'
+        return 1
+        ;;
+      *) die 'unexpected continuation CLI operation' ;;
+    esac
+  }
+  establish_legacy_continuation
+  verify_continuation_init
+  [ "$(wc -l < "$STATE_ROOT/inits")" = 3 ] || die 'continuation lost repeated plain init'
+  assert_legacy_continuation
+  touch "$STATE_ROOT/passed"
+)
+for continuation_scenario in success enrollment-fail init-fail grant-change mode-change ownership-change uuid-change \
+  full-removal-accepted full-removal-wrong-reason full-removal-change; do
+  continuation_log="$TMP/continuation-$continuation_scenario.log"
+  continuation_rc=0
+  # Keep errexit inside the fixture; the parent captures its native result.
+  set +e
+  (set -e; legacy_continuation_fixture_contract "$continuation_scenario") > "$continuation_log" 2>&1
+  continuation_rc=$?
+  set -e
+  continuation_expected=2
+  case "$continuation_scenario" in success) continuation_expected=0 ;; enrollment-fail) continuation_expected=45 ;; init-fail) continuation_expected=47 ;; esac
+  [ "$continuation_rc" = "$continuation_expected" ] \
+    || { cat "$continuation_log" >&2; fail "continuation fixture concealed $continuation_scenario: native exit $continuation_rc"; }
+  if [ "$continuation_scenario" = success ]; then
+    [ -f "$TMP/continuation-$continuation_scenario/passed" ] || fail 'continuation success did not finish'
+  else
+    [ ! -e "$TMP/continuation-$continuation_scenario/passed" ] || fail 'continuation finished after refusal'
+  fi
+done
+
 # Keep the authentic legacy predecessor refusal distinct from compatible rollback.
 # shellcheck disable=SC2034 # context globals are consumed by extracted owning helpers
 power_rollback_fixture_contract() {
   (
     set -euo pipefail
-    local scenario="$1" fixture="$TMP/power-rollback-$1"
+    local scenario="$1" fixture="$TMP/power-rollback-$1" continuation=0
+    if [[ "$scenario" = continuation-* ]]; then continuation=1; scenario="${scenario#continuation-}"; fi
     . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
@@ -4886,6 +5125,11 @@ power_rollback_fixture_contract() {
         "$@"
       fi
     }
+    assert_registered_ownership() { :; }
+    if [ "$continuation" = 1 ]; then
+      printf 'retained grant hash\n' > "$STATE_ROOT/legacy-continuation.sha256"
+      eval "$(fixture_functions "$ROOT/dev/e2e/legacy-continuation-upgrade.sh" assert_upgrade_ownership)"
+    fi
     operator_yard() {
       local current previous next=''
       current="$(cat "$STATE_ROOT/current")" previous="$(cat "$STATE_ROOT/previous")"
@@ -4900,8 +5144,6 @@ power_rollback_fixture_contract() {
               journal-change) printf 'foreign\n' > "$V2_JOURNAL" ;;
               checkpoint-change) printf 'foreign\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
               history-change) printf 'foreign\n' > "$OPERATOR_HOME/.config/subyard/migrations/state.json" ;;
-              grant-change) printf 'foreign\n' > "$grant" ;;
-              mode-change) chmod 0644 "$grant" ;;
               native-change) jq '.config["security.privileged"]="true"' "$STATE_ROOT/instance" > "$STATE_ROOT/instance.next"; mv "$STATE_ROOT/instance.next" "$STATE_ROOT/instance" ;;
             esac
             printf 'operator-action-required: code=rollback-incompatible\n' >&2
@@ -4930,6 +5172,8 @@ power_rollback_fixture_contract() {
       printf '%s\n' "$current" > "$STATE_ROOT/previous"
       printf '%s\n' "$next" > "$STATE_ROOT/current"
       printf '%s\n' "$*" >> "$STATE_ROOT/updates"
+      if [ "$scenario" = grant-change ]; then printf 'changed grant\n' > "$grant"; fi
+      if [ "$scenario" = mode-change ]; then chmod 0644 "$grant"; fi
       if [ "$scenario" = compatible-policy-change ]; then
         jq '.config["restricted.devices.gpu"]="allow"' "$STATE_ROOT/project" > "$STATE_ROOT/project.next"
         mv "$STATE_ROOT/project.next" "$STATE_ROOT/project"
@@ -4941,14 +5185,15 @@ power_rollback_fixture_contract() {
   )
 }
 for power_rollback_scenario in success unexpected-accept wrong-reason links-change ledger-change journal-change \
-  checkpoint-change history-change grant-change mode-change native-change blocked-check wrong-target noop-check \
-  compatible-policy-change full-removal-change rollback-fail rollforward-fail; do
+  checkpoint-change history-change native-change blocked-check wrong-target noop-check \
+  compatible-policy-change rollback-fail rollforward-fail continuation-success continuation-grant-change \
+  continuation-mode-change continuation-rollback-fail continuation-rollforward-fail; do
   power_rollback_log="$TMP/power-rollback-$power_rollback_scenario.log"
   set +e
   power_rollback_fixture_contract "$power_rollback_scenario" > "$power_rollback_log" 2>&1
   power_rollback_rc=$?
   set -e
-  if [ "$power_rollback_scenario" = success ]; then
+  if [[ "$power_rollback_scenario" = success || "$power_rollback_scenario" = continuation-success ]]; then
     if [ "$power_rollback_rc" != 0 ]; then
       cat "$power_rollback_log" >&2
       fail 'power fixture lost authentic incompatible refusal or compatible rollback/forward'
@@ -4959,35 +5204,16 @@ for power_rollback_scenario in success unexpected-accept wrong-reason links-chan
   fi
 done
 
-# The input-free capability response has no lifecycle results or extra owners.
-. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
-for power_capability_case in valid missing-owner extra-owner unsupported-schema lifecycle-result malformed; do
-  power_capability_file="$TMP/power-capability-$power_capability_case.json"
-  jq -n --arg scenario "$power_capability_case" '
-    {schemaVersion:2,activationReconciliationOwned:false,activationOwners:["core-guest-runtime","git-fetch-runtime","github-runtime","host-power","key-tools-runtime","openlit-runtime","orca-runtime","test-vm-broker","test-yard-route-consumers"]} |
-    if $scenario == "missing-owner" then .activationOwners |= .[1:]
-    elif $scenario == "extra-owner" then .activationOwners += ["foreign"]
-    elif $scenario == "unsupported-schema" then .schemaVersion=1
-    elif $scenario == "lifecycle-result" then .outcome={status:"ready"}
-    else . end' > "$power_capability_file"
-  [ "$power_capability_case" != malformed ] || printf 'invalid\n' > "$power_capability_file"
-  if (die() { exit 2; }; verify_compatible_capabilities "$power_capability_file") >/dev/null 2>&1; then
-    [ "$power_capability_case" = valid ] || fail 'power fixture accepted unsupported capability response'
-  else
-    [ "$power_capability_case" != valid ] || fail 'power fixture refused exact compiled capabilities'
-  fi
-done
-
 # Exercise the complete post-reboot smoke flow with a strict retained-runtime model.
 # shellcheck disable=SC2034 # context globals are consumed by extracted smoke functions
 smoke_rollback_fixture_contract() {
   (
     set -euo pipefail
     local scenario="$1" fixture="$TMP/smoke-rollback-$1"
-    for function_name in verify_smoke_state establish_smoke_continuation verify_predecessor_rollback_refusal finish_smoke; do
+    for function_name in verify_smoke_state establish_smoke_ownership verify_predecessor_rollback_refusal finish_smoke; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
     done
-    for function_name in assert_project_owned assert_legacy_continuation legacy_continuation_identity init_legacy_continuation post_restart_release_ready repair_legacy_activation_after_restart establish_legacy_continuation verify_legacy_full_removal_refusal; do
+    for function_name in assert_registered_ownership establish_registered_ownership; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
     done
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
@@ -5014,14 +5240,15 @@ smoke_rollback_fixture_contract() {
       printf 'retained %s\n' "$record" > "$V2_STATE_ROOT/$record"
       chmod 0600 "$V2_STATE_ROOT/$record"
     done
-    if [[ "$scenario" = disk-tmp-reboot* || "$scenario" = tmp-* ]]; then
-      printf '{"schemaVersion":2,"checkpoint":"complete","transaction":"old-transaction","goal":{"target":"candidate-aaaaaaaaaaaa","direction":"activate-target"},"releases":{"from":"predecessor","target":"candidate-aaaaaaaaaaaa"},"steps":[]}\n' > "$V2_JOURNAL"
-    fi
     install -d -m 0700 "$V2_STATE_ROOT/evidence/retained"
     printf 'retained evidence\n' > "$V2_STATE_ROOT/evidence/retained/verified.json"
     chmod 0600 "$V2_STATE_ROOT/evidence/retained/verified.json"
     printf '# Release smoke retained operator setting\n' > "$OPERATOR_HOME/.config/subyard/config.env"
-    printf '\n' > "$STATE_ROOT/installation"
+    printf 'adopted-v1\n' > "$STATE_ROOT/installation"
+    case "$scenario" in
+      missing-ownership) printf '\n' > "$STATE_ROOT/installation" ;;
+      foreign-ownership) printf 'foreign\n' > "$STATE_ROOT/installation" ;;
+    esac
     die() { printf '%s\n' "$*" >&2; exit 2; }
     info() { :; }
     ok() { case "$*" in *'and teardown passed') printf '%s\n' "$*" > "$STATE_ROOT/passed" ;; esac; }
@@ -5038,21 +5265,8 @@ smoke_rollback_fixture_contract() {
     sudo() { [ "$1" = -n ] || die 'unexpected sudo arguments'; shift; "$@"; }
     ip() { printf 'retained-route\n'; }
     incus() {
-      if [ "$1" = exec ]; then
-        [ "$*" = "exec $INSTANCE --project $PROJECT -- sh -c $(cat "$ROOT/scripts/guest-disk-tmp.sh") sh check" ] \
-          || die 'disk policy check did not use the production guest script'
-        printf 'probe\n' >> "$STATE_ROOT/probes"
-        [ "$scenario" != tmp-probe-fail ] || return 73
-        [ ! -e "$STATE_ROOT/pending" ] || return 10
-        return 0
-      fi
       case "$*" in
-        "project get $PROJECT user.subyard.installation")
-          if [ "$scenario" = tmp-owner ] && [ -e "$STATE_ROOT/pending" ]; then printf '1\n'; else cat "$STATE_ROOT/installation"; fi ;;
-        "project get $PROJECT user.subyard.p0-power-systemd")
-          if [ "$scenario" = tmp-marker ]; then printf 'foreign-marker\n'; else printf '%s\n' "$MARKER"; fi ;;
-        "config get $INSTANCE volatile.uuid --project $PROJECT")
-          if [ "$scenario" = tmp-uuid ] || { [ "$scenario" = tmp-after-uuid ] && [ -e "$STATE_ROOT/restarted" ]; }; then printf 'foreign-uuid\n'; else printf 'fixture-uuid\n'; fi ;;
+        "project get $PROJECT user.subyard.installation") cat "$STATE_ROOT/installation" ;;
         "info $INSTANCE --project $PROJECT") return 0 ;;
         "list $INSTANCE --project $PROJECT --format csv -c s") printf 'RUNNING\n' ;;
         "project show $PROJECT") return 1 ;;
@@ -5075,7 +5289,7 @@ smoke_rollback_fixture_contract() {
             if [[ "$scenario" = checkpoint-* ]]; then
               [ -f "$STATE_ROOT/resumed" ] || die 'ownership enrollment preceded completed checkpoint resume'
             fi
-            [ ! -e "$STATE_ROOT/consents" ] || die 'ownership enrollment followed continuation consent'
+            [ ! -e "$STATE_ROOT/plain-inits" ] || die 'ownership enrollment followed ordinary init'
             [ "$scenario" != enrollment-fail ] || return 45
             case "$scenario" in
               enrollment-links-change) printf 'releases/foreign\n' > "$STATE_ROOT/previous" ;;
@@ -5102,120 +5316,23 @@ smoke_rollback_fixture_contract() {
       case "$*" in
         --version) printf 'yard %s\n' "${current#releases/}" | sed 's/-[ab]\{12\}$//' ;;
         check|"shell $SMOKE_PROJECT --yes -- grep -Fxq $MARKER retained.txt"|"shell $SMOKE_PROJECT --yes -- grep -Fxq guest-change retained.txt") return 0 ;;
-        'init --continue-legacy --yes')
-          [ -f "$STATE_ROOT/enrollments" ] || die 'continuation consent preceded public inventory enrollment'
-          if [[ "$scenario" = checkpoint-* ]]; then
-            [ -f "$STATE_ROOT/resumed" ] || die 'continuation consent preceded completed checkpoint resume'
-          fi
-          [ "$scenario" != checkpoint-consent-fail ] || return 45
-          install -d -m 0700 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations"
-          printf '{"schema":1,"scope":"normal-reconcile","operatorUid":2000,"instanceUuid":"fixture-uuid"}\n' \
-            > "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
-          chmod 0600 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
-          printf 'consent\n' >> "$STATE_ROOT/consents"
-          if [[ "$scenario" = disk-tmp-* ]]; then
-            printf '%s\n' 'yard: init: verify init stage "provision": yard default: disk-backed /tmp policy is installed; the active /tmp is memory-backed; reboot required; close active yard sessions, then run yard -Y default stop and yard -Y default start' > "$STATE_ROOT/expected-init.log"
-            case "$scenario" in
-              disk-tmp-unrelated) printf 'unrelated init failure\n' >&2; return 1 ;;
-              disk-tmp-near-match) sed 's/yard default:/yard foreign:/' "$STATE_ROOT/expected-init.log" >&2; return 1 ;;
-              disk-tmp-wrong-exit) cat "$STATE_ROOT/expected-init.log" >&2; return 23 ;;
-            esac
-            : > "$STATE_ROOT/pending"
-            cat "$STATE_ROOT/expected-init.log" >&2
-            return 1
-          fi
-          ;;
-        'stop --yes'|'start --yes')
-          assert_project_owned
-          assert_legacy_continuation
-          [[ "$scenario" = disk-tmp-reboot* || "$scenario" = tmp-* ]] || die 'unexpected fixture restart'
-          printf '%s\n' "$*" >> "$STATE_ROOT/restart"
-          [ "$scenario:$1" != tmp-stop-fail:stop ] || return 45
-          [ "$scenario:$1" != tmp-start-fail:start ] || return 46
-          [ "$1" != start ] || rm "$STATE_ROOT/pending"
-          [ "$1" != start ] || : > "$STATE_ROOT/restarted"
-          ;;
-        'migrate --check --json')
-          local check_scenario="$scenario"
-          printf 'check\n' >> "$STATE_ROOT/migration-checks"
-          if [[ "$scenario" = disk-tmp-reboot-settled-* ]] && [ -f "$STATE_ROOT/migration-authorized" ]; then
-            check_scenario="${scenario/-settled/}"
-          fi
-          [ "$(cat "$STATE_ROOT/restart")" = $'stop --yes\nstart --yes' ] || die 'assessment preceded restart'
-          assert_legacy_continuation
-          if [[ "$scenario" = disk-tmp-reboot-ready* ]]; then
-            { sha256sum "$V2_LEDGER" "$V2_JOURNAL" "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
-              stat -c '%d:%i:%a:%u:%g:%N' "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous"
-            } > "$STATE_ROOT/ready-identities.before"
-          fi
-          printf 'assessed\n' > "$STATE_ROOT/migration-assessed"
-          [ "$scenario" != disk-tmp-reboot-check-fail ] || { printf 'private-sentinel\n' >&2; return 45; }
-          jq -n --arg scenario "$check_scenario" '{schemaVersion:1,current:"candidate-aaaaaaaaaaaa",owner:"candidate-aaaaaaaaaaaa",next:"yard migrate",outcome:{status:"migration-required",code:"transition-required"},domains:[{domain:"settings",pending:[]}],decisions:[{scope:"activation",resource:"activation.core-guest-runtime",decision:"canonicalize"}]} |
-            if $scenario | startswith("disk-tmp-reboot-ready") then
-              .outcome={status:"ready",code:"ready",reachedGoal:true,active:.current,target:.current} | del(.next,.decisions) |
-              if $scenario == "disk-tmp-reboot-ready-preserve" then .decisions=[{resource:"transition.source-metadata",decision:"preserve",result:"private-sentinel"}]
-              elif $scenario == "disk-tmp-reboot-ready-pending" then .domains[0].pending=["pending"]
-              elif $scenario == "disk-tmp-reboot-ready-blocker" then .blockers=[{code:"private-sentinel"}]
-              elif $scenario == "disk-tmp-reboot-ready-work" then .decisions=[{scope:"activation",resource:"activation.core-guest-runtime",decision:"canonicalize"}]
-              elif $scenario == "disk-tmp-reboot-ready-owner" then .owner="foreign"
-              elif $scenario == "disk-tmp-reboot-ready-target" then .outcome.target="foreign"
-              elif $scenario == "disk-tmp-reboot-ready-next-false" then .next=false
-              elif $scenario == "disk-tmp-reboot-ready-blockers-false" then .blockers=false
-              elif $scenario == "disk-tmp-reboot-ready-decisions-false" then .decisions=false
-              elif $scenario == "disk-tmp-reboot-ready-pending-false" then .domains[0].pending=false else . end
-            elif $scenario | startswith("disk-tmp-reboot-metadata") then
-              .decisions += [{resource:"transition.source-metadata",decision:"preserve",result:"private-sentinel"}] |
-              if $scenario == "disk-tmp-reboot-metadata-only" then .decisions=[.decisions[1]]
-              elif $scenario == "disk-tmp-reboot-metadata-unknown" then .decisions[1].resource="private-sentinel"
-              elif $scenario == "disk-tmp-reboot-metadata-scope" then .decisions[1].scope="activation"
-              elif $scenario == "disk-tmp-reboot-metadata-decision" then .decisions[1].decision="canonicalize"
-              else . end
-            elif $scenario == "disk-tmp-reboot-pending" then .domains[0].pending=["pending"]
-            elif $scenario == "disk-tmp-reboot-private-resource" then .decisions[0].resource="private-sentinel"
-            elif $scenario == "disk-tmp-reboot-resource-array-allowed" then .decisions[0].resource=["activation.core-guest-runtime"] else . end'
-          [ "$scenario" != disk-tmp-reboot-inspection-mutation ] || printf 'changed\n' >> "$V2_JOURNAL"
-          if [ "$scenario" = disk-tmp-reboot-settled-ready-inspection-mutation ] && [ -f "$STATE_ROOT/migration-authorized" ]; then
-            printf 'changed\n' >> "$V2_JOURNAL"
-          fi
-          ;;
-        'migrate --yes')
-          [[ "$scenario" != disk-tmp-reboot-ready* ]] || die 'ready inspection unexpectedly authorized a repair'
-          [ -f "$STATE_ROOT/migration-assessed" ] || die 'migration authorization preceded assessment'
-          assert_legacy_continuation
-          [ "$scenario" != disk-tmp-reboot-apply-fail ] || { printf 'private-sentinel\n' >&2; return 45; }
-          if [[ "$scenario" != disk-tmp-reboot-settled-* ]]; then
-            jq --arg scenario "$scenario" '.transaction="new-transaction" | .releases.from=.goal.target |
-              if $scenario == "disk-tmp-reboot-replay" then .steps=[{checkpoint:"verified"}]
-              elif $scenario == "disk-tmp-reboot-same-transaction" then .transaction="old-transaction" else . end' "$V2_JOURNAL" > "$STATE_ROOT/new-journal"
-            cat "$STATE_ROOT/new-journal" > "$V2_JOURNAL"
-          fi
-          [ "$scenario" != disk-tmp-reboot-ledger-change ] || printf 'changed\n' >> "$V2_LEDGER"
-          [ "$scenario" != disk-tmp-reboot-links-change ] || ln -sfn releases/foreign "$OPERATOR_HOME/.subyard/runtime/current"
-          printf 'authorized\n' > "$STATE_ROOT/migration-authorized"
-          ;;
         'init --yes')
-          [ ! -f "$STATE_ROOT/legacy-continuation.sha256" ] || assert_legacy_continuation
-          if [[ "$scenario" = disk-tmp-reboot* ]]; then
-            [ "$(cat "$STATE_ROOT/restart")" = $'stop --yes\nstart --yes' ] \
-              || die 'repeat init preceded explicit owner restart'
-            if [[ "$scenario" = disk-tmp-reboot-ready* ]]; then
-              [ -f "$STATE_ROOT/migration-assessed" ] && [ ! -e "$STATE_ROOT/migration-authorized" ] \
-                || die 'ready continuation skipped inspection or authorized a repair'
-              { sha256sum "$V2_LEDGER" "$V2_JOURNAL" "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
-                stat -c '%d:%i:%a:%u:%g:%N' "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous"
-              } > "$STATE_ROOT/ready-identities.after"
-              cmp -s "$STATE_ROOT/ready-identities.before" "$STATE_ROOT/ready-identities.after" \
-                || die 'ready continuation changed protected history, links or grant'
-            else
-              [ -f "$STATE_ROOT/migration-authorized" ] || die 'plain init reused completed release authorization'
-            fi
+          [ -f "$STATE_ROOT/enrollments" ] || die 'ordinary init preceded public inventory enrollment'
+          if [[ "$scenario" = checkpoint-* ]]; then
+            [ -f "$STATE_ROOT/resumed" ] || die 'ordinary init preceded completed checkpoint resume'
           fi
+          assert_registered_ownership
           printf 'plain-init\n' >> "$STATE_ROOT/plain-inits"
-          ;;
-        'teardown --full --yes')
-          [ "$scenario" != full-removal-accept ] || return 0
-          printf 'legacy continuation grants no full removal ownership\n' >&2
-          return 1
+          case "$scenario:$(wc -l < "$STATE_ROOT/plain-inits")" in
+            init-fail:1|checkpoint-init-fail:1) return 45 ;;
+            repeat-init-fail:2) return 47 ;;
+            init-unrelated-fail:1) printf 'unrelated init failure\n' >&2; return 1 ;;
+            init-wrong-exit:1) printf 'native init failure\n' >&2; return 23 ;;
+            init-reboot-required:1)
+              printf '%s\n' 'yard: init: verify init stage "provision": yard default: disk-backed /tmp policy is installed; the active /tmp is memory-backed; reboot required; close active yard sessions, then run yard -Y default stop and yard -Y default start' >&2
+              return 1 ;;
+            init-ownership-change:1) printf 'foreign\n' > "$STATE_ROOT/installation" ;;
+          esac
           ;;
         "export $SMOKE_PROJECT --yes")
           install -d -m 0700 "$OPERATOR_HOME/.subyard/exports"
@@ -5254,26 +5371,10 @@ smoke_rollback_fixture_contract() {
         'teardown --yes') [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'teardown did not retain candidate' ;;
         *) die 'unexpected yard operation' ;;
       esac
-      case "$*" in
-        'init --continue-legacy --yes'|'init --yes')
-          printf 'init\n' >> "$STATE_ROOT/init-calls"
-          local calls
-          calls="$(wc -l < "$STATE_ROOT/init-calls")"
-          if { [[ "$scenario" = tmp-* ]] && [ "$scenario" != tmp-repeat ] && [ "$calls" = 1 ]; } \
-            || { [ "$scenario" = tmp-repeat ] && [ "$calls" = 2 ]; } \
-            || { [ "$scenario" = tmp-twice ] && [ "$calls" = 3 ]; }; then
-            : > "$STATE_ROOT/pending"
-            [ "$scenario" != tmp-grant ] || chmod 0644 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
-            printf '%s\n' 'yard: init: verify init stage "provision": yard default: disk-backed /tmp policy is installed; the active /tmp is memory-backed; reboot required; close active yard sessions, then run yard -Y default stop and yard -Y default start' >&2
-            [ "$scenario" != tmp-other-error ] || printf 'another terminal error\n' >&2
-            return 1
-          fi
-          [ "$scenario:$calls" != tmp-resume-fail:2 ] || return 47
-          ;;
-      esac
       if [ -n "${next:-}" ]; then
-        if [ "$scenario" = grant-change ]; then
-          printf 'changed\n' >> "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+        if [ "$scenario" = unexpected-grant ]; then
+          install -d -m 0700 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations"
+          printf 'unexpected\n' > "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
         elif [ "$scenario" = installation-change ]; then
           printf '1\n' > "$STATE_ROOT/installation"
         fi
@@ -5282,147 +5383,70 @@ smoke_rollback_fixture_contract() {
         printf '%s\n' "$next" > "$STATE_ROOT/current"
       fi
     }
-    # The authentic predecessor is verified without a grant; modern passages
-    # must retain explicit limited consent, never a product installation label.
+    # The published update registers the yard; enrollment and every modern passage
+    # must preserve that ownership without creating a continuation grant.
     printf '%s\n' "$OLD_RELEASE_TARGET" > "$STATE_ROOT/current"
     verify_smoke_state "$OLD_VERSION"
     printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
     if [[ "$scenario" != checkpoint-* ]]; then
-      establish_smoke_continuation
+      establish_smoke_ownership
       operator_yard init --yes
     fi
     finish_smoke
-    local expected_plain=2
-    case "$scenario" in tmp-repeat|disk-tmp-reboot*) expected_plain=3 ;; esac
     [ "$(wc -l < "$STATE_ROOT/enrollments")" = 1 ] \
-      && [ "$(wc -l < "$STATE_ROOT/consents")" = 1 ] \
-      && [ "$(wc -l < "$STATE_ROOT/plain-inits")" = "$expected_plain" ] || die 'smoke lost explicit consent or repeated plain init'
-    if [[ "$scenario" = tmp-* || "$scenario" = disk-tmp-reboot* ]]; then
-      [ "$(cat "$STATE_ROOT/restart")" = $'stop --yes\nstart --yes' ] \
-        && [ "$(wc -l < "$STATE_ROOT/probes")" = 2 ] || die 'disk policy transition was not bounded to one verified restart'
-    else
-      [ ! -e "$STATE_ROOT/restart" ] && [ ! -e "$STATE_ROOT/probes" ] \
-        || die 'successful init added an unnecessary restart or probe'
-    fi
+      && [ "$(wc -l < "$STATE_ROOT/plain-inits")" = 2 ] || die 'smoke lost enrollment or repeated ordinary init'
+    [ ! -e "$STATE_ROOT/restart" ] && [ ! -e "$STATE_ROOT/probes" ] \
+      || die 'ordinary init added an unnecessary restart or probe'
+    assert_registered_ownership
     assert_runtime_links "$CANDIDATE_RELEASE_TARGET" releases/compatible-bbbbbbbbbbbb
     [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] || die 'compatible smoke cycle lost a transition'
     [ -f "$STATE_ROOT/passed" ] || die 'smoke did not complete teardown'
   )
 }
-for smoke_rollback_scenario in success disk-tmp-reboot disk-tmp-reboot-metadata \
-  disk-tmp-reboot-settled-ready disk-tmp-reboot-settled-ready-inspection-mutation \
-  disk-tmp-reboot-metadata-only disk-tmp-reboot-metadata-unknown disk-tmp-reboot-metadata-scope \
-  disk-tmp-reboot-metadata-decision \
-  disk-tmp-reboot-ready disk-tmp-reboot-ready-preserve \
-  disk-tmp-reboot-ready-pending disk-tmp-reboot-ready-blocker disk-tmp-reboot-ready-work disk-tmp-reboot-ready-owner disk-tmp-reboot-ready-target \
-  disk-tmp-reboot-ready-next-false \
-  disk-tmp-reboot-ready-blockers-false \
-  disk-tmp-reboot-ready-decisions-false disk-tmp-reboot-ready-pending-false \
-  disk-tmp-unrelated disk-tmp-near-match disk-tmp-wrong-exit \
-  disk-tmp-reboot-check-fail disk-tmp-reboot-pending disk-tmp-reboot-inspection-mutation \
-  disk-tmp-reboot-apply-fail disk-tmp-reboot-ledger-change disk-tmp-reboot-replay \
-  disk-tmp-reboot-same-transaction disk-tmp-reboot-links-change disk-tmp-reboot-private-resource \
-  disk-tmp-reboot-resource-array-allowed \
-  checkpoint-success checkpoint-consent-fail full-removal-accept \
+for smoke_rollback_scenario in success checkpoint-success checkpoint-init-fail \
   enrollment-fail enrollment-links-change enrollment-symlink-change \
   enrollment-checkpoint-change enrollment-ledger-change enrollment-journal-change \
   enrollment-evidence-change enrollment-mode-change enrollment-project-change \
-  grant-change installation-change wrong-reason unexpected-accept links-change \
-  checkpoint-change ledger-change journal-change rollback-fail rollforward-fail \
-  tmp-repeat tmp-other-error tmp-probe-fail tmp-stop-fail tmp-start-fail \
-  tmp-resume-fail tmp-uuid tmp-after-uuid tmp-grant tmp-owner tmp-marker tmp-twice; do
+  missing-ownership foreign-ownership init-ownership-change unexpected-grant installation-change \
+  init-fail repeat-init-fail init-unrelated-fail init-wrong-exit init-reboot-required \
+  wrong-reason unexpected-accept links-change checkpoint-change ledger-change journal-change \
+  rollback-fail rollforward-fail; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
   set +e
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success || "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata || "$smoke_rollback_scenario" = disk-tmp-reboot-ready || "$smoke_rollback_scenario" = disk-tmp-reboot-ready-preserve || "$smoke_rollback_scenario" = disk-tmp-reboot-settled-ready || "$smoke_rollback_scenario" = tmp-repeat ]]; then
+  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success ]]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
     fi
-    if [ "$smoke_rollback_scenario" = disk-tmp-reboot-settled-ready ]; then
-      [ "$(wc -l < "$TMP/smoke-rollback-$smoke_rollback_scenario/state/migration-checks")" = 2 ] \
-        || fail 'settled activation did not obtain fresh readiness after the no-op apply'
-    fi
-    if [[ "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata ]]; then
-      smoke_restart_state="$TMP/smoke-rollback-$smoke_rollback_scenario/state"
-      grep -Flx -- "$(cat "$smoke_restart_state/expected-init.log")" "$smoke_restart_state"/continuation-init.* >/dev/null \
-        && [ "$(stat -c '%a' "$smoke_restart_state"/continuation-init.* | sort -u)" = 600 ] \
-        && grep -Fxq 'legacy_continuation_init_exit=1' "$smoke_rollback_log" \
-        || fail 'fixture lost the original bounded reboot-required init result'
-      [ "$(stat -c '%a' "$smoke_restart_state/post-restart-migrate.json")" = 600 ] \
-        && ! grep -Fq private-sentinel "$smoke_rollback_log" \
-        && sed -n 's/^power_activation_repair_inspection=//p' "$smoke_rollback_log" | jq -e '
-          .status == "migration-required" and .code == "transition-required" and .activation_count == 1 and
-          .activation == [{resource:"activation.core-guest-runtime",decision:"canonicalize"}]' >/dev/null \
-        || fail 'fixture lost private migration evidence or closed activation facts'
-    fi
-    if [[ "$smoke_rollback_scenario" = disk-tmp-reboot-ready* ]]; then
-      smoke_ready_state="$TMP/smoke-rollback-$smoke_rollback_scenario/state"
-      [ ! -e "$smoke_ready_state/migration-authorized" ] \
-        && [ "$(stat -c '%a' "$smoke_ready_state/post-restart-migrate.json")" = 600 ] \
-        && ! grep -Fq private-sentinel "$smoke_rollback_log" \
-        && sed -n 's/^power_activation_repair_inspection=//p' "$smoke_rollback_log" | jq -e '
-          .status == "ready" and .code == "ready" and .activation_count == 0 and .activation == []' >/dev/null \
-        || fail 'ready continuation lost private inspection, stable history or no-op semantics'
-    fi
   else
     smoke_rollback_expected=2
-    [[ "$smoke_rollback_scenario" != *-fail ]] || smoke_rollback_expected=45
     case "$smoke_rollback_scenario" in
-      disk-tmp-unrelated|disk-tmp-near-match) smoke_rollback_expected=1 ;;
-      disk-tmp-wrong-exit) smoke_rollback_expected=23 ;;
-      tmp-probe-fail) smoke_rollback_expected=73 ;;
-      tmp-stop-fail) smoke_rollback_expected=45 ;;
-      tmp-start-fail) smoke_rollback_expected=46 ;;
-      tmp-resume-fail) smoke_rollback_expected=47 ;;
-      tmp-*) smoke_rollback_expected=1 ;;
+      enrollment-fail|checkpoint-init-fail|init-fail|rollback-fail|rollforward-fail) smoke_rollback_expected=45 ;;
+      repeat-init-fail) smoke_rollback_expected=47 ;;
+      init-unrelated-fail|init-reboot-required) smoke_rollback_expected=1 ;;
+      init-wrong-exit) smoke_rollback_expected=23 ;;
     esac
     [ "$smoke_rollback_rc" = "$smoke_rollback_expected" ] \
-      || fail "release smoke concealed $smoke_rollback_scenario failure"
+      || fail "release smoke concealed $smoke_rollback_scenario failure (exit $smoke_rollback_rc, expected $smoke_rollback_expected)"
     [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/passed" ] \
       || fail 'release smoke reported success after a rollback contract failure'
-    if [[ "$smoke_rollback_scenario" = disk-tmp-* ]]; then
-      smoke_first_init_expected="$smoke_rollback_expected"
-      [[ "$smoke_rollback_scenario" != disk-tmp-reboot-* ]] || smoke_first_init_expected=1
-      grep -Fxq "legacy_continuation_init_exit=$smoke_first_init_expected" "$smoke_rollback_log" \
-        || fail 'fixture lost the unexpected original init exit'
-      if [[ "$smoke_rollback_scenario" = disk-tmp-reboot-* ]]; then
-        [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/plain-inits" ] \
-          && ! grep -Fq private-sentinel "$smoke_rollback_log" \
-          || fail 'fixture continued init or leaked a private migration diagnostic'
-        if [[ "$smoke_rollback_scenario" = disk-tmp-reboot-ready* || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata-* ]]; then
-          [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/migration-authorized" ] \
-            || fail 'invalid migration inspection authorized migration'
-        fi
-        if [[ "$smoke_rollback_scenario" = disk-tmp-reboot-resource-* ]]; then
-          [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/migration-authorized" ] \
-            && sed -n 's/^power_activation_repair_inspection=//p' "$smoke_rollback_log" | jq -e '
-              .activation_count == 1 and .activation == [{resource:"unknown",decision:"canonicalize"}]' >/dev/null \
-            || fail 'non-string activation resource reached authorization or escaped closed projection'
-        fi
-      else
-        [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/restart" ] \
-          || fail 'fixture restarted after an unexpected init failure'
-      fi
+    if [[ "$smoke_rollback_scenario" = enrollment-* ]]; then
+      [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/plain-inits" ] \
+        || fail 'release smoke initialized after failed inventory enrollment'
     fi
     case "$smoke_rollback_scenario" in
-      tmp-other-error|tmp-probe-fail|tmp-uuid|tmp-grant|tmp-owner|tmp-marker)
-        [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/restart" ] \
-          || fail 'unproved pending policy restarted the yard' ;;
-      tmp-twice)
-        [ "$(wc -l < "$TMP/smoke-rollback-$smoke_rollback_scenario/state/restart")" = 2 ] \
-          || fail 'establishment repeated its single allowed transition' ;;
+      missing-ownership|foreign-ownership)
+        [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/enrollments" ] \
+          || fail 'release smoke enrolled without registered ownership' ;;
     esac
-    if [[ "$smoke_rollback_scenario" = enrollment-* ]]; then
-      [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/consents" ] \
-        || fail 'release smoke granted continuation after failed inventory enrollment'
-    fi
-    if [[ "$smoke_rollback_scenario" != *-fail && "$smoke_rollback_scenario" != grant-change && "$smoke_rollback_scenario" != installation-change ]]; then
-      [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/updates" ] \
-        || fail 'release smoke continued after an invalid predecessor refusal'
-    fi
+    case "$smoke_rollback_scenario" in
+      unexpected-grant|installation-change|rollback-fail|rollforward-fail) ;;
+      *) [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/updates" ] \
+        || fail 'release smoke continued after invalid ownership, init, enrollment or predecessor refusal' ;;
+    esac
   fi
 done
 
@@ -5603,6 +5627,115 @@ SH
 }
 reliable_migrations_fixture_contract
 
+# Read-only failure capture stays bounded, reports both independent queries and
+# never turns the updater's native failure into a diagnostic/cleanup status.
+reliable_migrations_failure_capture_contract() (
+  set -euo pipefail
+  local kind="$1" capture_root="$TMP/reliable-capture-$1"
+  STATE_ROOT="$capture_root/state" OPERATOR_HOME="$capture_root/operator" MARKER=capture-fixture
+  V2_JOURNAL="$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json"
+  install -d -m 0700 "$STATE_ROOT" "${V2_JOURNAL%/*}" "$OPERATOR_HOME/.subyard/runtime"
+  printf '%s\n' "$MARKER" > "$STATE_ROOT/.marker"
+  ln -s releases/candidate-aaaaaaaaaaaa "$OPERATOR_HOME/.subyard/runtime/current"
+  ln -s releases/0.18.6-bbbbbbbbbbbb "$OPERATOR_HOME/.subyard/runtime/previous"
+  jq -n '{checkpoint:"complete", transaction:"tx-fixture", goal:{target:"candidate-aaaaaaaaaaaa",direction:"activate-target"},
+    releases:{from:"0.18.6-bbbbbbbbbbbb",target:"candidate-aaaaaaaaaaaa"}, artifactDigest:("a"*64), registryDigest:("b"*64),
+    catalogDigest:("c"*64), observationScope:("d"*64), authorizationDigest:("e"*64), intentDigest:("f"*64),
+    authorizationPlan:"private-plan-sentinel", steps:[{value:"private-step-sentinel"}]}' > "$V2_JOURNAL"
+  chmod 0600 "$V2_JOURNAL"
+  case "$kind" in
+    missing) rm "$V2_JOURNAL" ;;
+    malformed) printf 'private-malformed-sentinel\n' > "$V2_JOURNAL" ;;
+    symlink) mv "$V2_JOURNAL" "$capture_root/foreign"; ln -s "$capture_root/foreign" "$V2_JOURNAL" ;;
+    valid) ;;
+    *) fail 'unknown reliability capture contract case' ;;
+  esac
+  eval "$(fixture_functions "$ROOT/dev/e2e/reliable-migrations-recovery.sh" recovery_journal_diagnostic recovery_failure_diagnostics)"
+  operator_env() {
+    if [ "$1" = python3 ]; then "$@"; return; fi
+    [ "$1:$2:$3:$4:$5" = "timeout:--signal=TERM:--kill-after=5:30:$OPERATOR_HOME/.local/bin/yard" ] \
+      || fail 'failure capture lost its bounded installed-yard command'
+    printf '%s\n' "${*:6}" >> "$STATE_ROOT/queries"
+    case "${*:6}" in
+      'migrate --check --json') printf 'migration-query\n'; printf '%70000s' ''; return 23 ;;
+      'config status --all-local') printf 'configuration-query\n'; return 11 ;;
+      *) fail 'failure capture attempted a mutating or unexpected command' ;;
+    esac
+  }
+  recovery_failure_diagnostics > "$STATE_ROOT/output" 2>&1
+  recovery_failure_diagnostics >> "$STATE_ROOT/output" 2>&1
+  [ "$(cat "$STATE_ROOT/queries")" = $'migrate --check --json\nconfig status --all-local' ] \
+    || fail 'failure capture hid a query or repeated before cleanup'
+  grep -Fq 'query=migrate-check native_exit=23' "$STATE_ROOT/output" \
+    && grep -Fq 'query=config-status native_exit=11' "$STATE_ROOT/output" \
+    && grep -Fq 'truncated=true' "$STATE_ROOT/output" \
+    && grep -Fq 'configuration-query' "$STATE_ROOT/output" \
+    && [ "$(wc -c < "$STATE_ROOT/output")" -lt 72000 ] \
+    || fail 'failure capture lost native query exits, independent results or its output bound'
+  ! grep -Eq 'private-(plan|step|malformed)-sentinel' "$STATE_ROOT/output" \
+    || fail 'journal header capture disclosed non-header content'
+  [ "$(grep -c 'journal-header {' "$STATE_ROOT/output")" = 2 ] \
+    || fail 'journal header was not captured before and after the queries'
+  case "$kind" in
+    valid) grep -Fq '"checkpoint": "complete"' "$STATE_ROOT/output" && grep -Fq '"current": "candidate-aaaaaaaaaaaa"' "$STATE_ROOT/output" ;;
+    missing) grep -Fq '"journal": null' "$STATE_ROOT/output" ;;
+    malformed|symlink) grep -Fq '"error":' "$STATE_ROOT/output" ;;
+  esac || fail 'journal presence, invalidity or links were hidden'
+)
+for reliable_capture_case in valid missing malformed symlink; do
+  reliable_migrations_failure_capture_contract "$reliable_capture_case"
+done
+reliable_update_capture_block="$(fixture_functions "$ROOT/tests/helpers/test-yard-source-repair.sh" run_source_repair_acceptance |
+  sed -n '/^  operator_env env/,/^    }$/p')"
+for reliable_capture_exit in 0 19; do
+  reliable_capture_rc=0
+  set +e
+  RELIABLE_UPDATE_BLOCK="$reliable_update_capture_block" RELIABLE_CAPTURE_EXIT="$reliable_capture_exit" bash -c '
+    set -euo pipefail
+    OPERATOR_HOME=/fixture RELEASE_ROOT=/release CANDIDATE_VERSION=candidate STATE_ROOT=$1
+    operator_env() {
+      case "$*" in
+        *"env "*" update --version candidate --yes") return 37 ;;
+        *) return 99 ;;
+      esac
+    }
+    source_repair_finish_known_final_check() { return 1; }
+    recovery_failure_diagnostics() { return "$RELIABLE_CAPTURE_EXIT"; }
+    eval "fixture_update() { local rc=0; $RELIABLE_UPDATE_BLOCK; exit 98; }"
+    fixture_update
+  ' _ "$TMP" > "$TMP/reliable-update-capture-$reliable_capture_exit.log" 2>&1
+  reliable_capture_rc=$?
+  set -e
+  [ "$reliable_capture_rc" = 37 ] || fail 'source update lost its native failure'
+done
+python3 -B "$ROOT/tests/helpers/source-repair-final-check-test.py"
+for reliable_cleanup_exit in 0 37; do
+  reliable_cleanup_root="$TMP/reliable-cleanup-capture-$reliable_cleanup_exit"
+  install -d -m 0700 "$reliable_cleanup_root"
+  reliable_capture_rc=0
+  set +e
+  RELIABLE_CLEANUP_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/reliable-migrations-recovery.sh" cleanup_recovery_fixture)" \
+    bash -c '
+      set -euo pipefail
+      eval "$RELIABLE_CLEANUP_FUNCTION"
+      STATE_ROOT=$1 SUBYARD_RELIABILITY_PHASE=source CLEANUP_ARMED=1 CREATED_IMAGE=""
+      OWNED_EXTRA_YARDS=()
+      assert_state_root() { :; }
+      recovery_failure_diagnostics() { printf "capture\n" >> "$STATE_ROOT/events"; return 19; }
+      source_repair_restore_host_sink() { printf "restore\n" >> "$STATE_ROOT/events"; }
+      cleanup() { local rc=$?; printf "cleanup\n" >> "$STATE_ROOT/events"; exit "$rc"; }
+      trap cleanup_recovery_fixture EXIT
+      exit "$2"
+    ' fixture "$reliable_cleanup_root" "$reliable_cleanup_exit" > "$reliable_cleanup_root/log" 2>&1
+  reliable_capture_rc=$?
+  set -e
+  reliable_expected_events=$'restore\ncleanup'
+  [ "$reliable_cleanup_exit" = 0 ] || reliable_expected_events=$'capture\nrestore\ncleanup'
+  [ "$reliable_capture_rc" = "$reliable_cleanup_exit" ] \
+    && [ "$(cat "$reliable_cleanup_root/events")" = "$reliable_expected_events" ] \
+    || fail 'failure capture ran after restoration or changed the native cleanup result'
+done
+
 # Switching fixture operators must isolate identity and the private working directory.
 (
   . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
@@ -5648,7 +5781,7 @@ for dispatcher_mode in prepare resume finish; do
       info() { :; }
       prepare_candidate() { log prepare_candidate; }
       exercise_activation_only_repair() { log exercise_activation_only_repair; }
-      establish_legacy_continuation() { log establish_legacy_continuation; }
+      establish_registered_ownership() { log establish_registered_ownership; }
       record_reboot_baseline() { log record_reboot_baseline; }
       write_fixture_value() { log "write_fixture_value $*"; }
       finish_candidate_flow() { log finish_candidate_flow; }
@@ -5667,7 +5800,7 @@ for dispatcher_mode in prepare resume finish; do
     || fail "power reconciler $dispatcher_mode dispatcher rejected its valid phase"
   case "$dispatcher_mode" in
     prepare)
-      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_legacy_continuation\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_registered_ownership\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
       ;;
     resume)
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\nverify_historical_init_boundary\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
@@ -5880,95 +6013,6 @@ for activation_mutation in unit journal ledger; do
   [ "$activation_mutation_rc" -ne 0 ] \
     || fail "activation-only repair helper accepted $activation_mutation mutation before confirmation"
 done
-assert_v2_transition_function="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
-(
-  set -euo pipefail
-  export OLD_VERSION=0.11.0
-  OPERATOR_HOME="$TMP/power-rollback/operator"
-  rollback_state="$OPERATOR_HOME/.config/subyard/release-transition/v2"
-  rollback_target=0.11.0-bbbbbbbbbbbb
-  CANDIDATE_RELEASE_TARGET=releases/0.11.3-aaaaaaaaaaaa
-  runtime="$OPERATOR_HOME/.subyard/runtime"
-  mkdir -p "$rollback_state" "$runtime/releases/$rollback_target" \
-    "$runtime/$CANDIDATE_RELEASE_TARGET/config"
-  printf 'published target manifest\n' > "$runtime/releases/$rollback_target/runtime-files.sha256"
-  printf 'candidate owner registry\n' > "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json"
-  artifact_digest="$(sha256sum "$runtime/releases/$rollback_target/runtime-files.sha256" | awk '{print $1}')"
-  registry_digest="$(sha256sum "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" | awk '{print $1}')"
-  catalog_digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-  jq -n '{
-    schemaVersion: 2,
-    domains: {
-      "owner-registration": {epoch: 3, applied: ["canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"]},
-      "power-metadata": {epoch: 3, applied: ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]},
-      "project-state": {epoch: 1, applied: []},
-      settings: {epoch: 3, applied: ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]}
-    }
-  }' > "$rollback_state/ledger.json"
-  # Published V2 shape: authorization/intent tokens use the frozen complete
-  # rollback fixture in records_test.go; target facts are not durable fields.
-  jq -n --arg target "$rollback_target" \
-    --arg artifact "$artifact_digest" --arg registry "$registry_digest" --arg catalog "$catalog_digest" '{
-    schemaVersion: 2, transaction: "tx-001", checkpoint: "complete",
-    goal: {target: $target, direction: "activate-previous"},
-    releases: {from: "0.11.3-aaaaaaaaaaaa", previous: $target, target: $target},
-    authorizationPlan: "plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    resumePlan: "resume-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    artifactDigest: $artifact, registryDigest: $registry, catalogDigest: $catalog,
-    observationScope: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    authorizationDigest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    intentDigest: "cffbd21069e88c37c6f18c83e9ac8643a98488e7b8be6ad5c8767c75eceef4b9",
-    steps: []
-  }' > "$rollback_state/journal.json"
-  cp "$rollback_state/journal.json" "$rollback_state/journal.valid"
-  # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
-  . "$assert_v2_transition_function"
-  operator_env() { "$@"; }
-  die() { return 2; }
-  assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest" \
-    || fail 'power rollback rejected a completed frozen V2 journal'
-  cp "$rollback_state/ledger.json" "$rollback_state/ledger.valid"
-  for ledger_filter in '.domains.settings.epoch = 2' \
-    '.domains.settings.applied |= reverse' \
-    '.domains.settings.applied |= .[:-1]' \
-    '.domains.settings.applied += ["foreign-migration"]'; do
-    jq "$ledger_filter" "$rollback_state/ledger.valid" > "$rollback_state/ledger.json"
-    set +e
-    (die() { exit 2; }; assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest") \
-      > "$TMP/power-ledger-rejection.log" 2>&1
-    ledger_assert_rc=$?
-    set -e
-    [ "$ledger_assert_rc" = 2 ] \
-      || fail "power migration ledger accepted changed epoch or ordered migration history"
-    grep -Fq 'migration record=ledger.json' "$TMP/power-ledger-rejection.log" \
-      || fail 'power migration ledger rejection lost its pre-cleanup diagnostic'
-  done
-  cp "$rollback_state/ledger.valid" "$rollback_state/ledger.json"
-  for rollback_mutation in wrong-target wrong-direction incomplete wrong-artifact wrong-registry \
-    wrong-catalog missing-artifact missing-registry missing-catalog missing-steps unverified-step new-field; do
-    case "$rollback_mutation" in
-      wrong-target) filter='.goal.target = "foreign"' ;;
-      wrong-direction) filter='.goal.direction = "activate-target"' ;;
-      incomplete) filter='.checkpoint = "reconciling"' ;;
-      wrong-artifact) filter='.artifactDigest = .catalogDigest' ;;
-      wrong-registry) filter='.registryDigest = .catalogDigest' ;;
-      wrong-catalog) filter='.catalogDigest = .artifactDigest' ;;
-      missing-artifact) filter='del(.artifactDigest)' ;;
-      missing-registry) filter='del(.registryDigest)' ;;
-      missing-catalog) filter='del(.catalogDigest)' ;;
-      missing-steps) filter='del(.steps)' ;;
-      unverified-step) filter='.steps = [{checkpoint: "intent"}]' ;;
-      new-field) filter='.rollbackTarget = {version: "0.11.0"}' ;;
-    esac
-    jq "$filter" "$rollback_state/journal.valid" > "$rollback_state/journal.json"
-    set +e
-    assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest" >/dev/null 2>&1
-    rollback_assert_rc=$?
-    set -e
-    [ "$rollback_assert_rc" -ne 0 ] \
-      || fail "power rollback evidence accepted $rollback_mutation"
-  done
-) || fail 'power rollback journal lost frozen artifact and owner bindings'
 fixture_state_functions="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 (
   STATE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/subyard-power-phase.XXXXXX")"
@@ -5991,6 +6035,48 @@ fixture_state_functions="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 
 cleanup_function="$(sed -n '/^cleanup() {/,/^}/p' \
   "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+for image_cleanup_case in private inherited foreign; do
+  image_cleanup_log="$TMP/power-images-$image_cleanup_case.log"
+  set +e
+  IMAGE_CLEANUP_CASE="$image_cleanup_case" IMAGE_CLEANUP_LOG="$image_cleanup_log" \
+    DELETE_PROJECT_FUNCTION="$(sed -n '/^delete_owned_project() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh")" bash -c '
+      set -euo pipefail
+      eval "$DELETE_PROJECT_FUNCTION"
+      PROJECT=fixture INSTANCE=yard
+      project_presence() { return 0; }
+      die() { exit 2; }
+      assert_project_owned() { [ "$IMAGE_CLEANUP_CASE" != foreign ] || die; }
+      incus() {
+        case "$*" in
+          "config show yard --project fixture") return 1 ;;
+          "storage volume list default --project fixture --format csv -c t,n"|"list --project fixture --format csv -c n") ;;
+          "project get fixture features.images")
+            if [ "$IMAGE_CLEANUP_CASE" = private ]; then printf "true\n"; else printf "false\n"; fi ;;
+          "image list --project fixture --format json")
+            [ "$IMAGE_CLEANUP_CASE" = private ] || die
+            printf "[{\"fingerprint\":\"%064d\"}]\n" 1 ;;
+          "image delete "*" --project fixture"|"project delete fixture") printf "%s\n" "$*" >> "$IMAGE_CLEANUP_LOG" ;;
+          *) die ;;
+        esac
+      }
+      delete_owned_project
+    '
+  image_cleanup_rc=$?
+  set -e
+  if [ "$image_cleanup_case" = foreign ]; then
+    [ "$image_cleanup_rc" = 2 ] && [ ! -e "$image_cleanup_log" ] \
+      || fail 'foreign project cleanup removed an image or project'
+  else
+    [ "$image_cleanup_rc" = 0 ] && grep -Fxq 'project delete fixture' "$image_cleanup_log" \
+      || fail 'marked project cleanup did not finish'
+    if [ "$image_cleanup_case" = private ]; then
+      grep -Fxq "image delete $(printf '%064d' 1) --project fixture" "$image_cleanup_log" \
+        || fail 'private project image survived cleanup'
+    else
+      ! grep -q '^image delete ' "$image_cleanup_log" || fail 'inherited image was deleted'
+    fi
+  fi
+done
 cleanup_log="$TMP/power-cleanup.log"
 : > "$cleanup_log"
 set +e
@@ -6295,7 +6381,93 @@ retryable_failure_snapshot="$(
 )"
 [ "$retryable_failure_snapshot" = 0 ] \
   || fail 'P0 reboot treats an auto-restarting exit-75 attempt as terminal'
-# Source default setup must let ordinary init create its own project first.
+# Source-lane transport keeps both reboots and leaves failures armed for cleanup.
+for source_phase in success prepare resume finish; do
+  source_flow_rc=0
+  SOURCE_FLOW="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" source_upgrade_lane)" \
+    bash -s -- "$TMP/source-flow-$source_phase" "$source_phase" <<'SOURCE_FLOW' || source_flow_rc=$?
+set -euo pipefail
+trace=$1 phase=$2
+SOURCE_LANE_VM=1 SOURCE_HOST_STARTED=0
+trap 'printf "armed=%s\n" "$SOURCE_HOST_STARTED" >> "$trace"' EXIT
+eval "$SOURCE_FLOW"
+run_source_vm() {
+  [ "$#:$1" = 2:2 ]
+  printf 'vm %s\n' "$2" >> "$trace"
+  [ "$phase" != "$2" ] || return 23
+}
+reboot_vm() { [ "$*" = 2 ]; printf 'reboot\n' >> "$trace"; }
+source_upgrade_lane 2
+SOURCE_FLOW
+  expected_rc=23
+  [ "$source_phase" != success ] || expected_rc=0
+  [ "$source_flow_rc" = "$expected_rc" ] || fail 'source-lane transport lost a native failure'
+  case "$source_phase" in
+    success) source_flow_expected=$'vm prepare\nreboot\nvm resume\nreboot\nvm finish\narmed=0' ;;
+    prepare) source_flow_expected=$'vm prepare\narmed=1' ;;
+    resume) source_flow_expected=$'vm prepare\nreboot\nvm resume\narmed=1' ;;
+    finish) source_flow_expected=$'vm prepare\nreboot\nvm resume\nreboot\nvm finish\narmed=1' ;;
+  esac
+  [ "$(cat "$TMP/source-flow-$source_phase")" = "$source_flow_expected" ] \
+    || fail 'source-lane transport changed reboot order or failure cleanup ownership'
+done
+
+# The supported predecessor creates the legacy owner through its own config CLI.
+BASELINE_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" prepare_baseline_yards)" \
+  bash -s -- "$TMP/published-owner" <<'PUBLISHED_OWNER'
+set -euo pipefail
+F=$1 OPERATOR_HOME=$1/operator SHARED_ROOT=$1/shared
+BASELINE_VERSION=0.11.0 BASE_IMAGE=fixture-cache FIXTURE_DEV_UID=1001
+PROJECT=subyard-e2e-yard INSTANCE=yard-e2e-yard DEFAULT_PROJECT=subyard DEFAULT_INSTANCE=yard
+install -d -m 0700 "$OPERATOR_HOME/.local/bin" "$SHARED_ROOT"
+trace="$F/trace"
+eval "$BASELINE_FUNCTION"
+die() { printf '%s\n' "$*" >&2; exit 2; }
+install_baseline() { printf 'install 0.11.0\n' >> "$trace"; }
+prepare_project() { printf 'project %s\n' "${1:-$PROJECT}" >> "$trace"; }
+ordinary_yard_facts() { printf 'retained ordinary state\n'; }
+incus() { printf 'incus %s\n' "$*" >> "$trace"; }
+operator_env() {
+  if [ "$1" = mktemp ]; then
+    install -d -m 0700 "$F/checkout"
+    printf '%s\n' "$F/checkout"
+  elif [ "$1" = env ]; then
+    [ "$2" = SUBYARD_HOST_ID=p0-owner ] && [ "$4:$5:$7" = config:sync:--yes ]
+    [ -z "$(git -C "$6" status --porcelain)" ]
+    [ "$(git -C "$6" show HEAD:hosts/p0-owner/yards/e2e-yard/config.env)" = $'SSH_PORT=2223\nYARD_TEMPLATE=test-vms' ]
+    install -d -m 0700 "$OPERATOR_HOME/.config/subyard/yards/e2e-yard"
+    install -m 0600 "$6/hosts/p0-owner/yards/e2e-yard/config.env" \
+      "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env"
+    printf 'config sync\n' >> "$trace"
+  else
+    "$@"
+  fi
+}
+operator_yard() {
+  case "$*" in
+    --version) printf 'yard 0.11.0\n'; return ;;
+    *--local*) exit 91 ;;
+    '-Y e2e-yard init --yes')
+      grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
+    'config set '*|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
+    *) exit 92 ;;
+  esac
+  printf 'yard %s\n' "$*" >> "$trace"
+}
+prepare_baseline_yards
+[ "$(head -n 2 "$trace")" = $'install 0.11.0\nconfig sync' ]
+[ "$(cat "$SHARED_ROOT/ordinary-before")" = 'retained ordinary state' ]
+[ "$(stat -c %a "$SHARED_ROOT/ordinary-before")" = 600 ]
+[ "$CONFIG_CHECKOUT" = "$F/checkout" ] && [ -d "$CONFIG_CHECKOUT/.git" ]
+for name in E2E_VM_SLOT_COUNT E2E_VM_CPU E2E_VM_MEMORY E2E_VM_DISK; do
+  grep -Eq "^yard -Y e2e-yard config set $name [^ ]+ --scope yard --yes$" "$trace"
+done
+grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
+grep -Fxq 'yard init --yes' "$trace"
+grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
+PUBLISHED_OWNER
+
+# Fresh service setup must prove ownership before fixture cache changes.
 run_source_default_fixture() {
   local fixture_case="$1" fixture_root="$TMP/source-default-$1"
   install -d -m 0700 "$fixture_root"
@@ -6305,7 +6477,7 @@ set -euo pipefail
 F="$SOURCE_DEFAULT_ROOT"
 DEFAULT_PROJECT=subyard DEFAULT_INSTANCE=yard PROJECT=subyard-e2e-yard
 BASE_IMAGE=fixture-cached-cloud MARKER=subyard-p0-source-441
-OPERATOR_HOME="$F/operator"
+OPERATOR_HOME="$F/operator" YARD_NAME=default
 install -m 0600 /dev/null "$F/calls"
 printf 'retain-default-cache\n' > "$F/default-cache"
 chmod 0600 "$F/default-cache"
@@ -6344,7 +6516,7 @@ incus() {
             unframed) printf '%s' "$OPERATOR_HOME/.config/subyard"; return 0 ;;
           esac
           ;;
-        user.subyard.p0-source)
+        user.p0-source)
           [ "$SOURCE_DEFAULT_CASE" != marker-query-error ] || return 7
           [ ! -e "$F/marker" ] || cat "$F/marker"
           if [ "$SOURCE_DEFAULT_CASE" = readback-extra-lf ] && [ -e "$F/marker" ]; then printf '\n'; fi
@@ -6357,7 +6529,7 @@ incus() {
       awk -F= -v key="$4" '$1==key {sub(/^[^=]*=/, ""); print}' "$F/owner"
       ;;
     'project set')
-      [ "$*" = "project set $DEFAULT_PROJECT user.subyard.p0-source=$MARKER" ] || return 91
+      [ "$*" = "project set $DEFAULT_PROJECT user.p0-source=$MARKER" ] || return 91
       case "$SOURCE_DEFAULT_CASE" in marker-write-error|partial-marker-write-error) return 7 ;; esac
       printf '%s' "$MARKER" > "$F/marker"
       chmod 0600 "$F/marker"
@@ -6383,7 +6555,7 @@ incus() {
 operator_yard() {
   printf 'yard %s\n' "$*" >> "$F/calls"
   case "$*" in
-    'init --yes')
+    'service install test-vms --yes')
       if [ -e "$F/present" ]; then
         # Same refusal as the native init guard: a fixture marker is not ownership.
         [ -f "$F/owner" ] || return 1
@@ -6413,17 +6585,17 @@ OWNER
     *) return 91 ;;
   esac
 }
-for name in prepare_project read_default_project_property mark_created_default_project prepare_default_yard \
+for name in prepare_project read_default_project_property mark_created_default_project install_current_test_yard \
   assert_fixture_project cleanup_owned_project; do
   eval "$(sed -n "/^$name() {/,/^}/p" "$SOURCE_DEFAULT_SCRIPT")"
 done
 case "$SOURCE_DEFAULT_CASE" in
   foreign) install -m 0600 /dev/null "$F/present" ;;
   legacy) prepare_project; exit ;;
-  getter-status73) operator_yard init --yes; read_default_project_property actual user.subyard.operator_uid; exit ;;
-  getter-encoder74) operator_yard init --yes; read_default_project_property actual user.subyard.operator_uid; exit ;;
+  getter-status73) operator_yard service install test-vms --yes; read_default_project_property actual user.subyard.operator_uid; exit ;;
+  getter-encoder74) operator_yard service install test-vms --yes; read_default_project_property actual user.subyard.operator_uid; exit ;;
 esac
-prepare_default_yard
+install_current_test_yard
 if [ "$SOURCE_DEFAULT_CASE" = private-cleanup ]; then
   cleanup_owned_project "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE"
 fi
@@ -6433,9 +6605,7 @@ run_source_default_fixture ordinary > "$TMP/source-default-ordinary.log" 2>&1 \
   || fail 'default source fixture precreated an unmarked project before ordinary init'
 source_default_root="$TMP/source-default-ordinary"
 [ "$(cat "$source_default_root/marker")" = subyard-p0-source-441 ] \
-  && grep -Fxq 'yard init --yes' "$source_default_root/calls" \
-  && grep -Fxq 'yard start --yes' "$source_default_root/calls" \
-  && grep -Fxq 'yard check' "$source_default_root/calls" \
+  && grep -Fxq 'yard service install test-vms --yes' "$source_default_root/calls" \
   && ! grep -Eq '^incus project create|features.images=' "$source_default_root/calls" \
   || fail 'default source fixture changed creation or image namespace policy'
 for source_default_case in foreign inventory-error owner-mismatch owner-query-error \
@@ -6446,7 +6616,7 @@ for source_default_case in foreign inventory-error owner-mismatch owner-query-er
   source_default_rc=0
   run_source_default_fixture "$source_default_case" \
     > "$TMP/source-default-$source_default_case.log" 2>&1 || source_default_rc=$?
-  case "$source_default_case" in partial-*) want=23 ;; getter-status73) want=73 ;; getter-encoder74) want=74 ;; *) want=2 ;; esac
+  case "$source_default_case" in partial-owned) want=23 ;; getter-status73) want=73 ;; getter-encoder74) want=74 ;; *) want=2 ;; esac
   [ "$source_default_rc" = "$want" ] \
     || fail "default source fixture lost $source_default_case native status"
   source_default_root="$TMP/source-default-$source_default_case"
@@ -6478,7 +6648,7 @@ for source_default_case in foreign inventory-error owner-mismatch owner-query-er
 done
 run_source_default_fixture legacy > "$TMP/source-default-legacy.log" 2>&1 \
   && grep -Fxq 'incus image info fixture-cached-cloud --project default' "$TMP/source-default-legacy/calls" \
-  && grep -Fxq 'incus project create subyard-e2e-yard -c features.images=false -c user.subyard.p0-source=subyard-p0-source-441' \
+  && grep -Fxq 'incus project create subyard-e2e-yard -c features.images=false -c user.p0-source=subyard-p0-source-441' \
     "$TMP/source-default-legacy/calls" \
   || fail 'historical source setup lost its shared cached-image contract'
 run_source_default_fixture private-cleanup > "$TMP/source-default-private-cleanup.log" 2>&1 \
@@ -6488,53 +6658,119 @@ run_source_default_fixture private-cleanup > "$TMP/source-default-private-cleanu
   || fail 'default source cleanup changed the shared default image cache'
 # End source default setup regression.
 
-source_deadline_function="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" relax_fixture_init_deadline)"
-run_source_deadline_fixture() {
-  local source_root="$1"
-  SOURCE_ROOT="$source_root" bash -c '
-    set -euo pipefail
-    operator_env() { "$@"; }
-    die() { printf "%s\n" "$*" >&2; return 2; }
-    eval "$1"
-    relax_fixture_init_deadline
-  ' _ "$source_deadline_function"
-}
-source_deadline_root="$TMP/source-deadline"
-mkdir -p "$source_deadline_root/internal/cli"
-printf 'package cli\n%s\n' $'\t\t\tTimeout:        10 * time.Minute,' \
-  > "$source_deadline_root/internal/cli/cli.go"
-run_source_deadline_fixture "$source_deadline_root" \
-  || fail "P0 source-upgrade rejected its exact synthetic deadline fixture"
-grep -Fqx $'\t\t\tTimeout:        30 * time.Minute,' \
-    "$source_deadline_root/internal/cli/cli.go" \
-  && ! grep -Fq $'\t\t\tTimeout:        10 * time.Minute,' \
-    "$source_deadline_root/internal/cli/cli.go" \
-  || fail "P0 source-upgrade did not patch only the synthetic adapter deadline"
-for invalid_deadline_count in missing duplicate mixed; do
-  case "$invalid_deadline_count" in
-    missing) printf 'package cli\n' > "$source_deadline_root/internal/cli/cli.go" ;;
-    duplicate)
-      printf '%s\n%s\n' \
-        $'\t\t\tTimeout:        10 * time.Minute,' \
-        $'\t\t\tTimeout:        10 * time.Minute,' \
-        > "$source_deadline_root/internal/cli/cli.go"
-      ;;
-    mixed)
-      printf '%s\n%s\n' \
-        $'\t\t\tTimeout:        10 * time.Minute,' \
-        $'\t\t\tTimeout:        30 * time.Minute,' \
-        > "$source_deadline_root/internal/cli/cli.go"
-      ;;
+# Legacy-owner recreation must execute its printed scope and preserve ordinary yards.
+for recreate_case in success image-miss image-unavailable wrong-guidance unready ordinary-change config-change sync-failure sync-change; do
+  recreate_root="$TMP/source-recreation-$recreate_case"
+  install -d -m 0700 "$recreate_root/operator/.config/subyard"
+  recreate_rc=0
+  RECREATE_FUNCTIONS="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" recreate_legacy_test_owner select_current_test_yard install_current_test_yard)" \
+    bash -s -- "$recreate_root" "$recreate_case" > "$recreate_root/log" 2>&1 <<'RECREATE' || recreate_rc=$?
+set -euo pipefail
+F=$1 scenario=$2 OPERATOR_HOME=$1/operator
+PROJECT=subyard-e2e-yard INSTANCE=yard-e2e-yard ORDINARY_BEFORE=retained
+BASE_IMAGE=fixture-cached-cloud
+CONFIG_CHECKOUT="$F/checkout"
+mkdir "$CONFIG_CHECKOUT"
+export F scenario OPERATOR_HOME
+trace="$F/trace"
+eval "$RECREATE_FUNCTIONS"
+die() { printf '%s\n' "$*" >&2; exit 2; }
+operator_env() { "$@"; }
+ordinary_yard_facts() { [ ! -e "$F/changed" ] && printf retained || printf changed; }
+incus() {
+  case "$*" in
+    'config show yard-e2e-yard --project subyard-e2e-yard --expanded') printf 'owned legacy instance\n' ;;
+    'project list --format csv -c n'|'list --project subyard-test-yard --format csv -c n') : ;;
+    'project set subyard-test-yard features.images=false') printf 'share owned cache\n' >> "$trace" ;;
+    'image info fixture-cached-cloud --project subyard-test-yard')
+      printf 'verify shared image\n' >> "$trace"
+      [ "$scenario" != image-unavailable ] || return 19 ;;
+    *) exit 91 ;;
   esac
-  set +e
-  source_deadline_failure="$(run_source_deadline_fixture "$source_deadline_root" 2>&1)"
-  source_deadline_rc=$?
-  set -e
-  [ "$source_deadline_rc" = 2 ] \
-    && grep -Fq 'source-upgrade adapter timeout fixture no longer matches its source' \
-      <<<"$source_deadline_failure" \
-    || fail "P0 source-upgrade accepted a $invalid_deadline_count deadline fixture"
+}
+mark_created_default_project() {
+  [ "$DEFAULT_PROJECT/$DEFAULT_INSTANCE/$1" = subyard-test-yard/yard-test-yard/test-yard ]
+  printf 'mark owned project\n' >> "$trace"
+}
+p0_retry_init_after_plan_stale() { "$@"; }
+operator_yard() {
+  case "$*" in
+    "config sync $CONFIG_CHECKOUT --yes")
+      printf 'config sync checkout --yes\n' >> "$trace"
+      [ "$scenario" != sync-failure ] || return 23
+      if [ "$scenario" = sync-change ]; then touch "$F/changed"; fi
+      touch "$F/synced" ;;
+    '-Y e2e-yard teardown --reset-config --yes') printf '%s\n' "$*" >> "$trace" ;;
+    'service install test-vms --yes')
+      printf '%s\n' "$*" >> "$trace"
+      install -d -m 0700 "$OPERATOR_HOME/.config/subyard/yards/test-yard"
+      printf 'YARD_TEMPLATE=test-vms\n' > "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
+      chmod 0600 "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
+      if [[ "$scenario" = image-* ]] && [ ! -e "$F/first-install" ]; then touch "$F/first-install"; return 23; fi ;;
+
+    'test-vms status --json'|'-Y test-yard check') : ;;
+    'migrate --check --json')
+      if [ -e "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" ]; then
+        printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true}}\n'
+      else
+        if [ "$scenario" = ordinary-change ]; then touch "$F/changed"; fi
+        if [ "$scenario" = config-change ]; then printf changed > "$OPERATOR_HOME/.config/subyard/changed"; fi
+        status=ready warning='test-yard requires recreation; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms'
+        if [ ! -e "$F/synced" ]; then
+          warning='test-yard requires recreation; run yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms'
+        fi
+        [ "$scenario" != wrong-guidance ] || warning='unrelated warning'
+        [ "$scenario" != unready ] || status=migration-required
+        jq -n --arg status "$status" --arg warning "$warning" \
+          '{schemaVersion:1,outcome:{status:$status,reachedGoal:($status == "ready"),warnings:[$warning]}}'
+      fi ;;
+    *) exit 91 ;;
+  esac
+}
+recreate_legacy_test_owner
+expected=$'config sync checkout --yes\n-Y e2e-yard teardown --reset-config --yes\nservice install test-vms --yes\nmark owned project'
+if [ "$scenario" = image-miss ]; then expected+=$'\nshare owned cache\nverify shared image\nservice install test-vms --yes'; fi
+[ "$(cat "$trace")" = "$expected" ]
+RECREATE
+  case "$recreate_case" in
+    success|image-miss) [ "$recreate_rc" = 0 ] && [ -f "$recreate_root/operator/.config/subyard/yards/test-yard/config.env" ] ;;
+    image-unavailable) [ "$recreate_rc" = 2 ] && [ "$(tail -n 2 "$recreate_root/trace")" = $'share owned cache\nverify shared image' ] \
+      && [ "$(grep -c '^service install ' "$recreate_root/trace")" = 1 ] ;;
+    sync-failure) [ "$recreate_rc" = 23 ] && [ "$(cat "$recreate_root/trace")" = 'config sync checkout --yes' ] ;;
+    sync-change) [ "$recreate_rc" = 2 ] && [ "$(cat "$recreate_root/trace")" = 'config sync checkout --yes' ] ;;
+    *) [ "$recreate_rc" = 2 ] && [ ! -e "$recreate_root/trace" ] ;;
+  esac || fail "source owner recreation lost $recreate_case protection"
 done
+
+# Published baseline selection must be explicit and precede its real init.
+(
+  eval "$(sed -n '/^published_agent_selection() {/,/^}/p' "$ROOT/dev/e2e/published-upgrade.sh")"
+  eval "$(sed -n '/^configure_published_agents() {/,/^}/p' "$ROOT/dev/e2e/published-upgrade.sh")"
+  [ -z "$(published_agent_selection none)" ] \
+    && [ "$(published_agent_selection all)" = 'claude codex opencode pi' ] \
+    && [ "$(published_agent_selection 'codex claude')" = 'codex claude' ] \
+    || fail 'published agent selection changed its defaults or selected set'
+  if published_agent_selection 'codex foreign' >/dev/null 2>&1; then
+    fail 'published lane accepted an unknown agent'
+  fi
+  OPERATOR_HOME="$TMP/published-agents/operator"
+  mkdir -p "$OPERATOR_HOME/.config/subyard"
+  configuration="$OPERATOR_HOME/.config/subyard/config.env"
+  printf 'AGENTS=none\nDEV_UID=2000\n' > "$configuration"
+  chmod 0600 "$configuration"
+  operator_env() { "$@"; }
+  PUBLISHED_AGENTS=''
+  configure_published_agents
+  [ "$(cat "$configuration")" = $'AGENTS=none\nDEV_UID=2000' ] \
+    || fail 'default published matrix selection changed'
+  PUBLISHED_AGENTS="$(published_agent_selection all)"
+  configure_published_agents
+  expected="CODING_TOOL_INTEGRATIONS='$PUBLISHED_AGENTS'"$'\nDEV_UID=2000'
+  [ "$(cat "$configuration")" = "$expected" ] \
+    || fail 'published agent selection retained conflicting aliases or changed other settings'
+  [ "$(stat -c %a "$configuration")" = 600 ] || fail 'published selection lost private settings mode'
+) || fail 'published agent selection contract failed'
+
 # Exercise the actual bootstrap diagnostic against the current public report shape.
 (
   eval "$(sed -n '/^bootstrap_failure_diagnostics() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
@@ -6542,8 +6778,11 @@ done
   OPERATOR_HOME="$TMP/source-bootstrap/operator"
   SHARED_ROOT="$TMP/source-bootstrap/shared"
   export CANDIDATE_A_REPOSITORY="$TMP/source-bootstrap/candidate"
-  mkdir -p "$OPERATOR_HOME/.subyard/runtime/current/bin" "$SHARED_ROOT"
-  launcher="$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
+  mkdir -p "$OPERATOR_HOME/.subyard/runtime/current/bin" "$SHARED_ROOT" "$CANDIDATE_A_REPOSITORY/bin"
+  # A v0.11.0 active launcher cannot inspect migrate; prefer the retained candidate.
+  printf '#!/bin/sh\nexit 2\n' > "$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
+  chmod 0700 "$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
+  launcher="$CANDIDATE_A_REPOSITORY/bin/yard"
   printf '#!/bin/sh\nexit 0\n' > "$launcher"
   chmod 0700 "$launcher"
   operator_env() { "$@"; }
@@ -6656,60 +6895,4 @@ source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
   [ "$(current_migration_readiness_diagnostics approved-release <<<not-json 2>&1)" = \
     'current migration readiness report is invalid' ] || fail 'invalid readiness diagnostic exposed parser output'
 ) || fail 'source-upgrade final readiness regression'
-(
-  SOURCE_ROOT="$TMP/source-registration/src"
-  OPERATOR_HOME="$TMP/source-registration/operator"
-  mkdir -p "$SOURCE_ROOT/private/yards" "$OPERATOR_HOME/.config/subyard/yards/test-yard"
-  original="$SOURCE_ROOT/private/yards/e2e-yard.env"
-  migrated="$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
-  printf '# retained comment\nYARD_TEMPLATE=e2e-vms\nSSH_PORT=2223\n' > "$original"
-  sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' "$original" > "$migrated"
-  operator_env() { "$@"; }
-  eval "$(sed -n '/^verify_migrated_yard_registration() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
-  verify_migrated_yard_registration || fail 'initial source registration comparison failed'
-  printf "CODING_TOOL_INTEGRATIONS=''\n" >> "$migrated"
-  if verify_migrated_yard_registration >/dev/null 2>&1; then
-    fail 'registration comparison accepted an unauthorized local selection'
-  fi
-  sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' "$original" > "$migrated"
-  sed -i 's/^SSH_PORT=2223$/SSH_PORT=2224/' "$migrated"
-  if verify_migrated_yard_registration >/dev/null 2>&1; then
-    fail 'registration comparison accepted unrelated setting drift'
-  fi
-) || fail 'source-upgrade registration comparison did not retain exact migration evidence'
-# The native CLI tests own normalization and detailed journal/evidence validation.
-# Here validate only the physical lane's retained ingress binding/checkpoint gate.
-source_ingress_function="$(sed -n '/^verify_authorized_source_ingress() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-source-upgrade.sh")"
-(
-  set -euo pipefail
-  OPERATOR_HOME="$TMP/source-ingress/operator"
-  SOURCE_ROOT="$OPERATOR_HOME/src"
-  V2_JOURNAL="$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json"
-  mkdir -p "$(dirname "$V2_JOURNAL")"
-  jq -n \
-    --arg source "$SOURCE_ROOT" --arg data "$OPERATOR_HOME/.subyard" \
-    --arg bin "$OPERATOR_HOME/.local/bin" --arg rc "$OPERATOR_HOME/.bashrc" \
-    --arg login "$OPERATOR_HOME/.profile" '{
-      schemaVersion: 2, checkpoint: "complete",
-      sourceIngress: {
-        schemaVersion: 1, kind: "pre-go-source-v1", sourceRoot: $source,
-        dataHome: $data, binDir: $bin, rc: $rc, loginRC: $login
-      },
-      steps: ["source-install.import", "source-install.entrypoints"] |
-        map({id: ., checkpoint: "verified"})
-    }' > "$V2_JOURNAL.valid"
-  cp "$V2_JOURNAL.valid" "$V2_JOURNAL"
-  eval "$source_ingress_function"
-  operator_env() { "$@"; }
-  die() { return 2; }
-  verify_authorized_source_ingress
-  for mutation in '.sourceIngress.dataHome += "-foreign"' \
-    '.checkpoint = "migrating"' '.steps = .steps[1:]' '.steps[1].checkpoint = "pending"'; do
-    jq "$mutation" "$V2_JOURNAL.valid" > "$V2_JOURNAL"
-    if verify_authorized_source_ingress >/dev/null 2>&1; then
-      fail "source ingress helper accepted $mutation"
-    fi
-  done
-) || fail 'P0 source-upgrade does not verify its authorized source ingress'
 printf 'ok: agent E2E lease transport is pinned, fenced and cleanup-owned\n'

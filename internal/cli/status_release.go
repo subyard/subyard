@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -94,9 +95,17 @@ func (cli *CLI) releaseReadiness(ctx context.Context) *domain.ReleaseReadiness {
 	if err != nil || probeCtx.Err() != nil {
 		return unknown
 	}
+	return releaseReadinessResult(outcome)
+}
+
+func releaseReadinessResult(outcome releasetransition.Outcome) *domain.ReleaseReadiness {
+	warnings := outcome.Warnings
+	if len(warnings) > 33 {
+		warnings = append(slices.Clone(warnings[:32]), fmt.Sprintf("%d additional release warnings; run yard migrate --check", len(warnings)-32))
+	}
 	return &domain.ReleaseReadiness{
 		Status: string(outcome.Status), Code: string(outcome.Code),
-		Message: outcome.Message, Next: outcome.Retry,
+		Message: outcome.Message, Next: outcome.Retry, Warnings: warnings,
 	}
 }
 
@@ -107,14 +116,19 @@ func (cli *CLI) printReleaseReadiness(readiness *domain.ReleaseReadiness, ownerE
 			Next: "yard migrate --check",
 		}
 	}
-	if readiness.Status == string(releasetransition.StatusReady) {
+	switch readiness.Status {
+	case string(releasetransition.StatusReady):
 		fmt.Fprintln(cli.options.Stdout, "  release  OK (ready)")
-		return
-	}
-	if readiness.Status == "unknown" {
+	case "unknown":
 		fmt.Fprintln(cli.options.Stdout, "  release  unknown")
-	} else {
+	default:
 		fmt.Fprintf(cli.options.Stdout, "  release  NOT OK (%s)\n", readiness.Status)
+	}
+	for _, warning := range readiness.Warnings {
+		fmt.Fprintf(cli.options.Stdout, "    warning: %s\n", warning)
+	}
+	if readiness.Status == string(releasetransition.StatusReady) {
+		return
 	}
 	if readiness.Message != "" {
 		fmt.Fprintf(cli.options.Stdout, "    %s\n", readiness.Message)

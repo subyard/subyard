@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -65,5 +66,36 @@ func TestNativeInventoryConvergenceCannotExpandApprovedIntegrationWork(t *testin
 	}
 	if err := CheckIntegrationPlan(partial, plan(run("observe", entries))); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("original skip became new work: %v", err)
+	}
+}
+
+func TestCheckIntegrationPlanComparesRepeatedFactKeysByOccurrence(t *testing.T) {
+	approved := IntegrationPlan{Fingerprint: "approved", Scope: "scope", Changed: true, facts: []integrationFact{
+		{Key: "structured:/home/dev/.tool/settings.json", Desired: "inventory", Observed: "inventory-observed"},
+		{Key: "structured:/home/dev/.tool/settings.json", Desired: "source", Observed: "source-observed", AtDesired: true},
+		{Key: "lifecycle:sample", Desired: "absent", Observed: "installed"},
+	}}
+	fresh := approved
+	fresh.Fingerprint = "fresh"
+	fresh.facts = slices.Clone(approved.facts)
+	fresh.facts[2].Observed, fresh.facts[2].AtDesired = "", true
+	if err := CheckIntegrationPlan(approved, fresh); err != nil {
+		t.Fatalf("movement toward approved facts was refused: %v", err)
+	}
+	for name, change := range map[string]func(){
+		"first occurrence":  func() { fresh.facts[0].Observed = "changed" },
+		"second occurrence": func() { fresh.facts[1].AtDesired = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fresh.facts = slices.Clone(approved.facts)
+			change()
+			if !errors.Is(CheckIntegrationPlan(approved, fresh), domain.ErrPlanStale) {
+				t.Fatal("unapproved repeated fact change was accepted")
+			}
+		})
+	}
+	fresh.facts = slices.Clone(approved.facts[1:])
+	if !errors.Is(CheckIntegrationPlan(approved, fresh), domain.ErrPlanStale) {
+		t.Fatal("removed repeated fact was accepted")
 	}
 }

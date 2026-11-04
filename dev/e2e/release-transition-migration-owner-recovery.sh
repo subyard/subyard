@@ -307,9 +307,8 @@ PY
     final_root="$(sed -n 's/^staged release=.* candidate=//p' "$FIXTURE_ROOT/final-stage.log")"
     [ -d "$final_root" ] || die 'final release was not staged'
     final_launcher="$final_root/bin/yard"
-    # A yard from before disk-backed /tmp needs its separately disclosed restart.
-    fixture_env python3 -B "$ROOT/dev/e2e/migration-late-consent.py" --yard "$YARD_NAME" --allow-no-prompt -- \
-      "$final_launcher" update --offline --version "$FINAL_VERSION" --yes
+    # The update plan covers disk-backed /tmp restarts before mutation.
+    fixture_env "$final_launcher" update --offline --version "$FINAL_VERSION" --yes
     fixture_env "$final_launcher" update --check --offline --version "$FINAL_VERSION" --json \
       > "$FIXTURE_ROOT/final-ready.json"
     jq -e '.outcome.status=="ready" and .outcome.reachedGoal' "$FIXTURE_ROOT/final-ready.json" >/dev/null \

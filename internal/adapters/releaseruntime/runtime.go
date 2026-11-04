@@ -1304,6 +1304,12 @@ func (runtime *Runtime) prepareRetainedTransition(
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return Prepared{}, verifiedPreparation(err)
 		}
+		var refusal publicReleaseInspectionError
+		if errors.As(err, &refusal) && refusal.outcome.Code == releasetransition.CodeRollbackIncompatible {
+			// These outcomes were validated at the process boundary or constructed
+			// by a caller-side guard. Preserve their specific safe next action.
+			return Prepared{}, verifiedPreparation(err)
+		}
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
 			observed, release, nil, releasetransition.CodeRollbackIncompatible,
 			"the retained release cannot provide a safe rollback plan",
@@ -1475,6 +1481,18 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	}
 	if response.Inspection == nil {
 		return Prepared{}, errors.New("candidate returned an invalid release inspection")
+	}
+	goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
+	if err := releasetransition.ValidateProcessInspection(goal, *response.Inspection); err != nil {
+		return Prepared{}, fmt.Errorf("candidate returned an inconsistent release inspection: %w", err)
+	}
+	if outcome, err := runtime.inspectRollbackSourceActivation(ctx, owner, target, request, *response.Inspection); err != nil {
+		return Prepared{}, err
+	} else if outcome != nil {
+		if parsed.check {
+			return runtime.preparePublicInspectionOutcome(parsed, *outcome), nil
+		}
+		return Prepared{}, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
 	}
 	return runtime.prepareInspectedCandidateTransition(
 		parsed,

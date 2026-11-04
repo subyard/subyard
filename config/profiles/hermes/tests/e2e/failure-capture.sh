@@ -159,8 +159,16 @@ PY
 }
 
 hermes_repeat_init() {
+  local signature definition="$SUBYARD_CONFIG_HOME/yards/$YARD/config.env"
+  local project instance
+  project="$(setting "$YARD" INCUS_PROJECT)"
+  instance="$(setting "$YARD" YARD_INSTANCE_NAME)"
+  # shellcheck source=dev/e2e/lib-repeat-init-signature.sh
+  . "$ROOT/dev/e2e/lib-repeat-init-signature.sh"
+  signature="$(repeat_init_signature "$definition" "$project" "$instance")"
   if yard "$YARD" init --yes; then
-    :
+    [ "$(repeat_init_signature "$definition" "$project" "$instance")" = "$signature" ] \
+      || die 'repeated init changed the registration or native yard state'
   else
     repeat_init_rc=$?
     hermes_capture_release_readiness "$repeat_init_rc" || true

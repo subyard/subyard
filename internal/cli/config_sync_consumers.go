@@ -105,7 +105,7 @@ func (consumers *configSyncConsumers) apply(ctx context.Context, cli *CLI, loade
 			return err
 		}
 		if outcome != nil {
-			permit, err := cli.prepareConfigApplyRepairMode(ctx, loaded.Context.YardName, false, *outcome, true, names)
+			permit, err := cli.prepareActivationRepair(ctx, loaded.Context.YardName, false, *outcome, activationRepairMode{requireDrift: true, selectedNames: names})
 			if err != nil {
 				return err
 			}

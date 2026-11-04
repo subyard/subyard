@@ -1,0 +1,22 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    - exhaustive
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: false
+      # Types whose switches are complete state machines. Classification switches
+      # over other enums deliberately end in a refusing default.
+      only-types:
+        - '.*releasetransition\.(JournalCheckpoint|StepCheckpoint|EvidenceCheckpoint|Direction|PublicStatus|Decision|ProcessMode|SourceIngressRequestKind|RecoveryProcessMode|JournalReplacementReason|RollbackCompatibility|OwnerRegistrationState|OwnerRegistrationProgress)$'
+        - '.*migration\.(V1ImportRelease|V1ImportCheckpoint)$'
+        - '.*testyardmigration\.(Progress|BrokerRuntimeState)$'

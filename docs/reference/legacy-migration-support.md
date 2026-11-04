@@ -76,16 +76,28 @@ reasons, and nothing is authorized or changed. Activation keeps its approved int
 exactly what these verified steps publish and their restart outputs; any other change still refuses as
 stale. Persistent data,
 instance UUID and desired power remain protected. Completed migrations are not reopened for drift.
-Resume pins instance configuration only while the journal is migrating. Activation legitimately writes
-that configuration afterwards, so from then on only the owners' identity refusals apply to verified
-steps: an instance replaced directly in Incus during that window completes the update as found.
+Resume pins native instance identity and configuration while the journal is migrating.
+After all native rows are verified and the journal leaves migration, activation legitimately
+changes those observations. As in the published hotfix, continuation finishes that transaction
+without reopening its completed native rows, including after a post-activation replacement.
 Explicit `yard init --continue-legacy` can establish
 a separately confirmed, protected grant for bounded normal reconciliation of a supported,
 exactly assessed legacy resource. It keeps its closed device list while reporting every refusal
 together, does not relabel the project and does not authorize full removal.
-The power acceptance fixture exercises this opt-in, repeated plain init, two reboots and
-compatible rollback/forward while preserving the grant and native identity. Current-owned
+The power acceptance fixture covers registered ownership through repeated plain init,
+two reboots and compatible rollback/forward; it requires the continuation grant to be absent.
+The separate `legacy-continuation` acceptance lane exercises the opt-in grant through
+repeated plain init, two reboots and compatible rollback/forward. It explicitly seeds an
+unmarked native project after a verified installed upgrade, preserving the native UUID and
+data; this synthetic boundary does not claim an authenticated historical grant. The lane
+also verifies that continuation alone never authorizes full removal. Current-owned
 projects retain their ordinary repeatable initialization contract.
+
+Published direct-upgrade baselines run from **v0.11.0 through v0.25.5**, inclusive,
+using the immutable release asset digests in
+[`published-upgrade-baselines.tsv`](../../dev/e2e/published-upgrade-baselines.tsv).
+Candidate versions for this window must sort above v0.25.5. The released-caller
+fixtures below retain their distinct protocol and recovery baselines.
 
 ## Existing compatibility inventory
 

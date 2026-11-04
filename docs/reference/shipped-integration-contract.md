@@ -175,27 +175,15 @@ Known limits:
 - A materialized activation whose runtime lacks the selection publishes no proof. The next init on
   that yard does, with one extra temporary boot if it is stopped by then.
 
-The Paseo compatibility package removes the unit, helpers, `/opt/subyard/paseo`, `/srv/agents/paseo`
-and the ownership receipt, in that order, when each is proven. A unit is proven by its receipt, or,
-for releases before v0.15.0 that wrote none, by the exact published template. Helpers need the exact
-published template; the runtime needs its exact layout and manifest kind.
-`paseo.service.subyard-retired` is outside its deletion inventory.
+The Paseo compatibility package removes its service from every declared unit location, including
+foreign units and drop-ins, the helper commands, `/opt/subyard/paseo`, the receipt and
+`/srv/agents/paseo`. It requires no ownership proof. Only a non-empty real `worktrees/` directory
+inside that state directory survives, with one warning naming `/srv/agents/paseo/worktrees`.
+All other state, including chats, schedules, loops and uploads, is removed. A second observation
+with only those worktrees left changes nothing.
 
-`/srv/agents/paseo` is deleted only with a valid receipt and a `worktrees/` entry that is absent or
-an empty plain directory, rechecked after the service stops. A symlink, another file type or an
-unreadable `worktrees/` counts as holding a worktree. Otherwise the whole directory stays, every other
-proven item is still removed, and a persistent warning gives the exact manual removal command. It also
-says that removal deletes chats, schedules, loops and uploads and that a compatible rollback must re-pair.
-A template-proven unit without a receipt keeps the directory. The binding covers this decision, not
-the directory contents, so a worktree added after approval makes the plan stale.
-
-Unlike other retired packages, foreign ownership is not an error here. A unit or receipt that
-cannot be proven leaves everything in place, reports `absent` with the exact manual removal
-command, and does not block activation. That includes a unit systemd loads from any other path and
-a service still running without its unit file, because disabling precedes the unlink and so a
-retry never finds its own unit running. Once the operator removes it, the remaining proven state
-retires on the next reconcile. A helper or runtime that cannot be proven stays with a warning, while
-everything proven is removed. A genuine removal failure stays a normal error with a safe retry.
-A stopped yard stays unchanged during an update. `yard start` does not converge integrations, so
-the old unit can run after start until `yard init` retires it, with or without that start; see
-[Retirement proof](#retirement-proof).
+Removal never follows a leaf or ancestor symlink outside the fixed paths and refuses mounted
+removal targets. Genuine removal failures remain errors and partial removal is safe to retry.
+A stopped yard stays unchanged during an update, with `run: yard -Y NAME init` in its warning.
+Init temporarily starts it, removes Paseo and restores stopped power; `yard start` only warns until
+then. See [Retirement proof](#retirement-proof). To use Paseo, install an older release.

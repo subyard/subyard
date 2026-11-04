@@ -23,7 +23,8 @@ const (
 	ModeObserve = "observe"
 	ModeApply   = "apply"
 	// ModeAssessAdopt permits creation or verifies existing managed fields against
-	// protected ownership evidence, including legacy baselines, without writing.
+	// protected ownership evidence or exact recognized pre-baseline templates,
+	// without writing.
 	ModeAssessAdopt = "assess-adopt"
 	// ModeAssessRetire reports whether ownership has already been released and
 	// rejects missing, stale, or drifted ownership receipts without changing state.
@@ -318,7 +319,7 @@ func materializationRequest(format, mode, developer, destination string, uid int
 	program := strings.ReplaceAll(guestJSONProgram, "@STATE_ROOT@", stateRoot)
 	program = strings.ReplaceAll(program, "@STATE_UID@", fmt.Sprint(stateUID))
 	program = strings.ReplaceAll(program, "@FORMAT@", format)
-	if format == "toml" && len(legacyTemplates) != 0 {
+	if len(legacyTemplates) != 0 {
 		templates := make([]string, 0, len(legacyTemplates))
 		for _, template := range legacyTemplates {
 			templates = append(templates, string(template))

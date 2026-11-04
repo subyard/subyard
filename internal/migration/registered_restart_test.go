@@ -1,10 +1,10 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -73,157 +74,17 @@ func (restartNetwork) WithStart(_ context.Context, _ yardnetwork.Yard, start fun
 	return start()
 }
 
-func TestGuestTmpResumesCutBetweenPhysicalStopAndStart(t *testing.T) {
-	for _, test := range []struct {
-		name, power         string
-		failStart, failStop int
-	}{{"running", "running", 1, 0}, {"stopped", "stopped", 2, 0}, {"restore-stop-cut", "stopped", 0, 2}, {"guard-stale", "stopped", 0, 0}, {"uuid-drift", "stopped", 0, 0}, {"desired-drift", "stopped", 0, 0}, {"partial-start", "stopped", 1, 0}, {"cancelled", "stopped", 0, 0}, {"missing-script", "stopped", 0, 0}} {
-		power := test.power
-		t.Run(test.name, func(t *testing.T) {
-			root := testkit.TempDir(t)
-			if err := os.Mkdir(filepath.Join(root, "scripts"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, filepath.Join(root, "scripts/guest-disk-tmp.sh"), []byte("trusted policy\n"), 0600)
-			testkit.WriteFile(t, filepath.Join(root, "status"), []byte(power), 0600)
-			testkit.WriteFile(t, filepath.Join(root, "memory"), []byte("tmpfs"), 0600)
-			script := fmt.Sprintf(`#!/bin/sh
-set -eu
-case "$1" in
- stop)
-  [ "$#" = 1 ]
-  count=0; if [ -f "$STATE/stops" ];then count=$(cat "$STATE/stops");fi
-  count=$((count+1));printf '%%s' "$count" > "$STATE/stops"
-  [ "$count" != %d ] || exit 8
-  printf stopped > "$STATE/status" ;;
- start)
-  [ "$2" = --reconcile ]
-  count=0; if [ -f "$STATE/starts" ];then count=$(cat "$STATE/starts");fi
-  count=$((count+1));printf '%%s' "$count" > "$STATE/starts"
-  [ "$count" != %d ] || exit 7
-  printf running > "$STATE/status"
-  if [ -f "$STATE/policy" ];then rm -f "$STATE/memory";fi ;;
- *) exit 99 ;;
-esac
-`, test.failStop, test.failStart)
-			if test.name == "partial-start" {
-				script = strings.Replace(script, `[ "$count" != 1 ] || exit 7`, `[ "$count" != 1 ] || { printf running > "$STATE/status"; exit 7; }`, 1)
-			}
-			testkit.WriteFile(t, filepath.Join(root, "scripts/lifecycle-guard.sh"), []byte(script), 0700)
-			configuration := map[string]string{"volatile.uuid": "uuid-original", "user.subyard.desired_power": power, "user.subyard.managed": "true", "user.subyard.initialized": "true"}
-			native := &restartNative{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"fixture/yard": {Project: "fixture", Name: "yard", Config: configuration, LocalConfig: maps.Clone(configuration)}}}, root: root}
-			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: native, Executor: native, NetworkPolicy: restartNetwork{}, Yard: domain.Context{YardName: "default", IncusProject: "fixture", YardInstanceName: "yard"}, Environment: []string{"PATH=" + os.Getenv("PATH"), "STATE=" + root}}
-			asks := 0
-			consent := func(domain.ConfirmationRequest) (bool, error) { asks++; return true, nil }
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			var guards []func() error
-			if test.name == "cancelled" {
-				guards = append(guards, func() error {
-					status, _ := os.ReadFile(filepath.Join(root, "status"))
-					if string(status) == "running" {
-						cancel()
-					}
-					return ctx.Err()
-				})
-			}
-			if test.name == "missing-script" {
-				if err := os.Remove(filepath.Join(root, "scripts/guest-disk-tmp.sh")); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if test.name == "guard-stale" || strings.HasSuffix(test.name, "-drift") {
-				guards = append(guards, func() error {
-					status, _ := os.ReadFile(filepath.Join(root, "status"))
-					if string(status) != "running" {
-						return nil
-					}
-					current := native.Instances["fixture/yard"]
-					if test.name == "uuid-drift" {
-						current.Config["volatile.uuid"] = "foreign-uuid"
-					}
-					if test.name == "desired-drift" {
-						current.Config["user.subyard.desired_power"] = "running"
-					}
-					return domain.ErrPlanStale
-				})
-			}
-			if err := migrateRegisteredDiskTmp(ctx, runtime, consent, guards...); err == nil {
-				t.Fatal("native start cut or stale input was completed")
-			}
-			if test.name == "missing-script" {
-				if _, err := os.Stat(filepath.Join(root, "starts")); !errors.Is(err, os.ErrNotExist) || asks != 0 {
-					t.Fatal("missing source caused consent or temporary boot")
-				}
-				return
-			}
-			after, err := native.Instance(context.Background(), "fixture", "yard")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if test.name == "uuid-drift" || test.name == "desired-drift" {
-				if after.Status != "running" {
-					t.Fatal("restoration stopped a changed native identity or intent")
-				}
-				return
-			}
-			expectedStatus, expectedMarker := "stopped", ""
-			if test.name == "restore-stop-cut" {
-				expectedStatus = "running"
-			}
-			if after.Status != expectedStatus || after.Config["user.subyard.disk_tmp"] != expectedMarker {
-				t.Fatalf("cut state: %#v", after)
-			}
-			if test.name == "restore-stop-cut" {
-				stops, _ := os.ReadFile(filepath.Join(root, "stops"))
-				err := migrateRegisteredDiskTmp(context.Background(), runtime, func(request domain.ConfirmationRequest) (bool, error) {
-					if !strings.Contains(request.Summary, "restore stopped power") || strings.Contains(request.Consequences[0], "start this yard") {
-						t.Fatal("restoration plan requests an unnecessary restart")
-					}
-					return false, nil
-				})
-				unchanged, _ := os.ReadFile(filepath.Join(root, "stops"))
-				current, _ := native.Instance(context.Background(), "fixture", "yard")
-				if !errors.Is(err, domain.ErrOperationDeclined) || string(stops) != string(unchanged) || current.Status != "running" {
-					t.Fatal("restoration decline changed power", err)
-				}
-			}
-			// Reconstruct the concrete runtime from durable native state after the cut.
-			resumed := runtime
-			resumed.Incus = &restartNative{Incus: native.Incus, root: root}
-			resumed.Executor = resumed.Incus.(*restartNative)
-			if err := migrateRegisteredDiskTmp(context.Background(), resumed, consent); err != nil {
-				t.Fatal("resume", err)
-			}
-			after, err = native.Instance(context.Background(), "fixture", "yard")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if after.Status != power || after.Config["user.subyard.desired_power"] != power || after.Config["volatile.uuid"] != "uuid-original" || after.Config["user.subyard.disk_tmp"] != "v1" {
-				t.Fatalf("resumed state: %#v", after)
-			}
-			ready, err := resumed.RegisteredDiskTmpReady(context.Background())
-			if err != nil || !ready {
-				t.Fatalf("readiness trapped after resume: %t %v", ready, err)
-			}
-			beforeAsks := asks
-			starts, _ := os.ReadFile(filepath.Join(root, "starts"))
-			if err := migrateRegisteredDiskTmp(context.Background(), resumed, consent); err != nil {
-				t.Fatal(err)
-			}
-			repeated, _ := os.ReadFile(filepath.Join(root, "starts"))
-			if string(starts) != string(repeated) || asks != beforeAsks {
-				t.Fatal("completed repeat restarted")
-			}
-		})
-	}
+func writeConvergedHostNetwork(t *testing.T, root string) {
+	t.Helper()
+	testkit.WriteFile(t, filepath.Join(root, "scripts/06-network.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
 }
 
-func TestGuestTmpMaintenanceFailuresHaveSafePublicDiagnostics(t *testing.T) {
-	for _, test := range []struct{ name, stage, class string }{
-		{"stale", "post-consent-check", "stale-input"}, {"cancel", "post-consent-check", "cancelled"}, {"deadline", "post-consent-check", "deadline"}, {"unknown", "post-consent-check", "unclassified"},
-		{"exit", "stop", "child-exit-37"}, {"missing", "stop", "command-not-found"}, {"permission", "stop", "permission-denied"},
-	} {
+func TestGuestTmpPreparesHostBeforeStopping(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		repair  int
+		stopped bool
+	}{{"repaired", 0, true}, {"refused", 3, false}} {
 		t.Run(test.name, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			if err := os.Mkdir(filepath.Join(root, "scripts"), 0700); err != nil {
@@ -232,39 +93,148 @@ func TestGuestTmpMaintenanceFailuresHaveSafePublicDiagnostics(t *testing.T) {
 			testkit.WriteFile(t, filepath.Join(root, "scripts/guest-disk-tmp.sh"), []byte("trusted policy\n"), 0600)
 			testkit.WriteFile(t, filepath.Join(root, "status"), []byte("running"), 0600)
 			testkit.WriteFile(t, filepath.Join(root, "memory"), []byte("tmpfs"), 0600)
-			if test.name != "missing" {
-				mode := os.FileMode(0700)
-				if test.name == "permission" {
-					mode = 0600
-				}
-				testkit.WriteFile(t, filepath.Join(root, "scripts/lifecycle-guard.sh"), []byte("#!/bin/sh\nexit 37\n"), mode)
-			}
+			testkit.WriteFile(t, filepath.Join(root, "scripts/06-network.sh"), fmt.Appendf(nil, `#!/bin/sh
+printf 'network %%s\n' "$1" >> %[1]q/calls
+[ "$1" != --check ] || exit 1
+exit %[2]d
+`, root, test.repair), 0700)
+			testkit.WriteFile(t, filepath.Join(root, "scripts/lifecycle-guard.sh"), fmt.Appendf(nil, `#!/bin/sh
+printf 'lifecycle %%s\n' "$1" >> %[1]q/calls
+case "$1" in
+ stop) printf "physical stop\n" >&2; printf stopped > %[1]q/status ;;
+ start) printf running > %[1]q/status; rm -f %[1]q/memory ;;
+esac
+`, root), 0700)
 			configuration := map[string]string{"volatile.uuid": "uuid-original", "user.subyard.desired_power": "running", "user.subyard.managed": "true", "user.subyard.initialized": "true"}
-			native := &restartNative{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"fixture/yard": {Project: "fixture", Name: "yard", Config: configuration, LocalConfig: maps.Clone(configuration)}}}, root: root}
-			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: native, Executor: native, Yard: domain.Context{YardName: "default", IncusProject: "fixture", YardInstanceName: "yard"}, Environment: []string{"PATH=" + os.Getenv("PATH")}}
-			consented := false
-			original := map[string]error{"stale": domain.ErrPlanStale, "cancel": context.Canceled, "deadline": context.DeadlineExceeded, "unknown": errors.New("private-fixture-detail")}[test.name]
-			err := migrateRegisteredDiskTmp(context.Background(), runtime, func(domain.ConfirmationRequest) (bool, error) { consented = true; return true, nil }, func() error {
-				if consented {
-					return original
+			native := &restartNative{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"fixture/yard": {Project: "fixture", Name: "yard", Config: configuration, LocalConfig: configuration}}}, root: root}
+			var warnings bytes.Buffer
+			runtime := reconcileruntime.Runtime{Stderr: &warnings, RepositoryRoot: root, Incus: native, Executor: native, NetworkPolicy: restartNetwork{}, Yard: domain.Context{YardName: "default", IncusProject: "fixture", YardInstanceName: "yard"}}
+			err := CompleteRegisteredDiskTmp(context.Background(), runtime)
+			calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+			if !test.stopped {
+				if err == nil {
+					t.Fatal("host refusal succeeded")
 				}
-				return nil
-			})
-			var diagnostic interface{ ActivationDiagnostic() (string, string) }
-			if err == nil || !errors.As(err, &diagnostic) {
-				t.Fatal("maintenance failure lost public diagnostic", err)
+				if status, _ := os.ReadFile(filepath.Join(root, "status")); string(status) != "running" || string(calls) != "network --check\nnetwork --yes\n" {
+					t.Fatalf("refused host repair touched the yard: %s %s", status, calls)
+				}
+				return
 			}
-			message, retry := diagnostic.ActivationDiagnostic()
-			if message != "registered yard maintenance "+test.stage+" failed ("+test.class+")" || retry != "run yard update --check" || strings.Contains(err.Error(), "private-fixture-detail") || strings.Contains(message, root) {
-				t.Fatal("unsafe or imprecise maintenance diagnostic", message, retry, err)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if original != nil && !errors.Is(err, original) {
-				t.Fatal("maintenance diagnostic lost original cause")
+			disclosure, stop := strings.Index(warnings.String(), DiskTmpDisclosure("default", true)), strings.Index(warnings.String(), "physical stop")
+			if disclosure < 0 || stop <= disclosure {
+				t.Fatal("caller lost disclosure before stop", warnings.String())
 			}
-			after, _ := native.Instance(context.Background(), "fixture", "yard")
-			if after.Status != "running" || after.Config["user.subyard.disk_tmp"] != "" || !consented {
-				t.Fatal("failed maintenance changed native completion or skipped late consent")
+			if string(calls) != "network --check\nnetwork --yes\nlifecycle stop\nlifecycle start\n" {
+				t.Fatalf("calls:\n%s", calls)
 			}
 		})
+	}
+}
+
+func TestGuestTmpStoppedYardIsUntouched(t *testing.T) {
+	config := map[string]string{"volatile.uuid": "original", "user.subyard.desired_power": "stopped"}
+	native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"fixture/yard": {Project: "fixture", Name: "yard", Status: "Stopped", Config: config, LocalConfig: config}}}
+	runtime := reconcileruntime.Runtime{Incus: native, Yard: domain.Context{IncusProject: "fixture", YardInstanceName: "yard"}}
+	if err := CompleteRegisteredDiskTmp(context.Background(), runtime); err != nil {
+		t.Fatal(err)
+	}
+	if native.Instances["fixture/yard"].Config["user.subyard.disk_tmp"] != "" {
+		t.Fatal("stopped yard marked complete without boot")
+	}
+}
+
+func TestGuestTmpDisclosureFitsReleasedResult(t *testing.T) {
+	// Resource IDs cap a wire-visible yard at 123 bytes (the 'yard.' prefix
+	// consumes five). This also covers Incus's shorter native name limit.
+	for _, running := range []bool{false, true} {
+		text := DiskTmpDisclosure(strings.Repeat("a", 123), running)
+		if len(text) > 256 {
+			t.Fatalf("frozen Result overflow: %d", len(text))
+		}
+		if running && (!strings.Contains(text, "sessions") || !strings.Contains(text, "connections") || !strings.Contains(text, "persistent data")) {
+			t.Fatal(text)
+		}
+	}
+}
+
+// A failed yard completes its authorized row, not its native policy. A fresh
+// update sees the absent marker again and leaves completed yards alone.
+func TestGuestTmpFailureKeepsPendingMarkerWithoutStoppingLaterRows(t *testing.T) {
+	var warnings bytes.Buffer
+	owners := []*RegisteredYardMigration{}
+	natives := []*registeredNativeFixture{}
+	desired := []releasetransition.Fingerprint{}
+	for index := 0; index < 3; index++ {
+		_, owner, native, _ := pairedRegisteredOwners(t)
+		original := owner.LoadTargets
+		owner.LoadTargets = func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
+			targets, err := original(ctx, view)
+			for i := range targets {
+				targets[i].Runtime.Stderr = &warnings
+			}
+			return targets, err
+		}
+		before, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		desired = append(desired, before.Desired)
+		native.failTmp = index == 1
+		owners = append(owners, owner)
+		natives = append(natives, native)
+	}
+	for index, owner := range owners {
+		if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+			t.Fatal(err)
+		}
+		after, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil || !after.Converged || after.Desired != desired[index] {
+			t.Fatalf("row %d not verified: %+v %v", index, after, err)
+		}
+		if (natives[index].Instances["fixture/yard"].Config["user.subyard.disk_tmp"] == "v1") != (index != 1) {
+			t.Fatalf("row %d marker lies", index)
+		}
+	}
+	if !strings.Contains(warnings.String(), "yard default: disk-/tmp migration pending") {
+		t.Fatal("missing named warning", warnings.String())
+	}
+	for index, owner := range owners {
+		owner.attempted = false // the next command's fresh owner
+		natives[index].failTmp = false
+		before, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := len(natives[index].ExecCalls)
+		if before.Converged == (index == 1) {
+			t.Fatalf("fresh row %d lost marker-derived work", index)
+		}
+		if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+			t.Fatal(err)
+		}
+		if natives[index].Instances["fixture/yard"].Config["user.subyard.disk_tmp"] != "v1" || (index != 1 && len(natives[index].ExecCalls) != calls) {
+			t.Fatalf("retry repeated finished row %d", index)
+		}
+	}
+}
+
+func TestGuestTmpNewRunningYardRequiresFreshPlan(t *testing.T) {
+	_, owner, native, _ := pairedRegisteredOwners(t)
+	instance := native.Instances["fixture/yard"]
+	instance.Status = "Stopped"
+	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	if _, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	instance.Status = "Running"
+	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("new restart escaped plan: %v", err)
+	}
+	if len(native.ExecCalls) != 0 || instance.Config["user.subyard.disk_tmp"] != "" {
+		t.Fatal("stale plan mutated guest")
 	}
 }

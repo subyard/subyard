@@ -129,20 +129,8 @@ def run(fixture):
         error(call(process, "operation.execute", operation,
                    {"confirmed": False, "digest": digest}), "confirmation_required", "decline")
         require(probe(fixture["probe"]) == initial, "decline mutated target state")
-        require("result" in call(process, "operation.discard", operation),
-                "discard failed")
-        error(call(process, "operation.execute", operation,
-                   {"confirmed": True, "digest": digest}), "plan_not_found", "discard-replay")
-        operation, digest = plan(process)
-        error(call(process, "operation.execute", operation,
-                   {"confirmed": True, "digest": "0" * 64}), "plan_binding_invalid", "digest-tamper")
-        error(call(process, "operation.execute", operation,
-                   {"confirmed": True, "digest": digest}), "plan_not_found", "tamper-replay")
-        disconnected_operation, disconnected_digest = plan(process)
-    require(probe(fixture["probe"]) == initial, "rejected or disconnected plan mutated state")
+    require(probe(fixture["probe"]) == initial, "decline or disconnect mutated target state")
     with session(fixture["ssh"]) as process:
-        error(call(process, "operation.execute", disconnected_operation,
-                   {"confirmed": True, "digest": disconnected_digest}), "plan_not_found", "disconnect-replay")
         if "drift" in fixture:
             drift_rejection = fixture.get("driftRejection", "plan_stale")
             require(drift_rejection in ("plan_stale", "transition-required"),

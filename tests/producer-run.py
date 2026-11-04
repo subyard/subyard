@@ -180,13 +180,16 @@ with tempfile.TemporaryDirectory(prefix="producer-bridge-", dir="/tmp") as tempo
 
 with tempfile.TemporaryDirectory(prefix="producer-test-", dir=ROOT / ".build") as temporary:
     root = Path(temporary)
+    # VM transports put the checkout below /var/tmp, which producers hide.
+    # Keep the fixture's marker exchange visible through the explicit contract.
+    shared = (str(root),) if any(root.is_relative_to(path) for path in ("/tmp", "/var/tmp", "/dev/shm")) else ()
     marker = root / "started"
     operation = root / "profile-operation-v4"
     legacy = root / "profile-operation"
     child = "import os,json,time; from pathlib import Path; f=open('/tmp/open-deleted','wb'); os.unlink(f.name); f.write(b'x'*1048576); f.flush(); fields=Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split(); pid=Path('/proc/self/stat').read_text().split(' ',1)[0]; Path(__import__('sys').argv[1]).write_text(json.dumps([pid,fields[19]])); time.sleep(300)"
     import shlex
     script = 'setsid python3 -c ' + shlex.quote(child) + ' "$1" & wait\n'
-    command = Profile(HELPER, root, 'set -- ' + shlex.quote(str(marker)) + '\n' + script)
+    command = Profile(HELPER, root, 'set -- ' + shlex.quote(str(marker)) + '\n' + script, shared=shared)
     old_command = command.replace(helper=LEGACY)
     recovery = command.replace(script="exit 7\n")
     old_recovery = recovery.replace(helper=LEGACY)

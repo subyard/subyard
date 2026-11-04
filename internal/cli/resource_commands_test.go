@@ -493,48 +493,80 @@ func TestResourceHelpAndHiddenSvcUseSafeSharedDispatch(t *testing.T) {
 }
 
 func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
-	remoteDirectory := filepath.Join(root, "state", "yards", "remote")
-	if err := os.MkdirAll(remoteDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(remoteDirectory, "config.env"),
-		"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
-	fakeBin := filepath.Join(root, "fake-bin")
-	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sshLog := writeStructuredOwnerFixture(t, fakeBin, "demo", []string{"run"}, []domain.OperationStep{{ID: "resource.run", Target: "owner inner fixture resource", Observed: "pending native resource", Desired: "native resource converged", Decision: domain.StepApply, Verify: "owner native verifier reports converged", Consequence: "converge owner fixture resource"}}, "converge owner fixture resource")
+	for _, test := range []struct {
+		name                      string
+		arguments, ownerArguments []string
+		prompts                   int
+		decline                   bool
+	}{
+		{"baseline", []string{"run"}, []string{"run"}, 1, false},
+		{"long payload flag", []string{"run", "--", "--yes"}, []string{"run", "--", "--yes"}, 1, false},
+		{"short payload flag", []string{"run", "--", "-y"}, []string{"run", "--", "-y"}, 1, false},
+		{"repeated separator", []string{"run", "--", "--", "--yes"}, []string{"run", "--", "--", "--yes"}, 1, false},
+		{"prefix and payload flags", []string{"run", "--yes", "--", "--yes"}, []string{"run", "--", "--yes"}, 0, false},
+		{"short prefix and payload flags", []string{"-y", "run", "--", "-y"}, []string{"run", "--", "-y"}, 0, false},
+		{"multiple prefix flags", []string{"--yes", "run", "-y", "--", "--yes"}, []string{"run", "--", "--yes"}, 0, false},
+		{"declined payload", []string{"run", "--", "--yes"}, []string{"run", "--", "--yes"}, 1, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, applyLog := resourceCommandFixture(t)
+			remoteDirectory := filepath.Join(root, "state", "yards", "remote")
+			if err := os.MkdirAll(remoteDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(remoteDirectory, "config.env"),
+				"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
+			fakeBin := filepath.Join(root, "fake-bin")
+			if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sshLog := writeStructuredOwnerFixture(t, fakeBin, "demo", test.ownerArguments, []domain.OperationStep{{ID: "resource.run", Target: "owner inner fixture resource", Observed: "pending native resource", Desired: "native resource converged", Decision: domain.StepApply, Verify: "owner native verifier reports converged", Consequence: "converge owner fixture resource"}}, "converge owner fixture resource")
 
-	path := fakeBin + ":" + os.Getenv("PATH")
-	t.Setenv("PATH", path)
-	environment = append(environment, "PATH="+path)
-	prompt := &testkit.Prompt{Answers: []bool{true}}
-	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "remote", "demo", "run"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code := program.Run(context.Background()); code != 0 {
-		t.Fatalf("code=%d stderr=%q", code, stderr.String())
-	}
-	if len(prompt.Requests) != 1 {
-		t.Fatalf("controller did not confirm the owner prepared action: %#v", prompt.Requests)
-	}
-	if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
-		t.Fatalf("controller ran resource handler: %v", err)
-	}
-	forwarded, err := os.ReadFile(sshLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, expected := range []string{"owner.example", "'yard'", "'inner'", "operation.plan", "operation.execute", "stepSchema", strings.Repeat("a", 64)} {
-		if !strings.Contains(string(forwarded), expected) {
-			t.Fatalf("forwarded command missing %q:\n%s", expected, forwarded)
-		}
+			path := fakeBin + ":" + os.Getenv("PATH")
+			t.Setenv("PATH", path)
+			environment = append(environment, "PATH="+path)
+			prompt := &testkit.Prompt{Answers: []bool{!test.decline}}
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: append([]string{"-Y", "remote", "demo"}, test.arguments...),
+				Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCode := 0
+			if test.decline {
+				wantCode = 1
+			}
+			if code := program.Run(context.Background()); code != wantCode {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if len(prompt.Requests) != test.prompts {
+				t.Fatalf("controller did not confirm the owner prepared action: %#v", prompt.Requests)
+			}
+			if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
+				t.Fatalf("controller ran resource handler: %v", err)
+			}
+			forwarded, err := os.ReadFile(sshLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, expected := range []string{"owner.example", "'yard'", "'inner'", "operation.plan", "stepSchema"} {
+				if !strings.Contains(string(forwarded), expected) {
+					t.Fatalf("forwarded command missing %q:\n%s", expected, forwarded)
+				}
+			}
+			if strings.Count(string(forwarded), "session ") != 1 {
+				t.Fatalf("resource operation used multiple owner sessions: %s", forwarded)
+			}
+			if test.decline {
+				if strings.Contains(string(forwarded), "operation.execute") {
+					t.Fatalf("declined payload reached owner execution: %s", forwarded)
+				}
+			} else if !strings.Contains(string(forwarded), "operation.execute") || !strings.Contains(string(forwarded), strings.Repeat("a", 64)) {
+				t.Fatalf("owner did not execute the exact reviewed digest: %s", forwarded)
+			}
+		})
 	}
 }
 

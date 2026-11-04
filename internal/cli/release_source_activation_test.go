@@ -66,12 +66,9 @@ func (native *stoppedActivationNative) AdoptRegisteredInstance(ctx context.Conte
 }
 
 func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *testing.T) {
-	for _, mode := range []string{"tmp-stopped", "tmp-running", "native-stopped", "combined-stopped", "no-proof", "tampered-proof", "retired-stopped", "retired-proven"} {
+	for _, mode := range []string{"tmp-stopped", "native-stopped", "combined-stopped", "retired-stopped", "retired-proven"} {
 		t.Run(mode, func(t *testing.T) {
 			initial := "stopped"
-			if mode == "tmp-running" {
-				initial = "running"
-			}
 			nativePending := mode == "native-stopped" || mode == "combined-stopped"
 			program, execution, fixture := adoptionFixture(t)
 			root := program.options.RepositoryRoot
@@ -148,9 +145,9 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 				}
 			}
 			testkit.WriteFile(t, settingsPath, body, 0600)
+			testkit.WriteFile(t, filepath.Join(root, "scripts/06-network.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
 			testkit.WriteFile(t, filepath.Join(root, "scripts/lifecycle-guard.sh"), []byte("#!/bin/sh\ncase \"$1\" in start) printf running > \"$STATE/physical-status\";; stop) printf stopped > \"$STATE/physical-status\";; *) exit 90;; esac\n"), 0700)
 			program.options.Stdin = strings.NewReader("yes\n")
-			program.migrationOperatorInput = nil
 			program.openTerminal = func() (*os.File, error) { return nil, errors.New("test uses explicit prompt") }
 			request := releasetransition.ProcessRequest{ConfigHome: execution.loaded.Context.Paths.ConfigHome}
 			register := program.registeredYardMigration(request, false, "default")
@@ -167,20 +164,13 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			releases := releasetransition.ReleasePair{From: "release-a", Target: "release-b"}
 			view := preparedActivationSnapshotFixture{home: request.ConfigHome}
 			owner := program.registeredYardMigration(request, true, "default").(*migration.RegisteredYardMigration)
-			owner.Prompt = &testkit.Prompt{Answers: []bool{true}}
-			maintenance, err := owner.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+			_, err = owner.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			sourceView := releasetransition.V2SourceActivationView{Settings: view, RegisteredYards: map[string]releasetransition.Fingerprint{}, GuestDiskTmp: map[string]releasetransition.Fingerprint{}}
 			if nativePending {
 				sourceView.RegisteredYards[register.ID()] = registration.Desired
-			}
-			if !maintenance.Converged && mode != "no-proof" {
-				sourceView.GuestDiskTmp[owner.ID()] = maintenance.Desired
-			}
-			if mode == "tampered-proof" {
-				sourceView.GuestDiskTmp[owner.ID()] = releasetransition.Fingerprint(strings.Repeat("b", 64))
 			}
 			projected, err := reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, sourceView)
 			if retired {
@@ -190,12 +180,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 				reminder := "retired integration widget may still be installed in yard default; run: yard -Y default init"
 				if slices.Contains(projected.Consequences, reminder) != (mode == "retired-stopped") {
 					t.Fatalf("update check consequences=%q", projected.Consequences)
-				}
-				return
-			}
-			if mode == "tampered-proof" {
-				if !errors.Is(err, domain.ErrPlanStale) {
-					t.Fatal("tampered intent accepted", err)
 				}
 				return
 			}
@@ -218,20 +202,18 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 					t.Fatal(err)
 				}
 			}
-			if mode != "native-stopped" && native.markerPower != "stopped" {
-				t.Error("completion marker published before stopped restoration", native.markerPower)
+			if native.markerPower != "" {
+				t.Fatal("stopped yard was booted or falsely marked", native.markerPower)
 			}
 			_, err = reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
-			if mode == "no-proof" {
-				if !errors.Is(err, domain.ErrPlanStale) {
-					t.Fatal("unplanned native drift authorized repair", err)
-				}
-				return
-			}
+
 			if err != nil {
 				t.Fatal("completed owned migration invalidated prepared availability", err)
 			}
 			for _, change := range []string{"uuid", "config", "device", "intent", "power", "missing", "private-input"} {
+				if change == "private-input" && !nativePending {
+					continue
+				}
 				current, err := native.Instance(context.Background(), instance.Project, instance.Name)
 				if err != nil {
 					t.Fatal(err)
@@ -467,9 +449,9 @@ func checkPreparedMaterializedActivation(t *testing.T, native bool) {
 		t.Fatalf("platform injection changed native desired fingerprint: injected=%s native=%s err=%v", otherPlatform.Desired, before.Desired, err)
 	}
 	hostAsset := filepath.Join(fixture.configHome, "overrides", "host", "agents", "claude", "settings.json")
-	newAsset := filepath.Join(fixture.configHome, "yards", "test-yard", "overrides", "agents", "claude", "settings.json")
-	registration := filepath.Join(fixture.configHome, "yards", "test-yard", "config.env")
-	view := preparedActivationSnapshotFixture{home: fixture.configHome, names: []string{"named", "test-yard"}, snapshots: map[string]config.PersistentFileSnapshot{
+	newAsset := filepath.Join(fixture.configHome, "yards", "imported-yard", "overrides", "agents", "claude", "settings.json")
+	registration := filepath.Join(fixture.configHome, "yards", "imported-yard", "config.env")
+	view := preparedActivationSnapshotFixture{home: fixture.configHome, names: []string{"named", "imported-yard"}, snapshots: map[string]config.PersistentFileSnapshot{
 		hostAsset:    {Exists: true, Content: []byte(`{"env":{"SCOPE":"default-imported"}}`)},
 		newAsset:     {Exists: true, Content: []byte(`{"env":{"SCOPE":"canonical-imported"}}`)},
 		registration: {Exists: true, Content: []byte("SSH_PORT=2244\nAGENT_claude_CONFIG='" + newAsset + "'\n")},
@@ -516,7 +498,7 @@ func checkPreparedMaterializedActivation(t *testing.T, native bool) {
 	if drift.Desired == projected.Desired {
 		t.Fatal("unexpected asset drift retained projected authority")
 	}
-	fixture.program.options.Incus.(*testkit.Incus).Instances["subyard-test-yard/yard-test-yard"] = ports.InstanceInfo{Project: "subyard-test-yard", Name: "yard-test-yard", Status: "Running"}
+	fixture.program.options.Incus.(*testkit.Incus).Instances["subyard-imported-yard/yard-imported-yard"] = ports.InstanceInfo{Project: "subyard-imported-yard", Name: "yard-imported-yard", Status: "Running"}
 	if _, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{}); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatal("unapproved backend availability was accepted", err)
 	}

@@ -19,6 +19,6 @@
     "handler": "retire.py",
     "instance_config_keys": [],
     "instance_devices": [],
-    "retirement_notice": "retire integration paseo: remove paseo.service, its helpers and /opt/subyard/paseo when proven; /srv/agents/paseo, including chats, schedules, loops and uploads, is also deleted unless it holds a worktree; paired clients disconnect and a compatible rollback needs re-pairing."
+    "retirement_notice": "retire integration paseo: remove its service, helper commands, /opt/subyard/paseo, receipt and /srv/agents/paseo, including chats, schedules, loops and uploads; keep only a non-empty real /srv/agents/paseo/worktrees directory."
   }
 }

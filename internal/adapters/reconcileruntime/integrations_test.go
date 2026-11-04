@@ -251,11 +251,15 @@ func TestPrepareLegacyIntegrationAdoptionSkipsUnavailableIncus(t *testing.T) {
 }
 
 func TestIntegrationConfigAdoptionReadsShippedHistoricalTemplates(t *testing.T) {
-	for _, kind := range []string{"absent", "regular", "symlink-directory", "symlink-template"} {
+	for _, kind := range []string{"absent", "regular", "regular-json", "symlink-directory", "symlink-template"} {
 		t.Run(kind, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			directory := filepath.Join(root, "config", "agents", "fixture", "legacy-config")
 			historical := []byte("# Previous template\nmanaged = 'old'\n")
+			format, desired := "toml", []byte("managed = 'new'\n")
+			if kind == "regular-json" {
+				format, historical, desired = "json", []byte(`{"managed":"old"}`), []byte(`{"managed":"new"}`)
+			}
 			if kind != "absent" {
 				if err := os.MkdirAll(filepath.Dir(directory), 0755); err != nil {
 					t.Fatal(err)
@@ -269,7 +273,7 @@ func TestIntegrationConfigAdoptionReadsShippedHistoricalTemplates(t *testing.T) 
 					if err := os.Mkdir(directory, 0755); err != nil {
 						t.Fatal(err)
 					}
-					path := filepath.Join(directory, "previous.toml")
+					path := filepath.Join(directory, "previous."+format)
 					if kind == "symlink-template" {
 						target := filepath.Join(root, "outside.toml")
 						testkit.WriteFile(t, target, historical, 0644)
@@ -285,8 +289,8 @@ func TestIntegrationConfigAdoptionReadsShippedHistoricalTemplates(t *testing.T) 
 			incus.ExecSteps[0].Result.Stdout = []byte(`{"converged":false,"adoptable":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 			runtime := Runtime{RepositoryRoot: root, Executor: incus,
 				Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
-			file := guestConfigFile{integration: "fixture", ownedFormat: "toml", destination: "/home/dev/.fixture/config.toml"}
-			_, err := runtime.observeIntegrationConfigFile(context.Background(), configmaterial.ModeAssessAdopt, file, []byte("managed = 'new'\n"))
+			file := guestConfigFile{integration: "fixture", ownedFormat: format, destination: "/home/dev/.fixture/config." + format}
+			_, err := runtime.observeIntegrationConfigFile(context.Background(), configmaterial.ModeAssessAdopt, file, desired)
 			unsafe := strings.HasPrefix(kind, "symlink-")
 			if unsafe {
 				if err == nil || len(incus.ExecCalls) != 0 {
@@ -298,8 +302,64 @@ func TestIntegrationConfigAdoptionReadsShippedHistoricalTemplates(t *testing.T) 
 				t.Fatalf("historical template assessment: %v", err)
 			}
 			command := incus.ExecCalls[0].Request.Command
-			if command[4] != configmaterial.ModeAssessAdopt || strings.Contains(command[3], "LEGACY_TEMPLATES = ") != (kind == "regular") {
+			if command[4] != configmaterial.ModeAssessAdopt || strings.Contains(command[3], "LEGACY_TEMPLATES = ") != strings.HasPrefix(kind, "regular") {
 				t.Fatal("historical templates were not scoped to their owning integration")
+			}
+		})
+	}
+}
+
+func TestRawHistoricalConfigDigestIsBoundToInitialAdoption(t *testing.T) {
+	root := testkit.TempDir(t)
+	directory := filepath.Join(root, "config/agents/sample")
+	if err := os.MkdirAll(filepath.Join(directory, "legacy-config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0644)
+	testkit.WriteFile(t, filepath.Join(directory, "integration.json"), []byte(`{"schema_version":1}`), 0644)
+	rules := filepath.Join(directory, "rules")
+	testkit.WriteFile(t, rules, []byte("new rules\n"), 0644)
+	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{DevUser: "dev", DevUID: 1000},
+		Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: directory}},
+		Environment:  []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_RULES=" + rules, "AGENT_sample_RULES_DEST=.sample/rules"},
+	}
+	path := filepath.Join(directory, "legacy-config/rules.sha256")
+	first := strings.Repeat("a", 64)
+	testkit.WriteFile(t, path, []byte(first+"\n"), 0644)
+	entries, err := runtime.integrationArtifactsPhase("inspect")
+	if err != nil || entries[0].SourceDigest != first {
+		t.Fatalf("historical raw proof unavailable: %v %#v", err, entries)
+	}
+	bound, _, err := runtime.IntegrationScope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte(strings.Repeat("b", 64)+"\n"), 0644)
+	fresh, _, err := runtime.IntegrationScope()
+	if err != nil || fresh == bound {
+		t.Fatal("historical source change was not bound to the plan")
+	}
+	for _, problem := range []string{"invalid", "symlink", "absent"} {
+		t.Run(problem, func(t *testing.T) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			switch problem {
+			case "invalid":
+				testkit.WriteFile(t, path, []byte("private-invalid-digest"), 0644)
+			case "symlink":
+				if err := os.Symlink(rules, path); err != nil {
+					t.Fatal(err)
+				}
+			case "absent":
+			}
+			entries, err := runtime.integrationArtifactsPhase("inspect")
+			if problem == "absent" {
+				if err != nil || entries[0].SourceDigest != "" {
+					t.Fatal("absent proof authorized historical raw bytes")
+				}
+			} else if err == nil || strings.Contains(err.Error(), "private-invalid") {
+				t.Fatal("unsafe proof accepted or exposed")
 			}
 		})
 	}
@@ -1606,6 +1666,7 @@ func TestReconcileIntegrationsStepIsSafePlanText(t *testing.T) {
 	for selection, want := range map[string]string{
 		"":             "reconcile selected integrations: none",
 		"  ":           "reconcile selected integrations: none",
+		" codex  pi ":  "reconcile selected integrations: codex pi",
 		" codex  orca": "reconcile selected integrations: codex orca",
 	} {
 		if got := reconcileIntegrationsStep(selection); got != want || strings.TrimSpace(got) != got {

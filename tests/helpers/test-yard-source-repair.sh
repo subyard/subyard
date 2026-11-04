@@ -2,6 +2,37 @@
 # Owning native test-yard source repair assertions. Sourced by the singleton
 # reliable-migrations-recovery fixture; never acquire or build an inner VM.
 
+# shellcheck source=tests/helpers/known-release-final-check.sh
+. "$ROOT/tests/helpers/known-release-final-check.sh"
+
+# The immutable 0.18.6 caller cannot perform the candidate's item-20 follow-up.
+# Admit only its observed completed migration with materialized activation left.
+source_repair_finish_known_final_check() {
+  local original="$1" current repair_rc=0
+  [ "$original" = 1 ] || return 1
+  tr -d '\r' < "$STATE_ROOT/source-update.log" | grep -Fx \
+    'yard: update: final update check: the inspected release transition has not started; next: run yard update' >/dev/null || return 1
+  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || return 1
+  current="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" || return 1
+  [[ "$current" = "releases/$CANDIDATE_VERSION-"* ]] || return 1
+  current="${current#releases/}"
+  operator_yard migrate --check --json > "$STATE_ROOT/source-final-check.json" || return 1
+  operator_env cat "$V2_JOURNAL" > "$STATE_ROOT/source-final-journal.json" || return 1
+  known_materialized_final_check "$STATE_ROOT/source-final-check.json" "$STATE_ROOT/source-final-journal.json" \
+    "$current" "${OLD_RELEASE_TARGET#releases/}" || return 1
+  printf 'reliable-migrations: released caller native_exit=%s; completed migration needs candidate materialized-config repair\n' "$original"
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$OPERATOR_HOME/.local/bin/yard" \
+    update --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/source-final-repair.log" 2>&1 || repair_rc=$?
+  cat "$STATE_ROOT/source-final-repair.log"
+  printf 'reliable-migrations: candidate follow-up native_exit=%s\n' "$repair_rc"
+  [ "$repair_rc" = 0 ] || return 1
+  operator_yard migrate --check --json > "$STATE_ROOT/source-final-ready.json" || return 1
+  jq -e --arg target "$current" '.outcome.status == "ready" and .outcome.code == "ready" and
+    .outcome.reachedGoal == true and .outcome.active == $target and .outcome.target == $target and
+    (.blockers // []) == [] and all(.decisions[]?; .decision == "preserve")' \
+    "$STATE_ROOT/source-final-ready.json" >/dev/null
+}
+
 source_repair_snapshot_host_sink() {
   local path name unit state
   install -d -m 0700 "$BEFORE_ROOT/sink"
@@ -79,7 +110,15 @@ source_repair_assert_native_routes() {
     incus exec "$instance" --project "$project" -- test -s /var/lib/subyard/e2e-routes/test-yard/current/known_hosts
   done
   # Ordinary init provisions broker metadata only. No cold base or held slot is permitted.
-  operator_yard -Y test-yard test-vms status --json > "$STATE_ROOT/source-pool-status.json"
+  local status_rc=0
+  printf 'reliable-migrations: native-route-status cli=%s\n' "$(operator_yard --version)" >&2
+  operator_yard -Y test-yard test-vms status --json > "$STATE_ROOT/source-pool-status.json" 2> "$STATE_ROOT/source-pool-status.err" || status_rc=$?
+  if [ "$status_rc" != 0 ]; then
+    printf 'reliable-migrations: native-route-status native_exit=%s\n' "$status_rc" >&2
+    head -c 16384 "$STATE_ROOT/source-pool-status.json" >&2
+    head -c 4096 "$STATE_ROOT/source-pool-status.err" >&2
+    return "$status_rc"
+  fi
   jq -e '.pool.slots | length == 1 and all(.[]; .state == "available" and (.lease_id // "") == "")' "$STATE_ROOT/source-pool-status.json" >/dev/null \
     || die 'fixture acquired or held a nested VM slot'
   incus exec yard-test-yard --project subyard-test-yard -- incus list --format json | jq -e 'length == 0' >/dev/null
@@ -151,6 +190,7 @@ run_source_repair_acceptance() {
   fi
   download_baseline
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  OLD_UNIT_FIXTURE="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in"
   operator_yard config set CODING_TOOL_INTEGRATIONS claude --scope host --local --yes
   seed_yard named 2233
   seed_yard stopped 2234
@@ -197,6 +237,8 @@ run_source_repair_acceptance() {
 
   # Authenticate the unfinished original-owner case through actual native apply.
   materialize_unit "$OLD_UNIT_FIXTURE" "$STATE_ROOT/source-drift.service"
+  # The installed release owns this template, so drift needs its own bytes.
+  printf '# subyard-p0 source repair drift %s\n' "$MARKER" >> "$STATE_ROOT/source-drift.service"
   sudo -n install -m 0644 "$STATE_ROOT/source-drift.service" "$UNIT"
   sudo -n systemctl daemon-reload
   install_activation_reconcile_fault
@@ -220,7 +262,22 @@ run_source_repair_acceptance() {
   sudo -n jq -e --arg predecessor "$predecessor" '.checkpoint == "complete" and .transaction != $predecessor' "$V2_JOURNAL" >/dev/null
   operator_yard migrate --check --json > "$STATE_ROOT/source-original-ready.json"
   jq -e '.outcome.status == "ready"' "$STATE_ROOT/source-original-ready.json" >/dev/null
-  candidate_update --yes
+  # A disk /tmp restart is confirmed by the operator at the terminal, per yard.
+  rc=0
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$OPERATOR_HOME/.local/bin/yard" \
+    update --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/source-update.log" 2>&1 || {
+      rc=$?
+      cat "$STATE_ROOT/source-update.log"
+      source_repair_finish_known_final_check "$rc" || {
+        printf 'reliable-migrations-diagnostic trigger=source-update native_exit=%s\n' "$rc" >&2
+        recovery_failure_diagnostics || true
+        return "$rc"
+      }
+    }
+  if [ "${rc:-0}" = 0 ]; then cat "$STATE_ROOT/source-update.log"; fi
+  # The legacy broker predates owner service registrations. Adopt its existing
+  # owned runtime through the supported API, without init, restart or a lease.
+  operator_yard service register test-vms --yard test-yard --yes
   source_repair_assert_native_routes
   before="$(source_repair_history_identity)"
   candidate_update --yes

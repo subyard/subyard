@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -25,6 +26,15 @@ import (
 type sampleRepairPlatformFixture struct {
 	*initPlatformFixture
 	observation *ports.RuntimeObservation
+	installed   *ports.RuntimeObservation
+	installedID string
+}
+
+func (fixture *sampleRepairPlatformFixture) ObserveInstalledRuntime(ctx context.Context, id string) (ports.RuntimeObservation, error) {
+	if id == firstNonempty(fixture.installedID, "core-guest-runtime") && fixture.installed != nil {
+		return *fixture.installed, nil
+	}
+	return fixture.initPlatformFixture.ObserveInstalledRuntime(ctx, id)
 }
 
 func (fixture *sampleRepairPlatformFixture) ObserveProfileRuntimes(context.Context) (map[string]ports.RuntimeObservation, error) {
@@ -47,18 +57,242 @@ func (fixture *initIntegrationRepairFixture) IntegrationPlan(context.Context) (r
 	return fixture.plan, fixture.err
 }
 
-func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
-	for _, scenario := range []string{"missing dispatcher", "ownership conflict", "unselected drift", "changed plan", "remaining drift"} {
+func TestIntegrationCompletedReleaseNoOpsAndRetry(t *testing.T) {
+	program, ready, home := completedSourceAuthoringFixture(t, false, map[string]string{
+		"config/agents.env": "CODING_TOOL_INTEGRATIONS=\nAGENT_tool_COMMAND=sh\n",
+	})
+	path := filepath.Join(home, "yards/default/config.env")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte("CODING_TOOL_INTEGRATIONS=\nSSH_PORT=2222\n"), 0600)
+	hook := filepath.Join(testkit.TempDir(t), "provision.sh")
+	testkit.WriteFile(t, hook, []byte("#!/bin/sh\nexit 71\n"), 0700)
+	runtime := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Scope: strings.Repeat("a", 64)}}
+	platform := newInitPlatformFixture()
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	program.options.InitPlatform = platform
+	program.options.IntegrationRuntime = func(loaded config.Loaded) IntegrationRuntime {
+		runtime.requested = loaded.Integrations.Requested
+		payload := mustReadConfigFixture(t, hook)
+		runtime.plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256(payload))
+		return runtime
+	}
+	runtime.afterApply = func() {
+		if runtime.applyErr != nil {
+			if err := os.Remove(ready); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			runtime.plan.Changed = false
+			testkit.WriteFile(t, ready, []byte("ready\n"), 0600)
+		}
+	}
+	run := func(verb string, want int) string {
+		t.Helper()
+		var output bytes.Buffer
+		options := program.options
+		options.Arguments = []string{"integration", verb, "tool", "--yes"}
+		options.Stdout, options.Stderr = &output, &output
+		cli, err := New(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := cli.Run(context.Background()); code != want {
+			t.Fatalf("%s: code=%d want=%d calls=%d %s", verb, code, want, runtime.applied, output.String())
+		}
+		if want == 0 {
+			gate, err := cli.inspectMutationGate(context.Background(), "default")
+			if err != nil || gate != nil {
+				t.Fatalf("%s left release unready: %#v %v", verb, gate, err)
+			}
+		}
+		return output.String()
+	}
+	testkit.WriteFile(t, ready, []byte("ready\n"), 0600)
+	history := activationRepairHistory(t, program.options.RepositoryRoot, home)
+	// No drift history is needed: healthy repeats must keep both source bytes
+	// and release readiness. The runtime still rechecks its captured plan.
+	for _, verb := range []string{"disable", "enable", "disable"} {
+		runtime.plan.Changed = verb != "disable" || runtime.applied != 0
+		run(verb, 0)
+		before := mustReadConfigFixture(t, path)
+		run(verb, 0)
+		if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
+			t.Fatalf("repeated %s changed persistent selection", verb)
+		}
+	}
+	beforeRetry := runtime.applied
+	runtime.plan.Changed = true
+	runtime.applyErr = errors.New("injected package failure")
+	if output := run("enable", 1); !strings.Contains(output, "injected package failure") || runtime.applied != beforeRetry+1 {
+		t.Fatalf("first apply never reached the hook: %s", output)
+	}
+	assignments, err := config.ReadAssignments(path)
+	if err != nil || assignments["CODING_TOOL_INTEGRATIONS"] != "tool" || !runtime.plan.Changed {
+		t.Fatal("failed application lost requested selection or pending state", err)
+	}
+	testkit.WriteFile(t, hook, []byte("#!/bin/sh\nexit 0\n"), 0700)
+	runtime.applyErr = nil
+	fake := program.options.Executor.(*testkit.Incus)
+	fake.ExecSteps = nil
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 8 {
+		appendHashSteps(t, fake, loaded)
+	}
+	run("enable", 0)
+	if runtime.applied != beforeRetry+2 || runtime.plan.Changed {
+		t.Fatalf("retry did not converge: calls=%d pending=%t", runtime.applied, runtime.plan.Changed)
+	}
+	runtime.plan.Changed = true
+	run("disable", 0)
+	run("disable", 0)
+	if !reflect.DeepEqual(history, activationRepairHistory(t, program.options.RepositoryRoot, home)) {
+		t.Fatal("ordinary integration operations rewrote completed release history")
+	}
+}
+
+func TestIntegrationRetryRepairScopeAndFreshness(t *testing.T) {
+	for _, scenario := range []string{"selected drift", "expansion", "retired id", "unknown id", "disable", "unselected drift", "host runtime drift", "unfinished journal", "changed history", "changed plan", "remaining drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := newConfigApplyRepairFixture(t, scenario == "unselected drift")
+			program := fixture.cli
+			path := filepath.Join(program.env["SUBYARD_CONFIG_HOME"], "yards/default/config.env")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=codex\nSSH_PORT=2222\n", 0600)
+			if scenario == "retired id" {
+				root := filepath.Join(program.options.RepositoryRoot, "config/retired-integrations/widget")
+				if err := os.MkdirAll(root, 0700); err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, filepath.Join(root, "integration.json"), `{"schema_version":1,"retired":true,"lifecycle":{"handler":"retire.sh","instance_config_keys":[],"instance_devices":[]}}`, 0600)
+				writeCLIFile(t, filepath.Join(root, "retire.sh"), "#!/bin/sh\nexit 0\n", 0700)
+				var err error
+				program, err = New(program.options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=widget\nSSH_PORT=2222\n", 0600)
+			}
+			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			if scenario == "host runtime drift" {
+				platform.installedID = "key-tools-runtime"
+				platform.installed = &ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("c", 64), Desired: strings.Repeat("d", 64)}
+			}
+			program.options.InitPlatform = platform
+			runtime := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Changed: true, Fingerprint: strings.Repeat("a", 64), Scope: strings.Repeat("b", 64)}}
+			program.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return runtime }
+			fake := program.options.Executor.(*testkit.Incus)
+			fake.ExecSteps = nil
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, err := program.localConfigTargets(loaded, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 8 {
+				for _, target := range targets {
+					appendHashSteps(t, fake, target.Loaded)
+				}
+			}
+			before := mustReadConfigFixture(t, fixture.journalPath)
+			if scenario == "unfinished journal" {
+				journal, err := releasetransition.ParseJournal(before)
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal.Checkpoint = releasetransition.JournalReconciling
+				payload, err := releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, fixture.journalPath, string(payload), 0600)
+			}
+			arguments := []string{"enable", "codex"}
+			if scenario == "expansion" {
+				arguments[1] = "claude"
+			} else if scenario == "retired id" {
+				arguments[1] = "widget"
+			} else if scenario == "unknown id" {
+				arguments[1] = "unknown"
+			} else if scenario == "disable" {
+				arguments[0] = "disable"
+			}
+			permit, err := program.prepareIntegrationRetryRepair(context.Background(), "default", arguments, fixture.outcome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "expansion" || scenario == "retired id" || scenario == "unknown id" || scenario == "disable" || scenario == "unselected drift" || scenario == "host runtime drift" || scenario == "unfinished journal" {
+				if permit != nil {
+					t.Fatal("unrequested or unrelated drift admitted a retry")
+				}
+				return
+			}
+			if permit == nil {
+				t.Fatal("already requested integration did not admit retry")
+			}
+			if scenario == "changed plan" {
+				runtime.plan.Scope = strings.Repeat("e", 64)
+			} else if scenario == "changed history" {
+				writeCLIFile(t, fixture.journalPath, string(before)+"\n", 0600)
+			}
+			unlock, err := program.lockConfigApplyRepair(context.Background(), permit)
+			if scenario == "changed plan" || scenario == "changed history" {
+				if err == nil {
+					unlock()
+					t.Fatal("replacement source plan reused retry consent")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			if scenario != "remaining drift" {
+				runtime.plan.Changed = false
+				writeCLIFile(t, fixture.readyMarker, "ready\n", 0600)
+			}
+			err = program.finishConfigApplyRepair(context.Background(), permit)
+			if (err != nil) != (scenario == "remaining drift") || runtime.applied != 0 || !bytes.Equal(before, mustReadConfigFixture(t, fixture.journalPath)) {
+				t.Fatal("retry readiness or read-only history boundary failed", err)
+			}
+		})
+	}
+}
+
+func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
+	for _, scenario := range []string{"missing dispatcher", "ownership conflict", "unselected drift", "changed plan", "remaining drift", "core guest drift", "unselected core guest drift", "changed core guest plan", "host key tools drift"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newConfigApplyRepairFixture(t, scenario == "unselected drift" || scenario == "unselected core guest drift")
 			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
 			for stage := range platform.converged {
 				platform.converged[stage] = true
 			}
 			fixture.cli.options.InitPlatform = platform
+			if strings.Contains(scenario, "core guest") || strings.Contains(scenario, "unselected maintenance") || scenario == "host key tools drift" {
+				platform.installed = &ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("c", 64), Desired: strings.Repeat("d", 64)}
+			}
+			if scenario == "host key tools drift" {
+				platform.installedID = "key-tools-runtime"
+			}
 			runtime := &initIntegrationRepairFixture{integrationRuntimeFixture: &integrationRuntimeFixture{
 				plan: reconcileruntime.IntegrationPlan{Changed: true, Fingerprint: strings.Repeat("a", 64), Scope: strings.Repeat("b", 64)},
 			}}
+			if strings.Contains(scenario, "core guest") || strings.Contains(scenario, "unselected maintenance") {
+				runtime.plan.Changed = false
+			}
 			if scenario == "ownership conflict" {
 				runtime.err = errors.New("owned artifact drift")
 			}
@@ -98,7 +332,7 @@ func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario == "ownership conflict" || scenario == "unselected drift" {
+			if scenario == "ownership conflict" || scenario == "unselected drift" || scenario == "unselected core guest drift" || scenario == "host key tools drift" {
 				if permit != nil {
 					t.Fatal("integration conflict or unselected drift admitted init")
 				}
@@ -111,8 +345,11 @@ func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
 				// Scope changes remain stale even if an adapter repeats its fingerprint.
 				runtime.plan.Scope = strings.Repeat("c", 64)
 			}
+			if scenario == "changed core guest plan" {
+				platform.installed.Actual = strings.Repeat("e", 64)
+			}
 			unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permit)
-			if scenario == "changed plan" {
+			if scenario == "changed plan" || scenario == "changed core guest plan" {
 				if err == nil {
 					unlock()
 					t.Fatal("replacement integration plan reused repair consent")
@@ -125,6 +362,9 @@ func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
 			defer unlock()
 			if scenario != "remaining drift" {
 				runtime.plan.Changed = false
+				if platform.installed != nil {
+					platform.installed.State, platform.installed.Actual = ports.RuntimeStateCurrent, platform.installed.Desired
+				}
 				writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
 			}
 			err = fixture.cli.finishConfigApplyRepair(context.Background(), permit)
@@ -581,8 +821,8 @@ func TestConfigApplyRepairRejectsMissingCorruptAndPendingLedgers(t *testing.T) {
 
 func TestConfigApplyRepairExactSelectionMustCoverEveryDriftedYard(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, true)
-	permit, err := fixture.cli.prepareConfigApplyRepairMode(
-		context.Background(), "default", true, fixture.outcome, true, []string{"default"},
+	permit, err := fixture.cli.prepareActivationRepair(
+		context.Background(), "default", true, fixture.outcome, activationRepairMode{requireDrift: true, selectedNames: []string{"default"}},
 	)
 	if err != nil || permit != nil {
 		t.Fatalf("partial exact-selection permit=%#v err=%v", permit, err)

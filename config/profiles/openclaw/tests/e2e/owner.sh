@@ -237,10 +237,16 @@ chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
 printf 'openclaw_e2e_stage=init-first\n'
 yard init --yes
 printf 'openclaw_e2e_stage=init-repeat\n'
-yard init --yes
-
 instance="yard-$YARD_NAME"
 project="subyard-$YARD_NAME"
+# shellcheck source=dev/e2e/lib-repeat-init-signature.sh
+. "$ROOT/dev/e2e/lib-repeat-init-signature.sh"
+definition="$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
+init_signature="$(repeat_init_signature "$definition" "$project" "$instance")"
+yard init --yes
+[ "$(repeat_init_signature "$definition" "$project" "$instance")" = "$init_signature" ] \
+  || die 'repeated init changed the registration or native yard state'
+
 provision_first="$STATE/provision-first.out"
 yard provision openclaw --yes > "$provision_first"
 grep -Fq 'provisioning openclaw' "$provision_first" \
