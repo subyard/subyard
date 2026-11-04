@@ -137,7 +137,8 @@ install_runtime() {
 }
 
 # One slot per job. The reserve leaves a 9 GiB pair admissible on a 16 GiB runner.
-# Service installation needs a running Incus, and this process predates its admin group.
+# The documented path for a host without Incus: init installs it, then the service is registered.
+# This process predates the incus-admin group that init creates.
 install_pool() {
   install -d -m 0700 "$HOME/.config/subyard"
   cat >> "$HOME/.config/subyard/config.env" <<'CONFIG'
@@ -145,7 +146,9 @@ CODING_TOOL_INTEGRATIONS=''
 E2E_VM_SLOT_COUNT=1
 E2E_MEMORY_RESERVE=2GiB
 CONFIG
-  sg incus-admin -c '"$HOME/.local/bin/yard" service install test-vms --yes </dev/null'
+  "$HOME/.local/bin/yard" -Y test-yard init --profile test-vms --yes </dev/null
+  incus_root --version
+  sg incus-admin -c '"$HOME/.local/bin/yard" service register test-vms --yard test-yard --yes </dev/null'
   sg incus-admin -c '"$HOME/.local/bin/yard" test-vms status </dev/null'
 }
 
@@ -173,8 +176,7 @@ check_probes() {
   probe docker-removed drop_docker
   probe_after prepare-host candidate install_candidate "$BUNDLE"
   probe_after candidate candidate-runtime install_runtime
-  probe_after candidate-runtime incus-on-runner incus_platform
-  probe_after incus-on-runner test-vms-service install_pool
+  probe_after candidate-runtime test-vms-service install_pool
   probe_after test-vms-service "check:$id" run_check "$@"
   probe facts-after facts
   write_summary
