@@ -108,6 +108,10 @@ prepare_host() {
   fi
   # Unprivileged guests must traverse storage paths under this home.
   sudo -n chmod 0711 "$HOME"
+  # The test-vms host check requires these nodes; nothing has loaded their modules yet.
+  sudo -n modprobe vsock
+  sudo -n modprobe vhost_vsock
+  [ -c /dev/vsock ] && [ -c /dev/vhost-vsock ]
 }
 
 drop_docker() {
