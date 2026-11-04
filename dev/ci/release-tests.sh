@@ -88,6 +88,13 @@ facts() {
   sudo -n iptables -S FORWARD 2>&1 | head -5 || true
   command -v incus lxc lxd 2>/dev/null || true
   stat -c '%a %U %n' "$HOME" || true
+  readlink -f "$(command -v awk)" || true
+  # apt-cache statuses when awk exits at its first match, the installer's former pipeline.
+  for module in 1 2 3 4 5 6 7 8 9 10; do
+    (set +e; apt-cache policy incus 2>/dev/null | awk '/Candidate:/{print $2; exit}' >/dev/null
+     printf '%s ' "${PIPESTATUS[0]}")
+  done
+  printf '\n'
 }
 
 enable_kvm() {
