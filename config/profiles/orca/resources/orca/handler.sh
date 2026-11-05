@@ -879,40 +879,45 @@ cmd_restart() {
   ok "Orca service restarted"
 }
 
-# Print scope, none, service or unavailable. A daemon inside the service survives
-# logout without the user manager, but any service restart ends it and its agents.
-daemon_placement() {
-  local in_service state scopes
-  in_service="$(yexec bash -se -- "$ORCA_UNIT" <<'YARD'
+# Print service or absent, and fail when the service cannot be read. A daemon or local
+# terminal in the service survives logout, but any service restart ends it and its agents.
+service_hosts_agents() {
+  yexec bash -se -- "$ORCA_UNIT" <<'YARD'
 set -euo pipefail
 cgroup="$(systemctl show "$1" --property=ControlGroup --value)"
-path="/sys/fs/cgroup$cgroup"
-if [ -n "$cgroup" ] && [ -d "$path" ]; then
-  while IFS= read -r pid; do
-    # A process can exit during this scan.
-    if cmdline="$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline")" && [[ "$cmdline" == *daemon-entry* ]]; then
-      printf service
-      exit 0
-    fi
-  done < <(find "$path" -name cgroup.procs -exec cat {} +)
+if [ -z "$cgroup" ]; then
+  printf absent
+  exit 0
 fi
+# A failed read must not look like an empty cgroup.
+pids="$(find "/sys/fs/cgroup$cgroup" -name cgroup.procs -exec cat {} +)"
+while IFS= read -r pid; do
+  # A process can exit during this scan.
+  cmdline="$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline")" || continue
+  stat="$(cat 2>/dev/null "/proc/$pid/stat")" || continue
+  # The fifth field after the command is the controlling terminal of a local PTY.
+  read -r _ _ _ _ tty _ <<<"${stat##*) }"
+  if [[ "$cmdline" == *daemon-entry* ]] || [ "$tty" != 0 ]; then
+    printf service
+    exit 0
+  fi
+done <<<"$pids"
 printf absent
 YARD
-)" || in_service=""
-  case "$in_service" in
-    service) printf service; return ;;
-    absent) ;;
-    *) printf unavailable; return ;;
-  esac
-  state="$(yexec systemctl show "user@$(yexec id -u "${DEV_USER:-dev}").service" --property=ActiveState --value)" || state=""
-  [ "$state" = active ] || { printf unavailable; return; }
-  scopes="$(daemon_scopes)" || { printf unavailable; return; }
+}
+
+# Print scope or none, and fail when the user manager cannot be read.
+daemon_scope_placement() {
+  local state scopes
+  state="$(yexec systemctl show "user@$(yexec id -u "${DEV_USER:-dev}").service" --property=ActiveState --value)" || return 1
+  [ "$state" = active ] || return 1
+  scopes="$(daemon_scopes)" || return 1
   if [ -n "$scopes" ]; then printf scope; else printf none; fi
 }
 
 # Report every independent gap in what keeps agents alive; only 'up' repairs them.
 report_agent_survival() {
-  local placement protected=1
+  local hosted placement protected=1
   yexec test -e "/etc/systemd/system/$ORCA_UNIT" || return 0
   if ! linger_ready; then
     protected=0
@@ -922,17 +927,22 @@ report_agent_survival() {
     protected=0
     warn "service ordering pending: a new daemon can start inside the service; run '$(yard_cmd_hint) orca up'"
   fi
-  placement="$(daemon_placement)"
-  case "$placement" in
+  hosted="$(service_hosts_agents)" || hosted=unavailable
+  case "$hosted" in
     service)
       protected=0
-      warn "daemon runs inside the service: agents survive logout, but the next restart ends them"
+      warn "agents run inside the service: they survive logout, but the next restart ends them"
       ;;
-    unavailable)
+    absent) ;;
+    *)
       protected=0
-      warn "user manager unavailable: agent survival unknown"
+      warn "service processes unreadable: agent survival unknown"
       ;;
   esac
+  if ! placement="$(daemon_scope_placement)"; then
+    protected=0
+    warn "user manager unavailable: agent survival unknown"
+  fi
   [ "$protected" -eq 1 ] || return 0
   if [ "$placement" = scope ]; then
     ok "agents survive logout and restart"

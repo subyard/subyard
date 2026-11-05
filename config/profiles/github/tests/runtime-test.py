@@ -107,6 +107,27 @@ class RuntimeTest(unittest.TestCase):
                 with patch.object(subprocess, 'run', native):
                     self.assertEqual(runtime.observe()[0]['state'], 'stale')
 
+    def test_slow_probes_are_unavailable_rather_than_an_observation_failure(self):
+        # A ready owner shows what each timeout decides: only the guest probe gates readiness.
+        self.ready = True
+        self.guest = ''
+        os.environ['SUBYARD_PROFILE_STOPPED'] = '1'
+        for selected in ('github', ''):
+            for slow, match, state in (('guest', lambda argv: argv[0] == 'incus' and 'sh' in argv, 'stale'),
+                                       ('manager', lambda argv: argv[0] == 'systemctl', 'current'),
+                                       ('loaded', lambda argv: argv[0] == 'incus' and 'status' in argv, 'current')):
+                with self.subTest(selected=selected, slow=slow):
+                    def native(argv, **kwargs):
+                        if match(argv):
+                            raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+                        return self.fake_run(argv, **kwargs)
+                    os.environ['ENVIRONMENT_PROFILES'] = selected
+                    with patch.object(subprocess, 'run', native):
+                        observed, _ = runtime.observe()
+                    self.assertEqual(observed['state'], state)
+                    if slow != 'loaded':
+                        self.assertFalse(observed.get('ownership_absent', False))
+
     def test_unselected_absence_requires_all_guest_and_loaded_owner_artifacts_absent(self):
         os.environ['ENVIRONMENT_PROFILES'] = ''
         self.ready = True  # ordinary removal check: no owned skills/links/socket

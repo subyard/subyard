@@ -150,8 +150,9 @@ func (prepared *preparedCommand) attachResourceExecution(runner *resourceApplyRu
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 		// RPC supplies its diagnostic stream here; handler output must never
 		// enter framed protocol stdout. Pairing is excluded before preparation.
+		// Handler stderr stays on stderr, so a redirected stdout keeps its failure.
 		operationCLI := *runner.cli
-		operationCLI.options.Stdout, operationCLI.options.Stderr = diagnostics, diagnostics
+		operationCLI.options.Stdout = diagnostics
 		runner.cli = &operationCLI
 		orchestrator.Runner = runner
 		result, stderr, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{

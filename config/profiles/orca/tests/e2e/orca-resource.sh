@@ -618,20 +618,32 @@ YARD
     rg -Fq "$1" "$work/survival-status.out" || { cat "$work/survival-status.out" >&2; die "status lacks: $1"; }
   }
   assert_survival_status 'agents survive logout and restart'
-  # A real cgroup member proves detection of the service placement, which this lane cannot reach naturally.
-  "${incus[@]}" exec "$instance" -- bash -ec '
-    echo $$ >"/sys/fs/cgroup$(systemctl show subyard-orca.service --property=ControlGroup --value)/cgroup.procs"
-    exec -a /srv/agents/orca/daemon-entry.js sleep 300' &
-  fake_daemon=$!
-  deadline=$((SECONDS + 15))
-  until "${incus[@]}" exec "$instance" -- pgrep -f '^/srv/agents/orca/daemon-entry.js 300$' >/dev/null; do
-    [ "$SECONDS" -lt "$deadline" ] || die 'fixture daemon did not start in the service'
-    sleep 0.2
-  done
-  assert_survival_status 'daemon runs inside the service'
-  "${incus[@]}" exec "$instance" -- pkill -f '^/srv/agents/orca/daemon-entry.js 300$'
-  wait "$fake_daemon" || true
-  assert_survival_status 'agents survive logout and restart'
+  assert_survival_refused() {
+    assert_survival_status "$1"
+    if rg -Fq 'survive logout and restart' "$work/survival-status.out"; then
+      cat "$work/survival-status.out" >&2
+      die "status confirmed protection next to: $1"
+    fi
+  }
+  # Real cgroup members prove detection inside the service, which this lane cannot reach naturally.
+  assert_service_process_refused() {
+    local match="$1" command="$2" process deadline
+    "${incus[@]}" exec "$instance" -- bash -ec '
+      echo $$ >"/sys/fs/cgroup$(systemctl show subyard-orca.service --property=ControlGroup --value)/cgroup.procs"
+      eval "exec $1"' _ "$command" &
+    process=$!
+    deadline=$((SECONDS + 15))
+    until "${incus[@]}" exec "$instance" -- pgrep -f "$match" >/dev/null; do
+      [ "$SECONDS" -lt "$deadline" ] || die "service fixture did not start: $match"
+      sleep 0.2
+    done
+    assert_survival_refused 'agents run inside the service'
+    "${incus[@]}" exec "$instance" -- pkill -f "$match"
+    wait "$process" || true
+    assert_survival_status 'agents survive logout and restart'
+  }
+  assert_service_process_refused '^/srv/agents/orca/daemon-entry.js 300$' '-a /srv/agents/orca/daemon-entry.js sleep 300'
+  assert_service_process_refused '^sleep 301$' "script -qfc 'sleep 301' /dev/null"
   delay_usec="$("${incus[@]}" exec "$instance" -- busctl get-property org.freedesktop.login1 \
     /org/freedesktop/login1 org.freedesktop.login1.Manager UserStopDelayUSec | awk '{print $2}')"
   [[ "$delay_usec" =~ ^[0-9]+$ ]] && [ "$delay_usec" -le 60000000 ] \
@@ -697,7 +709,7 @@ YARD
   "${incus[@]}" exec "$instance" -- python3 -B /tmp/orca-daemon-lifetime.py stopped
   assert_survival_status 'agents will survive logout and restart'
   "${incus[@]}" exec "$instance" -- loginctl disable-linger dev
-  assert_survival_status 'lingering disabled'
+  assert_survival_refused 'lingering disabled'
   run_orca up
   # The running service may already have started its daemon in the scope.
   assert_survival_status 'survive logout and restart'

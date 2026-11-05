@@ -131,6 +131,11 @@ case "${1:-}" in
         daemon_manager_fixture "$state_root" "${*: -1}"
         ;;
       *' bash -se -- subyard-orca.service '*)
+        if [ -e "$state_root/service-pids" ]; then
+          . "$state_root/daemon-manager-fixture.bash"
+          service_scan_fixture "$state_root"
+          exit
+        fi
         cat >/dev/null
         [ ! -e "$state_root/fail-service-scan" ] || exit 1
         if [ -e "$state_root/daemon-in-service" ]; then printf service; else printf absent; fi ;;
@@ -1014,17 +1019,80 @@ touch "$TMP/legacy-unit-ordering" "$TMP/daemon-in-service"
 survival_status
 survival_has 'lingering disabled' 'status hid disabled lingering next to other gaps'
 survival_has 'service ordering pending' 'status hid a legacy unit next to other gaps'
-survival_has 'daemon runs inside the service' 'status hid a daemon inside the service next to other gaps'
-survival_lacks 'agents survive logout and restart' 'status confirmed protection despite gaps'
+survival_has 'agents run inside the service' 'status hid agents inside the service next to other gaps'
+survival_lacks 'survive logout and restart' 'status confirmed protection despite gaps'
 touch "$TMP/linger"
-rm -f "$TMP/legacy-unit-ordering" "$TMP/daemon-in-service" "$TMP/daemon-scope"
+rm -f "$TMP/legacy-unit-ordering" "$TMP/daemon-in-service"
+# Each gap alone must withhold both confirmations.
+for daemon in present absent; do
+  if [ "$daemon" = present ]; then touch "$TMP/daemon-scope"; else rm -f "$TMP/daemon-scope"; fi
+  for gap in no-linger legacy-unit-ordering daemon-in-service; do
+    if [ "$gap" = no-linger ]; then rm -f "$TMP/linger"; else touch "$TMP/$gap"; fi
+    survival_status
+    survival_lacks 'survive logout and restart' "status confirmed protection with $gap and daemon $daemon"
+    touch "$TMP/linger"
+    rm -f "$TMP/legacy-unit-ordering" "$TMP/daemon-in-service"
+  done
+done
 for fault in fail-service-scan fail-manager-state no-user-manager fail-user-bus; do
   touch "$TMP/$fault"
   survival_status
   survival_has 'agent survival unknown' "status hid $fault"
-  survival_lacks 'will survive logout and restart' "status confirmed protection under $fault"
+  survival_lacks 'survive logout and restart' "status confirmed protection under $fault"
   rm -f "$TMP/$fault"
 done
+touch "$TMP/fail-service-scan"
+survival_status
+survival_has 'service processes unreadable' 'status mislabeled a failed service read'
+survival_lacks 'user manager unavailable' 'status blamed the user manager for a failed service read'
+rm -f "$TMP/fail-service-scan"
+touch "$TMP/daemon-in-service" "$TMP/fail-manager-state"
+survival_status
+survival_has 'agents run inside the service' 'status hid agents inside the service next to an unreadable manager'
+survival_has 'user manager unavailable' 'status hid an unreadable manager next to agents inside the service'
+rm -f "$TMP/daemon-in-service" "$TMP/fail-manager-state"
+# The real service scan, over live processes.
+scan_with() { printf '%s\n' "$@" >"$TMP/service-pids"; survival_status; }
+# A failed assertion must not leave these fixtures holding the caller's output open.
+scan_fixtures=()
+trap 'kill "${scan_fixtures[@]}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+/bin/sleep 300 &
+scan_plain=$!
+scan_fixtures+=("$scan_plain")
+(exec -a /srv/agents/orca/daemon-entry.js /bin/sleep 300) &
+scan_daemon=$!
+scan_fixtures+=("$scan_daemon")
+script -qfc 'exec /bin/sleep 300' /dev/null </dev/null >/dev/null &
+scan_script=$!
+scan_fixtures+=("$scan_script")
+scan_deadline=$((SECONDS + 10))
+until scan_terminal="$(pgrep -P "$scan_script" -x sleep)"; do
+  [ "$SECONDS" -lt "$scan_deadline" ] || fail 'scan fixture terminal did not start'
+  sleep 0.1
+done
+scan_fixtures+=("$scan_terminal")
+until grep -Fq 'daemon-entry' "/proc/$scan_daemon/cmdline" 2>/dev/null; do
+  [ "$SECONDS" -lt "$scan_deadline" ] || fail 'scan fixture daemon did not start'
+  sleep 0.1
+done
+scan_with "$scan_plain"
+survival_has 'agents will survive logout and restart' 'scan flagged a process without a daemon or terminal'
+scan_with "$scan_plain" 999999999
+survival_has 'agents will survive logout and restart' 'scan failed on a process that exited'
+scan_with "$scan_plain" "$scan_daemon"
+survival_has 'agents run inside the service' 'scan missed a daemon inside the service'
+survival_lacks 'survive logout and restart' 'scan confirmed protection with a daemon inside the service'
+scan_with "$scan_plain" "$scan_terminal"
+survival_has 'agents run inside the service' 'scan missed a local terminal inside the service'
+survival_lacks 'survive logout and restart' 'scan confirmed protection with a local terminal inside the service'
+touch "$TMP/fail-service-read"
+scan_with "$scan_daemon"
+survival_has 'service processes unreadable' 'scan treated a failed read as an empty service'
+survival_lacks 'survive logout and restart' 'scan confirmed protection after a failed read'
+kill "${scan_fixtures[@]}" 2>/dev/null || true
+wait "$scan_plain" "$scan_daemon" "$scan_script" 2>/dev/null || true
+trap 'rm -rf "$TMP"' EXIT
+rm -f "$TMP/fail-service-read" "$TMP/service-pids"
 touch "$TMP/no-orca-unit"
 survival_status
 survival_lacks 'survive' 'status reported agent survival without an Orca unit'

@@ -308,6 +308,10 @@ if not args or args[0] not in ('run', 'down', 'purge'):
     sys.exit(2)
 verb = args[0]
 if mode == 'apply':
+    if '--fail-apply' in args:
+        print('fixture apply output')
+        print('fixture apply failure', file=sys.stderr)
+        sys.exit(1)
     if verb != 'run':
         for unit in (('first',) if verb == 'down' else ('first', 'second')):
             (root / ('unit-' + unit)).unlink(missing_ok=True)
@@ -389,6 +393,25 @@ func TestResourceExactDirectAllowsPartialConvergence(t *testing.T) {
 	first, err := os.ReadFile(filepath.Join(root, "unit-first"))
 	if err != nil || string(first) != "already-running" {
 		t.Fatalf("resource overwrote converged state: %q, %v", first, err)
+	}
+}
+
+func TestResourceExactKeepsHandlerStreamsSeparate(t *testing.T) {
+	root, environment, _ := resourceExactFixture(t)
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--fail-apply"},
+		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: &callbackPrompt{callback: func() {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 {
+		t.Fatalf("failed handler returned %d: stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "fixture apply failure") || strings.Contains(stderr.String(), "fixture apply output") {
+		t.Fatalf("handler stderr was not kept on stderr: %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "fixture apply output") || strings.Contains(stdout.String(), "fixture apply failure") {
+		t.Fatalf("handler stdout was not kept on stdout: %q", stdout.String())
 	}
 }
 

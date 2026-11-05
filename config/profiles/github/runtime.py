@@ -79,6 +79,14 @@ def metadata(path):
         return None
 
 
+def run_probe(command, **options):
+    """A slow probe is unavailable like a failed one, not an observation failure."""
+    try:
+        return subprocess.run(command, capture_output=True, **options)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(command, 124, b'', b'')
+
+
 def observe():
     yard = os.environ.get('SUBYARD_YARD') or 'default'
     if not re.fullmatch('[a-zA-Z0-9_-]+', yard):
@@ -130,7 +138,7 @@ def observe():
     facts['ready'] = ready
     guest = ['incus', 'exec', os.environ['YARD_INSTANCE_NAME'], '--project', os.environ['INCUS_PROJECT'], '--']
     probe = "getent passwd \"$1\" >/dev/null || exit 2; for path in /usr/local/libexec/subyard/github-client /usr/local/bin/subyard-github /usr/local/bin/git-remote-subyard-github; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then stat -c '%F|%a|%u|%g|%i|%s|%Y|%Z' \"$path\" 2>/dev/null && sha256sum \"$path\" 2>/dev/null || exit 2; fi; done; home=$(getent passwd \"$1\" | cut -d: -f6); if [ ! -L \"$home/.config/subyard/github-git.conf\" ] && [ \"$(head -n 1 \"$home/.config/subyard/github-git.conf\" 2>/dev/null)\" = '# subyard-managed-github-git-v1' ]; then for path in \"$home/.config/git/config\" \"$home/.config/subyard/github-git.conf\"; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then stat -c '%F|%a|%u|%g|%i|%s|%Y|%Z' \"$path\" 2>/dev/null || exit 2; fi; done; fi"
-    installed = subprocess.run(guest + ['sh', '-c', probe, 'subyard', os.environ.get('DEV_USER', 'dev')], capture_output=True, timeout=3)
+    installed = run_probe(guest + ['sh', '-c', probe, 'subyard', os.environ.get('DEV_USER', 'dev')], timeout=3)
     ready = ready and installed.returncode == 0
     facts['ready'] = ready
     facts['guest_available'] = installed.returncode == 0
@@ -138,9 +146,9 @@ def observe():
         facts['guest'] = installed.stdout.decode().splitlines()
     manager_environment = dict(environment, XDG_RUNTIME_DIR=f'/run/user/{os.getuid()}',
                                DBUS_SESSION_BUS_ADDRESS=f'unix:path=/run/user/{os.getuid()}/bus')
-    manager = subprocess.run(['systemctl', '--user', 'show', unit.name,
-                             '--property=ActiveState,UnitFileState,MainPID,LoadState'],
-                            capture_output=True, env=manager_environment, timeout=3)
+    manager = run_probe(['systemctl', '--user', 'show', unit.name,
+                         '--property=ActiveState,UnitFileState,MainPID,LoadState'],
+                        env=manager_environment, timeout=3)
     if manager.returncode in (0, 4) and len(manager.stdout) < 4096:
         facts['manager'] = manager.stdout.decode().splitlines()
     # The ordinary disabled check proves owned skills, links and socket absent.
@@ -155,9 +163,9 @@ def observe():
                 'ownership_absent': True}, environment
     # Loaded identity binds stale/partial state before apply. A proven absent
     # installation has no loaded client whose diagnostic would be retained.
-    loaded = subprocess.run(guest + ['timeout', '--kill-after=1', '2', 'runuser', '-u',
-                            os.environ.get('DEV_USER', 'dev'), '--', '/usr/local/bin/subyard-github',
-                            'status', '--runtime'], capture_output=True, timeout=4)
+    loaded = run_probe(guest + ['timeout', '--kill-after=1', '2', 'runuser', '-u',
+                       os.environ.get('DEV_USER', 'dev'), '--', '/usr/local/bin/subyard-github',
+                       'status', '--runtime'], timeout=4)
     if loaded.returncode == 0 and len(loaded.stdout) < 4096:
         try:
             identity = json.loads(loaded.stdout)

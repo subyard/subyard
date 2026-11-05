@@ -33,3 +33,15 @@ daemon_manager_fixture() {
   export -f id systemctl runuser
   /bin/bash -se -- dev "$2"
 }
+
+# Execute the real guest service scan over chosen live processes.
+service_scan_fixture() {
+  export ORCA_MANAGER_FIXTURE_ROOT="$1"
+  systemctl() { printf '/fixture\n'; }
+  find() {
+    [ ! -e "$ORCA_MANAGER_FIXTURE_ROOT/fail-service-read" ] || return 1
+    command cat "$ORCA_MANAGER_FIXTURE_ROOT/service-pids"
+  }
+  export -f systemctl find
+  /bin/bash -se -- subyard-orca.service
+}

@@ -55,9 +55,10 @@ still runs inside the service end with that restart, so run it at a quiet moment
 Repeating `up` also repairs lingering if it was disabled later.
 
 `yard orca status` reports this protection. It warns separately when lingering is
-disabled, when the service ordering is pending, when the daemon runs inside the service,
-and when the user manager is unavailable. It changes nothing; the warning names the
-repair where `up` provides one.
+disabled, when the service ordering is pending, when the daemon or a local terminal runs
+inside the service, and when the service or the user manager cannot be read. It changes
+nothing; the warning names the repair where `up` provides one. Status sees running processes
+only, so it cannot tell that Orca fell back to local terminals before the first one starts.
 
 `yard update` also refreshes the project-registration files of existing Orca
 installations in all running local yards, including named yards. The refresh includes
