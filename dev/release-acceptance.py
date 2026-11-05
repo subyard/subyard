@@ -240,6 +240,9 @@ def defer_external(output, obligations, reason, authorization_reference):
     return 0
 
 
+LIVE_CAPACITY_WAIT = "30m"
+
+
 OPTIONAL_VM_NOT_RUN = {"status": "not-run", "reason": "optional VM check; run explicitly with --with-vms or --only"}
 
 
@@ -256,6 +259,12 @@ def vm_checks_optional(root):
 
 def optional_vm_not_run(name, result):
     return name.startswith("profile:") and result == OPTIONAL_VM_NOT_RUN
+
+
+def transfer_target_open(name, result):
+    # load_bound rejects an optional not-run that hides a request, attempt or log,
+    # so the exact value is as untouched as pending. Any other not-run stays closed.
+    return result["status"] == "pending" or optional_vm_not_run(name, result)
 
 
 def validate_optional_vm_history(output, names):
@@ -1010,6 +1019,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
                       if name in prioritized and (name == selector or name.startswith(selector + "/"))]
     order = list(dict.fromkeys([*priority_order, *checks]))
     env = clean_environment()
+    # VM checks wait for broker memory or disk instead of draining the queue on a
+    # transient refusal; a refusal that outlasts this bound still blocks visibly.
+    env.setdefault("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and (rerun or receipt["checks"][name]["status"] != "passed")]
@@ -1936,7 +1948,7 @@ def prepare_transfer(target_candidate, source_candidate, name, review_path, revi
     if name not in required or not required[name] or name not in old_commands or not old_commands[name]:
         raise ValueError("reviewed transfer requires an exact executable check")
     expected = command_identity(required[name], root)
-    if expected != command_identity(old_commands[name], source_root) or receipt["checks"][name]["status"] != "pending":
+    if expected != command_identity(old_commands[name], source_root) or not transfer_target_open(name, receipt["checks"][name]):
         raise ValueError("reviewed transfer command differs or target is already attempted")
     source_output = source_candidate.output
     tested, target = transfer_candidate(source), transfer_candidate(receipt)
@@ -2028,8 +2040,8 @@ def batch_guard(root, receipt, source_root, source, name, target_context, source
            {key: command_identity(value, source_root) if value else value for key, value in previous.items()}
         or target_context["external"] != source_context["external"]):
         raise ValueError("batch requires active candidates with matching complete inventories")
-    if name not in required or not required[name] or name == "package" or receipt["checks"][name]["status"] != "pending":
-        raise ValueError("batch requires an exact pending executable target check")
+    if name not in required or not required[name] or name == "package" or not transfer_target_open(name, receipt["checks"][name]):
+        raise ValueError("batch requires an exact pending or untouched optional executable target check")
     original = source["checks"][name]
     if original.get("inherited") or "evidence_transfer" in original:
         raise ValueError("batch cannot chain inherited evidence")

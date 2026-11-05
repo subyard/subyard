@@ -65,7 +65,10 @@ Host-free verification retains core/profile checks, CLI freshness and profile in
 for these same-attempt jobs before running
 local adapters and the complete released-caller compatibility matrix. It builds final-version assets
 once and uploads their source archive, exact inventory and SHA-256 identity manifest for 90 days.
-`CANDIDATE` prints the attempt-specific ID and local directory. Publication never rebuilds these assets.
+`CANDIDATE` prints the attempt-specific ID and local directory. Before printing it, `prepare` also creates
+that directory's `acceptance/` output from the downloaded assets: it imports the `package` result, leaves
+every other check pending or optional `not-run`, and runs nothing. Evidence can be transferred into it
+before the first `accept`. Publication never rebuilds these assets.
 
 Recovery checks the exact same-attempt job inventory against the executed workflow file at the
 native run's immutable `head_sha`. Only explicitly recorded workflow Git-blob identities are accepted:

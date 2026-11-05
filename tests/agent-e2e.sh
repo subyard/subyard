@@ -3922,6 +3922,8 @@ case "$command" in
           '{schema_version:1,status:"error",code:"capacity",reason:"memory",message:$message}'
         ;;
       wait-success) [ "$count" -eq 1 ] && printf '%s\n' "$busy" || printf '%s\n' "$grant" ;;
+      capacity-then-grant) [ "$count" -eq 1 ] && printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}' || printf '%s\n' "$grant" ;;
+      capacity-then-busy) [ "$count" -eq 1 ] && printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}' || printf '%s\n' "$busy" ;;
       *) printf '%s\n' "$busy" ;;
     esac
     ;;
@@ -4193,6 +4195,34 @@ for capacity_case in capacity-snapshot capacity-unsafe capacity-state-unsafe; do
       || fail 'runner rendered arbitrary capacity error data'
   fi
 done
+
+# A bounded wait retries capacity refusals; the collector may bound capacity alone.
+new_runner_fixture capacity-wait-flag
+run_runner_fixture capacity-then-grant --slot 2 --wait 30s --ssh 1 -- true >"$TMP/capacity-wait.log" 2>&1 \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 2 ] && grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
+  && grep -Fq 'waiting for memory capacity for slot-002' "$TMP/capacity-wait.log" \
+  || fail "capacity refusal was not retried within --wait: $(cat "$TMP/capacity-wait.log" "$RUNNER_FIXTURE/facade.log")"
+new_runner_fixture capacity-wait-env
+SUBYARD_E2E_CAPACITY_WAIT=30s run_runner_fixture capacity-then-grant --slot 2 --ssh 1 -- true >"$TMP/capacity-env.log" 2>&1 \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 2 ] \
+  || fail 'capacity refusal was not retried within SUBYARD_E2E_CAPACITY_WAIT'
+new_runner_fixture capacity-wait-busy
+capacity_rc=0
+SUBYARD_E2E_CAPACITY_WAIT=30s run_runner_fixture capacity-then-busy --slot 2 --ssh 1 -- true >"$TMP/capacity-busy.log" 2>&1 || capacity_rc=$?
+[ "$capacity_rc" != 0 ] && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 2 ] \
+  && grep -Fq 'is unavailable: state=held' "$TMP/capacity-busy.log" && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
+  || fail 'capacity-only wait also waited for a busy slot'
+new_runner_fixture capacity-wait-expired
+capacity_rc=0
+capacity_output="$(SUBYARD_E2E_CAPACITY_WAIT=3s run_runner_fixture capacity --slot 2 --ssh 1 -- true 2>&1)" || capacity_rc=$?
+[ "$capacity_rc" = 4 ] && grep -Fq 'retryable capacity refusal for slot-002: resource=memory' <<<"$capacity_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" -ge 2 ] && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
+  || fail "expired capacity wait lost the typed refusal: $capacity_output"
+new_runner_fixture capacity-wait-invalid
+capacity_rc=0
+SUBYARD_E2E_CAPACITY_WAIT=soon run_runner_fixture capacity-then-grant --slot 2 --ssh 1 -- true >"$TMP/capacity-invalid.log" 2>&1 || capacity_rc=$?
+[ "$capacity_rc" != 0 ] && ! grep -q '^acquire' "$RUNNER_FIXTURE/facade.log" \
+  || fail 'invalid capacity wait reached the broker'
 
 new_runner_fixture exact-busy
 set +e

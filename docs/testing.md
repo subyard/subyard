@@ -751,8 +751,10 @@ After reviewing changed inputs, transfer per-check evidence as inherited coverag
 python3 dev/release-acceptance.py transfer --output NEW --from OLD --check CHECK --review REVIEW.json
 ```
 
-Both directories must be valid frozen candidates. The target check must still be pending;
-failed, blocked, interrupted or already passed target attempts cannot be overwritten.
+Both directories must be valid frozen candidates. The target check must still be pending, or an
+optional VM profile check with the exact untouched default `not-run` result; no `--exclude` is needed
+first. Failed, blocked, interrupted, already passed, otherwise not-run, or previously requested target
+checks cannot be overwritten.
 For a new original attempt, `REVIEW.json` has exactly `schema_version: 2`, `check`,
 `tested_manifest_sha256`, `target_manifest_sha256`, `original_attempt`, `review` and `standalone`.
 `original_attempt` is the source check's current `{id, sha256}` reference; `standalone` must be null.
@@ -844,7 +846,8 @@ behavior. The ordinary generated-at-only provenance rule remains available in th
 semantic differences still require explicit review. New physical attempts require recorded base
 and successful cleanup evidence. Standalone evidence retains the original launcher, bundle,
 terminal-result and cleanup checks; unknown timings remain unknown. Inherited evidence cannot
-be chained, active sources must remain current, and only pending target checks can be replaced.
+be chained, active sources must remain current, and only pending or untouched optional VM target
+checks can be replaced.
 
 Canonical paths are deduplicated and existing nonblocking locks are acquired in sorted order:
 exclusive for the target, shared for every source. Each unique snapshot builds its public source

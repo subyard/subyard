@@ -461,9 +461,14 @@ The runner requires `attribution-v2`, `environment-acquire-v3` and `disposable-v
 status. When the broker advertises `process-acquire-v4`, the runner uses `acquire-v4` with the
 same arguments as `acquire-v3`. Otherwise it retains the released `acquire-v3` protocol; that
 older broker cannot provide immediate pre-grant cancellation. Legacy acquire is not supported,
-and the runner never switches protocols in response to acquire failure. Only a typed busy response plus bounded `--wait` permits
-another request for the same slot; a transport failure or any other unknown outcome ends the
-attempt. A `held` busy response
+and the runner never switches protocols in response to acquire failure. Only a typed busy or
+capacity response plus bounded `--wait` permits another request for the same slot; a transport
+failure or any other unknown outcome ends the attempt. Without `--wait`,
+`SUBYARD_E2E_CAPACITY_WAIT` (for example `30m` or `90s`) bounds capacity retries alone and a busy
+slot still fails at once; the release acceptance collector sets it to `30m` for VM checks unless
+already set. The runner retries only while another request can start before the deadline, so a
+late grant is never needed. When the bound expires, the final typed capacity refusal and exit 4
+remain visible. A `held` busy response
 contains exactly the safe owner fields `display_label`, `yard`, `project`, `run`, `purpose`,
 `acquired_at` and `expires_at`. Other unavailable states carry no owner object. The runner validates
 the complete response before retrying; a missing, extra or malformed owner field makes the outcome

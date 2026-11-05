@@ -954,7 +954,7 @@ capacity_refusal_snapshot() {
 acquire_lease() {
   resolve_vm_count
   local client fingerprint type blob response code reason state started last_report request
-  local status_response workspace_context elapsed sleep_seconds attempt=0 last_state='' last_reason=''
+  local status_response workspace_context elapsed sleep_seconds capacity_wait attempt=0 last_state='' last_reason=''
   local owner_display='' owner_yard='' owner_project='' owner_run='' owner_purpose=''
   local owner_acquired='' owner_expires='' owner_acquired_epoch='' owner_expires_epoch=''
   local owner_summary='' last_owner_summary=''
@@ -997,12 +997,20 @@ acquire_lease() {
   if jq -e '(.capabilities // []) | index("process-acquire-v4") != null' <<<"$status_response" >/dev/null; then
     LEASE_ACQUIRE_PROTOCOL=acquire-v4
   fi
+  # --wait bounds both busy and capacity retries. Without it, a collector may bound
+  # capacity retries alone; a busy slot still fails at once.
+  capacity_wait=$WAIT_SECONDS
+  if [ "$capacity_wait" -eq 0 ] && [ -n "${SUBYARD_E2E_CAPACITY_WAIT:-}" ]; then
+    [[ "$SUBYARD_E2E_CAPACITY_WAIT" =~ ^([0-9]{1,6})([sm])$ ]] || die 'SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s'
+    capacity_wait=$((10#${BASH_REMATCH[1]}))
+    [ "${BASH_REMATCH[2]}" = s ] || capacity_wait=$((capacity_wait * 60))
+  fi
   request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
   started=$SECONDS
   last_report=-30
   while true; do
     elapsed=$((SECONDS - started))
-    if [ "$attempt" -gt 0 ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+    if [ "$attempt" -gt 0 ] && [ "$last_state" != capacity ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
       printf 'agent-e2e: timed out waiting for %s: state=%s reason=%s\n' \
         "$LEASE_REQUESTED_SLOT" "$last_state" "$last_reason" >&2
       [ -z "$last_owner_summary" ] || printf 'agent-e2e: %s\n' "$last_owner_summary" >&2
@@ -1064,6 +1072,24 @@ acquire_lease() {
         || die "lease acquire outcome is unknown; refusing a second allocation"
       # A validated capacity refusal confirms the broker aborted before creating guests.
       [ "$LEASE_ACQUIRE_PROTOCOL" != acquire-v4 ] || LEASE_ID=''
+      elapsed=$((SECONDS - started))
+      # Retry only while another request can still start before the deadline, so a
+      # grant never arrives after it and the final refusal stays typed.
+      if [ $((capacity_wait - elapsed)) -gt 1 ]; then
+        last_state=capacity
+        last_reason="$reason"
+        last_owner_summary=''
+        if [ "$((SECONDS - last_report))" -ge 30 ]; then
+          printf 'agent-e2e: waiting for %s capacity for %s; waited %s, deadline in %s\n' \
+            "$reason" "$LEASE_REQUESTED_SLOT" "$(format_duration "$elapsed")" \
+            "$(format_duration $((capacity_wait - elapsed)))" >&2
+          last_report=$SECONDS
+        fi
+        sleep_seconds=$((capacity_wait - elapsed - 1))
+        [ "$sleep_seconds" -le 5 ] || sleep_seconds=5
+        sleep "$sleep_seconds"
+        continue
+      fi
       printf 'agent-e2e: retryable capacity refusal for %s: resource=%s; retry after resources become available\n' \
         "$LEASE_REQUESTED_SLOT" "$reason" >&2
       local admission_snapshot

@@ -1121,6 +1121,17 @@ def dispatch(github, workflow, inputs, state, path):
     raise ValueError("dispatch outcome unknown; repeat command to discover retained request, do not duplicate dispatch")
 
 
+def ensure_acceptance(directory, identity, prepared):
+    """Create the candidate's acceptance output once; it imports only prepared assets and runs no check."""
+    output = directory / "acceptance"
+    if not output.exists():
+        with tempfile.TemporaryDirectory(prefix=".acceptance-", dir=directory) as temporary:
+            staging = Path(temporary) / "acceptance"
+            a.prepare(staging, identity["version"], prepared)
+            staging.rename(output)
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".build/release-publication")
@@ -1216,6 +1227,8 @@ def main():
                 or identity["version"] != args.version or identity["commit"] != args.commit):
                 raise ValueError("local preparation state mismatch")
             write_json(directory / "identity.json", identity)
+            with a.acceptance_lock(directory):
+                ensure_acceptance(directory, identity, prepared)
             print("CANDIDATE " + candidate + " " + str(directory))
             return 0
     candidate_parts(args.candidate)
@@ -1239,11 +1252,7 @@ def main():
                 signal.signal(signum, lambda signum, frame: a.STOP.set())
             if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
                 raise ValueError("slots must be unique integers from 1 to 999")
-            if not output.exists():
-                with tempfile.TemporaryDirectory(prefix=".acceptance-", dir=directory) as temporary:
-                    staging = Path(temporary) / "acceptance"
-                    a.prepare(staging, identity["version"], prepared)
-                    staging.rename(output)
+            ensure_acceptance(directory, identity, prepared)
             with a.acceptance_lock(output):
                 result = a.run_checks(output, args.slots, args.only, False, with_vms=args.with_vms)
             if result == 0:

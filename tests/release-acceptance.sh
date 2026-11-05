@@ -552,6 +552,59 @@ class TestAcceptance(unittest.TestCase):
         path.write_text(json.dumps(request))
         return source, target, path, request
 
+    def test_batch_transfers_to_untouched_optional_vm_check_only(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory, optional_vms=True)
+            (checkout / "config/profiles/sample/tests/e2e/acceptance.sh").write_text(
+                "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
+                "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
+            source, target = directory / "source-candidate", directory / "target-candidate"
+            source_root, old = prepare_fixture(checkout, source)
+            name = "profile:sample/one"
+            old["checks"][name] = m.execute(name, m.commands(source_root, "test", old["profiles"])[name], source_root, source, m.clean_environment(), slot=1)
+            result = old["checks"][name]
+            self.assertEqual(result["status"], "passed")
+            result["execution_environment"] = old["environment"]
+            result["original_attempt"] = m.completed_attempt(source, source_root, old, name, result)
+            m.save(source, old)
+            (checkout / "reviewed-document.txt").write_text("Unrelated reviewed fixture documentation\n")
+            with patch.dict(os.environ, {"SUBYARD_FIXTURE_GENERATED_AT": "2026-01-02T00:00:00Z"}):
+                _, current = prepare_fixture(checkout, target)
+            self.assertEqual(current["checks"][name], m.OPTIONAL_VM_NOT_RUN)
+            request = {"schema_version": 1, "target": m.transfer_candidate(current), "checks": [
+                {"check": name, "source": str(source), "attempt": result["original_attempt"], "review": None}]}
+            path = directory / "batch.json"
+            path.write_text(json.dumps(request))
+            with redirect_stdout(io.StringIO()):
+                review = m.transfer_batch(target, path, plan=True)["checks"][0]["review_draft"]
+            review["review"] = {"unchanged_scope": "Only synthetic documentation changed", "reason": "Reviewed fixture delta",
+                                "authorization_reference": "operator:batch-fixture"}
+            review_path = directory / "review.json"
+            review_path.write_text(json.dumps(review))
+            request["checks"][0]["review"] = {"path": str(review_path), "sha256": m.digest(review_path)}
+            path.write_text(json.dumps(request))
+            receipt_path = target / "receipt.json"
+            pristine = receipt_path.read_bytes()
+            for closed in ({"status": "not-run", "reason": "operator skipped"}, {"status": "failed", "exit_code": 23}):
+                refused = json.loads(pristine)
+                refused["checks"][name] = closed
+                m.save(target, refused)
+                before = receipt_path.read_bytes()
+                with self.subTest(closed=closed["status"]), redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
+                    m.transfer_batch(target, path)
+                self.assertEqual(receipt_path.read_bytes(), before)
+            receipt_path.write_bytes(pristine)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.transfer_batch(target, path), 0)
+            _, receipt = m.load_bound(target)
+            self.assertEqual(receipt["checks"][name]["status"], "passed")
+            self.assertTrue(receipt["checks"][name]["inherited"])
+            applied = receipt_path.read_bytes()
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.transfer_batch(target, path), 0)
+            self.assertEqual(receipt_path.read_bytes(), applied)
+
     def test_batch_plan_scans_unique_candidates_once_and_does_not_mutate_evidence(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             source, target, path, request = self.batch_fixture(Path(temporary))
@@ -2077,6 +2130,7 @@ while True: time.sleep(1)
                 execute = m.execute
                 def observe(name, *args):
                     calls.append((name, args[-1]))
+                    self.assertEqual(args[3]["SUBYARD_E2E_CAPACITY_WAIT"], m.LIVE_CAPACITY_WAIT)
                     result = execute(name, *args)
                     original[name] = copy.deepcopy(result)
                     return result

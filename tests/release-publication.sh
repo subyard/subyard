@@ -377,9 +377,15 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(m.main(), 0)
                     request = state_dir / "requests" / (identity["version"] + "-" + identity["commit"] + ".json")
                     original_request = request.read_bytes()
+                    acceptance = state_dir / identity["candidate_id"] / "acceptance" / "receipt.json"
+                    checks = json.loads(acceptance.read_text())["checks"]
+                    self.assertEqual(checks["package"]["status"], "passed")
+                    self.assertEqual(checks["verify"], {"status": "pending"})
+                    original_acceptance = acceptance.read_bytes()
                     argv[4] = github.repository = "subyard/subyard"
                     self.assertEqual(m.main(), 0)
                     self.assertEqual(request.read_bytes(), original_request)
+                    self.assertEqual(acceptance.read_bytes(), original_acceptance)
                     argv[4] = github.repository = "foreign/subyard"
                     with self.assertRaisesRegex(ValueError, "request repository mismatch"):
                         m.main()
