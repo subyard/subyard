@@ -15,8 +15,9 @@ yard ssh-agent lock
 ```
 
 `--key` must name an encrypted, owner-only private-key file. `--ttl` is required, must resolve to
-a whole number of seconds from 1 second to 24 hours, and accepts duration units `s`, `m`, and `h`,
-such as `900s`, `30m`, `1h30m`, or `2h`. There is no unlimited lifetime.
+a whole number of seconds from 1 second to 2147483647 seconds, and accepts duration units `s`, `m`,
+`h`, and whole days with `d` (one day is 24 hours), such as `900s`, `30m`, `2h`, `14d`, or `365d`.
+There is no unlimited lifetime.
 Unlock asks for confirmation before granting access. `--yes`
 answers that confirmation only; it never supplies or bypasses the private-key passphrase. The
 key passphrase is read from the operator terminal. The yard must be running with its managed SSH

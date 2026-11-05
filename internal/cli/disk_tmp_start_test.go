@@ -142,14 +142,17 @@ esac
 					t.Fatal("start lost identity or power", after)
 				}
 				if outcome == "marked" {
-					if after.Config["user.subyard.disk_tmp"] != "v1" || after.Config["user.subyard.preview_sha256"] != "old-runtime" || native.markerPower != "" || strings.Contains(output.String(), "pending") {
+					if after.Config["user.subyard.disk_tmp"] != "v1" || after.Config["user.subyard.preview_sha256"] != "old-runtime" || native.markerPower != "" || strings.Contains(output.String(), "pending") || strings.Contains(output.String(), "disk-backed /tmp is active") {
 						t.Fatal("ordinary marked start attempted maintenance or runtime repair", after.Config, output.String())
 					}
 				} else if outcome == "success" {
 					if after.Config["user.subyard.disk_tmp"] != "v1" || native.markerPower != "Running" {
 						t.Fatal("explicit start failed to finish pending policy", after.Config)
 					}
-				} else if !strings.Contains(output.String(), "warning: yard private: disk-/tmp completion pending") || after.Config["user.subyard.disk_tmp"] != "" {
+					if !strings.Contains(output.String(), "[ ok ] "+instance.Name+" restarted; disk-backed /tmp is active (desired=running)") {
+						t.Fatal("completed restart has no result line", output.String())
+					}
+				} else if !strings.Contains(output.String(), "warning: yard private: disk-/tmp completion pending") || after.Config["user.subyard.disk_tmp"] != "" || strings.Contains(output.String(), "disk-backed /tmp is active") {
 					t.Fatal("running completion failure hidden", output.String())
 				}
 				if startup && after.Config[startupIntentKey(definition)] != startupEnabled {

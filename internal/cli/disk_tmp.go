@@ -182,6 +182,14 @@ func (cli *CLI) finishDiskTmpStart(ctx context.Context, loaded config.Loaded, ex
 		return nil
 	})
 	if err == nil {
+		// The completion restart follows the "started" line, so close it with its own result.
+		if execution.observed.Config["user.subyard.disk_tmp"] == "" {
+			native, _ := cli.statusPorts()
+			actual, readErr := native.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+			if readErr == nil && actual.Config["user.subyard.disk_tmp"] == "v1" && strings.EqualFold(actual.Status, "running") {
+				fmt.Fprintf(diagnostics, "  [ ok ] %s restarted; disk-backed /tmp is active (desired=running)\n", loaded.Context.YardInstanceName)
+			}
+		}
 		return nil
 	}
 	failure := fmt.Errorf("yard %s: disk-/tmp completion failed: %w", loaded.Context.YardName, err)
