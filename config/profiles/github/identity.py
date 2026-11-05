@@ -8,14 +8,30 @@ import subprocess
 import tempfile
 
 SOURCE=Path(__file__).resolve().parent
+PREFIX='GitHub identity: '
+
+
+def refusal(error):
+    import importlib.util
+    try:
+        spec=importlib.util.spec_from_file_location('authority',SOURCE.parents[1]/'identity/authority.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    except OSError:
+        return PREFIX+'owned state could not be verified; resolve it, then retry plain yard init'
+    return module.refusal('GitHub',error)
 
 
 def guest(arguments):
     program='import sys,types\n'
     for name,path in (('authority',SOURCE.parents[1]/'identity/authority.py'),('git_wiring',SOURCE/'git_wiring.py'),('identity_guest',SOURCE/'identity_guest.py')):
         program+=f"module=types.ModuleType({name!r});sys.modules[{name!r}]=module;exec({path.read_text()!r},module.__dict__)\n"
-    program+='sys.modules["identity_guest"].main(sys.argv[1:])\n'
-    result=subprocess.run(['incus','exec',os.environ['YARD_INSTANCE_NAME'],'--project',os.environ['INCUS_PROJECT'],'--','python3','-B','-c',program,*arguments],capture_output=True,timeout=30,check=True)
+    program+='try:sys.modules["identity_guest"].main(sys.argv[1:])\n'
+    program+='except Exception as error:print(sys.modules["authority"].refusal("GitHub",error),file=sys.stderr);raise SystemExit(1)\n'
+    result=subprocess.run(['incus','exec',os.environ['YARD_INSTANCE_NAME'],'--project',os.environ['INCUS_PROJECT'],'--','python3','-B','-c',program,*arguments],capture_output=True,timeout=30)
+    if result.returncode:
+        # Relay only the guest's own refusal line; refusal() filters it again on the host.
+        lines=[line[len(PREFIX):] for line in result.stderr.decode('utf-8','replace').splitlines() if line.startswith(PREFIX)]
+        raise ValueError(lines[-1] if lines else 'Git identity guest operation failed')
     return json.loads(result.stdout)
 
 

@@ -2063,6 +2063,15 @@ identity, project inventory and the conditional ordinary init scope. After the
 prerequisite, init discards old account observations, reassesses, and refuses any
 new scope before consuming the original approval for the normal continuation.
 
+For a stopped yard, a protected local hint records only the verified applied
+identity, native yard UUID and source/release binding. A matching current hint
+avoids repeated inspection boots; a missing legacy hint requires one disclosed boot.
+The hint never authorizes account changes. A new transition captures normal
+post-boot service state; an interrupted one retains its original approved owner
+intent and re-quiesces those owners after a reboot. Until init commits the rename,
+completed-release observations use the verified applied identity; without an
+integration inventory or core skills receipt that establishes it, authoring refuses.
+
 Profiles declare an optional `developer-identity.json` sidecar with schema `1`
 and mode `rebind` or `independent`. Rebind owners implement `identity-observe
 <target-user> <source-binding>` and `identity-apply <source-binding>` through their
@@ -2072,6 +2081,10 @@ authority helper, quiesces at `prepared`, then rebinds at `account-ready`. Owner
 preserve unrelated state and accept only their recorded old or projected new
 artifacts on retry. Core does not rewrite arbitrary profile JSON or branch on
 profile names; an installed owner without this contract refuses identity changes.
+A refusing owner prints one stderr line `<Owner> identity: <reason>`, built by the
+core authority helper's `refusal`; core shows only that line. Reasons that are not
+fixed owner prose become a generic retry line, so file contents never reach the
+operator.
 
 A private host marker and guest journal fence other mutations during recovery,
 including direct and RPC operations and runtime installation. Independently assessed

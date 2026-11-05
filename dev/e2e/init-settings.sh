@@ -91,16 +91,6 @@ printf '#!/bin/sh\n[ ! -e /var/lib/subyard-fixture-hook-fail ]\n' > /usr/local/b
 chmod 0755 /usr/local/bin/fixture-hook
 SH
 chmod 0600 "$STATE/provision.sh"
-fixture_integrations='' fixture_command=fixture-agent fixture_check=fixture-check
-if [ "${1:-}" = --identity-rename ]; then
-  fixture_integrations=claude fixture_command=fixture-agent-next fixture_check=fixture-check-next
-  cat >> "$STATE/provision.sh" <<'SH'
-for command in fixture-agent-next fixture-check-next; do
-  printf '#!/bin/sh\nexit 0\n' > "/usr/local/bin/$command"
-  chmod 0755 "/usr/local/bin/$command"
-done
-SH
-fi
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
 port=$((35000 + $$ % 10000))
 cat > "$SUBYARD_CONFIG_HOME/yards/$name/config.env" <<EOF
@@ -108,10 +98,10 @@ SSH_PORT=$port
 YARD_KIND=container
 YARD_IMAGE=images:debian/13/cloud
 YARD_IMAGE_FALLBACK=images:debian/13/cloud
-CODING_TOOL_INTEGRATIONS=$fixture_integrations
+CODING_TOOL_INTEGRATIONS=
 AGENT_claude_PROVISION=$STATE/provision.sh
-AGENT_claude_COMMAND=$fixture_command
-AGENT_claude_CHECK=$fixture_check
+AGENT_claude_COMMAND=fixture-agent
+AGENT_claude_CHECK=fixture-check
 AGENT_claude_PERSIST=
 ENVIRONMENT_PROFILES=
 DEV_USER=dev
@@ -122,18 +112,9 @@ FORWARD_SSH_AGENT=0
 LIMITS_CPU=1
 LIMITS_MEMORY=1GiB
 EOF
-if [ "${1:-}" = --identity-rename ]; then
-  printf 'AGENT_claude_PROJECTS_CHANGED=fixture-hook\n' >> "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
-fi
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
 yard init --yes
 yard start --yes
-if [ "${1:-}" = --identity-baseline ]; then
-  guest python3 -c 'import json,os,pwd,stat; from pathlib import Path; u=pwd.getpwnam("dev"); result={"uid":u.pw_uid,"gid":u.pw_gid,"home":u.pw_dir}; result["subids"]={name:{"named_rows":sum(line.split(":",1)[0]==u.pw_name for line in Path("/etc",name).read_text().splitlines()),"numeric_rows":sum(line.split(":",1)[0]==str(u.pw_uid) for line in Path("/etc",name).read_text().splitlines())} for name in ("subuid","subgid") if Path("/etc",name).exists()}; result["mail"]={str(p):{"mode":oct(stat.S_IMODE(p.lstat().st_mode)),"uid":p.lstat().st_uid,"gid":p.lstat().st_gid,"size":p.lstat().st_size,"symlink":p.is_symlink()} for p in [Path("/var/mail/dev"),Path("/var/spool/mail/dev")] if p.exists() or p.is_symlink()}; print("IDENTITY_BASELINE="+json.dumps(result,sort_keys=True))'
-  printf 'PASS: product-created developer identity baseline recorded without rewriting account state\n'
-  exit
-fi
-if [ "${1:-}" != --identity-rename ]; then
 before="$(guest sha256sum /etc/subyard/preview.json | cut -d' ' -f1)"
 preview_port=$((port + 1))
 yard config set WEB_PREVIEW_HOST_PORT "$preview_port" --scope yard --yes
@@ -193,7 +174,6 @@ fi
 guest mv /usr/local/libexec/subyard/projects-changed.fixture-backup /usr/local/libexec/subyard/projects-changed
 yard init --yes
 printf 'PASS: applied settings retain missing-owned-file release refusal\n'
-fi
 # Install the relevant credential-free owners before exercising account recovery.
 yard config set ENVIRONMENT_PROFILES 'git-fetch telemetry' --scope yard --yes
 yard config set DEV_SUDO 1 --scope yard --yes

@@ -208,6 +208,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
+        if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):
+            import identity
+            print(identity.refusal(error), file=sys.stderr)
         print('GitHub runtime activation failed; inspect the selected broker service', file=sys.stderr)
         sys.exit(1)

@@ -6,6 +6,16 @@ import re
 import stat
 
 JOURNAL = Path('/var/lib/subyard/developer-identity/transition.json')
+# Owner-authored refusals are fixed prose; anything else (parser errors,
+# quoted values) could carry file contents and stays generic.
+PUBLIC_REFUSAL = re.compile('[A-Za-z][A-Za-z ,;/-]{0,160}')
+
+
+def refusal(owner, error):
+    """Return the one stderr line core shows the operator for a refused owner."""
+    if type(error) is ValueError and PUBLIC_REFUSAL.fullmatch(str(error)):
+        return owner+' identity: '+str(error)
+    return owner+' identity: owned state could not be verified; resolve it, then retry plain yard init'
 
 
 def unique(pairs):
@@ -36,15 +46,12 @@ def load(source, name, path=JOURNAL, machine=Path('/etc/machine-id'), owner=0, r
     if plan['source'] != source or plan['machine'] != machine.read_text().strip() or name not in plan.get('owners', {}):
         raise ValueError('foreign identity authority')
     recipe = plan['owners'][name]
-    if recipe['original'] != {**plan['old'], 'group': plan['group']['name']} or recipe['target'] != {**plan['new'], 'group': plan['new']['user']}:
-        # Account records may carry the shell for core postconditions. Owners
-        # address just the account identity and never authorize a shell change.
-        expected_old = {key: plan['old'][key] for key in ('user', 'uid', 'gid', 'home')}
-        expected_old['group'] = plan['group']['name']
-        expected_new = {key: plan['new'][key] for key in ('user', 'uid', 'gid', 'home')}
-        expected_new['group'] = plan['new']['user']
-        if recipe['original'] != expected_old or recipe['target'] != expected_new:
-            raise ValueError('identity owner scope changed')
+    # Account records carry the shell for core postconditions; owners address
+    # just the account identity and never authorize a shell change.
+    expected_old = {key: plan['old'][key] for key in ('user', 'uid', 'gid', 'home')}
+    expected_new = {key: plan['new'][key] for key in ('user', 'uid', 'gid', 'home')}
+    if recipe['original'] != {**expected_old, 'group': plan['group']['name']} or recipe['target'] != {**expected_new, 'group': plan['new']['user']}:
+        raise ValueError('identity owner scope changed')
     if plan['old']['uid'] != plan['new']['uid'] or plan['old']['gid'] != plan['new']['gid'] or plan['new']['home'] != '/home/'+plan['new']['user']:
         raise ValueError('identity numeric ownership changed')
     return value, recipe

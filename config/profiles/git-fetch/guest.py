@@ -618,5 +618,8 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):
+            import authority
+            print(authority.refusal('Git-fetch', error), file=sys.stderr)
         print('git-fetch: '+failure_reason(error)+'; inspect owned timer state', file=sys.stderr)
         sys.exit(2)

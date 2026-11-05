@@ -56,6 +56,13 @@ class IdentityTransitionTest(unittest.TestCase):
         else:
             self.fail('unexpected account tool')
 
+    def test_owner_refusal_shows_only_fixed_prose(self):
+        import authority
+        self.assertEqual(authority.refusal('Git-fetch',ValueError('identity owner manager changed')),'Git-fetch identity: identity owner manager changed')
+        generic='Telemetry identity: owned state could not be verified; resolve it, then retry plain yard init'
+        for error in (ValueError("invalid literal for int() with base 10: 'secret'"),json.JSONDecodeError('Expecting value','secret',0),OSError('identity owner manager changed')):
+            self.assertEqual(authority.refusal('Telemetry',error),generic)
+
     def test_owner_reboot_allowance_requires_changed_native_boot(self):
         import authority
         journal={'plan':{'boot':self.transition.boot()}}

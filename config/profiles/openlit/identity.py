@@ -112,6 +112,6 @@ def main():
 
 if __name__=='__main__':
     try:main()
-    except (ValueError,OSError,KeyError,TypeError):
-        print('OpenLit identity ownership could not be verified',file=sys.stderr)
+    except (ValueError,OSError,KeyError,TypeError) as error:
+        print(authority.refusal('OpenLit',error),file=sys.stderr)
         raise SystemExit(1)

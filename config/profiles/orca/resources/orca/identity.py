@@ -220,11 +220,6 @@ def main():
 
 if __name__ == '__main__':
     try: main()
-    except ValueError as error:
-        # These owner checks use fixed diagnostic strings, never file contents.
-        print('Orca identity: '+str(error), file=sys.stderr)
-        raise SystemExit(1)
-    except (OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        print('Orca identity native read failed: '+type(error).__name__, file=sys.stderr)
-        print('Orca identity state could not be verified; retry plain init after resolving owned runtime drift', file=sys.stderr)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(authority.refusal('Orca', error), file=sys.stderr)
         raise SystemExit(1)

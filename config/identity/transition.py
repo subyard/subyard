@@ -325,6 +325,7 @@ class Transition:
         return value
 
     def prepare(self, old_user, new_user, uid, source, yard, packages=None):
+        # Report every independent refusal; build the plan only from a clean inspection.
         failures = []
         def inspect(action):
             try:
@@ -341,14 +342,15 @@ class Transition:
             failures.append('invalid identity source')
         accounts = inspect(self.accounts)
         groups = inspect(self.groups)
-        inspect(self.machine)
-        old = None
+        machine = inspect(self.machine)
+        old = new = primary = home = subordinate = account_recipe = None
         if accounts is not None:
             matches = [item for item in accounts if item['user'] == old_user]
             if len(matches) != 1 or matches[0]['uid'] != uid or uid == 0 or matches[0]['gid'] == 0 or sum(item['uid'] == uid for item in accounts) != 1:
                 failures.append('developer account is not uniquely owned')
             else:
                 old = matches[0]
+                new = dict(old, user=new_user, home='/home/'+new_user)
             if any(item['user'] == new_user for item in accounts):
                 failures.append('destination account already exists')
         if groups is not None:
@@ -358,6 +360,7 @@ class Transition:
                 primary = [item for item in groups if item['gid'] == old['gid']]
                 if len(primary) != 1 or primary[0]['name'] != old_user or any(name != old_user for name in primary[0]['members']) or any(item['gid'] == old['gid'] and item['user'] != old_user for item in accounts):
                     failures.append('developer primary group is shared or foreign')
+        destination = None
         if valid_target:
             destination = self.path('/home/'+new_user)
             inspect(lambda: self.safe(destination))
@@ -366,10 +369,12 @@ class Transition:
             if inspect(lambda: self.lingering(new_user)):
                 failures.append('destination lingering already exists')
         if old is not None:
-            if old['home'] != '/home/'+old_user:
+            if old['home'] != '/home/'+old_user or old_user == new_user:
                 failures.append('canonical developer home transition required')
             else:
-                inspect(lambda: self.home(old))
+                home = inspect(lambda: self.home(old))
+                if home is not None and destination is not None and inspect(lambda: destination.parent.stat().st_dev != home[0]):
+                    failures.append('home transition requires the same filesystem')
                 inspect(lambda: self.no_mounts(old['home']))
                 inspect(lambda: self.evidence(old))
             if inspect(lambda: self.lingering(old_user) and self.user_services(uid)):
@@ -381,57 +386,19 @@ class Transition:
                 break
         if valid_target:
             import subids
-            inspect(lambda: subids.SubordinateIDs(self.root,self.owner).observe(old_user,new_user,uid))
+            subordinate = inspect(lambda: subids.SubordinateIDs(self.root,self.owner).observe(old_user,new_user,uid))
             inspect(lambda: self.sudo_grant(old_user))
             destination_grant=self.path('/etc/sudoers.d/90-subyard-'+new_user)
             if destination_grant.exists() or destination_grant.is_symlink():
                 failures.append('destination sudo grant already exists')
-            if old is not None:
-                import accounts
-                inspect(lambda: accounts.AccountRecovery(self.root,self.owner,self.subid_lock).observe(old,dict(old,user=new_user,home='/home/'+new_user)))
+            if new is not None:
+                import accounts as account_module
+                account_recipe = inspect(lambda: account_module.AccountRecovery(self.root,self.owner,self.subid_lock).observe(old,new))
         inspect(self.listener)
         if failures:
             raise IdentityRefusal('; '.join(failures))
-        return self.prepare_checked(old_user,new_user,uid,source,yard,packages or [])
-
-    def prepare_checked(self, old_user, new_user, uid, source, yard, packages):
-        if not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', new_user) or not re.fullmatch('[0-9a-f]{64}', source):
-            raise IdentityRefusal('invalid identity transition target')
-        accounts = self.accounts()
-        old = [item for item in accounts if item['user'] == old_user]
-        if len(old) != 1 or old[0]['uid'] != uid or uid == 0 or old[0]['gid'] == 0 or sum(item['uid'] == uid for item in accounts) != 1:
-            raise IdentityRefusal('developer account is not uniquely owned')
-        old = old[0]
-        if old['home'] != '/home/'+old_user or old_user == new_user:
-            raise IdentityRefusal('canonical developer home transition required')
-        if any(item['user'] == new_user for item in accounts):
-            raise IdentityRefusal('destination account already exists')
-        groups = self.groups()
-        primary = [item for item in groups if item['gid'] == old['gid']]
-        if len(primary) != 1 or primary[0]['name'] != old_user or any(name != old_user for name in primary[0]['members']) or any(item['gid'] == old['gid'] and item['user'] != old_user for item in accounts):
-            raise IdentityRefusal('developer primary group is shared or foreign')
-        if any(item['name'] == new_user for item in groups):
-            raise IdentityRefusal('destination group already exists')
-        new = dict(old, user=new_user, home='/home/'+new_user)
-        destination = self.path(new['home'])
-        self.safe(destination)
-        if destination.exists() or destination.is_symlink():
-            raise IdentityRefusal('destination home already exists')
-        if self.lingering(new_user):
-            raise IdentityRefusal('destination lingering already exists')
-        home = self.home(old)
-        if destination.parent.stat().st_dev != home[0]:
-            raise IdentityRefusal('home transition requires the same filesystem')
-        self.no_mounts(old['home'])
-        for relative in ('var/spool/cron/crontabs/'+old_user, 'var/spool/mail/'+old_user, 'var/mail/'+old_user):
-            auxiliary = self.root/relative
-            if auxiliary.exists() or auxiliary.is_symlink():
-                raise IdentityRefusal('developer scheduled jobs or mailbox require an explicit owned transition')
-        import subids
-        subordinate = subids.SubordinateIDs(self.root,self.owner).observe(old_user,new_user,uid)
-        import accounts
-        account_recipe=accounts.AccountRecovery(self.root,self.owner,self.subid_lock).observe(old,new)
-        return dict(schema=1, machine=self.machine(), boot=self.boot(), yard=yard, source=source,
+        packages = packages or []
+        return dict(schema=1, machine=machine, boot=self.boot(), yard=yard, source=source,
                     old=old, new=new, linger=self.lingering(old_user), group=primary[0], home=home, parent=self.parent(old['home']), evidence=self.evidence(old), subids=subordinate, accounts=account_recipe, packages=packages,receipts=self.receipts(old,new,packages),sudo=self.sudo_grant(old_user) is not None,listener=self.listener())
 
     @contextmanager
@@ -510,46 +477,6 @@ class Transition:
                 settings['DEV_USER']=new['user']
         return value
 
-    def skill_contents(self, value, home, old):
-        adapters=('.agents/skills','.claude/skills','.config/opencode/skills')
-        if value['extra']:
-            adapters+=('.pi/agent/skills','.hermes/skills')
-        for name,files in value['skills'].items():
-            if not re.fullmatch('[a-z0-9]+(?:-[a-z0-9]+)*',name) or not isinstance(files,dict) or 'SKILL.md' not in files:
-                raise IdentityRefusal('invalid owned skill registration')
-            directory=self.root/'usr/local/share/subyard/skills'/name
-            self.safe(directory)
-            for relative,expected in files.items():
-                if not isinstance(relative,str) or Path(relative).is_absolute() or '..' in Path(relative).parts or os.path.normpath(relative)!=relative or not isinstance(expected,str) or not re.fullmatch('[0-9a-f]{64}',expected):
-                    raise IdentityRefusal('invalid owned skill file')
-                path=directory/relative
-                self.safe(path)
-                info=path.lstat()
-                if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o644 or info.st_uid!=self.owner or info.st_gid!=os.getgid() or info.st_nlink!=1 or info.st_size>4*1024*1024 or hashlib.sha256(path.read_bytes()).hexdigest()!=expected:
-                    raise IdentityRefusal('owned skill content changed')
-            actual={str(path.relative_to(directory)) for path in directory.rglob('*') if not path.is_dir() or path.is_symlink()}
-            if actual!=set(files):
-                raise IdentityRefusal('unrecognized owned skill content')
-            for adapter in adapters+('.codex/skills',):
-                link=self.path(home)/adapter/name
-                physical_home=self.path(home)
-                parents=[]
-                for parent in (link.parent,*link.parent.parents):
-                    if parent==physical_home.parent:break
-                    parents.append(parent)
-                for parent in reversed(parents):
-                    try: info=parent.lstat()
-                    except FileNotFoundError: break
-                    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (self.owner,old['uid']) or info.st_mode & 0o022:
-                        raise IdentityRefusal('unsafe skill discovery parent')
-                if adapter not in adapters:
-                    if link.exists() or link.is_symlink():
-                        raise IdentityRefusal('unexpected owned skill adapter')
-                    continue
-                info=link.lstat()
-                if not stat.S_ISLNK(info.st_mode) or (info.st_uid,info.st_gid)!=(old['uid'],old['gid']) or os.readlink(link)!=str(directory):
-                    raise IdentityRefusal('owned skill discovery link changed')
-
     def receipt_paths(self):
         result=[]
         inventory=self.root/'var/lib/subyard/integrations/inventory.json'
@@ -581,8 +508,6 @@ class Transition:
                         raise IdentityRefusal('owned package identity source changed')
             moved=self.receipt_projection(value,kind,old,new,False,packages)
             final=self.receipt_projection(value,kind,old,new,True,packages)
-            if kind=='skill':
-                self.skill_contents(value,old['home'],old)
             result[str(path.relative_to(self.root))]=dict(kind=kind,before=hashlib.sha256(path.read_bytes()).hexdigest(),moved=hashlib.sha256(encoded(moved)).hexdigest(),after=hashlib.sha256(encoded(final)).hexdigest())
         return result
 
@@ -597,8 +522,6 @@ class Transition:
             current=hashlib.sha256(before).hexdigest()
             if current not in (recipe['before'],recipe['moved'],recipe['after']):
                 raise IdentityRefusal('owned identity receipt changed')
-            if recipe['kind']=='skill':
-                self.skill_contents(value,plan['new']['home'],plan['old'])
             if current==recipe['after']:
                 continue
             projected=self.receipt_projection(value,recipe['kind'],plan['old'],plan['new'],commit,plan['packages'])

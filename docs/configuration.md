@@ -684,41 +684,25 @@ captures its independently verified current configuration. Start a stopped affec
 yard first; an unverified or conflicting legacy installation must be reconciled
 before its old settings can be adopted. Host-scoped writes check every affected
 local yard, including whether its own override masks the change.
-Changing `DEV_USER` on an installed yard is reconciled by plain `yard init`.
-The confirmed plan first renames the verified existing account and private primary
-group, retaining their numeric UID and GID, and moves its canonical home with an
-inode-preserving rename. Managed profile owners rebind their own account references;
-user data and unrelated configuration remain intact. The new applied identity is
-published after those owners and core receipts verify. Other applied settings keep
-their prior values until ordinary init succeeds.
+Changing `DEV_USER` on an installed yard is reconciled by plain `yard init`; no
+release migration is required. The confirmed plan renames the verified existing
+account and its private primary group, keeps their numeric UID and GID, and moves
+the canonical home in place. Managed profile owners rebind their own account
+references; user data and unrelated configuration remain intact. `DEV_UID` changes
+are not account migrations. For a stopped yard, the same plan may temporarily start
+it for inspection and restores its desired power afterwards.
 
-For a stopped yard, the same confirmed init plan may temporarily start the yard
-for identity inspection and restore its desired power after successful init.
-A protected local hint records only the verified applied identity, native yard
-UUID and source/release binding. A matching current hint avoids repeated boots;
-a missing legacy hint requires one disclosed inspection boot. The hint never
-authorizes account changes. A new transition captures normal post-boot service
-state; interrupted transitions retain their original approved owner intent and
-re-quiesce those owners after a reboot before changing the account.
-
-
-This prerequisite briefly stops the managed SSH listener and affected profile
-services. Existing developer processes must exit before the account changes; init
-refuses to kill them. Systemd lingering moves to the new login; while it is enabled,
-init refuses as long as the developer's user manager runs services. Foreign accounts, homes, shared primary groups, nested mounts,
-unsafe ownership, unsupported installed owners, and changed recovery inputs refuse
-before account mutation. `DEV_UID` changes are not account migrations.
+The rename briefly stops the managed SSH listener and affected profile services.
+Existing developer processes must exit first; init refuses to kill them. Systemd
+lingering moves to the new login; while it is enabled, init refuses as long as the
+developer's user manager runs services. Foreign accounts, homes, shared primary
+groups, nested mounts, unsafe ownership and installed owners without rename support
+refuse before the account changes.
 
 If interrupted, retry plain `yard init` with the same desired configuration and
-installed source. A protected pending identity blocks other mutations until its
-narrow recovery completes. Independently assessed `teardown --full` remains available
-for complete removal. Once the identity is verified and committed, a later
-ordinary init hook failure leaves the new account usable; rerun init to reconcile
-remaining settings. No release migration is required for this configuration change.
-Completed-release observations continue to use the verified applied identity while
-the desired name is pending. If neither the integration inventory nor protected
-core skills receipt establishes an applied identity, identity authoring refuses;
-reconcile the existing installation first.
+installed source; other mutations stay blocked until it completes. `teardown --full`
+remains available for complete removal. Once the rename is committed, a later init
+hook failure leaves the new account usable; rerun init for the remaining settings.
 
 Changing `ENVIRONMENT_PROFILES` takes effect for project admission on the next
 command. Retained project cleanup, yard stop and shell access remain available

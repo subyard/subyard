@@ -348,5 +348,8 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):
+            import authority
+            print(authority.refusal('Telemetry', error), file=sys.stderr)
         print(failure_diagnostic(error), file=sys.stderr)
         raise SystemExit(2)
