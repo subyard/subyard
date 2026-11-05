@@ -182,7 +182,7 @@ Enable the profile on the owner for a running yard, then set the mode and author
 ```sh
 yard -Y default profile enable github
 yard -Y default config set GITHUB_GIT_MODE broker-last --scope yard
-yard -Y default migrate
+yard migrate
 yard -Y default profile status github --json
 ```
 
@@ -192,7 +192,7 @@ To turn routing off while retaining the broker and `gh` wrapper:
 
 ```sh
 yard -Y default config set GITHUB_GIT_MODE off --scope yard
-yard -Y default migrate
+yard migrate
 ```
 
 Changing the mode changes the desired installed runtime. Run `yard migrate` after setting it;
@@ -298,6 +298,6 @@ protected connection for each request, so materializing a new revision takes eff
 the next request without placing credentials in the yard.
 
 For transport failures, inspect `systemctl --user status subyard-github-default.service` on the
-owner host. For installed-runtime drift, run `yard -Y default migrate` with fresh authorization;
+owner host. For installed-runtime drift, run `yard migrate` with fresh authorization;
 repeat `yard -Y default profile enable github` to resume profile installation when release readiness permits it.
 Remote controllers use the same `init` path on the owner; no App credential belongs on the controller.
