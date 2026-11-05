@@ -269,6 +269,33 @@ if [ "$lane" = skills ]; then
     android_candidate_command "$YARD_BIN" migrate --yes
     android_candidate_command "$YARD_BIN" migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null
   }
+  # A profile provisioned before shared skills existed has no receipt, installed skill or links.
+  # Its pending provision is listed and offered after migrate, never run unasked.
+  receipt=/var/lib/subyard/agent-skills/profile-android.json
+  incus --project "$project" exec "$instance" -- sh -eu -c '
+    rm "$1"
+    rm -r /usr/local/share/subyard/skills/subyard-android
+    for adapter in .agents/skills .claude/skills .config/opencode/skills; do
+      rm -f "/home/dev/$adapter/subyard-android"
+    done
+  ' _ "$receipt"
+  yard profile list | tee "$state/pending-list.log"
+  grep -Eq "provisioning required \\(run: [^ ]+ -Y $YARD_NAME provision android\\)" "$state/pending-list.log"
+  android_candidate_command "$YARD_BIN" migrate --yes </dev/null | tee "$state/pending-migrate.log"
+  grep -Fq "Profile android in yard $YARD_NAME is selected but not provisioned for this release." "$state/pending-migrate.log"
+  grep -Eq "Provision it with: [^ ]+ -Y $YARD_NAME provision android$" "$state/pending-migrate.log"
+  incus --project "$project" exec "$instance" -- test ! -e "$receipt"
+  android_candidate_command timeout --foreground 1800 python3 -I \
+    "$root/config/profiles/android/tests/e2e/pty-confirm.py" "$YARD_BIN" migrate | tee "$state/pending-offer.log"
+  grep -Fq "Profile android in yard $YARD_NAME is selected but not provisioned for this release." "$state/pending-offer.log"
+  grep -Eq '^pty_prompts_answered=[1-9]' "$state/pending-offer.log"
+  incus --project "$project" exec "$instance" -- test -s "$receipt"
+  incus --project "$project" exec "$instance" -- test -r /home/dev/.agents/skills/subyard-android/SKILL.md
+  yard profile list | tee "$state/repaired-list.log"
+  if grep -Fq 'provisioning required' "$state/repaired-list.log"; then exit 1; fi
+  android_candidate_command "$YARD_BIN" migrate --yes </dev/null | tee "$state/repaired-migrate.log"
+  if grep -Fq 'Profile android' "$state/repaired-migrate.log"; then exit 1; fi
+  printf 'android_pending_provision_offer=PASS\n'
   pool_pid="$(incus --project "$project" exec "$instance" -- systemctl show subyard-android-pool.service -p MainPID --value)"
   [[ "$pool_pid" =~ ^[1-9][0-9]*$ ]]
   # Repeated static refresh and missing-link repair must not restart the capability.

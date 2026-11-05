@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/application"
@@ -79,8 +80,11 @@ func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ 
 		_ = runtime.Close()
 		return err
 	}
-	execution := &releaseExecution{prepared: operation, yard: "default", runtime: runtime, phase: "execute"}
+	execution := &releaseExecution{prepared: operation, yard: "default", runtime: runtime, phase: "execute",
+		configHome: loaded.Context.Paths.ConfigHome,
+		launcher:   filepath.Join(loaded.Environment["YARD_RUNTIME_ROOT"], "current", "bin", "yard")}
 	prepared.closeResource = execution.Close
+	prepared.profileFollowup = execution
 	prepared.exactState = operation.Binding
 	prepared.stepsComplete = operation.Binding != "" && len(operation.Steps) != 0
 	prepared.steps = func() []domain.OperationStep { return domain.CloneOperationSteps(operation.Steps) }

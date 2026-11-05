@@ -39,6 +39,12 @@ type Profile struct {
 	Resources         []string `json:"resources"`
 }
 
+// ProvisionPending reports a selected profile whose owning provision check
+// observed changes: it has no successful provision for the installed release.
+func (entry Profile) ProvisionPending() bool {
+	return entry.Selected && entry.Eligible && entry.Provisionable && entry.Convergence == "changes-required"
+}
+
 type ProfileList struct {
 	SchemaVersion int              `json:"schemaVersion"`
 	YardName      string           `json:"yardName"`

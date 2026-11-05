@@ -140,5 +140,8 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 		return -1, err
 	}
 	definition, _ := cli.manifest.Lookup("migrate")
+	// Init keeps its own plan and names its own provision continuation.
+	cli.profileOfferSuppressed = true
+	defer func() { cli.profileOfferSuppressed = false }()
 	return cli.runCurrentMigration(ctx, definition, nil, false, yes || slices.Contains(arguments, "--yes") || slices.Contains(arguments, "-y")), nil
 }

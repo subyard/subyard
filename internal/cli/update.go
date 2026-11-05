@@ -41,6 +41,8 @@ type releaseExecution struct {
 	followup      bool
 	retryDiskTmp  func(context.Context) error
 	newerRelease  releaseruntime.NewerRelease
+	// launcher is the installed runtime launcher for post-operation follow-up.
+	launcher string
 }
 
 func (execution *releaseExecution) Close() error {

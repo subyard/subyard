@@ -87,7 +87,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 	}
 	if parsed.help {
 		return Prepared{Action: "migrate.help", run: func(context.Context) error {
-			_, err := fmt.Fprintln(runtime.config.Stdout, "Usage: yard migrate [--check [--json]] [--yes]\nInspect or complete migrations and runtime readiness for the installed current release.")
+			_, err := fmt.Fprintln(runtime.config.Stdout, "Usage: yard migrate [--check [--json]] [--yes]\nInspect or complete migrations and runtime readiness for the installed current release.\nAfter success, offer provisioning for selected profiles that need it.")
 			return err
 		}}, nil
 	}

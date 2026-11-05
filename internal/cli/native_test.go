@@ -1088,7 +1088,12 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				t.Fatalf("update invoked legacy migration finalization: payload=%q err=%v", finalized, finalizeErr)
 			}
 			activeArguments, err := os.ReadFile(activeLog)
-			if err != nil || string(activeArguments) != "config apply --yes\n" {
+			// An activated runtime also observes selected profiles for the provision offer.
+			want := "config apply --yes\n-Y default profile list --json\n"
+			if test.rollback {
+				want = "config apply --yes\n"
+			}
+			if err != nil || string(activeArguments) != want {
 				t.Fatalf("active launcher arguments = %q, err=%v", activeArguments, err)
 			}
 			if payload, err := os.ReadFile(oldLog); err == nil {

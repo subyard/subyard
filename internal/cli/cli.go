@@ -138,6 +138,9 @@ type CLI struct {
 	ownerAdmission               *ownerWriteAdmission
 	ownerAdmissionMutex          *sync.Mutex
 	localMetadataDiagnostics     bool
+
+	// profileOfferSuppressed keeps init-embedded migration from offering provisioning.
+	profileOfferSuppressed bool
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {

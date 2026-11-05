@@ -172,6 +172,16 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	if prepared.printResult != nil {
 		prepared.printResult(result)
 	}
+	if followup := prepared.profileFollowup; followup != nil &&
+		(followup.prepared.Action == "update.activate" || followup.prepared.Action == "migrate.apply") {
+		// Release locks belong to the completed operation; a follow-up
+		// provision is a separate operation with its own plan.
+		if closeErr := prepared.Close(); closeErr != nil {
+			cli.errorf("close completed %s: %v", prepared.Definition.Name, closeErr)
+			return 1
+		}
+		cli.offerPendingProfileProvision(ctx, followup, assumeYes)
+	}
 	return 0
 }
 

@@ -329,6 +329,7 @@ inspect or finish migrations for the installed release.
 ```text
 Usage: yard migrate [--check [--json]] [--yes]
 Inspect or complete migrations and runtime readiness for the installed current release.
+After success, offer provisioning for selected profiles that need it.
 ```
 
 ## integration

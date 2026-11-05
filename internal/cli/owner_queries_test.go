@@ -146,6 +146,9 @@ func TestOwnerProfileQueryChecksOnlyRunningSelectedEligibleHooks(t *testing.T) {
 		if entry.Name == "legacy" && entry.Convergence != "current" || entry.Name == "selected" && entry.Convergence != "changes-required" {
 			t.Fatalf("checks=%#v", result)
 		}
+		if entry.ProvisionPending() != (entry.Name == "selected") {
+			t.Fatalf("provision pending=%t for %#v", entry.ProvisionPending(), entry)
+		}
 	}
 	runner.Steps = []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, Status: "error"}, Stderr: "private hook diagnostic"}, {Result: domain.AdapterResult{Schema: 1, Status: "ok"}, Stderr: "invalid private output"}}
 	runner.Requests = nil
@@ -156,6 +159,9 @@ func TestOwnerProfileQueryChecksOnlyRunningSelectedEligibleHooks(t *testing.T) {
 	for _, entry := range result.Profiles {
 		if (entry.Name == "legacy" || entry.Name == "selected") && (entry.Convergence != "unknown" || entry.Diagnostic != "check-unavailable") {
 			t.Fatalf("unavailable=%#v", entry)
+		}
+		if entry.ProvisionPending() {
+			t.Fatalf("an unavailable check is not a pending provision: %#v", entry)
 		}
 	}
 }

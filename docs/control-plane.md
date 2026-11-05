@@ -437,6 +437,17 @@ authorization binding, protected evidence, per-domain epoch advancement, stable 
 forward recovery and post-activation reconciliation. A completed one-time migration is durable
 history and is never reopened to repair later drift.
 
+After a successful `yard update` or `yard migrate`, the activated runtime reads `profile list`
+for every local yard. A selected profile whose read-only owning provision check reports changes,
+for example a profile provisioned before its capability registration existed, is not a migration
+and does not affect release readiness. An interactive run offers it through the ordinary scoped
+`yard -Y NAME provision PROFILE` plan and confirmation; `--yes` and non-interactive runs only name
+that command. A declined or failed offer leaves the release result unchanged, and the next update
+or migrate observes the profile again. `yard profile list` shows the same pending provision.
+The offer belongs to the runtime that runs the command: an update started by an older runtime
+does not offer it, so run `yard migrate` once after that update. Init-embedded migration does not
+offer it either: init keeps its own plan and names its own provision continuation.
+
 Registered local yards run missing compatibility migrations before ordinary init admission.
 Their native ownership and selected resource receipts use per-yard steps in the same release
 journal. The migration cannot be rolled back, so existing state does not stop it: local devices

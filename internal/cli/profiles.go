@@ -206,6 +206,9 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			fmt.Fprintf(cli.options.Stdout, "Yard: %s\nEnvironment profiles (%s, %s scope, %s:%d):\n", loaded.Context.YardName, group, source.Scope, source.Path, source.Line)
 			for _, entry := range list.Profiles {
 				fmt.Fprintf(cli.options.Stdout, "  %s: requested=%t effective=%t eligible=%t reason=%s; runtime=%s (%s)\n", entry.Name, entry.Requested, entry.Effective, entry.Eligible, entry.Reason, entry.Convergence, entry.Diagnostic)
+				if entry.ProvisionPending() {
+					fmt.Fprintf(cli.options.Stdout, "    provisioning required (run: %s provision %s)\n", cli.yardHint(loaded.Context), entry.Name)
+				}
 			}
 			for _, entry := range overridden {
 				fmt.Fprintf(cli.options.Stdout, "  overridden: %s (%s scope, %s:%d)\n", entry.Status, entry.Scope, entry.Path, entry.Line)

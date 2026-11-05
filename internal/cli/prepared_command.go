@@ -190,6 +190,8 @@ type preparedCommand struct {
 	lifecycle            *preparedLifecycle
 	ownerAdmission       ownerWriteAdmission
 	remotePhased         bool
+	// profileFollowup offers pending profile provisioning after success.
+	profileFollowup *releaseExecution
 }
 
 // Both prepared commands and early source recovery capture these read-only
@@ -1198,6 +1200,7 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	}
 	prepared.closeResource = execution.Close
 	prepared.release = execution
+	prepared.profileFollowup = execution
 	prepared.exactState = execution.prepared.Binding
 	prepared.steps = func() []domain.OperationStep { return domain.CloneOperationSteps(execution.prepared.Steps) }
 	prepared.stepsComplete = execution.prepared.Binding != "" && len(execution.prepared.Steps) != 0
