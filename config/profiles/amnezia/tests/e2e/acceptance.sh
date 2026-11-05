@@ -31,7 +31,7 @@ done
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE=amnezia-acceptance
 # The enclosing runner keeps its fixed work deadline and 300-second TERM grace.
-# Capture (110+2 seconds) and cleanup (under 95 seconds) fit inside that grace.
+# Capture (110+2 and 20+2 seconds) and cleanup (under 95 seconds) fit inside that grace.
 install -d -m 0700 "$ROOT/.build/test-runs"
 OUTPUT="$(mktemp -d "$ROOT/.build/test-runs/amnezia.XXXXXX")"
 chmod 0700 "$OUTPUT"
@@ -54,7 +54,21 @@ diagnose_failure() {
   [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] || rc=1
   timeout --signal=TERM --kill-after=2 5 python3 \
     "$ROOT/config/profiles/amnezia/tests/e2e/failure-capture.py" validate "$OUTPUT/failure.tar" || rc=1
+  capture_native_failure
   return "$rc"
+}
+# GUI failure evidence is optional: its absence never changes the capture result.
+capture_native_failure() {
+  local command
+  local -a codes
+  [ -n "${GUEST_DIRS[2]:-}" ] || return 0
+  install -m 0600 /dev/null "$OUTPUT/native-failure.tar"
+  command="$(quote_ssh_command sh -c 'cd /var/tmp/subyard-amnezia-native-app/failure 2>/dev/null || exit 0; exec tar -cf - -- *')" || return 0
+  timeout --signal=TERM --kill-after=2 20 ssh -F "$CLIENT_CONFIG" -T e2e-vm-2 -- "$command" \
+    </dev/null 2>/dev/null | head -c 3145728 >"$OUTPUT/native-failure.tar"
+  codes=("${PIPESTATUS[@]}")
+  printf 'native_failure_transport_exit_code=%s\nnative_failure_archive_bytes=%s\n' \
+    "${codes[0]}" "$(stat -c %s "$OUTPUT/native-failure.tar")" >>"$OUTPUT/capture-result"
 }
 cleanup_acceptance_resources() {
   local cleanup_rc=0 vm command
@@ -163,6 +177,13 @@ native_app() {
   guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/native-app.sh" "$@" </dev/null
 }
 
+# Direct SSH through the advertised port: the app's own administration path, without its GUI.
+native_admin() {
+  printf 'amnezia_acceptance_stage=native-%s\n' "$1"
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" \
+    "$1" --owner-ip "${VM_IP[1]}" --owner-port 2226 </dev/null
+}
+
 prepare_native_server() {
   printf 'amnezia_acceptance_stage=protected-admin-transfer\n'
   guest 2 bash -ceu '
@@ -171,7 +192,7 @@ prepare_native_server() {
     install -d -o 0 -g 0 -m 0700 "$directory"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq docker.io curl >/dev/null
+    apt-get install -y -qq docker.io curl openssh-client >/dev/null
     systemctl start docker
   ' </dev/null
   guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
@@ -233,6 +254,7 @@ prepare_native_clients() {
   client_denied one
   client_probe two
   owner_phase native-baseline
+  native_admin admin-baseline
 }
 
 reboot_owner() {
@@ -391,6 +413,7 @@ if [ "$lane" = resources ]; then
   client_reboot_traffic
   reboot_owner
   owner_phase verify-enabled
+  native_admin admin-check
   client_probe
   printf 'amnezia_acceptance_stage=free-page-reporting-after-reboot\n'
   guest 1 env SUBYARD_E2E_VM=1 bash "${GUEST_DIRS[1]}/src/dev/e2e/vm-page-reporting.sh" \
@@ -405,7 +428,7 @@ fi
 owner_phase admin-down
 client_probe
 owner_phase admin-up
-native_app discover --name acceptance-two
+native_admin admin-check
 if [ "$lane" = full ]; then
   owner_phase deselect
   client_denied
@@ -418,9 +441,11 @@ if [ "$lane" = recovery ] || [ "$lane" = full ]; then
   owner_phase recovery-state-mount
   client_probe
   owner_phase recovery-agent-loss
+  native_admin admin-check
   client_probe
 fi
 if [ "$lane" = recovery ]; then
+  native_app discover --name acceptance-two
   for client in one two; do
     guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup --client "$client" </dev/null
   done
@@ -448,7 +473,7 @@ if [ "$lane" != disabled ] && [ "$lane" != reconnect ]; then
   client_reboot_traffic
   reboot_owner
   owner_phase verify-enabled
-  native_app discover --name acceptance-two
+  native_admin admin-check
   client_probe
   if [ "$lane" != startup ]; then
     printf 'amnezia_acceptance_stage=free-page-reporting\n'
@@ -459,7 +484,7 @@ if [ "$lane" != disabled ] && [ "$lane" != reconnect ]; then
     client_reboot_traffic
     reboot_owner
     owner_phase verify-enabled
-    native_app discover --name acceptance-two
+    native_admin admin-check
     client_probe
   fi
 fi
@@ -484,6 +509,8 @@ if [ "$lane" = reconnect ] || [ "$lane" = full ]; then
   ' -- "${VM_IP[1]}" </dev/null
 fi
 owner_phase up
+native_admin admin-check
+# The one stock-app reconnection: the original saved entry after an app restart.
 native_app discover --name acceptance-two
 client_probe
 for client in one two; do

@@ -17,6 +17,14 @@ config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane share
 
 Live checks use fresh allocated test VMs and the shared `dev/agent-e2e.sh` lease
 API. Follow [the VM guide](../../../../docs/test-vms.md) before running them.
+The fixture turns off the stock app's own "Check for updates automatically" setting
+before every launch, so upstream publication cannot replace its pages; a visible update
+page fails immediately with that reason. A GUI failure after the app registers for
+accessibility leaves `native-failure.tar` in the lane's evidence directory: a screenshot
+unless a page can show a client configuration or key or its controls could not be read,
+control roles with fixture-known labels only, and the saved-server count. A failure before
+that (the pre-launch settings refusal, a registration timeout, an update page seen while
+registering) leaves that archive empty, with its reason in the lane log.
 The `setup` diagnostic stops after the stock app installs its native server, before
 sharing clients. It keeps the ordinary 360-second installation completion gate;
 failures retain numeric native error codes and bounded owned-server state.
@@ -25,11 +33,13 @@ distinct identities, reopens administration, scans the native server and verifie
 the retained second user, then closes the app before image transfer or traffic probes.
 Export failures retain fixed stage/action flags and bounded control counts, without
 UI text or configuration values. The ordinary export deadlines remain unchanged.
-For navigation diagnosis, `reconnect` reaches disabled owner reboot, explicit up
-and discovery without the full resource, load and recovery prefix. It performs
-two discoveries; the full lane performs four. Whether the two additional earlier
-reopens affect the late GUI state remains unconfirmed, so this diagnostic does
-not reproduce the full prior navigation history.
+Reboots, restarts and recovery check the server directly: SSH through the advertised
+administration port, its `clientsTable` and live `awg show awg0 peers` against a baseline
+of exactly the retained client and the app's own administrator client, the revoked client
+absent. Every lane except `setup` and `resources` then runs one stock-app discovery,
+reopening the original saved entry; a failure there stays fatal. For navigation diagnosis,
+`reconnect` reaches that discovery after disabled owner reboot and explicit up, without
+the full resource, load and recovery prefix.
 
 For a separate administrative idempotence diagnostic, one leased owner can run
 the existing `owner.sh` phases `bootstrap`, `init-isolated`, then `admin-down-check`

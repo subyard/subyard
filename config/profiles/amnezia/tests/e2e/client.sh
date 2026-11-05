@@ -9,7 +9,7 @@ MARKER=subyard-amnezia-e2e-client-v1
 
 die() { printf 'amnezia-client: %s\n' "$*" >&2; exit 1; }
 usage() {
-  printf 'Usage: %s probe --owner-ip IPV4 --owner-port PORT [--private-ip IPV4] [--client one|two]\n       %s denied|reboot-traffic|cleanup [--client one|two]\n' "$0" "$0"
+  printf 'Usage: %s probe --owner-ip IPV4 --owner-port PORT [--private-ip IPV4] [--client one|two]\n       %s denied|reboot-traffic|cleanup [--client one|two]\n       %s admin-baseline|admin-check --owner-ip IPV4 --owner-port ADMIN_PORT\n' "$0" "$0" "$0"
 }
 [ "${SUBYARD_E2E_VM:-}" = 2 ] && [ -r /run/subyard-e2e-lease.json ] \
   || die 'run only on allocated VM2'
@@ -31,7 +31,7 @@ case "$client" in one|two) ;; *) die 'client must be one or two' ;; esac
 CONFIG="$CONFIG_DIR/client-$client.conf"
 CONTAINER="subyard-amnezia-e2e-client-$client"
 case "$mode" in
-  probe)
+  probe|admin-baseline|admin-check)
     [ -n "$owner_ip" ] && [ -n "$owner_port" ] || { usage; die 'owner management target is required'; }
     python3 - "$owner_ip" "$private_ip" <<'PYADDR' || die 'probe address must be IPv4'
 import ipaddress, sys
@@ -76,6 +76,19 @@ python3 - "$TUNNEL_IP" <<'PYADDR' || die 'native server tunnel address is invali
 import ipaddress, sys
 ipaddress.IPv4Address(sys.argv[1])
 PYADDR
+
+if [ "$mode" = admin-baseline ] || [ "$mode" = admin-check ]; then
+  # The stock app's administration path: sudo docker exec, as its Users page reads clientsTable
+  # and runs awg show. Peers come from the live interface; owner.sh already hashes awg0.conf.
+  # Only public peer keys and client names cross; the server's private key stays there.
+  timeout --signal=TERM --kill-after=5 60 \
+    ssh -i "$CONFIG_DIR/admin.key" -p "$owner_port" -T -o BatchMode=yes -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -o ConnectTimeout=10 -o ConnectionAttempts=3 "amnezia@$owner_ip" \
+    "sudo docker exec amnezia-awg2 sh -c \"cat /opt/amnezia/awg/clientsTable; echo; echo PEERS; awg show awg0 peers\"" \
+    </dev/null | python3 -B "$ROOT/config/profiles/amnezia/tests/e2e/admin-state.py" "$CONFIG_DIR" "$mode"
+  exit 0
+fi
 
 if [ "$mode" = denied ] || [ "$mode" = reboot-traffic ]; then
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 \

@@ -16,6 +16,7 @@ Upstream reference: github.com/amnezia-vpn/amnezia-client/tree/5.0.3.0
 
 import argparse
 import collections
+import configparser
 import csv
 import hashlib
 import ipaddress
@@ -44,12 +45,23 @@ DIGEST = '0335f2643f58c4d7494be4c6d47582574fa7e5a463450e9a47b0c5c2eda797c2'
 LAUNCHER = '/opt/AmneziaVPN/bin/AmneziaVPN'
 GUI_BINARY = LAUNCHER
 SESSION = ROOT / 'session.json'
-NAVIGATION_LANDMARKS = {'Settings': 'settings', 'Servers': 'servers', 'Connection': 'connection',
-                        'Application': 'application', 'Backup': 'backup', 'About AmneziaVPN': 'about',
-                        'Close application': 'close_application', 'Close': 'close', 'Cancel': 'cancel'}
+SETTINGS = ROOT / 'config' / 'AmneziaVPN.ORG' / 'AmneziaVPN.conf'
+FAILURE_EVIDENCE = ROOT / 'failure'
+# PageUpdate.qml: every state of the button that only this page shows, except its generic Retry.
+UPDATE_PAGE_BUTTONS = ('Update app', 'Downloading update...', 'Install update')
+# Evidence keeps only these fixture-known labels. Other accessible names can hold private values.
+EVIDENCE_LABELS = frozenset(UPDATE_PAGE_BUTTONS + (
+    'AmneziaVPN', "Let's get started", 'Self-hosted VPN', 'Manual', 'AmneziaWG', 'Continue', 'Start configuring',
+    'Install', 'Installing', 'Cancel installation', 'Connect', 'Connection', 'Users', 'Share', 'Revoke',
+    'Show connection settings', 'Save', 'Save AmneziaWG config', 'Settings', 'Servers', 'Protocols', 'Services',
+    'Management', 'Close application', 'Close', 'Cancel', 'Retry'))
 
 
 class Failure(Exception):
+    pass
+
+
+class TimedOut(Failure):
     pass
 
 
@@ -178,6 +190,92 @@ def install():
     write_private(ROOT / '.installed', (VERSION + '\n').encode())
 
 
+def app_settings():
+    require(not SETTINGS.is_symlink(), 'refusing a symlink for the stock app settings')
+    settings = configparser.RawConfigParser(strict=False)
+    settings.optionxform = str
+    settings.read_string(SETTINGS.read_text())
+    return settings
+
+
+def require_update_check_off(started=False):
+    # The stock app checks once at startup, then pushes PageUpdate over the current page.
+    # Its own setting skips that request: "Check for updates automatically" in
+    # PageSettingsApplication.qml, read by coreController.cpp checkForAppUpdates.
+    # Upstream publication then cannot change these pages; no DNS or network is altered.
+    if not started and not SETTINGS.exists():
+        private_dir(SETTINGS.parent, create=True)
+        write_private(SETTINGS, b'[Conf]\nautoUpdateCheck=false\n')
+    settings = app_settings()
+    require(settings.get('Conf', 'autoUpdateCheck', fallback=None) == 'false',
+            'stock app settings do not disable its update check')
+    # amneziaApplication.cpp writes permFixed at every start: it proves this is the file in use.
+    require(not started or settings.get('General', 'permFixed', fallback=None) == 'true',
+            'stock app is not using the settings file that disables its update check')
+
+
+def saved_servers():
+    # Saved servers hold administration credentials: only their count leaves here.
+    try:
+        value = app_settings().get('Servers', 'serversList', fallback=None)
+        if value is None:
+            return dict(state='no-server-list', count=0)
+        # QSettings INI escaping around a QByteArray of JSON.
+        value = value[1:-1] if value.startswith('"') and value.endswith('"') else value
+        raw = value.encode('ascii').decode('unicode_escape').encode('latin-1')
+        require(raw.startswith(b'@ByteArray(') and raw.endswith(b')'), 'unknown server list encoding')
+        servers = json.loads(raw[11:-1])
+        require(isinstance(servers, list) and all(isinstance(item, dict) for item in servers),
+                'unknown server list structure')
+        return dict(state='parsed', count=len(servers))
+    except Exception:
+        return dict(state='unknown', count=None)
+
+
+def failure_evidence(gui, mode):
+    # Small files for the controller's failure capture. A share page can show a client
+    # configuration and an editable field can hold the SSH key, so neither is photographed.
+    # Show connection settings marks the export page, wherever it is reached from.
+    report = dict(mode=mode, saved_servers=saved_servers(), screenshot='omitted', controls=[])
+    private_dir(FAILURE_EVIDENCE, create=True)
+    nodes, frames, private = gui.nodes(), [], mode == 'share'
+    # A node that was not read could be the private one.
+    if not gui.walk_complete or len(nodes) > 500:
+        private, report['screenshot'] = True, 'unreadable'
+    for node in nodes[:500]:
+        try:
+            flags = node.getState()
+            label = node.name.strip()
+            private = private or flags.contains(gui.api.STATE_EDITABLE) or label == 'Show connection settings'
+        except Exception:
+            private, report['screenshot'] = True, 'unreadable'
+            continue
+        # Geometry decides nothing private. The application root has none on any ordinary page.
+        try:
+            rectangle = node.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
+            if node.getRole() in (gui.api.ROLE_FRAME, gui.api.ROLE_WINDOW):
+                frames.append(rectangle)
+            report['controls'].append(dict(
+                role=node.getRoleName(), label=label if label in EVIDENCE_LABELS else 'other' if label else '',
+                rectangle=[rectangle.x, rectangle.y, rectangle.width, rectangle.height],
+                states=[name for name in ('enabled', 'checked', 'focused', 'editable')
+                        if flags.contains(getattr(gui.api, 'STATE_' + name.upper()))]))
+        except Exception:
+            continue
+    try:
+        if not private and len(frames) == 1:
+            frame = frames[0]
+            image = run(['import', '-window', 'root', '-crop', f'{frame.width}x{frame.height}+{frame.x}+{frame.y}', 'png:-'],
+                        capture=True, timeout=30, operation='frame-capture')
+            if len(image) <= 2097152:
+                write_private(FAILURE_EVIDENCE / 'screen.png', image)
+                report['screenshot'] = 'screen.png'
+    except Exception:
+        report['screenshot'] = 'unavailable'
+    write_private(FAILURE_EVIDENCE / 'controls.json', (json.dumps(report, sort_keys=True) + '\n').encode())
+    return report
+
+
 def process_identity(pid):
     try:
         return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
@@ -231,6 +329,7 @@ def session(reopen=False):
             stop_process(state.get('app'))
             time.sleep(1)
         if reopen or process_identity(state['app']['pid']) != state['app']['start']:
+            require_update_check_off()
             state['app'] = spawn([LAUNCHER], dict(os.environ))
             save_session(state)
         return state
@@ -244,6 +343,7 @@ def session(reopen=False):
                XDG_CACHE_HOME=str(ROOT / 'cache'), XDG_RUNTIME_DIR=str(ROOT / 'run'))
     for name in ('config', 'data', 'cache', 'run'):
         private_dir(ROOT / name, create=True)
+    require_update_check_off()
     state = {}
     try:
         state['xvfb'] = spawn(['Xvfb', display, '-screen', '0', '1024x900x24', '-nolisten', 'tcp'], env)
@@ -355,6 +455,8 @@ def installation_evidence(nodes):
             label = node.name
             if isinstance(label, str) and label.strip() in controls:
                 visible.add(label.strip())
+            if node.getRoleName() == 'progress bar':
+                visible.add('progress bar')
             parent = node
             for _ in range(32):
                 if parent is None:
@@ -388,23 +490,14 @@ def installation_evidence(nodes):
 
 def wait_native_installation(gui, ready):
     def outcome():
-        errors = gui.installation_evidence()['error_codes']
-        if errors:
-            return 'error', errors
-        return ('ready', []) if ready() else False
+        evidence = gui.installation_evidence()
+        # PageSetupWizardInstalling.qml shows a progress bar: no OCR or click until it leaves.
+        if evidence['error_codes'] or 'progress bar' in evidence['visible_controls']:
+            return evidence['error_codes']
+        return ready() and 'ready'
 
-    def started():
-        state = outcome()
-        if state:
-            return state
-        return ('started', []) if gui.matching('Installing') else False
-
-    def verify(state):
-        require(state[0] != 'error', 'native installation failed ErrorCode='
-                + ','.join(str(code) for code in state[1]))
-
-    verify(gui.wait(started, 'native installer startup'))
-    verify(gui.wait(outcome, 'native installation completion', 360))
+    result = gui.wait(outcome, 'native installation completion', 360)
+    require(result == 'ready', 'native installation failed ErrorCode=' + ','.join(str(code) for code in result))
 
 
 class GUI:
@@ -415,6 +508,7 @@ class GUI:
 
     def nodes(self):
         result = []
+        self.walk_complete = True
         desktop = self.api.Registry.getDesktop(0)
         for application in desktop:
             if 'amnezia' not in application.name.lower():
@@ -428,20 +522,30 @@ class GUI:
                         result.append(node)
                     pending.extend(reversed(list(node)))
                 except Exception:
-                    continue
+                    self.walk_complete = False
         return result
+
+    def refuse_update_page(self):
+        try:
+            present = any(node.name.strip() in UPDATE_PAGE_BUTTONS for node in self.nodes())
+        except Exception:  # A node can vanish during a page transition; the next poll repeats this.
+            return
+        require(not present, 'stock app is showing its update page despite its disabled update check')
 
     def wait(self, action, description, seconds=30):
         deadline = time.monotonic() + seconds
+        last_error = ''
         while time.monotonic() < deadline:
+            self.refuse_update_page()
             try:
                 result = action()
                 if result:
                     return result
-            except Exception:
-                pass
+            except Exception as error:
+                # Failure text is fixture-authored; any other exception can quote UI values.
+                last_error = ': last error ' + (str(error) if isinstance(error, Failure) else type(error).__name__)
             time.sleep(0.25)
-        raise Failure(f'GUI timed out waiting for {description}')
+        raise TimedOut(f'GUI timed out waiting for {description}{last_error}')
 
     def matching(self, names):
         if isinstance(names, str):
@@ -463,19 +567,17 @@ class GUI:
         require(frame.x >= 0 and frame.y >= 0 and 0 < frame.width <= 1024 and 0 < frame.height <= 900
                 and frame.x + frame.width <= 1024 and frame.y + frame.height <= 900,
                 'OCR requires one bounded application frame')
+        # OpenMP threads spin against each other on a contended VM, and one costs nothing
+        # idle. These limits only catch a hung tool: the caller's wait bounds a slow host.
+        single_thread = dict(os.environ, OMP_THREAD_LIMIT='1')
         image = run(['import', '-window', 'root', '-crop',
                      f'{frame.width}x{frame.height}+{frame.x}+{frame.y}', '-resize', '200%', 'png:-'],
-                    capture=True, timeout=5, operation='frame-capture')
+                    capture=True, env=single_thread, timeout=30, operation='frame-capture')
         require(len(image) <= 12582912, 'OCR frame capture is too large')
         tsv = run(['tesseract', 'stdin', 'stdout', '-l', 'eng', '--psm', '11', 'tsv'],
-                  capture=True, input_data=image, timeout=5, operation='ocr')
+                  capture=True, env=single_thread, input_data=image, timeout=30, operation='ocr')
         require(len(tsv) <= 262144, 'OCR output is too large')
-        text = tsv.decode()
-        if names == ('Servers',) and getattr(self, 'discover_evidence', {}).get('stage') == 'servers-control':
-            # Keep only the last existing OCR observation in memory. Failure
-            # diagnostics emit whitelist counts, never this text or an image.
-            self._discovery_ocr = (text, frame, time.monotonic())
-        return visible_text(text, names, frame, scale=2)
+        return visible_text(tsv.decode(), names, frame, scale=2)
 
     def click_node(self, node):
         evidence = getattr(self, 'share_evidence', None)
@@ -525,10 +627,7 @@ class GUI:
             raise
 
     def click(self, names, seconds=30, description='a named control'):
-        matching = lambda: self.matching(names)
-        if names == 'Servers' and getattr(self, 'discover_evidence', {}).get('stage') == 'servers-control':
-            matching = lambda: discovery_match(self, names, 'servers')
-        nodes = self.wait(matching, description, seconds)
+        nodes = self.wait(lambda: self.matching(names), description, seconds)
         evidence = getattr(self, 'share_evidence', None)
         if isinstance(evidence, dict):
             evidence['candidate_count'] = min(len(nodes), 3000)
@@ -621,11 +720,14 @@ class GUI:
         self.wait(lambda: len(self.fields()) == 1 and self.matching('Install'), 'AmneziaWG port screen')
 
     def click_saved_server(self):
+        rows = []
+
         def target():
+            rows.clear()
             nodes = self.nodes()
             frames = [node for node in nodes if node.getRole() in (self.api.ROLE_FRAME, self.api.ROLE_WINDOW)]
             buttons = [node for node in nodes if node.getRole() == self.api.ROLE_PUSH_BUTTON]
-            if (len(frames) != 1 or len(buttons) != 2 or self.fields() or not self.matching('Servers')
+            if (len(frames) != 1 or self.fields()
                     or any(node.getRole() == self.api.ROLE_RADIO_BUTTON for node in nodes)):
                 return None
             state = json.loads(private_file(SESSION))
@@ -660,11 +762,20 @@ class GUI:
                     back.append(button)
                 elif abs(rectangle.x - frame.x - frame.width + 56) <= 2 and rectangle.y >= frame.y + 76:
                     arrows.append(button)
-            # PageSettingsServersList has one row per saved server; its plain
-            # title is unregistered, while LabelWithButtonType exposes the arrow.
-            return arrows[0] if len(back) == len(arrows) == 1 else None
+            # PageSettingsServersList has one back control and one row per saved server;
+            # its plain title is unregistered, while LabelWithButtonType exposes the arrow.
+            if len(back) != 1 or len(back) + len(arrows) != len(buttons):
+                return None
+            rows.append(len(arrows))
+            return arrows[0] if len(arrows) == 1 else None
 
-        self.click_node(self.wait(target, 'saved native administration server'))
+        try:
+            row = self.wait(target, 'saved native administration server')
+        except TimedOut as timeout:
+            # The fixture owns exactly one saved server, so another count is a hard failure.
+            raise Failure(f'Servers page must list one saved server: rows={rows[0]}' if rows else
+                          f'Servers page was not reached after selecting Servers ({timeout})') from None
+        self.click_node(row)
         self.wait(lambda: self.matching('Management'), 'native server management page')
 
     def fields(self):
@@ -737,10 +848,8 @@ class GUI:
 def setup(gui, args):
     key = private_file(args.key_file).decode()
     require('PRIVATE KEY-----' in key and key.startswith('-----BEGIN '), 'administrative key is not a private key')
-    if gui.matching("Let's get started"):
-        gui.click("Let's get started", description='setup welcome control')
-    else:
-        gui.tab(3)
+    # The fixture's fresh app state always opens on the welcome page.
+    gui.click("Let's get started", description='setup welcome control')
     gui.click_setup_card('Self-hosted VPN')
     gui.wait(lambda: len(gui.fields()) == 3, 'server credential fields')
     # PageSetupWizardCredentials.qml: hostname, username, secret, in that order.
@@ -757,7 +866,7 @@ def setup(gui, args):
         controls = lambda: all(gui.matching(label) for label in ('Connection', 'Users', 'Share'))
         if controls():
             return True
-        if gui.fields() or gui.matching('Installing'):
+        if gui.fields():
             return False
         gui.tab(1)
         return controls()
@@ -984,8 +1093,7 @@ def discovery_snapshot(gui, target=None):
     result = dict(session_owned=False, owned_frames=0, frame_eligible=False,
                   frame_active=None,
                   management_tabs=0, management_checked=None, management_selected=None,
-                  data_rows={key: 0 for key in ('scan_title', 'scan_description', 'reboot', 'remove', 'clear', 'reset')},
-                  error_codes=[], classification='ownership-or-access-unavailable', target=flags)
+                  error_codes=[], target=flags)
     try:
         state = json.loads(private_file(SESSION))
         app = state['app']
@@ -1041,112 +1149,22 @@ def discovery_snapshot(gui, target=None):
             result['target'] = control_flags(target)
             return result
         tabs = []
-        labels = {'Check the server for previously installed Amnezia services': 'scan_title',
-                  'Add them to the application if they were not displayed': 'scan_description',
-                  'Reboot server': 'reboot', 'Remove server from application': 'remove',
-                  'Clear server from Amnezia software': 'clear', 'Reset API config': 'reset'}
         for node in nodes:
             try:
                 value = control_flags(node)
                 if value['defunct'] is not False or not all(value[key] is True for key in ('owned', 'showing', 'enabled', 'in_frame')):
                     continue
-                label = node.name.strip()
-                if label == 'Management' and node.getRoleName() == 'page tab':
+                if node.name.strip() == 'Management' and node.getRoleName() == 'page tab':
                     tabs.append(value)
-                if label in labels:
-                    result['data_rows'][labels[label]] += 1
             except Exception:
                 pass
         result['management_tabs'] = len(tabs)
         if len(tabs) == 1:
             result['management_checked'], result['management_selected'] = tabs[0]['checked'], tabs[0]['selected']
         result['error_codes'] = installation_evidence(nodes)['error_codes']
-        selected = result['management_checked'] is True or result['management_selected'] is True
-        result['classification'] = ('selected-management-scan-visible' if selected and
-                                    (result['data_rows']['scan_title'] or result['data_rows']['scan_description']) else
-                                    'selected-management-scan-missing' if selected else 'management-page-unconfirmed')
     except Exception:
         pass
     return result
-
-
-def navigation_snapshot(gui, include_ocr=False):
-    started = time.monotonic()
-    result = dict(session_owned=False, owned_frames=0, frame_active=None, frame_eligible=False,
-                  bottom_tabs=[], owned_modals=None, owned_dialogs=0,
-                  landmarks={key: 0 for key in NAVIGATION_LANDMARKS.values()})
-    try:
-        state = json.loads(private_file(SESSION))
-        app = state['app']
-        if process_identity(app['pid']) != app['start'] or os.environ.get('DISPLAY') != state['environment']['DISPLAY']:
-            return result
-        result['session_owned'] = True
-        nodes = gui.nodes()[:3000]
-        def owned(node):
-            return node.getApplication().get_process_id() == app['pid']
-        frames = [node for node in nodes if node.getRoleName() in ('frame', 'window') and owned(node)]
-        result['owned_frames'] = len(frames)
-        if len(frames) != 1:
-            return result
-        frame = frames[0]
-        bounds = frame.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
-        if not (bounds.x >= 0 and bounds.y >= 0 and bounds.width > 0 and bounds.height > 0
-                and bounds.x + bounds.width <= 1024 and bounds.y + bounds.height <= 900):
-            return result
-        result['frame_eligible'] = True
-        result['frame_active'] = frame.getState().contains(gui.api.STATE_ACTIVE)
-        modal = getattr(gui.api, 'STATE_MODAL', None)
-        result['owned_modals'] = 0 if modal is not None else None
-        tabs = []
-        for node in nodes:
-            role, label = node.getRoleName(), node.name.strip()
-            if role not in ('page tab', 'dialog') and label not in NAVIGATION_LANDMARKS:
-                continue
-            flags = node.getState()
-            if not owned(node) or not flags.contains(gui.api.STATE_SHOWING) or flags.contains(gui.api.STATE_DEFUNCT):
-                continue
-            if role == 'dialog':
-                result['owned_dialogs'] += 1
-                if modal is not None and flags.contains(modal):
-                    result['owned_modals'] += 1
-            if label in NAVIGATION_LANDMARKS:
-                result['landmarks'][NAVIGATION_LANDMARKS[label]] += 1
-            if role == 'page tab' and node.get_parent().getRoleName() == 'page tab list':
-                rectangle = node.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
-                if (rectangle.width > 0 and rectangle.height > 0 and bounds.x <= rectangle.x and bounds.y <= rectangle.y
-                        and rectangle.x + rectangle.width <= bounds.x + bounds.width
-                        and rectangle.y + rectangle.height <= bounds.y + bounds.height):
-                    tabs.append((rectangle.y, rectangle.x, dict(enabled=flags.contains(gui.api.STATE_ENABLED),
-                        checked=flags.contains(gui.api.STATE_CHECKED), selected=flags.contains(gui.api.STATE_SELECTED))))
-        if tabs:
-            bottom = max(tab[0] for tab in tabs)
-            result['bottom_tabs'] = [tab[2] for tab in sorted(tabs, key=lambda tab: tab[1]) if tab[0] == bottom][:8]
-        if include_ocr and getattr(gui, '_discovery_ocr', None) is not None:
-            text, rectangle, observed = gui._discovery_ocr
-            result['ocr_age_ms'] = max(0, round((time.monotonic() - observed) * 1000))
-            result['ocr_landmarks'] = {key: min(len(visible_text(text, (label,), rectangle, scale=2)), 3000)
-                                       for label, key in NAVIGATION_LANDMARKS.items()}
-    except Exception:
-        result['probe_failure'] = 'unavailable'
-    finally:
-        result['duration_ms'] = max(0, round((time.monotonic() - started) * 1000))
-    return result
-
-
-def discovery_match(gui, label, key):
-    # Record only calls already required by discovery, with the same short circuit.
-    try:
-        nodes = gui.matching(label)
-    except Exception as error:
-        gui.discover_evidence['matches'][key] = dict(count=None, failure='matching-failure' if isinstance(error, Failure)
-                                                   else 'matching-exception')
-        category = ('failure' if isinstance(error, Failure) else 'timeout' if isinstance(error, TimeoutError)
-                    else 'os-error' if isinstance(error, OSError) else 'other-exception')
-        counts = gui.discover_evidence.setdefault('matching_failure_counts', {}).setdefault(key, {})
-        counts[category] = min(counts.get(category, 0) + 1, 3000)
-        raise
-    gui.discover_evidence['matches'][key] = dict(count=min(len(nodes), 3000), failure='none')
-    return nodes
 
 
 def activate_management(gui):
@@ -1219,13 +1237,12 @@ def activate_management(gui):
 
 
 def discover(gui, args):
-    gui.discover_evidence = dict(stage='servers-control', matches={})
+    gui.discover_evidence = dict(stage='settings-page')
     gui.share_evidence = gui.discover_evidence  # Existing bounded action receipt, emitted only on failure.
-    gui.discover_evidence['before_tab'] = navigation_snapshot(gui)
-    started = time.monotonic()
     gui.tab(2)
-    gui.discover_evidence['tab_duration_ms'] = max(0, round((time.monotonic() - started) * 1000))
-    gui.discover_evidence['after_tab'] = navigation_snapshot(gui)
+    # PageSettings.qml footer row: unlike its Servers row, this also rules out the Servers page.
+    gui.wait(lambda: gui.matching('Close application'), 'Settings page')
+    gui.discover_evidence['stage'] = 'servers-control'
     gui.click('Servers', description='native servers control')
     # The fixture owns exactly one admin server. No client import adds another.
     gui.discover_evidence['stage'] = 'saved-server'
@@ -1235,8 +1252,8 @@ def discover(gui, args):
     # The row title is capped at two elided lines; its complete description
     # belongs to the same stock MouseArea and invokes the same scan handler.
     gui.discover_evidence['stage'] = 'scan-control'
-    scan = gui.wait(lambda: discovery_match(gui, 'Check the server for previously installed Amnezia services', 'title')
-                    or discovery_match(gui, 'Add them to the application if they were not displayed', 'description'),
+    scan = gui.wait(lambda: gui.matching('Check the server for previously installed Amnezia services')
+                    or gui.matching('Add them to the application if they were not displayed'),
                     'native service discovery control')
     gui.discover_evidence['stage'] = 'scan-dispatch'
     gui.click_node(scan[0])
@@ -1271,10 +1288,11 @@ def discovery_self_check():
                           STATE_DEFUNCT=12, STATE_SELECTED=13, STATE_FOCUSABLE=15,
                           STATE_FOCUSED=16, STATE_ACTIVE=17, DESKTOP_COORDS=0)
     session_bytes = b'{"app":{"pid":42,"start":"owned"},"environment":{"DISPLAY":":synthetic"}}'
-    for scenario in ('ready', 'servers-matching-exception', 'focus-delayed-default', 'focus-after-deadline', 'focus-near-deadline', 'focus-return', 'not-accepted', 'action-exception', 'read-only', 'unknown-match',
+    for scenario in ('ready', 'update-page', 'settings-page-missing',
+                     'servers-matching-exception', 'focus-delayed-default', 'focus-after-deadline', 'focus-near-deadline', 'focus-return', 'not-accepted', 'action-exception', 'read-only', 'unknown-match',
                      'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
                      'inactive-frame', 'ambiguous-management', 'focus-no-selection'):
-        state = dict(page='info', clock=0.0, dispatches=0, focus_requests=0, focused=False, keys=0, pointers=0,
+        state = dict(page='info', tab=0, clock=0.0, dispatches=0, focus_requests=0, focused=False, keys=0, pointers=0,
                      clock_consumed=False, key_timeouts=[], default_focus_due=None,
                      default_focus_reset=False, delayed_focus_sample=False, focus_requested_at=None)
         def advance(seconds):
@@ -1337,17 +1355,19 @@ def discovery_self_check():
                     node('All installed containers have been added to the application', 8, parent=frame),
                     node('Close', 3, parent=frame), node('Servers', 14, parent=frame),
                     node('Users', 14, parent=frame), node('retained-test-user', 8, parent=frame),
-                    node('Remove server from application', 8, parent=frame)]
+                    node('Close application', 8, parent=frame), node('Update app', 3, parent=frame)]
         if scenario.startswith('focus-') or scenario == 'inactive-frame':
             controls[0].queryAction = mock.Mock(side_effect=NotImplementedError('synthetic-private-action'))
         if scenario == 'foreign-management':
             controls[0].getApplication = lambda: SimpleNamespace(get_process_id=lambda: 99)
         def current_nodes():
             valid = {'Management', 'Servers'}
-            if state['page'] == 'data':
-                valid.add('Remove server from application')
-                if scenario != 'read-only':
-                    valid.add(controls[1].name)
+            if scenario != 'settings-page-missing':
+                valid.add('Close application')
+            if scenario == 'update-page' and state['tab'] == 2:
+                valid.add('Update app')
+            if state['page'] == 'data' and scenario != 'read-only':
+                valid.add(controls[1].name)
             if state['page'] == 'scan-complete':
                 valid.update((controls[2].name, 'Close'))
             if state['page'] == 'users':
@@ -1365,7 +1385,7 @@ def discovery_self_check():
         gui.api, gui.nodes, gui.matching = api, current_nodes, matching
         # Entering the settings page arms PageType's timer, after the Servers click.
         gui.click_saved_server = lambda: state.update(default_focus_due=state['clock'] + 0.2)
-        gui.tab = lambda index: state.update(page='users') if index == 1 else None
+        gui.tab = lambda index: state.update(tab=index, page='users' if index == 1 else state['page'])
         def external(command, **kwargs):
             if command != ['xdotool', 'key', 'Return']:
                 state['pointers'] += 1
@@ -1396,7 +1416,10 @@ def discovery_self_check():
                 discover(gui, SimpleNamespace(name='retained-test-user'))
             except Failure as error:
                 expected = {
-                    'servers-matching-exception': 'GUI timed out waiting for native servers control',
+                    'update-page': 'stock app is showing its update page despite its disabled update check',
+                    'settings-page-missing': 'GUI timed out waiting for Settings page',
+                    'servers-matching-exception': 'GUI timed out waiting for native servers control: last error RuntimeError',
+                    'unknown-match': 'GUI timed out waiting for native service discovery control: last error RuntimeError',
                     'not-accepted': 'native Management activation was not accepted',
                     'action-exception': 'native Management action failed',
                     'focus-unavailable': 'native Management control is not focusable',
@@ -1412,6 +1435,7 @@ def discovery_self_check():
                 }.get(scenario, 'GUI timed out waiting for native service discovery control')
                 require(scenario not in ('ready', 'focus-return', 'focus-delayed-default') and str(error) == expected,
                         'Management activation changed its safe failure boundary: ' + scenario)
+                require(scenario != 'update-page' or state['clock'] == 0, 'update page failure waited for a timeout')
             else:
                 require(scenario in ('ready', 'focus-return', 'focus-delayed-default'), 'unready discovery was accepted')
                 require(('native server scan', 120) in waits and ('retained native user after discovery', 90) in waits,
@@ -1419,15 +1443,13 @@ def discovery_self_check():
             snapshot = discovery_snapshot(gui)
             if scenario in ('ready', 'focus-return', 'focus-delayed-default', 'read-only', 'unknown-match'):
                 require(('native service discovery control', 30) in waits, 'discovery changed the control wait')
-            refused = scenario in ('servers-matching-exception', 'focus-after-deadline', 'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
+            refused = scenario in ('update-page', 'settings-page-missing',
+                                   'servers-matching-exception', 'focus-after-deadline', 'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
                                    'inactive-frame', 'ambiguous-management')
             require(state['dispatches'] == (0 if refused else 1), 'Management activation was repeated or bypassed refusal')
             require(state['pointers'] == 0, 'Management activation used coordinate input')
             if scenario == 'servers-matching-exception':
-                require(gui.discover_evidence['stage'] == 'servers-control'
-                        and gui.discover_evidence['matches']['servers'] == dict(count=None, failure='matching-exception')
-                        and gui.discover_evidence['matching_failure_counts']['servers']['other-exception'] > 0,
-                        'Servers matching failure was swallowed without a sanitized receipt')
+                require(gui.discover_evidence['stage'] == 'servers-control', 'Servers failure lost its stage')
             require(state['keys'] == int(scenario in ('focus-return', 'focus-delayed-default', 'focus-no-selection', 'focus-near-deadline')),
                     'Management key escaped its focused single activation')
             require(state['focus_requests'] == int(scenario in ('focus-return', 'focus-delayed-default', 'focus-refused',
@@ -1444,21 +1466,12 @@ def discovery_self_check():
                 require(len(state['key_timeouts']) == 1 and 0 < state['key_timeouts'][0] <= 0.100001
                         and state['clock'] <= state['activation_deadline'] + 0.000001,
                         'Management keyboard command or settle exceeded its deadline')
-            if scenario == 'read-only':
-                require(snapshot['classification'] == 'selected-management-scan-missing'
-                        and snapshot['data_rows']['remove'] == 1, 'selected page without scan was not distinguished')
-            elif scenario in ('not-accepted', 'action-exception'):
-                require(snapshot['classification'] == 'management-page-unconfirmed'
+            if scenario in ('not-accepted', 'action-exception'):
+                require(snapshot['management_checked'] is not True
                         and gui.discover_evidence['action']['dispatch_error'] == scenario,
                         'failed Management dispatch was not distinguished')
-            elif scenario == 'unknown-match':
-                require(gui.discover_evidence['matches']['title'] == dict(count=None, failure='matching-exception')
-                        and snapshot['classification'] == 'selected-management-scan-visible',
-                        'matching failure was mistaken for a missing scan row')
-            elif scenario in ('ready', 'focus-return', 'focus-delayed-default'):
-                state['page'] = 'data'
-                require(discovery_snapshot(gui)['classification'] == 'selected-management-scan-visible',
-                        'ready selected Management page was not distinguished')
+            elif scenario in ('read-only', 'unknown-match'):
+                require(snapshot['management_checked'] is True, 'selected page without scan was not distinguished')
             foreign = node('Management', 14, parent=frame)
             foreign.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 99)
             gui.nodes = lambda: current_nodes() + [foreign, node('synthetic-private-label', 8, parent=frame)]
@@ -1473,8 +1486,8 @@ def discovery_self_check():
                         'defunct target was confused with eligible Management state')
             with mock.patch.object(sys.modules[__name__], 'process_identity', return_value='foreign'):
                 unavailable = discovery_snapshot(gui)
-            require(unavailable['classification'] == 'ownership-or-access-unavailable'
-                    and unavailable['management_tabs'] == 0, 'unknown ownership was treated as selected native state')
+            require(not unavailable['session_owned'] and unavailable['management_tabs'] == 0,
+                    'unknown ownership was treated as selected native state')
             evidence = json.dumps(dict(gui.discover_evidence, snapshot=snapshot, unavailable=unavailable))
             require('synthetic-private' not in evidence and 'Management' not in evidence,
                     'discovery diagnostics exposed native labels, body or exception text')
@@ -1482,64 +1495,124 @@ def discovery_self_check():
                 item.queryText.assert_not_called()
 
 
-def navigation_self_check():
+def update_check_self_check():
     from unittest import mock
-    api = SimpleNamespace(STATE_ENABLED=5, STATE_CHECKED=6, STATE_SHOWING=9,
-                          STATE_DEFUNCT=12, STATE_SELECTED=13, STATE_ACTIVE=17, STATE_MODAL=18, DESKTOP_COORDS=0)
-    selected = 0
-    def node(role, label='', parent=None, index=None):
-        item = SimpleNamespace(name=label)
-        item.getRoleName = lambda: role
-        item.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 42)
-        item.get_parent = lambda: parent
-        item.getState = lambda: SimpleNamespace(contains=lambda flag: flag in (5, 9, 17)
-            or flag in (6, 13) and index == selected and index is not None
-            or flag == 18 and role == 'dialog')
-        item.queryComponent = lambda: SimpleNamespace(getExtents=lambda coordinates: SimpleNamespace(
-            x=0 if index is None else 100 + index * 40, y=0 if index is None else 730,
-            width=380 if index is None else 40, height=800 if index is None else 48))
-        return item
-    frame = node('frame')
-    tab_bar = node('page tab list', parent=frame)
-    tabs = [node('page tab', parent=tab_bar, index=index) for index in range(4)]
-    settings, servers = node('label', 'Settings', frame), node('label', 'Servers', frame)
-    foreign = node('label', 'Servers', frame)
-    foreign.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 99)
-    private = node('label', 'synthetic-private-QR-config', frame)
+    module = sys.modules[__name__]
+    def make_private(path, create=False):
+        if create:
+            path.mkdir(mode=0o700, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir='/tmp') as temporary, \
+            mock.patch.object(module, 'private_dir', side_effect=make_private), \
+            mock.patch.object(module, 'SETTINGS', Path(temporary) / 'AmneziaVPN.ORG' / 'AmneziaVPN.conf'):
+        def refused(message, **kwargs):
+            try:
+                require_update_check_off(**kwargs)
+            except Failure as error:
+                require(str(error) == message, 'update check refusal changed: ' + str(error))
+            else:
+                raise Failure('update check state was accepted: ' + message)
+        not_in_use = 'stock app is not using the settings file that disables its update check'
+        enabled = 'stock app settings do not disable its update check'
+        require(saved_servers()['state'] == 'unknown', 'unreadable settings were reported as an empty server list')
+        require_update_check_off()
+        require(module.SETTINGS.read_bytes() == b'[Conf]\nautoUpdateCheck=false\n', 'fresh settings were not seeded')
+        refused(not_in_use, started=True)
+        require(saved_servers() == dict(state='no-server-list', count=0), 'absent server list changed')
+        secret = 'synthetic-private-key-value'
+        servers = json.dumps([dict(hostName='192.0.2.1', userName='amnezia', password=secret, port=2226), {}])
+        encoded = '"@ByteArray(' + servers.replace('\\', '\\\\').replace('"', '\\"') + ')"'
+        started = f'[Conf]\nautoUpdateCheck=false\n\n[General]\npermFixed=true\n\n[Servers]\nserversList={encoded}\n'
+        module.SETTINGS.write_text(started)
+        require_update_check_off(started=True)
+        observed = saved_servers()
+        require(observed == dict(state='parsed', count=2) and secret not in json.dumps(observed),
+                'saved server count is incorrect')
+        for text, message in (('[Conf]\nautoUpdateCheck=true\n', enabled), ('[General]\npermFixed=true\n', enabled)):
+            module.SETTINGS.write_text(text)
+            refused(message)
+        for value in ('@ByteArray({})', '@ByteArray([null])', '@Variant(synthetic-private)', '"@ByteArray([])'):
+            module.SETTINGS.write_text(f'[Servers]\nserversList={value}\n')
+            require(saved_servers() == dict(state='unknown', count=None),
+                    'unknown server list encoding was reported as absence')
     gui = GUI.__new__(GUI)
-    gui.api = api
-    nodes = [frame, tab_bar, *tabs, private, foreign]
-    gui.nodes = lambda: nodes
-    session = b'{"app":{"pid":42,"start":"owned"},"environment":{"DISPLAY":":synthetic"}}'
-    with mock.patch.object(sys.modules[__name__], 'private_file', return_value=session), \
-            mock.patch.object(sys.modules[__name__], 'process_identity', return_value='owned'), \
-            mock.patch.dict(os.environ, DISPLAY=':synthetic'):
-        wrong = navigation_snapshot(gui)
-        require(len(wrong['bottom_tabs']) == 4 and wrong['bottom_tabs'][0]['selected']
-                and not wrong['bottom_tabs'][2]['selected'] and wrong['landmarks']['servers'] == 0,
-                'wrong selected tab or foreign Servers landmark was not distinguished')
-        selected = 2
-        nodes.append(settings)
-        missing = navigation_snapshot(gui)
-        require(missing['bottom_tabs'][2]['checked'] and missing['landmarks']['settings'] == 1
-                and missing['landmarks']['servers'] == 0, 'Settings without Servers was not distinguished')
-        nodes.extend([servers, node('dialog', parent=frame)])
-        ready = navigation_snapshot(gui)
-        require(ready['landmarks']['servers'] == 1 and ready['owned_modals'] == ready['owned_dialogs'] == 1,
-                'Servers landmark or owned modal was not recorded')
-        header = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
-        text = header + '5\t1\t1\t1\t1\t1\t20\t40\t80\t24\t99\tServers\n'
-        gui._discovery_ocr = (text, SimpleNamespace(x=0, y=0, width=380, height=800), time.monotonic())
-        require('ocr_landmarks' not in navigation_snapshot(gui), 'navigation probe added a normal-path OCR observation')
-        observed = navigation_snapshot(gui, include_ocr=True)
-        require(observed['ocr_landmarks']['servers'] == 1 and observed['ocr_landmarks']['settings'] == 0,
-                'last existing OCR observation was not reduced to fixed landmark counts')
-        require('synthetic-private' not in json.dumps([wrong, missing, ready, observed]),
-                'navigation receipt exposed raw UI names or configuration')
+    gui.nodes = lambda: [SimpleNamespace(name='Update app')]
+    action = mock.Mock()
+    try:
+        gui.wait(action, 'synthetic page')
+    except Failure as error:
+        require(str(error) == 'stock app is showing its update page despite its disabled update check',
+                'update page lost its explicit reason')
+    else:
+        raise Failure('update page was accepted')
+    action.assert_not_called()
+    gui.nodes = lambda: []
+    for error, reason in ((RuntimeError('synthetic-private-value'), ': last error RuntimeError'),
+                          (Failure('external command failed operation=ocr status=timeout'),
+                           ': last error external command failed operation=ocr status=timeout')):
+        try:
+            gui.wait(mock.Mock(side_effect=error), 'synthetic page', 0.01)
+        except Failure as timeout:
+            require(str(timeout) == 'GUI timed out waiting for synthetic page' + reason,
+                    'timeout lost its safe cause or exposed a value: ' + str(timeout))
+        else:
+            raise Failure('failing action was accepted')
+
+
+def failure_evidence_self_check():
+    from unittest import mock
+    module = sys.modules[__name__]
+    api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, STATE_ENABLED=5, STATE_CHECKED=6, STATE_FOCUSED=7,
+                          STATE_EDITABLE=8, DESKTOP_COORDS=0)
+    def node(label, role, flags=(5,)):
+        return SimpleNamespace(name=label, getRole=lambda: role, getRoleName=lambda: 'frame' if role == 1 else 'button',
+                               getState=lambda: SimpleNamespace(contains=lambda flag: flag in flags),
+                               queryComponent=lambda: SimpleNamespace(getExtents=lambda coordinates: SimpleNamespace(
+                                   x=0, y=0, width=380, height=680)))
+    frame, update = node('AmneziaVPN', 1), node('Update app', 3)
+    private = node('synthetic-private-config', 3)
+    field = node('', 3, flags=(5, 8))
+    export_page = node('Show connection settings', 3)
+    def fail(*_):
+        raise RuntimeError('node vanished')
+    def failing(base, read):
+        return SimpleNamespace(**{**vars(base), read: fail})
+    unnamed = type('Unnamed', (), dict(name=property(fail), getState=staticmethod(update.getState)))()
+    partial_walk = [frame, update]
+    for mode, nodes, image, screenshot in (('discover', [frame, update, private], b'png', 'screen.png'),
+                                           ('setup', [frame, field], b'png', 'omitted'),
+                                           ('share', [frame, update], b'png', 'omitted'),
+                                           ('revoke', [frame, export_page], b'png', 'omitted'),
+                                           ('discover', [frame, update], b'x' * 2097153, 'omitted'),
+                                           ('discover', [frame, failing(node('', 3), 'queryComponent'), update],
+                                            b'png', 'screen.png'),
+                                           ('discover', [frame] + [update] * 499, b'png', 'screen.png'),
+                                           ('revoke', [frame, failing(export_page, 'queryComponent')], b'png', 'omitted'),
+                                           ('revoke', [frame, failing(field, 'queryComponent')], b'png', 'omitted'),
+                                           ('revoke', [frame, failing(update, 'getState')], b'png', 'unreadable'),
+                                           ('revoke', [frame, unnamed], b'png', 'unreadable'),
+                                           ('revoke', [frame] + [update] * 500 + [export_page], b'png', 'unreadable'),
+                                           ('revoke', partial_walk, b'png', 'unreadable')):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary, \
+                mock.patch.object(module, 'FAILURE_EVIDENCE', Path(temporary)), \
+                mock.patch.object(module, 'private_dir'), \
+                mock.patch.object(module, 'saved_servers', return_value=dict(state='parsed', count=1)), \
+                mock.patch.object(module, 'run', return_value=image) as capture:
+            report = failure_evidence(SimpleNamespace(api=api, nodes=lambda: nodes,
+                                                      walk_complete=nodes is not partial_walk), mode)
+            stored = (Path(temporary) / 'controls.json').read_text()
+            require(json.loads(stored) == report and report['screenshot'] == screenshot
+                    and report['saved_servers']['count'] == 1, 'failure evidence changed: ' + mode)
+            require((Path(temporary) / 'screen.png').exists() == (screenshot == 'screen.png'),
+                    'failure screenshot does not match its report')
+            require(capture.called == (mode == 'discover'), 'a page that can show private values was photographed')
+            require('synthetic-private' not in stored, 'failure evidence exposed a private accessible name')
+            require(update not in nodes or 'Update app' in [item['label'] for item in report['controls']],
+                    'failure evidence lost a known control label')
 
 
 def self_check():
-    navigation_self_check()
+    update_check_self_check()
+    failure_evidence_self_check()
     discovery_self_check()
     from unittest import mock
     from types import SimpleNamespace
@@ -1550,6 +1623,8 @@ def self_check():
                                queryText=lambda: SimpleNamespace(characterCount=len(value),
                                    getText=lambda start, end: value[start:end]))
     secret = 'synthetic-private-key-value'
+    bar = SimpleNamespace(name='', getRoleName=lambda: 'progress bar', parent=frame)
+    require('progress bar' in installation_evidence([bar])['visible_controls'], 'installation progress was not observed')
     evidence = installation_evidence([message('ErrorCode: 305. ' + secret), message('Installing'),
                                       message('Connection', frame), message(secret)])
     require(evidence == {'error_codes': [305], 'visible_controls': ['Connection', 'Installing']},
@@ -1572,36 +1647,31 @@ def self_check():
         require(not installation_evidence([message(value, parent)])['error_codes'],
                 'unconfirmed or malformed error text became a terminal failure')
     waits = []
-    observed = SimpleNamespace(installation_evidence=lambda: {'error_codes': []},
-                               matching=lambda label: label == 'Installing')
     def wait(action, description, seconds=30):
         waits.append((description, seconds))
-        return action() or require(False, 'synthetic installer made no progress')
-    observed.wait = wait
-    checks = iter((False, True))
-    wait_native_installation(observed, lambda: next(checks))
-    require(waits == [('native installer startup', 30), ('native installation completion', 360)],
-            'installer observation changed the completion deadline')
-    observed.installation_evidence = lambda: {'error_codes': [305]}
-    with mock.patch.object(observed, 'matching') as matching:
+        for _ in range(4):
+            result = action()
+            if result:
+                return result
+        raise Failure('synthetic installer made no progress')
+    clear = {'error_codes': [], 'visible_controls': []}
+    progress = {'error_codes': [], 'visible_controls': ['progress bar']}
+    probe = mock.Mock(return_value=True)
+    wait_native_installation(SimpleNamespace(wait=wait, installation_evidence=mock.Mock(
+        side_effect=(progress, progress, clear))), probe)
+    require(probe.call_count == 1, 'installer progress drove the GUI')
+    require(waits == [('native installation completion', 360)], 'installation lost its one completion deadline')
+    for states in (({'error_codes': [305], 'visible_controls': []},),
+                   (progress, {'error_codes': [203], 'visible_controls': ['progress bar']})):
+        probe = mock.Mock()
         try:
-            wait_native_installation(observed, lambda: True)
+            wait_native_installation(SimpleNamespace(wait=wait, installation_evidence=mock.Mock(side_effect=states)), probe)
         except Failure as error:
-            require(str(error) == 'native installation failed ErrorCode=305',
+            require(str(error) == f"native installation failed ErrorCode={states[-1]['error_codes'][0]}",
                     'terminal error lost its safe numeric diagnostic')
         else:
             raise Failure('terminal error was mistaken for installation success')
-        require(not matching.called, 'terminal installation error kept driving the GUI')
-    observed.matching = lambda label: label == 'Installing'
-    states = iter(({'error_codes': []}, {'error_codes': [203]}))
-    observed.installation_evidence = lambda: next(states)
-    try:
-        wait_native_installation(observed, lambda: False)
-    except Failure as error:
-        require(str(error) == 'native installation failed ErrorCode=203',
-                'error after installer progress was replaced by a timeout')
-    else:
-        raise Failure('installer progress hid a subsequent terminal error')
+        require(not probe.called, 'terminal installation error kept driving the GUI')
     gui = GUI.__new__(GUI)
     gui.api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, ROLE_PUSH_BUTTON=3,
                               ROLE_RADIO_BUTTON=4, STATE_ENABLED=5, STATE_CHECKED=6,
@@ -1722,6 +1792,19 @@ def self_check():
                  ocr_line(1, 'Share') + ocr_line(2, 'Share', y=70)):
         require(not visible_text(header + rows, ('Share',), offset_frame, scale=2),
                 'scaled OCR accepted an unsafe or ambiguous phrase')
+    owned = fixture_node(1, 0, 0, 380, 680)
+    owned.getApplication.return_value.get_process_id.return_value = 7
+    ocr_session = GUI.__new__(GUI)
+    ocr_session.api, ocr_session.nodes = gui.api, lambda: [owned]
+    session = json.dumps(dict(app=dict(pid=7, start='owned'), environment=dict(DISPLAY=':synthetic'))).encode()
+    with mock.patch.object(sys.modules[__name__], 'private_file', return_value=session), \
+            mock.patch.object(sys.modules[__name__], 'process_identity', return_value='owned'), \
+            mock.patch.dict(os.environ, DISPLAY=':synthetic'), \
+            mock.patch.object(sys.modules[__name__], 'run', return_value=header.encode()) as tool:
+        ocr_session.matching('Installing')
+    require([(call.args[0][0], call.kwargs['timeout'], call.kwargs['env']['OMP_THREAD_LIMIT'])
+             for call in tool.call_args_list] == [('import', 30, '1'), ('tesseract', 30, '1')],
+            'OCR lost its load-tolerant limits')
     for already_ready in (False, True):
         wizard = mock.Mock()
         wizard.installation_evidence.return_value = {'error_codes': [], 'visible_controls': []}
@@ -1959,6 +2042,25 @@ def self_check():
             require(gui.click_node.call_count == int(accepted), 'unsafe saved-server layout clicked a control')
             if accepted:
                 gui.click_node.assert_called_once_with(arrow)
+        second_arrow = fixture_node(3, 324, 218, 40, 40)
+        second_arrow.get_parent.return_value = server_frame
+        second_arrow.getState.return_value.contains.side_effect = lambda value: value in (5, 9)
+        synthetic_wait = gui.wait
+        gui.wait = lambda action, description, seconds=30: GUI.wait(gui, action, description, 0.01)
+        for nodes, reason in (([server_frame, back], 'Servers page must list one saved server: rows=0'),
+                              ([server_frame, back, arrow, second_arrow], 'Servers page must list one saved server: rows=2'),
+                              ([server_frame, arrow], 'Servers page was not reached after selecting Servers '
+                               '(GUI timed out waiting for saved native administration server)')):
+            gui.nodes = lambda: nodes
+            gui.click_node.reset_mock()
+            try:
+                gui.click_saved_server()
+            except Failure as error:
+                require(str(error) == reason, 'saved server failure lost its reason: ' + str(error))
+            else:
+                raise Failure('a lost or duplicated saved server was accepted')
+            gui.click_node.assert_not_called()
+        gui.wait = synthetic_wait
         gui.nodes = lambda: [server_frame, back, arrow]
         gui.click_node.reset_mock()
         with mock.patch.object(sys.modules[__name__], 'process_identity', return_value='foreign-start'):
@@ -2072,6 +2174,7 @@ def main():
         else:
             session(reopen=args.mode == 'discover')
             gui = GUI()
+            require_update_check_off(started=True)
             if args.mode == 'setup':
                 setup(gui, args)
             elif args.mode == 'share':
@@ -2087,6 +2190,13 @@ def main():
         print(f'native_app_mode={args.mode} result=fail reason={message}', file=sys.stderr)
         if gui:
             try:
+                evidence = failure_evidence(gui, args.mode)
+                print('native_app_failure_evidence=' + json.dumps(dict(
+                    saved_servers=evidence['saved_servers'], screenshot=evidence['screenshot']), sort_keys=True),
+                      file=sys.stderr)
+            except Exception:
+                pass
+            try:
                 print('native_app_visible_role_counts=' + json.dumps(gui.diagnostics(), sort_keys=True), file=sys.stderr)
                 if args.mode == 'setup':
                     print('native_app_installation_evidence=' + json.dumps(gui.installation_evidence(), sort_keys=True),
@@ -2098,8 +2208,7 @@ def main():
                 pass
             if args.mode == 'discover':
                 print('native_app_discover_evidence=' + json.dumps(dict(
-                    getattr(gui, 'discover_evidence', {}), snapshot=discovery_snapshot(gui),
-                    navigation=navigation_snapshot(gui, include_ocr=True)), sort_keys=True),
+                    getattr(gui, 'discover_evidence', {}), snapshot=discovery_snapshot(gui)), sort_keys=True),
                       file=sys.stderr)
         return 1
 

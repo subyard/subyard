@@ -205,6 +205,98 @@ release_lease() { touch "$RELEASED"; [ "$FAULT" != cleanup-stalled ] || sleep 10
                         self.assertEqual(result['probes']['state']['stdout_bytes'], 22)
                         self.assertTrue(all(item.isfile() and item.mode == 0o600 for item in archive.getmembers()))
 
+    def test_native_failure_capture_is_bounded_and_never_changes_the_capture_result(self):
+        source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
+        function = re.search(r'^capture_native_failure\(\) \{\n.*?^\}', source, re.M | re.S)[0]
+        for fault, guest, code, size in (('', 'set', 0, 3145728), ('transport', 'set', 19, 0), ('', '', None, None)):
+            with self.subTest(fault=fault, guest=guest), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                directory = Path(temporary)
+                (directory / 'ssh').write_text('#!/bin/sh\n[ "$FAULT" != transport ] || exit 19\nhead -c 3200000 /dev/zero; exit 0\n')
+                (directory / 'ssh').chmod(0o700)
+                script = f"""quote_ssh_command() {{ printf '%q ' "$@"; }}
+CLIENT_CONFIG=synthetic-config
+{'GUEST_DIRS[2]=/var/tmp/subyard-worktree.synthetic' if guest else ''}
+{function}
+capture_native_failure
+"""
+                observed = subprocess.run(['bash', '-c', script], capture_output=True, check=False, env=dict(
+                    os.environ, PATH=f"{directory}:{os.environ['PATH']}", OUTPUT=str(directory), FAULT=fault))
+                self.assertEqual(observed.returncode, 0)
+                archive = directory / 'native-failure.tar'
+                self.assertEqual(archive.exists(), bool(guest))
+                if guest:
+                    self.assertEqual(archive.stat().st_size, size)
+                    self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
+                    self.assertIn(f'native_failure_transport_exit_code={code}\n',
+                                  (directory / 'capture-result').read_text())
+
+    def test_admin_state_requires_the_retained_client_and_rejects_change(self):
+        retained, revoked, admin = 'public-retained', 'public-revoked', 'public-administrator'
+        def stdin(clients, peers):
+            table = [dict(clientId=key, userData=dict(clientName=name, latestHandshake='ignored'))
+                     for key, name in clients.items()]
+            return json.dumps(table) + '\nPEERS\n' + ''.join(peer + '\n' for peer in peers)
+        good = {retained: 'acceptance-two', admin: 'Admin [synthetic]'}
+        retained_missing = 'retained native client is missing from the server'
+        revoked_present = 'revoked native client is present on the server'
+        peers_differ = 'native clients and live peers differ'
+        not_exact = 'native clients are not exactly the retained client and the administrator'
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)
+            binary = directory / 'bin'
+            binary.mkdir()
+            (binary / 'docker').write_text('#!/bin/sh\ncase "$3" in *-two) echo public-retained ;; *) echo public-revoked ;; esac\n')
+            (binary / 'docker').chmod(0o700)
+            for client in ('one', 'two'):
+                (directory / f'client-{client}.conf').write_text(f'[Interface]\nPrivateKey = synthetic-private-{client}\n')
+            def run_state(mode, text):
+                return subprocess.run(['python3', '-B', str(PROFILE / 'tests/e2e/admin-state.py'), str(directory), mode],
+                                      input=text, capture_output=True, text=True, check=False,
+                                      env=dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}"))
+            baseline = directory / 'admin-baseline.json'
+            other = 'public-other'
+            for clients, peers, reasons in (
+                    ({admin: good[admin]}, [admin], [retained_missing]),
+                    (good, [admin], [retained_missing, peers_differ]),
+                    ({**good, revoked: 'acceptance-one'}, [retained, admin],
+                     [revoked_present, peers_differ, not_exact]),
+                    (good, [retained, admin, revoked], [revoked_present, peers_differ]),
+                    ({**good, other: 'Client 3'}, [retained, admin, other], [not_exact]),
+                    ({retained: 'acceptance-two', other: 'Client 3'}, [retained, other], [not_exact]),
+                    ({retained: 'acceptance-two'}, [retained], [not_exact]),
+                    (good, [retained, admin, other], [peers_differ]),
+                    ({revoked: 'acceptance-one', other: 'Client 3'}, [revoked],
+                     [retained_missing, revoked_present, peers_differ, not_exact])):
+                observed = run_state('admin-baseline', stdin(clients, peers))
+                self.assertEqual(observed.returncode, 1)
+                self.assertEqual(observed.stderr.splitlines(), reasons)
+                self.assertFalse(baseline.exists())
+            observed = run_state('admin-baseline', stdin(good, [retained, admin]))
+            self.assertEqual((observed.returncode, observed.stderr), (0, ''))
+            self.assertEqual(stat.S_IMODE(baseline.stat().st_mode), 0o600)
+            self.assertIn('clients=2 peers=2 retained=present revoked=absent', observed.stdout)
+            self.assertEqual(run_state('admin-check', stdin(good, [admin, retained])).returncode, 0)
+            observed = run_state('admin-check', stdin({revoked: 'acceptance-one'}, [revoked]))
+            self.assertEqual(observed.stderr.splitlines(), [
+                retained_missing, revoked_present, 'native client state changed since its baseline'])
+            for text, reason in ((stdin({admin: good[admin]}, [admin]), 'retained native client is missing'),
+                                 (stdin(good, [retained, admin, revoked]), 'revoked native client is present'),
+                                 (stdin({**good, revoked: 'acceptance-one'}, [retained, admin, revoked]),
+                                  'revoked native client is present'),
+                                 (stdin({**good, 'public-other': 'other'}, [retained, admin]), 'changed since its baseline'),
+                                 (stdin(good, [retained]), 'changed since its baseline'),
+                                 ('', 'did not return native client state'),
+                                 ('not-json\nPEERS\n', 'did not return native client state')):
+                observed = run_state('admin-check', text)
+                self.assertEqual(observed.returncode, 1)
+                self.assertIn(reason, observed.stderr)
+                self.assertNotIn('public-', observed.stdout + observed.stderr)
+                self.assertNotIn('synthetic-private', observed.stdout + observed.stderr)
+
+    def test_last_server_check_precedes_the_final_stock_app_discovery(self):
+        source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
+        self.assertLess(source.rindex('native_admin admin-check'), source.rindex('native_app discover'))
+
     def test_capture_rejects_unsafe_archives_and_caps_native_output(self):
         capture = load_module('amnezia_capture_test', PROFILE / 'tests/e2e/failure-capture.py')
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
