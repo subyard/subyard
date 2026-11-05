@@ -20,10 +20,7 @@ on:
         type: string
         default: ''
       # Set by the reschedule job, which runs nested VM checks again until they land on Intel.
-      sha:
-        description: Commit to test instead of the branch head
-        type: string
-        default: ''
+      # A retry tests the branch's latest commit, like any run that starts then.
       origin:
         description: Run whose nested VM checks this run retries
         type: string
@@ -88,7 +85,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -145,7 +141,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -165,7 +160,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -197,7 +191,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -251,7 +244,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.cpu.outputs.run == 'true'
         with:
-          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         if: steps.cpu.outputs.run == 'true'
@@ -290,7 +282,6 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REF: ${{ github.ref_name }}
-          SHA: ${{ inputs.sha || github.sha }}
           ORIGIN: ${{ inputs.origin || github.run_id }}
           ATTEMPT: ${{ inputs.attempt || 0 }}
         run: |
@@ -308,7 +299,7 @@ jobs:
               "$NESTED_ATTEMPTS" "$checks"
             exit 1
           fi
-          gh workflow run release-tests.yml --ref "$REF" -f checks="$checks" -f sha="$SHA" \
-            -f origin="$ORIGIN" -f attempt="$attempt"
-          printf 'Rescheduled on new runners, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
-            "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"
+          gh workflow run release-tests.yml --ref "$REF" -f checks="$checks" -f origin="$ORIGIN" \
+            -f attempt="$attempt"
+          printf 'Rescheduled on new runners at the latest %s commit, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
+            "$REF" "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"
