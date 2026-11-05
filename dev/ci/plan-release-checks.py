@@ -11,6 +11,10 @@ SLOT = ["--slot", "1"]
 # Agent jobs selected by docs/test-vms.md: each ownership-evidence boundary, without the full matrix.
 AGENT_BASELINES = {"0.11.0": "all", "0.17.1": "all", "0.22.1": "all", "0.25.5": "all",
                    "0.23.0": "claude", "0.24.0": "claude"}
+# Checks that boot a VM inside the leased VM. On AMD hosted runners such a VM boots far too slowly
+# under the runner's hypervisor for these checks to finish, so they run only on Intel runners.
+NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnezia",
+          "profile:telemetry", "profile:test-vms/broker-cold-upgrade"}
 
 
 def collector():
@@ -49,7 +53,11 @@ def plan(root=ROOT):
         raise SystemExit("plan-release-checks: unpinned agent baselines: " + " ".join(missing))
     include += [{"id": f"published:{version}:{agents}", "command": published_upgrade(version, agents)}
                 for version, agents in AGENT_BASELINES.items()]
-    return {"include": include}
+    unknown = sorted(NESTED - {check["id"] for check in include})
+    if unknown:
+        raise SystemExit("plan-release-checks: unknown nested checks: " + " ".join(unknown))
+    return {"checks": {"include": [c for c in include if c["id"] not in NESTED]},
+            "nested": {"include": [c for c in include if c["id"] in NESTED]}}
 
 
 if __name__ == "__main__":

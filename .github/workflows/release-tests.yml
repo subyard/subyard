@@ -1,4 +1,7 @@
 name: Release tests
+run-name: >-
+  ${{ inputs.origin && format('Nested VM checks on Intel, attempt {0}, for run {1}', inputs.attempt, inputs.origin)
+  || (github.event_name == 'push' && github.event.head_commit.message) || github.workflow }}
 
 # Long release VM checks on hosted runners, ahead of a release. A red check here is a finding to
 # fix early; this workflow does not replace release acceptance. It holds no secrets and never
@@ -16,6 +19,19 @@ on:
         description: Space-separated check ids to run instead of all; skips the layer probes
         type: string
         default: ''
+      # Set by the reschedule job, which runs nested VM checks again until they land on Intel.
+      sha:
+        description: Commit to test instead of the branch head
+        type: string
+        default: ''
+      origin:
+        description: Run whose nested VM checks this run retries
+        type: string
+        default: ''
+      attempt:
+        description: Retry attempt of the nested VM checks
+        type: number
+        default: 0
   push:
     branches:
       - 'ci-probe/**'
@@ -24,16 +40,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-tests-${{ github.ref }}
-  # A probe branch's new push replaces its run; master always finishes the run it started.
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/ci-probe/') }}
+  group: release-tests-${{ github.ref }}${{ inputs.origin && format('-retry-{0}', inputs.origin) || '' }}
+  # A probe branch's new push replaces its run; master and retries always finish.
+  cancel-in-progress: ${{ !inputs.origin && startsWith(github.ref, 'refs/heads/ci-probe/') }}
 
 env:
   CANDIDATE_VERSION: 1.0.0-ci.release-tests
+  NESTED_ATTEMPTS: 20
 
 jobs:
-  # The schedule runs only for a commit no finished run has covered. A failed commit is not
-  # repeated automatically; use Re-run or a manual dispatch.
+  # The schedule runs only for a commit no finished push or scheduled run has covered. A failed
+  # commit is not repeated automatically; use Re-run or a manual dispatch.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -54,7 +71,8 @@ jobs:
           run=true
           if [ "$EVENT" = schedule ]; then
             last="$(gh run list --workflow release-tests.yml --branch "$REF" --status completed \
-              --limit 1 --json headSha --jq '.[0].headSha // ""')"
+              --limit 30 --json headSha,event \
+              --jq 'map(select(.event == "schedule" or .event == "push"))[0].headSha // ""')"
             [ "$last" != "$HEAD" ] || run=false
           fi
           printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
@@ -66,9 +84,11 @@ jobs:
     timeout-minutes: 30
     outputs:
       checks: ${{ steps.plan.outputs.checks }}
+      nested: ${{ steps.plan.outputs.nested }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -84,14 +104,23 @@ jobs:
         env:
           ONLY: ${{ inputs.checks }}
         run: |
-          checks="$(python3 -B dev/ci/plan-release-checks.py)"
+          plan="$(python3 -B dev/ci/plan-release-checks.py)"
           if [ -n "$ONLY" ]; then
-            checks="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
-              | .include |= map(select(.id as $id | $ids | index($id)))' <<<"$checks")"
-            [ "$(jq '.include | length' <<<"$checks")" -gt 0 ] || { echo "no such checks: $ONLY"; exit 1; }
+            plan="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
+              | map_values(.include |= map(select(.id as $id | $ids | index($id))))' <<<"$plan")"
+            [ "$(jq '[.[].include[]] | length' <<<"$plan")" -gt 0 ] || { echo "no such checks: $ONLY"; exit 1; }
           fi
-          printf 'checks=%s\n' "$checks" >> "$GITHUB_OUTPUT"
-          jq -r '.include[].id' <<<"$checks" >> "$GITHUB_STEP_SUMMARY"
+          # An empty matrix fails its job, so an empty list skips the job instead.
+          for kind in checks nested; do
+            printf '%s=%s\n' "$kind" "$(jq -c --arg kind "$kind" '.[$kind] | select(.include != [])' <<<"$plan")" \
+              >> "$GITHUB_OUTPUT"
+          done
+          {
+            echo '### Checks'
+            jq -r '.checks.include[].id' <<<"$plan"
+            echo '### Nested VM checks, only on Intel runners'
+            jq -r '.nested.include[].id' <<<"$plan"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: candidate-bundle
@@ -116,6 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -126,14 +156,16 @@ jobs:
         run: bash dev/ci/release-tests.sh layers
 
   # One real lease first: if the pool cannot run here, the matrix would only repeat that failure.
+  # A retry already passed it in its original run.
   pool:
     needs: candidate
-    if: ${{ !inputs.layers_only }}
+    if: ${{ !inputs.layers_only && !inputs.origin }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -153,16 +185,19 @@ jobs:
   check:
     name: ${{ matrix.id }}
     needs: [candidate, pool]
+    if: ${{ needs.candidate.outputs.checks && needs.pool.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      # Leaves room in the account-wide 20-job pool for ordinary CI and release preparation.
-      max-parallel: 14
+      # With the nested jobs, leaves room in the account-wide 20-job pool for ordinary CI and
+      # release preparation.
+      max-parallel: 11
       matrix: ${{ fromJSON(needs.candidate.outputs.checks) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -181,3 +216,99 @@ jobs:
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
           bash dev/ci/release-tests.sh check "$CHECK_ID" \
             "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
+
+  # Checks that boot a VM inside the leased VM. On an AMD runner the job only explains the skip;
+  # the reschedule job then runs those checks again on new runners.
+  nested:
+    name: ${{ matrix.id }}
+    needs: [candidate, pool]
+    if: >-
+      ${{ !cancelled() && needs.candidate.outputs.nested && needs.candidate.result == 'success'
+      && (needs.pool.result == 'success' || (needs.pool.result == 'skipped' && inputs.origin)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.candidate.outputs.nested) }}
+    steps:
+      - name: Require an Intel runner
+        id: cpu
+        env:
+          CHECK_ID: ${{ matrix.id }}
+        run: |
+          vendor="$(awk -F': *' '/^vendor_id/ {print $2; exit}' /proc/cpuinfo)"
+          model="$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
+          printf 'cpu: %s (%s)\n' "$model" "$vendor"
+          if [ "$vendor" = GenuineIntel ]; then
+            printf 'run=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'run=false\n' >> "$GITHUB_OUTPUT"
+          reason="Not run on this $model runner. On AMD hosted runners a VM inside the leased VM boots far too slowly under the runner's hypervisor for this check to finish: its firmware alone takes 1.5 to over 4 minutes, and its guest agent did not start within 5 to 15 minutes. The check is rescheduled on another runner."
+          printf '::warning title=Rescheduled, nested VMs are too slow on AMD::%s\n' "$reason"
+          printf '### %s\n%s\n' "$CHECK_ID" "$reason" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.cpu.outputs.run == 'true'
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Go
+        if: steps.cpu.outputs.run == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        if: steps.cpu.outputs.run == 'true'
+        with:
+          name: candidate-bundle
+          path: ${{ runner.temp }}/candidate
+      - name: Run the check
+        if: steps.cpu.outputs.run == 'true'
+        env:
+          CHECK_ID: ${{ matrix.id }}
+          CHECK_COMMAND: ${{ toJSON(matrix.command) }}
+        run: |
+          mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
+          bash dev/ci/release-tests.sh check "$CHECK_ID" \
+            "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
+
+  # The only job allowed to start runs. It checks out nothing and runs no repository code.
+  reschedule:
+    needs: nested
+    if: ${{ !cancelled() && needs.nested.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Retry nested VM checks that landed on AMD
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ inputs.sha || github.sha }}
+          ORIGIN: ${{ inputs.origin || github.run_id }}
+          ATTEMPT: ${{ inputs.attempt || 0 }}
+        run: |
+          # A nested job whose check step was skipped ran on AMD.
+          checks="$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | select(any(.steps[]; .name == "Require an Intel runner" and .conclusion == "success")
+              and any(.steps[]; .name == "Run the check" and .conclusion == "skipped")) | .name' | sort | xargs)"
+          if [ -z "$checks" ]; then
+            printf 'Every nested VM check ran on an Intel runner.\n' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          attempt=$((ATTEMPT + 1))
+          if [ "$attempt" -gt "$NESTED_ATTEMPTS" ]; then
+            printf '::error title=Nested VM checks did not run::No Intel runner in %s attempts; not run: %s\n' \
+              "$NESTED_ATTEMPTS" "$checks"
+            exit 1
+          fi
+          gh workflow run release-tests.yml --ref "$REF" -f checks="$checks" -f sha="$SHA" \
+            -f origin="$ORIGIN" -f attempt="$attempt"
+          printf 'Rescheduled on new runners, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
+            "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"

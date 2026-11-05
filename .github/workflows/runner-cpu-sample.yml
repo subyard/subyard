@@ -1,0 +1,32 @@
+name: Runner CPU sample
+
+# Temporary: which CPU vendors each hosted Linux x64 label gets. Remove after the measurement.
+on:
+  push:
+    branches:
+      - 'ci-probe/**'
+    paths:
+      - .github/workflows/runner-cpu-sample.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sample:
+    name: ${{ matrix.label }}-${{ matrix.sample }}
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        label: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+        sample: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - name: Report the CPU
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          model="$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
+          printf '::notice title=%s::%s\n' "$LABEL" "$model"
