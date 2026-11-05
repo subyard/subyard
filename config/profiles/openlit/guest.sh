@@ -12,6 +12,9 @@ mode=${1:?expected lifecycle mode}
 selected=${2:?expected selected bit}
 user=${3:?expected developer user}
 agents=${4-}
+if [ "$mode" = identity-observe ] || [ "$mode" = identity-apply ]; then
+  exec python3 -B "$root/identity.py" "$@"
+fi
 case "$mode" in apply|check|pause|resume|observe|refresh) ;; *) exit 2 ;; esac
 case "$selected" in 0|1) ;; *) exit 2 ;; esac
 [[ "$user" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || exit 2

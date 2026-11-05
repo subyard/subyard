@@ -27,6 +27,115 @@ type integrationRuntimeFixture struct {
 	requested  []string
 }
 
+type appliedSelectionPlatformFixture struct {
+	*initPlatformFixture
+	selected []string
+	settings map[string]string
+}
+
+func (fixture *appliedSelectionPlatformFixture) AppliedIntegrationConfiguration(context.Context) (reconcileruntime.AppliedIntegrationConfiguration, error) {
+	return reconcileruntime.AppliedIntegrationConfiguration{Selected: fixture.selected, Settings: fixture.settings, Installed: true}, nil
+}
+
+type appliedProfilesPlatformFixture struct {
+	*appliedSelectionPlatformFixture
+	profiles []string
+	known    bool
+}
+
+func (fixture *appliedProfilesPlatformFixture) AppliedEnvironmentProfiles(context.Context) ([]string, bool, error) {
+	return fixture.profiles, fixture.known, nil
+}
+
+func TestReleaseMaterializationUsesVerifiedAppliedProfilesIncludingEmpty(t *testing.T) {
+	for _, applied := range [][]string{{}, {"retained"}} {
+		cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+		cli.options.InitPlatform = &appliedProfilesPlatformFixture{appliedSelectionPlatformFixture: &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), selected: []string{"codex"}}, profiles: applied, known: true}
+		loaded, err := cli.loadContext("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded.Environment["ENVIRONMENT_PROFILES"] = "newly-desired"
+		target, err := cli.appliedIntegrationTarget(context.Background(), configTarget{Name: "default", Loaded: loaded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target.Loaded.Environment["ENVIRONMENT_PROFILES"] != strings.Join(applied, " ") || !slices.Equal(target.Loaded.EnvironmentProfiles.Effective, applied) || loaded.Environment["ENVIRONMENT_PROFILES"] != "newly-desired" {
+			t.Fatal("installed profile selection followed pending desired configuration")
+		}
+	}
+}
+
+func TestReleaseMaterializationRetainsEveryAppliedIntegrationInitField(t *testing.T) {
+	for _, suffix := range []string{"COMMAND", "CHECK", "HEALTH", "PROJECTS_CHANGED", "DEPENDS", "PERSIST", "PROVISION"} {
+		t.Run(suffix, func(t *testing.T) {
+			cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+			name, value := "AGENT_codex_"+suffix, "old-command"
+			switch suffix {
+			case "DEPENDS":
+				value = ""
+			case "PERSIST":
+				value = ".old:/mnt/host/old"
+			case "PROVISION":
+				value = filepath.Join(cli.options.RepositoryRoot, "old-provision.sh")
+				writeCLIFile(t, value, "#!/bin/sh\nexit 0\n", 0o700)
+			}
+			cli.options.InitPlatform = &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), selected: []string{"codex"}, settings: map[string]string{name: value}}
+			loaded, err := cli.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded.Environment[name] = "new-desired-value"
+			target, err := cli.appliedIntegrationTarget(context.Background(), configTarget{Name: "default", Loaded: loaded})
+			if err != nil || target.Loaded.Environment[name] != value || loaded.Environment[name] != "new-desired-value" {
+				t.Fatalf("applied %s not retained: %v", suffix, err)
+			}
+		})
+	}
+}
+
+func TestReleaseMaterializationUsesAppliedCodingSelection(t *testing.T) {
+	cli, _, _, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=relay\n")
+	cli.options.InitPlatform = &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), selected: []string{"codex"}}
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	target, err := cli.appliedIntegrationTarget(context.Background(), configTarget{Name: "default", Loaded: loaded})
+	if err != nil || strings.Join(target.Loaded.Integrations.Effective, " ") != "codex" || strings.Join(loaded.Integrations.Requested, " ") != "relay" {
+		t.Fatalf("release projection changed desired selection or followed pending selection: %v %#v", err, target.Loaded.Integrations)
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("read-only release observation authored configuration")
+	}
+}
+
+func TestReleaseMaterializationKeepsFirstAuthoredHookPending(t *testing.T) {
+	cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := loaded.Environment["AGENT_codex_PROJECTS_CHANGED"]; present {
+		t.Fatal("fixture hook must be absent before its first assignment")
+	}
+	applied := loaded.Catalog.IntegrationInitSettings(loaded.Environment)
+	cli.options.InitPlatform = &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), selected: []string{"codex"}, settings: applied}
+	loaded.Environment["AGENT_codex_PROJECTS_CHANGED"] = "new-hook"
+	target, err := cli.appliedIntegrationTarget(context.Background(), configTarget{Name: "default", Loaded: loaded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := target.Loaded.Environment["AGENT_codex_PROJECTS_CHANGED"]; present {
+		t.Fatal("first authored hook entered completed-release readiness before apply")
+	}
+	if loaded.Environment["AGENT_codex_PROJECTS_CHANGED"] != "new-hook" {
+		t.Fatal("release projection discarded desired hook intent")
+	}
+}
+
 func (fixture *integrationRuntimeFixture) IntegrationPlan(context.Context) (reconcileruntime.IntegrationPlan, error) {
 	return fixture.plan, nil
 }

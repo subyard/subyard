@@ -59,20 +59,21 @@ type IncusReader interface {
 
 type Runtime struct {
 	// Retained only when restoring frozen materialization recipes.
-	legacyPreviewInstructions   bool
-	ownerInitPlanning           bool
-	ownerSources                *preparedOwnerSourceExecution
-	afterOwnerConfigs           *afterOwnerConfigPhysical
-	afterOwnerConfigSource      bool
-	afterOwnerBroker            *afterOwnerBrokerPhysical
-	afterOwnerRoutes            *afterOwnerRoutePhysical
-	afterOwnerIntegrationSource bool
-	afterOwnerIntegrations      *afterOwnerIntegrationPhysical
-	ownerProject                *ownerProjectExecution
-	ownerInstance               *ownerInstanceExecution
-	ownerVolume                 *ownerVolumeExecution
-	LegacyContinuation          *domain.LegacyContinuation
-	RepositoryRoot              string
+	legacyPreviewInstructions    bool
+	appliedIntegrationInspection bool
+	ownerInitPlanning            bool
+	ownerSources                 *preparedOwnerSourceExecution
+	afterOwnerConfigs            *afterOwnerConfigPhysical
+	afterOwnerConfigSource       bool
+	afterOwnerBroker             *afterOwnerBrokerPhysical
+	afterOwnerRoutes             *afterOwnerRoutePhysical
+	afterOwnerIntegrationSource  bool
+	afterOwnerIntegrations       *afterOwnerIntegrationPhysical
+	ownerProject                 *ownerProjectExecution
+	ownerInstance                *ownerInstanceExecution
+	ownerVolume                  *ownerVolumeExecution
+	LegacyContinuation           *domain.LegacyContinuation
+	RepositoryRoot               string
 	// LogicalRepositoryRoot labels durable recipes while RepositoryRoot may be
 	// the helper's own retained descriptor used only for physical source reads.
 	LogicalRepositoryRoot string
@@ -1661,11 +1662,23 @@ func (runtime Runtime) gitIdentityConverged(ctx context.Context) (bool, error) {
 	if runtime.Executor == nil {
 		return false, errors.New("Incus executor is required")
 	}
+	user := runtime.devUser()
+	if !domain.SafeName(user) {
+		return false, errors.New("invalid developer user")
+	}
+	uid := runtime.Yard.DevUID
+	if uid <= 0 {
+		uid = 1000
+	}
+	// Git writes an existing XDG global config when ~/.gitconfig is absent.
+	// Observe the same developer/global setting that applyGitIdentity writes,
+	// rather than assuming one of Git's supported storage locations.
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
-		ports.InstanceExecRequest{Command: []string{
-			"test", "-s", "/home/" + runtime.environmentDefault("DEV_USER", "dev") + "/.gitconfig",
-		}})
-	if err == nil {
+		ports.InstanceExecRequest{
+			Command: []string{"git", "config", "--global", "--fixed-value", "--get-all", "safe.directory", "*"},
+			User:    uint32(uid), Group: uint32(uid), Environment: map[string]string{"HOME": "/home/" + user},
+		})
+	if err == nil && result.ExitCode == 0 {
 		return true, nil
 	}
 	if result.ExitCode != 0 {

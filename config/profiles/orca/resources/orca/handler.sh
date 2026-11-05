@@ -368,6 +368,42 @@ YARD
   yexec systemctl enable --now "$ORCA_DISCOVERY_TIMER" >/dev/null
 }
 
+render_runtime_service() { # <guest-uid>
+  local guest_uid="$1"
+  cat <<UNIT
+[Unit]
+Description=Subyard Orca remote server
+After=network-online.target user@$guest_uid.service
+Wants=network-online.target user@$guest_uid.service
+
+[Service]
+Type=simple
+User=${DEV_USER:-dev}
+Group=${DEV_USER:-dev}
+Environment=HOME=/home/${DEV_USER:-dev}
+Environment=SSH_AUTH_SOCK=/home/${DEV_USER:-dev}/.ssh/subyard-agent.sock
+Environment=XDG_CONFIG_HOME=/home/${DEV_USER:-dev}/.config
+Environment=ORCA_USER_DATA_PATH=$ORCA_STATE/config/orca
+Environment=XDG_DATA_HOME=$ORCA_STATE/data
+Environment=XDG_STATE_HOME=$ORCA_STATE/state
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=SUBYARD_ORCA_CODEX_CONFIG=1
+WorkingDirectory=/srv/workspaces
+ExecStartPre=+$ORCA_INGRESS up $ORCA_GUEST_PORT
+ExecStart=$ORCA_CAPTURE $ORCA_READY $ORCA_EXEC serve --port $ORCA_GUEST_PORT --pairing-address $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT --json
+ExecStopPost=+$ORCA_INGRESS down
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=120
+TimeoutStopSec=30
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
 stage_runtime_contract() {
   ensure_linger
   ORCA_TMP_DIR="${ORCA_TMP_DIR:-$(mktemp -d)}"
@@ -435,38 +471,7 @@ CAPTURE
   # An existing function suppresses Orca's own wrapper; codex_launch.py also owns
   # its supported --no-daemon policy and managed-account hook preparation.
   render_registration_hook >"$sync"
-  cat >"$unit" <<UNIT
-[Unit]
-Description=Subyard Orca remote server
-After=network-online.target user@$guest_uid.service
-Wants=network-online.target user@$guest_uid.service
-
-[Service]
-Type=simple
-User=${DEV_USER:-dev}
-Group=${DEV_USER:-dev}
-Environment=HOME=/home/${DEV_USER:-dev}
-Environment=SSH_AUTH_SOCK=/home/${DEV_USER:-dev}/.ssh/subyard-agent.sock
-Environment=XDG_CONFIG_HOME=/home/${DEV_USER:-dev}/.config
-Environment=ORCA_USER_DATA_PATH=$ORCA_STATE/config/orca
-Environment=XDG_DATA_HOME=$ORCA_STATE/data
-Environment=XDG_STATE_HOME=$ORCA_STATE/state
-Environment=LIBGL_ALWAYS_SOFTWARE=1
-Environment=SUBYARD_ORCA_CODEX_CONFIG=1
-WorkingDirectory=/srv/workspaces
-ExecStartPre=+$ORCA_INGRESS up $ORCA_GUEST_PORT
-ExecStart=$ORCA_CAPTURE $ORCA_READY $ORCA_EXEC serve --port $ORCA_GUEST_PORT --pairing-address $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT --json
-ExecStopPost=+$ORCA_INGRESS down
-Restart=on-failure
-RestartSec=2
-TimeoutStartSec=120
-TimeoutStopSec=30
-KillMode=mixed
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+  render_runtime_service "$guest_uid" >"$unit"
   chmod 0755 "$ingress" "$capture" "$sync"
   incus file push "$ingress" "$YARD_INSTANCE_NAME$guest_ingress" \
     "${PROJ[@]}" --mode 0755 >/dev/null
@@ -1363,11 +1368,57 @@ cmd_is_up() {
   yexec systemctl is-active --quiet "$ORCA_UNIT" >/dev/null 2>&1
 }
 
+identity_program() {
+  printf '%s\n' 'import sys,types' 'module=types.ModuleType("authority");sys.modules["authority"]=module' 'exec(compile('
+  jq -Rs . "$SUBYARD_ROOT/config/identity/authority.py"
+  printf '%s\n' ',"authority.py","exec"),module.__dict__)'
+  cat "$RESOURCE_DIR/identity.py"
+}
+
+identity_contract() {
+  local mode="$1" target source original="${DEV_USER:-dev}" observation manifest full guest_uid
+  local -a helpers=() files=()
+  if [ "$mode" = identity-observe ]; then
+    [ "$#" -eq 3 ] || die 'invalid Orca identity observation arguments'
+    target="$2"; source="$3"
+  else
+    [ "$#" -eq 2 ] || die 'invalid Orca identity apply arguments'
+    source="$2"
+    target="$(identity_program | yexec python3 -I -B - target "$source")"
+  fi
+  [[ "$target" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ "$source" =~ ^[a-f0-9]{64}$ ]] || die 'invalid Orca identity scope'
+  # A rename keeps the UID, and only one of the two names exists at any phase.
+  guest_uid="$(yexec id -u "$original" 2>/dev/null || yexec id -u "$target")" || die 'Orca development user UID unavailable'
+  [[ "$guest_uid" =~ ^[0-9]+$ ]] || die 'Orca development user UID is invalid'
+  observation="$(observe_registration_contract)"
+  full="$(identity_program | yexec python3 -I -B - main-state "$source")"
+  # Absent profiles need no endpoint configuration. Installed profiles must use
+  # the exact same pure unit renderers as their ordinary resource owner.
+  if [ "$full" = true ]; then require_runtime_settings; fi
+  ORCA_HOST_PORT="${ORCA_HOST_PORT:-0}"; ORCA_ADVERTISE_HOST="${ORCA_ADVERTISE_HOST:-127.0.0.1}"
+  mapfile -t helpers < <(registration_files)
+  if [ "$full" = true ]; then
+    files=("$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}")
+  else
+    files=("$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "${helpers[@]}" "$ORCA_REGISTRATION/discover" "$ORCA_REGISTRATION_DIGEST" "/etc/systemd/system/$ORCA_DISCOVERY_TIMER")
+  fi
+  manifest="$(jq -n --arg oldMain "$(render_runtime_service "$guest_uid")" --arg oldDiscovery "$(render_discovery_service)" \
+    --arg newMain "$(DEV_USER="$target" render_runtime_service "$guest_uid")" --arg newDiscovery "$(DEV_USER="$target" render_discovery_service)" \
+    --arg version "$(registration_contract_version)" --arg oldDigest "$(registration_desired_digest)" \
+    --arg newDigest "$(DEV_USER="$target" registration_desired_digest)" --argjson observation "$observation" \
+    --arg files "$(printf '%s\n' "${files[@]}")" --argjson full "$full" \
+    '{before:[$oldMain+"\n",$oldDiscovery+"\n"],after:[$newMain+"\n",$newDiscovery+"\n"],version:$version,oldDigest:$oldDigest,newDigest:$newDigest,observation:$observation,full:$full,files:($files|split("\n"))}')"
+  identity_program | yexec python3 -I -B - "$mode" "$source" "$original" "$target" "$manifest"
+}
+
 sub="${1:-}"
 shift || true
 
 if [ "$sub" = _runtime-contract ]; then
   case "${1:-}" in
+    identity-observe|identity-apply)
+      identity_contract "$@"
+      ;;
     observe)
       [ "$#" -eq 1 ] || die "usage: _runtime-contract observe"
       ORCA_METADATA_PROJECTION="$(cat)"

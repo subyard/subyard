@@ -1759,6 +1759,7 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stderr bytes.Buffer
 	program, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop", "--force"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-cli"), WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: cliRunner, Prompt: prompt, Clock: clock,
@@ -1785,6 +1786,7 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	rpcIncus.Instances["subyard/yard"] = rpcInstance
 	powerScriptedIncus(rpcRunner, rpcIncus)
 	program, err = New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: rpcIncus,
 	})
@@ -1851,6 +1853,7 @@ func TestStructuredActionRechecksNoOpAfterConsent(t *testing.T) {
 	}}
 	var stderr bytes.Buffer
 	program, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-recheck"),
 		WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt, Incus: incus,

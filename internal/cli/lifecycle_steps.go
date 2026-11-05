@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
@@ -115,7 +116,8 @@ func (execution *teardownExecution) binding() string {
 	return operationStateDigest(struct {
 		Physical      *teardownSnapshot
 		Configuration *teardownConfigSnapshot
-	}{execution.snapshot(), execution.configSnapshot})
+		Owner         physicalOwner
+	}{execution.snapshot(), execution.configSnapshot, execution.teardownOwnerBinding()})
 }
 func (execution *teardownExecution) steps(yard domain.Context) []domain.OperationStep {
 	if execution == nil || execution.snapshot() == nil {
@@ -243,4 +245,12 @@ func (cli *CLI) verifyTeardown(ctx context.Context, loaded config.Loaded, execut
 		return errors.New("teardown did not retain approved data infrastructure")
 	}
 	return nil
+}
+
+func (execution *teardownExecution) teardownOwnerBinding() physicalOwner {
+	if execution.activeYard == nil {
+		return physicalOwner{}
+	}
+	uid, _ := strconv.Atoi(execution.activeYard.Environment[teardownOwnerUID])
+	return physicalOwner{execution.activeYard.Environment[teardownOwnerUser], uid, execution.activeYard.Environment[teardownOwnerProfiles]}
 }

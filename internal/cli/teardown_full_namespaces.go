@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/uninstall"
+	"io"
 	"path/filepath"
 	"strings"
 )
@@ -33,6 +37,15 @@ func fullRootNamespaces(root string, installation uninstall.Installation, execut
 	case installation.ConfigHome:
 		scoped = true
 		owned = []string{"release-transition-replaced-journals", "config.env", "settings.env", "host.env", "overrides.env", "hosts", "host", "yards", "generated", "projects", "keys", "tools", "git", "recovery", "migrations", "owner-inventory", "host-id", "host-id.json", "configuration-source.json", "config-source.json", "source.json", "settings", ".sync", "overrides", "secrets", "release-transition", "host-id-rename.json", "reconcile"}
+		for _, yard := range execution.Yards {
+			path, err := ownedIdentityRemovalMarker(root, yard)
+			if err != nil {
+				return nil, false, err
+			}
+			if path != "" {
+				owned = append(owned, path)
+			}
+		}
 	case installation.RuntimeRoot:
 		scoped = true
 		owned = []string{"current", "previous", "releases", uninstall.ManifestName, "update.lock"}
@@ -68,4 +81,39 @@ func fullRootNamespaces(root string, installation uninstall.Installation, execut
 		}
 	}
 	return owned, scoped, nil
+}
+
+// A full removal may retire a pending identity fence only for a yard already
+// included in its independently verified native deletion scope. The scoped
+// uninstall tree subsequently binds bytes/inode/mode and refuses changed files.
+func ownedIdentityRemovalMarker(root string, yard uninstall.RecoveryYard) (string, error) {
+	path := config.DeveloperIdentityMarkerPath(root, yard.Context.YardName)
+	snapshot, err := config.ReadPersistentFileSnapshot(root, path)
+	if err != nil {
+		return "", err
+	}
+	if !snapshot.Exists {
+		return "", nil
+	}
+	var marker config.DeveloperIdentityMarker
+	decoder := json.NewDecoder(bytes.NewReader(snapshot.Content))
+	decoder.DisallowUnknownFields()
+	if snapshot.Identity.Mode&0777 != 0600 || len(snapshot.Content) > 2<<20 || decoder.Decode(&marker) != nil || decoder.Decode(new(any)) != io.EOF || marker.Schema != 1 || marker.Yard != yard.Context.YardName || len(marker.Inputs) != 64 || len(marker.Release) != 64 {
+		return "", fmt.Errorf("unsafe pending identity removal marker for yard %s", yard.Context.YardName)
+	}
+	var proof map[string]any
+	decoder = json.NewDecoder(strings.NewReader(marker.Proof))
+	decoder.UseNumber()
+	if decoder.Decode(&proof) != nil || decoder.Decode(new(any)) != io.EOF || operationStateDigest(proof) != marker.Identity {
+		return "", fmt.Errorf("invalid pending identity removal proof")
+	}
+	native, ok := proof["yard"].(map[string]any)
+	if !ok || native["name"] != yard.Context.YardName || native["project"] != yard.Context.IncusProject || native["instance"] != yard.Context.YardInstanceName {
+		return "", fmt.Errorf("pending identity removal scope changed")
+	}
+	uuid, ok := native["uuid"].(string)
+	if !ok || len(uuid) != 36 || yard.Snapshot == nil || !yard.Snapshot.State.InstanceFound || yard.Snapshot.State.Instance.Config["volatile.uuid"] != uuid {
+		return "", fmt.Errorf("pending identity removal native yard changed")
+	}
+	return filepath.Base(path), nil
 }

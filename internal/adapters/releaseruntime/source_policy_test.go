@@ -3,12 +3,14 @@ package releaseruntime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/blang/semver/v4"
@@ -208,6 +210,31 @@ func TestSourceVersionRefusalsDistinguishInvalidFromUnsupported(t *testing.T) {
 				if err != nil {
 					t.Fatal("supported version refused", err)
 				}
+			}
+		})
+	}
+}
+
+// Internal update/replacement callers share the same fence as direct CLI and RPC.
+func TestSourcePolicyPendingIdentityPrecedesReleaseRecovery(t *testing.T) {
+	root := testkit.TempDir(t)
+	digest := strings.Repeat("a", 64)
+	marker := config.DeveloperIdentityMarker{Schema: 1, Yard: "default", Inputs: digest, Identity: digest, Release: digest}
+	payload, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := config.DeveloperIdentityMarkerPath(root, "default")
+	testkit.WriteFile(t, path, payload, 0600)
+	for _, mode := range []releasetransition.ProcessMode{releasetransition.ProcessConverge, releasetransition.ProcessMode(releasetransition.RecoveryProcessConverge)} {
+		t.Run(string(mode), func(t *testing.T) {
+			err := CheckSourcePolicy(context.Background(), releasetransition.ProcessRequest{ConfigHome: root, Mode: mode, RuntimeRoot: filepath.Join(root, "unavailable-runtime")})
+			if err == nil || !strings.Contains(err.Error(), "developer identity transition is pending") {
+				t.Fatalf("release mutation escaped identity fence: %v", err)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil || string(after) != string(payload) {
+				t.Fatal("release admission changed pending authority", readErr)
 			}
 		})
 	}

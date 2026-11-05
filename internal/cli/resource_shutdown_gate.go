@@ -109,7 +109,7 @@ func (cli *CLI) prepareResourceShutdownRepair(ctx context.Context, yard string, 
 	if err != nil {
 		return nil, err
 	}
-	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
+	output, err := cli.prepareResource(ctx, cli.resourceShutdownContext(ctx, loaded, definition, invocation.verb), definition, invocation.arguments)
 	if err != nil {
 		return nil, err
 	}

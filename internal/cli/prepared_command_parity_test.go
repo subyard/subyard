@@ -221,7 +221,7 @@ func preparationRunningYard(
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
 	incus.Reconcile = ports.ReconcileState{InstanceFound: true}
-	return environment, incus, preparationParityProbe{}, nil
+	return environment, incus, preparationParityProbe{}, newInitPlatformFixture()
 }
 
 func preparationProject(

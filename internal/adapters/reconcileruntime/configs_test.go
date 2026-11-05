@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -632,5 +633,71 @@ func TestCurrentPreviewDeliveryLeavesInstructionsWithoutInjection(t *testing.T) 
 	ambiguous := append(append([]byte(nil), host...), []byte("<!-- subyard-preview -->")...)
 	if !bytes.Equal(stripLegacyPreviewBlock(ambiguous), ambiguous) {
 		t.Fatal("ambiguous markers changed")
+	}
+}
+
+type localGitIdentityExecutor struct{ home string }
+
+func (executor localGitIdentityExecutor) Exec(ctx context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if request.Environment["HOME"] != "/home/developer" || request.User != 1001 || request.Group != 1001 {
+		return ports.InstanceExecResult{}, errors.New("Git identity lost developer context")
+	}
+	command := exec.CommandContext(ctx, request.Command[0], request.Command[1:]...)
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + executor.home, "XDG_CONFIG_HOME=" + executor.home + "/.config", "GIT_CONFIG_NOSYSTEM=1"}
+	output, err := command.CombinedOutput()
+	result := ports.InstanceExecResult{Stdout: output}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		result.ExitCode = exit.ExitCode()
+	}
+	return result, err
+}
+
+func TestGitIdentityApplyAndProbeUseNativeGlobalConfigSelection(t *testing.T) {
+	for _, location := range []string{".gitconfig", ".config/git/config"} {
+		t.Run(location, func(t *testing.T) {
+			home := testkit.TempDir(t)
+			path := filepath.Join(home, location)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, path, []byte("[user]\n\tname = retained\n"), 0600)
+			runtime := Runtime{Incus: runningIncus(0), Executor: localGitIdentityExecutor{home},
+				Yard:        domain.Context{DevUser: "developer", DevUID: 1001, Paths: domain.RuntimePaths{DataHome: testkit.TempDir(t)}},
+				Environment: []string{"GIT_USER_NAME=Developer", "GIT_USER_EMAIL=dev@example.test"}}
+			if ready, err := runtime.gitIdentityConverged(context.Background()); err != nil || ready {
+				t.Fatalf("missing applied trust was accepted: %t %v", ready, err)
+			}
+			if err := runtime.applyGitIdentity(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ready, err := runtime.gitIdentityConverged(context.Background()); err != nil || !ready {
+				t.Fatalf("native Git applied state not recognized: %t %v", ready, err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterInfo, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) || !os.SameFile(info, afterInfo) || info.Mode() != afterInfo.Mode() || info.ModTime() != afterInfo.ModTime() {
+				t.Fatal("Git observation changed configuration")
+			}
+			if location != ".gitconfig" {
+				if _, err := os.Stat(filepath.Join(home, ".gitconfig")); !os.IsNotExist(err) {
+					t.Fatal("XDG writer unexpectedly created legacy Git config")
+				}
+			}
+		})
 	}
 }

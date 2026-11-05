@@ -2,4 +2,4 @@
 # Release activation reuses the profile's ordinary owner/guest lifecycle.
 set -euo pipefail
 profile="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$profile/runtime.py" "$@"
+exec python3 -B "$profile/runtime.py" "$@"

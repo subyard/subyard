@@ -318,6 +318,28 @@ func (plan *ProjectHookPlan) CaptureOwnerProjects(records []domain.ProjectRecord
 	}
 }
 
+// CheckContinuationScope binds a freshly observed continuation to the same
+// disclosed hooks and workspace roots while permitting their owned bytes to
+// change during an approved prerequisite.
+func (plan *ProjectHookPlan) CheckContinuationScope(current *ProjectHookPlan) error {
+	if plan == nil || current == nil {
+		return fmt.Errorf("%w: project hook continuation scope unavailable", domain.ErrPlanStale)
+	}
+	roots := plan.approved.Roots
+	if plan.conditional {
+		roots = nil
+		for _, record := range plan.ownerProjects {
+			roots = append(roots, filepath.Dir(record.YardPath))
+		}
+		slices.Sort(roots)
+		roots = slices.Compact(roots)
+	}
+	if !slices.Equal(plan.allowedHooks, current.allowedHooks) || !slices.Equal(roots, current.approved.Roots) || installedRuntimeDigest(plan.ownerProjects) != installedRuntimeDigest(current.ownerProjects) {
+		return fmt.Errorf("%w: project hook continuation scope changed", domain.ErrPlanStale)
+	}
+	return nil
+}
+
 func (plan *ProjectHookPlan) Environment() map[string]string {
 	if plan == nil {
 		return nil

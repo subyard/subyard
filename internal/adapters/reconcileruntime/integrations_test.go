@@ -158,6 +158,153 @@ func TestIntegrationInventoryPreservesDriftAndRetiresOnlyOwnedFiles(t *testing.T
 	}
 }
 
+func TestAppliedIntegrationSelectionIgnoresUncommittedIntent(t *testing.T) {
+	root := testkit.TempDir(t)
+	home, state := filepath.Join(root, "home"), filepath.Join(root, "state")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	program := strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", state)
+	program = strings.ReplaceAll(program, "@STATE_UID@", fmt.Sprint(os.Getuid()))
+	entries := []integrationArtifact{{ID: "codex", Kind: "package", Digest: strings.Repeat("a", 64)}}
+	run := func(mode string) integrationObservation {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"home": home, "uid": os.Getuid(), "entries": entries})
+		command := exec.Command("python3", "-B", "-c", program, mode)
+		command.Stdin = strings.NewReader(string(payload))
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v: %s", mode, err, output)
+		}
+		var observed integrationObservation
+		if mode == "selection" {
+			if err := json.Unmarshal(output, &observed); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return observed
+	}
+	if run("selection").Installed {
+		t.Fatal("absent inventory adopted desired selection")
+	}
+	run("commit")
+	entries = append(entries, integrationArtifact{ID: "relay", Kind: "package", Digest: strings.Repeat("b", 64)})
+	run("apply")
+	if observed := run("selection"); !observed.Installed || strings.Join(observed.Selected, " ") != "codex" {
+		t.Fatalf("pending enable replaced successful selection: %#v", observed)
+	}
+	run("commit")
+	if observed := run("selection"); strings.Join(observed.Selected, " ") != "codex relay" {
+		t.Fatalf("committed enable was not applied: %#v", observed)
+	}
+}
+
+func TestAppliedIntegrationSettingsRequireConvergenceAndRetainFailedIntent(t *testing.T) {
+	root := testkit.TempDir(t)
+	home, state := filepath.Join(root, "home"), filepath.Join(root, "state")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	program := strings.ReplaceAll(strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", state), "@STATE_UID@", fmt.Sprint(os.Getuid()))
+	owned := filepath.Join(home, "owned")
+	ownedBytes := []byte("owned\n")
+	entries := []integrationArtifact{{ID: "sample", Kind: "package", Digest: strings.Repeat("a", 64)}, {ID: "sample", Kind: "file", Path: owned, Digest: fmt.Sprintf("%x", sha256.Sum256(ownedBytes)), Content: base64.StdEncoding.EncodeToString(ownedBytes)}}
+	settings := map[string]string{"AGENT_sample_COMMAND": "old-command"}
+	expected := ""
+	run := func(mode string, fail bool) integrationObservation {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"home": home, "uid": os.Getuid(), "entries": entries, "applied_settings": settings, "expected": expected})
+		command := exec.Command("python3", "-B", "-c", program, mode)
+		command.Stdin = strings.NewReader(string(payload))
+		output, err := command.CombinedOutput()
+		if (err != nil) != fail {
+			t.Fatalf("%s: %v %s", mode, err, output)
+		}
+		var observed integrationObservation
+		if !fail && (mode == "observe" || mode == "selection") {
+			if err := json.Unmarshal(output, &observed); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return observed
+	}
+	run("apply", false)
+	run("commit", false)
+	if run("selection", false).AppliedSettings != nil {
+		t.Fatal("legacy inventory invented an applied baseline")
+	}
+	run("capture-settings", true)
+	expected = run("observe", false).Fingerprint
+	run("capture-settings", false)
+	expected = ""
+	if run("selection", false).AppliedSettings["AGENT_sample_COMMAND"] != "old-command" {
+		t.Fatal("legacy baseline was not captured")
+	}
+	before, err := os.Stat(filepath.Join(state, "inventory.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected = run("observe", false).Fingerprint
+	run("capture-settings", false)
+	expected = ""
+	after, err := os.Stat(filepath.Join(state, "inventory.json"))
+	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("identical baseline replaced the inventory")
+	}
+	expected = strings.Repeat("0", 64)
+	run("capture-settings", true)
+	expected = ""
+	if err := os.Remove(owned); err != nil {
+		t.Fatal(err)
+	}
+	expected = run("observe", false).Fingerprint
+	run("capture-settings", true)
+	expected = ""
+	testkit.WriteFile(t, owned, []byte("foreign\n"), 0o644)
+	run("observe", true)
+	testkit.WriteFile(t, owned, ownedBytes, 0o644)
+	inventory := filepath.Join(state, "inventory.json")
+	if err := os.Chmod(inventory, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("selection", true)
+	if err := os.Chmod(inventory, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings["AGENT_sample_COMMAND"] = "new-command"
+	entries[0].Digest = strings.Repeat("b", 64)
+	run("apply", false)
+	if run("selection", false).AppliedSettings["AGENT_sample_COMMAND"] != "old-command" {
+		t.Fatal("failed apply promoted desired settings")
+	}
+	expected = run("observe", false).Fingerprint
+	run("capture-settings", true)
+	expected = ""
+	run("commit", false)
+	if run("selection", false).AppliedSettings["AGENT_sample_COMMAND"] != "old-command" {
+		t.Fatal("entry commit promoted settings before verification")
+	}
+	expected = run("observe", false).Fingerprint
+	run("capture-settings", false)
+	expected = ""
+	if run("selection", false).AppliedSettings["AGENT_sample_COMMAND"] != "new-command" {
+		t.Fatal("verified settings were not published")
+	}
+}
+
+func TestAppliedIntegrationConfigurationRejectsUnknownFields(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, settings := range []map[string]string{{"UNRELATED": "private-canary"}, {"AGENT_sample_CONFIG": "/private-canary"}, {"AGENT_sample_COMMAND": "unsafe command private-canary"}} {
+		payload, _ := json.Marshal(integrationObservation{Installed: true, AppliedSettings: settings})
+		executor := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: payload}}}}
+		runtime := Runtime{RepositoryRoot: root, Executor: executor, Integrations: []profile.IntegrationDefinition{}}
+		_, err := runtime.AppliedIntegrationConfiguration(context.Background())
+		if err == nil || strings.Contains(err.Error(), "private-canary") {
+			t.Fatalf("unsafe applied settings validation: %v", err)
+		}
+	}
+}
+
 func TestIntegrationInventoryRejectsArtifactAppearingAfterObservation(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
@@ -208,6 +355,117 @@ type retryableIntegrationExecutor struct {
 	hookReady      string
 	requests       []ports.InstanceExecRequest
 	observeHooks   func() hookObservation
+}
+
+type appliedSettingsExecutor struct {
+	*retryableIntegrationExecutor
+	settings    map[string]string
+	captures    int
+	failCapture bool
+}
+
+func (fixture *appliedSettingsExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) >= 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") {
+		switch request.Command[4] {
+		case "selection", "settings":
+			payload, _ := json.Marshal(integrationObservation{Installed: true, AppliedSettings: fixture.settings})
+			return ports.InstanceExecResult{Stdout: payload}, nil
+		case "capture-settings":
+			if fixture.failCapture {
+				fixture.failCapture = false
+				return ports.InstanceExecResult{ExitCode: 1}, errors.New("fixture baseline publication failed")
+			}
+			var input struct {
+				Settings map[string]string `json:"applied_settings"`
+			}
+			if err := json.Unmarshal(request.Stdin, &input); err != nil {
+				return ports.InstanceExecResult{}, err
+			}
+			fixture.settings = input.Settings
+			fixture.captures++
+			return ports.InstanceExecResult{}, nil
+		}
+	}
+	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestIntegrationSettingsPublicationRetryAndLateFailure(t *testing.T) {
+	for _, scenario := range []string{"publication-retry", "late-retirement-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			runtime, _ := retiredApplyFixture(t, `{"state":"absent","actual":"","desired":""}`)
+			executor := &appliedSettingsExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{pending: true}, settings: map[string]string{"AGENT_sample_COMMAND": "old-command"}, failCapture: scenario == "publication-retry"}
+			runtime.Executor = executor
+			runtime.Environment = append(runtime.Environment, "AGENT_sample_COMMAND=new-command")
+			if scenario == "late-retirement-failure" {
+				runtime.ConfigWriter = failingBaselineConfigWriter{}
+			}
+			plan, err := runtime.IntegrationPlan(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = runtime.ApplyIntegrations(context.Background(), plan); err == nil {
+				t.Fatal("injected failure was accepted")
+			}
+			if executor.captures != 0 || executor.settings["AGENT_sample_COMMAND"] != "old-command" {
+				t.Fatal("failed apply promoted desired settings")
+			}
+			if scenario == "late-retirement-failure" {
+				return
+			}
+			plan, err = runtime.IntegrationPlan(context.Background())
+			if err != nil || plan.Changed {
+				t.Fatalf("expected converged retry: %v changed=%v", err, plan.Changed)
+			}
+			if err = runtime.ApplyIntegrations(context.Background(), plan); err != nil || executor.captures != 1 || executor.settings["AGENT_sample_COMMAND"] != "new-command" {
+				t.Fatalf("converged retry did not publish settings: %v calls=%d", err, executor.captures)
+			}
+		})
+	}
+}
+
+type failingBaselineConfigWriter struct{}
+
+func (failingBaselineConfigWriter) SetInstanceConfig(context.Context, string, string, map[string]string) error {
+	return errors.New("fixture retired marker publication failed")
+}
+
+func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T) {
+	for _, scenario := range []string{"ready", "source-drift", "runtime-drift"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(root, "config/projects-changed.sh")
+			testkit.WriteFile(t, source, []byte("#!/bin/sh\nexit 0\n"), 0o644)
+			executor := &appliedSettingsExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{}}}}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, Integrations: []profile.IntegrationDefinition{}, Profiles: []profile.Definition{}, Yard: domain.Context{IncusProject: "p", YardInstanceName: "i", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"AGENT_sample_COMMAND=old-command"}}
+			capture, err := runtime.PrepareAppliedIntegrationSettings(context.Background())
+			if err != nil || capture == nil {
+				t.Fatalf("legacy capture preparation: %v", err)
+			}
+			if executor.captures != 0 {
+				t.Fatal("preparation published settings")
+			}
+			if scenario == "source-drift" {
+				testkit.WriteFile(t, source, []byte("#!/bin/sh\n# changed source\nexit 0\n"), 0o644)
+			}
+			if scenario == "runtime-drift" {
+				executor.pending = true
+			}
+			err = capture.Apply(context.Background())
+			if scenario != "ready" {
+				if !errors.Is(err, domain.ErrPlanStale) || executor.captures != 0 {
+					t.Fatalf("unapproved capture: %v calls=%d", err, executor.captures)
+				}
+				return
+			}
+			if err != nil || executor.captures != 1 || executor.settings["AGENT_sample_COMMAND"] != "old-command" {
+				t.Fatalf("ready capture: %v %#v", err, executor.settings)
+			}
+		})
+	}
 }
 
 type preparedAdoptionExecutor struct {

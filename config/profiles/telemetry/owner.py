@@ -40,6 +40,10 @@ def main():
             operation = 'observe'
         elif arguments[:1] == ['apply'] and len(arguments) == 4:
             operation, bindings = 'refresh', arguments[2:]
+        elif arguments[:1] == ['identity-observe'] and len(arguments) == 3:
+            operation,bindings='identity-observe',arguments[1:]
+        elif arguments[:1] == ['identity-apply'] and len(arguments) == 2:
+            operation,bindings='identity-apply',arguments[1:]
         else:
             raise ValueError('invalid runtime request')
     elif len(arguments) == 1 and arguments[0] in mode:
@@ -66,6 +70,8 @@ def main():
             archive.add(source/name, arcname=name, recursive=False)
         archive.add(binary, arcname='subyard-telemetry', recursive=False)
         archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
+        if operation.startswith('identity-'):
+            archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     agents = ' '.join(name for name in ('claude', 'codex') if name in os.environ.get('CODING_TOOL_INTEGRATIONS', '').split())
     for agent in agents.split():
         destination = os.environ.get('AGENT_'+agent+'_CONFIG_DEST')

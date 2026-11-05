@@ -152,9 +152,10 @@ func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) 
 		goal: releasetransition.Goal{
 			Target: request.Target, Direction: request.Direction,
 		},
-		artifactDigest: request.ArtifactDigest,
-		registryDigest: request.RegistryDigest,
-		sourceIngress:  request.SourceIngress != nil,
+		artifactDigest:   request.ArtifactDigest,
+		registryDigest:   request.RegistryDigest,
+		sourceIngress:    request.SourceIngress != nil,
+		appliedSelection: completedReleaseConfiguration(request),
 	}
 	return slices.Insert(reconcilers, len(cli.profileRuntimeIDs()), releasetransition.V2ActivationReconciler(materialized))
 }
@@ -925,6 +926,7 @@ type materializedConfigActivationReconciler struct {
 	scopeResolved             bool
 	integrationPlans          map[string]reconcileruntime.IntegrationPlan
 	sourceIngress             bool
+	appliedSelection          bool
 	projectedIntegrationPlans bool
 	projectedUnavailable      map[string]projectedIntegrationUnavailable
 	recoveryApply             *configApplyExecution
@@ -1086,6 +1088,15 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		reconciler.integrationPlans = map[string]reconcileruntime.IntegrationPlan{}
 	}
 	for _, target := range targets {
+		// A successfully installed selection is a release consumer even while a
+		// different desired selection awaits init. Its current source templates,
+		// packages and ownership are still assessed below.
+		if files == nil && reconciler.appliedSelection {
+			target, err = operation.appliedIntegrationTarget(ctx, target)
+			if err != nil {
+				return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "installed integration selection", "integration status", "inspect", reconciler.configHome}
+			}
+		}
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
 			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}
@@ -1111,7 +1122,11 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 				if err != nil {
 					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect", reconciler.configHome}
 				}
-				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
+				if files == nil && reconciler.appliedSelection {
+					integration, err = platform.(reconcileruntime.Runtime).AppliedIntegrationPlan(ctx)
+				} else {
+					integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
+				}
 				if err != nil {
 					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect", reconciler.configHome}
 				}
@@ -1154,6 +1169,74 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	// The frozen protocol requires a sorted warning list.
 	slices.Sort(warnings)
 	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings)}, nil
+}
+
+func (cli *CLI) appliedIntegrationTarget(ctx context.Context, target configTarget) (configTarget, error) {
+	observer, ok := cli.initPlatform(target.Loaded, nil).(interface {
+		AppliedIntegrationConfiguration(context.Context) (reconcileruntime.AppliedIntegrationConfiguration, error)
+	})
+	if !ok {
+		return target, nil
+	}
+	incus, _ := cli.statusPorts()
+	instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)
+	if err != nil || !strings.EqualFold(instance.Status, "running") {
+		return target, nil // The ordinary assessment owns absent/stopped/read failures.
+	}
+	applied, err := observer.AppliedIntegrationConfiguration(ctx)
+	if err != nil {
+		return target, err
+	}
+	loaded := target.Loaded
+	if err := loaded.Catalog.ValidateIntegrationInitSettings(applied.Settings); err != nil {
+		return target, err
+	}
+	if applied.Installed {
+		loaded.Environment = loaded.Catalog.WithAppliedIntegrationInitSettings(loaded.Environment, applied.Settings)
+	} else {
+		loaded.Environment = maps.Clone(loaded.Environment)
+	}
+	for name, value := range applied.Identity {
+		loaded.Environment[name] = value
+	}
+	if user, ok := applied.Identity["DEV_USER"]; ok {
+		loaded.Context.DevUser = user
+		loaded.Context.DevUID, _ = strconv.Atoi(applied.Identity["DEV_UID"])
+	}
+	if value, ok := applied.Settings["DEV_USER"]; ok {
+		loaded.Context.DevUser = value
+	}
+	if value, ok := applied.Settings["DEV_UID"]; ok {
+		loaded.Context.DevUID, _ = strconv.Atoi(value)
+	}
+	if profiles, ok := observer.(interface {
+		AppliedEnvironmentProfiles(context.Context) ([]string, bool, error)
+	}); ok {
+		selected, known, err := profiles.AppliedEnvironmentProfiles(ctx)
+		if err != nil {
+			return target, err
+		}
+		if known {
+			// This is passive installed-state inspection, not a new profile
+			// selection. Retained disabled profiles must remain observable.
+			loaded.Environment["ENVIRONMENT_PROFILES"] = strings.Join(selected, " ")
+			loaded.EnvironmentProfiles = config.EnvironmentProfileSelection{Present: true, Requested: slices.Clone(selected), Effective: slices.Clone(selected)}
+		}
+	}
+	if !applied.Installed {
+		target.Loaded = loaded
+		return target, nil
+	}
+	loaded, err = config.WithIntegrationSelection(loaded, applied.Selected)
+	for _, name := range []string{"HOST_LINKS", "INTEGRATION_HOST_LINKS"} {
+		if value, ok := applied.Settings[name]; ok && err == nil {
+			loaded.Environment[name] = value
+		}
+	}
+	if err == nil {
+		target.Loaded = loaded
+	}
+	return target, err
 }
 
 func (reconciler *materializedConfigActivationReconciler) resolveScope(

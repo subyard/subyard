@@ -189,13 +189,13 @@ func TestDirectOwnedObservationRequiresExactReadOnlyEmptyScope(t *testing.T) {
 	}
 	reader := bytes.ReplaceAll(bytes.ReplaceAll(program, []byte("@STATE_ROOT@"), []byte("/var/lib/subyard/integrations")), []byte("@STATE_UID@"), []byte("0"))
 	respond := directOwnedResponder("unused-policy-digest")
-	for _, change := range []string{"none", "apply", "program", "developer", "foreign-path", "selected-integration"} {
+	for _, change := range []string{"none", "observe-applied", "apply", "program", "developer", "foreign-path", "selected-integration"} {
 		call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", string(reader), "observe"}}
 		entries := []map[string]string{{"id": "_projects", "kind": "file", "path": "/usr/local/libexec/subyard/projects-changed"}, {"id": "_projects", "kind": "file", "path": "/etc/subyard/agent-project-hooks"}}
 		developer := "dev"
 		switch change {
-		case "apply":
-			call.Command[4] = "apply"
+		case "observe-applied", "apply":
+			call.Command[4] = change
 		case "program":
 			call.Command[3] += "\n"
 		case "developer":
@@ -214,7 +214,7 @@ func TestDirectOwnedObservationRequiresExactReadOnlyEmptyScope(t *testing.T) {
 		if step.AfterInput != nil {
 			code = step.AfterInput(call)
 		}
-		if (code == 0) != (change == "none") {
+		if (code == 0) != (change == "none" || change == "observe-applied") {
 			t.Fatalf("%s: exit %d", change, code)
 		}
 	}

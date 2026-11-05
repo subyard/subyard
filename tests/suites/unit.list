@@ -1,5 +1,6 @@
 # Pure or filesystem-local modules with no fake process boundary.
 build-engine.sh
+developer-identity.sh
 docker-forwarding-convergence.sh
 lib-power-network.sh
 p0-capacity.sh

@@ -1066,7 +1066,7 @@ func TestLifecycleStartFailsClosedWithoutNetworkPolicyAdapter(t *testing.T) {
 		program.operationOrchestrator("start-without-network-policy", config.Loaded{Context: domain.Context{
 			YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0",
 		}}, nil, nil),
-		domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0"},
+		config.Loaded{Context: domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0"}},
 		domain.OperationPlan{OperationID: "start-without-network-policy", Confirmed: true},
 		execution, io.Discard,
 	)

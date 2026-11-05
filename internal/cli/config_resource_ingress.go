@@ -36,7 +36,7 @@ func (cli *CLI) checkResourceConfigChange(ctx context.Context, loaded config.Loa
 		if !affected {
 			continue
 		}
-		output, err := cli.prepareResource(ctx, loaded, definition, []string{definition.Shutdown})
+		output, err := cli.prepareResource(ctx, cli.resourceShutdownContext(ctx, loaded, definition, definition.Shutdown), definition, []string{definition.Shutdown})
 		if err != nil {
 			return fmt.Errorf("verify resource shutdown before changing %s: run %s %s in the running yard first", request.name, definition.Command, definition.Shutdown)
 		}

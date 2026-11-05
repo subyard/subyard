@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
 var errConfigUsage = errors.New("invalid config invocation")
@@ -183,6 +184,43 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 			return err
 		}
 	}
+	var captures []integrationSettingsCapture
+	if changed && loaded.Catalog.IntegrationInitSetting(request.name) {
+		// Config-only and cold installations have no installed release contract.
+		// Preserve their offline authoring without contacting a guest daemon.
+		options, available, readErr := cli.mutationGateReleaseOptions()
+		if readErr != nil {
+			return readErr
+		}
+		if available {
+			store, readErr := releasetransition.NewPOSIXV2Store(options.ConfigHome)
+			if readErr != nil {
+				return readErr
+			}
+			snapshot, readErr := store.ReadCurrentJournal()
+			if readErr != nil {
+				return readErr
+			}
+			if snapshot.Exists {
+				journal, readErr := releasetransition.ParseJournal(snapshot.Payload)
+				if readErr != nil {
+					return readErr
+				}
+				if journal.Checkpoint == releasetransition.JournalComplete {
+					captures, err = cli.prepareIntegrationSettingsCaptures(ctx, loaded, request, prospective)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	var captureBindings []string
+	for _, capture := range captures {
+		if capture.prepared != nil {
+			captureBindings = append(captureBindings, capture.loaded.Context.YardName+":"+capture.prepared.Binding())
+		}
+	}
 	step := domain.OperationStep{ID: "config." + action, Target: string(request.scope) + " setting " + request.name,
 		Observed: "fingerprint:" + operationStateDigest(baseline), Desired: "fingerprint:" + operationStateDigest(desired),
 		Decision: domain.StepSkip, Preconditions: []string{"persistent setting scope, permissions and ownership are valid", "the authored target matches the captured baseline or desired content"},
@@ -194,12 +232,25 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		Action, Name, Value, Scope, Path string
 		Before, Desired                  config.PersistentFileSnapshot
 		Dependencies, Semantics, Source  string
-	}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding})
+		Captures                         []string
+	}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding, captureBindings})
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return domain.ActionID("config." + action), domain.ActionDelta{Changed: changed, Consequences: []string{step.Consequence}}, nil
 	}
 	prepared.stepsComplete = true
-	prepared.steps = func() []domain.OperationStep { return []domain.OperationStep{step} }
+	prepared.steps = func() []domain.OperationStep {
+		var steps []domain.OperationStep
+		configStep := step
+		for _, capture := range captures {
+			if capture.prepared == nil {
+				continue
+			}
+			id := "config.applied-settings." + capture.loaded.Context.YardName
+			steps = append(steps, domain.OperationStep{ID: id, Target: capture.loaded.Context.YardName, Observed: "verified legacy integration configuration", Desired: "protected applied settings baseline", Decision: domain.StepApply, Preconditions: []string{"native installation and source fingerprints match the approved observation"}, Verify: "compare-and-swap the protected inventory baseline", Consequence: "preserve verified applied integration settings before authoring desired configuration"})
+			configStep.DependsOn = append(configStep.DependsOn, id)
+		}
+		return append(steps, configStep)
+	}
 	prepared.executeNoOp = true
 	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, output io.Writer) (domain.AdapterResult, error) {
 		unlock := func() {}
@@ -211,6 +262,11 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 			}
 		}
 		defer unlock()
+		unlockCaptures, err := lockIntegrationSettingsCaptures(ctx, loaded, request.scope == config.ScopeYard, captures)
+		if err != nil {
+			return domain.AdapterResult{}, err
+		}
+		defer unlockCaptures()
 		if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
 			return domain.AdapterResult{}, err
 		}
@@ -255,7 +311,16 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 				return err
 			}
 			if request.sourceGuard != nil {
-				return request.sourceGuard()
+				if err := request.sourceGuard(); err != nil {
+					return err
+				}
+			}
+			for _, capture := range captures {
+				if capture.prepared != nil {
+					if err := capture.prepared.Apply(ctx); err != nil {
+						return err
+					}
+				}
 			}
 			return nil
 		}); err != nil {
@@ -264,6 +329,14 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 			}
 			return domain.AdapterResult{}, err
 		}
+		if request.name == "DEV_USER" || request.name == "DEV_UID" {
+			for _, capture := range captures {
+				if err := cli.publishAppliedIdentityHint(ctx, capture.loaded); err != nil {
+					return domain.AdapterResult{}, err
+				}
+			}
+		}
+
 		current, err = readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
 		if err != nil {
 			return domain.AdapterResult{}, err

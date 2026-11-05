@@ -17,12 +17,13 @@ assert args[0]=='exec'
 Path(os.environ['GIT_FETCH_FIXTURE_CALLS']+'.argv').write_text(json.dumps(args))
 with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
     names=sorted(member.name for member in archive)
-assert names==['fetch.py','guest.py','subyard-git-fetch.service.in','subyard-git-fetch.timer']
+assert names==['authority.py','fetch.py','guest.py','subyard-git-fetch.service.in','subyard-git-fetch.timer']
 arguments=args[args.index('subyard')+1:]
 Path(os.environ['GIT_FETCH_FIXTURE_CALLS']).write_text(json.dumps(arguments))
 if arguments[0]=='check' and os.environ.get('GIT_FETCH_FIXTURE_DRIFT')=='1': print('git-fetch-drift')
 if arguments[0]=='pause': print('paused')
 if arguments[0] in ('observe','refresh'): print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
+if arguments[0]=='identity-observe': print(json.dumps({'schema':1,'transport':'identity','target':arguments[-2]}))
 if arguments[0]=='custody-observe': print(json.dumps({'generation':'0'}))
 if arguments[0]=='custody-refresh': print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
 if arguments[0]=='custody-fence': print(json.dumps({'generation':arguments[-1]}))
@@ -180,3 +181,18 @@ trap - EXIT
             assert 'UID probe project ownership changed' in result.stderr and log == [], (result.stderr, log)
 print('ok: git-fetch fresh/repeat init owns its project; failed init cannot claim or delete partial state')
 PY
+
+bash "$root/config/profiles/git-fetch/runtime.sh" identity-observe fixture-next "$expected" > "$state/identity-observation"
+python3 - "$state/calls" "$state/identity-observation" "$expected" <<'PYIDENTITY'
+import json,sys
+args=json.load(open(sys.argv[1]))
+assert args[:4]==['identity-observe','1','dev','0'] and len(args)==7 and args[-2:]==['fixture-next',sys.argv[3]]
+assert json.load(open(sys.argv[2]))=={'schema':1,'transport':'identity','target':'fixture-next'}
+PYIDENTITY
+bash "$root/config/profiles/git-fetch/runtime.sh" identity-apply "$expected"
+python3 - "$state/calls" "$expected" <<'PYIDENTITY'
+import json,sys
+args=json.load(open(sys.argv[1]))
+assert args[:4]==['identity-apply','1','dev','0'] and len(args)==6 and args[-1]==sys.argv[2]
+PYIDENTITY
+expect_exit 2 env GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/runtime.sh" identity-apply "$expected"

@@ -165,6 +165,9 @@ func (definition *Definition) validatePackage() error {
 			return fmt.Errorf("runtime handler: %w", err)
 		}
 	}
+	if _, err := definition.DeveloperIdentityContract(); err != nil {
+		return err
+	}
 	if definition.GuestEnvironment != nil {
 		if err := definition.validateExecutable(definition.GuestEnvironment.Handler); err != nil {
 			return fmt.Errorf("guest environment handler: %w", err)

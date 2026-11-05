@@ -277,6 +277,13 @@ type RuntimeObservation struct {
 	OwnershipAbsent bool `json:"ownership_absent,omitempty"`
 }
 
+// PreparedSettingsCapture preserves independently verified applied inputs before
+// desired configuration changes. Apply rechecks the exact native observation.
+type PreparedSettingsCapture interface {
+	Binding() string
+	Apply(context.Context) error
+}
+
 type RemoteTransport interface {
 	Call(context.Context, string, []byte) ([]byte, error)
 }

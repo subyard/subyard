@@ -67,7 +67,9 @@ controller_main() {
     esac
   done
   [ -n "$slot" ] || { usage; return 2; }
+  # shellcheck disable=SC2034 # Read by the dynamically sourced broker client.
   VM_COUNT_REQUESTED=1
+  # shellcheck disable=SC2034 # Read by the dynamically sourced broker client.
   VM_COUNT=1
   set_requested_slot "$slot" --slot
   # shellcheck disable=SC2034
@@ -162,6 +164,8 @@ controller_main() {
   run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --verify-reboot
   cleanup_guest 1
   prepared=0
+  run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --identity-rename
+  cleanup_guest 1
   if [ "$run_hermes" = 1 ]; then
     run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/hermes/tests/e2e/hermes-profile.sh
     cleanup_guest 1
@@ -180,7 +184,7 @@ case "${SUBYARD_E2E_VM:-}" in
 esac
 
 case "$MODE" in
-  normal|--prepare-reboot|--verify-reboot|--cleanup) ;;
+  normal|--identity-rename|--prepare-reboot|--verify-reboot|--cleanup) ;;
   *) die "unknown mode: $MODE" ;;
 esac
 if [ "$MODE" = --cleanup ] && [ ! -e "$CHECKPOINT" ] && [ ! -L "$CHECKPOINT" ]; then
@@ -330,6 +334,7 @@ write_config() {
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/default"
   {
     printf 'INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\n' "$PROJECT" "$INSTANCE"
+    if [ "${MODE:-}" = --identity-rename ]; then printf 'GITHUB_GIT_MODE=broker-last\n'; fi
     printf 'HOST_BASE=%s/host\nRESTRICTED_DISK_PATHS=%s/host\n' "$STATE" "$STATE"
   } > "$SUBYARD_CONFIG_HOME/yards/default/config.env"
   chmod 0600 "$SUBYARD_CONFIG_HOME/yards/default/config.env"
@@ -547,6 +552,11 @@ else
   wait_status '{"configured":false}'
   assert_wiring
   ok 'default broker, guest status, agent skills and Git helper are connected'
+
+  if [ "$MODE" = --identity-rename ]; then
+    verify_developer_identity_rename
+    exit 0
+  fi
 
   before_pid="$(systemctl_user show "$UNIT" -p MainPID --value)"
   before_unit_hash="$(sha256sum "$UNIT_FILE" | awk '{print $1}')"

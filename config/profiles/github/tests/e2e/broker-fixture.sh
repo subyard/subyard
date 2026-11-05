@@ -1,5 +1,45 @@
 # shellcheck shell=bash
 # Source-only broker lifecycle operations; state and traps belong to the caller.
+verify_developer_identity_rename() {
+  local original_home original_data original_connection unit_hash user home
+  original_home="$(guest stat -c '%d:%i:%u:%g' /home/dev)"
+  guest_dev sh -c 'printf "retained broker identity data\n" > /home/dev/identity-data'
+  original_data="$(guest stat -c '%d:%i:%u:%g' /home/dev/identity-data)"
+  guest_dev git config --file /home/dev/.config/git/config identityFixture.retained unchanged
+  original_connection="$(sha256sum "$SUBYARD_HOME/github-broker/default.json" | cut -d' ' -f1)"
+  unit_hash="$(sha256sum "$UNIT_FILE" | cut -d' ' -f1)"
+  for user in renamed-dev dev; do
+    home="/home/$user"
+    yard config set DEV_USER "$user" --scope yard --yes
+    yard init --yes
+    [ "$(guest id -u "$user")" = "$DEV_UID" ] && [ "$(guest id -g "$user")" = "$DEV_GID" ] \
+      || die 'identity rename changed the numeric account identity'
+    [ "$(guest stat -c '%d:%i:%u:%g' "$home")" = "$original_home" ] \
+      && [ "$(guest stat -c '%d:%i:%u:%g' "$home/identity-data")" = "$original_data" ] \
+      || die 'identity rename replaced retained home or data'
+    [ "$(guest cat "$home/identity-data")" = 'retained broker identity data' ]
+    [ "$(guest runuser -u "$user" -- git config --file "$home/.config/git/config" --get-all include.path)" = "$home/.config/subyard/github-git.conf" ] \
+      || die 'managed absolute Git include did not follow the home'
+    [ "$(guest runuser -u "$user" -- git config --file "$home/.config/git/config" --get identityFixture.retained)" = unchanged ] \
+      || die 'identity rename changed unrelated Git configuration'
+    [ "$(jq -r .developer "$SUBYARD_HOME/github-broker/default.json")" = "$user" ] \
+      || die 'broker runtime retained the old developer'
+    [ "$(sha256sum "$UNIT_FILE" | cut -d' ' -f1)" = "$unit_hash" ] \
+      || die 'identity rename changed the broker unit recipe'
+    wait_active
+    assert_default_boot_registration
+    [ "$(yard shell -- id -un)" = "$user" ] || die 'real SSH did not select the renamed account'
+    [ "$(yard shell -- /usr/local/bin/subyard-github status | tr -d '\n')" = '{"configured":false}' ] \
+      || die 'loaded broker/client connection failed after rename'
+    yard init --yes
+    [ "$(yard shell -- /usr/local/bin/subyard-github status | tr -d '\n')" = '{"configured":false}' ] \
+      || die 'repeat init lost the broker/client connection'
+  done
+  [ "$(sha256sum "$SUBYARD_HOME/github-broker/default.json" | cut -d' ' -f1)" = "$original_connection" ] \
+    || die 'reverse rename did not restore the original broker context'
+  ok 'ordinary identity rename preserved broker state, Git include, data and real SSH/client connectivity'
+}
+
 assert_default_boot_registration() {
   local link="$SUBYARD_OPERATOR_HOME/.config/systemd/user/default.target.wants/$UNIT" wants
   [ -L "$link" ] && [ "$(readlink -- "$link")" = "$UNIT_FILE" ] \

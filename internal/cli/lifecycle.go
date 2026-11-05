@@ -27,6 +27,7 @@ type lifecycleExecution struct {
 	status        string
 	vmCPUReady    bool
 	approvedSteps []domain.OperationStep
+	owner         *physicalOwner
 }
 
 func prepareLifecycleExecution(
@@ -161,11 +162,12 @@ func (cli *CLI) observeLifecycleExecution(
 func (cli *CLI) executeLifecycle(
 	ctx context.Context,
 	orchestrator *application.Orchestrator,
-	yard domain.Context,
+	loaded config.Loaded,
 	plan domain.OperationPlan,
 	execution *lifecycleExecution,
 	diagnostics io.Writer,
 ) (domain.AdapterResult, error) {
+	yard := loaded.Context
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("lifecycle execution is required")
 	}
@@ -194,7 +196,13 @@ func (cli *CLI) executeLifecycle(
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}
+	if err := cli.bindLifecycleOwner(ctx, loaded, execution); err != nil {
+		return domain.AdapterResult{}, err
+	}
 	contextValues := structuredAdapterContext(yard)
+	if execution.owner != nil {
+		execution.owner.apply(contextValues)
+	}
 	contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
 	if weight := execution.observed.Config["user.subyard.vm_cpu_weight"]; weight != "" {
 		contextValues["VM_CPU_WEIGHT"] = weight
@@ -310,7 +318,8 @@ func (execution *lifecycleExecution) binding() string {
 		Action   string
 		Force    bool
 		Instance *ports.InstanceInfo
-	}{execution.action, execution.force, execution.observed})
+		Owner    *physicalOwner
+	}{execution.action, execution.force, execution.observed, execution.owner})
 }
 func (execution *lifecycleExecution) steps(yard domain.Context) []domain.OperationStep {
 	if execution == nil || execution.observed == nil {

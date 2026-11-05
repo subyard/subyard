@@ -98,6 +98,8 @@ func (cli *CLI) runResourceCommand(
 		cli.printResourceEndpoint(loaded, definition)
 	}
 
+	desired := loaded
+	loaded = cli.resourceShutdownContext(ctx, loaded, definition, invocation.verb)
 	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
 		cli.errorf("%s: %v", definition.Command, err)
@@ -113,7 +115,7 @@ func (cli *CLI) runResourceCommand(
 		cli.errorf("%s: %v", definition.Command, err)
 		return 1
 	}
-	if err := cli.validateResourceShutdownRepair(definition, invocation.verb, loaded, native); err != nil {
+	if err := cli.validateResourceShutdownRepair(definition, invocation.verb, desired, native); err != nil {
 		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
 		return 1
 	}

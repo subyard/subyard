@@ -93,7 +93,7 @@ EOF
 list_lanes() {
   printf '%s\n' \
     smoke boundary nested-teardown full-uninstall transport dependencies real-incus profile-resource release source-upgrade \
-    power-systemd newer-release legacy-continuation yard-maintenance \
+    power-systemd newer-release legacy-continuation yard-maintenance init-settings \
     reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
   printf 'producer-reboot\tdiagnostic-only\n'
@@ -123,7 +123,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|newer-release|legacy-continuation|yard-maintenance|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|newer-release|legacy-continuation|yard-maintenance|init-settings|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -1071,6 +1071,10 @@ yard_maintenance_lane() {
   run_power_systemd_vm 1 dev/e2e/yard-maintenance-upgrade.sh "$TOKEN"
 }
 
+init_settings_lane() {
+  run_power_systemd_vm 1 dev/e2e/init-settings.sh
+}
+
 legacy_continuation_lane() {
   local vm="${1:-1}"
   POWER_SYSTEMD_LANE_VM="$vm"
@@ -1314,6 +1318,10 @@ case "$P0_LANE" in
     run_phase power-systemd-platform run_vm 1 fixture-platform
     run_phase power-systemd power_systemd_lane 1
     run_phase cleanup cleanup_lane
+    ;;
+  init-settings)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase init-settings init_settings_lane
     ;;
   yard-maintenance)
     run_phase capacity-preflight run_vm 1 capacity-preflight

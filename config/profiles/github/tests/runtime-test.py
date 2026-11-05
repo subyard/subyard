@@ -16,13 +16,89 @@ import time
 import unittest
 from unittest.mock import patch
 
+NATIVE_RUN = subprocess.run
 
 spec = importlib.util.spec_from_file_location('github_runtime', Path(__file__).parents[1]/'runtime.py')
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
+identity_spec = importlib.util.spec_from_file_location('github_identity', Path(__file__).parents[1]/'identity.py')
+identity = importlib.util.module_from_spec(identity_spec)
+identity_spec.loader.exec_module(identity)
+
+
+class IdentityRecoveryTest(unittest.TestCase):
+    def test_guest_reboot_requiesces_only_exact_previously_active_broker(self):
+        for state, substate, rebooted, foreign, accepted in (
+                ('failed', 'failed', True, '', True),
+                ('activating', 'auto-restart', True, '', True),
+                ('failed', 'failed', False, '', False),
+                ('activating', 'auto-restart', False, '', False),
+                ('activating', 'start', True, '', False),
+                ('failed', 'failed', True, 'unit', False),
+                ('failed', 'failed', True, 'intent', False)):
+            with self.subTest(state=state, substate=substate, rebooted=rebooted, foreign=foreign), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                root = Path(temporary)
+                state_dir = root/'data/github-broker'; state_dir.mkdir(parents=True)
+                path = state_dir/'sample.json'; engine = state_dir/'sample-engine'
+                unit = root/'home/.config/systemd/user/subyard-github-sample.service'
+                unit.parent.mkdir(parents=True)
+                before = json.dumps(dict(app_config='retained-app', key_file='retained-key', ssh_port=2222,
+                                         developer='old', identity_file='retained-id', known_hosts_file='retained-hosts')).encode()
+                for artifact, content, mode in ((path,before,0o600),(engine,b'owned-engine',0o700),(unit,b'owned-unit',0o644)):
+                    artifact.write_bytes(content); artifact.chmod(mode)
+                expected = dict(ActiveState='active', UnitFileState='enabled', FragmentPath=str(unit))
+                recipe = dict(original={'user':'old'},target={'user':'new'},broker=dict(installed=True,
+                    before=identity.digest(before),after=identity.digest(identity.projected(before,'new')),
+                    unit=identity.digest(unit.read_bytes()),engine=identity.digest(engine.read_bytes()),manager=expected))
+                response = dict(recipe=recipe,phase='prepared',rebooted=rebooted)
+                fields = dict(expected,ActiveState=state)
+                if foreign == 'unit': unit.write_bytes(b'foreign-unit')
+                if foreign == 'intent': fields['UnitFileState']='disabled'
+                calls=[]
+                def manager(name,*args):
+                    if args[0]=='show':
+                        if '--property=SubState' in args:return substate+'\n'
+                        return ''.join(key+'='+value+'\n' for key,value in fields.items())
+                    calls.append(args[0]); fields['ActiveState']='inactive' if args[0]=='stop' else 'active'
+                    return ''
+                environment=dict(SUBYARD_HOME=str(root/'data'),SUBYARD_OPERATOR_HOME=str(root/'home'),SUBYARD_YARD='sample',DEV_USER='old')
+                with patch.dict(os.environ,environment), patch.object(identity,'guest',return_value=response), patch.object(identity,'manager',manager), contextlib.redirect_stdout(io.StringIO()):
+                    if not accepted:
+                        with self.assertRaises(ValueError): identity.run(['identity-apply','source'])
+                        self.assertEqual(calls,[]);self.assertEqual(path.read_bytes(),before)
+                        continue
+                    identity.run(['identity-observe','new','source'])
+                    self.assertEqual(calls,[])
+                    identity.run(['identity-apply','source'])
+                    self.assertEqual(calls,['stop'])
+                    self.assertEqual(path.read_bytes(),before)
+                    response['phase']='account-ready'
+                    identity.run(['identity-apply','source'])
+                    identity.run(['identity-apply','source'])
+                    self.assertEqual(fields,expected)
+                    self.assertEqual(json.loads(path.read_bytes()),dict(json.loads(before),developer='new'))
+                    self.assertEqual(engine.read_bytes(),b'owned-engine')
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_identity_observation_does_not_write_into_published_source(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            root=Path(temporary)
+            profile=root/'config/profiles/github'
+            profile.mkdir(parents=True)
+            for name in ('runtime.sh','runtime.py','identity.py'):
+                (profile/name).write_bytes((Path(__file__).parents[1]/name).read_bytes())
+            before={str(path.relative_to(root)):path.read_bytes() for path in root.rglob('*') if path.is_file()}
+            # The omitted authority module stops the actual identity import path
+            # before any Incus command. Source immutability still applies on failure.
+            result=NATIVE_RUN(['bash',str(profile/'runtime.sh'),'identity-observe','next','a'*64],
+                                  env={'PATH':os.defpath,'DEV_USER':'dev'},capture_output=True)
+            self.assertEqual(result.returncode,1)
+            self.assertIn(b'GitHub runtime activation failed',result.stderr)
+            after={str(path.relative_to(root)):path.read_bytes() for path in root.rglob('*') if path.is_file()}
+            self.assertEqual(after,before)
+            self.assertFalse(list(root.rglob('__pycache__')))
+
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir='/tmp')

@@ -1,15 +1,19 @@
 package reconcileruntime
 
 import (
+	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -42,6 +46,27 @@ func (f configInventoryFixture) run(mode string, entries []map[string]any, wantE
 	if (err != nil) != wantError {
 		f.t.Fatalf("%s: error=%v, output=%s", mode, err, output)
 	}
+}
+
+// Execute the production transport request against this fixture's private paths.
+func (f configInventoryFixture) Exec(ctx context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(request.Stdin, &payload); err != nil {
+		return ports.InstanceExecResult{}, err
+	}
+	payload["home"], payload["uid"] = f.home, os.Getuid()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ports.InstanceExecResult{}, err
+	}
+	command := exec.CommandContext(ctx, "python3", "-B", "-c", f.program, request.Command[4])
+	command.Stdin = strings.NewReader(string(data))
+	output, err := command.CombinedOutput()
+	result := ports.InstanceExecResult{Stdout: output}
+	if err != nil {
+		result.ExitCode = command.ProcessState.ExitCode()
+	}
+	return result, err
 }
 
 func (f configInventoryFixture) save(entries []map[string]any, released []string) {
@@ -184,4 +209,99 @@ func TestConfigInventoryAcknowledgement(t *testing.T) {
 		f.write([]byte("new"), 0600)
 		f.run("configs-commit", desired, true)
 	})
+}
+
+// Real apply leaves intent before the hook/commit boundary. Passive admission
+// must recognize only redundant intent, without completing the pending init.
+func TestAppliedInventoryObservationAfterHookFailure(t *testing.T) {
+	for _, scenario := range []string{"redundant", "different-pending", "source-drift", "foreign", "missing", "mode"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newConfigInventoryFixture(t)
+			entry := configInventoryEntry(f.home, "file", "owned")
+			entry["content"] = base64.StdEncoding.EncodeToString([]byte("owned"))
+			entry["mode"] = 0644
+			entries := []map[string]any{entry}
+			f.run("apply", entries, false)
+			f.run("commit", entries, false)
+			inventory := f.read()
+			inventory["applied_settings"] = map[string]string{"AGENT_claude_COMMAND": "old-command"}
+			payload, _ := json.Marshal(inventory)
+			testkit.WriteFile(t, f.state+"/inventory.json", payload, 0600)
+			f.run("apply", entries, false) // No commit: the following hook failed.
+			switch scenario {
+			case "different-pending":
+				changed := configInventoryEntry(f.home, "file", "next")
+				changed["content"] = base64.StdEncoding.EncodeToString([]byte("next"))
+				changed["mode"] = 0644
+				f.run("apply", []map[string]any{changed}, false)
+			case "source-drift":
+				entry["digest"] = strings.Repeat("a", 64)
+			case "foreign":
+				f.write([]byte("foreign"), 0644)
+			case "missing":
+				if err := os.Remove(f.home + "/settings"); err != nil {
+					t.Fatal(err)
+				}
+			case "mode":
+				if err := os.Chmod(f.home+"/settings", 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.ReadFile(f.state + "/inventory.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeInfo, err := os.Stat(f.state + "/inventory.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(mode string) (integrationObservation, error) {
+				t.Helper()
+				data, _ := json.Marshal(entries)
+				var artifacts []integrationArtifact
+				if err := json.Unmarshal(data, &artifacts); err != nil {
+					t.Fatal(err)
+				}
+				runtime := Runtime{Executor: f, appliedIntegrationInspection: mode == "observe-applied"}
+				return runtime.integrationInventory(context.Background(), "observe", artifacts, "")
+			}
+			passive, err := run("observe-applied")
+			if scenario == "redundant" {
+				if err != nil || passive.Changed || len(passive.Fingerprint) != 64 || len(passive.Facts) == 0 {
+					t.Fatalf("redundant intent prevents admission: %#v %v", passive, err)
+				}
+				for _, fact := range passive.Facts {
+					if !fact.AtDesired {
+						t.Fatalf("unexpected drift: %#v", fact)
+					}
+				}
+				normal, err := run("observe")
+				if err != nil || !normal.Changed {
+					t.Fatalf("ordinary init lost pending work: %#v %v", normal, err)
+				}
+			} else if err == nil && !passive.Changed {
+				t.Fatalf("%s admitted", scenario)
+			}
+			after, err := os.ReadFile(f.state + "/inventory.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterInfo, err := os.Stat(f.state + "/inventory.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) || !os.SameFile(beforeInfo, afterInfo) || !sameInventoryMetadata(beforeInfo, afterInfo) {
+				t.Fatal("passive observation changed protected pending/applied inventory")
+			}
+			if f.read()["applied_settings"].(map[string]any)["AGENT_claude_COMMAND"] != "old-command" {
+				t.Fatal("pending command published")
+			}
+		})
+	}
+}
+
+func sameInventoryMetadata(before, after os.FileInfo) bool {
+	a, b := *before.Sys().(*syscall.Stat_t), *after.Sys().(*syscall.Stat_t)
+	a.Atim, b.Atim = syscall.Timespec{}, syscall.Timespec{}
+	return reflect.DeepEqual(a, b)
 }

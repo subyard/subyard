@@ -88,6 +88,7 @@ func (prepared *preparedCommand) prepareResourceInvocation(ctx context.Context, 
 	if bootstrap != nil {
 		loaded = bootstrap.loaded
 	}
+	loaded = cli.resourceShutdownContext(ctx, loaded, definition, invocation.verb)
 	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
 		return err
@@ -240,6 +241,12 @@ func (execution *resourceExecution) refresh(ctx context.Context) error {
 	}
 	if resourceSettingsDigest(freshLoaded) != execution.configDigest {
 		return fmt.Errorf("%w: resource owner context or configuration changed", domain.ErrPlanStale)
+	}
+	if runner.verb == runner.definition.Shutdown {
+		installed := runner.cli.resourceShutdownContext(ctx, execution.baseline, runner.definition, runner.verb)
+		if installed.Context.DevUser != runner.loaded.Context.DevUser || installed.Context.DevUID != runner.loaded.Context.DevUID {
+			return fmt.Errorf("%w: installed resource account changed", domain.ErrPlanStale)
+		}
 	}
 	if err := runner.bootstrap.refresh(ctx, runner.cli); err != nil {
 		return err

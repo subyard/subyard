@@ -30,6 +30,7 @@ func TestDirectPreparedCommandPreservesFailurePhaseDiagnostics(t *testing.T) {
 		incus.Instances["subyard/yard"] = instance
 		var stderr bytes.Buffer
 		program, err := New(Options{
+			InitPlatform:   newInitPlatformFixture(),
 			RepositoryRoot: root, Program: "yard",
 			Arguments: []string{"stop", "--force", "--yes"},
 			Environment: append(environment,
@@ -149,6 +150,7 @@ func TestPrepareCommandOwnsCanonicalStopPlan(t *testing.T) {
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
 	program, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root,
 		Environment: append(environment,
 			"SUBYARD_OPERATION_ID=prepared-stop",
@@ -198,6 +200,7 @@ func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
 	}}}
 	powerScriptedIncus(runner, incus)
 	program, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root,
 		Environment: append(environment,
 			"SUBYARD_OPERATION_ID=prepared-execute",
@@ -247,6 +250,7 @@ func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
 	}}}
 	powerScriptedIncus(runner, incus)
 	program, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root,
 		Environment: append(environment,
 			"SUBYARD_OPERATION_ID=prepared-commit",

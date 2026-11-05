@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import pwd
+import grp
+from types import SimpleNamespace
 import secrets
 import stat
 import subprocess
@@ -30,10 +32,10 @@ def systemctl(*args):
 class Runtime:
     def __init__(self, source, user, selected, agents, control=Path('/var/lib/subyard/telemetry-control'),
                  data=Path('/var/lib/subyard/telemetry'), library=Path('/usr/local/lib/subyard-telemetry'),
-                 units=Path('/etc/systemd/system'), commands=Path('/usr/local/bin'), legacy=Path('/var/lib/subyard/openlit/native.json')):
+                 units=Path('/etc/systemd/system'), commands=Path('/usr/local/bin'), legacy=Path('/var/lib/subyard/openlit/native.json'), account=None):
         self.source, self.user, self.selected, self.agents = source, user, selected, agents
         self.control, self.data, self.library, self.units, self.commands, self.legacy = control, data, library, units, commands, legacy
-        account = pwd.getpwnam(user)
+        account = account or pwd.getpwnam(user)
         self.uid, self.gid, self.home = account.pw_uid, account.pw_gid, Path(account.pw_dir)
         if self.uid == 0 or not user.replace('_', '').replace('-', '').isalnum():
             raise ValueError('developer account required')
@@ -61,6 +63,72 @@ class Runtime:
     def asset_limit(self, path):
         return BINARY_LIMIT if path == self.library/'subyard-telemetry' else native.CONFIG_LIMIT
 
+    def identity_runtime(self,record):
+        return Runtime(self.source,record['user'],self.selected,self.agents,self.control,self.data,self.library,self.units,self.commands,self.legacy,
+                       account=SimpleNamespace(pw_uid=record['uid'],pw_gid=record['gid'],pw_dir=record['home']))
+
+    def identity_files(self,wanted):
+        return {str(self.units/unit):[hashlib.sha256(self.assets[self.units/unit][0]).hexdigest(),hashlib.sha256(wanted.assets[self.units/unit][0]).hexdigest()] for unit in (COLLECTOR,MANAGER)}
+
+    def identity_observe(self,target,source):
+        observed=self.observe()
+        if observed['state'] not in ('current','absent'):
+            raise ValueError('identity requires converged telemetry ownership')
+        original=dict(user=self.user,uid=self.uid,gid=self.gid,home=str(self.home),group=grp.getgrgid(self.gid).gr_name)
+        wanted=self.identity_runtime(target)
+        manager={unit:{key:self.manager(unit).get(key,'') for key in ('ActiveState','UnitFileState')} for unit in (COLLECTOR,MANAGER)} if self.owned() else {}
+        # A failing unit cannot be restored to its recorded state after the rename.
+        if any(fields['ActiveState']=='failed' for fields in manager.values()):
+            raise ValueError('telemetry identity requires stable owner services')
+        return dict(schema=1,source=source,original=original,target=target,installed=self.owned(),files=self.identity_files(wanted),manager=manager)
+
+    def identity_check(self,recipe,phase):
+        wanted=self.identity_runtime(recipe['target'])
+        if recipe['original']['uid']!=recipe['target']['uid'] or recipe['original']['gid']!=recipe['target']['gid'] or recipe['files']!=self.identity_files(wanted):
+            raise ValueError('telemetry identity scope changed')
+        if self.owned()!=recipe['installed']:
+            raise ValueError('telemetry identity ownership changed')
+        if not recipe['installed']:return wanted
+        for path,(content,mode) in self.assets.items():
+            allowed=[content]
+            if phase=='rebind':allowed.append(wanted.assets[path][0])
+            if self.asset_snapshot(path) not in allowed or stat.S_IMODE(path.stat().st_mode)!=mode:
+                raise ValueError('telemetry identity asset changed')
+        for unit in (COLLECTOR,MANAGER):
+            try:fields=self.manager(unit)
+            except ValueError:
+                if phase!='rebind':raise
+                fields=wanted.manager(unit)
+            before=recipe['manager'][unit]
+            if fields.get('UnitFileState','')!=before['UnitFileState'] or not (fields.get('ActiveState','') in (before['ActiveState'],'inactive') or (getattr(self,'identity_rebooted',False) and (fields.get('ActiveState')=='failed' or before['UnitFileState']=='enabled' and fields.get('ActiveState')=='active'))):
+                raise ValueError('telemetry identity service intent changed')
+        return wanted
+
+    def identity_apply(self,recipe,phase):
+        wanted=self.identity_check(recipe,phase)
+        if not recipe['installed']:return
+        if phase=='quiesce':
+            for unit in (COLLECTOR,MANAGER):systemctl('stop',unit)
+            return
+        inventory_path=self.control/'assets.json'
+        before=native.snapshot(inventory_path)
+        inventory=json.loads(before)
+        for unit in (COLLECTOR,MANAGER):
+            path=self.units/unit
+            if inventory.get(str(path)) not in recipe['files'][str(path)]:
+                raise ValueError('telemetry asset inventory changed')
+            content,mode=wanted.assets[path]
+            if self.asset_snapshot(path)!=content:
+                native.publish(path,content,native.snapshot(path),mode=mode)
+            inventory[str(path)]=hashlib.sha256(content).hexdigest()
+        after=(json.dumps(inventory)+'\n').encode()
+        if before!=after:native.publish(inventory_path,after,before)
+        systemctl('daemon-reload')
+        for unit in (MANAGER,COLLECTOR):
+            if recipe['manager'][unit]['ActiveState']=='active':systemctl('start',unit)
+            elif wanted.manager(unit).get('ActiveState')!='inactive':systemctl('stop',unit)
+            if wanted.manager(unit).get('ActiveState')!=recipe['manager'][unit]['ActiveState']:raise ValueError('telemetry identity intent was not restored')
+
     def asset_snapshot(self, path):
         return native.snapshot(path, max_bytes=self.asset_limit(path))
 
@@ -85,8 +153,12 @@ class Runtime:
         return token
 
     def manager(self, unit):
-        raw = systemctl('show', unit, '--property=ActiveState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate')
+        raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate')
         fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+        # A failed service waiting for Restart= has failed, e.g. after a reboot
+        # during a rename, while its unit still names the previous account.
+        if fields.get('ActiveState') == 'activating' and fields.get('SubState') == 'auto-restart':
+            fields['ActiveState'] = 'failed'
         if fields.get('LoadState') not in ('not-found', None):
             dropins = fields.get('DropInPaths', '').split()
             if any(Path(path).parent not in (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d')) for path in dropins):
@@ -213,6 +285,24 @@ def main():
     if os.getuid() != 0:
         raise ValueError('guest root required')
     mode, selected, user, agents, *bindings = sys.argv[1:]
+    if mode in ('identity-observe','identity-apply'):
+        import authority
+        source=bindings[-1]
+        try:
+            journal,recipe=authority.load(source,'telemetry')
+            account=recipe['original']
+            runtime=Runtime(Path(__file__).resolve().parent,account['user'],selected=='1',agents.split(),account=SimpleNamespace(pw_uid=account['uid'],pw_gid=account['gid'],pw_dir=account['home']))
+            runtime.identity_rebooted=authority.rebooted(journal)
+            phase='rebind' if journal['phase']=='account-ready' else 'quiesce'
+            runtime.identity_check(recipe,phase)
+        except FileNotFoundError:
+            if mode!='identity-observe':raise
+            runtime=Runtime(Path(__file__).resolve().parent,user,selected=='1',agents.split())
+            target=dict(user=bindings[0],uid=runtime.uid,gid=runtime.gid,home='/home/'+bindings[0],group=bindings[0])
+            recipe=runtime.identity_observe(target,source)
+        if mode=='identity-observe':print(json.dumps(recipe))
+        else:runtime.identity_apply(recipe,phase)
+        return
     runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1', agents.split())
     if mode == 'pause':
         if runtime.owned() and runtime.manager(COLLECTOR).get('ActiveState') == 'active':

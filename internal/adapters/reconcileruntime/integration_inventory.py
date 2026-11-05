@@ -236,6 +236,7 @@ def main():
     path = ROOT + '/inventory.json'
     records = []
     released = []
+    applied_settings = None
     established = False
     if os.path.lexists(ROOT):
         ancestors(ROOT)
@@ -247,10 +248,21 @@ def main():
         if inventory.get('schema') != 1 or not isinstance(inventory.get('entries'), list):
             raise ValueError('unsupported inventory')
         records = inventory['entries']
+        applied_settings = inventory.get('applied_settings')
+        if applied_settings is not None and (stat.S_IMODE(os.lstat(path).st_mode) != 0o600 or os.lstat(path).st_nlink != 1):
+            raise ValueError('unsafe applied integration settings inventory')
+        if applied_settings is not None and (not isinstance(applied_settings, dict) or len(applied_settings) > 4096 or any(not isinstance(k, str) or not isinstance(v, str) or len(k) > 256 or len(v) > 16384 for k, v in applied_settings.items())):
+            raise ValueError('invalid applied integration settings')
         released = inventory.get('released', [])
-        if not isinstance(released, list) or any(not isinstance(p, str) or not p.startswith(home + '/') or os.path.normpath(p) != p for p in released):
-            raise ValueError('invalid released artifact evidence')
         established = True
+    if mode == 'settings':
+        # Read only protected baseline metadata first. The caller validates its
+        # developer identity before a second selection read validates every
+        # installed/released destination against that applied owner's home.
+        print(json.dumps({'installed': established, 'applied_settings': applied_settings}))
+        return
+    if not isinstance(released, list) or any(not isinstance(p, str) or not p.startswith(home + '/') or os.path.normpath(p) != p for p in released):
+        raise ValueError('invalid released artifact evidence')
     for entry in records + desired:
         if entry['kind'] not in ('file', 'link', 'structured', 'package') or not entry['id']:
             raise ValueError('invalid inventory entry')
@@ -267,6 +279,12 @@ def main():
     wanted = {key(e): e for e in desired}
     if len(previous) != len(records) or len(wanted) != len(desired):
         raise ValueError('duplicate inventory entry')
+    if mode == 'selection':
+        # Only committed package entries prove successful selection. Apply keeps
+        # new package intent out of this inventory until all hooks succeed.
+        selected = [e['id'] for e in records if e['kind'] == 'package']
+        print(json.dumps({'installed': established, 'selected': selected, 'applied_settings': applied_settings}))
+        return
     cutover = request.get('preview_skill_cutover') is True
     migrations = preview_migration_plan(records, home, uid) if cutover else []
     if mode in ('configs-prepare', 'configs-commit'):
@@ -326,7 +344,19 @@ def main():
         return
     observed = {}
     metadata = {}
-    comparable = [{k: v for k, v in entry.items() if k != 'preview_migrated'} for entry in records]
+    def comparable_entry(entry):
+        value = {k: v for k, v in entry.items() if k != 'preview_migrated'}
+        if mode == 'observe-applied':
+            # Apply records intent before writes, including unchanged files.
+            # A later hook failure leaves those exact redundant labels behind.
+            # Passive release inspection may ignore only intent identical to
+            # the committed artifact; actual bytes/metadata and source-derived
+            # desired records are still compared below. Init retains the labels.
+            for field in ('pending_digest', 'config_pending_digest'):
+                if value.get(field) == value.get('digest'):
+                    value.pop(field, None)
+        return value
+    comparable = [comparable_entry(entry) for entry in records]
     changed = comparable != [clean(e) for e in desired] or bool(migrations)
     retired = []
     adopted = []
@@ -371,13 +401,15 @@ def main():
     identity = [home, uid, records, released, observed, metadata,
                 [clean(e) for e in desired], not established, adopt, adoption,
                 [e.get('source_digest') for e in desired]]
+    if applied_settings is not None:
+        identity.append(applied_settings)
     if cutover:
         identity.append('preview-skill-cutover-v1')
     fingerprint = digest(encode(identity))
     expected = request.get('expected')
     if expected and fingerprint != expected:
         raise ValueError('integration plan is stale')
-    if mode == 'observe':
+    if mode in ('observe', 'observe-applied'):
         facts = []
         for name in sorted(set(previous) | set(wanted)):
             entry = wanted.get(name) or previous[name]
@@ -385,12 +417,20 @@ def main():
             facts.append({'key': name, 'desired': digest(encode(clean(wanted[name]))) if name in wanted else 'absent',
                           'observed': digest(encode([previous.get(name), value, metadata.get(name)])),
                           'at_desired': (value is None if name not in wanted else
-                              {k: v for k, v in (previous.get(name) or {}).items() if k != 'preview_migrated'} == clean(entry) and (
+                              comparable_entry(previous.get(name) or {}) == clean(entry) and (
                                   entry['kind'] in ('structured', 'package') or
                                   value == entry['digest'] and metadata.get(name) == expected_metadata(entry, home, uid)))})
         print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'retired': retired,
                           'adopted': [clean(e) for e in adopted], 'initial': not established,
                           'facts': facts}))
+        return
+    if mode == 'capture-settings':
+        settings = request.get('applied_settings')
+        if not expected or not established or changed or not isinstance(settings, dict) or len(settings) > 4096 or any(not isinstance(k, str) or not isinstance(v, str) or len(k) > 256 or len(v) > 16384 for k,v in settings.items()):
+            raise ValueError('applied settings require a converged installed inventory')
+        if applied_settings == settings:
+            return
+        atomic(path, encode(dict(inventory, applied_settings=settings)))
         return
     if mode not in ('apply', 'commit'):
         raise ValueError('invalid inventory operation')
@@ -408,7 +448,10 @@ def main():
     os.makedirs(ROOT, mode=0o700, exist_ok=True)
     protected(ROOT, True)
     def save(entries):
-        atomic(path, encode({'schema': 1, 'entries': entries, 'released': sorted(set(released))}))
+        value = {'schema': 1, 'entries': entries, 'released': sorted(set(released))}
+        if applied_settings is not None:
+            value['applied_settings'] = applied_settings
+        atomic(path, encode(value))
     if mode == 'commit':
         # Structured retirement releases fields, preserving the user's document.
         # Tombstones prove why these known paths are no longer owned.

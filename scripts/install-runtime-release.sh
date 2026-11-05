@@ -79,6 +79,15 @@ try:
    if inherited or time.monotonic()>=deadline:raise ValueError()
    time.sleep(0.1)
  if epoch()!=original or before!=[identity(target) for target in targets] or os.path.lexists(home+".uninstall"):raise ValueError()
+ config_home=pathlib.Path(os.environ.get("SUBYARD_CONFIG_HOME",os.path.join(os.environ.get("XDG_CONFIG_HOME",os.path.expanduser("~/.config")),"subyard")))
+ identity_path=pathlib.Path(runtime)/"installation.json"
+ if identity_path.exists():
+  import json
+  identity_record=json.loads(identity_path.read_bytes())
+  config_home=pathlib.Path(identity_record.get("configHome",str(config_home)))
+ if any(config_home.glob(".developer-identity-*.json")):
+  print("install-runtime-release: developer identity transition is pending; finish plain init before replacing the runtime",file=sys.stderr)
+  raise SystemExit(75)
  if inherited:raise SystemExit(0)
  safe_fd=fcntl.fcntl(fd,fcntl.F_DUPFD,10);os.close(fd);os.set_inheritable(safe_fd,True)
  environment=dict(os.environ,SUBYARD_INSTALL_OWNER_FD=str(safe_fd),SUBYARD_INSTALL_OWNER_EPOCH=original)

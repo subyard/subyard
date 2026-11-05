@@ -13,3 +13,5 @@ bash "$ROOT/config/profiles/orca/tests/release-preparation.sh"
 bash "$ROOT/config/profiles/orca/tests/resource-lifecycle.sh"
 
 python3 -B "$ROOT/config/profiles/orca/tests/release-observation-test.py"
+
+python3 -B "$ROOT/config/profiles/orca/tests/identity-test.py"

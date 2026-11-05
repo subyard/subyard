@@ -257,6 +257,9 @@ func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, e
 		return errors.New("teardown execution is required")
 	}
 	execution.selectYard(loaded)
+	if err := cli.bindTeardownOwner(ctx, loaded, execution); err != nil {
+		return err
+	}
 	incusPort, _ := cli.statusPorts()
 	incusState, err := incusPort.ReconcileState(
 		ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName,
@@ -498,6 +501,7 @@ func (cli *CLI) executeTeardownYards(ctx context.Context, orchestrator *applicat
 					return err
 				}
 				values := structuredCommandContext(loaded)
+				applyTeardownOwner(values, execution)
 				values["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
 				payload, _ := json.Marshal(execution.liveSnapshot.Resources)
 				values["SUBYARD_TEARDOWN_INVENTORY"] = string(payload)
@@ -573,7 +577,11 @@ func (cli *CLI) applyTeardownYard(
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("teardown execution is required")
 	}
+	if err := cli.bindTeardownOwner(ctx, loaded, execution); err != nil {
+		return domain.AdapterResult{}, err
+	}
 	contextValues := structuredCommandContext(loaded)
+	applyTeardownOwner(contextValues, execution)
 	contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
 	inventory, err := json.Marshal(execution.liveSnapshot.Resources)
 	if err != nil {

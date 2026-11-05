@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -654,6 +655,38 @@ func TestConfigApplyRepairUsesCompletedProtectedGateAndStableLock(t *testing.T) 
 	after, err := os.ReadFile(fixture.journalPath)
 	if err != nil || string(after) != string(before) {
 		t.Fatalf("config repair changed completed journal: err=%v", err)
+	}
+}
+
+func TestIntegrationRetryAdmissionKeepsCompletedHistoryAndLock(t *testing.T) {
+	fixture := newConfigApplyRepairFixture(t, false)
+	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	fixture.cli.options.InitPlatform = platform
+	admission := invocationAdmission{handler: "@integration", recovery: recoveryIntegrationRetry}
+	permits, code, done := fixture.cli.admitReleaseGate(context.Background(), "default", admission, resource.Definition{}, []string{"enable", "codex"}, true)
+	if done || code != 0 || permits.integrationRetry == nil {
+		t.Fatalf("direct retry was blocked: code=%d done=%v permit=%v", code, done, permits.integrationRetry)
+	}
+	before, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permits.integrationRetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
+	err = fixture.cli.finishConfigApplyRepair(context.Background(), permits.integrationRetry)
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(fixture.journalPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("integration retry rewrote completed release history")
 	}
 }
 

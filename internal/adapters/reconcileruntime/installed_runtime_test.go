@@ -2,6 +2,7 @@ package reconcileruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -169,6 +170,96 @@ func TestInstalledGuestCCUsageDriftRefreshAndNativeFailures(t *testing.T) {
 			incus.ExecSteps = steps("files", ports.InstanceExecResult{ExitCode: scenario.code, Stdout: []byte(scenario.out)}, scenario.err)
 			if _, err := runtime.ObserveInstalledRuntime(ctx, "core-guest-runtime"); err == nil {
 				t.Fatal("failed usage observation reported readiness")
+			}
+		})
+	}
+}
+
+func TestInstalledReleaseReadinessUsesAppliedInitSettings(t *testing.T) {
+	previewLoopbackFixture(t)
+	root := testkit.TempDir(t)
+	for _, path := range []string{"config/preview/subyard-preview", "config/agents/ccusage/provision.sh", "scripts/refresh-installed-guest-runtime.sh", guestFactsSource} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, path), []byte("fixture"), 0o644)
+	}
+	settings := map[string]string{"WEB_PREVIEW_HOST_PORT": "8765", "CCUSAGE_VERSION": "1.0.0", "CCUSAGE_SHA256_AMD64": strings.Repeat("a", 64), "CCUSAGE_SHA256_ARM64": strings.Repeat("b", 64), "ENVIRONMENT_PROFILES": "", "ALLOWS_CODING_TOOLS": "true", "DEV_USER": "dev"}
+	projection, _ := json.Marshal(settings)
+	for name := range settings {
+		t.Run(name, func(t *testing.T) {
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/i": {Status: "Running", Config: map[string]string{"user.subyard.ccusage_version": "owned"}}}}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: incus, Yard: domain.Context{IncusProject: "p", YardInstanceName: "i"}}
+			for key, value := range settings {
+				if key == name {
+					value = "new-desired-value"
+				}
+				runtime.Environment = append(runtime.Environment, key+"="+value)
+			}
+			steps := func(stale bool) []testkit.IncusExecStep {
+				preview := ports.InstanceExecResult{}
+				var previewErr error
+				if stale {
+					preview.ExitCode = 1
+					previewErr = errors.New("fixture helper stale")
+				}
+				return []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: projection}}, {}, {Result: preview, Err: previewErr}, {Result: ports.InstanceExecResult{Stdout: []byte("ccusage-current\n")}}, {}}
+			}
+			incus.ExecSteps = steps(false)
+			observed, err := runtime.ObserveInstalledReleaseRuntime(context.Background(), "core-guest-runtime")
+			if err != nil || observed.State != ports.RuntimeStateCurrent {
+				t.Fatalf("pending %s blocked release readiness: %#v %v", name, observed, err)
+			}
+			usage := incus.ExecCalls[3].Request.Environment
+			if usage["CCUSAGE_VERSION"] != settings["CCUSAGE_VERSION"] || usage["CCUSAGE_SHA256_AMD64"] != settings["CCUSAGE_SHA256_AMD64"] {
+				t.Fatal("release observation used desired pins")
+			}
+			incus.ExecSteps = steps(true)
+			observed, err = runtime.ObserveInstalledReleaseRuntime(context.Background(), "core-guest-runtime")
+			if err != nil || observed.State != ports.RuntimeStateStale {
+				t.Fatalf("applied configuration hid stale release helper: %#v %v", observed, err)
+			}
+		})
+	}
+}
+
+func TestInstalledReleaseKeyReadinessUsesAppliedPins(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, directory := range []string{"scripts", "config/systemd", "tools/bin"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings := map[string]string{"SUBYARD_AGE_VERSION": "1.0.0", "SUBYARD_SOPS_VERSION": "2.0.0", "SUBYARD_AGE_SHA256_AMD64": strings.Repeat("a", 64), "SUBYARD_AGE_SHA256_ARM64": strings.Repeat("a", 64), "SUBYARD_SOPS_SHA256_AMD64": strings.Repeat("b", 64), "SUBYARD_SOPS_SHA256_ARM64": strings.Repeat("b", 64)}
+	script := "#!/bin/sh\nset -eu\n"
+	for name, value := range settings {
+		script += "[ \"$" + name + "\" = '" + value + "' ]\n"
+	}
+	for name, payload := range map[string]string{"scripts/install-key-tools.sh": script, "scripts/install-keys-auto-sync.sh": "fixture", "config/systemd/subyard-keys-sync.service.in": "fixture", "config/systemd/subyard-keys-sync.timer.in": "fixture"} {
+		testkit.WriteFile(t, filepath.Join(root, name), []byte(payload), 0o755)
+	}
+	receipt := filepath.Join(root, "tools/bin/.subyard-native-tools.json")
+	payload, _ := json.Marshal(map[string]any{"schema": 1, "age": "1.0.0", "sops": "2.0.0", "age_archive": strings.Repeat("a", 64), "sops_archive": strings.Repeat("b", 64)})
+	testkit.WriteFile(t, receipt, payload, 0o600)
+	for name := range settings {
+		t.Run(name, func(t *testing.T) {
+			runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{Paths: domain.RuntimePaths{DataHome: root, OperatorHome: root}}, Environment: []string{"SUBYARD_KEYS_TOOLS_DIR=" + filepath.Join(root, "tools")}}
+			for key, value := range settings {
+				if key == name {
+					value = "3.0.0"
+					if strings.Contains(key, "SHA256") {
+						value = strings.Repeat("c", 64)
+					}
+				}
+				runtime.Environment = append(runtime.Environment, key+"="+value)
+			}
+			ordinary, err := runtime.ObserveInstalledRuntime(context.Background(), "key-tools-runtime")
+			if err != nil || ordinary.State != ports.RuntimeStateStale {
+				t.Fatalf("desired pin did not remain pending: %#v %v", ordinary, err)
+			}
+			release, err := runtime.ObserveInstalledReleaseRuntime(context.Background(), "key-tools-runtime")
+			if err != nil || release.State != ports.RuntimeStateCurrent {
+				t.Fatalf("pending desired pin blocked release readiness: %#v %v", release, err)
 			}
 		})
 	}

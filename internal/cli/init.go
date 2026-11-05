@@ -1067,6 +1067,11 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 			return err
 		}
 	}
+	if !cli.releaseTransitionChild {
+		if err := cli.publishAppliedIdentityHint(ctx, execution.loaded); err != nil {
+			return err
+		}
+	}
 	finalizer := application.Reconciler{
 		Stages: []application.ReconcileStage{application.FinalizeStage()},
 		Runner: execution.platform, Reporter: initReporter{output: output},

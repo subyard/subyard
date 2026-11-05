@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 
 MARKER = '# Managed by Subyard git-fetch profile.\n'
 SERVICE = 'subyard-git-fetch.service'
@@ -30,25 +31,102 @@ def systemctl(*args):
 
 class Runtime:
     def __init__(self, source, user, selected, stopped=False,
-                 state=Path('/var/lib/subyard/git-fetch'), units=Path('/etc/systemd/system')):
-        self.state, self.units = state, units
+                 state=Path('/var/lib/subyard/git-fetch'), units=Path('/etc/systemd/system'), account=None, group=None):
+        self.source, self.state, self.units = source, state, units
         self.selected, self.stopped = selected, stopped
         self.custody_guard = None
-        account = pwd.getpwnam(user)
+        account = account or pwd.getpwnam(user)
         if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]*', user) or account.pw_uid == 0:
             raise ValueError('invalid developer account')
         home = account.pw_dir
         if not re.fullmatch(r'/[a-zA-Z0-9_./-]+', home):
             raise ValueError('unsupported developer home')
-        group = grp.getgrgid(account.pw_gid).gr_name
+        group = group or grp.getgrgid(account.pw_gid).gr_name
         if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]*', group):
             raise ValueError('unsupported developer group')
         service = (source/(SERVICE+'.in')).read_text()
         for key, value in (('USER', user), ('GROUP', group), ('HOME', home)):
             service = service.replace('@'+key+'@', value)
         self.user, self.group, self.home = user, group, home
+        self.uid, self.gid = account.pw_uid, account.pw_gid
         self.assets = {state/'fetch.py': (source/'fetch.py').read_bytes(),
                        units/SERVICE: service.encode(), units/TIMER: (source/TIMER).read_bytes()}
+
+    def identity_runtime(self, record):
+        account = SimpleNamespace(pw_uid=record['uid'], pw_gid=record['gid'], pw_dir=record['home'])
+        result = Runtime(self.source, record['user'], self.selected, self.stopped,
+                         state=self.state, units=self.units, account=account, group=record['group'])
+        result.safe = self.safe
+        return result
+
+    def identity_observe(self, target, binding):
+        observed = self.observe(binding)
+        if observed['state'] not in ('current', 'absent'):
+            raise ValueError('identity transition requires verified profile assets')
+        original = dict(user=self.user, uid=self.uid, gid=self.gid, home=self.home, group=self.group)
+        if target['uid'] != self.uid or target['gid'] != self.gid:
+            raise ValueError('identity transition cannot change numeric ownership')
+        wanted = self.identity_runtime(target)
+        return dict(schema=1, source=binding, original=original, target=target,
+                    installed=observed['state'] != 'absent',
+                    files={str(path): [hashlib.sha256(content).hexdigest(), hashlib.sha256(wanted.assets[path]).hexdigest()]
+                           for path, content in self.assets.items()},
+                    manager={unit: list(self.manager(unit)) for unit in (TIMER, SERVICE)})
+
+    def identity_check(self, plan, phase):
+        # The transport supplies only the recipe stored in the protected generic
+        # identity journal. Both old and new bytes are reconstructed from this
+        # owner's current source, never accepted from arbitrary journal payloads.
+        if phase not in ('quiesce', 'rebind') or plan.get('schema') != 1:
+            raise ValueError('invalid identity owner request')
+        original = dict(user=self.user, uid=self.uid, gid=self.gid, home=self.home, group=self.group)
+        if original != plan['original'] or plan['target']['uid'] != self.uid or plan['target']['gid'] != self.gid:
+            raise ValueError('identity owner account changed')
+        wanted = self.identity_runtime(plan['target'])
+        files = {str(path): [hashlib.sha256(content).hexdigest(), hashlib.sha256(wanted.assets[path]).hexdigest()]
+                 for path, content in self.assets.items()}
+        if files != plan['files'] or not re.fullmatch('[a-f0-9]{64}', plan['source']):
+            raise ValueError('identity owner source changed')
+        if not plan['installed']:
+            if self.owned() or any(self.fact(path) is not None for path in self.assets):
+                raise ValueError('identity owner installation changed')
+            return
+        if not self.owned():
+            raise ValueError('identity owner installation disappeared')
+        for path, content in self.assets.items():
+            allowed = [[0o644, content]]
+            if phase == 'rebind':
+                allowed.append([0o644, wanted.assets[path]])
+            if self.fact(path) not in allowed:
+                raise ValueError('identity owner asset changed')
+        for unit in (TIMER, SERVICE):
+            fields = self.manager_details(unit)
+            if not self.loaded_owned(unit, fields) and not (phase == 'rebind' and wanted.loaded_owned(unit, fields)):
+                raise ValueError('identity owner manager changed')
+            active, enabled = self.manager(unit)
+            if enabled != plan['manager'][unit][1] or not (active in (plan['manager'][unit][0], 'inactive') or (getattr(self,'identity_rebooted',False) and (active=='failed' or enabled=='enabled' and active=='active'))):
+                raise ValueError('identity owner intent changed')
+        return wanted
+
+    def identity_apply(self, plan, phase):
+        wanted = self.identity_check(plan, phase)
+        if not plan['installed']:
+            return
+        self.guard_custody()
+        wanted.custody_guard = self.custody_guard
+        if phase == 'quiesce':
+            self.stop_owned_units()
+            return
+        for path, content in wanted.assets.items():
+            if wanted.fact(path) != [0o644, content]:
+                wanted.publish(path, content)
+        systemctl('daemon-reload')
+        if plan['manager'][TIMER][0] == 'active':
+            systemctl('start', TIMER)
+        elif self.manager(TIMER)[0] == 'active':
+            systemctl('stop', TIMER)
+        if not wanted.check(refresh=True):
+            raise ValueError('identity owner verification failed')
 
     def safe(self, path):
         # Parent traversal must never turn an installed root asset into a symlink write.
@@ -404,13 +482,42 @@ def ordinary_custody(runtime, fd, lock):
 
 def main():
     mode, selected, user, stopped, *extra = sys.argv[1:]
-    if mode not in ('check', 'apply', 'pause', 'resume', 'observe', 'refresh', 'custody-observe', 'custody-refresh', 'custody-fence') or selected not in ('0', '1') or stopped not in ('0', '1'):
+    if mode not in ('check', 'apply', 'pause', 'resume', 'observe', 'refresh', 'custody-observe', 'custody-refresh', 'custody-fence', 'identity-observe', 'identity-apply') or selected not in ('0', '1') or stopped not in ('0', '1'):
         raise ValueError('invalid lifecycle request')
-    if len(extra) != {'observe': 1, 'refresh': 4, 'custody-observe': 1, 'custody-refresh': 6, 'custody-fence': 4}.get(mode, 0):
+    if len(extra) != {'observe': 1, 'refresh': 4, 'custody-observe': 1, 'custody-refresh': 6, 'custody-fence': 4, 'identity-observe': 3, 'identity-apply': 2}.get(mode, 0):
         raise ValueError('invalid lifecycle arguments')
     if os.geteuid() != 0:
         raise ValueError('invalid lifecycle authority')
-    runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1', stopped == '1')
+    identity_recipe = None
+    identity_phase = None
+    if mode in ('identity-observe', 'identity-apply'):
+        import authority
+        binding, *identity_arguments = extra
+        source = identity_arguments[-1]
+        if authority.JOURNAL.exists() or authority.JOURNAL.is_symlink():
+            journal, identity_recipe = authority.load(source, 'git-fetch')
+            record = identity_recipe['original']
+            account = SimpleNamespace(pw_uid=record['uid'], pw_gid=record['gid'], pw_dir=record['home'])
+            runtime = Runtime(Path(__file__).resolve().parent, record['user'], selected == '1', stopped == '1', account=account, group=record['group'])
+            if identity_recipe['source'] != binding:
+                raise ValueError('identity owner source changed')
+            runtime.identity_rebooted = authority.rebooted(journal)
+            identity_phase = 'rebind' if journal['phase'] in ('account-ready', 'rebind', 'complete') else 'quiesce'
+            if mode == 'identity-apply' and journal['phase'] in ('complete',):
+                raise ValueError('identity owner phase is not applicable')
+            runtime.identity_check(identity_recipe, identity_phase)
+        else:
+            if mode != 'identity-observe':
+                raise ValueError('identity owner requires protected authority')
+            runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1', stopped == '1')
+            target = dict(user=identity_arguments[0], uid=runtime.uid, gid=runtime.gid,
+                          home='/home/'+identity_arguments[0], group=identity_arguments[0])
+            identity_recipe = runtime.identity_observe(target, binding)
+        if mode == 'identity-observe':
+            print(json.dumps(identity_recipe))
+            return
+    else:
+        runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1', stopped == '1')
     if mode == 'observe':
         print(json.dumps(runtime.observe(*extra)))
         return
@@ -434,6 +541,10 @@ def main():
         validate_lock(fd, lock)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         validate_lock(fd, lock)
+        if mode == 'identity-apply':
+            ordinary_custody(runtime, fd, lock)
+            runtime.identity_apply(identity_recipe, identity_phase)
+            return
         if mode == 'custody-observe':
             print(json.dumps({'generation': runtime.custody_generation()}))
             return

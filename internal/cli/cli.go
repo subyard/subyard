@@ -525,6 +525,15 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	admission := cli.admission(definition, core, resourceDefinition, profileResource, commandArguments, explicit)
 	readOnlyInvocation := admission.readOnly
+	identityRecovery := false
+	if !readOnlyInvocation && definition.Handler != "@release-transition" {
+		var err error
+		identityRecovery, err = cli.admitDeveloperIdentity(ctx, yard, definition.Handler, commandArguments)
+		if err != nil {
+			cli.errorf("developer identity: %v", err)
+			return 1
+		}
+	}
 	if !readOnlyInvocation && !commandHelpRequested(commandArguments) && (slices.Contains([]string{"@update", "@current-migration", "@host", "@config"}, definition.Handler) || definition.Handler == "@teardown" && slices.Contains(commandArguments, "--full")) {
 		home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
 		pending, err := filepath.Glob(filepath.Join(home, "cleanup", "*", "journal.json"))
@@ -587,7 +596,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runHostLogs(commandArguments)
 	}
-	if !readOnlyInvocation && !cli.releaseTransitionChild && core && definition.Handler == "@init" {
+	if !identityRecovery && !readOnlyInvocation && !cli.releaseTransitionChild && core && definition.Handler == "@init" {
 		code, err := cli.finishRegisteredInitMigrations(ctx, yard, commandArguments, yes)
 		if err != nil {
 			cli.errorf("init compatibility migrations: %v", err)
@@ -600,7 +609,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 			cli.registeredInitMigrated = true
 		}
 	}
-	if admission.gate == gateRequired && !cli.releaseTransitionChild {
+	if admission.gate == gateRequired && !cli.releaseTransitionChild && !identityRecovery {
 		permits, code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes)
 		if done {
 			return code
@@ -4278,7 +4287,11 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("cleanup_recovery_failed", err)
 			}
 		}
-		if !releaseRecoveryCommand(definition) && !cleanupRecovery {
+		identityRecovery, identityErr := operationCLI.admitDeveloperIdentity(ctx, operationLoaded.Context.YardName, definition.Handler, params.Arguments)
+		if identityErr != nil {
+			return nil, operationRPCError("identity_recovery_failed", identityErr)
+		}
+		if !releaseRecoveryCommand(definition) && !cleanupRecovery && !identityRecovery {
 			outcome, gateInspection, gateErr := operationCLI.inspectMutationGateInspection(
 				ctx, operationLoaded.Context.YardName,
 			)
@@ -4407,7 +4420,11 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("cleanup_recovery_failed", err)
 			}
 		}
-		if !releaseRecoveryCommand(planned.Definition) && !cleanupRecovery {
+		identityRecovery, identityErr := planned.CLI.admitDeveloperIdentity(ctx, planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments)
+		if identityErr != nil {
+			return nil, operationRPCError("identity_recovery_failed", identityErr)
+		}
+		if !releaseRecoveryCommand(planned.Definition) && !cleanupRecovery && !identityRecovery {
 			outcome, gateInspection, gateErr := planned.CLI.inspectMutationGateInspection(
 				ctx, planned.Loaded.Context.YardName,
 			)

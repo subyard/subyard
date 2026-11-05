@@ -30,6 +30,142 @@ func (runtime Runtime) ObserveInstalledRuntime(ctx context.Context, id string) (
 	}
 }
 
+// Release readiness checks installed consumers using their applied configuration.
+// Desired settings belong to ordinary init; changing them is not a new release.
+// The normal observer still checks current source bytes, receipts and ownership.
+func (runtime Runtime) ObserveInstalledReleaseRuntime(ctx context.Context, id string) (ports.RuntimeObservation, error) {
+	if id == "key-tools-runtime" {
+		return runtime.observeInstalledReleaseKeyRuntime(ctx)
+	}
+	if id != "core-guest-runtime" || !runtime.guestFactsAvailable() || runtime.Executor == nil {
+		return runtime.ObserveInstalledRuntime(ctx, id)
+	}
+	presence, instance, err := runtime.installedGuestPresence(ctx)
+	if err != nil || !strings.EqualFold(instance.Status, "running") || !presence.Preview && !presence.CCUsage {
+		return runtime.ObserveInstalledRuntime(ctx, id)
+	}
+	program, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, guestFactsSource))
+	if err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{
+		Command: []string{"python3", "-B", "-c", "__name__ = 'subyard_release_observer'\n" + string(program) + installedGuestSettingsProjection},
+	})
+	if err != nil || result.ExitCode != 0 {
+		// Invalid or missing ownership evidence must retain ordinary readiness.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || err != nil && result.ExitCode == 0 {
+			return ports.RuntimeObservation{}, err
+		}
+		return runtime.ObserveInstalledRuntime(ctx, id)
+	}
+	var settings map[string]string
+	if len(result.Stdout) > 16384 || json.Unmarshal(result.Stdout, &settings) != nil {
+		return ports.RuntimeObservation{}, errors.New("invalid installed guest configuration projection")
+	}
+	allowed := map[string]bool{"ENVIRONMENT_PROFILES": true, "ALLOWS_CODING_TOOLS": true, "DEV_USER": true,
+		"WEB_PREVIEW_HOST_PORT": true, "CCUSAGE_VERSION": true, "CCUSAGE_SHA256_AMD64": true, "CCUSAGE_SHA256_ARM64": true}
+	environment := runtimeEnvironment(runtime.Environment)
+	for name, value := range settings {
+		if !allowed[name] {
+			return ports.RuntimeObservation{}, errors.New("unexpected installed guest setting")
+		}
+		environment[name] = value
+	}
+	if user, ok := settings["DEV_USER"]; ok {
+		runtime.Yard.DevUser = user
+	}
+	runtime.Environment = nil
+	for name, value := range environment {
+		runtime.Environment = append(runtime.Environment, name+"="+value)
+	}
+	return runtime.ObserveInstalledRuntime(ctx, id)
+}
+
+func (runtime Runtime) observeInstalledReleaseKeyRuntime(ctx context.Context) (ports.RuntimeObservation, error) {
+	tools := runtime.environmentDefault("SUBYARD_KEYS_TOOLS_DIR", filepath.Join(runtime.Yard.Paths.DataHome, "tools"))
+	path := filepath.Join(tools, "bin", ".subyard-native-tools.json")
+	// Keep ordinary readiness for absent/legacy/unsafe receipts. The installed
+	// observer retains its exact mode/owner, binary hash and version checks.
+	if _, err := installedRuntimeFile(path); err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) || info.Size() > 16384 {
+		return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	var receipt struct {
+		Schema      int `json:"schema"`
+		Age, Sops   string
+		AgeArchive  string `json:"age_archive"`
+		SopsArchive string `json:"sops_archive"`
+	}
+	if json.Unmarshal(payload, &receipt) != nil || receipt.Schema != 1 {
+		return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+	}
+	settings := map[string]string{"SUBYARD_AGE_VERSION": receipt.Age, "SUBYARD_SOPS_VERSION": receipt.Sops,
+		"SUBYARD_AGE_SHA256_AMD64": receipt.AgeArchive, "SUBYARD_AGE_SHA256_ARM64": receipt.AgeArchive,
+		"SUBYARD_SOPS_SHA256_AMD64": receipt.SopsArchive, "SUBYARD_SOPS_SHA256_ARM64": receipt.SopsArchive}
+	for name, value := range settings {
+		if err := config.ValidateSetting(config.ScopeHost, name, value, false); err != nil {
+			return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+		}
+	}
+	environment := runtimeEnvironment(runtime.Environment)
+	for name, value := range settings {
+		environment[name] = value
+	}
+	runtime.Environment = nil
+	for name, value := range environment {
+		runtime.Environment = append(runtime.Environment, name+"="+value)
+	}
+	return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+}
+
+// Execute after the facts module has been loaded without invoking its CLI.
+// These protected receipts supply configuration only, never desired source bytes.
+const installedGuestSettingsProjection = `
+value = read()
+applied = value['last_success']
+if applied is None:
+    raise ValueError('no successful guest refresh')
+def protected_json(path, mode):
+    safe(path)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != mode or info.st_uid != 0 or info.st_gid != 0 or info.st_nlink != 1 or info.st_size > 16384:
+        raise ValueError('unsafe installed configuration receipt')
+    return json.loads(path.read_bytes(), object_pairs_hook=unique_fields)
+settings = {'ENVIRONMENT_PROFILES': ' '.join(applied['selected_profiles'])}
+endpoint = protected_json(Path('/etc/subyard/preview.json'), 0o644)
+if endpoint.get('version') != 1 or type(endpoint.get('port')) is not int or not 1 <= endpoint['port'] <= 65535:
+    raise ValueError('invalid installed preview endpoint')
+settings['WEB_PREVIEW_HOST_PORT'] = str(endpoint['port'])
+core = Path('/var/lib/subyard/agent-skills/core.json')
+settings['ALLOWS_CODING_TOOLS'] = 'true' if core.exists() or core.is_symlink() else 'false'
+if settings['ALLOWS_CODING_TOOLS'] == 'true':
+    import pwd
+    receipt = protected_json(core, 0o600)
+    users = [user.pw_name for user in pwd.getpwall() if user.pw_dir == receipt.get('home')]
+    if len(users) != 1:
+        raise ValueError('invalid installed skill user')
+    settings['DEV_USER'] = users[0]
+usage = Path('/usr/local/bin/ccusage.subyard-runtime.json')
+if usage.exists() or usage.is_symlink():
+    receipt = protected_json(usage, 0o600)
+    if receipt.get('schema') != 1 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?', receipt.get('version', '')) or not re.fullmatch('[0-9a-f]{64}', receipt.get('archive', '')):
+        raise ValueError('invalid installed usage receipt')
+    settings['CCUSAGE_VERSION'] = receipt['version']
+    settings['CCUSAGE_SHA256_AMD64'] = settings['CCUSAGE_SHA256_ARM64'] = receipt['archive']
+print(json.dumps(settings))
+`
+
 func (runtime Runtime) InstalledRuntimePresence(ctx context.Context, id string) (ports.RuntimePresence, error) {
 	if id == "core-guest-runtime" {
 		presence, _, err := runtime.installedGuestPresence(ctx)

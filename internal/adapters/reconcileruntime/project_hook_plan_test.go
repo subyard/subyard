@@ -54,6 +54,23 @@ func (executor *changingNativeHookExecutor) Exec(ctx context.Context, project, n
 	return executor.hookPlanExecutor.Exec(ctx, project, name, request)
 }
 
+func TestPreparedProjectHooksContinuationRejectsEqualCountScopeReplacement(t *testing.T) {
+	before := &ProjectHookPlan{allowedHooks: []string{"/usr/local/libexec/subyard/owned-hook"}, approved: hookObservation{Roots: []string{"/srv/workspaces/project"}}}
+	current := *before
+	if err := before.CheckContinuationScope(&current); err != nil {
+		t.Fatal(err)
+	}
+	current.allowedHooks = []string{"/usr/local/libexec/subyard/foreign-hook"}
+	if err := before.CheckContinuationScope(&current); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("replaced hook admitted: %v", err)
+	}
+	current = *before
+	current.approved.Roots = []string{"/srv/workspaces/foreign"}
+	if err := before.CheckContinuationScope(&current); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("replaced root admitted: %v", err)
+	}
+}
+
 func TestPreparedProjectHooksRunOnceAfterSuccessfulNativeCatalogChange(t *testing.T) {
 	for _, scenario := range []string{"repeat", "project changed", "source changed", "failed first invocation"} {
 		t.Run(scenario, func(t *testing.T) {

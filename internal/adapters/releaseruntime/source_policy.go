@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/blang/semver/v4"
@@ -123,6 +124,11 @@ func verifyHistoricalUninstallSource(ctx context.Context, runtimeRoot string) (*
 // Exact accepted V2 owners retain their recovery contract even when their source
 // predates the ordinary admission floor; the transition validates that binding.
 func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessRequest) error {
+	if pending, err := config.PendingDeveloperIdentities(request.ConfigHome); err != nil {
+		return err
+	} else if len(pending) != 0 && request.Mode != releasetransition.ProcessInspect {
+		return errors.New("developer identity transition is pending; finish plain init before replacing the runtime")
+	}
 	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
 	if err != nil {
 		return err

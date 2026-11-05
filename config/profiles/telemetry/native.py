@@ -48,7 +48,7 @@ def snapshot(path, max_bytes=CONFIG_LIMIT):
     return content
 
 
-def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT):
+def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT, mode=0o600):
     safe(path)
     if len(content) > max_bytes:
         raise ValueError('native file exceeds size bound')
@@ -56,7 +56,7 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT)
     fd, temporary = tempfile.mkstemp(prefix='.telemetry-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as output:
-            os.fchmod(output.fileno(), 0o600)
+            os.fchmod(output.fileno(), mode)
             if uid is not None:
                 os.fchown(output.fileno(), uid, gid)
             output.write(content)

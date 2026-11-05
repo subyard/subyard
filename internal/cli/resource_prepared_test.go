@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -307,6 +308,8 @@ args = sys.argv[1:]
 if not args or args[0] not in ('run', 'down', 'purge'):
     sys.exit(2)
 verb = args[0]
+with (root / 'resource-account.log').open('a') as output:
+    output.write(verb + ' ' + os.environ.get('DEV_USER', '') + '\n')
 if mode == 'apply':
     if '--fail-apply' in args:
         print('fixture apply output')
@@ -393,6 +396,46 @@ func TestResourceExactDirectAllowsPartialConvergence(t *testing.T) {
 	first, err := os.ReadFile(filepath.Join(root, "unit-first"))
 	if err != nil || string(first) != "already-running" {
 		t.Fatalf("resource overwrote converged state: %q, %v", first, err)
+	}
+}
+
+func TestResourceShutdownAddressesInstalledAccountUntilInitAppliesRename(t *testing.T) {
+	for verb, want := range map[string]string{"purge": "installed-dev", "run": "dev"} {
+		t.Run(verb, func(t *testing.T) {
+			root, environment, _ := resourceExactFixture(t)
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", verb},
+				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: &callbackPrompt{callback: func() {}},
+				InitPlatform: &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(),
+					settings: map[string]string{"DEV_USER": "installed-dev", "DEV_UID": "1000"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Context.DevUser != "dev" {
+				t.Fatalf("fixture desired account = %q", loaded.Context.DevUser)
+			}
+			instance := ports.InstanceInfo{Project: loaded.Context.IncusProject, Name: loaded.Context.YardInstanceName, Status: "Running"}
+			program.options.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{instance.Project + "/" + instance.Name: instance}}
+			if verb == "purge" {
+				writeCLIFile(t, filepath.Join(root, "unit-first"), "running", 0o600)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("%s failed: code=%d stderr=%s", verb, code, stderr.String())
+			}
+			payload, err := os.ReadFile(filepath.Join(root, "resource-account.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(strings.TrimSpace(string(payload)), "\n") {
+				if line != verb+" "+want {
+					t.Fatalf("handler context = %q, want account %q", payload, want)
+				}
+			}
+		})
 	}
 }
 

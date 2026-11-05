@@ -174,19 +174,22 @@ type preparedCommand struct {
 	assess           commandAssessment
 	refresh          commandAssessment
 	initExecution    *initExecution
-	initFacts        string
-	steps            func() []domain.OperationStep
-	stepsComplete    bool
-	execute          func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
-	closeResource    func() error
-	preview          func()
-	displayOnly      func()
-	printResult      func(domain.AdapterResult)
-	remoteArguments  func([]string) ([]string, error)
-	executeNoOp      bool
-	lifecycle        *preparedLifecycle
-	ownerAdmission   ownerWriteAdmission
-	remotePhased     bool
+	identityHookPlan *reconcileruntime.ProjectHookPlan
+	// A stopped-yard inspection disclosed pending retirements before its start.
+	retirementsDisclosed bool
+	initFacts            string
+	steps                func() []domain.OperationStep
+	stepsComplete        bool
+	execute              func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
+	closeResource        func() error
+	preview              func()
+	displayOnly          func()
+	printResult          func(domain.AdapterResult)
+	remoteArguments      func([]string) ([]string, error)
+	executeNoOp          bool
+	lifecycle            *preparedLifecycle
+	ownerAdmission       ownerWriteAdmission
+	remotePhased         bool
 }
 
 // Both prepared commands and early source recovery capture these read-only
@@ -602,6 +605,9 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 			return domain.AdapterResult{}, lockErr
 		}
 		defer unlock()
+		if _, err := prepared.CLI.admitDeveloperIdentity(ctx, prepared.Loaded.Context.YardName, prepared.Definition.Handler, prepared.Arguments); err != nil {
+			return domain.AdapterResult{}, err
+		}
 	}
 	noOp := func() (domain.AdapterResult, error) {
 		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok"}, nil
@@ -693,6 +699,17 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			return errors.New(warning)
 		}
 	}
+	if handled, err := prepared.prepareStoppedIdentityInspection(ctx, bootstrap); handled || err != nil {
+		return err
+	}
+	if handled, err := prepared.prepareDeveloperIdentityInit(ctx, bootstrap); handled || err != nil {
+		return err
+	}
+	return prepared.prepareOrdinaryInit(ctx, bootstrap)
+}
+
+func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootstrap *initBootstrap) error {
+	cli := prepared.CLI
 	execution, err := cli.prepareInitExecutionPlan(ctx, prepared.Loaded, prepared.Arguments, bootstrap, true)
 	if err != nil {
 		return err
@@ -813,6 +830,9 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		if err == nil && !cli.releaseTransitionChild {
 			err = cli.verifyInitReleaseReadiness(ctx, execution.loaded.Context.YardName)
 		}
+		if err == nil && !cli.releaseTransitionChild {
+			err = cli.publishAppliedIdentityHint(ctx, execution.loaded)
+		}
 		if err == nil && execution.mode != initConfigs && !execution.hooksOnly() {
 			fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
 		}
@@ -828,6 +848,9 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 	}
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
 	if err := prepared.CLI.observeLifecycleExecution(ctx, prepared.Loaded.Context, execution); err != nil {
+		return err
+	}
+	if err := prepared.CLI.bindLifecycleOwner(ctx, prepared.Loaded, execution); err != nil {
 		return err
 	}
 	var startup *resourceStartup
@@ -855,6 +878,9 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 	if execution.action == "stop" {
 		prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
 			if err := prepared.CLI.observeLifecycleExecution(ctx, prepared.Loaded.Context, execution); err != nil {
+				return "", domain.ActionDelta{}, err
+			}
+			if err := prepared.CLI.bindLifecycleOwner(ctx, prepared.Loaded, execution); err != nil {
 				return "", domain.ActionDelta{}, err
 			}
 			return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
@@ -895,7 +921,7 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 				}
 			}
 		}
-		result, err := prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
+		result, err := prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
 		if err != nil || result.Status != "ok" {
 			return result, err
 		}

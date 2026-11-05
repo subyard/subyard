@@ -98,12 +98,87 @@ type integrationArtifact struct {
 	Mode         int    `json:"mode,omitempty"`
 }
 type integrationObservation struct {
-	Fingerprint string                `json:"fingerprint"`
-	Changed     bool                  `json:"changed"`
-	Retired     []integrationArtifact `json:"retired"`
-	Adopted     []integrationArtifact `json:"adopted"`
-	Initial     bool                  `json:"initial"`
-	Facts       []integrationFact     `json:"facts"`
+	Fingerprint     string                `json:"fingerprint"`
+	Changed         bool                  `json:"changed"`
+	Retired         []integrationArtifact `json:"retired"`
+	Adopted         []integrationArtifact `json:"adopted"`
+	Initial         bool                  `json:"initial"`
+	Facts           []integrationFact     `json:"facts"`
+	Installed       bool                  `json:"installed"`
+	Selected        []string              `json:"selected"`
+	AppliedSettings map[string]string     `json:"applied_settings"`
+}
+
+type AppliedIntegrationConfiguration struct {
+	Selected  []string
+	Settings  map[string]string
+	Installed bool
+	Identity  map[string]string
+}
+
+// AppliedIntegrationConfiguration reads committed ownership and validated inputs,
+// independently of desired settings or an incomplete enable operation.
+func (runtime Runtime) AppliedIntegrationConfiguration(ctx context.Context) (AppliedIntegrationConfiguration, error) {
+	baseline, err := runtime.integrationInventory(ctx, "settings", nil, "")
+	if err != nil {
+		return AppliedIntegrationConfiguration{}, err
+	}
+	if baseline.AppliedSettings != nil {
+		catalog, loadErr := config.LoadCatalog(runtime.RepositoryRoot)
+		if loadErr != nil {
+			return AppliedIntegrationConfiguration{}, loadErr
+		}
+		if err := catalog.ValidateIntegrationInitSettings(baseline.AppliedSettings); err != nil {
+			return AppliedIntegrationConfiguration{}, err
+		}
+		if user, ok := baseline.AppliedSettings["DEV_USER"]; ok {
+			runtime.Yard.DevUser = user
+		}
+		if uid, ok := baseline.AppliedSettings["DEV_UID"]; ok {
+			value, parseErr := strconv.Atoi(uid)
+			if parseErr != nil {
+				return AppliedIntegrationConfiguration{}, errors.New("invalid applied developer UID")
+			}
+			runtime.Yard.DevUID = value
+		}
+	}
+	identity := map[string]string{}
+	if user, userOK := baseline.AppliedSettings["DEV_USER"]; userOK {
+		if uid, uidOK := baseline.AppliedSettings["DEV_UID"]; uidOK {
+			identity["DEV_USER"], identity["DEV_UID"] = user, uid
+		}
+	}
+	if len(identity) == 0 {
+		identity, err = runtime.appliedGuestIdentity(ctx)
+		if err != nil {
+			return AppliedIntegrationConfiguration{}, err
+		}
+		if len(identity) != 0 {
+			runtime.Yard.DevUser = identity["DEV_USER"]
+			runtime.Yard.DevUID, _ = strconv.Atoi(identity["DEV_UID"])
+		}
+	}
+	observed, err := runtime.integrationInventory(ctx, "selection", nil, "")
+	if err != nil {
+		return AppliedIntegrationConfiguration{}, err
+	}
+	if observed.Installed != baseline.Installed || (observed.AppliedSettings == nil) != (baseline.AppliedSettings == nil) || !maps.Equal(observed.AppliedSettings, baseline.AppliedSettings) {
+		return AppliedIntegrationConfiguration{}, domain.ErrPlanStale
+	}
+	return AppliedIntegrationConfiguration{Selected: observed.Selected, Settings: observed.AppliedSettings, Installed: observed.Installed, Identity: identity}, nil
+}
+
+// CheckAppliedGuestIdentity refuses identity authoring when no independent owner
+// can keep the installed consumers observable until ordinary init applies it.
+func (runtime Runtime) CheckAppliedGuestIdentity(ctx context.Context) error {
+	applied, err := runtime.AppliedIntegrationConfiguration(ctx)
+	if err != nil {
+		return err
+	}
+	if len(applied.Identity) == 0 {
+		return errors.New("applied developer identity cannot be verified; reconcile the existing identity with yard init before editing DEV_USER or DEV_UID")
+	}
+	return nil
 }
 
 // IntegrationScope binds the selected artifact destinations and desired
@@ -261,31 +336,11 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "link", Path: "/home/" + runtime.devUser() + "/" + relative, Target: parts[1], FileTarget: len(parts) == 3 && parts[2] == "file", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(parts[1])))})
 	}
-	definitions, err := runtime.integrationDefinitions()
+	packages, err := runtime.integrationPackageArtifacts(phase, reader)
 	if err != nil {
 		return nil, err
 	}
-	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
-		inputs := []string{id, runtime.devUser(), runtime.environmentValue("CODING_TOOL_INTEGRATIONS")}
-		for _, definition := range definitions {
-			if definition.Name == id {
-				binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
-				if err != nil {
-					return nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
-				}
-				inputs = append(inputs, binding)
-			}
-		}
-		provision := runtime.environmentValue("AGENT_" + id + "_PROVISION")
-		if provision != "" {
-			payload, err := (guestConfigFile{readAsset: reader}).readSourceAsset(config.MaterializedAsset{Source: provision})
-			if err != nil {
-				return nil, err
-			}
-			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
-		}
-		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
-	}
+	entries = append(entries, packages...)
 
 	dispatcher, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "config", "projects-changed.sh"))
 	if err != nil {
@@ -314,7 +369,42 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 	return entries, nil
 }
 
+// Package ownership includes the applied login as well as immutable source inputs.
+func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(config.MaterializedAsset) ([]byte, error)) ([]integrationArtifact, error) {
+	entries := []integrationArtifact{}
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
+		inputs := []string{id, runtime.devUser(), runtime.environmentValue("CODING_TOOL_INTEGRATIONS")}
+		for _, definition := range definitions {
+			if definition.Name == id {
+				binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
+				if err != nil {
+					return nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
+				}
+				inputs = append(inputs, binding)
+			}
+		}
+		provision := runtime.environmentValue("AGENT_" + id + "_PROVISION")
+		if provision != "" {
+			payload, err := (guestConfigFile{readAsset: reader}).readSourceAsset(config.MaterializedAsset{Source: provision})
+			if err != nil {
+				return nil, err
+			}
+			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
+		}
+		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
+	}
+
+	return entries, nil
+}
+
 func (runtime Runtime) integrationInventory(ctx context.Context, mode string, entries []integrationArtifact, expected string) (integrationObservation, error) {
+	if mode == "observe" && runtime.appliedIntegrationInspection {
+		mode = "observe-applied"
+	}
 	home := "/home/" + runtime.devUser()
 	uid := runtime.Yard.DevUID
 	if uid <= 0 {
@@ -348,7 +438,19 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			}
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": !runtime.legacyPreviewInstructions})
+	request := map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": !runtime.legacyPreviewInstructions}
+	if mode == "capture-settings" {
+		catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
+		if err != nil {
+			return integrationObservation{}, err
+		}
+		settings := catalog.IntegrationInitSettings(runtimeEnvironment(runtime.Environment))
+		if err := catalog.ValidateIntegrationInitSettings(settings); err != nil {
+			return integrationObservation{}, err
+		}
+		request["applied_settings"] = settings
+	}
+	payload, _ := json.Marshal(request)
 	program := strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", "/var/lib/subyard/integrations")
 	program = strings.ReplaceAll(program, "@STATE_UID@", "0")
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", program, mode}, Stdin: payload})
@@ -394,8 +496,8 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		return integrationObservation{}, errors.New("integration ownership conflict or unavailable evidence; managed artifacts were preserved")
 	}
 	var observed integrationObservation
-	if mode == "observe" {
-		if json.Unmarshal(result.Stdout, &observed) != nil || len(observed.Fingerprint) != 64 {
+	if mode == "observe" || mode == "observe-applied" || mode == "selection" || mode == "settings" {
+		if json.Unmarshal(result.Stdout, &observed) != nil || (mode == "observe" || mode == "observe-applied") && len(observed.Fingerprint) != 64 {
 			return observed, errors.New("invalid integration ownership observation")
 		}
 	}
@@ -849,6 +951,13 @@ func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retiremen
 	return retirements, warnings, nil
 }
 
+// AppliedIntegrationPlan inspects committed consumers for passive release admission.
+// It accepts redundant retry labels without completing or modifying pending init.
+func (runtime Runtime) AppliedIntegrationPlan(ctx context.Context) (IntegrationPlan, error) {
+	runtime.appliedIntegrationInspection = true
+	return runtime.IntegrationPlan(ctx)
+}
+
 func (runtime Runtime) IntegrationPlan(ctx context.Context) (IntegrationPlan, error) {
 	plan, _, err := runtime.observeIntegrations(ctx)
 	return plan, err
@@ -1115,7 +1224,10 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 		return err
 	}
 	if !fresh.Changed {
-		return runtime.recordRetiredIntegrations(ctx)
+		if err := runtime.recordRetiredIntegrations(ctx); err != nil {
+			return err
+		}
+		return runtime.storeAppliedIntegrationSettings(ctx)
 	}
 	execution := runtime
 	executionCompleted := false
@@ -1222,6 +1334,71 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 		return runtime.integrationDiagnostic(errors.New("integration reconcile verification failed; desired selection retained for retry"),
 			profile.IntegrationDefinition{}, "verify", "convergence-failed")
 	}
+	if err := runtime.recordRetiredIntegrations(ctx); err != nil {
+		return err
+	}
+	if err := runtime.storeAppliedIntegrationSettings(ctx); err != nil {
+		return err
+	}
 	executionCompleted = true
-	return runtime.recordRetiredIntegrations(ctx)
+	return nil
+}
+
+type appliedIntegrationSettingsCapture struct {
+	runtime   Runtime
+	plan      string
+	inventory string
+	entries   []integrationArtifact
+}
+
+func (capture *appliedIntegrationSettingsCapture) Binding() string { return capture.plan }
+
+func (capture *appliedIntegrationSettingsCapture) Apply(ctx context.Context) error {
+	plan, _, err := capture.runtime.observeIntegrations(ctx)
+	if err != nil {
+		return err
+	}
+	if plan.Changed || plan.StateBinding() != capture.plan {
+		return domain.ErrPlanStale
+	}
+	_, err = capture.runtime.integrationInventory(ctx, "capture-settings", capture.entries, capture.inventory)
+	return err
+}
+
+func (runtime Runtime) PrepareAppliedIntegrationSettings(ctx context.Context) (ports.PreparedSettingsCapture, error) {
+	configuration, err := runtime.AppliedIntegrationConfiguration(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !configuration.Installed || configuration.Settings != nil {
+		return nil, nil
+	}
+	plan, observed, err := runtime.observeIntegrations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Changed {
+		return nil, errors.New("legacy integration settings have no verified applied baseline; reconcile the existing settings with yard init before editing them")
+	}
+	entries, err := runtime.integrationArtifactsPhase("inspect")
+	if err != nil {
+		return nil, err
+	}
+	return &appliedIntegrationSettingsCapture{runtime: runtime, plan: plan.StateBinding(), inventory: observed.Fingerprint, entries: entries}, nil
+}
+
+func (runtime Runtime) storeAppliedIntegrationSettings(ctx context.Context) error {
+	plan, observed, err := runtime.observeIntegrations(ctx)
+	if err != nil {
+		return err
+	}
+	if plan.Changed {
+		return domain.ErrPlanStale
+	}
+	entries, err := runtime.integrationArtifactsPhase("verify")
+	if err != nil {
+		return err
+	}
+	_, err = runtime.integrationInventory(ctx, "capture-settings", entries, observed.Fingerprint)
+	return err
 }

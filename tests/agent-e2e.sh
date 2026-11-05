@@ -98,7 +98,7 @@ done
     [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
   done
   for P0_LANE in boundary nested-teardown transport dependencies real-incus profile-resource producer-reboot release \
-    source-upgrade power-systemd newer-release legacy-continuation yard-maintenance reboot-verify peer-cleanup cleanup full-uninstall; do
+    source-upgrade power-systemd newer-release legacy-continuation yard-maintenance init-settings reboot-verify peer-cleanup cleanup full-uninstall; do
     [ "$(lane_vm_count)" = 1 ] || fail "single-host P0 lane requested a pair: $P0_LANE"
   done
   P0_LANE=nested-teardown P0_NESTED_VM=2

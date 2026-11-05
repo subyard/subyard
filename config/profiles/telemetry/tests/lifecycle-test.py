@@ -49,6 +49,9 @@ class LifecycleTest(unittest.TestCase):
             with patch.object(guest,'systemctl',return_value='\n'.join(key+'='+value for key,value in fields.items())):
                 observed=guest.Runtime.manager(runtime,guest.COLLECTOR)
             self.assertEqual(observed['NoNewPrivileges'],'no')
+            fields.update(ActiveState='activating',SubState='auto-restart',NoNewPrivileges='yes')
+            with patch.object(guest,'systemctl',return_value='\n'.join(key+'='+value for key,value in fields.items())):
+                self.assertEqual(guest.Runtime.manager(runtime,guest.COLLECTOR)['ActiveState'],'failed')
 
     def test_unit_failure_projection_reports_predicates_without_private_native_fields(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -171,7 +174,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     if unit not in states:
                         return 'LoadState=not-found'
                     command=next(line.removeprefix('ExecStart=') for line in (root/'units'/unit).read_text().splitlines() if line.startswith('ExecStart='))
-                    fields=dict(LoadState='loaded',FragmentPath=str(root/'units'/unit),User='dev',Group=str(account.pw_gid),
+                    unit_user=next(line.removeprefix('User=') for line in (root/'units'/unit).read_text().splitlines() if line.startswith('User='))
+                    fields=dict(LoadState='loaded',FragmentPath=str(root/'units'/unit),User=unit_user,Group=str(account.pw_gid),
                         Type='simple',UMask='0077',LimitCORE='0',NoNewPrivileges='yes',DropInPaths='',
                         ExecStart='{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; start_time=x ; }',
                         KillMode='process' if unit==guest.MANAGER else 'control-group',Delegate='yes',
@@ -190,6 +194,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                             states[unit]['ActiveState'] = 'inactive'
                 if args[0] == 'restart':
                     for unit in args[1:]: states[unit]['ProcessNNP']='yes'
+                if args[0] in ('stop','start'):
+                    for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
@@ -251,6 +257,28 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertFalse(any(call[0] == 'stop' and guest.MANAGER in call for call in calls))
                 self.assertTrue((root/'bin/subyard-telemetry-run').read_text().startswith('#!/bin/sh\n'))
                 self.assertNotIn('analytics', (root/'home/.codex/config.toml').read_text())
+                token=(root/'data/auth.token').read_bytes()
+                native_receipt=(root/'control/native.json').read_bytes()
+                target=dict(user='next',uid=runtime.uid,gid=runtime.gid,home=str(runtime.home),group='next')
+                recipe=runtime.identity_observe(target,'a'*64)
+                runtime.identity_apply(recipe,'quiesce')
+                self.assertEqual(states[guest.COLLECTOR]['ActiveState'],'inactive')
+                self.assertEqual(states[guest.MANAGER]['ActiveState'],'inactive')
+                original_replace=guest.native.os.replace
+                def cut_after_unit_replace(source,path):
+                    original_replace(source,path)
+                    if Path(path)==runtime.units/guest.COLLECTOR:
+                        raise InterruptedError('after first identity unit publication')
+                with patch.object(guest.native.os,'replace',side_effect=cut_after_unit_replace):
+                    with self.assertRaises(InterruptedError):runtime.identity_apply(recipe,'rebind')
+                self.assertEqual((runtime.units/guest.COLLECTOR).stat().st_mode & 0o777,0o644)
+                for _ in range(2):runtime.identity_apply(recipe,'rebind')
+                self.assertEqual(states[guest.COLLECTOR]['ActiveState'],'inactive')
+                self.assertEqual(states[guest.MANAGER]['ActiveState'],'active')
+                self.assertEqual((root/'data/auth.token').read_bytes(),token)
+                self.assertEqual((root/'control/native.json').read_bytes(),native_receipt)
+                self.assertEqual(marker.read_bytes(),b'history')
+                runtime=runtime.identity_runtime(target)
                 # The binary exception must not relax configuration admission.
                 with self.assertRaisesRegex(ValueError, 'unsafe native file'):
                     guest.native.snapshot(source/'subyard-telemetry')

@@ -16,6 +16,8 @@ if [ "${1-}" = _runtime-contract ]; then
   shift
   case "${1-}" in
     observe) [ "$#" = 1 ] || exit 2; mode=observe ;;
+    identity-observe) [ "$#" = 3 ] || exit 2; mode=identity-observe; runtime_args=("${@:2}") ;;
+    identity-apply) [ "$#" = 2 ] || exit 2; mode=identity-apply; runtime_args=("$2") ;;
     apply)
       [ "$#" = 4 ] && [[ "$2" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "$3" =~ ^[a-f0-9]{64}$ ]] && [[ "$4" =~ ^[a-f0-9]{64}$ ]] || exit 2
       mode=refresh

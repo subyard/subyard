@@ -165,9 +165,9 @@ func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServ
 		}
 		// The direct-caller case selects no integrations: only the two project
 		// hook artifacts may be observed, with the exact released/current reader.
-		if len(call.Command) == 5 && slices.Equal(call.Command[:3], []string{"python3", "-B", "-c"}) && call.Command[4] == "observe" {
+		if len(call.Command) == 5 && slices.Equal(call.Command[:3], []string{"python3", "-B", "-c"}) && (call.Command[4] == "observe" || call.Command[4] == "observe-applied") {
 			program := fmt.Sprintf("%x", sha256.Sum256([]byte(call.Command[3])))
-			if program == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e" || program == "b0000549b3ec4cd53824d5143b79b05b1b78a253d0e4aceb30342321535e3372" {
+			if program == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e" || program == "b0000549b3ec4cd53824d5143b79b05b1b78a253d0e4aceb30342321535e3372" || program == "f13739c75b5a44dd280e3464d9fb2fc7a4ff7a24a6d4fc9f7998e9cab1edb5ce" || program == "853f6adfd1780ea684f1211a3f2a33b35d762d8bedd99993f5a0e5bea2e9e473" {
 				if len(paths) > 1 && paths[1] != "" {
 					payload, err := os.ReadFile(paths[1])
 					if err == nil {

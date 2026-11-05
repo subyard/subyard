@@ -1838,6 +1838,27 @@ read-only queries retain their shorter bound. Expiration, cancellation and local
 never constitute a native terminal witness.
 
 Core also registers `core-guest-runtime` and `key-tools-runtime` for already installed helpers.
+Inspection of an exactly matching completed release validates installed consumers
+against their applied settings; ordinary init continues to assess desired settings.
+The protected integration inventory retains validated non-secret applied inputs
+only after successful native verification. Its complete snapshot preserves absent
+inputs as absent. Inspection reads the protected applied developer identity before
+validating home-bound inventory and released paths, then retains the ordinary
+strict path and ownership checks for that applied owner. Generic profile observers
+receive the same applied target only during exact completed-release inspection.
+Without an integration baseline, current machine-bound guest facts and the protected
+core skills receipt can establish a unique home/passwd identity; absent evidence
+never authorizes an inferred owner. Core guest observation retains its own receipt
+projection, and host key observation remains independent of Incus. Ordinary stop
+and teardown bind the applied developer identity before confirmation and recheck it
+before physical owner-service and session guards. Only that identity enters those
+hooks; desired power, resource scope and provisioning inputs stay unchanged.
+Full teardown retains the nonsecret identity in its existing per-yard recovery
+context, while old resumed plans retain their original context. Legacy capture requires a converged
+native observation and a fresh fingerprint CAS before desired authoring. Failed
+application retains the previous inputs. Neither projection nor capture suppresses
+source, ownership, missing-file or native runtime readiness checks, and unfinished
+release transitions retain their complete desired activation contract.
 Provisioning's preview/ccusage ownership markers authorize bounded helper refresh; missing
 artifacts with those markers remain drift. Unprovisioned guests without the markers are absent.
 Preview delivery, capability skills and the pinned ccusage installer are shared with ordinary
@@ -2033,3 +2054,33 @@ The original guest must support bounded backup inspection; an unbootable operati
 system requires separate recovery. A selected migration's old journal binding can
 be retired only by an exact receipt tied to the recreated native identity; shared
 history and other yards remain under the existing release-transition contract.
+
+### Developer identity reconciliation
+
+Plain init can carry a same-UID/GID account rename as a disclosed prerequisite of
+its existing plan. The approval binds desired configuration, source, native yard
+identity, project inventory and the conditional ordinary init scope. After the
+prerequisite, init discards old account observations, reassesses, and refuses any
+new scope before consuming the original approval for the normal continuation.
+
+Profiles declare an optional `developer-identity.json` sidecar with schema `1`
+and mode `rebind` or `independent`. Rebind owners implement `identity-observe
+<target-user> <source-binding>` and `identity-apply <source-binding>` through their
+runtime handler. Their bounded recipe carries original and target account identity
+and owned state. Apply reads the fixed protected guest journal through the core
+authority helper, quiesces at `prepared`, then rebinds at `account-ready`. Owners
+preserve unrelated state and accept only their recorded old or projected new
+artifacts on retry. Core does not rewrite arbitrary profile JSON or branch on
+profile names; an installed owner without this contract refuses identity changes.
+
+A private host marker and guest journal fence other mutations during recovery,
+including direct and RPC operations and runtime installation. Independently assessed
+full removal retains its existing producer fencing and deletion guards. Only plain init
+with the same captured desired configuration and source may continue. Account
+mutation fences new SSH sessions, requires an empty developer UID, retains numeric
+ownership, and moves only the canonical home on its existing filesystem. Shadow
+account and subordinate-ID recovery accepts only captured old or projected rows
+under native-compatible locks. Core publishes the applied identity last, after
+owner and metadata verification, and retires identity authority before ordinary
+init continues. A subsequent hook failure retains the new identity and the prior
+applied values of other settings.

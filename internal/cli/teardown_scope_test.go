@@ -650,3 +650,78 @@ func TestFullTeardownOwnsReplacedJournalEvidence(t *testing.T) {
 		t.Fatalf("namespaces = %v", namespaces)
 	}
 }
+
+func TestFullTeardownRetiresOnlyOwnedIdentityAuthority(t *testing.T) {
+	for _, scenario := range []string{"remove", "changed", "foreign-uuid", "foreign-scope", "unsafe-mode"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			uuid := "11111111-1111-1111-1111-111111111111"
+			yard := uninstall.RecoveryYard{Context: domain.Context{YardName: "owned", IncusProject: "project", YardInstanceName: "instance"}, Snapshot: &teardownSnapshot{State: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Config: map[string]string{"volatile.uuid": uuid}}}}}
+			proof := map[string]any{"yard": map[string]any{"name": "owned", "project": "project", "instance": "instance", "uuid": uuid}}
+			if scenario == "foreign-uuid" {
+				proof["yard"].(map[string]any)["uuid"] = "22222222-2222-2222-2222-222222222222"
+			}
+			if scenario == "foreign-scope" {
+				proof["yard"].(map[string]any)["project"] = "foreign"
+			}
+			body, _ := json.Marshal(proof)
+			marker := config.DeveloperIdentityMarker{Schema: 1, Yard: "owned", Inputs: strings.Repeat("a", 64), Identity: operationStateDigest(proof), Release: strings.Repeat("b", 64), Proof: string(body)}
+			body, _ = json.Marshal(marker)
+			path := config.DeveloperIdentityMarkerPath(root, "owned")
+			mode := os.FileMode(0600)
+			if scenario == "unsafe-mode" {
+				mode = 0644
+			}
+			testkit.WriteFile(t, path, body, mode)
+			hint := config.AppliedIdentityHint{Schema: 1, Yard: "owned", UUID: uuid, Source: strings.Repeat("a", 64), Release: strings.Repeat("b", 64), User: "developer", UID: 1001}
+			if err := config.PublishAppliedIdentityHint(root, hint, config.PersistentFileSnapshot{}); err != nil {
+				t.Fatal(err)
+			}
+			foreign := []string{filepath.Join(root, "foreign-data"), config.DeveloperIdentityMarkerPath(root, "foreign")}
+			for _, sentinel := range foreign {
+				testkit.WriteFile(t, sentinel, []byte("foreign retained bytes"), 0600)
+			}
+			execution := &fullTeardown{RecoveryPlan: uninstall.RecoveryPlan{Yards: []uninstall.RecoveryYard{yard}}}
+			namespaces, scoped, err := fullRootNamespaces(root, uninstall.Installation{ConfigHome: root}, execution, nil)
+			if strings.HasPrefix(scenario, "foreign-") || scenario == "unsafe-mode" {
+				if err == nil {
+					t.Fatal("unsafe removal marker admitted")
+				}
+				return
+			}
+			if err != nil || !scoped {
+				t.Fatal("owned removal assessment", err)
+			}
+			tree, err := uninstall.CaptureScoped(root, namespaces, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "changed" {
+				testkit.WriteFile(t, path, []byte("concurrent winner"), 0600)
+				if err := tree.Remove(); err == nil {
+					t.Fatal("changed removal authority accepted")
+				}
+				if got, err := os.ReadFile(path); err != nil || string(got) != "concurrent winner" {
+					t.Fatal("changed marker removed", err)
+				}
+			} else {
+				if err := tree.Remove(); err != nil {
+					t.Fatal(err)
+				}
+				if err := tree.VerifyRemoved(); err != nil {
+					t.Fatal(err)
+				}
+				for _, removed := range []string{path, config.AppliedIdentityHintPath(root, "owned")} {
+					if _, err := os.Stat(removed); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("owned identity state survived full removal", removed, err)
+					}
+				}
+			}
+			for _, sentinel := range foreign {
+				if got, err := os.ReadFile(sentinel); err != nil || string(got) != "foreign retained bytes" {
+					t.Fatal("foreign adjacent state changed", sentinel, err)
+				}
+			}
+		})
+	}
+}

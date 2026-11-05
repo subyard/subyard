@@ -129,7 +129,23 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		if _, ok := deferred[target.Name]; ok {
 			continue
 		}
-		state, err := observeProfileRuntime(ctx, profileActivationPlatform(operation, target), reconciler.id)
+		if !coreInstalledRuntimeID(reconciler.id) && completedReleaseConfiguration(reconciler.request) {
+			var err error
+			target, err = operation.appliedIntegrationTarget(ctx, target)
+			if err != nil {
+				return releasetransition.V2ActivationObservation{}, reconciler.failure(target.Name, "inspect", err)
+			}
+		}
+		platform := profileActivationPlatform(operation, target)
+		var state ports.RuntimeObservation
+		var err error
+		if observer, ok := platform.(interface {
+			ObserveInstalledReleaseRuntime(context.Context, string) (ports.RuntimeObservation, error)
+		}); ok && coreInstalledRuntimeID(reconciler.id) && completedReleaseConfiguration(reconciler.request) {
+			state, err = observer.ObserveInstalledReleaseRuntime(ctx, reconciler.id)
+		} else {
+			state, err = observeProfileRuntime(ctx, platform, reconciler.id)
+		}
 		if err != nil {
 			return releasetransition.V2ActivationObservation{}, reconciler.failure(target.Name, "inspect", err)
 		}
@@ -147,6 +163,27 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		actualDigest, err = activationStageFingerprint(actual)
 	}
 	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Warnings: warnings}, err
+}
+
+// A completed release retains its installed configuration until an ordinary
+// operation applies newly authored intent. Unfinished transitions still assess
+// their complete desired activation contract.
+func completedReleaseConfiguration(request releasetransition.ProcessRequest) bool {
+	if request.Mode != releasetransition.ProcessInspect {
+		return false
+	}
+	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+	if err != nil {
+		return false
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return false
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	return err == nil && journal.Checkpoint == releasetransition.JournalComplete &&
+		journal.Goal.Target == request.Target && journal.Goal.Direction == request.Direction && journal.ArtifactDigest == request.ArtifactDigest &&
+		journal.RegistryDigest == request.RegistryDigest
 }
 
 func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Context, _ releasetransition.ReleaseLinks) error {

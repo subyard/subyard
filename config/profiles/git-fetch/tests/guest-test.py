@@ -17,6 +17,65 @@ spec.loader.exec_module(guest)
 
 
 class GuestTests(unittest.TestCase):
+    def test_identity_requiesces_enabled_timer_only_after_verified_reboot(self):
+        runtime=self.runtime(stopped=True)
+        runtime.apply()
+        target=dict(user='fixture_next',uid=runtime.uid,gid=runtime.gid,home='/home/fixture_next',group='fixture_next')
+        recipe=runtime.identity_observe(target,'a'*64)
+        self.assertEqual(recipe['manager'][guest.TIMER],['inactive','enabled'])
+        self.timer[0]='active'
+        self.service[0]='failed' # Old login may be gone at a pending account cut.
+        with self.assertRaises(ValueError):runtime.identity_check(recipe,'quiesce')
+        runtime.identity_rebooted=True
+        fd,lock=self.custody_lock()
+        guest.ordinary_custody(runtime,fd,lock)
+        runtime.identity_apply(recipe,'quiesce')
+        self.assertEqual(self.timer,['inactive','enabled'])
+        self.assertEqual(recipe['manager'][guest.TIMER],['inactive','enabled'])
+        (self.units/guest.SERVICE).write_text('foreign')
+        with self.assertRaises(ValueError):runtime.identity_check(recipe,'quiesce')
+
+    def test_identity_rebind_preserves_timer_intent_and_rejects_foreign_units(self):
+        runtime = self.runtime()
+        runtime.apply()
+        target = dict(user='fixture_next', uid=runtime.uid, gid=runtime.gid,
+                      home='/home/fixture_next', group='fixture_next')
+        plan = runtime.identity_observe(target, 'a'*64)
+        fd, lock = self.custody_lock()
+        delayed = 'f'*64
+        runtime.claim_custody(('0',), delayed, fd, lock)
+        guest.ordinary_custody(runtime, fd, lock)
+        saved_manager = self.systemctl
+        def manager(*args):
+            result = saved_manager(*args)
+            if args[0] == 'daemon-reload':
+                content = (self.units/guest.SERVICE).read_text()
+                for field in ('User', 'Group', 'Environment'):
+                    self.overrides.setdefault(guest.SERVICE, {})[field] = ' '.join(line.split('=', 1)[1] for line in content.splitlines() if line.startswith(field+'='))
+            return result
+        guest.systemctl = manager
+        runtime.identity_apply(plan, 'quiesce')
+        self.assertEqual(self.timer, ['inactive', 'enabled'])
+        quiesced = runtime.custody_generation()
+        self.assertNotEqual(quiesced, delayed)
+        with self.assertRaises(ValueError): runtime.claim_custody((delayed,), delayed, fd, lock)
+        service = self.units/guest.SERVICE
+        original = service.read_bytes()
+        service.write_bytes(original+b'# foreign\n')
+        self.calls.clear()
+        with self.assertRaisesRegex(ValueError, 'asset changed'):
+            runtime.identity_apply(plan, 'rebind')
+        self.assertEqual(self.calls, [])
+        service.write_bytes(original)
+        for _ in range(2):
+            guest.ordinary_custody(runtime, fd, lock)
+            runtime.identity_apply(plan, 'rebind')
+            for previous in (delayed,quiesced):
+                with self.assertRaises(ValueError): runtime.claim_custody((previous,), previous, fd, lock)
+            self.assertEqual(self.timer, ['active', 'enabled'])
+            self.assertIn(b'User=fixture_next', service.read_bytes())
+        self.assertTrue(runtime.identity_runtime(target).check(refresh=True))
+
     def test_transport_diagnostic_exposes_only_fixed_source_reason(self):
         self.assertEqual(guest.failure_reason(ValueError('unsafe managed parent')), 'unsafe managed parent')
         self.assertEqual(guest.failure_reason(ValueError('private native output')), 'profile request could not be verified')

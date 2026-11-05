@@ -468,7 +468,8 @@ func TestGitIdentityProbeUsesTypedInstanceState(t *testing.T) {
 	}
 	assertStage(t, runtime, "git-identity", true, "running yard with git config")
 	if calls := incus.ExecCalls; len(calls) != 1 ||
-		calls[0].Request.Command[2] != "/home/developer/.gitconfig" {
+		!slices.Equal(calls[0].Request.Command, []string{"git", "config", "--global", "--fixed-value", "--get-all", "safe.directory", "*"}) ||
+		calls[0].Request.Environment["HOME"] != "/home/developer" || calls[0].Request.User != 1000 {
 		t.Fatalf("unexpected git identity probe: %#v", calls)
 	}
 	incus.ExecSteps = []testkit.IncusExecStep{{

@@ -180,6 +180,10 @@ def observe():
 
 def main():
     arguments = sys.argv[1:]
+    if (arguments[:1]==['identity-observe'] and len(arguments)==3) or (arguments[:1]==['identity-apply'] and len(arguments)==2):
+        import identity
+        identity.run(arguments)
+        return
     if arguments == ['observe']:
         result, _ = observe()
     elif len(arguments) == 4 and arguments[0] == 'apply':

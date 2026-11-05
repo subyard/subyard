@@ -54,6 +54,12 @@ up` applies the service ordering and restarts the service once. Agents whose dae
 still runs inside the service end with that restart, so run it at a quiet moment.
 Repeating `up` also repairs lingering if it was disabled later.
 
+Renaming `DEV_USER` restarts the service, and core moves lingering to the new login.
+`yard init` refuses while agent terminals, the Orca daemon or other user services run,
+because the rename would end them; close them or run `yard orca down` first. It also refuses when the service still has the
+ordering from an earlier release: restore the previous `DEV_USER`, run `yard orca up`, then
+rename again.
+
 `yard orca status` reports this protection. It warns separately when lingering is
 disabled, when the service ordering is pending, when the daemon or a local terminal runs
 inside the service, and when the service or the user manager cannot be read. It changes

@@ -245,6 +245,8 @@ func TestInitPlanNamesStoppedRetirementThroughTheRealCommand(t *testing.T) {
 			root, environment := retiredYardFixture(t)
 			incus := lifecycleIncus()
 			instance := retiredInstance("Stopped", proven)
+			instance.Config["volatile.uuid"] = "11111111-1111-1111-1111-111111111111"
+			instance.LocalConfig["volatile.uuid"] = instance.Config["volatile.uuid"]
 			incus.Instances["subyard/yard"] = instance
 			incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: instance}
 			var output bytes.Buffer
