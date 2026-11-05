@@ -7,7 +7,8 @@ create no `vMAJOR.MINOR.PATCH` ref, so a corrected commit can use the same versi
 
 Run from the managed development checkout with Python 3, authenticated GitHub CLI and the
 [acceptance prerequisites](../testing.md#one-release-candidate). The dispatch workflows must exist
-on the default branch and selected workflow ref; the source commit must contain the release tooling.
+on the default branch; the source commit must contain the release tooling. A
+[compatible workflow ref](#workflow-ref-selection) must run the candidate's own release workflows.
 Choose worktree checks using the
 [validation policy](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 
@@ -79,9 +80,34 @@ The default `.build/release-publication/rRUN_ID-aATTEMPT/` directory holds:
 - `attestation.json` and `publication.json` when generated.
 
 Dispatch requests persist under `.build/release-publication/requests/`. Global `--state-dir DIR`
-selects another root; `--repository OWNER/REPO` selects a fork or fixture. `--workflow-ref BRANCH`
-selects the dispatch workflow independently of the source SHA. Preserve the whole candidate
-directory when moving evidence between operator machines.
+selects another root; `--repository OWNER/REPO` selects a fork or fixture. Preserve the whole
+candidate directory when moving evidence between operator machines.
+
+### Workflow ref selection
+
+The dispatched workflow ref, not the pinned source commit, supplies the workflow definitions and the
+publication fetch tooling. `prepare` and `publish` therefore choose the ref when they create a new
+request: the default branch first, then branches whose head is the candidate, in name order. A ref
+is compatible only when its `.github/workflows/release.yml`, `.github/workflows/release-publish.yml`
+and `dev/release-assets.sh` blobs equal the candidate's and the candidate's `release.yml` blob is a
+registered preparation policy. An explicit `--workflow-ref BRANCH` must name a branch and gets the same check.
+`prepare` also refuses a new request when tag `vX.Y.Z` already exists, naming the owning candidate
+when the tag belongs to this commit. Refusals list every examined ref and happen before dispatch.
+
+When no compatible ref exists, typically a hotfix whose default branch has since changed its
+release workflows, the refusal names the exact release branch and the commands that create it at
+the candidate and publish it. The tool never creates or pushes a branch itself. Then repeat the
+same `prepare` or `publish` command (with `--workflow-ref` of the new branch if a ref was given):
+
+```sh
+git branch release/X.Y.Z-SHORT12 FULL_SHA
+git push origin release/X.Y.Z-SHORT12
+dev/release.sh prepare --version X.Y.Z --commit FULL_SHA
+```
+
+A retained request keeps its recorded ref even after branches move. Continue it by repeating the
+same command; an explicit `--workflow-ref` that differs from the recorded ref is refused with
+that ref's name and dispatches nothing.
 
 Under `subyard-github run`, the broker's token belongs to the App installation of the repository it
 selected, which may come from the working directory's `origin`. Before any GitHub call, local
@@ -258,9 +284,10 @@ unexpected assets and conflicting bytes are never overwritten. A matching publis
 release is verified and returned as success.
 
 If dispatch/run discovery was lost, the persisted request UUID locates the original run. Discovery
-timeout leaves outcome unknown without a second dispatch. Retry once the run becomes visible.
-If it never reached GitHub, inspect the Actions inventory before explicitly retiring the local
-request and issuing another; unknown outcome is never PASS.
+timeout leaves outcome unknown without a second dispatch; repeat the same command once the run
+becomes visible. Unknown outcome is never PASS. There is no retirement command: only after the
+Actions inventory shows no run titled `Subyard REQUEST_UUID` may the operator remove that exact
+request file (`requests/X.Y.Z-FULL_SHA.json` or the candidate's `publication.json`) and repeat the command.
 
 Once a stable ref exists, its version belongs to that candidate even after failure: retry that
 candidate. The tooling never moves/deletes stable refs or replaces foreign/published releases.
@@ -299,6 +326,13 @@ Agents preparing a release apply the
   checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
   then transfer equivalent complete original PASS evidence through the reviewed workflow.
   Rerun only affected or missing gates.
+- A release directly from the default branch needs no extra branch. A hotfix, whose default branch
+  has changes beyond the candidate, gets its own release branch. If hotfix fixes are still
+  uncommitted, the agent prepares them on a local branch from the hotfix base and asks the
+  operator to commit them. At the candidate commit the agent creates the local branch named by the
+  refusal (`git branch release/X.Y.Z-SHORT12 FULL_SHA`) and asks the operator to push it, then
+  repeats `prepare` without `--workflow-ref`. Any pushed branch whose head is the candidate is
+  selected automatically, as described in [workflow ref selection](#workflow-ref-selection).
 
 ## Development verification
 

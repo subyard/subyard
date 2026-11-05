@@ -118,6 +118,9 @@ def capture_attempts(output, names=None):
     m.a.save(output, receipt)
     return root, receipt
 
+CURRENT_POLICY = m.git_blob_sha((ROOT / ".github/workflows/release.yml").read_bytes())
+
+
 class FakeGitHub:
     repository = m.REPOSITORY
     def __init__(self, identity):
@@ -137,6 +140,11 @@ class FakeGitHub:
         self.workflow_blob = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
         self.host_free_verify = True
         self.immutable = True
+        # Release workflow files by ref: the candidate commit and an unchanged default branch.
+        workflow_files = dict(zip(m.WORKFLOW_REF_FILES, (CURRENT_POLICY, "1" * 40, "2" * 40)))
+        self.files = {identity["commit"]: workflow_files, "master": dict(workflow_files)}
+        self.default_branch = "master"
+        self.heads = []
 
     def api(self, path, method="GET", payload=None, missing=False):
         self.calls.append((path, method))
@@ -149,12 +157,29 @@ class FakeGitHub:
             return {"id": 9}
         if path == "contents/.github/workflows/release.yml?ref=" + self.workflow_revision:
             return {"type": "file", "path": ".github/workflows/release.yml", "sha": self.workflow_blob}
+        if path == "":
+            return {"default_branch": self.default_branch}
+        if path == "commits/" + self.identity["commit"] + "/branches-where-head":
+            return [{"name": name, "commit": {"sha": self.identity["commit"]}} for name in self.heads]
+        if path.startswith("contents/") and "?ref=" in path:
+            name, ref = path.removeprefix("contents/").split("?ref=", 1)
+            blob = self.files.get(m.urllib.parse.unquote(ref), {}).get(name)
+            if blob is None and missing:
+                return None
+            return {"type": "file", "path": name, "sha": blob}
         if path.startswith("actions/runs/") and path.endswith("/attempts/1"):
             return {"workflow_id": 9, "event": "workflow_dispatch", "status": "completed",
                 "conclusion": "success" if self.successful_run else "failure", "run_attempt": 1,
                 "repository": {"full_name": self.run_repository}, "head_sha": self.workflow_revision}
         if path.startswith("git/ref/tags/"):
             return copy.deepcopy(self.ref)
+        if path.startswith("git/ref/heads/"):
+            name = m.urllib.parse.unquote(path.removeprefix("git/ref/heads/"))
+            if name in self.files and name != self.identity["commit"]:
+                return {"ref": "refs/heads/" + name}
+            return None if missing else {}
+        if path == "commits/" + self.identity["commit"]:
+            return {"sha": self.identity["commit"]} if self.identity["commit"] in self.files else None
         if path == "git/tags" and method == "POST":
             self.tag = {"message": payload["message"], "object": {"type": "commit", "sha": payload["object"]}, "sha": "t" * 40}
             return self.tag
@@ -1022,6 +1047,7 @@ class Contracts(unittest.TestCase):
         original_api = self.github.api
         def api(path, method="GET", payload=None, missing=False):
             if path.endswith("/dispatches"):
+                self.assertEqual(payload["ref"], "master")
                 dispatched.append(copy.deepcopy(payload["inputs"]))
                 envelope = json.loads(base64.b64decode(payload["inputs"]["attestation"], validate=True))
                 m.publish_remote(self.github, candidate / "prepared", envelope, root)
@@ -1036,8 +1062,18 @@ class Contracts(unittest.TestCase):
                 "--defer-profile", "profile:sample", "--deferral-reason", "Known profile issue; postpone this check",
                 "--deferral-authorization-reference", "operator:fixture"]
         with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=self.github), patch.object(m, "discover", return_value=run):
+            self.github.files["0.26.y"] = {**self.github.files["master"], "dev/release-assets.sh": "e" * 40}
+            with patch.object(sys, "argv", argv + ["--workflow-ref", "0.26.y"]), \
+                 self.assertRaisesRegex(ValueError, "0.26.y: dev/release-assets.sh differs from the candidate"):
+                m.main()
+            self.assertFalse((candidate / "publication.json").exists())
             self.assertEqual(m.main(), 0)
+            # A retained publication request keeps its workflow ref after the branch moves.
+            self.github.files["master"][".github/workflows/release-publish.yml"] = "e" * 40
             self.assertEqual(m.main(), 0)
+            with patch.object(sys, "argv", argv + ["--workflow-ref", "0.26.y"]), \
+                 self.assertRaisesRegex(ValueError, "already uses workflow ref master"):
+                m.main()
             retained = (candidate / "publication.json").read_bytes()
             attestation_before = (candidate / "attestation.json").read_bytes()
             changed = argv.copy()
@@ -1667,6 +1703,145 @@ class Contracts(unittest.TestCase):
         with patch.object(m, "discover", return_value=None), patch.object(m.time, "monotonic", side_effect=[0, 121]):
             with self.assertRaisesRegex(ValueError, "outcome unknown"):
                 m.dispatch(Dispatch(), "release-publish.yml", inputs, state, path)
+
+
+class WorkflowRef(unittest.TestCase):
+    """Dispatch workflow refs must run the candidate's own release workflows."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="subyard-workflow-ref-", dir="/tmp")
+        self.directory = Path(self.temporary.name)
+        _, self.prepared, self.identity = fixture(self.directory)
+        self.commit = self.identity["commit"]
+        self.github = FakeGitHub(self.identity)
+        self.state_dir = self.directory / "state"
+        self.request = self.state_dir / "requests" / ("1.2.3-" + self.commit + ".json")
+        self.branch = "release/1.2.3-" + self.commit[:12]
+        self.dispatched = []
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def move_master(self):
+        self.github.files["master"][".github/workflows/release.yml"] = "e" * 40
+
+    def hotfix_branch(self, name="0.26.y"):
+        self.github.files[name] = dict(self.github.files[self.commit])
+        self.github.heads.append(name)
+
+    def prepare(self, *extra):
+        def dispatch(github, workflow, inputs, state, path):
+            self.dispatched.append(state["workflow_ref"])
+            return {"id": 123, "run_attempt": 1}
+        def fetch(github, candidate, destination):
+            shutil.copytree(self.prepared, destination)
+            return self.identity
+        argv = ["release-publication", "--state-dir", str(self.state_dir), "prepare",
+                "--version", "1.2.3", "--commit", self.commit, *extra]
+        with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=self.github), \
+             patch.object(m, "dispatch", side_effect=dispatch), patch.object(m, "fetch", side_effect=fetch), \
+             redirect_stdout(io.StringIO()):
+            return m.main()
+
+    def refused(self, *extra):
+        with self.assertRaises(ValueError) as refused:
+            self.prepare(*extra)
+        self.assertEqual(self.dispatched, [])
+        self.assertFalse(self.request.exists())
+        self.assertTrue(str(refused.exception).endswith("Nothing was dispatched."))
+        return str(refused.exception)
+
+    def test_default_branch_is_preferred_and_hotfix_branch_is_selected_after_master_moves(self):
+        self.hotfix_branch("a-branch")
+        self.assertEqual(m.select_workflow_ref(self.github, "1.2.3", self.commit), ("master", []))
+        self.move_master()
+        self.hotfix_branch("0.26.y")
+        self.assertEqual(m.select_workflow_ref(self.github, "1.2.3", self.commit), ("0.26.y", []))
+        self.assertEqual(self.prepare(), 0)
+        self.assertEqual(self.dispatched, ["0.26.y"])
+        self.assertEqual(json.loads(self.request.read_text())["workflow_ref"], "0.26.y")
+
+    def test_each_release_workflow_file_must_match_the_candidate(self):
+        for path in m.WORKFLOW_REF_FILES[1:]:
+            with self.subTest(path=path):
+                self.github.files["master"] = dict(self.github.files[self.commit], **{path: "e" * 40})
+                ref, refusals = m.select_workflow_ref(self.github, "1.2.3", self.commit)
+                self.assertIsNone(ref)
+                self.assertIn("master: " + path + " differs from the candidate", refusals[0])
+
+    def test_missing_branch_names_exact_release_branch_commands(self):
+        self.move_master()
+        message = self.refused()
+        self.assertIn("no workflow ref runs candidate " + self.commit + " unchanged:\n"
+                      "    master: .github/workflows/release.yml differs from the candidate", message)
+        self.assertIn("then repeat this command:\n    git branch " + self.branch + " " + self.commit +
+                      "\n    git push origin " + self.branch + "\n", message)
+        files, self.github.files = self.github.files, {}
+        message = self.refused()
+        self.assertIn("candidate commit " + self.commit + " is not on GitHub\n", message)
+        self.assertIn("git push origin " + self.branch, message)
+        self.github.files = {self.commit: {}, "master": files["master"]}
+        message = self.refused()
+        self.assertIn("candidate commit " + self.commit + " has no release workflow files", message)
+        self.assertNotIn("git branch", message)
+
+    def test_unknown_policy_refuses_without_branch_hint(self):
+        for ref in (self.commit, "master"):
+            self.github.files[ref][".github/workflows/release.yml"] = "f" * 40
+        message = self.refused()
+        self.assertIn("blob " + "f" * 40 + " has an unknown preparation workflow policy", message)
+        self.assertNotIn("git branch", message)
+        del self.github.files[self.commit]["dev/release-assets.sh"]
+        message = self.refused()
+        self.assertIn("lacks dev/release-assets.sh", message)
+        self.assertIn("unknown preparation workflow policy", message)
+
+    def test_explicit_ref_is_checked_like_a_selected_ref(self):
+        self.move_master()
+        self.hotfix_branch()
+        message = self.refused("--workflow-ref", "master")
+        self.assertIn("master: .github/workflows/release.yml differs", message)
+        self.assertIn("repeat this command with --workflow-ref " + self.branch + ":", message)
+        self.assertIn("--workflow-ref missing-branch is not a branch", self.refused("--workflow-ref", "missing-branch"))
+        self.assertIn("--workflow-ref " + self.commit + " is not a branch", self.refused("--workflow-ref", self.commit))
+        for invalid in ("../master", "-x", "branch/", "a b"):
+            with self.subTest(ref=invalid):
+                self.assertIn("invalid --workflow-ref", self.refused("--workflow-ref=" + invalid))
+        self.assertEqual(self.prepare("--workflow-ref", "0.26.y"), 0)
+        self.assertEqual(self.dispatched, ["0.26.y"])
+
+    def test_occupied_stable_tag_refuses_with_every_independent_refusal(self):
+        self.move_master()
+        self.github.ref = {"object": {"type": "commit", "sha": self.commit}}
+        message = self.refused()
+        self.assertLess(message.index("master: "), message.index("stable tag v1.2.3 is already occupied"))
+        self.assertIn("git branch " + self.branch, message)
+        self.github.files["master"] = dict(self.github.files[self.commit])
+        self.github.ref = {"object": {"type": "tag", "sha": "t" * 40}}
+        self.github.tag = {"message": "Subyard candidate r9-a2 identity " + "c" * 64 + "\n",
+                           "object": {"type": "commit", "sha": self.commit}}
+        message = self.refused()
+        self.assertIn("v1.2.3 already belongs to candidate r9-a2 of this commit; continue it with: "
+                      "dev/release.sh publish --candidate r9-a2", message)
+        self.github.tag["object"]["sha"] = "d" * 40
+        self.assertIn("v1.2.3 is already occupied", self.refused())
+
+    def test_resume_keeps_retained_ref_after_master_moves_and_refuses_a_conflicting_one(self):
+        self.assertEqual(self.prepare(), 0)
+        self.move_master()
+        # The stable tag of this candidate's own publication must not block a resume.
+        self.github.ref = {"object": {"type": "commit", "sha": self.commit}}
+        self.assertEqual(self.prepare(), 0)
+        self.assertEqual(self.prepare("--workflow-ref", "master"), 0)
+        self.assertEqual(self.dispatched, ["master"] * 3)
+        retained = self.request.read_bytes()
+        self.hotfix_branch()
+        with self.assertRaises(ValueError) as refused:
+            self.prepare("--workflow-ref", "0.26.y")
+        self.assertIn("already uses workflow ref master; repeat the command without --workflow-ref "
+                      "or with --workflow-ref master", str(refused.exception))
+        self.assertEqual(self.dispatched, ["master"] * 3)
+        self.assertEqual(self.request.read_bytes(), retained)
 
 
 class BrokerRepository(unittest.TestCase):

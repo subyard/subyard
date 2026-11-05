@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
 import zipfile
 import zlib
@@ -221,7 +222,8 @@ class GitHub:
         self.prefix = "repos/" + repository + "/"
 
     def api(self, path, method="GET", payload=None, missing=False):
-        command = ["gh", "api", self.prefix + path, "--method", method]
+        # An empty path reads the repository itself.
+        command = ["gh", "api", self.prefix + path if path else self.prefix.rstrip("/"), "--method", method]
         if payload is not None:
             command += ["--input", "-"]
         result = subprocess.run(command, input=canonical(payload) if payload is not None else None,
@@ -837,6 +839,116 @@ def validate_attestation(document, identity, root):
             raise ValueError("external obligation evidence missing")
 
 
+# Files a dispatched workflow ref executes instead of the candidate: release.yml
+# defines the preparation job policy, release-publish.yml fetches the candidate with
+# the ref's tooling before checking out the pinned commit, and release-assets.sh
+# names the expected assets during that fetch.
+WORKFLOW_REF_FILES = (".github/workflows/release.yml", ".github/workflows/release-publish.yml", "dev/release-assets.sh")
+WORKFLOW_REF_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}")
+
+
+def release_branch(version, commit):
+    return "release/" + version + "-" + commit[:12]
+
+
+def workflow_file_blob(github, path, ref):
+    value = github.api("contents/" + path + "?ref=" + urllib.parse.quote(ref, safe=""), missing=True)
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or value.get("type") != "file" or value.get("path") != path
+        or not isinstance(value.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", value["sha"])):
+        raise ValueError("invalid workflow file identity: " + path + " at " + ref)
+    return value["sha"]
+
+
+def select_workflow_ref(github, version, commit, explicit=None):
+    """Return a ref whose dispatched workflows run this candidate unchanged, and refusals.
+
+    Without an explicit ref, the default branch is preferred, then branches whose head is
+    the candidate in name order. The tool never creates or pushes a branch."""
+    refusals, refs = [], []
+    candidate = {path: workflow_file_blob(github, path, commit) for path in WORKFLOW_REF_FILES}
+    absent = [path for path, blob in candidate.items() if blob is None]
+    hint = len(absent) in (0, len(WORKFLOW_REF_FILES))
+    if not hint:
+        refusals.extend("candidate commit " + commit + " lacks " + path for path in absent)
+    elif absent and github.api("commits/" + commit, missing=True) is not None:
+        hint = False
+        refusals.append("candidate commit " + commit + " has no release workflow files")
+    elif absent:
+        refusals.append("candidate commit " + commit + " is not on GitHub")
+    policy = candidate[WORKFLOW_REF_FILES[0]]
+    if policy is not None and policy not in PREPARATION_WORKFLOW_POLICIES:
+        hint = False
+        refusals.append("candidate " + WORKFLOW_REF_FILES[0] + " blob " + policy +
+                        " has an unknown preparation workflow policy; register the reviewed blob in this tooling")
+    if explicit is not None:
+        if not WORKFLOW_REF_PATTERN.fullmatch(explicit) or ".." in explicit or explicit.endswith(("/", ".lock")):
+            refusals.append("invalid --workflow-ref " + shlex.quote(explicit))
+        elif github.api("git/ref/heads/" + urllib.parse.quote(explicit, safe="/"), missing=True) is None:
+            # workflow_dispatch runs only a branch or tag; a commit SHA would fail after dispatch intent.
+            refusals.append("--workflow-ref " + explicit + " is not a branch")
+        else:
+            refs = [explicit]
+    elif not absent:
+        default = github.api("")
+        heads = github.api("commits/" + commit + "/branches-where-head")
+        if (not isinstance(default, dict) or not isinstance(default.get("default_branch"), str)
+            or not isinstance(heads, list)
+            or any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in heads)):
+            raise ValueError("invalid GitHub branch inventory")
+        refs = [default["default_branch"]] + sorted({item["name"] for item in heads} - {default["default_branch"]})
+    compatible, details = None, []
+    for ref in refs if not absent else []:
+        blobs = {path: workflow_file_blob(github, path, ref) for path in WORKFLOW_REF_FILES}
+        if all(blob is None for blob in blobs.values()):
+            details.append(ref + ": ref not found or has no release workflow files")
+            continue
+        differs = [path + (" is missing" if blobs[path] is None else " differs from the candidate")
+                   for path in WORKFLOW_REF_FILES if blobs[path] != candidate[path]]
+        if differs:
+            details.append(ref + ": " + "; ".join(differs))
+        elif compatible is None:
+            compatible = ref
+    if details and compatible is None:
+        refusals.append("no workflow ref runs candidate " + commit + " unchanged:\n" +
+                        "\n".join("    " + line for line in details))
+    if compatible is None and hint:
+        branch = release_branch(version, commit)
+        refusals.append("Create the release branch at the candidate, publish it, then repeat this command" +
+                        (" with --workflow-ref " + branch if explicit is not None else "") + ":\n" +
+                        "    git branch " + branch + " " + commit + "\n" +
+                        "    git push origin " + branch)
+    return (None if refusals else compatible), refusals
+
+
+def stable_tag_refusals(github, version, commit):
+    """Refuse a new preparation whose stable version tag already exists."""
+    tag = "v" + version
+    ref = github.api("git/ref/tags/" + tag, missing=True)
+    if ref is None:
+        return []
+    obj = github.api("git/tags/" + ref["object"]["sha"]) if ref.get("object", {}).get("type") == "tag" else {}
+    owner = re.fullmatch(r"Subyard candidate (r[1-9][0-9]*-a[1-9][0-9]*) identity [0-9a-f]{64}",
+                         str(obj.get("message", "")).strip())
+    if owner and obj.get("object", {}).get("type") == "commit" and obj["object"].get("sha") == commit:
+        return ["stable tag " + tag + " already belongs to candidate " + owner[1] +
+                " of this commit; continue it with: dev/release.sh publish --candidate " + owner[1]]
+    return ["stable tag " + tag + " is already occupied; prepare a free version"]
+
+
+def retained_workflow_ref(state, explicit):
+    if explicit is not None and explicit != state["workflow_ref"]:
+        return ["this request already uses workflow ref " + state["workflow_ref"] +
+                "; repeat the command without --workflow-ref or with --workflow-ref " + state["workflow_ref"]]
+    return []
+
+
+def refuse(refusals):
+    if refusals:
+        raise ValueError("\n".join(refusals) + "\nNothing was dispatched.")
+
+
 def verify_owned_ref(github, tag, marker, commit, ref=None):
     ref = ref if ref is not None else github.api("git/ref/tags/" + tag)
     if ref["object"]["type"] != "tag":
@@ -1020,7 +1132,7 @@ def main():
     prepare = sub.add_parser("prepare", help="dispatch all preparation gates on a pinned commit; create no stable tag")
     prepare.add_argument("--version", required=True)
     prepare.add_argument("--commit", required=True)
-    prepare.add_argument("--workflow-ref", default="master", help="branch containing the dispatch workflow")
+    prepare.add_argument("--workflow-ref", help="dispatch workflow branch; default: compatible default or candidate head branch")
     for action in ("accept", "publish"):
         command = sub.add_parser(action)
         command.add_argument("--candidate", required=True)
@@ -1029,7 +1141,7 @@ def main():
             command.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
             command.add_argument("--only", action="append", default=[], help="run one exact check or check family; repeat as needed")
         else:
-            command.add_argument("--workflow-ref", default="master")
+            command.add_argument("--workflow-ref", help="dispatch workflow branch; default: compatible default or candidate head branch")
             command.add_argument("--operator-acceptance", type=Path, action="append", default=[],
                                  help="explicit exact-candidate profile failure declaration; repeat for each authorized check")
             command.add_argument("--defer-profile", action="append", default=[], metavar="CHECK",
@@ -1075,11 +1187,15 @@ def main():
         requests.mkdir(exist_ok=True)
         path = requests / (args.version + "-" + args.commit + ".json")
         with a.acceptance_lock(requests):
-            state = json.loads(path.read_text()) if path.exists() else {
-                "request": str(uuid.uuid4()), "version": args.version, "commit": args.commit,
-                "repository": args.repository, "workflow_ref": args.workflow_ref}
-            if not same_repository(state["repository"], args.repository):
-                raise ValueError("request repository mismatch")
+            if path.exists():
+                state = json.loads(path.read_text())
+                refusals = [] if same_repository(state["repository"], args.repository) else ["request repository mismatch"]
+                refuse(refusals + retained_workflow_ref(state, args.workflow_ref))
+            else:
+                workflow_ref, refusals = select_workflow_ref(github, args.version, args.commit, args.workflow_ref)
+                refuse(refusals + stable_tag_refusals(github, args.version, args.commit))
+                state = {"request": str(uuid.uuid4()), "version": args.version, "commit": args.commit,
+                         "repository": args.repository, "workflow_ref": workflow_ref}
             write_json(path, state)
             run = dispatch(github, "release.yml", {"version": args.version, "commit": args.commit}, state, path)
             state.setdefault("next_action_at", utc_now())
@@ -1142,10 +1258,15 @@ def main():
         if deferred:
             print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
         path = directory / "publication.json"
-        state = json.loads(path.read_text()) if path.exists() else {
-            "request": str(uuid.uuid4()), "workflow_ref": args.workflow_ref, "attestation_sha256": identity_hash(document)}
-        if state["attestation_sha256"] != identity_hash(document):
-            raise ValueError("publication attestation changed; preserve original unfinished state")
+        if path.exists():
+            state = json.loads(path.read_text())
+            refuse((["publication attestation changed; preserve original unfinished state"]
+                    if state["attestation_sha256"] != identity_hash(document) else [])
+                   + retained_workflow_ref(state, args.workflow_ref))
+        else:
+            workflow_ref, refusals = select_workflow_ref(github, identity["version"], identity["commit"], args.workflow_ref)
+            refuse(refusals)
+            state = {"request": str(uuid.uuid4()), "workflow_ref": workflow_ref, "attestation_sha256": identity_hash(document)}
         write_json(directory / "attestation.json", document)
         write_json(path, state)
         encoded = encode_attestation(document, github, state["request"])
