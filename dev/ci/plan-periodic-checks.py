@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the GitHub Actions matrix of release VM checks from their existing owners."""
+"""Print the periodic E2E matrices of release acceptance VM checks from their existing owners."""
 import importlib.util
 import json
 import pathlib
@@ -39,7 +39,7 @@ def plan(root=ROOT):
                                     cwd=root, text=True).splitlines()
     full = [line.split("\t", 1)[1].split() for line in lanes if line.startswith("full\t")]
     if len(full) != 1 or not full[0]:
-        raise SystemExit("plan-release-checks: P0 full lane inventory is missing")
+        raise SystemExit("plan-periodic-checks: P0 full lane inventory is missing")
     # The workflow's pool gate already runs boundary. The cleanup lane verifies a previous
     # lane's leftovers, and a fresh runner has none.
     include += [{"id": "p0:" + lane, "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, *SLOT]}
@@ -50,12 +50,12 @@ def plan(root=ROOT):
                 for version in versions]
     missing = sorted(set(AGENT_BASELINES) - set(versions))
     if missing:
-        raise SystemExit("plan-release-checks: unpinned agent baselines: " + " ".join(missing))
+        raise SystemExit("plan-periodic-checks: unpinned agent baselines: " + " ".join(missing))
     include += [{"id": f"published:{version}:{agents}", "command": published_upgrade(version, agents)}
                 for version, agents in AGENT_BASELINES.items()]
     unknown = sorted(NESTED - {check["id"] for check in include})
     if unknown:
-        raise SystemExit("plan-release-checks: unknown nested checks: " + " ".join(unknown))
+        raise SystemExit("plan-periodic-checks: unknown nested checks: " + " ".join(unknown))
     return {"checks": {"include": [c for c in include if c["id"] not in NESTED]},
             "nested": {"include": [c for c in include if c["id"] in NESTED]}}
 

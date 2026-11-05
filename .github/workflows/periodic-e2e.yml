@@ -1,10 +1,11 @@
-name: Release tests
+name: Periodic E2E
 run-name: >-
   ${{ inputs.origin && format('Nested VM checks on Intel, attempt {0}, for run {1}', inputs.attempt, inputs.origin)
   || (github.event_name == 'push' && github.event.head_commit.message) || github.workflow }}
 
-# Long release VM checks on hosted runners, ahead of a release. A red check here is a finding to
-# fix early; this workflow does not replace release acceptance. It holds no secrets and never
+# Periodic full end-to-end run: the long VM checks of release acceptance on hosted runners, so
+# their failures surface between releases. A red check here is a finding to fix early; this
+# workflow does not replace release acceptance. It holds no secrets and never
 # runs pull request code, because the jobs run the checked out source as root.
 on:
   schedule:
@@ -37,12 +38,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-tests-${{ github.ref }}${{ inputs.origin && format('-retry-{0}', inputs.origin) || '' }}
+  group: periodic-e2e-${{ github.ref }}${{ inputs.origin && format('-retry-{0}', inputs.origin) || '' }}
   # A probe branch's new push replaces its run; master and retries always finish.
   cancel-in-progress: ${{ !inputs.origin && startsWith(github.ref, 'refs/heads/ci-probe/') }}
 
 env:
-  CANDIDATE_VERSION: 1.0.0-ci.release-tests
+  CANDIDATE_VERSION: 1.0.0-ci.periodic-e2e
   NESTED_ATTEMPTS: 20
 
 jobs:
@@ -67,7 +68,7 @@ jobs:
         run: |
           run=true
           if [ "$EVENT" = schedule ]; then
-            last="$(gh run list --workflow release-tests.yml --branch "$REF" --status completed \
+            last="$(gh run list --workflow periodic-e2e.yml --branch "$REF" --status completed \
               --limit 30 --json headSha,event \
               --jq 'map(select(.event == "schedule" or .event == "push"))[0].headSha // ""')"
             [ "$last" != "$HEAD" ] || run=false
@@ -100,7 +101,7 @@ jobs:
         env:
           ONLY: ${{ inputs.checks }}
         run: |
-          plan="$(python3 -B dev/ci/plan-release-checks.py)"
+          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"
           if [ -n "$ONLY" ]; then
             plan="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
               | map_values(.include |= map(select(.id as $id | $ids | index($id))))' <<<"$plan")"
@@ -148,7 +149,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Probe each virtualization layer
-        run: bash dev/ci/release-tests.sh layers
+        run: bash dev/ci/periodic-e2e.sh layers
 
   # One real lease first: if the pool cannot run here, the matrix would only repeat that failure.
   # A retry already passed it in its original run.
@@ -172,7 +173,7 @@ jobs:
           path: ${{ runner.temp }}/candidate
       - name: Install the pool and hold one lease
         run: >-
-          bash dev/ci/release-tests.sh check pool-boundary
+          bash dev/ci/periodic-e2e.sh check pool-boundary
           "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz"
           bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1
 
@@ -207,7 +208,7 @@ jobs:
           CHECK_COMMAND: ${{ toJSON(matrix.command) }}
         run: |
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
-          bash dev/ci/release-tests.sh check "$CHECK_ID" \
+          bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \
             "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
 
   # Checks that boot a VM inside the leased VM. On an AMD runner the job only explains the skip;
@@ -263,7 +264,7 @@ jobs:
           CHECK_COMMAND: ${{ toJSON(matrix.command) }}
         run: |
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
-          bash dev/ci/release-tests.sh check "$CHECK_ID" \
+          bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \
             "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
 
   # The only job allowed to start runs. It checks out nothing and runs no repository code.
@@ -299,7 +300,7 @@ jobs:
               "$NESTED_ATTEMPTS" "$checks"
             exit 1
           fi
-          gh workflow run release-tests.yml --ref "$REF" -f checks="$checks" -f origin="$ORIGIN" \
+          gh workflow run periodic-e2e.yml --ref "$REF" -f checks="$checks" -f origin="$ORIGIN" \
             -f attempt="$attempt"
           printf 'Rescheduled on new runners at the latest %s commit, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
             "$REF" "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"

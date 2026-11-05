@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Runs release VM checks on a disposable GitHub-hosted runner. The runner becomes an ordinary
+# Runs a periodic E2E VM check on a disposable GitHub-hosted runner. The runner becomes an ordinary
 # owner: the candidate runtime installs the test-vms service, and unchanged controllers lease
 # from it. A failing check is a result; the probes here only establish that it could run.
 set -uo pipefail
 umask 022
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RESULTS="${RUNNER_TEMP:-/var/tmp}/release-tests-results.tsv"
+RESULTS="${RUNNER_TEMP:-/var/tmp}/periodic-e2e-results.tsv"
 # Controllers attribute leases from the managed workspace path.
 WORKSPACE=/srv/workspaces/Subyard/src
 VM_IMAGE=subyard-ci-debian-13-vm
@@ -24,7 +24,7 @@ users:
 ssh_pwauth: false
 '
 
-die() { printf 'release-tests: %s\n' "$*" >&2; exit 2; }
+die() { printf 'periodic-e2e: %s\n' "$*" >&2; exit 2; }
 
 require_runner() {
   [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
@@ -345,11 +345,11 @@ layer_probes() {
 
 require_runner
 case "${1:-}" in
-  layers) [ "$#" = 1 ] || die 'usage: release-tests.sh layers'; layer_probes ;;
+  layers) [ "$#" = 1 ] || die 'usage: periodic-e2e.sh layers'; layer_probes ;;
   check)
-    [ "$#" -ge 4 ] || die 'usage: release-tests.sh check ID BUNDLE COMMAND...'
+    [ "$#" -ge 4 ] || die 'usage: periodic-e2e.sh check ID BUNDLE COMMAND...'
     shift
     check_probes "$@"
     ;;
-  *) die 'usage: release-tests.sh layers | check ID BUNDLE COMMAND...' ;;
+  *) die 'usage: periodic-e2e.sh layers | check ID BUNDLE COMMAND...' ;;
 esac
