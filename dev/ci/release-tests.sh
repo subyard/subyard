@@ -97,6 +97,19 @@ facts() {
   printf '\n'
 }
 
+reload_runner_kvm() {
+  sudo -n modprobe -r kvm_amd kvm
+  sudo -n modprobe kvm "$@"
+  sudo -n modprobe kvm_amd
+}
+
+# On AMD under the runner's Hyper-V, a VM nested in our VMs boots far slower with the TDP MMU.
+tune_runner_kvm() {
+  grep -qw svm /proc/cpuinfo || { printf 'runner is not AMD: unchanged\n'; return 0; }
+  reload_runner_kvm tdp_mmu=N
+  grep -H . /sys/module/kvm/parameters/tdp_mmu
+}
+
 enable_kvm() {
   printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
     | sudo -n tee /etc/udev/rules.d/99-subyard-ci-kvm.rules >/dev/null
@@ -207,6 +220,7 @@ check_probes() {
   shift 2
   : > "$RESULTS"
   probe facts facts
+  probe kvm-tune tune_runner_kvm
   probe kvm-udev enable_kvm
   probe prepare-host prepare_host
   probe docker-removed drop_docker
@@ -294,25 +308,36 @@ nested_incus() {
 nested_boot() {
   local vm="$1"
   incus_root file push "$ROOT/dev/ci/l3-boot-probe.sh" "$vm/var/tmp/l3-boot-probe.sh"
-  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh 240
+  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh firmware 240
+  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh stack 300
 }
 
 runner_kernel() {
   sudo -n dmesg | grep -i -E 'kvm|svm|nested' | tail -n 20 || true
+  grep -H . /sys/module/kvm_amd/parameters/{nested,npt,vgif,vls,avic,vnmi} 2>/dev/null || true
 }
 
-# The same firmware boot after the runner's own KVM drops its TDP MMU.
-nested_boot_runner_variant() {
+# Restarts the VM around a reload of the runner's KVM, so every result has the same history.
+runner_settings() {
   local vm="$1"
-  grep -qw svm /proc/cpuinfo || { printf 'runner is not AMD: skipped\n'; return 0; }
+  shift
+  printf 'runner kvm settings: %s\n' "${*:-defaults}"
   incus_root stop --force --all --project default
-  sudo -n modprobe -r kvm_amd kvm
-  sudo -n modprobe kvm tdp_mmu=N
-  sudo -n modprobe kvm_amd
-  grep -H . /sys/module/kvm/parameters/tdp_mmu /sys/module/kvm_amd/parameters/npt
+  reload_runner_kvm "$@"
   incus_root start "$vm"
   wait_agent "$vm"
-  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh 240 firmware
+}
+
+nested_boot_runner_variants() {
+  local vm="$1" settings
+  grep -qw svm /proc/cpuinfo || { printf 'runner is not AMD: skipped\n'; return 0; }
+  for settings in '' tdp_mmu=N 'tdp_mmu=N nx_huge_pages=never eager_page_split=N' 'tdp_mmu=N halt_poll_ns=0'; do
+    # shellcheck disable=SC2086 # Each entry is a list of module parameters.
+    runner_settings "$vm" $settings
+    incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh firmware 240
+  done
+  runner_settings "$vm" tdp_mmu=N
+  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh stack 900
 }
 
 two_vms() {
@@ -341,7 +366,7 @@ layer_probes() {
   probe_after vm-start l3-incus nested_incus vm1
   probe_after l3-incus l3-boot nested_boot vm1
   probe l3-runner-kernel runner_kernel
-  probe_after l3-boot l3-boot-runner-variant nested_boot_runner_variant vm1
+  probe_after l3-boot l3-boot-runner-variants nested_boot_runner_variants vm1
   probe_after vm-start two-vms two_vms
   probe facts-after facts
   write_summary
