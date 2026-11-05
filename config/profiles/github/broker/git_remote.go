@@ -243,6 +243,7 @@ func startCurl(ctx context.Context, name, target, token string, tentative bool, 
 	cmd := gitCommand(ctx)
 	cmd.Path = strings.TrimSpace(string(data)) + "/git-remote-https"
 	cmd.Args = []string{cmd.Path, name, target}
+	cmd.Env = os.Environ()
 	if token != "" {
 		executable, e := os.Executable()
 		if e != nil {
@@ -263,6 +264,7 @@ func startCurl(ctx context.Context, name, target, token string, tentative bool, 
 		}
 		cmd.Env = append(cmd.Env, ephemeralToken+"="+token, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never")
 	}
+	cmd.Env = withProtocolV0(cmd.Env)
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -294,6 +296,30 @@ func startCurl(ctx context.Context, name, target, token string, tentative bool, 
 		}
 	}
 	return remote, nil
+}
+
+// This helper relays list/fetch/push and does not offer stateless-connect. Under
+// protocol v2 the stock HTTPS helper answers list with no refs, so it must speak v0
+// regardless of the user's protocol.version; a later command-line setting wins.
+func withProtocolV0(environment []string) []string {
+	const parameter = "'protocol.version=0'"
+	result := make([]string, 0, len(environment)+1)
+	merged := false
+	for _, entry := range environment {
+		if value, ok := strings.CutPrefix(entry, "GIT_CONFIG_PARAMETERS="); ok && !merged {
+			merged = true
+			if value != "" {
+				entry = "GIT_CONFIG_PARAMETERS=" + value + " " + parameter
+			} else {
+				entry = "GIT_CONFIG_PARAMETERS=" + parameter
+			}
+		}
+		result = append(result, entry)
+	}
+	if !merged {
+		result = append(result, "GIT_CONFIG_PARAMETERS="+parameter)
+	}
+	return result
 }
 
 func (remote *curlRemote) exchange(line string, block bool) (string, error) {

@@ -20,7 +20,8 @@ func TestGitAccessPermissionsAndTargetedInstallations(t *testing.T) {
 	for _, test := range []struct{ name, operation, installation, token, state string }{
 		{"read", "read", `{"contents":"read"}`, `{"contents":"read"}`, "available"},
 		{"write can read", "read", `{"contents":"write"}`, `{"contents":"write"}`, "available"},
-		{"push requires workflows", "push", `{"contents":"write"}`, `{"contents":"write"}`, "insufficient-permissions"},
+		{"push requires contents write", "push", `{"contents":"read","workflows":"write"}`, `{"contents":"read","workflows":"write"}`, "insufficient-permissions"},
+		{"push without workflows", "push", `{"contents":"write"}`, `{"contents":"write"}`, "available"},
 		{"push", "push", `{"contents":"write","workflows":"write"}`, `{"contents":"write","workflows":"write"}`, "available"},
 		{"token reduced grants", "push", `{"contents":"write","workflows":"write"}`, `{"contents":"read"}`, "insufficient-permissions"},
 		{"unknown installation", "read", `null`, `{"contents":"read"}`, "unknown"},

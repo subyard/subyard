@@ -30,7 +30,8 @@ func permissionState(grants map[string]string, operation string) string {
 	if operation == "read" && (contents == "read" || contents == "write") {
 		return "available"
 	}
-	if operation == "push" && contents == "write" && grants["workflows"] == "write" {
+	// Workflow-file updates additionally need Workflows write; GitHub enforces that per push.
+	if operation == "push" && contents == "write" {
 		return "available"
 	}
 	return "insufficient-permissions"

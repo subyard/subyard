@@ -367,6 +367,9 @@ class NativeGitTest(unittest.TestCase):
                 environment = dict(os.environ, GIT_PROJECT_ROOT=str(fixture.remotes), GIT_HTTP_EXPORT_ALL='1',
                                    PATH_INFO=path, QUERY_STRING=query, REQUEST_METHOD=self.command,
                                    CONTENT_TYPE=self.headers.get('Content-Type', ''), REMOTE_USER='fixture')
+                # Like GitHub, honor the client's protocol request; v2 empties the stock helper's list.
+                if self.headers.get('Git-Protocol'):
+                    environment['GIT_PROTOCOL'] = self.headers['Git-Protocol']
                 body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 result = subprocess.run(['git', 'http-backend'], input=body, env=environment, capture_output=True)
                 if self.command == 'POST' and path.endswith('/git-receive-pack'):
@@ -385,6 +388,7 @@ class NativeGitTest(unittest.TestCase):
         self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
         self.git('config', '--global', 'http.proxy', 'http://127.0.0.1:'+str(server.server_port))
         self.git('config', '--global', 'http.sslVerify', 'false')
+        self.git('config', '--global', 'protocol.version', '2')
         log = self.work/'credentials.log'
         credential = self.bin/'original-credential'
         credential.write_text('#!/usr/bin/env python3\nimport sys\ndata=sys.stdin.read()\n'

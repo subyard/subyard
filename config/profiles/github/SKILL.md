@@ -22,7 +22,7 @@ For ordinary Git, check `subyard-github status --git`. With the owner-selected
 `broker-last` tries original authentication (including anonymous HTTPS) first and only
 requests App access if ref discovery fails. Cancellation stops selection; if both
 attempts fail, the operation fails without retrying the original transport.
-Reads require Contents read/write; every App push requires Contents and Workflows write.
+Reads require Contents read/write; App pushes require Contents write, plus Workflows write for workflow-file changes.
 Backend selection stays fixed after ref discovery: never retry a failed/partial push
 under another identity automatically. Saved URLs stay unchanged; pre-push sees the
 helper URL as its second argument. LFS/custom URL-parsing hooks and fetch

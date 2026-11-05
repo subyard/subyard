@@ -216,10 +216,10 @@ selection. If that broker attempt fails, the command fails without retrying the 
 
 When tried, the broker checks the selected repository's installation and effective token
 permissions through `/git-access/v1`; legacy `/token` is unchanged. Reads require Contents read
-or write. Every push conservatively requires both Contents write and Workflows write, including
-code-only pushes. Missing or unknown grants, an unavailable/unconfigured broker, an old broker,
-or failed read-only broker discovery choose the original transport in `broker-first` before refs
-reach parent Git.
+or write; pushes require Contents write. A push that changes workflow files also needs
+Workflows write, which GitHub enforces and reports for that push. Missing or unknown grants,
+an unavailable/unconfigured broker, an old broker, or failed read-only broker discovery choose
+the original transport in `broker-first` before refs reach parent Git.
 Targeted requests never retry the default installation, and token scope remains installation-wide.
 
 Broker HTTPS uses stock Git with an ephemeral credential helper isolated from ordinary helpers,
@@ -236,7 +236,8 @@ Parent Git runs `pre-push` once, but its second argument is the effective
 `subyard-github::...` helper URL. Hooks that parse this URL, including Git LFS integration, require
 separate compatibility work; transparent LFS/custom-hook support is not promised. The helper
 supports fetch/push/option rather than connect/stateless-connect, so `fetch --negotiate-only`
-is unsupported. Git's pack engine remains native. Submodules allow only the narrowly validated
+is unsupported and HTTPS always uses Git protocol v0, whatever `protocol.version` selects.
+Git's pack engine remains native. Submodules allow only the narrowly validated
 `subyard-github` protocol; the profile never broadly enables arbitrary protocols. Live GitHub
 permission policy and external authentication still require verification with the intended account.
 
