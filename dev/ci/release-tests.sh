@@ -129,8 +129,14 @@ free_disk() {
   sudo -n find /opt/hostedtoolcache -mindepth 1 -maxdepth 1 ! -name go -exec rm -rf {} +
   sudo -n rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
     /usr/lib/jvm /usr/lib/google-cloud-sdk /usr/local/share/powershell /usr/local/share/chromium \
-    /usr/local/lib/node_modules /opt/microsoft /opt/google /opt/az /usr/share/miniconda
+    /usr/local/lib/node_modules /opt/microsoft /opt/google /opt/az /usr/share/miniconda \
+    /usr/local/julia* /usr/local/share/vcpkg /usr/share/kotlinc /usr/local/aws-cli \
+    /usr/local/aws-sam-cli /usr/share/gradle* /usr/share/apache-maven* /usr/share/sbt /opt/pipx \
+    /usr/lib/firefox /usr/share/az_* /usr/share/rust "$HOME/.rustup" "$HOME/.cargo" \
+    /usr/local/share/boost /opt/mssql-tools /usr/lib/mono
   df -h /
+  # What is left, for the next trim.
+  sudo -n du -xh -d 3 / 2>/dev/null | sort -h | tail -n 30
 }
 
 drop_docker() {
@@ -197,7 +203,9 @@ run_check() {
   cd "$WORKSPACE"
   controller_env "$@" </dev/null || status=$?
   # The runner is gone afterwards, and only these events hold a refusal's or quarantine's reason.
-  [ "$status" = 0 ] || controller_env dev/agent-e2e.sh --logs --slot 1 -n 50 </dev/null || true
+  # Checks lease through either the service route or the yard route, with separate histories.
+  [ "$status" = 0 ] || controller_env dev/agent-e2e.sh --logs --slot 1 -n 50 </dev/null \
+    || controller_env dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 50 </dev/null || true
   return "$status"
 }
 

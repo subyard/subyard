@@ -12,6 +12,10 @@ on:
         description: Sample only the virtualization layer probes, on more runners
         type: boolean
         default: false
+      checks:
+        description: Space-separated check ids to run instead of all; skips the layer probes
+        type: string
+        default: ''
   push:
     branches:
       - 'ci-probe/**'
@@ -77,8 +81,15 @@ jobs:
         run: python3 dev/release-acceptance.py prepare --version "$CANDIDATE_VERSION" --output .build/candidate
       - name: Plan the checks from their owners
         id: plan
+        env:
+          ONLY: ${{ inputs.checks }}
         run: |
           checks="$(python3 -B dev/ci/plan-release-checks.py)"
+          if [ -n "$ONLY" ]; then
+            checks="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
+              | .include |= map(select(.id as $id | $ids | index($id)))' <<<"$checks")"
+            [ "$(jq '.include | length' <<<"$checks")" -gt 0 ] || { echo "no such checks: $ONLY"; exit 1; }
+          fi
           printf 'checks=%s\n' "$checks" >> "$GITHUB_OUTPUT"
           jq -r '.include[].id' <<<"$checks" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -94,6 +105,7 @@ jobs:
   layers:
     name: layers-${{ matrix.sample }}
     needs: candidate
+    if: ${{ !inputs.checks }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     continue-on-error: true
