@@ -133,7 +133,8 @@ free_disk() {
     /usr/local/julia* /usr/local/share/vcpkg /usr/share/kotlinc /usr/local/aws-cli \
     /usr/local/aws-sam-cli /usr/share/gradle* /usr/share/apache-maven* /usr/share/sbt /opt/pipx \
     /usr/lib/firefox /usr/share/az_* /usr/share/rust "$HOME/.rustup" "$HOME/.cargo" \
-    /usr/local/share/boost /opt/mssql-tools /usr/lib/mono
+    /usr/local/share/boost /opt/mssql-tools /usr/lib/mono /usr/lib/llvm-16 /usr/lib/llvm-17 \
+    /usr/lib/llvm-18 /etc/skel/.rustup /etc/skel/.cargo /home/packer
   df -h /
   # What is left, for the next trim.
   sudo -n du -xh -d 3 / 2>/dev/null | sort -h | tail -n 30
