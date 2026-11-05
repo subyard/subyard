@@ -1378,9 +1378,24 @@ assert service.index("HOLDER_PID=''", service.index(': > "$STATE_PARENT/holder.r
 assert boundary < service.index('fixture_yard service stop test-vms --yes')
 assert 'SERVICE_CONTAINER_BOUNDARY=' in service[boundary:]
 assert 'adopt_supported_upgrade_owner' not in fixture
-assert 'runtime_yard service register' not in fixture
+# The manual current owner must use the real service contract before public refresh.
+# Authentic cold-upgrade retains its explicit pre-registration transport.
+start = fixture.index('if [ "$SUPPORTED_UPGRADE" = 1 ]; then\n  prepare_supported_upgrade_owner\nelse\n')
+end = fixture.index("\nprintf 'STAGING_CANDIDATE='", start)
+owner_setup = fixture[start:end]
+for mode, native in ((0, 0), (0, 23), (1, 0)):
+    script = 'set -euo pipefail\nSUPPORTED_UPGRADE='+str(mode)+' YARD=test-yard\n'
+    script += 'prepare_supported_upgrade_owner() { echo historical; }\nprepare_minimal_owner() { echo minimal; }\n'
+    script += 'runtime_yard() { [ "$*" = "service register test-vms --yard test-yard --yes" ]; echo registered; return '+str(native)+'; }\n'
+    script += owner_setup+'\necho probe-ready\n'
+    result = subprocess.run(['bash', '-c', script], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == native, (mode, native, result)
+    expected = ['historical', 'probe-ready'] if mode else ['minimal', 'registered'] + ([] if native else ['probe-ready'])
+    assert result.stdout.splitlines() == expected, (mode, native, result)
+assert end < fixture.index('cold post-upgrade base validation')
 assert '--verify-boundary' not in fixture
-print('current canonical service lane owns default-route singleton negative boundary after release; historical cold keeps explicit transport')
+print('manual current broker registers before public refresh; historical cold keeps explicit transport and registration failures propagate')
 
 boundary_proof = service.split("<<'PYBOUNDARY'\n",1)[1].split('\nPYBOUNDARY',1)[0]
 for fault in ['', 'missing', 'generation', 'pin', 'mode', 'link', 'hardlink']:

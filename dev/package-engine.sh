@@ -199,7 +199,7 @@ for required in config/installation-capabilities.json \
 done
 (
   cd "$bundle_stage"
-  find . -type f ! -path './runtime-files.sha256' -print0 | sort -z | xargs -0 sha256sum \
+  find . -type f ! -path './runtime-files.sha256' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum \
     > runtime-files.sha256
 )
 chmod 0644 "$bundle_stage/runtime-files.sha256"

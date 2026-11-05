@@ -1184,6 +1184,8 @@ if [ "$SUPPORTED_UPGRADE" = 1 ]; then
   prepare_supported_upgrade_owner
 else
   prepare_minimal_owner
+  # Manual backend setup has no service install step; adopt its proved runtime.
+  runtime_yard service register test-vms --yard "$YARD" --yes
 fi
 printf 'STAGING_CANDIDATE='
 python3 - "$ROOT" "$SUBYARD_HOME/runtime/current/bin/yard-engine" <<'PY'
