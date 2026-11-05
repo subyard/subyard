@@ -197,7 +197,7 @@ run_check() {
   cd "$WORKSPACE"
   controller_env "$@" </dev/null || status=$?
   # The runner is gone afterwards, and only these events hold a refusal's or quarantine's reason.
-  [ "$status" = 0 ] || controller_env dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 50 </dev/null || true
+  [ "$status" = 0 ] || controller_env dev/agent-e2e.sh --logs --slot 1 -n 50 </dev/null || true
   return "$status"
 }
 
@@ -270,9 +270,9 @@ vm_reboot() {
   printf 'boot id changed: %s -> %s\n' "$before" "$after"
 }
 
-# A VM inside the runner's VM: the depth YARD_KIND=vm fixtures need. Incus comes from the
-# product installer with the broker base recipe's context, the same stack the fixtures use.
-nested_vm() {
+# Incus inside the runner's VM, the depth YARD_KIND=vm fixtures need. It comes from the product
+# installer with the broker base recipe's context, the same stack the fixtures use.
+nested_incus() {
   local vm="$1"
   incus_root file push -r -p "$ROOT/scripts" "$vm/var/tmp/l3-recipe/"
   incus_root exec "$vm" --env DEBIAN_FRONTEND=noninteractive --env SUBYARD_ENGINE_CONTEXT=1 \
@@ -285,73 +285,34 @@ nested_vm() {
     --env SSH_HOST= --env DEV_USER=dev --env DEV_UID=1000 --env DEV_SUDO=1 \
     --env FORWARD_SSH_AGENT=0 --env NESTED_E2E_VMS=0 -- sh -euc '
     apt-get -o Acquire::Retries=3 update -qq
-    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends ca-certificates curl jq
+    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends ca-certificates curl jq python3
     bash /var/tmp/l3-recipe/scripts/01-install-incus.sh --upgrade-only --yes --zabbly
     incus --version
-    incus admin init --auto
-    ls -l /dev/kvm
-    incus launch images:debian/13/cloud l3 --vm -c limits.cpu=1 -c limits.memory=1GiB \
-      -c security.secureboot=false </dev/null \
-      || { journalctl -u incus --no-pager -n 40 </dev/null; exit 1; }
-    start=$(date +%s)
-    reported=$start
-    until incus exec l3 -- true </dev/null >/dev/null 2>&1; do
-      now=$(date +%s)
-      if [ $(( now - reported )) -ge 60 ]; then
-        reported=$now
-        incus console l3 --show-log </dev/null > /tmp/l3-console 2>&1 || true
-        printf "l3 t=%ss console_lines=%s last: %s\n" "$(( now - start ))" \
-          "$(wc -l < /tmp/l3-console)" "$(grep -v "^[[:space:]]*$" /tmp/l3-console | tail -n 1 | cut -c1-120)"
-      fi
-      if [ $(( now - start )) -ge 900 ]; then
-        tail -n 60 /tmp/l3-console
-        incus info l3 --show-log </dev/null | tail -n 30
-        grep -m1 -o -w -E "svm|vmx" /proc/cpuinfo || true
-        grep -H . /sys/module/kvm_amd/parameters/* /sys/module/kvm_intel/parameters/nested 2>/dev/null || true
-        dmesg | grep -i -E "kvm|svm" | tail -n 20 || true
-        uptime
-        top -b -n 1 | head -n 15
-        exit 1
-      fi
-      sleep 5
-    done
-    printf "l3 agent after %ss\n" "$(( $(date +%s) - start ))"
-    incus exec l3 -- uname -r </dev/null
-    incus exec l3 -- systemd-analyze </dev/null || true
-    incus delete --force l3 </dev/null'
+    incus admin init --auto'
+}
+
+nested_boot() {
+  local vm="$1"
+  incus_root file push "$ROOT/dev/ci/l3-boot-probe.sh" "$vm/var/tmp/l3-boot-probe.sh"
+  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh 240
 }
 
 runner_kernel() {
   sudo -n dmesg | grep -i -E 'kvm|svm|nested' | tail -n 20 || true
 }
 
-# On AMD the nested guest never leaves its firmware. These variants tell what in the firmware
-# path is responsible: SMM off keeps OVMF, while CSM boots through SeaBIOS instead.
-nested_variants() {
+# The same firmware boot after the runner's own KVM drops its TDP MMU.
+nested_boot_runner_variant() {
   local vm="$1"
   grep -qw svm /proc/cpuinfo || { printf 'runner is not AMD: skipped\n'; return 0; }
-  incus_root exec "$vm" -- sh -uc '
-    incus delete --force l3 </dev/null 2>/dev/null
-    try() {
-      name="$1"; shift
-      start=$(date +%s)
-      incus launch images:debian/13/cloud "$name" --vm -c limits.cpu=1 -c limits.memory=1GiB \
-        -c security.secureboot=false "$@" </dev/null || { printf "%s: launch failed\n" "$name"; return; }
-      until incus exec "$name" -- true </dev/null >/dev/null 2>&1; do
-        if [ $(( $(date +%s) - start )) -ge 300 ]; then
-          printf "%s: no agent after 300s; console:\n" "$name"
-          incus console "$name" --show-log </dev/null 2>&1 | tail -n 15 | cut -c1-160
-          incus delete --force "$name" </dev/null
-          return
-        fi
-        sleep 5
-      done
-      printf "%s: agent after %ss\n" "$name" "$(( $(date +%s) - start ))"
-      incus delete --force "$name" </dev/null
-    }
-    try l3-smm-off -c "raw.qemu.conf=[machine]
-smm = \"off\""
-    try l3-csm -c security.csm=true'
+  incus_root stop --force --all --project default
+  sudo -n modprobe -r kvm_amd kvm
+  sudo -n modprobe kvm tdp_mmu=N
+  sudo -n modprobe kvm_amd
+  grep -H . /sys/module/kvm/parameters/tdp_mmu /sys/module/kvm_amd/parameters/npt
+  incus_root start "$vm"
+  wait_agent "$vm"
+  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh 240 firmware
 }
 
 two_vms() {
@@ -377,9 +338,10 @@ layer_probes() {
   probe docker-removed drop_docker
   probe_after vm-start vm-network-docker-removed guest_network vm1
   probe_after vm-start vm-reboot vm_reboot vm1
-  probe_after vm-start l3-nested-vm nested_vm vm1
+  probe_after vm-start l3-incus nested_incus vm1
+  probe_after l3-incus l3-boot nested_boot vm1
   probe l3-runner-kernel runner_kernel
-  probe_after vm-start l3-variants nested_variants vm1
+  probe_after l3-boot l3-boot-runner-variant nested_boot_runner_variant vm1
   probe_after vm-start two-vms two_vms
   probe facts-after facts
   write_summary

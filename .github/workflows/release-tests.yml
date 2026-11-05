@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: '23 */6 * * *'
   workflow_dispatch:
+    inputs:
+      layers_only:
+        description: Sample only the virtualization layer probes, on more runners
+        type: boolean
+        default: false
   push:
     branches:
       - 'ci-probe/**'
@@ -95,7 +100,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        sample: [1, 2, 3]
+        sample: ${{ inputs.layers_only && fromJSON('[1, 2, 3, 4, 5, 6, 7, 8]') || fromJSON('[1, 2, 3]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -111,6 +116,7 @@ jobs:
   # One real lease first: if the pool cannot run here, the matrix would only repeat that failure.
   pool:
     needs: candidate
+    if: ${{ !inputs.layers_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
