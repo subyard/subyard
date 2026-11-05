@@ -83,6 +83,11 @@ selects another root; `--repository OWNER/REPO` selects a fork or fixture. `--wo
 selects the dispatch workflow independently of the source SHA. Preserve the whole candidate
 directory when moving evidence between operator machines.
 
+Under `subyard-github run`, the broker's token belongs to the App installation of the repository it
+selected, which may come from the working directory's `origin`. Before any GitHub call, local
+`preflight`, `prepare`, `accept`, and `publish` refuse unless the broker selected the release
+repository, and name the exact `subyard-github run --repo OWNER/REPO -- dev/release.sh ...` rerun.
+
 Dispatch state records UTC `observed_at` at the first terminal observation for an attempt,
 `github_updated_at` from the API, and nullable `completed_at` only when the API supplies an actual
 completion field. An update timestamp is not an exact completion time. `next_action_at` records

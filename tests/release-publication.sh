@@ -1668,5 +1668,42 @@ class Contracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outcome unknown"):
                 m.dispatch(Dispatch(), "release-publish.yml", inputs, state, path)
 
+
+class BrokerRepository(unittest.TestCase):
+    def test_guard_accepts_only_the_release_repository_under_the_broker(self):
+        broker = {m.BROKER_RUN_CONTEXT: "{}"}
+        m.broker_repository_guard("Subyard/Subyard", [], {})
+        m.broker_repository_guard("Subyard/Subyard", [], {"GH_REPO": "other/repo"})
+        m.broker_repository_guard("Subyard/Subyard", [], {**broker, "GH_REPO": "subyard/subyard"})
+        for environ, issued in (({**broker, "GH_REPO": "owner/private"}, "repository owner/private"),
+                                (broker, "the broker default installation")):
+            with self.assertRaises(ValueError) as refused:
+                m.broker_repository_guard("Subyard/Subyard", ["preflight", "--output", "a b"], environ)
+            self.assertIn(issued, str(refused.exception))
+            self.assertTrue(str(refused.exception).endswith(
+                "\n    subyard-github run --repo Subyard/Subyard -- dev/release.sh preflight --output 'a b'"))
+
+    def test_mismatched_broker_repository_refuses_before_any_github_call(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            calls = directory / "gh-calls"
+            fake = directory / "bin"
+            fake.mkdir()
+            (fake / "gh").write_text("#!/bin/sh\necho \"$@\" >> " + str(calls) + "\nexit 1\n")
+            (fake / "gh").chmod(0o755)
+            env = {**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
+                   m.BROKER_RUN_CONTEXT: "{}", "GH_REPO": "owner/private", "GITHUB_REPOSITORY": "Subyard/Subyard"}
+            for action in (["preflight", "--output", str(directory / "out")],
+                           ["prepare", "--version", "1.2.3", "--commit", "a" * 40],
+                           ["publish", "--candidate", "c1"]):
+                result = subprocess.run([sys.executable, "-B", str(ROOT / "dev/release-publication.py"),
+                                         "--state-dir", str(directory / "state"), *action],
+                                        env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("issued for repository owner/private, but this release targets Subyard/Subyard", result.stderr)
+                self.assertIn("subyard-github run --repo Subyard/Subyard -- dev/release.sh --state-dir", result.stderr)
+            self.assertFalse(calls.exists())
+            self.assertFalse((directory / "state").exists())
+
 unittest.main()
 PY

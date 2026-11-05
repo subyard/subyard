@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -63,6 +64,25 @@ def clear_completion(state):
 def same_repository(left, right):
     return (all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value)
                 for value in (left, right)) and left.lower() == right.lower())
+
+
+# The Subyard GitHub broker marks every `subyard-github run` child with this
+# context and exports GH_REPO only when it selected a repository. Its token is
+# scoped to that repository's App installation, which the checkout origin or
+# working directory can make differ from the release repository.
+BROKER_RUN_CONTEXT = "SUBYARD_GITHUB_RUN_CONTEXT_V1"
+
+
+def broker_repository_guard(repository, argv, environ=os.environ):
+    if BROKER_RUN_CONTEXT not in environ:
+        return
+    selected = environ.get("GH_REPO", "")
+    if selected and same_repository(selected, repository):
+        return
+    issued = "repository " + selected if selected else "the broker default installation"
+    command = shlex.join(["subyard-github", "run", "--repo", repository, "--", "dev/release.sh", *argv])
+    raise ValueError("GitHub token was issued for " + issued + ", but this release targets " + repository +
+                     "; nothing was sent to GitHub. Rerun with the release repository:\n    " + command)
 
 
 def git_blob_sha(payload):
@@ -1024,6 +1044,8 @@ def main():
     remote.add_argument("--prepared", type=Path, required=True)
     remote.add_argument("--attestation", type=Path, required=True)
     args = parser.parse_args()
+    if args.action not in ("export-ci", "publish-ci"):
+        broker_repository_guard(args.repository, sys.argv[1:])
     def interrupted(signum, frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
