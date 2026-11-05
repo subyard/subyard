@@ -119,11 +119,24 @@ prepare_host() {
   sudo -n modprobe vsock
   sudo -n modprobe vhost_vsock
   [ -c /dev/vsock ] && [ -c /dev/vhost-vsock ]
+  free_disk
+}
+
+# Hosted runners come with either 82 or 13 GB free, and building a base reserves three VM disks.
+# None of these preinstalled tools is used here; Go stays because setup-go installed it there.
+free_disk() {
+  df -h /
+  sudo -n find /opt/hostedtoolcache -mindepth 1 -maxdepth 1 ! -name go -exec rm -rf {} +
+  sudo -n rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
+    /usr/lib/jvm /usr/lib/google-cloud-sdk /usr/local/share/powershell /usr/local/share/chromium \
+    /usr/local/lib/node_modules /opt/microsoft /opt/google /opt/az /usr/share/miniconda
+  df -h /
 }
 
 drop_docker() {
   sudo -n systemctl stop docker.socket docker.service containerd.service
   sudo -n systemctl disable docker.socket docker.service containerd.service
+  sudo -n rm -rf /var/lib/docker /var/lib/containerd
   sudo -n ip link delete docker0 2>/dev/null || true
   sudo -n iptables -P FORWARD ACCEPT
   sudo -n iptables -F DOCKER-USER 2>/dev/null || true
@@ -151,12 +164,20 @@ install_runtime() {
 # The documented path for a host without Incus: init installs it, then the service is registered.
 # This process predates the incus-admin group that init creates.
 install_pool() {
+  local free_gib
   install -d -m 0700 "$HOME/.config/subyard"
   cat >> "$HOME/.config/subyard/config.env" <<'CONFIG'
 CODING_TOOL_INTEGRATIONS=''
 E2E_VM_SLOT_COUNT=1
 E2E_MEMORY_RESERVE=2GiB
+E2E_DISK_RESERVE=2GiB
 CONFIG
+  # The default 20 GiB disk needs 62 GiB to build a base; the small runner disk has less.
+  free_gib="$(df --output=avail -BG "$HOME" | tail -n 1 | tr -dc 0-9)"
+  if [ "$free_gib" -lt 65 ]; then
+    printf 'E2E_VM_DISK=12GiB\n' >> "$HOME/.config/subyard/config.env"
+    printf 'only %s GiB free: using 12 GiB VM disks\n' "$free_gib"
+  fi
   "$HOME/.local/bin/yard" -Y test-yard init --profile test-vms --yes </dev/null
   incus_root --version
   sg incus-admin -c '"$HOME/.local/bin/yard" service register test-vms --yard test-yard --yes </dev/null'
@@ -172,8 +193,12 @@ controller_env() {
 }
 
 run_check() {
+  local status=0
   cd "$WORKSPACE"
-  controller_env "$@" </dev/null
+  controller_env "$@" </dev/null || status=$?
+  # The runner is gone afterwards, and only these events hold a refusal's or quarantine's reason.
+  [ "$status" = 0 ] || controller_env dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 50 </dev/null || true
+  return "$status"
 }
 
 check_probes() {
@@ -300,16 +325,33 @@ runner_kernel() {
   sudo -n dmesg | grep -i -E 'kvm|svm|nested' | tail -n 20 || true
 }
 
-# How much of the 144 GiB disk the preinstalled tools hold, and what removing them leaves.
-runner_disk() {
-  local paths=(/usr/local/lib/android /opt/hostedtoolcache /usr/share/dotnet /usr/local/.ghcup
-    /usr/share/swift /usr/lib/jvm /usr/lib/google-cloud-sdk /usr/local/share/powershell
-    /usr/local/share/chromium /usr/local/lib/node_modules /opt/microsoft /opt/google /opt/az
-    /usr/share/miniconda /var/lib/docker)
-  sudo -n du -xh --max-depth=3 / 2>/dev/null | sort -h | tail -n 30
-  df -h /
-  time sudo -n rm -rf "${paths[@]}"
-  df -h /
+# On AMD the nested guest never leaves its firmware. These variants tell what in the firmware
+# path is responsible: SMM off keeps OVMF, while CSM boots through SeaBIOS instead.
+nested_variants() {
+  local vm="$1"
+  grep -qw svm /proc/cpuinfo || { printf 'runner is not AMD: skipped\n'; return 0; }
+  incus_root exec "$vm" -- sh -uc '
+    incus delete --force l3 </dev/null 2>/dev/null
+    try() {
+      name="$1"; shift
+      start=$(date +%s)
+      incus launch images:debian/13/cloud "$name" --vm -c limits.cpu=1 -c limits.memory=1GiB \
+        -c security.secureboot=false "$@" </dev/null || { printf "%s: launch failed\n" "$name"; return; }
+      until incus exec "$name" -- true </dev/null >/dev/null 2>&1; do
+        if [ $(( $(date +%s) - start )) -ge 300 ]; then
+          printf "%s: no agent after 300s; console:\n" "$name"
+          incus console "$name" --show-log </dev/null 2>&1 | tail -n 15 | cut -c1-160
+          incus delete --force "$name" </dev/null
+          return
+        fi
+        sleep 5
+      done
+      printf "%s: agent after %ss\n" "$name" "$(( $(date +%s) - start ))"
+      incus delete --force "$name" </dev/null
+    }
+    try l3-smm-off -c "raw.qemu.conf=[machine]
+smm = \"off\""
+    try l3-csm -c security.csm=true'
 }
 
 two_vms() {
@@ -337,9 +379,9 @@ layer_probes() {
   probe_after vm-start vm-reboot vm_reboot vm1
   probe_after vm-start l3-nested-vm nested_vm vm1
   probe l3-runner-kernel runner_kernel
+  probe_after vm-start l3-variants nested_variants vm1
   probe_after vm-start two-vms two_vms
   probe facts-after facts
-  probe runner-disk runner_disk
   write_summary
 }
 
