@@ -65,6 +65,8 @@ type Prepared struct {
 	currentReport *currentReport
 	// Set only after the verified owner returns a validated ready convergence.
 	convergedOutcome *releasetransition.Outcome
+	// Set only for an ordinary resume of an unfinished journal.
+	newerRelease func(context.Context) NewerRelease
 }
 
 type verifiedPreparationError struct {
@@ -599,7 +601,11 @@ func (runtime *Runtime) PrepareTransition(
 			if newerRelease == nil {
 				runtime.setV0111StandaloneRetry(ctx, parsed.root, protected)
 				runtime.setV0173StandaloneRetry(ctx, parsed.root, protected)
-				return runtime.prepareProtectedTransition(parsed, protected)
+				prepared, err := runtime.prepareProtectedTransition(parsed, protected)
+				if err == nil && unfinished {
+					prepared.newerRelease = runtime.newerReleaseProbe(parsed, configHome)
+				}
+				return prepared, err
 			}
 		}
 	}
@@ -929,21 +935,8 @@ func newerReleaseReplacement(parsed options, configHome string) *releasetransiti
 	if err != nil {
 		return nil
 	}
-	store, err := releasetransition.NewPOSIXV2Store(configHome)
-	if err != nil {
-		return nil
-	}
-	snapshot, err := store.ReadCurrentJournal()
-	if err != nil || !snapshot.Exists {
-		return nil
-	}
-	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	if err != nil || journal.Checkpoint == releasetransition.JournalComplete {
-		return nil
-	}
-	pinned, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)
-	if err != nil || !requested.GT(pinned) || negotiatedRecoveryRelease(journal.Goal.Target) ||
-		journal.SourceIngress != nil {
+	journal, snapshot, ok := replaceableJournal(configHome, requested)
+	if !ok {
 		return nil
 	}
 	return &releasetransition.JournalReplacement{
@@ -1880,6 +1873,7 @@ type options struct {
 	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit, json  bool
+	rootExplicit                                            bool
 }
 
 func (runtime *Runtime) prepareHelp() Prepared {
@@ -1995,6 +1989,7 @@ func (runtime *Runtime) parse(arguments []string) (options, bool, error) {
 				result.versionExplicit = true
 			case "--runtime-root":
 				result.root = arguments[index]
+				result.rootExplicit = true
 			}
 		case "--offline":
 			result.offline = true

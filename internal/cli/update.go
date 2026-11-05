@@ -40,6 +40,7 @@ type releaseExecution struct {
 	repairPending bool
 	followup      bool
 	retryDiskTmp  func(context.Context) error
+	newerRelease  releaseruntime.NewerRelease
 }
 
 func (execution *releaseExecution) Close() error {
@@ -227,6 +228,10 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 			}
 		}
 	}
+	if (runErr != nil || result.Status != "ok") && !execution.repairPending {
+		// A plain resume stays pinned to its target; name the explicit way out.
+		execution.newerRelease = execution.prepared.NewerRelease(ctx)
+	}
 	return result, runErr
 }
 
@@ -243,7 +248,7 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 		} else {
 			fmt.Fprintln(output, "\n  [FAIL] Current release repair did not complete successfully")
 		}
-		if !execution.followup {
+		if !execution.followup && (success || execution.newerRelease.Command == "") {
 			fmt.Fprintln(output, "  No newer release was checked or installed.")
 		}
 	} else if success {
@@ -288,6 +293,11 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 		fmt.Fprintf(output, "  Next: %s\n", outcome.Retry)
 	} else if success && execution.prepared.RepairCurrent && !execution.followup {
 		fmt.Fprintln(output, "  Next: run yard update again to check for and install a newer release")
+	}
+	if newer := execution.newerRelease; !success && newer.Command != "" {
+		fmt.Fprintf(output, "  Newer release %s is available. A plain yard update resumes only the unfinished target;\n", newer.Version)
+		fmt.Fprintln(output, "  to replace that update instead, review the newer release's plan, then apply it:")
+		fmt.Fprintf(output, "    %s --check\n    %s\n", newer.Command, newer.Command)
 	}
 }
 

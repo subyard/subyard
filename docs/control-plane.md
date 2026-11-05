@@ -1004,8 +1004,12 @@ and the [support inventory](reference/legacy-migration-support.md).
 
 An unfinished forward update pins its exact target, so a plain `yard update` only resumes it. To
 leave a failed update, publish a fixed release and select it explicitly: a release newer than the
-pinned target replaces the unfinished journal, before or after activation. A host whose active
-launcher predates this contract refuses a different version, so it uses the new release's own launcher:
+pinned target replaces the unfinished journal, before or after activation. When a plain resume
+fails and the stable channel already publishes a newer release, the failure report names that
+release and the exact `yard update --version` commands, with `--check` first. The lookup runs only
+after the failure, never for `--offline` or an explicit selection, and an unreachable channel adds
+nothing. Only the newer release's own inspection decides whether it may replace the journal. A host
+whose active launcher predates this contract refuses a different version, so it uses the new release's own launcher:
 
 ```bash
 VERSION=<fixed version>

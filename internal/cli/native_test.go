@@ -874,6 +874,44 @@ func TestUpdatePrintsFinalWarnings(t *testing.T) {
 	}
 }
 
+func TestFailedResumeNamesNewerReleaseCommands(t *testing.T) {
+	outcome := &releasetransition.Outcome{
+		Status: releasetransition.StatusRecovering, Active: "release-a", Retry: "run yard update --check",
+	}
+	newer := releaseruntime.NewerRelease{Version: "9.9.9", Command: "yard update --version 9.9.9"}
+	for _, success := range []bool{false, true} {
+		var stdout bytes.Buffer
+		program := &CLI{options: Options{Stdout: &stdout}}
+		program.printUpdateResult(&releaseExecution{
+			prepared: releaseruntime.Prepared{Action: "update.activate"},
+			outcome:  outcome, newerRelease: newer,
+		}, success)
+		output := stdout.String()
+		named := strings.Contains(output, "Newer release 9.9.9 is available") &&
+			strings.Index(output, "Next: run yard update --check") < strings.Index(output, "Newer release") &&
+			strings.Contains(output, "    yard update --version 9.9.9 --check\n    yard update --version 9.9.9\n")
+		if named == success {
+			t.Fatalf("success=%v output=%q", success, output)
+		}
+	}
+	var stdout bytes.Buffer
+	program := &CLI{options: Options{Stdout: &stdout}}
+	program.printUpdateResult(&releaseExecution{
+		prepared: releaseruntime.Prepared{Action: "update.activate"}, outcome: outcome,
+	}, false)
+	if strings.Contains(stdout.String(), "Newer release") {
+		t.Fatalf("failure without a newer release named one: %q", stdout.String())
+	}
+	stdout.Reset()
+	program.printUpdateResult(&releaseExecution{
+		prepared: releaseruntime.Prepared{Action: "update.activate", RepairCurrent: true},
+		outcome:  outcome, newerRelease: newer,
+	}, false)
+	if strings.Contains(stdout.String(), "No newer release was checked") || !strings.Contains(stdout.String(), "Newer release 9.9.9") {
+		t.Fatalf("failed repair contradicts its newer-release lookup: %q", stdout.String())
+	}
+}
+
 func TestUpdatePrintsFinalBlockerResources(t *testing.T) {
 	var stdout bytes.Buffer
 	program := &CLI{options: Options{Stdout: &stdout}}
