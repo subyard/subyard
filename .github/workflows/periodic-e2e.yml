@@ -45,7 +45,11 @@ concurrency:
 
 env:
   CANDIDATE_VERSION: 1.0.0-ci.periodic-e2e
-  NESTED_ATTEMPTS: 20
+  # A retry runs each nested VM check on this many runners at once. Intel's share of hosted
+  # runners varies from about one in four to one in twenty, so a single copy may need dozens of
+  # retries; a second copy on Intel only repeats the check.
+  NESTED_COPIES: 3
+  NESTED_ATTEMPTS: 30
 
 jobs:
   # The schedule runs only for a commit no finished push or scheduled run has covered; a cancelled
@@ -102,12 +106,17 @@ jobs:
         id: plan
         env:
           ONLY: ${{ inputs.checks }}
+          RETRY: ${{ inputs.origin }}
         run: |
           plan="$(python3 -B dev/ci/plan-periodic-checks.py)"
           if [ -n "$ONLY" ]; then
             plan="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
               | map_values(.include |= map(select(.id as $id | $ids | index($id))))' <<<"$plan")"
             [ "$(jq '[.[].include[]] | length' <<<"$plan")" -gt 0 ] || { echo "no such checks: $ONLY"; exit 1; }
+          fi
+          if [ -n "$RETRY" ]; then
+            plan="$(jq -c --argjson copies "$NESTED_COPIES" \
+              '.nested.include |= [.[] as $check | range(1; $copies + 1) | $check + {copy: .}]' <<<"$plan")"
           fi
           # An empty matrix fails its job, so an empty list skips the job instead.
           for kind in checks nested; do
@@ -118,7 +127,7 @@ jobs:
             echo '### Checks'
             jq -r '.checks.include[].id' <<<"$plan"
             echo '### Nested VM checks, only on Intel runners'
-            jq -r '.nested.include[].id' <<<"$plan"
+            jq -r '.nested.include[].id' <<<"$plan" | uniq
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -216,7 +225,7 @@ jobs:
   # Checks that boot a VM inside the leased VM. On an AMD runner the job only explains the skip;
   # the reschedule job then runs those checks again on new runners.
   nested:
-    name: ${{ matrix.id }}
+    name: ${{ matrix.copy && format('{0} #{1}', matrix.id, matrix.copy) || matrix.id }}
     needs: [candidate, pool]
     if: >-
       ${{ !cancelled() && needs.candidate.outputs.nested && needs.candidate.result == 'success'
@@ -288,10 +297,13 @@ jobs:
           ORIGIN: ${{ inputs.origin || github.run_id }}
           ATTEMPT: ${{ inputs.attempt || 0 }}
         run: |
-          # A nested job whose check step was skipped ran on AMD.
-          checks="$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
-            --jq '.jobs[] | select(any(.steps[]; .name == "Require an Intel runner" and .conclusion == "success")
-              and any(.steps[]; .name == "Run the check" and .conclusion == "skipped")) | .name' | sort | xargs)"
+          # A nested job whose check step was skipped ran on AMD. A check is retried only when
+          # every copy of it did.
+          checks="$(gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
+            | jq -r '[.[].jobs[] | select(any(.steps[]; .name == "Require an Intel runner" and .conclusion == "success"))
+              | {id: (.name | sub(" #[0-9]+$"; "")),
+                 ran: any(.steps[]; .name == "Run the check" and .conclusion != "skipped")}]
+              | group_by(.id)[] | select(all(.[]; .ran | not)) | .[0].id' | sort | xargs)"
           if [ -z "$checks" ]; then
             printf 'Every nested VM check ran on an Intel runner.\n' >> "$GITHUB_STEP_SUMMARY"
             exit 0
