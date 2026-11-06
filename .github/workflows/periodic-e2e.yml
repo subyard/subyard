@@ -12,12 +12,8 @@ on:
     - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
-      layers_only:
-        description: Sample only the virtualization layer probes, on more runners
-        type: boolean
-        default: false
       checks:
-        description: Space-separated check ids to run instead of all; skips the layer probes
+        description: Space-separated check ids to run instead of all
         type: string
         default: ''
       # Set by the reschedule job, which runs nested VM checks again until they land on Intel.
@@ -137,36 +133,11 @@ jobs:
           retention-days: 2
           if-no-files-found: error
 
-  # Explains a pool failure layer by layer. Its own failures do not stop the checks.
-  # Several jobs, because the runner's CPU vendor varies and nested VMs behave differently on each.
-  layers:
-    name: layers-${{ matrix.sample }}
-    needs: candidate
-    if: ${{ !inputs.checks }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        sample: ${{ inputs.layers_only && fromJSON('[1, 2, 3, 4, 5, 6, 7, 8]') || fromJSON('[1, 2, 3]') }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: Probe each virtualization layer
-        run: bash dev/ci/periodic-e2e.sh layers
-
   # One real lease first: if the pool cannot run here, the matrix would only repeat that failure.
   # A retry already passed it in its original run.
   pool:
     needs: candidate
-    if: ${{ !inputs.layers_only && !inputs.origin }}
+    if: ${{ !inputs.origin }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:

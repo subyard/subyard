@@ -136,8 +136,7 @@ if [ "$USE_ZABBLY" = auto ]; then
   elif ! command -v apt-cache >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
     USE_ZABBLY=1
   else
-    # Read all input: under pipefail, an early awk exit can fail apt-cache with SIGPIPE.
-    candidate="$(apt-cache policy incus 2>/dev/null | awk '/Candidate:/ && !seen {print $2; seen=1}')"
+    candidate="$(apt-cache policy incus 2>/dev/null | awk '/Candidate:/{print $2; exit}')"
     [ -n "$candidate" ] && [ "$candidate" != '(none)' ] \
       && dpkg --compare-versions "$candidate" ge "$MIN_INCUS_VER" \
       || USE_ZABBLY=1

@@ -5,24 +5,10 @@
 set -uo pipefail
 umask 022
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RESULTS="${RUNNER_TEMP:-/var/tmp}/periodic-e2e-results.tsv"
 # Controllers attribute leases from the managed workspace path.
 WORKSPACE=/srv/workspaces/Subyard/src
-VM_IMAGE=subyard-ci-debian-13-vm
-VM_MEMORY=4GiB
-VM_DISK=20GiB
-AGENT_WAIT_SECONDS=420
 PACKAGES=(build-essential ca-certificates curl expect git jq make openssh-client openssh-server ripgrep shellcheck tar xz-utils zsh)
-CLOUD_CONFIG='#cloud-config
-users:
-  - name: dev
-    groups: [sudo]
-    shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: true
-ssh_pwauth: false
-'
 
 die() { printf 'periodic-e2e: %s\n' "$*" >&2; exit 2; }
 
@@ -88,13 +74,6 @@ facts() {
   sudo -n iptables -S FORWARD 2>&1 | head -5 || true
   command -v incus lxc lxd 2>/dev/null || true
   stat -c '%a %U %n' "$HOME" || true
-  readlink -f "$(command -v awk)" || true
-  # apt-cache statuses when awk exits at its first match, the installer's former pipeline.
-  for module in 1 2 3 4 5 6 7 8 9 10; do
-    (set +e; apt-cache policy incus 2>/dev/null | awk '/Candidate:/{print $2; exit}' >/dev/null
-     printf '%s ' "${PIPESTATUS[0]}")
-  done
-  printf '\n'
 }
 
 enable_kvm() {
@@ -227,129 +206,12 @@ check_probes() {
   write_summary
 }
 
-# Diagnostics that explain a pool failure: each virtualization layer on its own.
-vm_image() {
-  incus_root image copy images:debian/13/cloud local: --vm --alias "$VM_IMAGE" --project default
-  incus_root image list --project default --format csv -c lfs
-}
-
-incus_platform() {
-  cd "$ROOT"
-  env SUBYARD_E2E_VM=1 timeout --signal=TERM --kill-after=60 1800 \
-    bash dev/e2e/p0-guest.sh fixture-platform "$(date +%s)" </dev/null
-  incus_root image list --project default --format csv -c lfs
-}
-
-wait_agent() {
-  local vm="$1" deadline=$((SECONDS + AGENT_WAIT_SECONDS))
-  until incus_root exec "$vm" -- true >/dev/null 2>&1; do
-    [ "$SECONDS" -lt "$deadline" ] || { incus_root info "$vm" --show-log | tail -n 30; return 1; }
-    sleep 3
-  done
-}
-
-launch_vm() {
-  local vm="$1"
-  incus_root init "$VM_IMAGE" "$vm" --vm --project default --storage default \
-    -c limits.cpu=2 -c "limits.memory=$VM_MEMORY" -c security.secureboot=false \
-    -c cloud-init.user-data="$CLOUD_CONFIG" -d "root,size=$VM_DISK"
-  incus_root config device add "$vm" subyard-cloud-init disk source=cloud-init:config
-  incus_root start "$vm"
-  wait_agent "$vm"
-  incus_root exec "$vm" -- cloud-init status --wait || true
-  incus_root exec "$vm" -- runuser -u dev -- sudo -n true
-}
-
-guest_network() {
-  local vm="$1"
-  incus_root exec "$vm" -- sh -c 'ip -4 route show default; getent hosts github.com'
-  incus_root exec "$vm" -- timeout 30 bash -c 'exec 3<>/dev/tcp/github.com/443'
-}
-
-vm_reboot() {
-  local vm="$1" before after deadline=$((SECONDS + AGENT_WAIT_SECONDS))
-  before="$(incus_root exec "$vm" -- cat /proc/sys/kernel/random/boot_id)"
-  incus_root exec "$vm" -- systemctl reboot || true
-  while :; do
-    after="$(incus_root exec "$vm" -- cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
-    [ -z "$after" ] || [ "$after" = "$before" ] || break
-    [ "$SECONDS" -lt "$deadline" ] || return 1
-    sleep 3
-  done
-  printf 'boot id changed: %s -> %s\n' "$before" "$after"
-}
-
-# Incus inside the runner's VM, the depth YARD_KIND=vm fixtures need. It comes from the product
-# installer with the broker base recipe's context, the same stack the fixtures use.
-nested_incus() {
-  local vm="$1"
-  incus_root file push -r -p "$ROOT/scripts" "$vm/var/tmp/l3-recipe/"
-  incus_root exec "$vm" --env DEBIAN_FRONTEND=noninteractive --env SUBYARD_ENGINE_CONTEXT=1 \
-    --env SUBYARD_ENGINE_CONTEXT_SCHEMA=1 --env ASSUME_YES=1 --env SUBYARD_USER=dev \
-    --env SUBYARD_OPERATOR_HOME=/home/dev --env SUBYARD_CONFIG_DIR=/etc/subyard \
-    --env SUBYARD_CONFIG_HOME=/etc/subyard --env SUBYARD_HOME=/home/dev/.local/share/subyard \
-    --env STORAGE_PATH=/var/lib/incus/storage-pools/default --env HOST_BASE=/srv/subyard \
-    --env RESTRICTED_DISK_PATHS= --env ACCESS_KIND=local --env YARD_KIND=container \
-    --env YARD_INSTANCE_NAME=base --env INCUS_PROJECT=default --env INCUS_BRIDGE=incusbr0 \
-    --env SSH_HOST= --env DEV_USER=dev --env DEV_UID=1000 --env DEV_SUDO=1 \
-    --env FORWARD_SSH_AGENT=0 --env NESTED_E2E_VMS=0 -- sh -euc '
-    apt-get -o Acquire::Retries=3 update -qq
-    apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends ca-certificates curl jq python3
-    bash /var/tmp/l3-recipe/scripts/01-install-incus.sh --upgrade-only --yes --zabbly
-    incus --version
-    incus admin init --auto'
-}
-
-nested_boot() {
-  local vm="$1"
-  incus_root file push "$ROOT/dev/ci/l3-boot-probe.sh" "$vm/var/tmp/l3-boot-probe.sh"
-  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh firmware 240
-  incus_root exec "$vm" -- bash /var/tmp/l3-boot-probe.sh stack 300
-}
-
-runner_kernel() {
-  sudo -n dmesg | grep -i -E 'kvm|svm|nested' | tail -n 20 || true
-  grep -H . /sys/module/kvm_amd/parameters/{nested,npt,vgif,vls,avic,vnmi} 2>/dev/null || true
-}
-
-two_vms() {
-  local address
-  launch_vm vm2
-  address="$(incus_root exec vm2 -- sh -c \
-    "ip -4 -o addr show scope global | awk '{print \$4}' | cut -d/ -f1 | head -n1")"
-  [ -n "$address" ]
-  incus_root exec vm2 -- sh -c 'apt-get update -qq && apt-get install -y -qq openssh-server'
-  incus_root exec vm1 -- timeout 30 bash -c "exec 3<>/dev/tcp/$address/22"
-  free -h
-}
-
-layer_probes() {
-  : > "$RESULTS"
-  probe facts facts
-  probe kvm-udev enable_kvm
-  probe prepare-host prepare_host
-  probe_after prepare-host incus-on-runner incus_platform
-  probe_after incus-on-runner vm-image-copy vm_image
-  probe_after vm-image-copy vm-start launch_vm vm1
-  probe_after vm-start vm-network-docker-present guest_network vm1
-  probe docker-removed drop_docker
-  probe_after vm-start vm-network-docker-removed guest_network vm1
-  probe_after vm-start vm-reboot vm_reboot vm1
-  probe_after vm-start l3-incus nested_incus vm1
-  probe_after l3-incus l3-boot nested_boot vm1
-  probe l3-runner-kernel runner_kernel
-  probe_after vm-start two-vms two_vms
-  probe facts-after facts
-  write_summary
-}
-
 require_runner
 case "${1:-}" in
-  layers) [ "$#" = 1 ] || die 'usage: periodic-e2e.sh layers'; layer_probes ;;
   check)
     [ "$#" -ge 4 ] || die 'usage: periodic-e2e.sh check ID BUNDLE COMMAND...'
     shift
     check_probes "$@"
     ;;
-  *) die 'usage: periodic-e2e.sh layers | check ID BUNDLE COMMAND...' ;;
+  *) die 'usage: periodic-e2e.sh check ID BUNDLE COMMAND...' ;;
 esac
