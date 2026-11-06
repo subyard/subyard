@@ -225,7 +225,7 @@ jobs:
   # Checks that boot a VM inside the leased VM. On an AMD runner the job only explains the skip;
   # the reschedule job then runs those checks again on new runners.
   nested:
-    name: ${{ matrix.copy && format('{0} #{1}', matrix.id, matrix.copy) || matrix.id }}
+    name: "${{ matrix.copy && format('{0} #{1}', matrix.id, matrix.copy) || matrix.id }}"
     needs: [candidate, pool]
     if: >-
       ${{ !cancelled() && needs.candidate.outputs.nested && needs.candidate.result == 'success'
