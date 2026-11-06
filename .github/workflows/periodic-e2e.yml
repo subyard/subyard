@@ -222,8 +222,13 @@ jobs:
           bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \
             "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
 
-  # Checks that boot a VM inside the leased VM. On an AMD runner the job only explains the skip;
-  # the reschedule job then runs those checks again on new runners.
+  # Checks that boot a VM inside the leased VM, which runs inside the runner's VM. Hosted runners
+  # are Azure Hyper-V VMs on either Intel or AMD CPUs, and the runner label cannot choose one. On
+  # AMD, virtualization nested this deep under Hyper-V is so slow that these checks cannot finish:
+  # the innermost VM's firmware alone takes 1.5 to over 4 minutes, and its guest agent did not
+  # start within 5 to 15 minutes; on Intel it starts in 1.5 to 3.5 minutes. So these checks run only
+  # on Intel. On AMD the job explains the skip, and the reschedule job runs the check again on new
+  # runners until one is Intel.
   nested:
     name: "${{ matrix.copy && format('{0} #{1}', matrix.id, matrix.copy) || matrix.id }}"
     needs: [candidate, pool]
@@ -237,7 +242,7 @@ jobs:
       max-parallel: 3
       matrix: ${{ fromJSON(needs.candidate.outputs.nested) }}
     steps:
-      - name: Require an Intel runner
+      - name: Require Intel, since nested VMs on AMD under Hyper-V are too slow for these checks
         id: cpu
         env:
           CHECK_ID: ${{ matrix.id }}
@@ -245,12 +250,14 @@ jobs:
           vendor="$(awk -F': *' '/^vendor_id/ {print $2; exit}' /proc/cpuinfo)"
           model="$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
           printf 'cpu: %s (%s)\n' "$model" "$vendor"
+          printf 'This check boots a VM inside the leased VM, inside this Hyper-V runner VM. On AMD that\n'
+          printf 'nested virtualization is too slow for the check to finish, so it runs only on Intel.\n'
           if [ "$vendor" = GenuineIntel ]; then
             printf 'run=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           printf 'run=false\n' >> "$GITHUB_OUTPUT"
-          reason="Not run on this $model runner. On AMD hosted runners a VM inside the leased VM boots far too slowly under the runner's hypervisor for this check to finish: its firmware alone takes 1.5 to over 4 minutes, and its guest agent did not start within 5 to 15 minutes. The check is rescheduled on another runner."
+          reason="Not run on this $model runner. On AMD hosted runners a VM inside the leased VM boots far too slowly under the runner's Hyper-V for this check to finish: its firmware alone takes 1.5 to over 4 minutes, and its guest agent did not start within 5 to 15 minutes. The check is rescheduled on another runner."
           printf '::warning title=Rescheduled, nested VMs are too slow on AMD::%s\n' "$reason"
           printf '### %s\n%s\n' "$CHECK_ID" "$reason" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -300,7 +307,7 @@ jobs:
           # A nested job whose check step was skipped ran on AMD. A check is retried only when
           # every copy of it did.
           checks="$(gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
-            | jq -r '[.[].jobs[] | select(any(.steps[]; .name == "Require an Intel runner" and .conclusion == "success"))
+            | jq -r '[.[].jobs[] | select(any(.steps[]; .name == "Require Intel, since nested VMs on AMD under Hyper-V are too slow for these checks" and .conclusion == "success"))
               | {id: (.name | sub(" #[0-9]+$"; "")),
                  ran: any(.steps[]; .name == "Run the check" and .conclusion != "skipped")}]
               | group_by(.id)[] | select(all(.[]; .ran | not)) | .[0].id' | sort | xargs)"
