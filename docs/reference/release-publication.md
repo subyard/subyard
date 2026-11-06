@@ -45,7 +45,31 @@ dev/release.sh accept --candidate rRUN_ID-aATTEMPT
 dev/release.sh publish --candidate rRUN_ID-aATTEMPT
 ```
 
-The default runs host-free/CI verification, local adapters and released-caller compatibility.
+For a CI-prepared candidate, `verify`, ShellCheck, local adapters and released-caller compatibility
+are counted from the successful preparation jobs and not repeated; `release-acceptance.py run` with
+`--only NAME --rerun` replaces a counted result with a local run. A locally prepared candidate runs them.
+
+### Release levels
+
+| Level | When | Checks | Typical time |
+| --- | --- | --- | --- |
+| Continuous | Every push and on a schedule, outside a release | `verify` and the GitHub-hosted matrix and lanes | Background |
+| Ordinary release or hotfix | No product migration or update-contract change since the previous release | CI preparation counted by `accept`; `p0-release-smoke` on the final bytes; the released-caller matrix; VM profile checks stay `not-run` unless requested | About 2 hours |
+| Full release | Product migration or update-contract changes, or an operator request | Ordinary checks plus every VM profile check and every core VM check (`vm:<id>` from `dev/e2e/release-vm-checks.json`) | Up to 8 hours |
+
+`accept --level ordinary|full [--level-reason TEXT]` records the level, its reason, the baseline tag and
+the changed migration paths as `release_level` in the receipt; later runs keep the recorded level unless
+`--level` or `--level-reason` is given, and `publish` refuses a candidate without one and prints it.
+Candidates whose pinned code predates release levels publish without one.
+The baseline is the highest local `vX.Y.Z` tag below the candidate version that the candidate commit
+contains. Changed product paths use the transfer rule in
+[reviewed evidence transfers](../testing.md#reviewed-evidence-transfers). Ordinary is refused while
+such paths exist; when the baseline or diff is unavailable locally it needs an explicit
+`--level-reason`, and a recorded change list still applies. Full requires a reason unless migration
+changes supply it, runs every VM check, and its attestation refuses an untouched `not-run` VM profile
+or core VM check; only an explicit `--defer-profile` operator deferral can leave a profile check unrun, and publication prints
+it. The level is a local receipt record: the publication workflow does not recheck it. Before a full release, fix a red continuous
+run before freezing the candidate.
 Long VM smoke and shipped-profile VM checks remain available only on explicit request:
 
 ```sh
@@ -66,9 +90,19 @@ for these same-attempt jobs before running
 local adapters and the complete released-caller compatibility matrix. It builds final-version assets
 once and uploads their source archive, exact inventory and SHA-256 identity manifest for 90 days.
 `CANDIDATE` prints the attempt-specific ID and local directory. Before printing it, `prepare` also creates
-that directory's `acceptance/` output from the downloaded assets: it imports the `package` result, leaves
-every other check pending or optional `not-run`, and runs nothing. Evidence can be transferred into it
-before the first `accept`. Publication never rebuilds these assets.
+that directory's `acceptance/` output from the downloaded assets: it imports the `package` result,
+records `shellcheck` and `verify` as passed by `host-free-verify` and `local-adapters` and `compatibility`
+as passed by `prepare` (`execution: ci-preparation`), leaves every other check pending or optional
+`not-run`, and runs nothing. It counts them only when the candidate's own pinned code declares
+`CI_PREPARED_CHECKS` and its `release.yml` blob is listed in `CI_COUNTED_POLICIES`, which every reviewed
+`release.yml` change must update; older candidates run them locally, so their own publication
+validator still accepts the attestation. Publication rechecks the run's policy and prints counted
+results as `ci_counted`. Counted results are never a transfer source for another candidate. Evidence can be transferred into it
+before the first `accept`. Before running checks, `accept` reuses profile PASS results from earlier
+local candidates of the same version when the runtime and release assets are identical and the source
+differs only in other profiles' unshared test files; provenance may differ in its timestamp and, between
+two concrete commits, in `sourceRevision`. Publication shows them as inherited evidence transfers. A
+`REUSE-SKIP` line names why an earlier PASS was not reused. Publication never rebuilds these assets.
 
 Recovery checks the exact same-attempt job inventory against the executed workflow file at the
 native run's immutable `head_sha`. Only explicitly recorded workflow Git-blob identities are accepted:

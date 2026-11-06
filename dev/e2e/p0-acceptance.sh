@@ -42,6 +42,14 @@ P0_CURRENT_PHASE='startup'
 P0_PHASE_STARTED=0
 P0_CHILD_PIDS=()
 P0_STARTED_PID=''
+# The full lane keeps going after an independent phase fails. Each failure leaves its VMs
+# blocked for later phases unless the fixture cleaners and capacity cleanup verify them.
+P0_FAILED_PHASES=()
+P0_BLOCKED_PHASES=()
+declare -A P0_DIRTY_VM=()
+P0_FAILURE_LOG_MODE=truncate
+P0_ACTIVE_PHASE_VMS=''
+FULL_AUX_RESULTS_FILE=''
 FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd legacy-continuation newer-release release-smoke peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
@@ -316,6 +324,90 @@ run_phase() {
   write_evidence "$phase" passed 0 "$duration"
   printf '  [ ok ] phase=%s duration=%ss\n' "$phase" "$duration"
 }
+record_phase_failure() { # <phase> <exit status> <duration>
+  P0_CURRENT_PHASE="$1"
+  P0_FAILED_PHASES+=("$1:$2")
+  collect_failure_diagnostics "$1" "$P0_FAILURE_LOG_MODE"
+  P0_FAILURE_LOG_MODE=append
+  write_evidence "$1" failed "$2" "$3"
+  printf '  [fail] phase=%s status=%s duration=%ss; continuing with independent phases\n' "$1" "$2" "$3" >&2
+}
+record_phase_blocked() { # <phase> <reason>
+  P0_BLOCKED_PHASES+=("$1")
+  write_evidence "$1" blocked null 0
+  printf '  [skip] phase=%s blocked: %s\n' "$1" "$2" >&2
+}
+recover_vm() { # <vm>: remove every owned fixture, then verify a clean disposable VM.
+  local vm="$1" rc=0
+  ( run_vm "$vm" peer-clean ) || rc=1
+  ( clean_source_host "$vm" ) || rc=1
+  ( clean_power_systemd_host "$vm" ) || rc=1
+  [ "$rc" = 0 ] && ( run_vm "$vm" capacity-verify-cleanup )
+}
+recover_phase_vms() { # <failed phase> <VMs>
+  local phase="$1" vm
+  for vm in $2; do
+    [ -z "${P0_DIRTY_VM[$vm]:-}" ] || continue
+    if recover_vm "$vm"; then
+      printf '  [ ok ] VM%s verified clean after failed phase=%s\n' "$vm" "$phase"
+    else
+      P0_DIRTY_VM[$vm]="$phase"
+      printf '  [fail] VM%s is not verified clean after phase=%s; later phases on it are blocked\n' "$vm" "$phase" >&2
+    fi
+  done
+}
+phase_blocker() { # <VMs>
+  local vm
+  for vm in $1; do
+    if [ -n "${P0_DIRTY_VM[$vm]:-}" ]; then
+      printf 'VM%s is not verified clean after failed %s\n' "$vm" "${P0_DIRTY_VM[$vm]}"
+      return 0
+    fi
+  done
+  return 1
+}
+run_independent_phase() { # <phase> <VMs> <command...>
+  local phase="$1" vms="$2" blocker started now duration rc; shift 2
+  if blocker="$(phase_blocker "$vms")"; then
+    record_phase_blocked "$phase" "$blocker"
+    return 0
+  fi
+  P0_CURRENT_PHASE="$phase"
+  started="$(p0_monotonic_seconds)"
+  P0_PHASE_STARTED="$started"
+  printf '  [ .. ] phase=%s bundle=%s\n' "$phase" "$P0_BUNDLE_HASH"
+  # Fixture flags change inside the subshell; an interrupt cleans these VMs instead.
+  P0_ACTIVE_PHASE_VMS="$vms"
+  set +e
+  ( set -e; "$@" )
+  rc=$?
+  set -e
+  now="$(p0_monotonic_seconds)"
+  duration=$((now - started))
+  if [ "$rc" = 0 ]; then
+    P0_ACTIVE_PHASE_VMS=''
+    write_evidence "$phase" passed 0 "$duration"
+    printf '  [ ok ] phase=%s duration=%ss\n' "$phase" "$duration"
+    return 0
+  fi
+  record_phase_failure "$phase" "$rc" "$duration"
+  recover_phase_vms "$phase" "$vms"
+  P0_ACTIVE_PHASE_VMS=''
+}
+finish_independent_phases() { # Exit with the first failure status, or 3 after any cleanup failure.
+  local item rc='' failed=''
+  [ "${#P0_FAILED_PHASES[@]}" -gt 0 ] || return 0
+  for item in "${P0_FAILED_PHASES[@]}"; do
+    failed+="${failed:+,}${item%%:*}(${item##*:})"
+    [ -n "$rc" ] || rc="${item##*:}"
+    [ "${item##*:}" != 3 ] || rc=3
+  done
+  printf '  [fail] full P0 failed=%s blocked=%s\n' "$failed" \
+    "$(IFS=,; printf '%s' "${P0_BLOCKED_PHASES[*]}")" >&2
+  P0_CURRENT_PHASE=independent-phases
+  P0_PHASE_STARTED="$(p0_monotonic_seconds)"
+  exit "$rc"
+}
 start_runner_child() {
   # Bash job-control mode gives each background runner its own process group. Disable it again
   # immediately so the rest of the non-interactive controller keeps its usual semantics.
@@ -442,10 +534,12 @@ cleanup_full_power_arm() {
 }
 cleanup_armed_full_fixtures() {
   local rc=0
-  [ -z "$FULL_POWER_ARM_FILE" ] || [ ! -e "$FULL_POWER_ARM_FILE" ] \
-    || cleanup_full_power_arm || rc=1
+  # Both fixtures are armed before the chain starts. The power fixture's clean refuses while
+  # another fixture's project exists, so remove the source fixture first, as recover_vm does.
   [ -z "$FULL_SOURCE_ARM_FILE" ] || [ ! -e "$FULL_SOURCE_ARM_FILE" ] \
     || cleanup_full_source_arm || rc=1
+  [ -z "$FULL_POWER_ARM_FILE" ] || [ ! -e "$FULL_POWER_ARM_FILE" ] \
+    || cleanup_full_power_arm || rc=1
   return "$rc"
 }
 stop_capacity_monitors() {
@@ -460,14 +554,18 @@ stop_capacity_monitors() {
   done
 }
 cleanup() {
-  local rc=$? cleanup_failed=0 duration now
+  local rc=$? cleanup_failed=0 duration now vm
   trap - EXIT INT TERM
   set +e
   if [ "$rc" -ne 0 ] && [ -n "$P0_EVIDENCE" ]; then
-    collect_failure_diagnostics failure-entry truncate
+    collect_failure_diagnostics failure-entry "${P0_FAILURE_LOG_MODE:-truncate}"
   fi
   stop_runner_children
   cleanup_armed_full_fixtures >/dev/null 2>&1 || cleanup_failed=1
+  for vm in ${P0_ACTIVE_PHASE_VMS:-}; do
+    { ( run_vm "$vm" peer-clean ) && ( clean_source_host "$vm" ) && ( clean_power_systemd_host "$vm" ); } \
+      >/dev/null 2>&1 || cleanup_failed=1
+  done
   stop_capacity_monitors
   if [ "$rc" -ne 0 ] && [ -n "$P0_EVIDENCE" ]; then
     now="$(p0_monotonic_seconds)"
@@ -898,15 +996,39 @@ transport_probes() {
   assert_no_worktrees
 }
 
+FULL_AUX_STAGES=(nested-teardown fixture-platform source-upgrade power-systemd legacy-continuation)
 run_full_aux_stage() {
-  local stage="$1" started now; shift
-  started="$(p0_monotonic_seconds)"
+  local stage="$1" started now rc; shift
   printf '%s\n' "$stage" > "$FULL_AUX_STAGE_FILE"
+  if [ -n "$FULL_AUX_BLOCKED" ]; then
+    FULL_AUX_LAST_STATUS=blocked
+    printf '%s\tblocked\tnull\t0\t%s\n' "$stage" "$FULL_AUX_BLOCKED" >> "$FULL_AUX_RESULTS_FILE"
+    printf '  [skip] full auxiliary stage=%s blocked: %s\n' "$stage" "$FULL_AUX_BLOCKED" >&2
+    return 0
+  fi
+  started="$(p0_monotonic_seconds)"
   printf '  [ .. ] full auxiliary stage=%s vm=2\n' "$stage"
-  "$@"
+  set +e
+  ( set -e; "$@" )
+  rc=$?
+  set -e
   now="$(p0_monotonic_seconds)"
-  printf '  [ ok ] full auxiliary stage=%s duration=%ss\n' \
-    "$stage" "$((now - started))"
+  if [ "$rc" = 0 ]; then
+    FULL_AUX_LAST_STATUS=passed
+    printf '%s\tpassed\t0\t%s\t\n' "$stage" "$((now - started))" >> "$FULL_AUX_RESULTS_FILE"
+    printf '  [ ok ] full auxiliary stage=%s duration=%ss\n' "$stage" "$((now - started))"
+    return 0
+  fi
+  FULL_AUX_LAST_STATUS=failed
+  printf '%s\tfailed\t%s\t%s\t\n' "$stage" "$rc" "$((now - started))" >> "$FULL_AUX_RESULTS_FILE"
+  printf '  [fail] full auxiliary stage=%s status=%s duration=%ss; continuing\n' \
+    "$stage" "$rc" "$((now - started))" >&2
+  if ! { ( cleanup_armed_full_fixtures ) && recover_vm 2; }; then
+    FULL_AUX_BLOCKED="VM2 is not verified clean after failed $stage"
+    # The controller must learn this even when no later stage reports it as a blocker.
+    printf '%s\tdirty\tnull\t0\t%s\n' "$stage" "$FULL_AUX_BLOCKED" >> "$FULL_AUX_RESULTS_FILE"
+    printf '  [fail] %s\n' "$FULL_AUX_BLOCKED" >&2
+  fi
 }
 
 full_aux_cleanup() {
@@ -930,18 +1052,24 @@ full_aux_exit() {
 full_aux_lane() (
   trap 'full_aux_exit "$?"' EXIT
   trap 'exit 143' TERM
+  FULL_AUX_BLOCKED=''
+  FULL_AUX_LAST_STATUS=''
   run_full_aux_stage nested-teardown run_vm 2 nested-teardown
   run_full_aux_stage fixture-platform run_vm 2 fixture-platform
+  [ "$FULL_AUX_LAST_STATUS" != failed ] || FULL_AUX_BLOCKED="${FULL_AUX_BLOCKED:-depends on failed fixture-platform}"
+  [ -e "$FULL_SOURCE_ARM_FILE" ] || arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
   run_full_aux_stage source-upgrade source_upgrade_lane 2
-  find "$FULL_SOURCE_ARM_FILE" -delete
+  [ "$FULL_AUX_LAST_STATUS" != passed ] || find "$FULL_SOURCE_ARM_FILE" -delete
+  [ -e "$FULL_POWER_ARM_FILE" ] || arm_full_fixture "$FULL_POWER_ARM_FILE" 2
   run_full_aux_stage power-systemd power_systemd_lane 2
+  [ -e "$FULL_POWER_ARM_FILE" ] || arm_full_fixture "$FULL_POWER_ARM_FILE" 2
   run_full_aux_stage legacy-continuation legacy_continuation_lane 2
-  find "$FULL_POWER_ARM_FILE" -delete
+  [ "$FULL_AUX_LAST_STATUS" != passed ] || find "$FULL_POWER_ARM_FILE" -delete
 )
 
 full_parallel_matrix() {
-  local owner_pid aux_pid owner_rc=0 aux_rc=0 owner_done=0 aux_done=0
-  local started deadline stage now
+  local owner_pid aux_pid owner_rc=0 aux_rc=0 owner_done=0 aux_done=0 timed_out=0
+  local started deadline now
   started="$(p0_monotonic_seconds)"
   deadline=$((started + FULL_MATRIX_TIMEOUT_SECONDS))
   printf '  [ .. ] full owner stage=release vm=1\n'
@@ -951,6 +1079,7 @@ full_parallel_matrix() {
   start_runner_child full_aux_lane
   aux_pid="$P0_STARTED_PID"
 
+  # A failed side never stops the other; both report before the matrix result.
   while [ "$owner_done" = 0 ] || [ "$aux_done" = 0 ]; do
     if [ "$owner_done" = 0 ] && ! kill -0 "$owner_pid" >/dev/null 2>&1; then
       set +e
@@ -959,16 +1088,12 @@ full_parallel_matrix() {
       owner_done=1
       now="$(p0_monotonic_seconds)"
       FULL_OWNER_DURATION=$((now - started))
-      if [ "$owner_rc" != 0 ]; then
-        P0_CURRENT_PHASE='parallel-matrix/release'
-        stop_runner_children
-        case "$owner_rc" in
-          3) return 3 ;;
-          2) return 2 ;;
-          *) return 1 ;;
-        esac
+      if [ "$owner_rc" = 0 ]; then
+        printf '  [ ok ] full owner stage=release duration=%ss\n' "$FULL_OWNER_DURATION"
+      else
+        printf '  [fail] full owner stage=release status=%s duration=%ss; auxiliary chain continues\n' \
+          "$owner_rc" "$FULL_OWNER_DURATION" >&2
       fi
-      printf '  [ ok ] full owner stage=release duration=%ss\n' "$FULL_OWNER_DURATION"
     fi
     if [ "$aux_done" = 0 ] && ! kill -0 "$aux_pid" >/dev/null 2>&1; then
       set +e
@@ -977,38 +1102,75 @@ full_parallel_matrix() {
       aux_done=1
       now="$(p0_monotonic_seconds)"
       FULL_AUX_DURATION=$((now - started))
-      if [ "$aux_rc" != 0 ]; then
-        stage="$(sed -n '1p' "$FULL_AUX_STAGE_FILE" 2>/dev/null || true)"
-        P0_CURRENT_PHASE="parallel-matrix/${stage:-auxiliary}"
-        stop_runner_children
-        case "$aux_rc" in
-          3) return 3 ;;
-          2) return 2 ;;
-          *) return 1 ;;
-        esac
-      fi
-      printf '  [ ok ] full auxiliary chain duration=%ss\n' "$FULL_AUX_DURATION"
+      printf '  [ .. ] full auxiliary chain finished status=%s duration=%ss\n' "$aux_rc" "$FULL_AUX_DURATION"
     fi
     if [ "$owner_done" = 0 ] || [ "$aux_done" = 0 ]; then
       now="$(p0_monotonic_seconds)"
       if [ "$now" -ge "$deadline" ]; then
-        stage="$(sed -n '1p' "$FULL_AUX_STAGE_FILE" 2>/dev/null || true)"
-        P0_CURRENT_PHASE="parallel-matrix/timeout-${stage:-auxiliary}"
+        timed_out=1
         stop_runner_children
-        return 2
+        [ "$owner_done" = 1 ] || { owner_rc=2; FULL_OWNER_DURATION=$((now - started)); }
+        [ "$aux_done" = 1 ] || { aux_rc=2; FULL_AUX_DURATION=$((now - started)); }
+        break
       fi
       sleep 1
     fi
   done
   P0_CHILD_PIDS=()
+  record_full_matrix_results "$owner_rc" "$aux_rc" "$timed_out"
+}
+
+# Record owner and auxiliary outcomes in their fixed order, independent of timing.
+record_full_matrix_results() { # <owner status> <auxiliary status> <timed out>
+  local owner_rc="$1" aux_rc="$2" timed_out="$3" stage status rc duration reason seen='' stopped=''
+  if [ "$owner_rc" = 0 ]; then
+    write_evidence parallel-matrix/release passed 0 "$FULL_OWNER_DURATION"
+  else
+    record_phase_failure parallel-matrix/release "$owner_rc" "$FULL_OWNER_DURATION"
+  fi
+  if [ -r "$FULL_AUX_RESULTS_FILE" ]; then
+    # Failure diagnostics run over SSH and read stdin; keep the results on their own descriptor.
+    while IFS=$'\t' read -r -u 9 stage status rc duration reason; do
+      seen+=" $stage"
+      case "$status" in
+        passed) write_evidence "parallel-matrix/$stage" passed 0 "$duration" ;;
+        failed) record_phase_failure "parallel-matrix/$stage" "$rc" "$duration" ;;
+        dirty) P0_DIRTY_VM[2]="parallel-matrix/$stage" ;;
+        blocked)
+          record_phase_blocked "parallel-matrix/$stage" "$reason"
+          case "$reason" in "VM2 is not verified clean"*) P0_DIRTY_VM[2]=parallel-matrix/auxiliary ;; esac
+          ;;
+      esac
+    done 9< "$FULL_AUX_RESULTS_FILE"
+  fi
+  if [ "$aux_rc" != 0 ]; then
+    stopped="$(sed -n '1p' "$FULL_AUX_STAGE_FILE" 2>/dev/null || true)"
+    case " $seen " in *" $stopped "*) stopped='' ;; esac
+    if [ "$timed_out" = 1 ]; then
+      record_phase_failure "parallel-matrix/timeout-${stopped:-auxiliary}" "$aux_rc" "$FULL_AUX_DURATION"
+    else
+      record_phase_failure "parallel-matrix/${stopped:-auxiliary}" "$aux_rc" "$FULL_AUX_DURATION"
+    fi
+    for stage in "${FULL_AUX_STAGES[@]}"; do
+      case " $seen $stopped " in *" $stage "*) continue ;; esac
+      record_phase_blocked "parallel-matrix/$stage" "auxiliary chain stopped with status $aux_rc"
+    done
+  fi
+  [ "$owner_rc" = 0 ] || recover_phase_vms parallel-matrix/release 1
+  if [ "$aux_rc" != 0 ]; then
+    ( cleanup_armed_full_fixtures ) || true
+    recover_phase_vms parallel-matrix/auxiliary 2
+  fi
 }
 
 run_full_matrix_phase() {
-  local started duration now
+  local started duration now failures
   P0_CURRENT_PHASE=parallel-matrix
   started="$(p0_monotonic_seconds)"
   P0_PHASE_STARTED="$started"
   FULL_AUX_STAGE_FILE="$LOCAL_TEMP/full-aux-stage"
+  FULL_AUX_RESULTS_FILE="$LOCAL_TEMP/full-aux-results"
+  : > "$FULL_AUX_RESULTS_FILE"
   FULL_SOURCE_ARM_FILE="$LOCAL_TEMP/full-source-vm"
   FULL_POWER_ARM_FILE="$LOCAL_TEMP/full-power-vm"
   SOURCE_LANE_VM=2
@@ -1017,11 +1179,18 @@ run_full_matrix_phase() {
   arm_full_fixture "$FULL_POWER_ARM_FILE" 2
   printf '  [ .. ] phase=parallel-matrix bundle=%s timeout=%ss\n' \
     "$P0_BUNDLE_HASH" "$FULL_MATRIX_TIMEOUT_SECONDS"
+  failures="${#P0_FAILED_PHASES[@]}"
   full_parallel_matrix
-  [ ! -e "$FULL_SOURCE_ARM_FILE" ] && [ ! -e "$FULL_POWER_ARM_FILE" ] \
-    || die 'parallel release matrix retained an armed fixture after success'
   now="$(p0_monotonic_seconds)"
   duration=$((now - started))
+  if [ "${#P0_FAILED_PHASES[@]}" != "$failures" ]; then
+    write_evidence parallel-matrix failed 1 "$duration"
+    printf '  [fail] phase=parallel-matrix duration=%ss owner=%ss auxiliary=%ss\n' \
+      "$duration" "$FULL_OWNER_DURATION" "$FULL_AUX_DURATION" >&2
+    return 0
+  fi
+  [ ! -e "$FULL_SOURCE_ARM_FILE" ] && [ ! -e "$FULL_POWER_ARM_FILE" ] \
+    || die 'parallel release matrix retained an armed fixture after success'
   write_evidence parallel-matrix passed 0 "$duration"
   printf '  [ ok ] phase=parallel-matrix duration=%ss owner=%ss auxiliary=%ss\n' \
     "$duration" "$FULL_OWNER_DURATION" "$FULL_AUX_DURATION"
@@ -1215,6 +1384,20 @@ full_uninstall_reboot() {
  wait_reboot_host_ready 1
 }
 
+full_final_verify() {
+  local vm
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
+    [ "$(home_state "$vm")" = "${HOME_STATE_BEFORE[$vm]}" ] \
+      || die "VM$vm operator home permissions or ownership changed"
+  done
+  verify_cache_lifecycle
+  capacity_report
+  verify_boundary
+}
+
+# Matrix fixtures install the frozen candidate; refuse before allocation instead of failing per stage.
+[ "$P0_LANE" != full ] || [ -n "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" ] \
+  || die '--lane full needs a frozen candidate: run python3 dev/release-acceptance.py prepare and export SUBYARD_E2E_CANDIDATE_BUNDLE and SUBYARD_E2E_CANDIDATE_SHA256'
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE="p0-$P0_LANE"
 [ "$P0_LANE" != full-uninstall ] || ENVIRONMENT_TYPE=android-test
@@ -1365,26 +1548,24 @@ case "$P0_LANE" in
     run_phase boundary verify_boundary
     run_phase transport transport_probes
     if [ "$P0_LANE" = full ]; then
+      # Prerequisites above stop the run; these phases report every failure together.
       run_full_matrix_phase
-      run_phase newer-release run_vm 1 newer-release
-      run_phase release-smoke release_smoke_lane
-      run_phase peer peer_lane
+      run_independent_phase newer-release 1 run_vm 1 newer-release
+      run_independent_phase release-smoke 1 release_smoke_lane
+      run_independent_phase peer '1 2' peer_lane
+      run_independent_phase cleanup '' cleanup_lane
+      run_independent_phase final-verify '1 2' full_final_verify
+      finish_independent_phases
     else
       run_phase real-incus run_vm 1 real-incus
       run_phase newer-release run_vm 1 newer-release
       run_phase release-smoke release_smoke_lane
       run_phase peer-smoke peer_lane smoke
+      run_phase cleanup cleanup_lane
+      P0_CURRENT_PHASE=final-verify
+      P0_PHASE_STARTED="$(p0_monotonic_seconds)"
+      full_final_verify
     fi
-    run_phase cleanup cleanup_lane
-    P0_CURRENT_PHASE=final-verify
-    P0_PHASE_STARTED="$(p0_monotonic_seconds)"
-    for ((vm=1; vm<=VM_COUNT; vm++)); do
-      [ "$(home_state "$vm")" = "${HOME_STATE_BEFORE[$vm]}" ] \
-        || die "VM$vm operator home permissions or ownership changed"
-    done
-    verify_cache_lifecycle
-    capacity_report
-    verify_boundary
     find "$CAPACITY_LOG_DIR" -depth -delete
     CAPACITY_LOG_DIR=''
     ;;

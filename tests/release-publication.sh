@@ -28,7 +28,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False):
+def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True):
     root = directory / "source"
     for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
@@ -53,6 +53,13 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
         external["required"] = external_required
     (profile / "external-obligations.json").write_text(json.dumps({"schema_version": 1, "obligations": [external]}))
     (root / "dev/package-engine.sh").write_text("#!/bin/bash\necho 'must not repackage'; exit 99\n")
+    if current_contract:
+        # Pinned candidate code declares CI-counted checks and release levels; release.yml is the reviewed policy.
+        (root / ".github/workflows").mkdir(parents=True)
+        shutil.copy2(ROOT / ".github/workflows/release.yml", root / ".github/workflows/release.yml")
+        if not optional_vms:
+            (root / "dev/release-acceptance.py").write_text("CI_PREPARED_CHECKS = {}\n")
+        (root / "dev/release-publication.py").write_text("def release_level():\n    pass\n")
     prepared = directory / "prepared"
     prepared.mkdir()
     assets = prepared / "assets"
@@ -83,6 +90,11 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
     return root, prepared, identity
 
 
+REAL_RELEASE_SCOPE = m.release_scope
+ORDINARY_LEVEL = {"level": "ordinary", "reason": "no migration or update-contract changes since v1.2.2",
+                  "baseline": "v1.2.2", "migration_changes": []}
+
+
 def accepted(directory, prepared, identity, external_passed=True, with_vms=True):
     output = directory / "acceptance"
     with patch.object(m.a, "execution_environment", return_value={"system": "Linux", "machine": "x86_64", "go": "go version fixture"}):
@@ -100,6 +112,7 @@ def accepted(directory, prepared, identity, external_passed=True, with_vms=True)
     if external_passed:
         for item in receipt["external_obligations"].values():
             item.update({"status": "passed", "evidence_sha256": "c" * 64})
+    receipt["release_level"] = ORDINARY_LEVEL
     m.a.save(output, receipt)
     return output, root, m.attestation(output, identity)
 
@@ -287,6 +300,88 @@ class Downloads(unittest.TestCase):
 
 
 class Contracts(unittest.TestCase):
+    def test_prepared_candidate_counts_ci_preparation_jobs_and_publication_rechecks_policy(self):
+        # Changing release.yml requires reviewing that its jobs still run these commands.
+        self.assertIn(CURRENT_POLICY, m.CI_COUNTED_POLICIES)
+        self.assertEqual(m.CI_COUNTED_POLICIES - set(m.PREPARATION_WORKFLOW_POLICIES), set())
+        output = self.directory / "ci-counted"
+        with patch.object(m.a, "execution_environment", return_value=self.document["environment"]):
+            m.a.prepare(output, self.identity["version"], self.prepared)
+        root, receipt = m.a.load_bound(output)
+        for name, result in receipt["checks"].items():
+            if name in m.a.CI_PREPARED_CHECKS:
+                self.assertEqual((result["status"], result["command"]), ("passed", ["ci-prepared", "r123-a1", m.a.CI_PREPARED_CHECKS[name]]))
+            elif name != "package" and result["status"] == "pending":
+                log = output / (name.replace(":", "-").replace("/", "-") + ".log")
+                log.write_text("synthetic passing evidence fixture\n")
+                receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
+                    "command": m.a.command_identity(m.a.commands(root, receipt["version"], receipt["profiles"])[name], root),
+                    "execution_environment": receipt["environment"],
+                    **({"environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]} if m.a.is_live(name) else {})}
+        for item in receipt["external_obligations"].values():
+            item.update({"status": "passed", "evidence_sha256": "c" * 64})
+        m.a.save(output, receipt)
+        with redirect_stdout(io.StringIO()), patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m.a, "execute") as execute:
+            self.assertEqual(m.a.run_checks(output, [1], [], False, with_vms=True), 0)
+            execute.assert_not_called()
+        document = m.attestation(output, self.identity)
+        self.assertEqual({name: result.get("ci_job") for name, result in document["checks"].items() if "ci_job" in result},
+                         m.a.CI_PREPARED_CHECKS)
+        self.github.workflow_blob = CURRENT_POLICY
+        with redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(m.publish_remote(self.github, self.prepared, document, root)["html_url"], "https://fixture/release")
+        self.assertIn("PUBLICATION ci_counted=compatibility,local-adapters,shellcheck,verify execution=ci-preparation\n", printed.getvalue())
+        self.github.workflow_blob = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
+        with self.assertRaisesRegex(ValueError, "does not run the counted checks: compatibility,local-adapters,shellcheck,verify"):
+            m.publish_remote(self.github, self.prepared, document, root)
+        for mutate in (lambda d: d["checks"]["verify"].update(ci_job="prepare"),
+                       lambda d: d["checks"]["p0-release-smoke"].update(execution="ci-preparation", ci_job="prepare"),
+                       lambda d: d["checks"]["verify"].pop("ci_job")):
+            invalid = copy.deepcopy(document)
+            mutate(invalid)
+            with self.assertRaises(ValueError):
+                m.validate_attestation(invalid, self.identity, root)
+        for mutate in (lambda r: r["checks"]["verify"].update(command=["ci-prepared", "r999-a1", "host-free-verify"]),
+                       lambda r: r["checks"]["p0-release-smoke"].update(execution="ci-preparation", command=["ci-prepared", "r123-a1", "prepare"]),
+                       lambda r: r.pop("preparation") and r["checks"]["package"].update(command=["bash"])):
+            changed = copy.deepcopy(receipt)
+            mutate(changed)
+            m.a.save(output, changed)
+            with self.assertRaises(ValueError):
+                m.a.load_bound(output)
+        m.a.save(output, receipt)
+        # Counted CI results are not command-bound local evidence for any other candidate.
+        _, other = m.a.load_bound(self.output)
+        other["checks"]["local-adapters"] = {"status": "pending"}
+        m.a.save(self.output, other)
+        review = self.directory / "ci-review.json"
+        review.write_text(json.dumps({"schema_version": 1, "check": "local-adapters", "tested": m.a.transfer_candidate(receipt),
+            "target": m.a.transfer_candidate(other), "source_receipt_sha256": m.a.digest(output / "receipt.json"),
+            "review": {"unchanged_scope": "Same inputs", "reason": "Fixture", "authorization_reference": "fixture"}, "standalone": None}))
+        with self.assertRaisesRegex(ValueError, "original passing command-bound evidence"):
+            m.a.transfer_evidence(self.output, output, "local-adapters", review)
+
+    def test_historical_candidate_code_keeps_local_checks_and_needs_no_release_level(self):
+        for name, mutate in (("old-code", None), ("unreviewed-policy", "edit")):
+            directory = self.directory / name
+            directory.mkdir()
+            root, prepared, identity = fixture(directory, current_contract=mutate is not None)
+            if mutate:
+                release = root / ".github/workflows/release.yml"
+                release.write_text(release.read_text() + "# unreviewed\n")
+                m.a.bundle(root, prepared / "source.tar.gz")
+                identity.update(source_fingerprint=m.a.source_fingerprint(root),
+                                source_archive_sha256=m.a.digest(prepared / "source.tar.gz"))
+                m.write_json(prepared / "identity.json", identity)
+            output = directory / "acceptance"
+            with redirect_stdout(io.StringIO()):
+                m.a.prepare(output, identity["version"], prepared)
+            _, receipt = m.a.load_bound(output)
+            self.assertEqual([check for check, result in receipt["checks"].items() if result.get("execution") == "ci-preparation"], [])
+            self.assertEqual(receipt["checks"]["verify"], {"status": "pending"})
+            self.assertEqual(m.a.source_declares(output / "source", "dev/release-publication.py", "release_level"), mutate is not None)
+
     def test_preparation_workflow_revision_policies(self):
         legacy = "bb9852249013520480a165571dac6c604c487e86"
         current = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
@@ -333,7 +428,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(result["transport"], m.ATTESTATION_BLOB_TRANSPORT)
         self.assertEqual(result["manifest_count"], 1)
         projected = json.loads(zlib.decompress(next(iter(self.github.blobs.values()))))
-        self.assertEqual(projected["checks"]["verify"]["status"], "pending")
+        self.assertEqual(projected["checks"]["p0-release-smoke"]["status"], "pending")
+        self.assertEqual(projected["checks"]["verify"]["ci_job"], "host-free-verify")
         self.assertNotIn("log", projected["checks"]["package"])
         self.assertEqual((output / "receipt.json").read_bytes(), before)
         self.assertIsNone(self.github.ref)
@@ -380,7 +476,10 @@ class Contracts(unittest.TestCase):
                     acceptance = state_dir / identity["candidate_id"] / "acceptance" / "receipt.json"
                     checks = json.loads(acceptance.read_text())["checks"]
                     self.assertEqual(checks["package"]["status"], "passed")
-                    self.assertEqual(checks["verify"], {"status": "pending"})
+                    self.assertEqual({name: (checks[name]["execution"], checks[name]["command"][2]) for name in m.a.CI_PREPARED_CHECKS},
+                                     {"shellcheck": ("ci-preparation", "host-free-verify"), "verify": ("ci-preparation", "host-free-verify"),
+                                      "local-adapters": ("ci-preparation", "prepare"), "compatibility": ("ci-preparation", "prepare")})
+                    self.assertEqual(checks["p0-release-smoke"], {"status": "pending"})
                     original_acceptance = acceptance.read_bytes()
                     argv[4] = github.repository = "subyard/subyard"
                     self.assertEqual(m.main(), 0)
@@ -393,8 +492,10 @@ class Contracts(unittest.TestCase):
                 self.assertEqual((local / "identity.json").read_bytes(), original_identity)
                 github.repository = argv[4] = "SUBYARD/Subyard"
                 argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "1"]
-                with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1):
+                with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1), \
+                     patch.object(m.a, "reuse_isolated_tests", wraps=m.a.reuse_isolated_tests) as reuse:
                     self.assertEqual(m.main(), 1)
+                    reuse.assert_called_once_with(state_dir / identity["candidate_id"] / "acceptance", [])
                     argv[4] = github.repository = "foreign/subyard"
                     with self.assertRaisesRegex(ValueError, "another candidate/repository"):
                         m.main()
@@ -476,6 +577,49 @@ class Contracts(unittest.TestCase):
             self.assertEqual(document["checks"]["profile:sample"]["status"], "not-run")
             m.validate_attestation(document, identity, root)
 
+    def test_policy_reuse_publishes_as_inherited_and_is_rechecked_from_source(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory)
+            source, _, _ = accepted(directory, prepared, identity)
+            capture_attempts(source)
+            target_dir = directory / "target"
+            target_dir.mkdir()
+            target, root, _ = accepted(target_dir, prepared, identity)
+            _, current = m.a.load_bound(target)
+            current["checks"]["profile:sample"] = {"status": "pending"}
+            m.a.save(target, current)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.a.reuse_isolated_tests(target, [source]), [("profile:sample", str(source.resolve()), 0)])
+            capture_attempts(target)
+            document = m.attestation(target, identity)
+            result = document["checks"]["profile:sample"]
+            self.assertEqual((document["schema_version"], result["execution"]), (5, "inherited"))
+            self.assertEqual(result["evidence_transfer"]["review"]["authorization_reference"], m.a.ISOLATED_TESTS_POLICY)
+            m.validate_attestation(document, identity, root)
+            with redirect_stdout(io.StringIO()) as printed:
+                m.report_inherited_checks(document)
+            self.assertEqual(printed.getvalue(), "PUBLICATION inherited=profile:sample authorization=" + m.a.ISOLATED_TESTS_POLICY
+                             + " reason=Automatic reuse: none of the changed files is an input of this check.\n")
+            forged = copy.deepcopy(document)
+            forged["checks"]["profile:sample"]["evidence_transfer"]["review"]["reason"] = "Reviewed elsewhere"
+            with self.assertRaisesRegex(ValueError, "policy transfer"):
+                m.validate_attestation(forged, identity, root)
+
+    def test_accept_offers_earlier_same_version_candidates_newest_first(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            state = Path(temporary)
+            identity = {"version": "1.2.3", "repository": m.REPOSITORY}
+            for name, version, repository in (("r5-a1", "1.2.3", m.REPOSITORY), ("r7-a2", "1.2.3", m.REPOSITORY.lower()),
+                                              ("r7-a1", "1.2.3", m.REPOSITORY), ("r9-a1", "1.2.4", m.REPOSITORY),
+                                              ("r3-a1", "1.2.3", "foreign/subyard"), ("r8-a1", "1.2.3", m.REPOSITORY), ("notes", "1.2.3", m.REPOSITORY)):
+                (state / name / "acceptance").mkdir(parents=True)
+                (state / name / "acceptance/receipt.json").write_text("{}")
+                (state / name / "identity.json").write_text(json.dumps({"version": version, "repository": repository}))
+            (state / "r6-a1").mkdir()
+            self.assertEqual(m.earlier_candidates(state, state / "r8-a1", identity),
+                             [state / name / "acceptance" for name in ("r7-a2", "r7-a1", "r5-a1")])
+
     def test_v2_attempt_transfer_publishes_with_shared_v5_manifests(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
@@ -517,6 +661,7 @@ class Contracts(unittest.TestCase):
         self.root, self.prepared, self.identity = fixture(self.directory)
         self.output, self.frozen, self.document = accepted(self.directory, self.prepared, self.identity)
         self.github = FakeGitHub(self.identity)
+        self.enterContext(patch.object(m, "release_scope", return_value=("v1.2.2", [])))
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -609,6 +754,102 @@ class Contracts(unittest.TestCase):
                                            "accept", "--candidate", identity["candidate_id"], *option]):
                 with self.assertRaisesRegex(ValueError, "require --slots"):
                     m.main()
+
+    def test_release_scope_uses_previous_merged_tag_and_product_migration_paths(self):
+        repository = self.directory / "scope-repository"
+        repository.mkdir()
+        def git(*arguments):
+            return subprocess.check_output(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                            "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *arguments],
+                                           cwd=repository, text=True).strip()
+        commits = []
+        def commit(*paths):
+            commits.append(paths)
+            for path in paths:
+                (repository / path).parent.mkdir(parents=True, exist_ok=True)
+                (repository / path).write_text(f"{path} {len(commits)}\n")
+            git("add", "-A")
+            git("commit", "-q", "-m", "fixture")
+            return git("rev-parse", "HEAD")
+        git("init", "-q", "-b", "main")
+        with patch.object(m, "ROOT", repository):
+            first = commit("README.md")
+            self.assertEqual(REAL_RELEASE_SCOPE("1.2.3", first), (None, None))
+            git("tag", "v1.2.1")
+            commit("internal/migration/old.go")
+            git("tag", "v1.2.2")
+            git("tag", "v1.2.3")
+            git("tag", "v1.3.0")
+            git("tag", "v1.2.4-rc1")
+            head = commit("docs/migration.md", "internal/migration/new_test.go", "tests/fixtures/migrations/x.json",
+                          "dev/e2e/release-transition.sh", "scripts/other.sh")
+            self.assertEqual(REAL_RELEASE_SCOPE("1.2.3", head), ("v1.2.2", []))
+            changed = commit("internal/releasetransition/plan.go", "config/identity/transition.py")
+            self.assertEqual(REAL_RELEASE_SCOPE("1.2.3", changed),
+                             ("v1.2.2", ["config/identity/transition.py", "internal/releasetransition/plan.go"]))
+            self.assertEqual(REAL_RELEASE_SCOPE("1.2.3", "f" * 40), (None, None))
+            git("checkout", "-q", "-b", "side", first)
+            side = commit("scripts/side.sh")
+            self.assertEqual(REAL_RELEASE_SCOPE("1.2.3", side), ("v1.2.1", []))
+
+    def test_release_level_decision_requires_full_for_migration_changes(self):
+        clean, changed, unknown = ("v1.2.2", []), ("v1.2.2", ["internal/migration/a.go"]), (None, None)
+        self.assertEqual(m.release_level("ordinary", None, clean), ORDINARY_LEVEL)
+        with self.assertRaisesRegex(ValueError, "full release required: .* since v1.2.2: internal/migration/a.go; rerun accept with --level full"):
+            m.release_level("ordinary", "Operator says it is fine", changed)
+        with self.assertRaisesRegex(ValueError, "cannot determine migration changes"):
+            m.release_level("ordinary", None, unknown)
+        self.assertEqual(m.release_level("ordinary", "Hotfix commit checked by hand", unknown),
+                         {"level": "ordinary", "reason": "Hotfix commit checked by hand", "baseline": None, "migration_changes": None})
+        self.assertEqual(m.release_level("full", None, changed)["reason"],
+                         "migration or update-contract changes since v1.2.2: internal/migration/a.go")
+        with self.assertRaisesRegex(ValueError, "requires --level-reason"):
+            m.release_level("full", None, clean)
+        recorded = m.release_level("full", None, changed)
+        with self.assertRaisesRegex(ValueError, "full release required: .* since v1.2.2: internal/migration/a.go"):
+            m.release_level("ordinary", "Baseline tag is not fetched here", unknown, recorded)
+        with self.assertRaisesRegex(ValueError, "one line of at most 500 characters; full release required"):
+            m.release_level("ordinary", "two\nlines", changed)
+        self.assertEqual(m.release_level("full", "Operator request", clean)["reason"], "Operator request")
+        for reason in ("", " ", "two\nlines", "x" * 501):
+            with self.assertRaisesRegex(ValueError, "one line"):
+                m.release_level("full", reason, changed)
+
+    def test_accept_records_release_level_and_full_level_requires_every_vm_check(self):
+        directory = self.directory / "r123-a1"
+        directory.mkdir()
+        _, prepared, identity = fixture(directory, external_required=False, optional_vms=True)
+        output, _, document = accepted(directory, prepared, identity, external_passed=False, with_vms=False)
+        _, receipt = m.a.load_bound(output)
+        receipt.pop("release_level")
+        m.a.save(output, receipt)
+        github = FakeGitHub(identity)
+        def run(action, *option, scope=("v1.2.2", [])):
+            with patch.object(m, "GitHub", return_value=github), patch.object(m, "release_scope", return_value=scope), \
+                 patch.object(m.a, "execution_environment", return_value=document["environment"]), \
+                 patch.object(m.signal, "signal"), patch.object(m.a, "run_checks", return_value=1) as checks, \
+                 patch.object(sys, "argv", ["release", "--state-dir", str(self.directory), action, "--candidate", identity["candidate_id"], *option]), \
+                 redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(m.main(), 1)
+            return checks.call_args.kwargs["with_vms"], json.loads((output / "receipt.json").read_text())["release_level"], printed.getvalue()
+        with patch.object(m, "GitHub", return_value=github), \
+             patch.object(sys, "argv", ["release", "--state-dir", str(self.directory), "publish", "--candidate", identity["candidate_id"]]):
+            with self.assertRaisesRegex(ValueError, "release level is not recorded; run accept"):
+                m.main()
+        with_vms, level, printed = run("accept")
+        self.assertEqual((with_vms, level), (False, ORDINARY_LEVEL))
+        self.assertIn("RELEASE_LEVEL ordinary reason=no migration or update-contract changes since v1.2.2\n", printed)
+        migration = ("v1.2.2", ["internal/migration/a.go"])
+        before = (output / "receipt.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, "full release required"):
+            run("accept", "--level", "ordinary", scope=migration)
+        self.assertEqual((output / "receipt.json").read_bytes(), before)
+        with_vms, level, _ = run("accept", "--level", "full", "--slots", "1", scope=migration)
+        self.assertEqual((with_vms, level["level"], level["migration_changes"]), (True, "full", ["internal/migration/a.go"]))
+        with_vms, recorded, _ = run("accept", "--slots", "1")  # The recorded level persists.
+        self.assertEqual((with_vms, recorded), (True, level))
+        with self.assertRaisesRegex(ValueError, "full release requires every VM check; not run: profile:sample"):
+            m.attestation(output, identity)
 
     def test_optional_vm_receipt_reset_refuses_publication_with_retained_history(self):
         directory = self.directory / "optional-history"
@@ -753,6 +994,8 @@ class Contracts(unittest.TestCase):
         target_root, receipt = m.a.load_bound(target)
         source_root, source = m.a.load_bound(self.output)
         name = "verify"
+        receipt["checks"][name] = {"status": "pending"}  # A rerun replaced the counted CI result.
+        m.a.save(target, receipt)
         review = {"schema_version": 1, "check": name, "tested": m.a.transfer_candidate(source),
             "target": m.a.transfer_candidate(receipt), "source_receipt_sha256": m.a.digest(self.output / "receipt.json"),
             "review": {"unchanged_scope": "Exact unchanged verification scope", "reason": "Original native PASS reviewed",
@@ -810,8 +1053,10 @@ class Contracts(unittest.TestCase):
         with patch.object(m.a, "execution_environment", return_value={**source["environment"], "go": "go version target fixture"}):
             m.a.prepare(output, identity["version"], candidate / "prepared")
         root, receipt = m.a.load_bound(output)
-        # This fixture explicitly transfers diagnostic execution as historical evidence.
-        receipt["checks"]["process-coverage"] = {"status": "pending"}
+        # This fixture explicitly transfers diagnostic execution and local runs as historical evidence.
+        for name in ("process-coverage", *m.a.CI_PREPARED_CHECKS):
+            receipt["checks"][name] = {"status": "pending"}
+        receipt["release_level"] = ORDINARY_LEVEL
         m.a.save(output, receipt)
         names = sorted(set(source["checks"]) - {"package"})
         self.assertEqual(len(names), 10)

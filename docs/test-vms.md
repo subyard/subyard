@@ -1420,6 +1420,19 @@ SUBYARD_P0_WAIT_SECONDS=1200 \
   dev/e2e/p0-acceptance.sh --slot "$slot" --lane power-systemd
 ```
 
+`--lane full` installs the frozen candidate in its fixtures and refuses before allocation unless
+`SUBYARD_E2E_CANDIDATE_BUNDLE` and `SUBYARD_E2E_CANDIDATE_SHA256` name one prepared by
+`python3 dev/release-acceptance.py prepare`; release acceptance passes them itself.
+
+After capacity preflight, boundary and transport pass, `--lane full` does not stop at the first failed
+phase. The parallel owner and auxiliary chain both finish, auxiliary stages continue after a failure,
+and newer-release, release smoke, peer, cleanup and final verification still run. After each failure
+the controller removes every owned fixture on that phase's VMs and verifies capacity cleanup; a VM
+that is not verified clean blocks later phases on it, and a failed `fixture-platform` blocks its
+dependent auxiliary stages. Evidence records every phase as passed, failed or blocked. The run ends
+with one `full P0 failed=... blocked=...` line in phase order and exits with the first failure status,
+or 3 when cleanup failed.
+
 `SUBYARD_P0_WAIT_SECONDS` is a non-negative number of seconds passed to the atomic broker acquire;
 zero keeps the fail-fast default. The `power-systemd` parser project is fully ephemeral: the lane
 removes its marker-owned project and restores the snapshotted host unit/runtime before the phase is

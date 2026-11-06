@@ -45,6 +45,9 @@ PREPARATION_WORKFLOW_POLICIES = {
 }
 
 
+CI_COUNTED_POLICIES = a.CI_COUNTED_POLICIES
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -180,6 +183,8 @@ def publication_preflight(output, manifest_paths, github):
     checks = {}
     for name, result in receipt["checks"].items():
         checks[name] = {key: result[key] for key in ("status", "exit_code", "log_sha256", "environments", "evidence_transfer") if key in result}
+        if result.get("execution") == "ci-preparation":
+            checks[name].update(execution="ci-preparation", ci_job=a.CI_PREPARED_CHECKS[name])
         if "original_attempt" in result:
             record, original = a.original_attempt(output, receipt, name, result)
             checks[name]["original_attempt"] = record
@@ -349,7 +354,7 @@ def verify_run(github, candidate):
     if (len(jobs) != len(required) or {job["name"] for job in jobs} != required
         or any(job["status"] != "completed" or job["conclusion"] != "success" for job in jobs)):
         raise ValueError("preparation job inventory did not completely pass in this attempt")
-    return run
+    return {**run, "preparation_policy": declaration["sha"]}
 
 
 def fetch(github, candidate, destination):
@@ -635,6 +640,10 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
         raise ValueError("complete passing acceptance of this exact candidate is required")
+    if receipt.get("release_level", {}).get("level") == "full":
+        unrun = sorted(name for name, result in receipt["checks"].items() if a.optional_vm_not_run(name, result))
+        if unrun:
+            raise ValueError("full release requires every VM check; not run: " + ",".join(unrun))
     checks, manifests = {}, {}
     for name, result in receipt["checks"].items():
         if name in deferred_profiles:
@@ -653,12 +662,17 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
                 raise ValueError("passing check lacks evidence")
             if not a.is_live(name) and "evidence_transfer" not in result and result.get("execution_environment") != receipt["environment"]:
                 raise ValueError("passing local check execution environment differs")
-            if name != "package" and result.get("command") != a.command_identity(a.commands(root, receipt["version"], receipt["profiles"])[name], root):
+            if result.get("execution") == "ci-preparation":
+                if result.get("command") != a.ci_prepared_result(name, identity["candidate_id"]):
+                    raise ValueError("CI preparation result lacks candidate binding")
+            elif name != "package" and result.get("command") != a.command_identity(a.commands(root, receipt["version"], receipt["profiles"])[name], root):
                 raise ValueError("passing check lacks command binding")
         checks[name] = {"status": result["status"], **({"log_sha256": result["log_sha256"], "exit_code": 0}
                                                      if result["status"] == "passed" else {})}
         if a.is_live(name) and result["status"] == "passed":
             checks[name]["environments"] = result.get("environments", [])
+        if result.get("execution") == "ci-preparation":
+            checks[name].update(execution="ci-preparation", ci_job=a.CI_PREPARED_CHECKS[name])
         if "evidence_transfer" in result:
             checks[name]["execution"] = "inherited"
             checks[name]["evidence_transfer"] = result["evidence_transfer"]
@@ -773,6 +787,10 @@ def validate_attestation(document, identity, root):
                     raise ValueError("operator acceptance original failure changed")
                 continue
             keys = {"status", "log_sha256", "exit_code"} | ({"environments"} if a.is_live(name) else set())
+            if result.get("execution") == "ci-preparation":
+                if name not in a.CI_PREPARED_CHECKS or result.get("ci_job") != a.CI_PREPARED_CHECKS[name]:
+                    raise ValueError("CI preparation result names a different job")
+                keys |= {"execution", "ci_job"}
             if "evidence_transfer" in result:
                 keys |= {"execution", "evidence_transfer"}
             if "original_attempt" in result:
@@ -788,7 +806,7 @@ def validate_attestation(document, identity, root):
                     if version != 5:
                         raise ValueError("original attempt transfer requires v5 attestation")
                     referenced.update(transfer[key] for key in ("tested_manifest_sha256", "target_manifest_sha256"))
-                a.validate_evidence_transfer(transfer, name, a.command_identity(command, root), target, result["log_sha256"], manifests)
+                a.validate_evidence_transfer(transfer, name, a.command_identity(command, root), target, result["log_sha256"], manifests, root)
                 if transfer.get("schema_version") == 2:
                     bind_attempt(transfer["original_attempt"])
                 if result["execution"] != "inherited" or result.get("environments", []) != result["evidence_transfer"]["environments"]:
@@ -960,6 +978,19 @@ def verify_owned_ref(github, tag, marker, commit, ref=None):
     return ref
 
 
+def report_inherited_checks(document):
+    for name, result in sorted(document["checks"].items()):
+        if "evidence_transfer" in result:
+            review = result["evidence_transfer"]["review"]
+            print(f"PUBLICATION inherited={name} authorization={review['authorization_reference']} reason={review['reason']}", flush=True)
+
+
+def report_ci_checks(document):
+    counted = sorted(name for name, result in document["checks"].items() if result.get("execution") == "ci-preparation")
+    if counted:
+        print("PUBLICATION ci_counted=" + ",".join(counted) + " execution=ci-preparation", flush=True)
+
+
 def report_unrun_checks(document):
     optional_vms = [name for name, result in document["checks"].items() if a.optional_vm_not_run(name, result)]
     if optional_vms:
@@ -977,9 +1008,14 @@ def publish_remote(github, prepared, document, root):
     identity = checked_identity(prepared)
     if not same_repository(identity["repository"], github.repository) or a.source_fingerprint(root) != identity["source_fingerprint"]:
         raise ValueError("publication source/repository mismatch")
-    verify_run(github, identity["candidate_id"])
+    run = verify_run(github, identity["candidate_id"])
     validate_attestation(document, identity, root)
+    counted = sorted(name for name, result in document["checks"].items() if result.get("execution") == "ci-preparation")
+    if counted and run["preparation_policy"] not in CI_COUNTED_POLICIES:
+        raise ValueError("preparation workflow policy does not run the counted checks: " + ",".join(counted))
     report_unrun_checks(document)
+    report_inherited_checks(document)
+    report_ci_checks(document)
     for name in document.get("operator_acceptances", []):
         print(f"PUBLICATION operator_accepted={name} native_status=failed exit_code={document['checks'][name]['exit_code']}", flush=True)
     deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
@@ -1121,6 +1157,77 @@ def dispatch(github, workflow, inputs, state, path):
     raise ValueError("dispatch outcome unknown; repeat command to discover retained request, do not duplicate dispatch")
 
 
+def earlier_candidates(state_dir, directory, identity):
+    """Other local candidates of the same repository and version, newest attempt first."""
+    found = []
+    for path in state_dir.iterdir():
+        try:
+            parts = candidate_parts(path.name)
+            other = json.loads((path / "identity.json").read_text())
+        except (ValueError, OSError):
+            continue
+        if (path != directory and (path / "acceptance/receipt.json").is_file() and other.get("version") == identity["version"]
+            and same_repository(other.get("repository", ""), identity["repository"])):
+            found.append((parts, path / "acceptance"))
+    return [path for _, path in sorted(found, reverse=True)]
+
+
+def release_scope(version, commit):
+    """Return the previous release tag merged into commit and the migration paths changed since it.
+
+    The tag or its diff may be unavailable locally; that returns (None, None), never an empty change list."""
+    target = tuple(int(part) for part in version.split("."))
+    try:
+        tags = subprocess.check_output(["git", "tag", "--list", "v[0-9]*", "--merged", commit], cwd=ROOT, text=True,
+                                       stderr=subprocess.DEVNULL).split()
+        released = sorted((tuple(int(part) for part in tag[1:].split(".")), tag) for tag in tags
+                          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) and tuple(int(part) for part in tag[1:].split(".")) < target)
+        if not released:
+            return None, None
+        baseline = released[-1][1]
+        paths = subprocess.check_output(["git", "diff", "--name-only", "-z", baseline, commit], cwd=ROOT,
+                                        stderr=subprocess.DEVNULL).decode().split("\0")
+    except (subprocess.CalledProcessError, OSError):
+        return None, None
+    return baseline, a.migration_paths(path for path in paths if path)
+
+
+def release_level(requested, reason, scope, recorded=None):
+    """Decide the release level; ordinary needs a known scope without migration or update-contract changes.
+
+    A previously recorded change list keeps applying when the scope is no longer known locally."""
+    baseline, changed = scope
+    if changed is None and recorded and recorded.get("migration_changes"):
+        baseline, changed = recorded["baseline"], recorded["migration_changes"]
+    refusals = []
+    if reason is not None and (not reason.strip() or len(reason) > 500 or any(ord(c) < 32 for c in reason)):
+        refusals.append("release level reason must be one line of at most 500 characters")
+    listed = None if not changed else ", ".join(changed[:10]) + (f" and {len(changed) - 10} more" if len(changed) > 10 else "")
+    if requested == "ordinary":
+        if changed:
+            refusals.append(f"full release required: migration or update-contract changes since {baseline}: {listed}; "
+                            "rerun accept with --level full --slots N [N ...]")
+        elif changed is None and reason is None:
+            refusals.append("cannot determine migration changes since the previous release from local tags; "
+                            "use --level full, or --level-reason to record why an ordinary release is safe")
+        reason = reason or f"no migration or update-contract changes since {baseline}"
+    elif reason is None:
+        if not changed:
+            refusals.append("a full release without migration changes requires --level-reason")
+        reason = f"migration or update-contract changes since {baseline}: {listed}"
+    if refusals:
+        raise ValueError("; ".join(refusals))
+    return {"level": requested, "reason": reason, "baseline": baseline, "migration_changes": changed}
+
+
+def record_release_level(output, level):
+    with a.acceptance_lock(output):
+        _, receipt = a.load_bound(output)
+        if receipt.get("release_level") != level:
+            receipt["release_level"] = level
+            a.save(output, receipt)
+
+
 def ensure_acceptance(directory, identity, prepared):
     """Create the candidate's acceptance output once; it imports only prepared assets and runs no check."""
     output = directory / "acceptance"
@@ -1151,6 +1258,9 @@ def main():
             command.add_argument("--slots", nargs="+", type=int, default=[])
             command.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
             command.add_argument("--only", action="append", default=[], help="run one exact check or check family; repeat as needed")
+            command.add_argument("--level", choices=("ordinary", "full"),
+                                 help="release level; default: the recorded level, else ordinary; full runs every VM check")
+            command.add_argument("--level-reason", help="public one-line reason recorded with the release level")
         else:
             command.add_argument("--workflow-ref", help="dispatch workflow branch; default: compatible default or candidate head branch")
             command.add_argument("--operator-acceptance", type=Path, action="append", default=[],
@@ -1253,16 +1363,30 @@ def main():
             if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
                 raise ValueError("slots must be unique integers from 1 to 999")
             ensure_acceptance(directory, identity, prepared)
+            recorded = json.loads((output / "receipt.json").read_text()).get("release_level", {})
+            requested = args.level or recorded.get("level", "ordinary")
+            level = (recorded if args.level is None and args.level_reason is None and recorded
+                     else release_level(requested, args.level_reason, release_scope(identity["version"], identity["commit"]), recorded))
+            record_release_level(output, level)
+            print(f"RELEASE_LEVEL {level['level']} reason={level['reason']}", flush=True)
+            a.reuse_isolated_tests(output, earlier_candidates(state_dir, directory, identity))
             with a.acceptance_lock(output):
-                result = a.run_checks(output, args.slots, args.only, False, with_vms=args.with_vms)
+                result = a.run_checks(output, args.slots, args.only, False, with_vms=args.with_vms or level["level"] == "full")
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result
         with a.acceptance_lock(output, shared=True):
+            level = json.loads((output / "receipt.json").read_text()).get("release_level")
+            if not level and a.source_declares(output / "source", "dev/release-publication.py", "release_level"):
+                raise ValueError("release level is not recorded; run accept for this candidate first")
             document = attestation(output, identity, [path.resolve() for path in args.operator_acceptance], args.defer_profile,
                                    args.deferral_reason, args.deferral_authorization_reference)
             validate_attestation(document, identity, output / "source")
+        if level:
+            print(f"PUBLICATION release_level={level['level']} reason={level['reason']}", flush=True)
         report_unrun_checks(document)
+        report_inherited_checks(document)
+        report_ci_checks(document)
         deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
         if deferred:
             print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)

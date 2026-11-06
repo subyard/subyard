@@ -66,7 +66,8 @@ seed_unmarked_continuation() {
     die 'plain init silently authorized the synthetic unmarked project'
   fi
   grep -Fq 'existing unmarked project has no continuation consent' "$STATE_ROOT/continuation-unconfirmed.log" \
-    || die 'plain init refused for a reason other than missing continuation consent'
+    || { tail -n 40 "$STATE_ROOT/continuation-unconfirmed.log" >&2
+         die 'plain init refused for a reason other than missing continuation consent'; }
   establish_legacy_continuation
   printf 'evidence: continuation_seed=synthetic-unmarked-native installed_history=completed\n'
 }

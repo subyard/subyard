@@ -616,9 +616,16 @@ python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/releas
 python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
-Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke/profile checks,
+Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke, core and profile checks,
 or use `run --only p0-release-smoke --slots 1` for one check. `--slots` alone does not
-request VM execution. Once explicitly requested, a pending VM check remains required on
+request VM execution. Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
+(full P0, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
+and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
+selects one family. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
+runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
+the next check; a refusal, interruption, timeout, cleanup failure or attempt without a lease stops the slot,
+so an unusable slot cannot turn later checks into failures. One collector owns a candidate's receipt
+at a time; run every check through it rather than separately, so the result is recorded. Once explicitly requested, a pending VM check remains required on
 continuation; interruption or exclusion cannot turn it back into optional passing acceptance.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
@@ -644,7 +651,7 @@ The output also retains the transport archive, logs and `receipt.json`; the inte
 archive is removed after extraction. Neither the source copy nor the VM payload needs a Git
 repository or index. Every controller receives the same checksum-verified transport archive; profile fixtures
 execute the packaged engine and runtime assets. The core smoke installs those assets through the
-public updater, including reboot, rollback and roll-forward. Local verification, ShellCheck, real local adapters and updater compatibility precede physical checks.
+public updater, including reboot, rollback and roll-forward. Local verification, ShellCheck, real local adapters and updater compatibility precede physical checks. A CI-prepared candidate counts these four from its successful preparation jobs; see [release publication](reference/release-publication.md).
 Process coverage (`dev/process-coverage.sh`) is optional; ordinary process contracts remain in
 `make verify`. Frozen receipts retain their recorded coverage requirement and command binding.
 Run the aggregator from the managed workspace checkout: it supplies that workspace for lease
@@ -740,8 +747,21 @@ The current run prints `REUSE` with direct/inherited origin and its validation r
 PASS results. A new or changed input requires the affected fresh check; failure/incomplete results
 remain recorded and cannot be promoted by a passing subset or an equal executable.
 `--allow-other-profile-tests` permits a profile check to survive changes confined to other shipped
-profiles' test directories. Its runtime, assets, inventory, own profile and shared inputs must
-remain identical. This exception never applies to local gates or continuous release smoke.
+profiles' unshared test directories. Its runtime, assets, inventory, own profile and shared inputs must
+remain identical. A profile's tests are shared when any non-Markdown file outside that profile names
+`profiles/NAME/tests`; a change there invalidates every profile check. This exception never applies
+to local gates or continuous release smoke.
+
+`reuse --output NEW --from OLD [--from OLDER ...]` applies the same rule automatically to every open
+profile check and records each match as an original-attempt evidence transfer under
+`policy:isolated-other-profile-tests-v1`, taking the first listed candidate that qualifies. The
+original PASS must be a complete direct attempt; physical attempts also need recorded environment
+and cleanup. The review text is generated from the changed paths, and validators, including
+publication, recompute the scope from both manifests and the target source. Busy, superseded or
+different candidates are skipped and each skip of an existing PASS prints a `REUSE-SKIP` reason.
+Shared-test detection matches literal `profiles/NAME/tests` references; a reference built from a
+variable or glob must also name the path literally. The release `accept` command runs it before any check against
+earlier local candidates of the same repository and version, newest attempt first.
 
 #### Reviewed evidence transfers
 
@@ -755,6 +775,16 @@ Both directories must be valid frozen candidates. The target check must still be
 optional VM profile check with the exact untouched default `not-run` result; no `--exclude` is needed
 first. Failed, blocked, interrupted, already passed, otherwise not-run, or previously requested target
 checks cannot be overwritten.
+A transfer may cover a reviewed product change only when no product migration or update-contract
+path changed; otherwise rerun the check. Such paths name a migration or transition (`migrat` or
+`transition`) or belong to the update contract: `scripts/install-runtime-release.sh`,
+`dev/bootstrap-runtime.sh`, `dev/release-assets.sh`, `internal/cli/update*.go`,
+`internal/cli/release_*.go` and `internal/adapters/releaseruntime/`. Markdown, `tests/`, `testkit/`,
+`testdata/`, `e2e/`, `*_test.go` and `*-test.py`/`.sh` files never count. Validation of legacy
+schema-1 transfers has no source inventories, so this rule applies to them only when they are made. `verify` and
+`p0-release-smoke` transfer only between identical sources, so they always describe the final bytes.
+Every refusal that applies is reported together. Publication prints each inherited check with its
+authorization and reason.
 For a new original attempt, `REVIEW.json` has exactly `schema_version: 2`, `check`,
 `tested_manifest_sha256`, `target_manifest_sha256`, `original_attempt`, `review` and `standalone`.
 `original_attempt` is the source check's current `{id, sha256}` reference; `standalone` must be null.
@@ -972,7 +1002,7 @@ singleton. Commands and exact coverage are documented in
 | T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; broader owning checks may take longer. |
 | T2 | The full host-free suite, `./tests/run.sh`. Veranda retains its separate host-free checks. |
 | T3 | Existing targeted E2E lanes or real-host checks for affected physical boundaries. |
-| T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N --lane full`. |
+| T4 | A fresh full P0 of a frozen candidate: `dev/e2e/p0-acceptance.sh --slot N --lane full` with `SUBYARD_E2E_CANDIDATE_BUNDLE` and `SUBYARD_E2E_CANDIDATE_SHA256` from `dev/release-acceptance.py prepare`; release acceptance runs it as `vm:p0-full`. |
 
 A fresh full pass also satisfies its contained T3 lanes: smoke, boundary, transport, nested teardown,
 real Incus, release, source upgrade, power/systemd (including reboot verification), peer and cleanup.

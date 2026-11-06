@@ -888,7 +888,8 @@ PY
                ["transition.observation-scope", "transition.active", "transition.bindings", "transition.links",
                 "transition.rollback-compatibility", "transition.source-checkpoint-compatibility"] | index($resource) then .
              elif type == "string" then split(".")[0] | enum(["transition", "migration", "activation", "runtime", "yard"])
-             else "other" end)}))}]}' "$output" 2>/dev/null)"; then
+             else "other" end),
+           resource: (.resource | if type == "string" and test("^activation\\.[a-z0-9][a-z0-9.-]{0,63}$") then . else null end)}))}]}' "$output" 2>/dev/null)"; then
     printf 'release-recovery inspection %s\n' "$summary" >&2
   else
     printf 'release-recovery inspection parse_valid=false\n' >&2

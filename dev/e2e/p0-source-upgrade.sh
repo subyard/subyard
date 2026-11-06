@@ -757,6 +757,45 @@ run_incus_installer() {
   )
 }
 
+# Real installs entered updates with shapes that fresh fixtures never create: a parent of the
+# guest disk-/tmp policy owned by the guest user, and the revision-only marker that a disabled
+# publication owner left on the instance (no schema key). Keys come from profile declarations,
+# so this core fixture names no profile; only owners whose current revision proves them disabled
+# (mode field 0) get the marker, as on real installs.
+seed_installed_shapes() {
+  local schema_key revision_key revision worker agent seeded=0
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- \
+    chown "$FIXTURE_DEV_UID:$FIXTURE_DEV_UID" /usr/local/lib
+  worker="$(printf 'historical worker revision' | sha256sum | awk '{print $1}')"
+  agent="$(printf 'historical agent key' | sha256sum | awk '{print $1}')"
+  while IFS=$'\t' read -r schema_key revision_key; do
+    revision="$(incus config get "$DEFAULT_INSTANCE" "$revision_key" --project "$DEFAULT_PROJECT")"
+    case "$revision" in 0:*) ;; *) continue ;; esac
+    [ -z "$(incus config get "$DEFAULT_INSTANCE" "$schema_key" --project "$DEFAULT_PROJECT")" ] \
+      || incus config unset "$DEFAULT_INSTANCE" "$schema_key" --project "$DEFAULT_PROJECT"
+    incus config set "$DEFAULT_INSTANCE" "$revision_key=0:$worker:$agent:4" --project "$DEFAULT_PROJECT"
+    seeded=$((seeded + 1))
+  done < <(jq -r '.instance_publication // empty | [.schema_key, .revision_key] | @tsv' "$ROOT"/config/profiles/*/profile.json)
+  [ "$seeded" -gt 0 ] || die 'no disabled publication owner on the baseline yard to carry the historical marker'
+  printf 'evidence: historical_disabled_markers=%s\n' "$seeded"
+}
+
+# The refused guest policy names the yard and the reason, and the printed retry completes it.
+complete_refused_disk_tmp() {
+  local retry
+  retry="$(sed -nE "s#^warning: yard [a-z0-9-]+: disk-/tmp migration pending: yard [a-z0-9-]+: guest disk /tmp policy refused: unsafe guest temporary policy directory: /usr/local/lib owner $FIXTURE_DEV_UID:$FIXTURE_DEV_UID mode [0-7]+; run (.*)\$#\\1#p" \
+    "$SHARED_ROOT/first-update.log")"
+  [ "$retry" = 'yard update --yes' ] \
+    || die "update did not name the yard, reason and running-yard retry of the refused guest /tmp policy: '$retry'"
+  [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.disk_tmp --project "$DEFAULT_PROJECT")" != v1 ] \
+    || die 'refused guest /tmp policy was recorded as complete'
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- chown 0:0 /usr/local/lib
+  operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/a" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_A" --yes
+  [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.disk_tmp --project "$DEFAULT_PROJECT")" = v1 ] \
+    || die 'the printed retry did not complete the guest /tmp policy'
+}
+
 prepare() {
   [ "$(uname -m)" = x86_64 ] || die 'the published v0.11.0 pin requires an amd64 P0 worker'
   command -v git >/dev/null 2>&1 || die 'Git is required for the published configuration import'
@@ -779,6 +818,7 @@ prepare() {
   prepare_operator
   package_candidates
   prepare_baseline_yards
+  seed_installed_shapes
   local update_rc=0 legacy_before
   legacy_before="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
   if bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
@@ -799,6 +839,7 @@ prepare() {
   [ "$(operator_yard --version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'
   verify_v2_release_transition "$VERSION_A"
+  complete_refused_disk_tmp
   bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"
   [ "$(operator_env grep -Fc '# Subyard CLI completion' "$OPERATOR_HOME/.bashrc")" = 1 ] \
     || die 'repeated bootstrap duplicated shell integration'

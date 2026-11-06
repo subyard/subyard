@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
@@ -19,12 +20,33 @@ import (
 // A stopped guest cannot supply account authority. This prefix authorizes only
 // a temporary, guarded boot and the same bounded init scope. Every actual
 // account recipe is freshly verified after boot, before any account mutation.
+// identityInspectionWithoutIncus reports an unreachable Incus with no pending developer identity
+// rename. Before Incus is reachable no yard instance exists to inspect, and ordinary init installs
+// Incus or reports its own refusal. A pending rename still fails closed on its native query.
+func identityInspectionWithoutIncus(ctx context.Context, runtime reconcileruntime.Runtime) bool {
+	if runtime.Incus == nil {
+		return false
+	}
+	if _, err := runtime.Incus.Server(ctx); err == nil {
+		return false
+	}
+	home := runtime.Yard.Paths.ConfigHome
+	if _, err := os.Lstat(home); os.IsNotExist(err) {
+		return true
+	}
+	marker, err := config.ReadPersistentFileSnapshot(home, config.DeveloperIdentityMarkerPath(home, runtime.Yard.YardName))
+	return err == nil && !marker.Exists
+}
+
 func (prepared *preparedCommand) prepareStoppedIdentityInspection(ctx context.Context, bootstrap *initBootstrap) (bool, error) {
 	cli := prepared.CLI
 	if cli.options.InitPlatform != nil || cli.releaseTransitionChild || bootstrap != nil {
 		return false, nil
 	}
 	runtime := cli.initPlatform(prepared.Loaded, nil).(reconcileruntime.Runtime)
+	if identityInspectionWithoutIncus(ctx, runtime) {
+		return false, nil
+	}
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		return false, nil

@@ -36,7 +36,8 @@ def fixture_checkout(directory, optional_vms=False):
     (checkout / ".gitignore").write_text("/.build/\n/private/\n/.subyard-acceptance/\n")
     (checkout / "Makefile").write_text("verify:\n\ttrue\n")
     inventory = checkout / "dev/test-profiles.sh"
-    inventory.write_text("#!/bin/bash\nprintf 'runner\\tsample\\tconfig/profiles/sample/tests/e2e/acceptance.sh\\nrunner\\tpeer\\tconfig/profiles/peer/tests/e2e/acceptance.sh\\n'\n")
+    # Like the shipped inventory, name profile test paths only through a pattern.
+    inventory.write_text("#!/bin/bash\nfor profile in sample peer; do printf 'runner\\t%s\\tconfig/profiles/%s/tests/e2e/acceptance.sh\\n' \"$profile\" \"$profile\"; done\n")
     for profile in ("sample", "peer"):
         runner = checkout / f"config/profiles/{profile}/tests/e2e/acceptance.sh"
         runner.parent.mkdir(parents=True)
@@ -355,8 +356,12 @@ class TestAcceptance(unittest.TestCase):
             known_digest = m.digest(controller)  # Freeze before preparing either candidate.
             self.enterContext(patch.object(m, "HISTORICAL_P0_SHA256", known_digest))
         first, second = directory / "old", directory / "new"
+        adapter = checkout / "tests/real-host/adapter-contracts.sh"
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_text("#!/bin/bash\nexit 0\n")
         old_root, old = prepare_fixture(checkout, first)
-        name = "p0-release-smoke" if core else "profile:sample/one" if standalone else "verify"
+        # verify and p0-release-smoke transfer only between identical sources.
+        name = "p0-release-smoke" if core else "profile:sample/one" if standalone else "local-adapters"
         command = m.commands(old_root, "test", old["profiles"])[name]
         artifacts = None
         if standalone:
@@ -379,8 +384,9 @@ class TestAcceptance(unittest.TestCase):
             old["checks"][name] = m.execute(name, command, old_root, first, m.clean_environment())
             old["checks"][name]["execution_environment"] = old["environment"]
             m.save(first, old)
-        package = checkout / "dev/package-engine.sh"
-        package.write_text(package.read_text().replace("packaged candidate", "changed reviewed runtime"))
+        if not core:
+            package = checkout / "dev/package-engine.sh"
+            package.write_text(package.read_text().replace("packaged candidate", "changed reviewed runtime"))
         _, new = prepare_fixture(checkout, second)
         review = {"schema_version": 1, "check": name, "tested": m.transfer_candidate(old), "target": m.transfer_candidate(new),
             "source_receipt_sha256": m.digest(first / "receipt.json"), "review": {"unchanged_scope": "Synthetic check behavior is unchanged",
@@ -524,9 +530,10 @@ class TestAcceptance(unittest.TestCase):
         adapter = checkout / "tests/real-host/adapter-contracts.sh"
         adapter.parent.mkdir(parents=True)
         adapter.write_text("#!/bin/bash\nexit 0\n")
+        (checkout / "dev/verify-release-upgrades.py").write_text("raise SystemExit(0)\n")
         source, target = directory / "source-candidate", directory / "target-candidate"
         source_root, old = prepare_fixture(checkout, source)
-        names = ("verify", "local-adapters")
+        names = ("compatibility", "local-adapters")
         for name in names:
             old["checks"][name] = m.execute(name, m.commands(source_root, "test", old["profiles"])[name], source_root, source, m.clean_environment())
             result = old["checks"][name]
@@ -604,6 +611,142 @@ class TestAcceptance(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(m.transfer_batch(target, path), 0)
             self.assertEqual(receipt_path.read_bytes(), applied)
+
+    def live_profile_candidates(self, directory, change, shared_reference=False, revisions=None):
+        checkout = fixture_checkout(directory, optional_vms=True)
+        (checkout / "config/profiles/sample/tests/e2e/acceptance.sh").write_text(
+            "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
+            "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
+        if shared_reference:
+            (checkout / "dev/e2e").mkdir(parents=True, exist_ok=True)
+            (checkout / "dev/e2e/uses-peer.sh").write_text("bash config/profiles/peer/tests/e2e/acceptance.sh\n")
+        source, target = directory / "source-candidate", directory / "target-candidate"
+        overrides = lambda index: {"SUBYARD_FIXTURE_PROVENANCE_OVERRIDES": json.dumps({"sourceRevision": revisions[index]})} if revisions else {}
+        with patch.dict(os.environ, overrides(0)):
+            source_root, old = prepare_fixture(checkout, source)
+        name = "profile:sample/one"
+        result = m.execute(name, m.commands(source_root, "test", old["profiles"])[name], source_root, source, m.clean_environment(), slot=1)
+        self.assertEqual(result["status"], "passed")
+        result["execution_environment"] = old["environment"]
+        result["original_attempt"] = m.completed_attempt(source, source_root, old, name, result)
+        old["checks"][name] = result
+        m.save(source, old)
+        path = checkout / change
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/bash\n# changed after the original run\nexit 0\n")
+        with patch.dict(os.environ, {"SUBYARD_FIXTURE_GENERATED_AT": "2026-01-02T00:00:00Z", **overrides(1)}):
+            prepare_fixture(checkout, target)
+        return source, target, name
+
+    def test_reuse_transfers_only_when_other_profiles_unshared_tests_changed(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            source, target, name = self.live_profile_candidates(Path(temporary), "config/profiles/peer/tests/e2e/acceptance.sh")
+            with redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(m.reuse_isolated_tests(target, [source]), [(name, str(source), 1)])
+            self.assertIn("REUSE " + name, printed.getvalue())
+            root, receipt = m.load_bound(target)
+            result = receipt["checks"][name]
+            self.assertEqual((result["status"], result["execution"]), ("passed", "inherited"))
+            transfer = result["evidence_transfer"]
+            self.assertEqual(transfer["review"], m.isolated_tests_review(["config/profiles/peer/tests/e2e/acceptance.sh"]))
+            manifests = {transfer[key]: m.read_transfer_json(target / result["evidence_files"][role])
+                         for key, role in (("tested_manifest_sha256", "manifest"), ("target_manifest_sha256", "target_manifest"))}
+            arguments = (transfer, name, transfer["command"], m.transfer_candidate(receipt), result["log_sha256"], manifests)
+            m.validate_evidence_transfer(*arguments, root)
+            with self.assertRaisesRegex(ValueError, "policy transfer"):
+                m.validate_evidence_transfer(*arguments)
+            forged = copy.deepcopy(transfer)
+            forged["review"]["unchanged_scope"] += " and nothing else"
+            with self.assertRaisesRegex(ValueError, "policy transfer"):
+                m.validate_evidence_transfer(forged, *arguments[1:], root)
+            before = (target / "receipt.json").read_bytes()
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.reuse_isolated_tests(target, [source]), [])
+            self.assertEqual((target / "receipt.json").read_bytes(), before)
+
+    def test_reuse_and_import_accept_distinct_commit_provenance_only_for_isolated_tests(self):
+        # CI candidates of different commits record different sourceRevision values.
+        for operation in ("reuse", "import"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                source, target, name = self.live_profile_candidates(
+                    Path(temporary), "config/profiles/peer/tests/e2e/acceptance.sh", revisions=("a" * 40, "b" * 40))
+                with redirect_stdout(io.StringIO()):
+                    if operation == "reuse":
+                        self.assertEqual(len(m.reuse_isolated_tests(target, [source])), 1)
+                    else:
+                        self.assertEqual(m.import_evidence(target, source, [name], True), 0)
+                _, receipt = m.load_bound(target)
+                self.assertEqual(receipt["checks"][name]["status"], "passed")
+                if operation == "import":
+                    provenance = receipt["checks"][name]["inherited_from"]["release_provenance"]
+                    self.assertEqual(provenance["scope"], "generated-at-and-revision")
+                    self.assertEqual({(item["source_revision"], item["target_revision"]) for item in provenance["files"].values()},
+                                     {("a" * 40, "b" * 40)})
+                    for change in ({"target_revision": "c" * 40}, {"source_revision": "b" * 40}):
+                        forged = copy.deepcopy(receipt)
+                        next(iter(forged["checks"][name]["inherited_from"]["release_provenance"]["files"].values())).update(change)
+                        m.save(target, forged)
+                        with self.assertRaisesRegex(ValueError, "inherited release provenance changed"):
+                            m.load_bound(target)
+                    m.save(target, receipt)
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            source, target, name = self.live_profile_candidates(
+                Path(temporary), "config/profiles/peer/tests/e2e/acceptance.sh", revisions=("unknown", "b" * 40))
+            with redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(m.reuse_isolated_tests(target, [source]), [])
+            self.assertIn("REUSE-SKIP " + name + ": source-candidate: evidence import release provenance identity differs", printed.getvalue())
+
+    def test_update_contract_and_migration_paths_exclude_tests(self):
+        self.assertEqual(m.migration_paths([
+            "scripts/install-runtime-release.sh", "internal/cli/update.go", "internal/cli/release_transition.go",
+            "internal/adapters/releaseruntime/retained.go", "dev/release-assets.sh", "dev/bootstrap-runtime.sh",
+            "config/migrations.json", "internal/migration/step.go", "internal/cli/update_test.go", "docs/update.md",
+            "dev/e2e/release-transition.sh", "tests/fixtures/migrations/a.json", "internal/cli/status.go", "dev/package-engine.sh"]),
+            ["config/migrations.json", "dev/bootstrap-runtime.sh", "dev/release-assets.sh", "internal/adapters/releaseruntime/retained.go",
+             "internal/cli/release_transition.go", "internal/cli/update.go", "internal/migration/step.go", "scripts/install-runtime-release.sh"])
+
+    def test_reuse_and_import_refuse_owner_product_and_shared_test_changes(self):
+        for change, shared in (("config/profiles/sample/tests/e2e/helper.sh", False),
+                               ("scripts/product.sh", False),
+                               ("config/profiles/peer/tests/e2e/acceptance.sh", True)):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                source, target, name = self.live_profile_candidates(Path(temporary), change, shared)
+                before = (target / "receipt.json").read_bytes()
+                with redirect_stdout(io.StringIO()) as printed:
+                    self.assertEqual(m.reuse_isolated_tests(target, [source]), [])
+                self.assertIn("REUSE-SKIP " + name + ": source-candidate: ", printed.getvalue())
+                self.assertEqual((target / "receipt.json").read_bytes(), before)
+                with self.assertRaisesRegex(ValueError, "(source identity|owning profile or shared inputs|candidate identity)"):
+                    m.import_evidence(target, source, [name], True)
+                self.assertEqual((target / "receipt.json").read_bytes(), before)
+
+    def test_transfer_never_crosses_migration_changes_or_final_bytes_checks(self):
+        same, other = "a" * 64, "b" * 64
+        old = {"internal/cli/update.go": ["regular", "1" * 64], "docs/migration.md": ["regular", "2" * 64]}
+        docs = {**old, "docs/migration.md": ["regular", "3" * 64]}
+        migration = {**old, "internal/releasetransition/plan.go": ["regular", "4" * 64], "config/identity/transition.py": ["regular", "5" * 64]}
+        self.assertEqual(m.transfer_scope_refusals("local-adapters", same, other, old, docs), [])
+        self.assertEqual(m.transfer_scope_refusals("verify", same, same, old, old), [])
+        refusals = m.transfer_scope_refusals("verify", same, other, old, migration)
+        self.assertEqual(len(refusals), 2)
+        self.assertIn("verify must run on the final candidate bytes", refusals[0])
+        self.assertIn("config/identity/transition.py, internal/releasetransition/plan.go", refusals[1])
+        self.assertEqual(m.transfer_scope_refusals("p0-release-smoke", same, other), [
+            "p0-release-smoke must run on the final candidate bytes; rerun it on this candidate"])
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            first, _, name, declaration, review = self.transfer_fixture(directory)
+            checkout = directory / "checkout"
+            (checkout / "internal/migration").mkdir(parents=True)
+            (checkout / "internal/migration/step.go").write_text("package migration\n")
+            third = directory / "third"
+            _, receipt = prepare_fixture(checkout, third)
+            review["target"] = m.transfer_candidate(receipt)
+            declaration.write_text(json.dumps(review))
+            before = (third / "receipt.json").read_bytes()
+            with self.assertRaisesRegex(ValueError, "migration or update-contract changes .*internal/migration/step.go"):
+                m.transfer_evidence(third, first, name, declaration)
+            self.assertEqual((third / "receipt.json").read_bytes(), before)
 
     def test_batch_plan_scans_unique_candidates_once_and_does_not_mutate_evidence(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -2488,6 +2631,117 @@ while True: time.sleep(1)
                 result = m.execute("capture", ["true"], output, output, m.clean_environment())
             self.assertEqual((result["status"], result["exit_code"], result["capture_status"]), ("failed", 0, "failed"))
             self.assertEqual(result["cleanup_status"], "unknown")
+
+    def test_core_vm_catalog_is_pinned_optional_and_selectable(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory, optional_vms=True)
+            (checkout / "dev/e2e/release-vm-checks.json").write_text(json.dumps({"schema_version": 1, "checks": [
+                {"id": "lane-a", "timeout_seconds": 60, "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "a"]},
+                {"id": "group/b", "lease": {}, "timeout_seconds": 60, "command": ["bash", "dev/e2e/b.sh"]}]}))
+            source, receipt = prepare_fixture(checkout, directory / "candidate")
+            self.assertEqual(m.core_vm_checks(source), ["lane-a", "group/b"])
+            commands = m.commands(source, "test", receipt["profiles"])
+            self.assertEqual(commands["vm:group/b"], ["bash", "dev/e2e/release-vm-check.sh", "group/b"])
+            for name in ("vm:lane-a", "vm:group/b"):
+                self.assertTrue(m.is_live(name))
+                self.assertEqual(receipt["checks"][name], m.OPTIONAL_VM_NOT_RUN)
+                self.assertTrue(m.optional_vm_not_run(name, receipt["checks"][name]))
+            self.assertEqual(m.select_checks(receipt["checks"], ["vm:group"]), {"vm:group/b"})
+            # Candidates prepared before the catalog keep their exact check set.
+            _, legacy = prepare_fixture(fixture_checkout(directory / "legacy", optional_vms=True), directory / "legacy-candidate")
+            self.assertFalse([name for name in legacy["checks"] if name.startswith("vm:")])
+
+    def test_core_vm_catalog_reports_every_invalid_entry(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            source = Path(temporary)
+            (source / "dev/e2e").mkdir(parents=True)
+            (source / "dev/e2e/release-vm-checks.json").write_text(json.dumps({"schema_version": 1, "checks": [
+                {"id": "slow", "timeout_seconds": 10, "command": ["bash", "dev/e2e/a.sh"]},
+                {"id": "outside", "timeout_seconds": 60, "command": ["bash", "../a.sh"]},
+                {"id": "typed", "lease": {"vm_count": 2}, "timeout_seconds": 60, "command": ["bash", "dev/e2e/a.sh"]},
+                {"id": "slow", "timeout_seconds": 60, "command": ["bash", "dev/e2e/a.sh"]}]}))
+            with self.assertRaisesRegex(ValueError, "slow: timeout_seconds.*; outside: command.*; typed: lease.*; slow: duplicate check"):
+                m.core_vm_checks(source)
+
+    def test_shipped_core_vm_catalog_names_existing_scripts(self):
+        catalog = json.loads((root / m.CORE_VM_CATALOG).read_text())
+        self.assertEqual(m.core_vm_checks(root), [entry["id"] for entry in catalog["checks"]])
+        for entry in catalog["checks"]:
+            self.assertTrue((root / entry["command"][1]).is_file(), entry["id"])
+        pins = {line.split("\t", 1)[0] for line in (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()}
+        for entry in catalog["checks"]:
+            if entry["command"][1] == "dev/e2e/published-upgrade.sh":
+                self.assertIn(entry["command"][2], pins)
+
+    def test_core_vm_check_wrapper_runs_the_declared_command_on_its_slot(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            checkout = Path(temporary)
+            (checkout / "dev/e2e").mkdir(parents=True)
+            shutil.copy2(root / "dev/e2e/release-vm-check.sh", checkout / "dev/e2e/release-vm-check.sh")
+            record = checkout / "argv"
+            for name in ("dev/agent-e2e.sh", "dev/e2e/fixture.sh"):
+                (checkout / name).write_text('#!/bin/bash\nprintf "%s\\n" "$0" "$@" >> "$RECORD"\n')
+                (checkout / name).chmod(0o755)
+            (checkout / "dev/e2e/release-vm-checks.json").write_text(json.dumps({"schema_version": 1, "checks": [
+                {"id": "own", "timeout_seconds": 60, "command": ["bash", "dev/e2e/fixture.sh", "--lane", "x"]},
+                {"id": "group/leased", "lease": {}, "timeout_seconds": 90, "command": ["bash", "dev/e2e/fixture.sh", "run", "@TOKEN@"]},
+                {"id": "typed", "lease": {"type": "android-test"}, "timeout_seconds": 120, "command": ["bash", "dev/e2e/fixture.sh"]}]}))
+            def run(*arguments):
+                record.unlink(missing_ok=True)
+                result = subprocess.run(["bash", str(checkout / "dev/e2e/release-vm-check.sh"), *arguments],
+                                        env={**os.environ, "RECORD": str(record)}, capture_output=True, text=True)
+                return result.returncode, record.read_text().splitlines() if record.exists() else [], result.stderr
+            code, argv, _ = run("own", "--slot", "7")
+            self.assertEqual((code, argv[1:]), (0, ["--lane", "x", "--slot", "7"]))
+            code, argv, _ = run("group/leased", "--slot", "2")
+            self.assertEqual(code, 0)
+            self.assertEqual(argv[1:8], ["--slot", "2", "--vm-count", "1", "--vm", "1", "--purpose"])
+            self.assertEqual(argv[8:15], ["release-group-leased", "--", "timeout", "--signal=TERM", "--kill-after=60", "90", "bash"])
+            self.assertEqual(argv[15:17], ["dev/e2e/fixture.sh", "run"])
+            self.assertRegex(argv[17], r"^[0-9]{11,13}$")
+            code, argv, _ = run("typed", "--slot", "3")
+            self.assertEqual((code, argv[3:7]), (0, ["--type", "android-test", "--vm", "1"]))
+            for arguments in (("missing", "--slot", "1"), ("own", "--slot", "0"), ("own",)):
+                code, argv, error = run(*arguments)
+                self.assertEqual((code, argv), (2, []), arguments)
+                self.assertIn("release-vm-check:", error)
+
+    def test_live_failure_inside_a_clean_lease_keeps_the_slot_for_later_checks(self):
+        # This scheduler fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        lease = {"status": "failed", "termination": "exit", "exit_code": 1, "duration_seconds": 1,
+                 "environment_evidence": "recorded", "environments": [], "cleanup_status": "recorded",
+                 "cleanup": {"guest-cleanup": {"exit_code": 0}, "lease-release": {"exit_code": 0}}}
+        for name, failure, continues in (("lease", lease, True),
+                                         ("cleanup", {**lease, "exit_code": 3}, False),
+                                         ("cleanup-phase", {**lease, "cleanup": {**lease["cleanup"], "guest-cleanup": {"exit_code": 1}}}, False),
+                                         ("no-cleanup-witness", {**lease, "cleanup": {}, "cleanup_status": "unknown"}, False),
+                                         ("no-lease-release", {**lease, "cleanup": {"guest-cleanup": {"exit_code": 0}}}, False),
+                                         ("failed-lease-release", {**lease, "cleanup": {**lease["cleanup"], "lease-release": {"exit_code": 1}}}, False),
+                                         ("unallocated", {**lease, "environment_evidence": "unknown"}, False),
+                                         ("timeout", {**lease, "termination": "timeout", "exit_code": 124}, False)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output = Path(temporary)
+                names = ["verify", "vm:one", "vm:two"]
+                checks = {item: ["true"] for item in names}
+                receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "checks": {item: {"status": "passed" if item == "verify" else "pending"} for item in names}}
+                calls = []
+                def execute(check, command, root, output, env, slot=None):
+                    calls.append(check)
+                    return dict(failure) if check == "vm:one" else {"status": "passed", "exit_code": 0, "duration_seconds": 1}
+                with patch.object(m, "load_bound", return_value=(output / "source", receipt)), \
+                     patch.object(m, "commands", return_value=checks), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m, "execute", side_effect=execute):
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
+                self.assertEqual(calls, ["vm:one", "vm:two"] if continues else ["vm:one"])
+                persisted = json.loads((output / "receipt.json").read_text())
+                self.assertEqual(persisted["checks"]["vm:one"]["status"], "failed")
+                self.assertEqual(persisted["checks"]["vm:two"]["status"], "passed" if continues else "pending")
+                self.assertEqual(persisted["result"], "failed")
 
     def test_single_collector_lock(self):
         with tempfile.TemporaryDirectory() as temporary:

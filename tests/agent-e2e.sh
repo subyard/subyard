@@ -5002,20 +5002,27 @@ reboot_lane_dispatch="$(awk '
   /^esac$/ { if (capture) { result = block; capture = 0 } }
   END { printf "%s", result }
 ' "$ROOT/dev/e2e/p0-acceptance.sh")"
-# The full branch must clean up before final verification, and failures must
-# retain their exit status rather than reaching the success path.
-for full_failure in success cleanup final-boundary; do
-  full_log="$TMP/full-dispatch-$full_failure.log"
-  full_capacity="$TMP/full-dispatch-$full_failure-capacity"
-  mkdir "$full_capacity"
-  printf 'retained\n' > "$full_capacity/marker"
+# Full P0 keeps going after independent phase failures: cleanup and final verification still
+# run, every failure is reported in fixed order, and a VM that is not verified clean blocks
+# only the later phases that use it. The first failure status is preserved.
+p0_independent_functions="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" \
+  record_phase_failure record_phase_blocked recover_phase_vms phase_blocker \
+  run_independent_phase finish_independent_phases full_final_verify)"
+full_dispatch_case() { # <name> <failing phases> <VMs whose recovery fails> <expected status> <expected output>
+  local name="$1" failing="$2" dirty="$3" expected_rc="$4" expected="$5" log capacity rc
+  log="$TMP/full-dispatch-$name.log"
+  capacity="$TMP/full-dispatch-$name-capacity"
+  mkdir "$capacity"
+  printf 'retained\n' > "$capacity/marker"
   set +e
-  P0_DISPATCH="$reboot_lane_dispatch" FULL_FAILURE="$full_failure" \
-    CAPACITY_LOG_DIR="$full_capacity" bash -c '
+  P0_DISPATCH="$reboot_lane_dispatch" P0_FUNCTIONS="$p0_independent_functions" FAILING=" $failing " DIRTY=" $dirty " \
+    CAPACITY_LOG_DIR="$capacity" bash -c '
       set -euo pipefail
-      P0_LANE=full
-      VM_COUNT=2
-      boundary_calls=0
+      P0_LANE=full VM_COUNT=2 P0_BUNDLE_HASH=fixture boundary_calls=0
+      P0_FAILED_PHASES=() P0_BLOCKED_PHASES=() P0_FAILURE_LOG_MODE=truncate P0_ACTIVE_PHASE_VMS=""
+      declare -A P0_DIRTY_VM=() HOME_STATE_BEFORE=() DEFAULT_BUILD_CACHE_BEFORE=() MODULE_CACHE_BEFORE=()
+      eval "$P0_FUNCTIONS"
+      step() { printf "%s\n" "$1"; case "$FAILING" in *" $1 "*) return "$2" ;; esac; }
       capacity_cache_snapshot() { printf "build\tmodules\n"; }
       home_state() { printf "private-%s\n" "$1"; }
       run_phase() { shift; "$@"; }
@@ -5023,38 +5030,124 @@ for full_failure in success cleanup final-boundary; do
       start_capacity_monitors() { :; }
       verify_boundary() {
         boundary_calls=$((boundary_calls + 1))
-        [ "$boundary_calls" = 1 ] || printf "final-boundary\n"
-        [ "$FULL_FAILURE:$boundary_calls" != final-boundary:2 ] || return 45
+        [ "$boundary_calls" = 1 ] || step final-boundary 45
       }
       transport_probes() { :; }
-      run_full_matrix_phase() { :; }
-      run_vm() { :; }
-      release_smoke_lane() { :; }
-      peer_lane() { :; }
-      cleanup_lane() {
-        printf "cleanup\n"
-        [ "$FULL_FAILURE" != cleanup ] || return 45
-      }
+      run_full_matrix_phase() { step matrix 44; }
+      run_vm() { step "$2" 48; }
+      release_smoke_lane() { step release-smoke 47; }
+      peer_lane() { step peer 49; }
+      cleanup_lane() { step cleanup 45; }
+      recover_vm() { printf "recover-vm%s\n" "$1"; case "$DIRTY" in *" $1 "*) return 1 ;; esac; }
+      write_evidence() { printf "evidence %s %s %s\n" "$1" "$2" "$3"; }
+      collect_failure_diagnostics() { :; }
       p0_monotonic_seconds() { printf "1\n"; }
       verify_cache_lifecycle() { :; }
       capacity_report() { :; }
       die() { printf "%s\n" "$*" >&2; exit 46; }
       eval "$P0_DISPATCH"
-    ' > "$full_log" 2>&1
-  full_rc=$?
+    ' > "$log" 2>&1
+  rc=$?
   set -e
-  full_expected=cleanup
-  [ "$full_failure" = cleanup ] || full_expected+=$'\nfinal-boundary'
-  full_expected_rc=45
-  [ "$full_failure" != success ] || full_expected_rc=0
-  [ "$full_rc" = "$full_expected_rc" ] && [ "$(cat "$full_log")" = "$full_expected" ] \
-    || fail "full P0 lost cleanup/final verification ordering or $full_failure status: $(cat "$full_log")"
-  if [ "$full_failure" = success ]; then
-    [ ! -e "$full_capacity" ] || fail 'full P0 retained completed capacity logs'
+  [ "$rc" = "$expected_rc" ] && [ "$(grep -v '^  \[' "$log")" = "$expected" ] \
+    || fail "full P0 $name: status $rc, output: $(cat "$log")"
+  if [ "$expected_rc" = 0 ]; then
+    [ ! -e "$capacity" ] || fail 'full P0 retained completed capacity logs'
   else
-    [ "$(cat "$full_capacity/marker")" = retained ] || fail 'failed full P0 discarded capacity evidence'
+    [ "$(cat "$capacity/marker")" = retained ] || fail "failed full P0 $name discarded capacity evidence"
+    grep -Fq "full P0 failed=" "$log" || fail "full P0 $name omitted its failure summary"
   fi
-done
+}
+full_dispatch_case success '' '' 0 $'matrix\nnewer-release\nevidence newer-release passed 0\nrelease-smoke\nevidence release-smoke passed 0\npeer\nevidence peer passed 0\ncleanup\nevidence cleanup passed 0\nfinal-boundary\nevidence final-verify passed 0'
+full_dispatch_case cleanup cleanup '' 45 $'matrix\nnewer-release\nevidence newer-release passed 0\nrelease-smoke\nevidence release-smoke passed 0\npeer\nevidence peer passed 0\ncleanup\nevidence cleanup failed 45\nfinal-boundary\nevidence final-verify passed 0'
+full_dispatch_case final-boundary final-boundary '' 45 $'matrix\nnewer-release\nevidence newer-release passed 0\nrelease-smoke\nevidence release-smoke passed 0\npeer\nevidence peer passed 0\ncleanup\nevidence cleanup passed 0\nfinal-boundary\nevidence final-verify failed 45\nrecover-vm1\nrecover-vm2'
+full_dispatch_case independent 'newer-release release-smoke' 1 48 $'matrix\nnewer-release\nevidence newer-release failed 48\nrecover-vm1\nevidence release-smoke blocked null\nevidence peer blocked null\ncleanup\nevidence cleanup passed 0\nevidence final-verify blocked null'
+full_dispatch_case recovered 'newer-release release-smoke' '' 48 $'matrix\nnewer-release\nevidence newer-release failed 48\nrecover-vm1\nrelease-smoke\nevidence release-smoke failed 47\nrecover-vm1\npeer\nevidence peer passed 0\ncleanup\nevidence cleanup passed 0\nfinal-boundary\nevidence final-verify passed 0'
+grep -Fq 'full P0 failed=newer-release(48),release-smoke(47) blocked=' "$TMP/full-dispatch-recovered.log" \
+  && grep -Fq 'full P0 failed=newer-release(48) blocked=release-smoke,peer,final-verify' "$TMP/full-dispatch-independent.log" \
+  || fail 'full P0 summary lost the fixed failure or blocked order'
+
+# The parallel matrix waits for both sides; an auxiliary stage failure continues after
+# recovery, a fixture-platform failure blocks only its dependents, and unverified VM2
+# blocks every later auxiliary stage.
+p0_matrix_functions="$p0_independent_functions
+$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" start_runner_child stop_runner_children \
+  arm_full_fixture run_full_aux_stage full_aux_cleanup full_aux_exit full_parallel_matrix \
+  record_full_matrix_results run_full_matrix_phase)
+$(sed -n '/^full_aux_lane() (/,/^)$/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
+full_matrix_case() { # <name> <failing stages> <VMs whose recovery fails> <expected calls> <expected evidence> <expected failures>
+  local name="$1" dir="$TMP/full-matrix-$1" rc
+  mkdir "$dir"
+  set +e
+  P0_FUNCTIONS="$p0_matrix_functions" FAILING=" $2 " DIRTY=" $3 " CALLS="$dir/calls" LOCAL_TEMP="$dir" bash -c '
+    set -euo pipefail
+    FULL_MATRIX_TIMEOUT_SECONDS=120 RUNNER_STOP_GRACE_SECONDS=1 RUNNER_KILL_GRACE_SECONDS=1
+    P0_BUNDLE_HASH=fixture FULL_OWNER_DURATION=0 FULL_AUX_DURATION=0
+    P0_FAILED_PHASES=() P0_BLOCKED_PHASES=() P0_FAILURE_LOG_MODE=truncate P0_ACTIVE_PHASE_VMS="" P0_CHILD_PIDS=()
+    FULL_AUX_STAGES=(nested-teardown fixture-platform source-upgrade power-systemd legacy-continuation)
+    declare -A P0_DIRTY_VM=()
+    eval "$P0_FUNCTIONS"
+    step() { printf "%s\n" "$1" >> "$CALLS"; case "$FAILING" in *" $1 "*) return "$2" ;; esac; }
+    run_vm() { step "$2" 31; }
+    source_upgrade_lane() { step source-upgrade 32; }
+    power_systemd_lane() { step power-systemd 33; }
+    legacy_continuation_lane() { step legacy-continuation 34; }
+    cleanup_armed_full_fixtures() { find "$FULL_SOURCE_ARM_FILE" "$FULL_POWER_ARM_FILE" -delete 2>/dev/null || true; }
+    recover_vm() { printf "recover-vm%s\n" "$1" >> "$CALLS"; case "$DIRTY" in *" $1 "*) return 1 ;; esac; }
+    write_evidence() { printf "%s %s %s\n" "$1" "$2" "$3" >> "$LOCAL_TEMP/evidence"; }
+    # Real diagnostics run over SSH, which consumes stdin.
+    collect_failure_diagnostics() { cat > /dev/null; }
+    p0_monotonic_seconds() { IFS=. read -r up _ < /proc/uptime; printf "%s\n" "$up"; }
+    die() { printf "%s\n" "$*" >&2; exit 46; }
+    run_full_matrix_phase
+    printf "%s\n" "${P0_FAILED_PHASES[@]}" > "$LOCAL_TEMP/failures"
+    printf "%s\n" "${!P0_DIRTY_VM[@]}" > "$LOCAL_TEMP/dirty"
+  ' < /dev/null > "$dir/log" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" = 0 ] || fail "full matrix $name exited $rc: $(cat "$dir/log")"
+  # Owner and auxiliary calls interleave; compare each side in order.
+  [ "$(grep -v '^owner$' "$dir/calls" | grep -v '^recover-vm1$')" = "$4" ] \
+    && grep -qx owner "$dir/calls" \
+    && [ "$(cat "$dir/evidence")" = "$5" ] && [ "$(sed '/^$/d' "$dir/failures")" = "$6" ] \
+    || fail "full matrix $name: calls=$(cat "$dir/calls") evidence=$(cat "$dir/evidence") failures=$(cat "$dir/failures") log=$(cat "$dir/log")"
+}
+full_matrix_case passing '' '' $'nested-teardown\nfixture-platform\nsource-upgrade\npower-systemd\nlegacy-continuation' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation passed 0\nparallel-matrix passed 0' ''
+[ ! -e "$TMP/full-matrix-passing/full-source-vm" ] && [ ! -e "$TMP/full-matrix-passing/full-power-vm" ] \
+  || fail 'passing full matrix retained an armed fixture'
+full_matrix_case owner-and-stage 'owner source-upgrade' '' \
+  $'nested-teardown\nfixture-platform\nsource-upgrade\nrecover-vm2\npower-systemd\nlegacy-continuation' \
+  $'parallel-matrix/release failed 31\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade failed 32\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation passed 0\nparallel-matrix failed 1' \
+  $'parallel-matrix/release:31\nparallel-matrix/source-upgrade:32'
+grep -qx recover-vm1 "$TMP/full-matrix-owner-and-stage/calls" \
+  || fail 'failed full owner did not recover VM1 before later phases'
+full_matrix_case platform fixture-platform '' $'nested-teardown\nfixture-platform\nrecover-vm2' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform failed 31\nparallel-matrix/source-upgrade blocked null\nparallel-matrix/power-systemd blocked null\nparallel-matrix/legacy-continuation blocked null\nparallel-matrix failed 1' \
+  'parallel-matrix/fixture-platform:31'
+grep -Fq 'blocked: depends on failed fixture-platform' "$TMP/full-matrix-platform/log" \
+  || fail 'full matrix did not name the failed prerequisite of blocked stages'
+[ "$(cat "$TMP/full-matrix-platform/dirty")" = '' ] || fail 'platform failure marked a recovered VM dirty'
+full_matrix_case unrecovered nested-teardown 2 $'nested-teardown\nrecover-vm2' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown failed 31\nparallel-matrix/fixture-platform blocked null\nparallel-matrix/source-upgrade blocked null\nparallel-matrix/power-systemd blocked null\nparallel-matrix/legacy-continuation blocked null\nparallel-matrix failed 1' \
+  'parallel-matrix/nested-teardown:31'
+[ "$(cat "$TMP/full-matrix-unrecovered/dirty")" = 2 ] || fail 'unverified VM2 did not block later phases'
+# A failed source upgrade leaves its project, which the power fixture's clean refuses to accept.
+armed_cleanup_order="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" cleanup_armed_full_fixtures | bash -c '
+  set -euo pipefail
+  eval "$(cat)"
+  FULL_SOURCE_ARM_FILE="$(mktemp)" FULL_POWER_ARM_FILE="$(mktemp)"
+  cleanup_full_source_arm() { printf "source\n"; find "$FULL_SOURCE_ARM_FILE" -delete; }
+  cleanup_full_power_arm() { [ ! -e "$FULL_SOURCE_ARM_FILE" ] || return 2; printf "power\n"; find "$FULL_POWER_ARM_FILE" -delete; }
+  cleanup_armed_full_fixtures
+' 2>&1)" || fail "armed fixture cleanup failed: $armed_cleanup_order"
+[ "$armed_cleanup_order" = $'source\npower' ] || fail "armed fixtures were not cleaned source first: $armed_cleanup_order"
+# The last stage has no later stage to report its unverified VM.
+full_matrix_case unrecovered-last legacy-continuation 2 \
+  $'nested-teardown\nfixture-platform\nsource-upgrade\npower-systemd\nlegacy-continuation\nrecover-vm2' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation failed 34\nparallel-matrix failed 1' \
+  'parallel-matrix/legacy-continuation:34'
+[ "$(cat "$TMP/full-matrix-unrecovered-last/dirty")" = 2 ] || fail 'unverified VM2 after the last stage did not block later phases'
 reboot_lane_function="$(sed -n '/^reboot_verify_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 legacy_continuation_lane_function="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" legacy_continuation_lane)"

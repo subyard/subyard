@@ -2,6 +2,7 @@ package reconcileruntime
 
 import (
 	"maps"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -38,6 +39,10 @@ func shippedReleasePath(path string) (string, bool) {
 // release that is later pruned. A shipped source follows the reading release
 // when the current value is that release's own copy of the same shipped file;
 // operator-authored paths stay exact even when shaped like a release path.
+// A process handle names no file once its process exits and is never an
+// operator path, so it also follows the reading release's copy of that shipped
+// file when the current value is unset or awaits init; without that copy the
+// capture stays exact.
 func (runtime Runtime) relocateAppliedShippedSources(catalog config.Catalog, settings map[string]string) map[string]string {
 	if settings == nil {
 		return nil
@@ -49,13 +54,24 @@ func (runtime Runtime) relocateAppliedShippedSources(catalog config.Catalog, set
 			continue
 		}
 		current := runtime.environmentValue(name)
-		if current == "" || current == applied {
+		if current == applied || runtime.RepositoryRoot == "" {
 			continue
 		}
 		appliedPath, appliedShipped := shippedReleasePath(applied)
-		if appliedShipped && runtime.RepositoryRoot != "" && filepath.Clean(current) == filepath.Join(runtime.RepositoryRoot, appliedPath) {
+		if !appliedShipped {
+			continue
+		}
+		release := filepath.Join(runtime.RepositoryRoot, appliedPath)
+		if current != "" && filepath.Clean(current) == release {
 			relocated[name] = current
+		} else if inheritedReleaseRoot.MatchString(filepath.Clean(applied)) && shippedRegularFile(release) {
+			relocated[name] = release
 		}
 	}
 	return relocated
+}
+
+func shippedRegularFile(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }

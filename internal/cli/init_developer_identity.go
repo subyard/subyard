@@ -28,6 +28,9 @@ func (prepared *preparedCommand) prepareDeveloperIdentityInit(ctx context.Contex
 		return false, nil
 	}
 	runtime := cli.initPlatform(prepared.Loaded, nil).(reconcileruntime.Runtime)
+	if identityInspectionWithoutIncus(ctx, runtime) {
+		return false, nil
+	}
 	markerPath := config.DeveloperIdentityMarkerPath(prepared.Loaded.Context.Paths.ConfigHome, prepared.Loaded.Context.YardName)
 	if _, err := os.Lstat(prepared.Loaded.Context.Paths.ConfigHome); os.IsNotExist(err) {
 		return false, nil

@@ -241,6 +241,44 @@ def defer_external(output, obligations, reason, authorization_reference):
 
 
 LIVE_CAPACITY_WAIT = "30m"
+# Successful release preparation jobs run these exact commands on the exact
+# candidate commit and assets; a prepared candidate counts them instead of
+# repeating them locally. Publication rechecks the job and workflow policy.
+CI_PREPARED_CHECKS = {"shellcheck": "host-free-verify", "verify": "host-free-verify",
+                      "local-adapters": "prepare", "compatibility": "prepare"}
+
+
+# release.yml Git-blob policies reviewed to run each CI_PREPARED_CHECKS command in the
+# named job on the exact candidate commit and exported assets.
+CI_COUNTED_POLICIES = frozenset({"e952002eada45e0d6f245fbc61f5403c7325ae5d"})
+
+
+def git_blob_sha(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def source_declares(root, relative, name):
+    """Whether pinned candidate source defines a top-level name, so historical candidates keep their contract."""
+    path = root / relative
+    if not path.is_file():
+        return False
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == name:
+            return True
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            return True
+    return False
+
+
+def counts_ci_preparation(root):
+    # The dispatched workflow ref must carry the candidate's own release.yml, so its blob is the run policy.
+    workflow = root / ".github/workflows/release.yml"
+    return (source_declares(root, "dev/release-acceptance.py", "CI_PREPARED_CHECKS") and workflow.is_file()
+            and git_blob_sha(workflow.read_bytes()) in CI_COUNTED_POLICIES)
+
+
+def ci_prepared_result(name, candidate_id):
+    return ["ci-prepared", candidate_id, CI_PREPARED_CHECKS[name]]
 
 
 OPTIONAL_VM_NOT_RUN = {"status": "not-run", "reason": "optional VM check; run explicitly with --with-vms or --only"}
@@ -258,7 +296,47 @@ def vm_checks_optional(root):
 
 
 def optional_vm_not_run(name, result):
-    return name.startswith("profile:") and result == OPTIONAL_VM_NOT_RUN
+    return name.startswith(("profile:", "vm:")) and result == OPTIONAL_VM_NOT_RUN
+
+
+CORE_VM_CATALOG = "dev/e2e/release-vm-checks.json"
+CORE_VM_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}(?:/[a-z0-9][a-z0-9.-]{0,63})?")
+
+
+def core_vm_checks(root):
+    """Core VM release checks declared by the candidate's pinned source, in catalog order.
+    Candidates prepared before the catalog declare none."""
+    path = root / CORE_VM_CATALOG
+    if not path.is_file():
+        return []
+    document = json.loads(path.read_text())
+    entries = document.get("checks") if isinstance(document, dict) else None
+    if not isinstance(document, dict) or set(document) != {"schema_version", "checks"} or document["schema_version"] != 1 \
+            or not isinstance(entries, list) or not entries:
+        raise ValueError("invalid core VM check catalog")
+    refusals = []
+    for index, entry in enumerate(entries):
+        label = entry.get("id") if isinstance(entry, dict) and isinstance(entry.get("id"), str) else f"entry {index}"
+        lease = entry.get("lease", {}) if isinstance(entry, dict) else None
+        if (not isinstance(entry, dict) or set(entry) - {"id", "lease", "timeout_seconds", "command"}
+                or not isinstance(entry.get("id"), str) or not CORE_VM_ID.fullmatch(entry["id"])):
+            refusals.append(f"{label}: invalid identity or fields")
+            continue
+        if type(entry.get("timeout_seconds")) is not int or not 60 <= entry["timeout_seconds"] <= 86400:
+            refusals.append(f"{label}: timeout_seconds must be an integer from 60 to 86400")
+        command = entry.get("command")
+        if (not isinstance(command, list) or len(command) < 2 or command[0] != "bash"
+                or any(not isinstance(item, str) or not item or any(ord(c) < 32 for c in item) for item in command)
+                or not re.fullmatch(r"(?:dev|config/profiles)/[A-Za-z0-9_./-]+\.sh", command[1]) or ".." in command[1].split("/")):
+            refusals.append(f"{label}: command must run a repository shell script with bash")
+        if not isinstance(lease, dict) or set(lease) - {"type"} or (
+                "type" in lease and (not isinstance(lease["type"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", lease["type"]))):
+            refusals.append(f"{label}: lease accepts only an environment type")
+    ids = [entry["id"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)]
+    refusals += [f"{name}: duplicate check" for name in sorted({name for name in ids if ids.count(name) > 1})]
+    if refusals:
+        raise ValueError("invalid core VM check catalog: " + "; ".join(refusals))
+    return ids
 
 
 def transfer_target_open(name, result):
@@ -317,6 +395,8 @@ def commands(root, version, inventory):
         "compatibility": ["python3", "dev/verify-release-upgrades.py", "--release-dir", str(release), "--version", version],
         "p0-release-smoke": ["bash", "dev/e2e/p0-acceptance.sh"],
     }
+    for check in core_vm_checks(root):
+        result["vm:" + check] = ["bash", "dev/e2e/release-vm-check.sh", check]
     for name, entry in inventory.items():
         if "lanes" in entry:
             for lane in entry["lanes"]:
@@ -696,6 +776,13 @@ def prepare(output, version, prepared=None):
             stream.write("Imported exact prepared CI assets: " + identity["candidate_id"] + "\n")
         receipt["checks"]["package"] = {"status": "passed", "exit_code": 0,
             "log": log.name, "log_sha256": digest(log), "command": ["ci-prepared", identity["candidate_id"]]}
+        for name, job in (CI_PREPARED_CHECKS.items() if counts_ci_preparation(root) else ()):
+            log = output / (name + "-ci.log")
+            with private_file(log) as stream:
+                stream.write(f"Counted successful preparation job {job} of {identity['candidate_id']} for {name}\n")
+            receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": digest(log),
+                                       "command": ci_prepared_result(name, identity["candidate_id"]),
+                                       "execution": "ci-preparation", "execution_environment": receipt["environment"]}
     else:
         receipt["checks"]["package"] = execute("package", ["bash", "dev/package-engine.sh", "--output-dir", str(release), "--version", version], root, output, clean_environment())
     receipt["checks"]["package"]["execution_environment"] = receipt["environment"]
@@ -778,6 +865,11 @@ def load_bound(output, entries=None, context=None):
             log = result.get("log", "")
             if not log or Path(log).name != log or digest(output / log) != result.get("log_sha256"):
                 raise ValueError("passing result evidence is missing or changed")
+            if result.get("execution") == "ci-preparation":
+                if (name not in CI_PREPARED_CHECKS or "preparation" not in receipt or result.get("inherited")
+                    or result.get("command") != ci_prepared_result(name, receipt["preparation"].get("candidate_id"))):
+                    raise ValueError("CI preparation result provenance changed")
+                continue
             if name in required_commands and required_commands[name] is not None and "command" in result:
                 if result["command"] != command_identity(required_commands[name], root):
                     raise ValueError("passing command provenance changed")
@@ -805,20 +897,26 @@ def load_bound(output, entries=None, context=None):
                     raise ValueError("invalid inherited source scope")
                 provenance = binding.get("release_provenance")
                 if provenance is not None:
+                    revised = isinstance(provenance, dict) and provenance.get("scope") == "generated-at-and-revision"
                     if (not isinstance(provenance, dict) or set(provenance) != {"scope", "files"}
-                        or provenance["scope"] != "generated-at-only" or not isinstance(provenance["files"], dict)
-                        or not provenance["files"]):
+                        or provenance["scope"] not in ("generated-at-only", "generated-at-and-revision")
+                        or revised and binding.get("scope") != "other-profile-tests-only"
+                        or not isinstance(provenance["files"], dict) or not provenance["files"]):
                         raise ValueError("invalid inherited release provenance scope")
                     for filename, metadata in provenance["files"].items():
                         identity, generated = release_provenance_identity(root, receipt, filename)
                         expected = {"source_sha256", "target_sha256", "source_generated_at", "target_generated_at", "identity_sha256"}
+                        expected |= {"source_revision", "target_revision"} if revised else set()
                         if (not isinstance(metadata, dict) or set(metadata) != expected
                             or any(not isinstance(value, str) for value in metadata.values())
                             or not re.fullmatch(r"[0-9a-f]{64}", metadata["source_sha256"])
                             or metadata["source_sha256"] == metadata["target_sha256"]
                             or metadata["target_sha256"] != receipt["release_files"].get(filename)
                             or metadata["target_generated_at"] != generated
-                            or metadata["source_generated_at"] == generated
+                            or not revised and metadata["source_generated_at"] == generated
+                            or revised and (metadata["target_revision"] != identity["sourceRevision"]
+                                            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", metadata["source_revision"])
+                                            or metadata["source_revision"] == metadata["target_revision"])
                             or metadata["identity_sha256"] != hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()):
                             raise ValueError("inherited release provenance changed")
     if digest(root / ".subyard-acceptance/release" / receipt["runtime_file"]) != receipt["runtime_sha256"]:
@@ -837,7 +935,19 @@ def select_checks(checks, selectors):
 
 
 def is_live(name):
-    return name == "p0-release-smoke" or name.startswith("profile:")
+    return name == "p0-release-smoke" or name.startswith(("profile:", "vm:"))
+
+
+def slot_continues_after(result):
+    """A check that failed inside a recorded lease, with its cleanup and lease release witnessed as
+    passing, leaves the slot to the next check. Refusals, interruptions, timeouts, cleanup failures
+    (exit 3), missing cleanup evidence and attempts without a lease stop that slot, so an unusable
+    slot cannot turn later checks into failures. A typed capacity block keeps the slot separately."""
+    cleanup = result.get("cleanup") or {}
+    return (result.get("status") == "failed" and result.get("termination") == "exit"
+            and result.get("exit_code") not in (3, 4) and result.get("environment_evidence") == "recorded"
+            and result.get("cleanup_status") == "recorded" and "lease-release" in cleanup
+            and all(item.get("exit_code") == 0 for item in cleanup.values()))
 
 
 def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=(), with_vms=False):
@@ -1111,7 +1221,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
                 capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
                                     and result.get("termination") == "exit"
                                     and result.get("reason") in ("capacity_memory", "capacity_disk"))
-                if result["status"] != "passed" and not capacity_blocked:
+                if result["status"] != "passed" and not capacity_blocked and not slot_continues_after(result):
                     return
         with ThreadPoolExecutor(max_workers=max(1, len(slots))) as pool:
             futures = [pool.submit(collect, slot) for slot in slots]
@@ -1360,6 +1470,96 @@ def attempt_facts(record):
             "execution_environment": facts["execution_environment"], "environments": facts["environments"]}
 
 
+# A transfer authorized by this policy needs no human review: the validator recomputes
+# its scope from both manifests and the target source.
+ISOLATED_TESTS_POLICY = "policy:isolated-other-profile-tests-v1"
+PROFILE_TESTS_REFERENCE = re.compile(rb"profiles/([a-z0-9][a-z0-9-]*)/tests(?![A-Za-z0-9_.-])")
+_shared_profile_tests = {}
+
+
+def shared_profile_tests(root, entries):
+    """Profiles whose tests are named by any non-Markdown file outside that profile."""
+    key = (str(Path(root).resolve()), evidence_hash(entries))
+    if key not in _shared_profile_tests:
+        shared = set()
+        for path, (_, value) in entries.items():
+            if path.endswith(".md"):
+                continue
+            data = os.fsencode(value[5:]) if value.startswith("link:") else (Path(root) / path).read_bytes()
+            for match in PROFILE_TESTS_REFERENCE.finditer(data):
+                profile = match.group(1).decode()
+                if not path.startswith("config/profiles/" + profile + "/"):
+                    shared.add(profile)
+        _shared_profile_tests[key] = frozenset(shared)
+    return _shared_profile_tests[key]
+
+
+def isolated_test_changes(root, name, tested, target):
+    """Changed paths when a profile check's product is identical and every change is another
+    profile's test file that nothing outside that profile uses; otherwise None."""
+    if not name.startswith("profile:"):
+        return None
+    owner = name.split(":", 1)[1].split("/", 1)[0]
+    old, new = tested["candidate"], target["candidate"]
+    if (any(old[key] != new[key] for key in ("version", "runtime_file", "runtime_sha256"))
+        or set(old["release_files"]) != set(new["release_files"])
+        or any(old["release_files"][file] != new["release_files"][file]
+               for file in new["release_files"] if not file.endswith(".provenance.json"))):
+        return None
+    left, right = tested["source_entries"], target["source_entries"]
+    changed = sorted(path for path in left.keys() | right.keys() if left.get(path) != right.get(path))
+    for path in changed:
+        match = re.fullmatch(r"config/profiles/([a-z0-9][a-z0-9-]*)/tests/.+", path)
+        if not match or match[1] == owner or match[1] in shared_profile_tests(root, right):
+            return None
+    return changed
+
+
+# Transferred evidence never crosses a migration or update-contract change, and these
+# checks always describe the exact published bytes.
+MIGRATION_PATH = re.compile(r"migrat|transition", re.IGNORECASE)
+TEST_PATH = re.compile(r"(^|/)(tests?|testkit|testdata|e2e)/|_test\.go$|[-_]tests?\.(py|sh)$")
+
+
+# The update contract: the installer and updater, release asset layout,
+# update and release-transition commands, and the release runtime adapter.
+UPDATE_CONTRACT_PATH = re.compile(r"^(scripts/install-runtime-release\.sh|dev/bootstrap-runtime\.sh|dev/release-assets\.sh"
+                                  r"|internal/cli/(update|release_)[^/]*\.go|internal/adapters/releaseruntime/)")
+
+
+def migration_paths(paths):
+    """Product (non-test, non-Markdown) paths of migrations, release transitions or the update contract."""
+    return sorted(path for path in paths if not path.endswith(".md") and not TEST_PATH.search(path)
+                  and (MIGRATION_PATH.search(path) or UPDATE_CONTRACT_PATH.search(path)))
+FINAL_BYTES_CHECKS = ("verify", "p0-release-smoke")
+
+
+def transfer_scope_refusals(name, tested_fingerprint, target_fingerprint, tested_entries=None, target_entries=None):
+    refusals = []
+    if name in FINAL_BYTES_CHECKS and tested_fingerprint != target_fingerprint:
+        refusals.append(name + " must run on the final candidate bytes; rerun it on this candidate")
+    if tested_entries is not None:
+        changed = migration_paths(path for path in tested_entries.keys() | target_entries.keys()
+                                  if tested_entries.get(path) != target_entries.get(path))
+        if changed:
+            refusals.append("evidence cannot cross migration or update-contract changes (" + ", ".join(changed[:5])
+                            + (f" and {len(changed) - 5} more" if len(changed) > 5 else "") + "); rerun " + name + " on this candidate")
+    return refusals
+
+
+def isolated_tests_review(changed):
+    listed, shown = "", 0
+    for shown, path in enumerate(changed, 1):
+        candidate = listed + (", " if listed else "") + path
+        if len(candidate) > 1800:
+            listed += f" and {len(changed) - shown + 1} more"
+            break
+        listed = candidate
+    return {"unchanged_scope": "Identical runtime and release assets; the source differs only in other profiles' unshared test files: " + (listed or "none"),
+            "reason": "Automatic reuse: none of the changed files is an input of this check.",
+            "authorization_reference": ISOLATED_TESTS_POLICY}
+
+
 def profile_closure(root, profiles, name, entries=None):
     owner = name.split(":", 1)[1].split("/", 1)[0]
     other_prefixes = tuple("config/profiles/" + profile + "/tests/" for profile in profiles if profile != owner)
@@ -1400,10 +1600,13 @@ def release_provenance_identity(root, receipt, name):
     return document, generated
 
 
-def release_import_binding(root, receipt, source_root, source):
+def release_import_binding(root, receipt, source_root, source, revisions=False):
+    """Bind release assets that differ only in provenance metadata. With revisions, an
+    isolated other-profile-tests scope may also differ in sourceRevision between two
+    concrete commits: CI candidates of different commits always record different ones."""
     if set(receipt["release_files"]) != set(source["release_files"]):
         raise ValueError("evidence import release inventory differs")
-    metadata = {}
+    metadata, revised = {}, False
     for name, target_hash in receipt["release_files"].items():
         source_hash = source["release_files"][name]
         if not name.endswith(".provenance.json"):
@@ -1412,14 +1615,22 @@ def release_import_binding(root, receipt, source_root, source):
             continue
         target_identity, target_time = release_provenance_identity(root, receipt, name)
         source_identity, source_time = release_provenance_identity(source_root, source, name)
-        if target_identity != source_identity:
+        target_revision, source_revision = target_identity["sourceRevision"], source_identity["sourceRevision"]
+        if (target_revision != source_revision and revisions and "unknown" not in (target_revision, source_revision)
+                and {**target_identity, "sourceRevision": ""} == {**source_identity, "sourceRevision": ""}):
+            revised = True
+        elif target_identity != source_identity:
             raise ValueError("evidence import release provenance identity differs")
         if target_hash != source_hash:
-            if target_time == source_time:
+            if target_time == source_time and target_revision == source_revision:
                 raise ValueError("evidence import release metadata differs beyond timestamp")
             metadata[name] = {"source_sha256": source_hash, "target_sha256": target_hash,
                               "source_generated_at": source_time, "target_generated_at": target_time,
                               "identity_sha256": hashlib.sha256(json.dumps(target_identity, sort_keys=True).encode()).hexdigest()}
+            if revised:
+                metadata[name].update(source_revision=source_revision, target_revision=target_revision)
+    if revised:
+        return {"scope": "generated-at-and-revision", "files": metadata}
     return {"scope": "generated-at-only", "files": metadata} if metadata else None
 
 
@@ -1435,7 +1646,8 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
     identity_keys = ("version", "runtime_file", "runtime_sha256", "profiles")
     if any(receipt[key] != source[key] for key in identity_keys):
         raise ValueError("evidence import candidate identity differs")
-    release_binding = release_import_binding(root, receipt, source_root, source)
+    release_binding = release_import_binding(root, receipt, source_root, source, revisions=allow_other_profile_tests
+                                             and source["source_fingerprint"] != receipt["source_fingerprint"])
     source_hash = digest(source_output / "receipt.json")
     check_commands = commands(root, receipt["version"], receipt["profiles"])
     incoming = []
@@ -1460,12 +1672,8 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
         if source["source_fingerprint"] != receipt["source_fingerprint"]:
             if not allow_other_profile_tests or not name.startswith("profile:"):
                 raise ValueError("evidence import source identity differs")
-            owner = name.split(":", 1)[1].split("/", 1)[0]
-            other_prefixes = tuple("config/profiles/" + profile + "/tests/"
-                                   for profile in receipt["profiles"] if profile != owner)
-            left, right = source_entries(source_root), source_entries(root)
-            changes = {path for path in left.keys() | right.keys() if left.get(path) != right.get(path)}
-            if not changes or any(not path.startswith(other_prefixes) for path in changes):
+            changes = isolated_test_changes(root, name, candidate_manifest(source_root, source), candidate_manifest(root, receipt))
+            if not changes:
                 raise ValueError("evidence import changes owning profile or shared inputs")
             binding["closure_sha256"] = profile_closure(root, receipt["profiles"], name)
             binding["scope"] = "other-profile-tests-only"
@@ -1508,8 +1716,9 @@ def read_transfer_json(path):
     return json.loads(path.read_text(), object_pairs_hook=unique)
 
 
-def validate_evidence_transfer(document, name, command, target, log_sha256, manifests=None):
-    """Validate the public provenance shared by local receipts and remote publication."""
+def validate_evidence_transfer(document, name, command, target, log_sha256, manifests=None, root=None, _attempt=False):
+    """Validate the public provenance shared by local receipts and remote publication.
+    A policy transfer also needs the target source root to recompute its scope."""
     if isinstance(document, dict) and document.get("schema_version") == 2:
         keys = {"schema_version", "check", "tested_manifest_sha256", "target_manifest_sha256", "original_attempt",
                 "command", "actual_command", "origin", "artifacts", "review", "preparation_environment",
@@ -1524,6 +1733,15 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
             validate_manifest(manifest)
             if evidence_hash(manifest) != document[key]:
                 raise ValueError("transfer manifest hash mismatch")
+        refusals = transfer_scope_refusals(name, tested["candidate"]["source_fingerprint"], destination["candidate"]["source_fingerprint"],
+                                           tested["source_entries"], destination["source_entries"])
+        if refusals:
+            raise ValueError("; ".join(refusals))
+        review = document["review"]
+        if isinstance(review, dict) and review.get("authorization_reference") == ISOLATED_TESTS_POLICY:
+            changed = None if root is None else isolated_test_changes(root, name, tested, destination)
+            if changed is None or review != isolated_tests_review(changed):
+                raise ValueError("policy transfer scope is not limited to other profiles' unshared tests")
         record = document["original_attempt"]
         validate_attempt(record, tested, name, command, log_sha256)
         if (record["result"]["status"] != "passed" or record["result"]["exit_code"] != 0
@@ -1541,7 +1759,7 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
                   ("tested_manifest_sha256", "target_manifest_sha256", "original_attempt")}
         legacy.update(schema_version=1, origin="receipt", tested=tested["candidate"], target=destination["candidate"],
                       artifacts={"receipt": document["artifacts"]["attempt"], "review": document["artifacts"]["review"], "log": log_sha256})
-        validate_evidence_transfer(legacy, name, command, target, log_sha256)
+        validate_evidence_transfer(legacy, name, command, target, log_sha256, _attempt=True)
         return
     keys = {"schema_version", "check", "tested", "target", "command", "actual_command", "origin",
             "artifacts", "review", "preparation_environment", "execution_environment", "environments",
@@ -1558,7 +1776,12 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
     if (any(document["target"].get(key) != value for key, value in target.items())
         or document["tested"]["version"] != document["target"]["version"]):
         raise ValueError("reviewed transfer target changed")
+    refusals = transfer_scope_refusals(name, document["tested"]["source_fingerprint"], document["target"]["source_fingerprint"])
+    if refusals:
+        raise ValueError("; ".join(refusals))
     review = document["review"]
+    if isinstance(review, dict) and review.get("authorization_reference") == ISOLATED_TESTS_POLICY and not _attempt:
+        raise ValueError("policy transfer requires original attempt manifests")
     if (not isinstance(review, dict) or set(review) != {"unchanged_scope", "reason", "authorization_reference"}
         or any(not public_text(review[key], limit) for key, limit in
                (("unchanged_scope", 2048), ("reason", 1024), ("authorization_reference", 256)))):
@@ -1846,7 +2069,7 @@ def validate_transferred_result(output, receipt, name, result, command, root):
         record = read_transfer_json(output / files["attempt"])
         manifests = {transfer[key]: read_transfer_json(output / files[role]) for key, role in
                      (("tested_manifest_sha256", "manifest"), ("target_manifest_sha256", "target_manifest"))}
-        validate_evidence_transfer(transfer, name, command_identity(command, root), transfer_candidate(receipt), result["log_sha256"], manifests)
+        validate_evidence_transfer(transfer, name, command_identity(command, root), transfer_candidate(receipt), result["log_sha256"], manifests, root)
         review = read_transfer_json(output / files["review"])
         expected_review = {"schema_version": 2, "check": name, "tested_manifest_sha256": transfer["tested_manifest_sha256"],
             "target_manifest_sha256": transfer["target_manifest_sha256"],
@@ -1935,7 +2158,7 @@ def prepare_attempt_transfer(target, source, name, review_path, review):
     transfer = {"schema_version": 2, "check": name, "tested_manifest_sha256": tested_sha, "target_manifest_sha256": target_sha,
         "original_attempt": record, "command": expected, "origin": "attempt", "artifacts": hashes,
         "review": review["review"], "preparation_environment": manifest["environment"], **attempt_facts(record)}
-    validate_evidence_transfer(transfer, name, expected, transfer_candidate(receipt), hashes["log"], {tested_sha: manifest, target_sha: target_manifest})
+    validate_evidence_transfer(transfer, name, expected, transfer_candidate(receipt), hashes["log"], {tested_sha: manifest, target_sha: target_manifest}, target.root)
     return transfer, files
 
 
@@ -1950,6 +2173,10 @@ def prepare_transfer(target_candidate, source_candidate, name, review_path, revi
     expected = command_identity(required[name], root)
     if expected != command_identity(old_commands[name], source_root) or not transfer_target_open(name, receipt["checks"][name]):
         raise ValueError("reviewed transfer command differs or target is already attempted")
+    refusals = transfer_scope_refusals(name, source["source_fingerprint"], receipt["source_fingerprint"],
+                                       source_candidate.entries, target_candidate.entries)
+    if refusals:
+        raise ValueError("; ".join(refusals))
     source_output = source_candidate.output
     tested, target = transfer_candidate(source), transfer_candidate(receipt)
     if isinstance(review, dict) and review.get("schema_version") == 2:
@@ -2208,6 +2435,78 @@ def transfer_batch(output, request_path, plan=False):
         return apply_transfers(target, prepared, batch_id, verify_inputs)
 
 
+def reuse_isolated_tests(output, sources):
+    """Transfer each open profile check's original PASS from the first listed earlier candidate
+    whose runtime and release assets are identical and whose source differs only in other
+    profiles' unshared test files. Busy, superseded or different candidates are skipped."""
+    output = output.resolve()
+    with acceptance_lock(output), ExitStack() as stack:
+        target = EvidenceCandidate(output)
+        receipt, required = target.receipt, target.context["commands"]
+        if receipt.get("superseded"):
+            return []
+        open_checks = [name for name in sorted(required) if required[name] and name.startswith("profile:")
+                       and transfer_target_open(name, receipt["checks"][name])]
+        candidates = []
+        for path in dict.fromkeys(Path(path).resolve() for path in sources):
+            if path == output or not open_checks:
+                continue
+            try:
+                stack.enter_context(acceptance_lock(path, shared=True))
+                candidate = EvidenceCandidate(path)
+            except (ValueError, OSError, KeyError) as error:
+                print(f"REUSE-SKIP candidate {path.parent.name if path.name == 'acceptance' else path.name}: {error}", flush=True)
+                continue
+            if not candidate.receipt.get("superseded"):
+                candidates.append(candidate)
+        reviews = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".reuse-", dir=output)))
+        prepared, reused = [], []
+        for name in open_checks:
+            skipped = []
+            for source in candidates:
+                original = source.receipt["checks"].get(name, {})
+                label = source.output.parent.name if source.output.name == "acceptance" else source.output.name
+                if original.get("status") != "passed":
+                    continue  # Nothing to reuse; not a diagnostic.
+                try:
+                    command, _ = batch_guard(target.root, receipt, source.root, source.receipt, name, target.context, source.context)
+                    if source.receipt["release_files"] != receipt["release_files"]:
+                        release_import_binding(target.root, receipt, source.root, source.receipt, revisions=True)
+                except (ValueError, KeyError) as error:
+                    skipped.append(f"{label}: {error}")
+                    continue
+                if (original.get("status") != "passed" or "original_attempt" not in original
+                    or original.get("execution_environment") != source.receipt["environment"]
+                    or is_live(name) and (original.get("cleanup_status") != "recorded" or not original.get("cleanup")
+                                          or original.get("environment_evidence") != "recorded")):
+                    skipped.append(f"{label}: no complete original direct PASS")
+                    continue
+                changed = isolated_test_changes(target.root, name, source.manifest, target.manifest)
+                if changed is None:
+                    skipped.append(f"{label}: changes reach this check's inputs")
+                    continue
+                review = {"schema_version": 2, "check": name, "tested_manifest_sha256": evidence_hash(source.manifest),
+                          "target_manifest_sha256": evidence_hash(target.manifest),
+                          "original_attempt": original["original_attempt"], "review": isolated_tests_review(changed), "standalone": None}
+                review_path = reviews / (uuid.uuid4().hex + ".json")
+                with private_file(review_path, "w") as stream:
+                    stream.write(json.dumps(review, sort_keys=True))
+                transfer, files = prepare_attempt_transfer(target, source, name, review_path, review)
+                prepared.append((name, command, transfer, files))
+                reused.append((name, str(source.output), len(changed)))
+                break
+            else:
+                if skipped:
+                    print(f"REUSE-SKIP {name}: " + "; ".join(skipped), flush=True)
+        if prepared:
+            batch_id = evidence_hash({"policy": ISOLATED_TESTS_POLICY, "target": transfer_candidate(receipt),
+                                      "checks": [[name, transfer["artifacts"]["attempt"]] for name, _, transfer, _ in prepared]})
+            apply_transfers(target, prepared, batch_id)
+            for name, source, count in reused:
+                print(f"REUSE {name} from={source} policy={ISOLATED_TESTS_POLICY} changed_files={count}", flush=True)
+        return reused
+
+
 def apply_transfers(target, prepared, batch_id=None, verify_inputs=None):
     """Stage, rehash and validate all evidence, then publish exactly one receipt."""
     output, root, receipt = target.output, target.root, target.receipt
@@ -2324,6 +2623,9 @@ def main():
     transferred.add_argument("--review", type=Path, help="target-bound public review declaration JSON")
     transferred.add_argument("--batch", type=Path, help="bound batch request JSON; exclusive with single-check flags")
     transferred.add_argument("--plan", action="store_true", help="print shared manifests, diffs and unsigned review drafts for --batch")
+    reuse = sub.add_parser("reuse", help="transfer profile PASS results whose only source changes are other profiles' unshared tests")
+    reuse.add_argument("--output", type=Path, required=True)
+    reuse.add_argument("--from", dest="sources", type=Path, action="append", required=True, help="earlier candidate; first match wins")
     superseded = sub.add_parser("supersede", help="retain original evidence and explicitly retire this candidate")
     superseded.add_argument("--output", type=Path, required=True)
     deferred = sub.add_parser("defer-external", help="record authorized external deferrals; execution stays not-run")
@@ -2357,6 +2659,9 @@ def main():
             parser.error("transfer requires --batch or all of --from, --check and --review; --plan requires --batch")
         with acceptance_lock(output), acceptance_lock(args.source_output.resolve(), shared=True):
             return transfer_evidence(output, args.source_output.resolve(), args.check, args.review.resolve())
+    if args.action == "reuse":
+        reuse_isolated_tests(output, args.sources)
+        return 0
     if args.action == "supersede":
         with acceptance_lock(output):
             return supersede(output)

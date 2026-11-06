@@ -75,6 +75,46 @@ func TestAppliedIdentityHintPublishesVerifiedIdentityAfterRecreation(t *testing.
 	}
 }
 
+// Fresh hosts run init before Incus exists: identity inspection must leave installation to
+// ordinary init, while a pending rename still refuses without its native proof.
+func TestIdentityInspectionLeavesUnreachableIncusToOrdinaryInit(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	unreachable := errors.New(`connect to Incus: dial unix /var/lib/incus/unix.socket: connect: no such file or directory`)
+	native := &testkit.Incus{Err: unreachable}
+	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := &preparedCommand{CLI: cli, Loaded: loaded}
+	check := func(name string, prepare func(context.Context, *initBootstrap) (bool, error), refuses bool) {
+		t.Helper()
+		handled, err := prepare(context.Background(), nil)
+		if handled || refuses != (err != nil) {
+			t.Fatalf("%s: handled=%v err=%v, want refusal=%v", name, handled, err, refuses)
+		}
+	}
+	for _, configHome := range []bool{false, true} {
+		if configHome {
+			if err := os.MkdirAll(loaded.Context.Paths.ConfigHome, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		check("stopped inspection", prepared.prepareStoppedIdentityInspection, false)
+		check("identity init", prepared.prepareDeveloperIdentityInit, false)
+	}
+	marker := config.DeveloperIdentityMarkerPath(loaded.Context.Paths.ConfigHome, loaded.Context.YardName)
+	if err := os.MkdirAll(filepath.Dir(marker), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, marker, []byte(`{}`), 0600)
+	check("pending stopped inspection", prepared.prepareStoppedIdentityInspection, true)
+	check("pending identity init", prepared.prepareDeveloperIdentityInit, true)
+}
+
 func TestStoppedIdentityInspectionCapturesPrivateApprovalScope(t *testing.T) {
 	for _, scenario := range []string{"missing", "match", "mismatch", "foreign", "source", "desired", "uuid", "hint"} {
 		t.Run(scenario, func(t *testing.T) {

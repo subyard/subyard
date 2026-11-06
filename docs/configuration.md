@@ -672,7 +672,9 @@ same installed configuration its plan observed, so configuration awaiting
 `yard init` stays pending. A materialized-configuration repair that would apply such
 pending configuration refuses and names every affected yard with `yard init`. A retained shipped provisioning
 path follows the active release only when the current value is that release's own
-copy of the file; an operator file path stays exact. `yard profile enable` and
+copy of the file; an operator file path stays exact. A path captured through a
+process handle follows that release's copy of the same shipped file even while
+a different current value awaits `yard init`. `yard profile enable` and
 `yard profile disable` apply one owner-service profile, so they record only that
 profile in the installed selection; a runtime repair records it the same way when
 the runtime already matches the desired selection. Unfinished release transitions, corrupt installed artifacts and unsafe
