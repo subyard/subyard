@@ -39,16 +39,18 @@ permissions:
 
 concurrency:
   group: periodic-e2e-${{ github.ref }}${{ inputs.origin && format('-retry-{0}', inputs.origin) || '' }}
-  # A probe branch's new push replaces its run; master and retries always finish.
-  cancel-in-progress: ${{ !inputs.origin && startsWith(github.ref, 'refs/heads/ci-probe/') }}
+  # A new run replaces the previous one; retries always finish. A run still going when the next
+  # schedule starts six hours later is stuck, and keeping it would hold the group forever.
+  cancel-in-progress: ${{ !inputs.origin }}
 
 env:
   CANDIDATE_VERSION: 1.0.0-ci.periodic-e2e
   NESTED_ATTEMPTS: 20
 
 jobs:
-  # The schedule runs only for a commit no finished push or scheduled run has covered. A failed
-  # commit is not repeated automatically; use Re-run or a manual dispatch.
+  # The schedule runs only for a commit no finished push or scheduled run has covered; a cancelled
+  # run covers nothing. A failed commit is not repeated automatically; use Re-run or a manual
+  # dispatch.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -69,8 +71,8 @@ jobs:
           run=true
           if [ "$EVENT" = schedule ]; then
             last="$(gh run list --workflow periodic-e2e.yml --branch "$REF" --status completed \
-              --limit 30 --json headSha,event \
-              --jq 'map(select(.event == "schedule" or .event == "push"))[0].headSha // ""')"
+              --limit 30 --json headSha,event,conclusion \
+              --jq 'map(select((.event == "schedule" or .event == "push") and .conclusion != "cancelled"))[0].headSha // ""')"
             [ "$last" != "$HEAD" ] || run=false
           fi
           printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
