@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Physical stop refuses active SSH sessions unless Go explicitly forces it.
+# Physical stop refuses active SSH sessions unless Go forces it or the plan approved the interruption.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -166,6 +166,35 @@ if grep -Fxq stop "$MOCK_INCUS_LOG"; then fail "unknown-state guard reached incu
 grep -Fxq ssh-restore "$MOCK_INCUS_LOG" || fail "unknown-state stop did not restore SSH"
 grep -Fxq profile-stop "$MOCK_INCUS_LOG" || fail "unknown-state stop did not pause the profile"
 grep -Fxq profile-start "$MOCK_INCUS_LOG" || fail "unknown-state stop did not resume the profile"
+
+# An operator-approved restart keeps the fence and probe but reports live sessions.
+for approved in active unknown idle; do
+  reset_case
+  if [ "$approved" = unknown ]; then MOCK_VSCODE_RC=9; else MOCK_VSCODE_STATE="$approved"; fi
+  "$ROOT/scripts/lifecycle-guard.sh" stop --interrupt-sessions > "$TMP/out" 2>&1 \
+    || fail "approved stop refused $approved sessions: $(tr '\n' ' ' < "$TMP/out")"
+  grep -Fxq stop "$MOCK_INCUS_LOG" || fail "approved stop with $approved sessions did not reach incus stop"
+  grep -Fxq ssh-quiesce "$MOCK_INCUS_LOG" || fail "approved stop skipped the SSH listener fence"
+  grep -Fxq vscode-probe "$MOCK_INCUS_LOG" || fail "approved stop skipped the session probe"
+  grep -Fxq profile-stop "$MOCK_INCUS_LOG" || fail "approved stop did not pause the profile"
+  if grep -Fxq ssh-restore "$MOCK_INCUS_LOG"; then fail "approved stop restored the SSH listener"; fi
+  case "$approved" in
+    active) grep -Fq 'interrupting the SSH and VS Code Remote-SSH sessions' "$TMP/out" \
+      || fail "approved stop did not report interrupted sessions" ;;
+    unknown) grep -Fq 'could not verify SSH and VS Code sessions' "$TMP/out" \
+      || fail "approved stop did not report the unknown session state" ;;
+    idle) if grep -Fq '[warn]' "$TMP/out"; then fail "approved idle stop warned: $(tr '\n' ' ' < "$TMP/out")"; fi ;;
+  esac
+done
+for misuse in "start --interrupt-sessions" "stop --interrupt-sessions --force" "stop --interrupt-sessions --reconcile"; do
+  reset_case
+  # shellcheck disable=SC2086 # The case lists whole argument vectors.
+  if "$ROOT/scripts/lifecycle-guard.sh" $misuse > "$TMP/out" 2>&1; then
+    fail "guard accepted '$misuse'"
+  fi
+  grep -Fq 'needs an ordinary stop' "$TMP/out" || fail "'$misuse' refusal is unclear"
+  if grep -Fxq stop "$MOCK_INCUS_LOG"; then fail "'$misuse' reached incus stop"; fi
+done
 
 reset_case
 MOCK_STOP_LISTENER_RC=9

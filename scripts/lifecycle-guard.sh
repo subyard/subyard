@@ -20,10 +20,11 @@ SSH_HOST="${SSH_HOST:-yard}"
 PROJ=(--project "$INCUS_PROJECT")
 
 action="${1:-}"; shift || true
-force=0 reconcile=0 publication_retry=0
+force=0 reconcile=0 publication_retry=0 interrupt_sessions=0
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
+    --interrupt-sessions) interrupt_sessions=1 ;;
     --reconcile) reconcile=1 ;;
     --publication-retry-only) publication_retry=1 ;;
     -*) die "unknown option '$a'" ;;
@@ -31,6 +32,9 @@ for a in "$@"; do
   esac
 done
 [ "$force" = 0 ] || [ "$action" = stop ] || die "--force is only valid with stop"
+# A restart the operator approved in a plan still fences and probes, but reports live sessions.
+[ "$interrupt_sessions" = 0 ] || { [ "$action" = stop ] && [ "$force" = 0 ] && [ "$reconcile" = 0 ]; } \
+  || die "--interrupt-sessions needs an ordinary stop"
 [ "$reconcile" = 0 ] || case "$action" in start | stop) ;; *) die "--reconcile needs start or stop" ;; esac
 
 incus_preflight "$action"
@@ -114,12 +118,18 @@ case "$action" in
             vcstate="$(vscode_remote_state)"
           done
         fi
-        case "$vcstate" in
-          active)
+        case "$interrupt_sessions:$vcstate" in
+          1:active)
+            warn "interrupting the SSH and VS Code Remote-SSH sessions still connected to '$SSH_HOST', as approved in the operation plan"
+            ;;
+          1:unknown)
+            warn "could not verify SSH and VS Code sessions in '$SSH_HOST'; stopping as approved in the operation plan"
+            ;;
+          *:active)
             ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
             die "VS Code Remote-SSH, the SSH agent forwarder or another SSH session is still connected to '$SSH_HOST' — if the SSH agent is unlocked, run '$(yard_cmd_hint) ssh-agent lock'; close every remote window (File > Close Remote Connection) and shell, then retry; use '$(yard_cmd_hint) stop --force' only for emergency shutdown"
             ;;
-          unknown)
+          *:unknown)
             ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
             die "could not verify that VS Code Remote-SSH is idle — retry, or use '$(yard_cmd_hint) stop --force' for emergency shutdown"
             ;;

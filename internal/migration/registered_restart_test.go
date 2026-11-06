@@ -99,7 +99,7 @@ printf 'network %%s\n' "$1" >> %[1]q/calls
 exit %[2]d
 `, root, test.repair), 0700)
 			testkit.WriteFile(t, filepath.Join(root, "scripts/lifecycle-guard.sh"), fmt.Appendf(nil, `#!/bin/sh
-printf 'lifecycle %%s\n' "$1" >> %[1]q/calls
+printf 'lifecycle %%s\n' "$*" >> %[1]q/calls
 case "$1" in
  stop) printf "physical stop\n" >&2; printf stopped > %[1]q/status ;;
  start) printf running > %[1]q/status; rm -f %[1]q/memory ;;
@@ -127,7 +127,7 @@ esac
 			if disclosure < 0 || stop <= disclosure {
 				t.Fatal("caller lost disclosure before stop", warnings.String())
 			}
-			if string(calls) != "network --check\nnetwork --yes\nlifecycle stop\nlifecycle start\n" {
+			if string(calls) != "network --check\nnetwork --yes\nlifecycle stop --interrupt-sessions\nlifecycle start --reconcile\n" {
 				t.Fatalf("calls:\n%s", calls)
 			}
 		})

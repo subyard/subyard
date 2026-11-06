@@ -317,7 +317,11 @@ only on interactive TTY; EOF/non-TTY without explicit consent rejects. Root reex
 consent and never repeats it; profile handlers do not add child prompts.
 An update lists each pending disk-/tmp restart before this confirmation, including session,
 process and connection loss, `/tmp` reset and persistent-data retention. `--yes` prints the
-same list and answers the one prompt; stopped yards are not booted by update. For a stopped pending yard, run
+same list and answers the one prompt; stopped yards are not booted by update. That consent is
+the operator's decision to interrupt connected sessions: the stop guard still fences and reports
+them but does not refuse, and migration does not ask again. The prompt keeps the action's default,
+because a superseded controller validates a release plan's recovery class against its own registry.
+A profile runtime's stated restart consequence follows the same rule. For a stopped pending yard, run
 `yard -Y NAME start`, then `yard migrate` to repair deferred runtimes.
 An update interrupted under a released owner retains that owner's confirmation rules.
 

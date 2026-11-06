@@ -34,19 +34,40 @@ func (runtime Runtime) ObserveInstalledRuntime(ctx context.Context, id string) (
 // Desired settings belong to ordinary init; changing them is not a new release.
 // The normal observer still checks current source bytes, receipts and ownership.
 func (runtime Runtime) ObserveInstalledReleaseRuntime(ctx context.Context, id string) (ports.RuntimeObservation, error) {
+	projected, err := runtime.installedReleaseProjection(ctx, id)
+	if err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	return projected.ObserveInstalledRuntime(ctx, id)
+}
+
+// ApplyInstalledReleaseRuntime repairs an installed consumer on the same applied
+// configuration its release observation used, so a completed-release repair
+// cannot apply settings that still await init.
+func (runtime Runtime) ApplyInstalledReleaseRuntime(ctx context.Context, id, operationID, actual, desired string) error {
+	projected, err := runtime.installedReleaseProjection(ctx, id)
+	if err != nil {
+		return err
+	}
+	return projected.ApplyInstalledRuntime(ctx, id, operationID, actual, desired)
+}
+
+// installedReleaseProjection replaces init-owned settings with their installed
+// values. Missing or legacy evidence keeps the ordinary configuration.
+func (runtime Runtime) installedReleaseProjection(ctx context.Context, id string) (Runtime, error) {
 	if id == "key-tools-runtime" {
-		return runtime.observeInstalledReleaseKeyRuntime(ctx)
+		return runtime.installedReleaseKeyProjection()
 	}
 	if id != "core-guest-runtime" || !runtime.guestFactsAvailable() || runtime.Executor == nil {
-		return runtime.ObserveInstalledRuntime(ctx, id)
+		return runtime, nil
 	}
 	presence, instance, err := runtime.installedGuestPresence(ctx)
 	if err != nil || !strings.EqualFold(instance.Status, "running") || !presence.Preview && !presence.CCUsage {
-		return runtime.ObserveInstalledRuntime(ctx, id)
+		return runtime, nil
 	}
 	program, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, guestFactsSource))
 	if err != nil {
-		return ports.RuntimeObservation{}, err
+		return Runtime{}, err
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{
 		Command: []string{"python3", "-B", "-c", "__name__ = 'subyard_release_observer'\n" + string(program) + installedGuestSettingsProjection},
@@ -54,20 +75,20 @@ func (runtime Runtime) ObserveInstalledReleaseRuntime(ctx context.Context, id st
 	if err != nil || result.ExitCode != 0 {
 		// Invalid or missing ownership evidence must retain ordinary readiness.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || err != nil && result.ExitCode == 0 {
-			return ports.RuntimeObservation{}, err
+			return Runtime{}, err
 		}
-		return runtime.ObserveInstalledRuntime(ctx, id)
+		return runtime, nil
 	}
 	var settings map[string]string
 	if len(result.Stdout) > 16384 || json.Unmarshal(result.Stdout, &settings) != nil {
-		return ports.RuntimeObservation{}, errors.New("invalid installed guest configuration projection")
+		return Runtime{}, errors.New("invalid installed guest configuration projection")
 	}
 	allowed := map[string]bool{"ENVIRONMENT_PROFILES": true, "ALLOWS_CODING_TOOLS": true, "DEV_USER": true,
 		"WEB_PREVIEW_HOST_PORT": true, "CCUSAGE_VERSION": true, "CCUSAGE_SHA256_AMD64": true, "CCUSAGE_SHA256_ARM64": true}
 	environment := runtimeEnvironment(runtime.Environment)
 	for name, value := range settings {
 		if !allowed[name] {
-			return ports.RuntimeObservation{}, errors.New("unexpected installed guest setting")
+			return Runtime{}, errors.New("unexpected installed guest setting")
 		}
 		environment[name] = value
 	}
@@ -78,28 +99,28 @@ func (runtime Runtime) ObserveInstalledReleaseRuntime(ctx context.Context, id st
 	for name, value := range environment {
 		runtime.Environment = append(runtime.Environment, name+"="+value)
 	}
-	return runtime.ObserveInstalledRuntime(ctx, id)
+	return runtime, nil
 }
 
-func (runtime Runtime) observeInstalledReleaseKeyRuntime(ctx context.Context) (ports.RuntimeObservation, error) {
+func (runtime Runtime) installedReleaseKeyProjection() (Runtime, error) {
 	tools := runtime.environmentDefault("SUBYARD_KEYS_TOOLS_DIR", filepath.Join(runtime.Yard.Paths.DataHome, "tools"))
 	path := filepath.Join(tools, "bin", ".subyard-native-tools.json")
 	// Keep ordinary readiness for absent/legacy/unsafe receipts. The installed
 	// observer retains its exact mode/owner, binary hash and version checks.
 	if _, err := installedRuntimeFile(path); err != nil {
-		return ports.RuntimeObservation{}, err
+		return Runtime{}, err
 	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+		return runtime, nil
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) || info.Size() > 16384 {
-		return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+		return runtime, nil
 	}
 	payload, err := os.ReadFile(path)
 	if err != nil {
-		return ports.RuntimeObservation{}, err
+		return Runtime{}, err
 	}
 	var receipt struct {
 		Schema      int `json:"schema"`
@@ -108,14 +129,14 @@ func (runtime Runtime) observeInstalledReleaseKeyRuntime(ctx context.Context) (p
 		SopsArchive string `json:"sops_archive"`
 	}
 	if json.Unmarshal(payload, &receipt) != nil || receipt.Schema != 1 {
-		return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+		return runtime, nil
 	}
 	settings := map[string]string{"SUBYARD_AGE_VERSION": receipt.Age, "SUBYARD_SOPS_VERSION": receipt.Sops,
 		"SUBYARD_AGE_SHA256_AMD64": receipt.AgeArchive, "SUBYARD_AGE_SHA256_ARM64": receipt.AgeArchive,
 		"SUBYARD_SOPS_SHA256_AMD64": receipt.SopsArchive, "SUBYARD_SOPS_SHA256_ARM64": receipt.SopsArchive}
 	for name, value := range settings {
 		if err := config.ValidateSetting(config.ScopeHost, name, value, false); err != nil {
-			return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+			return runtime, nil
 		}
 	}
 	environment := runtimeEnvironment(runtime.Environment)
@@ -126,7 +147,7 @@ func (runtime Runtime) observeInstalledReleaseKeyRuntime(ctx context.Context) (p
 	for name, value := range environment {
 		runtime.Environment = append(runtime.Environment, name+"="+value)
 	}
-	return runtime.ObserveInstalledRuntime(ctx, "key-tools-runtime")
+	return runtime, nil
 }
 
 // Execute after the facts module has been loaded without invoking its CLI.

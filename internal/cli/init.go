@@ -690,6 +690,9 @@ func (execution *initExecution) consequences() []string {
 		hostIDConsequences = append(hostIDConsequences, "record owner HostID "+execution.hostID)
 	}
 	hostIDConsequences = append(hostIDConsequences, execution.orphanIngress.consequences()...)
+	if execution.mode == initReconcile {
+		hostIDConsequences = append(hostIDConsequences, execution.runtimePlan.Consequences()...)
+	}
 	if execution.orphanIngressDeferred {
 		hostIDConsequences = append(hostIDConsequences,
 			"restore owner Incus access and inspect deselected public ingress; any discovered route requires a new init approval")

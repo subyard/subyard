@@ -457,6 +457,37 @@ EOF_SECONDARY_HANDLER
     "$mode" "$UPGRADE_FROM" "$rolled_back_version" "$target_version" "$legacy_helper" "$target_helper"
 }
 
+# An installed main unit that differs from the rendered one (for example from an
+# older release) is release drift: status warns, migrate discloses the restart in its
+# plan, and the approved migration rewrites the unit and restarts the service.
+assert_main_unit_migration() {
+  local unit=/etc/systemd/system/subyard-orca.service report="$STATE/orca-unit-migrate"
+  local consequence='Orca service restarts to apply its updated unit; Orca clients reconnect; agents or terminals running inside the service end'
+  local rendered before after
+  stage 'applying an outdated Orca main unit through yard migrate'
+  rendered="$(guest_root cat "$unit")" || die 'Orca main unit is unreadable'
+  before="$(guest_root systemctl show subyard-orca.service -p MainPID --value)"
+  guest_root sh -c 'printf "%s\n" "Environment=SUBYARD_E2E_OUTDATED_UNIT=1" >> "$1" && systemctl daemon-reload' _ "$unit" \
+    || die 'could not seed the outdated Orca main unit'
+  yard orca status >"$report-status.out" 2>"$report-status.err" || :
+  grep -Fq 'service runs an outdated unit' "$report-status.out" "$report-status.err" \
+    || die 'Orca status did not warn about the outdated main unit'
+  yard migrate --check >"$report-check.out" 2>&1 || :
+  grep -Fq "$consequence" "$report-check.out" \
+    || { sed -n '1,60p' "$report-check.out" >&2; die 'migrate plan did not disclose the Orca restart'; }
+  yard migrate --yes >"$report-apply.out" 2>&1 \
+    || { tail -n 40 "$report-apply.out" >&2; die 'approved migration did not apply the Orca main unit'; }
+  [ "$(guest_root cat "$unit")" = "$rendered" ] || die 'migration left the outdated Orca main unit'
+  guest_root systemctl is-active --quiet subyard-orca.service || die 'Orca did not run after the unit migration'
+  after="$(guest_root systemctl show subyard-orca.service -p MainPID --value)"
+  [ "$after" != "$before" ] || die 'migration applied the Orca unit without restarting the service'
+  yard migrate --check --json >"$report.json" || die 'release was not ready after the Orca unit migration'
+  jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$report.json" >/dev/null \
+    || die 'release was not ready after the Orca unit migration'
+  assert_orca_readiness
+  stage 'outdated Orca main unit applied through yard migrate with a disclosed restart'
+}
+
 focused_release_ready() {
   local phase="$1" report="$STATE/focused-migrate-$1.json" status=0 state
   stage "assessing focused release activation: $phase"
@@ -1540,6 +1571,7 @@ guest_root test -x /usr/local/libexec/subyard/projects-changed \
 [ "$(incus --project "$PROJECT" config device get "$INSTANCE" orca-server listen)" = \
   "tcp:127.0.0.1:$ORCA_PORT" ] || die 'Orca bootstrap published the wrong owner endpoint'
 assert_orca_readiness
+[ "${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}" != 1 ] || assert_main_unit_migration
 if [ "$CODEX_CONFIG" = 1 ]; then
   stage 'checking Codex TOML runtime additions through public apply and Orca restart'
   install_stock_orca_client

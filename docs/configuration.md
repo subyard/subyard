@@ -664,8 +664,19 @@ Settings marked `yard init` store desired intent. On an initialized yard, changi
 them does not require `yard migrate` or block ordinary commands before application.
 Run `yard init` to reconcile the desired settings. Release readiness retains the
 successfully installed configuration while checking current helper bytes, protected
-receipts and ownership. Unfinished release transitions, corrupt installed artifacts
-and unsafe configuration retain their existing guards.
+receipts and ownership. A repair of the completed release by `yard migrate` or
+`yard update` is planned and rechecked against that same installed configuration,
+and its effects stay inside that plan: a yard current in its installed configuration
+is left unchanged, and a stale runtime is repaired with the active release on the
+same installed configuration its plan observed, so configuration awaiting
+`yard init` stays pending. A materialized-configuration repair that would apply such
+pending configuration refuses and names every affected yard with `yard init`. A retained shipped provisioning
+path follows the active release only when the current value is that release's own
+copy of the file; an operator file path stays exact. `yard profile enable` and
+`yard profile disable` apply one owner-service profile, so they record only that
+profile in the installed selection; a runtime repair records it the same way when
+the runtime already matches the desired selection. Unfinished release transitions, corrupt installed artifacts and unsafe
+configuration retain their existing guards.
 
 | Installed consumer | Settings applied by `yard init` |
 | --- | --- |

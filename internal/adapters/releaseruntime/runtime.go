@@ -147,6 +147,19 @@ func (unsupportedReleaseOwnerError) Error() string {
 	return "experimental release-owner metadata is unsupported; use an ordinary Go runtime"
 }
 
+// inspectionFailure renders a failed protected inspection: a public outcome
+// keeps its diagnostics, any other cause stays redacted.
+func (runtime *Runtime) inspectionFailure(parsed options, err error) (Prepared, error) {
+	var public publicReleaseInspectionError
+	if errors.As(err, &public) {
+		if parsed.check {
+			return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
+		}
+		return Prepared{}, transitionOutcomeError(public.outcome)
+	}
+	return Prepared{}, redactReleaseInspectionError(err)
+}
+
 func allowsCompletedMetadataAdmission(protected *protectedTransitionInspection, err error) bool {
 	var selected unsupportedReleaseOwnerError
 	if errors.As(err, &selected) {
@@ -554,6 +567,8 @@ func (runtime *Runtime) PrepareTransition(
 		ctx, parsed.root, configHome, yard, inheritedSettingIDs,
 	)
 	var completedAdmission *SourceAdmission
+	// The original inspection result stays the answer for a same-target retry.
+	originalProtected, originalErr := protected, err
 	// A validated fresh repair still belongs to the exact original owner.
 	// Metadata admission is only a fallback for unavailable or blocked inspection.
 	if !parsed.rollback && allowsCompletedMetadataAdmission(protected, err) {
@@ -571,14 +586,7 @@ func (runtime *Runtime) PrepareTransition(
 		}
 	}
 	if err != nil {
-		var public publicReleaseInspectionError
-		if errors.As(err, &public) {
-			if parsed.check {
-				return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
-			}
-			return Prepared{}, transitionOutcomeError(public.outcome)
-		}
-		return Prepared{}, redactReleaseInspectionError(err)
+		return runtime.inspectionFailure(parsed, err)
 	}
 	if protected != nil {
 		unfinished := protected.journal.Checkpoint != releasetransition.JournalComplete ||
@@ -755,6 +763,18 @@ func (runtime *Runtime) PrepareTransition(
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
 	if err == nil && completedAdmission != nil {
 		if request.Target == completedAdmission.Metadata.Journal.Goal.Target {
+			// Same-target convergence belongs to the exact sealed original owner and
+			// stays refused; the refusal reports that owner's inspection, which names
+			// the blocker.
+			if originalErr != nil {
+				return runtime.inspectionFailure(parsed, originalErr)
+			}
+			if originalProtected != nil && originalProtected.inspection.Outcome != nil {
+				return runtime.inspectionFailure(parsed, publicReleaseInspectionError{
+					cause:   errors.New("same-target convergence must use the exact sealed original owner"),
+					outcome: *originalProtected.inspection.Outcome,
+				})
+			}
 			return Prepared{}, errors.New("same-target convergence must use the exact sealed original owner")
 		}
 		// The candidate's ordinary plan must bind this exact proof inside its

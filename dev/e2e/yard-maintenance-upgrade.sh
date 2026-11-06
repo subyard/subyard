@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published pre-policy yards: one upfront confirmation and marker-only retry.
+# Published pre-policy yards: one upfront confirmation, approved session interruption and marker-only retry.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOKEN="${1:?fixture token required}"
@@ -98,8 +98,23 @@ printf 'n\n' | operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" scr
 [ "$rc" != 0 ] && grep -Fq 'operation declined' "$STATE_ROOT/decline.log" || die 'ordinary confirmation was not declined'
 [ "$(protected_state)" = "$before" ] || die 'decline changed protected state'
 for name in "${NAMES[@]}"; do [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] && [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] && [ -z "$(marker "$name")" ] || die 'decline changed native state'; done
+# The approved restart interrupts a real live SSH session instead of refusing it.
+operator_env ssh -F "$OPERATOR_HOME/.ssh/config" -o BatchMode=yes -T yard -- true || die 'fixture SSH transport to the default yard is unavailable'
+operator_env ssh -F "$OPERATOR_HOME/.ssh/config" -o BatchMode=yes -T yard -- sleep 900 > "$STATE_ROOT/live-ssh.log" 2>&1 &
+# operator_env runs through sudo, so liveness checks of this root-owned PID need sudo too.
+session_pid=$!
+# The fixture's incus wrapper closes stdin, so the probe travels as an argument.
+ssh_probe() { yard_guest default sh -c "$(cat "$ROOT/scripts/vscode-remote-maintenance.sh")" vscode-remote-maintenance check-ssh; }
+for _ in {1..40}; do [ "$(ssh_probe)" = active ] && break; sleep 0.5; done
+probe="$(ssh_probe)"
+sudo -n kill -0 "$session_pid" && [ "$probe" = active ] \
+  || die "live SSH session did not connect: probe=$probe ssh=$(tr '\n' ' ' < "$STATE_ROOT/live-ssh.log")"
 update_candidate --offline --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/update.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/update.log" >&2; exit "$rc"; }
 cat "$STATE_ROOT/update.log"
+grep -Fq "interrupting the SSH and VS Code Remote-SSH sessions still connected to 'yard'" "$STATE_ROOT/update.log" || die 'approved restart did not report the interrupted session'
+for _ in {1..60}; do sudo -n kill -0 "$session_pid" 2>/dev/null || break; sleep 0.5; done
+! sudo -n kill -0 "$session_pid" 2>/dev/null || die 'approved restart left the live SSH session connected'
+wait "$session_pid" 2>/dev/null || true
 grep -Fq 'yard weighted: disk-/tmp migration pending' "$STATE_ROOT/update.log" || die 'failure warning missing'
 before="$(protected_state)"
 update_candidate --check --offline --version "$CANDIDATE_VERSION" --json > "$STATE_ROOT/ready.json"

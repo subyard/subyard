@@ -388,8 +388,23 @@ cleanup_unit_file() {
   fi
   [ ! -e "$unit_file" ] && [ ! -L "$unit_file" ]
 }
+# Key tools install the operator's credential timer for this state's runtime.
+# Remove it with the state; refuse a timer whose service another runtime owns.
+cleanup_keys_timer() {
+  local units="${SUBYARD_OPERATOR_HOME:-$HOME}/.config/systemd/user" name present=0
+  for name in subyard-keys-sync.service subyard-keys-sync.timer .subyard-keys-sync.json; do
+    [ ! -e "$units/$name" ] && [ ! -L "$units/$name" ] || present=1
+  done
+  [ "$present" = 1 ] || return 0
+  [ -n "${STATE:-}" ] && [ -f "$units/subyard-keys-sync.service" ] && [ ! -L "$units/subyard-keys-sync.service" ] \
+    && grep -x 'ExecStart=.* _keys-auto-sync --if-due' "$units/subyard-keys-sync.service" | grep -Fq "ExecStart=$STATE/" \
+    || { printf 'github-broker-e2e: refusing to remove a credential timer of another runtime\n' >&2; return 1; }
+  systemctl_user disable --now subyard-keys-sync.timer >/dev/null 2>&1 || true
+  rm -f -- "$units/subyard-keys-sync.timer" "$units/subyard-keys-sync.service" "$units/.subyard-keys-sync.json"
+  systemctl_user daemon-reload >/dev/null 2>&1 || true
+}
 cleanup_unit() {
-  cleanup_unit_file "$UNIT" "$UNIT_FILE"
+  cleanup_unit_file "$UNIT" "$UNIT_FILE" && cleanup_keys_timer
 }
 cleanup_hermes() {
   local project_marker='' instance_marker=''

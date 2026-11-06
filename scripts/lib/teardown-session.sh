@@ -38,5 +38,5 @@ teardown_session_guard() {
       result="$(teardown_ssh_state)"
     done
   fi
-  [ "$result" != active ] || die "an SSH session is still connected to the yard — close remote windows and shells, then retry teardown"
+  [ "$result" != active ] || die "VS Code Remote-SSH, the SSH agent forwarder or another SSH session is still connected to yard instance '$instance' — if the SSH agent is unlocked, run '$(yard_cmd_hint) ssh-agent lock'; close every remote window (File > Close Remote Connection) and shell, then retry teardown"
 }

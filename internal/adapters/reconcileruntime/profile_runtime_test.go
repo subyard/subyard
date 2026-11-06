@@ -390,6 +390,12 @@ func TestObserveProfileRuntimeValidatesBoundedStrictJSON(t *testing.T) {
 		{name: "stale ownership", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","ownership_absent":true}`},
 		{name: "unbound ownership", output: `{"state":"current","ownership_absent":true}`},
 		{name: "wrong ownership type", output: `{"state":"current","actual":"` + testRuntimeNewDigest + `","desired":"` + testRuntimeNewDigest + `","ownership_absent":"yes"}`},
+		{name: "current consequence", output: `{"state":"current","actual":"` + testRuntimeNewDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"service restarts"}`},
+		{name: "absent consequence", output: `{"state":"absent","actual":"","desired":"","consequence":"service restarts"}`},
+		{name: "control consequence", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"service\nrestarts"}`},
+		{name: "trailing space consequence", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"service restarts "}`},
+		{name: "long consequence", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"` + strings.Repeat("a", profileRuntimeConsequenceBytes+1) + `"}`},
+		{name: "list consequence", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":["service restarts"]}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -397,6 +403,14 @@ func TestObserveProfileRuntimeValidatesBoundedStrictJSON(t *testing.T) {
 				t.Fatal("invalid handler output was accepted")
 			}
 		})
+	}
+}
+
+func TestObserveProfileRuntimeAcceptsStaleConsequence(t *testing.T) {
+	consequence := "service restarts to apply its new unit; clients reconnect"
+	observation, err := decodeProfileRuntimeObservation([]byte(`{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"` + consequence + `"}`))
+	if err != nil || observation.Consequence != consequence {
+		t.Fatalf("observation = %#v, err = %v", observation, err)
 	}
 }
 

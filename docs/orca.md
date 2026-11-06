@@ -48,10 +48,14 @@ orders Orca after that user's manager. Running agents and their terminals surviv
 closing every SSH or other login session, including a temporary SSH outage. A yard
 reboot still ends those processes.
 
-On an existing running yard, `yard update` enables lingering without restarting Orca;
-a stopped yard gets it at its next `yard init` or `yard orca up`. The next `yard orca
-up` applies the service ordering and restarts the service once. Agents whose daemon
-still runs inside the service end with that restart, so run it at a quiet moment.
+On an existing running yard, `yard update` enables lingering;
+a stopped yard gets it at its next `yard init` or `yard orca up`. When the release changes the
+installed service unit, such as its ordering or environment, `yard update`, `yard migrate` and
+`yard init` list an Orca restart in their plan and, after confirmation, install the unit and restart
+a running service once. The restart keeps the endpoint installed by `up`; a changed
+`ORCA_ADVERTISE_HOST` or `ORCA_HOST_PORT` still applies through `yard orca up`. Agents whose daemon
+still runs inside the service end with that restart, so confirm it at a quiet moment.
+Until then, `yard orca status` warns that the service runs an outdated unit.
 Repeating `up` also repairs lingering if it was disabled later.
 
 Renaming `DEV_USER` restarts the service, and core moves lingering to the new login.
@@ -71,7 +75,7 @@ installations in all running local yards, including named yards. The refresh inc
 the Codex chat launcher and its login environment, so updated chat permission helpers
 are used by newly started or reopened chats. This does not
 install Orca in other yards, change endpoints or start a stopped Orca service.
-Registration-only changes do not restart the service. Stopped yards are left
+Registration-only changes do not restart the service; a changed service unit does, as described above. Stopped yards are left
 stopped; after starting one, run `yard init` to repair its installed handler before
 project hooks execute. This repair also runs when provisioning is already current.
 `orca sync` refuses a stale registration contract and points to `yard init`.

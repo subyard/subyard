@@ -275,6 +275,9 @@ type RuntimeObservation struct {
 	// OwnershipAbsent proves no owned installation remains after convergence.
 	// It is valid only for current, with the ordinary desired digest retained.
 	OwnershipAbsent bool `json:"ownership_absent,omitempty"`
+	// Consequence is an optional owner-stated effect of applying a stale contract,
+	// such as a service restart. The approving plan discloses it.
+	Consequence string `json:"consequence,omitempty"`
 }
 
 // PreparedSettingsCapture preserves independently verified applied inputs before

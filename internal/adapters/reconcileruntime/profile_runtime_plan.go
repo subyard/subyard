@@ -287,11 +287,30 @@ func (plan *ProfileRuntimePlan) OperationSteps(target string) []domain.Operation
 		if current.Actual != "" {
 			observed += " " + current.Actual
 		}
+		consequence := "refresh installed profile runtime " + id
+		if decision == domain.StepApply && current.Consequence != "" {
+			consequence += "; " + current.Consequence
+		}
 		steps = append(steps, domain.OperationStep{ID: "init.runtime." + id, Target: target + ":" + id, Observed: observed, Desired: desired, Decision: decision,
 			Preconditions: []string{"captured native runtime declarations, handlers and configuration are unchanged", "an observed converged runtime cannot acquire new work"},
-			Verify:        "native observe returns the approved desired contract after apply", Consequence: "refresh installed profile runtime " + id})
+			Verify:        "native observe returns the approved desired contract after apply", Consequence: consequence})
 	}
 	return steps
+}
+
+// Consequences returns the owner-stated effects of applying the observed stale runtimes.
+func (plan *ProfileRuntimePlan) Consequences() []string {
+	if plan == nil {
+		return nil
+	}
+	result := []string{}
+	for _, definition := range plan.definitions {
+		id := definition.Runtime.ActivationID
+		if current := plan.current[id]; !plan.conditional[id] && current.State == ports.RuntimeStateStale && current.Consequence != "" {
+			result = append(result, "profile runtime "+id+": "+current.Consequence)
+		}
+	}
+	return result
 }
 
 func (runtime Runtime) resolveProfileRuntimePlan() {

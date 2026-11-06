@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -17,9 +18,11 @@ import (
 )
 
 type profileRuntimeFixture struct {
-	installed bool
-	fail      bool
-	applied   []string
+	installed  bool
+	fail       bool
+	recordFail bool
+	applied    []string
+	recorded   []string
 }
 type profileRuntimeSelection struct {
 	fixture  *profileRuntimeFixture
@@ -35,6 +38,14 @@ func (runtime profileRuntimeSelection) ApplyProfileService(_ context.Context, na
 		return errors.New("fixture apply failure")
 	}
 	runtime.fixture.installed = runtime.selected
+	return nil
+}
+
+func (runtime profileRuntimeSelection) RecordAppliedProfile(_ context.Context, name string, selected bool) error {
+	if runtime.fixture.recordFail {
+		return errors.New("fixture record failure")
+	}
+	runtime.fixture.recorded = append(runtime.fixture.recorded, fmt.Sprintf("%s=%t", name, selected))
 	return nil
 }
 
@@ -164,6 +175,10 @@ func TestScopedProfileEnableDisablePreservesNeighborsAndSkipsInit(t *testing.T) 
 			}
 			if strings.Join(runtime.applied, " ") != "fixture fixture fixture" {
 				t.Fatalf("scoped apply=%v", runtime.applied)
+			}
+			// Every converged operation records its own profile, including no-op repeats.
+			if strings.Join(runtime.recorded, " ") != "fixture=true fixture=true fixture=false fixture=false fixture=true" {
+				t.Fatalf("applied selection records=%v", runtime.recorded)
 			}
 			if platform := cli.options.InitPlatform.(*initPlatformFixture); len(platform.applied) != 0 {
 				t.Fatalf("entered init: %+v", platform)
@@ -508,5 +523,30 @@ func TestScopedProfileFirstEditPreservesDeclaredDefaultPeers(t *testing.T) {
 	content, err := os.ReadFile(path)
 	if err != nil || !bytes.Contains(content, []byte("ENVIRONMENT_PROFILES='peer'")) {
 		t.Fatalf("authored selection=%q %v", content, err)
+	}
+}
+
+// A converged runtime whose applied selection could not be recorded fails the
+// operation; the saved selection stays and a retry records it.
+func TestScopedProfileRecordFailureRetainsSelectionAndRetryRecords(t *testing.T) {
+	cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='neighbor'\n")
+	runtime.recordFail = true
+	run := func() int {
+		prepared, err := prepareScopedProfile(t, cli, "enable", "fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		return cli.runPreparedCommand(context.Background(), prepared, true)
+	}
+	if code := run(); code == 0 || !strings.Contains(output.String(), "record applied selection, retry profile enable fixture") {
+		t.Fatalf("record failure exit=%d: %s", code, output)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "ENVIRONMENT_PROFILES='neighbor fixture'\n" || !runtime.installed {
+		t.Fatalf("record failure lost applied work: %s installed=%v", data, runtime.installed)
+	}
+	runtime.recordFail = false
+	if code := run(); code != 0 || strings.Join(runtime.recorded, " ") != "fixture=true" || strings.Join(runtime.applied, " ") != "fixture" {
+		t.Fatalf("retry exit=%d records=%v applied=%v: %s", code, runtime.recorded, runtime.applied, output)
 	}
 }

@@ -179,7 +179,12 @@ func CompleteRegisteredDiskTmp(ctx context.Context, runtime reconcileruntime.Run
 		if action == "stop" && runtime.Stderr != nil {
 			fmt.Fprintln(runtime.Stderr, DiskTmpDisclosure(runtime.Yard.YardName, true))
 		}
-		if err := runtime.RunMigrationPhysicalLifecycle(ctx, action); err != nil {
+		// The caller's plan disclosed this restart and its session loss before consent.
+		power := runtime.RunApprovedMigrationStop
+		if action == "start" {
+			power = func(ctx context.Context) error { return runtime.RunMigrationPhysicalLifecycle(ctx, action) }
+		}
+		if err := power(ctx); err != nil {
 			return fmt.Errorf("%s: %w", action, err)
 		}
 	}

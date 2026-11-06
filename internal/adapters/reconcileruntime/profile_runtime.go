@@ -31,6 +31,11 @@ const (
 
 var profileRuntimeDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// A runtime hook may state one short plan consequence of applying a stale contract.
+const profileRuntimeConsequenceBytes = 200
+
+var profileRuntimeConsequence = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ,;:._()'/-]*$`)
+
 func (runtime Runtime) profileObservationFailure(owner, reason string, cause error) error {
 	if reason == "" {
 		reason = "unclassified"
@@ -383,6 +388,11 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 	}
 	if observation.OwnershipAbsent && observation.State != ports.RuntimeStateCurrent {
 		return ports.RuntimeObservation{}, errors.New("runtime ownership absence requires current state")
+	}
+	if observation.Consequence != "" && (observation.State != ports.RuntimeStateStale ||
+		len(observation.Consequence) > profileRuntimeConsequenceBytes || !profileRuntimeConsequence.MatchString(observation.Consequence) ||
+		strings.HasSuffix(observation.Consequence, " ")) {
+		return ports.RuntimeObservation{}, errors.New("runtime observation has an invalid consequence")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {

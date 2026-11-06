@@ -355,3 +355,24 @@ func TestSourceAdmissionErrorNamesProtectedMetadataOperation(t *testing.T) {
 		}
 	}
 }
+
+// A same-target refusal reports the original owner's blocker, not only that
+// convergence belongs to that owner.
+func TestSameTargetRefusalReportsOriginalInspection(t *testing.T) {
+	outcome := releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired, Active: "release-a", Target: "release-a",
+		Code: releasetransition.CodeDependencyUnavailable, Message: "integration claude inspect in yard default: native dependency or observation unavailable", Retry: "yard update --check"}
+	runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	defer runtime.Close()
+	_, err := runtime.inspectionFailure(options{}, publicReleaseInspectionError{cause: errors.New("same-target convergence must use the exact sealed original owner"), outcome: outcome})
+	var failure transitionOutcomeFailure
+	if !errors.As(err, &failure) || failure.outcome.Code != outcome.Code || !strings.Contains(err.Error(), outcome.Message) {
+		t.Fatalf("same-target refusal lost the original blocker: %v", err)
+	}
+	var stdout bytes.Buffer
+	check := New(Config{Stdout: &stdout, Stderr: &bytes.Buffer{}})
+	defer check.Close()
+	prepared, err := check.inspectionFailure(options{check: true, json: true}, publicReleaseInspectionError{cause: errors.New("refused"), outcome: outcome})
+	if err != nil || prepared.Changed || prepared.run == nil {
+		t.Fatalf("check refusal is not a read-only report: %#v %v", prepared, err)
+	}
+}

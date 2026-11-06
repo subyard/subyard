@@ -916,17 +916,21 @@ func inspectPowerActivationApplicability(
 }
 
 type materializedConfigActivationReconciler struct {
-	cli                       *CLI
-	yard                      string
-	configHome                string
-	goal                      releasetransition.Goal
-	artifactDigest            releasetransition.Fingerprint
-	registryDigest            releasetransition.Fingerprint
-	allLocal                  bool
-	scopeResolved             bool
-	integrationPlans          map[string]reconcileruntime.IntegrationPlan
-	sourceIngress             bool
-	appliedSelection          bool
+	cli              *CLI
+	yard             string
+	configHome       string
+	goal             releasetransition.Goal
+	artifactDigest   releasetransition.Fingerprint
+	registryDigest   releasetransition.Fingerprint
+	allLocal         bool
+	scopeResolved    bool
+	integrationPlans map[string]reconcileruntime.IntegrationPlan
+	sourceIngress    bool
+	appliedSelection bool
+	// approved is the last installed-configuration observation of a completed
+	// release repair; its effects must stay inside that observation.
+	approved                  *releasetransition.V2ActivationObservation
+	approvedReleases          releasetransition.ReleasePair
 	projectedIntegrationPlans bool
 	projectedUnavailable      map[string]projectedIntegrationUnavailable
 	recoveryApply             *configApplyExecution
@@ -1033,7 +1037,98 @@ func (cli *CLI) releaseActivationOperation() *CLI {
 func (reconciler *materializedConfigActivationReconciler) Observe(
 	ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks,
 ) (releasetransition.V2ActivationObservation, error) {
-	return reconciler.observe(ctx, releases, nil)
+	observation, err := reconciler.observe(ctx, releases, nil)
+	if err == nil && reconciler != nil && reconciler.appliedSelection {
+		approved := observation
+		reconciler.approved, reconciler.approvedReleases = &approved, releases
+	}
+	return observation, err
+}
+
+// boundedRepair keeps a completed-release repair inside its approved plan. A
+// converged installed configuration needs no effect; otherwise desired intent
+// must equal the installed configuration the plan observed.
+func (reconciler *materializedConfigActivationReconciler) boundedRepair(ctx context.Context) (bool, error) {
+	if !reconciler.appliedSelection || reconciler.approved == nil {
+		return true, nil
+	}
+	if reconciler.approved.Converged {
+		return false, nil
+	}
+	approved := *reconciler.approved
+	reconciler.appliedSelection = false
+	desired, err := reconciler.observe(ctx, reconciler.approvedReleases, nil)
+	reconciler.appliedSelection = true
+	if err != nil {
+		return false, err
+	}
+	if desired.Actual != approved.Actual || desired.Desired != approved.Desired || desired.Converged != approved.Converged {
+		yards, err := reconciler.pendingConfigurationYards(ctx)
+		if err != nil {
+			return false, err
+		}
+		return false, materializedConfigActivationError{pendingConfigurationError{yards}, yards[0], "materialized config", "init", "apply", reconciler.configHome}
+	}
+	return true, nil
+}
+
+// pendingConfigurationYards names, in stable order, every yard whose desired
+// configuration differs from its installed one. When the difference is not
+// attributable to one yard, every yard in the repair scope is named.
+func (reconciler *materializedConfigActivationReconciler) pendingConfigurationYards(ctx context.Context) ([]string, error) {
+	operation := reconciler.operation()
+	yard := reconciler.yard
+	if yard == "" || reconciler.allLocal {
+		yard = "default"
+	}
+	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
+	if err != nil {
+		return nil, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect", reconciler.configHome}
+	}
+	targets, err := operation.releaseConfigTargets(ctx, loaded, reconciler.allLocal)
+	if err != nil {
+		return nil, err
+	}
+	var pending, all []string
+	for _, target := range targets {
+		all = append(all, target.Name)
+		applied, err := operation.appliedIntegrationTarget(ctx, target)
+		if err != nil {
+			return nil, materializedConfigActivationError{err, target.Name, "installed integration selection", "integration status", "inspect", reconciler.configHome}
+		}
+		if integrationConfigurationFingerprint(applied.Loaded) != integrationConfigurationFingerprint(target.Loaded) {
+			pending = append(pending, target.Name)
+		}
+	}
+	if len(pending) == 0 {
+		pending = all
+	}
+	if len(pending) == 0 {
+		pending = []string{yard}
+	}
+	slices.Sort(pending)
+	return pending, nil
+}
+
+// pendingConfigurationError refuses a completed-release repair whose effects would
+// apply configuration that awaits yard init and is absent from the approved plan.
+type pendingConfigurationError struct{ yards []string }
+
+func (err pendingConfigurationError) Error() string {
+	return "configuration awaiting yard init in yards " + strings.Join(err.yards, ", ") + " is not covered by the approved release repair"
+}
+
+func (err pendingConfigurationError) ActivationDiagnostic() (string, string) {
+	subject := "yard " + err.yards[0]
+	if len(err.yards) > 1 {
+		subject = "yards " + strings.Join(err.yards, ", ")
+	}
+	if len(subject) > 300 {
+		// Stay within the release diagnostic text bound.
+		subject = fmt.Sprintf("%d yards", len(err.yards))
+	}
+	return subject + ": configuration awaiting yard init differs from the installed release configuration; the release repair would apply it without a plan; run yard init for each, then yard migrate",
+		"run yard -Y " + err.yards[0] + " init"
 }
 
 func (reconciler *materializedConfigActivationReconciler) ObserveProspective(
@@ -1436,6 +1531,12 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 ) error {
 	if reconciler == nil || reconciler.cli == nil {
 		return errors.New("materialized config reconciler is unavailable")
+	}
+	if reconciler.recoveryApply == nil {
+		proceed, err := reconciler.boundedRepair(ctx)
+		if err != nil || !proceed {
+			return err
+		}
 	}
 	operation := reconciler.reconcileCLI()
 	yard := reconciler.yard

@@ -25,6 +25,12 @@ type ProfileServiceRuntime interface {
 	ApplyProfileService(context.Context, string, []ports.TeardownArtifact) error
 }
 
+// profileSelectionRecorder records one converged profile in the guest's applied
+// selection, so completed-release inspection observes what this operation applied.
+type profileSelectionRecorder interface {
+	RecordAppliedProfile(context.Context, string, bool) error
+}
+
 type profileServiceBinder interface {
 	ProfileServiceBinding(context.Context, string) (string, error)
 }
@@ -520,6 +526,11 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			}
 			if !ready {
 				return result, errors.New("profile runtime did not converge; desired selection retained for retry")
+			}
+			if recorder, ok := runtime.(profileSelectionRecorder); ok {
+				if err := recorder.RecordAppliedProfile(ctx, request.id, request.verb == "enable"); err != nil {
+					return result, fmt.Errorf("profile runtime converged; record applied selection, retry profile %s %s: %w", request.verb, request.id, err)
+				}
 			}
 		}
 		fresh, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,

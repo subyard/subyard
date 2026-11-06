@@ -165,7 +165,15 @@ func (runtime Runtime) AppliedIntegrationConfiguration(ctx context.Context) (App
 	if observed.Installed != baseline.Installed || (observed.AppliedSettings == nil) != (baseline.AppliedSettings == nil) || !maps.Equal(observed.AppliedSettings, baseline.AppliedSettings) {
 		return AppliedIntegrationConfiguration{}, domain.ErrPlanStale
 	}
-	return AppliedIntegrationConfiguration{Selected: observed.Selected, Settings: observed.AppliedSettings, Installed: observed.Installed, Identity: identity}, nil
+	settings := observed.AppliedSettings
+	if settings != nil {
+		catalog, loadErr := config.LoadCatalog(runtime.RepositoryRoot)
+		if loadErr != nil {
+			return AppliedIntegrationConfiguration{}, loadErr
+		}
+		settings = runtime.relocateAppliedShippedSources(catalog, settings)
+	}
+	return AppliedIntegrationConfiguration{Selected: observed.Selected, Settings: settings, Installed: observed.Installed, Identity: identity}, nil
 }
 
 // CheckAppliedGuestIdentity refuses identity authoring when no independent owner

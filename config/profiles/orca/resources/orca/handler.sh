@@ -649,6 +649,67 @@ ensure_linger() {
   linger_ready || die "Orca lingering is disabled for ${DEV_USER:-dev} after reconciliation"
 }
 
+# Set ORCA_MAIN_UNIT_STATE to current, drift or unrenderable for the installed main unit.
+# The endpoint stays the one installed by 'up': a changed endpoint setting applies through 'up'.
+inspect_main_unit() {
+  local installed exec_line endpoint guest_uid
+  ORCA_MAIN_UNIT_STATE=current ORCA_INSTALLED_ADVERTISE_HOST="" ORCA_INSTALLED_HOST_PORT=""
+  yexec test -f "/etc/systemd/system/$ORCA_UNIT" || return 0
+  installed="$(yexec cat "/etc/systemd/system/$ORCA_UNIT")" || return 1
+  exec_line="$(grep -m1 '^ExecStart=' <<<"$installed" || true)"
+  endpoint="${exec_line##* --pairing-address }"
+  endpoint="${endpoint%% *}"
+  ORCA_MAIN_UNIT_STATE=unrenderable
+  guest_uid="$(yexec id -u "${DEV_USER:-dev}" 2>/dev/null)" || return 0
+  [[ "$guest_uid" =~ ^[0-9]+$ ]] || return 0
+  [[ "$endpoint" =~ ^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?):([0-9]{1,5})$ ]] || return 0
+  ORCA_INSTALLED_ADVERTISE_HOST="${BASH_REMATCH[1]}" ORCA_INSTALLED_HOST_PORT="${BASH_REMATCH[3]}"
+  ORCA_MAIN_UNIT_STATE=current
+  if [ "$(ORCA_ADVERTISE_HOST="$ORCA_INSTALLED_ADVERTISE_HOST" ORCA_HOST_PORT="$ORCA_INSTALLED_HOST_PORT" render_runtime_service "$guest_uid")" != "$installed" ] ||
+    [ "$(yexec systemctl show "$ORCA_UNIT" --property=NeedDaemonReload --value)" = yes ]; then
+    ORCA_MAIN_UNIT_STATE=drift
+  fi
+}
+
+main_unit_state() {
+  inspect_main_unit || return 1
+  printf '%s' "$ORCA_MAIN_UNIT_STATE"
+}
+
+ORCA_MAIN_UNIT_CONSEQUENCE="Orca service restarts to apply its updated unit; Orca clients reconnect; agents or terminals running inside the service end"
+
+# The registration digest stays the shared desired contract. Main-unit drift only makes the
+# actual state differ, so activation applies it and discloses the restart.
+observe_runtime_contract() {
+  local observation unit actual
+  # Command substitution does not inherit errexit; keep observer refusals fatal.
+  observation="$(observe_registration_contract)" || return 1
+  # An absent contract has no unit; its observation stays the single read-only observer call.
+  if [ "$(jq -r .state <<<"$observation")" = absent ]; then
+    printf '%s\n' "$observation"
+    return 0
+  fi
+  unit="$(main_unit_state)" || die "Orca service unit unavailable"
+  if [ "$unit" != drift ]; then
+    printf '%s\n' "$observation"
+    return 0
+  fi
+  actual="$(printf '%s main-unit-drift\n' "$(jq -r .actual <<<"$observation")" | sha256sum | awk '{print $1}')"
+  jq -c --arg actual "$actual" --arg consequence "$ORCA_MAIN_UNIT_CONSEQUENCE" \
+    '.state = "stale" | .actual = $actual | .consequence = $consequence' <<<"$observation"
+}
+
+apply_main_unit() {
+  inspect_main_unit || die "Orca service unit unavailable"
+  [ "$ORCA_MAIN_UNIT_STATE" = drift ] || return 0
+  ORCA_ADVERTISE_HOST="$ORCA_INSTALLED_ADVERTISE_HOST" ORCA_HOST_PORT="$ORCA_INSTALLED_HOST_PORT"
+  stage_runtime_contract
+  if yexec systemctl is-active --quiet "$ORCA_UNIT"; then
+    yexec systemctl restart "$ORCA_UNIT"
+    wait_service_endpoint_ready || die "Orca did not become ready after applying its updated unit"
+  fi
+}
+
 runtime_contract_ready() {
   linger_ready || return 1
   local contract_version
@@ -974,6 +1035,12 @@ cmd_status() {
   else
     warn "owner route absent"
   fi
+  case "$(main_unit_state 2>/dev/null || printf unavailable)" in
+    current) ;;
+    drift) warn "service runs an outdated unit: its updated environment is not applied; run '$(yard_cmd_hint) migrate' or '$(yard_cmd_hint) orca up' (Orca restarts; agents or terminals inside the service end)" ;;
+    unrenderable) warn "service unit has no readable endpoint; run '$(yard_cmd_hint) orca up'" ;;
+    *) warn "service unit unreadable: whether its update is applied is unknown" ;;
+  esac
   report_agent_survival
   if automatic_project_hook_ready; then
     ok "automatic project hook ready"
@@ -1426,7 +1493,7 @@ if [ "$sub" = _runtime-contract ]; then
         jq -e '.schema == 1 and (.missingMetadata | type == "array")' <<<"$ORCA_METADATA_PROJECTION" >/dev/null \
           || die 'invalid native metadata projection'
       fi
-      observation="$(observe_registration_contract)"
+      observation="$(observe_runtime_contract)" || exit 1
       hook_binding=""
       if [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] &&
         yexec systemctl is-active --quiet "$ORCA_UNIT";then
@@ -1441,7 +1508,7 @@ if [ "$sub" = _runtime-contract ]; then
       [[ "${2:-}" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "${3:-}" =~ ^[a-f0-9]{64}$ ]] &&
         [[ "${4:-}" =~ ^[a-f0-9]{64}$ ]] || die "invalid Orca runtime activation arguments"
       SUBYARD_OPERATION_ID="$2"
-      observation="$(observe_registration_contract)"
+      observation="$(observe_runtime_contract)" || exit 1
       [ "$(jq -r .actual <<<"$observation")" = "$3" ] &&
         [ "$(jq -r .desired <<<"$observation")" = "$4" ] \
         || die "Orca runtime contract changed since assessment; retry yard init"
@@ -1449,11 +1516,16 @@ if [ "$sub" = _runtime-contract ]; then
         absent) printf '%s\n' "$observation" ;;
         current) printf '%s\n' "$observation" ;;
         stale)
-          # Protects running agents on update: this restarts nothing, unlike the unit change `up` applies.
+          # Helper refresh restarts nothing. A changed main unit restarts the service, as the
+          # approving plan disclosed through this observation's consequence.
           ensure_linger
-          stage_registration_contract
+          if [ "$(jq -r '.consequence // empty' <<<"$observation")" = "$ORCA_MAIN_UNIT_CONSEQUENCE" ]; then
+            apply_main_unit
+          else
+            stage_registration_contract
+          fi
           cleanup_guest || die "Orca guest staging directory could not be removed"
-          observe_registration_contract | jq -e --arg desired "$4" \
+          observe_runtime_contract | jq -e --arg desired "$4" \
             'select(.state == "current" and .actual == .desired and .desired == $desired)'
           ;;
         *) die "invalid Orca runtime contract observation" ;;

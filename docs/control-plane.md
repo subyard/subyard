@@ -474,6 +474,12 @@ rules, including that version's separate restart confirmation where required.
 
 Each running yard applies the existing guest policy, restarts and verifies it before setting
 `user.subyard.disk_tmp=v1`. Host and guest safety checks run before stopping the yard.
+That approval also covers interrupting connected sessions. The stop runs
+`lifecycle-guard.sh stop --interrupt-sessions`: it still pauses new SSH connections and profile
+owner services and probes for sessions, but warns about VS Code Remote-SSH, SSH shells, the SSH agent
+forwarder or an unverifiable session state instead of refusing. An ordinary `yard stop` without
+that approval still refuses them. The same restart after a `yard start` that finishes a pending
+yard follows the start plan, which discloses it.
 A yard-local failure warns and leaves its marker absent while the remaining yards and release
 update continue. Readiness and sorted warnings read the marker and actual power state. Pending yards do not hold profile/core runtime readiness;
 host key-tools and host-wide owners remain strict, so a pending route-owning test-yard can
@@ -1797,6 +1803,10 @@ The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`
 bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
 `ownership_absent`. States are `absent`, `deferred`, `current`
 and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
+A `stale` observation may add one `consequence`: a short sentence of at most 200 bytes from a
+plain-text alphabet, such as a service restart that apply performs. Update, migrate and `yard init`
+plans disclose it before their single confirmation; release plans name the yards once per distinct
+consequence. The text must not depend on live session state, because the plan binds it.
 Core bounds execution and output, checks the assessment before apply, and verifies the resulting
 state separately. Hook paths retain the updater's pinned directory descriptor; symbolic links
 below that anchor are rejected. Missing/stopped yards are absent/deferred without starting them.

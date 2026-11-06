@@ -123,3 +123,71 @@ if value['status'] != 'current' or applied is None or applied['yard'] != expecte
     raise ValueError('profile selection requires current guest facts for this yard')
 print(json.dumps(applied['selected_profiles']))
 `
+
+// ErrGuestFactsUnfinished reports guest facts left incomplete by an interrupted
+// refresh; only a full refresh by init or release activation completes them.
+var ErrGuestFactsUnfinished = errors.New("guest runtime facts refresh is unfinished; run yard init")
+
+// RecordAppliedProfile updates one profile in the protected successful
+// selection after that profile's runtime converged. Other entries keep their
+// applied value: a profile operation applies only its own profile, and init
+// still owns the whole selection snapshot. Missing facts stay with init and
+// the release refresh; unfinished facts refuse until init rewrites them.
+func (runtime Runtime) RecordAppliedProfile(ctx context.Context, name string, selected bool) error {
+	if !runtime.guestFactsAvailable() || runtime.Executor == nil {
+		return nil
+	}
+	if !domain.SafeName(name) {
+		return errors.New("invalid applied profile name")
+	}
+	program, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, guestFactsSource))
+	if err != nil {
+		return err
+	}
+	var target map[string]any
+	if err := json.Unmarshal(runtime.guestRuntimeFacts(), &target); err != nil {
+		return err
+	}
+	request, err := json.Marshal(map[string]any{"yard": target["yard"], "profile": name, "selected": selected})
+	if err != nil {
+		return err
+	}
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{
+		Command: []string{"python3", "-B", "-c", "__name__ = 'subyard_profile_selection_recorder'\n" + string(program) + recordAppliedProfileProjection},
+		Stdin:   request,
+	})
+	if result.ExitCode == 10 && (err == nil || !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+		return nil
+	}
+	if result.ExitCode == 12 && (err == nil || !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+		// An interrupted refresh or record must not look recorded; init rewrites the snapshot.
+		return ErrGuestFactsUnfinished
+	}
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return errors.New("applied profile selection record failed")
+	}
+	return nil
+}
+
+const recordAppliedProfileProjection = `
+if not FACTS.exists() and not FACTS.is_symlink():
+    sys.exit(10)
+request = json.load(sys.stdin)
+value = read()
+applied = value['last_success']
+if value['target']['yard'] != request['yard']:
+    sys.exit(10)
+if value['status'] != 'current':
+    sys.exit(12)
+name = request['profile']
+profiles = [item for item in applied['selected_profiles'] if item != name]
+if request['selected']:
+    profiles = list(applied['selected_profiles']) if name in applied['selected_profiles'] else profiles + [name]
+recorded = dict(applied, selected_profiles=profiles)
+if recorded != applied:
+    apply('begin', recorded)
+    apply('commit', recorded)
+`

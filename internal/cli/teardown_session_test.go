@@ -38,6 +38,7 @@ case "$GUARD_STATE:$1" in paused-*:--pause|late-failure:--pause|vanished:--pause
 			script := `set -euo pipefail
 have_incus=1; PROJ=(--project selected); SCRIPT_DIR="$1"; DEV_USER=missing-user
 die() { printf '%s\n' "$*" >&2; exit 1; }
+yard_cmd_hint() { printf 'yard -Y fixture'; }
 timeout() { [ "$1" = 5s ] || exit 9; shift; "$@"; }
 sleep() { :; }
 incus() {
@@ -98,6 +99,10 @@ trap - EXIT
 			content, _ := os.ReadFile(log)
 			if strings.Contains(string(content), "delete") == blocked {
 				t.Fatalf("wrong deletion decision for %s: %s", state, content)
+			}
+			if (state == "active" || state == "paused-active") && !strings.Contains(string(output), "yard instance 'selected'") ||
+				(state == "active" || state == "paused-active") && !strings.Contains(string(output), "'yard -Y fixture ssh-agent lock'") {
+				t.Fatalf("active refusal does not name the cause and repair: %s", output)
 			}
 			if (state == "active" || state == "fence-failed" || state == "pause-failed" || state == "paused-active" || state == "late-failure") && !strings.Contains(string(content), "restore") {
 				t.Fatalf("active refusal did not restore SSH: %s", content)

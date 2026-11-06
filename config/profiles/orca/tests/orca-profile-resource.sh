@@ -144,6 +144,12 @@ case "${1:-}" in
         if [ -e "$state_root/no-user-manager" ]; then printf 'inactive\n'; else printf 'active\n'; fi ;;
       *' test -e /etc/systemd/system/subyard-orca.service '*)
         [ ! -e "$state_root/no-orca-unit" ] ;;
+      *' test -f /etc/systemd/system/subyard-orca.service '*)
+        [ ! -e "$state_root/no-orca-unit" ] && [ -f "$guest/etc/systemd/system/subyard-orca.service" ] ;;
+      *' cat /etc/systemd/system/subyard-orca.service '*)
+        cat "$guest/etc/systemd/system/subyard-orca.service" ;;
+      *' systemctl show subyard-orca.service --property=NeedDaemonReload --value '*)
+        if [ -e "$state_root/need-daemon-reload" ]; then printf 'yes\n'; else printf 'no\n'; fi ;;
       *' grep -Eq '*'/etc/systemd/system/subyard-orca.service '*)
         [ ! -e "$state_root/legacy-unit-ordering" ] ;;
       *' id -u dev '*) printf '1234\n' ;;
@@ -867,6 +873,41 @@ grep -Fq 'orca-registration.sha256' "$ORCA_TEST_GUEST/usr/local/libexec/subyard/
   || fail 'registration-only runtime repair restarted Orca'
 [ "$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")" = "$unit_hash" ] \
   || fail 'registration-only runtime repair changed the installed service unit'
+
+# Activation applies a changed main unit with the installed endpoint and discloses the restart.
+installed_unit="$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service"
+cp "$installed_unit" "$TMP/current-unit"
+sed -i 's#^Environment=XDG_CONFIG_HOME=.*#Environment=XDG_CONFIG_HOME=/srv/agents/orca/config#' "$installed_unit"
+sed -i 's#--pairing-address owner.example-tailnet.ts.net:17678#--pairing-address legacy.example-tailnet.ts.net:17679#' "$installed_unit" "$TMP/current-unit"
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 run_orca status >"$TMP/status-unit-drift.out"
+grep -Fq "service runs an outdated unit: its updated environment is not applied; run 'yard migrate' or 'yard orca up'" \
+  "$TMP/status-unit-drift.out" || fail 'status did not report an unapplied service unit'
+observation="$(ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "stale" and .actual != .desired and
+  .consequence == "Orca service restarts to apply its updated unit; Orca clients reconnect; agents or terminals running inside the service end"' \
+  <<<"$observation" >/dev/null || fail "runtime contract did not disclose main-unit drift: $observation"
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-unit.json"
+jq -e '.state == "current" and .actual == .desired and (has("consequence") | not)' "$TMP/runtime-unit.json" >/dev/null \
+  || fail 'runtime contract apply did not converge the main unit'
+cmp -s "$TMP/current-unit" "$installed_unit" \
+  || fail 'runtime contract apply did not install the current unit with the installed endpoint'
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
+  || fail 'runtime contract apply did not restart Orca once for its updated unit'
+touch "$TMP/need-daemon-reload"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "stale" and (.consequence | length > 0)' <<<"$observation" >/dev/null \
+  || fail 'runtime contract missed a unit change systemd has not loaded'
+rm -f "$TMP/need-daemon-reload"
+# Restore the configured endpoint; up republishes its contract marker for the restored unit.
+sed -i 's#--pairing-address legacy.example-tailnet.ts.net:17679#--pairing-address owner.example-tailnet.ts.net:17678#' "$installed_unit"
+run_orca up --yes >/dev/null
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "current" and .actual == .desired' <<<"$observation" >/dev/null \
+  || fail 'runtime contract did not match the unit installed by up'
 if grep -Eqi 'nodejs|npm|AppImage|squashfs|APPDIR|SHA512' \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$ROOT/config/profiles/orca/release.env"; then
   fail 'removed SSH/AppImage dependencies returned'

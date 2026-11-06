@@ -2,13 +2,17 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -19,6 +23,44 @@ type profileRuntimeActivationReconciler struct {
 	request  releasetransition.ProcessRequest
 	id       string
 	recovery map[string]ports.RuntimeObservation
+	// applied caches whether this process repairs a completed release. Convergence
+	// writes an unfinished journal before its effects, which must not switch the
+	// effects to configuration its approved plan did not observe.
+	applied *bool
+}
+
+func (reconciler *profileRuntimeActivationReconciler) appliedConfiguration() bool {
+	if reconciler.applied == nil {
+		applied := completedReleaseConfiguration(reconciler.request)
+		reconciler.applied = &applied
+	}
+	return *reconciler.applied
+}
+
+// installedReleaseRuntime observes and repairs a core runtime on its installed
+// configuration projection.
+type installedReleaseRuntime interface {
+	ObserveInstalledReleaseRuntime(context.Context, string) (ports.RuntimeObservation, error)
+	ApplyInstalledReleaseRuntime(context.Context, string, string, string, string) error
+}
+
+// observeTarget is the stage observation of one yard. A completed-release repair
+// observes the installed configuration; other processes observe desired intent.
+func (reconciler *profileRuntimeActivationReconciler) observeTarget(ctx context.Context, operation *CLI, target configTarget, applied bool) (ports.RuntimeObservation, error) {
+	if applied && !coreInstalledRuntimeID(reconciler.id) {
+		var err error
+		target, err = operation.appliedIntegrationTarget(ctx, target)
+		if err != nil {
+			return ports.RuntimeObservation{}, err
+		}
+	}
+	platform := profileActivationPlatform(operation, target)
+	if observer, ok := platform.(interface {
+		ObserveInstalledReleaseRuntime(context.Context, string) (ports.RuntimeObservation, error)
+	}); ok && applied && coreInstalledRuntimeID(reconciler.id) {
+		return observer.ObserveInstalledReleaseRuntime(ctx, reconciler.id)
+	}
+	return observeProfileRuntime(ctx, platform, reconciler.id)
 }
 
 func (cli *CLI) profileActivationReconciler(request releasetransition.ProcessRequest, id string) releasetransition.V2ActivationReconciler {
@@ -125,27 +167,12 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	}
 	actual := make([]observation, 0, len(targets))
 	converged := true
+	disclosed, order := map[string][]string{}, []string{}
 	for _, target := range targets {
 		if _, ok := deferred[target.Name]; ok {
 			continue
 		}
-		if !coreInstalledRuntimeID(reconciler.id) && completedReleaseConfiguration(reconciler.request) {
-			var err error
-			target, err = operation.appliedIntegrationTarget(ctx, target)
-			if err != nil {
-				return releasetransition.V2ActivationObservation{}, reconciler.failure(target.Name, "inspect", err)
-			}
-		}
-		platform := profileActivationPlatform(operation, target)
-		var state ports.RuntimeObservation
-		var err error
-		if observer, ok := platform.(interface {
-			ObserveInstalledReleaseRuntime(context.Context, string) (ports.RuntimeObservation, error)
-		}); ok && coreInstalledRuntimeID(reconciler.id) && completedReleaseConfiguration(reconciler.request) {
-			state, err = observer.ObserveInstalledReleaseRuntime(ctx, reconciler.id)
-		} else {
-			state, err = observeProfileRuntime(ctx, platform, reconciler.id)
-		}
+		state, err := reconciler.observeTarget(ctx, operation, target, reconciler.appliedConfiguration())
 		if err != nil {
 			return releasetransition.V2ActivationObservation{}, reconciler.failure(target.Name, "inspect", err)
 		}
@@ -157,19 +184,47 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual, Desired: state.Desired}
 		actual = append(actual, entry)
 		converged = converged && state.State != "stale"
+		if state.State == "stale" && state.Consequence != "" {
+			if _, seen := disclosed[state.Consequence]; !seen {
+				order = append(order, state.Consequence)
+			}
+			disclosed[state.Consequence] = append(disclosed[state.Consequence], target.Name)
+		}
 	}
 	actualDigest := desiredDigest
 	if !converged {
 		actualDigest, err = activationStageFingerprint(actual)
 	}
-	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Warnings: warnings}, err
+	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Consequences: runtimeConsequences(order, disclosed), Warnings: warnings}, err
+}
+
+// runtimeConsequences states each owner consequence once with its yards, within the
+// release plan's diagnostic text bound.
+func runtimeConsequences(order []string, yards map[string][]string) []string {
+	result := make([]string, 0, len(order))
+	for _, consequence := range order {
+		names := yards[consequence]
+		prefix := "yard " + names[0]
+		if len(names) > 1 {
+			prefix = "yards " + strings.Join(names, ", ")
+		}
+		if len(prefix)+len(consequence) > 480 {
+			prefix = fmt.Sprintf("%d yards", len(names))
+		}
+		result = append(result, prefix+": "+consequence)
+	}
+	return result
 }
 
 // A completed release retains its installed configuration until an ordinary
 // operation applies newly authored intent. Unfinished transitions still assess
 // their complete desired activation contract.
+//
+// Release convergence observes the same way: its pre-effect recheck must
+// reproduce the plan its inspection approved. Reconcile still applies the
+// desired contract, and ordinary repairs that apply new intent carry no mode.
 func completedReleaseConfiguration(request releasetransition.ProcessRequest) bool {
-	if request.Mode != releasetransition.ProcessInspect {
+	if request.Mode != releasetransition.ProcessInspect && request.Mode != releasetransition.ProcessConverge {
 		return false
 	}
 	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
@@ -209,8 +264,54 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		if _, ok := deferred[target.Name]; ok {
 			continue
 		}
+		if reconciler.appliedConfiguration() {
+			// The approved plan observed the installed configuration. A yard current
+			// there receives no effect; a stale yard is repaired to that installed
+			// configuration with this release's own values. Intent awaiting init stays
+			// pending for init.
+			installed, err := reconciler.observeTarget(ctx, operation, target, true)
+			if err != nil {
+				return reconciler.failure(target.Name, "inspect", err)
+			}
+			if installed.State != ports.RuntimeStateStale {
+				continue
+			}
+			// An owner-service profile already matching desired intent has only a
+			// lagging applied record, left by profile enable or disable before they
+			// recorded it. Record the converged selection instead of reverting it.
+			if _, owner := reconciler.ownerServiceProfile(); owner {
+				desired, err := observeProfileRuntime(ctx, profileActivationPlatform(operation, target), reconciler.id)
+				if err != nil {
+					return reconciler.failure(target.Name, "inspect", err)
+				}
+				if desired.State == ports.RuntimeStateCurrent {
+					if err := reconciler.recordAppliedProfile(ctx, profileActivationPlatform(operation, target), target); err != nil {
+						return reconciler.failure(target.Name, "apply", err)
+					}
+					continue
+				}
+			}
+			if !coreInstalledRuntimeID(reconciler.id) {
+				target, err = operation.appliedIntegrationTarget(ctx, target)
+				if err != nil {
+					return reconciler.failure(target.Name, "inspect", err)
+				}
+			}
+		}
 		platform := profileActivationPlatform(operation, target)
-		state, err := observeProfileRuntime(ctx, platform, reconciler.id)
+		observe := func() (ports.RuntimeObservation, error) { return observeProfileRuntime(ctx, platform, reconciler.id) }
+		apply := platform.ApplyProfileRuntime
+		if coreInstalledRuntimeID(reconciler.id) {
+			apply = platform.ApplyInstalledRuntime
+			// A core repair applies the same installed projection its plan observed.
+			if release, ok := platform.(installedReleaseRuntime); ok && reconciler.appliedConfiguration() {
+				observe = func() (ports.RuntimeObservation, error) {
+					return release.ObserveInstalledReleaseRuntime(ctx, reconciler.id)
+				}
+				apply = release.ApplyInstalledReleaseRuntime
+			}
+		}
+		state, err := observe()
 		if err != nil {
 			return reconciler.failure(target.Name, "inspect", err)
 		}
@@ -224,24 +325,61 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 			return reconciler.failure(target.Name, "apply", domain.ErrPlanStale)
 		}
 		if state.State != "stale" {
+			// Absent and deferred yards have no running guest whose selection could be recorded.
+			if state.State == ports.RuntimeStateCurrent {
+				if err := reconciler.recordAppliedProfile(ctx, platform, target); err != nil {
+					return reconciler.failure(target.Name, "apply", err)
+				}
+			}
 			continue
-		}
-		apply := platform.ApplyProfileRuntime
-		if coreInstalledRuntimeID(reconciler.id) {
-			apply = platform.ApplyInstalledRuntime
 		}
 		if err := apply(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
 			return reconciler.failure(target.Name, "apply", err)
 		}
-		state, err = observeProfileRuntime(ctx, platform, reconciler.id)
+		state, err = observe()
 		if err != nil {
 			return reconciler.failure(target.Name, "verify", err)
 		}
 		if state.State != "current" {
 			return reconciler.failure(target.Name, "verify", fmt.Errorf("profile runtime did not converge"))
 		}
+		if err := reconciler.recordAppliedProfile(ctx, platform, target); err != nil {
+			return reconciler.failure(target.Name, "apply", err)
+		}
 	}
 	return nil
+}
+
+// recordAppliedProfile keeps the applied selection of an owner-service profile
+// equal to its converged desired runtime. Profile enable and disable apply only
+// that runtime, so a completed release must not keep observing the old selection.
+// Profiles that init provisions keep their selection with init.
+func (reconciler *profileRuntimeActivationReconciler) recordAppliedProfile(ctx context.Context, platform ports.InitPlatform, target configTarget) error {
+	definition, owner := reconciler.ownerServiceProfile()
+	recorder, ok := platform.(profileSelectionRecorder)
+	if !owner || !ok {
+		return nil
+	}
+	err := recorder.RecordAppliedProfile(ctx, definition.Name, definition.Selected(target.Loaded.Context.YardName, target.Loaded.Environment))
+	if errors.Is(err, reconcileruntime.ErrGuestFactsUnfinished) {
+		// The core guest refresh of this transition rewrites unfinished facts with
+		// the whole desired selection; a release retry must still reach it.
+		return nil
+	}
+	return err
+}
+
+// ownerServiceProfile is the owner-service profile whose runtime this reconciler owns.
+func (reconciler *profileRuntimeActivationReconciler) ownerServiceProfile() (profile.Definition, bool) {
+	if coreInstalledRuntimeID(reconciler.id) {
+		return profile.Definition{}, false
+	}
+	for _, definition := range reconciler.cli.catalog.Profiles() {
+		if definition.Runtime != nil && definition.Runtime.ActivationID == reconciler.id && definition.OwnerService != "" {
+			return definition, true
+		}
+	}
+	return profile.Definition{}, false
 }
 
 func observeProfileRuntime(ctx context.Context, platform ports.InitPlatform, id string) (ports.RuntimeObservation, error) {

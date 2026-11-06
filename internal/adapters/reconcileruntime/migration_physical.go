@@ -18,3 +18,10 @@ func (runtime Runtime) RunMigrationPhysicalLifecycle(ctx context.Context, action
 	}
 	return errors.New("unsupported physical migration lifecycle action")
 }
+
+// RunApprovedMigrationStop stops a yard for a restart its caller's plan disclosed and
+// the operator approved. The guard still fences listeners and pauses profile services,
+// then reports live sessions instead of refusing them.
+func (runtime Runtime) RunApprovedMigrationStop(ctx context.Context) error {
+	return runtime.runScript(ctx, runtime.Stderr, "lifecycle-guard.sh", "stop", "--interrupt-sessions")
+}

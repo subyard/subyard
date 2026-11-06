@@ -27,6 +27,11 @@ Status reports `locked`, `pending` (waiting for key loading), `unlocked`, or `re
 the remaining lifetime after activation. Reconnecting does not extend the lifetime. A host reboot
 or agent worker restart requires a new explicit unlock.
 
+The forwarder holds an SSH session to the yard. An ordinary `yard stop` refuses while it is
+connected; run `yard ssh-agent lock` first. A yard restart approved in an update or migrate plan
+does not refuse: it closes the forwarder with the yard, and the unlocked worker reconnects after
+the yard starts, within the original lifetime.
+
 Unlock replaces the key available to the selected yard. Replacement revokes the old access before
 the new key becomes available. A wrong passphrase or cancelled prompt does not grant new access.
 `lock` needs no confirmation and prevents new authentication with the per-yard agent. It does not

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
@@ -197,5 +198,28 @@ func TestPreparedProfileRuntimeRealColdTransportRequiresApprovedPrerequisite(t *
 				t.Fatal("ambiguous missing backend was accepted as a cold install")
 			}
 		})
+	}
+}
+
+func TestProfileRuntimePlanDisclosesOwnerConsequenceOnlyForApply(t *testing.T) {
+	stale := ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: testRuntimeOldDigest, Desired: testRuntimeNewDigest, Consequence: "service restarts"}
+	current := ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: testRuntimeNewDigest, Desired: testRuntimeNewDigest}
+	definitions := []profile.Definition{{Runtime: &profile.RuntimeHook{ActivationID: "synthetic-runtime"}}, {Runtime: &profile.RuntimeHook{ActivationID: "settled-runtime"}}, {Runtime: &profile.RuntimeHook{ActivationID: "pending-runtime"}}}
+	plan := &ProfileRuntimePlan{definitions: definitions,
+		approved:    map[string]ports.RuntimeObservation{"synthetic-runtime": stale, "settled-runtime": current, "pending-runtime": stale},
+		current:     map[string]ports.RuntimeObservation{"synthetic-runtime": stale, "settled-runtime": current, "pending-runtime": stale},
+		conditional: map[string]bool{"pending-runtime": true}}
+	if got := plan.Consequences(); !slices.Equal(got, []string{"profile runtime synthetic-runtime: service restarts"}) {
+		t.Fatalf("consequences = %q", got)
+	}
+	steps := plan.OperationSteps("fixture")
+	want := []string{"refresh installed profile runtime synthetic-runtime; service restarts", "refresh installed profile runtime settled-runtime", "refresh installed profile runtime pending-runtime"}
+	for index, step := range steps {
+		if step.Consequence != want[index] {
+			t.Fatalf("step %s consequence = %q", step.ID, step.Consequence)
+		}
+	}
+	if (*ProfileRuntimePlan)(nil).Consequences() != nil {
+		t.Fatal("nil plan reported consequences")
 	}
 }
