@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 import io
@@ -28,7 +29,7 @@ class Facts(unittest.TestCase):
         # The host-free worker is unprivileged. Keep real file modes/fsync/replace;
         # substitute only ownership and the root-only ancestor admission.
         self.addCleanup(patch.stopall)
-        patch.object(facts, 'safe').start()
+        patch.object(facts, 'safe', return_value=(0, 0)).start()
         patch.object(facts.os, 'fchown').start()
         self.real_lstat = Path.lstat
         def root_stat(path):
@@ -172,6 +173,119 @@ class Facts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'symlink'): self.apply('begin')
         for invalid in (None, {}, dict(self.target, selected_profiles=None), dict(self.target, selected_profiles=['synthetic','synthetic'])):
             with self.assertRaises(ValueError): facts.snapshot(invalid)
+
+
+class Ownership(unittest.TestCase):
+    """Kernel metadata snapshots; native namespace checks own the real mounts."""
+
+    def setUp(self):
+        self.path = facts.FACTS
+        self.parents = (self.path.parent, *self.path.parent.parents)
+        self.metadata = {path: self.info(stat.S_IFDIR | 0o755) for path in self.parents}
+        self.metadata[self.path] = self.info(stat.S_IFREG | 0o644)
+        self.maps = {'uid': '1000 0 1\n', 'gid': '1001 0 1\n'}
+        self.writable = set()
+        target = dict(version='0.22.0-test', yard=dict(name='yard', project='project', instance='yard'), selected_profiles=[])
+        value = dict(schema=1, machine_id='a'*32, status='current', target=target,
+                     last_success=target, capabilities='unknown', readiness='unknown')
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(Path, 'lstat', lambda path: self.metadata[path]))
+        def read_map(path):
+            value = self.maps[path.name.removesuffix('_map')]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        self.map_read = stack.enter_context(patch.object(Path, 'read_text', side_effect=read_map, autospec=True))
+        self.bytes_read = stack.enter_context(patch.object(Path, 'read_bytes', return_value=json.dumps(value).encode()))
+        stack.enter_context(patch.object(facts, 'identity', return_value='a'*32))
+        stack.enter_context(patch.object(facts.os, 'geteuid', return_value=1000))
+        stack.enter_context(patch.object(facts.os, 'getegid', return_value=1001))
+        self.access = stack.enter_context(patch.object(facts.os, 'access', side_effect=lambda path, mode, **kwargs: path in self.writable))
+
+    @staticmethod
+    def info(mode, uid=65534, gid=65534, links=1):
+        return os.stat_result((mode, 1, 1, links, uid, gid, 1024, 0, 0, 0))
+
+    def test_root_owned_facts_keep_normal_admission_without_namespace_reads(self):
+        self.metadata = {path: self.info(info.st_mode, 0, 0) for path, info in self.metadata.items()}
+        self.assertEqual(facts.read()['status'], 'current')
+        self.map_read.assert_not_called()
+        self.access.assert_not_called()
+
+    def test_codex_single_user_namespace_accepts_protected_facts(self):
+        self.assertEqual(facts.read()['status'], 'current')
+        self.assertEqual({call.args[0] for call in self.access.call_args_list}, {*self.parents, self.path})
+        self.assertTrue(all(call.kwargs == {'effective_ids': True} for call in self.access.call_args_list))
+
+    def test_namespace_maps_fail_closed(self):
+        for name in ('uid', 'gid'):
+            for mapping in ('', 'invalid', '0 0 1', '1000 1000 1', '0 0 4294967295',
+                            '1000 0 1\n2000 2000 1', OSError('map unreadable')):
+                with self.subTest(name=name, mapping=mapping):
+                    original = self.maps[name]
+                    self.maps[name] = mapping
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'unsafe yard facts directory'):
+                            facts.read()
+                    finally:
+                        self.maps[name] = original
+        self.bytes_read.assert_not_called()
+
+    def test_namespace_exception_requires_fixed_path_and_unmapped_root_anchor(self):
+        with self.assertRaisesRegex(ValueError, 'unsafe yard facts directory'):
+            facts.read(Path('/tmp/guest-runtime.json'))
+        for uid, gid in ((1000, 65534), (65534, 1001), (65534, 0)):
+            with self.subTest(uid=uid, gid=gid):
+                self.metadata[Path('/')] = self.info(stat.S_IFDIR | 0o755, uid, gid)
+                with self.assertRaisesRegex(ValueError, 'unsafe yard facts directory'):
+                    facts.read()
+        self.bytes_read.assert_not_called()
+
+    def test_mapped_developer_ownership_is_refused_even_on_read_only_mounts(self):
+        # access(W_OK) is false throughout: readonly bind mounts do not establish
+        # trust in a dev-owned directory, whose owner can later chmod/replace it.
+        for path in (*self.parents, self.path):
+            for uid, gid in ((1000, 65534), (65534, 1001)):
+                with self.subTest(path=path, uid=uid, gid=gid):
+                    original = self.metadata[path]
+                    self.metadata[path] = self.info(original.st_mode, uid, gid)
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'unsafe yard facts'):
+                            facts.read()
+                    finally:
+                        self.metadata[path] = original
+        self.bytes_read.assert_not_called()
+
+    def test_writable_ancestors_and_file_are_refused(self):
+        for path in (*self.parents, self.path):
+            original = self.metadata[path]
+            for permission in (0o002, 0o020):
+                with self.subTest(path=path, permission=permission):
+                    self.metadata[path] = self.info(original.st_mode | permission)
+                    with self.assertRaisesRegex(ValueError, 'unsafe yard facts'):
+                        facts.read()
+                    self.metadata[path] = original
+            with self.subTest(path=path, access='writable'):
+                self.writable.add(path)
+                with self.assertRaisesRegex(ValueError, 'unsafe yard facts'):
+                    facts.read()
+                self.writable.remove(path)
+        self.bytes_read.assert_not_called()
+
+    def test_links_and_foreign_visible_owners_remain_refused(self):
+        for path in (*self.parents, self.path):
+            original = self.metadata[path]
+            invalid = (self.info(stat.S_IFLNK | 0o777), self.info(original.st_mode, 2000, 2000))
+            if path == self.path:
+                invalid += (self.info(original.st_mode, links=2),)
+            for info in invalid:
+                with self.subTest(path=path, mode=info.st_mode, uid=info.st_uid, links=info.st_nlink):
+                    self.metadata[path] = info
+                    with self.assertRaisesRegex(ValueError, 'unsafe yard facts'):
+                        facts.read()
+            self.metadata[path] = original
+        self.bytes_read.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

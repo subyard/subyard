@@ -37,10 +37,34 @@ def snapshot(value):
 
 
 def safe(path):
+    owner = (0, 0)
+    root = Path('/').lstat()
+    if root.st_uid != 0:
+        # Codex maps only the invoking user/group; all other owners, including
+        # root, collapse to overflow IDs. Those IDs alone are not root proof.
+        # Anchor this exception at / and the fixed system path, and require the
+        # sole mapped identity to remain visible so its files cannot pass even
+        # when a read-only mount makes access(W_OK) return false. Other unmapped
+        # accounts remain indistinguishable: this trusts the administrator's
+        # protected system ancestry, not arbitrary overflow-owned paths.
+        if path != FACTS:
+            raise ValueError('unsafe yard facts directory')
+        for name, current, unmapped in (('uid', os.geteuid(), root.st_uid),
+                                         ('gid', os.getegid(), root.st_gid)):
+            try:
+                mapping = Path('/proc/self/' + name + '_map').read_text().split()
+                valid = list(map(int, mapping)) == [current, 0, 1]
+            except (OSError, ValueError):
+                valid = False
+            if not valid or current == 0 or unmapped == current or unmapped == 0:
+                raise ValueError('unsafe yard facts directory')
+        owner = (root.st_uid, root.st_gid)
     for parent in (path.parent, *path.parent.parents):
         info = parent.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner[0] or info.st_mode & 0o022 or
+                (owner[0] != 0 and (info.st_gid != owner[1] or os.access(parent, os.W_OK, effective_ids=True)))):
             raise ValueError('unsafe yard facts directory')
+    return owner
 
 
 def unique_fields(pairs):
@@ -53,9 +77,11 @@ def unique_fields(pairs):
 
 
 def read(path=FACTS, machine=MACHINE):
-    safe(path)
+    owner = safe(path)
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o644 or info.st_uid != 0 or info.st_gid != 0 or info.st_nlink != 1:
+    if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o644 or
+            (info.st_uid, info.st_gid) != owner or info.st_nlink != 1 or
+            (owner[0] != 0 and os.access(path, os.W_OK, effective_ids=True))):
         raise ValueError('unsafe yard facts file')
     if info.st_size > 16384:
         raise ValueError('invalid yard facts size')
