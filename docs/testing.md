@@ -918,6 +918,38 @@ The separate nightly/manual Deep CI runs repeated Go race tests and one minute o
 Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
 Veranda and live P0 acceptance remain separate checks.
 
+#### Periodic E2E on hosted runners
+
+The Periodic E2E workflow (`.github/workflows/periodic-e2e.yml`) runs the long VM checks of release
+acceptance on GitHub-hosted runners, so their failures surface between releases. Every six hours it
+tests the latest `master` commit unless a finished push or scheduled run already covered it; a
+cancelled run covers nothing, and a new run replaces one still in progress. A red check is a finding
+to fix early. It does not replace [release acceptance](#one-release-candidate) and imports no evidence
+into it.
+
+`dev/ci/plan-periodic-checks.py` takes the checks from their existing owners: the release collector's
+profile lanes, smoke check and core VM catalog (`dev/e2e/release-vm-checks.json`), and the pinned
+published-upgrade baselines without agents. The catalog's full P0 check runs as its separate lanes,
+except `boundary` and `cleanup`. The `pool` job first installs the candidate's `test-vms` service on a
+runner and holds one real lease; each check then runs on its own fresh runner through
+`dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
+becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it. After
+a failed check the job prints the broker's lease events, since the runner and its evidence are gone
+afterwards. Jobs run as root on the runner and hold no secrets, so the workflow never runs pull
+request code.
+
+Checks that boot a VM inside the leased VM run only on Intel runners. Hosted runners are Azure
+Hyper-V VMs on Intel or AMD CPUs, and the runner label cannot choose one. On AMD, virtualization
+nested this deep is so slow that these checks cannot finish. On an AMD runner the job explains the
+skip, and a `reschedule` job dispatches runs named `Nested VM checks on Intel, attempt N, for run X`
+at the branch's latest commit. A retry runs each check on three runners at once and is repeated up to
+30 times; checks that never reached Intel fail that last run as not run. Only the `reschedule` job may
+start runs, and it checks out no code.
+
+A manual dispatch can name the check ids to run in `checks`. The separate Stale runs workflow cancels
+runs of any workflow left queued or in progress for over a day, since such a run holds its
+concurrency group.
+
 Agent compatibility regressions run locally with
 `go test ./internal/adapters/statusruntime` and `bash tests/codex-agent-provision.sh`.
 They use temporary rules, fake CLI programs and release metadata; they do not start VMs,
