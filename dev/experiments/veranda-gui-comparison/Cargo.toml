@@ -1,0 +1,11 @@
+[package]
+name = "veranda-egui-comparison"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11"] }
+
+[profile.release]
+strip = true
