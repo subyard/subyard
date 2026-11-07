@@ -1,5 +1,8 @@
 # Native framework comparison
 
+Further GUI framework examples, screenshots and measurements are maintained in
+[rust-desktop-comparison](https://github.com/HeyVasily/rust-desktop-comparison).
+
 **Decision (2026-10-11): Veranda uses GTK4 through gtk4-rs.** Framework research and comparative
 measurements are complete. This reference preserves the matched Qt Widgets, GTK4 and Slint
 results, their scope and maintenance tradeoffs.
