@@ -17,13 +17,14 @@ on:
         type: string
         default: ''
       # Set by the reschedule job, which runs nested VM checks again until they land on Intel.
-      # A retry tests the branch's latest commit, like any run that starts then.
+      # A retry tests the branch's latest commit, like any run that starts then. A manual run
+      # leaves both empty; attempt counts only together with origin.
       origin:
-        description: Run whose nested VM checks this run retries
+        description: Set by the reschedule job; leave empty. Run whose nested VM checks this run retries
         type: string
         default: ''
       attempt:
-        description: Retry attempt of the nested VM checks
+        description: Set by the reschedule job; leave 0. Retry attempt of the nested VM checks
         type: number
         default: 0
   push:
@@ -273,7 +274,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REF: ${{ github.ref_name }}
           ORIGIN: ${{ inputs.origin || github.run_id }}
-          ATTEMPT: ${{ inputs.attempt || 0 }}
+          ATTEMPT: ${{ inputs.origin && inputs.attempt || 0 }}
         run: |
           # A nested job whose check step was skipped ran on AMD. A check is retried only when
           # every copy of it did.
