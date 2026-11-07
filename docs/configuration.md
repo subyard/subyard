@@ -662,23 +662,43 @@ the consumer:
 
 Settings marked `yard init` store desired intent. On an initialized yard, changing
 them does not require `yard migrate` or block ordinary commands before application.
-Run `yard init` to reconcile the desired settings. Release readiness retains the
-successfully installed configuration while checking current helper bytes, protected
-receipts and ownership. A repair of the completed release by `yard migrate` or
-`yard update` is planned and rechecked against that same installed configuration,
-and its effects stay inside that plan: a yard current in its installed configuration
-is left unchanged, and a stale runtime is repaired with the active release on the
-same installed configuration its plan observed, so configuration awaiting
-`yard init` stays pending. A materialized-configuration repair that would apply such
-pending configuration refuses and names every affected yard with `yard init`. A retained shipped provisioning
-path follows the active release only when the current value is that release's own
-copy of the file; an operator file path stays exact. A path captured through a
-process handle follows that release's copy of the same shipped file even while
-a different current value awaits `yard init`. `yard profile enable` and
-`yard profile disable` apply one owner-service profile, so they record only that
-profile in the installed selection; a runtime repair records it the same way when
-the runtime already matches the desired selection. Unfinished release transitions, corrupt installed artifacts and unsafe
-configuration retain their existing guards.
+Run `yard init` to reconcile the desired settings. Release readiness retains recorded installed
+init-owned values while checking current helper bytes, protected receipts and ownership.
+Repair after a completed release transition, including a completed rollback, uses that
+installed view. An interrupted repair whose source equals its target retains the same view;
+ordinary unfinished updates and rollbacks keep their desired view.
+The repair direction does not change this choice. The installed view covers the integration
+applied snapshot, including identity, profiles and effective integration selection, and core-guest
+receipts, including recorded provisioning inputs such as `CCUSAGE_PROVISION`. Complete integration
+snapshots also record absence. Init-owned values without an installed record, including
+profile-owned settings, remain desired in both approving and resuming processes, including their
+ordinary failures. Repairs by their owning runtimes use ordinary plan steps; these values are not
+listed as pending init. Pending integration detection shares the activation yard loader's installed
+overlay. Test-yard route inspection retains its ordinary desired configuration loading.
+
+After the release is ready, fresh and resumed repairs list pending init-owned integration
+settings and run ordinary `yard -Y NAME init` for the disclosed yards. Detection covers effective
+integration selection, recorded integration inputs, identity and profile selection, and core
+guest receipts. It does not detect resource limits or other init-owned changes outside those
+records; apply those with explicit `yard init`, as before. Stopped, absent and unavailable yards
+are listed without inspection. An unreadable desired integration source makes that yard
+unavailable for pending detection; this inspection does not add a release blocker.
+Uninspected yards are listed even when none is pending. Ordinary configuration loading,
+including the outer update command, keeps its existing source validation.
+
+Before each post-repair init, the listing is compared with the confirmed listing. Unchanged
+settings use that confirmation; explicit `--yes` or `ASSUME_YES=1` also approves changed settings.
+Otherwise changed settings require init's own interactive confirmation, or a printed continuation
+command when no terminal is available. Ordinary admission and guards apply; all refusals are
+reported while release repair stays complete. Settings irrelevant to effective consumers do not
+remain pending after successful init. See [Release migrations](control-plane.md#release-migrations).
+
+A retained shipped provisioning path follows the active release only when the current value is
+that release's own copy; operator paths stay exact. A path captured through a process handle
+follows that release's copy of the same shipped file even while another value awaits init.
+`yard profile enable` and `yard profile disable` record only the owner-service profile they apply.
+Release repair restores the recorded installed profile selection; pending desired selection belongs to
+ordinary init. Corrupt installed artifacts and unsafe configuration retain their existing guards.
 
 | Installed consumer | Settings applied by `yard init` |
 | --- | --- |

@@ -22,7 +22,6 @@ FINAL_VERSION="${9:-}"
 
 STATE_ROOT="/var/tmp/subyard-migration-owner-$TOKEN"
 SUCCESS_ROOT="$STATE_ROOT/success"
-POST_CAS_ROOT="$STATE_ROOT/unused"
 MARKER="subyard-migration-owner-$TOKEN"
 SUCCESS_YARD="migration-owner-$TOKEN"
 CANDIDATE_VERSION="$CANDIDATE_INPUT_VERSION"

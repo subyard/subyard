@@ -66,7 +66,7 @@ func migrationProjectFixture(t *testing.T, yard string) (*CLI, config.Loaded, *i
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := program.resolveReleaseTransitionContext(yard, home)
+	loaded, err := program.resolveReleaseTransitionContext(context.Background(), yard, home)
 	if err != nil {
 		t.Fatal(err)
 	}

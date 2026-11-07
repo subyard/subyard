@@ -112,7 +112,7 @@ func TestPendingDiskTmpReadyWireAndStatus(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, true)
 	platform := &installedActivationFixture{initPlatformFixture: newInitPlatformFixture(), state: ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)}}
 	fixture.cli.options.InitPlatform = platform
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "core-guest-runtime", request: releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}}
+	owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}, "core-guest-runtime").(*profileRuntimeActivationReconciler))
 	ctx := context.Background()
 	_, targets, err := owner.targets(context.Background())
 	if err != nil {

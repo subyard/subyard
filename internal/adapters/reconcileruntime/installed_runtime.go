@@ -30,26 +30,25 @@ func (runtime Runtime) ObserveInstalledRuntime(ctx context.Context, id string) (
 	}
 }
 
-// Release readiness checks installed consumers using their applied configuration.
-// Desired settings belong to ordinary init; changing them is not a new release.
-// The normal observer still checks current source bytes, receipts and ownership.
-func (runtime Runtime) ObserveInstalledReleaseRuntime(ctx context.Context, id string) (ports.RuntimeObservation, error) {
-	projected, err := runtime.installedReleaseProjection(ctx, id)
+// InstalledReleaseSettings supplies the recorded core inputs for the single
+// release-context overlay. Unknown fields retain ordinary values.
+func (runtime Runtime) InstalledReleaseSettings(ctx context.Context) (map[string]string, error) {
+	projected, err := runtime.installedReleaseProjection(ctx, "core-guest-runtime")
 	if err != nil {
-		return ports.RuntimeObservation{}, err
+		return nil, err
 	}
-	return projected.ObserveInstalledRuntime(ctx, id)
-}
-
-// ApplyInstalledReleaseRuntime repairs an installed consumer on the same applied
-// configuration its release observation used, so a completed-release repair
-// cannot apply settings that still await init.
-func (runtime Runtime) ApplyInstalledReleaseRuntime(ctx context.Context, id, operationID, actual, desired string) error {
-	projected, err := runtime.installedReleaseProjection(ctx, id)
+	projected, err = projected.installedReleaseProjection(ctx, "key-tools-runtime")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return projected.ApplyInstalledRuntime(ctx, id, operationID, actual, desired)
+	desired, installed := runtimeEnvironment(runtime.Environment), runtimeEnvironment(projected.Environment)
+	settings := map[string]string{}
+	for name, value := range installed {
+		if current, ok := desired[name]; !ok || current != value {
+			settings[name] = value
+		}
+	}
+	return settings, nil
 }
 
 // installedReleaseProjection replaces init-owned settings with their installed

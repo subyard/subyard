@@ -76,7 +76,10 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	} else if prepared.preview != nil {
 		prepared.preview()
 	}
-	assumeYes = assumeYes || commandAssumeYes(prepared.Arguments)
+	if prepared.pendingInit != nil {
+		cli.printPendingInit(*prepared.pendingInit)
+	}
+	assumeYes = assumeYes || commandAssumeYes(prepared.Arguments) || cli.env["ASSUME_YES"] == "1"
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
 	plan, err := prepared.Confirm(ctx, orchestrator, assumeYes)
 	if err != nil {
@@ -171,6 +174,13 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	}
 	if prepared.printResult != nil {
 		prepared.printResult(result)
+	}
+	if prepared.pendingInit != nil {
+		if err := prepared.Close(); err != nil {
+			cli.errorf("close completed %s: %v", prepared.Definition.Name, err)
+			return 1
+		}
+		return cli.runPostRepairInit(ctx, *prepared.pendingInit, assumeYes)
 	}
 	if followup := prepared.profileFollowup; followup != nil &&
 		(followup.prepared.Action == "update.activate" || followup.prepared.Action == "migrate.apply") {

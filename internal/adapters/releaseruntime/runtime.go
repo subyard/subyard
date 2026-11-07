@@ -45,6 +45,7 @@ type Config struct {
 }
 
 type Prepared struct {
+	Request        releasetransition.ProcessRequest `json:"-"`
 	Action         domain.ActionID
 	Changed        bool
 	Consequences   []string
@@ -1587,6 +1588,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 	}
 	convergedOutcome := new(releasetransition.Outcome)
 	return Prepared{
+		Request: request,
 		Action: map[bool]domain.ActionID{
 			true: "update.rollback", false: "update.activate",
 		}[request.Direction == releasetransition.DirectionActivatePrevious],

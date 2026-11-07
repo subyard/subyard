@@ -241,7 +241,7 @@ func (cli *CLI) prepareActivationRepair(
 	operation := *cli
 	operation.baseEnv = cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 	operation.env = maps.Clone(operation.baseEnv)
-	loaded, err := operation.resolveReleaseTransitionContext(yard, options.ConfigHome)
+	loaded, err := operation.resolveReleaseTransitionContext(ctx, yard, options.ConfigHome)
 	if err != nil {
 		return nil, nil
 	}

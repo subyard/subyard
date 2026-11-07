@@ -1,0 +1,393 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
+)
+
+func repairRequest(t *testing.T, fixture pendingInitFixture) (releasetransition.ProcessRequest, releasetransition.JournalRecord) {
+	t.Helper()
+	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, fixture.journalPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return releasetransition.ProcessRequest{Mode: releasetransition.ProcessConverge, RuntimeRoot: fixture.cli.env["YARD_RUNTIME_ROOT"], ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"], Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}, journal
+}
+
+// Native guest observations retain preview drift until the real refresh script
+// invokes the configured provisioning hook. Other installed-state reads use the
+// same synthetic receipts as the pending-init fixtures.
+type installedHookExecutor struct {
+	installedSettingsExecutor
+	marker string
+}
+
+func (fixture installedHookExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	command := request.Command
+	if len(command) >= 4 && command[0] == "sh" && strings.Contains(command[3], "helper=/usr/local/bin/subyard-preview") {
+		if _, err := os.Stat(fixture.marker); os.IsNotExist(err) {
+			return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
+		}
+		return ports.InstanceExecResult{}, nil
+	}
+	if len(command) == 4 && command[0] == "sh" && strings.Contains(command[3], "/var/lib/subyard/ccusage-ownership") {
+		return ports.InstanceExecResult{Stdout: []byte("installed helper files")}, nil
+	}
+	if len(command) == 3 && command[0] == "bash" {
+		return ports.InstanceExecResult{Stdout: []byte("ccusage-current\n")}, nil
+	}
+	if len(command) == 5 && command[0] == "python3" && command[4] == "check" {
+		return ports.InstanceExecResult{}, nil
+	}
+	return fixture.installedSettingsExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestCoreGuestRepairUsesInstalledProvisionHook(t *testing.T) {
+	for _, scenario := range []string{"pending", "unavailable", "unknown installed hook", "missing hook record"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newPendingInitFixture(t, false, nil)
+			root := fixture.cli.options.RepositoryRoot
+			marker := filepath.Join(root, "hook-ran")
+			installed, desired := filepath.Join(root, "hook-a"), filepath.Join(root, "hook-b")
+			writeCLIFile(t, installed, "#!/bin/sh\nprintf A > '"+marker+"'\n", 0o700)
+			if scenario != "unavailable" {
+				writeCLIFile(t, desired, "#!/bin/sh\nprintf B > '"+marker+"'\n", 0o700)
+			}
+			writeConfigCommandFile(t, filepath.Join(root, "config/preview/subyard-preview"), "preview helper", 0o644)
+			writeConfigCommandFile(t, filepath.Join(root, "config/agents/ccusage/provision.sh"), "usage check", 0o644)
+			writeConfigCommandFile(t, filepath.Join(root, "scripts/refresh-installed-guest-runtime.sh"), "#!/bin/sh\nset -eu\n[ \"$1\" = --yes ]\nexec /bin/sh \"$CCUSAGE_PROVISION\"\n", 0o700)
+			for _, command := range []string{"tailscale", "ip"} {
+				writeConfigCommandFile(t, filepath.Join(root, "fake-bin", command), "#!/bin/sh\nexit 1\n", 0o700)
+			}
+			t.Setenv("PATH", filepath.Join(root, "fake-bin")+":/usr/bin:/bin")
+			baseline := fixture.cli.options.Executor.(installedSettingsExecutor)
+			baseline.settings["CCUSAGE_PROVISION"] = installed
+			if scenario == "unknown installed hook" {
+				baseline.settings = nil // Legacy evidence keeps ordinary desired configuration.
+			}
+			if scenario == "missing hook record" {
+				delete(baseline.settings, "CCUSAGE_PROVISION")
+			}
+			baseline.guest = map[string]string{"ALLOWS_CODING_TOOLS": "true", "DEV_USER": "dev", "ENVIRONMENT_PROFILES": ""}
+			fixture.cli.options.Executor = installedHookExecutor{baseline, marker}
+			fixture.cli.options.NetworkPolicy = allowTestNetworkPolicy()
+			incus := fixture.cli.options.Incus.(*testkit.Incus)
+			for key, instance := range incus.Instances {
+				instance.Config = map[string]string{"user.subyard.preview_sha256": "owned"}
+				incus.Instances[key] = instance
+			}
+			writeConfigCommandFile(t, filepath.Join(fixture.cli.env["SUBYARD_CONFIG_HOME"], "yards/default/config.env"), "CCUSAGE_PROVISION="+desired+"\n")
+			if scenario != "unknown installed hook" && scenario != "missing hook record" {
+				plan, err := fixture.cli.inspectPendingInit(context.Background(), fixture.cli.env["SUBYARD_CONFIG_HOME"])
+				if err != nil || !strings.Contains(strings.Join(plan.lines(), "\n"), "CCUSAGE_PROVISION") {
+					t.Fatalf("installed hook change was not disclosed: %v %v", plan.lines(), err)
+				}
+			}
+			request, journal := repairRequest(t, fixture)
+			owner := (fixture.cli.profileActivationReconciler(request, "core-guest-runtime").(*profileRuntimeActivationReconciler))
+			observation, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+			if err != nil || observation.Converged {
+				t.Fatalf("preview drift: %#v %v", observation, err)
+			}
+			if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
+			}
+			want := "A"
+			if scenario == "unknown installed hook" || scenario == "missing hook record" {
+				want = "B"
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != want {
+				t.Fatalf("repair hook=%q want=%s err=%v", data, want, err)
+			}
+			verified, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+			if err != nil || !verified.Converged {
+				t.Fatalf("repair did not converge: %#v %v", verified, err)
+			}
+		})
+	}
+}
+
+func publishRepairResume(t *testing.T, fixture pendingInitFixture, journal releasetransition.JournalRecord, ordinaryUpdate bool) releasetransition.JournalRecord {
+	t.Helper()
+	journal.Checkpoint = releasetransition.JournalReconciling
+	journal.Releases = normalizedCompletedConfigApplyPair(journal.Releases)
+	if ordinaryUpdate {
+		journal.Releases.From = "release-source"
+	}
+	payload, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
+	return journal
+}
+
+// A new owner process must reproduce the approved installed observation even
+// when init-owned desired settings change after journal publication.
+func TestActiveReleaseRepairResumeKeepsInstalledView(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, map[string]string{"default": pendingRename + "ENVIRONMENT_PROFILES=sample\nCODING_TOOL_INTEGRATIONS=\n"})
+	request, journal := repairRequest(t, fixture)
+	// A forward request repairs the active target of a completed rollback.
+	journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+	payload, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
+	materialized := fixture.cli.activationReconcilers(request)[len(fixture.cli.profileRuntimeIDs())].(*materializedConfigActivationReconciler)
+	if !materialized.cli.activation.repair {
+		t.Fatal("forward materialized repair after rollback selected desired configuration")
+	}
+	if err := materialized.resolveScope(normalizedCompletedConfigApplyPair(journal.Releases)); err != nil || !materialized.allLocal {
+		t.Fatalf("forward materialized repair lost completed scope: %v", err)
+	}
+	marker := filepath.Join(fixture.cli.options.RepositoryRoot, "profile-repaired")
+	stale, current := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	handler := fmt.Sprintf(`#!/bin/sh
+[ "$DEV_USER" = dev ] && [ "$DEV_UID" = 1000 ] && [ -z "$ENVIRONMENT_PROFILES" ] && [ "$CODING_TOOL_INTEGRATIONS" = codex ] || exit 19
+case "$1" in
+apply) : > '%s' ;;
+observe) [ -f '%s' ] || { printf '%%s\n' '{"state":"stale","actual":"%s","desired":"%s"}'; exit 0; } ;;
+*) exit 18 ;;
+esac
+printf '%%s\n' '{"state":"current","actual":"%s","desired":"%s"}'
+`, marker, marker, stale, current, current, current)
+	testkit.WriteFile(t, filepath.Join(fixture.cli.options.RepositoryRoot, "config/profiles/sample/runtime.sh"), []byte(handler), 0o700)
+	first := (fixture.cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
+	approved, err := first.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+	if err != nil || approved.Converged {
+		t.Fatalf("approve installed repair: %#v %v", approved, err)
+	}
+	journal.Goal.Direction = request.Direction
+	journal = publishRepairResume(t, fixture, journal, false)
+	path := filepath.Join(request.ConfigHome, "yards/default/config.env")
+	testkit.WriteFile(t, path, []byte("DEV_USER=edited\nDEV_UID=1003\nENVIRONMENT_PROFILES=sample\nCODING_TOOL_INTEGRATIONS=\n"), 0o600)
+	fresh, err := New(fixture.cli.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := (fresh.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
+	if !fresh.activationReconcilers(request)[len(fresh.profileRuntimeIDs())].(*materializedConfigActivationReconciler).cli.activation.repair {
+		t.Fatal("resumed forward materialized repair selected desired configuration")
+	}
+	observed, err := second.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+	if err != nil || observed.Actual != approved.Actual || observed.Desired != approved.Desired || observed.Converged {
+		t.Fatalf("resumed view differs: got=%#v approved=%#v err=%v", observed, approved, err)
+	}
+	if !second.cli.activation.repair {
+		t.Fatal("unfinished in-place repair lost installed view")
+	}
+	if _, err := second.PrepareActivationRecovery(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal("resume failed", err)
+	}
+	verified, err := second.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+	if err != nil || !verified.Converged {
+		t.Fatalf("repair did not converge: %#v %v", verified, err)
+	}
+}
+
+func TestOrdinaryUpdateResumeKeepsDesiredView(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, map[string]string{"default": pendingRename + "ENVIRONMENT_PROFILES=sample\n"})
+	request, journal := repairRequest(t, fixture)
+	journal = publishRepairResume(t, fixture, journal, true)
+	if activeReleaseRepair(request) {
+		t.Fatal("ordinary update resume selected installed view")
+	}
+	handler := `#!/bin/sh
+[ "$DEV_USER" = other ] && [ "$DEV_UID" = 1002 ] && [ "$ENVIRONMENT_PROFILES" = sample ] || exit 19
+printf '%s\n' '{"state":"current","actual":"` + strings.Repeat("b", 64) + `","desired":"` + strings.Repeat("b", 64) + `"}'
+`
+	testkit.WriteFile(t, filepath.Join(fixture.cli.options.RepositoryRoot, "config/profiles/sample/runtime.sh"), []byte(handler), 0o700)
+	owner := (fixture.cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
+	observed, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+	if err != nil || !observed.Converged {
+		t.Fatalf("update did not observe desired view: %#v %v", observed, err)
+	}
+}
+
+// The physical config adapter sees only installed destinations and bytes. This
+// keeps the test independent of the number of freshness observations.
+type installedConfigRepairExecutor struct {
+	destination, hash string
+	ready             bool
+}
+
+func (fixture *installedConfigRepairExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) != 3 || request.Command[0] != "sha256sum" || request.Command[2] != fixture.destination {
+		return ports.InstanceExecResult{}, fmt.Errorf("unexpected materialization request: %v", request.Command)
+	}
+	hash := strings.Repeat("0", 64)
+	if fixture.ready {
+		hash = fixture.hash
+	}
+	return ports.InstanceExecResult{Stdout: []byte(hash + "  " + fixture.destination + "\n")}, nil
+}
+
+type installedConfigRefreshPlatform struct {
+	*appliedSelectionPlatformFixture
+	executor *installedConfigRepairExecutor
+}
+
+func (fixture *installedConfigRefreshPlatform) RefreshConfigs(context.Context) error {
+	fixture.configs++
+	fixture.executor.ready = true
+	return nil
+}
+
+func TestMaterializedRepairResumeConvergesInstalledConfiguration(t *testing.T) {
+	for _, missingSource := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing-source=%t", missingSource), func(t *testing.T) {
+			fixture := newPendingInitFixture(t, false, nil)
+			request, journal := repairRequest(t, fixture)
+			loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", request.ConfigHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			platform := &installedConfigRefreshPlatform{appliedSelectionPlatformFixture: &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), selected: []string{"codex"}, settings: loaded.Catalog.IntegrationInitSettings(loaded.Environment)}}
+			fixture.cli.options.InitPlatform = platform
+			assets, err := effectiveConfigAssets(loaded)
+			if err != nil || len(assets) != 1 {
+				t.Fatalf("assets=%v err=%v", assets, err)
+			}
+			hash, err := config.HashRegularFile(assets[0].Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor := &installedConfigRepairExecutor{destination: assets[0].Destination, hash: hash}
+			platform.executor = executor
+			fixture.cli.options.Executor = executor
+			newOwner := func(program *CLI) *materializedConfigActivationReconciler {
+				return program.activationReconcilers(request)[len(program.profileRuntimeIDs())].(*materializedConfigActivationReconciler)
+			}
+			first := newOwner(fixture.cli)
+			approved, err := first.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+			if err != nil || approved.Converged {
+				t.Fatalf("approve: %#v %v", approved, err)
+			}
+			journal = publishRepairResume(t, fixture, journal, false)
+			pendingSource := filepath.Join(fixture.cli.options.RepositoryRoot, "pending.rules")
+			setting := "HOST_CODEX_AGENTS_MD"
+			if missingSource {
+				setting = "AGENT_codex_PROVISION"
+			} else {
+				testkit.WriteFile(t, pendingSource, []byte("pending rule\n"), 0o600)
+			}
+			writeConfigCommandFile(t, filepath.Join(request.ConfigHome, "yards/default/config.env"), "DEV_USER=edited\nDEV_UID=1003\n"+setting+"="+pendingSource+"\n")
+			if missingSource {
+				if _, err := fixture.cli.loadContext("default"); err == nil {
+					t.Fatal("ordinary loading accepted a missing provisioning source")
+				}
+				plan, err := fixture.cli.inspectPendingInit(context.Background(), request.ConfigHome)
+				if err != nil || len(plan.Yards) != 1 || plan.Yards[0].State != "unavailable" || plan.Yards[0].Pending {
+					t.Fatalf("unreadable desired source blocked repair: %#v %v", plan, err)
+				}
+				listing := strings.Join(plan.lines(), "\n")
+				if !strings.Contains(listing, "not inspected (unavailable: desired integration sources cannot be read)") || strings.Contains(listing, pendingSource) {
+					t.Fatalf("unsafe or missing unavailable reason: %s", listing)
+				}
+				if len(plan.steps(nil)) != 0 {
+					t.Fatal("unreadable desired source scheduled init")
+				}
+				baseline := platform.settings
+				installed, err := fixture.cli.resolveInstalledReleaseContext(context.Background(), "default", request.ConfigHome)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, present := installed.Environment["AGENT_codex_PROVISION"]; present {
+					t.Fatal("context discovery introduced an unrecorded consumer input")
+				}
+				platform.settings = nil
+				_, err = fixture.cli.resolveInstalledReleaseContext(context.Background(), "default", request.ConfigHome)
+				platform.settings = baseline
+				if err == nil {
+					t.Fatal("unknown installed sources bypassed ordinary validation")
+				}
+			}
+			fresh, err := New(fixture.cli.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second := newOwner(fresh)
+			if !second.cli.activation.repair {
+				t.Fatal("resumed materialized repair uses desired view")
+			}
+			resumed, err := second.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+			if err != nil || resumed.Actual != approved.Actual || resumed.Desired != approved.Desired {
+				t.Fatalf("resumed=%#v approved=%#v err=%v", resumed, approved, err)
+			}
+			if err := second.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal("installed repair refused pending settings", err)
+			}
+			verified, err := second.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+			if err != nil || !verified.Converged || platform.configs != 1 {
+				t.Fatalf("verify=%#v err=%v effects=%d", verified, err, platform.configs)
+			}
+			// The ordinary update materialized reconciler also keeps desired intent.
+			journal = publishRepairResume(t, fixture, journal, true)
+			if newOwner(fresh).cli.activation.repair {
+				t.Fatal("ordinary materialized update selected installed view")
+			}
+		})
+	}
+}
+
+func TestRollbackRepairConfigurationView(t *testing.T) {
+	for _, scenario := range []struct {
+		name                                       string
+		complete, sameRelease, rollback, installed bool
+	}{
+		{"completed rollback", true, false, true, true},
+		{"unfinished rollback", false, false, true, false},
+		{"resumed rollback repair", false, true, true, true},
+		{"ordinary update", false, false, false, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newPendingInitFixture(t, false, map[string]string{"default": pendingRename + "ENVIRONMENT_PROFILES=sample\n"})
+			request, journal := repairRequest(t, fixture)
+			if scenario.rollback {
+				journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+			}
+			if !scenario.complete {
+				journal.Checkpoint = releasetransition.JournalReconciling
+			}
+			if scenario.sameRelease {
+				journal.Releases = normalizedCompletedConfigApplyPair(journal.Releases)
+			}
+			payload, err := releasetransition.MarshalJournal(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
+			request.Direction = journal.Goal.Direction
+			if activeReleaseRepair(request) != scenario.installed {
+				t.Fatal("journal selected the wrong configuration view")
+			}
+			user, uid, profiles := "other", "1002", "sample"
+			if scenario.installed {
+				user, uid, profiles = "dev", "1000", ""
+			}
+			handler := fmt.Sprintf("#!/bin/sh\n[ \"$DEV_USER\" = %q ] && [ \"$DEV_UID\" = %q ] && [ \"$ENVIRONMENT_PROFILES\" = %q ] || exit 19\nprintf '%%s\\n' '{\"state\":\"current\",\"actual\":\"%s\",\"desired\":\"%s\"}'\n", user, uid, profiles, strings.Repeat("b", 64), strings.Repeat("b", 64))
+			testkit.WriteFile(t, filepath.Join(fixture.cli.options.RepositoryRoot, "config/profiles/sample/runtime.sh"), []byte(handler), 0o700)
+			observed, err := (fixture.cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler)).Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+			if err != nil || !observed.Converged {
+				t.Fatalf("rollback/update view: %#v %v", observed, err)
+			}
+			materialized := fixture.cli.activationReconcilers(request)[len(fixture.cli.profileRuntimeIDs())].(*materializedConfigActivationReconciler)
+			if materialized.cli.activation.repair != scenario.installed {
+				t.Fatal("materialized view differs from profile view")
+			}
+		})
+	}
+}

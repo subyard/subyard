@@ -539,7 +539,7 @@ func TestPreparedActivationOmitsDisabledIntegrationScope(t *testing.T) {
 					t.Fatal(err)
 				}
 				testkit.WriteFile(t, path, append(before, []byte("YARD_TEMPLATE=restricted\n")...), 0o600)
-				loaded, err := fixture.program.resolveReleaseTransitionContext(name, fixture.configHome)
+				loaded, err := fixture.program.resolveReleaseTransitionContext(context.Background(), name, fixture.configHome)
 				if err != nil || loaded.Integrations.AllowsCodingTools {
 					t.Fatalf("restricted fixture did not disable coding tools: %s %v", name, err)
 				}

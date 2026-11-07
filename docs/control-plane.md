@@ -496,6 +496,57 @@ repair plan and obtains that plan's ordinary confirmation. After an explicit sta
 `yard migrate` provides that guarded repair instead; readiness remains strict until it completes.
 Persistent data and instance identity are retained. Read-only checks never retry.
 
+A repair of the active release by `yard migrate` or `yard update` uses recorded installed
+init-owned values after a completed journal, including a completed rollback, regardless
+of the repair request's direction. The same
+view survives interruption when the unfinished journal's source equals its target, with matching
+artifact and registry. Ordinary updates and rollbacks whose source differs from their target
+use desired configuration on resume. The installed view covers the integration applied snapshot,
+including identity, profiles and effective integration selection, and core-guest receipts,
+including recorded provisioning inputs such as `CCUSAGE_PROVISION`. Complete integration snapshots
+also record absence. Init-owned values without an installed record, including profile-owned
+settings, remain desired in both approving and resuming processes. Repairs by their owning runtimes
+use ordinary plan steps; these values are not listed as pending init. Unavailable unrecorded
+desired inputs retain their ordinary failures. Test-yard route inspection retains its ordinary
+desired configuration loading.
+
+`activeReleaseRepair` in `internal/cli/release_configuration.go` makes the single view decision
+from the protected journal, the current release link and the verified request. The activation
+yard loader shares one `releaseConfiguration` across its owners, migration children and runtime platforms.
+Each yard's context is built once with `installedReleaseTarget`: applied integration inputs,
+identity, effective selection, profiles and protected core receipts share one overlay. Consumers
+using that loader observe and apply the resulting context without selecting another view.
+Pending-init detection compares desired inputs with this same overlay, normalizing effective
+selections and the installed architecture's usage pin.
+Binding owners preserves ordinary applicability inputs. Non-repair observations keep their
+ordinary configuration view; completed materialized readiness remains release-wide independently
+of that view, so selecting another yard cannot hide drift.
+
+Before confirmation, the plan lists local yards in name order and differing init-owned
+integration settings in setting order as `NAME  installed -> desired`. Sensitive settings show
+only `changed`; missing applied snapshots show
+`installed integration settings unknown (no applied baseline)`; stopped or absent yards show
+`stopped; not inspected`. Unavailable yards show `not inspected (unavailable)`, with a safe reason
+when desired integration sources cannot be read. They receive no init step and do not add a
+release blocker. This listing is printed even when no yard is pending. Ordinary configuration
+and update loading remain strict. Detection compares effective integration selection, applied integration inputs,
+identity and profile selection, and core guest receipts. Suppressed requests and irrelevant
+consumer settings do not stay pending after successful init. The usage helper receipt records
+only the guest architecture's archive and matches either configured architecture pin.
+Resource limits and other init-owned settings outside these recorded inputs are not detected;
+apply those changes with explicit `yard -Y NAME init`, as before.
+
+After repair reaches `ready`, including on resume, ordinary `yard -Y NAME init` runs for each
+disclosed pending yard in name order. Plan steps put these inits after repair. Before each init,
+the command rechecks that yard's listing. An unchanged listing uses the original confirmation.
+Explicit `--yes` or `ASSUME_YES=1` also approves a changed listing. Otherwise a changed listing
+uses init's own plan and confirmation if a terminal is available; without a terminal it prints
+the new listing and continuation command without running init. Unreadable desired integration
+sources remain uninspected. Each init uses ordinary admission and guards; refusals are collected
+in stable order with each `yard -Y NAME init` continuation, leaving release repair complete.
+RPC execution prints the listing and commands without running in-process inits. With no pending
+integration settings, no init steps are added.
+
 Go is the production release owner. Historical transitions retain their exact sealed
 owners and frozen process and recovery protocols. Unsupported experimental owner
 metadata is refused before executable probing and cannot enter historical metadata

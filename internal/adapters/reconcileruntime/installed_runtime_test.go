@@ -206,7 +206,7 @@ func TestInstalledReleaseReadinessUsesAppliedInitSettings(t *testing.T) {
 				return []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: projection}}, {}, {Result: preview, Err: previewErr}, {Result: ports.InstanceExecResult{Stdout: []byte("ccusage-current\n")}}, {}}
 			}
 			incus.ExecSteps = steps(false)
-			observed, err := runtime.ObserveInstalledReleaseRuntime(context.Background(), "core-guest-runtime")
+			observed, err := projectedReleaseFixture(t, runtime).ObserveInstalledRuntime(context.Background(), "core-guest-runtime")
 			if err != nil || observed.State != ports.RuntimeStateCurrent {
 				t.Fatalf("pending %s blocked release readiness: %#v %v", name, observed, err)
 			}
@@ -215,7 +215,7 @@ func TestInstalledReleaseReadinessUsesAppliedInitSettings(t *testing.T) {
 				t.Fatal("release observation used desired pins")
 			}
 			incus.ExecSteps = steps(true)
-			observed, err = runtime.ObserveInstalledReleaseRuntime(context.Background(), "core-guest-runtime")
+			observed, err = projectedReleaseFixture(t, runtime).ObserveInstalledRuntime(context.Background(), "core-guest-runtime")
 			if err != nil || observed.State != ports.RuntimeStateStale {
 				t.Fatalf("applied configuration hid stale release helper: %#v %v", observed, err)
 			}
@@ -257,7 +257,7 @@ func TestInstalledReleaseKeyReadinessUsesAppliedPins(t *testing.T) {
 			if err != nil || ordinary.State != ports.RuntimeStateStale {
 				t.Fatalf("desired pin did not remain pending: %#v %v", ordinary, err)
 			}
-			release, err := runtime.ObserveInstalledReleaseRuntime(context.Background(), "key-tools-runtime")
+			release, err := projectedReleaseFixture(t, runtime).ObserveInstalledRuntime(context.Background(), "key-tools-runtime")
 			if err != nil || release.State != ports.RuntimeStateCurrent {
 				t.Fatalf("pending desired pin blocked release readiness: %#v %v", release, err)
 			}
@@ -337,4 +337,21 @@ func TestInstalledStoppedGuestPresenceIsConservativeAndBound(t *testing.T) {
 	if err != nil || before.Actual == after.Actual {
 		t.Fatalf("stopped marker metadata not bound: %v", err)
 	}
+}
+
+func projectedReleaseFixture(t *testing.T, runtime Runtime) Runtime {
+	t.Helper()
+	settings, err := runtime.InstalledReleaseSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := runtimeEnvironment(runtime.Environment)
+	for name, value := range settings {
+		environment[name] = value
+	}
+	runtime.Environment = nil
+	for name, value := range environment {
+		runtime.Environment = append(runtime.Environment, name+"="+value)
+	}
+	return runtime
 }

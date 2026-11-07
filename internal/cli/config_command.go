@@ -876,8 +876,8 @@ func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLoca
 		}
 		var targetLoaded config.Loaded
 		var err error
-		if loaded.ProspectiveFiles != nil {
-			targetLoaded, err = cli.resolveReleaseTransitionContext(name, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
+		if cli.activation != nil || loaded.ProspectiveFiles != nil {
+			targetLoaded, err = cli.resolveReleaseTransitionContext(ctx, name, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
 		} else {
 			targetLoaded, err = cli.loadInventoryLoaded(name, loaded)
 		}

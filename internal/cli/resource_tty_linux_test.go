@@ -889,7 +889,7 @@ func TestSealedDispatcherRemainsExecutableInProfileServiceChild(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := cli.resolveReleaseTransitionContext("default", cli.env["SUBYARD_CONFIG_HOME"])
+		loaded, err := cli.resolveReleaseTransitionContext(context.Background(), "default", cli.env["SUBYARD_CONFIG_HOME"])
 		if err != nil {
 			t.Fatal(err)
 		}

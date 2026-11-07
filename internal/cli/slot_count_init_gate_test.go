@@ -71,7 +71,7 @@ esac
 			fixture.cli.options.InitPlatform = platform
 			fake := fixture.cli.options.Executor.(*testkit.Incus)
 			fake.ExecSteps = nil
-			loaded, err := fixture.cli.resolveReleaseTransitionContext("test-yard", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+			loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "test-yard", fixture.cli.env["SUBYARD_CONFIG_HOME"])
 			if err != nil {
 				t.Fatal(err)
 			}

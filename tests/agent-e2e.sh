@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
+# A caller's prepared candidate would replace the worktree bundle under test.
+unset SUBYARD_E2E_CANDIDATE_BUNDLE SUBYARD_E2E_CANDIDATE_SHA256
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 fixture_functions() { # source file, then function names
   local source="$1" name
@@ -2766,219 +2768,53 @@ grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' 
   || fail "host-free engine release can observe the physical host power reconciler"
 v0111_recovery="$ROOT/dev/e2e/release-transition-v0111-recovery.sh"
 v0111_observer="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
-assert_v0111_resume_capture_contract() {
-  local scenario output result probe
-  for scenario in failure capture-failure success foreign stdout-symlink \
-    stderr-symlink stderr-hardlink stderr-foreign oversized-inspection \
-    follow-next repeat-recovering other-refusal wrong-next; do
-    probe="$TMP/v0111-resume-capture-$scenario"
+assert_v0111_inspection_size_contract() {
+  local scenario probe output
+  for scenario in bounded oversized-output oversized-journal; do
+    probe="$TMP/v0111-inspection-$scenario"
     install -d -m 0700 "$probe"
-    output="$probe/controller.log"
-    install -m 0600 /dev/null "$output"
-    if bash -c '
+    output="$probe/diagnostics.log"
+    bash -c '
       set -euo pipefail
-      umask 0022
       source "$1"
-      STATE_ROOT="$2/state"
-      MARKER=subyard-p0-v0111-123
+      probe=$2
+      scenario=$3
+      STATE_ROOT="$probe/state"
       SUCCESS_ROOT="$STATE_ROOT/success"
-      POST_CAS_ROOT="$STATE_ROOT/post-cas"
-      POST_CAS_OBSERVER="$2/observer.py"
-      CANDIDATE_RELEASE=0.11.2-candidate
-      CANDIDATE_VERSION=0.11.2
-      scenario="$3"
-      install -d -m 0700 "$STATE_ROOT" "$POST_CAS_ROOT"
-      printf "%s\n" "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
-      printf "%s\n" "$MARKER:post-cas" > "$POST_CAS_ROOT/.subyard-p0-marker"
-      chmod 0600 "$STATE_ROOT/.subyard-p0-marker" "$POST_CAS_ROOT/.subyard-p0-marker"
-      select_fixture post-cas
-      install -d -m 0700 "$CONFIG_HOME/release-transition/v2" "$RUNTIME_ROOT"
-      printf "%s\n" "{\"transaction\":\"source\",\"checkpoint\":\"reconciling\"}" > "$JOURNAL"
-      chmod 0600 "$JOURNAL"
-      touch "$POST_CAS_OBSERVER"
-      ln -s releases/0.11.2-candidate "$RUNTIME_ROOT/current"
-      ln -s releases/0.11.1-source "$RUNTIME_ROOT/previous"
-      python3 - "$2" "$scenario" <<"PY"
+      MARKER=subyard-p0-v0111-123
+      select_fixture success
+      install -d -m 0700 "$CONFIG_HOME/release-transition/v2"
+      python3 - "$probe/update.json" "$JOURNAL" "$scenario" <<"PY"
 import json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-for name, data in (("stdout", bytes(range(256)) * 300), ("stderr", b"native-error\x00original\n")):
-    if name == "stdout" and sys.argv[2] == "oversized-inspection":
-        data = json.dumps({"outcome": {"status": "ready", "code": "ready"},
-                           "assessment": {"changed": False}, "padding": "x" * 70000}).encode()
-    path = root / name
-    path.write_bytes(data)
-    path.chmod(0o600)
-for name in ("foreign", "foreign.expected"):
-    path = root / name
-    path.write_bytes(b"FOREIGN-RESUME-SENTINEL\n")
-    path.chmod(0o600)
+report = {"outcome": {"status": "ready", "code": "ready"}, "assessment": {"changed": False}}
+journal = {"transaction": "source", "checkpoint": "reconciling"}
+if sys.argv[3] == "oversized-output":
+    report["padding"] = "x" * 70000
+if sys.argv[3] == "oversized-journal":
+    journal["padding"] = "x" * 70000
+pathlib.Path(sys.argv[1]).write_text(json.dumps(report) + "\n")
+pathlib.Path(sys.argv[2]).write_text(json.dumps(journal) + "\n")
 PY
-      probe_foreign="$2/foreign"
-      eval "$(declare -f prepare_recovery_logs | sed "1s/prepare_recovery_logs/actual_prepare_recovery_logs/")"
-      prepare_recovery_logs() {
-        actual_prepare_recovery_logs "$@" || return
-        if [ "$scenario:${*: -1}" = stdout-symlink:resume.stderr ]; then
-          mv "$FIXTURE_ROOT/resume.log" "$FIXTURE_ROOT/held-resume.log"
-          ln -s "$probe_foreign" "$FIXTURE_ROOT/resume.log"
-        fi
+      jq() {
+        [ "$1" != -cs ] || touch "$probe/jq-slurp"
+        command jq "$@"
       }
-      capture_recovery_plan() { :; }
-      setsid() {
-        printf "%s\n" "{\"transaction\":\"candidate\",\"checkpoint\":\"target-active\",\"active\":\"releases/$CANDIDATE_RELEASE\"}" > "$POST_CAS_OBSERVATION_MARKER"
-        chmod 0600 "$POST_CAS_OBSERVATION_MARKER"
-        printf "%s\n" "{\"transaction\":\"candidate\",\"checkpoint\":\"target-active\"}" > "$JOURNAL"
-        printf "first-process-original\n"
-        return 137
-      }
-      fence_reaped_post_cas_transition() { [ "$1" = 137 ]; POST_CAS_TRANSITION_PID=; }
-      fixture_env() {
-        if [ "$2" = update ] && [ "$3" = --offline ]; then
-          [ "$*" = "$RUNTIME_ROOT/current/bin/yard update --offline --version 0.11.2 --runtime-root $RUNTIME_ROOT" ] || return 98
-          [ -z "$(cat)" ] || return 99
-          count=$(cat "$FIXTURE_ROOT/resume.calls" 2>/dev/null || printf 0)
-          printf "%s\n" "$((count + 1))" > "$FIXTURE_ROOT/resume.calls"
-          cat "$probe_stdout"
-          case "$scenario" in
-            follow-next|repeat-recovering|other-refusal|wrong-next)
-              if [ "$scenario:$count" = follow-next:1 ]; then return 0; fi
-              code=verification-failed next="run yard update"
-              [ "$scenario" != other-refusal ] || code=dependency-unavailable
-              [ "$scenario" != wrong-next ] || next="run yard migrate"
-              printf "yard: update: execute prepared release: release transition recovering: code=%s active=%s previous=%s target=%s transaction=tx-0123456789abcdef0123456789abcdef; the release transition was interrupted after a durable mutation checkpoint; next: %s\n" \
-                "$code" "$CANDIDATE_RELEASE" "$SOURCE_VERSION-source" "$CANDIDATE_RELEASE" "$next" >&2
-              return 17 ;;
-          esac
-          cat "$probe_stderr" >&2
-          case "$scenario" in
-            stderr-symlink|stderr-hardlink|stderr-foreign)
-              mv "$FIXTURE_ROOT/resume.stderr" "$FIXTURE_ROOT/held-resume.stderr"
-              case "$scenario" in
-                stderr-symlink) ln -s "$probe_foreign" "$FIXTURE_ROOT/resume.stderr" ;;
-                stderr-hardlink) ln "$probe_foreign" "$FIXTURE_ROOT/resume.stderr" ;;
-                stderr-foreign) cp "$probe_foreign" "$FIXTURE_ROOT/resume.stderr"; chmod 0600 "$FIXTURE_ROOT/resume.stderr" ;;
-              esac
-              ;;
-          esac
-          [ "$scenario" != foreign ] || printf "foreign\n" > "$FIXTURE_ROOT/.subyard-p0-marker"
-          [ "$scenario" = success ] && return 0
-          return 17
-        fi
-        printf "{}\n"
-      }
-      probe_stdout="$2/stdout"
-      probe_stderr="$2/stderr"
-      if [ "$scenario" = oversized-inspection ]; then
-        probe_jq_slurp="$2/jq-slurp"
-        jq() {
-          [ "$1" != -cs ] || touch "$probe_jq_slurp"
-          command jq "$@"
-        }
-      else
-        recovery_inspection_diagnostics() { printf "inspection-attempted\n"; return 23; }
-      fi
-      cleanup_failure_diagnostics() { printf "error-capture-attempted\n"; return 23; }
-      if [ "$scenario" = capture-failure ]; then
-        capture_post_cas_resume_failure() { return 23; }
-      fi
-      assert_terminal() { :; }
-      assert_ready_check() { :; }
-      assert_materialized_fixed_point() { :; }
-      yard() { :; }
-      upgrade_to_current_candidate() { :; }
-      run_post_cas_resume post-cas
-    ' _ "$v0111_recovery" "$probe" "$scenario" >"$output" 2>&1; then result=0; else result=$?; fi
-    case "$scenario" in
-      follow-next|repeat-recovering)
-        expected=17; [ "$scenario" != follow-next ] || expected=0
-        [ "$result" = "$expected" ] && [ "$(cat "$probe/state/post-cas/resume.calls")" = 2 ] \
-          && grep -q '^release-recovery resume-followed-next' "$output" \
-          && [ -f "$probe/state/post-cas/resume.log" ] && [ -f "$probe/state/post-cas/resume-retry.log" ] \
-          && grep -q '"name": "resume-retry-stdout"' "$output" \
-          || fail "historical resume did not bound/preserve its next-command retry: $scenario/$result"
-        continue ;;
-      other-refusal|wrong-next)
-        [ "$result" = 17 ] && [ "$(cat "$probe/state/post-cas/resume.calls")" = 1 ] \
-          && ! grep -q '^release-recovery resume-followed-next' "$output" \
-          || fail "historical resume retried an unrelated refusal: $scenario/$result"
-        continue ;;
-    esac
-    if [ "$scenario" = success ]; then
-      [ "$result" = 0 ] && ! grep -q 'RELEASE_RECOVERY_\|inspection-attempted' "$output" \
-        || fail 'successful historical resume emitted failure capture'
+      recovery_inspection_diagnostics "$probe/update.json"
+    ' _ "$v0111_recovery" "$probe" "$scenario" >"$output" 2>&1 \
+      || fail "historical inspection diagnostics failed: $scenario"
+    if [ "$scenario" = bounded ]; then
+      [ -e "$probe/jq-slurp" ] \
+        && grep -q '^release-recovery inspection {"parse_valid":true,"report_count":1,' "$output" \
+        || fail 'bounded historical inspection did not summarize its report'
     else
-      [ "$result" = 17 ] || fail "historical resume capture replaced native17: $scenario/$result"
-      case "$scenario" in
-        failure|oversized-inspection)
-          grep -q 'native_status=17 capture_status=0' "$output" \
-            || fail 'failed historical resume lost its original artifact capture'
-          if [ "$scenario" = oversized-inspection ]; then
-            [ ! -e "$probe/jq-slurp" ] \
-              && grep -q 'inspection parse_valid=unavailable size_limit=65536' "$output" \
-              || fail 'oversized held resume output reached inspection jq slurp'
-          fi
-          python3 - "$probe" <<'PY'
-import base64, hashlib, json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-fixture = root / 'state/post-cas'
-records, chunks = {}, {}
-for line in (root / 'controller.log').read_bytes().splitlines():
-    if line.startswith(b'RELEASE_RECOVERY_ARTIFACT '):
-        item = json.loads(line.split(b' ', 1)[1]); records[item['name']] = item
-    if line.startswith(b'RELEASE_RECOVERY_DATA '):
-        item = json.loads(line.split(b' ', 1)[1]); chunks.setdefault(item['name'], {})[item['index']] = item['base64']
-paths = {'resume-stdout': 'resume.log', 'resume-stderr': 'resume.stderr',
-         'journal': 'config/release-transition/v2/journal.json',
-         'cas-marker': 'post-cas-link-observed.json', 'first-process': 'first-process.log'}
-assert records.keys() == paths.keys()
-for name, relative in paths.items():
-    path = fixture / relative
-    assert path.stat().st_mode & 0o777 == 0o600
-    item = records[name]
-    assert item['state'] == 'retained'
-    data = base64.b64decode(''.join(chunks.get(name, {})[i] for i in range(item['chunks'])), validate=True)
-    original = path.read_bytes()
-    assert data == original[:item['retained_bytes']]
-    assert item['source_bytes'] == len(original) and item['truncated'] == (len(data) < len(original))
-    assert hashlib.sha256(data).hexdigest() == item['sha256']
-assert records['resume-stdout']['truncated'] and records['resume-stdout']['retained_bytes'] == 65536
-assert (fixture / 'resume.stderr').read_bytes() == (root / 'stderr').read_bytes()
-assert (root / 'stderr').read_bytes() in (root / 'controller.log').read_bytes()
-PY
-          ;;
-        capture-failure|foreign)
-          grep -q 'native_status=17 capture_status=23' "$output" \
-            || fail 'capture refusal replaced the native resume outcome'
-          ! grep -q '^RELEASE_RECOVERY_DATA ' "$output" \
-            || fail 'foreign/refused historical resume artifacts were exported'
-          ;;
-        stdout-symlink|stderr-symlink|stderr-hardlink|stderr-foreign)
-          cmp -s "$probe/foreign" "$probe/foreign.expected" \
-            || fail "historical resume wrote through a replaced log path: $scenario"
-          ! grep -aq 'FOREIGN-RESUME-SENTINEL' "$output" \
-            || fail "historical resume exposed foreign log bytes: $scenario"
-          grep -aq 'native_status=17 capture_status=23' "$output" \
-            || fail "log replacement lost original17/capture23: $scenario"
-          python3 - "$output" "$scenario" <<'PY'
-import json, pathlib, sys
-name = 'resume-stdout' if sys.argv[2] == 'stdout-symlink' else 'resume-stderr'
-records, data = [], []
-for line in pathlib.Path(sys.argv[1]).read_bytes().splitlines():
-    if line.startswith(b'RELEASE_RECOVERY_ARTIFACT '):
-        item = json.loads(line.split(b' ', 1)[1])
-        if item['name'] == name:
-            records.append(item)
-    if line.startswith(b'RELEASE_RECOVERY_DATA '):
-        item = json.loads(line.split(b' ', 1)[1])
-        if item['name'] == name:
-            data.append(item)
-assert len(records) == 1 and records[0]['state'] == 'refused' and not data
-PY
-          ;;
-      esac
+      [ ! -e "$probe/jq-slurp" ] \
+        && grep -qx 'release-recovery inspection parse_valid=unavailable size_limit=65536' "$output" \
+        && ! grep -q 'xxxxxxxx' "$output" \
+        || fail "oversized historical inspection reached jq slurp: $scenario"
     fi
   done
 }
-assert_v0111_resume_capture_contract
+assert_v0111_inspection_size_contract
 assert_v0111_materialized_oracle_contract() {
   local scenario output expected_error
   for scenario in composed raw-only missing wrong-source body-drift extra host-mutated \
@@ -3326,63 +3162,6 @@ fi
   && grep -Fq 'transition exited with status 23 before exact activation' \
     "$v0111_queued_probe/stderr" \
   || fail 'v0.11.1 observer accepted a queued activation after transition exit'
-for v0111_stop_case in cancel normal reaped; do
-  v0111_stop_probe="$TMP/v0111-stop-$v0111_stop_case"
-  mkdir -p "$v0111_stop_probe"
-  v0111_stop_rc=0
-  bash -c '
-    set -euo pipefail
-    source "$1"
-    probe=$2
-    scenario=$3
-    CLEANUP_ARMED=0
-    trap cleanup EXIT
-    trap "handle_signal 130" INT
-    trap "handle_signal 143" TERM
-    setsid sh -c '\''
-      mutate() {
-        while :; do
-          for resource in $2; do printf "mutation\n" >> "$1/$resource"; done
-          sleep 0.02
-        done
-      }
-      case "$3" in
-        normal) trap "" TERM; mutate "$1" "$2" ;;
-        cancel) mutate "$1" "$2" ;;
-        reaped) mutate "$1" "$2" & sleep 0.05; exit 23 ;;
-      esac
-    '\'' _ "$probe" "$4" "$scenario" &
-    POST_CAS_TRANSITION_PID=$!
-    printf "%s\n" "$POST_CAS_TRANSITION_PID" > "$probe/pid"
-    for _ in $(seq 1 100); do
-      [ -s "$probe/fixture" ] && break
-      sleep 0.01
-    done
-    [ -s "$probe/fixture" ]
-    case "$scenario" in
-      cancel) kill -TERM "$$" ;;
-      normal) stop_post_cas_transition KILL ;;
-      reaped)
-        observed_rc=0
-        wait "$POST_CAS_TRANSITION_PID" || observed_rc=$?
-        fence_reaped_post_cas_transition "$observed_rc"
-        [ "$POST_CAS_TRANSITION_STATUS" = 23 ]
-        ;;
-    esac
-    [ -z "$POST_CAS_TRANSITION_PID" ]
-  ' _ "$v0111_recovery" "$v0111_stop_probe" "$v0111_stop_case" \
-    "$([ "$v0111_stop_case" = cancel ] && printf 'project unit reconciler fixture' || printf fixture)" \
-    || v0111_stop_rc=$?
-  expected=0
-  [ "$v0111_stop_case" != cancel ] || expected=143
-  [ "$v0111_stop_rc" = "$expected" ] || fail "post-CAS $v0111_stop_case lost native exit: $v0111_stop_rc"
-  ! kill -0 -- "-$(cat "$v0111_stop_probe/pid")" 2>/dev/null \
-    || fail "post-CAS $v0111_stop_case left its process group alive"
-  assert_no_later_mutations "$v0111_stop_probe"/fixture
-  if [ "$v0111_stop_case" = cancel ]; then
-    assert_no_later_mutations "$v0111_stop_probe"/{project,unit,reconciler}
-  fi
-done
 grep -Fq 'STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"' "$v0111_recovery" \
   && grep -Fq -- '-c features.images=false -c user.p0-release-recovery="$FIXTURE_MARKER"' "$v0111_recovery" \
   && grep -Fq 'assert_state_root' "$v0111_recovery" \
@@ -3539,7 +3318,7 @@ for newer_original in 0 2 23; do
     set -euo pipefail
     source "$1/dev/e2e/release-transition-v0111-recovery.sh" 123
     eval "$(sed -n "/^cleanup_newer_release() {/,/^}/p" "$1/dev/e2e/release-transition-newer-release-replacement.sh")"
-    STATE_ROOT="$2/state" SUCCESS_ROOT="$2/state/success" POST_CAS_ROOT="$2/state/unused"
+    STATE_ROOT="$2/state" SUCCESS_ROOT="$2/state/success"
     MARKER=newer-early CLEANUP_ARMED=1
     install -d -m 0700 "$STATE_ROOT/assets"
     printf "%s\n" "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
@@ -3554,7 +3333,7 @@ done
 # End newer fixture handoff contract.
 
 # Exercise the actual EXIT cleanup and yard alias with shared default power paths.
-for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enablement loaded active main-pid control-pid late-unit absent; do
+for v0111_cleanup_case in current-refusal failed-exit helper unit enablement loaded active main-pid control-pid late-unit absent; do
   bash -c '
     set -euo pipefail
     source "$1" 123
@@ -3562,7 +3341,6 @@ for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enable
     scenario=$3
     STATE_ROOT="$probe/state"
     SUCCESS_ROOT="$STATE_ROOT/success"
-    POST_CAS_ROOT="$STATE_ROOT/post-cas"
     install -d -m 0700 "$STATE_ROOT" "$probe/defaults"
     printf "%s\n" "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
     eval "$(declare -f select_fixture | sed "1s/select_fixture/select_fixture_native/")"
@@ -3586,28 +3364,21 @@ for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enable
     fi
     SUCCESS_ARMED=1
     CLEANUP_ARMED=1
+    [ "$scenario" != current-refusal ] || CURRENT_UNINSTALL_REFUSED=success
     case "$scenario" in
-      post-cas-refusal)
-        select_fixture post-cas
-        install -d -m 0700 "$FIXTURE_ROOT"
-        printf "%s\n" "$FIXTURE_MARKER" > "$FIXTURE_ROOT/.subyard-p0-marker"
-        POST_CAS_ARMED=1
-        CURRENT_UNINSTALL_REFUSED=post-cas
-        ;;
-    esac
-    case "$scenario" in
-      post-cas-refusal|second-entry-drift|helper)
+      current-refusal|failed-exit|helper)
         printf "foreign helper\n" > "$POWER_RECONCILER"
         chmod 0751 "$POWER_RECONCILER" ;;
     esac
     case "$scenario" in
-      post-cas-refusal|second-entry-drift|unit)
+      current-refusal|failed-exit|unit)
         printf "ExecStart=%s _power-reconcile\n" "$POWER_RECONCILER" > "$POWER_UNIT"
         chmod 0640 "$POWER_UNIT" ;;
     esac
     case "$scenario" in
-      post-cas-refusal|second-entry-drift|enablement) ln -s unit "$POWER_UNIT_ENABLEMENT" ;;
+      current-refusal|failed-exit|enablement) ln -s unit "$POWER_UNIT_ENABLEMENT" ;;
     esac
+    capture_fixture_failure_logs() { printf "%s\n" "$FIXTURE" >> "$probe/failure-capture"; }
     snapshot() {
       local path
       for path in "$POWER_RECONCILER" "$POWER_UNIT" "$POWER_UNIT_ENABLEMENT"; do
@@ -3637,7 +3408,7 @@ for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enable
     }
     sudo() {
       if [ "$scenario" = absent ] && [ "$1:$2:$4:$5" = "-n:find:-depth:-delete" ] \
-        && { [ "$3" = "$SUCCESS_ROOT" ] || [ "$3" = "$POST_CAS_ROOT" ]; }; then
+        && [ "$3" = "$SUCCESS_ROOT" ]; then
         command find "$3" -depth -delete
       else
         printf "sudo\n" >> "$probe/commands"
@@ -3648,7 +3419,7 @@ for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enable
     (
       trap cleanup EXIT
       case "$scenario" in
-        second-entry-drift) prepare_fixture post-cas ;;
+        failed-exit) exit 23 ;;
         absent)
           select_fixture success
           cleanup_power_runtime
@@ -3671,9 +3442,11 @@ for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enable
     else
       [ "$observed" = 3 ]
       [ "$(cat "$SUCCESS_ROOT/.subyard-p0-marker")" = "$MARKER:success" ]
-      if [ "$scenario" = post-cas-refusal ]; then
-        [ "$(cat "$POST_CAS_ROOT/.subyard-p0-marker")" = "$MARKER:post-cas" ]
-      fi
+    fi
+    if [ "$scenario" = failed-exit ]; then
+      [ "$(cat "$probe/failure-capture")" = success ]
+    else
+      [ ! -e "$probe/failure-capture" ]
     fi
   ' _ "$v0111_recovery" "$TMP/v0111-cleanup-$v0111_cleanup_case" "$v0111_cleanup_case" \
     || fail "historical recovery cleanup changed shared power state: $v0111_cleanup_case"

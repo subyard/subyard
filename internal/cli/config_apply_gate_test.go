@@ -300,7 +300,7 @@ func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
 			fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return runtime }
 			fake := fixture.cli.options.Executor.(*testkit.Incus)
 			fake.ExecSteps = nil
-			loaded, err := fixture.cli.resolveReleaseTransitionContext("default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+			loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -483,7 +483,7 @@ func TestProfileRuntimeInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *
 			fixture.cli.options.InitPlatform = platform
 			fake := fixture.cli.options.Executor.(*testkit.Incus)
 			fake.ExecSteps = nil
-			loaded, err := fixture.cli.resolveReleaseTransitionContext("default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+			loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1000,7 +1000,7 @@ func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := program.resolveReleaseTransitionContext(
+	loaded, err := program.resolveReleaseTransitionContext(context.Background(),
 		"default", environmentValue(environment, "SUBYARD_CONFIG_HOME"),
 	)
 	if err != nil {

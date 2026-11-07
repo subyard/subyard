@@ -95,7 +95,7 @@ func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ 
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
 		return cli.executeRelease(ctx, orchestrator, prepared.Plan, execution)
 	}
-	return nil
+	return prepared.preparePostRepairInit(ctx, execution)
 }
 
 func releaseRecoveryCommand(definition command.Definition) bool {
