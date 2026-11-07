@@ -360,4 +360,27 @@ for package_path in upgrade install; do
   done
 done
 
+# The distro candidate check must read apt-cache to the end: output beyond the pipe buffer after the
+# Candidate line would otherwise end apt-cache with SIGPIPE and fail the installer with 141.
+cat > "$version_bin/apt-cache" <<'SH'
+#!/usr/bin/env bash
+printf '  Candidate: 6.0.6\n'
+filler=x
+for _ in {1..20}; do filler="$filler$filler"; done
+printf '%s\n' "$filler"
+SH
+rm -f "$version_bin/incus"
+sigpipe_home="$TMP/version-sigpipe/.subyard"
+mkdir -p "$sigpipe_home/incus/storage"
+set +e
+TEST_UID=0 TEST_INCUS_VERSION=6.0.6 TEST_INCUS_FIXTURE="$TMP/bin/incus" \
+  TEST_FAKE_BIN="$version_bin" TEST_COMMAND_PATH="$version_bin" \
+  TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+  run_installer "$sigpipe_home" >"$TMP/version-sigpipe.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 0 ] || fail "distro candidate check with long apt-cache output failed with $status"
+grep -Eq 'incus (installed|present) \(6\.0\.6\)' "$TMP/version-sigpipe.out" \
+  || fail 'distro candidate check with long apt-cache output omitted the Incus success result'
+
 printf 'ok: Incus installer protects the operator data-home boundary\n'
