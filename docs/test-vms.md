@@ -891,19 +891,30 @@ The installed-owner release contract also creates a new named yard without a pro
 checks protected empty selections, a distinct SSH port, retained `/srv` data through a
 controlled init failure and ordinary retry, real SSH access, and unchanged neighboring yards.
 
-The owner chain recovers two authentic v0.11.1 histories through the checksum-pinned official
+The owner chain recovers one authentic v0.11.1 history through the checksum-pinned official
 v0.11.2 bridge. This preserves the closed recovery policy and its historical metadata writers.
-Each completed or interrupted/resumed bridge then
+The completed bridge then
 upgrades through the public installer to the unmodified frozen current candidate. The fixture
 records the bridge and current runtime hashes separately and verifies current readiness,
-materialized configuration and retained migration history. The historical updater requires the
-default power boundary: before each history, the fixture refuses any existing default helper,
-unit, enablement or custody metadata. After current assertions, supported selected-yard teardown
+materialized configuration and retained migration history. It does not interrupt the published
+bridge: published releases before v0.21.2 cannot resume an empty journal staging file left by a kill
+inside a compare-and-swap, which is not a supported state. The current reader's handling of that
+file is covered by the `journal-zero` case in `internal/releasetransition/pending_recovery_test.go`.
+Current activation interruption and resume are covered by the interrupted fixture of `verify` in
+`dev/verify-release-upgrades.py`, which kills a released updater at the candidate's current-link
+exchange and resumes its journal. The `--checkpoint` observer interruptions in the release-smoke and reliable-migrations fixtures
+stop compact-history publication after the journal completes; reliable-migrations also interrupts
+same-release activation reconciliation and asserts the unfinished `reconciling` journal.
+The historical updater requires the default power boundary: before the history, the fixture
+refuses any existing default helper, unit, enablement or custody metadata. After current assertions, supported selected-yard teardown
 removes the exact historical yard; full uninstall then removes the remaining installation and
 must remove installed resources and enablement before reuse. Default power install locks and
-generation records remain as coordination fences. The first history refuses preexisting fences;
-the second accepts only the exact validated state captured around its own successful first
-cleanup. Busy, unsafe or changed coordination state refuses reuse without deleting barriers.
+generation records remain as coordination fences. The history refuses preexisting fences, and
+its cleanup requires the fences captured before current cleanup to stay unchanged. Sourcing the
+fixture resets that binding: the newer-release fixture binds the valid coordination state it finds
+before its own history, so a valid generation that changed between fixtures is accepted rather
+than compared with an earlier cleanup. Busy or unsafe coordination state, or a bound state that
+changes before reuse, refuses without deleting barriers.
 Producer cleanup prepares the same operator's systemd user manager on the disposable VM when
 absent, without enabling lingering or restarting an existing manager.
 Failed histories retain their marked fixture state while a default power artifact or producer

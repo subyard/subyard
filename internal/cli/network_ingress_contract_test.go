@@ -107,7 +107,7 @@ func TestRegisteredMigrationRetainsCurrentNetworkInventoryWithoutPowerScope(t *t
 		t.Fatal(err)
 	}
 	native.Instances = map[string]ports.InstanceInfo{execution.loaded.Context.IncusProject + "/" + execution.loaded.Context.YardInstanceName: native.Reconcile.Instance}
-	loaded, err := program.resolveReleaseTransitionContext("default", execution.loaded.Context.Paths.ConfigHome)
+	loaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", execution.loaded.Context.Paths.ConfigHome)
 	if err != nil {
 		t.Fatal(err)
 	}

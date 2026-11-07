@@ -14,7 +14,6 @@ TOKEN="${1:-}"
 
 STATE_ROOT="/var/tmp/subyard-newer-release-$TOKEN"
 SUCCESS_ROOT="$STATE_ROOT/success"
-POST_CAS_ROOT="$STATE_ROOT/unused"
 MARKER="subyard-newer-release-$TOKEN"
 SUCCESS_YARD="newer-release-$TOKEN"
 # From v0.25.1, init refuses the unmarked project this fixture shares its image through.

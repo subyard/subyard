@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -157,58 +159,36 @@ func TestReleaseDiagnosticsProfileFailurePreservesPhaseAndPublicCause(t *testing
 	}
 }
 
-// A completed-release repair of materialized configuration applies nothing when
-// its approved installed observation converged, and refuses desired intent that
-// differs from that observation instead of applying it without a plan.
-func TestMaterializedCompletedReleaseRepairStaysInsideApprovedPlan(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Any effect would first resolve this unreadable yard configuration.
-	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "broken", "config.env"), "SSH_PORT=${UNSET:?synthetic}\n")
-	converged := &materializedConfigActivationReconciler{cli: program, yard: "broken", configHome: configHome, scopeResolved: true,
-		appliedSelection: true, approved: &releasetransition.V2ActivationObservation{Converged: true}}
-	if err := converged.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
-		t.Fatalf("converged installed plan produced an effect: %v", err)
-	}
-	pending := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true,
-		appliedSelection: true, approved: &releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(strings.Repeat("a", 64)), Desired: releasetransition.Fingerprint(strings.Repeat("b", 64))}}
-	err = pending.Reconcile(context.Background(), releasetransition.ReleaseLinks{})
-	var refusal pendingConfigurationError
-	if !errors.As(err, &refusal) || !pending.appliedSelection {
-		t.Fatalf("desired intent outside the approved plan was not refused: %v", err)
-	}
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if !errors.As(err, &diagnostic) {
-		t.Fatal("pending refusal has no activation diagnostic")
-	}
-	if _, retry := diagnostic.ActivationDiagnostic(); retry != "run yard -Y default init" {
-		t.Fatalf("pending refusal retry=%q", retry)
-	}
-}
-
-// A refusal over several local yards names each one, in stable order.
-func TestMaterializedPendingRefusalNamesEveryYard(t *testing.T) {
+// Pending inspection discovers exactly the repository's configured yards plus
+// default, with or without an optional overlay. Missing instances are uninspected.
+func TestMaterializedPendingListingNamesEveryYard(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "second", "config.env"), "SSH_PORT=2299\n")
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "alpha", "config.env"), "SSH_PORT=2298\n")
+	expected, err := config.YardNames(filepath.Join(root, "config"), configHome)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, allLocal: true, scopeResolved: true,
-		appliedSelection: true, approved: &releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(strings.Repeat("a", 64)), Desired: releasetransition.Fingerprint(strings.Repeat("b", 64))}}
-	err = pending.Reconcile(context.Background(), releasetransition.ReleaseLinks{})
-	var refusal pendingConfigurationError
-	if !errors.As(err, &refusal) || strings.Join(refusal.yards, " ") != "default e2e-yard second" {
-		t.Fatalf("refusal did not name every yard in order: %v %#v", err, refusal)
+	if !slices.Contains(expected, "default") {
+		expected = append(expected, "default")
 	}
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if !errors.As(err, &diagnostic) {
-		t.Fatal("pending refusal has no activation diagnostic")
+	slices.Sort(expected)
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: &testkit.Incus{}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if message, retry := diagnostic.ActivationDiagnostic(); !strings.HasPrefix(message, "yards default, e2e-yard, second: ") || retry != "run yard -Y default init" {
-		t.Fatalf("pending refusal diagnostic=%q retry=%q", message, retry)
+	plan, err := program.inspectPendingInit(context.Background(), configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, yard := range plan.Yards {
+		names = append(names, yard.Name)
+		if yard.State != "stopped" || yard.Pending {
+			t.Fatalf("absent yard was inspected: %#v", yard)
+		}
+	}
+	if !slices.Equal(names, expected) {
+		t.Fatalf("yards=%v want %v", names, expected)
 	}
 }

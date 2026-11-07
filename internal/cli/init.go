@@ -401,7 +401,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 	}
 	incusPort, executor := cli.statusPorts()
 	configWriter, _ := incusPort.(ports.InstanceConfigWriter)
-	return reconcileruntime.Runtime{
+	return cli.activation.runtime(reconcileruntime.Runtime{
 		Profiles:          loaded.Catalog.Profiles(),
 		Integrations:      loaded.Catalog.Integrations(),
 		RetiredSelection:  loaded.Integrations.Retired,
@@ -419,7 +419,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 		PowerYards:        powerYards,
 		SRVPool:           loaded.Environment["SRV_POOL"],
 		SRVVolume:         loaded.Environment["SRV_VOLUME"],
-	}
+	})
 }
 
 func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, error) {

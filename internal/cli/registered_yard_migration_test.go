@@ -103,7 +103,7 @@ func TestPlainInitFinishesCurrentMigrationsBeforeNormalPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, loadErr := program.resolveReleaseTransitionContext("default", program.env["SUBYARD_CONFIG_HOME"])
+	loaded, loadErr := program.resolveReleaseTransitionContext(context.Background(), "default", program.env["SUBYARD_CONFIG_HOME"])
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
@@ -167,7 +167,7 @@ func TestRegisteredMaintenanceUsesPreparedCLIContextAndOriginalOwner(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := cli.resolveReleaseTransitionContext("default", cli.env["SUBYARD_CONFIG_HOME"])
+	loaded, err := cli.resolveReleaseTransitionContext(context.Background(), "default", cli.env["SUBYARD_CONFIG_HOME"])
 	if err != nil {
 		t.Fatal(err)
 	}

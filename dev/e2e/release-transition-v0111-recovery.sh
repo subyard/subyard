@@ -11,20 +11,13 @@ OLD_INSTALLER_SHA256=5bd3c61e3dd39cb2d258be5cd75237383f00eff0512c77a3a5ca75d96e6
 SOURCE_INSTALLER_SHA256=41acb799e55cf82cdbbef8e7f75e8e17c2df344c1ceeb748181fb6aec7ea6f8d
 STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"
 SUCCESS_ROOT="$STATE_ROOT/success"
-POST_CAS_ROOT="$STATE_ROOT/post-cas"
 MARKER="subyard-p0-v0111-$TOKEN"
 SUCCESS_YARD="v0111-success-$TOKEN"
-POST_CAS_YARD="v0111-post-cas-$TOKEN"
 RELEASE_ROOT="$STATE_ROOT/candidate-release"
 OLD_INSTALLER="$STATE_ROOT/subyard-install-$OLD_VERSION.sh"
 SOURCE_INSTALLER="$STATE_ROOT/subyard-install-$SOURCE_VERSION.sh"
 CLEANUP_ARMED=0
 SUCCESS_ARMED=0
-POST_CAS_ARMED=0
-POST_CAS_TRANSITION_PID=
-POST_CAS_TRANSITION_STATUS=
-POST_CAS_OBSERVER="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
-POST_CAS_OBSERVATION_MARKER=
 
 # select_fixture populates these fixture-scoped paths.
 FIXTURE=
@@ -52,7 +45,6 @@ TEST_VMS_SINK_SERVICE=
 TEST_VMS_SINK_TIMER_NAME=
 TEST_VMS_SINK_TIMER=
 CANDIDATE_BUNDLE=
-CANDIDATE_RELEASE=
 CURRENT_RELEASE_ROOT=
 CURRENT_VERSION=
 CURRENT_RUNTIME_SHA256=
@@ -72,16 +64,12 @@ assert_state_root() {
   die "refusing unmarked state root $STATE_ROOT"
 }
 
-select_fixture() { # success|post-cas
+select_fixture() { # success
   FIXTURE="$1"
   case "$FIXTURE" in
     success)
       FIXTURE_ROOT="$SUCCESS_ROOT"
       YARD_NAME="$SUCCESS_YARD"
-      ;;
-    post-cas)
-      FIXTURE_ROOT="$POST_CAS_ROOT"
-      YARD_NAME="$POST_CAS_YARD"
       ;;
     *) die "unknown fixture $FIXTURE" ;;
   esac
@@ -203,12 +191,11 @@ cleanup_test_vms_sink() {
   fi
 }
 
-cleanup_fixture() { # success|post-cas
+cleanup_fixture() { # success
   local fixture="$1" failed=0 armed=0 status
   select_fixture "$fixture"
   case "$fixture" in
     success) armed="$SUCCESS_ARMED" ;;
-    post-cas) armed="$POST_CAS_ARMED" ;;
   esac
   [ "$armed" = 1 ] || return 0
   if [ "$CURRENT_UNINSTALL_REFUSED" = "$fixture" ]; then
@@ -274,86 +261,17 @@ cleanup_fixture() { # success|post-cas
   return "$failed"
 }
 
-reap_post_cas_transition_leader() { # bounded poll count
-  local attempts="$1" state
-  for _ in $(seq 1 "$attempts"); do
-    state="$(ps -o stat= -p "$POST_CAS_TRANSITION_PID" 2>/dev/null \
-      | awk 'NR == 1 { print substr($1, 1, 1) }')"
-    if [ -z "$state" ] || [ "$state" = Z ]; then
-      if wait "$POST_CAS_TRANSITION_PID" 2>/dev/null; then
-        POST_CAS_TRANSITION_STATUS=0
-      else
-        POST_CAS_TRANSITION_STATUS=$?
-      fi
-      return 0
-    fi
-    sleep 0.05
-  done
-  return 1
-}
-
-stop_post_cas_transition() { # [TERM|KILL]
-  local initial_signal="${1:-TERM}"
-  [ -n "$POST_CAS_TRANSITION_PID" ] || return 0
-  [[ "$POST_CAS_TRANSITION_PID" =~ ^[1-9][0-9]*$ ]] || return 1
-  case "$initial_signal" in
-    TERM)
-    kill -TERM -- "-$POST_CAS_TRANSITION_PID" 2>/dev/null || true
-      kill -TERM -- "$POST_CAS_TRANSITION_PID" 2>/dev/null || true
-      if ! reap_post_cas_transition_leader 200; then
-        kill -KILL -- "-$POST_CAS_TRANSITION_PID" 2>/dev/null || true
-        kill -KILL -- "$POST_CAS_TRANSITION_PID" 2>/dev/null || true
-        reap_post_cas_transition_leader 100 || return 1
-      fi
-      ;;
-    KILL)
-      kill -KILL -- "-$POST_CAS_TRANSITION_PID" 2>/dev/null || true
-      kill -KILL -- "$POST_CAS_TRANSITION_PID" 2>/dev/null || true
-      reap_post_cas_transition_leader 100 || return 1
-      ;;
-    *) return 1 ;;
-  esac
-  kill -KILL -- "-$POST_CAS_TRANSITION_PID" 2>/dev/null || true
-  for _ in $(seq 1 100); do
-    kill -0 -- "-$POST_CAS_TRANSITION_PID" 2>/dev/null || {
-      POST_CAS_TRANSITION_PID=
-      return 0
-    }
-    sleep 0.05
-  done
-  return 1
-}
-
-fence_reaped_post_cas_transition() { # observed-status
-  local observed_status="$1"
-  [[ "$observed_status" =~ ^[0-9]+$ ]] || return 1
-  stop_post_cas_transition KILL || return 1
-  # shellcheck disable=SC2034 # observed by the host-free contract when this helper is sourced
-  POST_CAS_TRANSITION_STATUS="$observed_status"
-}
-
 cleanup() {
-  local rc=$? cleanup_failed=0 fixture
+  local rc=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
   if [ "$rc" != 0 ]; then
-    for fixture in success post-cas; do
-      select_fixture "$fixture"
-      if fixture_root_is_marked; then
-        capture_fixture_failure_logs || printf 'release-recovery fixture=%s failure-log capture_failed=true\n' "$fixture" >&2
-      fi
-    done
-  fi
-  if ! stop_post_cas_transition; then
-    printf 'release-transition-v0111-recovery: post-CAS process group did not stop\n' >&2
-    printf 'release-recovery cleanup stage=post-cas-process original_status=%s final_status=3\n' "$rc" >&2
-    exit 3
+    select_fixture success
+    if fixture_root_is_marked; then
+      capture_fixture_failure_logs || printf 'release-recovery fixture=success failure-log capture_failed=true\n' >&2
+    fi
   fi
   [ "$CLEANUP_ARMED" = 1 ] || exit "$rc"
-  cleanup_fixture post-cas || {
-    printf 'release-recovery cleanup fixture=post-cas stage=fixture failed\n' >&2
-    cleanup_failed=1
-  }
   cleanup_fixture success || {
     printf 'release-recovery cleanup fixture=success stage=fixture failed\n' >&2
     cleanup_failed=1
@@ -391,7 +309,6 @@ download_pinned_installer() { # version digest destination
 write_fixture_config() {
   local base_image="${P0_V0111_BASE_IMAGE:-subyard-e2e-debian-13-cloud-container}"
   local ssh_port=2291
-  [ "$FIXTURE" = post-cas ] && ssh_port=2292
   install -d -m 0700 "$CONFIG_HOME/yards/$YARD_NAME" "$BIN_ROOT" "$HOME_ROOT/host"
   printf 'AGENTS=\n' > "$CONFIG_HOME/config.env"
   # This workspace selects Codex to reproduce materialized-config drift. The
@@ -528,7 +445,7 @@ assert_native_resources_absent() {
   done
 }
 
-prepare_fixture() { # success|post-cas
+prepare_fixture() { # success
   select_fixture "$1"
   require_absent_legacy_power
   [ ! -e "$FIXTURE_ROOT" ] || die "fixture state already exists: $FIXTURE_ROOT"
@@ -537,7 +454,6 @@ prepare_fixture() { # success|post-cas
   chmod 0600 "$FIXTURE_ROOT/.subyard-p0-marker"
   case "$1" in
     success) SUCCESS_ARMED=1 ;;
-    post-cas) POST_CAS_ARMED=1 ;;
   esac
   assert_fixture_root
   write_fixture_config
@@ -580,7 +496,7 @@ assert_source_dead_end() {
     }
 }
 
-reproduce_official_dead_end() { # success|post-cas
+reproduce_official_dead_end() { # success
   local source_rc
   prepare_fixture "$1"
   info "creating independent official v0.9.1 -> v0.11.1 $FIXTURE history"
@@ -788,7 +704,7 @@ upgrade_to_current_candidate() {
 capture_fixture_failure_logs() {
   local name path failed=0
   fixture_root_is_marked || return 1
-  for name in source-install.log candidate-recovery.log current-upgrade.log first-process.log resume.log resume.stderr \
+  for name in source-install.log candidate-recovery.log current-upgrade.log \
     cleanup-yard.log current-yard-teardown.log current-uninstall.log; do
     path="$FIXTURE_ROOT/$name"
     [ -f "$path" ] && [ ! -L "$path" ] || continue
@@ -904,198 +820,6 @@ PY
   fi
 }
 
-prepare_recovery_logs() { # <descriptor-variable> <fixed-log-name>
-  local destination="$1" name="$2" directory_fd log_fd rc=0 restore_clobber=0
-  case "$name" in resume.log|resume.stderr|resume-retry.log|resume-retry.stderr|first-process.log) ;; *) return 2 ;; esac
-  exec {directory_fd}< "$FIXTURE_ROOT/." || return
-  python3 - "$STATE_ROOT" "$MARKER" "$FIXTURE_ROOT" "$FIXTURE_MARKER" "$BASHPID" "$directory_fd" <<'PY' || rc=$?
-import os, stat, sys
-assert os.path.dirname(sys.argv[3]) == sys.argv[1]
-for path, marker in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        info = os.fstat(fd)
-        info_root = info
-        assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
-        with os.fdopen(os.open('.subyard-p0-marker', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd), 'rb') as stream:
-            info = os.fstat(stream.fileno())
-            assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
-            assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
-            assert stream.read(256) == (marker + '\n').encode()
-        if path == sys.argv[3]:
-            held = os.stat('/proc/' + sys.argv[5] + '/fd/' + sys.argv[6])
-            assert (held.st_dev, held.st_ino) == (info_root.st_dev, info_root.st_ino)
-    finally:
-        os.close(fd)
-PY
-  if [ "$rc" = 0 ]; then
-    [ ! -e "/proc/self/fd/$directory_fd/$name" ] && [ ! -L "/proc/self/fd/$directory_fd/$name" ] || rc=2
-  fi
-  if [ "$rc" = 0 ]; then
-    case "$-" in *C*) ;; *) set -C; restore_clobber=1 ;; esac
-    exec {log_fd}> "/proc/self/fd/$directory_fd/$name" || rc=$?
-    [ "$restore_clobber" = 0 ] || set +C
-  fi
-  exec {directory_fd}<&-
-  [ "$rc" = 0 ] || return "$rc"
-  python3 - "$BASHPID" "$log_fd" <<'PY' || rc=$?
-import os, stat, sys
-with open('/proc/' + sys.argv[1] + '/fd/' + sys.argv[2], 'rb') as stream:
-    info = os.fstat(stream.fileno())
-    assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
-    os.fchmod(stream.fileno(), 0o600)
-    assert stat.S_IMODE(os.fstat(stream.fileno()).st_mode) == 0o600
-PY
-  if [ "$rc" != 0 ]; then exec {log_fd}>&-; return "$rc"; fi
-  printf -v "$destination" '%s' "$log_fd"
-}
-
-recovery_log_artifacts() { # replay|export, then held stdout/stderr/first-process descriptors
-  python3 - "$STATE_ROOT" "$MARKER" "$FIXTURE_ROOT" "$FIXTURE_MARKER" "$BASHPID" "$@" <<'PY'
-import base64, hashlib, json, os, stat, sys
-
-def private_root(path, marker):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        info = os.fstat(fd)
-        assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
-        with os.fdopen(os.open('.subyard-p0-marker', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd), 'rb') as stream:
-            info = os.fstat(stream.fileno())
-            assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
-            assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
-            assert stream.read(256) == (marker + '\n').encode()
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
-
-failed = False
-if len(sys.argv) not in (10, 11) or not all(value.isdecimal() for value in sys.argv[5:6] + sys.argv[7:10]):
-    print('RELEASE_RECOVERY_CAPTURE {"state":"refused"}', flush=True)
-    sys.exit(23)
-action = sys.argv[6]
-assert action in ('replay', 'export')
-stem = sys.argv[10] if len(sys.argv) == 11 else 'resume'
-assert stem in ('resume', 'resume-retry')
-held = dict(zip((stem + '-stdout', stem + '-stderr', 'first-process'), sys.argv[7:10]))
-try:
-    os.close(private_root(sys.argv[1], sys.argv[2]))
-    root = private_root(sys.argv[3], sys.argv[4])
-except (OSError, AssertionError):
-    print('RELEASE_RECOVERY_CAPTURE {"state":"refused"}', flush=True)
-    sys.exit(23)
-try:
-    for name, relative, limit in (
-        (stem + '-stdout', stem + '.log', 65536), (stem + '-stderr', stem + '.stderr', 16384),
-        ('journal', 'config/release-transition/v2/journal.json', 65536),
-        ('cas-marker', 'post-cas-link-observed.json', 4096),
-        ('first-process', 'first-process.log', 65536),
-    ):
-        if action == 'replay' and name != stem + '-stderr':
-            continue
-        opened = []
-        try:
-            parent = root
-            parts = relative.split('/')
-            for part in parts[:-1]:
-                parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                opened.append(parent)
-                assert os.fstat(parent).st_uid == os.getuid()
-            descriptor = ('/proc/' + sys.argv[5] + '/fd/' + held[name]) if name in held else None
-            file_fd = os.open(descriptor, os.O_RDONLY | os.O_NONBLOCK) if descriptor else os.open(
-                parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-            with os.fdopen(file_fd, 'rb') as stream:
-                before = os.fstat(stream.fileno())
-                assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
-                assert stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
-                current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
-                assert (before.st_dev, before.st_ino, before.st_mode) == (current.st_dev, current.st_ino, current.st_mode)
-                if action == 'replay':
-                    remaining = before.st_size
-                    while remaining:
-                        data = stream.read(min(65536, remaining))
-                        assert data
-                        sys.stderr.buffer.write(data)
-                        remaining -= len(data)
-                    continue
-                data = stream.read(limit)
-                after = os.fstat(stream.fileno())
-                assert all(getattr(before, key) == getattr(after, key) for key in
-                           ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
-            encoded = base64.b64encode(data).decode('ascii')
-            print('RELEASE_RECOVERY_ARTIFACT ' + json.dumps(dict(name=name, state='retained',
-                source_bytes=before.st_size, retained_bytes=len(data), truncated=len(data) < before.st_size,
-                sha256=hashlib.sha256(data).hexdigest(), chunks=(len(encoded) + 2047) // 2048)), flush=True)
-            for index, offset in enumerate(range(0, len(encoded), 2048)):
-                print('RELEASE_RECOVERY_DATA ' + json.dumps(dict(name=name, index=index,
-                    base64=encoded[offset:offset + 2048])), flush=True)
-        except (OSError, AssertionError) as error:
-            failed = True
-            state = 'unavailable' if isinstance(error, FileNotFoundError) else 'refused'
-            prefix = 'RELEASE_RECOVERY_CAPTURE ' if action == 'replay' else 'RELEASE_RECOVERY_ARTIFACT '
-            print(prefix + json.dumps(dict(name=name, state=state)), flush=True)
-        finally:
-            for fd in reversed(opened):
-                os.close(fd)
-finally:
-    os.close(root)
-sys.exit(23 if failed else 0)
-PY
-}
-
-capture_post_cas_resume_failure() {
-  recovery_log_artifacts export "$@"
-}
-
-post_cas_resume_needs_next() { # held stderr descriptor; never classify a replaced pathname
-  local previous
-  previous="$(readlink "$RUNTIME_ROOT/previous")" || return 1
-  case "$previous" in releases/"$SOURCE_VERSION"-*) ;; *) return 1 ;; esac
-  python3 - "$BASHPID" "$1" "$CANDIDATE_RELEASE" "${previous#releases/}" <<'PY_NEXT'
-import re, sys
-try:
-    with open('/proc/' + sys.argv[1] + '/fd/' + sys.argv[2], 'rb') as stream:
-        text = stream.read(16385).decode('ascii').strip()
-except (OSError, UnicodeError):
-    sys.exit(1)
-expected = ('yard: update: execute prepared release: release transition recovering: '
-            'code=verification-failed active=' + sys.argv[3] + ' previous=' + sys.argv[4] +
-            ' target=' + sys.argv[3] + ' transaction=')
-pattern = (re.escape(expected) + r'tx-[a-f0-9]{32}' + re.escape(
-    '; the release transition was interrupted after a durable mutation checkpoint; next: run yard update'))
-sys.exit(0 if re.fullmatch(pattern, text) else 1)
-PY_NEXT
-}
-
-resume_post_cas_candidate() {
-  local output="$1" first_fd="$2" output_fd errors_fd rc=0 capture_rc=0 replay_rc=0 stem
-  case "$output" in "$FIXTURE_ROOT/resume.log"|"$FIXTURE_ROOT/resume-retry.log") ;; *) return 2 ;; esac
-  stem="${output##*/}"; stem="${stem%.log}"
-  POST_CAS_FOLLOW_NEXT=0
-  prepare_recovery_logs output_fd "$stem.log" || return
-  prepare_recovery_logs errors_fd "$stem.stderr" || rc=$?
-  if [ "$rc" != 0 ]; then exec {output_fd}>&-; return "$rc"; fi
-  fixture_env "$RUNTIME_ROOT/current/bin/yard" update --offline \
-    --version "$CANDIDATE_VERSION" --runtime-root "$RUNTIME_ROOT" </dev/null \
-    1>&"$output_fd" 2>&"$errors_fd" || rc=$?
-  recovery_log_artifacts replay "$output_fd" "$errors_fd" "$first_fd" "$stem" || replay_rc=$?
-  if [ "$rc" != 0 ]; then
-    recovery_inspection_diagnostics "/proc/$BASHPID/fd/$output_fd" || true
-    cleanup_failure_diagnostics "/proc/$BASHPID/fd/$output_fd" || true
-    capture_post_cas_resume_failure "$output_fd" "$errors_fd" "$first_fd" "$stem" || capture_rc=$?
-    printf 'release-recovery resume native_status=%s capture_status=%s replay_status=%s\n' "$rc" "$capture_rc" "$replay_rc" >&2
-    if [ "$stem:$capture_rc:$replay_rc" = resume:0:0 ] && post_cas_resume_needs_next "$errors_fd"; then
-      POST_CAS_FOLLOW_NEXT=1
-    fi
-  elif [ "$stem" = resume-retry ]; then
-    # Retain both attempts even when the one permitted retry succeeds.
-    capture_post_cas_resume_failure "$output_fd" "$errors_fd" "$first_fd" "$stem" || rc=$?
-  elif [ "$replay_rc" != 0 ]; then
-    printf 'release-recovery resume native_status=0 replay_status=%s\n' "$replay_rc" >&2
-  fi
-  exec {output_fd}>&- {errors_fd}>&-
-  return "$rc"
-}
 capture_recovery_plan() {
   local candidate_path output before after plan inspection_status
   assert_fixture_root
@@ -1108,7 +832,6 @@ capture_recovery_plan() {
     releases/0.11.2-*) ;;
     *) die "publish-only returned an invalid candidate identity: $candidate_path" ;;
   esac
-  CANDIDATE_RELEASE="${candidate_path#releases/}"
   output="$FIXTURE_ROOT/recovery-check.json"
   before="$(sha256sum "$JOURNAL" | awk '{print $1}')"
   fixture_env "$RUNTIME_ROOT/$candidate_path/bin/yard" update --check --offline \
@@ -1239,85 +962,6 @@ run_candidate_recovery() { # success
   upgrade_to_current_candidate
 }
 
-run_post_cas_resume() { # post-cas
-  local transition_pid transition_rc=0 output active source_transaction marker_metadata first_process_fd
-  select_fixture "$1"
-  capture_recovery_plan
-  source_transaction="$(jq -er '.transaction' "$JOURNAL")"
-  POST_CAS_OBSERVATION_MARKER="$FIXTURE_ROOT/post-cas-link-observed.json"
-  [ -f "$POST_CAS_OBSERVER" ] && [ ! -L "$POST_CAS_OBSERVER" ] \
-    || die 'post-CAS link observer is unavailable'
-  sh -c 'test ! -e "$1" && test ! -L "$1"' _ "$POST_CAS_OBSERVATION_MARKER" \
-    || die 'refusing an existing post-CAS observation marker'
-  output="$FIXTURE_ROOT/first-process.log"
-  prepare_recovery_logs first_process_fd first-process.log
-  setsid env \
-    HOME="$HOME_ROOT" USER="$(id -un)" LOGNAME="$(id -un)" SHELL=/bin/bash \
-    PATH="$BIN_ROOT:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    SUBYARD_OPERATOR_HOME="$HOME_ROOT" SUBYARD_HOME="$DATA_ROOT" \
-    SUBYARD_KEYS_SYSTEMD_DIR="$HOME_ROOT/.config/systemd/user" \
-    SUBYARD_CONFIG_HOME="$CONFIG_HOME" SUBYARD_YARD="$YARD_NAME" \
-    YARD_RUNTIME_ROOT="$RUNTIME_ROOT" YARD_RELEASE_CACHE="$CACHE_ROOT" \
-    YARD_BIN_DIR="$BIN_ROOT" YARD_SHELL_RC="$HOME_ROOT/.bashrc" \
-    YARD_LOGIN_RC="$HOME_ROOT/.profile" YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    YARD_RELEASE_VERSION="$CANDIDATE_VERSION" \
-    SUBYARD_POWER_LIBEXEC_DIR=/usr/local/libexec/subyard \
-    SUBYARD_POWER_RECONCILER_PATH="$POWER_RECONCILER" \
-    SUBYARD_POWER_UNIT_PATH="$POWER_UNIT" \
-    python3 "$POST_CAS_OBSERVER" \
-      --runtime-root "$RUNTIME_ROOT" --journal "$JOURNAL" \
-      --source-transaction "$source_transaction" \
-      --candidate-target "$CANDIDATE_RELEASE" \
-      --marker "$POST_CAS_OBSERVATION_MARKER" --timeout 120 -- \
-      "$RELEASE_ROOT/subyard-install.sh" --yes 1>&"$first_process_fd" 2>&1 &
-  transition_pid=$!
-  POST_CAS_TRANSITION_PID="$transition_pid"
-  if wait "$POST_CAS_TRANSITION_PID"; then
-    transition_rc=0
-  else
-    transition_rc=$?
-  fi
-  fence_reaped_post_cas_transition "$transition_rc" \
-    || die 'post-CAS transition process group did not stop after observer exit'
-  [ "$transition_rc" = 137 ] \
-    || die "post-CAS transition exited with $transition_rc instead of SIGKILL status 137"
-  [ -f "$POST_CAS_OBSERVATION_MARKER" ] \
-    && [ ! -L "$POST_CAS_OBSERVATION_MARKER" ] \
-    || die 'post-CAS observer did not publish a regular observation marker'
-  marker_metadata="$(stat -c '%u:%g:%a' -- "$POST_CAS_OBSERVATION_MARKER")"
-  [ "$marker_metadata" = "$(id -u):$(id -g):600" ] \
-    || die 'post-CAS observation marker is not an operator-owned regular file'
-  jq -e --arg source "$source_transaction" --arg active "releases/$CANDIDATE_RELEASE" \
-    '.transaction != $source and
-      (.checkpoint == "activation-intent" or .checkpoint == "target-active" or
-        .checkpoint == "reconciling") and .active == $active' \
-    "$POST_CAS_OBSERVATION_MARKER" >/dev/null \
-    || die 'post-CAS observer did not bind the journal CAS to candidate activation'
-  jq -e --arg source "$source_transaction" \
-    '.transaction != $source and .checkpoint != "complete"' "$JOURNAL" >/dev/null \
-    || die 'post-CAS interruption did not retain resumable candidate state'
-  output="$FIXTURE_ROOT/resume.log"
-  resume_post_cas_candidate "$output" "$first_process_fd" || {
-    local resume_rc=$?
-    [ "$POST_CAS_FOLLOW_NEXT" = 1 ] || return "$resume_rc"
-    printf 'release-recovery resume-followed-next native_status=%s next="run yard update" retry=1\n' "$resume_rc"
-    output="$FIXTURE_ROOT/resume-retry.log"
-    resume_post_cas_candidate "$output" "$first_process_fd" || return
-  }
-  exec {first_process_fd}>&-
-  ! grep -Eiq 'confirm|proceed' "$FIXTURE_ROOT/resume.log" "$output" \
-    || die 'ordinary post-CAS resume requested a second confirmation'
-  assert_terminal "$FIXTURE_ROOT/source-ledger.json" "$FIXTURE_ROOT/recovery-plan"
-  output="$FIXTURE_ROOT/repeat-check.json"
-  check_recovery_update "$output" "$CANDIDATE_VERSION" || return
-  active="$(readlink "$RUNTIME_ROOT/current")"
-  assert_ready_check "$output" "${active#releases/}"
-  assert_materialized_fixed_point historical
-  yard -Y "$YARD_NAME" status >/dev/null
-  ok 'ordinary active-candidate update resumed after the exact post-CAS interruption'
-  upgrade_to_current_candidate
-}
-
 main() {
   trap cleanup EXIT
   trap 'handle_signal 130' INT
@@ -1325,7 +969,7 @@ main() {
   valid_token "$TOKEN" || die 'numeric P0 allocation token is required'
   [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run only inside an allocated P0 guest'
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'v0.11.1 release recovery is pinned to the P0 owner VM'
-  for dependency in curl go incus jq ps python3 setsid sha256sum sudo systemctl tar; do
+  for dependency in curl go incus jq python3 sha256sum sudo systemctl tar; do
     command -v "$dependency" >/dev/null 2>&1 || die "$dependency is required"
   done
   [ ! -e "$STATE_ROOT" ] || die "fixture state already exists: $STATE_ROOT"
@@ -1340,9 +984,7 @@ main() {
   reproduce_official_dead_end success
   prepare_recovery_bridge
   run_candidate_recovery success
-  reproduce_official_dead_end post-cas
-  run_post_cas_resume post-cas
-  printf 'ok: two official v0.9.1 -> v0.11.1 histories and v0.11.2 recovery are covered\n'
+  printf 'ok: the official v0.9.1 -> v0.11.1 history and its v0.11.2 recovery are covered\n'
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

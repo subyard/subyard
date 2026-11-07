@@ -115,9 +115,10 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		cli.errorf("release transition: %v", err)
 		return 1
 	}
-	reconcilers := cli.activationReconcilers(request)
-	ownerRegistration := cli.ownerRegistrationTransition(request)
-	ingressFactory := cli.releaseTransitionIngressFactory(request)
+	operation := cli.releaseActivationOperation(request)
+	reconcilers := operation.activationReconcilers(request)
+	ownerRegistration := operation.ownerRegistrationTransition(request)
+	ingressFactory := operation.releaseTransitionIngressFactory(request)
 	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
 	response, err := executeReleaseTransitionRequest(
 		ctx, cli.options.RepositoryRoot, request,
@@ -145,6 +146,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 }
 
 func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
+	cli = cli.releaseActivationOperation(request)
 	reconcilers := cli.nonConfigActivationReconcilers(request)
 	// Integration reconciliation runs project hooks, so repair installed profile runtimes first.
 	materialized := &materializedConfigActivationReconciler{
@@ -152,10 +154,9 @@ func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) 
 		goal: releasetransition.Goal{
 			Target: request.Target, Direction: request.Direction,
 		},
-		artifactDigest:   request.ArtifactDigest,
-		registryDigest:   request.RegistryDigest,
-		sourceIngress:    request.SourceIngress != nil,
-		appliedSelection: completedReleaseConfiguration(request),
+		artifactDigest: request.ArtifactDigest,
+		registryDigest: request.RegistryDigest,
+		sourceIngress:  request.SourceIngress != nil,
 	}
 	return slices.Insert(reconcilers, len(cli.profileRuntimeIDs()), releasetransition.V2ActivationReconciler(materialized))
 }
@@ -163,6 +164,7 @@ func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) 
 // Keep the complete set of non-config activation owners shared by release
 // transitions and bounded materialized-config repair admission.
 func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
+	cli = cli.releaseActivationOperation(request)
 	var result []releasetransition.V2ActivationReconciler
 	for _, id := range cli.profileRuntimeIDs() {
 		result = append(result, cli.profileActivationReconciler(request, id))
@@ -298,6 +300,7 @@ type activationApplicability struct {
 }
 
 type activationStageReconciler struct {
+	configuration        *CLI
 	prospective          func(releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error)
 	sourceActivation     func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error)
 	id                   string
@@ -319,6 +322,7 @@ type routeConsumerActivationPort interface {
 }
 
 type routeConsumerActivationReconciler struct {
+	configuration    *CLI
 	sourceActivation func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error)
 	port             routeConsumerActivationPort
 }
@@ -336,7 +340,7 @@ func (reconciler *routeConsumerActivationReconciler) ObserveProspective(ctx cont
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
-	return (&routeConsumerActivationReconciler{port: projected}).Observe(ctx, releases, links)
+	return (&routeConsumerActivationReconciler{configuration: reconciler.configuration, port: projected}).Observe(ctx, releases, links)
 }
 
 func (reconciler *routeConsumerActivationReconciler) Observe(
@@ -501,9 +505,10 @@ func (cli *CLI) routeConsumerActivationReconciler(
 ) releasetransition.V2ActivationReconciler {
 	options, err := cli.releaseTransitionTestYardOptions(request)
 	if err != nil {
-		return &routeConsumerActivationReconciler{port: routeConsumerActivationError{err: err}}
+		return &routeConsumerActivationReconciler{configuration: cli, port: routeConsumerActivationError{err: err}}
 	}
 	return &routeConsumerActivationReconciler{
+		configuration:    cli,
 		sourceActivation: cli.prepareRouteSourceActivation(request),
 		port:             &testYardRouteConsumerActivation{options: options},
 	}
@@ -667,6 +672,7 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 		return values, err
 	}
 	return &activationStageReconciler{
+		configuration: cli,
 		prospective: func(view releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error) {
 			projected, err := prospectiveActivationFiles(request.ConfigHome, view)
 			if err != nil {
@@ -694,11 +700,11 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 				target: yard,
 			}, err
 		},
-		platform: func(_ context.Context, applicability activationApplicability) (ports.ReconcileStageRunner, error) {
+		platform: func(ctx context.Context, applicability activationApplicability) (ports.ReconcileStageRunner, error) {
 			if applicability.target == "" {
 				return nil, errors.New("active test VM broker has no registered yard")
 			}
-			loaded, err := cli.resolveReleaseTransitionContext(
+			loaded, err := cli.resolveReleaseTransitionContext(ctx,
 				applicability.target,
 				request.ConfigHome, files,
 			)
@@ -763,7 +769,7 @@ func (cli *CLI) ensureReleaseTransitionImageProject(ctx context.Context, configH
 	if !prepared.Absent || !shared {
 		return native.ApplyPreparedImageProject(ctx, prepared)
 	}
-	loaded, err := cli.resolveReleaseTransitionContext(yard, configHome)
+	loaded, err := cli.resolveReleaseTransitionContext(ctx, yard, configHome)
 	if err != nil {
 		return err
 	}
@@ -842,7 +848,8 @@ func (cli *CLI) powerActivationReconciler(
 	request releasetransition.ProcessRequest,
 ) releasetransition.V2ActivationReconciler {
 	return &activationStageReconciler{
-		id: "host-power", stage: ports.ReconcileStagePower,
+		configuration: cli,
+		id:            "host-power", stage: ports.ReconcileStagePower,
 		inspectApplicability: func(context.Context) (activationApplicability, error) {
 			return inspectPowerActivationApplicability(cli.env)
 		},
@@ -852,11 +859,7 @@ func (cli *CLI) powerActivationReconciler(
 			operation := *cli
 			operation.baseEnv = cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 			operation.env = maps.Clone(operation.baseEnv)
-			loaded, err := operation.resolveReleaseTransitionContext("default", request.ConfigHome)
-			if err != nil {
-				return nil, err
-			}
-			targets, err := operation.releaseConfigTargets(ctx, loaded, true)
+			loaded, targets, err := operation.releaseActivationTargets(ctx, "default", request.ConfigHome, true, nil)
 			powerYards := make([]domain.Context, 0, len(targets))
 			for _, target := range targets {
 				powerYards = append(powerYards, target.Loaded.Context)
@@ -916,27 +919,25 @@ func inspectPowerActivationApplicability(
 }
 
 type materializedConfigActivationReconciler struct {
-	cli              *CLI
-	yard             string
-	configHome       string
-	goal             releasetransition.Goal
-	artifactDigest   releasetransition.Fingerprint
-	registryDigest   releasetransition.Fingerprint
-	allLocal         bool
-	scopeResolved    bool
-	integrationPlans map[string]reconcileruntime.IntegrationPlan
-	sourceIngress    bool
-	appliedSelection bool
-	// approved is the last installed-configuration observation of a completed
-	// release repair; its effects must stay inside that observation.
-	approved                  *releasetransition.V2ActivationObservation
-	approvedReleases          releasetransition.ReleasePair
+	cli                       *CLI
+	yard                      string
+	configHome                string
+	goal                      releasetransition.Goal
+	artifactDigest            releasetransition.Fingerprint
+	registryDigest            releasetransition.Fingerprint
+	allLocal                  bool
+	scopeResolved             bool
+	integrationPlans          map[string]reconcileruntime.IntegrationPlan
+	sourceIngress             bool
 	projectedIntegrationPlans bool
 	projectedUnavailable      map[string]projectedIntegrationUnavailable
 	recoveryApply             *configApplyExecution
 }
 
-type releaseTransitionConfigApplier struct{ cli *CLI }
+type releaseTransitionConfigApplier struct {
+	cli             *CLI
+	approvedTargets []configTarget
+}
 
 func (applier releaseTransitionConfigApplier) ApplyConfig(
 	ctx context.Context,
@@ -944,6 +945,31 @@ func (applier releaseTransitionConfigApplier) ApplyConfig(
 ) error {
 	if applier.cli == nil {
 		return errors.New("release transition config applier is unavailable")
+	}
+	if applier.approvedTargets != nil {
+		index := slices.IndexFunc(applier.approvedTargets, func(target configTarget) bool { return target.Name == yard })
+		if index < 0 {
+			return errors.New("config target is outside the activation plan")
+		}
+		target := applier.approvedTargets[index]
+		unlock, err := lockIntegrationYard(ctx, target.Loaded)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		loaded, err := applier.cli.resolveReleaseTransitionContext(ctx, yard, target.Loaded.Context.Paths.ConfigHome)
+		if err != nil {
+			return err
+		}
+		fresh := configTarget{Name: yard, Loaded: loaded}
+		if integrationConfigurationFingerprint(fresh.Loaded) != integrationConfigurationFingerprint(target.Loaded) {
+			return fmt.Errorf("%w: yard %s activation configuration changed", domain.ErrPlanStale, yard)
+		}
+		// This is the same native config refresh as init --configs, with the
+		// approved inputs the release plan observed. It does not author settings.
+		platform := applier.cli.initPlatform(target.Loaded, nil)
+
+		return platform.RefreshConfigs(ctx)
 	}
 	return applier.cli.runReleaseTransitionYardCommandIO(
 		ctx,
@@ -1020,8 +1046,20 @@ func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
 	return reconciler.cli.releaseActivationOperation()
 }
 
-func (cli *CLI) releaseActivationOperation() *CLI {
+func (cli *CLI) releaseActivationOperation(requests ...releasetransition.ProcessRequest) *CLI {
 	operation := *cli
+	if len(requests) != 0 {
+		if operation.activation == nil {
+			request := requests[0]
+			if request.RuntimeRoot == "" {
+				request.RuntimeRoot = cli.env["YARD_RUNTIME_ROOT"]
+			}
+			operation.activation = &releaseConfiguration{request: request, repair: activeReleaseRepair(request), yards: map[string]releaseYardConfiguration{}}
+		}
+		// Binding owners must preserve their ordinary applicability inputs.
+		// Yard loaders below already discard resolved caller settings.
+		return &operation
+	}
 	environment := operation.freshMigrationEnvironment(
 		cli.baseEnv,
 		cli.options.RepositoryRoot,
@@ -1035,100 +1073,9 @@ func (cli *CLI) releaseActivationOperation() *CLI {
 }
 
 func (reconciler *materializedConfigActivationReconciler) Observe(
-	ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks,
+	ctx context.Context, releases releasetransition.ReleasePair, _ releasetransition.ReleaseLinks,
 ) (releasetransition.V2ActivationObservation, error) {
-	observation, err := reconciler.observe(ctx, releases, nil)
-	if err == nil && reconciler != nil && reconciler.appliedSelection {
-		approved := observation
-		reconciler.approved, reconciler.approvedReleases = &approved, releases
-	}
-	return observation, err
-}
-
-// boundedRepair keeps a completed-release repair inside its approved plan. A
-// converged installed configuration needs no effect; otherwise desired intent
-// must equal the installed configuration the plan observed.
-func (reconciler *materializedConfigActivationReconciler) boundedRepair(ctx context.Context) (bool, error) {
-	if !reconciler.appliedSelection || reconciler.approved == nil {
-		return true, nil
-	}
-	if reconciler.approved.Converged {
-		return false, nil
-	}
-	approved := *reconciler.approved
-	reconciler.appliedSelection = false
-	desired, err := reconciler.observe(ctx, reconciler.approvedReleases, nil)
-	reconciler.appliedSelection = true
-	if err != nil {
-		return false, err
-	}
-	if desired.Actual != approved.Actual || desired.Desired != approved.Desired || desired.Converged != approved.Converged {
-		yards, err := reconciler.pendingConfigurationYards(ctx)
-		if err != nil {
-			return false, err
-		}
-		return false, materializedConfigActivationError{pendingConfigurationError{yards}, yards[0], "materialized config", "init", "apply", reconciler.configHome}
-	}
-	return true, nil
-}
-
-// pendingConfigurationYards names, in stable order, every yard whose desired
-// configuration differs from its installed one. When the difference is not
-// attributable to one yard, every yard in the repair scope is named.
-func (reconciler *materializedConfigActivationReconciler) pendingConfigurationYards(ctx context.Context) ([]string, error) {
-	operation := reconciler.operation()
-	yard := reconciler.yard
-	if yard == "" || reconciler.allLocal {
-		yard = "default"
-	}
-	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
-	if err != nil {
-		return nil, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect", reconciler.configHome}
-	}
-	targets, err := operation.releaseConfigTargets(ctx, loaded, reconciler.allLocal)
-	if err != nil {
-		return nil, err
-	}
-	var pending, all []string
-	for _, target := range targets {
-		all = append(all, target.Name)
-		applied, err := operation.appliedIntegrationTarget(ctx, target)
-		if err != nil {
-			return nil, materializedConfigActivationError{err, target.Name, "installed integration selection", "integration status", "inspect", reconciler.configHome}
-		}
-		if integrationConfigurationFingerprint(applied.Loaded) != integrationConfigurationFingerprint(target.Loaded) {
-			pending = append(pending, target.Name)
-		}
-	}
-	if len(pending) == 0 {
-		pending = all
-	}
-	if len(pending) == 0 {
-		pending = []string{yard}
-	}
-	slices.Sort(pending)
-	return pending, nil
-}
-
-// pendingConfigurationError refuses a completed-release repair whose effects would
-// apply configuration that awaits yard init and is absent from the approved plan.
-type pendingConfigurationError struct{ yards []string }
-
-func (err pendingConfigurationError) Error() string {
-	return "configuration awaiting yard init in yards " + strings.Join(err.yards, ", ") + " is not covered by the approved release repair"
-}
-
-func (err pendingConfigurationError) ActivationDiagnostic() (string, string) {
-	subject := "yard " + err.yards[0]
-	if len(err.yards) > 1 {
-		subject = "yards " + strings.Join(err.yards, ", ")
-	}
-	if len(subject) > 300 {
-		// Stay within the release diagnostic text bound.
-		subject = fmt.Sprintf("%d yards", len(err.yards))
-	}
-	return subject + ": configuration awaiting yard init differs from the installed release configuration; the release repair would apply it without a plan; run yard init for each, then yard migrate",
-		"run yard -Y " + err.yards[0] + " init"
+	return reconciler.observe(ctx, releases, nil)
 }
 
 func (reconciler *materializedConfigActivationReconciler) ObserveProspective(
@@ -1168,11 +1115,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		yard = "default"
 	}
 	operation := reconciler.operation()
-	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome, files)
-	if err != nil {
-		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect", reconciler.configHome}
-	}
-	targets, err := operation.releaseConfigTargets(ctx, loaded, reconciler.allLocal)
+	_, targets, err := operation.releaseActivationTargets(ctx, yard, reconciler.configHome, reconciler.allLocal, files)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}
 	}
@@ -1183,15 +1126,6 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		reconciler.integrationPlans = map[string]reconcileruntime.IntegrationPlan{}
 	}
 	for _, target := range targets {
-		// A successfully installed selection is a release consumer even while a
-		// different desired selection awaits init. Its current source templates,
-		// packages and ownership are still assessed below.
-		if files == nil && reconciler.appliedSelection {
-			target, err = operation.appliedIntegrationTarget(ctx, target)
-			if err != nil {
-				return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "installed integration selection", "integration status", "inspect", reconciler.configHome}
-			}
-		}
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
 			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}
@@ -1217,11 +1151,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 				if err != nil {
 					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect", reconciler.configHome}
 				}
-				if files == nil && reconciler.appliedSelection {
-					integration, err = platform.(reconcileruntime.Runtime).AppliedIntegrationPlan(ctx)
-				} else {
-					integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
-				}
+				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
 				if err != nil {
 					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect", reconciler.configHome}
 				}
@@ -1267,24 +1197,32 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 }
 
 func (cli *CLI) appliedIntegrationTarget(ctx context.Context, target configTarget) (configTarget, error) {
+	applied, _, err := cli.appliedIntegrationTargetBaseline(ctx, target)
+	return applied, err
+}
+
+// appliedIntegrationTargetBaseline also reports whether the running yard records
+// an applied settings baseline; without one its installed settings are unknown.
+func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target configTarget) (configTarget, bool, error) {
 	observer, ok := cli.initPlatform(target.Loaded, nil).(interface {
 		AppliedIntegrationConfiguration(context.Context) (reconcileruntime.AppliedIntegrationConfiguration, error)
 	})
 	if !ok {
-		return target, nil
+		return target, false, nil
 	}
 	incus, _ := cli.statusPorts()
 	instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)
 	if err != nil || !strings.EqualFold(instance.Status, "running") {
-		return target, nil // The ordinary assessment owns absent/stopped/read failures.
+		return target, false, nil // The ordinary assessment owns absent/stopped/read failures.
 	}
 	applied, err := observer.AppliedIntegrationConfiguration(ctx)
 	if err != nil {
-		return target, err
+		return target, false, err
 	}
+	baseline := applied.Settings != nil
 	loaded := target.Loaded
 	if err := loaded.Catalog.ValidateIntegrationInitSettings(applied.Settings); err != nil {
-		return target, err
+		return target, false, err
 	}
 	if applied.Installed {
 		loaded.Environment = loaded.Catalog.WithAppliedIntegrationInitSettings(loaded.Environment, applied.Settings)
@@ -1309,7 +1247,7 @@ func (cli *CLI) appliedIntegrationTarget(ctx context.Context, target configTarge
 	}); ok {
 		selected, known, err := profiles.AppliedEnvironmentProfiles(ctx)
 		if err != nil {
-			return target, err
+			return target, false, err
 		}
 		if known {
 			// This is passive installed-state inspection, not a new profile
@@ -1320,7 +1258,7 @@ func (cli *CLI) appliedIntegrationTarget(ctx context.Context, target configTarge
 	}
 	if !applied.Installed {
 		target.Loaded = loaded
-		return target, nil
+		return target, baseline, nil
 	}
 	loaded, err = config.WithIntegrationSelection(loaded, applied.Selected)
 	for _, name := range []string{"HOST_LINKS", "INTEGRATION_HOST_LINKS"} {
@@ -1328,10 +1266,11 @@ func (cli *CLI) appliedIntegrationTarget(ctx context.Context, target configTarge
 			loaded.Environment[name] = value
 		}
 	}
+
 	if err == nil {
 		target.Loaded = loaded
 	}
-	return target, err
+	return target, baseline, err
 }
 
 func (reconciler *materializedConfigActivationReconciler) resolveScope(
@@ -1340,69 +1279,11 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 	if reconciler.scopeResolved {
 		return nil
 	}
-	store, err := releasetransition.NewPOSIXV2Store(reconciler.configHome)
-	if err != nil {
-		return err
-	}
-	snapshot, err := store.ReadCurrentJournal()
-	if err != nil {
-		return err
-	}
-	var journal releasetransition.JournalRecord
-	if snapshot.Exists {
-		journal, err = releasetransition.ParseJournal(snapshot.Payload)
-		if err != nil {
-			return err
-		}
-	}
-	matches := snapshot.Exists && journal.Goal == reconciler.goal &&
-		journal.ArtifactDigest == reconciler.artifactDigest &&
-		(reconciler.registryDigest == "" || journal.RegistryDigest == reconciler.registryDigest)
-	if matches && journal.Checkpoint == releasetransition.JournalComplete &&
-		(journal.Releases.From != journal.Releases.Target || journal.SourceIngress != nil) {
-		pending, err := releaseCheckpointPublicationPending(reconciler.cli.options.RepositoryRoot, store)
-		if err != nil {
-			return err
-		}
-		if pending {
-			// Keep the original selected scope through its authorized checkpoint
-			// publication. Ledger-only work may explicitly select the wide scope.
-			reconciler.scopeResolved = true
-			return nil
-		}
-	}
-	if (reconciler.sourceIngress && !matches) ||
-		(matches && journal.SourceIngress != nil && journal.Checkpoint != releasetransition.JournalComplete) {
-		// A bootstrap can prelink its target before importing registrations.
-		// Preserve the authorized source scope until checkpoint publication.
-		reconciler.scopeResolved = true
-		return nil
-	}
-	if releases.From != releases.Target {
-		// Source migrations can rename registrations. Their authorized scope
-		// must remain stable even after they advance the ledger during recovery.
-		if matches && journal.Checkpoint != releasetransition.JournalComplete && len(journal.Steps) != 0 {
-			reconciler.scopeResolved = true
-			return nil
-		}
-		reconciler.allLocal, err = reconciler.sourceMigrationsComplete(store)
-		reconciler.scopeResolved = err == nil
-		return err
-	}
-	reconciler.scopeResolved = true
-	if !snapshot.Exists {
-		reconciler.allLocal = true
-		return nil
-	}
-	if !matches {
-		return nil
-	}
-	// Completed source work makes materialized readiness a release-wide fixed
-	// point. Same-release catch-up also covers every local yard, including when
-	// ledger migrations remain, and retains that scope on resume.
-	reconciler.allLocal = journal.Checkpoint == releasetransition.JournalComplete ||
-		journal.Releases.From == journal.Releases.Target
-	return nil
+	var err error
+	reconciler.allLocal, err = reconciler.cli.activation.materializedScope(reconciler.cli, releases,
+		reconciler.configHome, reconciler.goal, reconciler.artifactDigest, reconciler.registryDigest, reconciler.sourceIngress)
+	reconciler.scopeResolved = err == nil
+	return err
 }
 
 func (reconciler *materializedConfigActivationReconciler) UseSourceStableActivationScope() func() {
@@ -1417,12 +1298,6 @@ func (reconciler *materializedConfigActivationReconciler) UseSourceStableActivat
 		reconciler.allLocal, reconciler.scopeResolved = allLocal, resolved
 		reconciler.integrationPlans = nil
 	}
-}
-
-func (reconciler *materializedConfigActivationReconciler) sourceMigrationsComplete(
-	store *releasetransition.POSIXV2Store,
-) (bool, error) {
-	return releaseSourceMigrationsComplete(reconciler.cli.options.RepositoryRoot, store)
 }
 
 func releaseSourceMigrationsComplete(
@@ -1497,15 +1372,15 @@ func (reconciler *materializedConfigActivationReconciler) PrepareActivationRecov
 		return "", err
 	}
 	operation := reconciler.reconcileCLI()
-	loaded, err := operation.resolveReleaseTransitionContext("default", reconciler.configHome)
+	loaded, _, err := operation.releaseActivationTargets(ctx, "default", reconciler.configHome, false, nil)
 	if err != nil {
 		return "", materializedConfigActivationError{err, "default", "configuration", "config status", "inspect", reconciler.configHome}
 	}
-	targets, err := operation.releaseConfigTargets(ctx, loaded, true)
+	targets, err := reconciler.configTargets(ctx, operation, loaded, true)
 	if err != nil {
 		return "", err
 	}
-	selector := func() ([]configTarget, error) { return operation.refreshLocalConfigTargets(loaded, true) }
+	selector := func() ([]configTarget, error) { return reconciler.configTargets(ctx, operation, loaded, true) }
 	execution, err := operation.prepareConfigApply(ctx, targets, selector)
 	if err != nil {
 		return "", err
@@ -1532,22 +1407,17 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	if reconciler == nil || reconciler.cli == nil {
 		return errors.New("materialized config reconciler is unavailable")
 	}
-	if reconciler.recoveryApply == nil {
-		proceed, err := reconciler.boundedRepair(ctx)
-		if err != nil || !proceed {
-			return err
-		}
-	}
+
 	operation := reconciler.reconcileCLI()
 	yard := reconciler.yard
 	if yard == "" || reconciler.allLocal {
 		yard = "default"
 	}
-	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
+	loaded, _, err := operation.releaseActivationTargets(ctx, yard, reconciler.configHome, false, nil)
 	if err != nil {
 		return materializedConfigActivationError{err, yard, "configuration", "config status", "apply", reconciler.configHome}
 	}
-	targets, err := operation.releaseConfigTargets(ctx, loaded, reconciler.allLocal)
+	targets, err := reconciler.configTargets(ctx, operation, loaded, reconciler.allLocal)
 	if err != nil {
 		return err
 	}
@@ -1564,7 +1434,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 		}
 	}
 	selector := func() ([]configTarget, error) {
-		return operation.refreshLocalConfigTargets(loaded, reconciler.allLocal)
+		return reconciler.configTargets(ctx, operation, loaded, reconciler.allLocal)
 	}
 	execution := reconciler.recoveryApply
 	if execution == nil {
@@ -1573,15 +1443,95 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 			return err
 		}
 	}
+	if applier, ok := operation.options.Config.(releaseTransitionConfigApplier); ok {
+		applier.approvedTargets = targets
+		operation.options.Config = applier
+	}
 	return operation.executeConfigApply(ctx, execution, execution.steps(), operation.options.Stdout)
 }
 
+// configTargets selects the same durable configuration view for assessment,
+// native integration effects, materialized refresh and every freshness check.
+func (reconciler *materializedConfigActivationReconciler) configTargets(ctx context.Context, operation *CLI, loaded config.Loaded, allLocal bool) ([]configTarget, error) {
+	_, targets, err := operation.releaseActivationTargets(ctx, loaded.Context.YardName, reconciler.configHome, allLocal, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return targets, nil
+}
+
 func (cli *CLI) resolveReleaseTransitionContext(
+	ctx context.Context,
 	yard string,
 	configHome string,
 	files ...*config.ProspectiveFiles,
 ) (config.Loaded, error) {
+	if cli.activation != nil {
+		return cli.activation.load(ctx, cli, yard, configHome, files...)
+	}
+	return cli.loadReleaseTransitionContext(yard, configHome, nil, files...)
+}
+
+// Only installed-view repairs may replace desired provisioning sources before
+// strict loading. An inert, already-required file lets context discovery locate
+// the installed receipt without opening unavailable desired provisioning inputs;
+// the final load validates the recorded sources, or retains the original error
+// when no applied baseline is available. Ordinary loading is always strict.
+func (cli *CLI) resolveInstalledReleaseContext(ctx context.Context, yard, home string) (config.Loaded, error) {
+	loaded, originalErr := cli.loadReleaseTransitionContext(yard, home, nil)
+	if originalErr == nil {
+		return loaded, nil
+	}
+	sources := map[string]string{}
+	bootstrap, err := loaded, originalErr
+	for err != nil {
+		var source *config.SourceError
+		if !errors.As(err, &source) || !cli.catalog.IntegrationInitSetting(source.Key) ||
+			!strings.HasPrefix(source.Key, "AGENT_") || !strings.HasSuffix(source.Key, "_PROVISION") {
+			return config.Loaded{}, originalErr
+		}
+		if _, seen := sources[source.Key]; seen {
+			return config.Loaded{}, originalErr
+		}
+		sources[source.Key] = filepath.Join(cli.options.RepositoryRoot, "config", "commands.registry")
+		bootstrap, err = cli.loadReleaseTransitionContext(yard, home, sources)
+	}
+	installed, known, err := cli.appliedIntegrationTargetBaseline(ctx, configTarget{Name: yard, Loaded: bootstrap})
+	if err != nil {
+		return config.Loaded{}, err
+	}
+	if !known {
+		return config.Loaded{}, originalErr
+	}
+	for name := range sources {
+		if source := installed.Loaded.Environment[name]; source != "" {
+			sources[name] = source
+		}
+	}
+	loaded, err = cli.loadReleaseTransitionContext(yard, home, sources)
+	// Discovery placeholders are never consumer inputs. The ordinary installed
+	// projection restores recorded values before observation or application.
+	for name := range sources {
+		if loaded.Environment[name] == filepath.Join(cli.options.RepositoryRoot, "config", "commands.registry") {
+			delete(loaded.Environment, name)
+		}
+	}
+	return loaded, err
+}
+
+func (cli *CLI) releaseActivationTargets(ctx context.Context, yard, home string, allLocal bool, files *config.ProspectiveFiles) (config.Loaded, []configTarget, error) {
+	loaded, err := cli.resolveReleaseTransitionContext(ctx, yard, home, files)
+	if err != nil {
+		return loaded, nil, err
+	}
+	targets, err := cli.releaseConfigTargets(ctx, loaded, allLocal)
+	return loaded, targets, err
+}
+
+func (cli *CLI) loadReleaseTransitionContext(yard, configHome string, sources map[string]string, files ...*config.ProspectiveFiles) (config.Loaded, error) {
 	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
+	maps.Copy(environment, sources)
 	if configHome != "" {
 		environment["SUBYARD_CONFIG_HOME"] = configHome
 	}

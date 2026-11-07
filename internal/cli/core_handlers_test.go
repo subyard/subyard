@@ -872,7 +872,7 @@ func TestCompletedTeardownUsesFreshConsentAndProtectedHistory(t *testing.T) {
 				inventorySource = filepath.Join(home, "yards/inventory/config.env")
 				writeProfileTestFile(t, inventorySource, []byte("SSH_PORT=2223\n"), 0o600)
 				inventorySettings = mustReadConfigFixture(t, inventorySource)
-				inventory, err := program.resolveReleaseTransitionContext("inventory", home)
+				inventory, err := program.resolveReleaseTransitionContext(context.Background(), "inventory", home)
 				if err != nil {
 					t.Fatal(err)
 				}

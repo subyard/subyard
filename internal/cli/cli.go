@@ -141,6 +141,10 @@ type CLI struct {
 
 	// profileOfferSuppressed keeps init-embedded migration from offering provisioning.
 	profileOfferSuppressed bool
+
+	// nestedCommand replaces same-host follow-up commands in tests.
+	nestedCommand func(context.Context, []string, io.Writer) int
+	activation    *releaseConfiguration
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -198,6 +202,11 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.options.Stdout = stdout
 	operation.options.Stderr = stderr
 	operation.releaseTransitionChild = true
+	if operation.activation != nil {
+		if _, err := operation.resolveReleaseTransitionContext(ctx, yard, operation.activation.request.ConfigHome); err != nil {
+			return err
+		}
+	}
 	operation.permits = recoveryPermits{}
 	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
 		// Keep the native execution error in process. Only the outer command
@@ -3773,6 +3782,9 @@ func (cli *CLI) loadContextWithYardSettings(yard, yardSettingsFile string) (conf
 }
 
 func (cli *CLI) resolveContextWithYardSettings(yard, yardSettingsFile string) (config.Loaded, error) {
+	if cli.activation != nil {
+		return cli.resolveReleaseTransitionContext(context.Background(), yard, cli.activation.request.ConfigHome)
+	}
 	operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
 	if operatorHome == "" {
 		operatorHome = cli.env["HOME"]

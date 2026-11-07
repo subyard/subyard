@@ -33,7 +33,7 @@ func (cli *CLI) registeredYardMigrations(request releasetransition.ProcessReques
 func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest, guestTmp bool, yard string) releasetransition.V2ActivationReconciler {
 	return &migration.RegisteredYardMigration{Yard: yard, ConfigHome: request.ConfigHome, Resources: cli.resources, GuestTmp: guestTmp,
 		Retired: func(ctx context.Context, journal releasetransition.JournalRecord) (bool, error) {
-			loaded, err := cli.resolveReleaseTransitionContext(yard, request.ConfigHome)
+			loaded, err := cli.resolveReleaseTransitionContext(ctx, yard, request.ConfigHome)
 			if err != nil {
 				return false, err
 			}
@@ -64,7 +64,7 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 			}
 			// An older parent passes its own resolved settings; they are not overrides.
 			operation := cli.releaseActivationOperation()
-			loaded, err := operation.resolveReleaseTransitionContext(yard, request.ConfigHome, files)
+			loaded, err := operation.resolveReleaseTransitionContext(ctx, yard, request.ConfigHome, files)
 			if err != nil {
 				return nil, fmt.Errorf("yard %s: %w", yard, err)
 			}
@@ -121,7 +121,7 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 			return -1, nil
 		}
 	}
-	loaded, err := cli.resolveReleaseTransitionContext(yard, options.ConfigHome)
+	loaded, err := cli.resolveReleaseTransitionContext(ctx, yard, options.ConfigHome)
 	if errors.Is(err, config.ErrUnknownYard) {
 		return -1, nil
 	}

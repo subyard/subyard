@@ -192,6 +192,7 @@ type preparedCommand struct {
 	remotePhased         bool
 	// profileFollowup offers pending profile provisioning after success.
 	profileFollowup *releaseExecution
+	pendingInit     *pendingInitPlan
 }
 
 // Both prepared commands and early source recovery capture these read-only
@@ -1218,7 +1219,10 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 		result, runErr := prepared.CLI.executeRelease(ctx, orchestrator, prepared.Plan, execution)
 		return result, prepared.CLI.finishUpdateHistory(ctx, execution, result, runErr)
 	}
-	return prepared.CLI.prepareDiskTmpRetry(ctx, prepared)
+	if err := prepared.CLI.prepareDiskTmpRetry(ctx, prepared); err != nil {
+		return err
+	}
+	return prepared.preparePostRepairInit(ctx, execution)
 }
 
 func (prepared *preparedCommand) prepareProject(ctx context.Context, _ *initBootstrap) error {

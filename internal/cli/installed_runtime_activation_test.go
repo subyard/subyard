@@ -24,7 +24,7 @@ func TestRuntimeRecoveryPlanBindsPartialDeliveryAndRejectsFurtherDrift(t *testin
 	state := ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)}
 	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &state}
 	fixture.cli.options.InitPlatform = platform
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "sample-runtime", request: releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}}
+	owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}, "sample-runtime").(*profileRuntimeActivationReconciler))
 	ctx := context.Background()
 	first, err := owner.PrepareActivationRecovery(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil {
@@ -51,12 +51,6 @@ type installedActivationFixture struct {
 	applied int
 }
 
-type installedReleaseActivationFixture struct{ *installedActivationFixture }
-
-func (fixture *installedReleaseActivationFixture) ObserveInstalledReleaseRuntime(context.Context, string) (ports.RuntimeObservation, error) {
-	return ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: fixture.state.Desired, Desired: fixture.state.Desired}, nil
-}
-
 func TestCompletedReleaseKeepsPendingConfigurationForOrdinaryInit(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, false)
 	store, err := releasetransition.NewPOSIXV2Store(fixture.cli.env["SUBYARD_CONFIG_HOME"])
@@ -71,37 +65,34 @@ func TestCompletedReleaseKeepsPendingConfigurationForOrdinaryInit(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessInspect, ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"], Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
-	if !completedReleaseConfiguration(request) {
+	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessInspect, RuntimeRoot: fixture.cli.env["YARD_RUNTIME_ROOT"], ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"], Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
+	if !activeReleaseRepair(request) {
 		t.Fatal("completed current release did not retain applied configuration")
 	}
 	// Convergence rechecks the plan its inspection approved before any effect.
 	converge := request
 	converge.Mode = releasetransition.ProcessConverge
-	if !completedReleaseConfiguration(converge) {
+	if !activeReleaseRepair(converge) {
 		t.Fatal("convergence observed a different configuration than its approved inspection")
 	}
 	for _, change := range []func(*releasetransition.ProcessRequest){
 		func(r *releasetransition.ProcessRequest) { r.Mode = "" },
 		func(r *releasetransition.ProcessRequest) { r.Target = "other" },
-		func(r *releasetransition.ProcessRequest) { r.Direction = releasetransition.DirectionActivatePrevious },
-		func(r *releasetransition.ProcessRequest) { r.ArtifactDigest = "other" },
-		func(r *releasetransition.ProcessRequest) { r.RegistryDigest = "other" },
 	} {
 		other := request
 		change(&other)
-		if completedReleaseConfiguration(other) {
+		if activeReleaseRepair(other) {
 			t.Fatal("configuration projection admitted a different release or mutation")
 		}
 	}
-	platform := &installedReleaseActivationFixture{&installedActivationFixture{initPlatformFixture: newInitPlatformFixture(), state: ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)}}}
+	platform := &installedActivationFixture{initPlatformFixture: newInitPlatformFixture(), state: ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: strings.Repeat("b", 64), Desired: strings.Repeat("b", 64)}}
 	fixture.cli.options.InitPlatform = platform
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "core-guest-runtime", request: request}
+	owner := (fixture.cli.profileActivationReconciler(request, "core-guest-runtime").(*profileRuntimeActivationReconciler))
 	observed, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
 	if err != nil || !observed.Converged {
 		t.Fatalf("pending desired configuration blocked ordinary commands: %#v %v", observed, err)
 	}
-	rechecked, err := (&profileRuntimeActivationReconciler{cli: fixture.cli, id: "core-guest-runtime", request: converge}).Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+	rechecked, err := (fixture.cli.profileActivationReconciler(converge, "core-guest-runtime").(*profileRuntimeActivationReconciler)).Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
 	if err != nil || rechecked.Actual != observed.Actual || rechecked.Desired != observed.Desired || rechecked.Converged != observed.Converged {
 		t.Fatalf("convergence recheck diverged from the approved inspection: %#v %#v %v", observed, rechecked, err)
 	}
@@ -110,9 +101,10 @@ func TestCompletedReleaseKeepsPendingConfigurationForOrdinaryInit(t *testing.T) 
 	if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil || platform.applied != 0 {
 		t.Fatalf("completed-release repair applied pending configuration outside its plan: %v effects=%d", err, platform.applied)
 	}
+	platform.state = ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)}
 	ordinary := request
 	ordinary.Mode = ""
-	if err := (&profileRuntimeActivationReconciler{cli: fixture.cli, id: "core-guest-runtime", request: ordinary}).Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil || platform.applied != 1 {
+	if err := (fixture.cli.profileActivationReconciler(ordinary, "core-guest-runtime").(*profileRuntimeActivationReconciler)).Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil || platform.applied != 1 {
 		t.Fatalf("pending desired configuration was not applied by ordinary repair: %v effects=%d", err, platform.applied)
 	}
 }
@@ -159,13 +151,13 @@ printf '%s\n' '{"state":"current","actual":"` + current + `","desired":"` + curr
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessConverge, ConfigHome: configHome, Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
+	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessConverge, RuntimeRoot: fixture.cli.env["YARD_RUNTIME_ROOT"], ConfigHome: configHome, Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
 	ordinary := request
 	ordinary.Mode = ""
-	if err := (&profileRuntimeActivationReconciler{cli: cli, id: "sample-runtime", request: ordinary}).Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err == nil {
+	if err := (cli.profileActivationReconciler(ordinary, "sample-runtime").(*profileRuntimeActivationReconciler)).Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err == nil {
 		t.Fatal("ordinary repair did not observe the pending desired identity")
 	}
-	owner := &profileRuntimeActivationReconciler{cli: cli, id: "sample-runtime", request: request}
+	owner := (cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
 	approved, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
 	if err != nil || approved.Converged {
 		t.Fatalf("approved repair plan: %#v %v", approved, err)
@@ -199,7 +191,7 @@ func TestInstalledHostActivationKeepsLocalScopesWithoutIncus(t *testing.T) {
 	fixture.cli.options.Incus = coldInstalledIncus{&testkit.Incus{Err: errors.New("host activation must not query Incus")}}
 	platform := &installedActivationFixture{initPlatformFixture: newInitPlatformFixture(), state: ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)}}
 	fixture.cli.options.InitPlatform = platform
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "key-tools-runtime", request: releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}}
+	owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}, "key-tools-runtime").(*profileRuntimeActivationReconciler))
 	_, targets, err := owner.targets(context.Background())
 	if err != nil || len(targets) != 2 {
 		t.Fatalf("host scopes lost to Incus absence: %v %v", targets, err)
@@ -212,7 +204,7 @@ func TestInstalledHostActivationKeepsLocalScopesWithoutIncus(t *testing.T) {
 func TestInstalledStoppedDeferralHasNoWarningOrInitAdvice(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, false)
 	fixture.cli.options.InitPlatform = &installedActivationFixture{initPlatformFixture: newInitPlatformFixture(), state: ports.RuntimeObservation{State: ports.RuntimeStateDeferred, Actual: strings.Repeat("a", 64)}}
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "core-guest-runtime", request: releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}}
+	owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}, "core-guest-runtime").(*profileRuntimeActivationReconciler))
 	observation, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil || !observation.Converged || len(observation.Warnings) != 0 {
 		t.Fatalf("expected stopped deferral diagnosed as warning/manual init: %#v %v", observation, err)
@@ -225,7 +217,7 @@ func TestCurrentInstalledSelectionFactsKeepReleasePlanReadyAndStable(t *testing.
 		State: ports.RuntimeStateCurrent, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("a", 64),
 	}}
 	fixture.cli.options.InitPlatform = platform
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "core-guest-runtime", request: releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}}
+	owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}, "core-guest-runtime").(*profileRuntimeActivationReconciler))
 	links := releasetransition.ReleaseLinks{Active: "release-current"}
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
 		ConfigHome: testkit.TempDir(t), Releases: releasetransition.ReleasePair{From: "release-current", Target: "release-current"},
@@ -328,18 +320,23 @@ printf '%s\n' '{"state":"current","actual":"` + strings.Repeat("a", 64) + `","de
 				t.Fatal(err)
 			}
 			request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessInspect, ConfigHome: cli.env["SUBYARD_CONFIG_HOME"], Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
-			owner := &profileRuntimeActivationReconciler{cli: cli, id: "sample-runtime", request: request}
+			owner := (cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
 			result, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
 			if err != nil || !result.Converged {
 				t.Fatalf("applied owner observation: %#v %v", result, err)
 			}
 			request.Mode = releasetransition.ProcessConverge
-			owner = &profileRuntimeActivationReconciler{cli: cli, id: "sample-runtime", request: request}
+			owner = (cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
 			if rechecked, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil || !reflect.DeepEqual(rechecked, result) {
 				t.Fatalf("convergence recheck diverged from the approved inspection: %#v %#v %v", result, rechecked, err)
 			}
-			request.ArtifactDigest = "other"
-			owner = &profileRuntimeActivationReconciler{cli: cli, id: "sample-runtime", request: request}
+			journal.Checkpoint = releasetransition.JournalReconciling
+			payload, err := releasetransition.MarshalJournal(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(request.ConfigHome, "release-transition/v2/journal.json"), payload, 0o600)
+			owner = (cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
 			if _, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err == nil {
 				t.Fatal("unfinished release stopped using desired owner")
 			}
@@ -405,7 +402,7 @@ func TestProfileRuntimeReconcileRecordsOwnerServiceSelection(t *testing.T) {
 			state := scenario.state
 			platform := &recordingProfilePlatform{sampleRepairPlatformFixture: &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &state}, after: &current}
 			fixture.cli.options.InitPlatform = platform
-			owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "sample-runtime", request: releasetransition.ProcessRequest{ConfigHome: configHome}}
+			owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: configHome}, "sample-runtime").(*profileRuntimeActivationReconciler))
 			if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
 				t.Fatal(err)
 			}
@@ -429,10 +426,9 @@ func (fixture recordingProfileExecutor) Exec(ctx context.Context, project, insta
 	return fixture.appliedProfileExecutor.Exec(ctx, project, instance, request)
 }
 
-// An owner-service profile disabled before profile disable recorded its applied
-// selection keeps a lagging record. A completed-release repair records the
-// converged selection; it does not reinstall the disabled runtime.
-func TestCompletedReleaseRepairRecordsLaggingOwnerServiceSelection(t *testing.T) {
+// A completed-release repair restores the installed owner-service selection.
+// Pending deselection remains for ordinary init after repair readiness.
+func TestCompletedReleaseRepairKeepsInstalledOwnerServiceSelection(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, false)
 	cli := fixture.cli
 	root := cli.options.RepositoryRoot
@@ -452,14 +448,16 @@ func TestCompletedReleaseRepairRecordsLaggingOwnerServiceSelection(t *testing.T)
 	}
 	cli.catalog = catalog
 	digest := strings.Repeat("b", 64)
-	// The runtime was removed: a selection containing sample observes it stale.
+	// The installed selection still contains sample, while desired intent disables it.
+	marker := filepath.Join(root, "installed-owner-repaired")
 	handler := `#!/bin/sh
 case "$1" in
+apply) : > "` + marker + `" ;;
 observe) ;;
 *) exit 18 ;;
 esac
 case " $ENVIRONMENT_PROFILES " in
-*" sample "*) printf '%s\n' '{"state":"stale","actual":"` + strings.Repeat("a", 64) + `","desired":"` + digest + `"}' ;;
+*" sample "*) if [ -f "` + marker + `" ]; then printf '%s\n' '{"state":"current","actual":"` + digest + `","desired":"` + digest + `"}'; exit 0; fi; printf '%s\n' '{"state":"stale","actual":"` + strings.Repeat("a", 64) + `","desired":"` + digest + `"}' ;;
 *) printf '%s\n' '{"state":"current","actual":"` + digest + `","desired":"` + digest + `"}' ;;
 esac
 `
@@ -478,8 +476,8 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessConverge, ConfigHome: configHome, Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
-	owner := &profileRuntimeActivationReconciler{cli: cli, id: "sample-runtime", request: request}
+	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessConverge, RuntimeRoot: fixture.cli.env["YARD_RUNTIME_ROOT"], ConfigHome: configHome, Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
+	owner := (cli.profileActivationReconciler(request, "sample-runtime").(*profileRuntimeActivationReconciler))
 	approved, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
 	if err != nil || approved.Converged {
 		t.Fatalf("lagging applied selection was not observed: %#v %v", approved, err)
@@ -488,28 +486,9 @@ esac
 	if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
 		t.Fatalf("lagging selection repair: %v", err)
 	}
-	if len(records) != 1 || !strings.Contains(records[0], `"profile":"sample"`) || !strings.Contains(records[0], `"selected":false`) {
-		t.Fatalf("converged selection was not recorded: %q", records)
+	if len(records) != 1 || !strings.Contains(records[0], `"profile":"sample"`) || !strings.Contains(records[0], `"selected":true`) {
+		t.Fatalf("installed selection was not recorded: %q", records)
 	}
-}
-
-type installedReleaseRepairFixture struct {
-	*installedActivationFixture
-	installed      ports.RuntimeObservation
-	releaseApplied int
-}
-
-func (fixture *installedReleaseRepairFixture) ObserveInstalledReleaseRuntime(context.Context, string) (ports.RuntimeObservation, error) {
-	return fixture.installed, nil
-}
-
-func (fixture *installedReleaseRepairFixture) ApplyInstalledReleaseRuntime(_ context.Context, _, _, actual, desired string) error {
-	if actual != fixture.installed.Actual || desired != fixture.installed.Desired {
-		return errors.New("installed repair received another observation")
-	}
-	fixture.releaseApplied++
-	fixture.installed = ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: desired, Desired: desired}
-	return nil
 }
 
 // A stale core runtime of a completed release is repaired on the installed
@@ -529,14 +508,11 @@ func TestCompletedReleaseCoreRepairUsesInstalledProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessConverge, ConfigHome: configHome, Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
-	// Desired settings would produce another digest than the installed projection.
-	platform := &installedReleaseRepairFixture{
-		installedActivationFixture: &installedActivationFixture{initPlatformFixture: newInitPlatformFixture(), state: ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("c", 64)}},
-		installed:                  ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)},
-	}
+	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessConverge, RuntimeRoot: fixture.cli.env["YARD_RUNTIME_ROOT"], ConfigHome: configHome, Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
+	// The ordinary platform receives the centrally projected context.
+	platform := &installedActivationFixture{initPlatformFixture: newInitPlatformFixture(), state: ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)}}
 	fixture.cli.options.InitPlatform = platform
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "core-guest-runtime", request: request}
+	owner := (fixture.cli.profileActivationReconciler(request, "core-guest-runtime").(*profileRuntimeActivationReconciler))
 	if approved, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil || approved.Converged {
 		t.Fatalf("approved repair plan: %#v %v", approved, err)
 	}
@@ -544,8 +520,8 @@ func TestCompletedReleaseCoreRepairUsesInstalledProjection(t *testing.T) {
 	if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
 		t.Fatalf("installed core repair: %v", err)
 	}
-	if platform.releaseApplied != 1 || platform.applied != 0 {
-		t.Fatalf("core repair effects: installed=%d desired=%d", platform.releaseApplied, platform.applied)
+	if platform.applied != 1 {
+		t.Fatalf("core repair effects: %d", platform.applied)
 	}
 }
 
@@ -569,7 +545,7 @@ func TestProfileRuntimeReconcileLeavesUnfinishedFactsToCoreRefresh(t *testing.T)
 	fixture.cli.catalog = catalog
 	current := ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: strings.Repeat("b", 64), Desired: strings.Repeat("b", 64)}
 	fixture.cli.options.InitPlatform = unfinishedFactsPlatform{&recordingProfilePlatform{sampleRepairPlatformFixture: &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &current}}}
-	owner := &profileRuntimeActivationReconciler{cli: fixture.cli, id: "sample-runtime", request: releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}}
+	owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}, "sample-runtime").(*profileRuntimeActivationReconciler))
 	if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
 		t.Fatalf("unfinished facts stopped the release retry: %v", err)
 	}

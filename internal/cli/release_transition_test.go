@@ -1510,7 +1510,7 @@ func TestForwardMaterializedConfigResumeKeepsScopeAcrossLegacyRename(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	complete, err := reconciler().sourceMigrationsComplete(store)
+	complete, err := releaseSourceMigrationsComplete(root, store)
 	if err != nil || !complete {
 		t.Fatalf("source migrations complete=%t err=%v", complete, err)
 	}
@@ -2038,7 +2038,7 @@ func TestPowerActivationReloadsHostLocalArtifactPaths(t *testing.T) {
 		if operation.env["SUBYARD_POWER_UNIT_PATH"] != "" || operation.env["SUBYARD_POWER_RECONCILER_PATH"] != "" {
 			t.Fatal("activation inherited resolved command settings")
 		}
-		loaded, err := operation.resolveReleaseTransitionContext("default", configHome)
+		loaded, err := operation.resolveReleaseTransitionContext(context.Background(), "default", configHome)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2094,7 +2094,7 @@ func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.
 		t.Fatal(err)
 	}
 	program.ensureOperationID()
-	targetLoaded, err := program.resolveReleaseTransitionContext("default", configHome)
+	targetLoaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", configHome)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2702,14 +2702,14 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := program.resolveReleaseTransitionContext(testyardmigration.CurrentYard, configHome)
+	loaded, err := program.resolveReleaseTransitionContext(context.Background(), testyardmigration.CurrentYard, configHome)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{
 		Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 	}
-	defaultLoaded, err := program.resolveReleaseTransitionContext("default", configHome)
+	defaultLoaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", configHome)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2811,7 +2811,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	freshLoaded, err := freshProgram.resolveReleaseTransitionContext(
+	freshLoaded, err := freshProgram.resolveReleaseTransitionContext(context.Background(),
 		testyardmigration.CurrentYard, freshConfigHome,
 	)
 	if err != nil {
@@ -3000,7 +3000,7 @@ exit 1
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := program.resolveReleaseTransitionContext("default", configHome)
+	loaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", configHome)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -966,6 +966,13 @@ func (runtime Runtime) AppliedIntegrationPlan(ctx context.Context) (IntegrationP
 	return runtime.IntegrationPlan(ctx)
 }
 
+// WithInstalledConfiguration binds passive ownership inspection to a context
+// whose init-owned inputs have already been projected by the release boundary.
+func (runtime Runtime) WithInstalledConfiguration() Runtime {
+	runtime.appliedIntegrationInspection = true
+	return runtime
+}
+
 func (runtime Runtime) IntegrationPlan(ctx context.Context) (IntegrationPlan, error) {
 	plan, _, err := runtime.observeIntegrations(ctx)
 	return plan, err
