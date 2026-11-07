@@ -1,0 +1,52 @@
+name: Stale runs
+
+# GitHub can leave a run queued or in progress after every job has finished. Such a run holds its
+# concurrency group, so later runs of that workflow wait forever. No run here legitimately takes
+# a day: hosted jobs stop after their timeouts, and no workflow waits for an approval.
+on:
+  schedule:
+    - cron: '41 * * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci-probe/**'
+    paths:
+      - .github/workflows/stale-runs.yml
+
+permissions:
+  actions: write
+
+concurrency:
+  group: stale-runs
+  cancel-in-progress: false
+
+jobs:
+  cancel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Cancel runs older than a day
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          found=0 failed=0
+          for status in requested waiting pending queued in_progress; do
+            while IFS=$'\t' read -r id name branch created; do
+              [ -n "$id" ] || continue
+              found=1
+              printf '::warning title=Cancelled a stale run::%s run %s on %s, %s since %s\n' \
+                "$name" "$id" "$branch" "$status" "$created"
+              # A run that ignored an earlier cancel needs the forced one.
+              if [ "$(( $(date +%s) - $(date -d "$created" +%s) ))" -gt $((25 * 3600)) ]; then
+                gh api -X POST "repos/$GH_REPO/actions/runs/$id/force-cancel" >/dev/null || failed=1
+              else
+                gh run cancel "$id" || failed=1
+              fi
+            done < <(gh run list --status "$status" --limit 100 \
+              --json databaseId,workflowName,headBranch,createdAt \
+              --jq '.[] | select(now - (.createdAt | fromdateiso8601) > 24 * 3600)
+                | [.databaseId, .workflowName, .headBranch, .createdAt] | @tsv')
+          done
+          [ "$found" = 1 ] || printf 'No run is older than a day.\n' >> "$GITHUB_STEP_SUMMARY"
+          [ "$failed" = 0 ] || { printf '::error::Some stale runs could not be cancelled\n'; exit 1; }

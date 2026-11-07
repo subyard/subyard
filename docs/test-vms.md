@@ -33,6 +33,10 @@ CI additionally runs
 Linux CLI tests also require util-linux `script` to exercise resource commands with a real
 controlling terminal, including terminal-input isolation and cancellation.
 
+[Periodic E2E](testing.md#periodic-e2e-on-hosted-runners) also runs the long release VM checks on
+GitHub-hosted runners, with a one-slot pool on each runner. Its results are findings, not
+acceptance evidence.
+
 For the combined existing-yard adoption and initialization regression, run
 `bash dev/e2e/yard-adoption.sh --preflight`, package the current candidate with
 `dev/release-acceptance.py prepare`, and pass its candidate bundle to the existing
