@@ -94,19 +94,22 @@ sha_no_binary="$(make_bad_archive 8.8.5 no_binary_tar)"
 cat > "$fake_bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-out='' url='' retries=''
+out='' url='' retries='' all_errors='' retry_time=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output|-o) out="$2"; shift 2 ;;
     --output=*) out="${1#*=}"; shift ;;
     --retry) retries="$2"; shift 2 ;;
+    --retry-all-errors) all_errors=1; shift ;;
+    --retry-max-time) retry_time="$2"; shift 2 ;;
     --header|-H|--proto|--proto-redir|--connect-timeout|--max-time) shift 2 ;;
     --*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 [ -n "$out" ] && [ -n "$url" ]
-[ "$retries" = 3 ]
+# Every GitHub download outlasts a short 5xx outage.
+[ "$retries" = 6 ] && [ "$all_errors" = 1 ] && [ "$retry_time" -ge 600 ]
 printf '%s\n' "$url" >> "$CODEX_TEST_CURL_LOG"
 case "$url" in
   https://api.github.com/repos/openai/codex/releases/latest)

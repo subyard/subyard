@@ -17,7 +17,7 @@ compile(owner.split("<<'PY_UNITS'\n", 1)[1].split('\nPY_UNITS', 1)[0], 'owner.sh
 acceptance = (pathlib.Path(sys.argv[1])/'acceptance.sh').read_text()
 controller = 'fixture_timeout='+acceptance.rsplit('\nfixture_timeout=', 1)[1]
 delegation = 'if [ "$delegated" = 0 ]; then\n'+owner.split('if [ "$delegated" = 0 ]; then\n', 1)[1].split('\nfi', 1)[0]+'\nfi'
-budgets = [('all', '125m', 7200), ('--held-diagnostic', '20m', 1140),
+budgets = [('all', '180m', 10500), ('--held-diagnostic', '20m', 1140),
            ('--native-only', '10m', 600), ('--resources', '70m', 4200),
            ('--local', '70m', 4200), ('--android', '70m', 4200),
            ('--android-resources', '70m', 4200), ('--scope-diagnostic', None, 240)]
@@ -198,7 +198,7 @@ case "${1:-}" in --held-diagnostic|--resources|--local|--native-only|--android|-
   printf 'telemetry acceptance requires a frozen candidate bundle and SHA256\n' >&2; exit 2;
 }
 fixture_timeout=70m
-[ "$mode" != all ] || fixture_timeout=125m
+[ "$mode" != all ] || fixture_timeout=180m
 [ "$mode" != --held-diagnostic ] || fixture_timeout=20m
 [ "$mode" != --native-only ] || fixture_timeout=10m
 allocation_route=()

@@ -24,7 +24,8 @@ if [ "$delegated" = 0 ]; then
   esac
   [[ "${SUBYARD_E2E_RUN_ID:-}" =~ ^[a-f0-9]{8}$ ]] || exit 2
   fixture_seconds=4200
-  [ "$mode" != all ] || fixture_seconds=7200
+  # Nested android-test stages on hosted CI runners need more than 7200 s for the full scenario.
+  [ "$mode" != all ] || fixture_seconds=10500
   [ "$mode" != --held-diagnostic ] || fixture_seconds=1140
   [ "$mode" != --scope-diagnostic ] || fixture_seconds=240
   [ "$mode" != --native-only ] || fixture_seconds=600

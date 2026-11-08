@@ -349,10 +349,13 @@ trap cleanup EXIT
 
 artifact="codex-package-${TARGET}.tar.gz"
 metadata="$tmp/release.json"
+# Release downloads retry transient failures, including GitHub 5xx outages;
+# the asset is still checked against the digest bound below.
 # GitHub supplies each official release asset's SHA-256 digest. Bind the tag,
 # filename, URL and digest from one response; never fall back to an unchecked URL.
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --retry 3 --connect-timeout 20 --max-time 60 --header 'Accept: application/vnd.github+json' \
+  --retry 6 --retry-all-errors --retry-max-time 600 --connect-timeout 20 --max-time 60 \
+  --header 'Accept: application/vnd.github+json' \
   --output "$metadata" "$RELEASE_API_URL" || die "latest release metadata download failed"
 release="$(jq -ers --arg artifact "$artifact" --arg base "$RELEASE_BASE_URL" '
   if length == 1 then .[0] else error("expected one release") end |
@@ -387,7 +390,7 @@ fi
 
 archive="$tmp/$artifact"
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --retry 3 --connect-timeout 20 --max-time 300 --output "$archive" "$url" \
+  --retry 6 --retry-all-errors --retry-max-time 900 --connect-timeout 20 --max-time 300 --output "$archive" "$url" \
   || die "release artifact download failed"
 
 actual_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
