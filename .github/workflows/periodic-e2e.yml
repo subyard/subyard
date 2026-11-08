@@ -71,10 +71,17 @@ jobs:
         run: |
           run=true
           if [ "$EVENT" = schedule ]; then
-            last="$(gh run list --workflow periodic-e2e.yml --branch "$REF" --status completed \
-              --limit 30 --json headSha,event,conclusion \
-              --jq 'map(select((.event == "schedule" or .event == "push") and .conclusion != "cancelled"))[0].headSha // ""')"
-            [ "$last" != "$HEAD" ] || run=false
+            # A run covers its commit only once its checks started: a run skipped as
+            # covered, or one that failed before its pool was ready, checked nothing.
+            for id in $(gh run list --workflow periodic-e2e.yml --branch "$REF" --status completed \
+              --limit 30 --json databaseId,headSha,event,conclusion \
+              --jq ".[] | select(.headSha == \"$HEAD\" and (.event == \"schedule\" or .event == \"push\") and .conclusion != \"cancelled\") | .databaseId"); do
+              pool="$(gh run view "$id" --json jobs --jq '.jobs[] | select(.name == "pool") | .conclusion')"
+              if [ "$pool" = success ]; then
+                run=false
+                break
+              fi
+            done
           fi
           printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
 

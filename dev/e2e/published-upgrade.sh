@@ -140,7 +140,7 @@ cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
 chmod -R a+rX "$RELEASE_ROOT"
 
 info "installing exact published v$OLD_VERSION"
-curl -fsSL --proto '=https' --tlsv1.2 \
+curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 \
   "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" -o "$INSTALLER"
 [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$OLD_INSTALLER_SHA256" ] \
   || die 'published installer checksum changed'

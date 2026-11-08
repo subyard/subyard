@@ -92,7 +92,13 @@ age_url="https://github.com/FiloSottile/age/releases/download/v$AGE_VERSION/$age
 sops_asset="sops-v$SOPS_VERSION.linux.$arch"
 sops_url="https://github.com/getsops/sops/releases/download/v$SOPS_VERSION/$sops_asset"
 
-curl --fail --silent --show-error --location "$age_url" -o "$tmp/$age_archive" \
+# Pinned checksums verify every download, so transient failures are retried.
+download() {
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 "$1" -o "$2"
+}
+
+download "$age_url" "$tmp/$age_archive" \
   || die "could not download age v$AGE_VERSION"
 [ "$(sha256sum "$tmp/$age_archive" | cut -d' ' -f1)" = "$age_sha" ] \
   || die "checksum mismatch for age v$AGE_VERSION ($arch)"
@@ -100,7 +106,7 @@ tar -xzf "$tmp/$age_archive" -C "$tmp"
 [ -x "$tmp/age/age" ] && [ -x "$tmp/age/age-keygen" ] \
   || die "age archive did not contain the expected binaries"
 
-curl --fail --silent --show-error --location "$sops_url" -o "$tmp/sops" \
+download "$sops_url" "$tmp/sops" \
   || die "could not download SOPS v$SOPS_VERSION"
 [ "$(sha256sum "$tmp/sops" | cut -d' ' -f1)" = "$sops_sha" ] \
   || die "checksum mismatch for SOPS v$SOPS_VERSION ($arch)"

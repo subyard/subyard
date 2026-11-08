@@ -922,8 +922,9 @@ Veranda and live P0 acceptance remain separate checks.
 
 The Periodic E2E workflow (`.github/workflows/periodic-e2e.yml`) runs the long VM checks of release
 acceptance on GitHub-hosted runners, so their failures surface between releases. Every six hours it
-tests the latest `master` commit unless a finished push or scheduled run already covered it; a
-cancelled run covers nothing, and a new run replaces one still in progress. A red check is a finding
+tests the latest `master` commit unless a finished push or scheduled run already covered it. Only a
+run whose `pool` job succeeded covers its commit: a cancelled run, a run skipped as covered and a run
+that failed while preparing the pool cover nothing. A new run replaces one still in progress. A red check is a finding
 to fix early. It does not replace [release acceptance](#one-release-candidate) and imports no evidence
 into it.
 
