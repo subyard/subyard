@@ -43,8 +43,8 @@ fixture_cleanup() {
       sudo -n tar --ignore-failed-read -C "$STATE_ROOT" -czf \
         "$ROOT/.build/disabled-components-release/failure.tar.gz" -- \
         default-inventory.json hermes-inventory.json \
-        all-local-plan.json failure-plan.json selected-hook-failure.log reduction-plan.txt \
-        reduction-decline.txt recovery-plan.json recovery-decline.txt recovery-receipt.json \
+        all-local-plan.json all-local-plan.txt all-local-apply.txt all-local-repeat.txt failure-plan.json selected-hook-failure.log \
+        recovery-plan.json recovery-init.txt recovery-status.json recovery-repeat.txt \
         activation-journal.before activation-ledger.before postboot-ready.json upgrade-capture-status.txt \
         upgrade-inspection.json upgrade-journal.json upgrade-ledger.json upgrade-identities.txt \
         installer.log installer-ready.json installer-config-status.txt \
@@ -206,6 +206,10 @@ assert_one_run_ready() {
     || die 'installer did not assess the follow-up activation repair'
   grep -Fq 'Current release repaired successfully' "$STATE_ROOT/installer.log" \
     || die 'installer did not complete the follow-up activation repair'
+  # The repair observes installed configuration and explains each yard's own installed selection.
+  grep -Fq 'yard default: requested coding integrations [], effective [], from installed configuration (applied record)' "$STATE_ROOT/installer.log" \
+    && grep -Fq 'yard hermes: requested coding integrations [codex], effective [codex], from installed configuration (applied record)' "$STATE_ROOT/installer.log" \
+    || die 'activation repair plan misstated per-yard installed selection provenance'
   # Inspect the installed release without another update or release lookup.
   operator_yard migrate --check --json > "$STATE_ROOT/installer-ready.json"
   jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true and
@@ -264,8 +268,9 @@ assert_candidate() {
 }
 
 exercise_recovery() {
-  local rc=0 predecessor replacement current previous
-  # Claude was never selected in this fixture, so selecting it reaches its real provisioner.
+  local rc=0 transaction current previous
+  # Selection is init-owned on a ready release: the repair keeps the installed view and
+  # the selected provisioner runs in the post-repair yard init, never as activation work.
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS 'codex claude' --scope yard --local --yes
   guest_yard hermes sh -euc 'test ! -e /usr/local/bin/curl; test ! -e /var/tmp/subyard-disabled-components-hook'
   cat > "$STATE_ROOT/native-curl.sh" <<'FAULT'
@@ -279,69 +284,52 @@ FAULT
   incus file push "$STATE_ROOT/native-curl.sh" yard-hermes/usr/local/bin/curl --project subyard-hermes
   guest_yard hermes sh -euc 'chown root:root /usr/local/bin/curl; chmod 0755 /usr/local/bin/curl; test "$(command -v curl)" = /usr/local/bin/curl'
   operator_yard migrate --check --json > "$STATE_ROOT/failure-plan.json"
-  operator_yard migrate --yes > "$STATE_ROOT/selected-hook-failure.log" 2>&1 || rc=$?
-  [ "$rc" != 0 ] || die 'native selected provision fault was not reached'
-  guest_yard hermes grep -Fxq hook-failed "$FAULT_MARKER" || die 'selected provision did not reach the native fault'
-  sudo -n jq -e '.checkpoint == "reconciling" and (.steps | length) == 0 and .releases.from == .releases.target' \
-    "$V2_JOURNAL" >/dev/null || die 'fault did not create original activation-only reconciliation'
-  install -m 0600 /dev/null "$STATE_ROOT/selected-hook-proof.json"
-  (
-    set +e
-    export -f operator_uid operator_env operator_yard
-    export OPERATOR OPERATOR_HOME
-    timeout --signal=KILL 30 bash -c 'operator_yard migrate --check --json' 2>/dev/null \
-      | jq -e 'select(type == "object" and .schemaVersion == 1 and (.outcome | type == "object")) |
-        {decisions:[.decisions[]? | {resource,scope,decision}],blockers:[.blockers[]? | {code,resource}],
-         outcome:(.outcome | {status,reachedGoal,active,previous,target,code,transaction})}' 2>/dev/null
-    codes=("${PIPESTATUS[@]}")
-    printf '{"inspection_exit_code":%s,"filter_exit_code":%s}\n' "${codes[0]}" "${codes[1]}"
-  ) | jq -s --argjson native_exit "$rc" '
-    (map(select(has("inspection_exit_code")))[0]) as $probe |
-    {operation:"migrate",native_exit_code:$native_exit,resource:"claude provision",injected_marker:"hook-failed",
-     checkpoint:"reconciling",migration_steps:0,same_release:true,
-     diagnostic:(if ($probe.inspection_exit_code == 0 or $probe.inspection_exit_code == 1) and $probe.filter_exit_code == 0
-       then (map(select(has("outcome")))[0] // null) else null end),probe:$probe}
-  ' > "$STATE_ROOT/selected-hook-proof.json"
+  jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/failure-plan.json" >/dev/null \
+    || die 'init-owned selection change entered release readiness'
   sudo -n install -m 0600 "$V2_JOURNAL" "$ACTIVATION_JOURNAL_BASELINE"
   sudo -n install -m 0600 "$V2_LEDGER" "$ACTIVATION_LEDGER_BASELINE"
-  predecessor="$(sudo -n jq -er .transaction "$V2_JOURNAL")"
+  transaction="$(sudo -n jq -er .transaction "$V2_JOURNAL")"
   current="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   previous="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")"
-  operator_yard -Y hermes config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local --check \
-    > "$STATE_ROOT/reduction-plan.txt"
-  rc=0
-  operator_yard -Y hermes config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local \
-    </dev/null > "$STATE_ROOT/reduction-decline.txt" 2>&1 || rc=$?
-  [ "$rc" != 0 ] && grep -Fq 'confirmation required' "$STATE_ROOT/reduction-decline.txt" \
-    || die 'source-only reduction reused activation consent'
-  operator_yard -Y hermes config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
-  sudo -n cmp "$ACTIVATION_JOURNAL_BASELINE" "$V2_JOURNAL"
+  operator_yard migrate --yes > "$STATE_ROOT/selected-hook-failure.log" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || { cat "$STATE_ROOT/selected-hook-failure.log"; die 'native selected provision fault was not reached'; }
+  guest_yard hermes grep -Fxq hook-failed "$FAULT_MARKER" || die 'selected provision did not reach the native fault'
+  { grep -Fq 'release.init.hermes' "$STATE_ROOT/selected-hook-failure.log" &&
+    grep -Fq 'pending yard init did not complete: yard hermes:' "$STATE_ROOT/selected-hook-failure.log" &&
+    grep -Fq 'next: run yard -Y hermes init' "$STATE_ROOT/selected-hook-failure.log"; } \
+    || { cat "$STATE_ROOT/selected-hook-failure.log"; die 'failed post-repair init did not name its yard init continuation'; }
+  # The release repair stays complete; only ordinary init owns the remaining work.
+  sudo -n jq -e --arg transaction "$transaction" '.checkpoint == "complete" and .transaction == $transaction and
+    (.steps | length) == 0 and .releases.from == .releases.target' "$V2_JOURNAL" >/dev/null \
+    || die 'failed post-repair init changed the release journal'
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER"
   [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$current" ] \
     && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$previous" ] \
-    || die 'source-only reduction changed release links'
+    || die 'failed post-repair init changed release links'
+  operator_yard migrate --check --json > "$STATE_ROOT/recovery-plan.json"
+  jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/recovery-plan.json" >/dev/null \
+    || die 'failed post-repair init undid release readiness'
+  install -m 0600 /dev/null "$STATE_ROOT/selected-hook-proof.json"
+  jq -n --argjson native_exit "$rc" --arg transaction "$transaction" --slurpfile check "$STATE_ROOT/recovery-plan.json" '
+    {operation:"migrate",native_exit_code:$native_exit,resource:"hermes pending yard init provision",
+     injected_marker:"hook-failed",checkpoint:"complete",transaction:$transaction,
+     continuation:"yard -Y hermes init",outcome:($check[0].outcome | {status,reachedGoal,active,previous,target,code})}
+  ' > "$STATE_ROOT/selected-hook-proof.json"
   guest_yard hermes sh -euc '
     test "$(head -n 2 /usr/local/bin/curl | tail -n 1)" = "# subyard-disabled-components-curl-v1"
     rm /usr/local/bin/curl /var/tmp/subyard-disabled-components-hook
   '
-  operator_yard migrate --check --json > "$STATE_ROOT/recovery-plan.json"
-  jq -e --arg transaction "$predecessor" '.outcome.code == "recovery-pending" and .outcome.transaction == $transaction and (.blockers | length) == 0' \
-    "$STATE_ROOT/recovery-plan.json" >/dev/null
-  rc=0
-  operator_yard migrate </dev/null > "$STATE_ROOT/recovery-decline.txt" 2>&1 || rc=$?
-  [ "$rc" != 0 ] && grep -Fq 'confirmation required' "$STATE_ROOT/recovery-decline.txt" \
-    || die 'fresh recovery reused source-reduction consent'
-  sudo -n cmp "$ACTIVATION_JOURNAL_BASELINE" "$V2_JOURNAL"
-  operator_yard migrate --yes
-  replacement="$(sudo -n jq -er .transaction "$V2_JOURNAL")"
-  [ "$replacement" != "$predecessor" ] || die 'recovery reused interrupted transaction'
-  sudo -n jq -e '.checkpoint == "complete" and (.steps | length) == 0' "$V2_JOURNAL" >/dev/null
-  sudo -n jq -e --arg transaction "$predecessor" --slurpfile original "$ACTIVATION_JOURNAL_BASELINE" '
-    .schemaVersion == 2 and .contract == "activation-only-replacement-v2" and
-    .predecessor == $original[0] and .replacement.transaction == $transaction and (.nativePlans | length) > 0
-  ' "$CONFIG_HOME/release-transition/recovery/v2/transactions/$replacement.json" >/dev/null
-  sudo -n install -m 0600 "$CONFIG_HOME/release-transition/recovery/v2/transactions/$replacement.json" "$STATE_ROOT/recovery-receipt.json"
+  operator_yard -Y hermes init --yes > "$STATE_ROOT/recovery-init.txt" 2>&1 \
+    || { cat "$STATE_ROOT/recovery-init.txt"; die 'yard init did not complete after the fault was removed'; }
+  operator_yard -Y hermes integration status --json > "$STATE_ROOT/recovery-status.json"
+  jq -e '(.selection.effective | sort) == ["claude","codex"]' "$STATE_ROOT/recovery-status.json" >/dev/null \
+    || die 'recovered yard init did not apply the selected integrations'
+  sudo -n jq -e --arg transaction "$transaction" '.checkpoint == "complete" and .transaction == $transaction' \
+    "$V2_JOURNAL" >/dev/null || die 'ordinary yard init changed the release journal'
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER"
+  operator_yard migrate --yes > "$STATE_ROOT/recovery-repeat.txt" 2>&1 \
+    || { cat "$STATE_ROOT/recovery-repeat.txt"; die 'repeated repair after yard init failed'; }
+  ! grep -Fq 'release.init.' "$STATE_ROOT/recovery-repeat.txt" || die 'yard init left the selection pending'
   assert_disabled default
   assert_disabled hermes
 }
@@ -375,12 +363,28 @@ prepare_acceptance() {
   assert_inventory hermes 'Git settings' '["codex","opencode"]' git-fallback
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
   assert_inventory hermes 'local overrides' '[]' local-empty
+  # Selection is init-owned: a ready release stays ready while its repair keeps the
+  # installed view, and the repair plan lists each yard's pending selection for yard init.
   operator_yard migrate --check --json > "$STATE_ROOT/all-local-plan.json"
-  jq -e '[.. | strings] | any(contains("yard default:") and contains("local overrides")) and
-    any(contains("yard hermes:") and contains("local overrides"))' "$STATE_ROOT/all-local-plan.json" >/dev/null \
-    || die 'all-local activation plan omitted distinct selection provenance'
-  operator_yard migrate --yes
-  operator_yard migrate --yes
+  jq -e '.outcome.status == "ready" and (.blockers | length) == 0 and
+    ([.. | strings] | all(contains("local overrides") | not))' "$STATE_ROOT/all-local-plan.json" >/dev/null \
+    || die 'local selection change entered the installed release readiness plan'
+  rc=0
+  operator_yard migrate </dev/null > "$STATE_ROOT/all-local-plan.txt" 2>&1 || rc=$?
+  { [ "$rc" != 0 ] && grep -Fq 'confirmation required' "$STATE_ROOT/all-local-plan.txt" &&
+    grep -Fxq '  yard default: integration settings current' "$STATE_ROOT/all-local-plan.txt" &&
+    grep -Fxq '  yard hermes:' "$STATE_ROOT/all-local-plan.txt" &&
+    grep -Fxq '    CODING_TOOL_INTEGRATIONS  codex -> (empty)' "$STATE_ROOT/all-local-plan.txt" &&
+    grep -Fq 'release.init.hermes' "$STATE_ROOT/all-local-plan.txt" &&
+    ! grep -Fq 'release.init.default' "$STATE_ROOT/all-local-plan.txt"; } \
+    || { cat "$STATE_ROOT/all-local-plan.txt"; die 'all-local repair plan omitted distinct pending selection per yard'; }
+  operator_yard migrate --yes > "$STATE_ROOT/all-local-apply.txt" 2>&1 \
+    || { cat "$STATE_ROOT/all-local-apply.txt"; die 'all-local repair did not apply pending yard init'; }
+  cat "$STATE_ROOT/all-local-apply.txt"
+  grep -Fxq '  yard -Y hermes init' "$STATE_ROOT/all-local-apply.txt" || die 'all-local repair did not run hermes yard init'
+  operator_yard migrate --yes > "$STATE_ROOT/all-local-repeat.txt" 2>&1 \
+    || { cat "$STATE_ROOT/all-local-repeat.txt"; die 'repeated all-local repair failed'; }
+  ! grep -Fq 'release.init.' "$STATE_ROOT/all-local-repeat.txt" || die 'yard init left the local selection pending'
   assert_disabled default
   assert_disabled hermes
   operator_yard -Y hermes integration enable opencode --yes
@@ -398,7 +402,7 @@ prepare_acceptance() {
   write_fixture_value "$BOOT_ID_STATE" "$(cat /proc/sys/kernel/random/boot_id)"
   write_fixture_value "$PHASE_STATE" disabled-ready
   PRESERVE_FIXTURE=1
-  printf 'ok: predecessor upgrade and fresh activation recovery; reboot pending\n'
+  printf 'ok: predecessor upgrade and pending-init recovery; reboot pending\n'
 }
 
 resume_acceptance() {
@@ -442,8 +446,7 @@ case "$MODE" in
     sudo -n tar -C "$STATE_ROOT" -czf - -- \
       default-inventory.json hermes-inventory.json default-profiles.json hermes-profiles.json \
       default-port.txt hermes-port.txt all-local-plan.json failure-plan.json \
-      reduction-plan.txt reduction-decline.txt recovery-plan.json recovery-decline.txt \
-      recovery-receipt.json activation-journal.before activation-ledger.before postboot-ready.json \
+      recovery-plan.json recovery-status.json activation-journal.before activation-ledger.before postboot-ready.json \
       installer.log installer-ready.json installer-config-status.txt \
       inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt
     PRESERVE_FIXTURE=1

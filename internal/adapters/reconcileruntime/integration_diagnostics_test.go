@@ -54,6 +54,10 @@ func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testin
 			if public != (kind != "transport" && kind != "unknown-stderr") {
 				t.Fatal("uncertain or arbitrary native error became a public ownership diagnosis")
 			}
+			// Only a refusal the guest program returned reports ownership state.
+			if IntegrationOwnershipConflict(err) != (kind != "transport") {
+				t.Fatalf("ownership conflict classification for %s: %v", kind, err)
+			}
 			if public {
 				message, retry := diagnostic.ActivationDiagnostic()
 				if !strings.Contains(message, wantDetail) || !strings.Contains(message, "/home/dev/.fixture/config.toml") ||

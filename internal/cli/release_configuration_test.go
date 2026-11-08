@@ -182,6 +182,12 @@ func TestActivationConfigurationBoundary(t *testing.T) {
 				if loaded.Context.DevUser != "dev" || loaded.Context.DevUID != 1000 || !slices.Equal(loaded.Integrations.Effective, []string{"codex"}) {
 					t.Fatalf("owner %s obtained desired identity or effective selection", owner.ID())
 				}
+				// Plan explanations name the installed record, never a desired or shipped source.
+				for _, explanation := range []string{loaded.IntegrationSelectionExplanation(), loaded.EnvironmentProfileSelectionExplanation()} {
+					if !strings.HasSuffix(explanation, "from installed configuration (applied record)") {
+						t.Fatalf("owner %s explained installed selection with another source: %q", owner.ID(), explanation)
+					}
+				}
 				runtime := operation.initPlatform(loaded, nil).(reconcileruntime.Runtime)
 				for _, pair := range runtime.Environment {
 					name, value, _ := strings.Cut(pair, "=")

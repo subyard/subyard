@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -433,4 +434,75 @@ func (cli *CLI) runNestedCommand(ctx context.Context, arguments []string, diagno
 	}
 	operation.promptInputTerminal = cli.promptInputTerminal
 	return operation.Run(ctx)
+}
+
+// pendingInitIntegrationRefusal inspects, read-only like integration status,
+// the desired integration configuration that pending yard init applies after an
+// installed-view repair. A prospective view supplies the desired files a planned
+// source publication would leave. Desired inputs that cannot be read remain
+// uninspected, as in the pending-init listing.
+func (cli *CLI) pendingInitIntegrationRefusal(ctx context.Context, installed configTarget, configHome string, files *config.ProspectiveFiles) error {
+	desiredView := *cli
+	desiredView.activation = nil
+	var prospective []*config.ProspectiveFiles
+	if files != nil {
+		prospective = append(prospective, files)
+	}
+	loaded, err := desiredView.loadReleaseTransitionContext(installed.Name, configHome, nil, prospective...)
+	if err != nil {
+		return nil
+	}
+	targets, err := desiredView.releaseConfigTargets(ctx, loaded, false)
+	if err != nil || len(targets) == 0 {
+		return nil
+	}
+	desired := targets[0]
+	if integrationConfigurationFingerprint(desired.Loaded) == integrationConfigurationFingerprint(installed.Loaded) {
+		return nil
+	}
+	platform := desiredView.initPlatform(desired.Loaded, nil)
+	runtime, ok := platform.(reconcileruntime.Runtime)
+	if !ok {
+		return nil
+	}
+	if files != nil {
+		runtime.SourceReader = files.ReadAsset
+	}
+	refusal := func(err error) error {
+		return pendingInitConflictError{yard: installed.Name, conflict: reconcileruntime.IntegrationOwnershipConflict(err), cause: err}
+	}
+	platform, _, err = prepareLegacyIntegrationAdoption(ctx, desired.Loaded.Integrations, runtime)
+	if err != nil {
+		return refusal(err)
+	}
+	if runtime, ok = platform.(reconcileruntime.Runtime); !ok {
+		return refusal(errors.New("prepared integration runtime is unavailable"))
+	}
+	if _, err = runtime.IntegrationPlan(ctx); err != nil {
+		return refusal(err)
+	}
+	return nil
+}
+
+// pendingInitConflictError refuses an installed-view repair whose integration
+// effects could overwrite owned state that the following yard init cannot
+// retire. An inspection failure refuses too, but is not named a conflict.
+type pendingInitConflictError struct {
+	yard     string
+	conflict bool
+	cause    error
+}
+
+func (err pendingInitConflictError) Error() string {
+	return fmt.Sprintf("yard %s: inspect integration configuration awaiting yard init: %v", err.yard, err.cause)
+}
+
+func (err pendingInitConflictError) Unwrap() error { return err.cause }
+
+func (err pendingInitConflictError) ActivationDiagnostic() (string, string) {
+	retry := "run yard -Y " + err.yard + " integration status"
+	if err.conflict {
+		return "yard " + err.yard + ": integration configuration awaiting yard init has an ownership conflict; the release repair would overwrite the changed owned configuration; fix the conflict that yard integration status reports, then run yard migrate", retry
+	}
+	return "yard " + err.yard + ": integration configuration awaiting yard init cannot be inspected; the release repair stops rather than overwrite owned configuration that init may be unable to retire; check yard integration status, then run yard migrate", retry
 }

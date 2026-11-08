@@ -516,3 +516,144 @@ func TestInitCaptureSkipsNonFileConfigEvidence(t *testing.T) {
 		t.Fatalf("non-file config input invalidated content evidence: %#v %v", baseline.Diagnostics, err)
 	}
 }
+
+func TestInstalledViewRetiresCommittedLabelledRecordLeavingInstalledScope(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	settings := configInventoryEntry(f.home, "file", "owned")
+	settings["content"], settings["mode"] = base64.StdEncoding.EncodeToString([]byte("owned")), 0644
+	codex := map[string]any{"id": "codex", "kind": "file", "path": f.home + "/codex-config",
+		"digest": fmt.Sprintf("%x", sha256.Sum256([]byte("committed"))), "content": base64.StdEncoding.EncodeToString([]byte("committed")), "mode": 0644}
+	committed := []map[string]any{settings, codex}
+	f.run("apply", committed, false)
+	f.run("commit", committed, false)
+	// A later failed apply labels every wanted record, including committed ones.
+	f.run("apply", committed, false)
+	labelled := false
+	for _, value := range f.read()["entries"].([]any) {
+		record := value.(map[string]any)
+		labelled = labelled || record["path"] == codex["path"] && record["pending_digest"] == codex["digest"]
+	}
+	if !labelled {
+		t.Fatalf("failed apply did not label the committed record: %#v", f.read())
+	}
+	artifacts := func(entries []map[string]any) []integrationArtifact {
+		t.Helper()
+		data, _ := json.Marshal(entries)
+		var result []integrationArtifact
+		if err := json.Unmarshal(data, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	// Its host source disappears: the committed record leaves installed scope.
+	installed := []map[string]any{settings}
+	installedView := Runtime{Executor: f}.WithInstalledConfiguration()
+	passive, err := installedView.integrationInventory(context.Background(), "observe", artifacts(installed), "")
+	if err != nil || !passive.Changed || len(passive.Retired) != 1 || passive.Retired[0].Path != codex["path"] {
+		t.Fatalf("installed view hid retirement of a committed record: %#v %v", passive, err)
+	}
+	for _, mode := range []string{"apply", "commit"} {
+		if _, err := installedView.integrationInventory(context.Background(), mode, artifacts(installed), ""); err != nil {
+			t.Fatalf("installed repair %s: %v", mode, err)
+		}
+	}
+	if _, err := os.Lstat(f.home + "/codex-config"); !os.IsNotExist(err) {
+		t.Fatalf("installed repair did not retire the committed record's asset: %v", err)
+	}
+	for _, value := range f.read()["entries"].([]any) {
+		if record := value.(map[string]any); record["path"] == codex["path"] {
+			t.Fatalf("installed repair kept the retired record: %#v", record)
+		}
+	}
+	if passive, err := installedView.integrationInventory(context.Background(), "observe", artifacts(installed), ""); err != nil || passive.Changed {
+		t.Fatalf("installed view did not converge after retirement: %#v %v", passive, err)
+	}
+}
+
+// A failed init writes real assets and intent for its desired selection before
+// its hook fails. The installed view (passive readiness and release repair) owns
+// only the committed scope: it must stay converged, must never retire or forget
+// that intent, and a later successful init must converge it.
+func TestInstalledViewRetainsIncompleteInitIntentOutsideInstalledScope(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	installedEntry := configInventoryEntry(f.home, "file", "owned")
+	installedEntry["content"], installedEntry["mode"] = base64.StdEncoding.EncodeToString([]byte("owned")), 0644
+	pendingEntry := map[string]any{"id": "codex", "kind": "file", "path": f.home + "/codex-config",
+		"digest": fmt.Sprintf("%x", sha256.Sum256([]byte("desired"))), "content": base64.StdEncoding.EncodeToString([]byte("desired")), "mode": 0644}
+	installed, desired := []map[string]any{installedEntry}, []map[string]any{installedEntry, pendingEntry}
+	f.run("apply", installed, false)
+	f.run("commit", installed, false)
+	f.run("apply", desired, false) // The desired selection's hook failed: no commit.
+	if payload, err := os.ReadFile(f.home + "/codex-config"); err != nil || string(payload) != "desired" {
+		t.Fatalf("incomplete init did not write its asset: %q %v", payload, err)
+	}
+	artifacts := func(entries []map[string]any) []integrationArtifact {
+		t.Helper()
+		data, _ := json.Marshal(entries)
+		var result []integrationArtifact
+		if err := json.Unmarshal(data, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	installedView := Runtime{Executor: f}.WithInstalledConfiguration()
+	requireInstalledConverged := func(stage string, entries []map[string]any) {
+		t.Helper()
+		passive, err := installedView.integrationInventory(context.Background(), "observe", artifacts(entries), "")
+		if err != nil || passive.Changed || len(passive.Retired) != 0 {
+			t.Fatalf("%s: installed view reports drift for pending init intent: %#v %v", stage, passive, err)
+		}
+		for _, fact := range passive.Facts {
+			if !fact.AtDesired {
+				t.Fatalf("%s: unexpected installed drift: %#v", stage, fact)
+			}
+		}
+	}
+	requireIntentRetained := func(stage string) {
+		t.Helper()
+		if payload, err := os.ReadFile(f.home + "/codex-config"); err != nil || string(payload) != "desired" {
+			t.Fatalf("%s: release repair retired the pending init asset: %q %v", stage, payload, err)
+		}
+		retained := false
+		for _, value := range f.read()["entries"].([]any) {
+			record := value.(map[string]any)
+			retained = retained || record["path"] == pendingEntry["path"] && record["pending_digest"] == pendingEntry["digest"]
+		}
+		if !retained {
+			t.Fatalf("%s: release repair forgot the pending init ownership evidence: %#v", stage, f.read())
+		}
+	}
+	requireInstalledConverged("passive readiness", installed)
+	if normal, err := (Runtime{Executor: f}).integrationInventory(context.Background(), "observe", artifacts(desired), ""); err != nil || !normal.Changed {
+		t.Fatalf("ordinary init lost its pending work: %#v %v", normal, err)
+	}
+	// An installed-view repair that applies for another reason keeps the intent.
+	for _, mode := range []string{"apply", "commit"} {
+		if _, err := installedView.integrationInventory(context.Background(), mode, artifacts(installed), ""); err != nil {
+			t.Fatalf("installed repair %s: %v", mode, err)
+		}
+		requireIntentRetained("installed repair " + mode)
+	}
+	requireInstalledConverged("after installed repair", installed)
+	// The later successful init owns and commits the pending intent.
+	for _, mode := range []string{"apply", "commit"} {
+		if _, err := (Runtime{Executor: f}).integrationInventory(context.Background(), mode, artifacts(desired), ""); err != nil {
+			t.Fatalf("successful init %s: %v", mode, err)
+		}
+	}
+	for _, value := range f.read()["entries"].([]any) {
+		if record := value.(map[string]any); record["pending_digest"] != nil || record["config_pending_digest"] != nil || record["uncommitted"] != nil {
+			t.Fatalf("successful init left intent behind: %#v", record)
+		}
+	}
+	requireInstalledConverged("after successful init", desired)
+	// Deselecting again is ordinary init work, which retires its owned asset.
+	for _, mode := range []string{"apply", "commit"} {
+		if _, err := (Runtime{Executor: f}).integrationInventory(context.Background(), mode, artifacts(installed), ""); err != nil {
+			t.Fatalf("deselecting init %s: %v", mode, err)
+		}
+	}
+	if _, err := os.Lstat(f.home + "/codex-config"); !os.IsNotExist(err) {
+		t.Fatalf("ordinary init did not retire the deselected asset: %v", err)
+	}
+}

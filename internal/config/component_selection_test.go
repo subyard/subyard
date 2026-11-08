@@ -28,3 +28,30 @@ func TestComponentSelectionExplanationKeepsStableShippedProvenance(t *testing.T)
 		}
 	}
 }
+
+func TestComponentSelectionExplanationNamesInstalledRecord(t *testing.T) {
+	installed := SettingResolution{Scope: InstalledSettingScope, Role: InstalledSettingRole, Value: "codex", Status: "effective"}
+	loaded := Loaded{Context: domain.Context{YardName: "named"},
+		Integrations:        IntegrationSelection{Present: true, Requested: []string{"codex"}, Effective: []string{"codex"}},
+		EnvironmentProfiles: EnvironmentProfileSelection{Present: true, Requested: []string{"github"}, Effective: []string{"github"}},
+		Settings: map[string]SettingTrace{
+			"CODING_TOOL_INTEGRATIONS": {Resolutions: []SettingResolution{installed}},
+			"ENVIRONMENT_PROFILES":     {Resolutions: []SettingResolution{installed}},
+		}}
+	if _, _, group := ComponentSelectionSource(loaded.Settings["CODING_TOOL_INTEGRATIONS"]); group != "installed configuration" {
+		t.Fatalf("installed record grouped as %q", group)
+	}
+	for _, want := range []string{
+		"yard named: requested coding integrations [codex], effective [codex], from installed configuration (applied record)",
+		"yard named: requested environment profiles [github], effective [github], from installed configuration (applied record)",
+	} {
+		if text := loaded.IntegrationSelectionExplanation() + "\n" + loaded.EnvironmentProfileSelectionExplanation(); !strings.Contains(text, want) {
+			t.Fatalf("missing %q in %q", want, text)
+		}
+	}
+	for _, entry := range loaded.IntegrationInventory() {
+		if entry.SourceGroup != "installed configuration" {
+			t.Fatalf("inventory source group %q", entry.SourceGroup)
+		}
+	}
+}

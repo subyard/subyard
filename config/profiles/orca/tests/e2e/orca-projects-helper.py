@@ -273,16 +273,21 @@ def stock_probe(arguments):
                     env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
-                deadline = time.monotonic() + 20
+                started = time.monotonic()
+                deadline = started + 20
+                last = "no runtime metadata"
                 while time.monotonic() < deadline and server.poll() is None:
                     if metadata.is_file():
                         try:
                             rpc.call("status.get")
                             return
-                        except SafeRpcError:
-                            pass
+                        except SafeRpcError as error:
+                            last = str(error)
                     time.sleep(0.1)
-                raise SafeRpcError("stock runtime did not become reachable")
+                status = server.poll()
+                state = (f"exited with status {status}" if status is not None
+                         else f"still running after {time.monotonic() - started:.0f}s")
+                raise SafeRpcError(f"stock runtime did not become reachable ({state}; last: {last})")
 
             try:
                 phase = "startup"

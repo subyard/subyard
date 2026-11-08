@@ -191,7 +191,7 @@ func (cli *CLI) installedReleaseTarget(ctx context.Context, target configTarget)
 		if known && definition.Application == config.SettingYardInit {
 			installed.Loaded.Settings[name] = config.SettingTrace{Name: name, EffectiveValue: value, Kind: definition.Kind, Type: definition.Type, Application: definition.Application, Owner: definition.Owner,
 				Aliases: definition.Aliases, Scopes: definition.Scopes, Syncable: definition.Syncable, Merge: definition.Merge, Sensitive: definition.Sensitive,
-				Resolutions: []config.SettingResolution{{Scope: "release", Role: "activation context", Value: value, Status: "effective"}}}
+				Resolutions: []config.SettingResolution{{Scope: config.InstalledSettingScope, Role: config.InstalledSettingRole, Value: value, Status: "effective"}}}
 		}
 	}
 	return installed, baseline, nil

@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -389,5 +392,206 @@ func TestRollbackRepairConfigurationView(t *testing.T) {
 				t.Fatal("materialized view differs from profile view")
 			}
 		})
+	}
+}
+
+// pendingRetirementExecutor keeps the native integration observer and answers
+// its ownership inventory by view: the installed view (observe-applied) needs a
+// repair, while the desired view that pending init applies is answered by
+// desired: "" (retirable), "conflict" (guest refusal) or "unavailable" (transport).
+type pendingRetirementExecutor struct {
+	installedSettingsExecutor
+	destination, hash string
+	desired           string
+	desiredByInstance map[string]string // per-instance override of desired
+	unreadable        string            // instance whose materialized config cannot be read
+	desiredReads      int
+	desiredInstances  []string
+}
+
+func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	command := request.Command
+	if len(command) == 5 && command[0] == "python3" && strings.Contains(command[3], "Version 1 records observed ownership only") {
+		switch command[4] {
+		case "observe-applied":
+			payload, _ := json.Marshal(map[string]any{"fingerprint": strings.Repeat("a", 64), "changed": true})
+			return ports.InstanceExecResult{Stdout: payload}, nil
+		case "observe":
+			fixture.desiredReads++
+			fixture.desiredInstances = append(fixture.desiredInstances, instance)
+			desired := fixture.desired
+			if override, ok := fixture.desiredByInstance[instance]; ok {
+				desired = override
+			}
+			switch desired {
+			case "conflict":
+				return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
+			case "unavailable":
+				return ports.InstanceExecResult{}, errors.New("synthetic transport failure")
+			}
+			payload, _ := json.Marshal(map[string]any{"fingerprint": strings.Repeat("b", 64), "changed": true})
+			return ports.InstanceExecResult{Stdout: payload}, nil
+		case "settings", "selection":
+			return fixture.installedSettingsExecutor.Exec(ctx, project, instance, request)
+		}
+		return ports.InstanceExecResult{}, fmt.Errorf("unexpected inventory mutation: %s", command[4])
+	}
+	if len(command) == 3 && command[0] == "sha256sum" && command[2] == fixture.destination {
+		if instance == fixture.unreadable {
+			return ports.InstanceExecResult{}, errors.New("synthetic materialized config read failure")
+		}
+		return ports.InstanceExecResult{Stdout: []byte(fixture.hash + "  " + fixture.destination + "\n")}, nil
+	}
+	if len(command) >= 4 && command[0] == "sh" && strings.Contains(strings.Join(command, " "), "changed=0") {
+		return ports.InstanceExecResult{Stdout: []byte("changed=0\n")}, nil
+	}
+	return fixture.installedSettingsExecutor.Exec(ctx, project, instance, request)
+}
+
+// An installed-view repair keeps a deselected integration installed until the
+// pending yard init retires it. When that retirement would refuse changed owned
+// state, or cannot be inspected, the repair refuses instead of first rewriting
+// the change. Another yard's independent read failure is reported together.
+func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
+	for _, desired := range []string{"conflict", "unavailable", "", "conflict+unreadable-named"} {
+		t.Run("desired="+desired, func(t *testing.T) {
+			named := desired == "conflict+unreadable-named"
+			fixture := newPendingInitFixture(t, named, map[string]string{"default": "CODING_TOOL_INTEGRATIONS=\n"})
+			request, journal := repairRequest(t, fixture)
+			installed := fixture.cli.options.Executor.(installedSettingsExecutor)
+			executor := &pendingRetirementExecutor{installedSettingsExecutor: installed, desired: strings.TrimSuffix(desired, "+unreadable-named")}
+			if named {
+				executor.unreadable = fixture.instanceName(t, "named")
+			}
+			fixture.cli.options.Executor = executor
+			fixture.cli.options.InitPlatform = nil
+			owner := fixture.cli.activationReconcilers(request)[len(fixture.cli.profileRuntimeIDs())].(*materializedConfigActivationReconciler)
+			if !owner.cli.activation.repair {
+				t.Fatal("fixture does not repair the active release")
+			}
+			// The installed view still selects codex; its materialized rules are current.
+			loaded, err := owner.cli.resolveReleaseTransitionContext(context.Background(), "default", request.ConfigHome)
+			if err != nil || !slices.Equal(loaded.Integrations.Effective, []string{"codex"}) {
+				t.Fatalf("installed selection=%v err=%v", loaded.Integrations.Effective, err)
+			}
+			assets, err := effectiveConfigAssets(loaded)
+			if err != nil || len(assets) != 1 {
+				t.Fatalf("assets=%v err=%v", assets, err)
+			}
+			fake := fixture.cli.options.Incus.(*testkit.Incus)
+			fake.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName]}
+			executor.destination = assets[0].Destination
+			if executor.hash, err = config.HashRegularFile(assets[0].Source); err != nil {
+				t.Fatal(err)
+			}
+			observation, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{})
+			if desired == "" {
+				if err != nil || observation.Converged || !owner.integrationPlans["default"].Changed || executor.desiredReads == 0 {
+					t.Fatalf("retirable pending selection blocked the repair: %#v %v", observation, err)
+				}
+				return
+			}
+			var refusal pendingInitConflictError
+			if !errors.As(err, &refusal) || refusal.yard != "default" || refusal.conflict != (executor.desired == "conflict") {
+				t.Fatalf("repair would rewrite state pending init cannot retire: %#v %v", observation, err)
+			}
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &diagnostic) {
+				t.Fatal("refusal has no public diagnostic")
+			}
+			message, retry := diagnostic.ActivationDiagnostic()
+			want := "yard default: integration configuration awaiting yard init has an ownership conflict"
+			if executor.desired == "unavailable" {
+				want = "yard default: integration configuration awaiting yard init cannot be inspected"
+			}
+			if !strings.HasPrefix(message, want) || retry != "run yard -Y default integration status" || len(message) > 512 || strings.ContainsAny(retry, ";&|") {
+				t.Fatalf("diagnostic=%q retry=%q", message, retry)
+			}
+			if named {
+				var read materializedConfigActivationError
+				if !errors.As(err, &read) || read.yard != "named" || !strings.Contains(message, "; yard named: cannot inspect materialized config") {
+					t.Fatalf("independent refusal of another yard was not reported: %v %q", err, message)
+				}
+			}
+		})
+	}
+}
+
+func TestActivationRefusalsStayWithinDiagnosticBound(t *testing.T) {
+	causes := []error{}
+	for index := range 6 {
+		causes = append(causes, pendingInitConflictError{yard: fmt.Sprintf("yard-%02d", index), conflict: index%2 == 0, cause: errors.New("synthetic")})
+	}
+	if single := collectActivationRefusals(causes[:1]); single != causes[0] {
+		t.Fatalf("single refusal was wrapped: %#v", single)
+	}
+	message, retry := collectActivationRefusals(causes).(interface{ ActivationDiagnostic() (string, string) }).ActivationDiagnostic()
+	want := "6 release activation refusals, 5 omitted; complete detail: run yard -Y yard-00 integration status, run yard -Y yard-01 integration status"
+	if len(message) > 512 || !strings.HasPrefix(message, want) || !strings.Contains(message, "; first: yard yard-00: ") || retry != "run yard -Y yard-00 integration status" {
+		t.Fatalf("diagnostic=%q retry=%q", message, retry)
+	}
+	// Every omitted yard is named while its status view fits the bound.
+	for _, yard := range []string{"yard-01", "yard-05"} {
+		if !strings.Contains(message, "run yard -Y "+yard+" integration status") {
+			t.Fatalf("omitted %s has no status view: %q", yard, message)
+		}
+	}
+	many := []error{}
+	for index := range 40 {
+		many = append(many, pendingInitConflictError{yard: fmt.Sprintf("yard-%02d", index), cause: errors.New("synthetic")})
+	}
+	message, _ = collectActivationRefusals(many).(interface{ ActivationDiagnostic() (string, string) }).ActivationDiagnostic()
+	if len(message) > 512 || !strings.HasPrefix(message, "40 release activation refusals, 39 omitted; ") || !strings.Contains(message, " more; first: yard yard-00: ") ||
+		len(message)-strings.Index(message, "; first: ")-len("; first: ") < 160 {
+		t.Fatalf("overflowing status views not counted or first refusal starved: %q", message)
+	}
+	// An oversized first retry never starves or breaks the first refusal.
+	long := []error{materializedConfigActivationError{yard: strings.Repeat("y", 450), command: "update --check", cause: errors.New("synthetic")}, many[1]}
+	message, _ = collectActivationRefusals(long).(interface{ ActivationDiagnostic() (string, string) }).ActivationDiagnostic()
+	if len(message) > 512 || !strings.HasPrefix(message, "2 release activation refusals, 1 omitted; first: yard "+strings.Repeat("y", 50)) {
+		t.Fatalf("oversized first retry: %q", message)
+	}
+}
+
+// Prospective planning applies the same guard to the desired files a planned
+// source publication would leave: one yard refuses with the desired-view
+// conflict while another, retirable yard proceeds in the same observation.
+func TestProspectiveRepairGuardsPendingInitRetirement(t *testing.T) {
+	fixture := newPendingInitFixture(t, true, map[string]string{"default": "CODING_TOOL_INTEGRATIONS=\n", "named": "CODING_TOOL_INTEGRATIONS=\n"})
+	request, journal := repairRequest(t, fixture)
+	installed := fixture.cli.options.Executor.(installedSettingsExecutor)
+	defaultInstance, namedInstance := fixture.instanceName(t, "default"), fixture.instanceName(t, "named")
+	executor := &pendingRetirementExecutor{installedSettingsExecutor: installed, desiredByInstance: map[string]string{defaultInstance: "conflict", namedInstance: ""}}
+	fixture.cli.options.Executor = executor
+	fixture.cli.options.InitPlatform = nil
+	owner := fixture.cli.activationReconcilers(request)[len(fixture.cli.profileRuntimeIDs())].(*materializedConfigActivationReconciler)
+	if !owner.cli.activation.repair {
+		t.Fatal("fixture does not repair the active release")
+	}
+	loaded, err := owner.cli.resolveReleaseTransitionContext(context.Background(), "default", request.ConfigHome)
+	if err != nil || !slices.Equal(loaded.Integrations.Effective, []string{"codex"}) {
+		t.Fatalf("installed selection=%v err=%v", loaded.Integrations.Effective, err)
+	}
+	assets, err := effectiveConfigAssets(loaded)
+	if err != nil || len(assets) != 1 {
+		t.Fatalf("assets=%v err=%v", assets, err)
+	}
+	fake := fixture.cli.options.Incus.(*testkit.Incus)
+	fake.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName]}
+	executor.destination = assets[0].Destination
+	if executor.hash, err = config.HashRegularFile(assets[0].Source); err != nil {
+		t.Fatal(err)
+	}
+	observation, err := owner.ObserveProspective(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}, retainedActivationSettingsView{request.ConfigHome})
+	if !slices.Contains(executor.desiredInstances, defaultInstance) || !slices.Contains(executor.desiredInstances, namedInstance) {
+		t.Fatalf("prospective planning did not inspect every pending desired view: %v %#v %v", executor.desiredInstances, observation, err)
+	}
+	var refusal pendingInitConflictError
+	if !errors.As(err, &refusal) || refusal.yard != "default" || !refusal.conflict {
+		t.Fatalf("prospective planning admitted a repair that pending init cannot retire: %#v %v", observation, err)
+	}
+	var refusals *activationRefusals
+	if errors.As(err, &refusals) || strings.Contains(err.Error(), "yard named") || !owner.integrationPlans["named"].Changed {
+		t.Fatalf("retirable yard did not proceed independently: %v", err)
 	}
 }

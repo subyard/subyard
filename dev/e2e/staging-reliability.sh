@@ -3,6 +3,8 @@
 # Controller: timeout --signal=TERM --kill-after=120 7200 dev/agent-e2e.sh \
 #   --slot N --type android-test --purpose staging-reliability --vm 1 -- \
 #   bash dev/e2e/staging-reliability.sh
+# Release acceptance runs it as vm:staging-reliability with purpose
+# release-staging-reliability (dev/e2e/release-vm-check.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
@@ -492,7 +494,8 @@ if scope=='outer_vm':
     if (type(lease.get('schema_version')) is not int or lease['schema_version']!=2
         or any(lease.get(key)!=value or not value for key,value in
             (('project',project),('run',run),('slot',slot),('purpose',purpose)))
-        or purpose not in ('staging-reliability','broker-cold-upgrade')): raise RuntimeError('foreign APT actor lease')
+        or purpose not in ('staging-reliability','release-staging-reliability','broker-cold-upgrade')):
+        raise RuntimeError('foreign APT actor lease')
     state=pathlib.Path(state);uid=int(uid);item=canonical(state)
     if uid<=0 or not stat.S_ISDIR(item.st_mode) or item.st_uid!=uid or stat.S_IMODE(item.st_mode)!=0o711:
         raise RuntimeError('unsafe APT actor fixture root')

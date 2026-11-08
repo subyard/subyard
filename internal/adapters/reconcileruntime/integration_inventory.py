@@ -389,19 +389,29 @@ def main():
         return
     observed = {}
     metadata = {}
+    # Installed-view release inspection and repair own only the committed
+    # installed scope. An incomplete apply marks the records it introduced as
+    # uncommitted; outside that scope they belong to the pending init, which
+    # completes or retires them. Release repair neither judges, retires nor
+    # forgets them. Committed records keep ordinary retirement even when a
+    # failed apply left intent labels on them.
+    retain = request.get('retain_pending_intent') is True or mode == 'observe-applied'
+    intent = {name for name, entry in previous.items()
+              if retain and name not in wanted and entry.get('uncommitted') is True}
     def comparable_entry(entry):
         value = {k: v for k, v in entry.items() if k != 'preview_migrated'}
         if mode == 'observe-applied':
             # Apply records intent before writes, including unchanged files.
             # A later hook failure leaves those exact redundant labels behind.
-            # Passive release inspection may ignore only intent identical to
-            # the committed artifact; actual bytes/metadata and source-derived
-            # desired records are still compared below. Init retains the labels.
+            # Inside the installed scope, passive release inspection may ignore
+            # only intent identical to the committed artifact; actual
+            # bytes/metadata and source-derived desired records are still
+            # compared below. Init retains the labels.
             for field in ('pending_digest', 'config_pending_digest'):
                 if value.get(field) == value.get('digest'):
                     value.pop(field, None)
         return value
-    comparable = [comparable_entry(entry) for entry in records]
+    comparable = [comparable_entry(entry) for entry in records if key(entry) not in intent]
     changed = comparable != [clean(e) for e in desired] or bool(migrations)
     retired = []
     adopted = []
@@ -411,6 +421,8 @@ def main():
         current_metadata = actual_metadata(entry)
         if current_metadata is not None:
             metadata[name] = current_metadata
+        if name in intent:
+            continue
         if entry['kind'] in ('file', 'link') and current not in (None, entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest')):
             raise OwnershipConflict('owned artifact drift', entry['path'])
         if name not in wanted:
@@ -458,7 +470,7 @@ def main():
         raise ValueError('integration plan is stale')
     if mode in ('observe', 'observe-applied'):
         facts = []
-        for name in sorted(set(previous) | set(wanted)):
+        for name in sorted((set(previous) - intent) | set(wanted)):
             entry = wanted.get(name) or previous[name]
             value = observed.get(name)
             facts.append({'key': name, 'desired': digest(encode(clean(wanted[name]))) if name in wanted else 'absent',
@@ -517,14 +529,15 @@ def main():
         for entry in committed:
             if previous.get(key(entry), {}).get('preview_migrated'):
                 entry['preview_migrated'] = True
-        save(committed)
+        save(committed + [previous[name] for name in sorted(intent)])
         return
     # Publish intent before file replacement; both old and candidate digests permit retry.
     pending = dict(previous)
     for name, entry in wanted.items():
         if entry['kind'] == 'package':
             continue
-        candidate = dict(clean(entry), pending_digest=entry['digest'])
+        # Commit saves clean desired records, which drops this marker.
+        candidate = dict(clean(entry), pending_digest=entry['digest'], uncommitted=True)
         if name in previous:
             candidate = dict(previous[name], pending_digest=entry['digest'])
         elif observed[name] is not None:

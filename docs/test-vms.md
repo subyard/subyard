@@ -816,6 +816,11 @@ timeout --signal=TERM --kill-after=120 7200 dev/agent-e2e.sh \
   bash dev/e2e/staging-reliability.sh
 ```
 
+Release acceptance runs the same fixture as `vm:staging-reliability` through
+`dev/e2e/release-vm-check.sh`, whose lease purpose is `release-staging-reliability`. The allocated
+VM APT actor accepts only that purpose, `staging-reliability` and the test-vms
+`broker-cold-upgrade` lane.
+
 The fixture emits source/installed-engine identities, installed Incus/QEMU/package versions,
 guest kernel/agent identities when reachable, and five-second measurements of marker-verified
 QEMU PID/start time, task state, wait channel, scheduler counters, PSI and cgroup counters.

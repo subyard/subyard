@@ -24,6 +24,14 @@ type ComponentSelection struct {
 	Dependencies []string            `json:"dependency_reasons"`
 }
 
+// InstalledSettingScope and InstalledSettingRole mark an init-owned value taken
+// from the installed record (applied snapshot or protected receipt) rather than
+// from a configuration source. Active-release repair observes these values.
+const (
+	InstalledSettingScope = "release"
+	InstalledSettingRole  = "activation context"
+)
+
 func ComponentSelectionSource(trace SettingTrace) (SettingResolution, []SettingResolution, string) {
 	source := SettingResolution{Status: "unset"}
 	overridden := []SettingResolution{}
@@ -38,6 +46,8 @@ func ComponentSelectionSource(trace SettingTrace) (SettingResolution, []SettingR
 	switch {
 	case source.Scope == "command":
 		group = "command override"
+	case source.Scope == InstalledSettingScope && source.Role == InstalledSettingRole:
+		group = "installed configuration"
 	case strings.Contains(source.Role, "Git"):
 		group = "Git settings"
 	case source.Role == "scalar settings" || source.Role == "file settings":
@@ -95,12 +105,21 @@ func (loaded Loaded) IntegrationInventory() []ComponentSelection {
 
 func (loaded Loaded) IntegrationSelectionExplanation() string {
 	source, _, group := ComponentSelectionSource(loaded.Settings["CODING_TOOL_INTEGRATIONS"])
-	explanation := fmt.Sprintf("yard %s: requested coding integrations [%s], effective [%s], from %s (%s scope, %s:%d)",
-		loaded.Context.YardName, strings.Join(loaded.Integrations.Requested, " "), strings.Join(loaded.Integrations.Effective, " "), group, source.Scope, loaded.componentSelectionSourcePath(source), source.Line)
+	explanation := fmt.Sprintf("yard %s: requested coding integrations [%s], effective [%s], from %s",
+		loaded.Context.YardName, strings.Join(loaded.Integrations.Requested, " "), strings.Join(loaded.Integrations.Effective, " "), loaded.componentSelectionOrigin(source, group))
 	if len(loaded.Integrations.Retired) != 0 {
 		explanation += "; retired and ignored [" + strings.Join(loaded.Integrations.Retired, " ") + "]"
 	}
 	return explanation
+}
+
+// An installed record has no configuration file; desired source changes that
+// differ from it are listed separately as awaiting yard init.
+func (loaded Loaded) componentSelectionOrigin(source SettingResolution, group string) string {
+	if group == "installed configuration" {
+		return "installed configuration (applied record)"
+	}
+	return fmt.Sprintf("%s (%s scope, %s:%d)", group, source.Scope, loaded.componentSelectionSourcePath(source), source.Line)
 }
 
 func (loaded Loaded) componentSelectionSourcePath(source SettingResolution) string {
@@ -122,6 +141,6 @@ func (loaded Loaded) EnvironmentProfileSelectionExplanation() string {
 	if !loaded.EnvironmentProfiles.Present {
 		return fmt.Sprintf("yard %s: environment profiles selection absent; effective declared defaults [%s]", loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Effective, " "))
 	}
-	return fmt.Sprintf("yard %s: requested environment profiles [%s], effective [%s], from %s (%s scope, %s:%d)",
-		loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Requested, " "), strings.Join(loaded.EnvironmentProfiles.Effective, " "), group, source.Scope, loaded.componentSelectionSourcePath(source), source.Line)
+	return fmt.Sprintf("yard %s: requested environment profiles [%s], effective [%s], from %s",
+		loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Requested, " "), strings.Join(loaded.EnvironmentProfiles.Effective, " "), loaded.componentSelectionOrigin(source, group))
 }

@@ -360,6 +360,12 @@ func TestPendingInitComparesEffectiveSelection(t *testing.T) {
 	if settings := pendingInitSettings(desired, installed); len(settings) != 1 || settings[0].Name != "CODING_TOOL_INTEGRATIONS" || settings[0].Desired != "codex" {
 		t.Fatalf("effective selection change not listed: %#v", settings)
 	}
+	// An explicit empty selection is listed as empty.
+	desired.Integrations = config.IntegrationSelection{Present: true, Requested: []string{}, Effective: []string{}, AllowsCodingTools: true}
+	installed.Integrations = config.IntegrationSelection{Present: true, Requested: []string{"codex"}, Effective: []string{"codex"}, AllowsCodingTools: true}
+	if settings := pendingInitSettings(desired, installed); len(settings) != 1 || settings[0].Value() != "codex -> (empty)" {
+		t.Fatalf("explicit empty selection not listed as empty: %#v", settings)
+	}
 }
 
 // The sealed fixture owner becomes ready only at its convergence boundary. Each

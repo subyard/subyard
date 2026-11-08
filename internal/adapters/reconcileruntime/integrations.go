@@ -46,6 +46,34 @@ func (err integrationOwnershipError) ActivationDiagnostic() (string, string) {
 	return err.message, err.retry
 }
 
+func (integrationOwnershipError) integrationOwnershipConflict() {}
+
+// integrationOwnershipRefusal is a refusal the guest ownership program itself
+// returned without a recognized public detail. Its text stays unchanged.
+type integrationOwnershipRefusal string
+
+func (err integrationOwnershipRefusal) Error() string             { return string(err) }
+func (integrationOwnershipRefusal) integrationOwnershipConflict() {}
+
+// ownershipRefusal labels a failed guest ownership command. Only a command the
+// guest completed reports ownership state; transport and host failures remain
+// inspection failures with the same text.
+func ownershipRefusal(message string, result ports.InstanceExecResult, err error) error {
+	var completed *ports.GuestExitError
+	if err == nil && result.ExitCode != 0 || errors.As(err, &completed) {
+		return integrationOwnershipRefusal(message)
+	}
+	return errors.New(message)
+}
+
+// IntegrationOwnershipConflict reports whether an integration observation
+// failed because the guest refused unproven or changed owned state, rather than
+// because the state could not be inspected.
+func IntegrationOwnershipConflict(err error) bool {
+	var conflict interface{ integrationOwnershipConflict() }
+	return errors.As(err, &conflict)
+}
+
 // IntegrationPlan binds the candidate selection and live ownership evidence.
 // It contains no credentials or document contents.
 type IntegrationPlan struct {
@@ -499,6 +527,11 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 	if evidence != nil {
 		request["config_diagnostics"] = evidence
 	}
+	if runtime.appliedIntegrationInspection {
+		// The installed view never retires or forgets a pending init's intent
+		// for its desired selection outside the installed scope.
+		request["retain_pending_intent"] = true
+	}
 	if mode == "capture-settings" {
 		catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
 		if err != nil {
@@ -590,7 +623,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 				}
 			}
 		}
-		return integrationObservation{}, errors.New("integration ownership conflict or unavailable evidence; managed artifacts were preserved")
+		return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 	}
 	var observed integrationObservation
 	if mode == "observe" || mode == "observe-applied" || mode == "selection" || mode == "settings" {
@@ -1004,7 +1037,7 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 					"--", "sha256sum", "--", path}),
 			}
 		}
-		return configmaterial.Observation{}, errors.New("integration structured configuration ownership conflict")
+		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)
 	}
 	return configmaterial.ParseObservation(result.Stdout)
 }

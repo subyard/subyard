@@ -148,6 +148,9 @@ async def run_case(source, mode, decision, base, server):
                "ANTHROPIC_API_KEY": "synthetic-local-only",
                "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+               # A custom base URL makes current clients ask the server for auto-mode review,
+               # which this loopback model cannot provide; use the client's own classifier.
+               "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
                "DISABLE_AUTOUPDATER": "1", "IS_SANDBOX": "1",
                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
         options = ClaudeAgentOptions(cwd=str(repo), settings=json.dumps(settings),

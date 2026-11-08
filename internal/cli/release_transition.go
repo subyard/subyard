@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
@@ -1125,10 +1126,14 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	if captureIntegrationPlans {
 		reconciler.integrationPlans = map[string]reconcileruntime.IntegrationPlan{}
 	}
+	// Each yard is observed independently. A refusal skips only that yard's
+	// findings that depend on the failed read; every refusal is reported together.
+	var refusals []error
 	for _, target := range targets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
-			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}
+			refusals = append(refusals, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome})
+			continue
 		}
 		consequences = append(consequences, target.Loaded.IntegrationSelectionExplanation(), target.Loaded.EnvironmentProfileSelectionExplanation())
 		var reader func(config.MaterializedAsset) ([]byte, error)
@@ -1137,7 +1142,8 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		}
 		integrationScope, managedPaths, err := operation.materializedIntegrationScope(target.Loaded, reader)
 		if err != nil {
-			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome}
+			refusals = append(refusals, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome})
+			continue
 		}
 		platform := operation.initPlatform(target.Loaded, nil)
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && files != nil {
@@ -1149,15 +1155,25 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			if assessment.State == "drift" || assessment.State == "converged" {
 				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 				if err != nil {
-					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect", reconciler.configHome}
+					refusals = append(refusals, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect", reconciler.configHome})
+					continue
 				}
 				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
 				if err != nil {
-					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect", reconciler.configHome}
+					refusals = append(refusals, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect", reconciler.configHome})
+					continue
 				}
 				if captureIntegrationPlans {
 					reconciler.integrationPlans[target.Name] = integration
 				}
+			}
+		}
+		// An installed-view repair must not rewrite owned integration state that the
+		// pending yard init could not retire: that would discard the operator's change.
+		if reconciler.cli.activation != nil && reconciler.cli.activation.repair &&
+			(integration.Changed || integration.NeedsRetirementProof()) {
+			if err := operation.pendingInitIntegrationRefusal(ctx, target, reconciler.configHome, files); err != nil {
+				refusals = append(refusals, err)
 			}
 		}
 		if integration.Changed {
@@ -1190,10 +1206,89 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integration.Changed || integration.NeedsRetirementProof(),
 		})
 	}
+	if err := collectActivationRefusals(refusals); err != nil {
+		return releasetransition.V2ActivationObservation{}, err
+	}
 	assessed := config.AssessMaterializationActivation(activationTargets)
 	// The frozen protocol requires a sorted warning list.
 	slices.Sort(warnings)
 	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings)}, nil
+}
+
+// activationRefusals keeps every independent per-yard refusal of one activation
+// owner. The release boundary publishes one bounded diagnostic and one retry.
+type activationRefusals struct{ causes []error }
+
+func collectActivationRefusals(causes []error) error {
+	switch len(causes) {
+	case 0:
+		return nil
+	case 1:
+		return causes[0]
+	}
+	return &activationRefusals{causes: slices.Clone(causes)}
+}
+
+func (refusals *activationRefusals) Error() string {
+	messages := make([]string, len(refusals.causes))
+	for index, cause := range refusals.causes {
+		messages[index] = cause.Error()
+	}
+	return strings.Join(messages, "; ")
+}
+
+func (refusals *activationRefusals) Unwrap() []error { return refusals.causes }
+
+// ActivationDiagnostic lists each public refusal in observation order and retries
+// the first. Over the protocol text bound, it keeps the first refusal, names how
+// many were omitted and the status views that report them in full.
+func (refusals *activationRefusals) ActivationDiagnostic() (string, string) {
+	const limit, firstBudget = 512, 160
+	messages := make([]string, 0, len(refusals.causes))
+	actions := make([]string, 0, len(refusals.causes))
+	for _, cause := range refusals.causes {
+		message, action := "release activation cannot be observed safely", "run yard update --check"
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		if errors.As(cause, &diagnostic) {
+			message, action = diagnostic.ActivationDiagnostic()
+		}
+		messages = append(messages, message)
+		actions = append(actions, action)
+	}
+	retry := actions[0]
+	if joined := strings.Join(messages, "; "); len(joined) <= limit {
+		return joined, retry
+	}
+	omitted := len(messages) - 1
+	const separator = "; first: "
+	// The first refusal keeps at least firstBudget characters; status views take
+	// only the remaining space and an oversized first retry is left to the action.
+	head := fmt.Sprintf("%d release activation refusals, %d omitted; complete detail: %s", len(messages), omitted, retry)
+	if len(head)+len(separator)+firstBudget > limit {
+		head = fmt.Sprintf("%d release activation refusals, %d omitted", len(messages), omitted)
+	} else {
+		for index, action := range actions[1:] {
+			if slices.Contains(actions[:index+1], action) {
+				continue
+			}
+			rest := fmt.Sprintf(", and %d more", omitted-index)
+			if len(head)+len(", ")+len(action)+len(rest)+len(separator)+firstBudget > limit {
+				head += rest
+				break
+			}
+			head += ", " + action
+		}
+	}
+	prefix := head + separator
+	first := messages[0]
+	if budget := limit - len(prefix); len(first) > budget {
+		end := budget - len("...")
+		for end > 0 && !utf8.RuneStart(first[end]) {
+			end--
+		}
+		first = strings.TrimSpace(first[:end]) + "..."
+	}
+	return prefix + first, retry
 }
 
 func (cli *CLI) appliedIntegrationTarget(ctx context.Context, target configTarget) (configTarget, error) {

@@ -781,9 +781,16 @@ test "$SUBYARD_E2E_YARD" = broker-selector
 '''], env={'PATH':'/usr/bin:/bin'}, capture_output=True, text=True, timeout=5)
 assert exported.returncode == 0, exported
 actor_context = exported.stdout.splitlines(); assert len(actor_context) == 4
+# Release acceptance runs this fixture through the core VM catalog wrapper,
+# which derives the lease purpose from the catalog id.
+catalog = json.loads(pathlib.Path('dev/e2e/release-vm-checks.json').read_text())
+release_ids = [entry['id'] for entry in catalog['checks'] if entry['command'][1:2] == ['dev/e2e/staging-reliability.sh']]
+assert release_ids == ['staging-reliability'], release_ids
+assert '--purpose "release-${id//\\//-}"' in pathlib.Path('dev/e2e/release-vm-check.sh').read_text()
+release_purpose = 'release-' + release_ids[0].replace('/', '-')
 with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
-    for scope,failed in [('owner_container',case) for case in ('','symlink','busy','linked','linked-lock','special','config')]+[('outer_vm',case) for case in ('','lease','project','run','slot','purpose','marker','marker-mode','lease-link','lease-symlink','du-timeout','du-invalid','supported-purpose','foreign-matching-purpose',
+    for scope,failed in [('owner_container',case) for case in ('','symlink','busy','linked','linked-lock','special','config')]+[('outer_vm',case) for case in ('','lease','project','run','slot','purpose','marker','marker-mode','lease-link','lease-symlink','du-timeout','du-invalid','supported-purpose','release-purpose','foreign-matching-purpose',
         'archive-config','archive-symlink','archive-owner','archive-mode','archive-link','archive-hardlink','archive-special','archive-entry-owner','archive-linked-lock','archive-busy','clean-failure','clean-timeout','clean-lock-replaced')]:
         case = root/(scope+'-'+(failed or 'success')); lists = case/'var/lib/apt/lists'; lists.mkdir(parents=True)
         locks = [case/name for name in ['var/lib/dpkg/lock-frontend','var/lib/dpkg/lock','var/lib/apt/lists/lock']]
@@ -811,6 +818,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as dir
         marker=state/'.subyard-p0-marker';marker.write_text(('foreign' if failed=='marker' else 'fixture')+'\n');marker.chmod(0o600)
         current_context=list(actor_context)
         if failed=='supported-purpose': current_context[-1]='broker-cold-upgrade'
+        if failed=='release-purpose': current_context[-1]=release_purpose
         if failed=='foreign-matching-purpose': current_context[-1]='foreign-purpose'
         lease=case/'lease';lease.write_text(json.dumps({'schema_version':1 if failed=='lease' else 2,'yard':'workspace-attribution',
             **dict(zip(('project','run','slot','purpose'),current_context))}));lease.chmod(0o444)
@@ -864,7 +872,7 @@ subprocess.check_output=command
         if held: held.close()
         native_failure=failed in ('clean-failure','clean-timeout')
         post_native_failure=native_failure or failed=='clean-lock-replaced'
-        refused=bool(failed) and not failed.startswith('du-') and failed!='supported-purpose' and not post_native_failure
+        refused=bool(failed) and not failed.startswith('du-') and failed not in ('supported-purpose','release-purpose') and not post_native_failure
         assert (result.returncode != 0) == (refused or post_native_failure), (scope,failed,result)
         assert index.exists() == refused and (partial/'index').exists() == refused and foreign.read_text() == 'foreign bytes', result
         assert native_calls.exists()==(scope=='outer_vm' and not refused),(scope,failed,result)

@@ -544,8 +544,28 @@ uses init's own plan and confirmation if a terminal is available; without a term
 the new listing and continuation command without running init. Unreadable desired integration
 sources remain uninspected. Each init uses ordinary admission and guards; refusals are collected
 in stable order with each `yard -Y NAME init` continuation, leaving release repair complete.
+A failed init can leave assets for its desired selection before its hook boundary; the ownership
+records it introduced stay marked uncommitted until a successful init commits them. Installed-view
+readiness and repair own only the committed installed scope: they neither report uncommitted
+records outside that scope as drift nor retire or drop them, so the release stays ready and the
+next successful init commits or retires them. Committed records that leave the installed scope
+are still retired, even when a failed apply left intent labels on them.
 RPC execution prints the listing and commands without running in-process inits. With no pending
 integration settings, no init steps are added.
+When a running yard's repair would change installed integration state while its integration
+configuration awaits init, materialized-config activation also inspects that desired
+configuration read-only, as `yard integration status` does; a planned source publication is
+inspected through its prospective files. This happens in every observation of the repair,
+including planning and `--check`, so a refusal precedes any effect. An ownership conflict the guest
+reports there, such as changed owned fields of a deselected integration, refuses the repair:
+restoring the installed state first would let the following init retire the operator's change.
+A failed inspection also refuses, with its own diagnostic rather than a conflict. Fix what
+`yard -Y NAME integration status` reports, then run `yard migrate`. Desired integration sources
+that cannot be read are not inspected, as in the pending-init listing, and the repair proceeds.
+Each yard is observed independently: refusals of all yards are reported together in target
+order (default first, then by name), and only findings that depend on a yard's failed read are
+skipped. When they exceed the diagnostic bound, the summary keeps the first refusal and names
+how many were omitted and the status views that report them in full.
 
 Go is the production release owner. Historical transitions retain their exact sealed
 owners and frozen process and recovery protocols. Unsupported experimental owner
@@ -787,6 +807,9 @@ recorded and required epochs, applied and pending migration IDs, transaction/ste
 runtime reconciliation actions, the verified owner's consequences (including per-yard selection
 and source explanations), and blockers. Add `--json` for the versioned machine-readable report;
 its optional `consequences` field preserves those explanations when the owner supplies them.
+A repair of the active release explains the installed selection it observes as
+`from installed configuration (applied record)`; desired init-owned selection changes are not
+activation work there and appear in the `yard migrate` plan's pending `yard init` listing.
 A successful inspection exits 0 even when work remains; inspect `outcome.status` for
 readiness. Unavailable or unsupported inspection never means ready.
 
