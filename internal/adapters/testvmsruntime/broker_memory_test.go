@@ -155,7 +155,15 @@ func TestBrokerNamespaceWaiterSignalsEndRequesterPromptly(t *testing.T) {
 		name   string
 		signal syscall.Signal
 		code   int
-	}{{"hangup", syscall.SIGHUP, 129}, {"interrupt", syscall.SIGINT, 130}, {"terminate", syscall.SIGTERM, 143}} {
+		ignore bool
+	}{
+		{"hangup", syscall.SIGHUP, 129, false},
+		{"interrupt", syscall.SIGINT, 130, false},
+		{"terminate", syscall.SIGTERM, 143, false},
+		{"ignored-hangup", syscall.SIGHUP, 129, true},
+		{"ignored-interrupt", syscall.SIGINT, 130, true},
+		{"ignored-terminate", syscall.SIGTERM, 143, true},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			output := filepath.Join(testkit.TempDir(t), "output")
 			testkit.WriteFile(t, output, nil, 0600)
@@ -165,6 +173,9 @@ func TestBrokerNamespaceWaiterSignalsEndRequesterPromptly(t *testing.T) {
 			}
 			defer file.Close()
 			command := brokerNamespaceWaiterCommand("/bin/sh", []string{"-c", "printf ready; exec sleep 30"})
+			if test.ignore {
+				command = append([]string{"/usr/bin/env", "--ignore-signal=HUP,INT,TERM", "--"}, command...)
+			}
 			process := exec.Command(command[0], command[1:]...)
 			process.Stdout = file
 			process.Stderr = file

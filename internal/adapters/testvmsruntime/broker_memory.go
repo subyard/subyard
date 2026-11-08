@@ -155,7 +155,9 @@ func brokerNamespaceWaiterCommand(executable string, arguments []string) []strin
 	// that attached PID as a transport waiter and give its child a visible parent.
 	// Save stdin before creating the async job: /bin/sh can replace descriptor 0
 	// with /dev/null before applying that job's redirections.
-	command := []string{"/bin/sh", "-c", `trap 'exit 129' HUP
+	// A non-interactive shell cannot trap signals ignored on entry. Reset them
+	// at exec, including dispositions inherited from detached launchers.
+	command := []string{"/usr/bin/env", "--default-signal=HUP,INT,TERM", "--", "/bin/sh", "-c", `trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 exec 3<&0

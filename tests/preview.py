@@ -23,7 +23,10 @@ with socket.socket() as reservation:
 URL = "http://%s:%d/" % ADDRESS
 PREVIEW = runpy.run_path(str(HELPER))
 LAUNCH = (
-    "import runpy, sys; helper = runpy.run_path(sys.argv.pop(1)); "
+    # Background test runners can inherit SIG_IGN for SIGINT. Give the child
+    # the handler whose foreground lifecycle this fixture exercises.
+    "import runpy, signal, sys; signal.signal(signal.SIGINT, signal.default_int_handler); "
+    "helper = runpy.run_path(sys.argv.pop(1)); "
     "settings = helper['main'].__globals__; "
     "settings['ENDPOINT_FILE'] = sys.argv.pop(1); "
     "settings['ADDRESS'] = ('127.0.0.1', int(sys.argv.pop(1))); "
