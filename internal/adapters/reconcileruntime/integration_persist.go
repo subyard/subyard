@@ -407,6 +407,10 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 // guest. Inspected reports whether the guest was observed: only then does the
 // result bind execution (a stopped guest is first observed while provisioning).
 func (runtime Runtime) InspectPersistTransfers(ctx context.Context) (plan IntegrationPlan, inspected bool, err error) {
+	// Before init installs Incus there is no yard whose data could be moved.
+	if ready, err := runtime.incusReady(ctx); err != nil || !ready {
+		return IntegrationPlan{}, false, err
+	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		return IntegrationPlan{}, false, err

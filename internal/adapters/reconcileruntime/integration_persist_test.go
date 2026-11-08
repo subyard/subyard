@@ -1,6 +1,7 @@
 package reconcileruntime
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -1098,5 +1099,15 @@ func TestPersistExecutionEnforcesTheConfirmedPlan(t *testing.T) {
 	// Without a confirmed binding (other commands bind their own plan) nothing changes.
 	if err := (Runtime{}).checkApprovedPersist(f.observation()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A fresh host runs init before Incus exists; inspecting persist transfers must
+// not fail on the missing server.
+func TestPersistInspectionWithoutIncusInspectsNothing(t *testing.T) {
+	runtime := Runtime{Incus: &testkit.Incus{Err: errors.New("dial unix /var/lib/incus/unix.socket: connect: no such file or directory")}}
+	plan, inspected, err := runtime.InspectPersistTransfers(context.Background())
+	if err != nil || inspected || plan.Changed {
+		t.Fatalf("plan=%#v inspected=%v err=%v", plan, inspected, err)
 	}
 }
