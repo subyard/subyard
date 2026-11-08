@@ -376,6 +376,44 @@ yard orca up --yes >/dev/null
 [ "$(repo_id "$clone_root")" = "$clone_repo_before" ] \
   || die 'repeat init/up lost preserved Orca server state'
 assert_no_managed_duplicates
+
+stage 'repairing metadata drift and reporting every unsafe project in one Orca up'
+recovery_project=/srv/workspaces/metadata-recovery
+clone_metadata_inode="$(guest_dev stat -c '%i' "$clone_meta")"
+guest_dev chmod 0664 -- "$clone_meta"
+guest_dev chmod 2775 -- "$recovery_project"
+guest_dev sed -i 's/"yard":"[^"]*"/"yard":"previous"/' "$recovery_meta"
+yard orca up --yes >/dev/null
+[ "$(guest_dev stat -c '%a:%i' "$clone_meta")" = "600:$clone_metadata_inode" ] \
+  || die 'Orca up did not narrow writable metadata in place'
+[ "$(guest_dev cat "$clone_meta")" = "$clone_metadata_before" ] \
+  || die 'metadata permission repair changed metadata content'
+[ "$(guest_dev stat -c '%a' "$recovery_project")" = 2755 ] \
+  || die 'Orca up did not narrow the group-writable project root'
+[ "$(guest_dev cat "$recovery_meta")" = "$recovery_metadata_before" ] \
+  || die 'Orca up did not restore stale yard metadata from the owner record'
+[ "$(guest_dev stat -c '%a' "$recovery_meta")" = 600 ] \
+  || die 'rewritten metadata is not private'
+[ "$(repo_id "$recovery_root")" = "$recovery_repo" ] && [ "$(repo_id "$clone_root")" = "$clone_repo_before" ] \
+  || die 'metadata drift repair changed repository identity'
+guest_root chown 0:0 -- "$clone_meta" "$recovery_meta"
+if yard orca up --yes >"$STATE/metadata-owner.out" 2>"$STATE/metadata-owner.err"; then
+  die 'Orca up accepted foreign-owned project metadata'
+fi
+for refused in /srv/workspaces/clone-project "$recovery_project"; do
+  grep -Fq "$refused" "$STATE/metadata-owner.err" \
+    || { cat "$STATE/metadata-owner.err" >&2; die "one Orca up did not report every refusing project: $refused"; }
+done
+grep -Fq 'chown' "$STATE/metadata-owner.err" \
+  || die 'metadata ownership refusal did not name the fix'
+if grep -Fq 'yard remove' "$STATE/metadata-owner.err"; then
+  die 'metadata refusal suggested removing the project'
+fi
+guest_root chown --reference="$recovery_root" -- "$clone_meta" "$recovery_meta"
+yard orca up --yes >/dev/null
+[ "$(repo_id "$recovery_root")" = "$recovery_repo" ] && [ "$(repo_id "$clone_root")" = "$clone_repo_before" ] \
+  || die 'Orca up after ownership fix changed repository identity'
+assert_no_managed_duplicates
 yard remove metadata-recovery --yes >/dev/null
 
 if [ "${SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC:-}" = 1 ]; then

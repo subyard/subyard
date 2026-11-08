@@ -40,10 +40,53 @@ type ProjectMetadataError struct {
 }
 
 func (failure *ProjectMetadataError) Error() string {
-	if failure.ProjectID != "" {
-		return fmt.Sprintf("project metadata repair refused for project %q at %q: %s", failure.ProjectID, failure.Root, failure.Reason)
+	reason := "filesystem access failed; restore read/write access to the workspace and retry"
+	path := failure.Root
+	switch failure.Reason {
+	case "missing_root":
+		reason = "project root is missing; restore the registered project directory at this path"
+	case "missing_source":
+		path = filepath.Join(path, "src")
+		reason = "source directory is missing; restore the project's source directory at this path"
+	case "unsafe_path":
+		reason = "root is not the canonical project path; restore the root path recorded by the authoritative owner registry"
+	case "unsafe_root_path":
+		reason = "root path is a symlink or has a non-directory parent; restore a real project directory at this path without symlink parents"
+	case "unsafe_source_path":
+		path = filepath.Join(path, "src")
+		reason = "source path is a symlink or not a directory; restore the real source directory at this path"
+	case "unsafe_root":
+		reason = "root ownership is unsafe; chown this directory to the developer user (a legacy bind root may stay root-owned without world write), then rerun the operation"
+	case "unsafe_source":
+		path = filepath.Join(path, "src")
+		reason = "source ownership is unsafe; chown this directory to the developer user (a legacy bind source may stay root-owned with the developer group and without world write), then rerun the operation"
+	case "access_denied":
+		reason = "the developer user cannot open this project's root, source or metadata; chown the unreadable entry to the developer user, then rerun the operation"
+	case "unsafe_metadata_path", "metadata_type", "metadata_owner", "metadata_links", "metadata_size", "invalid_metadata":
+		path = filepath.Join(path, ".subyard-meta.json")
+		problem := map[string]string{
+			"unsafe_metadata_path": "metadata is a symlink",
+			"metadata_type":        "metadata is not a regular file",
+			"metadata_owner":       "metadata belongs to another user",
+			"metadata_links":       "metadata has hard links",
+			"metadata_size":        "metadata exceeds 65536 bytes",
+			"invalid_metadata":     "metadata is not valid project metadata",
+		}[failure.Reason]
+		reason = problem + "; move this entry out of the project root, then rerun the operation to recreate it from the owner record"
+	case "conflicting_metadata":
+		path = filepath.Join(path, ".subyard-meta.json")
+		reason = "metadata names a different schema, projectId, name or mode than the owner record; if this directory belongs to this project, move this file out of the project root and rerun the operation to recreate it"
+	case "stale_inputs", "scope_changed":
+		reason = "captured workspace inputs changed; rerun the operation to capture a fresh plan"
+	case "scope_limit":
+		reason = "workspace inspection exceeds 4096 entries; move unrelated direct workspace entries outside /srv/workspaces and retry"
+	case "verification_failed":
+		reason = "published metadata could not be verified; check workspace storage and concurrent writers, then rerun the operation"
 	}
-	return fmt.Sprintf("project metadata repair refused at %q: %s", failure.Root, failure.Reason)
+	if failure.ProjectID != "" {
+		return fmt.Sprintf("project metadata repair refused for project %q at %q: %s", failure.ProjectID, path, reason)
+	}
+	return fmt.Sprintf("project metadata repair refused at %q: %s", path, reason)
 }
 
 func (failure *ProjectMetadataError) Unwrap() error {
@@ -55,36 +98,52 @@ func (failure *ProjectMetadataError) Unwrap() error {
 
 func metadataFailure(plan *projectMetadataPlan, output []byte) error {
 	failure := &ProjectMetadataError{Root: "/srv/workspaces", Reason: "io_failure"}
+	type detail struct {
+		Reason string `json:"reason"`
+		Target *int   `json:"target"`
+		Stale  bool   `json:"stale"`
+	}
 	var envelope struct {
-		Error *struct {
-			Reason string `json:"reason"`
-			Target *int   `json:"target"`
-			Stale  bool   `json:"stale"`
-		} `json:"error"`
+		Error  *detail  `json:"error"`
+		Errors []detail `json:"errors"`
 	}
-	if len(output) > 4096 || json.Unmarshal(output, &envelope) != nil || envelope.Error == nil || envelope.Error.Target == nil {
+	if len(output) > 1<<20 || json.Unmarshal(output, &envelope) != nil {
 		return failure
 	}
-	detail := envelope.Error
-	switch detail.Reason {
-	case "missing_root", "missing_source", "unsafe_path", "unsafe_root", "unsafe_source", "unsafe_metadata", "invalid_metadata", "conflicting_metadata", "stale_inputs", "scope_changed", "scope_limit", "verification_failed", "io_failure":
-	default:
-		return failure
-	}
-	index := *detail.Target
-	if index < -1 || index >= len(plan.Targets) {
-		return failure
-	}
-	failure.Reason, failure.stale = detail.Reason, detail.Stale
-	if index >= 0 {
-		failure.ProjectID = filepath.Base(plan.Targets[index].Root)
-		// Legacy owner IDs have no length limit; keep even invalid long roots bounded.
-		if len(failure.ProjectID) > 255 {
-			failure.ProjectID = failure.ProjectID[:252] + "..."
+	details := envelope.Errors
+	if envelope.Error != nil {
+		if len(details) != 0 {
+			return failure
 		}
-		failure.Root = filepath.Join("/srv/workspaces", failure.ProjectID)
+		details = []detail{*envelope.Error}
+	} else if len(details) > len(plan.Targets) {
+		return failure
 	}
-	return failure
+	if len(details) == 0 {
+		return failure
+	}
+	causes := make([]error, 0, len(details))
+	for _, detail := range details {
+		if detail.Target == nil || *detail.Target < -1 || *detail.Target >= len(plan.Targets) {
+			return failure
+		}
+		switch detail.Reason {
+		case "missing_root", "missing_source", "unsafe_path", "unsafe_root_path", "unsafe_source_path", "unsafe_metadata_path", "unsafe_root", "unsafe_source", "access_denied", "metadata_type", "metadata_owner", "metadata_links", "metadata_size", "invalid_metadata", "conflicting_metadata", "stale_inputs", "scope_changed", "scope_limit", "verification_failed", "io_failure":
+		default:
+			return failure
+		}
+		cause := &ProjectMetadataError{Root: "/srv/workspaces", Reason: detail.Reason, stale: detail.Stale}
+		if index := *detail.Target; index >= 0 {
+			cause.ProjectID = filepath.Base(plan.Targets[index].Root)
+			// Legacy owner IDs have no length limit; keep even invalid long roots bounded.
+			if len(cause.ProjectID) > 255 {
+				cause.ProjectID = cause.ProjectID[:252] + "..."
+			}
+			cause.Root = filepath.Join("/srv/workspaces", cause.ProjectID)
+		}
+		causes = append(causes, cause)
+	}
+	return domain.CollectRefusals(causes...)
 }
 
 // HasMetadataRepair lets resource bring-up retain a bounded init dependency
@@ -103,14 +162,15 @@ func (runtime Runtime) prepareMetadataHookBindings(ctx context.Context) error {
 		return err
 	}
 	var entries []struct {
-		Metadata json.RawMessage `json:"metadata"`
+		Metadata       json.RawMessage `json:"metadata"`
+		RepairMetadata string          `json:"repairMetadata"`
 	}
 	if err := json.Unmarshal(plan.Expected, &entries); err != nil {
 		return err
 	}
 	missing := []projectMetadataTarget{}
 	for index, entry := range entries {
-		if string(entry.Metadata) == "null" {
+		if string(entry.Metadata) == "null" || entry.RepairMetadata == "rewrite" {
 			missing = append(missing, plan.Targets[index])
 		}
 	}
@@ -182,19 +242,21 @@ func (plan *ProjectHookPlan) MetadataOperationStep(target string) *domain.Operat
 	if plan == nil || plan.metadata == nil {
 		return nil
 	}
-	decision, observed := domain.StepApply, "captured missing owner project metadata"
+	decision, observed := domain.StepApply, "captured missing or drifted owner project metadata"
 	if plan.conditional {
 		decision, observed = domain.StepConditional, "guest metadata unavailable"
 	} else if plan.approved.Projects == "" {
 		decision, observed = domain.StepSkip, "intentionally stopped"
 	} else {
 		var entries []struct {
-			Metadata json.RawMessage `json:"metadata"`
+			Metadata       json.RawMessage `json:"metadata"`
+			RepairRoot     bool            `json:"repairRoot"`
+			RepairMetadata string          `json:"repairMetadata"`
 		}
 		if json.Unmarshal(plan.metadata.Expected, &entries) == nil {
 			missing := false
 			for _, entry := range entries {
-				missing = missing || string(entry.Metadata) == "null"
+				missing = missing || string(entry.Metadata) == "null" || entry.RepairRoot || entry.RepairMetadata != ""
 			}
 			if !missing {
 				decision, observed = domain.StepSkip, "captured owner metadata already present"
@@ -203,7 +265,7 @@ func (plan *ProjectHookPlan) MetadataOperationStep(target string) *domain.Operat
 	}
 	return &domain.OperationStep{ID: "init.project-metadata", Target: fmt.Sprintf("%s:%d captured owner project roots", target, len(plan.metadata.Targets)), Observed: observed, Desired: "canonical metadata for every captured owner project root", Decision: decision,
 		Preconditions: []string{"authoritative owner records and captured guest roots remain unchanged", "canonical roots are owned directories; existing metadata has matching identity"},
-		Verify:        "all captured roots contain matching metadata; source and session files remain unchanged", Consequence: "atomically restore missing registered project metadata before installed hooks"}
+		Verify:        "all captured roots contain matching metadata; source and session files remain unchanged", Consequence: "restore missing metadata and repair captured metadata or root permission drift before installed hooks"}
 }
 
 func (runtime Runtime) metadataRequest(ctx context.Context, mode string, plan *projectMetadataPlan) (projectMetadataObservation, error) {
@@ -238,12 +300,13 @@ func (runtime Runtime) metadataRequest(ctx context.Context, mode string, plan *p
 	return observation, nil
 }
 
-// Only captured missing metadata in a legacy bind wrapper can require root.
+// Only captured missing or stale-content metadata in a legacy bind wrapper can require root.
 // The guest rechecks these exact facts before publishing a developer-owned file.
 func (plan *projectMetadataPlan) needsPrivilegedMetadataPublication(uid int) bool {
 	var entries []struct {
-		Root     []uint64        `json:"root"`
-		Metadata json.RawMessage `json:"metadata"`
+		Root           []uint64        `json:"root"`
+		Metadata       json.RawMessage `json:"metadata"`
+		RepairMetadata string          `json:"repairMetadata"`
 	}
 	if json.Unmarshal(plan.Expected, &entries) != nil || len(entries) != len(plan.Targets) {
 		return false
@@ -253,7 +316,7 @@ func (plan *projectMetadataPlan) needsPrivilegedMetadataPublication(uid int) boo
 			Mode domain.ProjectMode `json:"mode"`
 		}
 		if json.Unmarshal([]byte(plan.Targets[index].Payload), &desired) == nil && desired.Mode == domain.ProjectBind &&
-			string(entry.Metadata) == "null" && len(entry.Root) >= 3 && entry.Root[1] == 0 && entry.Root[2] == uint64(uid) && entry.Root[0]&0o022 == 0 {
+			(string(entry.Metadata) == "null" || entry.RepairMetadata == "rewrite") && len(entry.Root) >= 3 && entry.Root[1] == 0 && entry.Root[2] == uint64(uid) && entry.Root[0]&0o022 == 0 {
 			return true
 		}
 	}

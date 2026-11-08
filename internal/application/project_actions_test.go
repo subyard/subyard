@@ -483,7 +483,7 @@ func TestProjectSyncReservesLocalWorkspaceAsRootBeforeAssigningOwnership(t *test
 		t.Fatalf("local reservation was not privileged and exclusive: %#v", got)
 	}
 	wantOwnership := []string{
-		"install", "-d", "-o", "1234", "-g", "1234", "--", root, record.YardPath,
+		"install", "-d", "-m", "0755", "-o", "1234", "-g", "1234", "--", root, record.YardPath,
 	}
 	if got := data.requests[1]; !slices.Equal(got.Command, wantOwnership) ||
 		got.User != 0 || got.Group != 0 {

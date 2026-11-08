@@ -52,11 +52,11 @@ func (data *emptyClonePlanData) Execute(ctx context.Context, yard domain.Context
 		request.Command = slices.Clone(request.Command)
 		if request.Command[0] == "install" {
 			uid := strconv.Itoa(yard.DevUID)
-			if len(request.Command) != 8 || !slices.Equal(request.Command[:7], []string{"install", "-d", "-o", uid, "-g", uid, "--"}) {
+			if len(request.Command) != 10 || !slices.Equal(request.Command[:9], []string{"install", "-d", "-m", "0755", "-o", uid, "-g", uid, "--"}) {
 				return ports.InstanceExecResult{}, errors.New("unexpected clone workspace ownership request")
 			}
 			// Map the validated guest ownership onto this unprivileged host user.
-			request.Command[3], request.Command[5] = strconv.Itoa(os.Geteuid()), strconv.Itoa(os.Getegid())
+			request.Command[5], request.Command[7] = strconv.Itoa(os.Geteuid()), strconv.Itoa(os.Getegid())
 		}
 		for index := range request.Command {
 			if strings.Contains(request.Command[index], "/usr/local/libexec/subyard/projects-changed") {

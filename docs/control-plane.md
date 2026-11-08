@@ -58,17 +58,26 @@ See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for us
 
 Explicit initialization also binds the selected yard's authoritative project records and
 guest metadata observations before approval. Its generic metadata step atomically restores
-missing canonical metadata before the installed project hooks run. Matching legacy metadata
-is preserved. Missing roots, unsafe ownership or paths, conflicting identity and stale
+missing canonical metadata before the installed project hooks run. Matching legacy metadata,
+including absent `yard`, `identityVersion`, `target` and `importedAt`, is preserved. It also
+repairs captured developer-owned root group/other write permissions, preserving all other mode
+bits, and narrows otherwise valid metadata with group/other write permissions to `0600` without
+rewriting it. Present stale `yard`, `identityVersion`, `target` and `importedAt` values are
+atomically rewritten from the owner record. Repairs appear in the operation plan without a warning or
+additional prompt. Missing roots, unsafe ownership or paths, hard-linked, non-regular,
+oversized or invalid metadata, conflicting `schema`, `projectId`, `name` or `mode`, and stale
 observations stop initialization; guest directories never authorize additional projects.
+Inspection reports every refusing project together in ProjectID order, with the path and
+specific corrective action. Apply still requires the exact expected snapshot and workspace digest.
 Legacy bind wrappers and sources may remain root-owned with the developer's group
-and without world-write access. Only captured missing metadata in a non-writable
+and without world-write access. Only captured missing or stale-content metadata in a non-writable
 legacy bind wrapper uses privileged publication; the new file belongs to the developer
 with mode `0600`. Wrapper and source ownership and permissions remain unchanged.
 Read-only project inventory and status do not perform this repair.
-When missing metadata changes a profile's native hook catalog, its runtime observer
+When missing or rewritten metadata changes a profile's native hook catalog, its runtime observer
 can consume an optional stdin object with `schema: 1` and `missingMetadata` entries
-containing canonical `root` and metadata `payload`. This is a read-only projection:
+containing canonical `root` and metadata `payload` for missing or stale-content files.
+This is a read-only projection:
 native repos, groups, registration state and source facts remain actual observations.
 Init captures the projected hook binding before approval, rechecks the original
 binding before publication, and requires normal readback to match the projected

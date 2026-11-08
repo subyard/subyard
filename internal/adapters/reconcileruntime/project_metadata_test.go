@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -93,17 +94,13 @@ func TestRemoteProjectCopyCreationPassesNativeMetadataGuardWithSharedParent(t *t
 	if info, err := os.Stat(payload); err != nil || info.Mode().Perm() != 0o664 {
 		t.Fatalf("copy changed archive payload permissions: %v %v", info, err)
 	}
-	// A later unsafe existing root remains a collision, never permission repair.
+	// Recovery plans permission repair, while copy admission still refuses a collision.
 	if err := os.Chmod(workspace, os.ModeSetgid|0o775); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.metadataRequest(ctx, "inspect", plan); err == nil {
-		t.Fatal("native guard accepted the unsafe existing root")
-	} else {
-		var failure *ProjectMetadataError
-		if !errors.As(err, &failure) || failure.Reason != "unsafe_root" {
-			t.Fatalf("unexpected native refusal: %v", err)
-		}
+	observation, err := runtime.metadataRequest(ctx, "inspect", plan)
+	if err != nil || !bytes.Contains(observation.Expected, []byte(`"repairRoot":true`)) {
+		t.Fatalf("native recovery did not capture root permission repair: %v", err)
 	}
 	if _, _, err := runner.Run(ctx, action, nil); err == nil {
 		t.Fatal("copy accepted the existing unsafe root")
@@ -120,7 +117,7 @@ func TestRemoteProjectCopyCreationPassesNativeMetadataGuardWithSharedParent(t *t
 }
 
 func TestPreparedProjectMetadataRepair(t *testing.T) {
-	for _, scenario := range []string{"missing", "existing", "legacy", "foreign", "foreign yard", "malformed", "symlink", "root symlink", "source symlink", "hardlink", "unsafe mode", "missing root", "missing src", "stale", "unrelated drift", "scope drift"} {
+	for _, scenario := range []string{"missing", "existing", "legacy", "foreign yard", "identity version", "target", "imported at", "root mode", "legacy bind root", "metadata mode", "conflicting schema", "conflicting projectId", "conflicting name", "conflicting mode", "invalid schema", "malformed", "symlink", "root symlink", "source symlink", "hardlink", "unreadable metadata", "nonregular metadata", "oversized metadata", "missing root", "missing src", "stale", "unrelated drift", "scope drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			workspace := filepath.Join(root, "sample")
@@ -128,6 +125,9 @@ func TestPreparedProjectMetadataRepair(t *testing.T) {
 				t.Fatal(err)
 			}
 			record := domain.ProjectRecord{Schema: 1, ProjectID: "sample", Name: "sample", YardPath: "/srv/workspaces/sample/src", Mode: domain.ProjectGit, Target: "yard", IdentityVersion: 2, SSHHost: "yard"}
+			if scenario == "legacy bind root" {
+				record.Mode = domain.ProjectBind
+			}
 			payload, err := application.ProjectMetadata(record, "selected")
 			if err != nil {
 				t.Fatal(err)
@@ -141,17 +141,44 @@ func TestPreparedProjectMetadataRepair(t *testing.T) {
 			case "legacy":
 				payload = []byte("{ \"schema\": 1, \"projectId\": \"sample\", \"name\": \"sample\", \"mode\": \"git\" }\n")
 				testkit.WriteFile(t, metadata, payload, 0o600)
-			case "foreign":
-				testkit.WriteFile(t, metadata, []byte(`{"schema":1,"yard":"other","projectId":"sample"}`), 0o600)
-			case "foreign yard":
-				testkit.WriteFile(t, metadata, []byte(`{"schema":1,"yard":"other","projectId":"sample","name":"sample","mode":"git"}`), 0o600)
+			case "foreign yard", "identity version", "target", "imported at", "conflicting schema", "conflicting projectId", "conflicting name", "conflicting mode", "invalid schema":
+				var value map[string]any
+				if err := json.Unmarshal(payload, &value); err != nil {
+					t.Fatal(err)
+				}
+				key := map[string]string{"foreign yard": "yard", "identity version": "identityVersion", "target": "target", "imported at": "importedAt", "conflicting schema": "schema", "conflicting projectId": "projectId", "conflicting name": "name", "conflicting mode": "mode", "invalid schema": "schema"}[scenario]
+				value[key] = "stale"
+				if scenario == "conflicting schema" {
+					value[key] = 2
+				}
+				stale, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, metadata, stale, 0o600)
+			case "root mode", "legacy bind root":
+				testkit.WriteFile(t, metadata, payload, 0o600)
+				if err := os.Chmod(workspace, os.ModeSetgid|0o775); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable metadata":
+				if os.Geteuid() == 0 {
+					t.Skip("root bypasses read permission")
+				}
+				testkit.WriteFile(t, metadata, payload, 0o000)
+			case "nonregular metadata":
+				if err := os.Mkdir(metadata, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "oversized metadata":
+				testkit.WriteFile(t, metadata, bytes.Repeat([]byte(" "), 65537), 0o600)
 			case "hardlink":
 				testkit.WriteFile(t, metadata, payload, 0o600)
 				if err := os.Link(metadata, filepath.Join(workspace, "linked")); err != nil {
 					t.Fatal(err)
 				}
-			case "unsafe mode":
-				testkit.WriteFile(t, metadata, payload, 0o666)
+			case "metadata mode":
+				testkit.WriteFile(t, metadata, payload, 0o664)
 			case "root symlink":
 				if err := os.Rename(workspace, workspace+"-old"); err != nil {
 					t.Fatal(err)
@@ -181,14 +208,30 @@ func TestPreparedProjectMetadataRepair(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			original, _ := os.Stat(metadata)
 			runtime := Runtime{Executor: metadataFileExecutor{root}, Yard: domain.Context{YardName: "selected", DevUID: os.Getuid()}, HookPlan: &ProjectHookPlan{ownerProjects: []domain.ProjectRecord{record}, approved: hookObservation{Projects: "fixture"}}}
+			if scenario == "legacy bind root" {
+				runtime.Executor = metadataFaultExecutor{metadataFileExecutor{root}, `import os,types
+_fstat=os.fstat
+_root=os.stat('/srv/workspaces/sample')
+def legacy_owner(fd):
+ s=_fstat(fd)
+ if (s.st_dev,s.st_ino)==(_root.st_dev,_root.st_ino):
+  fields={k:getattr(s,k) for k in dir(s) if k.startswith('st_')}
+  fields['st_uid']=0
+  return types.SimpleNamespace(**fields)
+ return s
+os.fstat=legacy_owner
+`}
+			}
 			observation, err := runtime.metadataRequest(context.Background(), "inspect", &projectMetadataPlan{Targets: []projectMetadataTarget{}})
 			if err != nil {
 				t.Fatal(err)
 			}
 			runtime.HookPlan.approved.Projects = observation.Projects
 			err = runtime.PrepareProjectMetadata(context.Background())
-			if scenario != "missing" && scenario != "existing" && scenario != "legacy" && scenario != "stale" && scenario != "unrelated drift" && scenario != "scope drift" {
+			refusal := map[string]string{"identity version": "invalid_metadata", "conflicting schema": "conflicting_metadata", "conflicting projectId": "conflicting_metadata", "conflicting name": "conflicting_metadata", "conflicting mode": "conflicting_metadata", "invalid schema": "invalid_metadata", "malformed": "invalid_metadata", "symlink": "unsafe_metadata_path", "root symlink": "unsafe_root_path", "source symlink": "unsafe_source_path", "hardlink": "metadata_links", "unreadable metadata": "access_denied", "nonregular metadata": "metadata_type", "oversized metadata": "metadata_size", "missing root": "missing_root", "missing src": "missing_source"}[scenario]
+			if refusal != "" {
 				if err == nil {
 					t.Fatal("unsafe repair accepted")
 				}
@@ -196,14 +239,17 @@ func TestPreparedProjectMetadataRepair(t *testing.T) {
 				if !errors.As(err, &failure) || failure.ProjectID != "sample" || failure.Root != "/srv/workspaces/sample" || errors.Is(err, domain.ErrPlanStale) {
 					t.Fatalf("missing bounded target diagnostic: %v", err)
 				}
-				reasons := map[string]string{"foreign": "conflicting_metadata", "foreign yard": "conflicting_metadata", "malformed": "invalid_metadata", "symlink": "unsafe_path", "root symlink": "unsafe_path", "source symlink": "unsafe_path", "hardlink": "unsafe_metadata", "unsafe mode": "unsafe_metadata", "missing root": "missing_root", "missing src": "missing_source"}
-				if failure.Reason != reasons[scenario] || strings.Contains(err.Error(), "private-payload") || strings.Contains(err.Error(), "Traceback") {
+				if failure.Reason != refusal || strings.Contains(err.Error(), "private-payload") || strings.Contains(err.Error(), "Traceback") {
 					t.Fatalf("incorrect or unsafe refusal reason: %v", err)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			wantRepair := scenario != "existing" && scenario != "legacy" && scenario != "legacy bind root"
+			if step := runtime.HookPlan.MetadataOperationStep("selected"); (step.Decision != domain.StepSkip) != wantRepair {
+				t.Fatalf("repair visibility: %+v", step)
 			}
 			if scenario == "stale" {
 				testkit.WriteFile(t, metadata, payload, 0o600)
@@ -242,6 +288,23 @@ func TestPreparedProjectMetadataRepair(t *testing.T) {
 			if err != nil || string(got) != string(payload) {
 				t.Fatalf("metadata=%s error=%v", got, err)
 			}
+			if scenario == "metadata mode" || scenario == "root mode" || scenario == "legacy bind root" || scenario == "existing" || scenario == "legacy" {
+				if !os.SameFile(original, info) || !original.ModTime().Equal(info.ModTime()) {
+					t.Fatal("permission-only repair rewrote metadata")
+				}
+			}
+			if scenario == "root mode" {
+				rootInfo, err := os.Stat(workspace)
+				if err != nil || rootInfo.Mode().Perm() != 0o755 || rootInfo.Mode()&os.ModeSetgid == 0 {
+					t.Fatalf("root repair failed to preserve setgid: %v %v", rootInfo, err)
+				}
+			}
+			if scenario == "legacy bind root" {
+				rootInfo, err := os.Stat(workspace)
+				if err != nil || rootInfo.Mode().Perm() != 0o775 || rootInfo.Mode()&os.ModeSetgid == 0 {
+					t.Fatalf("legacy bind root permissions changed: %v %v", rootInfo, err)
+				}
+			}
 			if info.Mode().Perm() != 0o600 {
 				t.Fatalf("metadata mode=%o", info.Mode().Perm())
 			}
@@ -264,6 +327,130 @@ func TestPreparedProjectMetadataRepair(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// Inject otherwise privileged ownership and publication races into the real script.
+type metadataFaultExecutor struct {
+	metadataFileExecutor
+	prefix string
+}
+
+func (fixture metadataFaultExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	request.Command = append([]string(nil), request.Command...)
+	request.Command[3] = fixture.prefix + request.Command[3]
+	return fixture.metadataFileExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestProjectMetadataRefusesForeignOwners(t *testing.T) {
+	for _, scenario := range []struct{ leaf, reason string }{
+		{"", "unsafe_root"}, {"/src", "unsafe_source"}, {"/.subyard-meta.json", "metadata_owner"},
+	} {
+		t.Run(scenario.reason, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			workspace := filepath.Join(root, "sample")
+			if err := os.MkdirAll(filepath.Join(workspace, "src"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			record := domain.ProjectRecord{Schema: 1, ProjectID: "sample", Name: "Sample", YardPath: "/srv/workspaces/sample/src", Mode: domain.ProjectSync, SSHHost: "yard"}
+			payload, err := application.ProjectMetadata(record, "selected")
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(workspace, ".subyard-meta.json"), payload, 0o600)
+			prefix := fmt.Sprintf(`import os,types
+_fstat=os.fstat
+_foreign=os.stat('/srv/workspaces/sample%s')
+def foreign_owner(fd):
+ s=_fstat(fd)
+ if (s.st_dev,s.st_ino)==(_foreign.st_dev,_foreign.st_ino):
+  fields={k:getattr(s,k) for k in dir(s) if k.startswith('st_')}
+  fields['st_uid']=os.getuid()+1
+  return types.SimpleNamespace(**fields)
+ return s
+os.fstat=foreign_owner
+`, scenario.leaf)
+			runtime := Runtime{Executor: metadataFaultExecutor{metadataFileExecutor{root}, prefix}, Yard: domain.Context{DevUID: os.Getuid()}}
+			_, err = runtime.metadataRequest(context.Background(), "inspect", &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/sample", Payload: string(payload)}}})
+			var failure *ProjectMetadataError
+			if !errors.As(err, &failure) || failure.Reason != scenario.reason || !strings.Contains(err.Error(), "then rerun the operation") {
+				t.Fatalf("foreign ownership was not refused with a fix: %v", err)
+			}
+		})
+	}
+}
+
+func TestProjectMetadataCollectsRefusalsInProjectOrder(t *testing.T) {
+	root := testkit.TempDir(t)
+	plan := &projectMetadataPlan{}
+	for _, name := range []string{"zeta", "alpha", "ready"} {
+		workspace := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Join(workspace, "src"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		record := domain.ProjectRecord{Schema: 1, ProjectID: name, Name: name, YardPath: "/srv/workspaces/" + name + "/src", Mode: domain.ProjectSync, SSHHost: "yard"}
+		payload, err := application.ProjectMetadata(record, "selected")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan.Targets = append(plan.Targets, projectMetadataTarget{Root: filepath.Dir(record.YardPath), Payload: string(payload)})
+		if name != "ready" {
+			testkit.WriteFile(t, filepath.Join(workspace, ".subyard-meta.json"), []byte("private-payload"), 0o600)
+		}
+	}
+	runtime := Runtime{Executor: metadataFileExecutor{root}, Yard: domain.Context{DevUID: os.Getuid()}}
+	_, err := runtime.metadataRequest(context.Background(), "inspect", plan)
+	var refusals *domain.Refusals
+	if !errors.As(err, &refusals) || len(refusals.Unwrap()) != 2 {
+		t.Fatalf("did not collect all project refusals: %v", err)
+	}
+	for index, name := range []string{"alpha", "zeta"} {
+		failure, ok := refusals.Unwrap()[index].(*ProjectMetadataError)
+		if !ok || failure.ProjectID != name || failure.Reason != "invalid_metadata" {
+			t.Fatalf("unstable project refusal order: %v", err)
+		}
+	}
+	if strings.Contains(err.Error(), "private-payload") {
+		t.Fatal("metadata bytes escaped into diagnostics")
+	}
+	if _, err := os.Stat(filepath.Join(root, "ready", ".subyard-meta.json")); !os.IsNotExist(err) {
+		t.Fatal("refused inspection changed a repairable project")
+	}
+}
+
+func TestProjectMetadataRewriteRechecksCapturedFileBeforeRename(t *testing.T) {
+	root := testkit.TempDir(t)
+	workspace := filepath.Join(root, "sample")
+	if err := os.MkdirAll(filepath.Join(workspace, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := domain.ProjectRecord{Schema: 1, ProjectID: "sample", Name: "Sample", YardPath: "/srv/workspaces/sample/src", Mode: domain.ProjectSync, SSHHost: "yard"}
+	payload, err := application.ProjectMetadata(record, "selected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(workspace, ".subyard-meta.json")
+	testkit.WriteFile(t, metadata, bytes.ReplaceAll(payload, []byte("selected"), []byte("previous")), 0o600)
+	prefix := `import os
+_fsync=os.fsync
+def substitute(fd):
+ _fsync(fd)
+ if os.path.basename(os.readlink('/proc/self/fd/'+str(fd))).startswith('.subyard-meta-'):
+  os.rename('/srv/workspaces/sample/.subyard-meta.json','/srv/workspaces/sample/retained')
+  with open('/srv/workspaces/sample/.subyard-meta.json','w') as stream: stream.write('replacement')
+os.fsync=substitute
+`
+	runtime := Runtime{Executor: metadataFaultExecutor{metadataFileExecutor{root}, prefix}, Yard: domain.Context{DevUID: os.Getuid()}}
+	plan := &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/sample", Payload: string(payload)}}}
+	plan.projectMetadataObservation, err = runtime.metadataRequest(context.Background(), "inspect", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.metadataRequest(context.Background(), "apply", plan); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("file substitution was not refused: %v", err)
+	}
+	if got, err := os.ReadFile(metadata); err != nil || string(got) != "replacement" {
+		t.Fatal("rewrite overwrote a substituted file")
 	}
 }
 
@@ -404,7 +591,7 @@ func TestInitRepairsOwnerMetadataBeforeHooksAndPreservesUnregisteredDirectories(
 }
 
 func TestMetadataRepairBindsProjectedNativeCatalogBeforeFirstHook(t *testing.T) {
-	for _, scenario := range []string{"repair", "native drift", "unsupported projection"} {
+	for _, scenario := range []string{"repair", "rewrite", "native drift", "unsupported projection"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			workspace := filepath.Join(root, "workspaces")
@@ -419,7 +606,7 @@ func TestMetadataRepairBindsProjectedNativeCatalogBeforeFirstHook(t *testing.T) 
 import json,os,sys
 raw=sys.stdin.read()
 projection=json.loads(raw) if raw else None
-present=os.path.exists(os.environ['META']) or bool(projection and projection['missingMetadata'] and os.environ['SUPPORTED']=='1')
+present=(os.path.exists(os.environ['META']) and json.load(open(os.environ['META'])).get('yard')=='selected') or bool(projection and projection['missingMetadata'] and os.environ['SUPPORTED']=='1')
 binding=os.environ['NEW'] if present else os.environ['OLD']
 if open(os.environ['CATALOG']).read()!='captured': binding=os.environ['DRIFT']
 print(json.dumps(dict(state='current',actual=os.environ['NEW'],desired=os.environ['NEW'],hook_binding=binding)))
@@ -445,6 +632,14 @@ print(json.dumps(dict(state='current',actual=os.environ['NEW'],desired=os.enviro
 			executor := &metadataHookExecutor{metadataFileExecutor: metadataFileExecutor{workspace}}
 			executor.expectedBinding = testRuntimeNewDigest
 			runtime.Executor = executor
+			record := domain.ProjectRecord{Schema: 1, ProjectID: "sample", Name: "Sample", YardPath: "/srv/workspaces/sample/src", Mode: domain.ProjectSync, SSHHost: "yard"}
+			if scenario == "rewrite" {
+				payload, err := application.ProjectMetadata(record, "previous")
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(workspace, "sample", ".subyard-meta.json"), payload, 0o600)
+			}
 			runtime.RuntimePlan, err = runtime.PrepareProfileRuntimes(context.Background(), false, false)
 			if err != nil {
 				t.Fatal(err)
@@ -453,7 +648,7 @@ print(json.dumps(dict(state='current',actual=os.environ['NEW'],desired=os.enviro
 			if err != nil {
 				t.Fatal(err)
 			}
-			runtime.HookPlan.CaptureOwnerProjects([]domain.ProjectRecord{{Schema: 1, ProjectID: "sample", Name: "Sample", YardPath: "/srv/workspaces/sample/src", Mode: domain.ProjectSync, SSHHost: "yard"}})
+			runtime.HookPlan.CaptureOwnerProjects([]domain.ProjectRecord{record})
 			if err := runtime.PrepareProjectMetadata(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -461,7 +656,7 @@ print(json.dumps(dict(state='current',actual=os.environ['NEW'],desired=os.enviro
 				testkit.WriteFile(t, nativeCatalog, []byte("drift"), 0o600)
 			}
 			err = runtime.RunProjectHooks(context.Background())
-			if scenario != "repair" {
+			if scenario != "repair" && scenario != "rewrite" {
 				if !errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
 					t.Fatalf("unapproved catalog reached hook: calls=%d err=%v", executor.calls, err)
 				}
@@ -618,6 +813,7 @@ func TestProjectMetadataPublicationUsesCapturedOwnerFacts(t *testing.T) {
 	}{
 		{"inspect", "inspect", "bind", "null", 0, 1000, 0o2755, 1000},
 		{"legacy publication", "apply", "bind", "null", 0, 1000, 0o2755, 0},
+		{"legacy rewrite", "apply", "bind", "[]", 0, 1000, 0o2755, 0},
 		{"group writable", "apply", "bind", "null", 0, 1000, 0o2775, 1000},
 		{"developer owned", "apply", "bind", "null", 1000, 1000, 0o755, 1000},
 		{"non bind", "apply", "sync", "null", 0, 1000, 0o2755, 1000},
@@ -626,7 +822,11 @@ func TestProjectMetadataPublicationUsesCapturedOwnerFacts(t *testing.T) {
 		{"existing metadata", "apply", "bind", "[]", 0, 1000, 0o2755, 1000},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			expected, err := json.Marshal([]any{map[string]any{"root": []int{0o40000 | scenario.permissions, scenario.owner, scenario.group}, "metadata": json.RawMessage(scenario.metadata)}})
+			repair := ""
+			if scenario.name == "legacy rewrite" {
+				repair = "rewrite"
+			}
+			expected, err := json.Marshal([]any{map[string]any{"root": []int{0o40000 | scenario.permissions, scenario.owner, scenario.group}, "metadata": json.RawMessage(scenario.metadata), "repairMetadata": repair}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -652,7 +852,7 @@ func TestProjectMetadataFailureBoundsLegacyIdentity(t *testing.T) {
 	plan := &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/" + strings.Repeat("a", 10000)}}}
 	err := metadataFailure(plan, []byte(`{"error":{"reason":"io_failure","target":0}}`))
 	var failure *ProjectMetadataError
-	if !errors.As(err, &failure) || len(failure.ProjectID) > 255 || len(failure.Root) > 271 || len(err.Error()) > 600 {
+	if !errors.As(err, &failure) || len(failure.ProjectID) > 255 || len(failure.Root) > 271 || len(err.Error()) > 800 {
 		t.Fatal("legacy identity diagnostic is unbounded")
 	}
 }
@@ -696,7 +896,7 @@ func TestProjectMetadataDispatcherParityWithDirectorySymlinks(t *testing.T) {
 			err = runtime.PrepareProjectMetadata(context.Background())
 			if scenario == "target symlink" {
 				var failure *ProjectMetadataError
-				if !errors.As(err, &failure) || failure.Reason != "unsafe_path" || executor.calls != 0 {
+				if !errors.As(err, &failure) || failure.Reason != "unsafe_root_path" || executor.calls != 0 {
 					t.Fatalf("symlinked owner target accepted: %v", err)
 				}
 				return

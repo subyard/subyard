@@ -307,10 +307,10 @@ func (runner ProjectActionRunner) clone(ctx context.Context) error {
 		}
 		return executionError("inspect clone workspace", result, err)
 	}
-	create := ports.InstanceExecRequest{Command: []string{"install", "-d", "--", directory}}
+	create := ports.InstanceExecRequest{Command: []string{"install", "-d", "-m", "0755", "--", directory}}
 	if runner.Yard.AccessKind != domain.AccessRemote {
 		uid := fmt.Sprint(runner.Yard.DevUID)
-		create.Command = []string{"install", "-d", "-o", uid, "-g", uid, "--", directory}
+		create.Command = []string{"install", "-d", "-m", "0755", "-o", uid, "-g", uid, "--", directory}
 	}
 	if err := runner.execute(ctx, "create workspace", create); err != nil {
 		return err
@@ -420,12 +420,12 @@ func (runner ProjectActionRunner) sync(ctx context.Context) error {
 	dev := uint32(runner.Yard.DevUID)
 	reserve := ports.InstanceExecRequest{Command: []string{"mkdir", "-m", "0755", "--", directory}}
 	create := ports.InstanceExecRequest{
-		Command: []string{"install", "-d", "--", runner.Project.YardPath}, User: dev, Group: dev,
+		Command: []string{"install", "-d", "-m", "0755", "--", runner.Project.YardPath}, User: dev, Group: dev,
 	}
 	if runner.Yard.AccessKind != domain.AccessRemote {
 		uid := fmt.Sprint(runner.Yard.DevUID)
 		create = ports.InstanceExecRequest{Command: []string{
-			"install", "-d", "-o", uid, "-g", uid, "--", directory, runner.Project.YardPath,
+			"install", "-d", "-m", "0755", "-o", uid, "-g", uid, "--", directory, runner.Project.YardPath,
 		}}
 	}
 	if err := runner.execute(ctx, "reserve sync workspace", reserve); err != nil {
@@ -480,7 +480,7 @@ func (runner ProjectActionRunner) bind(ctx context.Context) error {
 	directory := filepath.Dir(runner.Project.YardPath)
 	uid := fmt.Sprint(runner.Yard.DevUID)
 	if err := runner.execute(ctx, "create bind metadata directory", ports.InstanceExecRequest{
-		Command: []string{"install", "-d", "-o", uid, "-g", uid, "--", directory},
+		Command: []string{"install", "-d", "-m", "0755", "-o", uid, "-g", uid, "--", directory},
 	}); err != nil {
 		return err
 	}
