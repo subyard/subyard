@@ -233,14 +233,18 @@ def read_descriptor(parent, mapping, yard):
 
 # ---------------------------------------------------------------- destructive sites
 
-def remove_own_records(parent, own):
+def remove_own_records(parent, own, link=None):
     """Unlink our own record names (descriptor, its temporary, a prepared link,
     a probe) below parent. Only regular files and symlinks owned by the
-    developer are removed; anything else under such a name stays."""
+    developer are removed; anything else under such a name stays. With link,
+    only a developer-owned symlink whose text is exactly link is removed."""
     for name in own:
         st = lstat(parent, name)
-        if st is not None and kind(st) in ('file', 'link') and st.st_uid == UID:
-            os.unlink(name, dir_fd=parent)
+        if st is None or st.st_uid != UID or kind(st) not in (('link',) if link is not None else ('file', 'link')):
+            continue
+        if link is not None and readlink(parent, name) != link:
+            continue
+        os.unlink(name, dir_fd=parent)
     os.fsync(parent)
 
 
@@ -529,7 +533,7 @@ def observe_mapping(mapping, yard, start, problems):
     source, target, selected = mapping['source'], mapping['target'], mapping['selected']
     result = {'integration': mapping['integration'], 'source': source, 'target': target, 'selected': selected,
               'ops': [], 'id': '', 'state': 'none', 'persist': '', 'files': 0, 'bytes': 0,
-              'existing': [], 'existing_count': 0, 'identity': None, 'target_identity': None}
+              'existing': [], 'existing_count': 0, 'identity': None, 'target_identity': None, 'retirable': False}
     try:
         parent = open_path(os.path.dirname(source))
     except FileNotFoundError:
@@ -562,6 +566,10 @@ def observe_mapping(mapping, yard, start, problems):
             preflight(parent, mapping, source_st, result, problems)
         if selected and (exact_link or 'adopt' in ops) and result['persist'] != 'deferred':
             result['persist'] = 'projected'
+        # A deselected integration may remove its exact link that the artifact
+        # inventory never recorded (an adoption cut before the inventory apply).
+        # The caller requests it only for a link the inventory does not retire.
+        result['retirable'] = not selected and start and state == 'none' and exact_link
         result['ops'] = ops
         return result
     finally:
@@ -881,16 +889,13 @@ def finish(parent, record, retire=False):
     own, retained = record['names'], []
     if attempt(discard_stage, own['stage'], own['copy']):
         retained.append(own['stage'])
-    prepared = lstat(parent, own['backup'])
-    if kind(prepared) == 'link' and readlink(parent, own['backup']) == record['target']:
-        # A link prepared before an exchange that never happened.
-        remove_own_records(parent, [own['backup']])
+    # A link prepared before an exchange that never happened.
+    remove_own_records(parent, [own['backup']], link=record['target'])
     if attempt(delete_backup, parent, own['backup'], record['root']):
         retained.append(os.path.dirname(record['source']) + '/' + own['backup'])
-    base = os.path.basename(record['source'])
-    link = lstat(parent, base)
-    own_link = retire and kind(link) == 'link' and readlink(parent, base) == record['target']
-    remove_own_records(parent, ([base] if own_link else []) + [own['descriptor']])
+    if retire:
+        remove_own_records(parent, [os.path.basename(record['source'])], link=record['target'])
+    remove_own_records(parent, [own['descriptor']])
     return retained
 
 
@@ -907,11 +912,8 @@ def cancel(parent, record):
     copies already published to T stay there."""
     own = record['names']
     retained = [own['stage']] if attempt(discard_stage, own['stage'], own['copy']) else []
-    prepared = lstat(parent, own['backup'])
-    stale = [own['temporary'], own['descriptor']]
-    if kind(prepared) == 'link' and readlink(parent, own['backup']) == record['target']:
-        stale.insert(0, own['backup'])
-    remove_own_records(parent, stale)
+    remove_own_records(parent, [own['backup']], link=record['target'])
+    remove_own_records(parent, [own['temporary'], own['descriptor']])
     return retained
 
 
@@ -931,6 +933,12 @@ def apply(request, entries):
                         outcome['retained'] += finish(parent, record, retire=not mapping['selected'])
                     elif op == 'cancel' and state == 'active':
                         outcome['retained'] += cancel(parent, record)
+                    elif op == 'retire':
+                        base = os.path.basename(mapping['source'])
+                        if (mapping['selected'] or state != 'none' or kind(source_st) != 'link'
+                                or source_st.st_uid != UID or readlink(parent, base) != mapping['target']):
+                            raise Refusal('integration plan is stale', mapping['source'])
+                        remove_own_records(parent, [base], link=mapping['target'])
                     elif op == 'adopt':
                         if state != 'none':
                             raise Refusal('integration plan is stale', mapping['source'])
@@ -1023,7 +1031,7 @@ def retained(request):
 def fingerprint(request, entries, start):
     return digest([request['yard'], UID, GID, start, [
         [e['integration'], e['source'], e['target'], e['selected'], e['ops'], e['id'], e['state'], e['persist'],
-         e['identity'], e['target_identity'], e['existing'], e['existing_count']] for e in entries]])
+         e['identity'], e['target_identity'], e['existing'], e['existing_count'], e['retirable']] for e in entries]])
 
 
 def drop_privileges(request):
@@ -1059,6 +1067,12 @@ def main():
         if mode == 'apply':
             if value != request.get('expected'):
                 raise Refusal('integration plan is stale', '')
+            retire = request.get('retire') or []
+            by_source = {e['source']: e for e in entries}
+            for source in retire:
+                if not isinstance(source, str) or not by_source.get(source, {}).get('retirable'):
+                    raise Refusal('integration plan is stale', source if isinstance(source, str) else '')
+                by_source[source]['ops'] = by_source[source]['ops'] + ['retire']
             result['results'] = apply(request, [e for e in entries if e['ops']])
         print(json.dumps(result))
     elif mode == 'retained':

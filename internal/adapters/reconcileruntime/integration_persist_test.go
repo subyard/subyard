@@ -1111,3 +1111,246 @@ func TestPersistInspectionWithoutIncusInspectsNothing(t *testing.T) {
 		t.Fatalf("plan=%#v inspected=%v err=%v", plan, inspected, err)
 	}
 }
+
+// An adoption of two mappings is cut after the first finished but before the
+// inventory recorded its link. Disabling the integration cancels the second and
+// removes the first one's exact link, disclosed in the plan; the data stays in T.
+func TestPersistDisableRemovesTheUnrecordedLinkOfAnInterruptedAdoption(t *testing.T) {
+	f := newPersistFixture(t)
+	memory, memoryTarget := f.root+"/home/.claude-memory", f.root+"/sessions/claude/memory"
+	mkdirs(t, memory)
+	testkit.WriteFile(t, memory+"/MEMORY.md", []byte("remember\n"), 0o600)
+	f.mappings = append([]PersistMapping{{Integration: "claude", Source: memory, Target: memoryTarget, Selected: true}}, f.mappings...)
+	// The first published copy is memory's only file; the second cuts projects.
+	f.interrupt(persistCuts["publishing"])
+	if link, _ := os.Readlink(memory); link != memoryTarget || !isDirectory(f.source) || len(f.records()) != 1 {
+		t.Fatal("cut did not land between the two transfers", link, f.records())
+	}
+	for index := range f.mappings {
+		f.mappings[index].Selected = false
+	}
+	observation := f.observation()
+	// The inventory records no link for memory, so the transfer removes it.
+	planned := observation.retireUnrecordedLinks(nil)
+	ops := map[string]string{}
+	for _, entry := range planned.Entries {
+		ops[entry.Source] = strings.Join(entry.Ops, "+")
+	}
+	if ops[memory] != "retire" || ops[f.source] != "cancel" || !planned.changed() {
+		t.Fatal("disable plan", ops)
+	}
+	disclosed := false
+	for _, fact := range planned.facts() {
+		if source, text, _ := persistStepText(fact); source == memory &&
+			strings.Contains(text, "remove the link "+memory+" to "+memoryTarget) && strings.Contains(text, "the data remains in "+memoryTarget) {
+			disclosed = true
+		}
+	}
+	if !disclosed {
+		t.Fatal("disable plan does not disclose the link removal", planned.facts())
+	}
+	// A link the inventory records is retired by the inventory, not here.
+	recorded := observation.retireUnrecordedLinks([]integrationArtifact{{Kind: "link", Path: memory}})
+	for _, entry := range recorded.Entries {
+		if entry.Source == memory && len(entry.Ops) != 0 {
+			t.Fatal("recorded link planned twice", entry.Ops)
+		}
+	}
+	if _, stderr, err := f.run("apply", map[string]any{"expected": observation.Fingerprint, "retire": planned.retireSources()}); err != nil {
+		t.Fatal("disable apply", err, stderr)
+	}
+	if _, err := os.Lstat(memory); !os.IsNotExist(err) {
+		t.Fatal("memory link left after disable", err)
+	}
+	if read(t, memoryTarget+"/MEMORY.md") != "remember\n" || !isDirectory(f.source) || len(f.records())+len(f.stages()) != 0 {
+		t.Fatal("disable lost data or kept transfer state", f.records(), f.stages())
+	}
+	if after := f.observation().retireUnrecordedLinks(nil); after.changed() {
+		t.Fatal("disable did not converge", after.Entries)
+	}
+	// Re-enabling finds no source: the inventory creates the link normally.
+	for index := range f.mappings {
+		f.mappings[index].Selected = true
+	}
+	for _, entry := range f.observation().Entries {
+		if entry.Source == memory && (len(entry.Ops) != 0 || entry.Persist != "") {
+			t.Fatal("re-enable planned a transfer for the absent memory source", entry)
+		}
+	}
+	developer, _ := inventoryDeveloper(t)
+	entries := []integrationArtifact{{ID: "claude", Kind: "link", Path: memory, Target: memoryTarget, Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(memoryTarget)))}}
+	program := strings.NewReplacer("@STATE_ROOT@", f.root+"/state", "@STATE_UID@", fmt.Sprint(os.Getuid())).Replace(integrationInventoryProgram)
+	inventory := func(mode, expected string) string {
+		payload, _ := json.Marshal(map[string]any{"home": f.root + "/home", "uid": os.Getuid(), "developer": developer, "entries": entries, "expected": expected})
+		command := exec.Command("python3", "-B", "-c", program, mode)
+		command.Stdin = strings.NewReader(string(payload))
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("inventory %s: %v %s", mode, err, output)
+		}
+		return string(output)
+	}
+	var observed struct{ Fingerprint string }
+	if json.Unmarshal([]byte(inventory("observe", "")), &observed) != nil {
+		t.Fatal("inventory observation")
+	}
+	inventory("apply", observed.Fingerprint)
+	inventory("commit", "")
+	if link, _ := os.Readlink(memory); link != memoryTarget || read(t, memory+"/MEMORY.md") != "remember\n" {
+		t.Fatal("re-enable did not recreate the memory link", link)
+	}
+}
+
+// Only an exact own link of a deselected mapping is removable, and only by init
+// or disable; activation and a request naming anything else change nothing.
+func TestPersistRetireIsBoundedToTheExactLinkOfADeselectedMapping(t *testing.T) {
+	retirable := func(f *persistFixture) bool {
+		entry := f.entry()
+		return entry["retirable"] == true
+	}
+	f := newPersistFixture(t)
+	f.mustApply()
+	f.mappings[0].Selected = false
+	if !retirable(f) {
+		t.Fatal("exact own link of a deselected mapping is not removable")
+	}
+	f.start = false
+	if retirable(f) {
+		t.Fatal("activation may remove a link")
+	}
+	f.start, f.mappings[0].Selected = true, true
+	if retirable(f) {
+		t.Fatal("selected link is removable")
+	}
+	value, _, _ := f.run("observe", nil)
+	if _, stderr, err := f.run("apply", map[string]any{"expected": value["fingerprint"], "retire": []string{f.source}}); err == nil || !strings.Contains(stderr, "integration plan is stale") {
+		t.Fatal("retire of a selected link accepted", err, stderr)
+	}
+	if link, _ := os.Readlink(f.source); link != f.target {
+		t.Fatal("refused retire changed the link")
+	}
+	if err := os.Remove(f.source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(f.root+"/elsewhere", f.source); err != nil {
+		t.Fatal(err)
+	}
+	f.mappings[0].Selected = false
+	if retirable(f) {
+		t.Fatal("a link to another target is removable")
+	}
+}
+
+// A deselected exact link without transfer records is retire-only work. Init
+// must disclose and bind it, or provisioning refuses the unconfirmed retire.
+func TestPersistInitInspectionBindsARetireOnlyPlan(t *testing.T) {
+	f := newPersistFixture(t)
+	f.mustApply()
+	f.mappings[0].Selected = false
+	full := func() (IntegrationPlan, error) {
+		// The full plan applies the inventory narrowing: nothing records the link.
+		persist := f.observation().retireUnrecordedLinks(nil)
+		return IntegrationPlan{Changed: persist.changed(), persist: persist, facts: persist.facts()}, nil
+	}
+	plan, inspected, err := persistInspectionPlan(f.observation(), nil, full)
+	if err != nil || !inspected {
+		t.Fatal(err)
+	}
+	disclosed := false
+	for _, step := range plan.PersistOperationSteps("yard") {
+		disclosed = disclosed || strings.Contains(step.Desired, "remove the link "+f.source)
+	}
+	if !disclosed {
+		t.Fatal("init inspection does not disclose the retire", plan.PersistOperationSteps("yard"))
+	}
+	approved := plan.PersistFingerprint()
+	fresh, _ := full()
+	if err := (Runtime{Yard: domain.Context{YardName: "default"}, ApprovedPersist: &approved}).checkApprovedPersist(fresh.persist); err != nil {
+		t.Fatal("provisioning refused the confirmed retire", err)
+	}
+	// With the link recorded the full plan has no persist work and nothing is bound.
+	f.mappings[0].Selected = true
+	if plan, inspected, err := persistInspectionPlan(f.observation(), nil, func() (IntegrationPlan, error) { t.Fatal("full plan without work"); return IntegrationPlan{}, nil }); err != nil || !inspected || plan.persist.changed() {
+		t.Fatal("converged inspection", plan, err)
+	}
+}
+
+// The bounded removal re-checks the exact link at the unlink: a regular file or
+// a link to another target placed under the name after validation stays.
+func TestPersistRemoveOwnRecordsKeepsAReplacedLink(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, root+"/file", []byte("data\n"), 0o600)
+	for _, link := range []struct{ name, target string }{{"other", root + "/elsewhere"}, {"exact", root + "/target"}} {
+		if err := os.Symlink(link.target, root+"/"+link.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	developer, _ := inventoryDeveloper(t)
+	script := `
+import json, sys
+request = json.load(sys.stdin)
+drop_privileges(request)
+parent = open_path(request['root'])
+for name in ('file', 'other', 'exact'):
+    remove_own_records(parent, [name], link=request['root'] + '/target')
+`
+	program := strings.Replace(integrationPersistProgram, "\nif __name__ == '__main__':", "\n"+script+"\nif False:", 1)
+	payload, _ := json.Marshal(map[string]any{"root": root, "developer": developer, "uid": os.Getuid()})
+	command := exec.Command("python3", "-B", "-c", program)
+	command.Stdin = strings.NewReader(string(payload))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("helper: %v %s", err, output)
+	}
+	if read(t, root+"/file") != "data\n" {
+		t.Fatal("regular file removed by an exact-link removal")
+	}
+	if link, _ := os.Readlink(root + "/other"); link != root+"/elsewhere" {
+		t.Fatal("link to another target removed")
+	}
+	if _, err := os.Lstat(root + "/exact"); !os.IsNotExist(err) {
+		t.Fatal("exact link kept", err)
+	}
+}
+
+// Provisioning recreates the integration substrate. When only that
+// precondition blocks the full plan, init proceeds uninspected (as for a
+// stopped guest) instead of refusing on every retry; other errors propagate.
+func TestPersistInitInspectionWithoutTheSubstrateDefersToProvisioning(t *testing.T) {
+	retire := newPersistFixture(t)
+	retire.mustApply()
+	retire.mappings[0].Selected = false
+	pending := newPersistFixture(t)
+	pending.interrupt(persistCuts["publishing"])
+	pending.mappings[0].Selected = false
+	for name, f := range map[string]*persistFixture{"retirable": retire, "cancel": pending} {
+		t.Run(name, func(t *testing.T) {
+			observation := f.observation()
+			unavailable := func() (IntegrationPlan, error) { return IntegrationPlan{}, errIntegrationSubstrateUnavailable }
+			if plan, inspected, err := persistInspectionPlan(observation, nil, unavailable); err != nil || inspected || plan.persist.changed() {
+				t.Fatalf("missing substrate is a dead end: inspected=%v err=%v", inspected, err)
+			}
+			other := errors.New("integration reconcile requires a running yard; start it explicitly first")
+			if _, inspected, err := persistInspectionPlan(observation, nil, func() (IntegrationPlan, error) { return IntegrationPlan{}, other }); !errors.Is(err, other) || inspected {
+				t.Fatalf("other full-plan error swallowed: inspected=%v err=%v", inspected, err)
+			}
+		})
+	}
+}
+
+// The provision stage recreates the integration substrate, so its missing
+// precondition means "not converged", never an init refusal; other errors propagate.
+func TestProvisionConvergenceTreatsAMissingSubstrateAsPending(t *testing.T) {
+	if ok, err := integrationPlanConverged(IntegrationPlan{}, errIntegrationSubstrateUnavailable); ok || err != nil {
+		t.Fatalf("missing substrate aborts init before provisioning: ok=%v err=%v", ok, err)
+	}
+	other := errors.New("integration reconcile requires a running yard; start it explicitly first")
+	if ok, err := integrationPlanConverged(IntegrationPlan{}, other); ok || !errors.Is(err, other) {
+		t.Fatalf("other plan error swallowed: ok=%v err=%v", ok, err)
+	}
+	if ok, err := integrationPlanConverged(IntegrationPlan{Changed: true}, nil); ok || err != nil {
+		t.Fatal("changed plan reported converged")
+	}
+	if ok, err := integrationPlanConverged(IntegrationPlan{}, nil); !ok || err != nil {
+		t.Fatal("converged plan reported pending")
+	}
+}

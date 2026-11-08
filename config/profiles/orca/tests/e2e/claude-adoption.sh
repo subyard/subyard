@@ -59,7 +59,7 @@ grep -Eq 'claude.*unmanaged' "${yard_status_logs[0]}" \
 # shellcheck source=config/profiles/orca/tests/e2e/claude-recovery.sh
 . "$ROOT/config/profiles/orca/tests/e2e/claude-recovery.sh"
 [ "${CLAUDE_RECOVERY_ONLY:-0}" != 1 ] || exit 0
-# Shows the plan on a terminal and declines it; --yes answers without printing it.
+# Shows the plan on a terminal and declines it.
 yard_declined() {
   local command
   printf -v command '%q ' "$YARD_BIN" "$@"
@@ -86,8 +86,10 @@ grep -Fq 'already exist in the target and will not be transferred' "$STATE/claud
   && grep -Fq 'orca-existing/session.jsonl' "$STATE/claude-adoption-existing-plan.out" \
   && grep -Fq 'MEMORY.md' "$STATE/claude-adoption-existing-plan.out" \
   || fail_with 'plan did not disclose the entries the target keeps' "$STATE/claude-adoption-existing-plan.out"
-guest_root grep -Fxq 'retained session' /home/dev/.claude/projects/orca-existing/session.jsonl
-guest_root grep -Fxq 'retained memory' /home/dev/.claude-memory/MEMORY.md
+guest_root grep -Fxq 'retained session' /home/dev/.claude/projects/orca-existing/session.jsonl \
+  || fail_with 'declined enable changed the projects source' "$STATE/claude-adoption-existing-plan.out"
+guest_root grep -Fxq 'retained memory' /home/dev/.claude-memory/MEMORY.md \
+  || fail_with 'declined enable changed the memory source' "$STATE/claude-adoption-existing-plan.out"
 
 stage 'seeding about 200 MB of session data'
 guest_root runuser -u dev -- sh -eu -c '
@@ -125,7 +127,8 @@ guest_root test -f /home/dev/.claude/projects.subyard-transfer.json \
 # The memory mapping sorts first, shares the target parent and is already exchanged.
 [ "$(guest_root readlink /home/dev/.claude-memory)" = /mnt/host/agent-sessions/claude/memory ] \
   || fail_with 'memory mapping was not exchanged before the projects interruption' "${interrupt_logs[@]}"
-pending_stage="$(guest_root sh -c 'ls -d /mnt/host/agent-sessions/claude/.subyard-stage-*')"
+pending_stage="$(guest_root sh -c 'ls -d /mnt/host/agent-sessions/claude/.subyard-stage-*')" \
+  || fail_with 'interrupted adoption left no stage' "${interrupt_logs[@]}"
 [ -n "$pending_stage" ] || fail_with 'interrupted adoption left no stage' "${interrupt_logs[@]}"
 pending_logs=("$STATE/claude-adoption-pending-status.json" "$STATE/claude-adoption-pending-status.err")
 yard integration status claude --json >"${pending_logs[0]}" 2>"${pending_logs[1]}" \
@@ -135,7 +138,8 @@ jq -e --arg stage "$pending_stage" \
   || fail_with 'status reported the pending stage as retained' "${pending_logs[@]}"
 # Disable plans and applies the runtime reconciliation for the deselected
 # selection itself: its confirmed plan discloses and performs the cancellation
-# (stage copies discarded, descriptor removed, the directory untouched).
+# (stage copies discarded, descriptor removed, the directory untouched) and
+# removes the memory link that the cut enable never recorded as an artifact.
 deselect_logs=("$STATE/claude-adoption-deselect.out" "$STATE/claude-adoption-deselect.err")
 yard integration disable claude --yes >"${deselect_logs[0]}" 2>"${deselect_logs[1]}" \
   || fail_with 'deselecting a pending adoption failed' "${deselect_logs[@]}"
@@ -147,13 +151,21 @@ guest_root sh -c '! ls -d /home/dev/.claude/projects.subyard-* /mnt/host/agent-s
   || fail_with 'cancellation left transfer state' "${deselect_logs[@]}"
 guest_root runuser -u dev -- sh -c 'cd /home/dev/.claude/projects/bulk && sha256sum -c --quiet /tmp/subyard-claude-bulk.sha256' \
   || fail_with 'cancellation changed source data' "${deselect_logs[@]}"
+grep -Fq 'remove the link /home/dev/.claude-memory to /mnt/host/agent-sessions/claude/memory' "${deselect_logs[@]}" \
+  || fail_with 'disable plan did not disclose the memory link removal' "${deselect_logs[@]}"
+if guest_root test -e /home/dev/.claude-memory || guest_root test -L /home/dev/.claude-memory; then
+  fail_with 'disable left the memory link' "${deselect_logs[@]}"
+fi
+guest_root grep -Fxq 'retained target memory' /mnt/host/agent-sessions/claude/memory/MEMORY.md \
+  || fail_with 'disable changed the memory data in the target' "${deselect_logs[@]}"
 # Nothing is left for init: it completes without asking for confirmation.
 yard_declined init >"$STATE/claude-adoption-deselect-init.out" 2>&1 \
   || fail_with 'init after the cancellation was not a no-op' "$STATE/claude-adoption-deselect-init.out" "${deselect_logs[@]}"
 if grep -Fq 'integration.persist' "$STATE/claude-adoption-deselect-init.out"; then
   fail_with 'init after the cancellation planned persist work' "$STATE/claude-adoption-deselect-init.out"
 fi
-guest_root grep -Fxq 'retained session' /home/dev/.claude/projects/orca-existing/session.jsonl
+guest_root grep -Fxq 'retained session' /home/dev/.claude/projects/orca-existing/session.jsonl \
+  || fail_with 'cancellation changed the projects source' "${deselect_logs[@]}"
 
 stage 'adopting with a real open-per-append writer and a held descriptor'
 guest_root install -d -o dev -g dev -m 0700 /tmp/subyard-claude-adoption-writer
@@ -194,11 +206,12 @@ for _ in $(seq 1 100); do [ "$(writer_progress)" -ge $((after_enable + 50)) ] &&
 guest_root runuser -u dev -- touch /tmp/subyard-claude-adoption-writer/stop
 for _ in $(seq 1 100); do guest_root test -f /tmp/subyard-claude-adoption-writer/done && break; sleep 0.1; done
 guest_root test -f /tmp/subyard-claude-adoption-writer/done \
-  || { guest_root cat /tmp/subyard-claude-adoption-writer/output >&2; die 'fixture writer did not finish'; }
+  || { guest_root cat /tmp/subyard-claude-adoption-writer/output >&2; fail_with 'fixture writer did not finish' "${enable_logs[@]}"; }
 [ "$(guest_root readlink /home/dev/.claude/projects)" = /mnt/host/agent-sessions/claude/projects ] \
   || fail_with 'Claude projects were not adopted' "${enable_logs[@]}"
+# Disable removed the memory link; enable creates it again as an ordinary artifact.
 [ "$(guest_root readlink /home/dev/.claude-memory)" = /mnt/host/agent-sessions/claude/memory ] \
-  || fail_with 'Claude memory was not adopted' "${enable_logs[@]}"
+  || fail_with 'Claude memory link was not created again' "${enable_logs[@]}"
 # The backup is deleted after the switch; nothing is retained.
 guest_root sh -c '! ls -d /home/dev/.claude/projects.subyard-* /home/dev/.claude-memory.subyard-* /mnt/host/agent-sessions/claude/.subyard-stage-* 2>/dev/null' \
   || fail_with 'successful adoption left a backup, stage or record' "${enable_logs[@]}"
@@ -222,8 +235,10 @@ fi
 guest_root runuser -u dev -- sh -c 'cd /home/dev/.claude/projects/bulk && sha256sum -c --quiet /tmp/subyard-claude-bulk.sha256' \
   || fail_with 'adopted bulk data differs' "${enable_logs[@]}"
 # The target won for entries it already had.
-guest_root grep -Fxq 'retained target session' /home/dev/.claude/projects/orca-existing/session.jsonl
-guest_root grep -Fxq 'retained target memory' /home/dev/.claude-memory/MEMORY.md
+guest_root grep -Fxq 'retained target session' /home/dev/.claude/projects/orca-existing/session.jsonl \
+  || fail_with 'the target session did not win' "${enable_logs[@]}"
+guest_root grep -Fxq 'retained target memory' /home/dev/.claude-memory/MEMORY.md \
+  || fail_with 'the target memory did not win' "${enable_logs[@]}"
 guest_root jq -e '.autoMemoryDirectory and .permissions and .hooks and .model == "sonnet" and .theme == "dark"' \
   /home/dev/.claude/settings.json >/dev/null || fail_with 'Claude settings lost foreign or managed fields' "${enable_logs[@]}"
 
@@ -235,7 +250,8 @@ jq -e '(.persist_retained // []) | length == 0' "${status_logs[0]}" >/dev/null \
   || fail_with 'status listed retained data after success' "${status_logs[@]}"
 
 stage 'repeating init without persist changes'
-state_before="$(guest_root sh -c 'ls -d /home/dev/.claude/projects.subyard-* /home/dev/.claude-memory.subyard-* 2>/dev/null | sort; stat -c %i /mnt/host/agent-sessions/claude/projects')"
+state_before="$(guest_root sh -c 'ls -d /home/dev/.claude/projects.subyard-* /home/dev/.claude-memory.subyard-* 2>/dev/null | sort; stat -c %i /mnt/host/agent-sessions/claude/projects')" \
+  || fail_with 'persist state before the repeat init is unavailable' "${status_logs[@]}"
 repeat_logs=("$STATE/claude-adoption-repeat.out" "$STATE/claude-adoption-repeat.err")
 yard init --yes >"${repeat_logs[0]}" 2>"${repeat_logs[1]}" \
   || fail_with 'Claude adoption repeat init failed' "${repeat_logs[@]}"
@@ -292,4 +308,4 @@ guest_root grep -Fxq kept "$retained_backup/kept" || fail_with 'init removed a r
 guest_root rm -r -- "$retained_backup"
 guest_root rm -rf /home/dev/.claude/projects/late
 
-stage 'Claude adoption, interruption and cancel by disable, target-wins disclosure, backup deletion, repeat init, re-adoption and retained reporting passed'
+stage 'Claude adoption, interruption and cancel by disable with memory link removal, target-wins disclosure, backup deletion, repeat init, re-adoption and retained reporting passed'

@@ -42,6 +42,8 @@ type persistEntry struct {
 	Bytes         int64    `json:"bytes"`
 	Existing      []string `json:"existing"`
 	ExistingCount int      `json:"existing_count"`
+	// Retirable marks the exact own link of a deselected mapping.
+	Retirable bool `json:"retirable"`
 }
 
 type persistObservation struct {
@@ -67,6 +69,38 @@ type PersistRetained struct {
 
 func (observation persistObservation) changed() bool {
 	return slices.ContainsFunc(observation.Entries, func(entry persistEntry) bool { return len(entry.Ops) != 0 })
+}
+
+// retireUnrecordedLinks plans removing the exact link of a deselected mapping
+// that the artifact inventory does not record: an adoption cut after its
+// exchange but before the inventory apply. A recorded link is retired by the
+// inventory itself.
+func (observation persistObservation) retireUnrecordedLinks(recorded []integrationArtifact) persistObservation {
+	owned := map[string]bool{}
+	for _, entry := range recorded {
+		if entry.Kind == "link" {
+			owned[entry.Path] = true
+		}
+	}
+	entries := slices.Clone(observation.Entries)
+	for index, entry := range entries {
+		if entry.Retirable && !owned[entry.Source] {
+			entries[index].Ops = append(slices.Clone(entry.Ops), "retire")
+		}
+	}
+	observation.Entries = entries
+	return observation
+}
+
+// retireSources names the links whose removal the plan approved.
+func (observation persistObservation) retireSources() []string {
+	sources := []string{}
+	for _, entry := range observation.Entries {
+		if slices.Contains(entry.Ops, "retire") {
+			sources = append(sources, entry.Source)
+		}
+	}
+	return sources
 }
 
 // The inventory records exactly the links this transfer publishes or already published.
@@ -131,6 +165,8 @@ func persistStepText(fact integrationFact) (string, string, bool) {
 			parts = append(parts, text)
 		case "cancel":
 			parts = append(parts, "cancel the interrupted adoption of "+step.Source+": the directory is unchanged, staged copies are discarded and copies already published to the target are kept")
+		case "retire":
+			parts = append(parts, "remove the link "+step.Source+" to "+step.Target+" that an interrupted adoption published without recording it; the data remains in "+step.Target)
 		}
 	}
 	return step.Source, strings.Join(parts, "; "), true
@@ -226,7 +262,7 @@ func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationAr
 	if err != nil {
 		return err
 	}
-	output, err := runtime.runPersist(ctx, "apply", mappings, map[string]any{"expected": approved.Fingerprint})
+	output, err := runtime.runPersist(ctx, "apply", mappings, map[string]any{"expected": approved.Fingerprint, "retire": approved.retireSources()})
 	if err != nil {
 		return err
 	}
@@ -405,7 +441,8 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 
 // InspectPersistTransfers discloses pending transfers for an already running
 // guest. Inspected reports whether the guest was observed: only then does the
-// result bind execution (a stopped guest is first observed while provisioning).
+// result bind execution (a stopped guest, or one whose integration substrate
+// provisioning must first recreate, is observed while provisioning).
 func (runtime Runtime) InspectPersistTransfers(ctx context.Context) (plan IntegrationPlan, inspected bool, err error) {
 	// Before init installs Incus there is no yard whose data could be moved.
 	if ready, err := runtime.incusReady(ctx); err != nil || !ready {
@@ -423,9 +460,22 @@ func (runtime Runtime) InspectPersistTransfers(ctx context.Context) (plan Integr
 		return IntegrationPlan{}, false, err
 	}
 	observation, err := runtime.observePersist(ctx, entries)
-	if err == nil && !observation.changed() {
+	return persistInspectionPlan(observation, err, func() (IntegrationPlan, error) { return runtime.IntegrationPlan(ctx) })
+}
+
+// persistInspectionPlan returns no plan when the raw observation has no work.
+// A removable link is work only once the full plan applies the inventory
+// narrowing, so it falls through to that plan, which discloses and binds it.
+// Inspected is false when the plan cannot bind execution yet.
+func persistInspectionPlan(observation persistObservation, err error, full func() (IntegrationPlan, error)) (IntegrationPlan, bool, error) {
+	if err == nil && !observation.changed() && !slices.ContainsFunc(observation.Entries, func(entry persistEntry) bool { return entry.Retirable }) {
 		return IntegrationPlan{}, true, nil
 	}
-	plan, err = runtime.IntegrationPlan(ctx)
+	plan, err := full()
+	// Only the bare substrate precondition (it fails first, alone) defers to
+	// provisioning, which recreates the substrate and then plans uninspected.
+	if err == errIntegrationSubstrateUnavailable {
+		return IntegrationPlan{}, false, nil
+	}
 	return plan, err == nil, err
 }

@@ -446,7 +446,10 @@ first, the transfer is cancelled: the directory is unchanged, staged copies are 
 and copies already in the target are kept. An adoption interrupted after the exchange is
 finished by init, deselection or release activation. After deselection finish also
 removes the link, but only while the transfer record names it and it points to the
-recorded target; the data remains in the target. Release activation finishes a
+recorded target; the data remains in the target. A link that a finished transfer
+published but an interrupted reconcile never recorded as an owned artifact is removed by
+init or disable of the deselected integration, disclosed in the plan, only while it is the
+developer's link to exactly the configured target; release activation leaves it. Release activation finishes a
 committed transfer but never starts or restarts one; finishing there is best-effort, and
 another pending item can defer it to the next `yard init`, which completes it. A new
 adoption stays pending configuration until `yard init`. That plain `yard init` of the yard is admitted as the

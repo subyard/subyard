@@ -330,6 +330,9 @@ func adoptionPlan(observed integrationObservation, structuredEvidence []string) 
 	return plan, legacy
 }
 
+// errIntegrationSubstrateUnavailable is the precondition that init provisioning repairs.
+var errIntegrationSubstrateUnavailable = errors.New("integration substrate is unavailable; run yard init")
+
 func (runtime Runtime) integrationPrecondition(ctx context.Context) (ports.InstanceInfo, error) {
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
@@ -345,7 +348,7 @@ func (runtime Runtime) integrationPrecondition(ctx context.Context) (ports.Insta
 		return ports.InstanceInfo{}, errors.New("Incus executor is required")
 	}
 	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
-		return ports.InstanceInfo{}, firstError(err, errors.New("integration substrate is unavailable; run yard init"))
+		return ports.InstanceInfo{}, firstError(err, errIntegrationSubstrateUnavailable)
 	}
 	return state.Instance, nil
 }
@@ -717,6 +720,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	if persistErr != nil {
 		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, nil))
 	}
+	persist = persist.retireUnrecordedLinks(observed.Retired)
 	plan := IntegrationPlan{Changed: observed.Changed || persist.changed(), persist: persist}
 	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsWithSourceReader(phase, reader)
 	if err != nil {

@@ -2029,8 +2029,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 		}
 	}
 	if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
-		plan, err := runtime.IntegrationPlan(ctx)
-		if err != nil || plan.Changed {
+		if ok, err := integrationPlanConverged(runtime.IntegrationPlan(ctx)); err != nil || !ok {
 			return false, err
 		}
 		return runtime.diskTmpReadiness(ctx, false)
@@ -2038,8 +2037,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	// Resolved contexts opt into the shared integration ownership contract.
 	for _, entry := range runtime.Environment {
 		if strings.HasPrefix(entry, "INTEGRATION_HOST_LINKS=") {
-			plan, err := runtime.IntegrationPlan(ctx)
-			if err != nil || marker != version || plan.Changed {
+			if ok, err := integrationPlanConverged(runtime.IntegrationPlan(ctx)); err != nil || marker != version || !ok {
 				return false, err
 			}
 			return runtime.diskTmpReadiness(ctx, false)
@@ -2049,6 +2047,19 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 		return false, nil
 	}
 	return runtime.diskTmpReadiness(ctx, false)
+}
+
+// integrationPlanConverged reports whether the integration plan has no work.
+// The provision stage recreates a missing integration substrate (the bare
+// precondition), so that is pending work, not a refusal.
+func integrationPlanConverged(plan IntegrationPlan, err error) (bool, error) {
+	if err == errIntegrationSubstrateUnavailable {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !plan.Changed, nil
 }
 
 func provisionPasswdProbe(user string) []string {
