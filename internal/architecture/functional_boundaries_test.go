@@ -25,7 +25,7 @@ func TestFunctionalBoundaryCallGraphsDoNotReachPhysicalAdapters(t *testing.T) {
 	}
 	functions := map[string][]function{}
 	// Inspect the shared pure history owner too; it receives no physical-call exemption.
-	packages := []string{"profile", "config", "resource", "domain", "adapters/reconcileruntime", "releasetransition", "releasetransition/journal/v2", "migrationhistory"}
+	packages := []string{"profile", "config", "resource", "domain", "adapters/reconcileruntime", "releasetransition", "releasetransition/journal/v2", "migrationhistory", "shellquote"}
 	for _, packageName := range packages {
 		directory := filepath.Join("..", packageName)
 		files, err := filepath.Glob(filepath.Join(directory, "*.go"))

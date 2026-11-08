@@ -183,14 +183,11 @@ func TestDiskTmpCheckFixtureRejectsOtherCommandsAndSources(t *testing.T) {
 }
 
 func TestDirectOwnedObservationRequiresExactReadOnlyEmptyScope(t *testing.T) {
-	program, err := os.ReadFile("../../../adapters/reconcileruntime/integration_inventory.py")
-	if err != nil {
-		t.Fatal(err)
-	}
-	reader := bytes.ReplaceAll(bytes.ReplaceAll(program, []byte("@STATE_ROOT@"), []byte("/var/lib/subyard/integrations")), []byte("@STATE_UID@"), []byte("0"))
+	reader := reconcileruntime.IntegrationInventoryReader()
+	var err error
 	respond := directOwnedResponder("unused-policy-digest")
 	for _, change := range []string{"none", "observe-applied", "apply", "program", "developer", "foreign-path", "selected-integration"} {
-		call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", string(reader), "observe"}}
+		call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", reader, "observe"}}
 		entries := []map[string]string{{"id": "_projects", "kind": "file", "path": "/usr/local/libexec/subyard/projects-changed"}, {"id": "_projects", "kind": "file", "path": "/etc/subyard/agent-project-hooks"}}
 		developer := "dev"
 		switch change {

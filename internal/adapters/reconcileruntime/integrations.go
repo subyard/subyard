@@ -31,6 +31,13 @@ import (
 //go:embed integration_inventory.py
 var integrationInventoryProgram string
 
+// IntegrationInventoryReader returns the exact guest program this release runs
+// to observe integration state, so test doubles can recognize it.
+func IntegrationInventoryReader() string {
+	program := strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", "/var/lib/subyard/integrations")
+	return strings.ReplaceAll(program, "@STATE_UID@", "0")
+}
+
 // Only validated, source-owned destinations and fixed diagnostic text may cross
 // the release boundary. Guest stderr and file contents remain private.
 type integrationOwnershipError struct {
@@ -592,9 +599,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		}
 	}
 	payload, _ := json.Marshal(request)
-	program := strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", "/var/lib/subyard/integrations")
-	program = strings.ReplaceAll(program, "@STATE_UID@", "0")
-	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", program, mode}, Stdin: payload})
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", IntegrationInventoryReader(), mode}, Stdin: payload})
 	if err != nil || result.ExitCode != 0 {
 		type conflictRecord struct{ Reason, Path, Detail string }
 		var report struct {

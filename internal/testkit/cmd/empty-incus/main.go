@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -134,6 +135,14 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 	}
 }
 
+// Integration inventory readers the fake answers: the one this build sends and
+// those sent by released engines (v0.17.4-v0.20.0 and v0.23.0-v0.26.0).
+var currentInventoryReader = fmt.Sprintf("%x", sha256.Sum256([]byte(reconcileruntime.IntegrationInventoryReader())))
+var releasedInventoryReaders = map[string]bool{
+	"2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e": true,
+	"b0000549b3ec4cd53824d5143b79b05b1b78a253d0e4aceb30342321535e3372": true,
+}
+
 // This opt-in models the direct-caller case: owned, empty integrations and an
 // already installed disk policy. Unknown commands and mutations fail closed.
 func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServerExecCall) testkit.IncusServerExecStep {
@@ -167,7 +176,7 @@ func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServ
 		// hook artifacts may be observed, with the exact released/current reader.
 		if len(call.Command) == 5 && slices.Equal(call.Command[:3], []string{"python3", "-B", "-c"}) && (call.Command[4] == "observe" || call.Command[4] == "observe-applied") {
 			program := fmt.Sprintf("%x", sha256.Sum256([]byte(call.Command[3])))
-			if program == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e" || program == "b0000549b3ec4cd53824d5143b79b05b1b78a253d0e4aceb30342321535e3372" || program == "f13739c75b5a44dd280e3464d9fb2fc7a4ff7a24a6d4fc9f7998e9cab1edb5ce" || program == "853f6adfd1780ea684f1211a3f2a33b35d762d8bedd99993f5a0e5bea2e9e473" || program == "b7392f6b5e2f97d19cb0cebacadb215232b5e654ea4d75b89eb112807fe94cb2" || program == "3dcd5340f3cc6bd69ea8ae4c0def18164324544dce054ebdbf7817095edbfdaa" {
+			if program == currentInventoryReader || releasedInventoryReaders[program] {
 				if len(paths) > 1 && paths[1] != "" {
 					payload, err := os.ReadFile(paths[1])
 					if err == nil {
