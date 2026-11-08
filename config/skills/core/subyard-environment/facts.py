@@ -8,8 +8,11 @@ import stat
 import sys
 import tempfile
 
-FACTS = Path('/etc/subyard/guest-runtime.json')
-MACHINE = Path('/etc/machine-id')
+# The guest root and the owner trusted for the facts and their system ancestry.
+ROOT = Path('/')
+TRUSTED_OWNER = (0, 0)
+FACTS = ROOT / 'etc/subyard/guest-runtime.json'
+MACHINE = ROOT / 'etc/machine-id'
 # check-only result: the saved helper refresh is valid, but selection awaits init.
 PROFILES_PENDING = 11
 
@@ -37,9 +40,9 @@ def snapshot(value):
 
 
 def safe(path):
-    owner = (0, 0)
-    root = Path('/').lstat()
-    if root.st_uid != 0:
+    owner = TRUSTED_OWNER
+    root = ROOT.lstat()
+    if root.st_uid != TRUSTED_OWNER[0]:
         # Codex maps only the invoking user/group; all other owners, including
         # root, collapse to overflow IDs. Those IDs alone are not root proof.
         # Anchor this exception at / and the fixed system path, and require the
@@ -49,21 +52,23 @@ def safe(path):
         # protected system ancestry, not arbitrary overflow-owned paths.
         if path != FACTS:
             raise ValueError('unsafe yard facts directory')
-        for name, current, unmapped in (('uid', os.geteuid(), root.st_uid),
-                                         ('gid', os.getegid(), root.st_gid)):
+        for name, current, unmapped, trusted in (('uid', os.geteuid(), root.st_uid, TRUSTED_OWNER[0]),
+                                                  ('gid', os.getegid(), root.st_gid, TRUSTED_OWNER[1])):
             try:
                 mapping = Path('/proc/self/' + name + '_map').read_text().split()
                 valid = list(map(int, mapping)) == [current, 0, 1]
             except (OSError, ValueError):
                 valid = False
-            if not valid or current == 0 or unmapped == current or unmapped == 0:
+            if not valid or current == 0 or unmapped == current or unmapped == trusted:
                 raise ValueError('unsafe yard facts directory')
         owner = (root.st_uid, root.st_gid)
     for parent in (path.parent, *path.parent.parents):
         info = parent.lstat()
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner[0] or info.st_mode & 0o022 or
-                (owner[0] != 0 and (info.st_gid != owner[1] or os.access(parent, os.W_OK, effective_ids=True)))):
+                (owner != TRUSTED_OWNER and (info.st_gid != owner[1] or os.access(parent, os.W_OK, effective_ids=True)))):
             raise ValueError('unsafe yard facts directory')
+        if parent == ROOT:
+            break
     return owner
 
 
@@ -81,7 +86,7 @@ def read(path=FACTS, machine=MACHINE):
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o644 or
             (info.st_uid, info.st_gid) != owner or info.st_nlink != 1 or
-            (owner[0] != 0 and os.access(path, os.W_OK, effective_ids=True))):
+            (owner != TRUSTED_OWNER and os.access(path, os.W_OK, effective_ids=True))):
         raise ValueError('unsafe yard facts file')
     if info.st_size > 16384:
         raise ValueError('invalid yard facts size')
@@ -108,7 +113,7 @@ def write(value, path=FACTS):
     try:
         with os.fdopen(fd, 'wb') as stream:
             os.fchmod(stream.fileno(), 0o644)
-            os.fchown(stream.fileno(), 0, 0)
+            os.fchown(stream.fileno(), *TRUSTED_OWNER)
             stream.write((json.dumps(value, sort_keys=True) + '\n').encode())
             stream.flush()
             os.fsync(stream.fileno())

@@ -4,26 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
-
-// ownedFactsExecutor runs the shipped facts program against a fixture root
-// owned by the test user instead of root.
-type ownedFactsExecutor struct{ appliedIdentityExecutor }
-
-func (fixture ownedFactsExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-	request.Command = append([]string(nil), request.Command...)
-	request.Command[3] = strings.ReplaceAll(request.Command[3], "os.fchown(stream.fileno(), 0, 0)", fmt.Sprintf("os.fchown(stream.fileno(), %d, %d)", os.Getuid(), os.Getgid()))
-	return fixture.appliedIdentityExecutor.Exec(ctx, project, instance, request)
-}
 
 // A profile operation applies only its own runtime. The applied selection must
 // follow that profile and keep every other entry, including unapplied intent.
@@ -58,7 +46,7 @@ func TestRecordAppliedProfileChangesOnlyThatProfile(t *testing.T) {
 			testkit.WriteFile(t, filepath.Join(root, guestFactsSource), program, 0o600)
 			testkit.WriteFile(t, filepath.Join(root, "etc/machine-id"), []byte(strings.Repeat("a", 32)), 0o644)
 			// The desired selection carries unapplied intent that a profile operation must not record.
-			runtime := Runtime{RepositoryRoot: root, Executor: ownedFactsExecutor{appliedIdentityExecutor{root}}, Yard: domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001},
+			runtime := Runtime{RepositoryRoot: root, Executor: appliedIdentityExecutor{root}, Yard: domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001},
 				Environment: []string{"YARD_VERSION=1.2.3", "ENVIRONMENT_PROFILES=a b c"}}
 			var target map[string]any
 			if err := json.Unmarshal(runtime.guestRuntimeFacts(), &target); err != nil {
@@ -108,7 +96,7 @@ func TestRecordAppliedProfileChangesOnlyThatProfile(t *testing.T) {
 			}
 		})
 	}
-	if err := (Runtime{RepositoryRoot: "../../..", Executor: ownedFactsExecutor{}}).RecordAppliedProfile(context.Background(), "../github", true); err == nil {
+	if err := (Runtime{RepositoryRoot: "../../..", Executor: appliedIdentityExecutor{}}).RecordAppliedProfile(context.Background(), "../github", true); err == nil {
 		t.Fatal("unsafe profile name accepted")
 	}
 }

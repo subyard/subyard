@@ -23,14 +23,11 @@ func (fixture appliedIdentityExecutor) Exec(ctx context.Context, _, _ string, re
 		return ports.InstanceExecResult{Stdout: []byte(`{"installed":false}`)}, nil
 	}
 	program := request.Command[3]
-	program = strings.ReplaceAll(program, "'/etc/", "'"+fixture.root+"/etc/")
+	// The shipped facts program trusts its named root and owner; the fixture owns
+	// both. The identity projection below it keeps its own root checks.
+	program = strings.ReplaceAll(program, "ROOT = Path('/')", "ROOT = Path('"+fixture.root+"')")
+	program = strings.ReplaceAll(program, "TRUSTED_OWNER = (0, 0)", fmt.Sprintf("TRUSTED_OWNER = (%d, %d)", os.Getuid(), os.Getgid()))
 	program = strings.ReplaceAll(program, "'/var/", "'"+fixture.root+"/var/")
-	program = strings.ReplaceAll(program, "        info = parent.lstat()", "        if parent == Path('/tmp'): break\n        info = parent.lstat()")
-	// The fixture owns the protected root itself: it is the ordinary root-owned
-	// case, not the Codex sandbox whose root maps to an overflow ID.
-	program = strings.ReplaceAll(program, "if root.st_uid != 0:", "if False:")
-	program = strings.ReplaceAll(program, "owner = (0, 0)", fmt.Sprintf("owner = (%d, %d)", os.Getuid(), os.Getgid()))
-	program = strings.ReplaceAll(program, "owner[0] != 0", fmt.Sprintf("owner[0] != %d", os.Getuid()))
 	program = strings.ReplaceAll(program, "st_uid != 0", fmt.Sprintf("st_uid != %d", os.Getuid()))
 	program = strings.ReplaceAll(program, "st_gid != 0", fmt.Sprintf("st_gid != %d", os.Getgid()))
 	program = "import types\nimport sys\nsys.modules['pwd'] = types.SimpleNamespace(getpwall=lambda: [types.SimpleNamespace(pw_name='dev', pw_uid=1001, pw_dir='/home/dev')])\n" + program
