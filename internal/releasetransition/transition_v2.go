@@ -3739,6 +3739,28 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 	return withActivationWarnings(outcome, observation.activationWarnings)
 }
 
+// pendingConfiguration reports whether a refusal is pending configuration
+// rather than a release blocker. Every cause of any aggregate (domain.Refusals,
+// the CLI's activation aggregate, errors.Join) must be pending: errors.As alone
+// would decide by the first matching cause.
+func pendingConfiguration(err error) bool {
+	switch typed := err.(type) {
+	case nil:
+		return false
+	case interface{ Unwrap() []error }:
+		causes := typed.Unwrap()
+		for _, cause := range causes {
+			if !pendingConfiguration(cause) {
+				return false
+			}
+		}
+		return len(causes) != 0
+	case interface{ ActivationPendingConfiguration() bool }:
+		return typed.ActivationPendingConfiguration()
+	}
+	return pendingConfiguration(errors.Unwrap(err))
+}
+
 func activationObservationBlocker(id string, err error) Blocker {
 	code := CodeDependencyUnavailable
 	message := fmt.Sprintf("activation reconciler %q cannot be observed safely", id)
@@ -3749,8 +3771,12 @@ func activationObservationBlocker(id string, err error) Blocker {
 		message = fmt.Sprintf("activation reconciler %q reports ambiguous activation topology", id)
 	}
 	message, retry = publicActivationDiagnostic(err, message, retry)
+	resource := "activation." + id
+	if pendingConfiguration(err) {
+		resource += ".pending-configuration"
+	}
 	return Blocker{
-		Code: code, Resource: "activation." + id, Message: message,
+		Code: code, Resource: resource, Message: message,
 		Retry: retry,
 	}
 }

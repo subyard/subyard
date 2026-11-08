@@ -144,8 +144,17 @@ def managed_settings():
     return {key: value.get(key) for key in ('autoMemoryDirectory', 'permissions')}
 
 
+def native_versions(xdg):
+    result = {}
+    for path in sorted((Path(xdg) / 'claude/versions').glob('*')):
+        with path.open('rb') as source:
+            result[path.name] = hashlib.file_digest(source, 'sha256').hexdigest()
+    return result
+
+
 def launch(arguments):
     """Start an interactive Claude under the requested data home and report its self-install."""
+    versions_before = native_versions(arguments.xdg)
     config = Path(tempfile.mkdtemp(prefix='subyard-managed-claude-', dir='/tmp'))
     workspace = config / 'workspace'
     workspace.mkdir()
@@ -222,7 +231,7 @@ def launch(arguments):
         assert result['link'], 'unlocked Claude did not self-install'
     else:
         assert result['model_requests'] > 0, 'Claude session did not reach the fixture model'
-        assert not result['link'] and not result['versions'], 'locked Claude self-installed'
+        assert not result['link'] and native_versions(arguments.xdg) == versions_before, 'locked Claude changed its native installation'
     return 0
 
 
@@ -248,6 +257,11 @@ def terminal_exe(arguments):
     print('orca-terminal-executables: ' + arguments.agent + ' ' + json.dumps(found, sort_keys=True), flush=True)
     assert found, 'no agent process is running in the Orca terminal workspace'
     assert set(found.values()) == {runtime}, 'Orca terminal ran another agent executable'
+    if arguments.plugin_dir:
+        command_lines = [Path('/proc', str(pid), 'cmdline').read_bytes().split(b'\0') for pid in found]
+        expected = [b'--plugin-dir', arguments.plugin_dir.encode()]
+        assert any(any(parts[index:index + 2] == expected for index in range(len(parts) - 1))
+                   for parts in command_lines), 'agent-view plugin argument was not delivered'
     return 0
 
 
@@ -403,6 +417,12 @@ def codex_routing(arguments):
                                 text=True, timeout=120, stdin=subprocess.DEVNULL, check=False)
         return result.returncode
 
+    def report(name, client_arguments, client, error):
+        # Enough to diagnose a recurrence: the command, the error and what the terminal showed.
+        print('codex-routing: %s failed: command: codex %s; %s: %s; provider failure: %s; terminal output tail:\n%s' % (
+            name, shlex.join(client_arguments), type(error).__name__, str(error)[:2000], provider.failure,
+            client.text()[-3000:]), file=sys.stderr, flush=True)
+
     def prompted(client, path, before):
         text = client.wait('Press enter to confirm', provider)
         assert command in text, 'the prompt names another command'
@@ -414,38 +434,44 @@ def codex_routing(arguments):
         provider.workspace, provider.command = path, 'readlink /proc/$PPID/exe > executor.txt; command -v rg > helper.txt'
         client = Client(client_arguments, path)
         try:
-            client.wait('Fixture complete.', provider)
-            client_executable = resolved_exe(client.pid)
-            executor = (path / 'executor.txt').read_text().strip()
-            expected = expected or os.path.realpath(package)
-            helper = (path / 'helper.txt').read_text().strip()
-            assert helper.startswith(os.path.dirname(os.path.dirname(expected)) + '/'), name + ': the package helper is elsewhere: ' + helper
-            print('codex-routing: %s: client %s, tool executor %s, model peers %s' % (
-                name, client_executable, executor, sorted(provider.peers)), flush=True)
-            assert client_executable == CODEX_RUNTIME, name + ': the client is another binary'
-            assert executor == expected, name + ': tools ran on an unexpected binary'
-            assert provider.peers == {expected}, name + ': the model was reached from an unexpected binary'
-            if not prompts:
-                return
-            client.buffer, provider.command = '', command
-            client.submit()
-            prompted(client, path, 0)
-            client.buffer = ''
-            client.settle()
-            client.send('\x1b')
-            client.wait('interrupted', provider)
-            assert commits(path) == 0, name + ': a declined commit ran'
-            client.buffer, provider.command = '', command
-            client.submit()
-            prompted(client, path, 0)
-            client.buffer = ''
-            client.settle()
-            client.send('y')
-            client.wait('Fixture complete.', provider)
-            assert commits(path) == 1, name + ': an approved commit did not run once'
-            print('codex-routing: %s: Git prompt named the command, decline kept history, approval added one commit' % name, flush=True)
+            turn_body(name, client, path, expected, prompts)
+        except Exception as error:
+            report(name, client_arguments, client, error)
+            raise
         finally:
             client.close()
+
+    def turn_body(name, client, path, expected, prompts):
+        client.wait('Fixture complete.', provider)
+        client_executable = resolved_exe(client.pid)
+        executor = (path / 'executor.txt').read_text().strip()
+        expected = expected or os.path.realpath(package)
+        helper = (path / 'helper.txt').read_text().strip()
+        assert helper.startswith(os.path.dirname(os.path.dirname(expected)) + '/'), name + ': the package helper is elsewhere: ' + helper
+        print('codex-routing: %s: client %s, tool executor %s, model peers %s' % (
+            name, client_executable, executor, sorted(provider.peers)), flush=True)
+        assert client_executable == CODEX_RUNTIME, name + ': the client is another binary'
+        assert executor == expected, name + ': tools ran on an unexpected binary'
+        assert provider.peers == {expected}, name + ': the model was reached from an unexpected binary'
+        if not prompts:
+            return
+        client.buffer, provider.command = '', command
+        client.submit()
+        prompted(client, path, 0)
+        client.buffer = ''
+        client.settle()
+        client.send('\x1b')
+        client.wait('interrupted', provider)
+        assert commits(path) == 0, name + ': a declined commit ran'
+        client.buffer, provider.command = '', command
+        client.submit()
+        prompted(client, path, 0)
+        client.buffer = ''
+        client.settle()
+        client.send('y')
+        client.wait('Fixture complete.', provider)
+        assert commits(path) == 1, name + ': an approved commit did not run once'
+        print('codex-routing: %s: Git prompt named the command, decline kept history, approval added one commit' % name, flush=True)
 
     def disconnect(name, client_arguments, expected, survives):
         path = workspaces[name]
@@ -463,6 +489,9 @@ def codex_routing(arguments):
             assert provider.peers == ({expected} if survives else set()), name + ': unexpected requests after the disconnect'
             print('codex-routing: %s: client killed during a slow tool; tool %s, model peers %s' % (
                 name, 'finished' if survives else 'did not finish', sorted(provider.peers)), flush=True)
+        except Exception as error:
+            report(name, client_arguments, client, error)
+            raise
         finally:
             client.close()
 
@@ -688,6 +717,7 @@ def main():
     serve_command.add_argument('--command-file', required=True)
     serve_command.set_defaults(handler=serve)
     exe_command = commands.add_parser('terminal-exe')
+    exe_command.add_argument('--plugin-dir')
     exe_command.add_argument('--agent', choices=('claude', 'codex'), default='claude')
     exe_command.add_argument('--seconds', type=int, default=0)
     exe_command.add_argument('workspace')
@@ -719,7 +749,7 @@ if __name__ == '__main__':
     try:
         raise SystemExit(main())
     except Exception as error:
-        # All fixture data is synthetic, but upstream exceptions can include runtime details.
+        # All fixture data is synthetic; the text is bounded so a failure can be diagnosed.
         print('managed-agents: ' + (str(error) if isinstance(error, AssertionError)
-                                    else type(error).__name__), file=sys.stderr)
+                                    else '%s: %s' % (type(error).__name__, str(error)[:2000])), file=sys.stderr)
         raise SystemExit(1)

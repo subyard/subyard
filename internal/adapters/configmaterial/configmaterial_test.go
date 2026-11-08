@@ -431,6 +431,37 @@ func TestPreBaselineJSONAdoptionRequiresExactPublishedFile(t *testing.T) {
 	}
 }
 
+func TestJSONAdoptsDisjointForeignFieldsWithoutClaimingThem(t *testing.T) {
+	h := newGuestHarness(t)
+	desired := []byte(`{"memory":"managed","permissions":{"ask":["managed command"]}}`)
+	testkit.WriteFile(t, h.destination, []byte(`{"hooks":{"start":"foreign"},"model":"foreign","permissions":{"deny":["foreign command"]}}`), 0644)
+	before := snapshotMaterialization(t, h.root)
+	observation := h.observeMode(t, desired, ModeAssessAdopt)
+	if !observation.Adoptable || observation.Converged {
+		t.Fatal("foreign-only fields not adoptable")
+	}
+	if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+		t.Fatal("assessment changed foreign data")
+	}
+	if output, err := h.run(desired, ModeApply); err != nil {
+		t.Fatalf("apply: %v %s", err, output)
+	}
+	payload, _ := os.ReadFile(h.destination)
+	if !strings.Contains(string(payload), `"start":"foreign"`) || !strings.Contains(string(payload), `"deny":["foreign command"]`) || !strings.Contains(string(payload), `"memory":"managed"`) {
+		t.Fatalf("merge lost fields: %s", payload)
+	}
+	if !h.observeMode(t, desired, ModeObserve).Converged {
+		t.Fatal("merged document not converged")
+	}
+	if output, err := h.run(nil, ModeRetire); err != nil {
+		t.Fatalf("retire: %v %s", err, output)
+	}
+	payload, _ = os.ReadFile(h.destination)
+	if strings.Contains(string(payload), `"memory"`) || !strings.Contains(string(payload), `"deny":["foreign command"]`) || !strings.Contains(string(payload), `"start":"foreign"`) {
+		t.Fatalf("retirement claimed foreign fields: %s", payload)
+	}
+}
+
 func TestPreBaselineTOMLAdoptionRequiresExactPublishedFile(t *testing.T) {
 	previous := []byte("# Published template\nmanaged = 'old'\n")
 	desired := []byte("managed = 'new'\nadded = true\n")

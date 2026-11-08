@@ -324,6 +324,13 @@ type integrationStatus struct {
 	Inventory     []integrationInventoryEntry `json:"inventory"`
 	Detail        string                      `json:"detail,omitempty"`
 	Health        map[string]string           `json:"health,omitempty"`
+	Unmanaged     map[string]string           `json:"unmanaged,omitempty"`
+	// Retained persist backups and stages are state, never a readiness warning.
+	PersistRetained []reconcileruntime.PersistRetained `json:"persist_retained,omitempty"`
+	// PersistRetainedLines are the rendered retained items with their next step.
+	PersistRetainedLines []string `json:"persist_retained_lines,omitempty"`
+	// PersistRetainedUnavailable states why retained persist data could not be listed.
+	PersistRetainedUnavailable string `json:"persist_retained_unavailable,omitempty"`
 }
 
 type integrationInventoryEntry struct {
@@ -375,6 +382,7 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 		if err != nil {
 			status.Observed = "conflict"
 			status.Detail = err.Error()
+			cli.listPersistRetained(ctx, loaded, &status)
 			return status, nil
 		}
 		runtime = prepared.(reconcileruntime.Runtime)
@@ -383,6 +391,8 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 	if err != nil {
 		status.Observed = "conflict"
 		status.Detail = err.Error()
+		// Retained backups are assessed independently of the plan.
+		cli.listPersistRetained(ctx, loaded, &status)
 		return status, nil
 	}
 	status.Observed = "ready"
@@ -406,14 +416,38 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 		}
 	}
 	status.Health = (statusruntime.Runtime{Environment: healthEnvironment, Executor: executor}).ReadIntegrationHealth(ctx, loaded.Context, true)
+	status.Unmanaged = (statusruntime.Runtime{Environment: loaded.Environment, Executor: executor, Profiles: loaded.Catalog.Profiles()}).ReadUnmanagedIntegrations(ctx, loaded.Context, true)
+	if detail, exists := status.Unmanaged[id]; exists {
+		status.Observed, status.Detail = "unmanaged", detail
+	}
+	cli.listPersistRetained(ctx, loaded, &status)
 	for index := range status.Inventory {
 		entry := &status.Inventory[index]
 		if state, exists := status.Health[entry.ID]; exists {
 			entry.Observed = state
 		}
+		if _, exists := status.Unmanaged[entry.ID]; exists {
+			entry.Observed = "unmanaged"
+		}
 	}
 	return status, nil
 }
+
+// listPersistRetained records retained backups and stages beside any other
+// status, independent of the plan and of the current selection.
+func (cli *CLI) listPersistRetained(ctx context.Context, loaded config.Loaded, status *integrationStatus) {
+	runtime, ok := cli.initPlatform(loaded, nil).(reconcileruntime.Runtime)
+	if !ok {
+		return
+	}
+	retained, err := runtime.ReadPersistRetained(ctx)
+	if err != nil {
+		status.PersistRetainedUnavailable = err.Error()
+		return
+	}
+	status.PersistRetained, status.PersistRetainedLines = retained, runtime.PersistRetainedLines(retained)
+}
+
 func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool) {
 	if jsonOutput {
 		_ = json.NewEncoder(cli.options.Stdout).Encode(status)
@@ -426,6 +460,15 @@ func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool
 		requested = "<empty>"
 	}
 	fmt.Fprintf(cli.options.Stdout, "Yard: %s\nRequested: %s\nEffective: %s\nSource: %s (%s)\nObserved (yard): %s\n", status.Yard, requested, strings.Join(status.Selection.Effective, " "), status.Selection.Provenance.Path, status.Selection.Provenance.Scope, status.Observed)
+	for _, id := range slices.Sorted(maps.Keys(status.Unmanaged)) {
+		fmt.Fprintf(cli.options.Stdout, "%s: unmanaged — %s\n", id, status.Unmanaged[id])
+	}
+	for _, line := range status.PersistRetainedLines {
+		fmt.Fprintln(cli.options.Stdout, line)
+	}
+	if status.PersistRetainedUnavailable != "" {
+		fmt.Fprintln(cli.options.Stdout, "persist retained data not listed: "+status.PersistRetainedUnavailable)
+	}
 	for _, entry := range status.Inventory {
 		fmt.Fprintf(cli.options.Stdout, "  %s: requested=%t effective=%t eligible=%t reason=%s; %s (%s, %s:%d); runtime=%s\n", entry.ID, entry.Requested, entry.Effective, entry.Eligible, entry.Reason, entry.SourceGroup, entry.Source.Scope, entry.Source.Path, entry.Source.Line, entry.Observed)
 	}
@@ -460,5 +503,25 @@ func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool
 		if state, present := status.Health[name]; present {
 			fmt.Fprintf(cli.options.Stdout, "%s health: %s\n", name, state)
 		}
+	}
+}
+
+// Init applies integrations inside its provision stage. A pending persist
+// transfer moves data, so its exact steps are disclosed and bound in the init plan.
+func (prepared *preparedCommand) capturePersistSteps(plan reconcileruntime.IntegrationPlan) {
+	transfers := plan.PersistOperationSteps(prepared.Loaded.Context.IncusProject + "/" + prepared.Loaded.Context.YardInstanceName)
+	if len(transfers) == 0 {
+		return
+	}
+	prepared.exactState = operationStateDigest([]string{prepared.exactState, plan.StateBinding()})
+	steps := prepared.steps
+	prepared.steps = func() []domain.OperationStep {
+		result := steps()
+		for _, transfer := range transfers {
+			if !slices.ContainsFunc(result, func(step domain.OperationStep) bool { return step.ID == transfer.ID }) {
+				result = append(result, transfer)
+			}
+		}
+		return result
 	}
 }

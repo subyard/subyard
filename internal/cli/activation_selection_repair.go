@@ -41,7 +41,7 @@ func (cli *CLI) checkPersistentSelectionInputs() error {
 
 // A failed optional hook must not lock its selection in forever. This edits only
 // desired selection; the original sealed owner separately authorizes recovery.
-func (cli *CLI) runActivationSelectionRepair(ctx context.Context, yard, handler string, arguments []string, yes bool, outcome releasetransition.Outcome) (bool, int) {
+func (cli *CLI) runActivationSelectionRepair(ctx context.Context, yard, handler string, arguments []string, yes bool, outcome releasetransition.Outcome, inspection *releasetransition.Inspection) (bool, int) {
 	request := configAliasRepairRequest{scope: config.ScopeYard, local: true, selection: true,
 		yes: yes || slices.Contains(arguments, "--yes") || slices.Contains(arguments, "-y")}
 	switch handler {
@@ -115,7 +115,7 @@ func (cli *CLI) runActivationSelectionRepair(ctx context.Context, yard, handler 
 		cli.errorf("%v", err)
 		return true, 2
 	}
-	if handled, code := cli.runCompletedSelectionAuthoring(ctx, yard, request, outcome); handled {
+	if handled, code := cli.runCompletedSelectionAuthoring(ctx, yard, request, outcome, inspection); handled {
 		return true, code
 	}
 
@@ -124,7 +124,7 @@ func (cli *CLI) runActivationSelectionRepair(ctx context.Context, yard, handler 
 
 // A completed transition may leave desired source drift. Admit only explicit
 // local scalar authoring; this never grants activation or historical recovery.
-func (cli *CLI) runCompletedConfigScalarAuthoring(ctx context.Context, yard string, arguments []string, yes bool, outcome releasetransition.Outcome) (bool, int) {
+func (cli *CLI) runCompletedConfigScalarAuthoring(ctx context.Context, yard string, arguments []string, yes bool, outcome releasetransition.Outcome, inspection *releasetransition.Inspection) (bool, int) {
 	arguments = configArguments(arguments)
 	if len(arguments) == 0 || !slices.Contains([]string{"set", "unset"}, arguments[0]) {
 		return false, 0
@@ -142,27 +142,37 @@ func (cli *CLI) runCompletedConfigScalarAuthoring(ctx context.Context, yard stri
 			return false, 0
 		}
 	}
-	return cli.runCompletedScalarAuthoring(ctx, yard, request, nil, outcome)
+	return cli.runCompletedScalarAuthoring(ctx, yard, request, nil, outcome, inspection)
 }
 
 // Completed selection authoring additionally requires an effective reduction.
-func (cli *CLI) runCompletedSelectionAuthoring(ctx context.Context, yard string, selection configAliasRepairRequest, outcome releasetransition.Outcome) (bool, int) {
+func (cli *CLI) runCompletedSelectionAuthoring(ctx context.Context, yard string, selection configAliasRepairRequest, outcome releasetransition.Outcome, inspection *releasetransition.Inspection) (bool, int) {
 	choice := selection.choices[0]
 	request := configAuthoringRequest{action: "set", name: choice.name, value: choice.value, scope: selection.scope, assumeYes: selection.yes}
-	return cli.runCompletedScalarAuthoring(ctx, yard, request, &selection, outcome)
+	return cli.runCompletedScalarAuthoring(ctx, yard, request, &selection, outcome, inspection)
 }
 
-func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, request configAuthoringRequest, selection *configAliasRepairRequest, outcome releasetransition.Outcome) (bool, int) {
+func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, request configAuthoringRequest, selection *configAliasRepairRequest, outcome releasetransition.Outcome, inspection *releasetransition.Inspection) (bool, int) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
 		return false, 0
 	}
 	// Integration provisioning or services can drift while config files remain
 	// current. A source-only reduction does not apply either kind of drift.
-	permit, err := cli.prepareActivationRepair(ctx, yard, true, outcome, activationRepairMode{})
-	if err != nil || permit == nil {
+	pendingSelection := selection != nil && inspection != nil && cli.pendingIntegrationConfigurationGate(inspection.Outcome, inspection) && operationStateDigest(inspection.Outcome) == operationStateDigest(outcome)
+	var permit *configApplyRepairPermit
+	facts := ""
+	if pendingSelection {
+		facts = operationStateDigest(inspection)
+	} else {
+		permit, err = cli.prepareActivationRepair(ctx, yard, true, outcome, activationRepairMode{})
+	}
+	if !pendingSelection && (err != nil || permit == nil) {
 		// The source-only fallback independently requires an interrupted journal.
 		return false, 0
+	}
+	if permit != nil {
+		facts = permit.factsFingerprint
 	}
 	fail := func(err error) (bool, int) { cli.errorf("config %s: %v", request.action, err); return true, 1 }
 	runtime := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
@@ -175,7 +185,16 @@ func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, re
 	if err != nil {
 		return fail(err)
 	}
+	if pendingSelection && (proof.Metadata.Journal == nil || !configApplyRepairJournalMatches(*proof.Metadata.Journal, outcome)) {
+		return fail(errors.New("selection reduction requires matching completed release history"))
+	}
 	guard := func() error {
+		if pendingSelection {
+			freshOutcome, fresh, err := cli.inspectMutationGateInspection(ctx, yard)
+			if err != nil || !cli.pendingIntegrationConfigurationGate(freshOutcome, fresh) || operationStateDigest(fresh) != facts {
+				return domain.ErrPlanStale
+			}
+		}
 		dir, binding, err := runtime.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
 		if err != nil || dir != configDir || binding != tooling {
 			return domain.ErrPlanStale
@@ -193,7 +212,7 @@ func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, re
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return fail(errors.New("source authoring requires the local source owner"))
 	}
-	request.sourceBinding, request.sourceGuard = operationStateDigest([]string{proof.Binding, tooling, permit.factsFingerprint}), guard
+	request.sourceBinding, request.sourceGuard = operationStateDigest([]string{proof.Binding, tooling, facts}), guard
 	arguments := []string{request.action, request.name}
 	if request.action == "set" {
 		arguments = append(arguments, request.value)
@@ -218,7 +237,24 @@ func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, re
 		}
 		execute := prepared.execute
 		prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, output io.Writer) (domain.AdapterResult, error) {
-			unlock, err := cli.lockConfigApplyRepair(ctx, permit)
+			var unlock func()
+			var err error
+			if pendingSelection {
+				store, storeErr := releasetransition.NewPOSIXV2Store(options.ConfigHome)
+				if storeErr != nil {
+					return domain.AdapterResult{}, storeErr
+				}
+				unlock, err = store.Lock()
+				if err == nil {
+					err = guard()
+				}
+				if err != nil && unlock != nil {
+					unlock()
+					unlock = nil
+				}
+			} else {
+				unlock, err = cli.lockConfigApplyRepair(ctx, permit)
+			}
 			if err != nil {
 				return domain.AdapterResult{}, domain.ErrPlanStale
 			}

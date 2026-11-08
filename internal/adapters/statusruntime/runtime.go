@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -145,6 +147,10 @@ func (runtime Runtime) agentStatus(
 			status.State, status.Hint = "unverified", "runtime approvals have no supported offline check"
 		}
 		result = append(result, status)
+	}
+	unmanaged := runtime.ReadUnmanagedIntegrations(ctx, yard, running)
+	for _, name := range slices.Sorted(maps.Keys(unmanaged)) {
+		result = append(result, domain.AgentStatus{Name: name, State: "unmanaged", Hint: unmanaged[name]})
 	}
 	return result
 }

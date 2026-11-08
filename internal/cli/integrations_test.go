@@ -21,6 +21,7 @@ import (
 
 type integrationRuntimeFixture struct {
 	plan       reconcileruntime.IntegrationPlan
+	planErr    error
 	applyErr   error
 	afterApply func()
 	applied    int
@@ -137,7 +138,7 @@ func TestReleaseMaterializationKeepsFirstAuthoredHookPending(t *testing.T) {
 }
 
 func (fixture *integrationRuntimeFixture) IntegrationPlan(context.Context) (reconcileruntime.IntegrationPlan, error) {
-	return fixture.plan, nil
+	return fixture.plan, fixture.planErr
 }
 func (fixture *integrationRuntimeFixture) ApplyIntegrations(context.Context, reconcileruntime.IntegrationPlan) error {
 	fixture.applied++

@@ -350,12 +350,12 @@ func (cli *CLI) admitReleaseGate(
 		return permits, 0, false
 	}
 	if admission.completedScalarAuthoring {
-		if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, arguments, yes, *outcome); handled {
+		if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, arguments, yes, *outcome, gateInspection); handled {
 			return permits, code, true
 		}
 	}
 	if admission.activationSelectionRepair {
-		if handled, code := cli.runActivationSelectionRepair(ctx, yard, admission.handler, arguments, yes, *outcome); handled {
+		if handled, code := cli.runActivationSelectionRepair(ctx, yard, admission.handler, arguments, yes, *outcome, gateInspection); handled {
 			return permits, code, true
 		}
 	}

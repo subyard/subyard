@@ -165,6 +165,19 @@ def overlay(current, desired):
             current[key] = wanted
 
 
+def disjoint_fields(current, desired):
+    # A foreign document can be merged when none of our owned fields exists.
+    # An existing scalar in place of a managed object is also a collision.
+    for key, value in desired.items():
+        if key not in current:
+            continue
+        if not isinstance(value, dict) or not isinstance(current[key], dict) or not value:
+            return False
+        if not disjoint_fields(current[key], value):
+            return False
+    return True
+
+
 def validate_baseline(payload, developer, destination):
     try:
         value = parse_json(payload)
@@ -554,15 +567,16 @@ def main():
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination) if parent_exists else ({}, None)
         if mode == "assess-adopt" and original is not None:
-            # Pre-baseline releases wrote complete shipped JSON/TOML files. Only
-            # their exact bytes and safe native metadata prove this case; a
-            # missing baseline from an interrupted or damaged write does not.
+            # Recognize exact pre-baseline templates, or JSON documents whose
+            # fields are disjoint from our declaration. Existing managed fields
+            # still need historical ownership proof and safe native metadata.
             info = os.lstat(destination)
             if (info.st_uid != uid or
                     stat.S_IMODE(info.st_mode) != 0o644 or info.st_nlink != 1 or
                     os.path.lexists(receipt_path) or os.path.lexists(lock_path) or
-                    not any(original == payload.encode() for payload in globals().get("LEGACY_TEMPLATES", [])) or
-                    any(entry not in wanted_owned for entry in ownership(current))):
+                    not (FORMAT == 'json' and disjoint_fields(current, desired) or (
+                        any(original == payload.encode() for payload in globals().get("LEGACY_TEMPLATES", [])) and
+                        all(entry in wanted_owned for entry in ownership(current))))):
                 raise MaterializationError("adoption ownership evidence unavailable")
             report = {"converged": False, "adoptable": True,
                       "fingerprint": fingerprint(current, desired,

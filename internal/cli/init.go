@@ -50,6 +50,8 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
+	// approvedPersist binds provisioning to the persist plan confirmed by init.
+	approvedPersist                             *string
 	legacyContinuation                          *initLegacyContinuation
 	resourceCommand                             string
 	resourceArguments                           []string
@@ -419,6 +421,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 		PowerYards:        powerYards,
 		SRVPool:           loaded.Environment["SRV_POOL"],
 		SRVVolume:         loaded.Environment["SRV_VOLUME"],
+		PersistFinishOnly: cli.releaseTransitionChild || cli.activation != nil,
 	})
 }
 
@@ -1294,6 +1297,7 @@ func (execution *initExecution) rebuildPlatform(cli *CLI) {
 			runtime.TeardownServices = execution.resetBaseline.execution.snapshot().Services
 		}
 		runtime.ProvisionProfile = execution.provisionProfile
+		runtime.ApprovedPersist = execution.approvedPersist
 		runtime.ResourceCommand = execution.resourceCommand
 		runtime.ResourceArguments = slices.Clone(execution.resourceArguments)
 		if execution.integrationAdoption.AdoptionFingerprint != "" {

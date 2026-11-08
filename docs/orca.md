@@ -234,6 +234,21 @@ Desktop as described above.
 
 ## Projects and lifecycle
 
+With the Claude integration selected, Orca terminals, native Claude chat and
+agent view use the managed Claude binary. Agent view appends its `--plugin-dir`
+argument to the existing launch command, so normal PATH resolution still applies.
+Orca's hook installation preserves the managed settings. Existing Orca sessions
+and native version files remain intact when initialization removes a recognized
+native command link. See [Claude configuration and adoption](configuration.md#coding-agent-compatibility).
+
+Without the Claude integration, an Orca-installed Claude copy is reported as
+**unmanaged** by `yard integration status claude` and detailed `yard -Y NAME status`: self-updating,
+without Subyard's commit approval, persistence or instructions. Enabling Orca never
+selects Claude automatically. Subyard leaves `disabledTuiAgents` untouched. Orca's upstream `disabledTuiAgents` setting can contain
+`"claude"` to remove it from TUI launch choices; Subyard does not change that
+preference. It does not prevent manually running Claude in a terminal. The setting
+is defined by the [pinned Orca release](https://github.com/stablyai/orca/blob/b8ec5c8d170bcb9988e65de547a3a4e98b2885a9/src/shared/global-settings-types.ts).
+
 Orca's Fetch, Pull and Push actions use the yard developer's ordinary Git configuration.
 The service keeps Orca's app profile at `/srv/agents/orca/config/orca` while Git reads
 `~/.config/git/config` and `~/.gitconfig`. To use the GitHub broker for these actions,

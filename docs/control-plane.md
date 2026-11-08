@@ -88,6 +88,14 @@ Optional `AGENT_<name>_HEALTH` probes report advisory service health for `yard s
 an unavailable, invalid, or timed-out probe reports `unknown`. Health never enters a release
 plan or its fingerprint. Installation can be converged while a service is still starting.
 
+Profiles may declare `unmanaged_integrations` observations with an integration ID,
+a literal guest command array and a fixed public detail. Status runs these bounded,
+read-only probes only for selected profiles and unselected integrations, appending
+the developer home and UID as arguments. Only the closed `{"state":"unmanaged"}`
+result publishes that informational state; absent, invalid or failed observations
+publish nothing. These probes cannot select software, block activation or produce
+warnings. Profile packages own detection and its tests.
+
 Optional shipped `config/agents/*/integration.json` declarations extend the same
 package loader and operation-local catalog with immutable inputs, typed settings,
 existing agent metadata, native lifecycle ownership and dashboard metadata. Core
@@ -520,7 +528,26 @@ Pending-init detection compares desired inputs with this same overlay, normalizi
 selections and the installed architecture's usage pin.
 Binding owners preserves ordinary applicability inputs. Non-repair observations keep their
 ordinary configuration view; completed materialized readiness remains release-wide independently
-of that view, so selecting another yard cannot hide drift.
+of that view, so selecting another yard cannot hide drift. Typed integration ownership
+refusals remain visible in initialization, status and migration readiness. When they are
+the only blockers of an already active, completed release, they describe pending configuration
+and do not block unrelated commands such as SSH-agent unlock. Invalid history, unfinished
+transactions and unclassified materialization failures still block mutation. A local typed
+selection reduction in this state validates the sealed original source and complete protected
+history, locks and rechecks that evidence, then writes only the desired selection; it grants
+no activation or historical recovery authority.
+
+Declared persist directories are adopted by a separate guest program
+(`internal/adapters/reconcileruntime/integration_persist.py`), not by the artifact
+inventory. It drops to the developer account, uses descriptor-relative no-follow
+access, and derives transfer state from the filesystem and one descriptor beside the
+source. Before its single exchange it neither deletes nor overwrites anything;
+destructive calls exist only in the stage discard, the backup deletion and the removal
+of its own records, which a source-level test enforces. Traversal never crosses a mount.
+Its observation is part of the integration plan fingerprint; the inventory receives a
+projection of the exact links the transfer publishes, so the initial inventory plan stays
+bound across the exchange. A backup or stage finish cannot remove is listed by status and
+never blocks anything.
 
 Before confirmation, the plan lists local yards in name order and differing init-owned
 integration settings in setting order as `NAME  installed -> desired`. Sensitive settings show

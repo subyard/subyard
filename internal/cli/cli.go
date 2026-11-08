@@ -4313,7 +4313,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if gateErr != nil {
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
-			if outcome != nil {
+			if outcome != nil && !(ordinaryCommandDuringPendingConfiguration(definition.Handler) && operationCLI.pendingIntegrationConfigurationGate(outcome, gateInspection)) {
 				if definition.Handler == "@init" {
 					var permit *configApplyRepairPermit
 					permit, outcome, gateErr = operationCLI.prepareInitAdmission(
@@ -4446,7 +4446,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if gateErr != nil {
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
-			if outcome != nil {
+			if outcome != nil && !(ordinaryCommandDuringPendingConfiguration(planned.Definition.Handler) && planned.CLI.pendingIntegrationConfigurationGate(outcome, gateInspection)) {
 				if planned.Definition.Handler != "@init" || planned.CLI.permits.profileInit == nil ||
 					!sameConfigApplyGate(planned.CLI.permits.profileInit.gate, *outcome) {
 					return nil, mutationGateRPCError(outcome, gateInspection)

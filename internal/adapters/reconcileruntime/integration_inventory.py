@@ -8,6 +8,8 @@ import grp
 import stat
 import sys
 import secrets
+import ctypes
+import errno
 
 ROOT = '@STATE_ROOT@'
 OWNER = int('@STATE_UID@')
@@ -17,6 +19,12 @@ class OwnershipConflict(Exception):
         self.reason = reason
         self.path = path
         self.detail = detail
+
+class OwnershipConflicts(Exception):
+    def __init__(self, conflicts, initial=False, retired=None):
+        self.conflicts = conflicts
+        self.initial = initial
+        self.retired = retired or []
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
@@ -226,6 +234,17 @@ def atomic(path, payload, mode=0o600, uid=OWNER):
             pass
         os.close(parent)
 
+def rename_noreplace(source, target, source_fd, target_fd):
+    # A concurrently created destination is refused, never replaced.
+    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(source_fd, os.fsencode(source), target_fd, os.fsencode(target), 1) != 0:
+        code = ctypes.get_errno()
+        if code == errno.EEXIST:
+            raise OwnershipConflict('concurrent artifact change', target)
+        raise OSError(code, 'artifact publication failed')
+
 def mkdir_owned(path, uid, gid=None):
     missing = []
     current = path
@@ -398,6 +417,25 @@ def main():
     retain = request.get('retain_pending_intent') is True or mode == 'observe-applied'
     intent = {name for name, entry in previous.items()
               if retain and name not in wanted and entry.get('uncommitted') is True}
+    conflicts = []
+    # The separate persist transfer owns directory data. A projected path is the
+    # exact link that transfer publishes before inventory apply; a deferred path
+    # is pending configuration reported by that transfer, not an artifact conflict.
+    persist = request.get('persist') or {}
+    if not isinstance(persist, dict) or any(v not in ('projected', 'deferred') for v in persist.values()):
+        raise ValueError('invalid persist projection')
+    projected = {key(e) for e in desired if e['kind'] == 'link' and not e.get('file_target')
+                 and persist.get(e['path']) == 'projected'}
+    deferred = {e['path'] for e in records + desired if persist.get(e.get('path')) == 'deferred'}
+    def observe_entry(entry, name):
+        if name not in projected:
+            return actual(entry), actual_metadata(entry)
+        wanted_metadata = expected_metadata(entry, home, uid)
+        if mode in ('apply', 'commit'):
+            current = actual(entry)
+            if current != entry['digest'] or actual_metadata(entry) != wanted_metadata:
+                raise unowned_selected(entry, current)
+        return entry['digest'], wanted_metadata
     def comparable_entry(entry):
         value = {k: v for k, v in entry.items() if k != 'preview_migrated'}
         if mode == 'observe-applied':
@@ -416,46 +454,71 @@ def main():
     retired = []
     adopted = []
     for name, entry in previous.items():
-        current = actual(entry)
-        observed[name] = inventory_identity(entry, current)
-        current_metadata = actual_metadata(entry)
-        if current_metadata is not None:
-            metadata[name] = current_metadata
-        if name in intent:
+        if entry.get('path') in deferred:
             continue
-        if entry['kind'] in ('file', 'link') and current not in (None, entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest')):
-            raise OwnershipConflict('owned artifact drift', entry['path'])
-        if name not in wanted:
-            if (entry['kind'] in ('file', 'link') and current is not None
-                    and current_metadata != expected_metadata(entry, home, uid)):
+        try:
+            current, current_metadata = observe_entry(entry, name)
+            observed[name] = inventory_identity(entry, current)
+            if current_metadata is not None:
+                metadata[name] = current_metadata
+            if name in intent:
+                continue
+            if entry['kind'] in ('file', 'link') and current not in (None, entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest')):
                 raise OwnershipConflict('owned artifact drift', entry['path'])
-            retired.append(entry)
+            if name not in wanted:
+                if (entry['kind'] in ('file', 'link') and current is not None
+                        and current_metadata != expected_metadata(entry, home, uid)):
+                    raise OwnershipConflict('owned artifact drift', entry['path'])
+                retired.append(entry)
+        except OwnershipConflict as error:
+            conflicts.append(error)
+        except OwnershipConflicts as error:
+            conflicts.extend(error.conflicts)
+        except (OSError, ValueError):
+            conflicts.append(OwnershipConflict('artifact evidence unavailable', entry.get('path', '')))
     for name, entry in wanted.items():
-        current = actual(entry)
-        observed[name] = inventory_identity(entry, current)
-        if entry['kind'] == 'link':
-            mount = '/' + '/'.join(entry['target'].strip('/').split('/')[:3])
-            if not os.path.isdir(mount):
-                raise ValueError('session mount is unavailable')
-        if entry['kind'] in ('file', 'link'):
-            if name not in previous and current is not None:
-                if adoptable_core(entry, current):
-                    adopted.append(entry)
-                elif adopt and not established and adoptable_selected(entry, current, home, uid):
-                    adopted.append(entry)
-                else:
-                    raise unowned_selected(entry, current)
-            changed |= current != entry['digest']
-            if current is not None:
-                metadata[name] = actual_metadata(entry)
-                changed |= metadata[name] != expected_metadata(entry, home, uid)
+        if entry.get('path') in deferred:
+            observed[name] = None
+            continue
+        try:
+            current, current_metadata = observe_entry(entry, name)
+            observed[name] = inventory_identity(entry, current)
+            if entry['kind'] == 'link':
+                mount = '/' + '/'.join(entry['target'].strip('/').split('/')[:3])
+                if not os.path.isdir(mount):
+                    raise ValueError('session mount is unavailable')
+            if entry['kind'] in ('file', 'link'):
+                if name not in previous and current is not None:
+                    if name in projected or adoptable_core(entry, current):
+                        adopted.append(entry)
+                    elif adopt and not established and adoptable_selected(entry, current, home, uid):
+                        adopted.append(entry)
+                    else:
+                        raise unowned_selected(entry, current)
+                changed |= current != entry['digest']
+                if current is not None:
+                    metadata[name] = current_metadata
+                    changed |= metadata[name] != expected_metadata(entry, home, uid)
+        except OwnershipConflict as error:
+            conflicts.append(error)
+        except OwnershipConflicts as error:
+            conflicts.extend(error.conflicts)
+        except (OSError, ValueError):
+            conflicts.append(OwnershipConflict('artifact evidence unavailable', entry.get('path', '')))
     # Initial adoption cannot silently claim legacy wiring. Once protected evidence
     # exists, new unrecorded paths belong to their creators, not this inventory.
     for candidate in request.get('legacy', []) if not established else []:
-        if candidate not in released and candidate not in [e.get('path') for e in records + desired] and os.path.lexists(candidate):
-            raise OwnershipConflict('legacy integration artifact has no ownership evidence', candidate)
+        try:
+            if candidate not in released and candidate not in [e.get('path') for e in records + desired] and os.path.lexists(candidate):
+                raise OwnershipConflict('legacy integration artifact has no ownership evidence', candidate)
+        except OwnershipConflict as error:
+            conflicts.append(error)
+        except OwnershipConflicts as error:
+            conflicts.extend(error.conflicts)
+    if conflicts:
+        raise OwnershipConflicts(conflicts, not established, retired)
     adoption = [[clean(entry), metadata[key(entry)]] for entry in adopted]
-    identity = [home, uid, records, released, observed, metadata,
+    identity = [home, uid, records, released, observed, metadata, sorted(projected), sorted(deferred),
                 [clean(e) for e in desired], not established, adopt, adoption,
                 [e.get('source_digest') for e in desired]]
     if applied_settings is not None:
@@ -499,9 +562,11 @@ def main():
         return
     if mode not in ('apply', 'commit'):
         raise ValueError('invalid inventory operation')
+    if deferred:
+        raise ValueError('pending persist transfer must not be applied')
     for entry in adopted:
         current = actual(entry)
-        if not (adoptable_core(entry, current)
+        if not (key(entry) in projected or adoptable_core(entry, current)
                 or adopt and not established and adoptable_selected(entry, current, home, uid)):
             raise unowned_selected(entry, current)
     if migrations:
@@ -595,7 +660,10 @@ def main():
                 os.chown(temporary, uid, entry['gid'], dir_fd=parent_fd, follow_symlinks=False)
                 if actual(entry) != observed[name] or actual_metadata(entry) != metadata.get(name):
                     raise OwnershipConflict('concurrent artifact change', destination)
-                os.replace(temporary, os.path.basename(destination), src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                if observed[name] is None:
+                    rename_noreplace(temporary, os.path.basename(destination), parent_fd, parent_fd)
+                else:
+                    os.replace(temporary, os.path.basename(destination), src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
                 os.fsync(parent_fd)
             finally:
                 try:
@@ -609,6 +677,13 @@ try:
 except OwnershipConflict as error:
     # Only a fixed category and destination are emitted, never document contents.
     print(json.dumps({'reason': error.reason, 'path': error.path, 'detail': error.detail}), file=sys.stderr)
+    sys.exit(1)
+except OwnershipConflicts as error:
+    values = [{'reason': item.reason, 'path': item.path, 'detail': item.detail}
+              for item in error.conflicts]
+    report = values[0] if len(values) == 1 else {'conflicts': values}
+    report.update(initial=error.initial, retired=error.retired)
+    print(json.dumps(report), file=sys.stderr)
     sys.exit(1)
 except Exception:
     print('integration ownership conflict or unavailable evidence', file=sys.stderr)

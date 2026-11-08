@@ -62,6 +62,7 @@ type Runtime struct {
 	legacyPreviewInstructions    bool
 	appliedIntegrationInspection bool
 	profileDiagnostics           bool
+	persistProjection            map[string]string
 	ownerInitPlanning            bool
 	ownerSources                 *preparedOwnerSourceExecution
 	afterOwnerConfigs            *afterOwnerConfigPhysical
@@ -101,6 +102,13 @@ type Runtime struct {
 	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
 	// a reviewed init plan. Ordinary integration commands leave it false.
 	AdoptLegacyIntegrations bool
+	// Release activation only finishes an already committed persist
+	// transfer; a new adoption stays pending configuration for yard init.
+	PersistFinishOnly bool
+	// ApprovedPersist, when set, is the persist observation fingerprint that an
+	// init plan disclosed and the operator confirmed ("" when it disclosed no
+	// transfer). Execution refuses a fresh transfer that differs from it.
+	ApprovedPersist *string
 	// LegacyIntegrationFingerprint binds the reviewed initial adoption until its
 	// first inventory publication. Retries with established evidence ignore it.
 	LegacyIntegrationFingerprint string

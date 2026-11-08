@@ -72,6 +72,11 @@ bash "$tmp/$controller" --lane codex-approvals --slot 7
 printf '%s\n' '--slot 7 --vm-count 1 --purpose codex-approvals --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 SUBYARD_E2E_ORCA_CODEX_APPROVALS_ONLY=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' > "$tmp/expected-approvals"
 diff -u "$tmp/expected-approvals" "$PROFILE_CONTROLLER_CALLS"
 
+: > "$PROFILE_CONTROLLER_CALLS"
+bash "$tmp/$controller" --lane claude-recovery --slot 7
+printf '%s\n' '--slot 7 --vm-count 1 --purpose claude-recovery --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_MANAGED_AGENTS=1 SUBYARD_E2E_ORCA_CLAUDE_RECOVERY_ONLY=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' > "$tmp/expected-recovery"
+diff -u "$tmp/expected-recovery" "$PROFILE_CONTROLLER_CALLS"
+
 rc=0
 : > "$PROFILE_CONTROLLER_CALLS"
 PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 > "$tmp/failure" 2>&1 || rc=$?

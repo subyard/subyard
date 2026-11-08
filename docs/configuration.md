@@ -281,7 +281,7 @@ described above. Unrelated fields and
 session targets remain preserved. Unknown or changed state fails before adoption.
 `yard integration status` assesses this same initial adoption without changing files or
 creating inventory. Matching legacy artifacts appear as pending work; a conflict identifies
-the first artifact or prerequisite that prevents adoption.
+every independently determinable artifact or prerequisite that prevents adoption.
 Release activation reconciles running ordinary yards before refreshing their configs,
 including unfinished inventory application. Stopped yards remain unchanged.
 Integration enable/disable does not perform this initial adoption. Interrupted
@@ -390,6 +390,91 @@ In a yard selecting Claude or Codex, only provisioning replaces `/usr/local/bin/
 `/usr/local/bin/codex`. By process image, a paired Orca terminal and Orca's native chat run these
 managed binaries for both agents, and Orca's Codex launcher and a login shell resolve to the managed
 Codex. An explicit path to another executable runs that executable.
+
+Claude can also be enabled after Orca has already installed and run its own copy.
+The confirmed `yard integration enable claude` or `yard init` plan adopts only the
+integration's declared persist directories (`~/.claude/projects` and
+`~/.claude-memory`), and only where a real directory exists. Adoption never stops
+sessions, never replaces a target entry and never crosses a mount point. The source and
+an existing target must be owned by the developer and not writable by group or others:
+
+1. Preflight lists every refusal at once: unsafe roots, unsafe, special or unreadable
+   entries, a mount point in the source or the target, a source and target that are the
+   same directory or contain each other (compared by directory identity, not by path),
+   unsupported renames on either filesystem and missing space (the source size plus a
+   1 GiB reserve on the sessions volume). Nothing is written before it passes.
+2. It records the transfer in `<directory>.subyard-transfer.json`, copies every entry
+   into a flat stage `.subyard-stage-<yard>-<id>` beside the target under new names
+   created exclusively, then makes one catch-up pass that copies changed files again.
+3. It renames the copies into the target without replacing anything. The target wins:
+   an entry that already exists there is not transferred, and where the target has a
+   non-directory in place of a source directory, that whole subtree is not transferred.
+   The plan lists, bounded with a count, the entries that already exist in the target;
+   their source copies are deleted with the backup. Only directories the transfer
+   creates get the source modes; existing target directories are never changed. If the
+   target refuses entries (permissions or space), every refused path is reported as
+   pending configuration and there is no exchange; the next `yard init` restarts it.
+4. One atomic exchange replaces the directory with a link to the target; the original
+   directory lands at `<directory>.subyard-backup-<id>`. The path is never absent.
+5. Finish removes the transfer's own stage copies, the backup and the record. Nothing
+   is deleted or overwritten before the exchange.
+
+Accepted limits: lines a session writes after the catch-up pass, or through a
+descriptor held across the exchange, are lost with the backup, as are source entries
+that were not transferred because the target already had them. A session that opens its
+files by path writes into the target after the exchange. A foreign file deliberately
+given the transfer's random copy prefix inside its stage is removed with the stage. Mount
+points are recognized by mount identity on each opened descriptor, so a bind mount of the
+same filesystem counts. The configured roots and their ancestors are trusted: root inside
+the yard mounting over them during an operation is outside this guarantee. Process
+interruption is tested; power-loss durability rests on the fsync order. The exchange
+requires `renameat2(RENAME_EXCHANGE)` and `RENAME_NOREPLACE`. ZFS-backed yards are
+unverified.
+
+Finish deletes a backup only while it is still the recorded original directory on its
+parent's mount. It never follows a link or enters a mount. Anything finish cannot remove
+(a changed backup, a mount inside it, foreign entries in the stage, or a filesystem error
+such as a denied access) is kept and the record is removed anyway. `yard integration status` lists each retained
+`<directory>.subyard-backup-*` and `.subyard-stage-<yard>-*` by name, with its size (or
+unknown) and an inspection command; remove it manually once its data is no longer needed.
+Retained items are state, not a warning, and never block activation, init or deselection.
+
+Transfer state is independent of the selection. An adoption interrupted before the
+exchange restarts on the next `yard init`: its stage copies are discarded and the transfer
+starts again; copies already in the target stay and win. If the integration is deselected
+first, the transfer is cancelled: the directory is unchanged, staged copies are discarded
+and copies already in the target are kept. An adoption interrupted after the exchange is
+finished by init, deselection or release activation. After deselection finish also
+removes the link, but only while the transfer record names it and it points to the
+recorded target; the data remains in the target. Release activation finishes a
+committed transfer but never starts or restarts one; finishing there is best-effort, and
+another pending item can defer it to the next `yard init`, which completes it. A new
+adoption stays pending configuration until `yard init`. That plain `yard init` of the yard is admitted as the
+release repair even without configuration drift, when every pending item names it as the
+next step. Each refusal is pending configuration with a next step and none blocks
+unrelated commands. `yard init` binds the transfer it disclosed: if the source, target, operation or the
+listed existing entries change before provisioning executes it, nothing is transferred
+and the next `yard init` shows the new plan. A plan that went stale in other ways stops
+that operation and is not pending configuration. A repeated run without changes does nothing.
+
+The destination JSON settings retain foreign fields, including Orca hooks, model
+and theme, while Subyard applies `autoMemoryDirectory` and its `permissions` fields.
+A document containing only foreign fields can be adopted without a historical
+baseline. Unknown plain instruction files, unsafe metadata and changed ownership
+evidence still require explicit inspection or moving the foreign file aside.
+
+Orca's agent-view command (`claude --plugin-dir …/orca-agent-view`) uses the same
+managed command as its terminal and native chat. Initialization removes only the
+recognized native `~/.local/bin/claude` shadow link, retaining its version files and
+running sessions. The managed update lock prevents later Claude launches from
+recreating it. Custom absolute executable paths retain their explicit meaning.
+
+When Claude is not selected, `yard integration status claude` and detailed
+`yard -Y NAME status`
+report an Orca-installed copy as **unmanaged**. It remains self-updating and receives
+no managed commit gate, persist links or instructions. This is informational state,
+without a readiness refusal or warning. Orca does not depend on or automatically
+enable the Claude integration.
 
 - Claude: the managed drop-in sets `env.DISABLE_UPDATES = "1"`. `claude update` and `claude install`
   each print that updates are disabled by the administrator and create no native installation, and an

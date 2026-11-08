@@ -63,6 +63,7 @@ type Definition struct {
 	ManagedPaths               []ManagedPath                  `json:"managed_paths,omitempty"`
 	Setup                      *Setup                         `json:"setup,omitempty"`
 	Dashboard                  *IntegrationDashboard          `json:"dashboard,omitempty"`
+	UnmanagedIntegrations      []UnmanagedIntegration         `json:"unmanaged_integrations,omitempty"`
 	Settings                   []Setting                      `json:"settings,omitempty"`
 	Runtime                    *RuntimeHook                   `json:"runtime,omitempty"`
 	GuestEnvironment           *GuestEnvironmentHook          `json:"guest_environment,omitempty"`

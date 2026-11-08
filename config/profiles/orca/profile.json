@@ -1,5 +1,12 @@
 {
   "schema_version": 1,
+  "unmanaged_integrations": [
+    {
+      "id": "claude",
+      "command": ["python3", "-B", "/usr/local/libexec/subyard/orca-registration/unmanaged_claude.py"],
+      "detail": "Orca-installed Claude; self-updating, without managed commit approval, persistence or instructions. Enable the claude integration to manage it."
+    }
+  ],
   "settings": [
     {
       "name": "ORCA_ADVERTISE_HOST",

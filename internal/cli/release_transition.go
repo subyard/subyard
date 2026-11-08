@@ -997,6 +997,55 @@ func (err materializedConfigActivationError) Error() string {
 
 func (err materializedConfigActivationError) Unwrap() error           { return err.cause }
 func (err materializedConfigActivationError) ActivationPhase() string { return err.action }
+func (err materializedConfigActivationError) ActivationPendingConfiguration() bool {
+	return err.action == "inspect" && pendingIntegrationConfiguration(err.cause)
+}
+
+// pendingIntegrationConfiguration requires every cause of an aggregate to be
+// pending integration configuration, not only the first errors.As finds.
+func pendingIntegrationConfiguration(err error) bool {
+	switch typed := err.(type) {
+	case nil:
+		return false
+	case interface{ Unwrap() []error }:
+		causes := typed.Unwrap()
+		for _, cause := range causes {
+			if !pendingIntegrationConfiguration(cause) {
+				return false
+			}
+		}
+		return len(causes) != 0
+	case interface{ PendingIntegrationConfiguration() bool }:
+		return typed.PendingIntegrationConfiguration()
+	}
+	return pendingIntegrationConfiguration(errors.Unwrap(err))
+}
+
+// Keep independent public adapter findings independent at the release boundary.
+// Wrapping their aggregate in one diagnostic would expose only its first cause.
+func (err materializedConfigActivationError) collected() error {
+	var refusals *domain.Refusals
+	if !errors.As(err.cause, &refusals) {
+		return err
+	}
+	causes := []error{}
+	for _, cause := range refusals.Unwrap() {
+		finding := err
+		finding.cause = cause
+		causes = append(causes, finding.collected())
+	}
+	return domain.CollectRefusals(causes...)
+}
+
+// appendTo adds each collected finding as its own activation refusal.
+func (err materializedConfigActivationError) appendTo(refusals []error) []error {
+	collected := err.collected()
+	var findings *domain.Refusals
+	if errors.As(collected, &findings) {
+		return append(refusals, findings.Unwrap()...)
+	}
+	return append(refusals, collected)
+}
 
 func (err materializedConfigActivationError) ActivationDiagnostic() (string, string) {
 	retry := fmt.Sprintf("run yard -Y %s %s", err.yard, err.command)
@@ -1118,7 +1167,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	operation := reconciler.operation()
 	_, targets, err := operation.releaseActivationTargets(ctx, yard, reconciler.configHome, reconciler.allLocal, files)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}
+		return releasetransition.V2ActivationObservation{}, (materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}).collected()
 	}
 	activationTargets := make([]config.MaterializationActivationTarget, 0, len(targets))
 	consequences, warnings := []string{}, []string{}
@@ -1132,7 +1181,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	for _, target := range targets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
-			refusals = append(refusals, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome})
+			refusals = materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}.appendTo(refusals)
 			continue
 		}
 		consequences = append(consequences, target.Loaded.IntegrationSelectionExplanation(), target.Loaded.EnvironmentProfileSelectionExplanation())
@@ -1142,7 +1191,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		}
 		integrationScope, managedPaths, err := operation.materializedIntegrationScope(target.Loaded, reader)
 		if err != nil {
-			refusals = append(refusals, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome})
+			refusals = materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome}.appendTo(refusals)
 			continue
 		}
 		platform := operation.initPlatform(target.Loaded, nil)
@@ -1155,12 +1204,12 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			if assessment.State == "drift" || assessment.State == "converged" {
 				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 				if err != nil {
-					refusals = append(refusals, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect", reconciler.configHome})
+					refusals = materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect", reconciler.configHome}.appendTo(refusals)
 					continue
 				}
 				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
 				if err != nil {
-					refusals = append(refusals, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect", reconciler.configHome})
+					refusals = materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect", reconciler.configHome}.appendTo(refusals)
 					continue
 				}
 				if captureIntegrationPlans {
@@ -1477,7 +1526,7 @@ func (reconciler *materializedConfigActivationReconciler) PrepareActivationRecov
 	operation := reconciler.reconcileCLI()
 	loaded, _, err := operation.releaseActivationTargets(ctx, "default", reconciler.configHome, false, nil)
 	if err != nil {
-		return "", materializedConfigActivationError{err, "default", "configuration", "config status", "inspect", reconciler.configHome}
+		return "", (materializedConfigActivationError{err, "default", "configuration", "config status", "inspect", reconciler.configHome}).collected()
 	}
 	targets, err := reconciler.configTargets(ctx, operation, loaded, true)
 	if err != nil {
@@ -1518,7 +1567,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	}
 	loaded, _, err := operation.releaseActivationTargets(ctx, yard, reconciler.configHome, false, nil)
 	if err != nil {
-		return materializedConfigActivationError{err, yard, "configuration", "config status", "apply", reconciler.configHome}
+		return (materializedConfigActivationError{err, yard, "configuration", "config status", "apply", reconciler.configHome}).collected()
 	}
 	targets, err := reconciler.configTargets(ctx, operation, loaded, reconciler.allLocal)
 	if err != nil {
@@ -1533,7 +1582,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	// before the ordinary config refresh can replace any unowned bytes.
 	for _, target := range targets {
 		if err := reconciler.reconcileIntegrationTarget(ctx, operation, target); err != nil {
-			return materializedConfigActivationError{err, target.Name, "integrations", "integration status", "reconcile", reconciler.configHome}
+			return (materializedConfigActivationError{err, target.Name, "integrations", "integration status", "reconcile", reconciler.configHome}).collected()
 		}
 	}
 	selector := func() ([]configTarget, error) {

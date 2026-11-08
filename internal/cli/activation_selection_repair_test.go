@@ -468,6 +468,16 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 		}
 		writeProfileTestFile(t, filepath.Join(root, relative), []byte(content), mode)
 	}
+	if _, pending := extraAssets["config/fixture-pending-ownership"]; pending {
+		enginePath := filepath.Join(root, "bin/yard-engine")
+		engine := string(mustReadConfigFixture(t, enginePath))
+		engine = strings.Replace(engine, `"status":"migration-required"`, `"status":"operator-action-required"`, 1)
+		engine = strings.Replace(engine, `"code":"transition-required"`, `"code":"dependency-unavailable"`, 1)
+		engine = strings.Replace(engine, `"message":"activation drift","retry":"run yard update"`, `"message":"fixture unowned selected artifact","retry":"move fixture file aside","transaction":"tx-0123456789abcdef"`, 1)
+		engine = strings.Replace(engine, `"consequences":["repair release activation"]},"outcome"`, `"consequences":["repair release activation"]},"blockers":[{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"fixture unowned selected artifact","retry":"move fixture file aside"}],"outcome"`, 1)
+		testkit.WriteFile(t, enginePath, []byte(engine), 0700)
+
+	}
 	manifest := ""
 	for _, tree := range []string{"bin", "config", "scripts"} {
 		err := filepath.WalkDir(filepath.Join(root, tree), func(path string, entry fs.DirEntry, err error) error {

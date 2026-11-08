@@ -58,6 +58,11 @@ func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testin
 			if IntegrationOwnershipConflict(err) != (kind != "transport") {
 				t.Fatalf("ownership conflict classification for %s: %v", kind, err)
 			}
+			var pending interface{ PendingIntegrationConfiguration() bool }
+			isPending := errors.As(err, &pending) && pending.PendingIntegrationConfiguration()
+			if isPending != (kind == "completed" || kind == "exit-only" || kind == "edited") {
+				t.Fatal("unavailable or malformed evidence became pending configuration")
+			}
 			if public {
 				message, retry := diagnostic.ActivationDiagnostic()
 				if !strings.Contains(message, wantDetail) || !strings.Contains(message, "/home/dev/.fixture/config.toml") ||

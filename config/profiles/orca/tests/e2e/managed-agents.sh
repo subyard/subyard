@@ -77,7 +77,6 @@ guest_root rm -rf "$daemon_package" "$daemon_home" "$daemon_control"
 stage 'launching agents under the Orca server environment without a self-install'
 as_dev python3 -B "$helper" launch --cli /usr/local/bin/claude --xdg "$orca_xdg" \
   || die 'locked Claude launch under Orca XDG failed'
-guest_root test ! -e "$orca_xdg/claude/versions" || die 'locked Claude created a data home installation'
 status=0
 as_dev env XDG_DATA_HOME="$orca_xdg" timeout 15 /usr/local/bin/codex exec --skip-git-repo-check \
   -c 'model_provider="fixture"' \
@@ -375,6 +374,17 @@ sleep 5
 assert_managed_settings orca-claude-terminal-launch
 terminal_close
 assert_managed_settings orca-claude-terminal-close
+
+stage 'running Claude agent view through a stock Orca terminal'
+agent_view_plugin="$(guest_root find /srv/agents/orca -type d -name orca-agent-view -print -quit)"
+[ -n "$agent_view_plugin" ] || die 'stock Orca agent-view plugin was not installed'
+orca_terminal_open "claude --plugin-dir '$agent_view_plugin'" subyard-managed-claude-agent-view
+as_dev python3 -B "$helper" terminal-exe --agent claude --seconds 30 --plugin-dir "$agent_view_plugin" "$workspace" \
+  || terminal_fail 'Orca agent view ran another Claude executable or omitted its plugin'
+sleep 5
+assert_managed_settings orca-claude-agent-view
+guest_root test ! -L /home/dev/.local/bin/claude || die 'agent view recreated the native Claude shadow'
+terminal_close
 
 stage 'reading managed Claude settings drift before repairing it'
 guest_root runuser -u dev -- sh -c "jq 'del(.autoMemoryDirectory)' $settings_file > $settings_file.stage && cat $settings_file.stage > $settings_file && rm -f $settings_file.stage"

@@ -305,7 +305,7 @@ func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) 
 func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *testing.T) {
 	for _, test := range []struct{ path, detail, want, command string }{
 		{path: "/etc/subyard/agent-project-hooks", want: "unowned selected artifact", command: "namei"},
-		{path: "/home/dev/.claude/CLAUDE.md", want: "unowned selected artifact", command: "namei"},
+		{path: "/home/dev/.claude/CLAUDE.md", want: "unowned selected artifact", command: "mv"},
 		{path: "/untrusted-secret", detail: "unrecognized core content"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unrecognized core content", want: "contents do not match", command: "sha256sum"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unsafe core metadata", want: "owned by root:root", command: "namei"},

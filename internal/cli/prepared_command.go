@@ -841,6 +841,20 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 		}
 		return result, err
 	}
+	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok && execution.mode == initReconcile {
+		plan, inspected, err := runtime.InspectPersistTransfers(ctx)
+		if err != nil {
+			return err
+		}
+		prepared.capturePersistSteps(plan)
+		if inspected {
+			// Provisioning recomputes the plan; it must match what is confirmed here.
+			approved := plan.PersistFingerprint()
+			execution.approvedPersist = &approved
+			runtime.ApprovedPersist = &approved
+			execution.platform = runtime
+		}
+	}
 	return nil
 }
 

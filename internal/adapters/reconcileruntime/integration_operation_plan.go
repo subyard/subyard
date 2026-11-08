@@ -111,10 +111,27 @@ func (plan IntegrationPlan) OperationSteps(target string) []domain.OperationStep
 		if strings.HasPrefix(label, "check:") {
 			label = fmt.Sprintf("readiness check %d", index)
 		}
-		steps = append(steps, domain.OperationStep{ID: fmt.Sprintf("integration.fact.%d", index), Target: target + ":" + label,
+		id := fmt.Sprintf("integration.fact.%d", index)
+		consequence := "converge " + label
+		if source, text, transfer := persistStepText(fact); transfer {
+			id = fmt.Sprintf("integration.persist.%d", index)
+			label, desired, consequence = source, text, text
+		}
+		steps = append(steps, domain.OperationStep{ID: id, Target: target + ":" + label,
 			Observed: observed, Desired: desired, Decision: decision,
 			Preconditions: []string{"native target ownership and captured desired identity are unchanged", "a converged target cannot require new work"},
-			Verify:        "native observation proves this captured fact reached its original desired state", Consequence: "converge " + label})
+			Verify:        "native observation proves this captured fact reached its original desired state", Consequence: consequence})
 	}
 	return steps
+}
+
+// PersistOperationSteps discloses data recovery independently of package stages.
+func (plan IntegrationPlan) PersistOperationSteps(target string) []domain.OperationStep {
+	result := []domain.OperationStep{}
+	for _, step := range plan.OperationSteps(target) {
+		if strings.HasPrefix(step.ID, "integration.persist.") {
+			result = append(result, step)
+		}
+	}
+	return result
 }

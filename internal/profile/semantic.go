@@ -23,6 +23,18 @@ func (definition *Definition) validateSemantic() error {
 	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported profile schema or name")
 	}
+	seenUnmanaged := map[string]bool{}
+	for _, observation := range definition.UnmanagedIntegrations {
+		if !domain.SafeName(observation.ID) || seenUnmanaged[observation.ID] || len(observation.Command) == 0 || len(observation.Command) > 8 || observation.Detail == "" || !textSafe(observation.Detail) {
+			return errors.New("invalid unmanaged integration observation")
+		}
+		seenUnmanaged[observation.ID] = true
+		for _, argument := range observation.Command {
+			if argument == "" || len(argument) > 256 || strings.ContainsAny(argument, "\x00\r\n") {
+				return errors.New("invalid unmanaged integration command")
+			}
+		}
+	}
 	if definition.InfrastructureService != nil {
 		if err := definition.InfrastructureService.validate(); err != nil {
 			return err
@@ -49,7 +61,7 @@ func (definition *Definition) validateSemantic() error {
 		}
 
 	}
-	if definition.LifecycleOnly && (definition.FullCleanup == "" || len(definition.DefaultYards) > 0 || definition.OwnerService != "" || definition.Setup != nil || definition.Runtime != nil || len(definition.Settings) > 0 || len(definition.Native) > 0 || len(definition.Consumers) > 0 || definition.GuestEnvironment != nil || definition.Dashboard != nil) {
+	if definition.LifecycleOnly && (definition.FullCleanup == "" || len(definition.DefaultYards) > 0 || definition.OwnerService != "" || definition.Setup != nil || definition.Runtime != nil || len(definition.Settings) > 0 || len(definition.Native) > 0 || len(definition.Consumers) > 0 || definition.GuestEnvironment != nil || definition.Dashboard != nil || len(definition.UnmanagedIntegrations) > 0) {
 		return errors.New("lifecycle-only profiles may declare only full cleanup hooks, managed paths and native publication metadata")
 	}
 	if definition.FullCleanup != "" && !relative(definition.FullCleanup) {
