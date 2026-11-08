@@ -211,7 +211,7 @@ print(output)
 					}
 				}
 			case "ordered errors":
-				if observeErr == nil || !strings.Contains(observeErr.Error(), "profile a-runtime observation failed (invalid-schema)") || active != 0 {
+				if observeErr == nil || !strings.Contains(observeErr.Error(), "profile a-runtime observation failed (invalid-schema)") || !strings.Contains(observeErr.Error(), "profile b-runtime observation failed (native-exit-9)") || active != 0 {
 					t.Fatalf("batch lost original-order failure or drain: %v active=%d", observeErr, active)
 				}
 			case "cancel":
@@ -396,6 +396,9 @@ func TestObserveProfileRuntimeValidatesBoundedStrictJSON(t *testing.T) {
 		{name: "trailing space consequence", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"service restarts "}`},
 		{name: "long consequence", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"` + strings.Repeat("a", profileRuntimeConsequenceBytes+1) + `"}`},
 		{name: "list consequence", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":["service restarts"]}`},
+		{name: "private diagnostic value", output: `{"state":"stale","desired":"` + testRuntimeNewDigest + `","diagnostics":[{"parameter":"sample.state","installed":"private-value","desired":"ready"}]}`},
+		{name: "duplicate diagnostic", output: `{"state":"stale","desired":"` + testRuntimeNewDigest + `","diagnostics":[{"parameter":"sample.state","installed":"unknown","desired":"ready"},{"parameter":"sample.state","installed":"unknown","desired":"ready"}]}`},
+		{name: "current diagnostic", output: `{"state":"current","actual":"` + testRuntimeNewDigest + `","desired":"` + testRuntimeNewDigest + `","diagnostics":[{"parameter":"sample.state","installed":"unknown","desired":"ready"}]}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -411,6 +414,28 @@ func TestObserveProfileRuntimeAcceptsStaleConsequence(t *testing.T) {
 	observation, err := decodeProfileRuntimeObservation([]byte(`{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","consequence":"` + consequence + `"}`))
 	if err != nil || observation.Consequence != consequence {
 		t.Fatalf("observation = %#v, err = %v", observation, err)
+	}
+}
+
+func TestObserveProfileRuntimeAcceptsClosedDiagnostic(t *testing.T) {
+	observation, err := decodeProfileRuntimeObservation([]byte(`{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","diagnostics":[{"parameter":"sample.service","installed":"inactive","desired":"active"}]}`))
+	if err != nil || observation.Diagnostics == nil || len(*observation.Diagnostics) != 1 || (*observation.Diagnostics)[0].Installed != "inactive" {
+		t.Fatalf("observation = %#v, err = %v", observation, err)
+	}
+}
+
+func TestProfileRuntimeDiagnosticsAreOptIn(t *testing.T) {
+	base := `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `"}`
+	withDetail := `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","diagnostics":[{"parameter":"sample.service","installed":"inactive","desired":"active"}]}`
+	runtime := profileRuntimeFixture(t, "#!/bin/sh\nif [ \"${SUBYARD_PROFILE_DIAGNOSTICS:-0}\" = 1 ]; then printf '%s' '"+withDetail+"'; else printf '%s' '"+base+"'; fi\n")
+	runtime.Environment = []string{"SUBYARD_PROFILE_DIAGNOSTICS=1"}
+	ordinary, err := runtime.ObserveProfileRuntimes(context.Background())
+	if err != nil || ordinary["synthetic-runtime"].Diagnostics != nil {
+		t.Fatalf("ordinary observation: %#v %v", ordinary, err)
+	}
+	diagnostic, err := runtime.ObserveProfileRuntimeDiagnostics(context.Background())
+	if err != nil || diagnostic["synthetic-runtime"].Diagnostics == nil {
+		t.Fatalf("diagnostic observation: %#v %v", diagnostic, err)
 	}
 }
 

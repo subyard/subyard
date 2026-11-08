@@ -120,6 +120,13 @@ class NativeSignalsTest(unittest.TestCase):
                         def turn(self, *args):
                             self.process = subprocess.Popen(shlex.split(args[-1]), start_new_session=True,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            # Establish the running-child premise independently
+                            # of the short completion timeout under test.
+                            ready_deadline = time.monotonic()+2
+                            while not pid.is_file() and self.process.poll() is None and time.monotonic() < ready_deadline:
+                                time.sleep(.01)
+                            if not pid.is_file():
+                                raise RuntimeError('fixture command did not become ready')
 
                         def close(self):
                             if self.process.poll() is None:

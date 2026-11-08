@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -69,6 +70,13 @@ func (runtime Runtime) ObserveProfileRuntimes(ctx context.Context) (map[string]p
 		return nil, err
 	}
 	return runtime.observeProfileRuntimes(ctx, definitions)
+}
+
+// ObserveProfileRuntimeDiagnostics opts into the current owners' read-only
+// diagnostic extension. Ordinary activation retains its historical wire shape.
+func (runtime Runtime) ObserveProfileRuntimeDiagnostics(ctx context.Context) (map[string]ports.RuntimeObservation, error) {
+	runtime.profileDiagnostics = true
+	return runtime.ObserveProfileRuntimes(ctx)
 }
 
 // ObserveProfileRuntime narrows native observation to one declared owner. A
@@ -134,17 +142,24 @@ func (runtime Runtime) observeProfileRuntimes(
 	workers.Wait()
 	// Every read-only native process has finished before decoding in declaration
 	// order. Errors never leave sibling observations running into later effects.
+	var refusals []error
 	for index, definition := range definitions {
 		if failures[index] != nil {
-			return nil, runtime.profileObservationFailure(definition.Runtime.ActivationID, "", failures[index])
+			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "", failures[index]))
+			continue
 		}
 		observation, err := decodeProfileRuntimeObservation(outputs[index])
 		if err != nil {
-			return nil, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", err)
+			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", err))
+			continue
+		}
+		if observation.Diagnostics != nil && !runtime.profileDiagnostics {
+			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", errors.New("unexpected runtime diagnostics")))
+			continue
 		}
 		observations[definition.Runtime.ActivationID] = observation
 	}
-	return observations, nil
+	return observations, domain.CollectRefusals(refusals...)
 }
 
 func (runtime Runtime) ApplyProfileRuntime(
@@ -301,6 +316,10 @@ func (runtime Runtime) runProfileRuntimeHandler(
 }
 
 func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile.Definition, handler string, environment []string, timeout time.Duration, action string, arguments ...string) ([]byte, []byte, error) {
+	environment = slices.DeleteFunc(slices.Clone(environment), func(value string) bool { return strings.HasPrefix(value, "SUBYARD_PROFILE_DIAGNOSTICS=") })
+	if action == "observe" && runtime.profileDiagnostics {
+		environment = append(environment, "SUBYARD_PROFILE_DIAGNOSTICS=1")
+	}
 	cleanPath, err := definition.ExecutablePath(handler)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve shipped handler: %w", err)
@@ -393,6 +412,23 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 		len(observation.Consequence) > profileRuntimeConsequenceBytes || !profileRuntimeConsequence.MatchString(observation.Consequence) ||
 		strings.HasSuffix(observation.Consequence, " ")) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation has an invalid consequence")
+	}
+	if observation.Diagnostics != nil && (len(*observation.Diagnostics) > 128 || observation.State != ports.RuntimeStateStale) {
+		return ports.RuntimeObservation{}, errors.New("runtime observation has invalid diagnostics")
+	}
+	seen := map[string]bool{}
+	var diagnostics ports.RuntimeDiagnostics
+	if observation.Diagnostics != nil {
+		diagnostics = *observation.Diagnostics
+	}
+	for _, item := range diagnostics {
+		validValue := func(value string) bool {
+			return slices.Contains([]string{"unknown", "absent", "present", "active", "inactive", "enabled", "disabled", "not-found", "failed", "drift", "current", "changed", "matched", "mismatch", "ready", "not-ready", "missing"}, value)
+		}
+		if len(item.Parameter) > 96 || !domain.SafeID(item.Parameter) || seen[item.Parameter] || !validValue(item.Installed) || !validValue(item.Desired) {
+			return ports.RuntimeObservation{}, errors.New("runtime observation has invalid diagnostics")
+		}
+		seen[item.Parameter] = true
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {

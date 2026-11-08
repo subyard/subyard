@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,10 +211,11 @@ func TestAppliedIntegrationSettingsRequireConvergenceAndRetainFailedIntent(t *te
 	ownedBytes := []byte("owned\n")
 	entries := []integrationArtifact{{ID: "sample", Kind: "package", Digest: strings.Repeat("a", 64)}, {ID: "sample", Kind: "file", Path: owned, Digest: fmt.Sprintf("%x", sha256.Sum256(ownedBytes)), Content: base64.StdEncoding.EncodeToString(ownedBytes)}}
 	settings := map[string]string{"AGENT_sample_COMMAND": "old-command"}
+	var diagnostics *IntegrationDiagnosticEvidence
 	expected := ""
 	run := func(mode string, fail bool) integrationObservation {
 		t.Helper()
-		payload, _ := json.Marshal(map[string]any{"home": home, "uid": os.Getuid(), "entries": entries, "applied_settings": settings, "expected": expected})
+		payload, _ := json.Marshal(map[string]any{"home": home, "uid": os.Getuid(), "entries": entries, "applied_settings": settings, "diagnostics": diagnostics, "expected": expected})
 		command := exec.Command("python3", "-B", "-c", program, mode)
 		command.Stdin = strings.NewReader(string(payload))
 		output, err := command.CombinedOutput()
@@ -251,6 +253,13 @@ func TestAppliedIntegrationSettingsRequireConvergenceAndRetainFailedIntent(t *te
 	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
 		t.Fatal("identical baseline replaced the inventory")
 	}
+	diagnostics = &IntegrationDiagnosticEvidence{Key: strings.Repeat("a", 64), Digests: map[string]string{"AGENT_sample_CONFIG": strings.Repeat("b", 64)}}
+	expected = run("observe", false).Fingerprint
+	run("capture-settings", false)
+	expected = ""
+	if captured := run("selection", false).Diagnostics; captured == nil || captured.Key != diagnostics.Key || captured.Digests["AGENT_sample_CONFIG"] != diagnostics.Digests["AGENT_sample_CONFIG"] {
+		t.Fatal("diagnostic evidence was not captured")
+	}
 	expected = strings.Repeat("0", 64)
 	run("capture-settings", true)
 	expected = ""
@@ -281,6 +290,9 @@ func TestAppliedIntegrationSettingsRequireConvergenceAndRetainFailedIntent(t *te
 	run("capture-settings", true)
 	expected = ""
 	run("commit", false)
+	if retained := run("selection", false).Diagnostics; retained != nil {
+		t.Fatal("entry commit accepted stale diagnostic evidence")
+	}
 	if run("selection", false).AppliedSettings["AGENT_sample_COMMAND"] != "old-command" {
 		t.Fatal("entry commit promoted settings before verification")
 	}
@@ -362,6 +374,7 @@ type appliedSettingsExecutor struct {
 	settings    map[string]string
 	captures    int
 	failCapture bool
+	diagnostics *IntegrationDiagnosticEvidence
 }
 
 func (fixture *appliedSettingsExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
@@ -376,17 +389,54 @@ func (fixture *appliedSettingsExecutor) Exec(ctx context.Context, project, insta
 				return ports.InstanceExecResult{ExitCode: 1}, errors.New("fixture baseline publication failed")
 			}
 			var input struct {
-				Settings map[string]string `json:"applied_settings"`
+				Settings    map[string]string              `json:"applied_settings"`
+				Diagnostics *IntegrationDiagnosticEvidence `json:"diagnostics"`
 			}
 			if err := json.Unmarshal(request.Stdin, &input); err != nil {
 				return ports.InstanceExecResult{}, err
 			}
 			fixture.settings = input.Settings
+			fixture.diagnostics = input.Diagnostics
 			fixture.captures++
 			return ports.InstanceExecResult{}, nil
 		}
 	}
 	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestAppliedDiagnosticCaptureRejectsSourceChangeBeforePublication(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			executor := &appliedSettingsExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}}
+			calls := 0
+			sources := newDiagnosticSourceSnapshot(func(config.MaterializedAsset) ([]byte, error) {
+				calls++
+				if changed && calls > 1 {
+					return []byte("changed after observation"), nil
+				}
+				return []byte("applied source"), nil
+			})
+			runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Executor: executor, SourceReader: sources.read, Environment: []string{"AGENT_sample_PROVISION=/fixture/provision"}, Yard: domain.Context{DevUser: "dev", DevUID: os.Getuid()}}
+			_, err := runtime.integrationInventory(context.Background(), "capture-settings", nil, strings.Repeat("a", 64), integrationInventoryCapture{verifySources: sources.verify})
+			if changed {
+				if !errors.Is(err, domain.ErrPlanStale) || executor.captures != 0 {
+					t.Fatalf("changed source was published: %v captures=%d", err, executor.captures)
+				}
+				return
+			}
+			if err != nil || executor.captures != 1 || executor.diagnostics == nil {
+				t.Fatalf("capture: %v %#v", err, executor.diagnostics)
+			}
+			key, err := hex.DecodeString(executor.diagnostics.Key)
+			if err != nil || executor.diagnostics.Digests["AGENT_sample_PROVISION"] != config.ConfigurationInputDigest("AGENT_sample_PROVISION", config.SettingFile, key, []byte("applied source")) {
+				t.Fatal("capture did not bind observed bytes")
+			}
+		})
+	}
 }
 
 func TestIntegrationSettingsPublicationRetryAndLateFailure(t *testing.T) {

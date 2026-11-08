@@ -923,3 +923,31 @@ func TestNativeOverflowRetainsReasonClassesAndFullFilteredDetails(t *testing.T) 
 		t.Fatalf("full filtered remainder is not available: %s", stderr.String())
 	}
 }
+
+func TestNativeDiagnosticStreamGroupsSafeParameterRows(t *testing.T) {
+	findings := []error{
+		domain.WithMigrationParameters(domain.MigrationStateRefusal("work", errors.New("private-one"), "native identity"), domain.MigrationParameter{Name: "bridge", Installed: "old", Desired: "new"}),
+		domain.WithMigrationParameters(domain.MigrationStateRefusal("default", errors.New("private-two"), "native identity"), domain.MigrationParameter{Name: "user", Installed: "dev", Desired: "next"}),
+		domain.WithMigrationParameters(domain.MigrationStateRefusal("default", errors.New("private-three"), "native identity"), domain.MigrationParameter{Name: "bridge", Installed: "old", Desired: "new"}),
+	}
+	var stderr bytes.Buffer
+	ctx, flush := captureMigrationDiagnostics(WithMigrationDiagnosticWriter(context.Background(), &stderr))
+	nativeRefusalBlocker("migration.native", domain.CollectRefusals(findings...), ctx)
+	flush()
+	want := "yard default:\n  bridge  old -> new\n  user  dev -> next\nyard work:\n  bridge  old -> new\n"
+	if !strings.Contains(stderr.String(), want) || strings.Contains(stderr.String(), "private") {
+		t.Fatalf("diagnostic stream: %s", stderr.String())
+	}
+}
+
+func TestCompactMigrationSummaryCountsOnlyOmittedDetails(t *testing.T) {
+	classes := []migrationReasonClass{{yard: "a", reason: "missing source", count: 1}, {yard: "b", reason: "identity differs", count: 1, details: 2}}
+	got := compactMigrationSummary(classes)
+	if !strings.Contains(got, "2 parameter/name details omitted") || strings.Contains(got, "more reason classes") {
+		t.Fatal(got)
+	}
+	classes[1].details = 0
+	if got := compactMigrationSummary(classes); strings.Contains(got, "omitted") || strings.Contains(got, "more") {
+		t.Fatal(got)
+	}
+}

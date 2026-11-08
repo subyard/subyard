@@ -2283,6 +2283,21 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     inventory = (Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
     history["inventoryProgramSHA256"] = hashlib.sha256(inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0").encode()).hexdigest()
     package_root = Path(__file__).resolve().parent.parent
+    guest_facts = (package_root / 'config/skills/core/subyard-environment/facts.py').read_text()
+    identity_source = (package_root / 'internal/adapters/reconcileruntime/applied_guest_identity.go').read_text()
+    recorder = re.search(r'(?s)const recordAppliedProfileProjection = `([^`]*)`', identity_source)
+    require(recorder is not None, 'profile recorder source is unavailable')
+    recorder_program = "__name__ = 'subyard_profile_selection_recorder'\n" + guest_facts + recorder.group(1)
+    history['profileRecorderProgramSHA256'] = hashlib.sha256(recorder_program.encode()).hexdigest()
+    for label, symbol, marker in [('profileSelectionProgramSHA256', 'appliedEnvironmentProfilesProjection', 'subyard_profile_selection_observer'),
+                                  ('guestIdentityProgramSHA256', 'appliedGuestIdentityProjection', 'subyard_identity_observer')]:
+        projection = re.search(r'(?s)const ' + symbol + r' = `([^`]*)`', identity_source)
+        require(projection is not None, 'guest facts observation source is unavailable')
+        program = "__name__ = '" + marker + "'\n" + guest_facts + projection.group(1)
+        history[label] = hashlib.sha256(program.encode()).hexdigest()
+    history['guestFactsVersion'] = fixture.version
+    history['profileNames'] = sorted(path.parent.name for path in (package_root / 'config/profiles').glob('*/profile.json')
+                                     if json.loads(path.read_text()).get('runtime'))
     package = runpy.run_path(str(package_root / 'config/skills/package.py'))
     history['skills'] = {'files': {name: digest(package_root / name) for name in package['source_files'](package_root)},
                          'programSHA256': digest(package_root / 'config/skills/probe.py'),

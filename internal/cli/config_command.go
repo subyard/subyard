@@ -23,8 +23,9 @@ import (
 )
 
 type configTarget struct {
-	Name   string
-	Loaded config.Loaded
+	installed *installedConfigurationEvidence
+	Name      string
+	Loaded    config.Loaded
 }
 
 type configTargetAssessment struct {
@@ -33,6 +34,7 @@ type configTargetAssessment struct {
 	Changed                 bool
 	DesiredFingerprint      string
 	MaterializedFingerprint string
+	Differences             []domain.ConfigurationDifference
 	// StoppedInstance is the read behind a "stopped" state; it reaches no fingerprint.
 	StoppedInstance *ports.InstanceInfo
 }
@@ -41,6 +43,7 @@ type configTargetSelector func() ([]configTarget, error)
 
 type configAsset struct {
 	OwnedFormat string
+	Setting     string
 	Name        string
 	Source      string
 	Destination string
@@ -927,26 +930,77 @@ func (cli *CLI) configStatus(
 		fmt.Fprintf(cli.options.Stdout, "attention: legacy input requires review/import: %s\n", path)
 	}
 	var drifted []string
+	var findings []error
 	for _, target := range targets {
 		assessment, err := cli.assessConfigTarget(ctx, target, checkDrift)
 		if err != nil {
-			return materializedConfigActivationError{err, target.Name, "materialized config", "config status", "verify", configHome}
+			findings = append(findings, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "verify", configHome})
+			if len(expectedDesired) != 0 {
+				continue
+			}
+			state, stateErr := cli.configDiagnosticState(ctx, target)
+			if stateErr != nil {
+				findings = append(findings, materializedConfigActivationError{stateErr, target.Name, "installed configuration", "config status", "inspect", configHome})
+				continue
+			}
+			assessment.State = state
 		}
 		if len(expectedDesired) != 0 && assessment.DesiredFingerprint != expectedDesired[0][target.Name] {
-			return fmt.Errorf("yard %s: approved desired configuration changed during verification", target.Name)
+			findings = append(findings, fmt.Errorf("yard %s: approved desired configuration changed during verification", target.Name))
 		}
 		state, drift := assessment.State, assessment.Changed
 		fmt.Fprintf(cli.options.Stdout, "yard %s materialized-config: %s\n", target.Name, state)
+		if len(expectedDesired) == 0 {
+			diagnostic, err := cli.configInstalledDiagnostic(ctx, target, state)
+			for _, difference := range assessment.Differences {
+				if !slices.ContainsFunc(diagnostic.Differences, func(existing domain.ConfigurationDifference) bool { return existing.Name == difference.Name }) {
+					diagnostic.Differences = append(diagnostic.Differences, difference)
+				}
+			}
+			if state != "stopped" && state != "absent" && !strings.HasPrefix(state, "remote") {
+				platform := cli.initPlatform(target.Loaded, nil)
+				var observations map[string]ports.RuntimeObservation
+				var runtimeErr error
+				if observer, ok := platform.(interface {
+					ObserveProfileRuntimeDiagnostics(context.Context) (map[string]ports.RuntimeObservation, error)
+				}); ok {
+					observations, runtimeErr = observer.ObserveProfileRuntimeDiagnostics(ctx)
+				} else {
+					observations, runtimeErr = platform.ObserveProfileRuntimes(ctx)
+				}
+				for id, observation := range observations {
+					if observation.State != ports.RuntimeStateStale {
+						continue
+					}
+					if observation.Diagnostics == nil || len(*observation.Diagnostics) == 0 {
+						diagnostic.Differences = append(diagnostic.Differences, domain.ConfigurationDifference{Name: id + ".runtime", Kind: domain.ConfigurationStateUnknown})
+					}
+					if observation.Diagnostics == nil {
+						continue
+					}
+					for _, detail := range *observation.Diagnostics {
+						diagnostic.Differences = append(diagnostic.Differences, domain.ConfigurationDifference{Name: detail.Parameter, Installed: detail.Installed, Desired: detail.Desired, InstalledSet: true, DesiredSet: true})
+					}
+				}
+				if runtimeErr != nil {
+					findings = append(findings, materializedConfigActivationError{runtimeErr, target.Name, "profile runtimes", "config status", "inspect", configHome})
+				}
+			}
+			if diagnostic.Unavailable != "" || len(diagnostic.Differences) != 0 {
+				fmt.Fprintln(cli.options.Stdout, domain.FormatConfigurationDiagnostics([]domain.YardConfigurationDiagnostic{diagnostic}))
+			}
+			if err != nil {
+				findings = append(findings, materializedConfigActivationError{err, target.Name, "installed configuration", "config status", "inspect", configHome})
+			}
+		}
 		if drift {
 			drifted = append(drifted, target.Name)
 		}
 	}
 	if len(drifted) != 0 {
-		return fmt.Errorf(
-			"materialized agent config drift in yards: %s", strings.Join(drifted, ", "),
-		)
+		findings = append(findings, fmt.Errorf("materialized agent config drift in yards: %s", strings.Join(drifted, ", ")))
 	}
-	return nil
+	return domain.CollectRefusals(findings...)
 }
 
 func (cli *CLI) applyConfig(
@@ -1007,7 +1061,9 @@ func materializationDesired(target configTarget, check bool, reader func(config.
 		return desired, nil, nil, nil
 	}
 	var assets []configAsset
+	var preparedAssets []configAsset
 	var desiredPayloads [][]byte
+	var findings []error
 	if check {
 		var err error
 		assets, err = effectiveConfigAssets(target.Loaded)
@@ -1020,30 +1076,34 @@ func materializationDesired(target configTarget, check bool, reader func(config.
 			}
 			payload, sourceErr := reader(config.MaterializedAsset{Source: asset.Source})
 			if sourceErr != nil && !os.IsNotExist(sourceErr) {
-				return desired, nil, nil, fmt.Errorf("%s: %w", asset.Name, sourceErr)
+				findings = append(findings, fmt.Errorf("%s: %w", asset.Name, sourceErr))
+				continue
 			}
 			payload, _, err := config.PrepareMaterializationContent(config.MaterializationConfigAssets, false, config.MaterializationContent{Present: sourceErr == nil, Payload: payload}, nil)
 			if err != nil {
 				if sourceErr != nil {
 					err = sourceErr
 				}
-				return desired, nil, nil, fmt.Errorf("%s: %w", asset.Name, err)
+				findings = append(findings, fmt.Errorf("%s: %w", asset.Name, err))
+				continue
 			}
 			hostHash := fmt.Sprintf("%x", sha256.Sum256(payload))
 			if asset.OwnedFormat != "" {
 				hostHash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, payload)
 			}
 			if err != nil {
-				return desired, nil, nil, fmt.Errorf("%s: %w", asset.Name, err)
+				findings = append(findings, fmt.Errorf("%s: %w", asset.Name, err))
+				continue
 			}
 			desired.Assets = append(desired.Assets, config.DesiredMaterializedArtifact{
 				Name: asset.Name, Destination: asset.Destination,
 				Scope: asset.Scope, Role: asset.Role, DesiredHash: hostHash, OwnedFormat: asset.OwnedFormat,
 			})
+			preparedAssets = append(preparedAssets, asset)
 			desiredPayloads = append(desiredPayloads, payload)
 		}
 	}
-	return desired, assets, desiredPayloads, nil
+	return desired, preparedAssets, desiredPayloads, domain.CollectRefusals(findings...)
 }
 
 func (cli *CLI) assessConfigTarget(
@@ -1051,18 +1111,16 @@ func (cli *CLI) assessConfigTarget(
 	target configTarget,
 	check bool,
 ) (configTargetAssessment, error) {
-	desired, assets, desiredPayloads, err := materializationDesired(target, check, target.Loaded.ProspectiveFiles.ReadAsset)
-	if err != nil {
-		return configTargetAssessment{}, err
-	}
+	desired, assets, desiredPayloads, prepareErr := materializationDesired(target, check, target.Loaded.ProspectiveFiles.ReadAsset)
 	facts := []config.MaterializedArtifactAssessment{}
+	var differences []domain.ConfigurationDifference
 	finish := func(state string) (configTargetAssessment, error) {
 		assessment, err := config.AssessMaterialization(desired, state, check, facts)
 		if err != nil {
 			return configTargetAssessment{}, err
 		}
 		return configTargetAssessment{Target: target, State: assessment.State, Changed: assessment.Changed,
-			DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint}, nil
+			DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint, Differences: differences}, prepareErr
 	}
 	if target.Loaded.Context.AccessKind == domain.AccessRemote {
 		return finish("remote (settings only; consumers not checked)")
@@ -1077,7 +1135,7 @@ func (cli *CLI) assessConfigTarget(
 		return finish("absent")
 	}
 	if err != nil {
-		return configTargetAssessment{}, err
+		return configTargetAssessment{}, domain.CollectRefusals(prepareErr, err)
 	}
 	if !strings.EqualFold(info.Status, "running") {
 		assessment, err := finish("stopped")
@@ -1087,6 +1145,7 @@ func (cli *CLI) assessConfigTarget(
 	if !check {
 		return finish("running")
 	}
+	failures := []error{prepareErr}
 	for index, asset := range assets {
 		request := ports.InstanceExecRequest{
 			Command: []string{"sha256sum", "--", asset.Destination},
@@ -1095,29 +1154,45 @@ func (cli *CLI) assessConfigTarget(
 		if asset.OwnedFormat != "" {
 			request, err = configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
 			if err != nil {
-				return configTargetAssessment{}, err
+				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
+				continue
 			}
 		}
 		result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, request)
 		if err != nil && result.ExitCode == 0 {
-			return configTargetAssessment{}, err
+			failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
+			continue
 		}
 		observed := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
 		if asset.OwnedFormat != "" {
 			if err != nil || result.ExitCode != 0 {
-				return configTargetAssessment{}, fmt.Errorf("%s: structured configuration observation failed", asset.Name)
+				failures = append(failures, fmt.Errorf("%s: structured configuration observation failed", asset.Name))
+				continue
 			}
 			observation, err := configmaterial.ParseObservation(result.Stdout)
 			if err != nil {
-				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
+				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
+				continue
 			}
 			observed.Fingerprint, observed.OwnedConverged = observation.Fingerprint, observation.Converged
 		}
 		fact, err := config.AssessMaterializedArtifact(desired.Assets[index], observed)
 		if err != nil {
-			return configTargetAssessment{}, err
+			failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
+			continue
 		}
 		facts = append(facts, fact)
+		if !fact.Converged && asset.Setting != "" {
+			known := fact.Snapshot.GuestOutput == "sha256" || strings.HasPrefix(fact.Snapshot.GuestOutput, "owned-")
+			kind := domain.ConfigurationContentUnknown
+			if known {
+				kind = domain.ConfigurationMaterializedChanged
+			}
+			differences = append(differences, domain.ConfigurationDifference{Name: asset.Setting, Kind: kind})
+		}
+	}
+	if err := domain.CollectRefusals(failures...); err != nil {
+		return configTargetAssessment{State: "running", Differences: differences}, err
 	}
 	return finish("running")
 }
@@ -1153,7 +1228,7 @@ func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 	var result []configAsset
 	for _, selected := range assets {
 		materialized := selected.Asset
-		asset := configAsset{Name: materialized.Name, Source: materialized.Source, Destination: materialized.Destination, OwnedFormat: materialized.OwnedFormat}
+		asset := configAsset{Name: materialized.Name, Setting: materialized.Setting, Source: materialized.Source, Destination: materialized.Destination, OwnedFormat: materialized.OwnedFormat}
 		if trace, ok := loaded.Settings[materialized.Setting]; ok {
 			if resolution, found := effectiveSettingResolution(trace); found {
 				asset.Scope, asset.Role = resolution.Scope, resolution.Role

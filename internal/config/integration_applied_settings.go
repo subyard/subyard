@@ -6,7 +6,16 @@ import "strings"
 // reconciliation. File settings contribute their configured path, never contents.
 func (catalog Catalog) IntegrationInitSetting(name string) bool {
 	definition, ok := catalog.LookupSetting(name)
-	return ok && definition.Application == SettingYardInit && !definition.Sensitive &&
+	return ok && !definition.Sensitive && integrationInitDefinition(name, definition)
+}
+
+func (catalog Catalog) IntegrationDiagnosticSetting(name string) bool {
+	definition, ok := catalog.LookupSetting(name)
+	return ok && integrationInitDefinition(name, definition)
+}
+
+func integrationInitDefinition(name string, definition SettingDefinition) bool {
+	return definition.Application == SettingYardInit &&
 		(definition.Owner == "agent-integration" || definition.Owner == "coding-tool-integration" || definition.Owner == "host-files" ||
 			strings.HasPrefix(definition.Owner, "integration:") || name == "HOST_LINKS" || name == "ALLOWS_HOST_ACCESS" || name == "ALLOWS_CODING_TOOLS" || name == "DEV_USER" || name == "DEV_UID")
 }

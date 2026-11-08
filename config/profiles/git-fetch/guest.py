@@ -353,8 +353,19 @@ class Runtime:
         facts['manager'] = {unit: {key: fields.get(key, '') for key in
                             ('ActiveState', 'UnitFileState', 'LoadState', 'NeedDaemonReload')}
                             for unit, fields in details.items()}
-        return {'state': 'current' if ready else 'stale',
-                'actual': desired if ready else digest(facts), 'desired': desired}
+        result = {'state': 'current' if ready else 'stale',
+                  'actual': desired if ready else digest(facts), 'desired': desired}
+        if not ready:
+            diagnostics = []
+            for path, content in self.assets.items():
+                observed = self.fact(path)
+                if observed != [0o644, content]:
+                    diagnostics.append({'parameter': 'git-fetch.asset.' + path.name,
+                                        'installed': 'missing' if observed is None else 'changed', 'desired': 'current'})
+            if not diagnostics:
+                diagnostics.append({'parameter': 'git-fetch.runtime', 'installed': 'unknown', 'desired': 'ready'})
+            result['diagnostics'] = diagnostics
+        return result
 
     def refresh(self, binding, operation, actual, desired):
         if not re.fullmatch('[a-zA-Z0-9_-]+', operation) or any(

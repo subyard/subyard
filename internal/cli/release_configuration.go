@@ -156,6 +156,12 @@ func (cli *CLI) installedReleaseTarget(ctx context.Context, target configTarget)
 		}
 	}
 	maps.Copy(installed.Loaded.Environment, guest)
+	if installed.installed == nil {
+		installed.installed = &installedConfigurationEvidence{known: map[string]bool{}}
+	}
+	for name := range guest {
+		installed.installed.known[name] = true
+	}
 	if value, known := installed.Loaded.Environment["DEV_USER"]; known {
 		installed.Loaded.Context.DevUser = value
 	}

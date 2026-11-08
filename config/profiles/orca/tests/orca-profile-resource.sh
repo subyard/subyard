@@ -856,6 +856,17 @@ rm -f "$TMP/fail-registration-marker"
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'interrupted runtime contract apply appeared current without its marker'
+assert_runtime_diagnostics() {
+  local normal detailed
+  normal="$(SUBYARD_PROFILE_DIAGNOSTICS=0 "$ROOT/config/profiles/orca/runtime.sh" observe)"
+  detailed="$(SUBYARD_PROFILE_DIAGNOSTICS=1 "$ROOT/config/profiles/orca/runtime.sh" observe)"
+  jq -en --argjson normal "$normal" --argjson detailed "$detailed" --argjson expected "$1" '
+    ($normal | has("diagnostics") | not) and
+    ($detailed | del(.diagnostics)) == $normal and
+    (if $expected == [] then ($detailed | has("diagnostics") | not) else $detailed.diagnostics == $expected end)' >/dev/null \
+    || fail 'opt-in runtime diagnostics changed the observation or exposed unexpected values'
+}
+assert_runtime_diagnostics '[{"parameter":"orca.registration","installed":"unknown","desired":"current"}]'
 rm -f "$TMP/linger"
 "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
@@ -887,6 +898,7 @@ observation="$(ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=1
 jq -e '.state == "stale" and .actual != .desired and
   .consequence == "Orca service restarts to apply its updated unit; Orca clients reconnect; agents or terminals running inside the service end"' \
   <<<"$observation" >/dev/null || fail "runtime contract did not disclose main-unit drift: $observation"
+assert_runtime_diagnostics '[{"parameter":"orca.main-unit","installed":"changed","desired":"current"}]'
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
@@ -908,6 +920,7 @@ run_orca up --yes >/dev/null
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and .actual == .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract did not match the unit installed by up'
+assert_runtime_diagnostics '[]'
 if grep -Eqi 'nodejs|npm|AppImage|squashfs|APPDIR|SHA512' \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$ROOT/config/profiles/orca/release.env"; then
   fail 'removed SSH/AppImage dependencies returned'

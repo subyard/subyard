@@ -278,6 +278,16 @@ type RuntimeObservation struct {
 	// Consequence is an optional owner-stated effect of applying a stale contract,
 	// such as a service restart. The approving plan discloses it.
 	Consequence string `json:"consequence,omitempty"`
+	// Diagnostics are source-owned public facts, independent of digest authority.
+	Diagnostics *RuntimeDiagnostics `json:"diagnostics,omitempty"`
+}
+
+type RuntimeDiagnostics []RuntimeDiagnostic
+
+type RuntimeDiagnostic struct {
+	Parameter string `json:"parameter"`
+	Installed string `json:"installed"`
+	Desired   string `json:"desired"`
 }
 
 // PreparedSettingsCapture preserves independently verified applied inputs before

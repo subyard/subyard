@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,7 +14,10 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -111,6 +115,73 @@ func configInventoryEntry(home, kind, content string) map[string]any {
 		entry["format"] = "json"
 	}
 	return entry
+}
+
+func TestConfigInventoryCapturesOnlyCommittedSourceEvidence(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	old := configInventoryEntry(f.home, "file", "old")
+	f.save([]map[string]any{old}, []string{})
+	inventory := f.read()
+	key := strings.Repeat("a", 64)
+	inventory["diagnostics"] = map[string]any{"key": key, "digests": map[string]string{}}
+	encoded, _ := json.Marshal(inventory)
+	testkit.WriteFile(t, f.state+"/inventory.json", encoded, 0600)
+	f.write([]byte("old"), 0644)
+	desired := []map[string]any{configInventoryEntry(f.home, "file", "new")}
+	f.run("configs-prepare", desired, false)
+	f.write([]byte("new"), 0644)
+	request := map[string]any{"home": f.home, "uid": os.Getuid(), "entries": desired, "config_diagnostics": map[string]any{"key": key, "files": map[string]any{
+		"AGENT_claude_CONFIG": map[string]string{"path": "/source", "digest": strings.Repeat("b", 64), "destination": f.home + "/settings"},
+		"AGENT_other_CONFIG":  map[string]string{"path": "/other", "digest": strings.Repeat("c", 64), "destination": f.home + "/unowned"},
+	}}}
+	payload, _ := json.Marshal(request)
+	result, err := f.Exec(context.Background(), "", "", ports.InstanceExecRequest{Command: []string{"", "", "", "", "configs-commit"}, Stdin: payload})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("commit: %v", err)
+	}
+	files := f.read()["diagnostics"].(map[string]any)["files"].(map[string]any)
+	if len(files) != 1 || files["AGENT_claude_CONFIG"].(map[string]any)["path"] != "/source" {
+		t.Fatalf("wrong committed evidence: %#v", files)
+	}
+}
+
+func TestConfigInventoryCreatesEvidenceOnFirstConfigCommit(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	old := configInventoryEntry(f.home, "file", "old")
+	f.save([]map[string]any{old}, []string{})
+	f.write([]byte("old"), 0644)
+	desired := []map[string]any{configInventoryEntry(f.home, "file", "new")}
+	f.run("configs-prepare", desired, false)
+	f.write([]byte("new"), 0644)
+	runtime := Runtime{RepositoryRoot: "../../..", Executor: f, Yard: domain.Context{DevUser: "dev", DevUID: os.Getuid()}}
+	prepared := &PreparedConfigs{files: []guestConfigFile{{setting: "AGENT_claude_CONFIG", source: "/source", destination: f.home + "/settings"}}, sources: map[configSourceKey]configSourceBytes{{path: "/source"}: {exists: true, payload: []byte("new")}}}
+	evidence, err := runtime.prepareConfigDiagnostics(context.Background(), prepared)
+	if err != nil || evidence == nil {
+		t.Fatalf("prepare first evidence: %v", err)
+	}
+	payload, _ := json.Marshal(map[string]any{"entries": desired, "config_diagnostics": evidence})
+	result, err := f.Exec(context.Background(), "", "", ports.InstanceExecRequest{Command: []string{"", "", "", "", "configs-commit"}, Stdin: payload})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("commit: %v", err)
+	}
+	diagnostics := f.read()["diagnostics"].(map[string]any)
+	files := diagnostics["files"].(map[string]any)
+	key, err := hex.DecodeString(evidence.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := config.LoadCatalog("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := catalog.LookupSetting("AGENT_claude_CONFIG")
+	if !ok {
+		t.Fatal("missing config setting")
+	}
+	file := files["AGENT_claude_CONFIG"].(map[string]any)
+	if diagnostics["key"] != evidence.Key || file["path"] != "/source" || file["digest"] != config.ConfigurationInputDigest("AGENT_claude_CONFIG", definition.Kind, key, []byte("new")) {
+		t.Fatalf("first commit missing evidence: %#v", diagnostics)
+	}
 }
 
 func TestConfigInventoryAcknowledgement(t *testing.T) {
@@ -304,4 +375,144 @@ func sameInventoryMetadata(before, after os.FileInfo) bool {
 	a, b := *before.Sys().(*syscall.Stat_t), *after.Sys().(*syscall.Stat_t)
 	a.Atim, b.Atim = syscall.Timespec{}, syscall.Timespec{}
 	return reflect.DeepEqual(a, b)
+}
+
+func TestInventoryDiagnosticsFollowCommittedStateAndTolerateNewerEvidence(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	entries := []map[string]any{{"id": "sample", "kind": "package", "digest": "installed"}}
+	f.save(entries, []string{})
+	request := map[string]any{"entries": entries}
+	run := func(mode string) integrationObservation {
+		t.Helper()
+		payload, _ := json.Marshal(request)
+		result, err := f.Exec(context.Background(), "", "", ports.InstanceExecRequest{Command: []string{"", "", "", "", mode}, Stdin: payload})
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		var observed integrationObservation
+		if len(result.Stdout) != 0 {
+			if err := json.Unmarshal(result.Stdout, &observed); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return observed
+	}
+	request["expected"] = run("observe").Fingerprint
+	request["applied_settings"] = map[string]string{"AGENT_sample_COMMAND": "before"}
+	request["diagnostics"] = &IntegrationDiagnosticEvidence{Key: strings.Repeat("a", 64), Digests: map[string]string{"AGENT_sample_PROVISION": strings.Repeat("b", 64)}}
+	run("capture-settings")
+	delete(request, "expected")
+	original := f.read()
+	if run("selection").Diagnostics == nil {
+		t.Fatal("fresh evidence missing")
+	}
+	for _, change := range []string{"settings", "entries", "newer", "malformed"} {
+		t.Run(change, func(t *testing.T) {
+			data, _ := json.Marshal(original)
+			var inventory map[string]any
+			_ = json.Unmarshal(data, &inventory)
+			switch change {
+			case "settings":
+				inventory["applied_settings"] = map[string]string{"AGENT_sample_COMMAND": "older-writer"}
+			case "entries":
+				inventory["entries"].([]any)[0].(map[string]any)["digest"] = "older-writer"
+			case "newer":
+				inventory["diagnostics"].(map[string]any)["future_schema"] = true
+			case "malformed":
+				inventory["diagnostics"] = "untrusted"
+			}
+			data, _ = json.Marshal(inventory)
+			testkit.WriteFile(t, f.state+"/inventory.json", data, 0600)
+			if run("selection").Diagnostics != nil || run("settings").Diagnostics != nil {
+				t.Fatal("stale or unsupported diagnostics accepted")
+			}
+			run("apply")
+			run("commit")
+			request["expected"] = run("observe").Fingerprint
+			delete(request, "diagnostics") // An older writer cannot recertify retained evidence.
+			run("capture-settings")
+			delete(request, "expected")
+			if run("selection").Diagnostics != nil {
+				t.Fatal("old capture restored invalid evidence")
+			}
+		})
+	}
+}
+
+func TestInitCaptureRecordsOriginalConfigSourceOnlyAfterConvergence(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	source := f.home + "/source"
+	testkit.WriteFile(t, source, []byte("source bytes"), 0600)
+	entry := configInventoryEntry(f.home, "file", "source bytes")
+	f.save([]map[string]any{entry}, []string{})
+	f.write([]byte("source bytes"), 0644)
+	entries := []integrationArtifact{{ID: "claude", Kind: "file", Path: f.home + "/settings", Digest: entry["digest"].(string)}}
+	sources := newDiagnosticSourceSnapshot(nil)
+	runtime := Runtime{RepositoryRoot: "../../..", Integrations: []profile.IntegrationDefinition{}, Executor: f, SourceReader: sources.read,
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude", "AGENT_claude_CONFIG=" + source, "AGENT_claude_CONFIG_DEST=settings"}, Yard: domain.Context{DevUser: "dev", DevUID: os.Getuid()}}
+	observed, err := runtime.integrationInventory(context.Background(), "observe", entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.integrationInventory(context.Background(), "capture-settings", entries, observed.Fingerprint, integrationInventoryCapture{verifySources: sources.verify})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := runtime.integrationInventory(context.Background(), "settings", nil, "")
+	if err != nil || baseline.Diagnostics == nil {
+		t.Fatalf("capture: %#v %v", baseline, err)
+	}
+	key, _ := hex.DecodeString(baseline.Diagnostics.Key)
+	file := baseline.Diagnostics.Files["AGENT_claude_CONFIG"]
+	if file.Path != source || file.Digest != config.ConfigurationInputDigest("AGENT_claude_CONFIG", config.SettingFile, key, []byte("source bytes")) {
+		t.Fatalf("wrong original source: %#v", file)
+	}
+	before, err := os.ReadFile(f.state + "/inventory.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err = runtime.integrationInventory(context.Background(), "observe", entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.home + "/settings"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.integrationInventory(context.Background(), "capture-settings", entries, observed.Fingerprint, integrationInventoryCapture{baseline: baseline.Diagnostics, verifySources: sources.verify}); err == nil {
+		t.Fatal("missing owned output accepted")
+	}
+	after, err := os.ReadFile(f.state + "/inventory.json")
+	if err != nil || string(before) != string(after) {
+		t.Fatal("failed capture changed evidence")
+	}
+}
+
+func TestInitCaptureSkipsNonFileConfigEvidence(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	f.save([]map[string]any{}, []string{})
+	root := testkit.TempDir(t)
+	if err := os.MkdirAll(root+"/config/agents/fixture", 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, root+"/config/agents/fixture/integration.json", []byte(`{"schema_version":2,"settings":[{"name":"FIXTURE_INSTRUCTIONS","type":"absolute-path","optional":true,"scopes":["host","yard","command"],"application":"config-apply"}],"artifacts":[{"id":"instructions","kind":"instructions","source_setting":"FIXTURE_INSTRUCTIONS","destination":"instructions","format":"raw"}]}`), 0644)
+	definitions, err := profile.LoadIntegrations(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := f.home + "/source"
+	testkit.WriteFile(t, source, []byte("original source"), 0600)
+	runtime := Runtime{RepositoryRoot: root, Integrations: definitions, Executor: f,
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "FIXTURE_INSTRUCTIONS=" + source, "AGENT_fixture_PROVISION=" + source},
+		Yard:        domain.Context{DevUser: "dev", DevUID: os.Getuid()}}
+	observed, err := runtime.integrationInventory(context.Background(), "observe", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.integrationInventory(context.Background(), "capture-settings", nil, observed.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := runtime.integrationInventory(context.Background(), "settings", nil, "")
+	if err != nil || baseline.Diagnostics == nil || len(baseline.Diagnostics.Files) != 0 || baseline.Diagnostics.Digests["AGENT_fixture_PROVISION"] == "" {
+		t.Fatalf("non-file config input invalidated content evidence: %#v %v", baseline.Diagnostics, err)
+	}
 }

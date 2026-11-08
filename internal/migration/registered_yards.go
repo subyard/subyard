@@ -91,12 +91,33 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 			return nil, fmt.Errorf("yard %s: %w", loaded.Context.YardName, err)
 		}
 		var refusals []error
-		if instance.Project != loaded.Context.IncusProject || instance.Name != loaded.Context.YardInstanceName || instance.Config["volatile.uuid"] == "" || instance.Config["user.subyard.name"] != loaded.Context.YardName || instance.Config["user.subyard.managed"] != "true" || instance.Config["user.subyard.bridge"] != loaded.Context.IncusBridge {
-			refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("registered yard native identity differs from protected registration"), "registered yard native identity differs from protected registration"))
+		identityInvalid := false
+		var parameters []domain.MigrationParameter
+		if instance.Config["volatile.uuid"] == "" {
+			identityInvalid = true
+		}
+		for _, field := range []struct{ name, installed, desired string }{
+			{"project", instance.Project, loaded.Context.IncusProject}, {"instance", instance.Name, loaded.Context.YardInstanceName},
+			{"user.subyard.name", instance.Config["user.subyard.name"], loaded.Context.YardName},
+			{"user.subyard.managed", instance.Config["user.subyard.managed"], "true"},
+			{"user.subyard.bridge", instance.Config["user.subyard.bridge"], loaded.Context.IncusBridge},
+		} {
+			if field.installed != field.desired {
+				parameter := domain.MigrationParameter{Name: field.name, Installed: domain.MigrationDiagnosticValue(field.installed), Desired: domain.MigrationDiagnosticValue(field.desired)}
+				parameters = append(parameters, parameter)
+			}
+		}
+		if identityInvalid || len(parameters) != 0 {
+			refusals = append(refusals, domain.WithMigrationParameters(domain.MigrationStateRefusal(m.Yard, errors.New("registered yard native identity differs from protected registration"), "registered yard native identity differs from protected registration"), parameters...))
 		}
 		for _, key := range []string{"volatile.uuid", "user.subyard.managed", "user.subyard.name", "user.subyard.bridge", "user.subyard.desired_power", "user.subyard.disk_tmp"} {
 			if instance.Config[key] != instance.LocalConfig[key] {
-				refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("registered yard identity or power is inherited or inconsistent"), "registered yard identity or power is inherited or inconsistent"))
+				reason := "registered yard identity or power is inherited or inconsistent"
+				var parameters []domain.MigrationParameter
+				if key != "volatile.uuid" {
+					parameters = append(parameters, domain.MigrationParameter{Name: key + ".local", Installed: instance.LocalConfig[key], Desired: instance.Config[key]})
+				}
+				refusals = append(refusals, domain.WithMigrationParameters(domain.MigrationStateRefusal(m.Yard, errors.New(reason), reason), parameters...))
 			}
 		}
 		if marker := instance.LocalConfig["user.subyard.disk_tmp"]; marker != "" && marker != "v1" {

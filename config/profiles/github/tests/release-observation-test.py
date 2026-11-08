@@ -15,6 +15,28 @@ ROOT = PROFILE.parents[2]
 
 
 class ReleaseObservationTest(unittest.TestCase):
+    def test_tracer_preserves_bytecode_flag_and_unrelated_native_calls(self):
+        tracer = PROFILE/'tests/e2e/runtime-observer-trace.py'
+        with tempfile.TemporaryDirectory(prefix='subyard-github-trace-', dir='/tmp') as temporary:
+            root = Path(temporary)
+            source = root/'runtime.py'
+            source.write_text('import sys, helper\nprint(sys.dont_write_bytecode, sys.argv[1:])\nsys.exit(7)\n')
+            (root/'helper.py').write_text('value = 1\n')
+            environment = dict(PATH='/usr/bin:/bin', SUBYARD_TRACE_REAL_PYTHON=sys.executable,
+                               SUBYARD_TRACE_GITHUB_SOURCE=str(source),
+                               SUBYARD_TRACE_GITHUB_LOG=str(root/'capture.log'))
+            for arguments in (['-B', str(source), 'observe'], ['-B', str(source), 'apply'],
+                              ['-B', '-c', 'import sys; print(sys.argv); sys.exit(9)', 'native']):
+                with self.subTest(arguments=arguments):
+                    plain = subprocess.run([sys.executable, *arguments], env=environment,
+                                           capture_output=True, text=True, timeout=10)
+                    traced = subprocess.run([sys.executable, str(tracer), *arguments], env=environment,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(plain.returncode, 0)
+                    self.assertEqual((traced.returncode, traced.stdout, traced.stderr),
+                                     (plain.returncode, plain.stdout, plain.stderr))
+                    self.assertFalse((root/'__pycache__').exists())
+
     def test_actual_absence_transport_and_manager_fail_closed(self):
         harness = runpy.run_path(str(ROOT / 'dev/verify-release-upgrades.py'))
         provider = runpy.run_path(str(PROFILE / 'tests/release-observation.py'))
@@ -68,6 +90,8 @@ class ReleaseObservationTest(unittest.TestCase):
             trace_source = runpy.run_path(str(tracer))
             trace_commands = root/'trace-commands'
             trace_commands.mkdir()
+            shutil.copy2(tracer, trace_commands/'python3')
+            (trace_commands/'python3').chmod(0o700)
             core_argv = ['exec', 'yard', '--project', 'subyard', '--', 'sh', '-eu', '-c', trace_source['CORE_FILES']]
             (trace_commands/'incus').write_text(
                 '#!'+sys.executable+'\nimport os,sys\n'
@@ -85,7 +109,7 @@ class ReleaseObservationTest(unittest.TestCase):
                                  SUBYARD_TRACE_REAL_PYTHON=sys.executable,
                                  SUBYARD_TRACE_GITHUB_SOURCE=str(package/'runtime.py'),
                                  SUBYARD_TRACE_GITHUB_LOG=str(trace_log), GH_TOKEN='synthetic-private-marker-do-not-log')
-                traced = subprocess.run([sys.executable, str(tracer), str(package/'runtime.py'), 'observe'],
+                traced = subprocess.run(['bash', str(package/'runtime.sh'), 'observe'],
                                         env=trace_env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
                 self.assertEqual((traced.returncode, traced.stdout, traced.stderr),
                                  (plain.returncode, plain.stdout, plain.stderr))

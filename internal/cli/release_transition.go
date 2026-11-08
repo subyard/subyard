@@ -1220,6 +1220,13 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 		return target, false, err
 	}
 	baseline := applied.Settings != nil
+	target.installed = &installedConfigurationEvidence{applied: applied, known: map[string]bool{}}
+	for name := range applied.Identity {
+		target.installed.known[name] = true
+	}
+	if applied.Installed {
+		target.installed.known["CODING_TOOL_INTEGRATIONS"] = true
+	}
 	loaded := target.Loaded
 	if err := loaded.Catalog.ValidateIntegrationInitSettings(applied.Settings); err != nil {
 		return target, false, err
@@ -1252,6 +1259,7 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 		if known {
 			// This is passive installed-state inspection, not a new profile
 			// selection. Retained disabled profiles must remain observable.
+			target.installed.known["ENVIRONMENT_PROFILES"] = true
 			loaded.Environment["ENVIRONMENT_PROFILES"] = strings.Join(selected, " ")
 			loaded.EnvironmentProfiles = config.EnvironmentProfileSelection{Present: true, Requested: slices.Clone(selected), Effective: slices.Clone(selected)}
 		}

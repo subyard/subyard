@@ -99,8 +99,18 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	// size enters management as found; ordinary init owns any later convergence.
 	pool, _ := runtime.volumeNames()
 	root, nic := state.ProfileDevices["root"], state.ProfileDevices["eth0"]
-	if root["type"] != "disk" || root["path"] != "/" || root["pool"] != pool || nic["type"] != "nic" || nic["network"] != runtime.Yard.IncusBridge {
-		refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses noncanonical project root or NIC properties"))
+	var parameters []domain.MigrationParameter
+	for _, field := range []struct{ name, installed, desired string }{
+		{"root.type", root["type"], "disk"}, {"root.path", root["path"], "/"}, {"root.pool", root["pool"], pool},
+		{"eth0.type", nic["type"], "nic"}, {"eth0.network", nic["network"], runtime.Yard.IncusBridge},
+	} {
+		if field.installed != field.desired {
+			parameter := domain.MigrationParameter{Name: field.name, Installed: domain.MigrationDiagnosticValue(field.installed), Desired: domain.MigrationDiagnosticValue(field.desired)}
+			parameters = append(parameters, parameter)
+		}
+	}
+	if len(parameters) != 0 {
+		refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal("yard adoption refuses noncanonical project root or NIC properties"), parameters...))
 	}
 	// A verified prior publication may be followed by an interrupted ordinary
 	// init, which marks the instance uninitialized until finalization. Only the
@@ -204,10 +214,17 @@ func (runtime Runtime) adoptionKindPolicy(state ports.ReconcileState, configurat
 		configuration["security.syscalls.intercept.bpf"] = "true"
 		configuration["security.syscalls.intercept.bpf.devices"] = "true"
 	}
+	var parameters []domain.MigrationParameter
 	for _, key := range []string{"security.syscalls.intercept.bpf", "security.syscalls.intercept.bpf.devices"} {
-		if state.Instance.Config[key] != configuration[key] || state.Instance.LocalConfig[key] != configuration[key] {
-			refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires converged nested device privileges"))
+		for _, observed := range []struct{ label, value string }{{key, state.Instance.Config[key]}, {key + ".local", state.Instance.LocalConfig[key]}} {
+			if observed.value != configuration[key] {
+				parameter := domain.MigrationParameter{Name: observed.label, Installed: domain.MigrationDiagnosticValue(observed.value), Desired: domain.MigrationDiagnosticValue(configuration[key])}
+				parameters = append(parameters, parameter)
+			}
 		}
+	}
+	if len(parameters) != 0 {
+		refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal("yard adoption requires converged nested device privileges"), parameters...))
 	}
 	if runtime.Yard.YardKind == domain.YardVM {
 		if runtime.environmentValue("VM_FREE_PAGE_REPORTING") == "1" {
@@ -218,7 +235,9 @@ func (runtime Runtime) adoptionKindPolicy(state ports.ReconcileState, configurat
 		}
 		configuration["user.subyard.vm_cpu_weight"] = runtime.environmentValue("VM_CPU_WEIGHT")
 		if state.Instance.Config["user.subyard.vm_cpu_weight"] != configuration["user.subyard.vm_cpu_weight"] {
-			refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires converged configured VM CPU policy"))
+			reason := "yard adoption requires converged configured VM CPU policy"
+			parameter := domain.MigrationParameter{Name: "VM_CPU_WEIGHT", Installed: domain.MigrationDiagnosticValue(state.Instance.Config["user.subyard.vm_cpu_weight"]), Desired: domain.MigrationDiagnosticValue(configuration["user.subyard.vm_cpu_weight"])}
+			refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal(reason), parameter))
 		}
 		if state.Instance.Config["security.nesting"] != "" {
 			refusals = append(refusals, runtime.adoptionRefusal("yard adoption refuses container privileges on a VM"))

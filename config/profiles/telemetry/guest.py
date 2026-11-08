@@ -205,7 +205,10 @@ class Runtime:
         if not installed:
             if any(path.exists() or path.is_symlink() for path in self.assets):
                 raise ValueError('unmanaged collector assets')
-            return {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
+            result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
+            if self.selected:
+                result['diagnostics'] = [{'parameter': 'telemetry.runtime', 'installed': 'absent', 'desired': 'present'}]
+            return result
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in self.assets}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
@@ -216,10 +219,33 @@ class Runtime:
         converged = converged and all(self.running_no_new_privs(state) for state in states.values())
         if self.selected:
             converged = converged and states[MANAGER].get('ActiveState') == 'active' and states[MANAGER].get('UnitFileState') == 'enabled'
-        converged = converged and native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, self.token(), tomli_w, self.uid, self.gid, check=True)
+        native_current = native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, self.token(), tomli_w, self.uid, self.gid, check=True) if converged else None
+        converged = converged and native_current is True
         actual = hashlib.sha256(json.dumps({'files': files, 'states': states, 'native_current': converged}, sort_keys=True).encode()).hexdigest()
         desired = self.desired()
-        return {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
+        result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
+        if not converged:
+            diagnostics = []
+            for path, (content, mode) in self.assets.items():
+                snapshot = self.asset_snapshot(path)
+                if snapshot != content:
+                    diagnostics.append({'parameter': 'telemetry.asset.' + path.name, 'installed': 'missing' if snapshot is None else 'changed', 'desired': 'current'})
+                elif stat.S_IMODE(path.stat().st_mode) != mode:
+                    diagnostics.append({'parameter': 'telemetry.mode.' + path.name, 'installed': 'mismatch', 'desired': 'matched'})
+            if native_current is not True:
+                diagnostics.append({'parameter': 'telemetry.native', 'installed': 'unknown' if native_current is None else 'changed', 'desired': 'current'})
+            for unit in (COLLECTOR, MANAGER):
+                expected = self.selected if unit == COLLECTOR else True if self.selected else None
+                if expected is None:
+                    continue
+                for field, wanted in [('ActiveState', 'active' if expected else 'inactive'), ('UnitFileState', 'enabled' if expected else 'disabled')]:
+                    value = states[unit].get(field, '')
+                    if (value == ('active' if field == 'ActiveState' else 'enabled')) != expected:
+                        diagnostics.append({'parameter': 'telemetry.' + unit + '.' + field, 'installed': value if value in ('active', 'inactive', 'enabled', 'disabled', 'failed', 'not-found') else 'unknown', 'desired': wanted})
+            if not diagnostics:
+                diagnostics.append({'parameter': 'telemetry.runtime', 'installed': 'unknown', 'desired': 'current'})
+            result['diagnostics'] = diagnostics
+        return result
 
     def desired(self):
         return hashlib.sha256(json.dumps({'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},

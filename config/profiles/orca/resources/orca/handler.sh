@@ -681,9 +681,10 @@ ORCA_MAIN_UNIT_CONSEQUENCE="Orca service restarts to apply its updated unit; Orc
 # The registration digest stays the shared desired contract. Main-unit drift only makes the
 # actual state differ, so activation applies it and discloses the restart.
 observe_runtime_contract() {
-  local observation unit actual
+  local observation unit actual registration_stale=false
   # Command substitution does not inherit errexit; keep observer refusals fatal.
   observation="$(observe_registration_contract)" || return 1
+  [ "$(jq -r .state <<<"$observation")" != stale ] || registration_stale=true
   # An absent contract has no unit; its observation stays the single read-only observer call.
   if [ "$(jq -r .state <<<"$observation")" = absent ]; then
     printf '%s\n' "$observation"
@@ -691,12 +692,16 @@ observe_runtime_contract() {
   fi
   unit="$(main_unit_state)" || die "Orca service unit unavailable"
   if [ "$unit" != drift ]; then
-    printf '%s\n' "$observation"
+    if [ "$registration_stale" = true ] && [ "${SUBYARD_PROFILE_DIAGNOSTICS:-0}" = 1 ]; then
+      jq -c '.diagnostics = [{parameter:"orca.registration",installed:"unknown",desired:"current"}]' <<<"$observation"
+    else
+      printf '%s\n' "$observation"
+    fi
     return 0
   fi
   actual="$(printf '%s main-unit-drift\n' "$(jq -r .actual <<<"$observation")" | sha256sum | awk '{print $1}')"
-  jq -c --arg actual "$actual" --arg consequence "$ORCA_MAIN_UNIT_CONSEQUENCE" \
-    '.state = "stale" | .actual = $actual | .consequence = $consequence' <<<"$observation"
+  jq -c --arg actual "$actual" --arg consequence "$ORCA_MAIN_UNIT_CONSEQUENCE" --argjson registration_stale "$registration_stale" --arg diagnostics "${SUBYARD_PROFILE_DIAGNOSTICS:-0}" \
+    '.state = "stale" | .actual = $actual | .consequence = $consequence | if $diagnostics == "1" then .diagnostics = ([{parameter:"orca.main-unit",installed:"changed",desired:"current"}] + (if $registration_stale then [{parameter:"orca.registration",installed:"unknown",desired:"current"}] else [] end)) else . end' <<<"$observation"
 }
 
 apply_main_unit() {

@@ -348,7 +348,7 @@ func TestRegisteredMigrationCollectsResourceAndOwnerRefusals(t *testing.T) {
 	instance.LocalConfig[key], instance.Config[key] = "foreign", "foreign"
 	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
 	native.Reconcile.ProjectConfig["user.subyard.operator_uid"] = "foreign"
-	want := `yard default: registered project owner differs from protected operator identity; registered resource "sample-server": has foreign or inherited receipt`
+	want := fmt.Sprintf(`yard default: registered project owner differs from protected operator identity; user.subyard.operator_uid  differs -> %d; registered resource "sample-server": has foreign or inherited receipt`, os.Getuid())
 	for range 10 {
 		_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 		if err == nil || err.Error() != want {
@@ -374,6 +374,37 @@ func TestRegisteredMigrationCollectsResourceAndOwnerRefusals(t *testing.T) {
 	}
 	if native.grants != 0 {
 		t.Fatal("refused observation published native grants")
+	}
+}
+
+func TestRegisteredMigrationReportsIndependentIdentityDifferences(t *testing.T) {
+	owner, native, _ := registeredMigrationFixture(t)
+	instance := native.Instances["fixture/yard"]
+	instance.Config["user.subyard.bridge"], instance.LocalConfig["user.subyard.bridge"] = "old-bridge", "old-bridge"
+	instance.Config["user.subyard.managed"], instance.LocalConfig["user.subyard.managed"] = "bad private value", "bad private value"
+	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	native.Reconcile.ProjectConfig["user.subyard.config_home"] = "/private/old-config"
+	native.Reconcile.ProjectConfig["user.subyard.data_home"] = "/private/old-data"
+	_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err == nil || !strings.Contains(err.Error(), "user.subyard.bridge  old-bridge -> fixture-br") || !strings.Contains(err.Error(), "user.subyard.managed  differs -> true") || strings.Contains(err.Error(), "bad private value") {
+		t.Fatalf("identity findings: %v", err)
+	}
+	for _, name := range []string{"config_home", "data_home"} {
+		if !strings.Contains(err.Error(), "user.subyard."+name+"  differs -> differs") || strings.Contains(err.Error(), "/private/old-") {
+			t.Fatalf("known hidden owner value misreported: %v", err)
+		}
+	}
+}
+
+func TestRegisteredMigrationReportsProxyType(t *testing.T) {
+	owner, native, _ := registeredMigrationFixture(t)
+	instance := native.Instances["fixture/yard"]
+	instance.LocalDevices["sample-server"]["type"] = "disk"
+	instance.Devices["sample-server"]["type"] = "disk"
+	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err == nil || !strings.Contains(err.Error(), "sample-server.type  disk -> proxy") {
+		t.Fatalf("proxy type diagnostic: %v", err)
 	}
 }
 

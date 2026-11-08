@@ -238,6 +238,7 @@ func nativeRefusalBlocker(resource string, err error, contexts ...context.Contex
 		yard, reason string
 		names        []string
 		causes       map[string]bool
+		parameters   map[string]domain.MigrationParameter
 	}
 	groups := map[string]*group{}
 	messages, actions := []string{}, []string{}
@@ -270,7 +271,20 @@ func nativeRefusalBlocker(resource string, err error, contexts ...context.Contex
 			}
 			key := yard + "\x00" + reason
 			if groups[key] == nil {
-				groups[key] = &group{yard: yard, reason: reason, causes: map[string]bool{}}
+				groups[key] = &group{yard: yard, reason: reason, causes: map[string]bool{}, parameters: map[string]domain.MigrationParameter{}}
+			}
+			var parameters interface {
+				MigrationParameters() []domain.MigrationParameter
+			}
+			if errors.As(cause, &parameters) {
+				for _, parameter := range parameters.MigrationParameters() {
+					if len(parameter.Name) > 96 || !domain.SafeID(parameter.Name) {
+						continue
+					}
+					parameter.Installed = domain.MigrationDiagnosticValue(parameter.Installed)
+					parameter.Desired = domain.MigrationDiagnosticValue(parameter.Desired)
+					groups[key].parameters[parameter.Name] = parameter
+				}
 			}
 			groups[key].names = append(groups[key].names, names...)
 			groups[key].causes[cause.Error()] = true
@@ -284,6 +298,7 @@ func nativeRefusalBlocker(resource string, err error, contexts ...context.Contex
 	for _, finding := range groups {
 		slices.Sort(finding.names)
 		finding.names = slices.Compact(finding.names)
+		finding.names = slices.DeleteFunc(finding.names, func(name string) bool { _, found := finding.parameters[name]; return found })
 		message := "yard " + finding.yard + ": " + finding.reason
 		count := max(len(finding.causes), len(finding.names))
 		if len(finding.names) > 0 {
@@ -291,7 +306,16 @@ func nativeRefusalBlocker(resource string, err error, contexts ...context.Contex
 		} else if count > 1 {
 			message += fmt.Sprintf(" (%d distinct findings)", count)
 		}
-		classes = append(classes, migrationReasonClass{yard: finding.yard, reason: finding.reason, count: count})
+		parameterNames := make([]string, 0, len(finding.parameters))
+		for name := range finding.parameters {
+			parameterNames = append(parameterNames, name)
+		}
+		slices.Sort(parameterNames)
+		for _, name := range parameterNames {
+			parameter := finding.parameters[name]
+			message += "; " + name + "  " + parameter.Installed + " -> " + parameter.Desired
+		}
+		classes = append(classes, migrationReasonClass{yard: finding.yard, reason: finding.reason, count: count, details: len(finding.names) + len(finding.parameters)})
 		messages = append(messages, message)
 	}
 	slices.Sort(messages)

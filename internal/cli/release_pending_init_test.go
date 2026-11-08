@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,9 +32,10 @@ import (
 // installedSettingsExecutor reports one installed applied-settings snapshot and
 // guest identity for every running yard of the config-apply repair fixture.
 type installedSettingsExecutor struct {
-	settings map[string]string
-	selected []string
-	profiles []string
+	settings    map[string]string
+	diagnostics *reconcileruntime.IntegrationDiagnosticEvidence
+	selected    []string
+	profiles    []string
 	// guest answers the core guest receipt projection of a completed release.
 	guest map[string]string
 	// byInstance answers for one instance instead, as yard init recorded it.
@@ -57,7 +59,7 @@ func (fixture installedSettingsExecutor) Exec(ctx context.Context, project, inst
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
 	if len(request.Command) == 5 {
-		value := map[string]any{"installed": fixture.settings != nil}
+		value := map[string]any{"installed": fixture.settings != nil, "diagnostics": fixture.diagnostics}
 		if fixture.settings != nil {
 			value["applied_settings"], value["selected"] = fixture.settings, append([]string{}, fixture.selected...)
 		}
@@ -169,11 +171,11 @@ const pendingRename = "DEV_USER=other\nDEV_UID=1002\n"
 func TestPendingInitListingIsStableAndHidesSensitiveValues(t *testing.T) {
 	plan := pendingInitPlan{Command: "migrate", Release: "r", Yards: []pendingInitYard{
 		{Name: "alpha", Baseline: true, Pending: true, Settings: []pendingInitSetting{
-			{Name: "DEV_UID", Installed: "1000", Desired: "1002"},
-			{Name: "ENVIRONMENT_PROFILES", Installed: "(unset)", Desired: "sample"},
-			{Name: "TOKEN", Installed: "old-secret", Desired: "new-secret", Sensitive: true},
+			{Name: "DEV_UID", Installed: "1000", Desired: "1002", InstalledSet: true, DesiredSet: true},
+			{Name: "ENVIRONMENT_PROFILES", Desired: "sample", DesiredSet: true},
+			{Name: "TOKEN", Installed: "old-secret", Desired: "new-secret", Kind: domain.ConfigurationSensitive},
 		}},
-		{Name: "beta", Pending: true, Settings: []pendingInitSetting{{Name: "DEV_USER", Installed: "dev", Desired: "other"}}},
+		{Name: "beta", Pending: true, Settings: []pendingInitSetting{{Name: "DEV_USER", Installed: "dev", Desired: "other", InstalledSet: true, DesiredSet: true}}},
 		{Name: "gamma", Baseline: true},
 		{Name: "delta", State: "stopped"},
 	}}
@@ -222,10 +224,10 @@ func TestPendingInitSettingsCompareIntegrationValuesInOrder(t *testing.T) {
 		Integrations: config.IntegrationSelection{AllowsCodingTools: false}}
 	var got []string
 	for _, setting := range pendingInitSettings(desired, installed) {
-		got = append(got, setting.Name+"="+setting.Installed+"->"+setting.Desired)
+		got = append(got, setting.Name+"="+strings.ReplaceAll(setting.Value(), " -> ", "->"))
 	}
 	// SSH_PORT applies on the next command, so it never awaits init.
-	want := []string{"ALLOWS_CODING_TOOLS=false->true", "CODING_TOOL_INTEGRATIONS=(unset)->codex", "DEV_USER=dev->other", "HOST_LINKS=(unset)->a:b", "INTEGRATION_HOST_LINKS=x->(unset)"}
+	want := []string{"ALLOWS_CODING_TOOLS=false->true", "CODING_TOOL_INTEGRATIONS=(empty)->codex", "DEV_USER=dev->other", "HOST_LINKS=(unset)->a:b", "INTEGRATION_HOST_LINKS=x->(unset)"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("differences: %v", got)
 	}
@@ -959,4 +961,95 @@ UPDATE_FOLLOWUP_HELPER=1 exec "$UPDATE_FOLLOWUP_BINARY" -test.run='^TestUpdateCo
 			t.Fatalf("resumed migrate omitted the listing/steps: %s", stdout)
 		}
 	})
+}
+
+func TestPendingInitAndConfigStatusShareContentEvidence(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, nil)
+	path := filepath.Join(testkit.TempDir(t), "provision.sh")
+	testkit.WriteFile(t, path, []byte("old source"), 0600)
+	loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Environment["AGENT_codex_PROVISION"] = path
+	key := bytes.Repeat([]byte{9}, 32)
+	executor := fixture.cli.options.Executor.(installedSettingsExecutor)
+	executor.settings = loaded.Catalog.IntegrationInitSettings(loaded.Environment)
+	executor.diagnostics = &reconcileruntime.IntegrationDiagnosticEvidence{Key: hex.EncodeToString(key), Digests: loaded.Catalog.IntegrationDiagnosticDigests(loaded.Environment, key, nil)}
+	evidence := executor.diagnostics
+	testkit.WriteFile(t, path, []byte("new source"), 0600)
+	for _, selected := range []bool{true, false} {
+		current, err := config.WithIntegrationSelection(loaded, nil)
+		if selected {
+			current, err = config.WithIntegrationSelection(loaded, []string{"codex"})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		executor.selected = current.Integrations.Effective
+		executor.settings = current.Catalog.IntegrationInitSettings(current.Environment)
+		fixture.cli.options.Executor = executor
+		target := configTarget{Name: "default", Loaded: current}
+		pending, err := fixture.cli.inspectPendingInitTarget(context.Background(), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, err := fixture.cli.configInstalledDiagnostic(context.Background(), target, "running")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := "AGENT_codex_PROVISION  content changed"
+		if pending.Pending != selected || strings.Contains(strings.Join((pendingInitPlan{Yards: []pendingInitYard{pending}}).lines(), "\n"), expected) != selected || strings.Contains(domain.FormatConfigurationDiagnostics([]domain.YardConfigurationDiagnostic{status}), expected) != selected {
+			t.Fatalf("selected=%v pending=%#v status=%#v", selected, pending, status)
+		}
+		executor.diagnostics = nil
+		fixture.cli.options.Executor = executor
+		unknown, err := fixture.cli.inspectPendingInitTarget(context.Background(), target)
+		if err != nil || unknown.Pending {
+			t.Fatalf("unknown evidence scheduled init: %#v %v", unknown, err)
+		}
+		executor.diagnostics = evidence
+	}
+}
+
+func TestPendingInitAndConfigStatusFindRemovedDigestOnlyConsumer(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, nil)
+	loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "AGENT_codex_PROVISION"
+	// Sensitive inputs likewise have an installed digest but no applied value.
+	// This catalog-owned file tests that consumer selection does not depend on
+	// the desired environment still containing the name.
+	delete(loaded.Environment, name)
+	for _, selected := range []bool{true, false} {
+		current, err := config.WithIntegrationSelection(loaded, nil)
+		if selected {
+			current, err = config.WithIntegrationSelection(loaded, []string{"codex"})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		executor := fixture.cli.options.Executor.(installedSettingsExecutor)
+		executor.selected = current.Integrations.Effective
+		executor.settings = current.Catalog.IntegrationInitSettings(current.Environment)
+		executor.diagnostics = &reconcileruntime.IntegrationDiagnosticEvidence{
+			Key: strings.Repeat("a", 64), Digests: map[string]string{name: strings.Repeat("b", 64)},
+		}
+		fixture.cli.options.Executor = executor
+		target := configTarget{Name: "default", Loaded: current}
+		pending, err := fixture.cli.inspectPendingInitTarget(context.Background(), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, err := fixture.cli.configInstalledDiagnostic(context.Background(), target, "running")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := name + "  content changed"
+		if pending.Pending != selected || strings.Contains(strings.Join((pendingInitPlan{Yards: []pendingInitYard{pending}}).lines(), "\n"), expected) != selected || strings.Contains(domain.FormatConfigurationDiagnostics([]domain.YardConfigurationDiagnostic{status}), expected) != selected {
+			t.Fatalf("selected=%v pending=%#v status=%#v", selected, pending, status)
+		}
+	}
 }

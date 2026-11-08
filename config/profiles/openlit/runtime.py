@@ -243,6 +243,8 @@ def valid_receipt(value):
 def observe(state, source, unit, home, selected, agents, user):
     observation, facts = capture(state, source, unit, home, selected, agents, user)
     if not state.exists():
+        if observation['state'] == 'stale':
+            observation['diagnostics'] = [{'parameter': 'openlit.runtime', 'installed': 'absent', 'desired': 'present'}]
         return observation
     receipt_path = state/'receipt.json'
     facts['receipt_metadata'] = metadata(receipt_path)
@@ -251,7 +253,23 @@ def observe(state, source, unit, home, selected, agents, user):
     if observation['state'] == 'current' and receipt == expected and valid_receipt(receipt):
         return observation
     facts['receipt'] = receipt if valid_receipt(receipt) else 'invalid'
-    return {'state': 'stale', 'actual': digest(facts), 'desired': observation['desired']}
+    diagnostics = []
+    for name in ('service', 'timer'):
+        statuses = facts.get(name)
+        if not isinstance(statuses, dict):
+            continue
+        for field, desired in (('ActiveState', 'active' if selected else 'inactive'), ('UnitFileState', 'enabled' if selected else 'disabled')):
+            value = statuses.get(field)
+            mismatch = (value != desired) if selected or name == 'timer' else (value == ('active' if field == 'ActiveState' else 'enabled'))
+            if mismatch:
+                diagnostics.append({'parameter': 'openlit.' + name + '.' + field,
+                                    'installed': value if value in ('active', 'inactive', 'enabled', 'disabled', 'failed', 'not-found') else 'unknown',
+                                    'desired': desired})
+    if receipt != expected or not valid_receipt(receipt):
+        diagnostics.append({'parameter': 'openlit.receipt', 'installed': 'mismatch', 'desired': 'matched'})
+    if not diagnostics:
+        diagnostics.append({'parameter': 'openlit.runtime', 'installed': 'unknown', 'desired': 'ready'})
+    return {'state': 'stale', 'actual': digest(facts), 'desired': observation['desired'], 'diagnostics': diagnostics}
 
 
 def publish(state, source, unit, home, selected, agents, user):

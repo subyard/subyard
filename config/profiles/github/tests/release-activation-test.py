@@ -114,6 +114,34 @@ class MigrationConsentTest(unittest.TestCase):
 
 
 class ActivationIdentityTest(unittest.TestCase):
+    def test_controller_forwards_optional_native_wait_and_preserves_exit(self):
+        controller = GUEST.with_name('release-activation.sh').read_text()
+        parser = controller.split('for command in ', 1)[0]
+        allocation = 'bash "$ROOT/dev/agent-e2e.sh"'+controller.rsplit('bash "$ROOT/dev/agent-e2e.sh"', 1)[1]
+        script = parser + '''
+ROOT=/fixture
+remaining=300
+allocation_route=()
+bash() { printf '%s\\n' "$@"; return 23; }
+''' + allocation
+        for arguments, forwarded in (([], []), (['--wait', '30m'], ['--wait', '30m']),
+                                     (['--wait', '45s'], ['--wait', '45s'])):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(['bash', '-c', script, 'fixture', '--slot', '4', *arguments],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 23, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ['/fixture/dev/agent-e2e.sh', *forwarded,
+                    '--slot', '4', '--vm-count', '1', '--vm', '1', '--purpose', 'github-release-activation',
+                    '--', 'timeout', '--signal=TERM', '--kill-after=360', '300', 'bash',
+                    'config/profiles/github/tests/e2e/release-activation-guest.sh', '--baseline', '0.19.0'])
+        for arguments in (['--wait'], ['--wait', ''], ['--wait', 'invalid'],
+                          ['--wait', '1s', '--wait', '2s']):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(['bash', '-c', script, 'fixture', '--slot', '4', *arguments],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, '')
+
     def test_loss_modes_are_closed_before_candidate_preparation(self):
         controller = GUEST.with_name('release-activation.sh')
         for arguments in (['--native-loss', 'invalid'], ['--native-loss'],

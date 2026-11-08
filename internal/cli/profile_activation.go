@@ -48,7 +48,7 @@ func (reconciler *profileRuntimeActivationReconciler) failure(yard, phase string
 	if coreInstalledRuntimeID(reconciler.id) {
 		owner = reconciler.id
 	}
-	return materializedConfigActivationError{cause, yard, owner, "status", phase, reconciler.request.ConfigHome}
+	return materializedConfigActivationError{cause, yard, owner, "config status", phase, reconciler.request.ConfigHome}
 }
 
 func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Context) (*CLI, []configTarget, error) {
@@ -130,13 +130,15 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	actual := make([]observation, 0, len(targets))
 	converged := true
 	disclosed, order := map[string][]string{}, []string{}
+	var failures []error
 	for _, target := range targets {
 		if _, ok := deferred[target.Name]; ok {
 			continue
 		}
 		state, err := reconciler.observeTarget(ctx, operation, target)
 		if err != nil {
-			return releasetransition.V2ActivationObservation{}, reconciler.failure(target.Name, "inspect", err)
+			failures = append(failures, reconciler.failure(target.Name, "inspect", err))
+			continue
 		}
 		kind := string(state.State)
 		if kind == "current" || kind == "stale" {
@@ -152,6 +154,9 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 			}
 			disclosed[state.Consequence] = append(disclosed[state.Consequence], target.Name)
 		}
+	}
+	if err := domain.CollectRefusals(failures...); err != nil {
+		return releasetransition.V2ActivationObservation{}, err
 	}
 	actualDigest := desiredDigest
 	if !converged {

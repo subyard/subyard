@@ -285,6 +285,21 @@ class RuntimeTest(unittest.TestCase):
                 runtime.main()
         self.assertEqual(self.applies, 0)
 
+    def test_opt_in_runtime_diagnostics_use_closed_reason(self):
+        self.check_reason = 'boot-link-missing'
+        with patch.dict(os.environ, {'SUBYARD_PROFILE_DIAGNOSTICS': '0'}):
+            default, _ = runtime.observe()
+        self.assertNotIn('diagnostics', default)
+        with patch.dict(os.environ, {'SUBYARD_PROFILE_DIAGNOSTICS': '1'}):
+            result, _ = runtime.observe()
+        self.assertIn({'parameter': 'github.boot-link-missing', 'installed': 'not-ready', 'desired': 'ready'}, result['diagnostics'])
+        self.assertEqual({key: value for key, value in result.items() if key != 'diagnostics'}, default)
+        self.check_reason = 'private-sentinel-do-not-copy'
+        with patch.dict(os.environ, {'SUBYARD_PROFILE_DIAGNOSTICS': '1'}):
+            result, _ = runtime.observe()
+        self.assertNotIn('private-sentinel-do-not-copy', str(result))
+        self.assertEqual(result['diagnostics'][0]['installed'], 'unknown')
+
     def test_unknown_check_diagnostics_do_not_enter_runtime_facts(self):
         old, _ = runtime.observe()
         self.check_reason = 'private-sentinel-do-not-copy'

@@ -12,10 +12,59 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+type diagnosticFailingReconciler struct {
+	releasetransition.V2ActivationReconciler
+	cause error
+}
+
+func (diagnosticFailingReconciler) ID() string { return "materialized-config" }
+func (owner diagnosticFailingReconciler) Observe(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks) (releasetransition.V2ActivationObservation, error) {
+	return releasetransition.V2ActivationObservation{}, owner.cause
+}
+
+func TestReleaseDiagnosticsPreservePublicWrapperOverRawRefusals(t *testing.T) {
+	wrapped := func(yard string) error {
+		return materializedConfigActivationError{
+			cause: domain.CollectRefusals(errors.New("private asset one"), errors.New("private asset two")),
+			yard:  yard, phase: "materialized config", action: "inspect", command: "config status",
+		}
+	}
+	for _, multiple := range []bool{false, true} {
+		t.Run(fmt.Sprint(multiple), func(t *testing.T) {
+			cause := fmt.Errorf("private wrapper: %w", wrapped("work"))
+			message := "yard work: cannot inspect materialized config for release activation"
+			retry := "run yard -Y work config status"
+			if multiple {
+				cause = domain.CollectRefusals(cause, wrapped("default"))
+				message = "yard default: cannot inspect materialized config for release activation; " + message
+				retry = "run yard -Y default config status, then " + retry
+			}
+			transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+				ConfigHome: testkit.TempDir(t), Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"},
+				RegistryPayload:     []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`),
+				ArtifactDigest:      releasetransition.Fingerprint(strings.Repeat("d", 64)),
+				VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
+				Reconcilers:         []releasetransition.V2ActivationReconciler{diagnosticFailingReconciler{cause: cause}},
+				ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+					return releasetransition.ReleaseLinks{Active: "release-a"}, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inspection, err := transition.Inspect(context.Background(), releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget})
+			if err != nil || inspection.Outcome == nil || inspection.Outcome.Message != message || inspection.Outcome.Retry != retry {
+				t.Fatalf("public wrapper lost: %#v, %v", inspection.Outcome, err)
+			}
+		})
+	}
+}
 
 func TestReleaseDiagnosticsIdentifyMalformedNamedYard(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
@@ -151,7 +200,7 @@ func TestReleaseDiagnosticsProfileFailurePreservesPhaseAndPublicCause(t *testing
 					if message != "known integration ownership conflict" || retry != "run yard -Y default integration status" {
 						t.Fatalf("specific profile diagnostic replaced: %q / %q", message, retry)
 					}
-				} else if !strings.Contains(message, "yard default") || !strings.Contains(message, "profile sample-runtime") || !strings.Contains(message, phase) || strings.Contains(message, cause.Error()) || retry != "run yard -Y default status" {
+				} else if !strings.Contains(message, "yard default") || !strings.Contains(message, "profile sample-runtime") || !strings.Contains(message, phase) || strings.Contains(message, cause.Error()) || retry != "run yard -Y default config status" {
 					t.Fatalf("profile context missing or unsafe: %q / %q", message, retry)
 				}
 			})

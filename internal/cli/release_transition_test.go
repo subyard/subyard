@@ -531,7 +531,7 @@ esac
 			t.Fatalf("failed helper installation lost its diagnostic: %v", err)
 		}
 		message, retry := diagnostic.ActivationDiagnostic()
-		if !strings.Contains(message, "yard default") || !strings.Contains(message, "sample-runtime") || !strings.Contains(message, "apply") || retry != "run yard -Y default status" {
+		if !strings.Contains(message, "yard default") || !strings.Contains(message, "sample-runtime") || !strings.Contains(message, "apply") || retry != "run yard -Y default config status" {
 			t.Fatalf("failed helper diagnostic: %q / %q", message, retry)
 		}
 	}

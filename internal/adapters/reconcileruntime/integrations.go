@@ -1,7 +1,9 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
@@ -98,22 +100,48 @@ type integrationArtifact struct {
 	Mode         int    `json:"mode,omitempty"`
 }
 type integrationObservation struct {
-	Fingerprint     string                `json:"fingerprint"`
-	Changed         bool                  `json:"changed"`
-	Retired         []integrationArtifact `json:"retired"`
-	Adopted         []integrationArtifact `json:"adopted"`
-	Initial         bool                  `json:"initial"`
-	Facts           []integrationFact     `json:"facts"`
-	Installed       bool                  `json:"installed"`
-	Selected        []string              `json:"selected"`
-	AppliedSettings map[string]string     `json:"applied_settings"`
+	Fingerprint     string                         `json:"fingerprint"`
+	Changed         bool                           `json:"changed"`
+	Retired         []integrationArtifact          `json:"retired"`
+	Adopted         []integrationArtifact          `json:"adopted"`
+	Initial         bool                           `json:"initial"`
+	Facts           []integrationFact              `json:"facts"`
+	Installed       bool                           `json:"installed"`
+	Selected        []string                       `json:"selected"`
+	AppliedSettings map[string]string              `json:"applied_settings"`
+	Diagnostics     *IntegrationDiagnosticEvidence `json:"diagnostics"`
+}
+
+type IntegrationDiagnosticEvidence struct {
+	Key     string                               `json:"key"`
+	Digests map[string]string                    `json:"digests"`
+	Files   map[string]IntegrationDiagnosticFile `json:"files,omitempty"`
+}
+
+type IntegrationDiagnosticFile struct {
+	Path   string `json:"path"`
+	Digest string `json:"digest"`
+}
+
+func validIntegrationDiagnosticEvidence(catalog config.Catalog, evidence *IntegrationDiagnosticEvidence) bool {
+	if evidence == nil || !catalog.ValidIntegrationDiagnosticEvidence(evidence.Key, evidence.Digests) || len(evidence.Files) > 4096 {
+		return false
+	}
+	for name, file := range evidence.Files {
+		definition, ok := catalog.LookupSetting(name)
+		if !ok || definition.Sensitive || definition.Kind != config.SettingFile || definition.Application != config.SettingConfigApply || len(file.Path) > 16384 || !filepath.IsAbs(file.Path) || config.ValidateNonSecretContent(name, file.Path) != nil || len(file.Digest) != 64 || strings.Trim(file.Digest, "0123456789abcdef") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 type AppliedIntegrationConfiguration struct {
-	Selected  []string
-	Settings  map[string]string
-	Installed bool
-	Identity  map[string]string
+	Selected    []string
+	Settings    map[string]string
+	Installed   bool
+	Identity    map[string]string
+	Diagnostics *IntegrationDiagnosticEvidence
 }
 
 // AppliedIntegrationConfiguration reads committed ownership and validated inputs,
@@ -162,7 +190,7 @@ func (runtime Runtime) AppliedIntegrationConfiguration(ctx context.Context) (App
 	if err != nil {
 		return AppliedIntegrationConfiguration{}, err
 	}
-	if observed.Installed != baseline.Installed || (observed.AppliedSettings == nil) != (baseline.AppliedSettings == nil) || !maps.Equal(observed.AppliedSettings, baseline.AppliedSettings) {
+	if observed.Installed != baseline.Installed || (observed.AppliedSettings == nil) != (baseline.AppliedSettings == nil) || !maps.Equal(observed.AppliedSettings, baseline.AppliedSettings) || (observed.Diagnostics == nil) != (baseline.Diagnostics == nil) || (observed.Diagnostics != nil && (observed.Diagnostics.Key != baseline.Diagnostics.Key || !maps.Equal(observed.Diagnostics.Digests, baseline.Diagnostics.Digests) || !maps.Equal(observed.Diagnostics.Files, baseline.Diagnostics.Files))) {
 		return AppliedIntegrationConfiguration{}, domain.ErrPlanStale
 	}
 	settings := observed.AppliedSettings
@@ -173,7 +201,7 @@ func (runtime Runtime) AppliedIntegrationConfiguration(ctx context.Context) (App
 		}
 		settings = runtime.relocateAppliedShippedSources(catalog, settings)
 	}
-	return AppliedIntegrationConfiguration{Selected: observed.Selected, Settings: settings, Installed: observed.Installed, Identity: identity}, nil
+	return AppliedIntegrationConfiguration{Selected: observed.Selected, Settings: settings, Installed: observed.Installed, Identity: identity, Diagnostics: observed.Diagnostics}, nil
 }
 
 // CheckAppliedGuestIdentity refuses identity authoring when no independent owner
@@ -409,7 +437,28 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 	return entries, nil
 }
 
-func (runtime Runtime) integrationInventory(ctx context.Context, mode string, entries []integrationArtifact, expected string) (integrationObservation, error) {
+type configDiagnosticCapture struct {
+	Key   string                                 `json:"key"`
+	Files map[string]configDiagnosticCaptureFile `json:"files"`
+}
+type configDiagnosticCaptureFile struct {
+	Path        string `json:"path"`
+	Digest      string `json:"digest"`
+	Destination string `json:"destination"`
+}
+
+type integrationInventoryCapture struct {
+	config        *configDiagnosticCapture
+	baseline      *IntegrationDiagnosticEvidence
+	verifySources func() error
+}
+
+func (runtime Runtime) integrationInventory(ctx context.Context, mode string, entries []integrationArtifact, expected string, captures ...integrationInventoryCapture) (integrationObservation, error) {
+	var capture integrationInventoryCapture
+	if len(captures) != 0 {
+		capture = captures[0]
+	}
+	evidence, baseline, verifySources := capture.config, capture.baseline, capture.verifySources
 	if mode == "observe" && runtime.appliedIntegrationInspection {
 		mode = "observe-applied"
 	}
@@ -447,6 +496,9 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		}
 	}
 	request := map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": !runtime.legacyPreviewInstructions}
+	if evidence != nil {
+		request["config_diagnostics"] = evidence
+	}
 	if mode == "capture-settings" {
 		catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
 		if err != nil {
@@ -457,6 +509,43 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			return integrationObservation{}, err
 		}
 		request["applied_settings"] = settings
+		var key []byte
+		if baseline != nil {
+			if !validIntegrationDiagnosticEvidence(catalog, baseline) {
+				return integrationObservation{}, errors.New("invalid applied diagnostics")
+			}
+			key, _ = hex.DecodeString(baseline.Key)
+		} else {
+			key = make([]byte, 32)
+			if _, err := rand.Read(key); err != nil {
+				return integrationObservation{}, err
+			}
+		}
+		evidence := IntegrationDiagnosticEvidence{Key: hex.EncodeToString(key), Digests: catalog.IntegrationDiagnosticDigests(runtimeEnvironment(runtime.Environment), key, runtime.SourceReader)}
+		// Capture source evidence from the same snapshot that produced the
+		// converged entries, including composed/structured configuration inputs.
+		files, err := runtime.guestConfigFilesWithSourceReader(runtime.SourceReader)
+		if err != nil {
+			return integrationObservation{}, err
+		}
+		evidence.Files = map[string]IntegrationDiagnosticFile{}
+		for _, file := range files {
+			definition, ok := catalog.LookupSetting(file.setting)
+			if !ok || definition.Sensitive || definition.Kind != config.SettingFile || definition.Application != config.SettingConfigApply {
+				continue
+			}
+			payload, err := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
+			if err != nil {
+				continue
+			}
+			evidence.Files[file.setting] = IntegrationDiagnosticFile{Path: file.source, Digest: config.ConfigurationInputDigest(file.setting, definition.Kind, key, payload)}
+		}
+		request["diagnostics"] = evidence
+	}
+	if verifySources != nil {
+		if err := verifySources(); err != nil {
+			return integrationObservation{}, err
+		}
 	}
 	payload, _ := json.Marshal(request)
 	program := strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", "/var/lib/subyard/integrations")
@@ -507,6 +596,22 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 	if mode == "observe" || mode == "observe-applied" || mode == "selection" || mode == "settings" {
 		if json.Unmarshal(result.Stdout, &observed) != nil || (mode == "observe" || mode == "observe-applied") && len(observed.Fingerprint) != 64 {
 			return observed, errors.New("invalid integration ownership observation")
+		}
+	}
+	if observed.Diagnostics != nil {
+		catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
+		if err != nil {
+			return observed, err
+		}
+		if !validIntegrationDiagnosticEvidence(catalog, observed.Diagnostics) {
+			// A newer catalog may have captured names this reader does not
+			// understand. Retain only the validated key for subsequent writes;
+			// none of those values can establish installed evidence.
+			key := observed.Diagnostics.Key
+			observed.Diagnostics = nil
+			if catalog.ValidIntegrationDiagnosticEvidence(key, nil) {
+				observed.Diagnostics = &IntegrationDiagnosticEvidence{Key: key, Digests: map[string]string{}}
+			}
 		}
 	}
 	return observed, nil
@@ -1360,10 +1465,12 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 }
 
 type appliedIntegrationSettingsCapture struct {
-	runtime   Runtime
-	plan      string
-	inventory string
-	entries   []integrationArtifact
+	runtime     Runtime
+	plan        string
+	inventory   string
+	entries     []integrationArtifact
+	diagnostics *IntegrationDiagnosticEvidence
+	sources     *diagnosticSourceSnapshot
 }
 
 func (capture *appliedIntegrationSettingsCapture) Binding() string { return capture.plan }
@@ -1376,7 +1483,9 @@ func (capture *appliedIntegrationSettingsCapture) Apply(ctx context.Context) err
 	if plan.Changed || plan.StateBinding() != capture.plan {
 		return domain.ErrPlanStale
 	}
-	_, err = capture.runtime.integrationInventory(ctx, "capture-settings", capture.entries, capture.inventory)
+	runtime := capture.runtime
+	runtime.SourceReader = capture.sources.read
+	_, err = runtime.integrationInventory(ctx, "capture-settings", capture.entries, capture.inventory, integrationInventoryCapture{baseline: capture.diagnostics, verifySources: capture.sources.verify})
 	return err
 }
 
@@ -1395,11 +1504,12 @@ func (runtime Runtime) PrepareAppliedIntegrationSettings(ctx context.Context) (p
 	if plan.Changed {
 		return nil, errors.New("legacy integration settings have no verified applied baseline; reconcile the existing settings with yard init before editing them")
 	}
-	entries, err := runtime.integrationArtifactsPhase("inspect")
+	sources := newDiagnosticSourceSnapshot(runtime.SourceReader)
+	entries, err := runtime.integrationArtifactsWithSourceReader("inspect", sources.read)
 	if err != nil {
 		return nil, err
 	}
-	return &appliedIntegrationSettingsCapture{runtime: runtime, plan: plan.StateBinding(), inventory: observed.Fingerprint, entries: entries}, nil
+	return &appliedIntegrationSettingsCapture{runtime: runtime, plan: plan.StateBinding(), inventory: observed.Fingerprint, entries: entries, diagnostics: observed.Diagnostics, sources: sources}, nil
 }
 
 func (runtime Runtime) storeAppliedIntegrationSettings(ctx context.Context) error {
@@ -1410,10 +1520,63 @@ func (runtime Runtime) storeAppliedIntegrationSettings(ctx context.Context) erro
 	if plan.Changed {
 		return domain.ErrPlanStale
 	}
-	entries, err := runtime.integrationArtifactsPhase("verify")
+	sources := newDiagnosticSourceSnapshot(runtime.SourceReader)
+	entries, err := runtime.integrationArtifactsWithSourceReader("verify", sources.read)
 	if err != nil {
 		return err
 	}
-	_, err = runtime.integrationInventory(ctx, "capture-settings", entries, observed.Fingerprint)
+	runtime.SourceReader = sources.read
+	_, err = runtime.integrationInventory(ctx, "capture-settings", entries, observed.Fingerprint, integrationInventoryCapture{baseline: observed.Diagnostics, verifySources: sources.verify})
 	return err
+}
+
+type diagnosticSourceSnapshot struct {
+	reader func(config.MaterializedAsset) ([]byte, error)
+	values map[configSourceKey]diagnosticSourceValue
+}
+
+type diagnosticSourceValue struct {
+	payload []byte
+	err     error
+}
+
+func newDiagnosticSourceSnapshot(reader func(config.MaterializedAsset) ([]byte, error)) *diagnosticSourceSnapshot {
+	return &diagnosticSourceSnapshot{reader: reader, values: map[configSourceKey]diagnosticSourceValue{}}
+}
+
+func (snapshot *diagnosticSourceSnapshot) read(asset config.MaterializedAsset) ([]byte, error) {
+	key := configSourceKey{path: asset.Source, follow: asset.FollowSymlinks}
+	if value, ok := snapshot.values[key]; ok {
+		return slices.Clone(value.payload), value.err
+	}
+	var payload []byte
+	var err error
+	if snapshot.reader == nil {
+		payload, err = asset.ReadSource()
+	} else {
+		payload, err = snapshot.reader(asset)
+	}
+	snapshot.values[key] = diagnosticSourceValue{payload: slices.Clone(payload), err: err}
+	return payload, err
+}
+
+func (snapshot *diagnosticSourceSnapshot) verify() error {
+	for key, old := range snapshot.values {
+		// Unreadable optional sources produce no diagnostic evidence.
+		if old.err != nil {
+			continue
+		}
+		asset := config.MaterializedAsset{Source: key.path, FollowSymlinks: key.follow}
+		var fresh []byte
+		var err error
+		if snapshot.reader == nil {
+			fresh, err = asset.ReadSource()
+		} else {
+			fresh, err = snapshot.reader(asset)
+		}
+		if err != nil || !bytes.Equal(old.payload, fresh) {
+			return domain.ErrPlanStale
+		}
+	}
+	return nil
 }

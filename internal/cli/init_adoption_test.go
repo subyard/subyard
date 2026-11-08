@@ -1256,6 +1256,7 @@ func TestRegisteredMigrationReportsEverySimultaneousRefusal(t *testing.T) {
 		`legacy continuation refuses unknown project permissions`,
 		`legacy continuation refuses unsupported instance configuration key "security.privileged"`,
 		`yard adoption refuses srv device that is missing or differs from persistent volume default/yard-srv: reattaching it would change the data mounted in the yard`,
+		`srv.source  differs -> yard-srv`,
 		`yard adoption refuses an uninventoried project feature namespace`,
 		`yard adoption refuses unproven snapshots`,
 		`registered resource "sample-server": has foreign or inherited receipt`,
@@ -1276,6 +1277,18 @@ func TestRegisteredMigrationReportsEverySimultaneousRefusal(t *testing.T) {
 	}
 	if operationStateDigest(*instance) != before || fake.writes != 0 {
 		t.Fatal("assessment mutated native state")
+	}
+}
+
+func TestRegisteredMigrationReportsNestingAndIDMapDifferences(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	owner, _, _ := registeredRefusalOwner(t, execution, fake)
+	instance := &fake.Reconcile.Instance
+	instance.Config["security.nesting"], instance.LocalConfig["security.nesting"] = "false", "false"
+	instance.Config["volatile.idmap.base"], instance.LocalConfig["volatile.idmap.base"] = "7", "7"
+	_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err == nil || !strings.Contains(err.Error(), "security.nesting  false -> true") || !strings.Contains(err.Error(), "volatile.idmap.base  7 -> 0") {
+		t.Fatalf("native policy diagnostics: %v", err)
 	}
 }
 

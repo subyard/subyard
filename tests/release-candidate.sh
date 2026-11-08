@@ -211,7 +211,8 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
             native = release / f'subyard-1.2.3-linux-{arch}.tar.gz'
             other = release / f'subyard-1.2.3-linux-{foreign}.tar.gz'
             # These host-free metadata archives are independent synthetic inputs.
-            for archive, archive_arch in ((native, arch), (other, foreign)):
+            archives = ((native, arch), (other, foreign))
+            for archive, archive_arch in archives if order == 'native-first' else reversed(archives):
                 files = {
                     './scripts/guest-disk-tmp.sh': f'fixture {archive_arch} disk tmp policy\n'.encode(),
                     './config/release-transition.json': json.dumps({
@@ -237,8 +238,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
             captured = []
             with patch.dict(helper.__globals__, {
                     'write_observation_incus': lambda *args, **kwargs: None,
-                    'set_fixture_observation': lambda *args, **kwargs: captured.append(kwargs['history'])}), \
-                 patch.object(Path, 'glob', return_value=iter([native, other] if order == 'native-first' else [other, native])):
+                    'set_fixture_observation': lambda *args, **kwargs: captured.append(kwargs['history'])}):
                 history, _, _, _ = helper(fixture, case, case/'control')
             expected = '1.2.3-' + hashlib.sha256(native.read_bytes()).hexdigest()[:12]
             assert history['target'] == expected, (arch, history['target'], expected)

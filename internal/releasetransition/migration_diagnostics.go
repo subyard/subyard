@@ -17,6 +17,7 @@ type migrationDiagnosticCaptureKey struct{}
 type migrationDiagnosticCapture struct {
 	writer   io.Writer
 	messages map[string]bool
+	yards    map[string]map[string]bool
 }
 
 // WithMigrationDiagnosticWriter selects the engine's diagnostic stream. It is
@@ -34,7 +35,7 @@ func captureMigrationDiagnostics(ctx context.Context) (context.Context, func()) 
 		return ctx, func() {}
 	}
 	writer, _ := ctx.Value(migrationDiagnosticWriterKey{}).(io.Writer)
-	capture := &migrationDiagnosticCapture{writer: writer, messages: map[string]bool{}}
+	capture := &migrationDiagnosticCapture{writer: writer, messages: map[string]bool{}, yards: map[string]map[string]bool{}}
 	return context.WithValue(ctx, migrationDiagnosticCaptureKey{}, capture), func() {
 		if capture.writer == nil {
 			return
@@ -46,6 +47,22 @@ func captureMigrationDiagnostics(ctx context.Context) (context.Context, func()) 
 		slices.Sort(rows)
 		for _, message := range rows {
 			fmt.Fprintln(capture.writer, message)
+		}
+		yards := make([]string, 0, len(capture.yards))
+		for yard := range capture.yards {
+			yards = append(yards, yard)
+		}
+		slices.Sort(yards)
+		for _, yard := range yards {
+			fmt.Fprintf(capture.writer, "yard %s:\n", yard)
+			rows := make([]string, 0, len(capture.yards[yard]))
+			for row := range capture.yards[yard] {
+				rows = append(rows, row)
+			}
+			slices.Sort(rows)
+			for _, row := range rows {
+				fmt.Fprintf(capture.writer, "  %s\n", row)
+			}
 		}
 	}
 }
@@ -71,6 +88,20 @@ func recordMigrationDiagnostics(ctx context.Context, err error) {
 		if errors.As(cause, &details) {
 			yard, reason, names := details.MigrationRefusalDetails()
 			if len(yard) <= 63 && domain.SafeName(yard) && utf8.ValidString(reason) && validateText(reason, "migration refusal", maxDiagnosticText, true) == nil {
+				var parameters interface {
+					MigrationParameters() []domain.MigrationParameter
+				}
+				if errors.As(cause, &parameters) {
+					if capture.yards[yard] == nil {
+						capture.yards[yard] = map[string]bool{}
+					}
+					for _, parameter := range parameters.MigrationParameters() {
+						if len(parameter.Name) <= 96 && domain.SafeID(parameter.Name) {
+							row := parameter.Name + "  " + domain.MigrationDiagnosticValue(parameter.Installed) + " -> " + domain.MigrationDiagnosticValue(parameter.Desired)
+							capture.yards[yard][row] = true
+						}
+					}
+				}
 				names = slices.Clone(names)
 				for index, name := range names {
 					if len(name) > 96 || !domain.SafeID(name) {
@@ -144,13 +175,21 @@ func (failure *blockedInspectionError) Error() string {
 type migrationReasonClass struct {
 	yard, reason string
 	count        int
+	details      int
 }
 
 // Names are the first detail to yield space. Keep reason classes and counts,
 // sharing a yard prefix. Only the final reduction omits classes, with an actual
 // update --check stderr stream retaining the complete filtered list.
 func compactMigrationSummary(classes []migrationReasonClass) string {
-	const hint = "; full filtered details: stderr of yard update --check"
+	hint := "; full filtered details: stderr of yard update --check --json"
+	omitted := 0
+	for _, class := range classes {
+		omitted += class.details
+	}
+	if omitted > 0 {
+		hint = fmt.Sprintf("; %d parameter/name details omitted", omitted) + hint
+	}
 	rows := map[string][]string{}
 	for index := range classes {
 		reason := classes[index].reason

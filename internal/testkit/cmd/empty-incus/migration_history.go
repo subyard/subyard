@@ -4,29 +4,37 @@ import (
 	"bytes"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type historyControl struct {
-	DiskTmpCheckSHA256 string         `json:"diskTmpCheckSHA256"`
-	Journal            string         `json:"journal"`
-	Runtime            string         `json:"runtime"`
-	Target             string         `json:"target"`
-	Source             string         `json:"source"`
-	Guest              string         `json:"guest"`
-	InitialDrift       string         `json:"initialDrift"`
-	Destination        string         `json:"destination"`
-	Migrations         []string       `json:"migrations"`
-	FailOnce           bool           `json:"failOnce"`
-	InventorySHA256    string         `json:"inventoryProgramSHA256"`
-	Skills             *historySkills `json:"skills,omitempty"`
+	DiskTmpCheckSHA256     string         `json:"diskTmpCheckSHA256"`
+	Journal                string         `json:"journal"`
+	Runtime                string         `json:"runtime"`
+	Target                 string         `json:"target"`
+	Source                 string         `json:"source"`
+	Guest                  string         `json:"guest"`
+	InitialDrift           string         `json:"initialDrift"`
+	Destination            string         `json:"destination"`
+	Migrations             []string       `json:"migrations"`
+	FailOnce               bool           `json:"failOnce"`
+	InventorySHA256        string         `json:"inventoryProgramSHA256"`
+	ProfileRecorderSHA256  string         `json:"profileRecorderProgramSHA256"`
+	ProfileSelectionSHA256 string         `json:"profileSelectionProgramSHA256"`
+	GuestIdentitySHA256    string         `json:"guestIdentityProgramSHA256"`
+	GuestFactsVersion      string         `json:"guestFactsVersion"`
+	ProfileNames           []string       `json:"profileNames"`
+	Skills                 *historySkills `json:"skills,omitempty"`
 }
 
 type historySkills struct {
@@ -59,6 +67,40 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		programSHA := ""
 		if len(command) > 3 {
 			programSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(command[3])))
+		}
+		// This fixture has no guest facts. The exact recorder must therefore
+		// return its missing-facts exit without executing a guest-side writer.
+		if control.ProfileRecorderSHA256 != "" && len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.ProfileRecorderSHA256 {
+			return testkit.IncusServerExecStep{AfterInput: func(actual testkit.IncusServerExecCall) int {
+				var input struct {
+					Yard     struct{ Name, Project, Instance string } `json:"yard"`
+					Profile  string                                   `json:"profile"`
+					Selected *bool                                    `json:"selected"`
+				}
+				decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+				decoder.DisallowUnknownFields()
+				if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || input.Yard.Name != "default" || input.Yard.Project != "subyard" || input.Yard.Instance != "yard" || input.Selected == nil || *input.Selected || !slices.Contains(control.ProfileNames, input.Profile) {
+					reject()
+					return 99
+				}
+				return 10
+			}}
+		}
+		if len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA != "" && (programSHA == control.ProfileSelectionSHA256 || programSHA == control.GuestIdentitySHA256) {
+			return testkit.IncusServerExecStep{AfterInput: func(actual testkit.IncusServerExecCall) int {
+				var input struct {
+					Version          string                                   `json:"version"`
+					Yard             struct{ Name, Project, Instance string } `json:"yard"`
+					SelectedProfiles []string                                 `json:"selected_profiles"`
+				}
+				decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+				decoder.DisallowUnknownFields()
+				if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || input.Version != control.GuestFactsVersion || input.Yard.Name != "default" || input.Yard.Project != "subyard" || input.Yard.Instance != "yard" || input.SelectedProfiles == nil || len(input.SelectedProfiles) != 0 {
+					reject()
+					return 99
+				}
+				return 10
+			}}
 		}
 		if control.Skills != nil && len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.Skills.ProgramSHA256 {
 			return testkit.IncusServerExecStep{Stdout: []byte("skills-current\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
@@ -136,9 +178,42 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			}
 			return testkit.IncusServerExecStep{Stdout: []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(payload), control.Destination))}
 		}
-		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && (programSHA == control.InventorySHA256 || programSHA == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e") && (command[4] == "configs-prepare" || command[4] == "configs-commit" || command[4] == "observe") {
+		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.InventorySHA256 && (command[4] == "settings" || command[4] == "selection") {
+			historyMu.Lock()
+			stored, err := os.ReadFile(path + ".inventory.json")
+			historyMu.Unlock()
+			if os.IsNotExist(err) {
+				stored = []byte(`{"installed":true,"applied_settings":null,"diagnostics":null,"selected":["fixture"]}`)
+			} else if err != nil {
+				return reject()
+			}
+			return testkit.IncusServerExecStep{Stdout: stored, AfterInput: func(actual testkit.IncusServerExecCall) int {
+				var input struct {
+					Home, Developer string
+					UID             int
+					Entries         []json.RawMessage
+					Expected        string
+					Legacy          []string `json:"legacy"`
+					Adopt           *bool    `json:"adopt"`
+					Preview         *bool    `json:"preview_skill_cutover"`
+				}
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(actual.Stdin, &input) != nil || json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 8 || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || len(input.Entries) != 0 || input.Expected != "" || input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil {
+					reject()
+					return 99
+				}
+				for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover"} {
+					if _, ok := fields[key]; !ok {
+						reject()
+						return 99
+					}
+				}
+				return 0
+			}}
+		}
+		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && (programSHA == control.InventorySHA256 || programSHA == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e") && (command[4] == "configs-prepare" || command[4] == "configs-commit" || command[4] == "observe" || (command[4] == "capture-settings" || command[4] == "observe-applied") && programSHA == control.InventorySHA256) {
 			output := []byte(nil)
-			if command[4] == "observe" {
+			if command[4] == "observe" || command[4] == "observe-applied" {
 				output = []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false,"facts":[]}`)
 			}
 			return testkit.IncusServerExecStep{Stdout: output, AfterInput: func(actual testkit.IncusServerExecCall) int {
@@ -146,6 +221,16 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 					Home, Developer string
 					UID             int
 					Entries         []struct{ ID, Kind, Path, Digest string }
+					Expected        string            `json:"expected"`
+					Legacy          []string          `json:"legacy"`
+					Adopt           *bool             `json:"adopt"`
+					Preview         *bool             `json:"preview_skill_cutover"`
+					AppliedSettings map[string]string `json:"applied_settings"`
+					Diagnostics     *struct {
+						Key     string                     `json:"key"`
+						Digests map[string]string          `json:"digests"`
+						Files   map[string]json.RawMessage `json:"files"`
+					} `json:"diagnostics"`
 				}
 				source, err := os.ReadFile(control.Source)
 				if err != nil || json.Unmarshal(actual.Stdin, &input) != nil || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 {
@@ -153,7 +238,7 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 					return 99
 				}
 				wanted := 1
-				if command[4] == "observe" {
+				if command[4] == "observe" || command[4] == "observe-applied" || command[4] == "capture-settings" {
 					wanted = 4
 				}
 				if len(input.Entries) != wanted {
@@ -162,7 +247,7 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 				}
 				for _, entry := range input.Entries {
 					valid := entry.ID == "fixture" && entry.Kind == "file" && entry.Path == control.Destination && entry.Digest == fmt.Sprintf("%x", sha256.Sum256(source))
-					if command[4] == "observe" {
+					if command[4] == "observe" || command[4] == "observe-applied" || command[4] == "capture-settings" {
 						valid = valid || entry.ID == "fixture" && entry.Kind == "package" && entry.Path == "" || entry.ID == "_projects" && entry.Kind == "file" && (entry.Path == "/usr/local/libexec/subyard/projects-changed" || entry.Path == "/etc/subyard/agent-project-hooks")
 					}
 					if !valid {
@@ -170,7 +255,46 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 						return 99
 					}
 				}
-				if command[4] != "observe" {
+				if command[4] == "capture-settings" {
+					var fields map[string]json.RawMessage
+					if json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 10 || input.Expected != strings.Repeat("a", 64) || input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil || input.AppliedSettings == nil || (config.Catalog{}).ValidateIntegrationInitSettings(input.AppliedSettings) != nil || input.Diagnostics == nil || input.Diagnostics.Digests == nil || len(input.Diagnostics.Files) > 1 || !(config.Catalog{}).ValidIntegrationDiagnosticEvidence(input.Diagnostics.Key, input.Diagnostics.Digests) || !historyApplyBoundary(control) {
+						reject()
+						return 99
+					}
+					for name, encoded := range input.Diagnostics.Files {
+						var file map[string]string
+						key, err := hex.DecodeString(input.Diagnostics.Key)
+						if err != nil || name != "AGENT_fixture_CONFIG" || json.Unmarshal(encoded, &file) != nil || len(file) != 2 || file["path"] != control.Source || file["digest"] != config.ConfigurationInputDigest(name, config.SettingFile, key, source) {
+							reject()
+							return 99
+						}
+					}
+					for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover", "applied_settings", "diagnostics"} {
+						if _, ok := fields[key]; !ok {
+							reject()
+							return 99
+						}
+					}
+					var diagnosticFields map[string]json.RawMessage
+					if json.Unmarshal(fields["diagnostics"], &diagnosticFields) != nil || len(diagnosticFields) < 2 || len(diagnosticFields) > 3 {
+						reject()
+						return 99
+					}
+					for key := range diagnosticFields {
+						if key != "key" && key != "digests" && key != "files" {
+							reject()
+							return 99
+						}
+					}
+					stored, _ := json.Marshal(map[string]any{"installed": true, "applied_settings": input.AppliedSettings, "diagnostics": input.Diagnostics, "selected": []string{"fixture"}})
+					historyMu.Lock()
+					err := os.WriteFile(path+".inventory.json", stored, 0o600)
+					historyMu.Unlock()
+					if err != nil {
+						return 99
+					}
+				}
+				if command[4] != "observe" && command[4] != "observe-applied" {
 					historyMu.Lock()
 					defer historyMu.Unlock()
 					line, _ := json.Marshal(map[string]any{"inventory": command[4], "stdinSHA256": fmt.Sprintf("%x", sha256.Sum256(actual.Stdin)), "exit": 0})

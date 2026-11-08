@@ -335,13 +335,19 @@ def guest(mode, selected, user, agents, origin, *bindings):
 def observe(selected, user, agents):
     actual, desired, origin = route(selected)
     native = json.loads(guest('observe', selected, user, agents, origin))
+    diagnostics = native.pop('diagnostics', [])
     current = actual == desired and native['state'] in ('current', 'absent') and (not selected or native['state'] == 'current')
     sources = {name: hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ('owner.sh', 'runtime.sh', 'dashboard.py')}
     wanted = digest({'source': sources, 'route': desired, 'runtime': native['desired'], 'origin': origin if selected else ''})
     state = 'current' if current else 'stale'
     if current and not selected and native['state'] == 'absent':
         return {'state': 'absent', 'actual': '', 'desired': ''}, native, actual, desired, origin
-    return {'state': state, 'actual': wanted if current else digest({'route': actual, 'runtime': native}), 'desired': wanted}, native, actual, desired, origin
+    observation = {'state': state, 'actual': wanted if current else digest({'route': actual, 'runtime': native}), 'desired': wanted}
+    if state == 'stale' and os.environ.get('SUBYARD_PROFILE_DIAGNOSTICS') == '1':
+        if actual != desired:
+            diagnostics.append({'parameter': 'openlit.route', 'installed': 'changed', 'desired': 'current'})
+        observation['diagnostics'] = diagnostics or [{'parameter': 'openlit.runtime', 'installed': 'unknown', 'desired': 'ready'}]
+    return observation, native, actual, desired, origin
 
 
 def publish(actual, desired):

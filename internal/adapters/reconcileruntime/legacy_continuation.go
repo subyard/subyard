@@ -68,6 +68,7 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 
 	instance := state.Instance
 	var identityDifferences, identityFields []string
+	var identityParameters []domain.MigrationParameter
 	for _, field := range []struct{ name, observed, required string }{
 		{"project", instance.Project, runtime.Yard.IncusProject},
 		{"instance", instance.Name, runtime.Yard.YardInstanceName},
@@ -80,6 +81,8 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 		if field.observed != field.required {
 			identityFields = append(identityFields, field.name)
 			identityDifferences = append(identityDifferences, field.name+": observed="+legacyIdentityValue(field.observed)+", required="+legacyIdentityValue(field.required))
+			parameter := domain.MigrationParameter{Name: field.name, Installed: domain.MigrationDiagnosticValue(field.observed), Desired: domain.MigrationDiagnosticValue(field.required)}
+			identityParameters = append(identityParameters, parameter)
 		}
 	}
 	if instance.Config["volatile.uuid"] == "" {
@@ -95,7 +98,7 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 		identityDifferences = append(identityDifferences, "user.subyard.desired_power: observed="+legacyIdentityValue(power)+", required running or stopped")
 	}
 	if len(identityDifferences) != 0 {
-		refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, config.OwnerMetadataError("", "legacy continuation native identity", "requires a complete matching managed native identity and UUID", strings.Join(identityDifferences, "; "), nil), "legacy continuation requires a complete matching managed native identity and UUID", identityFields...))
+		refusals = append(refusals, domain.WithMigrationParameters(domain.MigrationStateRefusal(runtime.Yard.YardName, config.OwnerMetadataError("", "legacy continuation native identity", "requires a complete matching managed native identity and UUID", strings.Join(identityDifferences, "; "), nil), "legacy continuation requires a complete matching managed native identity and UUID", identityFields...), identityParameters...))
 	}
 
 	// Policy findings about a different instance or kind would be meaningless.
@@ -246,10 +249,10 @@ func (runtime Runtime) LegacyContinuationSecurityBinding(state ports.ReconcileSt
 // data. The host access boundary, resource receipts and consistency check also apply.
 func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.ReconcileState, adopt bool) error {
 	instance := state.Instance
-	if !adopt && (runtime.Yard.YardKind != domain.YardContainer || runtime.environmentValue("NESTED_E2E_VMS") == "1" || runtime.environmentValue("ALLOWS_HOST_ACCESS") == "false") {
-		return runtime.adoptionRefusal("legacy continuation supports only the canonical non-nested container policy")
-	}
 	var refusals []error
+	if !adopt && (runtime.Yard.YardKind != domain.YardContainer || runtime.environmentValue("NESTED_E2E_VMS") == "1" || runtime.environmentValue("ALLOWS_HOST_ACCESS") == "false") {
+		refusals = append(refusals, runtime.adoptionRefusal("legacy continuation supports only the canonical non-nested container policy"))
+	}
 	extras, extrasErr := runtime.extrasContext()
 	refusals = append(refusals, extrasErr)
 	extraConfig := map[string]string{}
@@ -257,10 +260,17 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	if adopt {
 		if extrasErr == nil {
 			extraConfig = extrasCapabilityConfiguration(extras)
+			var parameters []domain.MigrationParameter
 			for key, value := range extraConfig {
-				if instance.Config[key] != value || instance.LocalConfig[key] != value {
-					refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("legacy continuation native capability assessment: profile capability configuration %q is not converged", key), "legacy continuation native capability configuration is not converged"))
+				for _, observed := range []struct{ name, value string }{{key, instance.Config[key]}, {key + ".local", instance.LocalConfig[key]}} {
+					if observed.value != value {
+						parameter := domain.MigrationParameter{Name: observed.name, Installed: domain.MigrationDiagnosticValue(observed.value), Desired: domain.MigrationDiagnosticValue(value)}
+						parameters = append(parameters, parameter)
+					}
 				}
+			}
+			if len(parameters) != 0 {
+				refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal("legacy continuation native capability configuration is not converged"), parameters...))
 			}
 		}
 		refusals = append(refusals, runtime.adoptionKindPolicy(state, extraConfig))
@@ -274,16 +284,28 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	if !adopt && extrasErr == nil {
 		refusals = append(refusals, testvmsruntime.HostMemoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, hostMemory))
 	}
+	var limitParameters []domain.MigrationParameter
 	for key, setting := range map[string]string{"limits.cpu": "LIMITS_CPU", "limits.memory": "LIMITS_MEMORY"} {
 		if want := runtime.environmentValue(setting); want != "" && instance.Config[key] != want {
-			refusals = append(refusals, runtime.adoptionRefusal("legacy continuation requires already-converged configured instance limits"))
+			parameter := domain.MigrationParameter{Name: setting, Installed: domain.MigrationDiagnosticValue(instance.Config[key]), Desired: domain.MigrationDiagnosticValue(want)}
+			limitParameters = append(limitParameters, parameter)
 		}
+	}
+	if len(limitParameters) != 0 {
+		refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal("legacy continuation requires already-converged configured instance limits"), limitParameters...))
 	}
 	if shift := runtime.environmentDefault("SHIFT_MODE", "shift"); shift != "shift" && shift != "acl" {
 		refusals = append(refusals, runtime.adoptionRefusal("legacy continuation requires a supported host mount policy"))
 	}
 	if !maps.Equal(instance.Config, instance.LocalConfig) {
-		refusals = append(refusals, runtime.adoptionRefusal("legacy continuation refuses inconsistent local and expanded instance configuration"))
+		failure := runtime.adoptionRefusal("legacy continuation refuses inconsistent local and expanded instance configuration")
+		for _, key := range []string{"security.nesting", "security.privileged", "limits.cpu", "limits.memory", "user.subyard.managed", "user.subyard.name", "user.subyard.bridge", "user.subyard.desired_power", "user.subyard.disk_tmp"} {
+			if instance.LocalConfig[key] != instance.Config[key] {
+				parameter := domain.MigrationParameter{Name: fmt.Sprintf("%s.local", key), Installed: domain.MigrationDiagnosticValue(instance.LocalConfig[key]), Desired: domain.MigrationDiagnosticValue(instance.Config[key])}
+				failure = domain.WithMigrationParameters(failure, parameter)
+			}
+		}
+		refusals = append(refusals, failure)
 	}
 	publication, publicationErr := runtime.legacyPublicationPolicy(instance)
 	refusals = append(refusals, publicationErr)
@@ -377,11 +399,15 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		}
 	}
 	if runtime.Yard.YardKind == domain.YardContainer && instance.Config["security.nesting"] != "true" {
-		refusals = append(refusals, runtime.adoptionRefusal("legacy continuation requires canonical local container configuration without inherited overrides"))
+		reason := "legacy continuation requires canonical local container configuration without inherited overrides"
+		parameter := domain.MigrationParameter{Name: "security.nesting", Installed: domain.MigrationDiagnosticValue(instance.Config["security.nesting"]), Desired: "true"}
+		refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal(reason), parameter))
 	}
 	if runtime.Yard.YardKind == domain.YardContainer {
 		if instance.Config["volatile.idmap.base"] != "0" {
-			refusals = append(refusals, runtime.adoptionRefusal("legacy continuation requires the unprivileged default ID-map base"))
+			reason := "legacy continuation requires the unprivileged default ID-map base"
+			parameter := domain.MigrationParameter{Name: "volatile.idmap.base", Installed: domain.MigrationDiagnosticValue(instance.Config["volatile.idmap.base"]), Desired: "0"}
+			refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal(reason), parameter))
 		}
 		current, err := legacyIDMap(instance.Config["volatile.idmap.current"])
 		refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, err, "legacy continuation requires canonical unprivileged UID/GID maps"))
@@ -411,7 +437,18 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 			desired["srv"]["io.bus"] = "virtio-scsi"
 		}
 		if !maps.Equal(instance.LocalDevices["srv"], desired["srv"]) {
-			refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("yard adoption refuses srv device that is missing or differs from persistent volume %s/%s: reattaching it would change the data mounted in the yard", pool, volume), "yard adoption refuses a missing or different srv device: reattaching it would change persistent data"))
+			failure := domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("yard adoption refuses srv device that is missing or differs from persistent volume %s/%s: reattaching it would change the data mounted in the yard", pool, volume), "yard adoption refuses a missing or different srv device: reattaching it would change persistent data")
+			for _, key := range []string{"type", "pool", "source", "path", "io.bus"} {
+				if instance.LocalDevices["srv"][key] != desired["srv"][key] {
+					installed := domain.MigrationDiagnosticValue(instance.LocalDevices["srv"][key])
+					if (key == "pool" || key == "source") && instance.LocalDevices["srv"][key] != "" {
+						installed = "differs"
+					}
+					parameter := domain.MigrationParameter{Name: fmt.Sprintf("srv.%s", key), Installed: installed, Desired: domain.MigrationDiagnosticValue(desired["srv"][key])}
+					failure = domain.WithMigrationParameters(failure, parameter)
+				}
+			}
+			refusals = append(refusals, failure)
 		}
 		_, err := runtime.YardAdoptionProjects(ctx, instance)
 		refusals = append(refusals, err)
@@ -496,7 +533,25 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		}
 		for name, device := range desired {
 			if !maps.Equal(instance.LocalDevices[name], device) {
-				refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("legacy continuation requires already-converged managed device %q", name), "legacy continuation requires already-converged managed device", name))
+				failure := domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("legacy continuation requires already-converged managed device %q", name), "legacy continuation requires already-converged managed device", name)
+				if domain.SafeName(name) {
+					for _, key := range []string{"type", "pool", "source", "path", "bind", "listen", "connect", "readonly", "shift", "io.bus"} {
+						want, declared := device[key]
+						if !declared {
+							continue
+						}
+						actual := instance.LocalDevices[name][key]
+						if actual != want {
+							installed := domain.MigrationDiagnosticValue(actual)
+							if (key == "pool" || key == "source") && actual != "" {
+								installed = "differs"
+							}
+							parameter := domain.MigrationParameter{Name: fmt.Sprintf("%s.%s", name, key), Installed: installed, Desired: domain.MigrationDiagnosticValue(want)}
+							failure = domain.WithMigrationParameters(failure, parameter)
+						}
+					}
+				}
+				refusals = append(refusals, failure)
 			}
 		}
 	}
@@ -511,7 +566,27 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		effective[name] = device
 	}
 	if !reflect.DeepEqual(effective, instance.Devices) {
-		refusals = append(refusals, runtime.adoptionRefusal("legacy continuation refuses inconsistent expanded native devices"))
+		failure := runtime.adoptionRefusal("legacy continuation refuses inconsistent expanded native devices")
+		for _, name := range []string{"root", "eth0", "srv", "ssh", "subyard-e2e-routes"} {
+			for _, key := range []string{"type", "pool", "source", "path", "bind", "listen", "connect", "readonly", "shift", "io.bus"} {
+				observed, expected := instance.Devices[name][key], effective[name][key]
+				if observed == expected {
+					continue
+				}
+				installed, desired := domain.MigrationDiagnosticValue(observed), domain.MigrationDiagnosticValue(expected)
+				if key == "source" || key == "pool" {
+					if observed != "" {
+						installed = "differs"
+					}
+					if expected != "" {
+						desired = "differs"
+					}
+				}
+				parameter := domain.MigrationParameter{Name: fmt.Sprintf("%s.%s", name, key), Installed: installed, Desired: desired}
+				failure = domain.WithMigrationParameters(failure, parameter)
+			}
+		}
+		refusals = append(refusals, failure)
 	}
 	return domain.CollectRefusals(refusals...)
 }

@@ -174,8 +174,23 @@ def observe():
                 facts['loaded'] = {key: identity[key] for key in ('protocol', 'broker_sha256', 'client_sha256')}
         except (ValueError, TypeError, AttributeError):
             pass
-    return {'state': 'current' if ready else 'stale',
-            'actual': desired if ready else digest(facts), 'desired': desired}, environment
+    observation = {'state': 'current' if ready else 'stale',
+                   'actual': desired if ready else digest(facts), 'desired': desired}
+    if not ready and os.environ.get('SUBYARD_PROFILE_DIAGNOSTICS') == '1':
+        reason = facts.get('check_reason')
+        diagnostics = [{'parameter': 'github.' + (reason if reason in CHECK_REASONS else 'readiness'),
+                        'installed': 'not-ready' if reason in CHECK_REASONS else 'unknown', 'desired': 'ready'}]
+        if not facts.get('guest_available', False):
+            diagnostics.append({'parameter': 'github.guest', 'installed': 'unknown', 'desired': 'ready'})
+        if selected:
+            for field, expected in (('ActiveState', 'active'), ('UnitFileState', 'enabled')):
+                value = manager_fields.get(field)
+                if value != expected:
+                    diagnostics.append({'parameter': 'github.service.' + field,
+                                        'installed': value if value in ('active', 'inactive', 'enabled', 'disabled', 'failed', 'not-found') else 'unknown',
+                                        'desired': expected})
+        observation['diagnostics'] = diagnostics
+    return observation, environment
 
 
 def main():

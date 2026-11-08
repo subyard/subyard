@@ -70,11 +70,12 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 		value := contract.OwnershipValue(device)
 		// An interrupted bring-up holds the pending form until its owner finishes it.
 		pending := contract.IsOwnerIPv4Ingress() && marker == strings.Replace(value, "v1:", "v1:pending:", 1)
-		if contract.IsOwnerIPv4Ingress() {
-			if device["type"] != "proxy" {
-				findings = append(findings, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("does not match its declared native proxy recipe"), "registered resource "+contract.Device+": does not match its declared native proxy recipe"))
-			}
-		} else {
+		if device["type"] != "proxy" {
+			reason := "does not match its declared native proxy recipe"
+			parameter := domain.MigrationParameter{Name: fmt.Sprintf("%s.type", contract.Device), Installed: domain.MigrationDiagnosticValue(device["type"]), Desired: "proxy"}
+			findings = append(findings, domain.WithMigrationParameters(domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New(reason), reason), parameter))
+		}
+		if !contract.IsOwnerIPv4Ingress() {
 			listen, ok := strings.CutPrefix(device["listen"], "tcp:")
 			host, port, splitErr := net.SplitHostPort(listen)
 			if !ok || splitErr != nil || !(ownerroute.TailscaleAddress(host) || host == "127.0.0.1" && contract.AddressPolicy == resource.ProxyAddressLoopbackOrTailscale) {
@@ -108,8 +109,33 @@ func inspectRegisteredYardMigration(ctx context.Context, runtime reconcileruntim
 		}
 	}
 	if state.ProjectConfig["user.subyard.installation"] == "1" {
-		if state.ProjectConfig["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) || state.ProjectConfig["user.subyard.config_home"] != runtime.Yard.Paths.ConfigHome || state.ProjectConfig["user.subyard.data_home"] != runtime.Yard.Paths.DataHome || state.ProjectConfig["user.subyard.adopted_uuid"] != "" {
-			refusals = append(refusals, domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("registered project owner differs from protected operator identity"), "registered project owner differs from protected operator identity"))
+		var parameters []domain.MigrationParameter
+		for _, field := range []struct{ name, installed, desired string }{
+			{"user.subyard.operator_uid", state.ProjectConfig["user.subyard.operator_uid"], strconv.Itoa(os.Getuid())},
+			{"user.subyard.config_home", state.ProjectConfig["user.subyard.config_home"], runtime.Yard.Paths.ConfigHome},
+			{"user.subyard.data_home", state.ProjectConfig["user.subyard.data_home"], runtime.Yard.Paths.DataHome},
+			{"user.subyard.adopted_uuid", state.ProjectConfig["user.subyard.adopted_uuid"], ""},
+		} {
+			if field.installed != field.desired {
+				installed, desired := "differs", "differs"
+				if field.installed == "" {
+					installed = "(unset)"
+				}
+				if field.desired == "" {
+					desired = "(unset)"
+				}
+				if field.name == "user.subyard.operator_uid" {
+					if value, err := strconv.ParseUint(field.installed, 10, 32); err == nil && strconv.FormatUint(value, 10) == field.installed {
+						installed = field.installed
+					}
+					desired = field.desired
+				}
+				parameter := domain.MigrationParameter{Name: field.name, Installed: installed, Desired: desired}
+				parameters = append(parameters, parameter)
+			}
+		}
+		if len(parameters) != 0 {
+			refusals = append(refusals, domain.WithMigrationParameters(domain.MigrationStateRefusal(runtime.Yard.YardName, errors.New("registered project owner differs from protected operator identity"), "registered project owner differs from protected operator identity"), parameters...))
 		}
 		state.Instance = original
 		return state, nil, nil, state.ProjectConfig, receipts, domain.CollectRefusals(refusals...)

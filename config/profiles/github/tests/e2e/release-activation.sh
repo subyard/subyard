@@ -2,14 +2,19 @@
 # One standard disposable owner VM; the guest owns bounded native cleanup.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
-usage() { printf 'Usage: release-activation.sh --slot N [--baseline 0.19.0|0.20.0] [--preflight]\n'; }
+usage() { printf 'Usage: release-activation.sh --slot N [--wait DURATION] [--baseline 0.19.0|0.20.0] [--preflight]\n'; }
 slot=''
+allocation_wait=()
 baseline=0.19.0
 preflight=0
 STARTED="$(date +%s)"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot) [ "$#" -ge 2 ] && [ -z "$slot" ] || { usage >&2; exit 2; }; slot="$2"; shift 2 ;;
+    --wait)
+      [ "$#" -ge 2 ] && [ "${#allocation_wait[@]}" = 0 ] && [[ "$2" =~ ^[0-9]{1,6}[sm]$ ]] \
+        || { usage >&2; exit 2; }
+      allocation_wait=(--wait "$2"); shift 2 ;;
     --baseline) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; baseline="$2"; shift 2 ;;
     --preflight) preflight=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -99,6 +104,6 @@ if [ -n "${SUBYARD_E2E_ROLLOUT_YARD:-}" ]; then
     || { printf 'release-activation: invalid rollout yard\n' >&2; exit 2; }
   allocation_route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
 fi
-bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$slot" --vm-count 1 --vm 1 \
+bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" "${allocation_wait[@]}" --slot "$slot" --vm-count 1 --vm 1 \
   --purpose github-release-activation -- timeout --signal=TERM --kill-after=360 "$remaining" \
   bash config/profiles/github/tests/e2e/release-activation-guest.sh --baseline "$baseline"

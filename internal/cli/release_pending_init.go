@@ -20,21 +20,17 @@ import (
 // An in-place repair retains installed configuration until it is ready. The
 // same confirmation then covers ordinary init for the disclosed pending yards.
 
-type pendingInitSetting struct {
-	Name      string
-	Installed string
-	Desired   string
-	Sensitive bool
-}
+type pendingInitSetting = domain.ConfigurationDifference
 
 type pendingInitYard struct {
 	Name string
 	// State describes why a yard was not inspected; empty for a running yard.
-	State    string
-	Reason   string
-	Baseline bool
-	Pending  bool
-	Settings []pendingInitSetting
+	State       string
+	Reason      string
+	Unavailable string
+	Baseline    bool
+	Pending     bool
+	Settings    []pendingInitSetting
 }
 
 type pendingInitPlan struct {
@@ -174,7 +170,7 @@ func (operation *CLI) inspectPendingInitTarget(ctx context.Context, target confi
 			return yard, err
 		}
 		yard.Baseline = baseline
-		settings, err := operation.pendingEffectiveSettings(target.Loaded, applied.Loaded, pendingInitSettings(target.Loaded, applied.Loaded))
+		diagnostic, err := operation.compareInstalledConfiguration(target, applied, baseline)
 		if err != nil {
 			var unavailable pendingInitUnavailableError
 			if errors.As(err, &unavailable) {
@@ -183,8 +179,14 @@ func (operation *CLI) inspectPendingInitTarget(ctx context.Context, target confi
 			}
 			return yard, fmt.Errorf("yard %s: inspect init integration settings: %w", target.Name, err)
 		}
-		yard.Settings = settings
-		yard.Pending = len(yard.Settings) != 0
+		yard.Settings = slices.DeleteFunc(diagnostic.Differences, func(row pendingInitSetting) bool {
+			definition, _ := target.Loaded.Catalog.LookupSetting(row.Name)
+			return definition.Application == config.SettingConfigApply
+		})
+		yard.Unavailable = diagnostic.Unavailable
+		yard.Pending = slices.ContainsFunc(yard.Settings, func(row pendingInitSetting) bool {
+			return row.Kind != domain.ConfigurationContentUnknown && row.Kind != domain.ConfigurationStateUnknown
+		})
 	}
 	return yard, nil
 }
@@ -214,11 +216,11 @@ func (cli *CLI) pendingEffectiveSettings(desired, installed config.Loaded, setti
 	}
 	desiredScope, _, err := cli.materializedIntegrationScope(desired, nil)
 	if err != nil {
-		return nil, pendingInitUnavailableError{}
+		return settings, pendingInitUnavailableError{}
 	}
 	installedScope, _, err := cli.materializedIntegrationScope(installed, nil)
 	if err != nil {
-		return nil, err
+		return settings, err
 	}
 	if desiredScope == installedScope {
 		settings = slices.DeleteFunc(settings, func(setting pendingInitSetting) bool { return integrationOnly(setting.Name) })
@@ -272,31 +274,25 @@ func pendingInitSettings(desired, installed config.Loaded) []pendingInitSetting 
 			continue
 		}
 		definition, _ := catalog.LookupSetting(name)
-		result = append(result, pendingInitSetting{Name: name, Installed: settingDisplay(installedValue, installedSet),
-			Desired: settingDisplay(desiredValue, desiredSet), Sensitive: definition.Sensitive})
+		kind := domain.ConfigurationValues
+		if definition.Sensitive {
+			kind = domain.ConfigurationSensitive
+		}
+		result = append(result, pendingInitSetting{Name: name, Installed: installedValue, InstalledSet: installedSet,
+			Desired: desiredValue, DesiredSet: desiredSet, Kind: kind})
 	}
 	if !slices.Equal(installed.Integrations.Effective, desired.Integrations.Effective) {
 		result = append(result, pendingInitSetting{Name: "CODING_TOOL_INTEGRATIONS",
-			Installed: settingDisplay(strings.Join(installed.Integrations.Effective, " "), len(installed.Integrations.Effective) != 0),
-			Desired:   settingDisplay(strings.Join(desired.Integrations.Effective, " "), len(desired.Integrations.Effective) != 0)})
+			Installed: strings.Join(installed.Integrations.Effective, " "), InstalledSet: true,
+			Desired: strings.Join(desired.Integrations.Effective, " "), DesiredSet: true})
 	}
 	listed := slices.ContainsFunc(result, func(setting pendingInitSetting) bool { return setting.Name == "ALLOWS_CODING_TOOLS" })
 	if installed.Integrations.AllowsCodingTools != desired.Integrations.AllowsCodingTools && !listed {
 		result = append(result, pendingInitSetting{Name: "ALLOWS_CODING_TOOLS",
-			Installed: strconv.FormatBool(installed.Integrations.AllowsCodingTools), Desired: strconv.FormatBool(desired.Integrations.AllowsCodingTools)})
+			Installed: strconv.FormatBool(installed.Integrations.AllowsCodingTools), Desired: strconv.FormatBool(desired.Integrations.AllowsCodingTools), InstalledSet: true, DesiredSet: true})
 	}
 	slices.SortStableFunc(result, func(left, right pendingInitSetting) int { return strings.Compare(left.Name, right.Name) })
 	return result
-}
-
-func settingDisplay(value string, set bool) string {
-	switch {
-	case !set:
-		return "(unset)"
-	case value == "":
-		return `""`
-	}
-	return value
 }
 
 const pendingInitHeading = "Init-owned integration settings awaiting yard init (installed -> desired); yard init runs after the release repair is ready:"
@@ -320,6 +316,8 @@ func (plan pendingInitPlan) listing(heading string) []string {
 			continue
 		case !yard.Baseline:
 			lines = append(lines, "  yard "+yard.Name+": installed integration settings unknown (no applied baseline)")
+		case yard.Unavailable != "":
+			lines = append(lines, "  yard "+yard.Name+": "+yard.Unavailable)
 		case !yard.Pending:
 			lines = append(lines, "  yard "+yard.Name+": integration settings current")
 			continue
@@ -327,11 +325,7 @@ func (plan pendingInitPlan) listing(heading string) []string {
 			lines = append(lines, "  yard "+yard.Name+":")
 		}
 		for _, setting := range yard.Settings {
-			if setting.Sensitive {
-				lines = append(lines, "    "+setting.Name+"  changed")
-				continue
-			}
-			lines = append(lines, "    "+setting.Name+"  "+setting.Installed+" -> "+setting.Desired)
+			lines = append(lines, "    "+setting.Name+"  "+setting.Value())
 		}
 	}
 	return lines

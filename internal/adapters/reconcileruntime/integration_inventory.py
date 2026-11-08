@@ -132,6 +132,26 @@ def adoptable_selected(entry, current, home, uid):
 def clean(entry):
     return {k: v for k, v in entry.items() if k not in ('content', 'source_digest')}
 
+def diagnostic_binding(settings, entries):
+    # Bind optional evidence to committed state. Older writers may preserve
+    # unknown fields while replacing settings/entries; those bytes are stale.
+    committed = [{k: v for k, v in entry.items()
+                  if k not in ('pending_digest', 'config_pending_digest')}
+                 for entry in entries]
+    return digest(encode([settings, committed]))
+
+def valid_diagnostics(value):
+    if not isinstance(value, dict) or not {'key', 'digests'} <= set(value) or set(value) - {'key', 'digests', 'files'}:
+        return False
+    key, digests, files = value['key'], value['digests'], value.get('files', {})
+    if not isinstance(key, str) or len(key) != 64 or any(c not in '0123456789abcdef' for c in key):
+        return False
+    if not isinstance(digests, dict) or len(digests) > 4096 or any(not isinstance(k, str) or len(k) > 256 or not isinstance(v, str) or len(v) != 64 or any(c not in '0123456789abcdef' for c in v) for k, v in digests.items()):
+        return False
+    if not isinstance(files, dict) or len(files) > 4096:
+        return False
+    return all(isinstance(k, str) and len(k) <= 256 and isinstance(v, dict) and set(v) == {'path', 'digest'} and isinstance(v['path'], str) and len(v['path']) <= 16384 and isinstance(v['digest'], str) and len(v['digest']) == 64 and all(c in '0123456789abcdef' for c in v['digest']) for k, v in files.items())
+
 def core_adoption_problem(entry, current):
     # These shared core files predate the integration inventory. Recognize only
     # their exact desired bytes and protected system metadata, never agent files.
@@ -237,6 +257,7 @@ def main():
     records = []
     released = []
     applied_settings = None
+    diagnostics = None
     established = False
     if os.path.lexists(ROOT):
         ancestors(ROOT)
@@ -249,17 +270,24 @@ def main():
             raise ValueError('unsupported inventory')
         records = inventory['entries']
         applied_settings = inventory.get('applied_settings')
+        diagnostics = inventory.get('diagnostics')
         if applied_settings is not None and (stat.S_IMODE(os.lstat(path).st_mode) != 0o600 or os.lstat(path).st_nlink != 1):
             raise ValueError('unsafe applied integration settings inventory')
         if applied_settings is not None and (not isinstance(applied_settings, dict) or len(applied_settings) > 4096 or any(not isinstance(k, str) or not isinstance(v, str) or len(k) > 256 or len(v) > 16384 for k, v in applied_settings.items())):
             raise ValueError('invalid applied integration settings')
+        if diagnostics is not None:
+            if stat.S_IMODE(os.lstat(path).st_mode) != 0o600 or os.lstat(path).st_nlink != 1:
+                raise ValueError('unsafe applied diagnostics inventory')
+            if (not valid_diagnostics(diagnostics)
+                    or inventory.get('diagnostic_binding') != diagnostic_binding(applied_settings, records)):
+                diagnostics = None
         released = inventory.get('released', [])
         established = True
     if mode == 'settings':
         # Read only protected baseline metadata first. The caller validates its
         # developer identity before a second selection read validates every
         # installed/released destination against that applied owner's home.
-        print(json.dumps({'installed': established, 'applied_settings': applied_settings}))
+        print(json.dumps({'installed': established, 'applied_settings': applied_settings, 'diagnostics': diagnostics}))
         return
     if not isinstance(released, list) or any(not isinstance(p, str) or not p.startswith(home + '/') or os.path.normpath(p) != p for p in released):
         raise ValueError('invalid released artifact evidence')
@@ -283,7 +311,7 @@ def main():
         # Only committed package entries prove successful selection. Apply keeps
         # new package intent out of this inventory until all hooks succeed.
         selected = [e['id'] for e in records if e['kind'] == 'package']
-        print(json.dumps({'installed': established, 'selected': selected, 'applied_settings': applied_settings}))
+        print(json.dumps({'installed': established, 'selected': selected, 'applied_settings': applied_settings, 'diagnostics': diagnostics}))
         return
     cutover = request.get('preview_skill_cutover') is True
     migrations = preview_migration_plan(records, home, uid) if cutover else []
@@ -306,6 +334,7 @@ def main():
         elif migrations:
             raise ValueError('preview migration requires prepared apply')
 
+        committed_paths = set()
         for entry in desired:
             if entry['kind'] not in ('file', 'structured') or not entry['path'].startswith(home + '/'):
                 raise ValueError('invalid config inventory entry')
@@ -334,8 +363,24 @@ def main():
                     raise OwnershipConflict('owned artifact drift', entry['path'])
                 record['digest'] = entry['digest']
                 record.pop('config_pending_digest', None)
+                committed_paths.add(entry['path'])
         if not established:
             return
+        capture = request.get('config_diagnostics')
+        if mode == 'configs-commit' and capture is not None:
+            if not isinstance(capture, dict) or set(capture) != {'key', 'files'} or not isinstance(capture['key'], str) or len(capture['key']) != 64 or any(c not in '0123456789abcdef' for c in capture['key']) or (diagnostics is not None and capture['key'] != diagnostics['key']) or not isinstance(capture['files'], dict) or len(capture['files']) > 4096:
+                raise ValueError('config diagnostic baseline changed')
+            if diagnostics is None:
+                diagnostics = {'key': capture['key'], 'digests': {}}
+            files = dict(diagnostics.get('files', {}))
+            for name, item in capture['files'].items():
+                if not isinstance(name, str) or len(name) > 256 or not isinstance(item, dict) or set(item) != {'path', 'digest', 'destination'} or not isinstance(item['path'], str) or len(item['path']) > 16384 or not isinstance(item['digest'], str) or len(item['digest']) != 64 or any(c not in '0123456789abcdef' for c in item['digest']) or not isinstance(item['destination'], str):
+                    raise ValueError('invalid config diagnostics')
+                if item['destination'] in committed_paths:
+                    files[name] = {'path': item['path'], 'digest': item['digest']}
+            diagnostics = dict(diagnostics, files=files)
+            inventory['diagnostics'] = diagnostics
+            inventory['diagnostic_binding'] = diagnostic_binding(applied_settings, records)
         updated = encode(dict(inventory, entries=records))
         with open(path, 'rb') as stream:
             unchanged = stream.read() == updated
@@ -403,6 +448,8 @@ def main():
                 [e.get('source_digest') for e in desired]]
     if applied_settings is not None:
         identity.append(applied_settings)
+    if diagnostics is not None:
+        identity.append(diagnostics)
     if cutover:
         identity.append('preview-skill-cutover-v1')
     fingerprint = digest(encode(identity))
@@ -420,17 +467,23 @@ def main():
                               comparable_entry(previous.get(name) or {}) == clean(entry) and (
                                   entry['kind'] in ('structured', 'package') or
                                   value == entry['digest'] and metadata.get(name) == expected_metadata(entry, home, uid)))})
-        print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'retired': retired,
+        print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'retired': retired, 'diagnostics': diagnostics,
                           'adopted': [clean(e) for e in adopted], 'initial': not established,
                           'facts': facts}))
         return
     if mode == 'capture-settings':
         settings = request.get('applied_settings')
+        new_diagnostics = request.get('diagnostics')
+        if new_diagnostics is None and settings == applied_settings:
+            new_diagnostics = diagnostics
         if not expected or not established or changed or not isinstance(settings, dict) or len(settings) > 4096 or any(not isinstance(k, str) or not isinstance(v, str) or len(k) > 256 or len(v) > 16384 for k,v in settings.items()):
             raise ValueError('applied settings require a converged installed inventory')
-        if applied_settings == settings:
+        if new_diagnostics is not None and not valid_diagnostics(new_diagnostics):
+            raise ValueError('invalid applied diagnostics')
+        if applied_settings == settings and diagnostics == new_diagnostics:
             return
-        atomic(path, encode(dict(inventory, applied_settings=settings)))
+        atomic(path, encode(dict(inventory, applied_settings=settings, diagnostics=new_diagnostics,
+                                 diagnostic_binding=diagnostic_binding(settings, records))))
         return
     if mode not in ('apply', 'commit'):
         raise ValueError('invalid inventory operation')
@@ -451,6 +504,9 @@ def main():
         value = {'schema': 1, 'entries': entries, 'released': sorted(set(released))}
         if applied_settings is not None:
             value['applied_settings'] = applied_settings
+        if diagnostics is not None:
+            value['diagnostics'] = diagnostics
+            value['diagnostic_binding'] = inventory.get('diagnostic_binding')
         atomic(path, encode(value))
     if mode == 'commit':
         # Structured retirement releases fields, preserving the user's document.

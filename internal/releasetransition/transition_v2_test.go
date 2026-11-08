@@ -3221,6 +3221,17 @@ func (err v2PublicActivationError) ActivationDiagnostic() (string, string) {
 	return err.message, err.retry
 }
 
+func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
+	cause := domain.CollectRefusals(
+		fmt.Errorf("first: %w", v2PublicActivationError{"yard work: profile unavailable", "run yard -Y work config status"}),
+		fmt.Errorf("second: %w", v2PublicActivationError{"yard default: profile unavailable", "run yard -Y default config status"}),
+	)
+	message, retry := publicActivationDiagnostic(cause, "fallback", "run yard update --check")
+	if message != "yard default: profile unavailable; yard work: profile unavailable" || retry != "run yard -Y default config status, then run yard -Y work config status" || strings.Contains(message, "private observation") {
+		t.Fatalf("diagnostic %q / %q", message, retry)
+	}
+}
+
 func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
 	for _, test := range []struct {
 		name           string
@@ -4493,4 +4504,16 @@ func TestV2FreshOwnerWarningPreservesAssessmentWithoutWriting(t *testing.T) {
 		t.Fatalf("fresh check lost ready warning: %+v %v", inspected, err)
 	}
 
+}
+
+func TestPublicActivationDiagnosticPreservesWrappedFallbackAndSafeActions(t *testing.T) {
+	cause := fmt.Errorf("private wrapper: %w", domain.CollectRefusals(errors.New("private transport"), v2PublicActivationError{"route unavailable", "run yard update --check"}))
+	message, retry := publicActivationDiagnostic(cause, "installation cannot be inspected", "inspect installation ownership")
+	if message != "installation cannot be inspected; route unavailable" || retry != "inspect installation ownership, then run yard update --check" || validateSafeAction(retry) != nil {
+		t.Fatalf("%q / %q", message, retry)
+	}
+	message, retry = publicActivationDiagnostic(domain.CollectRefusals(errors.New("private one"), errors.New("private two")), "installation unavailable", "inspect installation ownership")
+	if message != "installation unavailable" || retry != "inspect installation ownership" {
+		t.Fatalf("%q / %q", message, retry)
+	}
 }

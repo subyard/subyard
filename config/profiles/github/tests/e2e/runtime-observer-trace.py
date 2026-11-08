@@ -93,10 +93,14 @@ def main():
         print('release_activation_observation_capture observations='+str(len(groups))+' named='+str(named))
         return
     source = Path(os.environ['SUBYARD_TRACE_GITHUB_SOURCE']).resolve()
-    args = sys.argv[1:]
+    original_args = sys.argv[1:]
+    no_bytecode = original_args[:1] == ['-B']
+    args = original_args[1:] if no_bytecode else original_args
     if len(args) != 2 or args[1] != 'observe' or Path(args[0]).resolve() != source:
         real = os.environ['SUBYARD_TRACE_REAL_PYTHON']
-        os.execv(real, [real, *args])
+        os.execv(real, [real, *original_args])
+    if no_bytecode:
+        sys.dont_write_bytecode = True
     failed = False
 
     def trace(frame, event, returned):

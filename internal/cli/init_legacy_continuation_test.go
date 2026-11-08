@@ -217,6 +217,26 @@ func TestLegacyContinuationConsentCASAndNarrowAuthority(t *testing.T) {
 	}
 }
 
+func TestLegacyContinuationReportsIndependentRefusalAfterNoncanonicalPolicy(t *testing.T) {
+	runtime, incus := legacyContinuationFixture(t)
+	runtime.Environment = append(runtime.Environment, "NESTED_E2E_VMS=1")
+	incus.Reconcile.Instance.Config["security.nesting"] = "false"
+	incus.Reconcile.Instance.LocalConfig["security.nesting"] = "false"
+	_, err := assessLegacyContinuation(context.Background(), runtime, "host", "/runtime", "sealed", config.PersistentFileSnapshot{})
+	if err == nil {
+		t.Fatal("unsafe continuation admitted")
+	}
+	for _, want := range []string{"canonical non-nested container policy", "security.nesting  false -> true"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("independent refusal %q missing: %v", want, err)
+		}
+	}
+	snapshot, readErr := readLegacyContinuation(runtime.Yard)
+	if readErr != nil || snapshot.Exists || len(incus.ConfigUpdates) != 0 {
+		t.Fatal("refusal wrote state", readErr)
+	}
+}
+
 func TestLegacyContinuationRefusesForeignIncompleteAndExpandedScope(t *testing.T) {
 	for _, test := range []struct {
 		name   string

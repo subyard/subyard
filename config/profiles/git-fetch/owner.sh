@@ -50,4 +50,7 @@ output="$(tar -C "$profile" -cf - guest.py fetch.py subyard-git-fetch.service.in
 if [ "$mode" = check ]; then
   case "$output" in '' ) exit 0 ;; git-fetch-drift) exit 1 ;; *) exit 2 ;; esac
 fi
+if [ "$mode" = observe ] && [ "${SUBYARD_PROFILE_DIAGNOSTICS:-0}" != 1 ] && [ -n "$output" ]; then
+  output="$(jq -c 'del(.diagnostics)' <<<"$output")"
+fi
 [ -z "$output" ] || printf '%s\n' "$output"

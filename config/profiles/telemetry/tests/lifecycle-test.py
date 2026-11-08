@@ -22,6 +22,22 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_runtime_diagnostics_name_changed_asset_without_contents(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            path = Path(name)/'collector.py'
+            path.write_bytes(b'private observed content')
+            runtime = object.__new__(guest.Runtime)
+            runtime.assets = {path: (b'desired content', 0o644)}
+            runtime.selected = True
+            runtime.owned = lambda: True
+            runtime.asset_snapshot = lambda path: path.read_bytes()
+            runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
+            runtime.running_no_new_privs = lambda state: True
+            runtime.desired = lambda: 'a'*64
+            observation = runtime.observe()
+            self.assertIn({'parameter': 'telemetry.asset.collector.py', 'installed': 'changed', 'desired': 'current'}, observation['diagnostics'])
+            self.assertNotIn('private observed content', str(observation))
+
     def test_running_child_no_new_privs_uses_actual_kernel_status_and_uid(self):
         process=subprocess.Popen(['/usr/bin/setpriv','--no-new-privs',sys.executable,'-c',
             "import sys;print('ready',flush=True);sys.stdin.read()"],stdin=subprocess.PIPE,stdout=subprocess.PIPE)

@@ -91,6 +91,8 @@ printf '#!/bin/sh\n[ ! -e /var/lib/subyard-fixture-hook-fail ]\n' > /usr/local/b
 chmod 0755 /usr/local/bin/fixture-hook
 SH
 chmod 0600 "$STATE/provision.sh"
+printf '{"fixture":"before"}\n' > "$STATE/claude.json"
+chmod 0600 "$STATE/claude.json"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
 port=$((35000 + $$ % 10000))
 cat > "$SUBYARD_CONFIG_HOME/yards/$name/config.env" <<EOF
@@ -100,6 +102,7 @@ YARD_IMAGE=images:debian/13/cloud
 YARD_IMAGE_FALLBACK=images:debian/13/cloud
 CODING_TOOL_INTEGRATIONS=
 AGENT_claude_PROVISION=$STATE/provision.sh
+AGENT_claude_CONFIG=$STATE/claude.json
 AGENT_claude_COMMAND=fixture-agent
 AGENT_claude_CHECK=fixture-check
 AGENT_claude_PERSIST=
@@ -138,7 +141,18 @@ printf 'PASS: no coding integrations or applied snapshot retains the verified co
 yard config set CODING_TOOL_INTEGRATIONS claude --scope yard --yes
 yard stop --yes
 yard start --yes
+# Exercise first publication with an established inventory and no diagnostic baseline.
+guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("diagnostics",None); open(p,"w").write(json.dumps(value))'
 yard init --yes
+printf '{"fixture":"after"}\n' > "$STATE/claude.json"
+yard config status > "$STATE/config-drift.log" 2>&1 || true
+if ! grep -F 'AGENT_claude_CONFIG  content changed' "$STATE/config-drift.log" >/dev/null; then
+  printf '{"fixture":"before"}\n' > "$STATE/claude.json"
+  cat "$STATE/config-drift.log" >&2
+  printf 'init-settings: first config publication did not record source content\n' >&2; exit 1
+fi
+printf '{"fixture":"before"}\n' > "$STATE/claude.json"
+printf 'PASS: first config publication records same-path content changes\n'
 # Seed the protected legacy inventory shape, preserving its native ownership.
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("applied_settings",None); open(p,"w").write(json.dumps(value))'
 yard config set AGENT_claude_COMMAND fixture-agent-next --scope yard --yes

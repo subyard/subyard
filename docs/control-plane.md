@@ -666,7 +666,24 @@ Activation observers do not print diagnostics. Return expected drift as
 failures as errors. The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
-Registered-migration summaries drop names before reason classes when the frozen message bound is reached. Full filtered verdict details are available on the stderr of `yard update --check`; `yard status` and resource-shutdown probes discard this diagnostic stream. Mixed dependency failures retain their original stderr detail and yard identity; raw dependency text does not enter the JSON report.
+State-drift refusals identify each affected yard and each independently known
+parameter in stable order. The complete status view renders `yard NAME:` followed
+by `PARAM  installed -> desired` rows. Sensitive values render only `changed`.
+For changed file bytes at the same recorded path, render `content changed`.
+A missing applied baseline is unknown, and a stopped yard is not
+inspected; neither is replaced by desired values. Report independent failures
+together, preserving their classification and a concrete repair route.
+The release protocol retains its bounded single-line diagnostics. A shortened
+summary names the number of omitted yards or findings and points to the owning
+status view for complete detail. Diagnostics evidence must not persist raw
+secrets or file contents, and older records without that evidence remain unknown. Optional evidence binds to committed applied settings and inventory entries;
+changed or unsupported evidence is ignored, while unsafe inventory permissions and ownership still refuse.
+This detects older writers changing those committed records, but cannot prove an unrecorded source-path
+change that produced identical records and bytes, or an older writer changing a sensitive value
+that was never recorded in applied settings or artifact entries. Such activity cannot establish
+reliable source or sensitive-value history without separate writer provenance. Status and pending-init share normalized comparisons,
+consumer selection and guest receipts; unknown evidence alone never schedules an init.
+Registered-migration summaries drop names before reason classes when the frozen message bound is reached. Full filtered verdict details are available on the stderr of `yard update --check --json`; `yard status` and resource-shutdown probes discard this diagnostic stream. Mixed dependency failures retain their original stderr detail and yard identity; raw dependency text does not enter the JSON report.
 Mutation refusals retain the verified inspection’s public decisions and blockers;
 a later readiness observation does not replace the refused resource or reason.
 

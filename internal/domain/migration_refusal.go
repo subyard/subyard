@@ -28,9 +28,16 @@ type migrationStateRefusal struct {
 	yard, reason string
 	cause        error
 	names        []string
+	parameters   []MigrationParameter
 }
 
-func (failure *migrationStateRefusal) Error() string  { return failure.cause.Error() }
+func (failure *migrationStateRefusal) Error() string {
+	rows := []string{failure.cause.Error()}
+	for _, parameter := range failure.parameters {
+		rows = append(rows, parameter.Name+"  "+parameter.Installed+" -> "+parameter.Desired)
+	}
+	return strings.Join(rows, "; ")
+}
 func (failure *migrationStateRefusal) Unwrap() error  { return failure.cause }
 func (*migrationStateRefusal) MigrationRefusal() bool { return true }
 func (failure *migrationStateRefusal) ActivationDiagnostic() (string, string) {
@@ -55,4 +62,39 @@ func (failure *migrationStateRefusal) MigrationRefusalDetails() (string, string,
 		yard = "unrecognized"
 	}
 	return yard, failure.reason, slices.Clone(failure.names)
+}
+
+// MigrationParameter is a safe, independently observed value comparison owned
+// by an existing migration refusal class, never another refusal class.
+type MigrationParameter struct{ Name, Installed, Desired string }
+
+func MigrationDiagnosticValue(value string) string {
+	if value == "" {
+		return "(unset)"
+	}
+	if value == "(unset)" || value == "/" || len(value) <= 63 && SafeName(value) {
+		return value
+	}
+	return "differs"
+}
+
+func WithMigrationParameters(refusal error, parameters ...MigrationParameter) error {
+	failure, ok := refusal.(*migrationStateRefusal)
+	if !ok {
+		return refusal
+	}
+	for _, parameter := range parameters {
+		if len(parameter.Name) > 96 || !SafeID(parameter.Name) {
+			continue
+		}
+		parameter.Installed = MigrationDiagnosticValue(parameter.Installed)
+		parameter.Desired = MigrationDiagnosticValue(parameter.Desired)
+		failure.parameters = append(failure.parameters, parameter)
+	}
+	slices.SortFunc(failure.parameters, func(a, b MigrationParameter) int { return strings.Compare(a.Name, b.Name) })
+	return failure
+}
+
+func (failure *migrationStateRefusal) MigrationParameters() []MigrationParameter {
+	return slices.Clone(failure.parameters)
 }

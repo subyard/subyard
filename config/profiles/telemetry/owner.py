@@ -86,6 +86,10 @@ def main():
         if output:
             raise ValueError('unexpected telemetry check output')
         return 0
+    if output and operation == 'observe' and os.environ.get('SUBYARD_PROFILE_DIAGNOSTICS') != '1':
+        observation = json.loads(output)
+        observation.pop('diagnostics', None)
+        output = json.dumps(observation)
     if output:
         print(output)
     return 0

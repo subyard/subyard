@@ -243,7 +243,8 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "status", "--all-local"},
 		Environment: environment, WorkingDir: root,
-		Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr,
+		InitPlatform: &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture()},
+		Incus:        fake, Executor: fake, Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
 		t.Fatal(err)

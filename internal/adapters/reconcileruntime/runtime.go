@@ -61,6 +61,7 @@ type Runtime struct {
 	// Retained only when restoring frozen materialization recipes.
 	legacyPreviewInstructions    bool
 	appliedIntegrationInspection bool
+	profileDiagnostics           bool
 	ownerInitPlanning            bool
 	ownerSources                 *preparedOwnerSourceExecution
 	afterOwnerConfigs            *afterOwnerConfigPhysical

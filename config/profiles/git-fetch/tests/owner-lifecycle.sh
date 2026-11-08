@@ -22,7 +22,11 @@ arguments=args[args.index('subyard')+1:]
 Path(os.environ['GIT_FETCH_FIXTURE_CALLS']).write_text(json.dumps(arguments))
 if arguments[0]=='check' and os.environ.get('GIT_FETCH_FIXTURE_DRIFT')=='1': print('git-fetch-drift')
 if arguments[0]=='pause': print('paused')
-if arguments[0] in ('observe','refresh'): print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
+if arguments[0] in ('observe','refresh'):
+    observation={'state':'current','actual':'a'*64,'desired':'a'*64}
+    if arguments[0]=='observe' and os.environ.get('GIT_FETCH_FIXTURE_DIAGNOSTICS')=='1':
+        observation.update(state='stale',actual='b'*64,diagnostics=[{'parameter':'git-fetch.asset.fetch.py','installed':'changed','desired':'current'}])
+    print(json.dumps(observation))
 if arguments[0]=='identity-observe': print(json.dumps({'schema':1,'transport':'identity','target':arguments[-2]}))
 if arguments[0]=='custody-observe': print(json.dumps({'generation':'0'}))
 if arguments[0]=='custody-refresh': print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
@@ -65,6 +69,12 @@ args=json.load(open(sys.argv[1]))
 assert args[:4]==['observe','1','dev','0'] and len(args)==5 and re.fullmatch('[a-f0-9]{64}',args[4])
 assert json.load(open(sys.argv[2]))['state']=='current'
 PY
+GIT_FETCH_FIXTURE_DIAGNOSTICS=1 SUBYARD_PROFILE_DIAGNOSTICS=0 bash "$root/config/profiles/git-fetch/runtime.sh" observe > "$state/default-diagnostic"
+GIT_FETCH_FIXTURE_DIAGNOSTICS=1 SUBYARD_PROFILE_DIAGNOSTICS=1 bash "$root/config/profiles/git-fetch/runtime.sh" observe > "$state/opt-diagnostic"
+jq -e --slurpfile normal "$state/default-diagnostic" '
+  ($normal[0] | has("diagnostics") | not) and
+  .diagnostics == [{parameter:"git-fetch.asset.fetch.py",installed:"changed",desired:"current"}] and
+  del(.diagnostics) == $normal[0]' "$state/opt-diagnostic" >/dev/null
 expected=$(printf '%064d' 0)
 ENVIRONMENT_PROFILES='' bash "$root/config/profiles/git-fetch/runtime.sh" apply operation "$expected" "$expected" > /dev/null
 python3 - "$state/calls" "$expected" <<'PY'

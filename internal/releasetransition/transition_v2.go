@@ -3758,6 +3758,56 @@ func activationObservationBlocker(id string, err error) Blocker {
 func publicActivationDiagnostic(err error, message, retry string) (string, string) {
 	// Adapters may explicitly provide a public diagnostic; never expose raw
 	// errors from guest commands, configuration parsing or transport failures.
+	var refusals *domain.Refusals
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if _, public := cause.(interface{ ActivationDiagnostic() (string, string) }); public {
+			break
+		}
+		if aggregate, ok := cause.(*domain.Refusals); ok {
+			refusals = aggregate
+			break
+		}
+	}
+	if refusals != nil {
+		var messages, actions []string
+		for _, cause := range refusals.Unwrap() {
+			text, action := publicActivationDiagnostic(cause, message, retry)
+			if text == "" {
+				continue
+			}
+			messages = append(messages, text)
+			if action != "" {
+				actions = append(actions, action)
+			}
+		}
+		if len(messages) > 0 {
+			slices.Sort(messages)
+			messages = slices.Compact(messages)
+			slices.Sort(actions)
+			actions = slices.Compact(actions)
+			kept := []string{}
+			for index, text := range messages {
+				candidate := strings.Join(append(slices.Clone(kept), text), "; ")
+				remaining := len(messages) - index - 1
+				suffix := ""
+				if remaining > 0 {
+					suffix = fmt.Sprintf("; and %d more findings; full details: stderr of yard update --check --json", remaining)
+				}
+				if len(candidate)+len(suffix) > maxDiagnosticText {
+					break
+				}
+				kept = append(kept, text)
+			}
+			if len(kept) < len(messages) {
+				kept = append(kept, fmt.Sprintf("and %d more findings; full details: stderr of yard update --check --json", len(messages)-len(kept)))
+			}
+			message = strings.Join(kept, "; ")
+			if combined := strings.Join(actions, ", then "); validateSafeAction(combined) == nil {
+				retry = combined
+			}
+			return message, retry
+		}
+	}
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if errors.As(err, &diagnostic) {
 		publicMessage, publicRetry := diagnostic.ActivationDiagnostic()

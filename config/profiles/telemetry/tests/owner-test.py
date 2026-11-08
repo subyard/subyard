@@ -55,7 +55,10 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         def __init__(self,source,user,selected,agents): self.selected=selected
         def observe(self):
             if os.environ.get('TELEMETRY_FIXTURE_STATE')=='unsafe': raise ValueError('foreign control state')
-            return dict(state='current' if marker.exists() else ('stale' if self.selected else 'absent'),actual='',desired='')
+            observation=dict(state='current' if marker.exists() else ('stale' if self.selected else 'absent'),actual='',desired='')
+            if os.environ.get('TELEMETRY_FIXTURE_DIAGNOSTICS')=='1':
+                observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
+            return observation
         def apply(self): marker.write_text(str(int(self.selected)))
     guest.Runtime=Runtime
     guest.os.getuid=lambda:0
@@ -72,8 +75,8 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
                         'STORAGE_PATH','HOST_BASE','RESTRICTED_DISK_PATHS','ACCESS_KIND','YARD_KIND','YARD_INSTANCE_NAME',
                         'INCUS_PROJECT','INCUS_BRIDGE','SSH_HOST','DEV_USER','DEV_UID','DEV_SUDO','FORWARD_SSH_AGENT','NESTED_E2E_VMS'):
                 environment[key] = 'dev' if key=='DEV_USER' else 'fixture'
-            def invoke(action, **overrides):
-                return subprocess.run(['bash',str(profile/'profile.sh'),action],env=dict(environment,**overrides),
+            def invoke(action, *arguments, **overrides):
+                return subprocess.run(['bash',str(profile/'profile.sh'),action,*arguments],env=dict(environment,**overrides),
                                       capture_output=True,timeout=5)
             self.assertEqual(invoke('--check').returncode,1,'fresh selected profile must be measured drift, not an unavailable adapter')
             self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0').returncode,0)
@@ -81,6 +84,17 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_BAD_OUTPUT='1').returncode,2)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_TRANSPORT_FAIL='1').returncode,2)
             self.assertFalse((root/'applied').exists(),'read-only checks must not apply the profile')
+            observations = []
+            for enabled in ('0', '1'):
+                result = invoke('--runtime', 'observe', ENVIRONMENT_PROFILES='telemetry',
+                                TELEMETRY_FIXTURE_DIAGNOSTICS='1', SUBYARD_PROFILE_DIAGNOSTICS=enabled)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observations.append(json.loads(result.stdout))
+            self.assertNotIn('diagnostics', observations[0])
+            self.assertEqual(observations[1].pop('diagnostics'),
+                             [dict(parameter='telemetry.asset.collector.py', installed='changed', desired='current')])
+            self.assertEqual(observations[0], observations[1])
+            self.assertFalse((root/'applied').exists(), 'diagnostic observation applied the profile')
             self.assertEqual(invoke('--yes').returncode,0)
             self.assertEqual((root/'applied').read_text(),'1')
             self.assertEqual(invoke('--check').returncode,0)

@@ -278,6 +278,8 @@ class GuestTests(unittest.TestCase):
         worker.write_bytes(b'owned older worker\n')
         before = runtime.observe(binding)
         self.assertEqual(before['state'], 'stale')
+        self.assertIn({'parameter': 'git-fetch.asset.fetch.py', 'installed': 'changed', 'desired': 'current'}, before['diagnostics'])
+        self.assertNotIn('owned older worker', str(before['diagnostics']))
         self.assertNotIn('Environment', str(before))
         worker.write_bytes(b'concurrent replacement\n')
         self.calls.clear()

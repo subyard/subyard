@@ -3,7 +3,9 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 type guestConfigFile struct {
 	readAsset           func(config.MaterializedAsset) ([]byte, error)
 	integration         string
+	setting             string
 	label               string
 	source              string
 	destination         string
@@ -296,6 +299,10 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 		}
 	}
 	files, payloads, entries := prepared.files, prepared.payloads, prepared.entries
+	evidence, err := runtime.prepareConfigDiagnostics(ctx, prepared)
+	if err != nil {
+		return err
+	}
 	if recheck {
 		files = slices.Clone(files)
 		for i := range files {
@@ -326,7 +333,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			file.label, runtime.devUser(), strings.TrimPrefix(file.destination, "/home/"+runtime.devUser()+"/"))
 	}
 	if len(entries) != 0 || prepared.previewSkillCutover {
-		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, ""); err != nil {
+		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, "", integrationInventoryCapture{config: evidence}); err != nil {
 			return err
 		}
 	}
@@ -337,6 +344,47 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	}
 	fmt.Fprintln(output, "  [ ok ] Agent instructions and configs refreshed.")
 	return nil
+}
+
+func (runtime Runtime) prepareConfigDiagnostics(ctx context.Context, prepared *PreparedConfigs) (*configDiagnosticCapture, error) {
+	catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
+	if err != nil {
+		return nil, err
+	}
+	hasSetting := false
+	for _, file := range prepared.files {
+		definition, ok := catalog.LookupSetting(file.setting)
+		hasSetting = hasSetting || ok && !definition.Sensitive && definition.Kind == config.SettingFile && definition.Application == config.SettingConfigApply
+	}
+	if !hasSetting {
+		return nil, nil
+	}
+	baseline, err := runtime.integrationInventory(ctx, "settings", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var key []byte
+	if baseline.Diagnostics == nil {
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+	} else {
+		key, _ = hex.DecodeString(baseline.Diagnostics.Key)
+	}
+	result := &configDiagnosticCapture{Key: hex.EncodeToString(key), Files: map[string]configDiagnosticCaptureFile{}}
+	for _, file := range prepared.files {
+		definition, ok := catalog.LookupSetting(file.setting)
+		if !ok || definition.Sensitive || definition.Kind != config.SettingFile || definition.Application != config.SettingConfigApply {
+			continue
+		}
+		source, ok := prepared.sources[configSourceKey{file.source, file.followSymlinks}]
+		if !ok || !source.exists {
+			continue
+		}
+		result.Files[file.setting] = configDiagnosticCaptureFile{Path: file.source, Destination: file.destination, Digest: config.ConfigurationInputDigest(file.setting, definition.Kind, key, source.payload)}
+	}
+	return result, nil
 }
 
 func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
@@ -497,7 +545,7 @@ func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.Mater
 	}
 	for _, source := range sources {
 		asset := source.Asset
-		file := guestConfigFile{readAsset: reader, integration: source.Integration, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
+		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
 		if file.previewInstructions {
 			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 		}
