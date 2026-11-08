@@ -41,6 +41,9 @@ export MOCK_CATALOG_REMOTE=images:
 export MOCK_TMP_CHECK_FILE="$TMP/tmp-checks" MOCK_REBOOT=0
 export MOCK_BOOT_AFTER_RESTART=0
 export MOCK_BOOT_WAIT_EXIT=0 MOCK_CHANGED_UUID=0
+# Boots that end STOPPED instead of reaching the agent, as when Incus loses a VM's restart.
+export MOCK_LOST_BOOTS_FILE="$TMP/lost-boots"
+printf '0\n' > "$MOCK_LOST_BOOTS_FILE"
 for file in "$MOCK_INSTANCE_FILE" "$MOCK_CATALOG_FILE" "$MOCK_CATALOG_ATTEMPTS" "$MOCK_CAPTURE_FILE"; do
   install -m 0600 /dev/null "$file"
 done
@@ -131,6 +134,7 @@ case "${1:-} ${2:-} ${3:-}" in
   'config set yard' | 'config unset yard') ;;
   'storage volume show') ;;
   'list yard --project')
+    printf 'yard,'
     if [ "$MOCK_REBOOT" = 1 ] && [ -f "$MOCK_TMP_CHECK_FILE.power" ]; then
       cat "$MOCK_TMP_CHECK_FILE.power"
     else printf '%s\n' "$MOCK_POWER_STATE"; fi ;;
@@ -140,7 +144,14 @@ case "${1:-} ${2:-} ${3:-}" in
     [ "$MOCK_BOOT_AFTER_RESTART" != 1 ] || printf 'initializing\n' > "$MOCK_TMP_CHECK_FILE.boot" ;;
   'exec yard --project')
     case "$*" in
-      'exec yard --project subyard -- true') ;;
+      'exec yard --project subyard -- true')
+        [ "$(cat "$MOCK_TMP_CHECK_FILE.power" 2>/dev/null)" != STOPPED ] || exit 1
+        lost="$(cat "$MOCK_LOST_BOOTS_FILE")"
+        if [ "$lost" -gt 0 ]; then
+          printf '%s\n' "$((lost - 1))" > "$MOCK_LOST_BOOTS_FILE"
+          printf 'STOPPED\n' > "$MOCK_TMP_CHECK_FILE.power"
+          exit 1
+        fi ;;
       'exec yard --project subyard -T -- sh -s -- apply') cat >/dev/null ;;
       'exec yard --project subyard -T -- sh -s -- wait-boot')
         cat >/dev/null
@@ -469,6 +480,46 @@ grep -Fq 'new yard identity changed before temporary storage boot' "$TMP/output"
 ! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail 'storage restart stopped a replacement instance'
 MOCK_CHANGED_UUID=0
 printf 'ok: new-yard storage restart refuses failed boot readiness and replaced instance identity\n'
+
+# Incus can lose the QEMU restart of a new VM's first in-guest reboot and leave it
+# STOPPED. Creation starts that new VM once more; a second loss, or a lost boot of an
+# existing yard, refuses at once with the cause instead of waiting out the agent deadline.
+export SUBYARD_INCUS_STOPPED_WINDOW=1
+for lost in 1 2; do
+  reset_creation
+  MOCK_INCUS_DEVICES='' MOCK_REBOOT=1 MOCK_POWER_STATE=STOPPED
+  rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+  printf '%s\n' "$lost" > "$MOCK_LOST_BOOTS_FILE"
+  rc=0
+  YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 VM_PIN_IPV4=0 SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=60 run_create || rc=$?
+  grep -Fq "new VM 'yard' stopped during its first boot; starting it once more" "$TMP/output" \
+    || fail "new VM with $lost lost boot(s) was not started again"
+  if [ "$lost" = 1 ]; then
+    [ "$rc" = 0 ] || fail 'new VM did not complete after one lost first boot'
+    [ "$(grep -c '^start yard --project subyard$' "$MOCK_INCUS_LOG")" = 3 ] \
+      || fail 'new VM restart did not use one extra guarded start before its storage boot'
+  else
+    [ "$rc" != 0 ] || fail 'new VM accepted a second lost first boot'
+    grep -Fq "instance 'yard' stopped and is not booting" "$TMP/output" || fail 'second lost boot hid its cause'
+    grep -Fq "rerun 'yard -Y test-yard init' to start it again" "$TMP/output" || fail 'second lost boot lacks its next step'
+    [ "$(grep -c '^start yard --project subyard$' "$MOCK_INCUS_LOG")" = 2 ] || fail 'new VM was started more than once more'
+  fi
+done
+reset_creation
+printf '1\n' > "$MOCK_INSTANCE_FILE"
+MOCK_INCUS_DEVICES='' MOCK_REBOOT=1 MOCK_POWER_STATE=STOPPED
+rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+printf '1\n' > "$MOCK_LOST_BOOTS_FILE"
+if YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 VM_PIN_IPV4=0 SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=60 run_create; then
+  fail 'existing VM accepted a lost boot'
+fi
+[ "$(grep -c '^start yard --project subyard$' "$MOCK_INCUS_LOG")" = 1 ] || fail 'existing VM was restarted on its own'
+grep -Fq "VM agent did not become ready for boot verification; instance 'yard' stopped and is not booting" "$TMP/output" \
+  || fail 'existing VM lost boot hid its cause'
+printf '0\n' > "$MOCK_LOST_BOOTS_FILE"
+unset SUBYARD_INCUS_STOPPED_WINDOW
+MOCK_REBOOT=0
+printf 'ok: a new VM is started once more after a lost first boot; other lost boots refuse at once\n'
 
 # Native creation precedes the split shell portions. Only a fresh POST result
 # may authorize their initial storage restart; retained identity alone may not.

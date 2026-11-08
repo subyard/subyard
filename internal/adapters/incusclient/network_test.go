@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 	"github.com/lxc/incus/v6/shared/api"
@@ -458,10 +459,24 @@ func TestNetworkPowerUsesBoundedGracefulOfficialOperation(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if len(fake.powerCalls) != 2 || fake.powerCalls[0].Action != "stop" || fake.powerCalls[0].Timeout != 30 || fake.powerCalls[0].Force ||
+	if len(fake.powerCalls) != 2 || fake.powerCalls[0].Action != "stop" || fake.powerCalls[0].Timeout != 180 || fake.powerCalls[0].Force ||
 		fake.powerCalls[1].Action != "start" || fake.powerCalls[1].Timeout != 30 || fake.powerCalls[1].Force ||
 		len(fake.operationWaitBounded) != 2 || !fake.operationWaitBounded[0] || !fake.operationWaitBounded[1] {
 		t.Fatalf("power calls were not bounded and graceful: %+v", fake.powerCalls)
+	}
+}
+
+func TestNetworkStopOutlastsMeasuredSlowGuestShutdown(t *testing.T) {
+	// The slowest measured clean stop of a nested VM yard took about 147 seconds.
+	const measured = 147 * time.Second
+	for _, action := range []string{"stop", "start"} {
+		incusWait, callerWait := yardnetwork.NetworkPowerTimeouts(action)
+		if callerWait <= incusWait {
+			t.Fatalf("%s: caller wait %s ends before the Incus wait %s", action, callerWait, incusWait)
+		}
+		if action == "stop" && incusWait < measured+30*time.Second {
+			t.Fatalf("stop wait %s leaves no margin over the measured %s", incusWait, measured)
+		}
 	}
 }
 

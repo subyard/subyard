@@ -111,14 +111,21 @@ incus_preflight() {
   die "can't reach Incus — you're not in the 'incus-admin' group, or the daemon isn't running. Run 'yard init' first."
 }
 
+# Returns 0 when the agent answers, 1 at the deadline, 2 for an invalid wait
+# setting and 3 when the instance stays STOPPED, so nothing is left to wait for.
 incus_wait_instance_agent() {
   local project="${1:?project required}" instance="${2:?instance required}"
-  local wait_timeout=120 deadline remaining probe_timeout
+  local wait_timeout=120 deadline remaining probe_timeout stopped_window stopped_since=''
   # Cloud-image seeding can reboot a VM before its agent accepts connections.
   # Allow two boot sequences while keeping one absolute deadline.
   [ "${YARD_KIND:-}" != vm ] || wait_timeout=600
   wait_timeout="${SUBYARD_INCUS_AGENT_WAIT_TIMEOUT:-$wait_timeout}"
   [[ "$wait_timeout" =~ ^[1-9][0-9]*$ ]] || return 2
+  # A guest reboot that Incus serves with a new QEMU process passes through
+  # STOPPED for about two seconds between the old process and the new one. Only
+  # a STOPPED state held for this whole window means no boot is in progress.
+  stopped_window="${SUBYARD_INCUS_STOPPED_WINDOW:-30}"
+  [[ "$stopped_window" =~ ^[1-9][0-9]*$ ]] || return 2
   deadline=$((SECONDS + wait_timeout))
   while [ "$SECONDS" -lt "$deadline" ]; do
     remaining=$((deadline - SECONDS))
@@ -127,9 +134,41 @@ incus_wait_instance_agent() {
     timeout --foreground "$probe_timeout" \
       incus exec "$instance" --project "$project" -- true >/dev/null 2>&1 \
       && return 0
+    # The state read has only the remaining budget, so a stalled Incus cannot extend the wait.
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    if [ "$(incus_instance_columns "$project" "$instance" s "$remaining")" = STOPPED ]; then
+      [ -n "$stopped_since" ] || stopped_since=$SECONDS
+      [ $((SECONDS - stopped_since)) -lt "$stopped_window" ] || return 3
+    else
+      stopped_since=''
+    fi
     [ "$SECONDS" -ge "$deadline" ] || sleep 1
   done
   return 1
+}
+
+# Prints the cause that an incus_wait_instance_agent status adds to a caller's
+# diagnostic: nothing for a plain timeout.
+incus_agent_wait_detail() { # <status> <project> <instance>
+  case "$1" in
+    2) printf '; the agent wait setting is invalid' ;;
+    3) printf "; instance '%s' stopped and is not booting (its last boot log: incus info %s --project %s --show-log)" \
+         "$3" "$3" "$2" ;;
+  esac
+}
+
+# Waits for the agent of the yard instance. On failure it stores <message>, the
+# cause and, for an instance that stays STOPPED, the optional <hint> in
+# AGENT_WAIT_ERROR, and returns the incus_wait_instance_agent status.
+incus_wait_yard_agent() { # <message> [hint]
+  local rc=0
+  AGENT_WAIT_ERROR=''
+  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" || rc=$?
+  [ "$rc" != 0 ] || return 0
+  AGENT_WAIT_ERROR="$1$(incus_agent_wait_detail "$rc" "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
+  if [ "$rc" = 3 ] && [ -n "${2:-}" ]; then AGENT_WAIT_ERROR+="; $2"; fi
+  return "$rc"
 }
 
 incus_project_has_isolated_images() {
@@ -314,14 +353,43 @@ ufw_yard_rules_remove() {
   fi
 }
 
+# The global IPv4 address of the guest's default-route interface. A guest whose
+# agent is ready may still be configuring its network after a restart, so wait
+# within one bounded deadline: each probe gets at most the remaining budget, an
+# answer after the deadline is not accepted, and the failure names the elapsed
+# time and the last observation.
 incus_instance_primary_ipv4() {
   local project="${1:?incus_instance_primary_ipv4 needs a project}"
   local instance="${2:?incus_instance_primary_ipv4 needs an instance}"
-  incus exec "$instance" --project "$project" -- sh -eu -c '
-    interface="$(ip -4 route show default | awk "NR == 1 { for (i=1; i<=NF; i++) if (\$i == \"dev\") { print \$(i+1); exit } }")"
-    [ -n "$interface" ]
-    ip -4 -o address show dev "$interface" scope global
-  ' 2>/dev/null | awk 'NR == 1 { split($4, address, "/"); print address[1] }'
+  local wait_timeout="${SUBYARD_VM_IPV4_TIMEOUT:-60}" started deadline remaining output address observed='no observation'
+  [[ "$wait_timeout" =~ ^[1-9][0-9]*$ ]] || return 2
+  started=$SECONDS
+  deadline=$((started + wait_timeout))
+  while remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ]; do
+    [ "$remaining" -le 5 ] || remaining=5
+    if output="$(timeout --foreground "$remaining" incus exec "$instance" --project "$project" -- sh -eu -c '
+      interface="$(ip -4 route show default | awk "NR == 1 { for (i=1; i<=NF; i++) if (\$i == \"dev\") { print \$(i+1); exit } }")"
+      printf "route %s\n" "${interface:-none}"
+      [ -z "$interface" ] || ip -4 -o address show dev "$interface" scope global
+    ' 2>/dev/null)"; then
+      address="$(printf '%s\n' "$output" | awk '$1 == "route" { next } { split($4, value, "/"); print value[1]; exit }')"
+      if [ -n "$address" ] && [ "$SECONDS" -le "$deadline" ]; then
+        printf '%s\n' "$address"
+        return 0
+      fi
+      case "$(printf '%s\n' "$output" | awk '$1 == "route" { print $2; exit }')" in
+        '' | none) observed='no default IPv4 route' ;;
+        *) observed="default route on $(printf '%s\n' "$output" | awk '$1 == "route" { print $2; exit }') without a global IPv4 address" ;;
+      esac
+      [ -z "$address" ] || observed='the guest answered after the deadline'
+    else
+      observed='the guest network query failed'
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 1
+  done
+  printf 'VM %s/%s has no primary IPv4 address after %ss: %s\n' "$project" "$instance" "$((SECONDS - started))" "$observed" >&2
+  return 1
 }
 
 zabbly_suite() {

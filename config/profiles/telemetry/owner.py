@@ -28,6 +28,37 @@ def run(arguments, **kwargs):
     return result.stdout.decode().strip()
 
 
+class Refusal(ValueError):
+    """Every independent refusal found before any effect, named for the operator."""
+    def __init__(self, refusals):
+        super().__init__('; '.join(refusals))
+
+
+def collector_binary(source, selected):
+    """Return the collector binary a selected run installs and every source refusal.
+
+    An unselected run needs no binary contents; a symlinked candidate is unsafe
+    whether or not the profile is selected."""
+    packaged = source/'bin/subyard-telemetry'
+    built = source.parents[2]/'.build/profiles/telemetry/bin/subyard-telemetry'
+    refusals = []
+    unsafe = [str(candidate) for candidate in (packaged, built) if candidate.is_symlink()]
+    if unsafe:
+        refusals.append('unsafe native telemetry source: symlinked collector ' + ', '.join(unsafe))
+    if not selected or unsafe:
+        return None, refusals
+    found = [candidate for candidate in (packaged, built) if candidate.is_file()]
+    usable = [candidate for candidate in found if os.access(candidate, os.X_OK)]
+    if usable:
+        return usable[0], refusals
+    if found:
+        refusals.append('native telemetry collector is not executable: ' + ', '.join(map(str, found)))
+    else:
+        refusals.append('native telemetry collector is missing: selected profile telemetry needs '
+                        f'{packaged} or {built}; build it with make build')
+    return None, refusals
+
+
 def main():
     arguments = sys.argv[1:]
     mode = {'--yes': 'apply', '--check': 'check', '--remove': 'apply', '--pause': 'pause', '--resume': 'resume'}
@@ -53,7 +84,9 @@ def main():
     else:
         raise ValueError('invalid lifecycle request')
     project, instance = os.environ['INCUS_PROJECT'], os.environ['YARD_INSTANCE_NAME']
-    status = run(['incus', 'list', instance, '--project', project, '-f', 'csv', '-c', 's'])
+    # `incus list NAME` also lists every instance whose name starts with NAME.
+    rows = run(['incus', 'list', instance, '--project', project, '-f', 'csv', '-c', 'ns']).splitlines()
+    status = next((row[len(instance) + 1:] for row in rows if row.startswith(instance + ',')), '')
     if status in ('', 'STOPPED'):
         if operation == 'observe':
             print(json.dumps({'state': 'deferred' if status else 'absent', 'actual': '', 'desired': ''}))
@@ -61,23 +94,25 @@ def main():
     if status != 'RUNNING':
         raise ValueError('yard unavailable')
     source = Path(__file__).resolve().parent
-    binary = source/'bin/subyard-telemetry'
-    if not binary.is_file():
-        binary = source.parents[2]/'.build/profiles/telemetry/bin/subyard-telemetry'
-    stream = io.BytesIO()
-    with tarfile.open(fileobj=stream, mode='w') as archive:
-        for name in FILES:
-            archive.add(source/name, arcname=name, recursive=False)
-        archive.add(binary, arcname='subyard-telemetry', recursive=False)
-        archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
-        if operation.startswith('identity-'):
-            archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
+    binary, refusals = collector_binary(source, selected)
     agents = ' '.join(name for name in ('claude', 'codex') if name in os.environ.get('CODING_TOOL_INTEGRATIONS', '').split())
     for agent in agents.split():
         destination = os.environ.get('AGENT_'+agent+'_CONFIG_DEST')
         expected = '.claude/settings.json' if agent == 'claude' else '.codex/config.toml'
         if selected and destination != expected:
-            raise ValueError('standard native destination required')
+            refusals.append(f'standard native destination required: AGENT_{agent}_CONFIG_DEST must be {expected}')
+    if refusals:
+        raise Refusal(refusals)
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode='w') as archive:
+        for name in FILES:
+            archive.add(source/name, arcname=name, recursive=False)
+        # Only a selected run installs the collector; an unselected one keeps its path only.
+        if binary is not None:
+            archive.add(binary, arcname='subyard-telemetry', recursive=False)
+        archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
+        if operation.startswith('identity-'):
+            archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     output = run(['incus', 'exec', instance, '--project', project, '--', 'bash', '-euo', 'pipefail', '-c',
                   GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
     if operation == 'check':
@@ -98,6 +133,8 @@ def main():
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        if isinstance(error, Refusal):
+            print(f'telemetry: refused: {error}', file=sys.stderr)
         print('telemetry: owner transport or native ownership unavailable', file=sys.stderr)
         raise SystemExit(2)

@@ -5,6 +5,8 @@ profile="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$profile/../../.." && pwd)"
 # shellcheck source=scripts/lib/engine-context.sh
 . "$root/scripts/lib/engine-context.sh"
+# shellcheck source=scripts/lib-power.sh
+. "$root/scripts/lib-power.sh"
 subyard_require_engine_context
 export SUBYARD_REPOSITORY_ROOT="$root"
 mode=apply
@@ -36,7 +38,7 @@ case "${1-}" in
 esac
 [ "$#" = 1 ] || exit 2
 fi
-state="$(incus list "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -f csv -c s)"
+state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
 case "$state" in
   RUNNING) ;;
   ''|STOPPED)

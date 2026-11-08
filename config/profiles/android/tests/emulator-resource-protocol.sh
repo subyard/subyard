@@ -11,7 +11,7 @@ export HOME="$tmp/home" SUBYARD_NO_AUDIT=1 PATH="$tmp/bin:$PATH"
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
-case "$1" in info) exit 0 ;; list) printf 'RUNNING\n' ;; *) exit 91 ;; esac
+case "$1" in info) exit 0 ;; list) printf '%s,RUNNING\n' "$2" ;; *) exit 91 ;; esac
 MOCK
 chmod +x "$tmp/bin/incus"
 handler="$ROOT/config/profiles/android/resources/emulator/handler.sh"

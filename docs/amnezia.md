@@ -108,11 +108,11 @@ uses the documented [Incus exec command](https://linuxcontainers.org/incus/docs/
 Transfer the file to the administrator's device through a protected channel. This key grants full
 administrative access to the dedicated VM; keep it out of repositories, issues, chat and logs.
 Subyard generates an ED25519 key, supported by the
-[native credentials screen](https://github.com/amnezia-vpn/amnezia-client/blob/5.0.3.0/client/ui/qml/Pages2/PageSetupWizardCredentials.qml).
+[native credentials screen](https://github.com/amnezia-vpn/amnezia-client/blob/5.1.0.6/client/ui/qml/Pages2/PageSetupWizardCredentials.qml).
 When entering it in the app, include the complete key with its BEGIN and END lines.
 
-Use the stock [AmneziaVPN app](https://github.com/amnezia-vpn/amnezia-client/releases/tag/5.0.3.0),
-with 5.0.3.0 as this profile's acceptance reference:
+Use the stock [AmneziaVPN app](https://github.com/amnezia-vpn/amnezia-client/releases/tag/5.1.0.6),
+with 5.1.0.6 as this profile's acceptance reference:
 
 1. Add a **Self-hosted VPN** connection.
 2. Enter the owner's advertised IPv4 and administration port, for example `203.0.113.10:2226`,
@@ -123,7 +123,7 @@ with 5.0.3.0 as this profile's acceptance reference:
 
 The upstream [self-hosted setup guide](https://docs.amnezia.org/documentation/instructions/install-vpn-on-server/)
 explains the SSH workflow. The
-[5.0.3.0 protocol settings screen](https://github.com/amnezia-vpn/amnezia-client/blob/5.0.3.0/client/ui/qml/Pages2/PageSetupWizardProtocolSettings.qml)
+[5.1.0.6 protocol settings screen](https://github.com/amnezia-vpn/amnezia-client/blob/5.1.0.6/client/ui/qml/Pages2/PageSetupWizardProtocolSettings.qml)
 supports choosing the port before installation. Automatic setup chooses a random AmneziaWG port,
 which will not necessarily match Subyard's route. Use the owner's advertised address rather than
 the guest's private address: the native app also uses this host address for client configurations.
@@ -197,14 +197,18 @@ that an established tunnel has terminated before guest cleanup converges.
 Close both routes before changing their endpoint settings or deselecting the profile. `vpn up`
 and `vpn-admin up` reject endpoint collisions and foreign ownership metadata. Changing the UDP
 port also requires changing it in AmneziaVPN and may require exporting updated client access.
-A failed bring-up can be retried without replacing the native server or its clients.
+A failed bring-up can be retried without replacing the native server or its clients. When
+it cannot roll back, for example while the yard is still finishing a slow clean stop, the
+error says whether owned ingress remains published, is closed or is unknown. Close it with
+`yard -Y <vpn-yard> vpn down` after that stop ends.
 
 VM boot follows Subyard's managed desired-power workflow and host network guards. No independent
-Incus autostart bypass is installed. Stopping another yard does not stop this VM. Free Page
-Reporting returns idle memory to the immediate owner without reserving RAM. The CPU scheduling
-policy is restored through managed starts, repeated initialization and owner boot reconciliation.
-After starting or restarting a VM directly through Incus, run `yard -Y vpn init` to restore the
-managed scheduling policy.
+Incus autostart bypass is installed. Network policy changes stop this VM cleanly, wait up to
+180 seconds and never force it off; see [network policy recovery](control-plane.md#yard-network-policy).
+Stopping another yard does not stop this VM. Free Page Reporting returns idle memory to the
+immediate owner without reserving RAM. The CPU scheduling policy is restored through managed
+starts, repeated initialization and owner boot reconciliation. After starting or restarting a VM
+directly through Incus, run `yard -Y vpn init` to restore the managed scheduling policy.
 
 ## Update, backup and recovery
 
@@ -217,6 +221,24 @@ The environment sets public DNS resolvers for Docker image builds. Native contai
 communicate inside the dedicated VM, including Amnezia's DNS sidecar. Container traffic cannot
 reach VM-local management services or external private networks through either Docker bridge.
 Amnezia continues to own client DNS settings.
+
+The app's **Management** → **Update server packages** action runs the VM's package manager over
+the administration route (`apt-get dist-upgrade`, keeping modified configuration files). When
+the update upgrades Docker or containerd, both daemons restart with their persistent storage,
+the environment reapplies its firewall, and the native containers return under their own restart
+policy. Native state, clients and the VPN route are retained; expect a brief VPN interruption
+while the daemons restart. A new kernel takes effect only after a restart: decline the app's
+reboot question and restart the VM with `yard -Y vpn stop` and `yard -Y vpn start`, which keep the
+managed CPU policy and network guards. Check free space on the root disk before large updates.
+
+AmneziaVPN's server setup also runs its host firewall script. In 5.1.0.6 that script ends with a
+raw-table `iptables` rule for CVE-2026-98432, dropping TCP packets that carry IP options, behind a
+kernel version check. The app sends the script to the server one line at a time, so that
+multi-line check never runs as a whole, and its final `iptables` line runs without `sudo`; setup
+leaves no such rule in the VM. The environment does not add one: keep the VM kernel current through
+package updates and a restart. The rule does not conflict with the environment's network policy,
+which owns only its own nftables table. With the rule applied as root, administration, VPN traffic
+and revocation behave as before.
 
 Persistent Docker and containerd storage lives under `/srv/amnezia/docker` and
 `/srv/amnezia/containerd`. Native configuration remains in the app's container storage, rather
@@ -252,9 +274,10 @@ On an available allocated two-VM test slot, run:
 ```sh
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane full
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane resources
+config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane maintenance
 ```
 
-The acceptance workflow runs stock AmneziaVPN 5.0.3.0 under a virtual display on the second test
+The acceptance workflow runs stock AmneziaVPN 5.1.0.6 under a virtual display on the second test
 VM. Through its GUI, it installs the server over dedicated SSH using Manual AmneziaWG and the
 configured port, creates two named clients, exports their native configurations, and revokes one
 while the other retains access. It also closes/reopens administration and rediscovers the native
@@ -266,6 +289,13 @@ VM and owner reboot recovery, unavailable guest-agent cleanup, mount recovery an
 Reporting cycles. Credentials remain in protected files inside the disposable lease. This describes
 acceptance coverage, not a recorded passing run; it does not establish provider filtering behavior
 or production VPS performance. See [test VM ownership and allocation](test-vms.md).
+
+The focused `maintenance` lane uses the same native clients. It records what the stock host
+firewall script left in the VM, applies its raw-table rule as root, and checks administration,
+retained-client traffic and revocation beside the environment policy. It then steps Docker and
+containerd back one repository version, runs the app's **Update server packages** action without
+its reboot, and requires both packages at their repository candidates, unchanged native state and
+readiness, working traffic, retained revocation and one native server discovery.
 
 The focused `resources` lane checks the new two-CPU preset, convergence from the prior one-CPU
 limit without changing RAM or native server state, repeat initialization without a VM restart,

@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -21,7 +23,7 @@ func TestTeardownSessionGuardAllowsUnfinishedAndUnavailableGuestsProtectsActive(
 			if err := os.Mkdir(filepath.Join(root, "lib"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"lib/ssh-listener.sh", "vscode-remote-maintenance.sh"} {
+			for _, name := range []string{"lib/ssh-listener.sh", "lib-power.sh", "vscode-remote-maintenance.sh"} {
 				content, err := os.ReadFile(filepath.Join("../../scripts", name))
 				if err != nil {
 					t.Fatal(err)
@@ -36,7 +38,7 @@ case "$GUARD_STATE:$1" in paused-*:--pause|late-failure:--pause|vanished:--pause
 `), 0700)
 			log := filepath.Join(root, "events")
 			script := `set -euo pipefail
-have_incus=1; PROJ=(--project selected); SCRIPT_DIR="$1"; DEV_USER=missing-user
+have_incus=1; INCUS_PROJECT=selected; PROJ=(--project selected); SCRIPT_DIR="$1"; DEV_USER=missing-user
 die() { printf '%s\n' "$*" >&2; exit 1; }
 yard_cmd_hint() { printf 'yard -Y fixture'; }
 timeout() { [ "$1" = 5s ] || exit 9; shift; "$@"; }
@@ -44,8 +46,8 @@ sleep() { :; }
 incus() {
   [ "$2" = selected ] && [ "$4" = selected ] || exit 9
   if [ "$1" = list ]; then
-    if [ ! -e "$GUARD_LOG.power" ] && [ "$GUARD_STATE" != absent ]; then printf 'RUNNING\n'; fi
-    if [ -e "$GUARD_LOG.power" ] && [ "$GUARD_STATE" = stopped ]; then printf 'STOPPED\n'; fi
+    if [ ! -e "$GUARD_LOG.power" ] && [ "$GUARD_STATE" != absent ]; then printf 'yard-selected-neighbour,STOPPED\nselected,RUNNING\n'; fi
+    if [ -e "$GUARD_LOG.power" ] && [ "$GUARD_STATE" = stopped ]; then printf 'selected,STOPPED\n'; fi
     return 0
   fi
   [ "$GUARD_STATE" != unavailable ] || return 1
@@ -120,5 +122,27 @@ trap - EXIT
 				t.Fatalf("retry did not use the same SSH probe: %s", content)
 			}
 		})
+	}
+}
+
+// `incus list NAME` also lists every instance whose name starts with NAME; the
+// yard-running check reads exactly its own instance.
+func TestIncusCLIYardRunningReadsTheExactInstance(t *testing.T) {
+	bin := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(bin, "incus"), []byte(`#!/bin/sh
+[ "$*" = "list yard --project subyard -f csv -c ns" ] || exit 9
+printf 'yard-neighbour,RUNNING\n'
+[ ! -e "$0.present" ] || printf 'yard,%s\n' "$(cat "$0.present")"
+`), 0o700)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cli := &CLI{env: map[string]string{"PATH": os.Getenv("PATH")}}
+	yard := domain.Context{YardInstanceName: "yard", IncusProject: "subyard"}
+	for _, state := range []string{"", "STOPPED", "RUNNING"} {
+		if state != "" {
+			testkit.WriteFile(t, filepath.Join(bin, "incus.present"), []byte(state), 0o600)
+		}
+		if running := cli.incusCLIYardRunning(context.Background(), yard); running != (state == "RUNNING") {
+			t.Fatalf("yard %q: running=%v", state, running)
+		}
 	}
 }

@@ -87,6 +87,29 @@ def run_probe(command, **options):
         return subprocess.CompletedProcess(command, 124, b'', b'')
 
 
+class Refusal(ValueError):
+    """A refusal whose diagnostic names the cause and the next step."""
+
+
+def native_engine(selected):
+    """The broker executable the selected owner installs, or None when unselected.
+
+    A symlinked candidate is unsafe whether or not the profile is selected."""
+    packaged = SOURCE/'bin/broker'
+    built = SOURCE.parents[2]/'.build/profiles/github/bin/broker'
+    unsafe = [str(candidate) for candidate in (packaged, built) if candidate.is_symlink()]
+    if unsafe:
+        raise Refusal('unsafe native GitHub runtime source: symlinked broker ' + ', '.join(unsafe))
+    if not selected:
+        return None
+    # Same executable choice as owner.sh, which installs it.
+    for candidate in (packaged, built):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise Refusal('native GitHub broker engine is missing: selected profile github needs '
+                  f'{packaged} or {built}; build it with make build')
+
+
 def observe():
     yard = os.environ.get('SUBYARD_YARD') or 'default'
     if not re.fullmatch('[a-zA-Z0-9_-]+', yard):
@@ -96,14 +119,13 @@ def observe():
                 if 'ENVIRONMENT_PROFILES' in os.environ else yard in descriptor.get('default_yards', []))
     selected = selected and not any(os.environ.get(key) == value
                                    for key, value in descriptor.get('disabled_when', {}).items())
-    engine = SOURCE/'bin/broker'
-    if not engine.exists():
-        engine = SOURCE.parents[2]/'.build/profiles/github/bin/broker'
     inputs = {name: hashlib.sha256((SOURCE/name).read_bytes()).hexdigest()
               for name in ('profile.json', 'owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'skills.json', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py')}
-    if engine.is_symlink():
-        raise ValueError('unsafe native GitHub runtime source')
-    inputs['engine'] = hashlib.sha256(engine.read_bytes()).hexdigest()
+    engine = native_engine(selected)
+    # Only a selected profile installs the broker, so only then is it an input.
+    # Source runs build no profile natives; an unselected profile needs none.
+    if engine is not None:
+        inputs['engine'] = hashlib.sha256(engine.read_bytes()).hexdigest()
     inputs['skill_delivery'] = hashlib.sha256((SOURCE.parents[1]/'skills/deliver.py').read_bytes()).hexdigest()
     # These are transport paths and settings; connection contents never enter a fingerprint.
     settings = {key: os.environ.get(key, '') for key in ('SUBYARD_YARD', 'INCUS_PROJECT',
@@ -227,5 +249,7 @@ if __name__ == '__main__':
         if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):
             import identity
             print(identity.refusal(error), file=sys.stderr)
+        elif isinstance(error, Refusal):
+            print(f'GitHub runtime refused: {error}', file=sys.stderr)
         print('GitHub runtime activation failed; inspect the selected broker service', file=sys.stderr)
         sys.exit(1)

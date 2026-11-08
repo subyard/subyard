@@ -224,7 +224,7 @@ func (s Service) applyLocked(ctx context.Context, plan Plan) error {
 		for _, u := range plan.Updates {
 			if u.Yard.InstanceFound && !strings.EqualFold(u.Yard.InstanceInfo.Status, "stopped") {
 				if err = s.Host.NetworkPower(ctx, u.Yard.Yard, "stop"); err != nil {
-					return fmt.Errorf("stop %s before changing network policy: %w; run yard network reconcile", u.Yard.Name, err)
+					return fmt.Errorf("stop %s before changing network policy: %w; %s", u.Yard.Name, err, s.stopRecovery(ctx, u.Yard.Yard))
 				}
 				observed, err := s.observe(ctx, u.Yard.Yard)
 				if err != nil {
@@ -338,9 +338,14 @@ func (s Service) applyLocked(ctx context.Context, plan Plan) error {
 			return errors.New("network restart postcondition failed")
 		}
 		if err = s.Guard(ctx); err != nil {
-			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
-			_ = s.Host.NetworkPower(stopContext, target, "stop")
+			_, stopWait := NetworkPowerTimeouts("stop")
+			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopWait)
+			stopErr := s.Host.NetworkPower(stopContext, target, "stop")
 			cancel()
+			if stopErr != nil {
+				return errors.Join(err, fmt.Errorf("stop %s after the host network guard failed: %w; %s",
+					name, stopErr, s.stopRecovery(ctx, target)))
+			}
 			return err
 		}
 		p.PendingStart = p.PendingStart[1:]
@@ -350,6 +355,27 @@ func (s Service) applyLocked(ctx context.Context, plan Plan) error {
 		}
 	}
 	return nil
+}
+
+// stopRecovery names what recovers a failed clean stop from the yard's current
+// power state. Reconcile repeats the same clean stop; only a forced Incus stop
+// ends a guest that never powers off. yard stop --force only bypasses session
+// guards, so it is never suggested here.
+func (s Service) stopRecovery(ctx context.Context, y Yard) string {
+	observeContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	observed, err := s.observe(observeContext, y)
+	if err != nil {
+		return fmt.Sprintf("could not read the power state of %s: %v; run yard network reconcile", y.Name, err)
+	}
+	status := observed.InstanceInfo.Status
+	if strings.EqualFold(status, "stopped") {
+		return "run yard network reconcile"
+	}
+	// Running, Ready and Error all keep a QEMU process that a clean stop has not ended.
+	return fmt.Sprintf("%s is still %s; run yard network reconcile to retry the clean stop; if it does not stop, "+
+		"force it off with incus stop --force %s --project %s (this can lose data the guest has not written), "+
+		"then run yard network reconcile", y.Name, status, y.Instance, y.Project)
 }
 
 func (s Service) observe(ctx context.Context, y Yard) (ObservedYard, error) {

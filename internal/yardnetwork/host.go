@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
@@ -87,6 +88,26 @@ type Snapshot struct {
 
 type Locker interface {
 	Acquire(context.Context) (func(), error)
+}
+
+// Network-managed power changes are clean and never forced. Incus waits
+// NetworkStopTimeout for a guest to power off: above the slowest measured clean
+// stop of a nested VM yard (about 147 seconds) with margin. Callers wait
+// NetworkPowerMargin longer, so Incus reports the operation's own result.
+const (
+	NetworkStopTimeout  = 180 * time.Second
+	NetworkStartTimeout = 30 * time.Second
+	NetworkPowerMargin  = 15 * time.Second
+)
+
+// NetworkPowerTimeouts returns Incus's wait for a power action and the longer
+// caller bound around it.
+func NetworkPowerTimeouts(action string) (incus, caller time.Duration) {
+	incus = NetworkStartTimeout
+	if action == "stop" {
+		incus = NetworkStopTimeout
+	}
+	return incus, incus + NetworkPowerMargin
 }
 
 // Host performs only exact Incus operations. Policy and ownership decisions stay

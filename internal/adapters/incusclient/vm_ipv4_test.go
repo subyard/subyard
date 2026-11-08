@@ -2,6 +2,7 @@ package incusclient
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -81,6 +82,27 @@ func TestPinVMIPv4FailsClosedOnCollisionAndLocalNIC(t *testing.T) {
 	if _, err := client.PinVMIPv4(context.Background(), yard, true); err == nil ||
 		!strings.Contains(err.Error(), "must not override") {
 		t.Fatalf("local NIC override accepted: %v", err)
+	}
+}
+
+// A booted guest that has not shown its address or lease yet is pending, so
+// the caller can wait; nothing is pinned.
+func TestPinVMIPv4ReportsAnUnobservedGuestAddressAsPending(t *testing.T) {
+	fake := vmNetworkFixture(t)
+	yard := yardnetwork.Yard{Name: "vpn", Project: "project-vpn", Instance: "yard-vpn", Network: "incusbr0"}
+	client := New(fake.socket, "projects")
+	delete(fake.leases, "project-vpn/incusbr0")
+	if _, err := client.PinVMIPv4(context.Background(), yard, true); !errors.Is(err, yardnetwork.ErrVMIPv4Pending) {
+		t.Fatalf("missing lease is not pending: %v", err)
+	}
+	instance := fake.instances["project-vpn/yard-vpn"]
+	instance.State["network"] = map[string]any{"eth0": map[string]any{"hwaddr": "00:16:3e:aa:bb:01", "addresses": []map[string]any{}}}
+	fake.instances["project-vpn/yard-vpn"] = instance
+	if _, err := client.PinVMIPv4(context.Background(), yard, true); !errors.Is(err, yardnetwork.ErrVMIPv4Pending) {
+		t.Fatalf("guest without an address is not pending: %v", err)
+	}
+	if fake.profiles["project-vpn/default"].Devices["eth0"]["ipv4.address"] != "" {
+		t.Fatal("pending guest address was pinned")
 	}
 }
 

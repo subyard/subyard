@@ -403,10 +403,51 @@ func (ingress *resourceIngress) probeReady(ctx context.Context, runner *resource
 	}
 }
 
+// resourceIngressCleanupBudget bounds the isolation ACL cleanup after a
+// rollback. It can stop and restart the yard: one clean network stop and one
+// start, each with its caller margin, must fit with time left for observation.
+const resourceIngressCleanupBudget = 5 * time.Minute
+
 func (ingress *resourceIngress) rollback(runner *resourceApplyRunner, operationID string) error {
 	if ingress == nil || !ingress.up {
 		return nil
 	}
+	if err := ingress.rollbackRoute(runner, operationID); err != nil {
+		return fmt.Errorf("%w; %s", err, ingress.rollbackResidue(runner))
+	}
+	return nil
+}
+
+// rollbackResidue reads what a failed rollback left. While a timed-out clean
+// stop is still pending, Incus refuses instance changes and the route stays
+// published; only an observed stopping yard names that cause. A closed route
+// can still leave resource cleanup incomplete.
+func (ingress *resourceIngress) rollbackResidue(runner *resourceApplyRunner) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdown := fmt.Sprintf("yard -Y %s %s %s", runner.loaded.Context.YardName,
+		runner.definition.Command, runner.definition.Shutdown)
+	snapshot, err := ingress.service.Host.InspectNetwork(ctx, []yardnetwork.Yard{ingress.preview.Target})
+	if err != nil {
+		return fmt.Sprintf("owned public ingress state is unknown (%v); close it with %s", err, shutdown)
+	}
+	for _, observed := range snapshot.Yards {
+		if observed.Yard != ingress.preview.Target {
+			continue
+		}
+		pending := ""
+		if strings.EqualFold(observed.InstanceInfo.Status, "stopping") {
+			pending = "; Incus refuses it until the pending clean stop of the yard has ended"
+		}
+		if len(observed.InstanceInfo.LocalDevices[ingress.contract.Device]) != 0 {
+			return "owned public ingress remains published; close it with " + shutdown + pending
+		}
+		return "owned public ingress is closed; resource cleanup is incomplete; finish it with " + shutdown + pending
+	}
+	return "owned public ingress state is unknown; close it with " + shutdown
+}
+
+func (ingress *resourceIngress) rollbackRoute(runner *resourceApplyRunner, operationID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, runner.definition.HandlerPath(), "rollback-ingress")
@@ -426,7 +467,7 @@ func (ingress *resourceIngress) rollback(runner *resourceApplyRunner, operationI
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("run owned ingress rollback: %w", err)
 	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), resourceIngressCleanupBudget)
 	defer cleanupCancel()
 	if err := ingress.cleanupRollbackACL(cleanupCtx); err != nil {
 		return fmt.Errorf("verify owned public ingress rollback and clean isolation ACL: %w", err)

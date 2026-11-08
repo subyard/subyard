@@ -6,6 +6,8 @@ cli-contract.sh
 command-registry.sh
 create-subyard-docker-apparmor.sh
 create-subyard-limits.sh
+incus-agent-wait.sh
+incus-exact-instance.sh
 init-extras-convergence.sh
 init-network-convergence.sh
 install-incus-data-home.sh

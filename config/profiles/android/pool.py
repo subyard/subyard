@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Android profile's private pool owner. No consumer can select paths or commands."""
 import contextlib
+import ctypes
 import datetime
 import fcntl
 import hashlib
@@ -355,6 +356,38 @@ class Runtime:
     PROC_ROOT = Path('/proc')
     CGROUP_ROOT = Path('/sys/fs/cgroup')
     HOST_MEMORY = Path('/var/lib/subyard/host-meminfo')
+    DRM_CLASS = Path('/sys/class/drm')
+    # DRM_IOWR(DRM_COMMAND_BASE + DRM_VIRTGPU_GETPARAM, struct drm_virtgpu_getparam)
+    VIRTGPU_GETPARAM = 0xC0106443
+    VIRTGPU_PARAM_3D_FEATURES = 1
+
+    @classmethod
+    def virtio_3d_features(cls, node):
+        value = struct.pack('i', 0)
+        buffer = bytearray(value)
+        address = (ctypes.c_char * len(buffer)).from_buffer(buffer)
+        request = bytearray(struct.pack('QQ', cls.VIRTGPU_PARAM_3D_FEATURES, ctypes.addressof(address)))
+        descriptor = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            fcntl.ioctl(descriptor, cls.VIRTGPU_GETPARAM, request)
+        finally:
+            os.close(descriptor)
+        return struct.unpack('i', bytes(buffer))[0]
+
+    @classmethod
+    def software_render_node(cls, node):
+        """An emulated virtio display without 3D renders through Mesa's software fallback."""
+        device = cls.DRM_CLASS / Path(node).name / 'device'
+        try:
+            identity = ((device / 'vendor').read_text().strip(), (device / 'device').read_text().strip())
+        except OSError:
+            return False
+        if identity != ('0x1af4', '0x1050'):
+            return False
+        try:
+            return cls.virtio_3d_features(node) == 0
+        except OSError:
+            return True
 
     def __init__(self, config):
         self.config = config
@@ -614,29 +647,55 @@ class Runtime:
         raise PoolError('preflight', 'Android egress requires a configured non-loopback IPv4 DNS server')
 
     def preflight(self, request, reserved, slot):
+        # Report every independently determinable refusal in stable order; only
+        # checks that depend on a failed one are skipped.
+        refusals = []
+
+        def check(ok, code, message):
+            if not ok:
+                refusals.append(PoolError(code, message))
+            return bool(ok)
+
+        def attempt(action):
+            try:
+                action()
+                return True
+            except PoolError as exc:
+                refusals.append(exc)
+                return False
+
         gpu = self.config.get('gpu', 'host')
-        require(gpu in ('host', 'software', 'software-gles'), 'config', 'EMULATOR_GPU must be host, software or software-gles')
-        require(platform.machine() == 'x86_64', 'unsupported', 'Android pool currently requires x86_64 KVM')
-        require(os.access('/dev/kvm', os.R_OK | os.W_OK), 'preflight', 'KVM is unavailable in this yard')
-        require((self.sdk / 'emulator/emulator').is_file(), 'preflight', 'Android emulator is not installed')
-        require(shutil.which('slirp4netns') and shutil.which('ip'), 'preflight', 'Android egress tools are not installed')
-        self.nameservers()
+        check(gpu in ('host', 'software', 'software-gles'), 'config', 'EMULATOR_GPU must be host, software or software-gles')
+        check(platform.machine() == 'x86_64', 'unsupported', 'Android pool currently requires x86_64 KVM')
+        kvm = check(os.access('/dev/kvm', os.R_OK | os.W_OK), 'preflight', 'KVM is unavailable in this yard')
+        installed = check((self.sdk / 'emulator/emulator').is_file(), 'preflight', 'Android emulator is not installed')
+        check(shutil.which('slirp4netns') and shutil.which('ip'), 'preflight', 'Android egress tools are not installed')
+        attempt(self.nameservers)
         account = self.config['runtime_user'] + '-' + slot['slot_id']
-        devices = ['/dev/kvm']
+        devices = ['/dev/kvm'] if kvm else []
+        render = None
         if gpu == 'host':
             render_nodes = sorted(Path('/dev/dri').glob('renderD*'))
-            require(render_nodes, 'preflight', 'no graphics render node in this yard')
-            devices.append(str(render_nodes[0]))
+            if check(render_nodes, 'preflight', 'no graphics render node in this yard') and \
+                    check(not self.software_render_node(render_nodes[0]), 'preflight',
+                          'EMULATOR_GPU=host needs a hardware render node, but this yard has only an emulated '
+                          'virtio display without 3D, which renders in software; select EMULATOR_GPU=software-gles'):
+                render = str(render_nodes[0])
+                devices.append(render)
+        accessible = set()
         for device in devices:
-            for permission in ('-r', '-w'):
-                result = run(['runuser', '-u', account, '--', 'test', permission, device], check=False)
-                require(result.returncode == 0, 'preflight',
-                        f'pool runtime account cannot access {device}; converge yard device permissions')
-        for binary in ('platform-tools/adb', 'emulator/emulator'):
-            result = run(['runuser', '-u', account, '--', 'test', '-x', str(self.sdk / binary)], check=False)
-            require(result.returncode == 0, 'preflight',
-                    f'pool runtime account cannot execute SDK {binary}; rerun yard provisioning')
-        if gpu == 'host':
+            results = [run(['runuser', '-u', account, '--', 'test', permission, device], check=False)
+                       for permission in ('-r', '-w')]
+            if check(all(result.returncode == 0 for result in results), 'preflight',
+                     f'pool runtime account cannot access {device}; converge yard device permissions'):
+                accessible.add(device)
+        if installed:
+            for binary in ('platform-tools/adb', 'emulator/emulator'):
+                result = run(['runuser', '-u', account, '--', 'test', '-x', str(self.sdk / binary)], check=False)
+                check(result.returncode == 0, 'preflight',
+                      f'pool runtime account cannot execute SDK {binary}; rerun yard provisioning')
+        # The graphics probe runs cage on the render node only, so it does not wait for KVM access.
+        if render in accessible:
             probe = Path(tempfile.mkdtemp(prefix='subyard-android-graphics-', dir='/run'))
             try:
                 account_info = pwd.getpwnam(account)
@@ -646,14 +705,16 @@ class Runtime:
                               'EMULATOR_GPU=host',
                               '/usr/local/lib/subyard-android/runtime.sh', '--check-graphics'],
                              check=False, timeout=15)
-                require(result.returncode == 0, 'preflight',
-                        'hardware graphics unavailable; converge the render device before allocation')
+                check(result.returncode == 0, 'preflight',
+                      'hardware graphics unavailable; converge the render device before allocation')
             except (OSError, subprocess.TimeoutExpired):
-                raise PoolError('preflight', 'hardware graphics unavailable; converge the render device before allocation')
+                check(False, 'preflight', 'hardware graphics unavailable; converge the render device before allocation')
             finally:
                 shutil.rmtree(probe, ignore_errors=True)
 
-        self.check_capacity(request, reserved)
+        attempt(lambda: self.check_capacity(request, reserved))
+        if refusals:
+            raise PoolError(refusals[0].code, '; '.join(str(refusal) for refusal in refusals))
 
     def start(self, slot, image, cancel):
         request = slot['request']

@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -115,6 +116,26 @@ esac
 			releasetransition.Blocker{Code: outcome.Code, Resource: "activation.materialized-config", Message: outcome.Message, Retry: outcome.Retry},
 			releasetransition.Blocker{Code: outcome.Code, Resource: "activation." + owner.ID(), Message: message, Retry: retry})
 	}
+	if scenario == "agent-loss" {
+		loaded, err := program.loadContext("private")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The applied-settings read is attempted only for a running instance.
+		incus := program.options.Incus.(*testkit.Incus)
+		incus.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Type: domain.YardVM, Status: "Running",
+			Config: map[string]string{"user.subyard.preview_sha256": "owned"},
+		}
+		// Readiness observes through the native installed-state runtime.
+		platform := program.options.InitPlatform
+		program.options.InitPlatform, program.options.Executor = nil, lostGuestAgent{}
+		response.Inspection.Blockers = lostAgentReadinessBlockers(t, program, home, journal)
+		program.options.InitPlatform = platform
+		for index := range response.Inspection.Blockers {
+			response.Inspection.Blockers[index].Message, response.Inspection.Blockers[index].Retry = outcome.Message, outcome.Retry
+		}
+	}
 	if scenario == "foreign-blocker" {
 		response.Inspection.Blockers[0].Resource = "activation.route-consumers"
 	}
@@ -208,6 +229,42 @@ esac
 	return program, home, &output
 }
 
+// lostGuestAgent is a running guest whose agent no longer answers commands.
+type lostGuestAgent struct{}
+
+func (lostGuestAgent) Exec(context.Context, string, string, ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	return ports.InstanceExecResult{}, errors.New("fixture guest agent is not running")
+}
+
+// lostAgentReadinessBlockers derives the gate inspection from the registered
+// readiness owners of the completed release repair, as the release engine does.
+func lostAgentReadinessBlockers(t *testing.T, program *CLI, home string, journal releasetransition.JournalRecord) []releasetransition.Blocker {
+	t.Helper()
+	request := releasetransition.ProcessRequest{Mode: releasetransition.ProcessInspect, RuntimeRoot: program.env["YARD_RUNTIME_ROOT"],
+		ConfigHome: home, Yard: "default", Target: journal.Goal.Target, Direction: journal.Goal.Direction,
+		ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest}
+	if !activeReleaseRepair(request) {
+		t.Fatal("fixture readiness is not an active-release repair")
+	}
+	var blockers []releasetransition.Blocker
+	for _, owner := range program.activationReconcilers(request) {
+		if _, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil {
+			code := releasetransition.CodeDependencyUnavailable
+			var conflict interface{ ActivationConflict() bool }
+			if errors.As(err, &conflict) && conflict.ActivationConflict() {
+				code = releasetransition.CodeActivationAmbiguous
+			}
+			blockers = append(blockers, releasetransition.Blocker{Code: code, Resource: "activation." + owner.ID()})
+		}
+	}
+	if !slices.ContainsFunc(blockers, func(blocker releasetransition.Blocker) bool {
+		return blocker.Resource == "activation.materialized-config"
+	}) {
+		t.Fatalf("readiness lost the unavailable guest diagnostic: %#v", blockers)
+	}
+	return blockers
+}
+
 type shutdownGateHost struct {
 	*rollbackIngressHost
 	path string
@@ -251,6 +308,29 @@ func TestResourceShutdownAdmitsCompletedHistoryUnavailableGuest(t *testing.T) {
 			invariants()
 		})
 	}
+}
+
+// An unanswered guest read during repair readiness leaves installed settings
+// unknown: host-side owners stay ready, so the ownership-closing shutdown is
+// admitted, closes owned ingress and reports the unverified guest shutdown.
+func TestResourceShutdownClosesIngressWhenRepairReadinessLosesGuestAgent(t *testing.T) {
+	program, home, output := shutdownGateFixture(t, "agent-loss")
+	invariants := nativeRecoveryInvariants(t, program, home)
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), "guest shutdown is unverified") {
+		t.Fatalf("shutdown blocked by unknown installed settings: code=%d output=%s", code, output)
+	}
+	if got := mustReadConfigFixture(t, filepath.Join(home, "cleanup-pending")); string(got) != "pending\n" {
+		t.Fatal("pending cleanup not retained")
+	}
+	var snapshot yardnetwork.Snapshot
+	if err := json.Unmarshal(mustReadConfigFixture(t, filepath.Join(home, "instance.json")), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	instance := snapshot.Yards[0].InstanceInfo
+	if instance.LocalDevices["sample-relay"] != nil || instance.Devices["sample-relay"] != nil || !strings.HasPrefix(instance.LocalConfig["user.subyard.resource.sample-relay"], "v1:pending:") {
+		t.Fatal("unverified cleanup did not close only owned ingress and retain pending marker")
+	}
+	invariants()
 }
 
 func TestResourceShutdownRepairRejectsUnsafeAdmission(t *testing.T) {

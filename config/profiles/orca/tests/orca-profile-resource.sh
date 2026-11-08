@@ -47,7 +47,7 @@ cleanup_failed="$state_root/cleanup-failed"
 printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   info) [ ! -e "$state_root/missing-yard" ] ;;
-  list) printf 'RUNNING\n' ;;
+  list) printf '%s,RUNNING\n' "$2" ;;
   file)
     if [ "${2:-}" = push ]; then
       push_counter="$(cat "$push_counter_file" 2>/dev/null || printf 0)"

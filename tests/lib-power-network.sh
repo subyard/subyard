@@ -97,7 +97,7 @@ cat > "$tmp/bin/incus" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
-  list) printf 'STOPPED\n' ;;
+  list) printf '%s,STOPPED\n' "$2" ;;
   network)
     [ "${2:-}" = list ] || exit 90
     [ "${MOCK_INCUS_NETWORK_RC:-0}" = 0 ] || exit "$MOCK_INCUS_NETWORK_RC"
@@ -111,7 +111,15 @@ case "${1:-}" in
       exit 1
     fi
     if [[ " $* " = *" -- sh -eu -c "* ]]; then
-      printf '%s\n' "${MOCK_INCUS_ETH0_ADDRESS:-}"
+      [ -z "${MOCK_INCUS_EXEC_DELAY:-}" ] || /bin/sleep "$MOCK_INCUS_EXEC_DELAY"
+      # The default route appears after MOCK_INCUS_ROUTE_AFTER polls.
+      n=0; [ ! -f "$MOCK_INCUS_ROUTE_COUNT" ] || n="$(cat "$MOCK_INCUS_ROUTE_COUNT")"
+      n=$((n + 1)); printf '%s\n' "$n" > "$MOCK_INCUS_ROUTE_COUNT"
+      if [ "$n" -lt "${MOCK_INCUS_ROUTE_AFTER:-1}" ]; then
+        printf 'route none\n'
+      else
+        printf 'route eth0\n%s\n' "${MOCK_INCUS_ETH0_ADDRESS:-}"
+      fi
       exit 0
     fi
     n=0; [ ! -f "$MOCK_INCUS_EXEC_COUNT" ] || n="$(cat "$MOCK_INCUS_EXEC_COUNT")"
@@ -273,8 +281,43 @@ CONTROL_PLANE_ROOT="$ROOT"
 # shellcheck source=tests/helpers/source-control-plane.sh
 . "$ROOT/tests/helpers/source-control-plane.sh"
 export MOCK_INCUS_ETH0_ADDRESS='2: eth0    inet 10.88.0.42/24 brd 10.88.0.255 scope global dynamic eth0'
+export MOCK_INCUS_ROUTE_COUNT="$tmp/route-count"
 [ "$(incus_instance_primary_ipv4 test-project test-yard)" = 10.88.0.42 ] \
   || fail "VM address selection did not use the default-route interface's global IPv4"
+# After a restart the default route appears only after some polls.
+(
+  sleep() { :; }
+  rm -f "$MOCK_INCUS_ROUTE_COUNT"
+  [ "$(MOCK_INCUS_ROUTE_AFTER=4 incus_instance_primary_ipv4 test-project test-yard)" = 10.88.0.42 ] \
+    || fail 'VM address selection did not wait for the default route'
+  [ "$(cat "$MOCK_INCUS_ROUTE_COUNT")" = 4 ] || fail 'VM address selection did not poll until the route appeared'
+) || exit 1
+# A route that never appears fails closed at the deadline, naming the observation.
+(
+  sleep() { SECONDS=$((SECONDS + 1)); }
+  rm -f "$MOCK_INCUS_ROUTE_COUNT"
+  if MOCK_INCUS_ROUTE_AFTER=1000 SUBYARD_VM_IPV4_TIMEOUT=5 incus_instance_primary_ipv4 test-project test-yard 2> "$tmp/ipv4.err"; then
+    fail 'VM without a default route returned an address'
+  fi
+  grep -Fxq 'VM test-project/test-yard has no primary IPv4 address after 5s: no default IPv4 route' "$tmp/ipv4.err" \
+    || fail "missing default route lost its diagnostic: $(cat "$tmp/ipv4.err")"
+  rm -f "$MOCK_INCUS_ROUTE_COUNT"
+  if MOCK_INCUS_ETH0_ADDRESS='' SUBYARD_VM_IPV4_TIMEOUT=2 incus_instance_primary_ipv4 test-project test-yard 2> "$tmp/ipv4.err"; then
+    fail 'VM without a global address returned an address'
+  fi
+  grep -Fq 'default route on eth0 without a global IPv4 address' "$tmp/ipv4.err" || fail 'missing address lost its diagnostic'
+) || exit 1
+# A probe slower than the remaining budget is cut to it; its late answer is not
+# accepted and the reported duration is the measured one.
+rm -f "$MOCK_INCUS_ROUTE_COUNT"
+ipv4_started=$SECONDS
+if MOCK_INCUS_EXEC_DELAY=3 SUBYARD_VM_IPV4_TIMEOUT=1 incus_instance_primary_ipv4 test-project test-yard 2> "$tmp/ipv4.err"; then
+  fail 'VM address answered after the deadline was accepted'
+fi
+ipv4_elapsed=$((SECONDS - ipv4_started))
+ipv4_reported="$(sed -n 's|^VM test-project/test-yard has no primary IPv4 address after \([0-9]*\)s: .*|\1|p' "$tmp/ipv4.err")"
+[ -n "$ipv4_reported" ] && [ "$ipv4_reported" -le "$ipv4_elapsed" ] && [ "$ipv4_elapsed" -le $((ipv4_reported + 1)) ] \
+  || fail "VM address wait misreported its duration ($ipv4_elapsed s): $(cat "$tmp/ipv4.err")"
 reset_case
 MOCK_INCUS_EXEC_READY_AFTER=2
 incus_wait_instance_agent test-project test-yard || fail "instance agent did not become ready"
@@ -399,7 +442,7 @@ fi
 srv_line="$(grep -nF 'incus config device add "$YARD_INSTANCE_NAME" srv disk' "$ROOT/scripts/03-create-subyard.sh" | cut -d: -f1)"
 start_line="$(grep -nF 'power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE"' "$ROOT/scripts/03-create-subyard.sh" | cut -d: -f1 | sed -n '1p')"
 [ "$srv_line" -lt "$start_line" ] || fail "VM /srv can still be hot-added after the first start"
-grep -Fq 'incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"' \
+grep -Fq 'incus_wait_yard_agent "instance' \
   "$ROOT/scripts/lifecycle-guard.sh" || fail "yard start can return before the VM agent is ready"
 
 printf 'ok: NetworkManager power guard\n'

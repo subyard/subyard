@@ -36,7 +36,7 @@ dev_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}"
 incus_preflight
 incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
   || die "instance '$YARD_INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
-[ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] \
+[ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] \
   || die "yard is not running — start it: $(yard_cmd_hint) start"
 
 fwd_note=()

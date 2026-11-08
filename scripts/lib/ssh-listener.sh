@@ -50,7 +50,8 @@ ssh_listener_fence() {
 }
 
 ssh_listener_running() {
-  [ "$(ssh_listener_command list "$SSH_LISTENER_INSTANCE" "${SSH_LISTENER_PROJECT[@]}" -f csv -c s 2>/dev/null)" = RUNNING ]
+  # SSH_LISTENER_PROJECT is (--project NAME); incus_instance_columns comes from lib-power.sh.
+  [ "$(incus_instance_columns "${SSH_LISTENER_PROJECT[1]}" "$SSH_LISTENER_INSTANCE" s "$SSH_LISTENER_DEADLINE")" = RUNNING ]
 }
 
 ssh_listener_restore() {

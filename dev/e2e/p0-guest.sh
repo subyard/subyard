@@ -1826,8 +1826,9 @@ dependency_bootstrap() (
   local download_pid='' deadline="${P0_DEPENDENCY_BOOTSTRAP_TIMEOUT:-1200}"
   local heartbeat="${P0_DEPENDENCY_HEARTBEAT_SECONDS:-30}" started
   cleanup_dependency_bootstrap() {
-    local cleanup_failed=0
+    # Capture the exit status before local resets it.
     rc=$?
+    local cleanup_failed=0
     trap - EXIT INT TERM
     set +e
     if [ -n "$download_pid" ]; then

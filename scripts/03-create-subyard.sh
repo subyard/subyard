@@ -476,17 +476,27 @@ state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
 [ "$state" = RUNNING ] || info "starting $YARD_INSTANCE_NAME temporarily (was: ${state:-unknown})"
 power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
 if [ "$YARD_KIND" = vm ]; then
-  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" || {
-    power_guest_start_failed "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-      'VM agent did not become ready for boot verification' || die "$POWER_ERROR"
-  }
+  boot_wait=("VM agent did not become ready for boot verification" "rerun '$(yard_cmd_hint) init' to start it again")
+  agent_rc=0
+  incus_wait_yard_agent "${boot_wait[@]}" || agent_rc=$?
+  # The first in-guest reboot of a new VM makes Incus replace QEMU, and Incus can
+  # lose that restart and leave the VM STOPPED. Start a VM created by this
+  # invocation once more; never restart an existing yard on the operator's behalf.
+  if [ "$agent_rc" = 3 ] && [ "$created" = 1 ]; then
+    warn "new VM '$YARD_INSTANCE_NAME' stopped during its first boot; starting it once more"
+    power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+    agent_rc=0
+    incus_wait_yard_agent "${boot_wait[@]}" || agent_rc=$?
+  fi
+  [ "$agent_rc" = 0 ] || power_guest_start_failed "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$AGENT_WAIT_ERROR" \
+    || die "$POWER_ERROR"
 fi
 # Only a guest created by this invocation has no admitted user workload. Apply
 # the base policy and finish its first boot before provisioning can publish READY.
 # An existing guest is never restarted to change its temporary storage.
 if [ "$created" = 1 ]; then
-  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-    || die 'new yard agent did not become ready for temporary storage setup'
+  incus_wait_yard_agent "new yard agent did not become ready for temporary storage setup" \
+    || die "$AGENT_WAIT_ERROR"
   incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- apply \
     < "$SCRIPT_DIR/guest-disk-tmp.sh"
   tmp_state=0
@@ -498,8 +508,8 @@ if [ "$created" = 1 ]; then
     "$SCRIPT_DIR/lifecycle-guard.sh" stop --reconcile \
       || die 'could not safely finish new yard temporary storage setup'
     power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
-    incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-      || die 'new yard agent did not become ready after temporary storage boot'
+    incus_wait_yard_agent "new yard agent did not become ready after temporary storage boot" \
+      || die "$AGENT_WAIT_ERROR"
     incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- wait-boot \
       < "$SCRIPT_DIR/guest-disk-tmp.sh" || die 'new yard boot did not complete after temporary storage restart'
     incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- check \

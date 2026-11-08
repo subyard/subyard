@@ -41,12 +41,19 @@ class Runtime:
             raise ValueError('developer account required')
         self.endpoint = 'http://127.0.0.1:14318'
         self.assets = {}
+        # Paths whose contents an unselected run neither needs nor installs. They
+        # stay known so that leftovers are detected and kept unchanged.
+        self.retained = {}
         for name in ('native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
                      'resources.py', 'sources.py', 'broker-correlation.py', 'tomli_w.py', 'subyard-telemetry'):
+            mode = 0o755 if name in ('subyard-telemetry', 'broker-correlation.py') else 0o644
+            if name == 'subyard-telemetry' and not selected:
+                self.retained[library/name] = mode
+                continue
             content = native.snapshot(source/name, max_bytes=self.asset_limit(library/name))
             if content is None:
                 raise ValueError('missing profile asset')
-            self.assets[library/name] = (content, 0o755 if name in ('subyard-telemetry', 'broker-correlation.py') else 0o644)
+            self.assets[library/name] = (content, mode)
         prefix = '# Managed by Subyard telemetry profile.\n'
         common = f'[Unit]\nDescription=Subyard local telemetry\n[Service]\nType=simple\nUser={user}\nGroup={self.gid}\nUMask=0077\nLimitCORE=0\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=10\n'
         self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {data}/auth.token',
@@ -91,9 +98,11 @@ class Runtime:
         if not recipe['installed']:return wanted
         for path,(content,mode) in self.assets.items():
             allowed=[content]
-            if phase=='rebind':allowed.append(wanted.assets[path][0])
+            if phase=='rebind' and path in wanted.assets:allowed.append(wanted.assets[path][0])
             if self.asset_snapshot(path) not in allowed or stat.S_IMODE(path.stat().st_mode)!=mode:
                 raise ValueError('telemetry identity asset changed')
+        if not self.retained_current(self.saved_inventory()):
+            raise ValueError('telemetry identity asset changed')
         for unit in (COLLECTOR,MANAGER):
             try:fields=self.manager(unit)
             except ValueError:
@@ -131,6 +140,28 @@ class Runtime:
 
     def asset_snapshot(self, path):
         return native.snapshot(path, max_bytes=self.asset_limit(path))
+
+    def saved_inventory(self):
+        return json.loads(native.snapshot(self.control/'assets.json') or b'{}')
+
+    def retained_current(self, saved):
+        """A retained path is absent, or exactly what the inventory recorded with its mode."""
+        for path, mode in self.retained.items():
+            content = self.asset_snapshot(path)
+            if content is None:
+                continue
+            if saved.get(str(path)) != hashlib.sha256(content).hexdigest() or stat.S_IMODE(path.stat().st_mode) != mode:
+                return False
+        return True
+
+    def inventory(self):
+        """Recorded hashes: delivered assets, and retained paths as they remain."""
+        recorded = {str(path): hashlib.sha256(data).hexdigest() for path, (data, _) in self.assets.items()}
+        for path in self.retained:
+            content = self.asset_snapshot(path)
+            if content is not None:
+                recorded[str(path)] = hashlib.sha256(content).hexdigest()
+        return (json.dumps(recorded)+'\n').encode()
 
     def owned(self):
         if not self.control.exists():
@@ -203,15 +234,16 @@ class Runtime:
     def observe(self):
         installed = self.owned()
         if not installed:
-            if any(path.exists() or path.is_symlink() for path in self.assets):
+            if any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
                 raise ValueError('unmanaged collector assets')
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
                 result['diagnostics'] = [{'parameter': 'telemetry.runtime', 'installed': 'absent', 'desired': 'present'}]
             return result
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
-                 for path in self.assets}
+                 for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
+        ready = ready and self.retained_current(self.saved_inventory())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
         enabled = states[COLLECTOR].get('UnitFileState') == 'enabled'
@@ -248,8 +280,12 @@ class Runtime:
         return result
 
     def desired(self):
-        return hashlib.sha256(json.dumps({'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
-                                          'selected': self.selected, 'agents': self.agents}, sort_keys=True).encode()).hexdigest()
+        value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
+                 'selected': self.selected, 'agents': self.agents}
+        if self.retained:
+            # Paths and modes only: packaged and source unselected runs agree.
+            value['retained'] = {str(path): mode for path, mode in self.retained.items()}
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
     def apply(self):
         installed = self.owned()
@@ -262,7 +298,7 @@ class Runtime:
             self.control.mkdir(mode=0o700, parents=True)
             self.library.mkdir(mode=0o755, parents=True)
             native.publish(self.control/'marker', MARKER, None)
-            native.publish(self.control/'assets.json', (json.dumps({str(path): hashlib.sha256(data).hexdigest() for path, (data, _) in self.assets.items()})+'\n').encode(), None)
+            native.publish(self.control/'assets.json', self.inventory(), None)
         if self.data.is_symlink():
             raise ValueError('unsafe data directory')
         if self.data.exists() and (self.data.stat().st_uid != self.uid or stat.S_IMODE(self.data.stat().st_mode) != 0o700):
@@ -276,7 +312,7 @@ class Runtime:
         saved = json.loads((self.control/'assets.json').read_text())
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
                    and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
-        for path in self.assets:
+        for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
             if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
                 raise ValueError('managed asset changed')
@@ -292,7 +328,10 @@ class Runtime:
             if before != content:
                 native.publish(path, content, before, max_bytes=self.asset_limit(path))
             os.chmod(path, mode)
-        native.publish(self.control/'assets.json', (json.dumps({str(path): hashlib.sha256(data).hexdigest() for path, (data, _) in self.assets.items()})+'\n').encode(), native.snapshot(self.control/'assets.json'))
+        for path, mode in self.retained.items():
+            if self.asset_snapshot(path) is not None:
+                os.chmod(path, mode)
+        native.publish(self.control/'assets.json', self.inventory(), native.snapshot(self.control/'assets.json'))
         systemctl('daemon-reload')
         if self.selected:
             drain = self.data/'drain.json'

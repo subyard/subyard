@@ -26,7 +26,7 @@ set -euo pipefail
 root="${QA_EXACT_FIXTURE:?}"
 case "$1" in
   info) exit 0 ;;
-  list) printf 'RUNNING\n'; exit 0 ;;
+  list) printf '%s,RUNNING\n' "$2"; exit 0 ;;
   file)
     [ "$2" = push ] || exit 1
     target="${4#*\/srv\/}"

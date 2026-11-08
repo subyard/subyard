@@ -23,9 +23,20 @@ power_fail() {
   return 1
 }
 
-power_state() { # <project> <instance>
-  incus list "$2" --project "$1" -f csv -c s 2>/dev/null
+# The CSV <columns> of exactly <instance>, without its name, or nothing when it
+# is absent: `incus list NAME` also lists every instance whose name starts with NAME.
+# Column 4 (IPv4) prints only the first address line; an empty value means none.
+incus_instance_columns() { # <project> <instance> <columns> [timeout]
+  local rows
+  if [ -n "${4:-}" ]; then
+    rows="$(timeout "$4" incus list "$2" --project "$1" -f csv -c "n$3" 2>/dev/null)" || return
+  else
+    rows="$(incus list "$2" --project "$1" -f csv -c "n$3" 2>/dev/null)" || return
+  fi
+  printf '%s\n' "$rows" | awk -v prefix="$2," 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }'
 }
+
+power_state() { incus_instance_columns "$1" "$2" s; } # <project> <instance>
 
 # Validate the effective NetworkManager configuration, not merely our drop-in file: a later distro
 # file can override unmanaged-devices and recreate the route-hijack incident. No active NM is safe.

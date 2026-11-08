@@ -70,14 +70,14 @@ if [ "$mode" != apply ]; then
     [ "$address_attempts" -ge 1 ] || exit 1
     address_attempt=1
     while [ "$address_attempt" -le "$address_attempts" ]; do
-      [ -z "$(incus list "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -c4 -fcsv 2>/dev/null)" ] \
+      [ -z "$(incus_instance_columns "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" 4)" ] \
         || exit 0
       [ "$address_attempt" -eq "$address_attempts" ] || sleep 1
       address_attempt=$((address_attempt + 1))
     done
     exit 1
   fi
-  [ -n "$(incus list "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -c4 -fcsv 2>/dev/null)" ]
+  [ -n "$(incus_instance_columns "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" 4)" ]
   exit
 fi
 

@@ -12,7 +12,7 @@ import json,os,sys,tarfile
 from pathlib import Path
 args=sys.argv[1:]
 if os.environ.get('GIT_FETCH_FIXTURE_FAIL')==args[0]: sys.exit(1)
-if args[0]=='list': print(os.environ.get('GIT_FETCH_FIXTURE_STATE','RUNNING')); sys.exit()
+if args[0]=='list': print(args[1]+','+os.environ.get('GIT_FETCH_FIXTURE_STATE','RUNNING')); sys.exit()
 assert args[0]=='exec'
 Path(os.environ['GIT_FETCH_FIXTURE_CALLS']+'.argv').write_text(json.dumps(args))
 with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:

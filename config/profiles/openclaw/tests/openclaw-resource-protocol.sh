@@ -57,7 +57,7 @@ printf '%s\n' "$*" >>"$log"
 
 case "${1:-}" in
   info) exit 0 ;;
-  list) printf 'RUNNING\n'; exit 0 ;;
+  list) printf '%s,RUNNING\n' "$2"; exit 0 ;;
   file)
     if [ "${2:-}" = push ]; then
       case "${4:-}" in

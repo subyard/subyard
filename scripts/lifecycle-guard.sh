@@ -41,7 +41,7 @@ incus_preflight "$action"
 incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
   || die "instance '$YARD_INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
 
-state() { incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null; }
+state() { power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; }
 BRIDGE="${INCUS_BRIDGE:-${INCUS_NETWORK:-incusbr0}}"
 if [ "$publication_retry" = 1 ]; then
   [ "$action" = start ] && [ "$force" = 0 ] && [ "$reconcile" = 0 ] || die 'publication retry needs ordinary start'
@@ -83,10 +83,8 @@ case "$action" in
     info "starting $YARD_INSTANCE_NAME"
     power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
     info "waiting for $YARD_INSTANCE_NAME agent"
-    incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" || {
-      power_guest_start_failed "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-        "instance '$YARD_INSTANCE_NAME' agent did not become ready" || die "$POWER_ERROR"
-    }
+    incus_wait_yard_agent "instance '$YARD_INSTANCE_NAME' agent did not become ready" "retry '$(yard_cmd_hint) start'" \
+      || power_guest_start_failed "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$AGENT_WAIT_ERROR" || die "$POWER_ERROR"
     # Cloud-image seeding can replace the QEMU process scoped at first start.
     if [ -n "${VM_CPU_WEIGHT:-}" ]; then
       power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"

@@ -17,7 +17,7 @@ cat > "$TMP/bin/incus" <<'MOCK'
 set -euo pipefail
 case "$1" in
   info) ;;
-  list) printf 'RUNNING\n' ;;
+  list) printf '%s,RUNNING\n' "$2" ;;
   config)
     case "$3" in
       list) printf 'ssh\n' ;;

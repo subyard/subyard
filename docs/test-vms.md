@@ -705,7 +705,9 @@ dev/e2e/yard-network-policy.sh --slot N --vm 2  # select the second guest when n
 ```
 
 This controller owns one lease across setup, a selected-guest reboot and resumed validation;
-`--vm` accepts `1` or `2` and defaults to `1`. It changes
+`--vm` accepts `1` or `2` and defaults to `1`. With `SUBYARD_E2E_CANDIDATE_BUNDLE` it installs the
+frozen candidate through the supported installer inside its marker-owned state; without one it
+packages the transported worktree the same way. It changes
 network policy only inside the disposable VM and does not enable isolation on the operator's host.
 The skill's risk criteria determine whether the focused network lane needs broader lifecycle coverage.
 
