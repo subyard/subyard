@@ -13,11 +13,7 @@ import importlib.util,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 spec=importlib.util.spec_from_file_location('acceptance',root/'dev/release-acceptance.py')
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-source,receipt=module.load_bound(pathlib.Path(sys.argv[2]))
-check=receipt['checks']['verify']
-if (source.resolve()!=root.resolve() or check['status']!='passed'
-    or check.get('command')!=module.command_identity(['make','verify'],source)
-    or check.get('execution_environment')!=module.execution_environment()):
+if not module.verify_evidence_applies(root,pathlib.Path(sys.argv[2])):
     raise SystemExit('FAIL: test-vms prerequisite evidence is not applicable')
 print('test-vms preflight: reuse validated make verify PASS; installer then bundled recipe prerequisites already passed')
 PYREUSE

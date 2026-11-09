@@ -7,17 +7,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 preflight=0
 case "$#:${1:-}" in 0:) ;; 1:--preflight) preflight=1 ;; *) printf 'Usage: tests/run.sh [--preflight]\n' >&2; exit 2 ;; esac
 if [ "$preflight" = 1 ] && [ -n "${SUBYARD_E2E_LOCAL_EVIDENCE:-}" ]; then
-  # Reuse only the existing collector's fully validated, command-bound local gate.
+  # Reuse only the existing collector's fully validated, command-bound verify gate.
   python3 - "$ROOT" "$SUBYARD_E2E_LOCAL_EVIDENCE" <<'PY'
 import importlib.util,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 spec=importlib.util.spec_from_file_location('acceptance',root/'dev/release-acceptance.py')
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-source,receipt=module.load_bound(pathlib.Path(sys.argv[2]))
-check=receipt['checks']['verify']
-if (source.resolve()!=root.resolve() or check['status']!='passed'
-    or check.get('command')!=module.command_identity(['make','verify'],source)
-    or check.get('execution_environment')!=module.execution_environment()):
+if not module.verify_evidence_applies(root,pathlib.Path(sys.argv[2])):
     raise SystemExit('FAIL: local prerequisite evidence is not applicable')
 print('GitHub local preflight: reuse validated make verify PASS; protocol, ownership and fixture checks already executed')
 PY

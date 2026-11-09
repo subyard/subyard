@@ -281,6 +281,19 @@ def ci_prepared_result(name, candidate_id):
     return ["ci-prepared", candidate_id, CI_PREPARED_CHECKS[name]]
 
 
+def verify_evidence_applies(root, output):
+    """Whether validated local or CI-prepared verify evidence covers this source."""
+    source, receipt = load_bound(output)
+    check = receipt["checks"]["verify"]
+    if source.resolve() != root.resolve() or check["status"] != "passed":
+        return False
+    if check.get("command") == command_identity(["make", "verify"], source):
+        return check.get("execution_environment") == execution_environment()
+    return (check.get("execution") == "ci-preparation" and "preparation" in receipt
+            and counts_ci_preparation(source)
+            and check.get("command") == ci_prepared_result("verify", receipt["preparation"]["candidate_id"]))
+
+
 OPTIONAL_VM_NOT_RUN = {"status": "not-run", "reason": "optional VM check; run explicitly with --with-vms or --only"}
 
 

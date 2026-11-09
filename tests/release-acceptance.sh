@@ -146,6 +146,42 @@ class TestAcceptance(unittest.TestCase):
             result = subprocess.run(['bash',str(runner),'--preflight'], env=env, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
 
+    def test_owning_preflights_reuse_only_bound_ci_prepared_verify(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            runners = [f"config/profiles/{profile}/tests/run.sh" for profile in ("github", "test-vms")]
+            for name in ["dev/release-acceptance.py", ".github/workflows/release.yml", *runners]:
+                target = checkout / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / name, target)
+            prepared = directory / "prepared"
+            local_source, local_receipt = prepare_fixture(checkout, prepared)
+            m.bundle(checkout, prepared / "source.tar.gz")
+            shutil.copytree(local_source / ".subyard-acceptance/release", prepared / "assets")
+            identity = {key: local_receipt[key] for key in ("version", "source_fingerprint", "release_files")}
+            identity.update(candidate_id="own-candidate", source_archive_sha256=m.digest(prepared / "source.tar.gz"))
+            (prepared / "identity.json").write_text(json.dumps(identity))
+            output = directory / "accepted"
+            with patch.object(m, "ROOT", checkout), patch.object(m, "execution_environment", return_value=local_receipt["environment"]):
+                m.prepare(output, "test", prepared)
+            source, receipt = m.load_bound(output)
+            # CI evidence does not depend on the local runner's Go/toolchain identity.
+            receipt["checks"]["verify"]["execution_environment"] = {"go": "CI toolchain"}
+            env = dict(os.environ, SUBYARD_E2E_LOCAL_EVIDENCE=str(output))
+            for candidate_id, status in ((identity["candidate_id"], "passed"), ("foreign-candidate", "passed"),
+                                         (identity["candidate_id"], "failed")):
+                receipt["checks"]["verify"].update(command=m.ci_prepared_result("verify", candidate_id), status=status)
+                m.save(output, receipt)
+                for name in runners:
+                    with self.subTest(runner=name, candidate_id=candidate_id, status=status):
+                        result = subprocess.run(["bash", str(source / name), "--preflight"],
+                                                env=env, capture_output=True, text=True)
+                        self.assertEqual(result.returncode == 0, candidate_id == identity["candidate_id"] and status == "passed",
+                                         result.stdout + result.stderr)
+                        if result.returncode == 0:
+                            self.assertIn("reuse validated make verify PASS", result.stdout)
+
     def test_fast_default_keeps_vm_inventory_honest_and_source_bound(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
