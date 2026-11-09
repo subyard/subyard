@@ -106,7 +106,13 @@ def capture(data_dir, kind):
         config['cursor'] = '-'
         for _ in range(32):
             page = sources.fetch(config)
-            require(sources.consume(data_dir, config, page), 'owner records were not durably admitted')
+            # Like the production reader, a refused admission (outbox lock held by
+            # the live reader or collector, or capacity pending drain) is retried;
+            # re-admission of the same events is idempotent.
+            admit_deadline = time.monotonic()+30
+            while not sources.consume(data_dir, config, page):
+                require(time.monotonic()<admit_deadline, 'owner records were not durably admitted')
+                time.sleep(.2)
             count += len(page['events'])
             if not page['more']:
                 break
