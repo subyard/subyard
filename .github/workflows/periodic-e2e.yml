@@ -36,8 +36,9 @@ permissions:
 
 concurrency:
   group: periodic-e2e-${{ github.ref }}${{ inputs.origin && format('-retry-{0}', inputs.origin) || '' }}
-  # A new run replaces the previous one; retries always finish. A run still going when the next
-  # schedule starts six hours later is stuck, and keeping it would hold the group forever.
+  # A new run replaces the previous one on its branch; the supersede job also stops that run's
+  # retries, which otherwise finish. A run still going when the next schedule starts six hours
+  # later is stuck, and keeping it would hold the group forever.
   cancel-in-progress: ${{ !inputs.origin }}
 
 env:
@@ -84,6 +85,56 @@ jobs:
             done
           fi
           printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
+
+  # Concurrency replaces only the previous main run of a branch; its nested retries run in their own
+  # groups. A run that tests the branch therefore also cancels earlier retries there, and a retry
+  # dispatched while that happens cancels itself. Runs on other branches are left alone.
+  supersede:
+    needs: changes
+    if: ${{ needs.changes.outputs.run == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Replace earlier runs on this branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
+          ORIGIN: ${{ inputs.origin }}
+        run: |
+          retry='Nested VM checks on Intel, '
+          runs() {
+            gh run list --workflow periodic-e2e.yml --branch "$REF" --limit 100 \
+              --json databaseId,status,displayTitle --jq "$1"
+          }
+          if [ -z "$ORIGIN" ]; then
+            for id in $(runs ".[] | select(.databaseId < $RUN_ID and .status != \"completed\" and (.displayTitle | startswith(\"$retry\"))) | .databaseId"); do
+              if gh run cancel "$id"; then
+                printf 'Cancelled earlier nested retry run %s.\n' "$id" >> "$GITHUB_STEP_SUMMARY"
+              else
+                # A retry that finished meanwhile needs no cancellation.
+                [ "$(gh run view "$id" --json status --jq .status)" = completed ]
+              fi
+            done
+            exit 0
+          fi
+          # A newer main run that tests this branch supersedes the run this retry continues.
+          for id in $(runs ".[] | select(.databaseId > $ORIGIN and .databaseId != $RUN_ID and (.displayTitle | startswith(\"$retry\") | not)) | .databaseId"); do
+            for _ in $(seq 1 36); do
+              state="$(gh run view "$id" --json status,jobs --jq '"\(.status) " + ([.jobs[] | select(.name == "supersede") | "\(.status)/\(.conclusion)"] | join(""))')"
+              case "$state" in
+                *' completed/success')
+                  printf 'Run %s replaced run %s; this retry stops.\n' "$id" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"
+                  gh run cancel "$RUN_ID"
+                  exit 0 ;;
+                *' completed/'* | 'completed ') break ;;
+              esac
+              sleep 5
+            done
+          done
 
   candidate:
     needs: changes
