@@ -572,6 +572,115 @@ class Leases(unittest.TestCase):
         self.assertTrue(any('/dev/kvm' in call for call in calls))
         self.assertFalse(any('check-graphics' in call for call in calls))
 
+    def host_graphics_runtime(self):
+        emulator = self.root / 'sdk/emulator/emulator'
+        emulator.parent.mkdir(parents=True)
+        emulator.touch()
+        (self.root / 'drm/renderD128/device').mkdir(parents=True)
+        return poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root=str(self.root / 'sdk'),
+                                    runtime_user='subyard-android', gpu='host'))
+
+    def render_node(self, vendor, product):
+        device = self.root / 'drm/renderD128/device'
+        (device / 'vendor').write_text(vendor + '\n')
+        (device / 'device').write_text(product + '\n')
+
+    @contextlib.contextmanager
+    def host_graphics_preflight(self, run, real_capacity=False):
+        """Patch a ready x86_64 host with one render node; yields the mocked command runner."""
+        with contextlib.ExitStack() as stack:
+            for target, name, options in [
+                    (poolmod.Runtime, 'DRM_CLASS', dict(new=self.root / 'drm')),
+                    (poolmod.platform, 'machine', dict(return_value='x86_64')),
+                    (poolmod.os, 'access', dict(return_value=True)),
+                    (poolmod.shutil, 'which', dict(return_value='/usr/bin/tool')),
+                    (poolmod.Runtime, 'nameservers', dict(return_value=['1.1.1.1'])),
+                    (poolmod.Path, 'glob', dict(return_value=[poolmod.Path('/dev/dri/renderD128')])),
+                    (poolmod.pwd, 'getpwnam', dict(return_value=SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()))),
+                    (poolmod.os, 'chown', {}),
+                    (poolmod.tempfile, 'mkdtemp',
+                     dict(side_effect=lambda make=tempfile.mkdtemp, **_: make(dir=self.root))),
+            ] + ([] if real_capacity else [(poolmod.Runtime, 'check_capacity', {})]):
+                stack.enter_context(patch.object(target, name, **options))
+            yield stack.enter_context(patch.object(poolmod, 'run', **run))
+
+    def test_host_graphics_refuses_a_virtio_display_without_3d(self):
+        runtime = self.host_graphics_runtime()
+        result = SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+        for vendor, product, features, refused, probed in [
+                ('0x1af4', '0x1050', 0, True, True),      # Incus virtio-vga: no virgl
+                ('0x1af4', '0x1050', 1, False, True),     # virtio-gpu with 3D
+                ('0x8086', '0x56a0', None, False, False),  # a real GPU is never probed
+        ]:
+            self.render_node(vendor, product)
+            probe = (lambda node, value=features: value) if probed else \
+                (lambda node: (_ for _ in ()).throw(AssertionError('probed a non-virtio node')))
+            with self.subTest(vendor=vendor, features=features), \
+                 patch.object(poolmod.Runtime, 'virtio_3d_features', side_effect=probe), \
+                 self.host_graphics_preflight(dict(return_value=result)) as command:
+                if refused:
+                    with self.assertRaisesRegex(poolmod.PoolError, 'virtio display without 3D'):
+                        runtime.preflight(dict(device='phone'), [], dict(slot_id='001'))
+                    calls = [arguments.args[0] for arguments in command.call_args_list]
+                    self.assertFalse(any('--check-graphics' in call for call in calls))
+                    self.assertFalse(any('/dev/dri/renderD128' in call for call in calls))
+                else:
+                    runtime.preflight(dict(device='phone'), [], dict(slot_id='001'))
+                    calls = [arguments.args[0] for arguments in command.call_args_list]
+                    self.assertTrue(any('--check-graphics' in call for call in calls))
+
+    def test_host_graphics_probe_is_reported_independently_of_kvm_access(self):
+        runtime = self.host_graphics_runtime()
+        self.render_node('0x8086', '0x56a0')
+
+        def command(arguments, **_):
+            refused = '/dev/kvm' in arguments or '--check-graphics' in arguments
+            return SimpleNamespace(returncode=1 if refused else 0, stdout=b'', stderr=b'')
+        with self.host_graphics_preflight(dict(side_effect=command)) as run:
+            with self.assertRaises(poolmod.PoolError) as refused:
+                runtime.preflight(dict(device='phone'), [], dict(slot_id='001'))
+        message = str(refused.exception)
+        self.assertEqual(refused.exception.code, 'preflight')
+        kvm = message.find('cannot access /dev/kvm')
+        graphics = message.find('hardware graphics unavailable')
+        self.assertGreaterEqual(kvm, 0, message)
+        self.assertGreater(graphics, kvm, message)
+        self.assertNotIn('cannot access /dev/dri/renderD128', message)
+        calls = [arguments.args[0] for arguments in run.call_args_list]
+        self.assertTrue(any('--check-graphics' in call for call in calls))
+
+    def test_preflight_reports_refused_host_graphics_and_insufficient_memory_together(self):
+        cgroups = self.root / 'cgroups'
+        (cgroups / 'system.slice').mkdir(parents=True)
+        for directory in (cgroups, cgroups / 'system.slice'):
+            (directory / 'memory.max').write_text('max')
+            (directory / 'memory.current').write_text('0')
+        runtime = self.host_graphics_runtime()
+        self.render_node('0x1af4', '0x1050')
+        result = SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+        original_read_text = poolmod.Path.read_text
+        def constrained_memory(path, *args, **kwargs):
+            if str(path) == '/proc/meminfo':
+                return 'MemTotal:        7863296 kB\nMemAvailable:    7863296 kB\n'
+            return original_read_text(path, *args, **kwargs)
+        with patch.object(poolmod.Runtime, 'CGROUP_ROOT', cgroups), \
+             patch.object(poolmod.Runtime, 'HOST_MEMORY', self.root / 'absent-host-meminfo'), \
+             patch.object(poolmod.Runtime, 'physical_memory', return_value=None), \
+             patch.object(poolmod.Runtime, 'virtio_3d_features', return_value=0), \
+             patch.object(poolmod.Path, 'read_text', new=constrained_memory), \
+             self.host_graphics_preflight(dict(return_value=result), real_capacity=True) as command:
+            with self.assertRaises(poolmod.PoolError) as refused:
+                runtime.preflight(dict(device='tablet'), [dict(request=dict(device='tablet'), state='held')],
+                                  dict(slot_id='001'))
+        message = str(refused.exception)
+        self.assertEqual(refused.exception.code, 'preflight')
+        graphics = message.find('virtio display without 3D')
+        memory = message.find('insufficient memory')
+        self.assertGreaterEqual(graphics, 0, message)
+        self.assertGreater(memory, graphics, message)
+        calls = [arguments.args[0] for arguments in command.call_args_list]
+        self.assertFalse(any('--check-graphics' in call for call in calls))
+
     def test_emulator_ram_floors_admit_pair_and_reject_insufficient_memory(self):
         cgroups = self.root / 'cgroups'
         (cgroups / 'system.slice').mkdir(parents=True)

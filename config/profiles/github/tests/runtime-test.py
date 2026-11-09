@@ -108,6 +108,7 @@ class RuntimeTest(unittest.TestCase):
         (self.source/'bin').mkdir(parents=True)
         for name in ('owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'skills.json', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py', 'bin/broker'):
             (self.source/name).write_text(name)
+        (self.source/'bin/broker').chmod(0o755)
         (self.source/'profile.json').write_text('{"default_yards":["default"],"disabled_when":{"NESTED_E2E_VMS":"1"}}')
         shared = self.root/'config/skills'
         shared.mkdir()
@@ -331,6 +332,73 @@ class RuntimeTest(unittest.TestCase):
         (self.source/'bin/broker').write_text('new-native-runtime')
         changed, _ = runtime.observe()
         self.assertNotEqual(old['desired'], changed['desired'])
+
+    def test_unselected_source_run_needs_no_native_engine(self):
+        # A run from plain source builds no profile natives; nothing selects the broker.
+        os.environ['ENVIRONMENT_PROFILES'] = ''
+        self.ready = True
+        self.guest = ''
+        self.manager = b'ActiveState=inactive\nMainPID=0\nLoadState=not-found\n'
+        packaged, _ = runtime.observe()
+        (self.source/'bin/broker').unlink()
+        source, environment = runtime.observe()
+        self.assertEqual(source, packaged)
+        self.assertTrue(source['ownership_absent'])
+        self.assertEqual(environment['SUBYARD_PROFILE_SELECTED'], '0')
+        with patch.object(sys, 'argv', ['runtime.py', 'observe']), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            runtime.main()
+        self.assertEqual(json.loads(output.getvalue()), packaged)
+
+    def test_selected_profile_refuses_a_missing_or_unsafe_engine(self):
+        built = self.root/'.build/profiles/github/bin/broker'
+        packaged = self.source/'bin/broker'
+        packaged.unlink()
+        cases = (('missing', lambda: None, 'native GitHub broker engine is missing', ('github',)),
+                 ('not executable', lambda: (packaged.write_text('broker'), packaged.chmod(0o644)),
+                  'native GitHub broker engine is missing', ('github',)),
+                 ('symlinked packaged', lambda: packaged.symlink_to(self.root/'elsewhere'),
+                  'symlinked broker '+str(packaged), ('github', '')),
+                 ('symlinked built', lambda: (built.parent.mkdir(parents=True, exist_ok=True),
+                                              built.symlink_to(self.root/'elsewhere')),
+                  'symlinked broker '+str(built), ('github', '')),
+                 ('both symlinked', lambda: (packaged.symlink_to(self.root/'elsewhere'),
+                                             built.symlink_to(self.root/'elsewhere')),
+                  'symlinked broker '+str(packaged)+', '+str(built), ('github', '')))
+        for name, arrange, message, selections in cases:
+            for selected in selections:
+                with self.subTest(case=name, selected=selected):
+                    for path in (packaged, built):
+                        if path.is_symlink() or path.exists():
+                            path.unlink()
+                    arrange()
+                    os.environ['ENVIRONMENT_PROFILES'] = selected
+                    self.commands.clear()
+                    with self.assertRaisesRegex(runtime.Refusal, message):
+                        runtime.observe()
+                    self.assertEqual(self.commands, [])
+
+    def test_refusal_diagnostic_reaches_the_command_entry_point(self):
+        (self.source/'runtime.py').write_bytes((Path(__file__).parents[1]/'runtime.py').read_bytes())
+        (self.source/'bin/broker').unlink()
+        result = NATIVE_RUN([sys.executable, '-B', str(self.source/'runtime.py'), 'observe'],
+                            env=dict(self.environment, PATH=os.defpath), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('GitHub runtime refused: native GitHub broker engine is missing: selected profile github needs '
+                      f'{self.source/"bin/broker"} or {self.root/".build/profiles/github/bin/broker"}; build it with make build',
+                      result.stderr)
+        self.assertIn('GitHub runtime activation failed', result.stderr)
+
+    def test_selected_source_run_uses_the_built_engine(self):
+        (self.source/'bin/broker').unlink()
+        built = self.root/'.build/profiles/github/bin/broker'
+        built.parent.mkdir(parents=True)
+        built.write_text('built-native-runtime')
+        built.chmod(0o755)
+        first, _ = runtime.observe()
+        built.write_text('rebuilt-native-runtime')
+        self.assertNotEqual(runtime.observe()[0]['desired'], first['desired'])
 
     def test_git_mode_binds_runtime_assessment(self):
         old, _ = runtime.observe()

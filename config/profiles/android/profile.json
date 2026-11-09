@@ -64,6 +64,23 @@
       "maximum": 65535,
       "default": "15555",
       "host_listener": true
+    },
+    {
+      "name": "EMULATOR_GPU",
+      "type": "string",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "yard-init",
+      "default": "software-gles",
+      "enum": [
+        "software-gles",
+        "software",
+        "host"
+      ]
     }
   ]
 }

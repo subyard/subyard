@@ -633,7 +633,8 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 	if action != "start" && action != "stop" {
 		return fmt.Errorf("invalid network power action %q", action)
 	}
-	powerContext, cancel := context.WithTimeout(ctx, 45*time.Second)
+	incusWait, callerWait := yardnetwork.NetworkPowerTimeouts(action)
+	powerContext, cancel := context.WithTimeout(ctx, callerWait)
 	defer cancel()
 	server, err := client.networkServer(powerContext)
 	if err != nil {
@@ -643,7 +644,7 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 		return err
 	}
 	operation, err := server.UseProject(yard.Project).UpdateInstanceState(yard.Instance, api.InstanceStatePut{
-		Action: action, Timeout: 30, Force: false,
+		Action: action, Timeout: int(incusWait / time.Second), Force: false,
 	}, "")
 	if err != nil {
 		return normalizeError(action+" network-managed instance", err)
@@ -659,7 +660,8 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 	}
 	if action == "start" {
 		if err := client.applyVMCPU(powerContext, yard.Project, yard.Instance); err != nil {
-			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+			_, stopWait := yardnetwork.NetworkPowerTimeouts("stop")
+			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopWait)
 			defer cancel()
 			stopErr := client.NetworkPower(stopContext, yard, "stop")
 			return errors.Join(err, stopErr)

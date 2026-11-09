@@ -14,18 +14,31 @@ yard prerequisites and installs the toolchain under one confirmation. It install
 at `/srv/cache/android-sdk`, JDK at `/opt/jdk-17`, the in-yard client and
 the pool service. It also writes `/etc/profile.d/subyard-android.sh`; open a new login shell after
 installation to load the SDK environment. A selected profile alone does not prove installation.
-The yard needs x86_64 KVM. The shipped `config/profiles/android/profile.conf` explicitly selects
-`EMULATOR_GPU=software-gles`: headless SwiftShader OpenGL ES without a GPU render node or
+The yard needs x86_64 KVM. `EMULATOR_GPU` is a typed Android setting with the shipped default
+`software-gles`: headless SwiftShader OpenGL ES without a GPU render node or
 compositor. Guest Vulkan is explicitly disabled in this mode to reduce startup work on small
 VMs. Verbose guest-to-host log forwarding is silenced; guest log buffers remain available through
-`adb logcat`. Select `EMULATOR_GPU=software` for SwiftShader with Vulkan support; it can require more
+`adb logcat`. Select `software` for SwiftShader with Vulkan support; it can require more
 startup time and CPU capacity. Neither mode substitutes hardware rendering automatically.
-For hardware graphics, set `EMULATOR_GPU=host` and `YARD_DEVICES="kvm gpu"` in that profile,
-then converge the yard with idle pool slots. Host mode requires a working hardware render node
-and never falls back to software. KVM remains required in every mode. See the upstream
+For hardware graphics, the profile must also grant the render node: the shipped
+`config/profiles/android/profile.conf` sets `YARD_DEVICES="kvm"`, so change it to
+`YARD_DEVICES="kvm gpu"` in that profile. Then select host mode for the yard and converge it
+with idle pool slots:
+
+```sh
+yard -Y NAME config set EMULATOR_GPU host --scope yard
+yard -Y NAME init
+yard -Y NAME provision
+```
+
+`yard config fields EMULATOR_GPU` lists the allowed values and scopes, and
+`yard -Y NAME config show EMULATOR_GPU` shows the winning one; other values are refused.
+Host mode requires a working hardware render node and never falls back to software. KVM remains
+required in every mode. A VM yard's emulated virtio display has no 3D acceleration and renders in
+software, so the pool refuses host-mode leases there before allocation. See the upstream
 [graphics modes](https://developer.android.com/studio/run/emulator-acceleration#accel-graphics) and
 [slow-emulator troubleshooting](https://developer.android.com/studio/run/emulator-troubleshooting#emulator_runs_slow_after_an_update).
-These are profile settings,
+These are settings,
 not flags to `yard init`. Setup never changes the outer yard's trust lane or enables host
 privileges to work around missing devices. Both container and VM yards are supported.
 

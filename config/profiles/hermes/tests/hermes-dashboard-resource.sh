@@ -71,7 +71,7 @@ restore_pending() {
 }
 case "${1:-}" in
   info) exit 0 ;;
-  list) printf 'RUNNING\n' ;;
+  list) printf '%s,RUNNING\n' "$2" ;;
   config)
     case "${2:-}" in
       device)

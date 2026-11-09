@@ -23,7 +23,7 @@ cat >"$TMP/bin/incus" <<'SH'
 #!/usr/bin/env bash
 case "$1" in
   info) exit 0 ;;
-  list) printf 'RUNNING\n' ;;
+  list) printf '%s,RUNNING\n' "$2" ;;
   exec) printf '%s\n' "$*" >"$INCUS_LOG" ;;
   *) exit 0 ;;
 esac

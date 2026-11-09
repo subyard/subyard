@@ -109,7 +109,7 @@ cat > "$TMP/fake-bin/incus" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
   info) exit 0 ;;
-  list) printf 'RUNNING\n' ;;
+  list) printf '%s,RUNNING\n' "$2" ;;
   exec)
     case " $* " in
       *' id -u '*|*' id -g '*) printf '1000\n' ;;

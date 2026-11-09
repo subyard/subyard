@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -112,7 +114,8 @@ func (source *releaseConfiguration) load(ctx context.Context, cli *CLI, yard, ho
 		entry.loaded, entry.err = cli.resolveInstalledReleaseContext(ctx, yard, home)
 		if entry.err == nil && entry.loaded.Context.AccessKind != domain.AccessRemote {
 			var target configTarget
-			target, _, entry.err = cli.installedReleaseTarget(ctx, configTarget{Name: yard, Loaded: entry.loaded})
+			readiness := source.request.Mode == releasetransition.ProcessInspect
+			target, _, entry.err = cli.observeInstalledReleaseTarget(ctx, configTarget{Name: yard, Loaded: entry.loaded}, readiness)
 			entry.loaded = target.Loaded
 		}
 		source.yards[key] = entry
@@ -126,17 +129,51 @@ func (source *releaseConfiguration) load(ctx context.Context, cli *CLI, yard, ho
 // Recorded integration absence stays absent. Unrecorded legacy/core inputs keep
 // ordinary desired values; protected core receipts override those when known.
 func (cli *CLI) installedReleaseTarget(ctx context.Context, target configTarget) (configTarget, bool, error) {
-	installed, baseline, appliedErr := cli.appliedIntegrationTargetBaseline(ctx, target)
+	return cli.observeInstalledReleaseTarget(ctx, target, false)
+}
+
+// observeInstalledReleaseTarget with unavailableUnknown serves readiness
+// inspection only. A read that failed because the running guest agent did not
+// answer leaves those installed settings unknown, as for an absent or stopped
+// instance: owners that need the guest still report the unavailable agent from
+// their own observation, and host-side owners, including the gate of an
+// ownership-closing shutdown, are judged independently. Convergence keeps the
+// refusal; it would otherwise apply desired values over unread installed ones.
+// A guest exit status, invalid evidence or a stale read remains a refusal.
+func (cli *CLI) observeInstalledReleaseTarget(ctx context.Context, target configTarget, unavailableUnknown bool) (configTarget, bool, error) {
+	observing := cli
+	var probe *guestExecProbe
+	if unavailableUnknown {
+		_, executor := cli.statusPorts()
+		probe = &guestExecProbe{executor: executor}
+		operation := *cli
+		operation.options.Executor = probe
+		observing = &operation
+	}
+	unavailable := func(err error) bool {
+		lost := err != nil && probe != nil && probe.lost
+		if probe != nil {
+			probe.lost = false
+		}
+		return lost
+	}
+	installed, baseline, appliedErr := observing.appliedIntegrationTargetBaseline(ctx, target)
+	if unavailable(appliedErr) {
+		installed, baseline, appliedErr = target, false, nil
+	}
 	var guest map[string]string
 	var guestErr error
 	observed := installed
 	if appliedErr != nil {
 		observed = target
 	}
-	if observer, ok := profileActivationPlatform(cli, observed).(interface {
+	if observer, ok := profileActivationPlatform(observing, observed).(interface {
 		InstalledReleaseSettings(context.Context) (map[string]string, error)
 	}); ok {
 		guest, guestErr = observer.InstalledReleaseSettings(ctx)
+	}
+	if unavailable(guestErr) {
+		guest, guestErr = nil, nil
 	}
 	if appliedErr != nil {
 		appliedErr = fmt.Errorf("yard %s: inspect installed configuration: %w", target.Name, appliedErr)
@@ -195,6 +232,22 @@ func (cli *CLI) installedReleaseTarget(ctx context.Context, target configTarget)
 		}
 	}
 	return installed, baseline, nil
+}
+
+// guestExecProbe records whether the guest agent failed to run a command during
+// one installed-state read. A guest exit status is an answer, not unavailability.
+type guestExecProbe struct {
+	executor ports.InstanceExecutor
+	lost     bool
+}
+
+func (probe *guestExecProbe) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	result, err := probe.executor.Exec(ctx, project, instance, request)
+	var exit *ports.GuestExitError
+	if err != nil && ctx.Err() == nil && !errors.As(err, &exit) {
+		probe.lost = true
+	}
+	return result, err
 }
 
 func (source *releaseConfiguration) runtime(runtime reconcileruntime.Runtime) reconcileruntime.Runtime {

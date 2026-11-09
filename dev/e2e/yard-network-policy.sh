@@ -68,10 +68,11 @@ controller_main() {
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 
   controller_cleanup() {
+    # Capture the exit status before any other statement resets it.
+    rc=$?
     existing_directory=''
     clean_succeeded=0
     old_directory_cleaned=0
-    rc=$?
     trap - EXIT INT TERM
     set +e
     if [ "$prepared" = 1 ] && [ -n "${bundle:-}" ] && [ -n "${bundle_hash:-}" ]; then
@@ -254,7 +255,7 @@ ok() { printf '  [ ok ] %s\n' "$*"; }
 [ "$MODE" = prepare ] || [ "$MODE" = resume ] || [ "$MODE" = clean ] \
   || [ "$MODE" = recover ] \
   || die 'guest mode must be prepare, resume, clean, or recover'
-for command in curl go incus jq sha256sum sg ss sudo timeout; do
+for command in curl incus jq sha256sum sg ss sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -529,7 +530,10 @@ token="${SUBYARD_E2E_NETWORK_TOKEN:-}"
 STATE="/var/tmp/subyard-yard-network-policy.$token"
 MARKER="subyard-yard-network-policy-e2e-v1-$token"
 YARDS=("net-a-$token" "net-b-$token" "net-c-$token")
-YARD_BIN="$STATE/yard"
+# The frozen candidate is installed through the supported bootstrap into the
+# marker-owned state, so it carries its migration ledger and host services.
+YARD_BIN="$STATE/bin/yard"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
 case "$MODE" in
   prepare)
     [ ! -e "$STATE" ] || die "marker-owned state already exists: $STATE"
@@ -566,7 +570,6 @@ if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
 fi
 
 export SUBYARD_OPERATOR_HOME="$HOME"
-export SUBYARD_REPOSITORY_ROOT="$ROOT"
 export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
@@ -712,9 +715,11 @@ fi
 
 for name in "${YARDS[@]:0:2}"; do create_yard_config "$name"; done
 
-info 'building the candidate and creating two normal local yards before isolation'
-"$ROOT/dev/build-engine.sh" --force
-install -m 0755 "$ROOT/.build/yard" "$YARD_BIN"
+info 'installing the candidate and creating two normal local yards before isolation'
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+installed="$(release_candidate_install "$ROOT" "$STATE")" || die 'candidate installation failed'
+[ "$installed" = "$YARD_BIN" ] || die "candidate launcher is not $YARD_BIN"
 status_json | jq -e '
   .isolation == false and .appliedIsolation == false and
   ((.links // []) | length == 0) and ((.bindings // []) | length == 0) and

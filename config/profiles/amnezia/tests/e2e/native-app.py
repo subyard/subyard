@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the unmodified AmneziaVPN 5.0.3.0 GUI on leased VM2.
+"""Drive the unmodified AmneziaVPN 5.1.0.6 GUI on leased VM2.
 
 install
 setup --host IPV4 --ssh-port PORT --user USER --key-file FILE --udp-port PORT
@@ -11,16 +11,14 @@ self-check
 
 The controller interleaves these actions with independent traffic probes. This
 helper never implements installation, peer generation or revocation on the server.
-Upstream reference: github.com/amnezia-vpn/amnezia-client/tree/5.0.3.0
+Upstream reference: github.com/amnezia-vpn/amnezia-client/tree/5.1.0.6
 """
 
 import argparse
 import collections
 import configparser
-import csv
 import hashlib
 import ipaddress
-import io
 import json
 import os
 from pathlib import Path
@@ -37,11 +35,11 @@ import urllib.request
 
 ROOT = Path('/var/tmp/subyard-amnezia-native-app')
 MARKER = 'subyard-amnezia-native-app-v1'
-VERSION = '5.0.3.0'
-ASSET = 'AmneziaVPN_5.0.3.0_linux_x64.run'
+VERSION = '5.1.0.6'
+ASSET = 'AmneziaVPN_5.1.0.6_linux_x64.run'
 URL = f'https://github.com/amnezia-vpn/amnezia-client/releases/download/{VERSION}/{ASSET}'
-# GitHub release asset metadata, checked 2026-10-05; never execute an unchecked asset.
-DIGEST = '0335f2643f58c4d7494be4c6d47582574fa7e5a463450e9a47b0c5c2eda797c2'
+# GitHub release asset metadata (tag commit ac175c8a), checked 2026-11-05; never execute an unchecked asset.
+DIGEST = 'f60a4f373332dac8465bd9b8e4f233ee3aa32131fe124d31ca70bc499c73496f'
 LAUNCHER = '/opt/AmneziaVPN/bin/AmneziaVPN'
 GUI_BINARY = LAUNCHER
 SESSION = ROOT / 'session.json'
@@ -49,12 +47,18 @@ SETTINGS = ROOT / 'config' / 'AmneziaVPN.ORG' / 'AmneziaVPN.conf'
 FAILURE_EVIDENCE = ROOT / 'failure'
 # PageUpdate.qml: every state of the button that only this page shows, except its generic Retry.
 UPDATE_PAGE_BUTTONS = ('Update app', 'Downloading update...', 'Install update')
+# PageStart.qml TabBarButtonType names. The bar is hidden while a page is pushed above its tab page.
+MAIN_TABS = ('Home', 'Share', 'Settings', 'Add')
+AWG_FORMAT = 'AmneziaWG native format'
+SCAN_CONTROL = 'Check the server for previously installed Amnezia services'
+UPDATE_PACKAGES = 'Update server packages'
 # Evidence keeps only these fixture-known labels. Other accessible names can hold private values.
-EVIDENCE_LABELS = frozenset(UPDATE_PAGE_BUTTONS + (
-    'AmneziaVPN', "Let's get started", 'Self-hosted VPN', 'Manual', 'AmneziaWG', 'Continue', 'Start configuring',
-    'Install', 'Installing', 'Cancel installation', 'Connect', 'Connection', 'Users', 'Share', 'Revoke',
-    'Show connection settings', 'Save', 'Save AmneziaWG config', 'Settings', 'Servers', 'Protocols', 'Services',
-    'Management', 'Close application', 'Close', 'Cancel', 'Retry'))
+EVIDENCE_LABELS = frozenset(UPDATE_PAGE_BUTTONS + MAIN_TABS + (
+    'AmneziaVPN', "Let's get started", 'Self-hosted VPN', 'Manual', 'AmneziaWG', 'Continue', 'Back',
+    'Install', 'Cancel installation', 'Connect', 'Connection', 'Users', 'Revoke', 'Rename',
+    'For the AmneziaVPN app', AWG_FORMAT, 'Copy', 'Show connection settings', 'Save', 'Save AmneziaWG config',
+    'Servers', 'Protocols', 'Services', 'Management', SCAN_CONTROL, 'Close application', 'Close', 'Cancel',
+    'Retry', UPDATE_PACKAGES, 'Reboot server', 'Reboot', 'Not now'))
 
 
 class Failure(Exception):
@@ -124,8 +128,7 @@ def guard():
 
 def run(command, timeout=30, capture=False, env=None, input_data=None, operation='external'):
     require(operation in ('external', 'apt-update', 'apt-install', 'installer-help', 'installer-install',
-                          'pointer-click', 'pointer-tab', 'frame-capture', 'ocr',
-                          'clipboard-write', 'clipboard-clear', 'keyboard-input'),
+                          'pointer-click', 'frame-capture', 'clipboard-write', 'clipboard-clear', 'keyboard-input'),
             'invalid external operation label')
     diagnostic = f'external command failed operation={operation}'
     try:
@@ -152,10 +155,8 @@ def install():
     run(['apt-get', 'install', '-y', '-qq', 'xvfb', 'xdotool', 'xclip', 'dbus-x11',
          'at-spi2-core', 'python3-pyatspi', 'libxcb-cursor0', 'libxcb-xinerama0',
          'libxcb-icccm4', 'libxcb-keysyms1', 'libopengl0', 'libxkbcommon-x11-0',
-         'libfontconfig1', 'libxcb-shape0', 'libegl1', 'imagemagick', 'tesseract-ocr'], timeout=300,
+         'libfontconfig1', 'libxcb-shape0', 'libegl1', 'imagemagick'], timeout=300,
         operation='apt-install')
-    require('eng' in run(['tesseract', '--list-langs'], capture=True).decode().splitlines(),
-            'English OCR data is unavailable')
     asset = ROOT / ASSET
     digest = hashlib.sha256()
     try:
@@ -378,78 +379,43 @@ def close():
         SESSION.unlink()
 
 
-class VisibleText:
-    """Geometry of one uniquely recognized phrase; text never leaves OCR memory."""
-    def __init__(self, rectangle):
-        self.rectangle = rectangle
-
-    def queryComponent(self):
-        return self
-
-    def getExtents(self, coordinates):
-        return self.rectangle
+def dialog_of(node):
+    # Qt exposes each QML Popup (SnackbarType, SheetType, LoadingOverlayType) as a dialog.
+    parent = node.parent
+    for _ in range(32):
+        if parent is None or parent.getRoleName() == 'dialog':
+            return parent
+        parent = parent.parent
+    return None
 
 
-def visible_text(tsv, names, frame, scale=1):
-    """Accept complete lines, including geometrically adjacent wrapped lines."""
-    normalized = lambda value: ' '.join(value.lower().split())
-    targets = {normalized(name) for name in names}
-    lines = collections.defaultdict(list)
-    for row in csv.DictReader(io.StringIO(tsv), delimiter='\t'):
-        if row['level'] != '5' or not row['text'].strip():
-            continue
-        x, y, width, height = (int(row[key]) for key in ('left', 'top', 'width', 'height'))
-        confidence = float(row['conf'])
-        valid = (80 <= confidence <= 100 and x >= 0 and y >= 0 and width > 0 and height > 0
-                 and x + width <= frame.width * scale and y + height <= frame.height * scale)
-        key = tuple(int(row[key]) for key in ('page_num', 'block_num', 'par_num', 'line_num'))
-        lines[key].append((x, y, width, height, row['text'], valid))
-    matches = {}
-    # Sparse-text OCR can put each wrapped line in a separate block. Use screen
-    # order and the adjacency guards below, rather than its paragraph IDs.
-    ordered = sorted(lines, key=lambda key: (key[0], min(word[1] for word in lines[key]),
-                                             min(word[0] for word in lines[key])))
-    for index, key in enumerate(ordered):
-        words, previous = [], None
-        for next_key in ordered[index:]:
-            if next_key[0] != key[0]:
-                break
-            line = sorted(lines[next_key])
-            left, top = min(word[0] for word in line), min(word[1] for word in line)
-            right = max(word[0] + word[2] for word in line)
-            bottom = max(word[1] + word[3] for word in line)
-            if previous:
-                old_left, old_top, old_right, old_bottom = previous
-                if (top < old_bottom or top - old_bottom > 2 * max(bottom - top, old_bottom - old_top)
-                        or right <= old_left or left >= old_right):
-                    break
-            words.extend(line)
-            phrase = normalized(' '.join(word[4] for word in words))
-            if phrase in targets:
-                x, y = min(word[0] for word in words), min(word[1] for word in words)
-                end_x = max(word[0] + word[2] for word in words)
-                end_y = max(word[1] + word[3] for word in words)
-                matches[(x, y, end_x - x, end_y - y)] = all(word[5] for word in words)
-            if not any(target.startswith(phrase + ' ') for target in targets):
-                break
-            previous = (left, top, right, bottom)
-    if len(matches) != 1 or not all(matches.values()):
-        return []
-    x, y, width, height = next(iter(matches))
-    left, top = x // scale, y // scale
-    right = (x + width + scale - 1) // scale
-    bottom = (y + height + scale - 1) // scale
-    return [VisibleText(SimpleNamespace(x=frame.x + left, y=frame.y + top,
-                                        width=right - left, height=bottom - top))]
+def outermost(nodes):
+    # BasicCardType repeats its name on its chevron IconButtonType child, which
+    # clicks the card: a match nested inside another match is the same control.
+    def nested(node):
+        try:
+            parent = node.parent
+            for _ in range(32):
+                if parent is None:
+                    return False
+                if any(parent == other for other in nodes):
+                    return True
+                parent = parent.parent
+        except Exception:
+            pass
+        return False
+    return [node for node in nodes if not nested(node)]
 
 
 def installation_evidence(nodes):
-    # 5.0.3.0: main2.qml opens PopupType for PageController.showErrorMessage;
-    # pageController.cpp renders the public ErrorCode prefix in that modal popup.
-    # Read bounded text in memory, but return only numeric codes and fixed UI flags.
-    controls = ('Installing', 'Cancel installation', 'Connection', 'Users', 'Share')
+    # main2.qml shows PageController.showErrorMessage in a closable SnackbarType: its Close
+    # button is accessible, while its plain Text message is not, so a code is read only if
+    # an accessible text carries it. Read bounded text in memory, but return only numeric
+    # codes and fixed UI flags.
+    controls = ('Cancel installation', 'Connection', 'Users', 'Share')
     visible = set()
     errors = set()
+    shown = False
     for node in nodes:
         try:
             label = node.name
@@ -457,17 +423,10 @@ def installation_evidence(nodes):
                 visible.add(label.strip())
             if node.getRoleName() == 'progress bar':
                 visible.add('progress bar')
-            parent = node
-            for _ in range(32):
-                if parent is None:
-                    break
-                if parent.getRoleName() == 'dialog':
-                    break
-                parent = parent.parent
-            else:
+            if dialog_of(node) is None:
                 continue
-            if parent is None or parent.getRoleName() != 'dialog':
-                continue
+            if node.getRoleName() in ('push button', 'button') and isinstance(label, str) and label.strip() == 'Close':
+                shown = True
             texts = [label] if isinstance(label, str) and len(label) <= 4096 else []
             if node.getRoleName() in ('text', 'label'):
                 try:
@@ -485,15 +444,35 @@ def installation_evidence(nodes):
                     errors.add(int(match[1]))
         except Exception:
             continue
-    return {'error_codes': sorted(errors)[:8], 'visible_controls': sorted(visible)}
+    return {'error_codes': sorted(errors)[:8], 'error_shown': shown or bool(errors),
+            'visible_controls': sorted(visible)}
+
+
+def notification_shown(nodes):
+    # A SnackbarType notification has no accessible child: its message is a plain Text item
+    # and its action button stays hidden. Busy overlays, sheets and errors expose children.
+    dialogs, occupied = [], []
+    for node in nodes:
+        try:
+            if node.getRoleName() == 'dialog':
+                dialogs.append(node)
+            else:
+                parent = dialog_of(node)
+                if parent is not None:
+                    occupied.append(parent)
+        except Exception:
+            continue
+    return any(not any(dialog == other for other in occupied) for dialog in dialogs)
 
 
 def wait_native_installation(gui, ready):
     def outcome():
         evidence = gui.installation_evidence()
-        # PageSetupWizardInstalling.qml shows a progress bar: no OCR or click until it leaves.
-        if evidence['error_codes'] or 'progress bar' in evidence['visible_controls']:
-            return evidence['error_codes']
+        if evidence['error_shown']:
+            return evidence['error_codes'] or ['unavailable']
+        # PageSetupWizardInstalling.qml shows a progress bar: no click until it leaves.
+        if 'progress bar' in evidence['visible_controls']:
+            return None
         return ready() and 'ready'
 
     result = gui.wait(outcome, 'native installation completion', 360)
@@ -525,6 +504,19 @@ class GUI:
                     self.walk_complete = False
         return result
 
+    def owned_nodes(self):
+        state = json.loads(private_file(SESSION))
+        app = state['app']
+        require(process_identity(app['pid']) == app['start'], 'owned application session is unavailable')
+        nodes = []
+        for node in self.nodes():
+            try:
+                if node.getApplication().get_process_id() == app['pid']:
+                    nodes.append(node)
+            except Exception:
+                pass
+        return nodes
+
     def refuse_update_page(self):
         try:
             present = any(node.name.strip() in UPDATE_PAGE_BUTTONS for node in self.nodes())
@@ -547,37 +539,26 @@ class GUI:
             time.sleep(0.25)
         raise TimedOut(f'GUI timed out waiting for {description}{last_error}')
 
-    def matching(self, names):
+    def roles(self, *names):
+        return tuple(getattr(self.api, 'ROLE_' + name) for name in names)
+
+    def matching(self, names, roles=None):
+        # 5.1.0.6 controls carry accessible names: Accessible.name or their text.
         if isinstance(names, str):
             names = (names,)
-        nodes = self.nodes()
-        named = [node for node in nodes if node.name.strip() in names]
-        if named:
-            return named
-        frames = [node for node in nodes if node.getRole() in (self.api.ROLE_FRAME, self.api.ROLE_WINDOW)]
-        if len(frames) != 1:
-            return []
-        state = json.loads(private_file(SESSION))
-        app = state['app']
-        require(process_identity(app['pid']) == app['start']
-                and frames[0].getApplication().get_process_id() == app['pid']
-                and os.environ.get('DISPLAY') == state['environment']['DISPLAY'],
-                'OCR requires the owned application session')
-        frame = frames[0].queryComponent().getExtents(self.api.DESKTOP_COORDS)
-        require(frame.x >= 0 and frame.y >= 0 and 0 < frame.width <= 1024 and 0 < frame.height <= 900
-                and frame.x + frame.width <= 1024 and frame.y + frame.height <= 900,
-                'OCR requires one bounded application frame')
-        # OpenMP threads spin against each other on a contended VM, and one costs nothing
-        # idle. These limits only catch a hung tool: the caller's wait bounds a slow host.
-        single_thread = dict(os.environ, OMP_THREAD_LIMIT='1')
-        image = run(['import', '-window', 'root', '-crop',
-                     f'{frame.width}x{frame.height}+{frame.x}+{frame.y}', '-resize', '200%', 'png:-'],
-                    capture=True, env=single_thread, timeout=30, operation='frame-capture')
-        require(len(image) <= 12582912, 'OCR frame capture is too large')
-        tsv = run(['tesseract', 'stdin', 'stdout', '-l', 'eng', '--psm', '11', 'tsv'],
-                  capture=True, env=single_thread, input_data=image, timeout=30, operation='ocr')
-        require(len(tsv) <= 262144, 'OCR output is too large')
-        return visible_text(tsv.decode(), names, frame, scale=2)
+        return outermost([node for node in self.nodes()
+                          if node.name.strip() in names and (roles is None or node.getRole() in roles)])
+
+    def unique(self, names, roles):
+        found = self.matching(names, roles)
+        return found if len(found) == 1 else None
+
+    def showing(self, node):
+        try:
+            state = node.getState()
+            return state.contains(self.api.STATE_SHOWING) and not state.contains(self.api.STATE_DEFUNCT)
+        except Exception:
+            return False
 
     def click_node(self, node):
         evidence = getattr(self, 'share_evidence', None)
@@ -586,7 +567,7 @@ class GUI:
             role = 'unknown'
             try:
                 candidate = node.getRoleName()
-                if candidate in ('button', 'page tab', 'text', 'label'):
+                if candidate in ('button', 'push button', 'radio button', 'list item', 'page tab', 'text', 'label'):
                     role = candidate
             except Exception:
                 pass
@@ -626,148 +607,48 @@ class GUI:
                 receipt['dispatch_error'] = 'pointer-exception'
             raise
 
-    def click(self, names, seconds=30, description='a named control'):
-        nodes = self.wait(lambda: self.matching(names), description, seconds)
+    def click(self, names, seconds=30, description='a named control', roles=None, unique=False):
+        def target():
+            nodes = self.matching(names, roles)
+            # A page transition briefly shows both pages; unique waits for one of them.
+            return nodes if nodes and (not unique or len(nodes) == 1) else None
+        nodes = self.wait(target, description, seconds)
         evidence = getattr(self, 'share_evidence', None)
         if isinstance(evidence, dict):
             evidence['candidate_count'] = min(len(nodes), 3000)
-        # Qt labels inside custom clickable rows also work through their geometry.
         self.click_node(nodes[0])
         time.sleep(0.35)
 
-    def cards(self, role):
-        nodes = self.nodes()
-        frames = [node for node in nodes if node.getRole() in (self.api.ROLE_FRAME, self.api.ROLE_WINDOW)]
-        if len(frames) != 1:
-            return []
-        frame = frames[0].queryComponent().getExtents(self.api.DESKTOP_COORDS)
-        cards = []
-        for node in nodes:
-            if node.getRole() != role or not node.getState().contains(self.api.STATE_ENABLED):
-                continue
-            rectangle = node.queryComponent().getExtents(self.api.DESKTOP_COORDS)
-            # Both pinned wizard card components fill the page with 16 px side margins.
-            if (abs(rectangle.x - frame.x - 16) <= 2
-                    and abs(rectangle.width - frame.width + 32) <= 2
-                    and rectangle.height >= 64 and rectangle.y >= frame.y
-                    and rectangle.y + rectangle.height <= frame.y + frame.height):
-                cards.append((rectangle.y, rectangle.y + rectangle.height, node))
-        cards.sort(key=lambda item: item[0])
-        if any(left[1] > right[0] for left, right in zip(cards, cards[1:])):
-            return []
-        return cards
+    def tab(self, name):
+        require(name in MAIN_TABS, 'unknown main tab')
+        self.click(name, description=f'main {name} tab', roles=self.roles('PAGE_TAB'), unique=True)
 
-    def click_setup_card(self, names, manual=False):
-        role = self.api.ROLE_RADIO_BUTTON if manual else self.api.ROLE_PUSH_BUTTON
-        description = 'manual installation card' if manual else 'self-hosted server card'
-
-        def target():
-            named = self.matching(names)
-            if named:
-                return named[0]
-            cards = self.cards(role)
-            if (not (len(cards) == 2 if manual else 2 <= len(cards) <= 6)
-                    or any(item[2].name.strip() for item in cards)):
-                return None
-            # ConfigSource variants start with VPN by Amnezia, then Self-hosted VPN.
-            # Easy has exactly one Automatic delegate, followed by its Manual footer.
-            if not manual and abs(cards[1][0] - cards[0][1] - 16) > 2:
-                return None
-            return cards[1][2]
-
-        self.click_node(self.wait(target, description, 90 if manual else 30))
-        time.sleep(0.35)
-        if manual:
-            def selected():
-                cards = self.cards(role)
-                return len(cards) == 2 and cards[1][2].getState().contains(self.api.STATE_CHECKED)
-            self.wait(selected, 'manual installation selection')
-
-    def click_awg(self):
-        def target():
-            named = self.matching('AmneziaWG')
-            if named:
-                return named[0]
-            nodes = self.nodes()
-            frames = [node for node in nodes if node.getRole() in (self.api.ROLE_FRAME, self.api.ROLE_WINDOW)]
-            if (len(frames) != 1 or self.fields()
-                    or any(node.getRole() == self.api.ROLE_RADIO_BUTTON for node in nodes)):
-                return None
-            frame = frames[0].queryComponent().getExtents(self.api.DESKTOP_COORDS)
-            buttons = [node for node in nodes if node.getRole() == self.api.ROLE_PUSH_BUTTON]
-            back, arrows = [], []
-            for node in buttons:
-                if node.name.strip() or not node.getState().contains(self.api.STATE_ENABLED):
-                    return None
-                rectangle = node.queryComponent().getExtents(self.api.DESKTOP_COORDS)
-                if abs(rectangle.width - 40) > 2 or abs(rectangle.height - 40) > 2:
-                    return None
-                if abs(rectangle.x - frame.x - 8) <= 2 and abs(rectangle.y - frame.y - 20) <= 2:
-                    back.append(node)
-                elif (abs(rectangle.x - frame.x - frame.width + 56) <= 2
-                      and rectangle.y >= frame.y + 76
-                      and rectangle.y + rectangle.height <= frame.y + frame.height):
-                    arrows.append((rectangle.y, node))
-            arrows.sort(key=lambda item: item[0])
-            if (len(back) != 1 or not 4 <= len(arrows) <= 5 or len(buttons) != len(arrows) + 1
-                    or any(right[0] - left[0] < 70 for left, right in zip(arrows, arrows[1:]))):
-                return None
-            # PageSetupWizardProtocols sorts installPageOrder; permitted Awg2 is first.
-            # LabelWithButtonType exposes its 40 px arrow rather than its plain Text title.
-            return arrows[0][1]
-
-        self.click_node(self.wait(target, 'AmneziaWG protocol control'))
-        self.wait(lambda: len(self.fields()) == 1 and self.matching('Install'), 'AmneziaWG port screen')
+    def back_to_tabs(self):
+        # NavigationBarType's Back closes one pushed page. The fixture opens at most three.
+        for _ in range(3):
+            if self.unique('Settings', self.roles('PAGE_TAB')):
+                return
+            back = self.wait(lambda: self.unique('Back', self.roles('PUSH_BUTTON')), 'page back control')[0]
+            self.click_node(back)
+            self.wait(lambda: not self.showing(back), 'closed pushed page')
+        self.wait(lambda: self.unique('Settings', self.roles('PAGE_TAB')), 'main tab bar')
 
     def click_saved_server(self):
         rows = []
 
         def target():
             rows.clear()
-            nodes = self.nodes()
-            frames = [node for node in nodes if node.getRole() in (self.api.ROLE_FRAME, self.api.ROLE_WINDOW)]
-            buttons = [node for node in nodes if node.getRole() == self.api.ROLE_PUSH_BUTTON]
-            if (len(frames) != 1 or self.fields()
+            nodes = self.owned_nodes()
+            names = [node.name.strip() for node in nodes]
+            # PageSettingsServersList: a NavigationBar Back and one ListItemType per saved server.
+            # PageSettings stays showing during the push transition; its footer row marks it.
+            if ('Close application' in names or names.count('Back') != 1 or self.fields()
                     or any(node.getRole() == self.api.ROLE_RADIO_BUTTON for node in nodes)):
                 return None
-            state = json.loads(private_file(SESSION))
-            app = state['app']
-            require(process_identity(app['pid']) == app['start']
-                    and frames[0].getApplication().get_process_id() == app['pid']
-                    and os.environ.get('DISPLAY') == state['environment']['DISPLAY'],
-                    'server settings require the owned application session')
-            frame = frames[0].queryComponent().getExtents(self.api.DESKTOP_COORDS)
-            if (frame.x < 0 or frame.y < 0 or frame.width <= 0 or frame.height <= 0
-                    or frame.x + frame.width > 1024 or frame.y + frame.height > 900):
-                return None
-            back, arrows = [], []
-            for button in buttons:
-                if not all(button.getState().contains(value) for value in
-                           (self.api.STATE_SHOWING, self.api.STATE_ENABLED)):
-                    return None
-                parent = button.get_parent()
-                for _ in range(100):
-                    if parent is None or parent.getRole() in (self.api.ROLE_FRAME, self.api.ROLE_WINDOW):
-                        break
-                    parent = parent.get_parent()
-                if parent != frames[0]:
-                    return None
-                rectangle = button.queryComponent().getExtents(self.api.DESKTOP_COORDS)
-                if (abs(rectangle.width - 40) > 2 or abs(rectangle.height - 40) > 2
-                        or rectangle.x < frame.x or rectangle.y < frame.y
-                        or rectangle.x + rectangle.width > frame.x + frame.width
-                        or rectangle.y + rectangle.height > frame.y + frame.height):
-                    return None
-                if abs(rectangle.x - frame.x - 8) <= 2 and abs(rectangle.y - frame.y - 20) <= 2:
-                    back.append(button)
-                elif abs(rectangle.x - frame.x - frame.width + 56) <= 2 and rectangle.y >= frame.y + 76:
-                    arrows.append(button)
-            # PageSettingsServersList has one back control and one row per saved server;
-            # its plain title is unregistered, while LabelWithButtonType exposes the arrow.
-            if len(back) != 1 or len(back) + len(arrows) != len(buttons):
-                return None
-            rows.append(len(arrows))
-            return arrows[0] if len(arrows) == 1 else None
+            items = [node for node in nodes if node.getRole() == self.api.ROLE_LIST_ITEM
+                     and node.getState().contains(self.api.STATE_ENABLED)]
+            rows.append(len(items))
+            return items[0] if len(items) == 1 else None
 
         try:
             row = self.wait(target, 'saved native administration server')
@@ -776,7 +657,7 @@ class GUI:
             raise Failure(f'Servers page must list one saved server: rows={rows[0]}' if rows else
                           f'Servers page was not reached after selecting Servers ({timeout})') from None
         self.click_node(row)
-        self.wait(lambda: self.matching('Management'), 'native server management page')
+        self.wait(lambda: self.matching('Management', self.roles('PAGE_TAB')), 'native server management page')
 
     def fields(self):
         fields = []
@@ -817,58 +698,51 @@ class GUI:
         require(remaining > 0, 'native Management activation deadline expired')
         time.sleep(min(0.25, remaining))
 
-    def tab(self, index):
-        frames = self.wait(lambda: [node for node in self.nodes()
-                                   if node.getRoleName() in ('frame', 'window')], 'main application window')
-        frame = frames[0].queryComponent().getExtents(self.api.DESKTOP_COORDS)
-        # PageStart.qml 319-428: four icon-only tabs with 96 px side padding.
-        x = frame.x + 96 + int((frame.width - 192) * (index + 0.5) / 4)
-        y = frame.y + frame.height - 32
-        run(['xdotool', 'mousemove', '--sync', str(x), str(y), 'click', '1'], operation='pointer-tab')
-        time.sleep(0.5)
-
     def diagnostics(self):
         # Never dump accessible names/values: they can contain credentials/configs.
         return dict(collections.Counter(node.getRoleName() for node in self.nodes()))
 
     def installation_evidence(self):
-        state = json.loads(private_file(SESSION))
-        app = state['app']
-        require(process_identity(app['pid']) == app['start'], 'owned application session is unavailable')
-        nodes = []
-        for node in self.nodes():
-            try:
-                if node.getApplication().get_process_id() == app['pid']:
-                    nodes.append(node)
-            except Exception:
-                pass
-        return installation_evidence(nodes)
+        return installation_evidence(self.owned_nodes())
 
 
 def setup(gui, args):
     key = private_file(args.key_file).decode()
     require('PRIVATE KEY-----' in key and key.startswith('-----BEGIN '), 'administrative key is not a private key')
-    # The fixture's fresh app state always opens on the welcome page.
-    gui.click("Let's get started", description='setup welcome control')
-    gui.click_setup_card('Self-hosted VPN')
+    button, radio, item = gui.roles('PUSH_BUTTON'), gui.roles('RADIO_BUTTON'), gui.roles('LIST_ITEM')
+    # The fixture's fresh app state always opens on PageSetupWizardStart.
+    gui.click("Let's get started", description='setup welcome control', roles=button)
+    # PageSetupWizardConfigSource.qml: BasicCardType carries its title as the accessible name.
+    gui.click('Self-hosted VPN', description='self-hosted server card', roles=button, unique=True)
     gui.wait(lambda: len(gui.fields()) == 3, 'server credential fields')
     # PageSetupWizardCredentials.qml: hostname, username, secret, in that order.
     gui.fill([f'{args.host}:{args.ssh_port}', args.user, key])
     del key
-    gui.click(('Continue', 'Start configuring'), description='server credential continuation')
-    gui.click_setup_card('Manual', manual=True)
-    gui.click('Continue', description='manual installation continuation')
-    gui.click_awg()
+    gui.click('Continue', description='server credential continuation', roles=button, unique=True)
+    # Continue first checks the SSH connection, then opens PageSetupWizardEasy.
+    gui.click('Manual', seconds=90, description='manual installation card', roles=radio, unique=True)
+
+    def manual_selected():
+        cards = gui.unique('Manual', radio)
+        return cards and cards[0].getState().contains(gui.api.STATE_CHECKED)
+
+    gui.wait(manual_selected, 'manual installation selection')
+    gui.click('Continue', description='manual installation continuation', roles=button, unique=True)
+    # PageSetupWizardProtocols.qml: one ListItemType per installable protocol; AmneziaWG is awg2.
+    gui.click('AmneziaWG', description='AmneziaWG protocol control', roles=item, unique=True)
+    gui.wait(lambda: len(gui.fields()) == 1 and gui.unique('Install', button), 'AmneziaWG port screen')
     gui.fill([str(args.udp_port)])
-    gui.click('Install', description='native installation control')
+    gui.click('Install', description='native installation control', roles=button, unique=True)
+
     def ready():
         # Share only becomes usable for a full-access native server connection.
-        controls = lambda: all(gui.matching(label) for label in ('Connection', 'Users', 'Share'))
+        controls = lambda: (gui.unique('Connection', radio) and gui.unique('Users', radio)
+                            and gui.unique('Share', button))
         if controls():
             return True
-        if gui.fields():
+        if gui.fields() or not gui.unique('Share', gui.roles('PAGE_TAB')):
             return False
-        gui.tab(1)
+        gui.tab('Share')
         return controls()
     wait_native_installation(gui, ready)
 
@@ -993,7 +867,7 @@ def share_diagnostics(gui):
     # Keep only fixture-authored flags/counts; never expose node names or text.
     result = dict(getattr(gui, 'share_evidence', {}))
     result.update(owned_frames=0, owned_modals=0, owned_save_candidates=0,
-                  owned_editable_candidates=0, error_codes=[], predicate='unavailable')
+                  owned_editable_candidates=0, error_codes=[], error_shown=None, predicate='unavailable')
     try:
         state = json.loads(private_file(SESSION))
         app = state['app']
@@ -1010,7 +884,8 @@ def share_diagnostics(gui):
                     and node.name.strip() in ('Save', 'Save AmneziaWG config'))
             except Exception:
                 continue
-        result['error_codes'] = gui.installation_evidence()['error_codes']
+        installation = gui.installation_evidence()
+        result['error_codes'], result['error_shown'] = installation['error_codes'], installation['error_shown']
         export_controls(gui, evidence=result)
     except Exception:
         result['predicate'] = 'ownership-or-access-unavailable'
@@ -1023,18 +898,22 @@ def share(gui, args):
     private_dir(output.parent)
     require(not output.exists() and not output.is_symlink(), 'refusing to overwrite a client export')
     require(output.suffix == '.conf', 'native AWG export needs a .conf filename')
+    button, radio = gui.roles('PUSH_BUTTON'), gui.roles('RADIO_BUTTON')
     gui.share_evidence['stage'] = 'connection'
-    gui.tab(1)
-    gui.click('Connection', description='native share connection control')
+    gui.tab('Share')
+    # PageShare.qml: SegmentedControlType exposes Connection and Users as radio buttons.
+    gui.click('Connection', description='native share connection control', roles=radio, unique=True)
     gui.fill([args.name])
-    # PageShare retains the selected native format after an export. Avoid reopening
-    # its drawer, which would display both the current value and the same choice.
-    if not gui.matching('AmneziaWG native format'):
+    # The Connection format DropDownType is a button named after its current value; its
+    # RadioListType sheet names each format. A reselected Share tab starts from the default.
+    if not gui.unique(AWG_FORMAT, button):
         gui.share_evidence['stage'] = 'format'
-        gui.click(('For the AmneziaVPN app', 'AmneziaWG native format'), description='native export format selector')
-        gui.click('AmneziaWG native format', description='native AWG export format')
+        gui.click('For the AmneziaVPN app', description='native export format selector', roles=button, unique=True)
+        gui.click(AWG_FORMAT, description='native AWG export format', roles=radio, unique=True)
+        gui.wait(lambda: gui.unique(AWG_FORMAT, button) and not gui.matching(AWG_FORMAT, radio),
+                 'selected native AWG export format')
     gui.share_evidence['stage'] = 'generation'
-    gui.click('Share', description='native client generation control')
+    gui.click('Share', description='native client generation control', roles=button, unique=True)
     gui.wait(lambda: gui.matching('Show connection settings'), 'native client generation', 90)
     gui.share_evidence['stage'] = 'export-dialog'
     click_export_share(gui)
@@ -1065,20 +944,24 @@ def share(gui, args):
     data = private_file(output)
     require(b'[Interface]' in data and b'[Peer]' in data and b'Endpoint = ' in data,
             'native AWG export is incomplete')
-    gui.tab(1)
+    # PageShareConnection is pushed above PageShare, which hides the main tab bar.
+    gui.share_evidence['stage'] = 'return'
+    gui.back_to_tabs()
 
 
 def revoke(gui, args):
-    gui.tab(1)
-    gui.click('Users', description='native users control')
-    gui.click(args.name, seconds=90, description='native named user control')
-    gui.click('Revoke', description='native revocation control')
-    gui.click('Continue', description='native revocation confirmation')
+    button, radio = gui.roles('PUSH_BUTTON'), gui.roles('RADIO_BUTTON')
+    gui.tab('Share')
+    gui.click('Users', description='native users control', roles=radio, unique=True)
+    # PageShare.qml: each client is a ListItemType opening ShareClientInfoSheet.
+    gui.click(args.name, seconds=90, description='native named user control', roles=gui.roles('LIST_ITEM'), unique=True)
+    gui.click('Revoke', description='native revocation control', roles=button, unique=True)
+    # QuestionDrawer.qml: the confirmation sheet's yes button.
+    gui.click('Continue', description='native revocation confirmation', roles=button, unique=True)
     def removed():
-        users = gui.matching('Users')
-        return (len(users) == 1 and users[0].getRole() == gui.api.ROLE_RADIO_BUTTON
-                and users[0].getState().contains(gui.api.STATE_CHECKED)
-                and not any(gui.matching(label) for label in ('Revoke', 'Continue', 'Close'))
+        users = gui.unique('Users', radio)
+        return (users and users[0].getState().contains(gui.api.STATE_CHECKED)
+                and not any(gui.matching(label, button) for label in ('Revoke', 'Continue', 'Close'))
                 and not gui.matching(args.name))
     # The success notification lasts three seconds; require the durable Users
     # page with the target row removed and its confirmation/details closed.
@@ -1168,12 +1051,12 @@ def discovery_snapshot(gui, target=None):
 
 
 def activate_management(gui):
-    # Pinned PageSettingsServerInfo.qml binds Management Return/Enter to index 2.
+    # Pinned TabButtonType.qml binds Return/Enter to its click, selecting the Management page.
     # Keep one activation within the existing named-control wait budget.
     deadline = time.monotonic() + 30
     nodes = gui.wait(lambda: gui.matching('Management'), 'native server management control',
                      max(0, deadline - time.monotonic()))
-    # Pinned PageType.qml resets default focus 200 ms after the page appears.
+    # Pinned PageType.qml moves focus to the page when its StackView push finishes.
     # Use GUI.click's 350 ms settle, then acquire the current accessible target.
     time.sleep(min(0.35, max(0, deadline - time.monotonic())))
     nodes = gui.wait(lambda: gui.matching('Management'), 'native server management control',
@@ -1236,36 +1119,81 @@ def activate_management(gui):
     gui.wait(selected_page, 'selected native Management page', max(0, deadline - time.monotonic()))
 
 
-def discover(gui, args):
+def open_server_data(gui):
+    item = gui.roles('LIST_ITEM')
     gui.discover_evidence = dict(stage='settings-page')
     gui.share_evidence = gui.discover_evidence  # Existing bounded action receipt, emitted only on failure.
-    gui.tab(2)
+    gui.tab('Settings')
     # PageSettings.qml footer row: unlike its Servers row, this also rules out the Servers page.
-    gui.wait(lambda: gui.matching('Close application'), 'Settings page')
+    gui.wait(lambda: gui.matching('Close application', item), 'Settings page')
     gui.discover_evidence['stage'] = 'servers-control'
-    gui.click('Servers', description='native servers control')
+    gui.click('Servers', description='native servers control', roles=item, unique=True)
     # The fixture owns exactly one admin server. No client import adds another.
     gui.discover_evidence['stage'] = 'saved-server'
     gui.click_saved_server()
     gui.discover_evidence['stage'] = 'management-control'
     activate_management(gui)
-    # The row title is capped at two elided lines; its complete description
-    # belongs to the same stock MouseArea and invokes the same scan handler.
+    return item
+
+
+def discover(gui, args):
+    radio = gui.roles('RADIO_BUTTON')
+    item = open_server_data(gui)
+    # PageSettingsServerData.qml: the scan row is a ListItemType named by its title.
     gui.discover_evidence['stage'] = 'scan-control'
-    scan = gui.wait(lambda: gui.matching('Check the server for previously installed Amnezia services')
-                    or gui.matching('Add them to the application if they were not displayed'),
-                    'native service discovery control')
+    scan = gui.wait(lambda: gui.unique(SCAN_CONTROL, item), 'native service discovery control')
+    # The scan result is a three-second notification; a persistent error snackbar has Close.
+    gui.wait(lambda: not notification_shown(gui.owned_nodes()), 'cleared native notification')
     gui.discover_evidence['stage'] = 'scan-dispatch'
     gui.click_node(scan[0])
     gui.discover_evidence['stage'] = 'scan-completion'
-    gui.wait(lambda: gui.matching(('All installed containers have been added to the application',
-                                 'No new installed containers found')), 'native server scan', 120)
-    gui.discover_evidence['stage'] = 'scan-close'
-    gui.click('Close', description='native server scan close control')
+
+    def scanned():
+        nodes = gui.owned_nodes()
+        if installation_evidence(nodes)['error_shown']:
+            return 'error'
+        # PageController.disableControls keeps page controls disabled under the busy overlay.
+        control = [node for node in nodes if node.name.strip() == SCAN_CONTROL and node.getRole() in item
+                   and node.getState().contains(gui.api.STATE_ENABLED)]
+        return 'scanned' if len(control) == 1 and notification_shown(nodes) else None
+
+    require(gui.wait(scanned, 'native server scan', 120) == 'scanned', 'native server scan showed an error')
     gui.discover_evidence['stage'] = 'retained-user'
-    gui.tab(1)
-    gui.click('Users', description='discovered native users control')
-    gui.wait(lambda: gui.matching(args.name), 'retained native user after discovery', 90)
+    gui.back_to_tabs()
+    gui.tab('Share')
+    gui.click('Users', description='discovered native users control', roles=radio, unique=True)
+    gui.wait(lambda: gui.matching(args.name, item), 'retained native user after discovery', 90)
+
+
+def update_packages(gui, args):
+    button = gui.roles('PUSH_BUTTON')
+    item = open_server_data(gui)
+    # PageSettingsServerData.qml: the row asks Continue/Cancel, then runs
+    # update_server_packages.sh over SSH from PageDeinstalling.
+    gui.discover_evidence['stage'] = 'packages-control'
+    control = gui.wait(lambda: gui.unique(UPDATE_PACKAGES, item), 'native package update control')
+    gui.wait(lambda: not notification_shown(gui.owned_nodes()), 'cleared native notification')
+    gui.click_node(control[0])
+    gui.discover_evidence['stage'] = 'packages-confirmation'
+    gui.click('Continue', description='native package update confirmation', roles=button, unique=True)
+    gui.discover_evidence['stage'] = 'packages-completion'
+
+    def finished():
+        nodes = gui.owned_nodes()
+        if installation_evidence(nodes)['error_shown']:
+            return 'error'
+        # Success closes the progress page and asks Reboot/Not now; a failure shows an error snackbar.
+        names = collections.Counter(node.name.strip() for node in nodes
+                                    if node.getRole() in button and gui.showing(node))
+        return 'updated' if names['Reboot'] == 1 and names['Not now'] == 1 else None
+
+    require(gui.wait(finished, 'native package update', 900) == 'updated', 'native package update showed an error')
+    # Kernel updates wait for a later reboot; the profile's reboot lanes cover restarts.
+    gui.discover_evidence['stage'] = 'packages-reboot-question'
+    gui.click('Not now', description='native post-update reboot refusal', roles=button, unique=True)
+    gui.wait(lambda: not gui.matching('Reboot', button), 'closed native reboot question')
+    gui.discover_evidence['stage'] = 'packages-return'
+    gui.back_to_tabs()
 
 
 def port(value):
@@ -1283,7 +1211,8 @@ def name(value):
 
 def discovery_self_check():
     from unittest import mock
-    api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, ROLE_PUSH_BUTTON=3, ROLE_TEXT=8,
+    api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, ROLE_PUSH_BUTTON=3, ROLE_RADIO_BUTTON=4, ROLE_TEXT=8,
+                          ROLE_PAGE_TAB=14, ROLE_LIST_ITEM=18,
                           STATE_ENABLED=5, STATE_CHECKED=6, STATE_SHOWING=9,
                           STATE_DEFUNCT=12, STATE_SELECTED=13, STATE_FOCUSABLE=15,
                           STATE_FOCUSED=16, STATE_ACTIVE=17, DESKTOP_COORDS=0)
@@ -1291,7 +1220,7 @@ def discovery_self_check():
     for scenario in ('ready', 'update-page', 'settings-page-missing',
                      'servers-matching-exception', 'focus-delayed-default', 'focus-after-deadline', 'focus-near-deadline', 'focus-return', 'not-accepted', 'action-exception', 'read-only', 'unknown-match',
                      'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
-                     'inactive-frame', 'ambiguous-management', 'focus-no-selection'):
+                     'inactive-frame', 'ambiguous-management', 'focus-no-selection', 'scan-error', 'scan-silent'):
         state = dict(page='info', tab=0, clock=0.0, dispatches=0, focus_requests=0, focused=False, keys=0, pointers=0,
                      clock_consumed=False, key_timeouts=[], default_focus_due=None,
                      default_focus_reset=False, delayed_focus_sample=False, focus_requested_at=None)
@@ -1305,7 +1234,8 @@ def discovery_self_check():
             item = SimpleNamespace(name=label, parent=parent)
             item.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 42)
             item.getRole = lambda: role
-            item.getRoleName = lambda: {1: 'frame', 3: 'button', 8: 'text', 14: 'page tab'}[role]
+            item.getRoleName = lambda: {1: 'frame', 3: 'push button', 4: 'radio button', 8: 'text', 14: 'page tab',
+                                        18: 'list item', 20: 'dialog'}[role]
             item.get_parent = lambda: parent
             def contains(flag):
                 if (label == 'Management' and flag == 16 and scenario == 'focus-delayed-default'
@@ -1350,12 +1280,14 @@ def discovery_self_check():
         def scan():
             state['page'] = 'scan-complete'
             return True
-        controls = [node('Management', 14, management, frame),
-                    node('Check the server for previously installed Amnezia services', 8, scan, frame),
-                    node('All installed containers have been added to the application', 8, parent=frame),
-                    node('Close', 3, parent=frame), node('Servers', 14, parent=frame),
-                    node('Users', 14, parent=frame), node('retained-test-user', 8, parent=frame),
-                    node('Close application', 8, parent=frame), node('Update app', 3, parent=frame)]
+        # The scan notification is an empty SnackbarType dialog: its message is not accessible.
+        controls = [node('Management', 14, management, frame), node(SCAN_CONTROL, 18, scan, frame),
+                    node('', 20, parent=frame), node('Servers', 18, parent=frame),
+                    node('Users', 4, parent=frame), node('retained-test-user', 18, parent=frame),
+                    node('Close application', 18, parent=frame), node('Update app', 3, parent=frame)]
+        error_dialog = node('', 20, parent=frame)
+        error_dialog.parent = frame
+        error_close = node('Close', 3, parent=error_dialog)
         if scenario.startswith('focus-') or scenario == 'inactive-frame':
             controls[0].queryAction = mock.Mock(side_effect=NotImplementedError('synthetic-private-action'))
         if scenario == 'foreign-management':
@@ -1364,28 +1296,30 @@ def discovery_self_check():
             valid = {'Management', 'Servers'}
             if scenario != 'settings-page-missing':
                 valid.add('Close application')
-            if scenario == 'update-page' and state['tab'] == 2:
+            if scenario == 'update-page' and state['tab'] == 'Settings':
                 valid.add('Update app')
-            if state['page'] == 'data' and scenario != 'read-only':
-                valid.add(controls[1].name)
-            if state['page'] == 'scan-complete':
-                valid.update((controls[2].name, 'Close'))
+            if state['page'] in ('data', 'scan-complete') and scenario != 'read-only':
+                valid.add(SCAN_CONTROL)
+            if state['page'] == 'scan-complete' and scenario not in ('scan-error', 'scan-silent'):
+                valid.add('')
             if state['page'] == 'users':
                 valid.update(('Users', 'retained-test-user'))
-            return [frame] + [item for item in controls if item.name in valid] + (
+            extra = [error_dialog, error_close] if scenario == 'scan-error' and state['page'] == 'scan-complete' else []
+            return [frame] + [item for item in controls if item.name in valid] + extra + (
                 [node('Management', 14, management, frame)] if scenario == 'ambiguous-management' else [])
-        def matching(labels):
+        def matching(labels, roles=None):
             if labels == 'Servers' and scenario == 'servers-matching-exception':
                 raise RuntimeError('synthetic-private-navigation')
-            if labels == controls[1].name and scenario == 'unknown-match':
+            if labels == SCAN_CONTROL and scenario == 'unknown-match':
                 raise RuntimeError('synthetic-private-matching')
             labels = (labels,) if isinstance(labels, str) else labels
-            return [item for item in current_nodes() if item.name in labels]
+            return [item for item in current_nodes() if item.name in labels and (roles is None or item.getRole() in roles)]
         gui = GUI.__new__(GUI)
         gui.api, gui.nodes, gui.matching = api, current_nodes, matching
-        # Entering the settings page arms PageType's timer, after the Servers click.
+        # Entering the server page moves focus when its push finishes, after the Servers click.
         gui.click_saved_server = lambda: state.update(default_focus_due=state['clock'] + 0.2)
-        gui.tab = lambda index: state.update(tab=index, page='users' if index == 1 else state['page'])
+        gui.tab = lambda name: state.update(tab=name, page='users' if name == 'Share' else state['page'])
+        gui.back_to_tabs = lambda: state.update(back=state.get('back', 0) + 1)
         def external(command, **kwargs):
             if command != ['xdotool', 'key', 'Return']:
                 state['pointers'] += 1
@@ -1432,6 +1366,8 @@ def discovery_self_check():
                     'inactive-frame': 'GUI timed out waiting for focused native Management control',
                     'ambiguous-management': 'native Management control is ambiguous',
                     'focus-no-selection': 'GUI timed out waiting for selected native Management page',
+                    'scan-error': 'native server scan showed an error',
+                    'scan-silent': 'GUI timed out waiting for native server scan',
                 }.get(scenario, 'GUI timed out waiting for native service discovery control')
                 require(scenario not in ('ready', 'focus-return', 'focus-delayed-default') and str(error) == expected,
                         'Management activation changed its safe failure boundary: ' + scenario)
@@ -1441,8 +1377,11 @@ def discovery_self_check():
                 require(('native server scan', 120) in waits and ('retained native user after discovery', 90) in waits,
                         'discovery observation changed existing completion waits')
             snapshot = discovery_snapshot(gui)
-            if scenario in ('ready', 'focus-return', 'focus-delayed-default', 'read-only', 'unknown-match'):
+            if scenario in ('ready', 'focus-return', 'focus-delayed-default', 'read-only', 'unknown-match',
+                            'scan-error', 'scan-silent'):
                 require(('native service discovery control', 30) in waits, 'discovery changed the control wait')
+            require(state.get('back', 0) == int(scenario in ('ready', 'focus-return', 'focus-delayed-default')),
+                    'discovery did not return to the main tab bar exactly once after its scan')
             refused = scenario in ('update-page', 'settings-page-missing',
                                    'servers-matching-exception', 'focus-after-deadline', 'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
                                    'inactive-frame', 'ambiguous-management')
@@ -1547,8 +1486,8 @@ def update_check_self_check():
     action.assert_not_called()
     gui.nodes = lambda: []
     for error, reason in ((RuntimeError('synthetic-private-value'), ': last error RuntimeError'),
-                          (Failure('external command failed operation=ocr status=timeout'),
-                           ': last error external command failed operation=ocr status=timeout')):
+                          (Failure('external command failed operation=frame-capture status=timeout'),
+                           ': last error external command failed operation=frame-capture status=timeout')):
         try:
             gui.wait(mock.Mock(side_effect=error), 'synthetic page', 0.01)
         except Failure as timeout:
@@ -1618,8 +1557,8 @@ def self_check():
     from types import SimpleNamespace
     dialog = SimpleNamespace(name='', getRoleName=lambda: 'dialog', parent=None)
     frame = SimpleNamespace(name='', getRoleName=lambda: 'frame', parent=None)
-    def message(value, parent=dialog):
-        return SimpleNamespace(name=value, getRoleName=lambda: 'text', parent=parent,
+    def message(value, parent=dialog, role='text'):
+        return SimpleNamespace(name=value, getRoleName=lambda: role, parent=parent,
                                queryText=lambda: SimpleNamespace(characterCount=len(value),
                                    getText=lambda start, end: value[start:end]))
     secret = 'synthetic-private-key-value'
@@ -1627,9 +1566,23 @@ def self_check():
     require('progress bar' in installation_evidence([bar])['visible_controls'], 'installation progress was not observed')
     evidence = installation_evidence([message('ErrorCode: 305. ' + secret), message('Installing'),
                                       message('Connection', frame), message(secret)])
-    require(evidence == {'error_codes': [305], 'visible_controls': ['Connection', 'Installing']},
+    require(evidence == {'error_codes': [305], 'error_shown': True, 'visible_controls': ['Connection']},
             'native terminal error or progress evidence was lost')
     require(secret not in json.dumps(evidence), 'installation evidence exposed private text')
+    # The 5.1.0.6 error snackbar exposes only its Close button; its message is not accessible.
+    snackbar = SimpleNamespace(name='', getRoleName=lambda: 'dialog', parent=frame)
+    close = message('Close', snackbar, 'push button')
+    require(installation_evidence([snackbar, close]) == {'error_codes': [], 'error_shown': True, 'visible_controls': []},
+            'an accessible-text-free native error was not observed')
+    require(not installation_evidence([message('Close', frame, 'push button')])['error_shown'],
+            'a page Close control was mistaken for a native error')
+    notification = SimpleNamespace(name='', getRoleName=lambda: 'dialog', parent=frame)
+    busy = SimpleNamespace(name='', getRoleName=lambda: 'dialog', parent=frame)
+    spinner = message('', busy, 'animation')
+    for nodes, shown in (([frame, notification], True), ([frame, busy, spinner], False),
+                         ([frame, snackbar, close], False), ([frame, bar], False),
+                         ([frame, busy, spinner, notification], True)):
+        require(notification_shown(nodes) == shown, 'native notification state was misread')
     owned = message('ErrorCode: 305. ' + secret)
     owned.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 7)
     foreign = message('ErrorCode: 203. ' + secret)
@@ -1644,7 +1597,8 @@ def self_check():
     for value, parent in (('ErrorCode: 305. ' + secret, frame), ('ErrorCode: 0. No error', dialog),
                           ('ErrorCode: 305', dialog), ('prefix ErrorCode: 305. ' + secret, dialog),
                           ('ErrorCode: 99999. ' + secret, dialog), ('ErrorCode: 305. ' + 'x' * 4096, dialog)):
-        require(not installation_evidence([message(value, parent)])['error_codes'],
+        observed = installation_evidence([message(value, parent)])
+        require(not observed['error_codes'] and not observed['error_shown'],
                 'unconfirmed or malformed error text became a terminal failure')
     waits = []
     def wait(action, description, seconds=30):
@@ -1654,20 +1608,21 @@ def self_check():
             if result:
                 return result
         raise Failure('synthetic installer made no progress')
-    clear = {'error_codes': [], 'visible_controls': []}
-    progress = {'error_codes': [], 'visible_controls': ['progress bar']}
+    clear = {'error_codes': [], 'error_shown': False, 'visible_controls': []}
+    progress = {'error_codes': [], 'error_shown': False, 'visible_controls': ['progress bar']}
     probe = mock.Mock(return_value=True)
     wait_native_installation(SimpleNamespace(wait=wait, installation_evidence=mock.Mock(
         side_effect=(progress, progress, clear))), probe)
     require(probe.call_count == 1, 'installer progress drove the GUI')
     require(waits == [('native installation completion', 360)], 'installation lost its one completion deadline')
-    for states in (({'error_codes': [305], 'visible_controls': []},),
-                   (progress, {'error_codes': [203], 'visible_controls': ['progress bar']})):
+    for states, reason in ((({'error_codes': [305], 'error_shown': True, 'visible_controls': []},), '305'),
+                           ((progress, {'error_codes': [203], 'error_shown': True, 'visible_controls': ['progress bar']}), '203'),
+                           ((progress, {'error_codes': [], 'error_shown': True, 'visible_controls': []}), 'unavailable')):
         probe = mock.Mock()
         try:
             wait_native_installation(SimpleNamespace(wait=wait, installation_evidence=mock.Mock(side_effect=states)), probe)
         except Failure as error:
-            require(str(error) == f"native installation failed ErrorCode={states[-1]['error_codes'][0]}",
+            require(str(error) == 'native installation failed ErrorCode=' + reason,
                     'terminal error lost its safe numeric diagnostic')
         else:
             raise Failure('terminal error was mistaken for installation success')
@@ -1676,7 +1631,8 @@ def self_check():
     gui.api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, ROLE_PUSH_BUTTON=3,
                               ROLE_RADIO_BUTTON=4, STATE_ENABLED=5, STATE_CHECKED=6,
                               STATE_EDITABLE=7, ROLE_TEXT=8, STATE_SHOWING=9,
-                              STATE_FOCUSABLE=10, STATE_FOCUSED=11, STATE_DEFUNCT=12, DESKTOP_COORDS=0)
+                              STATE_FOCUSABLE=10, STATE_FOCUSED=11, STATE_DEFUNCT=12,
+                              ROLE_PAGE_TAB=14, ROLE_LIST_ITEM=18, DESKTOP_COORDS=0)
     def fixture_node(role, x, y, width, height, checked=False):
         node = mock.Mock(name='synthetic-private-node')
         node.name = ''
@@ -1686,36 +1642,7 @@ def self_check():
             x=x, y=y, width=width, height=height)
         return node
     frame = fixture_node(1, 0, 0, 380, 800)
-    first = fixture_node(3, 16, 335, 348, 103)
-    second = fixture_node(3, 16, 454, 348, 95)
-    gui.matching = lambda names: []
     gui.wait = lambda action, *args: action() or require(False, 'synthetic layout rejected')
-    gui.click_node = mock.Mock()
-    with mock.patch.object(time, 'sleep'):
-        gui.nodes = lambda: [frame, first, second]
-        gui.click_setup_card('Self-hosted VPN')
-        gui.click_node.assert_called_once_with(second)
-        for nodes in ([frame, first], [frame, first, fixture_node(3, 16, 460, 348, 95)],
-                      [frame, first, fixture_node(3, 17, 400, 348, 95)]):
-            gui.nodes = lambda: nodes
-            gui.click_node.reset_mock()
-            try:
-                gui.click_setup_card('Self-hosted VPN')
-            except Failure:
-                pass
-            else:
-                raise Failure('unexpected wizard layout was accepted')
-            require(not gui.click_node.called, 'unexpected wizard layout clicked a control')
-        for checked in (False, True):
-            automatic = fixture_node(4, 16, 200, 348, 150)
-            manual = fixture_node(4, 16, 390, 348, 95, checked=checked)
-            gui.nodes = lambda: [frame, automatic, manual]
-            try:
-                gui.click_setup_card('Manual', manual=True)
-            except Failure:
-                require(not checked, 'checked manual selection was rejected')
-            else:
-                require(checked, 'unchecked manual selection was accepted')
     editable = fixture_node(8, 32, 152, 316, 20)
     editable.getState.return_value.contains.side_effect = lambda state: state in (5, 7)
     editable.queryEditableText.side_effect = NotImplementedError('synthetic-private-interface')
@@ -1723,98 +1650,79 @@ def self_check():
     gui.nodes = lambda: [frame, readonly, editable]
     require(gui.fields() == [editable], 'editable fields without the EditableText interface were rejected')
     editable.queryEditableText.assert_not_called()
-    back = fixture_node(3, 8, 20, 40, 40)
-    arrows = [fixture_node(3, 324, y, 40, 40) for y in (274, 395, 508, 621)]
-    gui.matching = lambda names: [second] if names == 'Install' else []
-    gui.nodes = lambda: [frame, back, *arrows]
-    gui.click_node = mock.Mock(side_effect=lambda node: setattr(gui, 'nodes', lambda: [frame, editable]))
-    gui.click_awg()
-    gui.click_node.assert_called_once_with(arrows[0])
-    for nodes in ([frame, back, *arrows, editable], [frame, back, back, *arrows],
-                  [frame, back, *arrows, arrows[0]]):
-        gui.nodes = lambda: nodes
-        gui.click_node.reset_mock()
+
+    def named(label, role, showing=lambda: True):
+        node = fixture_node(role, 16, 100, 300, 40)
+        node.name = label
+        node.getState.return_value.contains.side_effect = lambda state: state in (5, 9) and showing()
+        return node
+    # PageSetupWizardConfigSource: a card and its chevron share one name; distinct cards do not.
+    card = named('Self-hosted VPN', 3)
+    chevron = named('Self-hosted VPN', 3)
+    other_card = named('Self-hosted VPN', 3)
+    card.parent, chevron.parent, other_card.parent = None, card, None
+    cards = GUI.__new__(GUI)
+    cards.api = gui.api
+    cards.nodes = lambda: [card, chevron]
+    require(cards.unique('Self-hosted VPN', (3,)) == [card], 'a setup card and its chevron were treated as two controls')
+    cards.nodes = lambda: [card, chevron, other_card]
+    require(cards.unique('Self-hosted VPN', (3,)) is None, 'two separate setup cards were accepted as one')
+    # Main tabs: the role keeps the bottom Share tab apart from PageShare's Share button.
+    tabs = [named('Share', 14), named('Share', 3), named('Settings', 14)]
+    navigation = GUI.__new__(GUI)
+    navigation.api, navigation.wait = gui.api, gui.wait
+    navigation.nodes = lambda: tabs
+    navigation.click_node = mock.Mock()
+    with mock.patch.object(time, 'sleep'):
+        navigation.tab('Share')
+        navigation.click_node.assert_called_once_with(tabs[0])
+        tabs.append(named('Share', 14))
+        navigation.click_node.reset_mock()
         try:
-            gui.click_awg()
+            navigation.tab('Share')
         except Failure:
             pass
         else:
-            raise Failure('ambiguous protocol page was accepted')
-        require(not gui.click_node.called, 'ambiguous protocol page clicked a control')
-    header = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
-    def ocr_line(number, words, y=20, confidence=95, x=16, block=1, page=1):
-        return ''.join(f'5\t{page}\t{block}\t1\t{number}\t{index + 1}\t{x + index * 60}\t{y}\t50\t12\t{confidence}\t{word}\n'
-                       for index, word in enumerate(words.split()))
-    rectangle = SimpleNamespace(x=0, y=0, width=380, height=800)
-    ocr_gui = GUI.__new__(GUI)
-    ocr_gui.api = gui.api
-    ocr_gui.wait = gui.wait
-    samples = ((ocr_line(1, 'Share'), 'share', True),
-               (ocr_line(1, 'AmneziaWG native') + ocr_line(2, 'format', y=36), 'AmneziaWG native format', True),
-               (ocr_line(1, 'Share') + ocr_line(2, 'Share', y=70), 'Share', False),
-               (ocr_line(1, 'Share') + ocr_line(2, 'Share', y=70, confidence=20), 'Share', False),
-               (ocr_line(1, 'Share', confidence=79), 'Share', False),
-               (ocr_line(1, 'Share', x=370), 'Share', False),
-               (ocr_line(1, 'Share VPN Access'), 'Share', False),
-               (ocr_line(1, 'AmneziaWG native') + ocr_line(2, 'format', y=100), 'AmneziaWG native format', False),
-               (ocr_line(1, 'Check the server for', block=3)
-                + ocr_line(1, 'previously installed Amnezia', y=36, block=2)
-                + ocr_line(1, 'services', y=52),
-                'Check the server for previously installed Amnezia services', True),
-               (ocr_line(1, 'AmneziaWG native') + ocr_line(1, 'format', y=36, block=2),
-                'AmneziaWG native format', True),
-               (ocr_line(1, 'AmneziaWG native') + ocr_line(1, 'format', y=100, block=2),
-                'AmneziaWG native format', False),
-               (ocr_line(1, 'AmneziaWG native') + ocr_line(1, 'format', y=36, block=2, confidence=79),
-                'AmneziaWG native format', False),
-               (ocr_line(1, 'AmneziaWG native') + ocr_line(1, 'format', y=36, page=2),
-                'AmneziaWG native format', False),
-               (ocr_line(1, 'AmneziaWG native') + ocr_line(1, 'format', y=36, block=2)
-                + ocr_line(1, 'AmneziaWG native', y=100, block=3)
-                + ocr_line(1, 'format', y=116, block=4), 'AmneziaWG native format', False))
-    with mock.patch.object(time, 'sleep'), mock.patch.object(sys.modules[__name__], 'run') as click:
-        for rows, target, accepted in samples:
-            ocr_gui.matching = lambda names: visible_text(header + rows, (target,), rectangle)
-            click.reset_mock()
-            try:
-                ocr_gui.click(target)
-            except Failure:
-                require(not accepted, 'valid visible phrase was rejected')
-            else:
-                require(accepted, 'ambiguous or unsafe visible phrase was accepted')
-            require(click.called == accepted, 'unsafe visible phrase clicked a control')
-    offset_frame = SimpleNamespace(x=121, y=83, width=100, height=90)
-    scaled = visible_text(header + ocr_line(1, 'Share', x=17, y=21), ('Share',), offset_frame, scale=2)
-    require(len(scaled) == 1 and vars(scaled[0].rectangle) == dict(x=129, y=93, width=26, height=7),
-            'scaled OCR did not preserve offset frame bounds and odd-pixel coverage')
-    for rows in (ocr_line(1, 'Share', x=151), ocr_line(1, 'Share', y=169),
-                 ocr_line(1, 'Share', confidence=79),
-                 ocr_line(1, 'Share') + ocr_line(2, 'Share', y=70)):
-        require(not visible_text(header + rows, ('Share',), offset_frame, scale=2),
-                'scaled OCR accepted an unsafe or ambiguous phrase')
-    owned = fixture_node(1, 0, 0, 380, 680)
-    owned.getApplication.return_value.get_process_id.return_value = 7
-    ocr_session = GUI.__new__(GUI)
-    ocr_session.api, ocr_session.nodes = gui.api, lambda: [owned]
-    session = json.dumps(dict(app=dict(pid=7, start='owned'), environment=dict(DISPLAY=':synthetic'))).encode()
-    with mock.patch.object(sys.modules[__name__], 'private_file', return_value=session), \
-            mock.patch.object(sys.modules[__name__], 'process_identity', return_value='owned'), \
-            mock.patch.dict(os.environ, DISPLAY=':synthetic'), \
-            mock.patch.object(sys.modules[__name__], 'run', return_value=header.encode()) as tool:
-        ocr_session.matching('Installing')
-    require([(call.args[0][0], call.kwargs['timeout'], call.kwargs['env']['OMP_THREAD_LIMIT'])
-             for call in tool.call_args_list] == [('import', 30, '1'), ('tesseract', 30, '1')],
-            'OCR lost its load-tolerant limits')
+            raise Failure('ambiguous main tab was accepted')
+        navigation.click_node.assert_not_called()
+    # Back closes pushed pages until the main tab bar returns, at most three pages.
+    for depth, accepted in ((0, True), (2, True), (3, True), (4, False)):
+        stack = list(range(depth))
+        backs = {}
+        def back(level):
+            return backs.setdefault(level, named('Back', 3, showing=lambda: level in stack))
+        navigation.nodes = lambda: [back(stack[-1])] if stack else [named('Settings', 14)]
+        navigation.click_node = mock.Mock(side_effect=lambda node: stack.pop())
+        try:
+            navigation.back_to_tabs()
+        except Failure:
+            require(not accepted, 'returning to the main tab bar was rejected')
+        else:
+            require(accepted, 'an unexpected page depth was accepted')
+        require(navigation.click_node.call_count == min(depth, 3), 'Back was clicked more often than pages were open')
     for already_ready in (False, True):
         wizard = mock.Mock()
-        wizard.installation_evidence.return_value = {'error_codes': [], 'visible_controls': []}
+        wizard.api = gui.api
+        wizard.roles.side_effect = lambda *names: names
+        wizard.installation_evidence.return_value = clear
         stage = ['credentials']
-        wizard.matching.side_effect = lambda label: [object()] if (
-            label == "Let's get started" or (stage[0] == 'installed' and already_ready
-                                             and label in ('Connection', 'Users', 'Share'))) else []
+        manual = fixture_node(4, 16, 390, 348, 95, checked=True)
+        def unique(label, roles):
+            if label == 'Manual' and roles == ('RADIO_BUTTON',):
+                return [manual]
+            if label == 'Install' and roles == ('PUSH_BUTTON',):
+                return [object()]
+            if (stage[0] == 'installed' and already_ready
+                    and (label, roles) in (('Connection', ('RADIO_BUTTON',)), ('Users', ('RADIO_BUTTON',)),
+                                           ('Share', ('PUSH_BUTTON',)))):
+                return [object()]
+            return None
+        wizard.unique.side_effect = unique
         wizard.fields.side_effect = lambda: [object()] * (3 if stage[0] == 'credentials' else 1)
-        wizard.click_awg.side_effect = lambda: stage.__setitem__(0, 'port')
-        wizard.click.side_effect = lambda label, **kwargs: stage.__setitem__(0, 'installed') if label == 'Install' else None
+        def click(label, **kwargs):
+            if label in ('AmneziaWG', 'Install'):
+                stage[0] = 'port' if label == 'AmneziaWG' else 'installed'
+        wizard.click.side_effect = click
         wizard.wait.side_effect = gui.wait
         with mock.patch.object(sys.modules[__name__], 'private_file', return_value=b'-----BEGIN PRIVATE KEY-----\n'):
             try:
@@ -1825,18 +1733,65 @@ def self_check():
             else:
                 require(already_ready, 'returned port screen was accepted as an installation')
         wizard.tab.assert_not_called()
-    for scenario in ('removed', 'missing page', 'wrong tab', 'wrong role',
+        require([call.args[0] for call in wizard.click.call_args_list] == [
+            "Let's get started", 'Self-hosted VPN', 'Continue', 'Manual', 'Continue', 'AmneziaWG', 'Install'],
+            'native setup changed its stock control sequence')
+    # Update server packages: success asks Reboot/Not now; the fixture never reboots from the app.
+    for outcome in ('updated', 'error', 'duplicate question'):
+        updater = mock.Mock()
+        updater.discover_evidence = {}
+        updater.roles.side_effect = lambda *names: names
+        updater.api = gui.api
+        updater.showing.return_value = True
+        stage = ['data']
+        question = [named('Reboot', 'PUSH_BUTTON'), named('Not now', 'PUSH_BUTTON')]
+        if outcome == 'duplicate question':
+            question.append(named('Not now', 'PUSH_BUTTON'))
+        snackbar = SimpleNamespace(name='', getRoleName=lambda: 'dialog', parent=None, getRole=lambda: 20)
+        error = [snackbar, SimpleNamespace(name='Close', getRoleName=lambda: 'push button', parent=snackbar, getRole=lambda: 3)]
+        def nodes():
+            if stage[0] == 'running':
+                stage[0] = 'finished'
+                return []
+            if stage[0] == 'finished':
+                return error if outcome == 'error' else question
+            return []
+        updater.owned_nodes.side_effect = nodes
+        updater.unique.side_effect = lambda label, roles: [object()] if label == UPDATE_PACKAGES else None
+        def clicked(label, **kwargs):
+            if label == 'Continue':
+                stage[0] = 'running'
+            elif label == 'Not now':
+                stage[0] = 'closed'
+        updater.click.side_effect = clicked
+        updater.matching.side_effect = lambda label, roles=None: question[:1] if stage[0] == 'finished' else []
+        updater.wait.side_effect = wait
+        with mock.patch.object(sys.modules[__name__], 'open_server_data', return_value=('LIST_ITEM',)):
+            try:
+                update_packages(updater, SimpleNamespace())
+            except Failure as failure:
+                require(outcome != 'updated', 'native package update success was rejected')
+                require(outcome != 'error' or str(failure) == 'native package update showed an error',
+                        'a native package update error was not reported at once')
+            else:
+                require(outcome == 'updated', 'a failed or ambiguous native package update was accepted')
+        clicks = [call.args[0] for call in updater.click.call_args_list]
+        require(clicks == (['Continue', 'Not now'] if outcome == 'updated' else ['Continue']),
+                'native package update rebooted the server or skipped its confirmation')
+        require(updater.back_to_tabs.called == (outcome == 'updated'), 'package update did not return to the tab bar')
+    for scenario in ('removed', 'missing page', 'wrong tab', 'duplicate users',
                      'details open', 'confirmation open', 'error open', 'retained row'):
         revocation = mock.Mock()
         revocation.api = gui.api
-        users = fixture_node(4 if scenario != 'wrong role' else 1, 16, 300, 174, 56,
-                             checked=scenario != 'wrong tab')
-        present = {'Users': [users]} if scenario != 'missing page' else {}
+        revocation.roles.side_effect = lambda *names: names
+        users = fixture_node(4, 16, 300, 174, 56, checked=scenario != 'wrong tab')
+        present = {'Users': [users] * (2 if scenario == 'duplicate users' else 1)} if scenario != 'missing page' else {}
         for case, label in (('details open', 'Revoke'), ('confirmation open', 'Continue'),
                             ('error open', 'Close'), ('retained row', 'synthetic-private-client')):
             if scenario == case:
                 present[label] = [object()]
-        revocation.matching.side_effect = lambda label: present.get(label, [])
+        revocation.unique.side_effect = lambda label, roles: present[label] if len(present.get(label, [])) == 1 else None
+        revocation.matching.side_effect = lambda label, roles=None: present.get(label, [])
         revocation.wait.side_effect = gui.wait
         try:
             revoke(revocation, SimpleNamespace(name='synthetic-private-client'))
@@ -1874,7 +1829,7 @@ def self_check():
     click_gui = GUI.__new__(GUI)
     click_gui.share_evidence = {'stage': 'export-dialog'}
     click_gui.wait = gui.wait
-    click_gui.matching = lambda names: [button, dialog]
+    click_gui.matching = lambda names, roles=None: [button, dialog]
     click_gui.click_node = mock.Mock()
     with mock.patch.object(time, 'sleep'):
         GUI.click(click_gui, 'Share')
@@ -1926,7 +1881,7 @@ def self_check():
         export_gui.api = gui.api
         export_gui.share_evidence = {'stage': 'export-dialog'}
         export_gui.nodes = lambda: [export_frame, outgoing, current, landmark]
-        export_gui.matching = lambda names: [outgoing, current]
+        export_gui.matching = lambda names, roles=None: [outgoing, current]
         export_gui.wait = mock.Mock(side_effect=lambda action, description, seconds: action()
                                    or require(False, 'synthetic export target rejected'))
         export_gui.click_node = mock.Mock()
@@ -2013,24 +1968,30 @@ def self_check():
                 'native export directory input was not scoped to its focused dialog field')
         gui.fields = lambda: [directory, directory, filename, filetype]
         require(export_controls(gui, location=True) is None, 'ambiguous native directory inputs were accepted')
+        # PageSettingsServersList: one Back control and one ListItemType per saved server.
         server_frame = fixture_node(1, 0, 0, 380, 680)
-        server_frame.getApplication.return_value.get_process_id.return_value = 42
         back = fixture_node(3, 8, 20, 40, 40)
-        arrow = fixture_node(3, 324, 138, 40, 40)
-        off_frame = fixture_node(3, 324, 660, 40, 40)
-        foreign = fixture_node(3, 324, 138, 40, 40)
-        for node in (back, arrow, off_frame, foreign):
-            node.get_parent.return_value = server_frame
+        row = fixture_node(18, 16, 138, 348, 56)
+        second_row = fixture_node(18, 16, 218, 348, 56)
+        footer = fixture_node(18, 16, 600, 348, 56)
+        selector = fixture_node(4, 16, 300, 348, 56)
+        foreign = fixture_node(18, 16, 138, 348, 56)
+        back.name, footer.name = 'Back', 'Close application'
+        for node in (server_frame, back, row, second_row, footer, selector, foreign):
+            node.getApplication.return_value.get_process_id.return_value = 42
             node.getState.return_value.contains.side_effect = lambda value: value in (5, 9)
-        foreign.get_parent.return_value = dialog
+        foreign.getApplication.return_value.get_process_id.return_value = 99
         gui.fields = lambda: []
-        gui.matching = lambda label: [object()] if label in ('Servers', 'Management') else []
+        gui.matching = lambda label, roles=None: [object()] if label == 'Management' else []
         gui.click_node = mock.Mock()
-        for nodes, accepted in (([server_frame, back, arrow], True),
-                                ([server_frame, back, arrow, arrow], False),
+        for nodes, accepted in (([server_frame, back, row], True),
+                                ([server_frame, back, row, foreign], True),
+                                ([server_frame, back, row, second_row], False),
                                 ([server_frame, back], False),
-                                ([server_frame, back, off_frame], False),
-                                ([server_frame, back, foreign], False)):
+                                ([server_frame, back, foreign], False),
+                                ([server_frame, back, row, footer], False),
+                                ([server_frame, back, row, selector], False),
+                                ([server_frame, row], False)):
             gui.nodes = lambda: nodes
             gui.click_node.reset_mock()
             try:
@@ -2041,15 +2002,12 @@ def self_check():
                 require(accepted, 'ambiguous or foreign saved-server control was accepted')
             require(gui.click_node.call_count == int(accepted), 'unsafe saved-server layout clicked a control')
             if accepted:
-                gui.click_node.assert_called_once_with(arrow)
-        second_arrow = fixture_node(3, 324, 218, 40, 40)
-        second_arrow.get_parent.return_value = server_frame
-        second_arrow.getState.return_value.contains.side_effect = lambda value: value in (5, 9)
+                gui.click_node.assert_called_once_with(row)
         synthetic_wait = gui.wait
         gui.wait = lambda action, description, seconds=30: GUI.wait(gui, action, description, 0.01)
         for nodes, reason in (([server_frame, back], 'Servers page must list one saved server: rows=0'),
-                              ([server_frame, back, arrow, second_arrow], 'Servers page must list one saved server: rows=2'),
-                              ([server_frame, arrow], 'Servers page was not reached after selecting Servers '
+                              ([server_frame, back, row, second_row], 'Servers page must list one saved server: rows=2'),
+                              ([server_frame, row], 'Servers page was not reached after selecting Servers '
                                '(GUI timed out waiting for saved native administration server)')):
             gui.nodes = lambda: nodes
             gui.click_node.reset_mock()
@@ -2061,7 +2019,7 @@ def self_check():
                 raise Failure('a lost or duplicated saved server was accepted')
             gui.click_node.assert_not_called()
         gui.wait = synthetic_wait
-        gui.nodes = lambda: [server_frame, back, arrow]
+        gui.nodes = lambda: [server_frame, back, row]
         gui.click_node.reset_mock()
         with mock.patch.object(sys.modules[__name__], 'process_identity', return_value='foreign-start'):
             try:
@@ -2082,8 +2040,7 @@ def self_check():
         else:
             raise Failure('failed external command was accepted')
     for operation in ('external', 'apt-update', 'apt-install', 'installer-help', 'installer-install',
-                      'pointer-click', 'pointer-tab', 'frame-capture', 'ocr',
-                      'clipboard-write', 'clipboard-clear', 'keyboard-input'):
+                      'pointer-click', 'frame-capture', 'clipboard-write', 'clipboard-clear', 'keyboard-input'):
         prefix = f'external command failed operation={operation}'
         outcomes = ((subprocess.CompletedProcess(command, -6, b'synthetic-private-stdout', b'synthetic-private-stderr'),
                      prefix + ' status=exit exit_code=-6'),
@@ -2147,6 +2104,7 @@ def main():
         modes.add_parser(mode)
     command = modes.add_parser('discover')
     command.add_argument('--name', type=name, default='acceptance-two')
+    modes.add_parser('update-packages')
     command = modes.add_parser('setup')
     command.add_argument('--host', type=lambda value: str(ipaddress.IPv4Address(value)), required=True)
     command.add_argument('--ssh-port', type=port, required=True)
@@ -2172,7 +2130,7 @@ def main():
         elif args.mode == 'close':
             close()
         else:
-            session(reopen=args.mode == 'discover')
+            session(reopen=args.mode in ('discover', 'update-packages'))
             gui = GUI()
             require_update_check_off(started=True)
             if args.mode == 'setup':
@@ -2181,6 +2139,8 @@ def main():
                 share(gui, args)
             elif args.mode == 'revoke':
                 revoke(gui, args)
+            elif args.mode == 'update-packages':
+                update_packages(gui, args)
             else:
                 discover(gui, args)
         print(f'native_app_mode={args.mode} result=pass')
@@ -2206,7 +2166,7 @@ def main():
                           file=sys.stderr)
             except Exception:
                 pass
-            if args.mode == 'discover':
+            if args.mode in ('discover', 'update-packages'):
                 print('native_app_discover_evidence=' + json.dumps(dict(
                     getattr(gui, 'discover_evidence', {}), snapshot=discovery_snapshot(gui)), sort_keys=True),
                       file=sys.stderr)

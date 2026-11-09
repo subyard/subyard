@@ -509,6 +509,56 @@ func (runtime Runtime) projectPolicyConverged(state ports.ReconcileState, report
 	return state.ProfileFound && root && network
 }
 
+// vmIPv4PollInterval separates guest address observations while a booted VM
+// configures its network.
+var vmIPv4PollInterval = time.Second
+
+// pinVMIPv4AfterBoot pins the address of a VM that has just booted. Its guest
+// may still be configuring its network, so it waits within one bounded
+// deadline, SUBYARD_VM_IPV4_TIMEOUT seconds (60 by default) as for the shell
+// address wait, and fails closed naming the last observation.
+func (runtime Runtime) pinVMIPv4AfterBoot(ctx context.Context, pinner vmIPv4Pinner) error {
+	timeout := 60 * time.Second
+	if value := runtime.environmentValue("SUBYARD_VM_IPV4_TIMEOUT"); value != "" {
+		seconds, err := strconv.Atoi(value)
+		if err != nil || seconds < 1 || strconv.Itoa(seconds) != value {
+			return errors.New("SUBYARD_VM_IPV4_TIMEOUT must be a positive whole number of seconds")
+		}
+		timeout = time.Duration(seconds) * time.Second
+	}
+	started := time.Now()
+	deadline := started.Add(timeout)
+	for {
+		// Each probe has only the remaining budget; a result after the deadline is late.
+		probe, cancel := context.WithDeadline(ctx, deadline)
+		pinned, err := pinner.PinVMIPv4(probe, runtime.networkPolicyYard(), true)
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		late := !time.Now().Before(deadline)
+		switch {
+		case err == nil && pinned && !late:
+			return nil
+		case err == nil && !pinned:
+			return errors.New("VM IPv4 was not pinned after its guarded boot")
+		case err == nil:
+			err = errors.New("the address was confirmed only after the deadline")
+		case !late && !errors.Is(err, yardnetwork.ErrVMIPv4Pending):
+			return err
+		}
+		if late {
+			return fmt.Errorf("VM %s/%s has no pinnable IPv4 address after %s: %w; check the guest network with yard -Y %s shell, then rerun yard -Y %s init",
+				runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, time.Since(started).Round(time.Second), err, runtime.Yard.YardName, runtime.Yard.YardName)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(min(vmIPv4PollInterval, time.Until(deadline))):
+		}
+	}
+}
+
 func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	reporting, err := runtime.vmPageReporting()
 	if err != nil {
@@ -1242,12 +1292,8 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		if !ok {
 			return errors.New("native VM IPv4 pinning is unavailable")
 		}
-		pinned, err := pinner.PinVMIPv4(ctx, runtime.networkPolicyYard(), true)
-		if err != nil {
+		if err := runtime.pinVMIPv4AfterBoot(ctx, pinner); err != nil {
 			return err
-		}
-		if !pinned {
-			return errors.New("VM IPv4 was not pinned after its guarded boot")
 		}
 	}
 	return runtime.powerService().Set(ctx, runtime.Yard, desired, false)

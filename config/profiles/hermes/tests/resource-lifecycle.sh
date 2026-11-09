@@ -21,7 +21,7 @@ log="$state_root/incus.log"
 printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   info) [ -e "$state_root/up" ] ;;
-  list) [ -e "$state_root/up" ] && printf 'RUNNING\n' ;;
+  list) [ -e "$state_root/up" ] && printf '%s,RUNNING\n' "$2" ;;
 esac
 MOCK
 chmod 755 "$TMP/bin/incus"

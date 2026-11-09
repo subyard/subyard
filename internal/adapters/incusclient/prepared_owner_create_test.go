@@ -1202,7 +1202,7 @@ func ownerBlockFormatCommand(t *testing.T, marker, recorded, observed string) ([
 	command := exec.Command("bash", "--noprofile", "--norc", "-peu", "-s")
 	command.Env = append(os.Environ(), "SRV_POOL=default", "SRV_VOLUME=yard-srv", "INCUS_PROJECT=original-project", "YARD_INSTANCE_NAME=yard", "SRV_VOLUME_SIZE=4GiB", "FORMAT_MARKER="+marker, "FORMAT_RECORDED="+recorded, "FORMAT_OBSERVED="+observed)
 	command.Stdin = io.MultiReader(bytes.NewReader(helper), strings.NewReader(`
-incus_wait_instance_agent() { :; }
+incus_wait_yard_agent() { :; }
 die() { printf '%s\n' "$1" >&2; exit 1; }
 incus() {
  case "$1 $2 $3" in

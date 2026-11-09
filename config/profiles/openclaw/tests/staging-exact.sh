@@ -41,7 +41,7 @@ swap_lease() {
 }
 case "$1" in
  info) exit 0 ;;
- list) printf 'RUNNING\n'; exit 0 ;;
+ list) printf '%s,RUNNING\n' "$2"; exit 0 ;;
  exec)
   shift; while [ "$1" != -- ]; do shift; done; shift
   if [ "$1" = id ]; then

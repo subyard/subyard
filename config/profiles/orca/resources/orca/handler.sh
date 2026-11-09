@@ -1220,7 +1220,7 @@ emit_up_assessment() {
   refuse_port_collision
   ORCA_STEPS='[]'
   if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 &&
-    [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ]; then
+    [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]; then
     available=true
     select_release
   fi
@@ -1500,7 +1500,7 @@ if [ "$sub" = _runtime-contract ]; then
       fi
       observation="$(observe_runtime_contract)" || exit 1
       hook_binding=""
-      if [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] &&
+      if [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] &&
         yexec systemctl is-active --quiet "$ORCA_UNIT";then
         hook_binding="$(project_registration_report source | jq -r '.catalogDigest // empty')"
         [[ "$hook_binding" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native hook catalog fingerprint unavailable'

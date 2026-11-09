@@ -135,8 +135,7 @@ vm_storage_mount() {
     ready) [[ "$recorded_uuid" =~ ^[a-f0-9-]{36}$ ]] || die 'ready VM state volume has no valid filesystem identity' ;;
     *) die 'VM state volume has an unknown format marker' ;;
   esac
-  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-    || die 'VM agent did not become ready for state volume initialization'
+  incus_wait_yard_agent "VM agent did not become ready for state volume initialization" || die "$AGENT_WAIT_ERROR"
   uuid="$(incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- bash -euo pipefail -s -- "$pending" "$bytes" "$recorded_uuid" <<'GUEST'
 disk=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_incus_srv
 udevadm settle --timeout=30

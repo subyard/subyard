@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -1557,6 +1558,89 @@ type vmPinIncusFixture struct {
 func (fixture *vmPinIncusFixture) PinVMIPv4(_ context.Context, _ yardnetwork.Yard, apply bool) (bool, error) {
 	fixture.pinCalls = append(fixture.pinCalls, apply)
 	return fixture.pinned, fixture.pinErr
+}
+
+type pendingVMPinner struct {
+	pending int
+	calls   int
+	err     error
+}
+
+func (pinner *pendingVMPinner) PinVMIPv4(context.Context, yardnetwork.Yard, bool) (bool, error) {
+	pinner.calls++
+	if pinner.calls <= pinner.pending {
+		return false, fmt.Errorf("%w: guest eth0 has no unique IPv4 address matching its MAC", yardnetwork.ErrVMIPv4Pending)
+	}
+	return pinner.err == nil, pinner.err
+}
+
+// slowVMPinner answers once its probe deadline passes: with the deadline error
+// when it honors it, otherwise with a success that arrives too late.
+type slowVMPinner struct {
+	honorDeadline bool
+	calls         int
+}
+
+func (pinner *slowVMPinner) PinVMIPv4(ctx context.Context, _ yardnetwork.Yard, _ bool) (bool, error) {
+	pinner.calls++
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		return false, errors.New("probe has no deadline")
+	}
+	if pinner.honorDeadline {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	time.Sleep(time.Until(deadline) + 50*time.Millisecond)
+	return true, nil
+}
+
+// The first pin of a just-booted VM waits, bounded like the shell address wait,
+// for the guest address; the failure names its cause and a working next step.
+func TestVMIPv4PinWaitsBoundedForTheGuestAddress(t *testing.T) {
+	interval := vmIPv4PollInterval
+	vmIPv4PollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { vmIPv4PollInterval = interval })
+	runtime := Runtime{Yard: domain.Context{YardName: "vpn", IncusProject: "subyard-vpn", YardInstanceName: "yard-vpn", YardKind: domain.YardVM},
+		Environment: []string{"SUBYARD_VM_IPV4_TIMEOUT=2"}}
+	late := &pendingVMPinner{pending: 3}
+	if err := runtime.pinVMIPv4AfterBoot(context.Background(), late); err != nil || late.calls != 4 {
+		t.Fatalf("pin did not wait for the guest address: calls=%d err=%v", late.calls, err)
+	}
+	runtime.Environment = []string{"SUBYARD_VM_IPV4_TIMEOUT=1"}
+	never := &pendingVMPinner{pending: 1 << 30}
+	started := time.Now()
+	err := runtime.pinVMIPv4AfterBoot(context.Background(), never)
+	if elapsed := time.Since(started); elapsed < time.Second || elapsed > 3*time.Second {
+		t.Fatalf("pin wait ignored its bound: %s", elapsed)
+	}
+	if err == nil || !errors.Is(err, yardnetwork.ErrVMIPv4Pending) ||
+		!strings.Contains(err.Error(), "VM subyard-vpn/yard-vpn has no pinnable IPv4 address after 1s") ||
+		!strings.Contains(err.Error(), "no unique IPv4 address matching its MAC") ||
+		!strings.Contains(err.Error(), "rerun yard -Y vpn init") {
+		t.Fatalf("pin timeout lacks its cause or next step: %v", err)
+	}
+	// A refusal that waiting cannot change is returned at once.
+	refused := &pendingVMPinner{err: errors.New("VM IPv4 \"10.0.0.2\" has another reservation owner")}
+	if err := runtime.pinVMIPv4AfterBoot(context.Background(), refused); err == nil || refused.calls != 1 || !strings.Contains(err.Error(), "another reservation owner") {
+		t.Fatalf("pin refusal was retried or lost: calls=%d err=%v", refused.calls, err)
+	}
+	// A slow probe gets only the remaining budget, and a late success is rejected.
+	runtime.Environment = []string{"SUBYARD_VM_IPV4_TIMEOUT=1"}
+	for _, slow := range []*slowVMPinner{{honorDeadline: true}, {}} {
+		started = time.Now()
+		err = runtime.pinVMIPv4AfterBoot(context.Background(), slow)
+		if elapsed := time.Since(started); elapsed > 2500*time.Millisecond || slow.calls != 1 {
+			t.Fatalf("slow probe exceeded the wait bound: honor=%v %s calls=%d", slow.honorDeadline, elapsed, slow.calls)
+		}
+		if err == nil || !strings.Contains(err.Error(), "no pinnable IPv4 address after 1s") {
+			t.Fatalf("late or cancelled probe accepted: honor=%v %v", slow.honorDeadline, err)
+		}
+	}
+	runtime.Environment = []string{"SUBYARD_VM_IPV4_TIMEOUT=0"}
+	if err := runtime.pinVMIPv4AfterBoot(context.Background(), late); err == nil || !strings.Contains(err.Error(), "SUBYARD_VM_IPV4_TIMEOUT") {
+		t.Fatalf("invalid wait bound accepted: %v", err)
+	}
 }
 
 func TestVMPageReportingIsFixedAndScoped(t *testing.T) {

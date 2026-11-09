@@ -26,7 +26,7 @@ cat > "$tmp/bin/incus" <<'SH'
 set -euo pipefail
 case "${1:-}" in
   info) exit 0 ;;
-  list) printf 'RUNNING\n' ;;
+  list) printf '%s,RUNNING\n' "$2" ;;
   exec)
     shift
     while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done

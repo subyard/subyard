@@ -45,7 +45,7 @@ def main(directory, mode):
         if state != baseline['state']:
             refusals.append('native client state changed since its baseline')
     else:
-        # Stock app 5.0.3.0: a clientId is its peer's public key, and besides the shared
+        # Stock app 5.1.0.6: a clientId is its peer's public key, and besides the shared
         # clients its installer adds one "Admin [platform]" client for the app itself.
         if set(state['clients']) != set(state['peers']):
             refusals.append('native clients and live peers differ')

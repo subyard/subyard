@@ -46,8 +46,7 @@ announce_confirm "Subyard Phase 3 — provision the yard ($YARD_INSTANCE_NAME)" 
 
 # RUNNING precedes guest-agent readiness for VMs. Wait before the first mutating exec.
 info "waiting for $YARD_INSTANCE_NAME agent"
-incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-  || die "instance '$YARD_INSTANCE_NAME' agent did not become ready"
+incus_wait_yard_agent "instance '$YARD_INSTANCE_NAME' agent did not become ready" || die "$AGENT_WAIT_ERROR"
 
 # Common base policy, independent of optional profiles. Never unmount or stop a
 # running /tmp; readiness reports when the installed policy still needs reboot.

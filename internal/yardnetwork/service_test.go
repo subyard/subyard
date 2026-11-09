@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -189,11 +191,18 @@ type rollbackDeadlineHost struct {
 	*memoryHost
 	started         bool
 	stopHadDeadline bool
+	stopWait        time.Duration
+	failStop        bool
 }
 
 func (h *rollbackDeadlineHost) NetworkPower(ctx context.Context, y Yard, action string) error {
 	if action == "stop" && h.started {
-		_, h.stopHadDeadline = ctx.Deadline()
+		var deadline time.Time
+		deadline, h.stopHadDeadline = ctx.Deadline()
+		h.stopWait = time.Until(deadline)
+		if h.failStop {
+			return errors.New("injected clean stop timeout")
+		}
 	}
 	if err := h.memoryHost.NetworkPower(ctx, y, action); err != nil {
 		return err
@@ -332,6 +341,97 @@ func TestPostStartGuardFailureRollsBackWithDeadline(t *testing.T) {
 	}
 	if !h.stopHadDeadline || h.snapshot.Yards[0].InstanceInfo.Status != "Stopped" {
 		t.Fatalf("rollback was not bounded and completed: deadline=%t status=%q", h.stopHadDeadline, h.snapshot.Yards[0].InstanceInfo.Status)
+	}
+	// The rollback stop must not cut short the clean stop's own wait.
+	if _, stopWait := NetworkPowerTimeouts("stop"); h.stopWait < stopWait-time.Second {
+		t.Fatalf("rollback stop bound %s clips the clean stop wait %s", h.stopWait, stopWait)
+	}
+}
+
+func TestPostStartGuardFailureReportsFailedRollbackStop(t *testing.T) {
+	h := &rollbackDeadlineHost{memoryHost: newMemoryHost(), failStop: true}
+	s := Service{Host: h, Lock: &memoryLock{}, Guard: func(context.Context) error {
+		if h.started {
+			return errors.New("injected post-start guard failure")
+		}
+		return nil
+	}}
+	on := true
+	plan, err := s.Prepare(context.Background(), fixtureYards(h.memoryHost), Change{Isolation: &on})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.Apply(context.Background(), plan)
+	y := h.snapshot.Yards[0].Yard
+	force := "incus stop --force " + y.Instance + " --project " + y.Project
+	// Both independent failures are reported, with the recovery for the yard left running.
+	if err == nil || !strings.Contains(err.Error(), "post-start guard failure") ||
+		!strings.Contains(err.Error(), "injected clean stop timeout") || !strings.Contains(err.Error(), force) {
+		t.Fatalf("guard and failed stop were not both reported: %v", err)
+	}
+}
+
+type failedStopHost struct {
+	*memoryHost
+	stops      bool
+	unreadable bool
+	stopTried  bool
+}
+
+func (h *failedStopHost) NetworkPower(_ context.Context, y Yard, action string) error {
+	if action != "stop" {
+		return errors.New("unexpected start")
+	}
+	h.stopTried = true
+	if h.stops {
+		h.snapshot.Yards[h.index(y)].InstanceInfo.Status = "Stopped"
+	}
+	return errors.New("Failed shutting down instance")
+}
+
+func (h *failedStopHost) InspectNetwork(ctx context.Context, yards []Yard) (Snapshot, error) {
+	if h.unreadable && h.stopTried {
+		return Snapshot{}, errors.New("injected unreadable state")
+	}
+	return h.memoryHost.InspectNetwork(ctx, yards)
+}
+
+func TestFailedNetworkStopKeepsPolicyPendingAndNamesRecovery(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		stops      bool
+		unreadable bool
+		want       string
+		force      bool
+	}{
+		{name: "guest still running", want: "a is still Running; run yard network reconcile to retry the clean stop", force: true},
+		{name: "guest stopped late", stops: true, want: "; run yard network reconcile"},
+		{name: "state unreadable", unreadable: true, want: "could not read the power state"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := &failedStopHost{memoryHost: newMemoryHost(), stops: test.stops, unreadable: test.unreadable}
+			s := Service{Host: h, Lock: &memoryLock{}, Guard: func(context.Context) error { return nil }}
+			on := true
+			plan, err := s.Prepare(context.Background(), fixtureYards(h.memoryHost), Change{Isolation: &on})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = s.Apply(context.Background(), plan)
+			if err == nil || !strings.Contains(err.Error(), "Failed shutting down instance") || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("failed stop lost its cause or recovery: %v", err)
+			}
+			y := h.snapshot.Yards[0].Yard
+			force := "incus stop --force " + y.Instance + " --project " + y.Project
+			if strings.Contains(err.Error(), force) != test.force || strings.Contains(err.Error(), "yard stop --force") {
+				t.Fatalf("untrue recovery: %v", err)
+			}
+			if test.force && !strings.Contains(err.Error(), "lose data") {
+				t.Fatalf("forced stop lacks its data-loss warning: %v", err)
+			}
+			if len(h.stored.Policy.PendingStart) == 0 || h.stored.Policy.AppliedIsolation || slices.Contains(h.events, "acl") {
+				t.Fatalf("failed stop lost pending policy or changed ACLs: %+v %v", h.stored.Policy, h.events)
+			}
+		})
 	}
 }
 

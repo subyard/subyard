@@ -783,6 +783,18 @@ ask the owner to close sessions and stop/start that yard. Intentionally stopped 
 retain their deferred policy marker and verify the actual filesystem when running.
 Initial observation failures also retain these reasons; repairable drift stays a state.
 
+Starts wait for the guest agent, up to ten minutes for a VM. A guest reboot that Incus
+serves with a new QEMU process passes through STOPPED for about two seconds; an instance
+that stays STOPPED for 30 seconds is not booting, so the wait ends at once with that
+cause. The first in-guest reboot of a new VM always needs such a restart (Incus marks
+it `volatile.vm.needs_reset`), and Incus 6.0 can lose it when the old QEMU monitor
+disconnects. Incus 6.0 also sets that mark on any configuration change to a running VM,
+so a later reboot from inside the guest can leave the yard stopped the same way; start
+it again with `yard start`. Initialization therefore starts a VM it created in the same invocation
+once more through the guarded start. A second loss, or a lost boot of an existing yard,
+refuses with the instance's boot-log command and the init or start command to retry;
+an existing yard is never restarted on the operator's behalf.
+
 The same guest policy installs bounded native temporary cleanup. The early
 `subyard-tmp-shutdown.service` starts before `sysinit.target`, so its stop command
 runs after ordinary services and before local filesystems unmount. It invokes
@@ -1384,6 +1396,19 @@ On failure, desired/applied revisions remain different and pending restarts pers
 managed starts refuse incomplete policy. Run `yard network reconcile --yes` to retry,
 or explicitly select `isolation off` to restore the recorded original NIC settings.
 
+These power changes are clean and never forced. A stop lets Incus wait up to 180 seconds
+for the guest to power off, above the slowest measured clean stop of a nested VM yard;
+a start waits 30 seconds. The client waits 15 seconds longer than Incus, so Incus reports
+the operation's own result. A failed stop that leaves the yard running keeps it running:
+reconcile repeats the clean stop. If the guest never powers off, only
+`incus stop --force <instance> --project <project>` ends it, which can lose data the
+guest has not written; the error names the exact instance and project. `yard stop --force`
+only bypasses session guards and does not help here. Until a timed-out clean stop ends,
+Incus refuses other changes to that instance. A resource bring-up that fails then cannot
+close its own route; its error states whether owned ingress remains published, is closed
+or is unknown, and names `yard -Y <yard> <command> <shutdown>` to finish after that stop ends.
+Rollback cleanup of the isolation ACL has five minutes, enough for one stop and one start.
+
 The fixed root-owned `/run/lock/subyard-network/policy.lock` serializes policy application
 and managed starts. Host network setup, boot-reconciler installation during upgrades,
 and boot reconciliation initialize it without replacing an existing validated lock.
@@ -1606,7 +1631,7 @@ The generic VM settings are:
 | Setting | Contract |
 | --- | --- |
 | `VM_FREE_PAGE_REPORTING=1` | Set the existing virtio balloon's fixed reporting property and guest reporting order 1; require the QEMU `free-page-reporting` property and guest negotiation, and reject conflicting raw configuration. No arbitrary QEMU input is accepted. |
-| `VM_PIN_IPV4=1` | Pin the private primary NIC to its observed DHCP address after ownership and collision checks. |
+| `VM_PIN_IPV4=1` | Pin the private primary NIC to its observed DHCP address after ownership and collision checks. After the guarded boot, wait a bounded time (60 s) for the guest address and its lease, then refuse naming the last observation. |
 | `VM_CPU_WEIGHT` | Optional Linux cgroup-v2 CPU weight (1–10000; normal weight 100). Persist local owned VM metadata and attach its verified QEMU process to a transient systemd scope in the root slice. Refuse placement that would bypass an ancestor CPU, memory, task, cpuset or I/O ceiling. |
 | `ROOT_DISK_SIZE` | Bound the root disk at creation; refuse implicit resizing of an existing VM. |
 | `SRV_VOLUME_TYPE=block` | Attach an owned custom block volume and mount its ext4 filesystem at `/srv` by UUID. |
@@ -2087,6 +2112,9 @@ execution timeout plus their existing two-second cleanup/drain allowance. SSH tr
 its existing timeout policy. These bounds preserve the full owning readiness check.
 Retired integration declarations live under `config/retired-integrations/`; they permit only
 bounded cleanup lifecycle and discarded-input metadata, with no provisioning or native binaries.
+An observation that reads guest services waits, within its observe limit, for a running guest
+that started recently and is still booting; a guest that is stopped, has been up longer, or does
+not answer within that bound reports `native-unavailable`.
 
 Full uninstall is a scope of the existing prepared teardown. It aggregates local yard executions
 through the same observation, stale checks, apply and verification methods. The existing

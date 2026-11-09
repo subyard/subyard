@@ -79,6 +79,71 @@ func TestResourceIngressRollbackVerifiesSuccessfulHandlerClosedRoute(t *testing.
 	}
 }
 
+type inspectFailureHost struct {
+	*rollbackIngressHost
+	failure error
+}
+
+func (host *inspectFailureHost) InspectNetwork(ctx context.Context, yards []yardnetwork.Yard) (yardnetwork.Snapshot, error) {
+	if host.failure != nil {
+		return yardnetwork.Snapshot{}, host.failure
+	}
+	return host.rollbackIngressHost.InspectNetwork(ctx, yards)
+}
+
+func TestFailedResourceIngressRollbackReportsWhatItLeft(t *testing.T) {
+	program, loaded, _ := orphanIngressFixture(t, true)
+	definition := program.resources.Definitions()[0]
+	// Incus refuses instance writes while a timed-out clean stop is pending.
+	writeCLIFile(t, definition.HandlerPath(), "#!/bin/sh\nexit 1\n", 0o700)
+	contract := *definition.Proxy
+	yard := networkYard(loaded.Context)
+	device := map[string]string{"type": "proxy", "listen": "udp:10.20.30.40:42000",
+		"connect": "udp:10.80.0.10:41999", "bind": "host", "nat": "true"}
+	shutdown := "yard -Y " + loaded.Context.YardName + " relay down"
+	pending := "; Incus refuses it until the pending clean stop of the yard has ended"
+	for name, test := range map[string]struct {
+		status  string
+		devices map[string]map[string]string
+		failure error
+		want    string
+	}{
+		"route still published": {status: "Running", devices: map[string]map[string]string{contract.Device: device},
+			want: "owned public ingress remains published; close it with " + shutdown},
+		"route published while the yard stops": {status: "Stopping", devices: map[string]map[string]string{contract.Device: device},
+			want: "owned public ingress remains published; close it with " + shutdown + pending},
+		"route closed": {status: "Running", devices: map[string]map[string]string{},
+			want: "owned public ingress is closed; resource cleanup is incomplete; finish it with " + shutdown},
+		"route closed while the yard stops": {status: "Stopping", devices: map[string]map[string]string{},
+			want: "owned public ingress is closed; resource cleanup is incomplete; finish it with " + shutdown + pending},
+		"state unreadable": {status: "Running", devices: map[string]map[string]string{contract.Device: device}, failure: errors.New("incus unavailable"),
+			want: "owned public ingress state is unknown (incus unavailable); close it with " + shutdown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := &inspectFailureHost{failure: test.failure, rollbackIngressHost: &rollbackIngressHost{snapshot: yardnetwork.Snapshot{
+				Yards: []yardnetwork.ObservedYard{{Yard: yard, InstanceFound: true, InstanceInfo: ports.InstanceInfo{
+					Type: domain.YardVM, Status: test.status, LocalDevices: test.devices}}}}}}
+			ingress := &resourceIngress{service: &yardnetwork.Service{Host: host}, contract: contract, up: true,
+				preview: yardnetwork.IngressPreview{Target: yard}}
+			runner := &resourceApplyRunner{cli: program, loaded: loaded, definition: definition,
+				localAction: definition.BringUp, effect: domain.ActionMutation}
+			err := ingress.rollback(runner, "rollback-test")
+			if err == nil || !strings.Contains(err.Error(), "run owned ingress rollback") || !strings.HasSuffix(err.Error(), test.want) {
+				t.Fatalf("rollback did not report its cause and what it left: %v", err)
+			}
+		})
+	}
+}
+
+func TestResourceIngressCleanupFitsOneNetworkRestart(t *testing.T) {
+	_, stop := yardnetwork.NetworkPowerTimeouts("stop")
+	_, start := yardnetwork.NetworkPowerTimeouts("start")
+	// Observation, policy writes and the host guards need time beyond the two waits.
+	if resourceIngressCleanupBudget < stop+start+30*time.Second {
+		t.Fatalf("cleanup budget %s cannot fit a clean stop (%s) and start (%s)", resourceIngressCleanupBudget, stop, start)
+	}
+}
+
 func TestResourceIngressRefreshRejectsChangedPersistedSettings(t *testing.T) {
 	for _, test := range []struct {
 		name, changed string

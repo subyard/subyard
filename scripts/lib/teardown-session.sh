@@ -2,6 +2,8 @@
 # Teardown permits unfinished/unreachable guests, but protects proven SSH sessions.
 # shellcheck source=scripts/lib/ssh-listener.sh
 . "$SCRIPT_DIR/lib/ssh-listener.sh"
+# shellcheck source=scripts/lib-power.sh
+. "$SCRIPT_DIR/lib-power.sh"
 
 teardown_ssh_state() {
   ssh_listener_command exec "$SSH_LISTENER_INSTANCE" "${SSH_LISTENER_PROJECT[@]}" -- \
@@ -11,7 +13,7 @@ teardown_ssh_state() {
 teardown_session_guard() {
   [ "${have_incus:-0}" = 1 ] || return 0
   local instance="$1" capture_rc=0 result paused=""
-  [ "$(timeout 5s incus list "$instance" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] || return 0
+  [ "$(incus_instance_columns "$INCUS_PROJECT" "$instance" s 5s)" = RUNNING ] || return 0
   ssh_listener_capture "$instance" 5s || capture_rc=$?
   case "$capture_rc" in
     0) ;;

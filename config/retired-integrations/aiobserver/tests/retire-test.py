@@ -29,7 +29,8 @@ class RetirementTest(unittest.TestCase):
                           'HostConfig':{},'Mounts':[],'State':{'Running':True}}
         self.service = 'owned control hashes\nactive\nenabled\n'
         self.effects = []
-        self.patchers = [patch.object(retirement,'run',self.native_run),patch.object(retirement,'guest',self.guest),patch.object(retirement,'incus',self.incus)]
+        self.patchers = [patch.object(retirement,'run',self.native_run),patch.object(retirement,'guest',self.guest),patch.object(retirement,'incus',self.incus),
+                         patch.object(retirement,'wait_guest_ready',lambda snapshot: None)]
         for patcher in self.patchers: patcher.start(); self.addCleanup(patcher.stop)
 
     def native_run(self,*args,**options):
@@ -193,6 +194,98 @@ class RetirementTest(unittest.TestCase):
         self.assertFalse(self.service)
         self.apply(retirement.observe()[0])
         self.assertEqual(retirement.observe()[0]['state'],'absent')
+
+
+class GuestReadinessTest(unittest.TestCase):
+    """A booting guest gets a bounded wait; an unanswered settled guest does not."""
+    def readiness(self, started, answers, clock_step=1.0):
+        calls, clock = [], [0.0]
+        def run(args, **options):
+            calls.append(args)
+            answer = answers[min(len(calls)-1, len(answers)-1)]
+            code = answer if type(answer) is int else 0 if answer else 1
+            return subprocess.CompletedProcess(args, code, b'', b'')
+        def monotonic():
+            clock[0] += clock_step
+            return clock[0]
+        snapshot = {'status': 'Running', 'last_used_at': started}
+        with patch.object(retirement.subprocess, 'run', run), patch.object(retirement.time, 'monotonic', monotonic), \
+             patch.object(retirement.time, 'sleep', lambda seconds: None):
+            try:
+                retirement.wait_guest_ready(snapshot)
+                return 'ready', calls
+            except ValueError as error:
+                return str(error), calls
+
+    def stamp(self, age):
+        import datetime
+        moment = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=age)
+        return moment.strftime('%Y-%m-%dT%H:%M:%S.123456789Z')
+
+    def test_booting_guest_is_awaited_until_it_answers(self):
+        result, calls = self.readiness(self.stamp(5), [False, False, True])
+        self.assertEqual((result, len(calls)), ('ready', 3))
+        self.assertEqual(calls[-1][-1], retirement.READY_PROBE)
+
+    def test_booting_guest_wait_is_bounded(self):
+        result, calls = self.readiness(self.stamp(5), [False], clock_step=30.0)
+        self.assertEqual(result, 'native-unavailable')
+        self.assertLess(len(calls), 4)
+
+    def test_unfinished_boot_is_not_ready_while_the_guest_boots(self):
+        # The probe's own boot wait timed out: keep waiting, then report it.
+        unfinished = retirement.UNFINISHED
+        result, calls = self.readiness(self.stamp(5), [unfinished, unfinished, True])
+        self.assertEqual((result, len(calls)), ('ready', 3))
+        result, calls = self.readiness(self.stamp(5), [unfinished], clock_step=30.0)
+        self.assertEqual(result, 'native-unavailable')
+        self.assertLess(len(calls), 4)
+
+    def test_probe_reports_unfinished_boot_after_its_timeout(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            for state, code in (('', retirement.UNFINISHED), ('starting', retirement.UNFINISHED), ('running', 0), ('degraded', 0)):
+                fake = Path(root)/'systemctl'
+                fake.write_text(f"#!/bin/sh\nprintf '%s' '{state}'\nexit 1\n")
+                fake.chmod(0o700)
+                timeout = Path(root)/'timeout'
+                timeout.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+                timeout.chmod(0o700)
+                result = subprocess.run(['sh', '-c', retirement.READY_PROBE], env=dict(os.environ, PATH=f'{root}:/usr/bin:/bin'), timeout=30)
+                self.assertEqual(result.returncode, code, state)
+
+    def test_settled_guest_that_answers_is_observed_as_is(self):
+        result, calls = self.readiness(self.stamp(3600), [retirement.UNFINISHED])
+        self.assertEqual((result, len(calls)), ('ready', 1))
+
+    def test_settled_guest_without_agent_is_unavailable_at_once(self):
+        result, calls = self.readiness(self.stamp(3600), [False])
+        self.assertEqual((result, len(calls)), ('native-unavailable', 1))
+        result, calls = self.readiness('', [False])
+        self.assertEqual((result, len(calls)), ('native-unavailable', 1))
+
+    def test_stopped_guest_is_not_awaited(self):
+        calls = []
+        def run(args, **options):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 1, b'', b'')
+        with patch.object(retirement.subprocess, 'run', run), patch.object(retirement.time, 'sleep', lambda seconds: self.fail('waited')):
+            with self.assertRaises(ValueError) as raised:
+                retirement.wait_guest_ready({'status': 'Stopped', 'last_used_at': self.stamp(5)})
+        self.assertEqual((str(raised.exception), len(calls)), ('native-unavailable', 1))
+
+
+class LifecycleDiagnosticTest(unittest.TestCase):
+    """The core parser requires `<phase> <reason>`; a bare reason is discarded."""
+    def test_failure_record_names_the_lifecycle_phase(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            fake = Path(root)/'incus'
+            fake.write_text('#!/bin/sh\nexit 1\n')
+            fake.chmod(0o700)
+            environment = dict(os.environ, PATH=f'{root}:/usr/bin:/bin', INCUS_PROJECT='fixture', YARD_INSTANCE_NAME='yard')
+            for arguments, phase in ((['observe'], 'inspect'), (['apply', 'op-retire', 'a', 'b'], 'apply')):
+                result = subprocess.run([sys.executable, '-B', str(PACKAGE/'retire.py'), *arguments], env=environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stderr.strip().splitlines()[-1], f'subyard-lifecycle-diagnostic-v1 {phase} native-unavailable')
 
 
 if __name__=='__main__': unittest.main()

@@ -109,7 +109,7 @@ case "${1:-} ${2:-} ${3:-}" in
       *'ip -4 -o address show'*) printf '2: eth0    inet 10.80.0.10/24 brd 10.80.0.255 scope global eth0\n' ;;
       *) exit 90 ;;
     esac ;;
-  'list yard --project') cat "$MOCK_STATE_DIR/power"; exit "$MOCK_STATE_EXIT" ;;
+  'list yard --project') printf 'yard,'; cat "$MOCK_STATE_DIR/power"; exit "$MOCK_STATE_EXIT" ;;
   'stop yard --project')
     [ "$MOCK_STOP_EXIT" = 0 ] || exit "$MOCK_STOP_EXIT"
     printf 'STOPPED\n' > "$MOCK_STATE_DIR/power" ;;

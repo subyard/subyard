@@ -25,7 +25,7 @@ log="$state_root/incus.log"
 printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   info) [ -e "$state_root/up" ] ;;
-  list) [ -e "$state_root/up" ] && printf 'RUNNING\n' ;;
+  list) [ -e "$state_root/up" ] && printf '%s,RUNNING\n' "$2" ;;
   config)
     if [ "${2:-}" = get ]; then
       [ ! -f "$state_root/config-${4:-}" ] || cat "$state_root/config-${4:-}"

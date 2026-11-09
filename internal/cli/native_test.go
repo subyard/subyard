@@ -155,7 +155,7 @@ exit 97
 	incusLog := filepath.Join(root, "incus.log")
 	writeCLIFile(t, filepath.Join(bin, "incus"), `#!/bin/sh
 case "$1" in
-  list) printf 'RUNNING\n' ;;
+  list) printf '%s,RUNNING\n' "$2" ;;
   exec) printf '%s\n' "$*" > "$INCUS_LOG" ;;
 esac
 `, 0o700)

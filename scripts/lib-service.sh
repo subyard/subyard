@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Shared physical helpers for profile resource handlers.
+# shellcheck source=scripts/lib-power.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib-power.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
@@ -16,6 +18,6 @@ svc_require_yard_running() {
   incus_preflight
   incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
     || die "instance '$YARD_INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
-  [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] \
+  [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] \
     || die "yard is not running — start it: $(yard_cmd_hint) start"
 }

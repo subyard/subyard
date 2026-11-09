@@ -15,6 +15,8 @@ import (
 // PinVMIPv4 validates the dedicated VM's default-profile reservation. On
 // its first guarded boot, apply reserves the address proven by both the guest
 // NIC and the bridge's MAC-matched DHCP lease. Existing pins are never changed.
+// A guest that has not shown that address or lease yet returns
+// yardnetwork.ErrVMIPv4Pending; the caller owns the bounded wait.
 func (client *Client) PinVMIPv4(ctx context.Context, yard yardnetwork.Yard, apply bool) (bool, error) {
 	if yard.Project == "" || yard.Instance == "" || yard.Network == "" {
 		return false, errors.New("VM network identity is incomplete")
@@ -99,7 +101,7 @@ func (client *Client) PinVMIPv4(ctx context.Context, yard yardnetwork.Yard, appl
 	}
 	address = vmGuestIPv4(instance, state, mac)
 	if address == "" {
-		return false, errors.New("VM guest eth0 has no unique IPv4 address matching its MAC")
+		return false, fmt.Errorf("%w: guest eth0 has no unique IPv4 address matching its MAC", yardnetwork.ErrVMIPv4Pending)
 	}
 	if err := validateVMIPv4Address(address, subnet); err != nil {
 		return false, err
@@ -121,6 +123,9 @@ func (client *Client) PinVMIPv4(ctx context.Context, yard yardnetwork.Yard, appl
 			return false, fmt.Errorf("VM MAC has conflicting lease %q", lease.Address)
 		}
 		matching++
+	}
+	if matching == 0 {
+		return false, fmt.Errorf("%w: the bridge has no lease for guest address %s and its MAC", yardnetwork.ErrVMIPv4Pending, address)
 	}
 	if matching != 1 {
 		return false, errors.New("VM guest IPv4 needs exactly one MAC-matched bridge lease")

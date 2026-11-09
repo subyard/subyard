@@ -237,7 +237,7 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 			if p.Policy.Isolation {
 				mode = "enable host yard isolation; allow only explicitly linked peers"
 			}
-			consequences = []string{mode, "briefly stop and restart affected running yards; active connections will close", "on failure, keep incomplete policy visible and affected yards stopped; retry with yard network reconcile"}
+			consequences = []string{mode, "briefly stop and restart affected running yards; active connections will close", "on failure, keep incomplete policy visible and affected yards stopped, or running if a guest does not stop within its clean-stop wait; retry with yard network reconcile"}
 			names := []string{}
 			for _, u := range p.Updates {
 				names = append(names, u.Yard.Name)

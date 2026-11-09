@@ -28,6 +28,7 @@ class LifecycleTest(unittest.TestCase):
             path.write_bytes(b'private observed content')
             runtime = object.__new__(guest.Runtime)
             runtime.assets = {path: (b'desired content', 0o644)}
+            runtime.retained = {}
             runtime.selected = True
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
@@ -269,6 +270,26 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(observed['actual'],observed['desired'])
                 self.assertEqual(marker.read_bytes(), b'history')
                 self.assertTrue((root/'data/drain.json').exists())
+                # A fresh unselected run, packaged or from plain source, needs no
+                # collector binary and keeps the installed one unchanged.
+                bare = root/'bare-source'
+                shutil.copytree(source, bare)
+                (bare/'subyard-telemetry').unlink()
+                installed_binary = root/'library/subyard-telemetry'
+                kept = installed_binary.read_bytes()
+                runs = {name: guest.Runtime(path, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', root/'legacy/native.json')
+                        for name, path in (('source', bare), ('packaged', source))}
+                for unselected in runs.values():
+                    self.assertNotIn(installed_binary, unselected.assets)
+                self.assertEqual(runs['source'].observe(), runs['packaged'].observe())
+                runs['source'].apply()
+                observed = runs['source'].observe()
+                self.assertEqual(observed['state'], 'current')
+                self.assertEqual(observed['actual'], observed['desired'])
+                self.assertEqual(observed, runs['packaged'].observe())
+                self.assertEqual(installed_binary.read_bytes(), kept)
+                self.assertEqual(json.loads((root/'control/assets.json').read_text())[str(installed_binary)],
+                                 hashlib.sha256(kept).hexdigest())
                 self.assertEqual(states[guest.MANAGER]['ActiveState'], 'active')
                 self.assertFalse(any(call[0] == 'stop' and guest.MANAGER in call for call in calls))
                 self.assertTrue((root/'bin/subyard-telemetry-run').read_text().startswith('#!/bin/sh\n'))
@@ -308,6 +329,37 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     output.truncate(guest.BINARY_LIMIT+1)
                 with self.assertRaisesRegex(ValueError, 'unsafe native file'):
                     guest.Runtime(source, 'dev', True, [], root/'control', root/'data', root/'library', root/'units', root/'bin', root/'legacy/native.json')
+
+    def test_unselected_guest_needs_only_the_collector_path(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            source = root/'source'
+            source.mkdir()
+            for path in Path(guest.__file__).parent.glob('*.py'):
+                shutil.copyfile(path, source/path.name)
+            shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
+            account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
+            def runtime(selected, origin=source):
+                return guest.Runtime(origin, 'dev', selected, [], root/'control', root/'data', root/'library',
+                                     root/'units', root/'bin', root/'legacy/native.json')
+            with patch.object(guest.pwd, 'getpwnam', return_value=account):
+                with self.assertRaisesRegex(ValueError, 'missing profile asset'):
+                    runtime(True)
+                source_run = runtime(False)
+                self.assertEqual(source_run.retained, {root/'library/subyard-telemetry': 0o755})
+                (source/'subyard-telemetry').write_bytes(b'\x7fELF synthetic collector')
+                packaged_run = runtime(False)
+                self.assertEqual(source_run.desired(), packaged_run.desired())
+                self.assertEqual(source_run.observe(), {'state': 'absent', 'actual': '', 'desired': ''})
+                self.assertEqual(packaged_run.observe(), source_run.observe())
+                selected_run = runtime(True)
+                self.assertNotEqual(selected_run.desired(), source_run.desired())
+                self.assertEqual(selected_run.retained, {})
+                # A leftover collector at the retained path is still detected.
+                (root/'library').mkdir()
+                (root/'library/subyard-telemetry').write_bytes(b'leftover')
+                with self.assertRaisesRegex(ValueError, 'unmanaged collector assets'):
+                    source_run.observe()
 
     def test_failure_diagnostic_omits_private_exception_payload(self):
         try:

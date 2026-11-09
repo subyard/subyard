@@ -311,3 +311,54 @@ func testNonRepairActivationConfiguration(t *testing.T) {
 		})
 	}
 }
+
+// failingGuest answers every command with a failure exit status.
+type failingGuest struct{}
+
+func (failingGuest) Exec(context.Context, string, string, ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
+}
+
+// Only readiness treats an unanswered installed read of a running guest as
+// unknown installed settings. Convergence would apply desired values over the
+// unread installed ones, and a guest that answered remains a refusal.
+func TestRepairInstalledReadUnknownOnlyForReadiness(t *testing.T) {
+	const installedRead = "inspect installed configuration"
+	for _, scenario := range []struct {
+		name     string
+		mode     releasetransition.ProcessMode
+		executor ports.InstanceExecutor
+		refused  bool
+	}{
+		{"readiness lost agent", releasetransition.ProcessInspect, lostGuestAgent{}, false},
+		{"convergence lost agent", releasetransition.ProcessConverge, lostGuestAgent{}, true},
+		{"readiness guest answered", releasetransition.ProcessInspect, failingGuest{}, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newPendingInitFixture(t, false, nil)
+			request, journal := repairRequest(t, fixture)
+			request.Mode = scenario.mode
+			fixture.cli.options.Executor = scenario.executor
+			program, err := New(fixture.cli.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failures := map[string]error{}
+			for _, owner := range program.activationReconcilers(request) {
+				if _, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil {
+					failures[owner.ID()] = err
+				}
+			}
+			// The host-side owner needs no guest; the materialized owner does.
+			for _, id := range []string{"key-tools-runtime", "materialized-config"} {
+				refused := failures[id] != nil && strings.Contains(failures[id].Error(), installedRead)
+				if refused != scenario.refused {
+					t.Fatalf("%s installed-read refusal=%t want %t: %v", id, refused, scenario.refused, failures[id])
+				}
+			}
+			if failures["materialized-config"] == nil {
+				t.Fatal("materialized configuration hid the unavailable guest")
+			}
+		})
+	}
+}

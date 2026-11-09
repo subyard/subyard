@@ -11,6 +11,7 @@ bash config/profiles/amnezia/tests/run.sh
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane full
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane recovery
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane resources
+config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane maintenance
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane setup
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane share
 ```
@@ -27,7 +28,8 @@ that (the pre-launch settings refusal, a registration timeout, an update page se
 registering) leaves that archive empty, with its reason in the lane log.
 The `setup` diagnostic stops after the stock app installs its native server, before
 sharing clients. It keeps the ordinary 360-second installation completion gate;
-failures retain numeric native error codes and bounded owned-server state.
+failures retain whether the stock app showed an error, its numeric code when the
+accessibility tree exposes one, and bounded owned-server state.
 The `share` diagnostic also exports the original two clients and checks their
 distinct identities, reopens administration, scans the native server and verifies
 the retained second user, then closes the app before image transfer or traffic probes.
@@ -46,6 +48,15 @@ the existing `owner.sh` phases `bootstrap`, `init-isolated`, then `admin-down-ch
 against the same candidate bundle. The last phase removes administrative ingress,
 waits for the running fixture's agent after any ACL restart, then repeats the
 same down command. It does not require native VPN installation or a GUI client.
+The `maintenance` lane runs after the shared native clients and revocation. It
+records what the stock host firewall script left in the guest's raw table, then
+applies that script's TCP IP-options drop rule as root and checks administration,
+retained and revoked client traffic beside the profile's nftables policy. It steps
+`docker-ce` and `containerd.io` back one repository version and drives the app's
+**Update server packages** action, declining its reboot question. Afterwards both
+packages must match their repository candidates, the native state signature and
+readiness must hold, and traffic, revocation and one discovery must still pass.
+
 The ordinary `admin-down` phase additionally verifies the running VPN afterward;
 public administrative down continues to support stopped or agentless yards.
 The shared Free Page Reporting probe remains under `dev/e2e/` because it tests a

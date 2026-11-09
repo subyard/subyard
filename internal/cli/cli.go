@@ -2062,11 +2062,23 @@ func shellExecArguments(yard domain.Context, root bool, cwd string, guestCommand
 }
 
 func (cli *CLI) incusCLIYardRunning(ctx context.Context, yard domain.Context) bool {
+	// `incus list NAME` also lists every instance whose name starts with NAME.
 	command := exec.CommandContext(ctx, "incus", "list", yard.YardInstanceName,
-		"--project", yard.IncusProject, "-f", "csv", "-c", "s")
+		"--project", yard.IncusProject, "-f", "csv", "-c", "ns")
 	command.Env = environmentList(cli.env, nil)
-	state, err := command.Output()
-	return err == nil && strings.EqualFold(strings.TrimSpace(string(state)), "running")
+	rows, err := command.Output()
+	return err == nil && strings.EqualFold(incusCSVInstanceColumns(string(rows), yard.YardInstanceName), "running")
+}
+
+// incusCSVInstanceColumns returns the remaining CSV columns of exactly the named
+// instance from `incus list -c n...` output, or "" when it is absent.
+func incusCSVInstanceColumns(rows, instance string) string {
+	for _, row := range strings.Split(rows, "\n") {
+		if columns, ok := strings.CutPrefix(strings.TrimSpace(row), instance+","); ok {
+			return columns
+		}
+	}
+	return ""
 }
 
 func parseShellArguments(arguments []string) (root bool, selector string, command []string, help bool, err error) {

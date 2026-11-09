@@ -22,6 +22,10 @@ import (
 
 var ErrNotConverged = errors.New("yard network policy is not converged; run yard network reconcile")
 
+// ErrVMIPv4Pending reports that a booted VM has not yet shown the guest
+// address and DHCP lease its first IPv4 pin reserves; the caller may wait.
+var ErrVMIPv4Pending = errors.New("VM guest IPv4 is not observed yet")
+
 type Change struct {
 	Link      *Link
 	Unlink    *Link

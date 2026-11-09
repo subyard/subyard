@@ -11,8 +11,10 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/native-installed-stage.sh"
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
+# shellcheck source=scripts/lib-power.sh
+. "$SCRIPT_DIR/lib-power.sh"
 PROJ=(--project "$INCUS_PROJECT")
-[ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" --format json | jq -r '.[0].status')" = Running ] \
+[ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] \
   || die "integration reconcile requires a running yard"
 [ "${ALLOWS_CODING_TOOLS:-true}" != false ] || [ -z "${CODING_TOOL_INTEGRATIONS:-}" ] \
   || die "coding integrations are forbidden by the yard role"

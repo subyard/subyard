@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Retire only proven predecessor service controls and routes; keep all user data."""
-import hashlib,ipaddress,json,os,re,subprocess,sys
+import datetime,hashlib,ipaddress,json,os,re,subprocess,sys,time
 ENV=os.environ
 PROJECT=ENV['INCUS_PROJECT']
 INSTANCE=ENV['YARD_INSTANCE_NAME']
@@ -67,6 +67,35 @@ def run(*args, input=None):
 def guest(*args):
     return run('incus','exec',INSTANCE,'--project',PROJECT,'--',*args)
 
+BOOT_WINDOW=180  # seconds after the last start in which an unanswered agent is booting
+READY_BOUND=60   # total wait; with one probe it stays within the core observe limit
+UNFINISHED=75   # the agent answered, but the guest boot has not finished within the probe
+READY_PROBE='state=$(timeout 20 systemctl is-system-running --wait 2>/dev/null) || :; case "$state" in running|degraded) exit 0 ;; esac; exit 75'
+
+def started_at(snapshot):
+    value=snapshot.get('last_used_at') or ''
+    match=re.fullmatch(r'(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?(?:Z|\+00:00)',value)
+    if not match: return None
+    return datetime.datetime.strptime(match.group(1),'%Y-%m-%dT%H:%M:%S').replace(tzinfo=datetime.timezone.utc).timestamp()
+
+def wait_guest_ready(snapshot):
+    """Wait, bounded, until a booting guest answers and finishes its boot jobs,
+    including the Docker daemon read below; an unfinished boot is never ready.
+    A guest that is not running or has been up longer than the boot window and
+    does not answer is unavailable at once; one that answers is observed as is."""
+    started=started_at(snapshot)
+    running=str(snapshot.get('status','')).lower()=='running'
+    deadline=time.monotonic()+READY_BOUND
+    while True:
+        try:
+            code=subprocess.run(('incus','exec',INSTANCE,'--project',PROJECT,'--','sh','-c',READY_PROBE),capture_output=True,timeout=30).returncode
+        except subprocess.TimeoutExpired: code=None
+        if code==0: return
+        booting=running and started is not None and time.time()-started<BOOT_WINDOW
+        if code==UNFINISHED and running and not booting: return
+        if not booting or time.monotonic()>=deadline: raise ValueError('native-unavailable')
+        time.sleep(2)
+
 def incus(*args):
     return run('incus',*args,'--project',PROJECT)
 
@@ -109,6 +138,7 @@ def observe():
         if (not marker or version!='v2' or not isinstance(deferred,dict)
             or set(deferred)!={'version','ownership','device'} or type(deferred['version']) is not int
             or deferred['version']!=1 or deferred['ownership']!=marker or deferred['device']!=expected): raise ValueError('ambiguous-ownership')
+    wait_guest_ready(snapshot)
     service=guest('sh','-eu','-c',CONTROL_ASSESSMENT).decode()
     names=guest('timeout','10','docker','container','ls','-a','--format','{{.Names}}').decode().splitlines()
     container=None
@@ -180,7 +210,8 @@ rm -- "$receipt"
     print(json.dumps(verified))
 
 if __name__=='__main__':
+    phase='apply' if sys.argv[1:2]==['apply'] else 'inspect'
     try: main()
     except (ValueError,KeyError,OSError,subprocess.SubprocessError) as error:
         reason=str(error) if str(error) in ('native-unavailable','ambiguous-ownership','foreign-ownership','observation-changed','convergence-failed') else 'ambiguous-ownership'
-        print('subyard-lifecycle-diagnostic-v1 '+reason,file=sys.stderr); sys.exit(1)
+        print(f'subyard-lifecycle-diagnostic-v1 {phase} {reason}',file=sys.stderr); sys.exit(1)

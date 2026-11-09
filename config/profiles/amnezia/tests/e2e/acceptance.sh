@@ -9,7 +9,7 @@ VM_COUNT_REQUESTED=2
 VM_COUNT=2
 
 lane=full
-usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|setup|share|resources|reboot|recovery|startup|disabled|reconnect]\n'; }
+usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|setup|share|resources|maintenance|reboot|recovery|startup|disabled|reconnect]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -18,8 +18,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --lane)
-      [ "$#" -ge 2 ] || die '--lane requires full, setup, share, resources, reboot, recovery, startup, disabled or reconnect'
-      case "$2" in full|setup|share|resources|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, setup, share, resources, reboot, recovery, startup, disabled or reconnect' ;; esac
+      [ "$#" -ge 2 ] || die '--lane requires full, setup, share, resources, maintenance, reboot, recovery, startup, disabled or reconnect'
+      case "$2" in full|setup|share|resources|maintenance|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, setup, share, resources, maintenance, reboot, recovery, startup, disabled or reconnect' ;; esac
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -390,6 +390,29 @@ if [ "$lane" = share ]; then
   exit 0
 fi
 prepare_native_clients
+if [ "$lane" = maintenance ]; then
+  # Stock server maintenance: the host firewall script's raw-table rule beside the
+  # profile policy, then the app's package update across Docker and containerd upgrades.
+  owner_phase host-firewall
+  native_admin admin-check
+  client_probe
+  client_denied one
+  owner_phase host-firewall-clear
+  owner_phase packages-stale
+  client_probe
+  native_app update-packages
+  owner_phase packages-current
+  native_admin admin-check
+  client_probe
+  client_denied one
+  native_app discover --name acceptance-two
+  for client in one two; do
+    guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup --client "$client" </dev/null
+  done
+  native_app close
+  printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
+  exit 0
+fi
 if [ "$lane" = resources ] || [ "$lane" = full ]; then
   owner_phase resources
   client_probe

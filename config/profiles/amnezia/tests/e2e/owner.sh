@@ -693,6 +693,80 @@ PY
     verify_enabled
     printf 'neighbor_load_cpu_workers=3 memory_mib=192 duration_seconds=120\n'
     ;;
+  host-firewall)
+    # Stock setup_host_firewall.sh ends with a raw-table rule guarded by a kernel
+    # version check. Record what native setup left, then apply that rule as root so
+    # the remaining checks run with it beside the profile's own nftables policy.
+    guest sh -ceu '
+      kernel="$(uname -r)"
+      rules="$(iptables -t raw -S PREROUTING)"
+      present=0
+      if printf "%s\n" "$rules" | grep -q -- "--comment cve-2026-98432"; then present=1; fi
+      bare="$(printf "%s\n" "$rules" | grep -cFx -- "-A PREROUTING" || true)"
+      admin_shell="$(getent passwd amnezia | cut -d: -f7)"
+      if su -s /bin/sh amnezia -c "command -v iptables" >/dev/null 2>&1; then admin_path=1; else admin_path=0; fi
+      nft list table inet subyard_amnezia >/dev/null
+      printf "amnezia_host_firewall_native kernel=%s iptables=%s raw_prerouting_rules=%s cve_rule=%s bare_rules=%s admin_shell=%s admin_iptables_in_path=%s\n" \
+        "${kernel%%-*}" "$(iptables -V | tr " " _)" "$(printf "%s\n" "$rules" | grep -c "^-A" || true)" \
+        "$present" "$bare" "$admin_shell" "$admin_path"
+      [ "$bare" = 0 ] || { printf "native setup inserted an unconditional raw rule\n" >&2; exit 1; }
+      if [ "$present" = 0 ]; then
+        iptables -t raw -I PREROUTING -p tcp -m u32 --u32 "0>>24&0xF=6:15" -j DROP -m comment --comment cve-2026-98432
+        install -m 0600 /dev/null /run/subyard-amnezia-e2e-raw-rule
+      fi
+      iptables -t raw -C PREROUTING -p tcp -m u32 --u32 "0>>24&0xF=6:15" -j DROP -m comment --comment cve-2026-98432
+    '
+    verify_enabled
+    ;;
+  host-firewall-clear)
+    verify_enabled
+    guest sh -ceu '
+      if [ -e /run/subyard-amnezia-e2e-raw-rule ]; then
+        iptables -t raw -D PREROUTING -p tcp -m u32 --u32 "0>>24&0xF=6:15" -j DROP -m comment --comment cve-2026-98432
+        rm -f /run/subyard-amnezia-e2e-raw-rule
+      fi
+      nft list table inet subyard_amnezia >/dev/null
+    '
+    ;;
+  packages-stale)
+    # Model a pending Docker release: step docker-ce and containerd.io back one
+    # repository version so the stock app's dist-upgrade must restart both daemons.
+    guest sh -ceu '
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      previous() {
+        installed="$(dpkg-query -W -f="\${Version}" "$1")"
+        for version in $(apt-cache madison "$1" | awk "{print \$3}"); do
+          if dpkg --compare-versions "$version" lt "$installed"; then printf "%s\n" "$version"; return; fi
+        done
+        printf "no earlier %s version is published\n" "$1" >&2
+        return 1
+      }
+      docker_version="$(previous docker-ce)"
+      containerd_version="$(previous containerd.io)"
+      apt-get install -y -qq --allow-downgrades \
+        "docker-ce=$docker_version" "containerd.io=$containerd_version" >/dev/null
+      printf "amnezia_packages_stale docker_ce=%s containerd_io=%s\n" "$docker_version" "$containerd_version"
+    '
+    verify_enabled
+    ;;
+  packages-current)
+    guest sh -ceu '
+      for package in docker-ce containerd.io; do
+        policy="$(LC_ALL=C apt-cache policy "$package")"
+        installed="$(printf "%s\n" "$policy" | awk "/Installed:/ {print \$2}")"
+        candidate="$(printf "%s\n" "$policy" | awk "/Candidate:/ {print \$2}")"
+        [ -n "$installed" ] && [ "$installed" = "$candidate" ] \
+          || { printf "%s was not upgraded by the native package update\n" "$package" >&2; exit 1; }
+        printf "amnezia_packages_current package=%s version=%s\n" "$package" "$installed"
+      done
+      [ "$(dpkg --audit | wc -l)" = 0 ] || { printf "package database needs repair\n" >&2; exit 1; }
+    '
+    # The state signature, storage binds, firewall and ingress must survive both restarts.
+    verify_enabled
+    guest python3 /usr/local/lib/subyard-amnezia/runtime.py observe \
+      | jq -e '.ready and .running and .enabled' >/dev/null || die 'native package update broke the VPN runtime'
+    ;;
   *) die 'unknown acceptance phase' ;;
 esac
 printf 'amnezia_profile_phase=%s result=pass\n' "$phase"

@@ -16,7 +16,7 @@ cat > "$TMP/bin/incus" <<'SH'
 set -euo pipefail
 case "${1:-}" in
   info) exit 0 ;;
-  list) cat "$MOCK_INCUS_STATE" ;;
+  list) [ "${*: -1}" != ns ] || printf '%s,' "$2"; cat "$MOCK_INCUS_STATE" ;;
   exec)
     case "$*" in
       *'systemctl is-active'*)

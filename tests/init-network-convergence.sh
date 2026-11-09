@@ -79,20 +79,23 @@ case "$*" in
   "info yard --project subyard")
     [ "${MOCK_INSTANCE_EXISTS:-1}" = 1 ]
     ;;
-  "list yard --project subyard -f csv -c s")
-    printf '%s\n' "${MOCK_INSTANCE_STATE:-STOPPED}"
+  "list yard --project subyard -f csv -c ns")
+    printf 'yard,%s\n' "${MOCK_INSTANCE_STATE:-STOPPED}"
     ;;
-  "list yard --project subyard -c4 -fcsv")
+  "list yard --project subyard -f csv -c n4")
+    # A prefix-matched neighbour's address never stands in for the yard's.
+    printf 'yard-x,10.0.0.99 (eth0)\n'
     if [ -n "${MOCK_INSTANCE_IP_AFTER_FILE:-}" ]; then
       attempts=0
       [ ! -e "$MOCK_INSTANCE_IP_AFTER_FILE" ] \
         || attempts="$(cat "$MOCK_INSTANCE_IP_AFTER_FILE")"
       attempts=$((attempts + 1))
       printf '%s\n' "$attempts" > "$MOCK_INSTANCE_IP_AFTER_FILE"
-      [ "$attempts" -lt 2 ] || printf '%s\n' "${MOCK_INSTANCE_IP:-10.0.0.2}"
+      printf 'yard,'
+      [ "$attempts" -lt 2 ] && printf '\n' || printf '%s\n' "${MOCK_INSTANCE_IP:-10.0.0.2}"
       exit 0
     fi
-    printf '%s\n' "${MOCK_INSTANCE_IP:-}"
+    printf 'yard,%s\n' "${MOCK_INSTANCE_IP:-}"
     ;;
   *) exit 90 ;;
 esac
