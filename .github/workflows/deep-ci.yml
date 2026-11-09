@@ -9,9 +9,14 @@ permissions:
   contents: read
 
 jobs:
+  # CI already runs every Go test once with the race detector in a fixed order and
+  # each fuzz target for 1000 inputs on every push. This job only adds what that
+  # cannot find: tests that depend on their order or fail intermittently, and longer
+  # fuzzing. Two shuffled race passes over all packages took 23 minutes on an
+  # 8-core workstation; internal/releasetransition alone took 21 of them.
   deep-go:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -21,9 +26,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - name: Install test tools
-        run: sudo apt-get update -qq && sudo apt-get install -y gcc ripgrep
-      - name: Repeated race tests
-        run: go test -race -shuffle=on -count=3 ./...
+      - name: Install system test tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep zsh
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      # Source admission and the prepared profile tests read the built runtime.
+      - name: Build runtime
+        run: make build VERSION=0.22.0-test
+      - name: Shuffled repeated race tests
+        run: umask 0022 && go test -race -shuffle=on -count=2 -timeout=60m ./...
       - name: Parser fuzzing
         run: go test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=60s
+      - name: Observation fuzzing
+        run: go test ./internal/observation -run '^$' -fuzz '^FuzzValidateJSON$' -fuzztime=60s

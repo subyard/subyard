@@ -915,7 +915,9 @@ release preparation and publication use explicit workflow dispatches, with no ta
 publication. Basic native ARM64 engine build,
 execution and Go tests run on GitHub's ARM runner in CI and gate Release publication. ARM requires
 no local agent access or workflow authorization.
-The separate nightly/manual Deep CI runs repeated Go race tests and one minute of parser fuzzing.
+The separate nightly/manual Deep CI adds only what that gate cannot find: it builds the runtime,
+runs every Go package twice with the race detector in shuffled order to expose order-dependent
+and intermittent tests, and fuzzes each fuzz target for one minute.
 Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
 Veranda and live P0 acceptance remain separate checks.
 
