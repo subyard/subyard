@@ -54,9 +54,11 @@ grep -Fxq '  push:' "$CI_WORKFLOW" && grep -Fxq '  pull_request:' "$CI_WORKFLOW"
 grep -Fxq '  workflow_dispatch:' "$DEEP_WORKFLOW" \
   && grep -Fxq '  schedule:' "$DEEP_WORKFLOW" \
   || fail 'deep CI must support manual and nightly runs'
-grep -Fq 'run: go test -race -shuffle=on -count=3 ./...' "$DEEP_WORKFLOW" \
-  && grep -Fq "run: go test ./internal/command -run '^\$' -fuzz '^FuzzParseDoesNotPanic\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
-  || fail 'deep CI must run repeated race tests and bounded parser fuzzing'
+grep -Fxq '        run: make build VERSION=0.22.0-test' "$DEEP_WORKFLOW" \
+  && grep -Fxq '        run: umask 0022 && go test -race -shuffle=on -count=2 -timeout=60m ./...' "$DEEP_WORKFLOW" \
+  && grep -Fxq "        run: go test ./internal/command -run '^\$' -fuzz '^FuzzParseDoesNotPanic\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
+  && grep -Fxq "        run: go test ./internal/observation -run '^\$' -fuzz '^FuzzValidateJSON\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
+  || fail 'deep CI must build the runtime, run shuffled repeated race tests and bounded fuzzing'
 
 for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   native_engine_job="$(awk '/^  native-engine-arm64:/ {inside=1; next} inside && /^  [^[:space:]]/ {exit} inside {print}' "$workflow")"
