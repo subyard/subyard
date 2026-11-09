@@ -4310,7 +4310,7 @@ pathlib.Path(sys.argv[1]).write_bytes(image)
 os.chmod(sys.argv[1], 0o600)
 PY
 P0_REAL_INCUS_WAIT_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-real-incus.sh" \
-  qemu_process_identity capture_qemu_facts emit_vga_screenshot capture_vga_screenshot wait_ready)" \
+  qemu_process_identity capture_qemu_facts emit_vga_screenshot capture_vga_screenshot vm_boot_completed wait_ready)" \
 P0_REAL_INCUS_WAIT_TMP="$TMP/real-incus-wait" \
 P0_REAL_INCUS_WAIT_PNG="$TMP/real-incus-vga.png" \
   bash -c '
@@ -4352,6 +4352,14 @@ P0_REAL_INCUS_WAIT_PNG="$TMP/real-incus-vga.png" \
       case "$1" in
         exec)
           exec_calls=$((exec_calls + 1))
+          if [ "$case_name" = first-boot-reboot ]; then
+            # The agent answers at once, but the first boot reboots before it completes.
+            [ "$6" = timeout ] || return 0
+            boot_probes=$((boot_probes + 1))
+            if [ "$((SECONDS - started))" -ge 360 ]; then printf "2\n"; return 0; fi
+            printf "native-agent-error-%s\n" "$exec_calls" >&2
+            return 71
+          fi
           if [ "$case_name" = slow-vm ] && [ "$((SECONDS - started))" -ge 300 ]; then
             return 0
           fi
@@ -4405,12 +4413,13 @@ P0_REAL_INCUS_WAIT_PNG="$TMP/real-incus-vga.png" \
         *) return 3 ;;
       esac
     }
-    for case_name in slow-vm slow-container stuck-vm failed-queries bounded-output \
+    for case_name in slow-vm first-boot-reboot slow-container stuck-vm failed-queries bounded-output \
       identity-drift start-drift unsafe-comm foreign-marker no-kvm-fds \
       vga-failure malformed-png oversized-png; do
       started=$SECONDS
       diagnostics=""
       exec_calls=0
+      boot_probes=0
       fake_sleep_elapsed=0
       printf "0\n" > "$TMP/state-count"
       printf "0\n" > "$TMP/stat-count"
@@ -4418,12 +4427,17 @@ P0_REAL_INCUS_WAIT_PNG="$TMP/real-incus-vga.png" \
       [ "$case_name" != slow-container ] || kind=container
       output="$TMP/$case_name.log"
       if wait_ready test-instance "$kind" >"$output" 2>&1; then
-        [ "$case_name" = slow-vm ]
+        case "$case_name" in slow-vm|first-boot-reboot) ;; *) false ;; esac
         [ -z "$diagnostics" ]
+        if [ "$case_name" = first-boot-reboot ]; then
+          # Ready only after the completed boot, not at the first agent answer.
+          [ "$fake_sleep_elapsed" -ge 360 ] && [ "$boot_probes" -ge 2 ]
+          grep -Fq "query=boot-completed boots=2" "$output"
+        fi
       else
         rc=$?
         [ "$rc" = 2 ]
-        [ "$case_name" != slow-vm ]
+        [ "$case_name" != slow-vm ] && [ "$case_name" != first-boot-reboot ]
         [ "$diagnostics" = " query info console" ]
         [ "$fake_sleep_elapsed" -le 720 ]
         grep -Fq "query=agent exit_status=71" "$output"

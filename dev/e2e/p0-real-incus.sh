@@ -366,6 +366,21 @@ capture_vga_screenshot() {
   emit_vga_screenshot "$image" "$name"
 }
 
+# A new cloud VM's first boot can still reboot after its agent first answers; Incus then
+# replaces QEMU and the agent disappears. A VM is ready only once its guest finished booting:
+# cloud-init done and systemd running or degraded. A reboot during this probe fails the exec,
+# so the caller keeps waiting. Each probe is bounded inside the guest and by the client.
+vm_boot_completed() {
+  local name="$1" boots
+  real_incus_observe exec "$name" --project "$PROJECT" -- timeout 25 sh -c '
+    if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait >/dev/null 2>&1 || :; fi
+    state=$(systemctl is-system-running --wait 2>/dev/null) || :
+    case "$state" in running|degraded) ;; *) exit 1 ;; esac
+    journalctl --list-boots --quiet 2>/dev/null | wc -l' >"$TMP/$name-boots" 2>"$probe_error" || return
+  boots="$(tr -dc 0-9 < "$TMP/$name-boots")"
+  printf 'P0_INCUS_DIAGNOSTIC instance=%s query=boot-completed boots=%s\n' "$name" "${boots:-unknown}" >&2
+}
+
 wait_ready() {
   local name="$1" kind="$2" state='' replaced=0
   local wait_timeout=240 deadline
@@ -380,7 +395,7 @@ wait_ready() {
   printf '  [ .. ] waiting for %s\n' "$name"
   while [ "$SECONDS" -lt "$deadline" ]; do
     if real_incus_observe exec "$name" --project "$PROJECT" -- true \
-      >/dev/null 2>"$probe_error"; then
+      >/dev/null 2>"$probe_error" && { [ "$kind" != virtual-machine ] || vm_boot_completed "$name"; }; then
       return 0
     else
       probe_status=$?
@@ -392,7 +407,7 @@ wait_ready() {
         [ "$SECONDS" -lt "$deadline" ] || break
         sleep 1
         if real_incus_observe exec "$name" --project "$PROJECT" -- true \
-          >/dev/null 2>"$probe_error"; then
+          >/dev/null 2>"$probe_error" && { [ "$kind" != virtual-machine ] || vm_boot_completed "$name"; }; then
           return 0
         else
           probe_status=$?
