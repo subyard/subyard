@@ -556,7 +556,8 @@ of its own records, which a source-level test enforces. Traversal never crosses 
 Its observation is part of the integration plan fingerprint; the inventory receives a
 projection of the exact links the transfer publishes, so the initial inventory plan stays
 bound across the exchange. A backup or stage finish cannot remove is listed by status and
-never blocks anything.
+never blocks anything. Only typed transfer conflicts are pending configuration;
+transport failures and program crashes remain blocking inspection failures.
 
 Before confirmation, the plan lists local yards in name order and differing init-owned
 integration settings in setting order as `NAME  installed -> desired`. Sensitive settings show

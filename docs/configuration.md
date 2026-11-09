@@ -454,8 +454,9 @@ committed transfer but never starts or restarts one; finishing there is best-eff
 another pending item can defer it to the next `yard init`, which completes it. A new
 adoption stays pending configuration until `yard init`. That plain `yard init` of the yard is admitted as the
 release repair even without configuration drift, when every pending item names it as the
-next step. Each refusal is pending configuration with a next step and none blocks
-unrelated commands. `yard init` binds the transfer it disclosed: if the source, target, operation or the
+next step. Each typed transfer conflict is pending configuration with a next step and none blocks
+unrelated commands. Transport failures and program crashes stop the operation as inspection failures.
+`yard init` binds the transfer it disclosed: if the source, target, operation or the
 listed existing entries change before provisioning executes it, nothing is transferred
 and the next `yard init` shows the new plan. A plan that went stale in other ways stops
 that operation and is not pending configuration. A repeated run without changes does nothing.

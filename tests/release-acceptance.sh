@@ -1671,7 +1671,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with self.assertRaisesRegex(ValueError, "deferral"):
                 m.defer_external(output, ["sample:account"], "Unavailable external account", "operator-authorization-1")
 
-    def test_transport_override_is_scoped_to_physical_controllers(self):
+    def test_transport_and_capacity_defaults_are_scoped_to_physical_controllers(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
@@ -1690,9 +1690,12 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                  patch.object(m, "execute", side_effect=execute), \
                  patch.dict(os.environ, {"SUBYARD_E2E_CANDIDATE_BUNDLE": "ambient",
                                          "SUBYARD_E2E_CONTROLLER_WORKSPACE": "ambient"}):
+                os.environ.pop("SUBYARD_E2E_CAPACITY_WAIT", None)
                 self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 0)
             self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", observed["verify"])
             self.assertNotIn("SUBYARD_E2E_CONTROLLER_WORKSPACE", observed["verify"])
+            self.assertNotIn("SUBYARD_E2E_CAPACITY_WAIT", observed["verify"])
+            self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CAPACITY_WAIT"], m.LIVE_CAPACITY_WAIT)
             self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CONTROLLER_WORKSPACE"], str(m.ROOT))
             self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CANDIDATE_BUNDLE"],
                              str(output / "candidate-bundle.tar.gz"))

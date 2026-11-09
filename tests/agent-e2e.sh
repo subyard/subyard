@@ -7,6 +7,8 @@ TMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 # A caller's prepared candidate would replace the worktree bundle under test.
 unset SUBYARD_E2E_CANDIDATE_BUNDLE SUBYARD_E2E_CANDIDATE_SHA256
+# Capacity fixtures must fail fast unless they explicitly request a wait.
+unset SUBYARD_E2E_CAPACITY_WAIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 fixture_functions() { # source file, then function names
   local source="$1" name

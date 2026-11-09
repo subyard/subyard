@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +43,7 @@ func TestHistoryReadinessContract(t *testing.T) {
 	}
 	expected.ProgramSHA256 = expected.Files["config/skills/probe.py"]
 	control := filepath.Join(root, "control")
-	value := historyControl{Skills: expected, Source: filepath.Join(root, "source"), Guest: filepath.Join(root, "guest"), Destination: "/home/dev/.subyard-fixture/config.txt"}
+	value := historyControl{guestContract: guestContract{Skills: expected}, Source: filepath.Join(root, "source"), Guest: filepath.Join(root, "guest"), Destination: "/home/dev/.subyard-fixture/config.txt"}
 	testkit.WriteFile(t, value.Source, []byte("desired\n"), 0o600)
 	testkit.WriteFile(t, value.Guest, []byte("prior\n"), 0o600)
 	server, err := testkit.NewIncusServer(root)
@@ -156,7 +158,7 @@ func TestHistoryReadinessContract(t *testing.T) {
 
 func TestDiskTmpCheckFixtureRejectsOtherCommandsAndSources(t *testing.T) {
 	payload := []byte("fixture policy source\n")
-	respond := directOwnedResponder(fmt.Sprintf("%x", sha256.Sum256(payload)))
+	respond := directOwnedResponder(fmt.Sprintf("%x", sha256.Sum256(payload)), guestContract{})
 	call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"sh", "-s", "--", "check"}, Stdin: payload}
 	if step := respond(call); step.AfterInput == nil || step.AfterInput(call) != 0 {
 		t.Fatal("exact read-only policy check refused")
@@ -185,7 +187,7 @@ func TestDiskTmpCheckFixtureRejectsOtherCommandsAndSources(t *testing.T) {
 func TestDirectOwnedObservationRequiresExactReadOnlyEmptyScope(t *testing.T) {
 	reader := reconcileruntime.IntegrationInventoryReader()
 	var err error
-	respond := directOwnedResponder("unused-policy-digest")
+	respond := directOwnedResponder("unused-policy-digest", guestContract{})
 	for _, change := range []string{"none", "observe-applied", "apply", "program", "developer", "foreign-path", "selected-integration"} {
 		call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", reader, "observe"}}
 		entries := []map[string]string{{"id": "_projects", "kind": "file", "path": "/usr/local/libexec/subyard/projects-changed"}, {"id": "_projects", "kind": "file", "path": "/etc/subyard/agent-project-hooks"}}
@@ -274,5 +276,95 @@ func TestHistoryDiskTmpCompletionAndPolicyCheckContract(t *testing.T) {
 	}
 	if len(server.ExecCalls()) != 5 || len(server.PowerCalls()) != 0 {
 		t.Fatalf("policy probes/lifecycle calls: exec=%d power=%d", len(server.ExecCalls()), len(server.PowerCalls()))
+	}
+}
+
+func TestDirectOwnedGuestModelsPersistAndSettingsBaseline(t *testing.T) {
+	root := testkit.TempDir(t)
+	control := filepath.Join(root, "control")
+	persist := persistContract{PersistSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("persist reader"))),
+		PersistMappings: []reconcileruntime.PersistMapping{{Integration: "sample", Source: "/home/dev/.sample/sessions", Target: "/mnt/host/agent-sessions/sample/sessions"}}}
+	respond := directOwnedResponder("unused-policy-digest", guestContract{persistContract: persist}, control)
+	run := func(command []string, payload any) (testkit.IncusServerExecStep, int) {
+		stdin, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: command, Stdin: stdin}
+		step := respond(call)
+		code := step.ExitCode
+		if step.AfterInput != nil {
+			code = step.AfterInput(call)
+		}
+		return step, code
+	}
+	observe := map[string]any{"yard": "default", "uid": 1000, "developer": "dev", "start": false,
+		"mappings": []map[string]any{{"integration": "sample", "source": "/home/dev/.sample/sessions", "target": "/mnt/host/agent-sessions/sample/sessions", "selected": false}}}
+	if _, code := run([]string{"python3", "-B", "-c", "persist reader", "observe"}, observe); code != 0 {
+		t.Fatalf("exact persist observation refused: %d", code)
+	}
+	if _, code := run([]string{"python3", "-B", "-c", "persist reader", "apply"}, observe); code != 99 {
+		t.Fatalf("persist apply accepted: %d", code)
+	}
+	if _, code := run([]string{"test", "!", "-e", "/var/lib/subyard/integrations/inventory.json"}, nil); code != 1 {
+		t.Fatalf("owned inventory reported absent: %d", code)
+	}
+	reader := reconcileruntime.IntegrationInventoryReader()
+	read := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false, "preview_skill_cutover": true, "persist": nil, "retain_pending_intent": true}
+	step, code := run([]string{"python3", "-B", "-c", reader, "settings"}, read)
+	if code != 0 || !bytes.Contains(step.Stdout, []byte(`"applied_settings":null`)) {
+		t.Fatalf("initial settings read: %d %s", code, step.Stdout)
+	}
+	entries := []map[string]string{{"id": "_projects", "kind": "file", "path": "/usr/local/libexec/subyard/projects-changed"}, {"id": "_projects", "kind": "file", "path": "/etc/subyard/agent-project-hooks"}}
+	capture := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": entries, "legacy": []string{}, "adopt": false, "expected": strings.Repeat("a", 64),
+		"preview_skill_cutover": true, "persist": map[string]string{}, "applied_settings": map[string]string{}, "diagnostics": map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}}}
+	for _, change := range []string{"entries", "expected", "files", "unknown"} {
+		changed := maps.Clone(capture)
+		switch change {
+		case "entries":
+			changed["entries"] = entries[:1]
+		case "expected":
+			changed["expected"] = strings.Repeat("b", 64)
+		case "files":
+			changed["diagnostics"] = map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}, "files": map[string]any{"AGENT_sample_CONFIG": map[string]string{}}}
+		case "unknown":
+			changed["unknown"] = true
+		}
+		if _, code := run([]string{"python3", "-B", "-c", reader, "capture-settings"}, changed); code != 99 {
+			t.Fatalf("changed %s capture accepted: %d", change, code)
+		}
+	}
+	if _, code := run([]string{"python3", "-B", "-c", reader, "capture-settings"}, capture); code != 0 {
+		t.Fatalf("exact settings capture refused: %d", code)
+	}
+	step, code = run([]string{"python3", "-B", "-c", reader, "settings"}, read)
+	if code != 0 || !bytes.Contains(step.Stdout, []byte(`"applied_settings":{}`)) {
+		t.Fatalf("captured baseline not read back: %d %s", code, step.Stdout)
+	}
+}
+
+func TestObservedGuestAnswersAbsentInventoryAndQueuesNativeObservations(t *testing.T) {
+	control := filepath.Join(testkit.TempDir(t), "control")
+	respond := observedGuestResponder(guestContract{}, control)
+	reader := reconcileruntime.IntegrationInventoryReader()
+	read := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false, "preview_skill_cutover": true, "persist": nil}
+	for mode, want := range map[string]string{"settings": `{"installed":false,"applied_settings":null,"diagnostics":null}`, "selection": `{"installed":false,"selected":[],"applied_settings":null,"diagnostics":null}`} {
+		stdin, _ := json.Marshal(read)
+		call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", reader, mode}, Stdin: stdin}
+		step := respond(call)
+		if step.Queued || string(step.Stdout) != want || step.AfterInput == nil || step.AfterInput(call) != 0 {
+			t.Fatalf("%s read of an absent inventory: %s", mode, step.Stdout)
+		}
+		changed := maps.Clone(read)
+		changed["adopt"] = true
+		call.Stdin, _ = json.Marshal(changed)
+		if step := respond(call); step.AfterInput == nil || step.AfterInput(call) != 99 {
+			t.Fatalf("%s read with adoption accepted", mode)
+		}
+	}
+	for _, command := range [][]string{{"python3", "-B", "-c", reader, "observe"}, {"python3", "-B", "-c", reader + "\n", "settings"}, {"sh", "-s", "--", "check"}} {
+		if step := respond(testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: command}); !step.Queued {
+			t.Fatalf("native observation %q was not left to the queue", command[len(command)-1])
+		}
 	}
 }

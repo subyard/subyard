@@ -242,3 +242,40 @@ func TestIncusInstanceInventoryRespectsProjectScope(t *testing.T) {
 		}
 	}
 }
+
+func TestIncusExecResponderDefersOnlyQueuedCallsToSteps(t *testing.T) {
+	fake, err := NewIncusServer(TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fake.Close()
+	fake.QueueExec(IncusServerExecStep{Stdout: []byte("queued")})
+	fake.SetExecResponder(func(call IncusServerExecCall) IncusServerExecStep {
+		if slices.Equal(call.Command, []string{"answered"}) {
+			return IncusServerExecStep{Stdout: []byte("answered")}
+		}
+		return IncusServerExecStep{Queued: true}
+	})
+	start := func(command string) *incusOperation {
+		t.Helper()
+		post := httptest.NewRecorder()
+		fake.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/1.0/instances/yard/exec?project=scope", bytes.NewBufferString(`{"command":["`+command+`"]}`)))
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		if post.Code != http.StatusAccepted {
+			t.Fatalf("%s exec: %d", command, post.Code)
+		}
+		return fake.operations["operation-"+string(rune('0'+fake.nextOp))]
+	}
+	if operation := start("answered"); string(operation.step.Stdout) != "answered" {
+		t.Fatalf("responder answer replaced: %q", operation.step.Stdout)
+	}
+	if operation := start("deferred"); string(operation.step.Stdout) != "queued" {
+		t.Fatalf("deferred call not served from the queue: %q", operation.step.Stdout)
+	}
+	post := httptest.NewRecorder()
+	fake.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/1.0/instances/yard/exec?project=scope", bytes.NewBufferString(`{"command":["deferred"]}`)))
+	if post.Code != http.StatusInternalServerError {
+		t.Fatalf("deferred call without a queued step accepted: %d", post.Code)
+	}
+}

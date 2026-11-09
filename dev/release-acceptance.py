@@ -1129,9 +1129,6 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
                       if name in prioritized and (name == selector or name.startswith(selector + "/"))]
     order = list(dict.fromkeys([*priority_order, *checks]))
     env = clean_environment()
-    # VM checks wait for broker memory or disk instead of draining the queue on a
-    # transient refusal; a refusal that outlasts this bound still blocks visibly.
-    env.setdefault("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and (rerun or receipt["checks"][name]["status"] != "passed")]
@@ -1196,6 +1193,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
             print("INCOMPLETE: live checks await successful local gates", flush=True)
             invocation.finish("interrupted" if STOP.is_set() else "finished", "prerequisite-stop")
             return 1
+        # Only live checks wait for broker memory or disk instead of draining the queue on a
+        # transient refusal; a refusal that outlasts this bound still blocks visibly.
+        env.setdefault("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
         # Physical controllers consume the frozen transport; local tests keep normal bundling.
         env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
                    SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],

@@ -50,6 +50,8 @@ type IncusServerExecStep struct {
 	OperationError string
 	Release        <-chan struct{}
 	AfterInput     func(IncusServerExecCall) int
+	// Queued, returned by a responder, serves the call from the queued steps.
+	Queued bool
 }
 
 type IncusServerExecCall struct {
@@ -429,8 +431,13 @@ func (fake *IncusServer) startExec(writer http.ResponseWriter, request *http.Req
 	call := IncusServerExecCall{Project: request.URL.Query().Get("project"), Name: name, Command: append([]string(nil), input.Command...), Environment: cloneStringMap(input.Environment), User: input.User, Group: input.Group}
 	fake.mu.Lock()
 	responder := fake.execResponder
+	fake.mu.Unlock()
 	var step IncusServerExecStep
-	if responder == nil {
+	if responder != nil {
+		step = responder(call)
+	}
+	if responder == nil || step.Queued {
+		fake.mu.Lock()
 		if len(fake.execSteps) == 0 {
 			fake.mu.Unlock()
 			writeIncusError(writer, http.StatusInternalServerError, "fake exec steps exhausted")
@@ -438,10 +445,7 @@ func (fake *IncusServer) startExec(writer http.ResponseWriter, request *http.Req
 		}
 		step = fake.execSteps[0]
 		fake.execSteps = fake.execSteps[1:]
-	}
-	fake.mu.Unlock()
-	if responder != nil {
-		step = responder(call)
+		fake.mu.Unlock()
 	}
 	if step.StartError != "" {
 		writeIncusError(writer, http.StatusBadRequest, step.StartError)

@@ -230,6 +230,9 @@ func (runtime Runtime) runPersist(ctx context.Context, mode string, mappings []P
 	if err == nil && result.ExitCode == 0 {
 		return result.Stdout, nil
 	}
+	if refusal := ownershipRefusal("persist transfer evidence is unavailable; data was preserved", result, err); !IntegrationOwnershipConflict(refusal) {
+		return nil, refusal
+	}
 	return nil, runtime.persistRefusal(result.Stderr)
 }
 
@@ -368,7 +371,7 @@ type persistRefused struct {
 
 func (err persistRefused) Unwrap() error { return err.error }
 
-// Every persist refusal is pending configuration with a converging next step.
+// Only typed persist conflicts are pending configuration.
 func (runtime Runtime) persistRefusal(stderr []byte) error {
 	var report struct {
 		Conflicts []struct{ Reason, Path, Detail, Integration string } `json:"conflicts"`
@@ -379,11 +382,11 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 	status := shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 	if json.Unmarshal(stderr, &report) != nil || len(report.Conflicts) == 0 {
 		// Only the exception class is reported, never paths or data.
-		message := "persist transfer evidence is unavailable; data was preserved. Inspect the pending transfers, then repeat"
-		if report.Error != "" && domain.SafeID(report.Error) {
-			message = fmt.Sprintf("persist transfer evidence is unavailable (%s); data was preserved. Inspect the pending transfers, then repeat", report.Error)
+		message := "persist transfer program failed; data was preserved"
+		if report.Error != "" && len(report.Error) <= 63 && domain.SafeID(report.Error) {
+			message = fmt.Sprintf("persist transfer program failed (%s); data was preserved", report.Error)
 		}
-		return integrationOwnershipError{pendingConfiguration: true, message: message, retry: status}
+		return errors.New(message)
 	}
 	inspect := func(path string) string {
 		return shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "namei", "-l", "--", path})

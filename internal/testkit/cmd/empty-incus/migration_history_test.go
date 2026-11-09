@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -22,7 +24,7 @@ func TestHistorySkillObservationRequiresExactSourcesAndSettings(t *testing.T) {
 	for name, payload := range files {
 		hashes[name] = fmt.Sprintf("%x", sha256.Sum256(payload))
 	}
-	respond := historyResponder(historyControl{Skills: &historySkills{Files: hashes, ProgramSHA256: hashes["config/skills/probe.py"], User: "dev", Profiles: "", Coding: true}}, control)
+	respond := historyResponder(historyControl{guestContract: guestContract{Skills: &historySkills{Files: hashes, ProgramSHA256: hashes["config/skills/probe.py"], User: "dev", Profiles: "", Coding: true}}}, control)
 	for _, change := range []string{"valid", "bytes", "missing", "extra", "user", "profiles", "coding", "program"} {
 		t.Run(change, func(t *testing.T) {
 			input := map[string]any{"files": map[string][]byte{}, "user": "dev", "profiles": "", "coding": true}
@@ -69,7 +71,7 @@ func TestHistoryProfileRecorderOnlyAcceptsExactAbsentFactsRequest(t *testing.T) 
 	root := testkit.TempDir(t)
 	program := "synthetic exact recorder"
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(program)))
-	respond := historyResponder(historyControl{ProfileRecorderSHA256: hash, ProfileNames: []string{"sample"}}, filepath.Join(root, "control"))
+	respond := historyResponder(historyControl{guestContract: guestContract{ProfileRecorderSHA256: hash, ProfileNames: []string{"sample"}}}, filepath.Join(root, "control"))
 	for _, scenario := range []string{"valid", "program", "yard", "profile", "selected", "unknown", "trailing"} {
 		t.Run(scenario, func(t *testing.T) {
 			command := []string{"python3", "-B", "-c", program}
@@ -107,7 +109,7 @@ func TestHistoryGuestFactsObservationsRequireExactAbsentFactsRequest(t *testing.
 	root := testkit.TempDir(t)
 	program := "synthetic exact profile observation"
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(program)))
-	respond := historyResponder(historyControl{ProfileSelectionSHA256: hash, GuestFactsVersion: "1.0.0-test"}, filepath.Join(root, "control"))
+	respond := historyResponder(historyControl{guestContract: guestContract{ProfileSelectionSHA256: hash, GuestFactsVersion: "1.0.0-test"}}, filepath.Join(root, "control"))
 	for _, scenario := range []string{"valid", "program", "yard", "profiles", "version", "unknown", "trailing"} {
 		t.Run(scenario, func(t *testing.T) {
 			command := []string{"python3", "-B", "-c", program}
@@ -141,6 +143,72 @@ func TestHistoryGuestFactsObservationsRequireExactAbsentFactsRequest(t *testing.
 	}
 }
 
+func TestHistoryPersistObservationAnswersOnlyExactDeselectedRequest(t *testing.T) {
+	root := testkit.TempDir(t)
+	program := "synthetic exact persist reader"
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(program)))
+	declared := []reconcileruntime.PersistMapping{{Integration: "sample", Source: "/home/dev/.sample/sessions", Target: "/mnt/host/agent-sessions/sample/sessions"}}
+	respond := historyResponder(historyControl{guestContract: guestContract{persistContract: persistContract{PersistSHA256: hash, PersistMappings: declared}}}, filepath.Join(root, "control"))
+	for _, scenario := range []string{"valid", "start", "program", "mode", "yard", "uid", "developer", "selected", "missing", "extra", "unknown", "trailing"} {
+		t.Run(scenario, func(t *testing.T) {
+			command := []string{"python3", "-B", "-c", program, "observe"}
+			mappings := []map[string]any{{"integration": "sample", "source": declared[0].Source, "target": declared[0].Target, "selected": false}}
+			input := map[string]any{"yard": "default", "uid": 1000, "developer": "dev", "mappings": mappings, "start": false}
+			switch scenario {
+			case "start":
+				input["start"] = true
+			case "program":
+				command[3] = "different reader"
+			case "mode":
+				command[4] = "apply"
+			case "yard":
+				input["yard"] = "other"
+			case "uid":
+				input["uid"] = 1001
+			case "developer":
+				input["developer"] = "root"
+			case "selected":
+				mappings[0]["selected"] = true
+			case "missing":
+				input["mappings"] = []map[string]any{}
+			case "extra":
+				input["mappings"] = append(mappings, map[string]any{"integration": "sample", "source": "/home/dev/.other", "target": "/mnt/host/other", "selected": false})
+			case "unknown":
+				mappings[0]["expected"] = "ignored"
+			}
+			payload, _ := json.Marshal(input)
+			if scenario == "trailing" {
+				payload = append(payload, []byte(" {}")...)
+			}
+			call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: command, Stdin: payload}
+			step := respond(call)
+			code := step.ExitCode
+			if step.AfterInput != nil {
+				code = step.AfterInput(call)
+			}
+			valid := scenario == "valid" || scenario == "start"
+			if valid && code != 0 || !valid && code != 99 {
+				t.Fatalf("%s: exit=%d", scenario, code)
+			}
+			if !valid {
+				return
+			}
+			var observation struct {
+				Fingerprint string
+				Entries     []struct {
+					Source string
+					Ops    []string
+					State  string
+				}
+			}
+			if json.Unmarshal(step.Stdout, &observation) != nil || len(observation.Fingerprint) != 64 || len(observation.Entries) != 1 ||
+				observation.Entries[0].Source != declared[0].Source || len(observation.Entries[0].Ops) != 0 || observation.Entries[0].State != "none" {
+				t.Fatalf("persist observation is not the absent-data report: %s", step.Stdout)
+			}
+		})
+	}
+}
+
 func TestHistorySettingsCaptureRequiresVerifiedBoundaryAndClosedEvidence(t *testing.T) {
 	root := testkit.TempDir(t)
 	source, journal := filepath.Join(root, "source"), filepath.Join(root, "journal")
@@ -152,13 +220,13 @@ func TestHistorySettingsCaptureRequiresVerifiedBoundaryAndClosedEvidence(t *test
 	program := "exact inventory program"
 	control := historyControl{Source: source, Journal: journal, Runtime: root, Target: "candidate", Destination: "/home/dev/.subyard-fixture/config.txt", Migrations: []string{"first"}, InventorySHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(program)))}
 	respond := historyResponder(control, filepath.Join(root, "control"))
-	for _, scenario := range []string{"valid", "valid-files", "wrong-file-path", "wrong-file-digest", "foreign-file", "extra-file-field", "unknown-field", "unknown-diagnostic", "wrong-expected", "bad-key", "unverified"} {
+	for _, scenario := range []string{"valid", "valid-files", "wrong-file-path", "wrong-file-digest", "foreign-file", "extra-file-field", "unknown-field", "unknown-diagnostic", "wrong-expected", "bad-key", "unverified", "released", "pending-intent", "persist-projected", "intent-false"} {
 		t.Run(scenario, func(t *testing.T) {
-			input := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "legacy": []string{}, "adopt": false, "expected": strings.Repeat("a", 64), "preview_skill_cutover": false, "applied_settings": map[string]string{}, "diagnostics": map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}}, "entries": []map[string]string{
+			input := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "legacy": []string{}, "adopt": false, "expected": strings.Repeat("a", 64), "preview_skill_cutover": false, "applied_settings": map[string]string{}, "diagnostics": map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}}, "persist": map[string]string{}, "entries": []map[string]string{
 				{"id": "fixture", "kind": "file", "path": control.Destination, "digest": fmt.Sprintf("%x", sha256.Sum256([]byte("desired")))},
 				{"id": "fixture", "kind": "package"}, {"id": "_projects", "kind": "file", "path": "/usr/local/libexec/subyard/projects-changed"}, {"id": "_projects", "kind": "file", "path": "/etc/subyard/agent-project-hooks"},
 			}}
-			valid := scenario == "valid" || scenario == "valid-files"
+			valid := scenario == "valid" || scenario == "valid-files" || scenario == "released" || scenario == "pending-intent"
 			if scenario == "valid-files" || strings.Contains(scenario, "file") {
 				key := bytes.Repeat([]byte{0xaa}, 32)
 				file := map[string]string{"path": source, "digest": config.ConfigurationInputDigest("AGENT_fixture_CONFIG", config.SettingFile, key, []byte("desired"))}
@@ -184,6 +252,14 @@ func TestHistorySettingsCaptureRequiresVerifiedBoundaryAndClosedEvidence(t *test
 				input["expected"] = strings.Repeat("b", 64)
 			case "bad-key":
 				input["diagnostics"] = map[string]any{"key": "bad", "digests": map[string]string{}}
+			case "persist-projected":
+				input["persist"] = map[string]string{"/home/dev/.sample/sessions": "projected"}
+			case "released":
+				delete(input, "persist")
+			case "pending-intent":
+				input["retain_pending_intent"] = true
+			case "intent-false":
+				input["retain_pending_intent"] = false
 			case "unverified":
 				testkit.WriteFile(t, journal, []byte(`{"checkpoint":"activating","steps":[]}`), 0o600)
 				defer testkit.WriteFile(t, journal, []byte(`{"checkpoint":"reconciling","steps":[{"migration":"first","checkpoint":"verified"}]}`), 0o600)
@@ -210,6 +286,20 @@ func TestHistorySettingsCaptureRequiresVerifiedBoundaryAndClosedEvidence(t *test
 				}
 				if observed.AfterInput == nil || observed.AfterInput(read) != 0 || json.Unmarshal(observed.Stdout, &value) != nil || value.AppliedSettings == nil || value.Diagnostics == nil || value.Diagnostics.Key != strings.Repeat("a", 64) {
 					t.Fatalf("captured baseline not readable: %s", observed.Stdout)
+				}
+				// The candidate's installed-view read adds its persist projection and retained intent.
+				for extra, want := range map[string]int{`{"persist":null}`: 0, `{"persist":{}}`: 0, `{"persist":{},"retain_pending_intent":true}`: 0,
+					`{"retain_pending_intent":true}`: 0, `{"persist":{"/home/dev/.sample/sessions":"projected"}}`: 99,
+					`{"persist":{},"retain_pending_intent":false}`: 99, `{"persist":{},"unknown":true}`: 99} {
+					var candidate, fields map[string]json.RawMessage
+					_ = json.Unmarshal(readPayload, &candidate)
+					_ = json.Unmarshal([]byte(extra), &fields)
+					maps.Copy(candidate, fields)
+					candidatePayload, _ := json.Marshal(candidate)
+					candidateRead := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", program, "settings"}, Stdin: candidatePayload}
+					if step := respond(candidateRead); step.AfterInput == nil || step.AfterInput(candidateRead) != want {
+						t.Fatalf("settings read with %s: want exit %d", extra, want)
+					}
 				}
 				effects, _ := os.ReadFile(filepath.Join(root, "control.effects.jsonl"))
 				delete(input, "applied_settings")

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -1009,13 +1010,6 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 			t.Fatalf("refusal is not pending configuration: %v", cause)
 		}
 	}
-	for _, raw := range []string{"not json", `{"error": "MemoryError"}`} {
-		var pending interface{ PendingIntegrationConfiguration() bool }
-		if err := runtime.persistRefusal([]byte(raw)); !errors.As(err, &pending) || !pending.PendingIntegrationConfiguration() ||
-			!strings.Contains(err.Error(), "data was preserved") {
-			t.Fatalf("unexplained failure is not pending configuration: %v", err)
-		}
-	}
 	desired, _ := json.Marshal(persistStep{Ops: []string{"finish"}, Source: "/home/dev/.claude/projects"})
 	if source, text, ok := persistStepText(integrationFact{Key: "persist:finish:/home/dev/.claude/projects", Desired: string(desired)}); !ok ||
 		source != "/home/dev/.claude/projects" || !strings.Contains(text, "removing its stage copies and the original directory") {
@@ -1352,5 +1346,39 @@ func TestProvisionConvergenceTreatsAMissingSubstrateAsPending(t *testing.T) {
 	}
 	if ok, err := integrationPlanConverged(IntegrationPlan{}, nil); !ok || err != nil {
 		t.Fatal("converged plan reported pending")
+	}
+}
+
+func TestPersistFailuresAreClassifiedByWhatTheGuestReported(t *testing.T) {
+	agent := errors.New("guest agent is not running")
+	conflict, _ := json.Marshal(map[string]any{"conflicts": []map[string]string{{"reason": "persist adoption pending", "path": "/home/dev/.claude-memory", "integration": "claude"}}})
+	for _, test := range []struct {
+		name    string
+		step    testkit.IncusExecStep
+		pending bool
+		want    string
+	}{
+		{"transport", testkit.IncusExecStep{Err: agent}, false, "evidence is unavailable"},
+		{"transport with stale stderr", testkit.IncusExecStep{Result: ports.InstanceExecResult{Stderr: conflict}, Err: agent}, false, "evidence is unavailable"},
+		{"crash class", testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(`{"error": "MemoryError"}`)}}, false, "program failed (MemoryError)"},
+		{"crash via exit error", testkit.IncusExecStep{Result: ports.InstanceExecResult{Stderr: []byte("Traceback (most recent call last):")}, Err: &ports.GuestExitError{Code: 1}}, false, "program failed;"},
+		{"crash empty stderr", testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}}, false, "program failed;"},
+		{"unsafe crash class", testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(`{"error": "/home/dev/secret"}`)}}, false, "program failed;"},
+		{"typed conflict", testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: conflict}}, true, "release activation does not start"},
+		{"typed conflict via exit error", testkit.IncusExecStep{Result: ports.InstanceExecResult{Stderr: conflict}, Err: &ports.GuestExitError{Code: 1}}, true, "release activation does not start"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := Runtime{Executor: &testkit.Incus{ExecSteps: []testkit.IncusExecStep{test.step}}, Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"}}
+			_, err := runtime.runPersist(context.Background(), "observe", []PersistMapping{{Integration: "claude", Source: "/home/dev/.claude-memory", Target: "/mnt/host/agent-sessions/claude/memory"}}, nil)
+			var pending interface{ PendingIntegrationConfiguration() bool }
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if err == nil || (errors.As(err, &pending) && pending.PendingIntegrationConfiguration()) != test.pending ||
+				errors.As(err, &diagnostic) != test.pending || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "data was preserved") {
+				t.Fatalf("misclassified persist failure: %v", err)
+			}
+			if IntegrationOwnershipConflict(err) != test.pending || strings.Contains(err.Error(), "/home/dev/secret") {
+				t.Fatal("only typed conflicts are ownership conflicts, and guest text stays private", err)
+			}
+		})
 	}
 }

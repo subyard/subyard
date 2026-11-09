@@ -13,28 +13,32 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type historyControl struct {
-	DiskTmpCheckSHA256     string         `json:"diskTmpCheckSHA256"`
-	Journal                string         `json:"journal"`
-	Runtime                string         `json:"runtime"`
-	Target                 string         `json:"target"`
-	Source                 string         `json:"source"`
-	Guest                  string         `json:"guest"`
-	InitialDrift           string         `json:"initialDrift"`
-	Destination            string         `json:"destination"`
-	Migrations             []string       `json:"migrations"`
-	FailOnce               bool           `json:"failOnce"`
-	InventorySHA256        string         `json:"inventoryProgramSHA256"`
-	ProfileRecorderSHA256  string         `json:"profileRecorderProgramSHA256"`
-	ProfileSelectionSHA256 string         `json:"profileSelectionProgramSHA256"`
-	GuestIdentitySHA256    string         `json:"guestIdentityProgramSHA256"`
-	GuestFactsVersion      string         `json:"guestFactsVersion"`
-	ProfileNames           []string       `json:"profileNames"`
-	Skills                 *historySkills `json:"skills,omitempty"`
+	DiskTmpCheckSHA256 string   `json:"diskTmpCheckSHA256"`
+	Journal            string   `json:"journal"`
+	Runtime            string   `json:"runtime"`
+	Target             string   `json:"target"`
+	Source             string   `json:"source"`
+	Guest              string   `json:"guest"`
+	InitialDrift       string   `json:"initialDrift"`
+	Destination        string   `json:"destination"`
+	Migrations         []string `json:"migrations"`
+	FailOnce           bool     `json:"failOnce"`
+	InventorySHA256    string   `json:"inventoryProgramSHA256"`
+	guestContract
+}
+
+// persistContract is the exact persist reader and the mappings the candidate
+// derives for the fixture's selection, deselected links included. The fixture
+// guest holds no data at any of them.
+type persistContract struct {
+	PersistSHA256   string                            `json:"persistProgramSHA256"`
+	PersistMappings []reconcileruntime.PersistMapping `json:"persistMappings"`
 }
 
 type historySkills struct {
@@ -68,67 +72,8 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		if len(command) > 3 {
 			programSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(command[3])))
 		}
-		// This fixture has no guest facts. The exact recorder must therefore
-		// return its missing-facts exit without executing a guest-side writer.
-		if control.ProfileRecorderSHA256 != "" && len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.ProfileRecorderSHA256 {
-			return testkit.IncusServerExecStep{AfterInput: func(actual testkit.IncusServerExecCall) int {
-				var input struct {
-					Yard     struct{ Name, Project, Instance string } `json:"yard"`
-					Profile  string                                   `json:"profile"`
-					Selected *bool                                    `json:"selected"`
-				}
-				decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
-				decoder.DisallowUnknownFields()
-				if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || input.Yard.Name != "default" || input.Yard.Project != "subyard" || input.Yard.Instance != "yard" || input.Selected == nil || *input.Selected || !slices.Contains(control.ProfileNames, input.Profile) {
-					reject()
-					return 99
-				}
-				return 10
-			}}
-		}
-		if len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA != "" && (programSHA == control.ProfileSelectionSHA256 || programSHA == control.GuestIdentitySHA256) {
-			return testkit.IncusServerExecStep{AfterInput: func(actual testkit.IncusServerExecCall) int {
-				var input struct {
-					Version          string                                   `json:"version"`
-					Yard             struct{ Name, Project, Instance string } `json:"yard"`
-					SelectedProfiles []string                                 `json:"selected_profiles"`
-				}
-				decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
-				decoder.DisallowUnknownFields()
-				if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || input.Version != control.GuestFactsVersion || input.Yard.Name != "default" || input.Yard.Project != "subyard" || input.Yard.Instance != "yard" || input.SelectedProfiles == nil || len(input.SelectedProfiles) != 0 {
-					reject()
-					return 99
-				}
-				return 10
-			}}
-		}
-		if control.Skills != nil && len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.Skills.ProgramSHA256 {
-			return testkit.IncusServerExecStep{Stdout: []byte("skills-current\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
-				var input struct {
-					Files    map[string][]byte `json:"files"`
-					User     *string           `json:"user"`
-					Profiles *string           `json:"profiles"`
-					Coding   *bool             `json:"coding"`
-				}
-				decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
-				decoder.DisallowUnknownFields()
-				if decoder.Decode(&input) != nil || input.User == nil || *input.User != control.Skills.User || input.Profiles == nil || *input.Profiles != control.Skills.Profiles || input.Coding == nil || *input.Coding != control.Skills.Coding || len(input.Files) != len(control.Skills.Files) {
-					reject()
-					return 99
-				}
-				if decoder.Decode(new(any)) != io.EOF {
-					reject()
-					return 99
-				}
-				for name, digest := range control.Skills.Files {
-					payload, ok := input.Files[name]
-					if !ok || fmt.Sprintf("%x", sha256.Sum256(payload)) != digest {
-						reject()
-						return 99
-					}
-				}
-				return 0
-			}}
+		if step, ok := control.guestContract.respond(command, reject); ok {
+			return step
 		}
 		if len(command) == 4 && command[0] == "test" && command[1] == "!" && command[2] == "-e" && command[3] == "/var/lib/subyard/integrations/inventory.json" {
 			return testkit.IncusServerExecStep{ExitCode: 1}
@@ -178,38 +123,12 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			}
 			return testkit.IncusServerExecStep{Stdout: []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(payload), control.Destination))}
 		}
-		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.InventorySHA256 && (command[4] == "settings" || command[4] == "selection") {
-			historyMu.Lock()
-			stored, err := os.ReadFile(path + ".inventory.json")
-			historyMu.Unlock()
-			if os.IsNotExist(err) {
-				stored = []byte(`{"installed":true,"applied_settings":null,"diagnostics":null,"selected":["fixture"]}`)
-			} else if err != nil {
+		if inventoryReadMode(command, control.InventorySHA256) != "" {
+			stored, err := storedInventory(path+".inventory.json", `{"installed":true,"applied_settings":null,"diagnostics":null,"selected":["fixture"]}`)
+			if err != nil {
 				return reject()
 			}
-			return testkit.IncusServerExecStep{Stdout: stored, AfterInput: func(actual testkit.IncusServerExecCall) int {
-				var input struct {
-					Home, Developer string
-					UID             int
-					Entries         []json.RawMessage
-					Expected        string
-					Legacy          []string `json:"legacy"`
-					Adopt           *bool    `json:"adopt"`
-					Preview         *bool    `json:"preview_skill_cutover"`
-				}
-				var fields map[string]json.RawMessage
-				if json.Unmarshal(actual.Stdin, &input) != nil || json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 8 || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || len(input.Entries) != 0 || input.Expected != "" || input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil {
-					reject()
-					return 99
-				}
-				for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover"} {
-					if _, ok := fields[key]; !ok {
-						reject()
-						return 99
-					}
-				}
-				return 0
-			}}
+			return inventoryReadStep(stored, reject)
 		}
 		if len(command) == 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && (programSHA == control.InventorySHA256 || programSHA == "2193bc75e21ea70024008739bb74004f92a2d3ffc5894de7ca017f2d4291be2e") && (command[4] == "configs-prepare" || command[4] == "configs-commit" || command[4] == "observe" || (command[4] == "capture-settings" || command[4] == "observe-applied") && programSHA == control.InventorySHA256) {
 			output := []byte(nil)
@@ -217,21 +136,7 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 				output = []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false,"facts":[]}`)
 			}
 			return testkit.IncusServerExecStep{Stdout: output, AfterInput: func(actual testkit.IncusServerExecCall) int {
-				var input struct {
-					Home, Developer string
-					UID             int
-					Entries         []struct{ ID, Kind, Path, Digest string }
-					Expected        string            `json:"expected"`
-					Legacy          []string          `json:"legacy"`
-					Adopt           *bool             `json:"adopt"`
-					Preview         *bool             `json:"preview_skill_cutover"`
-					AppliedSettings map[string]string `json:"applied_settings"`
-					Diagnostics     *struct {
-						Key     string                     `json:"key"`
-						Digests map[string]string          `json:"digests"`
-						Files   map[string]json.RawMessage `json:"files"`
-					} `json:"diagnostics"`
-				}
+				var input settingsCapture
 				source, err := os.ReadFile(control.Source)
 				if err != nil || json.Unmarshal(actual.Stdin, &input) != nil || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 {
 					reject()
@@ -256,41 +161,20 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 					}
 				}
 				if command[4] == "capture-settings" {
-					var fields map[string]json.RawMessage
-					if json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 10 || input.Expected != strings.Repeat("a", 64) || input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil || input.AppliedSettings == nil || (config.Catalog{}).ValidateIntegrationInitSettings(input.AppliedSettings) != nil || input.Diagnostics == nil || input.Diagnostics.Digests == nil || len(input.Diagnostics.Files) > 1 || !(config.Catalog{}).ValidIntegrationDiagnosticEvidence(input.Diagnostics.Key, input.Diagnostics.Digests) || !historyApplyBoundary(control) {
+					captured, ok := settingsCaptureRequest(actual.Stdin)
+					if !ok || len(captured.Diagnostics.Files) > 1 || !historyApplyBoundary(control) {
 						reject()
 						return 99
 					}
-					for name, encoded := range input.Diagnostics.Files {
+					for name, encoded := range captured.Diagnostics.Files {
 						var file map[string]string
-						key, err := hex.DecodeString(input.Diagnostics.Key)
+						key, err := hex.DecodeString(captured.Diagnostics.Key)
 						if err != nil || name != "AGENT_fixture_CONFIG" || json.Unmarshal(encoded, &file) != nil || len(file) != 2 || file["path"] != control.Source || file["digest"] != config.ConfigurationInputDigest(name, config.SettingFile, key, source) {
 							reject()
 							return 99
 						}
 					}
-					for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover", "applied_settings", "diagnostics"} {
-						if _, ok := fields[key]; !ok {
-							reject()
-							return 99
-						}
-					}
-					var diagnosticFields map[string]json.RawMessage
-					if json.Unmarshal(fields["diagnostics"], &diagnosticFields) != nil || len(diagnosticFields) < 2 || len(diagnosticFields) > 3 {
-						reject()
-						return 99
-					}
-					for key := range diagnosticFields {
-						if key != "key" && key != "digests" && key != "files" {
-							reject()
-							return 99
-						}
-					}
-					stored, _ := json.Marshal(map[string]any{"installed": true, "applied_settings": input.AppliedSettings, "diagnostics": input.Diagnostics, "selected": []string{"fixture"}})
-					historyMu.Lock()
-					err := os.WriteFile(path+".inventory.json", stored, 0o600)
-					historyMu.Unlock()
-					if err != nil {
+					if storeInventory(path+".inventory.json", captured.inventory("fixture")) != nil {
 						return 99
 					}
 				}
@@ -353,6 +237,245 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		}
 		return reject()
 	}
+}
+
+// guestContract is the exact read-only guest programs a fixture guest without
+// guest facts or persist data answers, shared by every owned fixture.
+type guestContract struct {
+	ProfileRecorderSHA256  string         `json:"profileRecorderProgramSHA256"`
+	ProfileSelectionSHA256 string         `json:"profileSelectionProgramSHA256"`
+	GuestIdentitySHA256    string         `json:"guestIdentityProgramSHA256"`
+	GuestFactsVersion      string         `json:"guestFactsVersion"`
+	ProfileNames           []string       `json:"profileNames"`
+	Skills                 *historySkills `json:"skills,omitempty"`
+	persistContract
+}
+
+func (contract guestContract) respond(command []string, reject func() testkit.IncusServerExecStep) (testkit.IncusServerExecStep, bool) {
+	programSHA := ""
+	if len(command) > 3 {
+		programSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(command[3])))
+	}
+	if contract.PersistSHA256 != "" && len(command) == 5 && slices.Equal(command[:3], []string{"python3", "-B", "-c"}) &&
+		programSHA == contract.PersistSHA256 && command[4] == "observe" {
+		return contract.persistObservation(reject), true
+	}
+	// This fixture has no guest facts. The exact recorder must therefore
+	// return its missing-facts exit without executing a guest-side writer.
+	if contract.ProfileRecorderSHA256 != "" && len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == contract.ProfileRecorderSHA256 {
+		return testkit.IncusServerExecStep{AfterInput: func(actual testkit.IncusServerExecCall) int {
+			var input struct {
+				Yard     struct{ Name, Project, Instance string } `json:"yard"`
+				Profile  string                                   `json:"profile"`
+				Selected *bool                                    `json:"selected"`
+			}
+			decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+			decoder.DisallowUnknownFields()
+			if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || input.Yard.Name != "default" || input.Yard.Project != "subyard" || input.Yard.Instance != "yard" || input.Selected == nil || *input.Selected || !slices.Contains(contract.ProfileNames, input.Profile) {
+				reject()
+				return 99
+			}
+			return 10
+		}}, true
+	}
+	if len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA != "" && (programSHA == contract.ProfileSelectionSHA256 || programSHA == contract.GuestIdentitySHA256) {
+		return testkit.IncusServerExecStep{AfterInput: func(actual testkit.IncusServerExecCall) int {
+			var input struct {
+				Version          string                                   `json:"version"`
+				Yard             struct{ Name, Project, Instance string } `json:"yard"`
+				SelectedProfiles []string                                 `json:"selected_profiles"`
+			}
+			decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+			decoder.DisallowUnknownFields()
+			if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || input.Version != contract.GuestFactsVersion || input.Yard.Name != "default" || input.Yard.Project != "subyard" || input.Yard.Instance != "yard" || input.SelectedProfiles == nil || len(input.SelectedProfiles) != 0 {
+				reject()
+				return 99
+			}
+			return 10
+		}}, true
+	}
+	if contract.Skills != nil && len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == contract.Skills.ProgramSHA256 {
+		return testkit.IncusServerExecStep{Stdout: []byte("skills-current\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
+			var input struct {
+				Files    map[string][]byte `json:"files"`
+				User     *string           `json:"user"`
+				Profiles *string           `json:"profiles"`
+				Coding   *bool             `json:"coding"`
+			}
+			decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+			decoder.DisallowUnknownFields()
+			if decoder.Decode(&input) != nil || input.User == nil || *input.User != contract.Skills.User || input.Profiles == nil || *input.Profiles != contract.Skills.Profiles || input.Coding == nil || *input.Coding != contract.Skills.Coding || len(input.Files) != len(contract.Skills.Files) {
+				reject()
+				return 99
+			}
+			if decoder.Decode(new(any)) != io.EOF {
+				reject()
+				return 99
+			}
+			for name, digest := range contract.Skills.Files {
+				payload, ok := input.Files[name]
+				if !ok || fmt.Sprintf("%x", sha256.Sum256(payload)) != digest {
+					reject()
+					return 99
+				}
+			}
+			return 0
+		}}, true
+	}
+	return testkit.IncusServerExecStep{}, false
+}
+
+// inventoryReadStep answers only a read-only settings or selection request.
+func inventoryReadStep(output []byte, reject func() testkit.IncusServerExecStep) testkit.IncusServerExecStep {
+	return testkit.IncusServerExecStep{Stdout: output, AfterInput: func(actual testkit.IncusServerExecCall) int {
+		var input settingsCapture
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(actual.Stdin, &input) != nil || json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 8+len(historyCandidateReadFields(fields)) || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || len(input.Entries) != 0 || input.Expected != "" || input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil {
+			reject()
+			return 99
+		}
+		for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover"} {
+			if _, ok := fields[key]; !ok {
+				reject()
+				return 99
+			}
+		}
+		return 0
+	}}
+}
+
+// inventoryReadMode returns the mode of an exact settings or selection read of
+// the reader with the given program digest, or "" for any other command.
+func inventoryReadMode(command []string, reader string) string {
+	if len(command) == 5 && slices.Equal(command[:3], []string{"python3", "-B", "-c"}) && (command[4] == "settings" || command[4] == "selection") &&
+		reader != "" && fmt.Sprintf("%x", sha256.Sum256([]byte(command[3]))) == reader {
+		return command[4]
+	}
+	return ""
+}
+
+// storedInventory returns the inventory a settings capture stored at file, or
+// fallback before any capture or without a store.
+func storedInventory(file, fallback string) ([]byte, error) {
+	if file == "" {
+		return []byte(fallback), nil
+	}
+	historyMu.Lock()
+	defer historyMu.Unlock()
+	stored, err := os.ReadFile(file)
+	if os.IsNotExist(err) {
+		return []byte(fallback), nil
+	}
+	return stored, err
+}
+
+func storeInventory(file string, payload []byte) error {
+	historyMu.Lock()
+	defer historyMu.Unlock()
+	return os.WriteFile(file, payload, 0o600)
+}
+
+// settingsCapture is a candidate's applied-settings capture request; its
+// entries and diagnostic files stay for the owning fixture to check.
+type settingsCapture struct {
+	Home, Developer string
+	UID             int
+	Expected        string   `json:"expected"`
+	Legacy          []string `json:"legacy"`
+	Adopt           *bool    `json:"adopt"`
+	Preview         *bool    `json:"preview_skill_cutover"`
+	Entries         []struct{ ID, Kind, Path, Digest string }
+	AppliedSettings map[string]string `json:"applied_settings"`
+	Diagnostics     struct {
+		Key     string                     `json:"key"`
+		Digests map[string]string          `json:"digests"`
+		Files   map[string]json.RawMessage `json:"files,omitempty"`
+	} `json:"diagnostics"`
+}
+
+// settingsCaptureRequest validates shared capture fields; each fixture checks its artifacts.
+func settingsCaptureRequest(payload []byte) (settingsCapture, bool) {
+	var input settingsCapture
+	var fields, diagnostics map[string]json.RawMessage
+	if json.Unmarshal(payload, &input) != nil || json.Unmarshal(payload, &fields) != nil || len(fields) != 10+len(historyCandidateReadFields(fields)) ||
+		input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || input.Expected != strings.Repeat("a", 64) ||
+		input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil ||
+		input.AppliedSettings == nil || (config.Catalog{}).ValidateIntegrationInitSettings(input.AppliedSettings) != nil ||
+		json.Unmarshal(fields["diagnostics"], &diagnostics) != nil || len(diagnostics) < 2 || len(diagnostics) > 3 || input.Diagnostics.Digests == nil ||
+		!(config.Catalog{}).ValidIntegrationDiagnosticEvidence(input.Diagnostics.Key, input.Diagnostics.Digests) {
+		return settingsCapture{}, false
+	}
+	for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover", "applied_settings", "diagnostics"} {
+		if _, ok := fields[key]; !ok {
+			return settingsCapture{}, false
+		}
+	}
+	for key := range diagnostics {
+		if key != "key" && key != "digests" && key != "files" {
+			return settingsCapture{}, false
+		}
+	}
+	return input, true
+}
+
+// inventory is what a settings read returns after this capture.
+func (capture settingsCapture) inventory(selected ...string) []byte {
+	stored, _ := json.Marshal(map[string]any{"installed": true, "applied_settings": capture.AppliedSettings, "diagnostics": capture.Diagnostics, "selected": append([]string{}, selected...)})
+	return stored
+}
+
+// historyCandidateReadFields accepts empty persist evidence and retained pending intent.
+func historyCandidateReadFields(fields map[string]json.RawMessage) []string {
+	present := []string{}
+	if value, ok := fields["persist"]; ok && (string(value) == "null" || string(value) == "{}") {
+		present = append(present, "persist")
+	}
+	if value, ok := fields["retain_pending_intent"]; ok && string(value) == "true" {
+		present = append(present, "retain_pending_intent")
+	}
+	return present
+}
+
+// persistObservation answers the exact persist reader with what the real
+// program reports for declared links whose parent directory is absent: one
+// entry per mapping without operations. Any other request is rejected.
+func (control persistContract) persistObservation(reject func() testkit.IncusServerExecStep) testkit.IncusServerExecStep {
+	entries := make([]map[string]any, 0, len(control.PersistMappings))
+	for _, mapping := range control.PersistMappings {
+		entries = append(entries, map[string]any{"integration": mapping.Integration, "source": mapping.Source, "target": mapping.Target,
+			"selected": mapping.Selected, "ops": []string{}, "id": "", "state": "none", "persist": "", "files": 0, "bytes": 0,
+			"existing": []string{}, "existing_count": 0, "identity": nil, "target_identity": nil, "retirable": false})
+	}
+	output, _ := json.Marshal(map[string]any{"fingerprint": strings.Repeat("b", 64), "entries": entries})
+	return testkit.IncusServerExecStep{Stdout: output, AfterInput: func(actual testkit.IncusServerExecCall) int {
+		var input struct {
+			Yard      string                            `json:"yard"`
+			UID       int                               `json:"uid"`
+			Developer string                            `json:"developer"`
+			Mappings  []reconcileruntime.PersistMapping `json:"mappings"`
+			Start     *bool                             `json:"start"`
+		}
+		var fields map[string]json.RawMessage
+		decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 5 ||
+			input.Yard != "default" || input.UID != 1000 || input.Developer != "dev" || input.Start == nil || len(control.PersistMappings) == 0 || !slices.Equal(input.Mappings, control.PersistMappings) {
+			reject()
+			return 99
+		}
+		var mappings []map[string]json.RawMessage
+		if json.Unmarshal(fields["mappings"], &mappings) != nil {
+			reject()
+			return 99
+		}
+		for _, mapping := range mappings {
+			if len(mapping) != 4 {
+				reject()
+				return 99
+			}
+		}
+		return 0
+	}}
 }
 
 // The initial known drift is armed only after the candidate's migration work;

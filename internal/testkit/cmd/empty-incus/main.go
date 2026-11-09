@@ -57,6 +57,10 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 		Projects           map[string]map[string]any `json:"projects"`
 		DiskTmpCheckSHA256 string                    `json:"diskTmpCheckSHA256"`
 		ActivationFailure  string                    `json:"activationFailure"`
+		guestContract
+		// ObservedGuest models a running guest without an integration inventory
+		// for the synthetic native-observation cases.
+		ObservedGuest *guestContract `json:"observedGuest"`
 	}
 	var observationMu sync.Mutex
 	read := func() control {
@@ -78,7 +82,9 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 			if value.History != nil {
 				server.SetExecResponder(historyResponder(*value.History, path))
 			} else if value.DiskTmpCheckSHA256 != "" {
-				server.SetExecResponder(directOwnedResponder(value.DiskTmpCheckSHA256, path, value.ActivationFailure))
+				server.SetExecResponder(directOwnedResponder(value.DiskTmpCheckSHA256, value.guestContract, path, value.ActivationFailure))
+			} else if value.ObservedGuest != nil {
+				server.SetExecResponder(observedGuestResponder(*value.ObservedGuest, path))
 			} else {
 				server.SetExecResponder(nil)
 			}
@@ -145,9 +151,20 @@ var releasedInventoryReaders = map[string]bool{
 
 // This opt-in models the direct-caller case: owned, empty integrations and an
 // already installed disk policy. Unknown commands and mutations fail closed.
-func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+func directOwnedResponder(digest string, guest guestContract, paths ...string) func(testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 	return func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 		if call.Project != "subyard" || call.Name != "yard" {
+			return testkit.IncusServerExecStep{ExitCode: 99}
+		}
+		reject := func() testkit.IncusServerExecStep {
+			if len(paths) != 0 {
+				command := slices.Clone(call.Command)
+				if len(command) > 3 {
+					command[3] = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(command[3])))
+				}
+				payload, _ := json.Marshal(map[string]any{"project": call.Project, "name": call.Name, "command": command})
+				_ = os.WriteFile(paths[0]+".unexpected", payload, 0600)
+			}
 			return testkit.IncusServerExecStep{ExitCode: 99}
 		}
 		// Same exact read-only integration substrate observation as historyResponder.
@@ -173,11 +190,12 @@ func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServ
 			}
 		}
 		// The direct-caller case selects no integrations: only the two project
-		// hook artifacts may be observed, with the exact released/current reader.
-		if len(call.Command) == 5 && slices.Equal(call.Command[:3], []string{"python3", "-B", "-c"}) && (call.Command[4] == "observe" || call.Command[4] == "observe-applied") {
+		// hook artifacts may be observed or captured, with the exact reader.
+		if len(call.Command) == 5 && slices.Equal(call.Command[:3], []string{"python3", "-B", "-c"}) && (call.Command[4] == "observe" || call.Command[4] == "observe-applied" || call.Command[4] == "capture-settings") {
 			program := fmt.Sprintf("%x", sha256.Sum256([]byte(call.Command[3])))
-			if program == currentInventoryReader || releasedInventoryReaders[program] {
-				if len(paths) > 1 && paths[1] != "" {
+			capture := call.Command[4] == "capture-settings"
+			if program == currentInventoryReader || !capture && releasedInventoryReaders[program] {
+				if !capture && len(paths) > 1 && paths[1] != "" {
 					payload, err := os.ReadFile(paths[1])
 					if err == nil {
 						var failure struct{ Journal, Marker string }
@@ -199,12 +217,12 @@ func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServ
 						return testkit.IncusServerExecStep{ExitCode: 99}
 					}
 				}
-				return testkit.IncusServerExecStep{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false,"facts":[]}`), AfterInput: func(actual testkit.IncusServerExecCall) int {
-					var input struct {
-						Home, Developer string
-						UID             int
-						Entries         []struct{ ID, Kind, Path string }
-					}
+				var output []byte
+				if !capture {
+					output = []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false,"facts":[]}`)
+				}
+				return testkit.IncusServerExecStep{Stdout: output, AfterInput: func(actual testkit.IncusServerExecCall) int {
+					var input settingsCapture
 					if json.Unmarshal(actual.Stdin, &input) != nil || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || len(input.Entries) != 2 {
 						return 99
 					}
@@ -215,22 +233,67 @@ func directOwnedResponder(digest string, paths ...string) func(testkit.IncusServ
 						}
 						seen[entry.Path] = true
 					}
+					if capture {
+						captured, ok := settingsCaptureRequest(actual.Stdin)
+						if !ok || len(captured.Diagnostics.Files) != 0 || len(paths) == 0 || storeInventory(paths[0]+".inventory.json", captured.inventory()) != nil {
+							reject()
+							return 99
+						}
+					}
 					return 0
 				}}
 			}
 		}
-		if !slices.Equal(call.Command, []string{"sh", "-s", "--", "check"}) {
+		if step, ok := guest.respond(call.Command, reject); ok {
+			return step
+		}
+		// Reads return the captured baseline of the owned inventory, with no selected integration.
+		if inventoryReadMode(call.Command, currentInventoryReader) != "" {
+			file := ""
 			if len(paths) != 0 {
-				command := slices.Clone(call.Command)
-				if len(command) > 3 {
-					command[3] = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(command[3])))
-				}
-				payload, _ := json.Marshal(map[string]any{"project": call.Project, "name": call.Name, "command": command})
-				_ = os.WriteFile(paths[0]+".unexpected", payload, 0600)
+				file = paths[0] + ".inventory.json"
 			}
-			return testkit.IncusServerExecStep{ExitCode: 99}
+			stored, err := storedInventory(file, `{"installed":true,"applied_settings":null,"diagnostics":null,"selected":[]}`)
+			if err != nil {
+				return reject()
+			}
+			return inventoryReadStep(stored, reject)
+		}
+		// The owned yard has an installed integration inventory, which the reader observes.
+		if slices.Equal(call.Command, []string{"test", "!", "-e", "/var/lib/subyard/integrations/inventory.json"}) {
+			return testkit.IncusServerExecStep{ExitCode: 1}
+		}
+		if !slices.Equal(call.Command, []string{"sh", "-s", "--", "check"}) {
+			return reject()
 		}
 		return diskTmpCheckResponse(digest)
+	}
+}
+
+// observedGuestResponder answers the exact read-only guest programs of a
+// running guest without guest facts, persist data or an integration
+// inventory. Every other call keeps the queued native observation and its hold.
+func observedGuestResponder(guest guestContract, path string) func(testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+	return func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+		reject := func() testkit.IncusServerExecStep {
+			payload, _ := json.Marshal(call)
+			_ = os.WriteFile(path+".unexpected", payload, 0o600)
+			return testkit.IncusServerExecStep{ExitCode: 99, Stderr: []byte("unsupported observed guest command\n")}
+		}
+		if call.Project != "subyard" || call.Name != "yard" {
+			return testkit.IncusServerExecStep{Queued: true}
+		}
+		if step, ok := guest.respond(call.Command, reject); ok {
+			return step
+		}
+		if mode := inventoryReadMode(call.Command, currentInventoryReader); mode != "" {
+			absent := `{"installed":false,"applied_settings":null,"diagnostics":null}`
+			if mode == "selection" {
+				absent = `{"installed":false,"selected":[],"applied_settings":null,"diagnostics":null}`
+			}
+			return inventoryReadStep([]byte(absent), reject)
+		}
+		return testkit.IncusServerExecStep{Queued: true}
 	}
 }
 

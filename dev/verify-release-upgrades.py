@@ -511,7 +511,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                     output.write(payload)
 
 
-def set_fixture_observation(control, status=None, journal=None, history=None, owned_project=None):
+def set_fixture_observation(control, status=None, journal=None, history=None, owned_project=None, guest=None):
     instances = [] if status is None else [{"project": "subyard", "name": "yard",
                                             "info": {"name": "yard", "status": status,
                                                      "type": "container", "config": {}, "devices": {}}}]
@@ -524,6 +524,8 @@ def set_fixture_observation(control, status=None, journal=None, history=None, ow
         instances[0]["info"].update(config=config, expanded_config=config,
                                     devices={}, expanded_devices={})
     observation = {"instances": instances, "holdJournal": str(journal) if journal else "", "migrationHistory": history}
+    if guest is not None and instances:
+        observation["observedGuest"] = guest
     project_config = history.get("projectConfig") if history is not None else owned_project
     if project_config is not None:
         observation["projects"] = {"subyard": {"name": "subyard", "config": project_config}}
@@ -1133,13 +1135,14 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
     registration_before = registration.read_bytes()
 
     control = root / "incus-observation.json"
+    guest = guest_contract(Path(__file__).resolve().parent.parent, version, selected=("codex",))
 
     def observe(status, hold, *, owned=False):
         project = {
             "user.subyard.installation": "1", "user.subyard.operator_uid": str(os.getuid()),
             "user.subyard.config_home": str(fixture.config), "user.subyard.data_home": str(fixture.data),
             "features.profiles": "false", "features.storage.volumes": "false"} if owned else None
-        set_fixture_observation(control, status, fixture.journal if hold else None, owned_project=project)
+        set_fixture_observation(control, status, fixture.journal if hold else None, owned_project=project, guest=guest)
 
     observe("Running", True)
     shims = fixture.root / "commands"
@@ -1435,8 +1438,11 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     links_before = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
     control = root / "incus-observation.json"
 
+    # The running guest has no guest facts, persist data or integration inventory.
+    guest = guest_contract(Path(__file__).resolve().parent.parent, fixture.version, selected=("codex",))
+
     def observe(status, hold):
-        set_fixture_observation(control, status, fixture.journal if hold else None)
+        set_fixture_observation(control, status, fixture.journal if hold else None, guest=guest)
 
     # Native observations are synthetic; any privileged or mutating host command
     # is rejected. This exercises the actual candidate engine and wire contract.
@@ -1756,7 +1762,8 @@ def verify_completed_source_selection(fixture, root):
     # A running consumer exposes ordinary materialized drift. Keep every other
     # runtime absent/current so this exercises completed config.set admission.
     control = root / "incus-observation.json"
-    set_fixture_observation(control, "Running")
+    set_fixture_observation(control, "Running", guest=guest_contract(Path(__file__).resolve().parent.parent,
+                                                                     fixture.version, selected=("codex",)))
     shims = fixture.root / "selection-commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-selection-host-command"
@@ -1819,11 +1826,12 @@ def verify_migration_owner_replacement(release, version, baseline, source_baseli
     registration.write_text("YARD_TEMPLATE=''\nSSH_PORT=2226\n")
     registration.chmod(0o600)
     control = root / "incus-observation.json"
+    guest = guest_contract(Path(__file__).resolve().parent.parent, version, selected=("codex",))
     def observe(status, hold):
         payload = json.dumps({"instances": [{"project": "subyard", "name": "yard",
                    "info": {"name": "yard", "status": status, "type": "container",
                             "config": {}, "devices": {}}}],
-                   "holdJournal": str(fixture.journal) if hold else ""})
+                   "holdJournal": str(fixture.journal) if hold else "", "observedGuest": guest})
         control.write_text(payload)
         control.chmod(0o600)
         deadline = time.monotonic() + 10
@@ -2015,6 +2023,7 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
                 "features.profiles": "false", "features.storage.volumes": "false"}}}
             value["diskTmpCheckSHA256"] = disk_tmp_sha256
             value["activationFailure"] = str(failure_control)
+            value.update(guest_contract(Path(__file__).resolve().parent.parent, version))
         payload = json.dumps(value)
         control.write_text(payload)
         control.chmod(0o600)
@@ -2287,25 +2296,7 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     inventory = (Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
     history["inventoryProgramSHA256"] = hashlib.sha256(inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0").encode()).hexdigest()
     package_root = Path(__file__).resolve().parent.parent
-    guest_facts = (package_root / 'config/skills/core/subyard-environment/facts.py').read_text()
-    identity_source = (package_root / 'internal/adapters/reconcileruntime/applied_guest_identity.go').read_text()
-    recorder = re.search(r'(?s)const recordAppliedProfileProjection = `([^`]*)`', identity_source)
-    require(recorder is not None, 'profile recorder source is unavailable')
-    recorder_program = "__name__ = 'subyard_profile_selection_recorder'\n" + guest_facts + recorder.group(1)
-    history['profileRecorderProgramSHA256'] = hashlib.sha256(recorder_program.encode()).hexdigest()
-    for label, symbol, marker in [('profileSelectionProgramSHA256', 'appliedEnvironmentProfilesProjection', 'subyard_profile_selection_observer'),
-                                  ('guestIdentityProgramSHA256', 'appliedGuestIdentityProjection', 'subyard_identity_observer')]:
-        projection = re.search(r'(?s)const ' + symbol + r' = `([^`]*)`', identity_source)
-        require(projection is not None, 'guest facts observation source is unavailable')
-        program = "__name__ = '" + marker + "'\n" + guest_facts + projection.group(1)
-        history[label] = hashlib.sha256(program.encode()).hexdigest()
-    history['guestFactsVersion'] = fixture.version
-    history['profileNames'] = sorted(path.parent.name for path in (package_root / 'config/profiles').glob('*/profile.json')
-                                     if json.loads(path.read_text()).get('runtime'))
-    package = runpy.run_path(str(package_root / 'config/skills/package.py'))
-    history['skills'] = {'files': {name: digest(package_root / name) for name in package['source_files'](package_root)},
-                         'programSHA256': digest(package_root / 'config/skills/probe.py'),
-                         'user': 'dev', 'profiles': '', 'coding': True}
+    history.update(guest_contract(package_root, fixture.version))
     shims = fixture.root / "commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-host-command"
@@ -2313,6 +2304,61 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     set_fixture_observation(control, "Running", history=history)
     return history, source, guest, unexpected
+
+
+def guest_contract(package_root, version, selected=()):
+    """Exact read-only guest programs of a fixture guest without guest facts or persist data."""
+    contract = persist_contract(package_root, selected)
+    guest_facts = (package_root / 'config/skills/core/subyard-environment/facts.py').read_text()
+    identity_source = (package_root / 'internal/adapters/reconcileruntime/applied_guest_identity.go').read_text()
+    recorder = re.search(r'(?s)const recordAppliedProfileProjection = `([^`]*)`', identity_source)
+    require(recorder is not None, 'profile recorder source is unavailable')
+    recorder_program = "__name__ = 'subyard_profile_selection_recorder'\n" + guest_facts + recorder.group(1)
+    contract['profileRecorderProgramSHA256'] = hashlib.sha256(recorder_program.encode()).hexdigest()
+    for label, symbol, marker in [('profileSelectionProgramSHA256', 'appliedEnvironmentProfilesProjection', 'subyard_profile_selection_observer'),
+                                  ('guestIdentityProgramSHA256', 'appliedGuestIdentityProjection', 'subyard_identity_observer')]:
+        projection = re.search(r'(?s)const ' + symbol + r' = `([^`]*)`', identity_source)
+        require(projection is not None, 'guest facts observation source is unavailable')
+        program = "__name__ = '" + marker + "'\n" + guest_facts + projection.group(1)
+        contract[label] = hashlib.sha256(program.encode()).hexdigest()
+    contract['guestFactsVersion'] = version
+    contract['profileNames'] = sorted(path.parent.name for path in (package_root / 'config/profiles').glob('*/profile.json')
+                                      if json.loads(path.read_text()).get('runtime'))
+    package = runpy.run_path(str(package_root / 'config/skills/package.py'))
+    contract['skills'] = {'files': {name: digest(package_root / name) for name in package['source_files'](package_root)},
+                          'programSHA256': digest(package_root / 'config/skills/probe.py'),
+                          'user': 'dev', 'profiles': '', 'coding': True}
+    return contract
+
+
+def persist_contract(package_root, selected=(), *, developer="dev"):
+    """Persist observation contract for a fixture guest with no persist data."""
+    # Mirror Runtime.persistMappings in internal/adapters/reconcileruntime/integration_persist.go.
+    home = "/home/" + developer
+    declarations = {path.parent.name: json.loads(path.read_text()).get("persist", "").split()
+                    for family in ("agents", "retired-integrations")
+                    for path in sorted(package_root.glob(f"config/{family}/*/integration.json"))}
+    mappings = []
+    seen = set()
+    for enabled, names in ((True, selected), (False, declarations)):
+        for name in names:
+            for link in declarations[name]:
+                parts = link.split(":")
+                if len(parts) != 2:
+                    continue  # single-file targets are not directory transfers
+                relative = os.path.normpath(parts[0])
+                safe = parts[0] and not os.path.isabs(parts[0]) and relative not in (".", "..") and not relative.startswith("../")
+                if enabled:
+                    require(safe and os.path.isabs(parts[1]), "invalid selected integration link")
+                if not safe:
+                    continue
+                source = home + "/" + relative
+                if not enabled and source in seen:
+                    continue
+                mappings.append({"integration": name, "source": source, "target": parts[1], "selected": enabled})
+                seen.add(source)
+    return {"persistProgramSHA256": digest(package_root / "internal/adapters/reconcileruntime/integration_persist.py"),
+            "persistMappings": sorted(mappings, key=lambda mapping: mapping["source"])}
 
 
 def history_migrations_verified(journal, migrations):
