@@ -21,7 +21,9 @@ if [ ! -x "$tool" ]; then
   download="$(mktemp -d "$tools/golangci-lint.XXXXXX")"
   trap 'rm -rf -- "$download"' EXIT
   archive="golangci-lint-$version-linux-$arch"
-  curl --fail --silent --show-error --location \
+  # Retry transient GitHub 5xx outages; the archive is still checksum-verified below.
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --retry 6 --retry-all-errors --retry-max-time 600 --connect-timeout 20 --max-time 300 \
     "https://github.com/golangci/golangci-lint/releases/download/v$version/$archive.tar.gz" \
     --output "$download/archive.tar.gz"
   printf '%s  %s\n' "$checksum" "$download/archive.tar.gz" | sha256sum --check --status
