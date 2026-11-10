@@ -294,8 +294,8 @@ func TestApplyGitIdentityUsesTypedDeveloperCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][]string{
-		{"git", "config", "--global", "user.name", "Developer"},
-		{"git", "config", "--global", "user.email", "dev@example.test"},
+		{"git", "config", "--global", "--replace-all", "user.name", "Developer"},
+		{"git", "config", "--global", "--replace-all", "user.email", "dev@example.test"},
 		{"git", "config", "--global", "--replace-all", "safe.directory", "*"},
 	}
 	if len(incus.ExecCalls) != len(want) {
@@ -310,15 +310,15 @@ func TestApplyGitIdentityUsesTypedDeveloperCommands(t *testing.T) {
 	}
 }
 
-func TestApplyGitIdentityCopiesOperatorDropin(t *testing.T) {
-	dataHome := t.TempDir()
-	payload := []byte("[user]\n\tname = Operator\n")
-	if err := os.WriteFile(filepath.Join(dataHome, "gitconfig"), payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	incus := runningIncus(2)
+func TestApplyGitIdentityKeepsHostFallbackAndIgnoresRetiredDropin(t *testing.T) {
+	dataHome, hostHome := testkit.TempDir(t), testkit.TempDir(t)
+	payload := []byte("[user]\n\tname = Retired\n[core]\n\teditor = retired-editor\n")
+	testkit.WriteFile(t, filepath.Join(dataHome, "gitconfig"), payload, 0600)
+	testkit.WriteFile(t, filepath.Join(hostHome, ".gitconfig"), []byte("[user]\n\tname = Host Operator\n\temail = host@example.test\n"), 0600)
+	incus := runningIncus(3)
 	runtime := Runtime{
 		Incus: incus, Executor: incus,
+		Environment: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + hostHome, "GIT_CONFIG_NOSYSTEM=1"},
 		Yard: domain.Context{
 			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 			Paths: domain.RuntimePaths{DataHome: dataHome},
@@ -327,12 +327,22 @@ func TestApplyGitIdentityCopiesOperatorDropin(t *testing.T) {
 	if err := runtime.applyGitIdentity(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(incus.ExecCalls) != 2 ||
-		incus.ExecCalls[0].Request.Command[5] != "/home/dev/.gitconfig" ||
-		!bytes.Equal(incus.ExecCalls[0].Request.Stdin, payload) ||
-		!slices.Equal(incus.ExecCalls[1].Request.Command,
-			[]string{"git", "config", "--global", "--replace-all", "safe.directory", "*"}) {
-		t.Fatalf("operator gitconfig was not copied through typed execution: %#v", incus.ExecCalls)
+	want := [][]string{
+		{"git", "config", "--global", "--replace-all", "user.name", "Host Operator"},
+		{"git", "config", "--global", "--replace-all", "user.email", "host@example.test"},
+		{"git", "config", "--global", "--replace-all", "safe.directory", "*"},
+	}
+	if len(incus.ExecCalls) != len(want) {
+		t.Fatalf("fallback calls = %#v", incus.ExecCalls)
+	}
+	for i, call := range incus.ExecCalls {
+		if !slices.Equal(call.Request.Command, want[i]) || len(call.Request.Stdin) != 0 {
+			t.Fatalf("fallback call = %#v", call)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(dataHome, "gitconfig"))
+	if err != nil || !bytes.Equal(payload, after) {
+		t.Fatalf("retired drop-in changed: %q %v", after, err)
 	}
 }
 
@@ -663,14 +673,14 @@ func TestGitIdentityApplyAndProbeUseNativeGlobalConfigSelection(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
 			}
-			testkit.WriteFile(t, path, []byte("[user]\n\tname = retained\n"), 0600)
+			testkit.WriteFile(t, path, []byte("[user]\n\tname = retained\n[core]\n\teditor = retained-editor\n"), 0600)
 			runtime := Runtime{Incus: runningIncus(0), Executor: localGitIdentityExecutor{home},
 				Yard:        domain.Context{DevUser: "developer", DevUID: 1001, Paths: domain.RuntimePaths{DataHome: testkit.TempDir(t)}},
 				Environment: []string{"GIT_USER_NAME=Developer", "GIT_USER_EMAIL=dev@example.test"}}
-			if ready, err := runtime.gitIdentityConverged(context.Background()); err != nil || ready {
+			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil || ready {
 				t.Fatalf("missing applied trust was accepted: %t %v", ready, err)
 			}
-			if err := runtime.applyGitIdentity(context.Background()); err != nil {
+			if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(path)
@@ -681,7 +691,7 @@ func TestGitIdentityApplyAndProbeUseNativeGlobalConfigSelection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ready, err := runtime.gitIdentityConverged(context.Background()); err != nil || !ready {
+			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil || !ready {
 				t.Fatalf("native Git applied state not recognized: %t %v", ready, err)
 			}
 			after, err := os.ReadFile(path)
@@ -694,6 +704,35 @@ func TestGitIdentityApplyAndProbeUseNativeGlobalConfigSelection(t *testing.T) {
 			}
 			if !bytes.Equal(before, after) || !os.SameFile(info, afterInfo) || info.Mode() != afterInfo.Mode() || info.ModTime() != afterInfo.ModTime() {
 				t.Fatal("Git observation changed configuration")
+			}
+			for _, key := range []string{"user.name", "user.email"} {
+				if err := runtime.runGuestAsDev(context.Background(), []string{"git", "config", "--global", "--add", key, "manual drift"}); err != nil {
+					t.Fatal(err)
+				}
+				if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil || ready {
+					t.Fatalf("owned %s drift was not observed: %t %v", key, ready, err)
+				}
+				if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil {
+					t.Fatal(err)
+				}
+				if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil || !ready {
+					t.Fatalf("git-identity init stage did not repair %s: %t %v", key, ready, err)
+				}
+			}
+			if err := runtime.runGuestAsDev(context.Background(), []string{"git", "config", "--global", "--replace-all", "user.email", "unowned@example.test"}); err != nil {
+				t.Fatal(err)
+			}
+			runtime.Environment = []string{"GIT_USER_NAME=Developer"}
+			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil || !ready {
+				t.Fatalf("unset email reported drift: %t %v", ready, err)
+			}
+			runtime.Environment = nil
+			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageGitIdentity); err != nil || !ready {
+				t.Fatalf("unowned identity reported drift: %t %v", ready, err)
+			}
+			preserved, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(preserved, []byte("editor = retained-editor")) {
+				t.Fatalf("unrelated Git settings lost: %q %v", preserved, err)
 			}
 			if location != ".gitconfig" {
 				if _, err := os.Stat(filepath.Join(home, ".gitconfig")); !os.IsNotExist(err) {

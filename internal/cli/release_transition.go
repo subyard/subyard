@@ -1179,6 +1179,9 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	// findings that depend on the failed read; every refusal is reported together.
 	var refusals []error
 	for _, target := range targets {
+		if err := migration.CheckLegacyGitConfig(ctx, target.Loaded.Context); err != nil {
+			refusals = materializedConfigActivationError{err, target.Name, "legacy gitconfig", "config status", "inspect", reconciler.configHome}.appendTo(refusals)
+		}
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
 			refusals = materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}.appendTo(refusals)

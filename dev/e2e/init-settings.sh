@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [ "${1:-}" = --preflight ]; then
   bash -n "$0"
-  go test ./internal/config ./internal/cli ./internal/adapters/reconcileruntime -run 'TestDeveloperIdentity|TestStoppedIdentityInspection|TestAppliedIdentityHint|TestIdentityPrerequisite|TestIdentityContinuation|TestPhysicalLifecycleOwner|TestTeardownPhysicalOwner|TestTeardownSessionGuard|TestGenericProfileCompleted|TestIdentityAuthoring|TestAppliedGuestIdentity|TestCompletedReleaseKeepsPendingConfiguration|TestReleaseMaterialization|TestIntegrationRetryAdmission|TestInstalledRelease|TestAppliedIntegration|TestNativeAppliedIntegrationCapture|TestIntegrationSettingsPublicationRetryAndLateFailure|TestLegacyIntegrationSettings|TestHostIntegrationSettings' -count=1
+  TMPDIR=/tmp go test ./internal/config ./internal/cli ./internal/adapters/reconcileruntime ./internal/migration -run 'TestDeveloperIdentity|TestStoppedIdentityInspection|TestAppliedIdentityHint|TestIdentityPrerequisite|TestIdentityContinuation|TestPhysicalLifecycleOwner|TestTeardownPhysicalOwner|TestTeardownSessionGuard|TestGenericProfileCompleted|TestIdentityAuthoring|TestAppliedGuestIdentity|TestCompletedReleaseKeepsPendingConfiguration|TestReleaseMaterialization|TestIntegrationRetryAdmission|TestInstalledRelease|TestAppliedIntegration|TestNativeAppliedIntegrationCapture|TestIntegrationSettingsPublicationRetryAndLateFailure|TestLegacyIntegrationSettings|TestHostIntegrationSettings|TestGitIdentitySettingsArePortableStrings|TestApplyGitIdentityUsesTypedDeveloperCommands|TestApplyGitIdentityKeepsHostFallbackAndIgnoresRetiredDropin|TestGitIdentityApplyAndProbeUseNativeGlobalConfigSelection|TestMaterializedConfigActivationCollectsLegacyGitConfigRefusal|TestMaterializedConfigActivationIgnoresGitIdentityChanges|TestLegacyGitConfigReadinessRefusesWithoutChangingOperatorFile|TestLegacyGitConfigReadinessRefusesUnreadableConfiguration' -count=1
   exit
 fi
 [ "${SUBYARD_E2E_VM:-}" = 1 ]
@@ -129,6 +129,32 @@ after="$(guest sha256sum /etc/subyard/preview.json | cut -d' ' -f1)"
 [ "$before" != "$after" ]
 yard init --yes
 printf 'PASS: installed candidate config set -> stop/start -> init converges preview port without migrate\n'
+yard config set GIT_USER_NAME 'Lane Author' --scope yard --yes
+yard config set GIT_USER_EMAIL lane-author@example.test --scope yard --yes
+yard init --yes
+guest runuser -u dev -- env HOME=/home/dev sh -eu -c '
+  [ "$(git config --global --get user.name)" = "Lane Author" ]
+  [ "$(git config --global --get user.email)" = lane-author@example.test ]
+'
+printf 'PASS: init sets the developer global Git identity\n'
+guest runuser -u dev -- env HOME=/home/dev sh -eu -c '
+  git config --global core.editor lane-editor
+  git config --global user.name "Manual Lane Author"
+'
+yard init --yes > "$STATE/git-identity-drift.log" 2>&1
+grep -F '[apply] init.stage.git-identity:' "$STATE/git-identity-drift.log"
+guest runuser -u dev -- env HOME=/home/dev sh -eu -c '
+  [ "$(git config --global --get user.name)" = "Lane Author" ]
+  [ "$(git config --global --get user.email)" = lane-author@example.test ]
+  [ "$(git config --global --get core.editor)" = lane-editor ]
+'
+printf 'PASS: init reports and repairs Git identity drift while unrelated Git settings survive\n'
+yard config unset GIT_USER_NAME --scope yard --yes
+yard config unset GIT_USER_EMAIL --scope yard --yes
+guest runuser -u dev -- env HOME=/home/dev git config --global user.name 'Unowned Lane Author'
+yard init --yes
+[ "$(guest runuser -u dev -- env HOME=/home/dev git config --global --get user.name)" = 'Unowned Lane Author' ]
+printf 'PASS: unset Git identity settings leave identity unowned for host fallback\n'
 # A yard with no coding integrations can establish the owner from core receipts
 # before its legacy applied-input snapshot is captured.
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("applied_settings",None); open(p,"w").write(json.dumps(value))'

@@ -5,12 +5,30 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestGitIdentitySettingsArePortableStrings(t *testing.T) {
+	wantScopes := []SettingScope{ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand}
+	for _, name := range []string{"GIT_USER_NAME", "GIT_USER_EMAIL"} {
+		definition, ok := LookupSetting(name)
+		if !ok || definition.Kind != SettingScalar || definition.Type != SettingString ||
+			!definition.Syncable || definition.Owner != "yard-runtime" || definition.Application != SettingYardInit ||
+			!slices.Equal(definition.Scopes, wantScopes) {
+			t.Fatalf("identity definition = %#v", definition)
+		}
+		for _, scope := range wantScopes {
+			if err := ValidateSetting(scope, name, "a plain string", false); err != nil {
+				t.Fatalf("%s in %s: %v", name, scope, err)
+			}
+		}
+	}
+}
 
 func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)

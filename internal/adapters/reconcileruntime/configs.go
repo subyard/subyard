@@ -482,39 +482,27 @@ func (runtime Runtime) applyGitIdentity(ctx context.Context) error {
 		return errors.New("yard is not running")
 	}
 	user := runtime.devUser()
-	home := "/home/" + user
 	if !domain.SafeName(user) {
 		return errors.New("invalid developer user")
 	}
-	dropin := filepath.Join(runtime.Yard.Paths.DataHome, "gitconfig")
-	if regularFile(dropin) {
-		payload, err := os.ReadFile(dropin)
-		if err != nil {
+	name := runtime.environmentValue("GIT_USER_NAME")
+	email := runtime.environmentValue("GIT_USER_EMAIL")
+	if name == "" {
+		name = runtime.hostGitValue("user.name")
+	}
+	if email == "" {
+		email = runtime.hostGitValue("user.email")
+	}
+	if name != "" {
+		if err := runtime.runGuestAsDev(ctx,
+			[]string{"git", "config", "--global", "--replace-all", "user.name", name}); err != nil {
 			return err
 		}
-		if err := runtime.writeGuestFile(ctx, home+"/.gitconfig", payload); err != nil {
+	}
+	if email != "" {
+		if err := runtime.runGuestAsDev(ctx,
+			[]string{"git", "config", "--global", "--replace-all", "user.email", email}); err != nil {
 			return err
-		}
-	} else {
-		name := runtime.environmentValue("GIT_USER_NAME")
-		email := runtime.environmentValue("GIT_USER_EMAIL")
-		if name == "" {
-			name = runtime.hostGitValue("user.name")
-		}
-		if email == "" {
-			email = runtime.hostGitValue("user.email")
-		}
-		if name != "" {
-			if err := runtime.runGuestAsDev(ctx,
-				[]string{"git", "config", "--global", "user.name", name}); err != nil {
-				return err
-			}
-		}
-		if email != "" {
-			if err := runtime.runGuestAsDev(ctx,
-				[]string{"git", "config", "--global", "user.email", email}); err != nil {
-				return err
-			}
 		}
 	}
 	if err := runtime.runGuestAsDev(ctx,

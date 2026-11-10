@@ -122,6 +122,26 @@ Configuration inspection and editing remain available to repair existing setting
 in the yard name also requires a valid `YARD_INSTANCE_NAME` override because Incus instance names
 use hostname rules.
 
+### Git identity
+
+`GIT_USER_NAME` and `GIT_USER_EMAIL` are syncable string settings. Set them in shared,
+host or yard scope, or override them for one command. `yard init` writes each nonempty
+setting to the developer's global Git `user.name` or `user.email` inside the yard. Its
+`git-identity` stage observes and repairs drift only for those configured identity keys;
+other Git settings remain untouched, apart from the existing `safe.directory` policy.
+An unset or empty setting keeps the host Git identity fallback, without owning that key
+or reporting identity drift.
+
+Save portable identity settings in shared scope and synchronize them through the existing
+private config Git workflow. Run `yard config sync pull` on each owner host, then
+`yard init` to apply the identity changes; there is no automatic pull. Host-side commits,
+including config sync and typed writers with `--git`, continue to use the host's Git identity.
+
+The former `$DATA_HOME/gitconfig` drop-in is no longer supported. Release readiness refuses
+activation while it exists, suggests commands to import its identity keys, and lists other
+keys for manual preservation. Move or delete the file after preserving its settings;
+Subyard never edits or deletes it during migration.
+
 ### Yard resource limits
 
 `LIMITS_CPU` and `LIMITS_MEMORY` are optional Incus resource limits for both container and VM

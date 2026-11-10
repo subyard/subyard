@@ -1733,13 +1733,32 @@ func (runtime Runtime) gitIdentityConverged(ctx context.Context) (bool, error) {
 			Command: []string{"git", "config", "--global", "--fixed-value", "--get-all", "safe.directory", "*"},
 			User:    uint32(uid), Group: uint32(uid), Environment: map[string]string{"HOME": "/home/" + user},
 		})
-	if err == nil && result.ExitCode == 0 {
-		return true, nil
-	}
 	if result.ExitCode != 0 {
 		return false, nil
 	}
-	return false, err
+	if err != nil {
+		return false, err
+	}
+	converged := true
+	var findings []error
+	for _, identity := range []struct{ setting, key string }{
+		{"GIT_USER_NAME", "user.name"}, {"GIT_USER_EMAIL", "user.email"},
+	} {
+		want := runtime.environmentValue(identity.setting)
+		if want == "" {
+			continue
+		}
+		result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
+			ports.InstanceExecRequest{
+				Command: []string{"git", "config", "--global", "--get", identity.key},
+				User:    uint32(uid), Group: uint32(uid), Environment: map[string]string{"HOME": "/home/" + user},
+			})
+		if err != nil && result.ExitCode == 0 {
+			findings = append(findings, err)
+		}
+		converged = converged && result.ExitCode == 0 && strings.TrimSuffix(string(result.Stdout), "\n") == want
+	}
+	return converged, domain.CollectRefusals(findings...)
 }
 
 func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {

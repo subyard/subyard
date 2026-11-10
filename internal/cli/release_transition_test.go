@@ -302,6 +302,73 @@ func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) 
 	}
 }
 
+func TestMaterializedConfigActivationIgnoresGitIdentityChanges(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	if err := os.MkdirAll(configHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running"},
+	}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		InitPlatform: newInitPlatformFixture(), Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
+	initial, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil || !initial.Converged {
+		t.Fatalf("initial activation: %#v %v", initial, err)
+	}
+	for _, settings := range []string{
+		"GIT_USER_NAME='Lane Author'\n",
+		"GIT_USER_NAME='Lane Author'\nGIT_USER_EMAIL=lane-author@example.test\n",
+		"GIT_USER_NAME='Changed Author'\nGIT_USER_EMAIL=changed@example.test\n",
+		"",
+	} {
+		writeCLIFile(t, filepath.Join(configHome, "config.env"), settings, 0600)
+		observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil || !observed.Converged || observed.Actual != initial.Actual || observed.Desired != initial.Desired {
+			t.Fatalf("identity changed release activation: %#v %v", observed, err)
+		}
+	}
+	if len(fake.ExecCalls) != 0 {
+		t.Fatal("release activation probed ordinary Git identity")
+	}
+}
+
+func TestMaterializedConfigActivationCollectsLegacyGitConfigRefusal(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	path := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "gitconfig")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, path, "[user]\nname = Developer\n[core]\neditor = retained-private-value\n", 0600)
+	cause := errors.New("independent inspection failure")
+	fake := &testkit.Incus{Err: cause}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
+	observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if observed.Converged || !errors.Is(err, cause) || !strings.Contains(err.Error(), "config set GIT_USER_NAME") ||
+		!strings.Contains(err.Error(), "core.editor") || !strings.Contains(err.Error(), "move or delete") || strings.Contains(err.Error(), "retained-private-value") {
+		t.Fatalf("activation lost independent refusal: %#v %v", observed, err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 || len(fake.ExecCalls) != 0 {
+		t.Fatal("activation observation printed or mutated guest state")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("activation removed the operator file", err)
+	}
+}
+
 func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *testing.T) {
 	for _, test := range []struct{ path, detail, want, command string }{
 		{path: "/etc/subyard/agent-project-hooks", want: "unowned selected artifact", command: "namei"},
