@@ -39,7 +39,7 @@ if [ "$lane" = all ] || [ "$lane" = service-container ]; then
 fi
 if [ "$lane" = all ] || [ "$lane" = memory-boundary ]; then
   bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$slot" --type android-test --purpose broker-memory-boundary --vm 1 -- \
-    timeout --signal=TERM --kill-after=120 7200 bash config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh
+    timeout --signal=TERM --kill-after=120 7200 bash config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh --lease-expiry
 fi
 if [ "$lane" = all ] || [ "$lane" = full-uninstall ]; then
   exec bash "$ROOT/dev/e2e/p0-acceptance.sh" --slot "$slot" --lane full-uninstall

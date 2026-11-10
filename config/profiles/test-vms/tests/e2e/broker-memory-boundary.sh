@@ -12,11 +12,14 @@ PREGRANT_ONLY=0
 PREGRANT_WORKING_ONLY=0
 TELEMETRY_ONLY=0
 HELD_DIAGNOSTIC=0
+# The test-vms release lane: the installed-runtime path through renewal, natural expiry and reuse.
+LEASE_EXPIRY=0
 TELEMETRY_FLAG=--telemetry-resources
 case "${1:-}" in
   --pregrant-cancellation) PREGRANT_ONLY=1; shift ;;
   --telemetry-resources) TELEMETRY_ONLY=1; shift ;;
   --telemetry-held-diagnostic) TELEMETRY_ONLY=1; HELD_DIAGNOSTIC=1; TELEMETRY_FLAG="$1"; shift ;;
+  --lease-expiry) TELEMETRY_ONLY=1; LEASE_EXPIRY=1; TELEMETRY_FLAG="$1"; shift ;;
 esac
 if [ "$PREGRANT_ONLY" = 1 ] && [ "${1:-}" = --working-creation-only ]; then
   PREGRANT_WORKING_ONLY=1
@@ -1278,7 +1281,7 @@ runtime_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/n
 printf '  [ ok ] ordinary rollback preserves telemetry, held lease, guests and yard\n'
 fi
 
-if [ "$TELEMETRY_ONLY" = 1 ]; then
+if [ "$TELEMETRY_ONLY" = 1 ] && [ "$LEASE_EXPIRY" = 0 ]; then
   printf 'ok: telemetry native VM allocation, held pair, storage failure and final observation\n'
   exit
 fi
@@ -1295,6 +1298,10 @@ assert_held_unchanged
 printf '  [ ok ] held lease renewal continues\n'
 
 assert_orphan_expiry
+if [ "$LEASE_EXPIRY" = 1 ]; then
+  printf 'ok: broker held lease renewal, requester-death natural expiry and clean reuse\n'
+  exit
+fi
 printf 'evidence: original_engine_sha256=%s candidate_engine_sha256=%s held_identity_sha256=%s\n' \
   "$old_hash" "$new_hash" "$HELD_BEFORE"
 printf 'ok: broker memory bounds, process budget, boot, held update/rollback and orphan expiry\n'

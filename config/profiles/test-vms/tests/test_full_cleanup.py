@@ -279,10 +279,10 @@ exit "${CONTROLLER_EXIT:-0}"
         memory_arguments = invocations[2].splitlines()
         self.assertEqual(memory_arguments[:8], ["--slot", "2", "--type", "android-test", "--purpose", "broker-memory-boundary", "--vm", "1"])
         self.assertEqual(memory_arguments[9:], ["timeout", "--signal=TERM", "--kill-after=120", "7200", "bash",
-                                              "config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh"])
+                                              "config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh", "--lease-expiry"])
         self.assertEqual((self.root / "argv").read_text().splitlines(), ["--slot", "2", "--lane", "full-uninstall"])
 
-    def test_memory_boundary_uses_full_mode_without_cold_upgrade_bundle(self):
+    def test_memory_boundary_uses_lease_expiry_mode_without_cold_upgrade_bundle(self):
         for status in (0, 23):
             with self.subTest(status=status):
                 environment = dict(self.environment, BROKER_EXIT=str(status),
@@ -293,8 +293,8 @@ exit "${CONTROLLER_EXIT:-0}"
                 self.assertEqual(result.returncode, status, result.stderr)
                 arguments = (self.root / "broker-argv").read_text().splitlines()
                 self.assertEqual(arguments[:4], ["--yard", "existing-broker", "--slot", "2"])
-                self.assertEqual(arguments[-6:], ["timeout", "--signal=TERM", "--kill-after=120", "7200", "bash",
-                                                 "config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh"])
+                self.assertEqual(arguments[-7:], ["timeout", "--signal=TERM", "--kill-after=120", "7200", "bash",
+                                                 "config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh", "--lease-expiry"])
                 self.assertFalse((self.root / "argv").exists())
 
     def test_explicit_rollout_route_is_preserved(self):
