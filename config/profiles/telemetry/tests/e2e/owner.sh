@@ -26,6 +26,8 @@ if [ "$delegated" = 0 ]; then
   fixture_seconds=4200
   # Nested android-test stages on hosted CI runners need more than 7200 s for the full scenario.
   [ "$mode" != all ] || fixture_seconds=10500
+  # The resource lane carries the slow native and storage stages of the full scenario.
+  [ "$mode" != --resources ] || fixture_seconds=10500
   [ "$mode" != --held-diagnostic ] || fixture_seconds=1140
   [ "$mode" != --scope-diagnostic ] || fixture_seconds=240
   [ "$mode" != --native-only ] || fixture_seconds=600

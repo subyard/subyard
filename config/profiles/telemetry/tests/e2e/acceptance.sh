@@ -18,7 +18,7 @@ acceptance = (pathlib.Path(sys.argv[1])/'acceptance.sh').read_text()
 controller = 'fixture_timeout='+acceptance.rsplit('\nfixture_timeout=', 1)[1]
 delegation = 'if [ "$delegated" = 0 ]; then\n'+owner.split('if [ "$delegated" = 0 ]; then\n', 1)[1].split('\nfi', 1)[0]+'\nfi'
 budgets = [('all', '180m', 10500), ('--held-diagnostic', '20m', 1140),
-           ('--native-only', '10m', 600), ('--resources', '70m', 4200),
+           ('--native-only', '10m', 600), ('--resources', '180m', 10500),
            ('--local', '70m', 4200), ('--android', '70m', 4200),
            ('--android-resources', '70m', 4200), ('--scope-diagnostic', None, 240)]
 with tempfile.TemporaryDirectory(prefix='telemetry-budget-', dir='/tmp') as temporary:
@@ -78,7 +78,8 @@ result = subprocess.run(['bash', '-c', probe+held], text=True, capture_output=Tr
 assert result.stdout.splitlines() == ['managed', 'finals', 'disabled', 'history', 'ok: telemetry held-pair diagnostic, final counters and retained history']
 broker = (pathlib.Path(sys.argv[1]).parents[4]/'config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh').read_text()
 dispatch = broker.split('TELEMETRY_ONLY=0\n',1)[1].split('\nTOKEN=',1)[0]
-for flag, expected in [('--telemetry-resources','1 0 --telemetry-resources'), ('--telemetry-held-diagnostic','1 1 --telemetry-held-diagnostic')]:
+for flag, expected in [('--telemetry-resources','1 0 --telemetry-resources'), ('--telemetry-held-diagnostic','1 1 --telemetry-held-diagnostic'),
+                       ('--lease-expiry','1 0 --lease-expiry')]:
     script = 'PREGRANT_ONLY=0; PREGRANT_WORKING_ONLY=0; TELEMETRY_ONLY=0; SUBYARD_E2E_RESOURCE_OBSERVER=fixture; SUBYARD_AGENT_RUN_ID=fixture; SUBYARD_TELEMETRY_DATA_DIR=/fixture\n'+dispatch+'\nprintf "%s %s %s\\n" "$TELEMETRY_ONLY" "$HELD_DIAGNOSTIC" "$TELEMETRY_FLAG"'
     result = subprocess.run(['bash','-eu','-c',script,'probe',flag], text=True, capture_output=True, check=True)
     assert result.stdout.strip() == expected
@@ -90,11 +91,11 @@ for condition in conditions:
         'HELD_DIAGNOSTIC=1; SUBYARD_E2E_NATIVE_EXERCISE=fixture; SUBYARD_E2E_RESOURCE_OBSERVER=fixture\n'+condition+'\nexit 1\nfi'], check=False)
     assert result.returncode == 0, 'held diagnostic must skip native clients and storage faults'
 assert broker.index('if [ "$HELD_DIAGNOSTIC" = 1 ]; then\n  printf') < broker.index('HEARTBEAT_BEFORE="$(held_heartbeat)"')
-short_start = broker.index('if [ "$TELEMETRY_ONLY" = 1 ]; then\n  printf \'ok: telemetry native VM allocation,')
+short_start = broker.index('if [ "$TELEMETRY_ONLY" = 1 ] && [ "$LEASE_EXPIRY" = 0 ]; then\n  printf \'ok: telemetry native VM allocation,')
 short = broker[short_start:broker.index('\nfi', short_start)+3]
 assert broker.index(short) < broker.index('HEARTBEAT_BEFORE="$(held_heartbeat)"') < broker.rindex('\nassert_orphan_expiry')
-for telemetry, continues in (('1', False), ('0', True)):
-    result = subprocess.run(['bash', '-eu', '-c', 'TELEMETRY_ONLY="$1"\n'+short+'\nprintf "renewal-and-expiry\\n"', 'probe', telemetry],
+for telemetry, expiry, continues in (('1', '0', False), ('0', '0', True), ('1', '1', True)):
+    result = subprocess.run(['bash', '-eu', '-c', 'TELEMETRY_ONLY="$1"; LEASE_EXPIRY="$2"\n'+short+'\nprintf "renewal-and-expiry\\n"', 'probe', telemetry, expiry],
                             text=True, capture_output=True, check=True)
     assert ('renewal-and-expiry' in result.stdout) == continues
 assert 'stop_holder_child "$HOLDER_PID"' in broker and '--kind vm --stage final' in broker
@@ -209,6 +210,7 @@ case "${1:-}" in --held-diagnostic|--resources|--local|--native-only|--android|-
 }
 fixture_timeout=70m
 [ "$mode" != all ] || fixture_timeout=180m
+[ "$mode" != --resources ] || fixture_timeout=180m
 [ "$mode" != --held-diagnostic ] || fixture_timeout=20m
 [ "$mode" != --native-only ] || fixture_timeout=10m
 allocation_route=()

@@ -12,7 +12,8 @@ SLOT = ["--slot", "1"]
 # under the runner's hypervisor for these checks to finish, so they run only on Intel runners.
 NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnezia",
           "profile:telemetry/local", "profile:telemetry/resources",
-          "profile:android/memory-lease", "profile:test-vms/broker-cold-upgrade", "vm:staging-reliability",
+          "profile:android/memory-lease", "profile:test-vms/broker-cold-upgrade", "profile:test-vms/memory-boundary",
+          "vm:staging-reliability",
           "vm:p0-yard-maintenance"}
 # The release catalog runs the full P0 matrix as one check; here its lanes run on separate runners.
 SPLIT = {"vm:p0-full"}
