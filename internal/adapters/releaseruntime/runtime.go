@@ -42,6 +42,7 @@ type Config struct {
 	HTTPClient                *http.Client
 	InstalledRuntimePresence  func(context.Context, string, config.Loaded, string) (ports.RuntimePresence, error)
 	ProfileRuntimeObservation func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error)
+	YardInstance              func(context.Context, config.Loaded) (ports.InstanceInfo, error)
 }
 
 type Prepared struct {
@@ -156,7 +157,7 @@ func (runtime *Runtime) inspectionFailure(parsed options, err error) (Prepared, 
 		if parsed.check {
 			return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
 		}
-		return Prepared{}, transitionOutcomeError(public.outcome)
+		return Prepared{}, public.publicError()
 	}
 	return Prepared{}, redactReleaseInspectionError(err)
 }
@@ -181,6 +182,15 @@ type publicReleaseInspectionError struct {
 func (err publicReleaseInspectionError) Error() string { return err.cause.Error() }
 
 func (err publicReleaseInspectionError) Unwrap() error { return err.cause }
+
+// publicError preserves an already typed public cause, including complete local
+// rollback findings, while arbitrary inspection causes retain their redaction.
+func (err publicReleaseInspectionError) publicError() error {
+	if _, public := TransitionOutcome(err.cause); public {
+		return err.cause
+	}
+	return transitionOutcomeError(err.outcome)
+}
 
 func (err redactedReleaseInspectionError) Error() string {
 	return "release transition inspection failed"
@@ -379,10 +389,12 @@ func (runtime *Runtime) inspectProtectedTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       journal.SourceIngress,
 	}
-	if outcome, err := runtime.inspectConfigLayoutRollback(ctx, verifiedTarget, request); err != nil {
+	if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
+		var public publicReleaseInspectionError
+		if errors.As(err, &public) {
+			return nil, err
+		}
 		return nil, publicCandidateFailure(err)
-	} else if outcome != nil {
-		return nil, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
 	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
 	if err != nil {
@@ -886,7 +898,7 @@ func (runtime *Runtime) PrepareTransition(
 			return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
 		}
 		return Prepared{}, verifiedPreparationError{
-			cause: transitionOutcomeError(public.outcome), prepared: verifiedPreparation,
+			cause: public.publicError(), prepared: verifiedPreparation,
 		}
 	}
 	outcome := observedPublicReleaseOutcome(
@@ -1449,13 +1461,12 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	request releasetransition.ProcessRequest,
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
-	if outcome, err := runtime.inspectConfigLayoutRollback(ctx, target, request); err != nil {
-		return Prepared{}, err
-	} else if outcome != nil {
-		if parsed.check {
-			return runtime.preparePublicInspectionOutcome(parsed, *outcome), nil
+	if err := runtime.inspectRollbackCompatibility(ctx, target, request); err != nil {
+		var public publicReleaseInspectionError
+		if parsed.check && errors.As(err, &public) {
+			return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
 		}
-		return Prepared{}, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
+		return Prepared{}, err
 	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
 	if err != nil {
@@ -1622,10 +1633,8 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			if verifiedTarget.registryDigest != target.registryDigest {
 				return fmt.Errorf("%w: target runtime registry changed after inspection", domain.ErrPlanStale)
 			}
-			if outcome, err := runtime.inspectConfigLayoutRollback(ctx, verifiedTarget, request); err != nil {
+			if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
 				return err
-			} else if outcome != nil {
-				return publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
 			}
 			verifiedOwner := verifiedTarget
 			if owner.candidate.release != target.candidate.release {

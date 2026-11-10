@@ -112,7 +112,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 			return runtime.prepareCurrentReport(parsed, currentReport{Current: current, Outcome: public.outcome, Next: public.outcome.Retry}), nil
 		}
 		if errors.As(err, &public) {
-			return Prepared{}, transitionOutcomeError(public.outcome)
+			return Prepared{}, public.publicError()
 		}
 		return Prepared{}, redactReleaseInspectionError(err)
 	}
@@ -642,7 +642,7 @@ func (runtime *Runtime) inspectCompletedTransition(ctx context.Context, root, co
 	if err != nil {
 		var public publicReleaseInspectionError
 		if errors.As(err, &public) {
-			return releasetransition.Inspection{}, false, transitionOutcomeError(public.outcome)
+			return releasetransition.Inspection{}, false, public.publicError()
 		}
 		return releasetransition.Inspection{}, false, redactReleaseInspectionError(err)
 	}

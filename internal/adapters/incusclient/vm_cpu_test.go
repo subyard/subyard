@@ -5,6 +5,7 @@ import (
 	"maps"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -58,7 +59,7 @@ func TestNativeStartStopsVMWhenPersistedSchedulingIsInvalid(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = server.Close() })
-			config := map[string]string{vmCPUWeightKey: "invalid"}
+			config := map[string]string{vmCPUWeightKey: "invalid", "raw.qemu.conf": domain.VMRawQEMUConfig(false)}
 			server.SetInstance("subyard", "yard", map[string]any{"name": "yard", "type": "virtual-machine", "status": "Stopped", "config": config, "expanded_config": config})
 			client := New(server.SocketPath)
 			if path == "boot" {

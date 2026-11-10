@@ -27,15 +27,26 @@ subyard_instance_defaults
 device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -Fx -- "$1" >/dev/null; }
 device_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 instance_get() { incus config get "$YARD_INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
-reporting_preflight() {
-  vm_page_reporting_required || die "VM_FREE_PAGE_REPORTING is not enabled"
-  [ "$YARD_KIND" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
-  vm_page_reporting_check_host || die "VM Free Page Reporting host preflight failed"
-  vm_page_reporting_check_profile "$INCUS_PROJECT" || die "VM profile has raw QEMU configuration"
+# Collects every independent raw QEMU refusal of a VM yard, then fails once.
+vm_raw_preflight() {
+  local refusals=() joined
+  if vm_page_reporting_required; then
+    [ "$YARD_KIND" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
+    vm_page_reporting_check_host || refusals+=("VM Free Page Reporting host preflight failed")
+  fi
+  [ "$YARD_KIND" = vm ] || return 0
+  vm_page_reporting_check_profile "$INCUS_PROJECT" || refusals+=("VM profile has raw QEMU configuration")
   if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
     vm_page_reporting_check_raw "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" true \
-      || die "VM has conflicting raw QEMU configuration"
+      || refusals+=("VM has conflicting raw QEMU configuration")
   fi
+  [ "${#refusals[@]}" != 0 ] || return 0
+  joined="$(printf '%s; ' "${refusals[@]}")"
+  die "${joined%; }"
+}
+reporting_preflight() {
+  vm_page_reporting_required || die "VM_FREE_PAGE_REPORTING is not enabled"
+  vm_raw_preflight
 }
 incus_apparmor_state() {
   local service_environment token quote c name value seen=0 state=restored i
@@ -167,9 +178,7 @@ if [ -n "${SUBYARD_PREPARED_OWNER_INSTANCE_UUID:-}" ]; then
   [ "$(instance_get volatile.uuid)" = "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" ] \
     || die "original owner-created instance identity differs"
 fi
-if vm_page_reporting_required; then
-  reporting_preflight
-fi
+vm_raw_preflight
 
 # The Go Apply path supplies its fresh observation before writing power metadata.
 # Standalone adapter calls observe here, before instance, route or power mutation.
@@ -247,8 +256,15 @@ for setting in "limits.cpu=${LIMITS_CPU:-}" "limits.memory=${LIMITS_MEMORY:-}"; 
     settings_drift=1
   fi
 done
-if vm_page_reporting_required; then
-  [ "$(instance_get raw.qemu.conf)" = "$VM_PAGE_REPORTING_CONF" ] || settings_drift=1
+vm_raw_conf=''
+if [ "$YARD_KIND" = vm ]; then
+  vm_raw_local="$(instance_get raw.qemu.conf)"
+  vm_raw_conf="$(vm_raw_qemu_target "$vm_raw_local")"
+  # An explicit reporting opt-in restarts a running VM: its guest check needs
+  # the property now. Removing the emulated display waits for the next start.
+  if vm_page_reporting_required && ! vm_raw_qemu_reporting_conf "$vm_raw_local"; then
+    settings_drift=1
+  fi
 fi
 if [ "${ALLOWS_HOST_ACCESS:-true}" = false ]; then
   device_exists subyard-e2e-routes && settings_drift=1
@@ -264,11 +280,22 @@ if [ "$settings_drift" = 1 ]; then
     *) die "cannot reconcile instance settings from unknown yard power state" ;;
   esac
 fi
-if vm_page_reporting_required; then
-  incus config set "$YARD_INSTANCE_NAME" raw.qemu.conf "$VM_PAGE_REPORTING_CONF" "${PROJ[@]}" \
-    || die "could not enable Free Page Reporting on the existing QEMU balloon"
-  vm_page_reporting_check_raw "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" true \
-    || die "VM Free Page Reporting setting did not converge"
+# QEMU reads raw.qemu.conf only when it starts, and Incus refuses to change it
+# on a running VM. A running yard keeps its previous owner value until its next
+# product start, which writes the headless value first.
+if [ "$YARD_KIND" = vm ] && [ "$(instance_get raw.qemu.conf)" != "$vm_raw_conf" ]; then
+  vm_raw_state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" \
+    || die "could not inspect yard power before reconciling the VM QEMU device policy"
+  case "$vm_raw_state" in
+    STOPPED)
+      incus config set "$YARD_INSTANCE_NAME" raw.qemu.conf "$vm_raw_conf" "${PROJ[@]}" \
+        || die "could not set the fixed VM QEMU device policy"
+      vm_page_reporting_check_raw "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" true \
+        && [ "$(instance_get raw.qemu.conf)" = "$vm_raw_conf" ] \
+        || die "VM QEMU device policy did not converge" ;;
+    RUNNING) ;;
+    *) die "cannot reconcile the VM QEMU device policy from unknown yard power state" ;;
+  esac
 fi
 for setting in "${limit_changes[@]}"; do
   key="${setting%%=*}" want="${setting#*=}"

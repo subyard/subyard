@@ -50,6 +50,8 @@ After interruption, durable intent and fresh observations determine the safe nex
   recovery owner and evidence until terminal completion.
 - Rollback requires an intact retained release and proven state compatibility. Some declared resets
   can remove rollback eligibility; their recovery class must be visible before authorization.
+  Releases that read headless-plus-reporting VM configuration must retain `_vm-start-policy`
+  in the bound command manifest with effect `mutate`: rollback uses this reader-support probe.
 - Recovery evidence is protected. Retirement requires proof that terminal evidence is closed and
   unreferenced; age or release count does not authorize cleanup.
 

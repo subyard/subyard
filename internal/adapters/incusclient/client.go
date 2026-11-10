@@ -25,6 +25,10 @@ import (
 )
 
 type Client struct {
+	// PreserveReportingVMConfig is for starts that bypass admission (boot and
+	// hard cleanup): retained releases cannot read headless-plus-reporting values.
+	PreserveReportingVMConfig bool
+
 	socket             string
 	requiredExtensions []string
 }
@@ -134,6 +138,11 @@ func (client *Client) SetInstancePower(
 	}
 	if err := client.validateServerExtensions(server); err != nil {
 		return err
+	}
+	if action == "start" {
+		if err := client.prepareVMStart(ctx, server, project, name); err != nil {
+			return err
+		}
 	}
 	if err := beforeNative(ctx, server, "instance-power", project, name); err != nil {
 		return err

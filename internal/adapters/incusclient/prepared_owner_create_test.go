@@ -470,7 +470,7 @@ func TestOwnerImageProjectInitialPOSTUsesActualOriginalRenderer(t *testing.T) {
 			}
 			fixture.mu.Lock()
 			config := fixture.project.Config
-			valid := config["user.subyard.installation"] == "1" && config["user.subyard.data_home"] == "/original/data" && config["user.subyard.context"] == contextValue && config["restricted.containers.interception"] == "allow" && (config["restricted.virtual-machines.lowlevel"] == "allow") == (reporting == "1") && config["features.images"] == "false" && len(config[ownerCreateTokenKey]) == 32
+			valid := config["user.subyard.installation"] == "1" && config["user.subyard.data_home"] == "/original/data" && config["user.subyard.context"] == contextValue && config["restricted.containers.interception"] == "allow" && config["restricted.virtual-machines.lowlevel"] == "allow" && config["features.images"] == "false" && len(config[ownerCreateTokenKey]) == 32
 			fixture.mu.Unlock()
 			if !valid {
 				t.Fatal("initial actual POST omitted original ownership or policy")

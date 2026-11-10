@@ -337,11 +337,7 @@ func (cli *CLI) inspectMutationGateInspection(
 	if err != nil || !available {
 		return nil, nil, err
 	}
-	runtime := releaseruntime.New(releaseruntime.Config{
-		Inputs:  cli.commandInputs,
-		Context: releaseruntime.RuntimeContext{OperatorHome: firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), DataHome: options.DataHome, ConfigHome: options.ConfigHome, RuntimeRoot: options.RuntimeRoot, OperationID: cli.env["SUBYARD_OPERATION_ID"]},
-		Stderr:  cli.options.Stderr,
-	})
+	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{OperatorHome: firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), DataHome: options.DataHome, ConfigHome: options.ConfigHome, RuntimeRoot: options.RuntimeRoot, OperationID: cli.env["SUBYARD_OPERATION_ID"]}))
 	defer runtime.Close()
 	v2, err := runtime.InspectMutationGateInspection(
 		ctx, options.RuntimeRoot, options.ConfigHome, "default",
@@ -437,6 +433,7 @@ func New(options Options) (*CLI, error) {
 	}
 	baseEnvironment := environmentMap(options.Environment)
 	delete(baseEnvironment, "SUBYARD_SUDO_PREAUTHORIZED")
+	delete(baseEnvironment, "SUBYARD_PRESERVE_VM_REPORTING")
 	activeEnvironment := make(map[string]string, len(baseEnvironment))
 	for name, value := range baseEnvironment {
 		activeEnvironment[name] = value
@@ -1278,6 +1275,7 @@ func (cli *CLI) statusPorts() (reconcileruntime.IncusReader, ports.InstanceExecu
 	executor := cli.options.Executor
 	if incusPort == nil || executor == nil {
 		client := incusclient.New(cli.env["SUBYARD_INCUS_SOCKET"], "projects")
+		client.PreserveReportingVMConfig = cli.env["SUBYARD_PRESERVE_VM_REPORTING"] == "1"
 		if incusPort == nil {
 			incusPort = client
 		}

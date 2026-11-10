@@ -56,15 +56,17 @@ func TestConfigLayoutRollbackCompatibility(t *testing.T) {
 func TestConfigLayoutRollbackWithoutManifestPreservesExistingRootModes(t *testing.T) {
 	for _, mode := range []os.FileMode{0o755, 0o775} {
 		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
-			runtime, parsed, candidate, request, called := configLayoutRollbackFixture(t, "--scope")
+			runtime, _, candidate, request, _ := configLayoutRollbackFixture(t, "--scope")
 			if err := os.Chmod(request.ConfigHome, mode); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := prepareCandidateTransitionForTest(runtime, context.Background(), parsed, candidate, request); err != nil {
+			verified, err := runtime.verifyPublishedCandidate(context.Background(), candidate, request.RuntimeRoot, nil)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := os.Stat(called); err != nil {
-				t.Fatalf("legacy target was blocked: %v", err)
+			defer verified.Close()
+			if outcome, err := runtime.inspectConfigLayoutRollback(context.Background(), verified, request); err != nil || outcome != nil {
+				t.Fatalf("legacy layout was blocked: %v, %v", outcome, err)
 			}
 			info, err := os.Stat(request.ConfigHome)
 			if err != nil || info.Mode().Perm() != mode {

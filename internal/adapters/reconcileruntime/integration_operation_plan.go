@@ -16,13 +16,15 @@ func cloneIntegrationConfig(config map[string]string, devices []string, virtualM
 	delete(copy, "user.subyard.ccusage_version")
 	// Apply publishes this proof after approval; it is never desired integration state.
 	maps.DeleteFunc(copy, func(key, _ string) bool { return strings.HasPrefix(key, retiredIntegrationMarkerPrefix) })
-	DeleteInstanceLifecycleOutputs(copy, devices, virtualMachine)
+	NormalizeInstanceLifecycleConfig(copy, devices, virtualMachine)
 	return copy
 }
 
-// DeleteInstanceLifecycleOutputs removes what Incus rewrites across an approved
-// stop or start, and nothing that identifies the instance or its devices.
-func DeleteInstanceLifecycleOutputs(values map[string]string, devices []string, virtualMachine bool) {
+// NormalizeInstanceLifecycleConfig normalizes configuration across an approved
+// stop or start: it removes Incus lifecycle outputs and rewrites an owner
+// raw.qemu.conf as its admitted-start value. Preserving starts may keep the
+// earlier owner value; both forms have the same binding. A foreign value stays bound.
+func NormalizeInstanceLifecycleConfig(values map[string]string, devices []string, virtualMachine bool) {
 	for _, key := range []string{"volatile.last_state.power", "volatile.last_state.ready"} {
 		delete(values, key)
 	}
@@ -41,6 +43,9 @@ func DeleteInstanceLifecycleOutputs(values map[string]string, devices []string, 
 		// Incus records a pending VM reset with exactly this value; any other value stays bound.
 		if values["volatile.vm.needs_reset"] == "true" {
 			delete(values, "volatile.vm.needs_reset")
+		}
+		if target, owner := domain.VMRawQEMUTarget(values["raw.qemu.conf"], false); owner {
+			values["raw.qemu.conf"] = target
 		}
 	}
 }

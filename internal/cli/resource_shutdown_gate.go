@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"maps"
 	"slices"
 	"strings"
@@ -78,7 +79,9 @@ func (cli *CLI) prepareResourceShutdownRepair(ctx context.Context, yard string, 
 	if err != nil || len(pending) != 0 {
 		return nil, err
 	}
-	runtime := releaseruntime.New(releaseruntime.Config{Inputs: cli.commandInputs})
+	runtimeConfig := cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{})
+	runtimeConfig.Stdout, runtimeConfig.Stderr, runtimeConfig.Progress = io.Discard, io.Discard, io.Discard
+	runtime := releaseruntime.New(runtimeConfig)
 	defer runtime.Close()
 	inspection, err := runtime.InspectMutationGateInspection(ctx, options.RuntimeRoot, options.ConfigHome, "default")
 	if err != nil || inspection == nil || inspection.Outcome == nil || !sameConfigApplyGate(outcome, *inspection.Outcome) || len(inspection.Blockers) == 0 {
@@ -200,7 +203,9 @@ func (cli *CLI) checkResourceShutdownGate(ctx context.Context, permit *resourceS
 	if err != nil || !available {
 		return domain.ErrPlanStale
 	}
-	runtime := releaseruntime.New(releaseruntime.Config{Inputs: cli.commandInputs})
+	runtimeConfig := cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{})
+	runtimeConfig.Stdout, runtimeConfig.Stderr, runtimeConfig.Progress = io.Discard, io.Discard, io.Discard
+	runtime := releaseruntime.New(runtimeConfig)
 	defer runtime.Close()
 	inspection, err := runtime.InspectMutationGateInspection(ctx, options.RuntimeRoot, options.ConfigHome, "default")
 	if err != nil {

@@ -227,11 +227,22 @@ func (runtime Runtime) adoptionKindPolicy(state ports.ReconcileState, configurat
 		refusals = append(refusals, domain.WithMigrationParameters(runtime.adoptionRefusal("yard adoption requires converged nested device privileges"), parameters...))
 	}
 	if runtime.Yard.YardKind == domain.YardVM {
-		if runtime.environmentValue("VM_FREE_PAGE_REPORTING") == "1" {
-			if ready, err := vmRawQEMUConverged(state.Instance); err != nil || !ready {
-				refusals = append(refusals, runtime.adoptionRefusal("yard adoption requires converged VM raw policy"))
-			}
-			configuration["raw.qemu.conf"] = vmPageReportingConfig
+		// Any owner raw.qemu.conf, previous or headless, enters management as
+		// found; ordinary init and the next product start converge it. A yard
+		// that opted into reporting must already carry its balloon property.
+		// No other raw QEMU override is accepted.
+		found := state.Instance.LocalConfig["raw.qemu.conf"]
+		findings := domain.VMRawQEMURefusals(state.Instance.Config, state.Instance.LocalConfig)
+		if runtime.environmentValue("VM_FREE_PAGE_REPORTING") == "1" && domain.VMRawQEMUOwnerValue(found) && !domain.VMRawQEMUReporting(found) {
+			findings = append(findings, "VM Free Page Reporting requires its owner raw.qemu.conf")
+		}
+		if len(findings) != 0 {
+			reason := "yard adoption requires converged VM raw policy"
+			refusal := domain.MigrationStateRefusal(runtime.Yard.YardName, fmt.Errorf("%s: %s", reason, strings.Join(findings, "; ")), reason)
+			refusals = append(refusals, domain.WithMigrationParameters(refusal, vmRawQEMUAdoptionParameters(state.Instance)...))
+		}
+		if found != "" {
+			configuration["raw.qemu.conf"] = found
 		}
 		configuration["user.subyard.vm_cpu_weight"] = runtime.environmentValue("VM_CPU_WEIGHT")
 		if state.Instance.Config["user.subyard.vm_cpu_weight"] != configuration["user.subyard.vm_cpu_weight"] {
@@ -244,6 +255,31 @@ func (runtime Runtime) adoptionKindPolicy(state ports.ReconcileState, configurat
 		}
 	}
 	return domain.CollectRefusals(refusals...)
+}
+
+// vmRawQEMUAdoptionParameters names every raw QEMU key that keeps a VM from
+// adoption, effective and local, with the owner policy as its desired value.
+func vmRawQEMUAdoptionParameters(instance ports.InstanceInfo) []domain.MigrationParameter {
+	var parameters []domain.MigrationParameter
+	for _, scope := range []struct {
+		suffix string
+		values map[string]string
+	}{{"", instance.Config}, {".local", instance.LocalConfig}} {
+		for key, value := range scope.values {
+			if !strings.HasPrefix(key, "raw.qemu") || value == "" && key != "raw.qemu.conf" {
+				continue
+			}
+			desired := "(unset)"
+			if key == "raw.qemu.conf" {
+				desired = "owner-policy"
+			}
+			parameters = append(parameters, domain.MigrationParameter{Name: key + scope.suffix, Installed: value, Desired: desired})
+		}
+	}
+	if _, found := instance.LocalConfig["raw.qemu.conf"]; !found {
+		parameters = append(parameters, domain.MigrationParameter{Name: "raw.qemu.conf.local", Desired: "owner-policy"})
+	}
+	return parameters
 }
 
 func (runtime Runtime) adoptionRefusal(reason string) error {

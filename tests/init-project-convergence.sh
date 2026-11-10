@@ -143,13 +143,35 @@ export MOCK_QEMU_PROBE_FAIL
 if vm_page_reporting_check_host >/dev/null 2>"$TMP/host-error"; then fail 'failed QEMU property probe accepted'; fi
 grep -Fq 'cannot inspect QEMU virtio-balloon-pci reporting capability' "$TMP/host-error" || fail 'failed QEMU probe lacked a precise diagnostic'
 : > "$MOCK_QEMU_LOG"
+: > "$MOCK_INCUS_LOG"
 VM_FREE_PAGE_REPORTING=0 "$ROOT/scripts/02-create-project.sh" --yes >/dev/null
 [ ! -s "$MOCK_QEMU_LOG" ] || fail 'ordinary project probed QEMU reporting'
+! grep -Fq 'restricted.virtual-machines.lowlevel' "$MOCK_INCUS_LOG" \
+  || fail 'container project gained the VM low-level grant'
+: > "$MOCK_INCUS_LOG"
+VM_FREE_PAGE_REPORTING=0 YARD_KIND=vm "$ROOT/scripts/02-create-project.sh" --yes >/dev/null
+grep -Fxq 'subyard|project set subyard restricted.virtual-machines.lowlevel allow' "$MOCK_INCUS_LOG" \
+  || fail 'VM project did not authorize the fixed VM device policy'
+[ ! -s "$MOCK_QEMU_LOG" ] || fail 'VM project without reporting probed QEMU reporting'
 unset MOCK_QEMU_PROBE_FAIL MOCK_QEMU_PROPERTY
 
+for MOCK_RAW_EFFECTIVE in "$VM_PAGE_REPORTING_CONF" "$VM_NO_DISPLAY_CONF" "$VM_NO_DISPLAY_CONF"$'\n'"$VM_PAGE_REPORTING_CONF"; do
+  MOCK_RAW_LOCAL="$MOCK_RAW_EFFECTIVE"
+  vm_page_reporting_check_raw subyard-vpn yard-vpn true || fail 'owner local override rejected'
+done
+for previous in '' "$VM_NO_DISPLAY_CONF"; do
+  [ "$(VM_FREE_PAGE_REPORTING=0 vm_raw_qemu_target "$previous")" = "$VM_NO_DISPLAY_CONF" ] || fail 'headless target changed'
+  [ "$(VM_FREE_PAGE_REPORTING=1 vm_raw_qemu_target "$previous")" = "$VM_NO_DISPLAY_CONF"$'\n'"$VM_PAGE_REPORTING_CONF" ] \
+    || fail 'reporting target lost the display removal or the balloon property'
+done
+[ "$(VM_FREE_PAGE_REPORTING=0 vm_raw_qemu_target "$VM_PAGE_REPORTING_CONF")" = "$VM_NO_DISPLAY_CONF"$'\n'"$VM_PAGE_REPORTING_CONF" ] \
+  || fail 'disabling reporting removed an installed override'
+MOCK_RAW_EFFECTIVE="$VM_NO_DISPLAY_CONF"$'\n[device "qemu_balloon"]\ndeflate-on-oom = "on"'
+MOCK_RAW_LOCAL="$MOCK_RAW_EFFECTIVE"
+if vm_page_reporting_check_raw subyard-vpn yard-vpn true >/dev/null 2>&1; then
+  fail 'foreign owner-like raw QEMU override accepted'
+fi
 MOCK_RAW_EFFECTIVE="$VM_PAGE_REPORTING_CONF"
-MOCK_RAW_LOCAL="$VM_PAGE_REPORTING_CONF"
-vm_page_reporting_check_raw subyard-vpn yard-vpn true || fail 'fixed local override rejected'
 MOCK_RAW_LOCAL=''
 if vm_page_reporting_check_raw subyard-vpn yard-vpn true >/dev/null 2>&1; then
   fail 'inherited raw QEMU override accepted'

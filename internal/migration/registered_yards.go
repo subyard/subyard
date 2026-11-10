@@ -465,7 +465,7 @@ func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) 
 	for _, values := range []map[string]string{configuration, expanded} {
 		// Only exact lifecycle outputs and independently validated producer results.
 		// Every start rewrites these for an accepted device; the journal must not pin them.
-		reconcileruntime.DeleteInstanceLifecycleOutputs(values, append(slices.Collect(maps.Keys(plan.instance.LocalDevices)), "eth0"), plan.runtime.Yard.YardKind == domain.YardVM && plan.instance.Type == domain.YardVM)
+		reconcileruntime.NormalizeInstanceLifecycleConfig(values, append(slices.Collect(maps.Keys(plan.instance.LocalDevices)), "eth0"), plan.runtime.Yard.YardKind == domain.YardVM && plan.instance.Type == domain.YardVM)
 		for key, value := range plan.receipts {
 			values[key] = value
 		}

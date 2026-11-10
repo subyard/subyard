@@ -49,6 +49,13 @@ for file in "$MOCK_INSTANCE_FILE" "$MOCK_CATALOG_FILE" "$MOCK_CATALOG_ATTEMPTS" 
 done
 printf '1\n' > "$MOCK_INSTANCE_FILE"
 install -d -m 0755 "$TMP/bin"
+# The engine applies the VM start policy; its own contract is tested in Go.
+cat > "$TMP/bin/dispatcher" <<'MOCK'
+#!/bin/sh
+printf 'engine %s\n' "$*" >> "$MOCK_INCUS_LOG"
+MOCK
+chmod 0700 "$TMP/bin/dispatcher"
+export SUBYARD_DISPATCHER_PATH="$TMP/bin/dispatcher"
 
 cat > "$TMP/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
@@ -107,7 +114,12 @@ case "${1:-} ${2:-} ${3:-}" in
       fi
       exit "$MOCK_INIT_EXIT"
     fi
-    printf '1\n' > "$MOCK_INSTANCE_FILE" ;;
+    printf '1\n' > "$MOCK_INSTANCE_FILE"
+    rm -f -- "$MOCK_INSTANCE_FILE.raw"
+    # A created VM stays stopped until its first start, so its fixed device
+    # policy is written before that boot without a stop.
+    case " $* " in *' --vm '*) : > "$MOCK_INSTANCE_FILE.fresh" ;; esac ;;
+  'profile get default') ;;
   'config device list')
     tr ' ' '\n' <<<"$MOCK_INCUS_DEVICES"
     ;;
@@ -130,15 +142,22 @@ case "${1:-} ${2:-} ${3:-}" in
     [ "${4:-}" != limits.cpu ] || printf '%s\n' "${LIMITS_CPU:-}"
     [ "${4:-}" != limits.memory ] || printf '%s\n' "${LIMITS_MEMORY:-}"
     [ "${4:-}" != user.subyard.owner_create ] || printf 'fixture-owner-token\n'
+    [ "${4:-}" != raw.qemu.conf ] || cat "$MOCK_INSTANCE_FILE.raw" 2>/dev/null || true
     ;;
-  'config set yard' | 'config unset yard') ;;
+  'config set yard')
+    [ "${4:-}" != raw.qemu.conf ] || printf '%s\n' "$5" > "$MOCK_INSTANCE_FILE.raw" ;;
+  'config unset yard') ;;
   'storage volume show') ;;
   'list yard --project')
     printf 'yard,'
-    if [ "$MOCK_REBOOT" = 1 ] && [ -f "$MOCK_TMP_CHECK_FILE.power" ]; then
+    if [ -e "$MOCK_INSTANCE_FILE.fresh" ]; then
+      printf 'STOPPED\n'
+    elif [ "$MOCK_REBOOT" = 1 ] && [ -f "$MOCK_TMP_CHECK_FILE.power" ]; then
       cat "$MOCK_TMP_CHECK_FILE.power"
     else printf '%s\n' "$MOCK_POWER_STATE"; fi ;;
-  'start yard --project') [ "$MOCK_REBOOT" != 1 ] || printf 'RUNNING\n' > "$MOCK_TMP_CHECK_FILE.power" ;;
+  'start yard --project')
+    rm -f -- "$MOCK_INSTANCE_FILE.fresh"
+    [ "$MOCK_REBOOT" != 1 ] || printf 'RUNNING\n' > "$MOCK_TMP_CHECK_FILE.power" ;;
   'stop yard --project')
     printf 'STOPPED\n' > "$MOCK_TMP_CHECK_FILE.power"
     [ "$MOCK_BOOT_AFTER_RESTART" != 1 ] || printf 'initializing\n' > "$MOCK_TMP_CHECK_FILE.boot" ;;
@@ -292,6 +311,7 @@ printf 'ok: AppArmor probe errors preserve yard state; known container and VM st
 # Image transport failures must not switch distribution or retry a mutating init.
 reset_creation() {
   printf '0\n' > "$MOCK_INSTANCE_FILE"
+  rm -f -- "$MOCK_INSTANCE_FILE.fresh" "$MOCK_INSTANCE_FILE.raw"
   printf '0\n' > "$MOCK_CATALOG_ATTEMPTS"
   MOCK_CATALOG_MODE=success MOCK_INIT_EXIT=0 MOCK_INIT_CREATED_ON_FAILURE=0 MOCK_INIT_SIGNAL=0
   MOCK_INIT_IMAGE_MISSING=0
@@ -421,6 +441,14 @@ grep -q '^init images:ubuntu/24.04 yard --project subyard ' "$MOCK_INCUS_LOG" ||
 reset_creation
 YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 run_create
 grep -q '^init images:ubuntu/24.04 yard --project subyard --vm ' "$MOCK_INCUS_LOG" || fail 'container image was used for a VM'
+# A new VM is headless from its first boot, without a stop.
+[ "$(cat "$MOCK_INSTANCE_FILE.raw")" = '[device "qemu_gpu"]' ] || fail 'new VM kept the emulated display'
+sed -n '/^config set yard raw.qemu.conf /,$p' "$MOCK_INCUS_LOG" | grep -Fxq 'engine _vm-start-policy subyard yard ' \
+  || fail 'new VM start skipped its device policy'
+if sed -n '1,/^config set yard raw.qemu.conf /p' "$MOCK_INCUS_LOG" | grep -q '^start '; then
+  fail 'new VM booted before its device policy'
+fi
+! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail 'new VM was stopped for its device policy'
 
 printf '1\n' > "$MOCK_INSTANCE_FILE"
 MOCK_CATALOG_MODE=terminal

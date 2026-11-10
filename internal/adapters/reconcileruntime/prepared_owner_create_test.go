@@ -92,7 +92,7 @@ func TestOwnerProjectRendererUsesOriginalSharedPolicyAndLosslessPaths(t *testing
 			if setting[1] == "1" {
 				wantInterception = "allow"
 			}
-			if values["restricted.containers.interception"] != wantInterception || (values["restricted.virtual-machines.lowlevel"] == "allow") != (setting[0] == "1") || values["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) || values["user.subyard.host_base"] != runtime.Yard.Paths.HostBase || values["user.subyard.data_home"] != runtime.Yard.Paths.DataHome || values["user.subyard.srv_pool"] != "original-pool" {
+			if values["restricted.containers.interception"] != wantInterception || values["restricted.virtual-machines.lowlevel"] != "allow" || values["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) || values["user.subyard.host_base"] != runtime.Yard.Paths.HostBase || values["user.subyard.data_home"] != runtime.Yard.Paths.DataHome || values["user.subyard.srv_pool"] != "original-pool" {
 				t.Fatal("original renderer policy or root bytes changed")
 			}
 			if _, included := values["features.images"]; included {
@@ -548,6 +548,7 @@ printf '%s\n' "$*" >>"$MOCK_TRACE"
 case "$*" in
  'info'|'project show subyard') exit 0 ;;
  'info yard --project subyard') exit 1 ;;
+ 'profile get default raw.qemu'*' --project subyard') exit 0 ;;
  'profile device get default root size --project subyard') cat "$MOCK_ROOT/root-size" ;;
  'profile device set default root size=20GiB --project subyard') printf '20GiB\n' >"$MOCK_ROOT/root-size" ;;
  'config get yard volatile.uuid --project subyard') printf 'original-uuid\n' ;;

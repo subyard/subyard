@@ -720,7 +720,9 @@ retain the assessed init and ownership boundary.
 
 Activation observers do not print diagnostics. Return expected drift as
 `Converged: false`, persistent notices as `V2ActivationObservation.Warnings`, and
-failures as errors. The operation boundary renders current `Outcome.Warnings`
+failures as errors. Converged readiness may return `Diagnostics` describing state;
+these are neither warnings nor consequences and never make a skip step stale.
+The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
 State-drift refusals identify each affected yard and each independently known
@@ -1627,11 +1629,62 @@ nested E2E access. These constraints are validated after configuration precedenc
 Before startup and during convergence, effective Incus devices are checked too: inherited host
 mappings and local root-disk overrides cannot bypass the role or its root disk bound.
 
+Every VM yard is headless. The owner sets a fixed local `raw.qemu.conf` whose empty
+`[device "qemu_gpu"]` section removes the Incus default emulated GPU (virtio-vga); with
+`VM_FREE_PAGE_REPORTING=1` it also carries the balloon reporting property. The yard's restricted
+project grants `restricted.virtual-machines.lowlevel=allow` for this override only; settings and
+profiles never supply raw QEMU text. `incus console --type=vga` therefore shows no display; the
+serial console, `incus exec` and SSH are unchanged.
+
+QEMU reads `raw.qemu.conf` only when it starts, and Incus refuses to change it on a running VM.
+New VMs receive the value before their first boot. An existing VM receives it lazily, with no init
+required after an update: each product
+start of a stopped VM (`power_start_guarded` for init, `yard start` and restarts, the boot
+reconciler, hard cleanup, `yard vpn up` and `yard network reconcile`) first writes the headless form of its owner value through one
+engine policy (`yard _vm-start-policy` from shell), under the instance ETag of the read that
+checked it. That start keeps an installed reporting property and leaves a foreign override as
+found. Host-reboot restoration makes only non-reporting yards headless; it starts reporting
+yards with their value unchanged because it bypasses admission and must preserve rollback
+readability. A reporting yard becomes headless at its next start through an admitted yard command.
+After a host reboot, a reporting yard therefore keeps its emulated display and the "headless VM
+device policy applies at the next yard start" readiness diagnostic until that admitted start.
+Hard cleanup is a recovery route for an authorized rollback and also bypasses admission: its starts
+preserve reporting values, and recreation creates reporting VMs with the earlier reporting-only
+value. Non-reporting VMs are still created headless. The internal preservation signal comes only
+from the hard-cleanup runtime, never from the caller's environment.
+When the restricted project lacks the low-level grant, the start adds only that key, under
+the project ETag, and only to a project whose installation ownership names the managed instance
+being started; any other project is left as found for init. A missing grant is converged for an
+otherwise ready existing VM with a previous owner value, so project readiness does not mask its
+next-start diagnostic or require init after an update. Init writes the value itself only on
+a stopped VM it is about to start; an intentionally stopped VM receives it at its next product
+start, and a running VM is never stopped for it. A running or intentionally stopped VM with a
+previous owner value (none, or the reporting-only value of earlier releases) is converged with the
+readiness diagnostic "headless VM device policy applies at the next yard start"; it is neither
+drift nor a warning, and no restart is disclosed. Enabling reporting keeps its existing guarded
+restart, because its guest check needs the property. Any other `raw.qemu*` key or value on the
+instance, an inherited `raw.qemu.conf`, or `raw.qemu*` in the project default profile refuses
+readiness and init with every finding; the product never overwrites it. Adoption takes any owner
+value as found. Plans that span an approved start bind an owner value as its start-written form,
+so that exact change does not make them stale. A VM started directly through Incus becomes
+headless at its next product start.
+
+Before rollback planning, journal reinspection and execution, the active engine inspects every
+local reporting VM yard. If its local `raw.qemu.conf` is the headless-plus-reporting owner value,
+a target without the bound `_vm-start-policy` command refuses with `rollback-incompatible`, naming
+affected yards in `YardNames` order (default first, then by name), with an omitted-findings count
+and a pointer to complete detail on `yard update --rollback` stderr when the diagnostic bound
+is exceeded. The inspection returns all findings; the operation boundary renders them once.
+Independent configuration-layout and VM reader refusals are combined before bounding the summary.
+Stay on the current release until a compatible retained release is available. The target is queried through `--command-effect _vm-start-policy` using its
+verified command manifest; a version alone never proves reader compatibility. Headless yards
+without reporting and the older reporting-only value do not block rollback.
+
 The generic VM settings are:
 
 | Setting | Contract |
 | --- | --- |
-| `VM_FREE_PAGE_REPORTING=1` | Set the existing virtio balloon's fixed reporting property and guest reporting order 1; require the QEMU `free-page-reporting` property and guest negotiation, and reject conflicting raw configuration. No arbitrary QEMU input is accepted. |
+| `VM_FREE_PAGE_REPORTING=1` | Add the existing virtio balloon's fixed reporting property to the owner override and set guest reporting order 1; require the QEMU `free-page-reporting` property and guest negotiation, and reject conflicting raw configuration. No arbitrary QEMU input is accepted. |
 | `VM_PIN_IPV4=1` | Pin the private primary NIC to its observed DHCP address after ownership and collision checks. After the guarded boot, wait a bounded time (60 s) for the guest address and its lease, then refuse naming the last observation. |
 | `VM_CPU_WEIGHT` | Optional Linux cgroup-v2 CPU weight (1–10000; normal weight 100). Persist local owned VM metadata and attach its verified QEMU process to a transient systemd scope in the root slice. Refuse placement that would bypass an ancestor CPU, memory, task, cpuset or I/O ceiling. |
 | `ROOT_DISK_SIZE` | Bound the root disk at creation; refuse implicit resizing of an existing VM. |

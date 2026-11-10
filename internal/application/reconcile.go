@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -19,6 +20,9 @@ type ReconcileStep struct {
 	Converged bool
 	// Conditional authorizes bounded work whose prerequisite was not ready at prepare.
 	Conditional bool
+	// Diagnostic joins the observation's readiness diagnostics for the
+	// operation boundary to render; it never authorizes or refuses work.
+	Diagnostic string
 }
 
 func (reconciler Reconciler) observe(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
@@ -83,7 +87,7 @@ func (reconciler Reconciler) plan(ctx context.Context, observations map[ports.Re
 				return ReconcilePlan{}, fmt.Errorf("check init stage %q: %w", stage.ID, err)
 			}
 		}
-		plan.Steps = append(plan.Steps, ReconcileStep{Stage: stage, Converged: observation.Converged})
+		plan.Steps = append(plan.Steps, ReconcileStep{Stage: stage, Converged: observation.Converged, Diagnostic: strings.Join(observation.Diagnostics, "; ")})
 		if !observation.Converged {
 			for _, dependent := range reconciler.Stages[index+1:] {
 				plan.Steps = append(plan.Steps, ReconcileStep{Stage: dependent, Conditional: true})

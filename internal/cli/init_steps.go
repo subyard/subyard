@@ -138,6 +138,9 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
 			"native VerifyStage "+string(native.Stage.ID)+" returns converged", desired, native.Converged, native.Conditional)
+		if native.Converged && native.Diagnostic != "" {
+			steps[len(steps)-1].Observed += "; " + native.Diagnostic
+		}
 		if execution.mode == initReconcile && native.Stage.ID == ports.ReconcileStageProvision {
 			for index, path := range execution.integrationAdoption.Adoption {
 				appendStep(fmt.Sprintf("init.integration-adoption.%d", index), path, "matching legacy artifact enrolled during approved provisioning",

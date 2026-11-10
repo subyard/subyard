@@ -33,6 +33,18 @@ func TestRepositoryQueriesUseGoManifest(t *testing.T) {
 	}
 }
 
+func TestHeadlessReportingReaderProbe(t *testing.T) {
+	var stdout bytes.Buffer
+	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Arguments: []string{"--command-effect", "_vm-start-policy"},
+		Environment: []string{"HOME=" + testkit.TempDir(t), "SUBYARD_NO_AUDIT=1"}, Stdout: &stdout})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || stdout.String() != "mutate\n" {
+		t.Fatalf("headless reader probe: code=%d output=%q", code, stdout.String())
+	}
+}
+
 func TestStreamPromptAcceptsDefaultYesOnlyOnInteractiveEnter(t *testing.T) {
 	var output bytes.Buffer
 	accepted, err := (streamPrompt{

@@ -49,7 +49,7 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 
 	// Unknown permission keys cannot be approved merely because they exist.
 	allowed := map[string]bool{"restricted": true, "restricted.containers.nesting": true, "restricted.containers.privilege": true, "restricted.containers.interception": true, "restricted.devices.disk": true, "restricted.devices.disk.paths": true, "restricted.devices.unix-char": true, "restricted.devices.proxy": true, "restricted.networks.access": true}
-	if runtime.environmentValue("VM_FREE_PAGE_REPORTING") == "1" {
+	if runtime.environmentValue("VM_FREE_PAGE_REPORTING") == "1" || runtime.Yard.YardKind == domain.YardVM {
 		allowed["restricted.virtual-machines.lowlevel"] = true
 	}
 	for key := range state.ProjectConfig {

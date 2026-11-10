@@ -176,6 +176,15 @@ power_start_guarded() { # <project> <instance> <bridge...>
   fi
   current="$(power_state "$project" "$instance")"
   if [ "$current" != RUNNING ]; then
+    # QEMU reads raw.qemu.conf only when it starts, and Incus refuses to change
+    # it on a running VM: the engine writes the owner value of a stopped VM here.
+    if [ "${YARD_KIND:-}" = vm ]; then
+      local policy_engine="${SUBYARD_DISPATCHER_PATH:-}"
+      [ -n "$policy_engine" ] && [ -x "$policy_engine" ] \
+        || { power_fail 'VM start policy engine is unavailable'; return 1; }
+      "$policy_engine" _vm-start-policy "$project" "$instance" "${SUBYARD_INCUS_SOCKET:-${INCUS_SOCKET:-}}" \
+        || { power_fail "could not apply the VM QEMU device policy before starting $project/$instance"; return 1; }
+    fi
     incus start "$instance" --project "$project" || {
       power_fail "failed to start $project/$instance"
       return 1

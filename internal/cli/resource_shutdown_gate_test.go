@@ -150,6 +150,9 @@ esac
 		t.Fatal(err)
 	}
 	engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n--version) printf 'yard-engine 1.2.3\\n';;\n_release-transition) cat >/dev/null; printf '%%s\\n' %q;;\n*) exit 64;;\nesac\n", payload)
+	if scenario == "probe-noise" {
+		engine = strings.Replace(engine, "cat >/dev/null;", fmt.Sprintf("cat >/dev/null; printf 'candidate probe noise\\n' >&2; printf 'probe\\n' >> %q;", filepath.Join(home, "probe-count")), 1)
+	}
 	changed := *response.Inspection
 	changed.Blockers = append([]releasetransition.Blocker(nil), changed.Blockers...)
 	changed.Blockers[0].Resource = "activation.route-consumers"
@@ -227,6 +230,31 @@ esac
 	testkit.WriteFile(t, filepath.Join(home, "retained-key"), []byte("synthetic retained state"), 0600)
 	program.options.NetworkPolicy = &yardnetwork.Service{Host: shutdownGateHost{rollbackIngressHost: host, path: filepath.Join(home, "instance.json")}}
 	return program, home, &output
+}
+
+func TestResourceShutdownReinspectionDiscardsCandidateOutput(t *testing.T) {
+	program, home, output := shutdownGateFixture(t, "probe-noise")
+	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, filepath.Join(home, "release-transition/v2/journal.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired,
+		Active: journal.Goal.Target, Target: journal.Goal.Target, Code: releasetransition.CodeDependencyUnavailable,
+		Message: "yard private: cannot inspect profile sample-runtime runtime for release activation", Retry: "run yard -Y private status", Transaction: &journal.Transaction}
+	definition, _ := program.resources.Lookup("relay")
+	permit, err := program.prepareResourceShutdownRepair(context.Background(), "private", definition, []string{"down"}, outcome)
+	if err != nil || permit == nil {
+		t.Fatalf("repair permit=%+v err=%v", permit, err)
+	}
+	if err := program.checkResourceShutdownGate(context.Background(), permit); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "candidate probe noise") {
+		t.Fatalf("candidate diagnostics leaked: %s", output)
+	}
+	if count := strings.Count(string(mustReadConfigFixture(t, filepath.Join(home, "probe-count"))), "probe\n"); count != 2 {
+		t.Fatalf("ran %d probes, want both reinspection sites", count)
+	}
 }
 
 // lostGuestAgent is a running guest whose agent no longer answers commands.

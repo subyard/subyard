@@ -640,6 +640,11 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 	if err != nil {
 		return err
 	}
+	if action == "start" {
+		if err := client.prepareVMStart(powerContext, server, yard.Project, yard.Instance); err != nil {
+			return err
+		}
+	}
 	if err := beforeNative(powerContext, server, "network-power", yard.Project, yard.Instance); err != nil {
 		return err
 	}

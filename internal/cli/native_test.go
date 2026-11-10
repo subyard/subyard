@@ -601,14 +601,20 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 
 func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
 	repositoryRoot := filepath.Join(t.TempDir(), "runtime", "releases", "0.11.2-candidate")
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"project/yard": {Name: "yard", LocalConfig: map[string]string{"raw.qemu.conf": domain.VMRawQEMUConfig(true)}}}}
 	program := &CLI{options: Options{
 		RepositoryRoot: repositoryRoot,
 		Stdout:         &bytes.Buffer{},
 		Stderr:         &bytes.Buffer{},
+		Incus:          incus,
 	}}
-	config := program.releaseRuntimeConfig(releaseruntime.RuntimeContext{})
-	if config.RepositoryRoot != repositoryRoot {
-		t.Fatalf("release runtime repository root = %q, want %q", config.RepositoryRoot, repositoryRoot)
+	runtimeConfig := program.releaseRuntimeConfig(releaseruntime.RuntimeContext{})
+	if runtimeConfig.RepositoryRoot != repositoryRoot {
+		t.Fatalf("release runtime repository root = %q, want %q", runtimeConfig.RepositoryRoot, repositoryRoot)
+	}
+	instance, err := runtimeConfig.YardInstance(context.Background(), config.Loaded{Context: domain.Context{IncusProject: "project", YardInstanceName: "yard"}})
+	if err != nil || instance.LocalConfig["raw.qemu.conf"] != domain.VMRawQEMUConfig(true) {
+		t.Fatalf("shared release runtime reader = %+v, %v", instance, err)
 	}
 }
 

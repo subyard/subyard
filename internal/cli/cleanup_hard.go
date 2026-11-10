@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -335,7 +336,7 @@ func cleanupSourceBinding(root string) (string, error) {
 }
 
 func (prepared *preparedCommand) prepareHardCleanup(ctx context.Context) error {
-	cli, loaded := prepared.CLI, prepared.Loaded
+	cli, loaded := prepared.CLI.hardCleanupOperation(), prepared.Loaded
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return errors.New("hard cleanup must execute on the selected yard owner")
 	}
@@ -534,7 +535,8 @@ func (cli *CLI) cleanupPower(ctx context.Context, loaded config.Loaded, action s
 		return nil
 	}
 	if cli.options.InitPlatform == nil {
-		return cli.initPlatform(loaded, nil).(reconcileruntime.Runtime).RunMigrationPhysicalLifecycle(ctx, action)
+		runtime := cli.initPlatform(loaded, nil).(reconcileruntime.Runtime)
+		return runtime.RunMigrationPhysicalLifecycle(ctx, action)
 	}
 	power, ok := reader.(ports.InstancePowerManager)
 	if !ok {
@@ -662,6 +664,15 @@ func (cli *CLI) detachCleanupBackup(ctx context.Context, loaded config.Loaded, j
 		}
 	}
 	return native.DetachYardBackup(ctx, journal.Native, uuid)
+}
+
+// hardCleanupOperation preserves reporting-only values throughout recovery,
+// including recreation, so an authorized rollback remains readable.
+func (cli *CLI) hardCleanupOperation() *CLI {
+	operation := *cli
+	operation.env = maps.Clone(cli.env)
+	operation.env["SUBYARD_PRESERVE_VM_REPORTING"] = "1"
+	return &operation
 }
 
 // Bootstrap the base guest before restoring projects: ordinary lifecycle and

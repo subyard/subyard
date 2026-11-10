@@ -10,11 +10,72 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
+
+func TestHardCleanupRuntimePreservesReportingPolicy(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	server, err := testkit.NewIncusServer(testkit.TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	server.SetProject("subyard", map[string]any{"name": "subyard", "config": map[string]string{"restricted": "true", "restricted.virtual-machines.lowlevel": "allow"}})
+	environment = append(environment, "SUBYARD_INCUS_SOCKET="+server.SocketPath)
+	// Caller-controlled preservation must not affect an admitted creation.
+	environment = append(environment, "SUBYARD_PRESERVE_VM_REPORTING=1")
+	cli, err := New(Options{RepositoryRoot: root, Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Context.YardKind = domain.YardVM
+	for _, reporting := range []string{"0", "1"} {
+		loaded.Environment["VM_FREE_PAGE_REPORTING"] = reporting
+		for _, cleanup := range []bool{false, true} {
+			operation := cli
+			if cleanup {
+				operation = cli.hardCleanupOperation()
+			}
+			runtime := operation.initPlatform(loaded, nil).(reconcileruntime.Runtime)
+			command := exec.Command("bash", "-c", `source "$1"; vm_raw_qemu_target ""`, "renderer", filepath.Join(repositoryRoot(t), "scripts/lib-vm-page-reporting.sh"))
+			command.Env = runtime.Environment
+			output, err := command.Output()
+			want := domain.VMRawQEMUConfig(reporting == "1")
+			if cleanup && reporting == "1" {
+				want = "[device \"qemu_balloon\"]\nfree-page-reporting = \"on\""
+			}
+			if err != nil || string(output) != want {
+				t.Fatalf("reporting=%s cleanup=%v rendered %q, want %q: %v", reporting, cleanup, output, want, err)
+			}
+			// The same production runtime supplies network reconciliation's client;
+			// it may restart peers during cleanup, outside CLI admission.
+			current := ""
+			if reporting == "1" {
+				current = "[device \"qemu_balloon\"]\nfree-page-reporting = \"on\""
+			}
+			values := map[string]string{"raw.qemu.conf": current}
+			server.SetInstance("subyard", "yard", map[string]any{"name": "yard", "type": "virtual-machine", "status": "Stopped", "config": values, "expanded_config": values})
+			before := len(server.ConfigUpdates())
+			if err := runtime.NetworkPolicy.(*yardnetwork.Service).Host.NetworkPower(context.Background(), networkYard(loaded.Context), "start"); err != nil {
+				t.Fatal(err)
+			}
+			instance, err := runtime.Incus.Instance(context.Background(), "subyard", "yard")
+			writes := len(server.ConfigUpdates()) - before
+			if err != nil || instance.LocalConfig["raw.qemu.conf"] != want || (writes == 0) != (cleanup && reporting == "1") {
+				t.Fatalf("reporting=%s cleanup=%v started with %q, writes=%d: %v", reporting, cleanup, instance.LocalConfig["raw.qemu.conf"], writes, err)
+			}
+		}
+	}
+}
 
 // The fixed serial follows Incus's PathNameEncode("cleanup-backup"), which
 // doubles hyphens before the virtio-scsi driver prefixes the serial with incus_.

@@ -3,9 +3,11 @@ package testkit
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -37,9 +39,14 @@ type IncusServer struct {
 	execCalls     []IncusServerExecCall
 	powerCalls    []IncusServerPowerCall
 	powerErrors   []string
-	operations    map[string]*incusOperation
-	eventQuery    string
-	nextOp        int
+	configUpdates []IncusServerConfigUpdate
+	// projectUpdates are accepted project PUT requests in order.
+	projectUpdates    []IncusServerConfigUpdate
+	updateHook        func(map[string]any) (int, string)
+	projectUpdateHook func(map[string]any)
+	operations        map[string]*incusOperation
+	eventQuery        string
+	nextOp            int
 }
 
 type IncusServerExecStep struct {
@@ -69,6 +76,13 @@ type IncusServerPowerCall struct {
 	Name    string
 	Action  string
 	Force   bool
+}
+
+// IncusServerConfigUpdate records one accepted instance PUT.
+type IncusServerConfigUpdate struct {
+	Project string
+	Name    string
+	Config  map[string]string
 }
 
 type incusOperation struct {
@@ -284,10 +298,15 @@ func (fake *IncusServer) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	case request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/state") &&
 		strings.HasPrefix(request.URL.Path, "/1.0/instances/"):
 		fake.setPower(writer, request)
+	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/1.0/instances/") &&
+		!strings.Contains(strings.TrimPrefix(request.URL.Path, "/1.0/instances/"), "/"):
+		fake.updateInstance(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/1.0/operations/"):
 		fake.serveOperation(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/1.0/instances":
 		fake.listInstances(writer, request)
+	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/1.0/projects/"):
+		fake.updateProject(writer, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/1.0/projects/"):
 		project := strings.TrimPrefix(request.URL.Path, "/1.0/projects/")
 		fake.mu.Lock()
@@ -298,6 +317,7 @@ func (fake *IncusServer) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			writeIncusError(writer, http.StatusNotFound, "project not found")
 			return
 		}
+		writer.Header().Set("ETag", incusServerETag(metadata))
 		writeIncusSync(writer, metadata)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/1.0/instances/") && strings.HasSuffix(request.URL.Path, "/snapshots"):
 		name := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/1.0/instances/"), "/snapshots")
@@ -324,6 +344,7 @@ func (fake *IncusServer) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			writeIncusError(writer, http.StatusNotFound, "instance not found")
 			return
 		}
+		writer.Header().Set("ETag", incusServerETag(instance))
 		writeIncusSync(writer, instance)
 	case request.URL.Path == "/1.0/events":
 		fake.mu.Lock()
@@ -361,6 +382,145 @@ func (fake *IncusServer) listInstances(writer http.ResponseWriter, request *http
 	}
 	fake.mu.Unlock()
 	writeIncusSync(writer, instances)
+}
+
+// ConfigUpdates returns the accepted instance PUT requests in order.
+func (fake *IncusServer) ConfigUpdates() []IncusServerConfigUpdate {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	updates := make([]IncusServerConfigUpdate, len(fake.configUpdates))
+	for index, update := range fake.configUpdates {
+		updates[index] = update
+		updates[index].Config = cloneStringMap(update.Config)
+	}
+	return updates
+}
+
+// ProjectUpdates returns the accepted project PUT requests in order.
+func (fake *IncusServer) ProjectUpdates() []IncusServerConfigUpdate {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	updates := make([]IncusServerConfigUpdate, len(fake.projectUpdates))
+	for index, update := range fake.projectUpdates {
+		updates[index] = update
+		updates[index].Config = cloneStringMap(update.Config)
+	}
+	return updates
+}
+
+// OnInstanceUpdate runs before each instance PUT is checked. It may change the
+// stored instance, as a concurrent writer would, or return a nonzero HTTP
+// status and message to refuse the request.
+func (fake *IncusServer) OnInstanceUpdate(hook func(instance map[string]any) (int, string)) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.updateHook = hook
+}
+
+// OnProjectUpdate models a concurrent edit before checking a project PUT's ETag.
+func (fake *IncusServer) OnProjectUpdate(hook func(map[string]any)) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.projectUpdateHook = hook
+}
+
+// updateProject accepts only the If-Match ETag of the current project.
+func (fake *IncusServer) updateProject(writer http.ResponseWriter, request *http.Request) {
+	name := strings.TrimPrefix(request.URL.Path, "/1.0/projects/")
+	var input struct {
+		Config map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024*1024)).Decode(&input); err != nil {
+		writeIncusError(writer, http.StatusBadRequest, "invalid project request")
+		return
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	project, ok := fake.projects[name]
+	if !ok {
+		writeIncusError(writer, http.StatusNotFound, "project not found")
+		return
+	}
+	if fake.projectUpdateHook != nil {
+		fake.projectUpdateHook(project)
+	}
+	if match := request.Header.Get("If-Match"); match == "" || match != incusServerETag(project) {
+		writeIncusError(writer, http.StatusPreconditionFailed, "ETag doesn't match")
+		return
+	}
+	project["config"] = cloneStringMap(input.Config)
+	fake.projectUpdates = append(fake.projectUpdates, IncusServerConfigUpdate{Project: name, Name: name, Config: cloneStringMap(input.Config)})
+	writeIncusSync(writer, map[string]any{})
+}
+
+func incusServerETag(instance map[string]any) string {
+	encoded, _ := json.Marshal(instance)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func incusServerConfig(value any) map[string]string {
+	config := map[string]string{}
+	switch typed := value.(type) {
+	case map[string]string:
+		maps.Copy(config, typed)
+	case map[string]any:
+		for key, entry := range typed {
+			if text, ok := entry.(string); ok {
+				config[key] = text
+			}
+		}
+	}
+	return config
+}
+
+// updateInstance accepts only the If-Match ETag of the current instance.
+// Expanded configuration follows the local keys that the request changes.
+func (fake *IncusServer) updateInstance(writer http.ResponseWriter, request *http.Request) {
+	name := strings.TrimPrefix(request.URL.Path, "/1.0/instances/")
+	project := request.URL.Query().Get("project")
+	var input struct {
+		Config map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024*1024)).Decode(&input); err != nil {
+		writeIncusError(writer, http.StatusBadRequest, "invalid instance request")
+		return
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	instance, ok := fake.instances[project+"/"+name]
+	if !ok {
+		writeIncusError(writer, http.StatusNotFound, "instance not found")
+		return
+	}
+	if fake.updateHook != nil {
+		if status, message := fake.updateHook(instance); status != 0 {
+			writeIncusError(writer, status, message)
+			return
+		}
+	}
+	if match := request.Header.Get("If-Match"); match == "" || match != incusServerETag(instance) {
+		writeIncusError(writer, http.StatusPreconditionFailed, "ETag doesn't match")
+		return
+	}
+	local, expanded := incusServerConfig(instance["config"]), incusServerConfig(instance["expanded_config"])
+	for key := range local {
+		if _, kept := input.Config[key]; !kept {
+			delete(expanded, key)
+		}
+	}
+	maps.Copy(expanded, input.Config)
+	instance["config"], instance["expanded_config"] = cloneStringMap(input.Config), expanded
+	fake.configUpdates = append(fake.configUpdates, IncusServerConfigUpdate{Project: project, Name: name, Config: cloneStringMap(input.Config)})
+	fake.nextOp++
+	id := fmt.Sprintf("operation-%d", fake.nextOp)
+	stdinDone := make(chan struct{})
+	close(stdinDone)
+	operation := &incusOperation{
+		id: id, cancelled: make(chan struct{}), stdinDone: stdinDone, callIndex: -1,
+		resource: map[string][]string{"instances": {"/1.0/instances/" + name + "?project=" + project}},
+	}
+	fake.operations[id] = operation
+	writeIncusAsync(writer, "/1.0/operations/"+id, operationMetadata(operation, "Running", 103, "", nil))
 }
 
 func (fake *IncusServer) setPower(writer http.ResponseWriter, request *http.Request) {

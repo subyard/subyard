@@ -26,6 +26,30 @@ import (
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
+// vmStartPolicyArguments accepts PROJECT INSTANCE [SOCKET]. An omitted or empty
+// socket uses the inherited one; a given socket must be absolute.
+func vmStartPolicyArguments(arguments []string, inherited string) (project, instance, socket string, err error) {
+	if (len(arguments) != 2 && len(arguments) != 3) || !domain.SafeName(arguments[0]) || !domain.SafeName(arguments[1]) {
+		return "", "", "", errors.New("usage: _vm-start-policy PROJECT INSTANCE [SOCKET]")
+	}
+	socket = inherited
+	if len(arguments) == 3 && arguments[2] != "" {
+		socket = arguments[2]
+	}
+	if socket != "" && !filepath.IsAbs(socket) {
+		return "", "", "", errors.New("VM start policy requires an absolute Incus socket")
+	}
+	return arguments[0], arguments[1], socket, nil
+}
+
+// bootIncusClient preserves reporting values because boot restoration bypasses
+// admission and an authorized rollback's retained reader may require that form.
+func bootIncusClient(socket string) *incusclient.Client {
+	client := incusclient.New(socket, "projects")
+	client.PreserveReportingVMConfig = true
+	return client
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -34,6 +58,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "test-vms: %v\n", err)
 			os.Exit(1)
 		}
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_vm-start-policy" {
+		project, instance, socket, err := vmStartPolicyArguments(os.Args[2:], os.Getenv("SUBYARD_INCUS_SOCKET"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		client := incusclient.New(socket, "projects")
+		client.PreserveReportingVMConfig = os.Getenv("SUBYARD_PRESERVE_VM_REPORTING") == "1"
+		if err := client.PrepareVMStart(ctx, project, instance); err != nil {
+			fmt.Fprintf(os.Stderr, "VM start policy: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_vm-cpu" {
 		if (len(os.Args) != 5 && len(os.Args) != 6) || (os.Args[2] != "apply" && os.Args[2] != "check") ||
@@ -290,7 +328,7 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_power-reconcile" {
-		client := incusclient.New(os.Getenv("SUBYARD_INCUS_SOCKET"), "projects")
+		client := bootIncusClient(os.Getenv("SUBYARD_INCUS_SOCKET"))
 		var contracts []ownerpublication.Contract
 		if encoded := os.Getenv("SUBYARD_PUBLICATION_CONTRACTS"); encoded != "" {
 			var err error

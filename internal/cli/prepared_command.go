@@ -124,7 +124,7 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@check", "@security", "@status", "@space", "@info", "@yards", "@logs", "@usage", "@list", "@help":
 		behavior.nonRPCReason = "read-only query"
-	case "@rpc", "@authorize", "@state", "@project-state", "@migrate", "@release-transition":
+	case "@rpc", "@authorize", "@state", "@project-state", "@migrate", "@release-transition", "@vm-start-policy":
 		behavior.nonRPCReason = "dedicated internal protocol"
 	default:
 		if !strings.HasPrefix(definition.Handler, "@") && definition.Handler != "" {

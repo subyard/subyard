@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -1693,12 +1694,63 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 	incus.Reconcile.ProjectConfig["user.subyard.operator_uid"] = strconv.Itoa(os.Getuid())
 	incus.Reconcile.ProjectConfig["user.subyard.data_home"] = "/fixture-data"
 	incus.Reconcile.ProjectConfig["user.subyard.config_home"] = "/fixture-config"
+	// A previous release's project can lack the grant that the next start adds.
+	// Exercise the ordered plan: project drift must not hide instance readiness.
+	for _, reporting := range []string{"0", "1"} {
+		t.Run("deferred grant reporting="+reporting, func(t *testing.T) {
+			runtime.Environment[2] = "VM_FREE_PAGE_REPORTING=" + reporting
+			raw := ""
+			if reporting == "1" {
+				raw = reportingOnlyQEMUConfig
+			}
+			incus.Reconcile.Instance.Config["raw.qemu.conf"] = raw
+			incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = raw
+			stages := slices.DeleteFunc(application.InitStages(runtime.Yard), func(stage application.ReconcileStage) bool {
+				return stage.ID != ports.ReconcileStageProject && stage.ID != ports.ReconcileStageInstance
+			})
+			plan, err := (application.Reconciler{Stages: stages, Runner: runtime}).Plan(context.Background())
+			if err != nil || plan.Pending() != 0 || len(plan.Steps) != 2 || plan.Steps[1].Diagnostic != vmRawQEMUDeferred {
+				t.Fatalf("previous owner state requires init or loses its diagnostic: plan=%+v err=%v", plan, err)
+			}
+			if incus.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] != "" {
+				t.Fatal("readiness granted low-level permission")
+			}
+		})
+	}
+	runtime.Environment[2] = "VM_FREE_PAGE_REPORTING=0"
+	delete(incus.Reconcile.Instance.Config, "raw.qemu.conf")
+	delete(incus.Reconcile.Instance.LocalConfig, "raw.qemu.conf")
+	incus.Reconcile.Instance.LocalConfig["limits.cpu"] = "2"
+	assertStage(t, runtime, "project", false, "instance reconciliation needs the grant before writing its QEMU policy")
+	incus.Reconcile.Instance.LocalConfig["limits.cpu"] = "1"
+	incus.Reconcile.Instance.Config["raw.qemu.conf"] = domain.VMRawQEMUConfig(false)
+	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = domain.VMRawQEMUConfig(false)
+	assertStage(t, runtime, "project", false, "a current owner value does not trigger a start-time grant")
+	incus.Reconcile.InstanceFound = false
+	assertStage(t, runtime, "project", false, "new VM needs the grant before creation")
+	incus.Reconcile.InstanceFound = true
+	runtime.Environment[2] = "VM_FREE_PAGE_REPORTING=1"
+	delete(incus.Reconcile.Instance.Config, "raw.qemu.conf")
+	delete(incus.Reconcile.Instance.LocalConfig, "raw.qemu.conf")
+	assertStage(t, runtime, "project", false, "reporting opt-in needs the grant before reconciliation")
 	incus.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = "allow"
 	assertStage(t, runtime, "project", true, "dedicated project permission")
 	assertStageConverged(t, runtime, false, "missing reporting override")
-	incus.Reconcile.Instance.Config["raw.qemu.conf"] = vmPageReportingConfig
-	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = vmPageReportingConfig
+	incus.Reconcile.Instance.Config["raw.qemu.conf"] = domain.VMRawQEMUConfig(true)
+	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = domain.VMRawQEMUConfig(true)
 	assertStageConverged(t, runtime, true, "fixed reporting override")
+	observation, err := runtime.ObserveStage(context.Background(), ports.ReconcileStageInstance)
+	if err != nil || !observation.Converged || len(observation.Diagnostics) != 0 {
+		t.Fatalf("current owner value reported a diagnostic: %#v, %v", observation, err)
+	}
+	incus.Reconcile.Instance.Config["raw.qemu.conf"] = "[device \"qemu_balloon\"]\nfree-page-reporting = \"on\""
+	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = incus.Reconcile.Instance.Config["raw.qemu.conf"]
+	observation, err = runtime.ObserveStage(context.Background(), ports.ReconcileStageInstance)
+	if err != nil || !observation.Converged || !slices.Equal(observation.Diagnostics, []string{vmRawQEMUDeferred}) {
+		t.Fatalf("running VM with its display is not converged with a next-start diagnostic: %#v, %v", observation, err)
+	}
+	incus.Reconcile.Instance.Config["raw.qemu.conf"] = domain.VMRawQEMUConfig(true)
+	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = domain.VMRawQEMUConfig(true)
 	runtime.Environment = append(runtime.Environment, "MOCK_GUEST_EXIT=10")
 	assertStageConverged(t, runtime, false, "guest reporting feature unavailable")
 	runtime.Environment[len(runtime.Environment)-1] = "MOCK_GUEST_EXIT=1"
@@ -1737,6 +1789,13 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
 		t.Fatal("inherited shared route mount bypassed ALLOWS_HOST_ACCESS=false")
 	}
+	// The device boundary and the raw QEMU policy are reported together.
+	incus.Reconcile.Instance.Config["raw.qemu.scriptlet"] = "foreign"
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil ||
+		!strings.Contains(err.Error(), "subyard-e2e-routes") || !strings.Contains(err.Error(), "unexpected effective raw.qemu.scriptlet on VM") {
+		t.Fatalf("readiness dropped an independent device or raw QEMU finding: %v", err)
+	}
+	delete(incus.Reconcile.Instance.Config, "raw.qemu.scriptlet")
 	delete(incus.Reconcile.Instance.Devices, "subyard-e2e-routes")
 	assertStageConverged(t, runtime, true, "host device boundary restored")
 	incus.Reconcile.Instance.LocalDevices["eth0"] = map[string]string{
@@ -1761,8 +1820,8 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
 		t.Fatal("inherited reporting override accepted")
 	}
-	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = vmPageReportingConfig
-	incus.Reconcile.ProfileConfig = map[string]string{"raw.qemu.conf": vmPageReportingConfig}
+	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = domain.VMRawQEMUConfig(true)
+	incus.Reconcile.ProfileConfig = map[string]string{"raw.qemu.conf": domain.VMRawQEMUConfig(true)}
 	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil ||
 		!strings.Contains(err.Error(), "unexpected inherited raw.qemu.conf") {
 		t.Fatalf("profile reporting override shadowed by the managed local override was accepted: %v", err)

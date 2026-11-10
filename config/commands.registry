@@ -51,6 +51,8 @@ _state||@state||local|mutate|dynamic|hidden|internal|none|_state|native project 
 _project-state||@project-state||forward|mutate|dynamic|hidden|internal|none|_project-state|converge owner-host project state||
 _migrate||@migrate||local|mutate|dynamic|hidden|internal|none|_migrate|inspect compatibility state and run bounded migration helpers||paths check overlay-manifest normalize-yard-config reconcile-test-vm-broker reconcile-power-reconciler
 _release-transition||@release-transition||local|mutate|dynamic|hidden|internal|none|_release-transition|inspect or converge one exact release transition||
+# Releases that read headless+reporting VM values must keep this command with effect mutate for rollback compatibility.
+_vm-start-policy||@vm-start-policy||local|mutate|never|hidden|internal|none|_vm-start-policy PROJECT INSTANCE [SOCKET]|apply the owner headless VM policy before start||
 _keys-exchange||@keys|_exchange|forward|mutate|dynamic|hidden|internal|none|_keys-exchange|credential peer exchange endpoint||
 _keys-auto-sync||@keys|_auto-worker|forward|mutate|dynamic|hidden|internal|none|_keys-auto-sync|credential auto-sync worker||
 _keys-init||@keys|_init-store|local|mutate|dynamic|hidden|internal|none|_keys-init|initialize the host credential ledger||

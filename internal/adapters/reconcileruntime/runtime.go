@@ -150,7 +150,7 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageProject:
 		return runtime.projectConverged(ctx)
 	case ports.ReconcileStageInstance:
-		return runtime.instanceConverged(ctx)
+		return runtime.instanceConverged(ctx, nil)
 	case ports.ReconcileStageMounts:
 		return runtime.mountsConverged(ctx)
 	case ports.ReconcileStagePowerImport:
@@ -238,6 +238,14 @@ func (runtime Runtime) profileRuntimesConverged(observations map[string]ports.Ru
 func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
 	if stage == ports.ReconcileStageProfileServices {
 		return runtime.observeProfileServices(ctx)
+	}
+	if stage == ports.ReconcileStageInstance {
+		var diagnostics []string
+		converged, err := runtime.instanceConverged(readOnlyProbeContext(ctx), &diagnostics)
+		if !converged {
+			diagnostics = nil
+		}
+		return ports.ReconcileStageObservation{Converged: converged, Diagnostics: diagnostics}, err
 	}
 	converged, err := runtime.CheckStage(ctx, stage)
 	return ports.ReconcileStageObservation{Converged: converged}, err
@@ -411,8 +419,6 @@ func probeConverged(err error) (bool, error) {
 	return false, err
 }
 
-const vmPageReportingConfig = "[device \"qemu_balloon\"]\nfree-page-reporting = \"on\""
-
 func (runtime Runtime) vmPageReporting() (bool, error) {
 	if runtime.environmentValue("VM_FREE_PAGE_REPORTING") != "1" {
 		return false, nil
@@ -423,28 +429,46 @@ func (runtime Runtime) vmPageReporting() (bool, error) {
 	return true, nil
 }
 
-func vmRawQEMUConverged(instance ports.InstanceInfo) (bool, error) {
-	for key, value := range instance.Config {
-		if !strings.HasPrefix(key, "raw.qemu") || value == "" {
-			continue
-		}
-		if key != "raw.qemu.conf" || value != vmPageReportingConfig {
-			return false, fmt.Errorf("unexpected effective %s on VM", key)
+// vmRawQEMUDeferred is the readiness diagnostic of a VM that keeps a previous
+// owner raw.qemu.conf until QEMU starts again.
+const vmRawQEMUDeferred = "headless VM device policy applies at the next yard start"
+
+// vmRawQEMUPolicy refuses every foreign raw QEMU override of the VM or its
+// project default profile together; such values are never overwritten. An
+// owner value that differs from the target is converged while QEMU runs or the
+// yard is intentionally stopped: Incus refuses the change on a running VM, and
+// the next product start writes it (deferred). Only an explicit reporting
+// opt-in still needs the existing restart, because its guest check depends on
+// the property. Any other stopped VM converges through init, which writes the
+// value without a restart.
+func (runtime Runtime) vmRawQEMUPolicy(state ports.ReconcileState, reporting bool) (converged, deferred bool, err error) {
+	var refusals []error
+	for _, key := range slices.Sorted(maps.Keys(state.ProfileConfig)) {
+		if strings.HasPrefix(key, "raw.qemu") && state.ProfileConfig[key] != "" {
+			refusals = append(refusals, fmt.Errorf("unexpected inherited %s in VM project %s", key, runtime.Yard.IncusProject))
 		}
 	}
-	for key, value := range instance.LocalConfig {
-		if !strings.HasPrefix(key, "raw.qemu") || value == "" {
-			continue
-		}
-		if key != "raw.qemu.conf" || value != vmPageReportingConfig {
-			return false, fmt.Errorf("unexpected local %s on VM", key)
-		}
+	for _, finding := range domain.VMRawQEMURefusals(state.Instance.Config, state.Instance.LocalConfig) {
+		refusals = append(refusals, errors.New(finding))
 	}
-	if instance.Config["raw.qemu.conf"] != "" && instance.LocalConfig["raw.qemu.conf"] == "" {
-		return false, errors.New("VM raw.qemu.conf must be owner-managed locally, not inherited")
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return false, false, err
 	}
-	return instance.LocalConfig["raw.qemu.conf"] == vmPageReportingConfig &&
-		instance.Config["raw.qemu.conf"] == vmPageReportingConfig, nil
+	current := state.Instance.LocalConfig["raw.qemu.conf"]
+	if runtime.environmentValue("SUBYARD_PRESERVE_VM_REPORTING") == "1" && domain.VMRawQEMUReporting(current) {
+		return true, current != domain.VMRawQEMUConfig(true), nil
+	}
+	if target, _ := domain.VMRawQEMUTarget(current, reporting); current == target {
+		return true, false, nil
+	}
+	if reporting && !domain.VMRawQEMUReporting(current) {
+		return false, false, nil
+	}
+	if strings.EqualFold(state.Instance.Status, "running") ||
+		strings.EqualFold(state.Instance.Status, "stopped") && instanceIntentionallyStopped(state.Instance) {
+		return true, true, nil
+	}
+	return false, false, nil
 }
 
 func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
@@ -478,10 +502,24 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 			return false, err
 		}
 	}
-	return runtime.projectPolicyConverged(state, reporting), nil
+	lowLevel := reporting || runtime.Yard.YardKind == domain.YardVM
+	current := state.Instance.LocalConfig["raw.qemu.conf"]
+	target, owned := domain.VMRawQEMUTarget(current, false)
+	if runtime.Yard.YardKind == domain.YardVM && state.InstanceFound && owned && current != target &&
+		state.ProjectConfig["restricted.virtual-machines.lowlevel"] != "allow" {
+		// A converged VM with a previous owner value gets the grant at its
+		// next product start. Instance reconciliation needs the grant now.
+		converged, err := runtime.instanceConverged(readOnlyProbeContext(ctx), nil)
+		if err != nil {
+			return false, err
+		}
+		lowLevel = !converged
+	}
+	return runtime.projectPolicyConverged(state, lowLevel), nil
 }
 
-func (runtime Runtime) projectPolicyConverged(state ports.ReconcileState, reporting bool) bool {
+// lowLevel requires the VM low-level grant that the owner raw.qemu.conf needs.
+func (runtime Runtime) projectPolicyConverged(state ports.ReconcileState, lowLevel bool) bool {
 	wantInterception := "block"
 	if runtime.Yard.NestedE2EVMs {
 		wantInterception = "allow"
@@ -501,7 +539,7 @@ func (runtime Runtime) projectPolicyConverged(state ports.ReconcileState, report
 			return false
 		}
 	}
-	if reporting && state.ProjectConfig["restricted.virtual-machines.lowlevel"] != "allow" {
+	if lowLevel && state.ProjectConfig["restricted.virtual-machines.lowlevel"] != "allow" {
 		return false
 	}
 	_, root := state.ProfileDevices["root"]
@@ -559,7 +597,9 @@ func (runtime Runtime) pinVMIPv4AfterBoot(ctx context.Context, pinner vmIPv4Pinn
 	}
 }
 
-func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
+// instanceConverged appends readiness diagnostics of a converged instance to
+// diagnostics when it is not nil; the operation boundary renders them.
+func (runtime Runtime) instanceConverged(ctx context.Context, diagnostics *[]string) (bool, error) {
 	reporting, err := runtime.vmPageReporting()
 	if err != nil {
 		return false, err
@@ -579,19 +619,18 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	if err != nil || !state.InstanceFound || !state.VolumeFound {
 		return false, err
 	}
-	if bounded, err := runtime.vmDeviceBoundary(state); err != nil || !bounded {
+	// The device boundary and the raw QEMU policy are independent findings of
+	// the same read, so both refusals are reported together.
+	bounded, boundaryErr := runtime.vmDeviceBoundary(state)
+	rawConverged, deferred, rawErr := true, false, error(nil)
+	if runtime.Yard.YardKind == domain.YardVM {
+		rawConverged, deferred, rawErr = runtime.vmRawQEMUPolicy(state, reporting)
+	}
+	if err := domain.CollectRefusals(boundaryErr, rawErr); err != nil || !bounded || !rawConverged {
 		return false, err
 	}
-	if reporting {
-		for key, value := range state.ProfileConfig {
-			if strings.HasPrefix(key, "raw.qemu") && value != "" {
-				return false, fmt.Errorf("unexpected inherited %s in VM project %s", key, runtime.Yard.IncusProject)
-			}
-		}
-		converged, err := vmRawQEMUConverged(state.Instance)
-		if err != nil || !converged {
-			return false, err
-		}
+	if deferred && diagnostics != nil {
+		*diagnostics = append(*diagnostics, vmRawQEMUDeferred)
 	}
 	for key, want := range map[string]string{"limits.cpu": runtime.environmentValue("LIMITS_CPU"),
 		"limits.memory": runtime.environmentValue("LIMITS_MEMORY")} {

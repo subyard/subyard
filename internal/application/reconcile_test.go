@@ -285,3 +285,21 @@ func TestReconcilerRefreshApprovedRejectsLaterSkipBeforePlanning(t *testing.T) {
 		t.Fatalf("later skip guard bypassed: checked=%v err=%v", fixture.checked, err)
 	}
 }
+
+// A converged stage carries its readiness diagnostics to the plan for the
+// operation boundary; they neither add work nor make the approval stale.
+func TestReconcilerCarriesConvergedReadinessDiagnostics(t *testing.T) {
+	stage := ReconcileStage{ID: ports.ReconcileStageInstance, Label: "Instance"}
+	base := &reconcileFixture{}
+	fixture := observedReconcileFixture{base, ports.ReconcileStageObservation{Converged: true, Diagnostics: []string{"first", "second"}}}
+	reconciler := Reconciler{Stages: []ReconcileStage{stage}, Runner: fixture}
+	plan, err := reconciler.Plan(context.Background())
+	if err != nil || plan.Pending() != 0 || plan.Steps[0].Diagnostic != "first; second" {
+		t.Fatalf("diagnostic did not reach the plan: %#v %v", plan, err)
+	}
+	fixture.observation.Diagnostics = nil
+	reconciler.Runner = fixture
+	if err := reconciler.Apply(context.Background(), plan); err != nil || len(base.applied) != 0 {
+		t.Fatalf("diagnostic change made the converged stage stale or applied it: %v %v", err, base.applied)
+	}
+}

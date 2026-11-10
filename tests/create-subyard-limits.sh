@@ -26,6 +26,7 @@ export MOCK_STOP_EXIT=0 MOCK_LIMIT_SET_EXIT=0 MOCK_LIMIT_NOOP=0 MOCK_STATE_EXIT=
 export MOCK_DEVICE_LIST_PADDING=0
 export MOCK_AGENT_READY_AFTER=1
 export MOCK_AGENT_EXIT=0 MOCK_REPORTING_EXIT=0
+export MOCK_VM_POLICY="$ROOT/scripts/lib-vm-page-reporting.sh"
 export LIMITS_CPU=2 LIMITS_MEMORY=4GiB
 install -d -m 0700 "$TMP/bin" "$MOCK_STATE_DIR"
 
@@ -77,7 +78,7 @@ case "${1:-} ${2:-} ${3:-}" in
       security.nesting) printf 'true\n' ;;
       security.syscalls.intercept.bpf | security.syscalls.intercept.bpf.devices) ;;
       user.subyard.vm_cpu_weight) printf '%s\n' "${VM_CPU_WEIGHT:-}" ;;
-      raw.qemu.conf) printf '[device "qemu_balloon"]\nfree-page-reporting = "on"\n' ;;
+      raw.qemu.conf) cat "$MOCK_STATE_DIR/raw.qemu.conf" ;;
       raw.qemu*) ;;
       *) exit 90 ;;
     esac ;;
@@ -88,11 +89,14 @@ case "${1:-} ${2:-} ${3:-}" in
         [ "$MOCK_LIMIT_SET_EXIT" = 0 ] || exit "$MOCK_LIMIT_SET_EXIT"
         [ "$MOCK_LIMIT_NOOP" = 1 ] || printf '%s\n' "$5" > "$MOCK_STATE_DIR/$4"
         ;;
-      raw.qemu.conf) ;;
+      raw.qemu.conf)
+        # Incus refuses raw.qemu.conf changes while a VM runs.
+        [ "$(cat "$MOCK_STATE_DIR/power")" = STOPPED ] || exit 91
+        printf '%s\n' "$5" > "$MOCK_STATE_DIR/raw.qemu.conf" ;;
       *) exit 90 ;;
     esac ;;
   'config unset yard') ;;
-  'profile get default') ;;
+  'profile get default') [ "$4" != raw.qemu.conf ] || printf '%s' "${MOCK_PROFILE_RAW:-}" ;;
   'exec yard --project')
     case "$*" in
       *' -- true')
@@ -117,7 +121,30 @@ case "${1:-} ${2:-} ${3:-}" in
   *) printf 'unexpected incus call: %s\n' "$*" >&2; exit 90 ;;
 esac
 MOCK
-chmod 0700 "$TMP/bin/"{systemctl,ip,dpkg,incus}
+# The engine's product start policy: a stopped VM receives the headless form of
+# its owner value before Incus starts it.
+cat > "$TMP/bin/dispatcher" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_STATE_DIR/dispatcher.log"
+case "$#:${1:-} ${2:-} ${3:-}" in
+  '3:_publications subyard yard') exit 0 ;;
+  '4:_vm-start-policy subyard yard')
+    [ "$(cat "$MOCK_STATE_DIR/power")" = STOPPED ] || exit 0
+    source "$MOCK_VM_POLICY"
+    current="$(cat "$MOCK_STATE_DIR/raw.qemu.conf")"
+    vm_raw_qemu_owner_conf "$current" || exit 0
+    VM_FREE_PAGE_REPORTING=0 vm_raw_qemu_target "$current" > "$MOCK_STATE_DIR/raw.qemu.conf" ;;
+  '5:_vm-cpu apply subyard')
+    [ "$4" = yard ] || exit 90
+    pid="$(cat "$MOCK_STATE_DIR/qemu-pid")"
+    [ "$pid" != 200 ] || [ "$MOCK_CPU_REAPPLY_EXIT" = 0 ] || exit "$MOCK_CPU_REAPPLY_EXIT"
+    printf '%s\n' "$pid" > "$MOCK_STATE_DIR/cpu-applied-pid" ;;
+  *) exit 90 ;;
+esac
+MOCK
+chmod 0700 "$TMP/bin/"{systemctl,ip,dpkg,incus,dispatcher}
+export SUBYARD_DISPATCHER_PATH="$TMP/bin/dispatcher" MOCK_CPU_REAPPLY_EXIT=0
 
 reset_state() {
   printf '%s\n' "$1" > "$MOCK_STATE_DIR/power"
@@ -125,6 +152,12 @@ reset_state() {
   printf '%s\n' "$3" > "$MOCK_STATE_DIR/limits.memory"
   printf '0\n' > "$MOCK_STATE_DIR/agent-attempts"
   : > "$MOCK_STATE_DIR/ipv4-pin"
+  # A converged VM already carries the owner device policy.
+  if [ "${VM_FREE_PAGE_REPORTING:-0}" = 1 ]; then
+    printf '[device "qemu_gpu"]\n[device "qemu_balloon"]\nfree-page-reporting = "on"\n'
+  else
+    printf '[device "qemu_gpu"]\n'
+  fi > "$MOCK_STATE_DIR/raw.qemu.conf"
   : > "$MOCK_INCUS_LOG"
 }
 run_create() {
@@ -258,20 +291,80 @@ case "$*" in
   *) exit 90 ;;
 esac
 MOCK
-cat > "$TMP/bin/cpu-dispatcher" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-# This fixture has no optional owner publication to reconcile before start.
-if [ "$#" = 3 ] && [ "$1 $2 $3" = '_publications subyard yard' ]; then exit 0; fi
-[ "$#" = 5 ] && [ "$1 $2 $3 $4" = '_vm-cpu apply subyard yard' ] || exit 90
-pid="$(cat "$MOCK_STATE_DIR/qemu-pid")"
-[ "$pid" != 200 ] || [ "$MOCK_CPU_REAPPLY_EXIT" = 0 ] || exit "$MOCK_CPU_REAPPLY_EXIT"
-printf '%s\n' "$pid" > "$MOCK_STATE_DIR/cpu-applied-pid"
-MOCK
-chmod 0700 "$TMP/bin/"{qemu-system-x86_64,cpu-dispatcher}
-export VM_CPU_WEIGHT=1000 VM_FREE_PAGE_REPORTING=1 MOCK_CPU_REAPPLY_EXIT=0
-export SUBYARD_DISPATCHER_PATH="$TMP/bin/cpu-dispatcher"
+chmod 0700 "$TMP/bin/qemu-system-x86_64"
 run_start() { bash "$ROOT/scripts/lifecycle-guard.sh" start > "$TMP/output" 2>&1; }
+
+# A VM created by an earlier release keeps the emulated display. Init leaves a
+# running VM untouched and the next product start writes the headless value
+# first; a stopped VM receives it from init itself. Only an explicit reporting
+# opt-in restarts a running VM. A foreign override refuses before any change.
+headless='[device "qemu_gpu"]'
+reporting_only=$'[device "qemu_balloon"]\nfree-page-reporting = "on"'
+# Hard cleanup recreates through the same production instance stage, retaining
+# the reporting-only form; admitted creation uses the current headless form.
+for preserve in 0 1; do
+  for reporting in 0 1; do
+    reset_state STOPPED 2 4GiB
+    : > "$MOCK_STATE_DIR/raw.qemu.conf"
+    YARD_KIND=vm VM_FREE_PAGE_REPORTING=$reporting SUBYARD_PRESERVE_VM_REPORTING=$preserve run_create \
+      || fail 'recreation policy rendering failed'
+    want="$headless"
+    if [ "$reporting" = 1 ]; then
+      want="$reporting_only"
+      [ "$preserve" = 1 ] || want="$headless"$'\n'"$reporting_only"
+    fi
+    [ "$(cat "$MOCK_STATE_DIR/raw.qemu.conf")" = "$want" ] || fail 'recreation wrote an incompatible VM policy'
+  done
+done
+for reporting in 0 1; do
+  for previous in '' "$reporting_only"; do
+    case "$reporting:$previous" in
+      1:) want="$headless"$'\n'"$reporting_only" restart=1 ;;
+      *:) want="$headless" restart=0 ;;
+      *) want="$headless"$'\n'"$reporting_only" restart=0 ;;
+    esac
+    VM_FREE_PAGE_REPORTING=$reporting reset_state RUNNING 2 4GiB
+    printf '%s' "$previous" > "$MOCK_STATE_DIR/raw.qemu.conf"
+    YARD_KIND=vm VM_FREE_PAGE_REPORTING=$reporting run_create \
+      || fail "running VM device policy failed from '$previous' (reporting $reporting)"
+    if [ "$restart" = 1 ]; then
+      [ "$(cat "$MOCK_STATE_DIR/raw.qemu.conf")" = "$want" ] || fail 'reporting opt-in did not set its policy'
+      [ "$(grep -c '^stop ' "$MOCK_INCUS_LOG")" = 1 ] && [ "$(grep -c '^start ' "$MOCK_INCUS_LOG")" = 1 ] \
+        || fail 'reporting opt-in did not keep its guarded restart'
+      continue
+    fi
+    [ "$(cat "$MOCK_STATE_DIR/raw.qemu.conf")" = "$previous" ] || fail 'init changed the policy of a running VM'
+    ! grep -Eq '^(start|stop|config set yard raw)' "$MOCK_INCUS_LOG" || fail 'init restarted a running VM for its display'
+    YARD_KIND=vm VM_FREE_PAGE_REPORTING=$reporting bash "$ROOT/scripts/lifecycle-guard.sh" stop --reconcile > "$TMP/output" 2>&1
+    : > "$MOCK_STATE_DIR/dispatcher.log"
+    YARD_KIND=vm VM_FREE_PAGE_REPORTING=$reporting run_start || fail 'VM start failed'
+    grep -Fxq '_vm-start-policy subyard yard ' "$MOCK_STATE_DIR/dispatcher.log" || fail 'VM start skipped its device policy'
+    [ "$(cat "$MOCK_STATE_DIR/raw.qemu.conf")" = "$want" ] || fail 'next VM start kept the emulated display'
+
+    VM_FREE_PAGE_REPORTING=$reporting reset_state STOPPED 2 4GiB
+    printf '%s' "$previous" > "$MOCK_STATE_DIR/raw.qemu.conf"
+    YARD_KIND=vm VM_FREE_PAGE_REPORTING=$reporting run_create || fail 'stopped VM device policy failed'
+    [ "$(cat "$MOCK_STATE_DIR/raw.qemu.conf")" = "$want" ] || fail 'init did not write the policy of a stopped VM'
+    grep -q '^config set yard raw.qemu.conf ' "$MOCK_INCUS_LOG" || fail 'init left the stopped VM to its start'
+    ! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail 'init stopped an already stopped VM'
+  done
+done
+reset_state RUNNING 2 4GiB
+printf '[device "qemu_gpu"]\ndriver = "virtio-vga"\n' > "$MOCK_STATE_DIR/raw.qemu.conf"
+if YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 run_create; then fail 'foreign VM raw QEMU override accepted'; fi
+grep -Fq 'VM has conflicting raw QEMU configuration' "$TMP/output" || fail 'foreign override lost its diagnostic'
+! grep -Eq '^(stop|config set yard)' "$MOCK_INCUS_LOG" || fail 'foreign override changed the VM'
+# An inherited profile value and the instance override are reported together.
+if MOCK_PROFILE_RAW='[device "foreign"]' YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 run_create; then fail 'inherited raw QEMU configuration accepted'; fi
+grep -Fq 'VM profile has raw QEMU configuration; VM has conflicting raw QEMU configuration' "$TMP/output" \
+  || fail 'raw QEMU preflight dropped an independent finding'
+# A VM start without the engine refuses instead of booting unconfigured.
+reset_state STOPPED 2 4GiB
+if YARD_KIND=vm SUBYARD_DISPATCHER_PATH='' run_start; then fail 'VM start without its device policy engine was accepted'; fi
+grep -Fq 'VM start policy engine is unavailable' "$TMP/output" || fail 'missing start policy engine lost its diagnostic'
+! grep -q '^start ' "$MOCK_INCUS_LOG" || fail 'VM started without its device policy'
+
+export VM_CPU_WEIGHT=1000 VM_FREE_PAGE_REPORTING=1 MOCK_CPU_REAPPLY_EXIT=0
 for operation in run_create run_start; do
   for MOCK_CPU_REAPPLY_EXIT in 0 1; do
     reset_state STOPPED 2 4GiB
@@ -343,3 +436,4 @@ run_create
 
 printf 'ok: existing container and VM limits converge safely and preserve empty settings\n'
 printf 'ok: VM IPv4 pinning waits for the guest agent and rejects readiness timeout\n'
+printf 'ok: VM yards become headless at their next start without a restart and refuse foreign raw QEMU overrides\n'

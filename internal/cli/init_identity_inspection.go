@@ -352,7 +352,7 @@ func identityInspectionInstanceBinding(instance ports.InstanceInfo) string {
 	instance.Config = maps.Clone(instance.Config)
 	instance.LocalConfig = maps.Clone(instance.LocalConfig)
 	instance.Status = ""
-	reconcileruntime.DeleteInstanceLifecycleOutputs(instance.Config, devices, instance.Type == domain.YardVM)
-	reconcileruntime.DeleteInstanceLifecycleOutputs(instance.LocalConfig, devices, instance.Type == domain.YardVM)
+	reconcileruntime.NormalizeInstanceLifecycleConfig(instance.Config, devices, instance.Type == domain.YardVM)
+	reconcileruntime.NormalizeInstanceLifecycleConfig(instance.LocalConfig, devices, instance.Type == domain.YardVM)
 	return operationStateDigest(instance)
 }

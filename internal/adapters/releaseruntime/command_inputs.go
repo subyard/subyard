@@ -26,6 +26,7 @@ func CaptureCommandInputs(environment []string, isSetting func(string) bool) Com
 		}
 	}
 	delete(inputs.values, "SUBYARD_SUDO_PREAUTHORIZED")
+	delete(inputs.values, "SUBYARD_PRESERVE_VM_REPORTING")
 	if isSetting != nil {
 		for name := range inputs.values {
 			if isSetting(name) {

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Fixed owner-side QEMU override for an opted-in VM. Never accept raw
-# QEMU text from yard settings or a profile.
+# Fixed owner-side QEMU override for every VM yard. Never accept raw
+# QEMU text from yard settings or a profile. The Go owner of the same values
+# is internal/domain/vm_qemu.go.
 
+# An override section without keys removes the Incus default emulated GPU
+# (virtio-vga). It slows guest boot and shutdown and never renders with host
+# hardware, so every VM yard is headless.
+VM_NO_DISPLAY_CONF='[device "qemu_gpu"]'
 VM_PAGE_REPORTING_CONF=$'[device "qemu_balloon"]\nfree-page-reporting = "on"'
 VM_PAGE_REPORTING_TMPFILES_RULE='w /sys/module/page_reporting/parameters/page_reporting_order - - - - 1'
 
@@ -19,32 +24,65 @@ vm_page_reporting_check_host() {
     || { printf 'QEMU virtio-balloon-pci has no free-page-reporting property\n' >&2; return 1; }
 }
 
+# Every key is inspected, so all independent findings are reported together.
 vm_page_reporting_check_profile() { # <project>
-  local project="$1" key value
+  local project="$1" key value rc=0
   for key in raw.qemu raw.qemu.conf raw.qemu.qmp.early raw.qemu.qmp.pre-start \
              raw.qemu.qmp.post-start raw.qemu.scriptlet; do
     value="$(incus profile get default "$key" --project "$project")" \
-      || { printf 'cannot inspect inherited %s in VM project %s\n' "$key" "$project" >&2; return 1; }
+      || { printf 'cannot inspect inherited %s in VM project %s\n' "$key" "$project" >&2; rc=1; continue; }
     [ -z "$value" ] \
-      || { printf 'unexpected inherited %s in VM project %s\n' "$key" "$project" >&2; return 1; }
+      || { printf 'unexpected inherited %s in VM project %s\n' "$key" "$project" >&2; rc=1; }
   done
+  return "$rc"
 }
 
+# Whether a local value is one a release wrote for a VM yard: none, the
+# reporting-only value of releases that kept the emulated display, or a
+# current headless value.
+vm_raw_qemu_owner_conf() { # <value>
+  [ -z "$1" ] || [ "$1" = "$VM_PAGE_REPORTING_CONF" ] || [ "$1" = "$VM_NO_DISPLAY_CONF" ] \
+    || [ "$1" = "$VM_NO_DISPLAY_CONF"$'\n'"$VM_PAGE_REPORTING_CONF" ]
+}
+
+vm_raw_qemu_reporting_conf() { # <value>
+  [ "$1" = "$VM_PAGE_REPORTING_CONF" ] || [ "$1" = "$VM_NO_DISPLAY_CONF"$'\n'"$VM_PAGE_REPORTING_CONF" ]
+}
+
+# The owner value that replaces an owner <value>: headless, with reporting when
+# the yard requests it or <value> already enables it. Disabling reporting never
+# removes an installed override.
+vm_raw_qemu_target() { # <value>
+  # Hard cleanup is a recovery route of an authorized rollback. Preserve the
+  # installed reporting form, or create the form retained releases can read.
+  if [ "${SUBYARD_PRESERVE_VM_REPORTING:-0}" = 1 ] && { vm_page_reporting_required || vm_raw_qemu_reporting_conf "$1"; }; then
+    if vm_raw_qemu_reporting_conf "$1"; then printf '%s' "$1"; else printf '%s' "$VM_PAGE_REPORTING_CONF"; fi
+    return
+  fi
+  printf '%s' "$VM_NO_DISPLAY_CONF"
+  if vm_page_reporting_required || vm_raw_qemu_reporting_conf "$1"; then
+    printf '\n%s' "$VM_PAGE_REPORTING_CONF"
+  fi
+}
+
+# Refuses any raw QEMU override except, with allow-managed-local, an owner
+# raw.qemu.conf that is set locally rather than inherited.
 vm_page_reporting_check_raw() { # <project> <instance> [allow-managed-local]
-  local project="$1" instance="$2" managed="${3:-false}" key value local_conf
+  local project="$1" instance="$2" managed="${3:-false}" key value local_conf rc=0
   for key in raw.qemu raw.qemu.conf raw.qemu.qmp.early raw.qemu.qmp.pre-start \
              raw.qemu.qmp.post-start raw.qemu.scriptlet; do
     value="$(incus config get "$instance" "$key" --expanded --project "$project")" \
-      || { printf 'cannot inspect effective %s on %s/%s\n' "$key" "$project" "$instance" >&2; return 1; }
+      || { printf 'cannot inspect effective %s on %s/%s\n' "$key" "$project" "$instance" >&2; rc=1; continue; }
     [ -n "$value" ] || continue
     if [ "$key" = raw.qemu.conf ] && [ "$managed" = true ]; then
       local_conf="$(incus config get "$instance" "$key" --project "$project")" \
-        || { printf 'cannot inspect local %s on %s/%s\n' "$key" "$project" "$instance" >&2; return 1; }
-      [ "$local_conf" = "$VM_PAGE_REPORTING_CONF" ] && [ "$value" = "$VM_PAGE_REPORTING_CONF" ] && continue
+        || { printf 'cannot inspect local %s on %s/%s\n' "$key" "$project" "$instance" >&2; rc=1; continue; }
+      [ "$local_conf" = "$value" ] && vm_raw_qemu_owner_conf "$value" && continue
     fi
     printf 'unexpected effective %s on VM %s/%s\n' "$key" "$project" "$instance" >&2
-    return 1
+    rc=1
   done
+  return "$rc"
 }
 
 vm_page_reporting_check_guest_feature() { # <project> <instance>

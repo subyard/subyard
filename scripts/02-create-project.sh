@@ -37,16 +37,16 @@ if [ "$owner_phase" != after-project ]; then
 incus_preflight
 if vm_page_reporting_required; then
   [ "${YARD_KIND:-}" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
-  if incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
-    vm_page_reporting_check_profile "$INCUS_PROJECT" \
-      || die "VM profile has raw QEMU configuration"
-  fi
+fi
+if [ "${YARD_KIND:-}" = vm ] && incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
+  vm_page_reporting_check_profile "$INCUS_PROJECT" \
+    || die "VM profile has raw QEMU configuration"
 fi
 
 
 project_policy_summary="Apply the restricted policy: nesting allow, host disks/unix-char/proxy allowed (disk sources kept under '$RESTRICTED_DISK_PATHS' by tooling, not Incus policy — needed for idmapped 'shift' mounts)."
-if vm_page_reporting_required; then
-  project_policy_summary+=" Permit low-level VM configuration in this project so the owner can set Free Page Reporting on its existing QEMU balloon."
+if [ "${YARD_KIND:-}" = vm ]; then
+  project_policy_summary+=" Permit low-level VM configuration in this project so the owner can set its fixed QEMU device policy: no emulated display, and Free Page Reporting on the existing QEMU balloon when enabled."
 fi
 announce_confirm "Subyard Phase 1 — create restricted Incus project" \
   "Create Incus project '$INCUS_PROJECT' (if absent)." \

@@ -182,6 +182,16 @@ stopped. Thereafter explicit desired state survives reboot/update for every yard
 unmanaged instances import observed power. Remote owners restore their own yards. Inner broker
 VMs never autostart and wait for acquire.
 
+VM yards are headless: a fixed owner `raw.qemu.conf` removes the emulated GPU, which slowed boot
+and shutdown and never rendered with host hardware. Incus refuses that key on a running VM, so
+existing VMs change lazily at their next product start rather than through a migration restart;
+the readiness state is a diagnostic, not drift. Foreign raw QEMU configuration refuses and is
+never overwritten. Only the serial console remains; see
+[VM capabilities](../control-plane.md#dedicated-profiles-and-vm-capabilities).
+
+Rollback refuses installed headless-plus-reporting VM values unless the retained release's bound command manifest proves headless reader support through `_vm-start-policy`.
+Host-reboot restoration and hard-cleanup recovery (starts and recreation) preserve reporting VM values because they bypass admission; recreation uses reporting-only, and headless conversion waits for an admitted yard-command start so hard cleanup remains a recovery route for an authorized rollback.
+
 Teardown removes only selected/proven owned resources. Delete instance/veth before bridge, empty
 owned project before deleting it, remove network guard only after bridge absence, and backing
 data only after pool absence. Authoritative failed observations are not absence. Nested/source

@@ -127,6 +127,10 @@ func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContex
 		Stdout:         cli.options.Stdout,
 		Stderr:         cli.options.Stderr,
 		Progress:       cli.updateProgress,
+		YardInstance: func(ctx context.Context, loaded config.Loaded) (ports.InstanceInfo, error) {
+			incus, _ := cli.statusPorts()
+			return incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+		},
 		InstalledRuntimePresence: func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimePresence, error) {
 			operation := cli.releaseActivationOperation()
 			operation.options.RepositoryRoot = root

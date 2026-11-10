@@ -17,6 +17,9 @@ subyard_project_policy_config() {
   SUBYARD_PROJECT_POLICY_HEAD=(restricted=true restricted.containers.nesting=allow restricted.containers.privilege=unprivileged)
   if [ "${VM_FREE_PAGE_REPORTING:-0}" = 1 ]; then
     [ "${YARD_KIND:-}" = vm ] || return 1
+  fi
+  # Every VM yard carries the fixed owner raw.qemu.conf device policy.
+  if [ "${YARD_KIND:-}" = vm ]; then
     SUBYARD_PROJECT_POLICY_HEAD+=(restricted.virtual-machines.lowlevel=allow)
   fi
   if [ "${NESTED_E2E_VMS:-0}" = 1 ]; then

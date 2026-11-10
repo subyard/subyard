@@ -116,7 +116,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 			beforeCheckpoint, beforeErr := os.ReadFile(checkpointPath)
 			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: home, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious}
 			var output bytes.Buffer
-			runtime := New(Config{Stdout: &output, Stderr: &output})
+			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": filepath.Dir(home)}), Stdout: &output, Stderr: &output})
 			defer runtime.Close()
 			prepared, err := prepareCandidateTransitionForTest(runtime, context.Background(), options{root: root}, candidate, request)
 			allowed := kind == "complete" || kind == "newer-checkpoint" || kind == "known-old-pending"
@@ -161,7 +161,7 @@ func TestFreshRollbackRequiresSourceActivationCapabilityBeforeConsent(t *testing
 					RuntimeRoot: root, ConfigHome: root, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious,
 				}
 				var stdout bytes.Buffer
-				runtime := New(Config{Stdout: &stdout, Stderr: &bytes.Buffer{}})
+				runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root}), Stdout: &stdout, Stderr: &bytes.Buffer{}})
 				defer runtime.Close()
 				prepared, err := prepareCandidateTransitionForTest(runtime, context.Background(), options{root: root, check: check, json: true}, candidate, request)
 				if check {
@@ -249,7 +249,7 @@ func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T)
 			}
 			bindRollbackFixtureRegistry(t, candidate, registryPayload)
 			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: root, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious}
-			runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root}), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 			defer runtime.Close()
 			var prepared Prepared
 			if scenario.registryless {
