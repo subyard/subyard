@@ -1369,9 +1369,11 @@ def main():
                      else release_level(requested, args.level_reason, release_scope(identity["version"], identity["commit"]), recorded))
             record_release_level(output, level)
             print(f"RELEASE_LEVEL {level['level']} reason={level['reason']}", flush=True)
-            a.reuse_isolated_tests(output, earlier_candidates(state_dir, directory, identity))
+            previous = earlier_candidates(state_dir, directory, identity)
+            a.reuse_isolated_tests(output, previous)
             with a.acceptance_lock(output):
-                result = a.run_checks(output, args.slots, args.only, False, with_vms=args.with_vms or level["level"] == "full")
+                result = a.run_checks(output, args.slots, args.only, False,
+                                      with_vms=args.with_vms or level["level"] == "full", previous=previous)
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result

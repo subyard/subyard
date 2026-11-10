@@ -1710,31 +1710,35 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
     def test_transport_and_capacity_defaults_are_scoped_to_physical_controllers(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary)
-            root = output / "source"
-            receipt = {"version": "test", "source_fingerprint": "a" * 64, "profiles": {},
-                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
-                       "checks": {name: {"status": "pending"} for name in ("verify", "profile:sample")}}
-            observed = {}
-            def execute(name, command, root, output, environment, slot=None):
-                observed[name] = dict(environment)
-                return {"status": "passed", "exit_code": 0}
-            with patch.object(m, "load_bound", return_value=(root, receipt)), \
-                 patch.object(m, "commands", return_value={"verify": ["true"], "profile:sample": ["true"]}), \
-                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
-                 patch.object(m, "execute", side_effect=execute), \
-                 patch.dict(os.environ, {"SUBYARD_E2E_CANDIDATE_BUNDLE": "ambient",
-                                         "SUBYARD_E2E_CONTROLLER_WORKSPACE": "ambient"}):
-                os.environ.pop("SUBYARD_E2E_CAPACITY_WAIT", None)
-                self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 0)
-            self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", observed["verify"])
-            self.assertNotIn("SUBYARD_E2E_CONTROLLER_WORKSPACE", observed["verify"])
-            self.assertNotIn("SUBYARD_E2E_CAPACITY_WAIT", observed["verify"])
-            self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CAPACITY_WAIT"], m.LIVE_CAPACITY_WAIT)
-            self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CONTROLLER_WORKSPACE"], str(m.ROOT))
-            self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CANDIDATE_BUNDLE"],
-                             str(output / "candidate-bundle.tar.gz"))
+        for capacity_wait in (None, "7s"):
+            with self.subTest(capacity_wait=capacity_wait), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output = Path(temporary)
+                root = output / "source"
+                receipt = {"version": "test", "source_fingerprint": "a" * 64, "profiles": {},
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "checks": {name: {"status": "pending"} for name in ("verify", "profile:sample")}}
+                observed = {}
+                def execute(name, command, root, output, environment, slot=None):
+                    observed[name] = dict(environment)
+                    return {"status": "passed", "exit_code": 0}
+                with patch.object(m, "load_bound", return_value=(root, receipt)), \
+                     patch.object(m, "commands", return_value={"verify": ["true"], "profile:sample": ["true"]}), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m, "execute", side_effect=execute), \
+                     patch.dict(os.environ, {"SUBYARD_E2E_CANDIDATE_BUNDLE": "ambient",
+                                             "SUBYARD_E2E_CONTROLLER_WORKSPACE": "ambient"}):
+                    if capacity_wait is None:
+                        os.environ.pop("SUBYARD_E2E_CAPACITY_WAIT", None)
+                    else:
+                        os.environ["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 0)
+                self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", set(observed["verify"]))
+                self.assertNotIn("SUBYARD_E2E_CONTROLLER_WORKSPACE", set(observed["verify"]))
+                self.assertNotIn("SUBYARD_E2E_CAPACITY_WAIT", set(observed["verify"]))
+                self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CAPACITY_WAIT"], capacity_wait or m.LIVE_CAPACITY_WAIT)
+                self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CONTROLLER_WORKSPACE"], str(m.ROOT))
+                self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CANDIDATE_BUNDLE"],
+                                 str(output / "candidate-bundle.tar.gz"))
 
     def test_lane_inventory_family_exact_selection_and_complete_aggregate(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1881,6 +1885,53 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                                           "--slots", "1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(m.main(), 1)
             self.assertEqual(before, set(checkout.rglob("*")))
+
+    def test_live_duration_order_preserves_local_gates_priorities_and_unknown_order(self):
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            names = ("verify", "p0-release-smoke", "vm:slow", "vm:fast", "vm:unknown",
+                     "profile:sample/one", "profile:sample/two", "profile:sample/tie", "profile:sample/excluded")
+            checks = {name: ["true"] for name in names}
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "checks": {name: {"status": "pending"} for name in names}}
+            receipt["checks"]["vm:fast"] = {"status": "passed", "duration_seconds": 80}
+            previous = [output / name for name in ("newer", "older")]
+            for directory, durations in zip(previous, (
+                {"p0-release-smoke": 10, "vm:slow": 600, "vm:fast": 8000, "profile:sample/one": 300,
+                 "profile:sample/two": 1, "profile:sample/tie": 10, "profile:sample/excluded": 9000},
+                {"vm:fast": 9000, "profile:sample/tie": 1000},
+            )):
+                directory.mkdir()
+                (directory / "receipt.json").write_text(json.dumps({"checks": {
+                    name: {"status": "passed", "duration_seconds": duration} for name, duration in durations.items()}}))
+            started = []
+            def execute(name, *args):
+                started.append(name)
+                return {"status": "passed", "exit_code": 0}
+            with patch.object(m, "load_bound", return_value=(output / "source", receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                 patch.object(m, "execute", side_effect=execute):
+                self.assertEqual(m.run_checks(output, [1], [], True,
+                    first=["profile:sample/two", "profile:sample/one"], exclude=["profile:sample/excluded"],
+                    with_vms=True, previous=previous), 1)
+            self.assertEqual(started, ["verify", "profile:sample/two", "profile:sample/one", "vm:slow", "vm:fast",
+                                       "p0-release-smoke", "profile:sample/tie", "vm:unknown"])
+
+    def test_duration_hints_ignore_incomplete_invalid_and_unreadable_history(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            for value in ({"checks": {"vm:one": {"status": "passed", "duration_seconds": 7}}},
+                          {"checks": []}, [], "invalid json"):
+                (output / "receipt.json").write_text(value if isinstance(value, str) else json.dumps(value))
+                for status, duration in (("blocked", 1800), ("failed", 9000), ("interrupted", 2000),
+                                         ("passed", None), ("passed", True), ("passed", -1),
+                                         ("passed", float("inf")), ("passed", float("nan"))):
+                    receipt = {"checks": {"vm:one": {"status": status, "duration_seconds": duration}}}
+                    expected = {"vm:one": 7} if isinstance(value, dict) and isinstance(value["checks"], dict) else {}
+                    self.assertEqual(m.duration_estimates(receipt, [output / "missing", output]), expected)
 
     def test_first_order_dynamic_dispatch_resume_and_exclusions(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
@@ -2289,7 +2340,7 @@ while True: time.sleep(1)
                 ("fixture/unfinished", "start", 0, 0)])
             self.assertNotIn("do-not-export", json.dumps(events))
 
-    def test_prelease_capacity_refusal_continues_once_and_later_retries_same_candidate(self):
+    def test_prelease_capacity_refusal_retries_once_and_later_continues_same_candidate(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         for resource in ("memory", "disk"):
@@ -2321,7 +2372,7 @@ while True: time.sleep(1)
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
                      patch.object(m, "execute", side_effect=observe):
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                    self.assertEqual(calls, [(blocked, 1), (following, 1)])
+                    self.assertEqual(calls, [(blocked, 1), (following, 1), (blocked, 1)])
                     persisted = json.loads((output / "receipt.json").read_text())
                     self.assertEqual(persisted["result"], "incomplete")
                     self.assertEqual(persisted["checks"][blocked], original[blocked] | {
@@ -2331,7 +2382,7 @@ while True: time.sleep(1)
                     events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
                     attempts = [item for item in events if item["event"] == "check-result"]
                     self.assertEqual([(item["check"], item["status"]) for item in attempts],
-                                     [(blocked, "blocked"), (following, "passed")])
+                                     [(blocked, "blocked"), (following, "passed"), (blocked, "blocked")])
                     self.assertEqual(events[-1]["status"], "incomplete")
                     blocked_log = output / original[blocked]["log"]
                     log_bytes = blocked_log.read_bytes()
@@ -2347,6 +2398,61 @@ while True: time.sleep(1)
                     self.assertEqual(blocked_log.read_bytes(), log_bytes)
                     self.assertEqual((output / "events.jsonl").read_text().splitlines()[:len(events)],
                                      [json.dumps(item, sort_keys=True) for item in events])
+
+    def test_capacity_retry_waits_for_active_checks_and_records_both_attempts(self):
+        for slow_exit in (0, 23):
+            with self.subTest(slow_exit=slow_exit), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                directory = Path(temporary)
+                source, receipt = prepare_fixture(fixture_checkout(directory), directory / "acceptance")
+                output = directory / "acceptance"
+                blocked, slow, following = "profile:sample/one", "profile:sample/two", "profile:peer"
+                marker = output / "capacity-retried"
+                command = ["bash", "-c", 'test ! -f "$1" || exit 0\ntouch "$1"\n'
+                    "printf 'agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\\n'\nexit 4",
+                    "controller", str(marker)]
+                checks = {blocked: command, slow: ["bash", "-c", "exit " + str(slow_exit)], following: ["true"]}
+                # Local gate behavior is covered separately; use real execution and immutable records here.
+                receipt["checks"] = {name: {"status": "pending"} for name in checks}
+                started, finished = threading.Event(), threading.Event()
+                following_done = threading.Event()
+                calls = []
+                execute = m.execute
+                def observe(name, command, root, output, env, slot=None):
+                    calls.append((name, slot))
+                    if name == blocked:
+                        if marker.exists():
+                            self.assertTrue(finished.is_set(), "capacity retry overlapped an active first-pass check")
+                        else:
+                            self.assertTrue(started.wait(3))
+                    if name == slow:
+                        started.set()
+                        self.assertTrue(following_done.wait(3))
+                    result = execute(name, command, root, output, env, slot)
+                    if name == following:
+                        following_done.set()
+                    if name == slow:
+                        finished.set()
+                    return result
+                with patch.object(m, "load_bound", return_value=(source, receipt)), \
+                     patch.object(m, "commands", return_value=checks), \
+                     patch.object(m, "execution_environment", return_value=receipt["environment"]), \
+                     patch.object(m, "execute", side_effect=observe):
+                    self.assertEqual(m.run_checks(output, [1, 2], [], False, with_vms=True), 0 if slow_exit == 0 else 1)
+                self.assertEqual([name for name, _ in calls].count(blocked), 2)
+                self.assertEqual([name for name, _ in calls].count(slow), 1, "a failure was retried")
+                self.assertEqual(calls[-1][0], blocked)
+                if slow_exit:
+                    self.assertEqual(calls[-1][1], next(slot for name, slot in calls if name == blocked))
+                records = [json.loads(path.read_text()) for path in (output / "attempts").glob("*.json")]
+                attempts = [record for record in records if record["check"] == blocked]
+                self.assertCountEqual([record["result"]["status"] for record in attempts], ["blocked", "passed"])
+                self.assertEqual(len({record["id"] for record in attempts}), 2)
+                logs = [item for item in (output / "events.jsonl").read_text().splitlines()
+                        if json.loads(item)["event"] == "check-result" and json.loads(item)["check"] == blocked]
+                self.assertEqual(len({json.loads(item)["log"] for item in logs}), 2)
+                persisted = json.loads((output / "receipt.json").read_text())
+                record, _ = m.original_attempt(output, persisted, blocked, persisted["checks"][blocked])
+                self.assertEqual(record["result"]["status"], "passed")
 
     def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.

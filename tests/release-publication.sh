@@ -492,10 +492,11 @@ class Contracts(unittest.TestCase):
                 self.assertEqual((local / "identity.json").read_bytes(), original_identity)
                 github.repository = argv[4] = "SUBYARD/Subyard"
                 argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "1"]
-                with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1), \
+                with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1) as run, \
                      patch.object(m.a, "reuse_isolated_tests", wraps=m.a.reuse_isolated_tests) as reuse:
                     self.assertEqual(m.main(), 1)
                     reuse.assert_called_once_with(state_dir / identity["candidate_id"] / "acceptance", [])
+                    self.assertEqual(run.call_args.kwargs["previous"], reuse.call_args.args[1])
                     argv[4] = github.repository = "foreign/subyard"
                     with self.assertRaisesRegex(ValueError, "another candidate/repository"):
                         m.main()

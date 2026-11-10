@@ -1122,7 +1122,30 @@ def public_broker_status(path):
         return {"status": "unavailable", "reason": "invalid or unreadable public status"}
 
 
-def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False):
+def duration_estimates(receipt, previous):
+    # Advisory ordering only: never discover orphaned attempts or import their evidence.
+    history = [receipt]
+    for output in previous:
+        try:
+            history.append(json.loads((output / "receipt.json").read_text()))
+        except (OSError, ValueError):
+            continue
+    durations = {}
+    for candidate in history:
+        checks = candidate.get("checks", {}) if isinstance(candidate, dict) else {}
+        if not isinstance(checks, dict):
+            continue
+        for name, result in checks.items():
+            if not isinstance(result, dict):
+                continue
+            duration = result.get("duration_seconds")
+            if (result.get("status") == "passed" and type(duration) in (int, float)
+                and math.isfinite(duration) and duration >= 0):
+                durations.setdefault(name, duration)
+    return durations
+
+
+def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=()):
     root, receipt = load_bound(output)
     if receipt.get("superseded"):
         raise ValueError("candidate was explicitly superseded; prepare a new candidate")
@@ -1142,10 +1165,13 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
                       if name in prioritized and (name == selector or name.startswith(selector + "/"))]
     order = list(dict.fromkeys([*priority_order, *checks]))
     env = clean_environment()
+    capacity_wait = env.pop("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and (rerun or receipt["checks"][name]["status"] != "passed")]
     live = [name for name in pending if is_live(name)]
+    durations = duration_estimates(receipt, previous)
+    live.sort(key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
     if live and not slots:
         raise ValueError("live checks require --slots N [N ...]")
     try:
@@ -1208,7 +1234,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
             return 1
         # Only live checks wait for broker memory or disk instead of draining the queue on a
         # transient refusal; a refusal that outlasts this bound still blocks visibly.
-        env.setdefault("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
+        env["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
         # Physical controllers consume the frozen transport; local tests keep normal bundling.
         env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
                    SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
@@ -1217,12 +1243,13 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
         work = queue.Queue()
         for name in live:
             work.put(name)
+        retries = queue.Queue()
         def collect(slot):
             while not STOP.is_set():
                 try:
                     name = work.get_nowait()
                 except queue.Empty:
-                    return
+                    return slot
                 result = attempt(name, slot)
                 if result is None:
                     return
@@ -1234,12 +1261,17 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False)
                 capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
                                     and result.get("termination") == "exit"
                                     and result.get("reason") in ("capacity_memory", "capacity_disk"))
+                if capacity_blocked and not retrying:
+                    retries.put(name)
                 if result["status"] != "passed" and not capacity_blocked and not slot_continues_after(result):
                     return
         with ThreadPoolExecutor(max_workers=max(1, len(slots))) as pool:
-            futures = [pool.submit(collect, slot) for slot in slots]
-            for future in as_completed(futures):
-                future.result()
+            for retrying in (False, True):
+                futures = [pool.submit(collect, slot) for slot in slots]
+                slots = [slot for future in as_completed(futures) if (slot := future.result()) is not None]
+                # Wait for every first-pass controller to finish before retrying capacity blocks.
+                # Only workers that drained their queue remain safe to reuse.
+                work = retries
         if source_fingerprint(root) != receipt["source_fingerprint"]:
             receipt["checks"]["verify"]["status"] = "failed"
             receipt["error"] = "source changed during acceptance"

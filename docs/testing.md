@@ -642,7 +642,9 @@ Positive headroom does not prove the selected types fit: compare it with their a
 and preserve the reported reserves. Run this worktree preflight before `prepare` and the local gates
 to avoid an obviously unsuitable attempt. The supplied snapshot is advisory; current native broker
 admission remains authoritative. Use `run --first CHECK` to prioritize the original
-regression after required local gates. Explicit `--exclude CHECK` leaves the required gate incomplete.
+regression after required local gates. Remaining live checks run longest-first using successful
+durations in the current receipt, then earlier candidate receipts already found by release publication.
+Unknown durations and ties retain declaration order. Explicit `--exclude CHECK` leaves the required gate incomplete.
 
 Select available slots using `dev/agent-e2e.sh --status`; each slot runs one controller at a time.
 Source fingerprints use Git executable-bit semantics; snapshots normalize public file modes explicitly,
@@ -672,8 +674,10 @@ and ordered `lanes` entries containing `id` and runner `arguments`. Explicit `--
 every runnable lane; `--only profile:NAME/ID` requests one lane. Available approved slots take the
 next queued check after their controller exits. A typed `blocked/capacity_memory` or
 `blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
-next independent check. The blocked attempt is recorded and is never requeued in that run;
-the candidate remains incomplete. Failures, interruptions, unknown refusals and attempts that
+next independent check. After all first-pass controllers finish, capacity-blocked checks are
+retried once on slots whose workers drained the queue. Both attempts retain their logs and
+immutable records; a second capacity block leaves the candidate incomplete.
+Failures, interruptions, unknown refusals and attempts that
 reached a lease or guest start stop that worker's queue. Exit 4 alone does not permit continuation.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
