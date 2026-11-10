@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published Paseo -> packaged removal, including a foreign unit and a stopped yard.
+# Published anchor -> candidate, then synthetic retained Paseo artifacts and removal.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 [[ "${2:-}" =~ ^[0-9]{1,10}$ ]] || { printf 'expected fresh numeric token\n' >&2; exit 2; }
@@ -11,13 +11,11 @@ cd "$ROOT"
 # shellcheck source=dev/e2e/published-baseline.sh
 . "$ROOT/dev/e2e/published-baseline.sh"
 CONFIG_HOME="$OPERATOR_HOME/.config/subyard"
-# shellcheck source=tests/helpers/known-release-final-check.sh
-. "$ROOT/tests/helpers/known-release-final-check.sh"
 YARDS=(default solo foreign)
 SENTINEL=/srv/agents/paseo/worktrees/fixture/unpushed
 FOREIGN_UNIT=/etc/systemd/system/paseo.service
 FOREIGN_DATA=/srv/agents/paseo/data/foreign-sentinel
-LOGS=(update-check.json update-check.txt update.log status-default.json status-solo.json status-foreign.json
+LOGS=(anchor-update.log update-check.json update-check.txt update.log status-default.json status-solo.json status-foreign.json
   stopped-status.json stopped-plan.log stopped-init.log stopped-repeat-init.log stopped-proven-status.json solo-start.log
   solo-stop.log stopped-before-init.json stopped-migrate.log stopped-ready.json solo-restart.log
   solo-final-stop.log solo-final-start.log
@@ -98,8 +96,8 @@ seed_settings() {
     printf "BASE_IMAGE=images:debian/13/cloud\nBASE_IMAGE_FALLBACK=images:debian/13/cloud\n" >> "$1"' _ "$CONFIG_HOME/config.env"
   for name in "${YARDS[@]}"; do
     case "$name" in
-      default) port=2222; selection="'codex paseo'" ;;
-      solo) port=2233; selection=paseo ;;
+      default) port=2222; selection=codex ;;
+      solo) port=2233; selection=none ;;
       foreign) port=2244; selection=codex ;;
     esac
     operator_env install -d -m 0700 "$CONFIG_HOME/yards/$name"
@@ -132,14 +130,34 @@ wait_active() {
     guest_yard "$name" systemctl is-active --quiet paseo.service && return
     sleep 1
   done
-  die 'published Paseo did not become active'
+  die 'synthetic retained Paseo did not become active'
 }
 
 seed_guests() {
   local name
+  # The anchor already retires Paseo. Seed explicit leftovers only after the
+  # candidate is active, so this tests its removal contract without a false
+  # claim that the anchor still installs the retired package.
   for name in "${YARDS[@]}"; do
-    [ "$name" = foreign ] || wait_active "$name"
+    [ "$name" = foreign ] && continue
+    guest_yard "$name" sh -eu -c '
+      install -d /opt/subyard/paseo /var/lib/subyard /srv/agents/paseo/worktrees
+      printf "%s\n" synthetic-retained-package > /var/lib/subyard/paseo-ownership
+      printf "%s\n" "[Service]" "ExecStart=/usr/bin/sleep infinity" "[Install]" "WantedBy=multi-user.target" > /etc/systemd/system/paseo.service
+      chmod 0644 /etc/systemd/system/paseo.service
+      systemctl daemon-reload
+      systemctl enable --now paseo.service
+    '
+    wait_active "$name"
   done
+  operator_env python3 - "$CONFIG_HOME/yards" <<'PY'
+import pathlib, re, sys
+for name, selection in (('default', "'codex paseo'"), ('solo', 'paseo')):
+    path = pathlib.Path(sys.argv[1]) / name / 'config.env'
+    path.write_text(re.sub(r'^CODING_TOOL_INTEGRATIONS=.*$', 'CODING_TOOL_INTEGRATIONS=' + selection,
+                           path.read_text(), flags=re.M))
+PY
+  operator_env bash -c 'sha256sum "$1"/yards/*/config.env' _ "$CONFIG_HOME" > "$STATE_ROOT/settings.before"
   guest_yard default test -f /var/lib/subyard/paseo-ownership
   guest_yard default sh -eu -c 'install -d "$(dirname "$1")"; printf "%s\n" "$2" > "$1"' subyard "$SENTINEL" "$MARKER"
   # Removal also deletes this unrelated same-name service and its non-worktree data.
@@ -204,36 +222,6 @@ update_candidate() {
     "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" "$@"
 }
 
-finish_known_final_check() {
-  local original="$1" current rc=0
-  [ "$original" = 1 ] || report_failure "unexpected released caller native_exit=$original" "$STATE_ROOT/update.log" || return 1
-  tr -d '\r' < "$STATE_ROOT/update.log" | grep -Fx \
-    'yard: update: final update check: the inspected release transition has not started; next: run yard update' >/dev/null \
-    || report_failure 'released caller did not report the exact known final-check refusal' "$STATE_ROOT/update.log" || return 1
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || report_failure 'candidate is not active after released caller' || return 1
-  current="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" || report_failure 'cannot read active candidate link' || return 1
-  [[ "$current" = "releases/$CANDIDATE_VERSION-"* ]] || report_failure "unexpected active release: $current" || return 1
-  current="${current#releases/}"
-  run_checked final-check.json 'known final-check inspection' operator_yard migrate --check --json || return 1
-  run_checked final-journal.json 'known final-check journal capture' operator_env cat "$CONFIG_HOME/release-transition/v2/journal.json" || return 1
-  # The retained old-caller log has no fresh decision JSON. Keep the exact shared
-  # materialized-only allowlist; disclose and refuse any different decision set.
-  jq '{outcome: (.outcome | {status,code,active,target}), decisions, blockers}' "$STATE_ROOT/final-check.json"
-  known_materialized_final_check "$STATE_ROOT/final-check.json" "$STATE_ROOT/final-journal.json" \
-    "$current" "${OLD_RELEASE_TARGET#releases/}" \
-    || report_failure 'candidate state is not the exact known materialized-only refusal' "$STATE_ROOT/final-check.json" "$STATE_ROOT/final-journal.json" || return 1
-  printf 'paseo-removal: released caller native_exit=%s; one candidate materialized-config repair\n' "$original"
-  update_candidate --yes > "$STATE_ROOT/final-repair.log" 2>&1 || rc=$?
-  cat "$STATE_ROOT/final-repair.log"
-  printf 'paseo-removal: candidate follow-up native_exit=%s\n' "$rc"
-  [ "$rc" = 0 ] || report_failure "candidate follow-up failed native_exit=$rc" "$STATE_ROOT/final-repair.log" || return 1
-  run_checked final-ready.json 'final readiness inspection' operator_yard migrate --check --json || return 1
-  check_json "$STATE_ROOT/final-ready.json" 'candidate follow-up final readiness is not ready' \
-    --arg target "$current" '.outcome.status == "ready" and .outcome.code == "ready" and
-    .outcome.reachedGoal == true and .outcome.active == $target and .outcome.target == $target and
-    (.blockers // []) == []'
-}
-
 prepare_acceptance() {
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
@@ -248,21 +236,20 @@ prepare_acceptance() {
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   seed_settings
   create_yards
+  update_candidate --yes > "$STATE_ROOT/anchor-update.log" 2>&1 || die 'anchor update failed before synthetic retirement setup'
+  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active before retirement setup'
   seed_guests
   operator_yard -Y solo stop --yes
   update_candidate --check --json > "$STATE_ROOT/update-check.json" || die 'update check failed with Paseo selected'
   jq -e '(.blockers | length) == 0' "$STATE_ROOT/update-check.json" >/dev/null || die 'Paseo produced an update blocker'
-  # Frozen protocol evidence: the old updater renders the candidate consequence.
+  # The candidate assesses the explicitly seeded retained artifacts.
   update_candidate --check > "$STATE_ROOT/update-check.txt" 2>&1 || true
   grep -Fq 'retire integration paseo' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
-    || die 'old updater preview omitted the retirement'
+    || die 'candidate preview omitted the retirement'
   grep -Fq 'run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
     || die 'update check omitted the stopped yard action'
-  update_candidate --yes > "$STATE_ROOT/update.log" 2>&1 || {
-    local rc=$?
-    tail -c 16384 "$STATE_ROOT/update.log" >&2
-    finish_known_final_check "$rc" || return "$rc"
-  }
+  update_candidate --yes > "$STATE_ROOT/update.log" 2>&1 \
+    || { report_failure 'candidate retirement failed' "$STATE_ROOT/update.log"; return 1; }
   grep -Fq 'Warning: yard default: retire integration paseo' "$STATE_ROOT/update.log" \
     || die 'unattended update omitted the retirement warning'
   [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate was not activated'
@@ -322,7 +309,7 @@ assert_stopped_yard_finishes() {
   grep -Fq 'retired integration paseo may still be installed in yard solo; run: yard migrate' "$STATE_ROOT/solo-start.log" \
     || { report_failure 'start did not name the remaining migrate step' "$STATE_ROOT/solo-start.log"; return 1; }
   [ "$(incus config get yard-solo user.subyard.disk_tmp --project subyard-solo)" = v1 ] \
-    || die 'start did not complete the disk-/tmp marker'
+    || die 'start lost the disk-/tmp marker'
   guest_yard solo sh -s -- check < "$ROOT/scripts/guest-disk-tmp.sh" || die 'start left active /tmp memory-backed'
   # Ordinary stop is gated until migrate repairs this now-running guest. Simulate an
   # external shutdown only inside our owned namespace to test stopped retirement.

@@ -2775,142 +2775,6 @@ grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' 
   || fail "host-free engine release can observe the physical host power reconciler"
 v0111_recovery="$ROOT/dev/e2e/release-transition-v0111-recovery.sh"
 v0111_observer="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
-assert_v0111_inspection_size_contract() {
-  local scenario probe output
-  for scenario in bounded oversized-output oversized-journal; do
-    probe="$TMP/v0111-inspection-$scenario"
-    install -d -m 0700 "$probe"
-    output="$probe/diagnostics.log"
-    bash -c '
-      set -euo pipefail
-      source "$1"
-      probe=$2
-      scenario=$3
-      STATE_ROOT="$probe/state"
-      SUCCESS_ROOT="$STATE_ROOT/success"
-      MARKER=subyard-p0-v0111-123
-      select_fixture success
-      install -d -m 0700 "$CONFIG_HOME/release-transition/v2"
-      python3 - "$probe/update.json" "$JOURNAL" "$scenario" <<"PY"
-import json, pathlib, sys
-report = {"outcome": {"status": "ready", "code": "ready"}, "assessment": {"changed": False}}
-journal = {"transaction": "source", "checkpoint": "reconciling"}
-if sys.argv[3] == "oversized-output":
-    report["padding"] = "x" * 70000
-if sys.argv[3] == "oversized-journal":
-    journal["padding"] = "x" * 70000
-pathlib.Path(sys.argv[1]).write_text(json.dumps(report) + "\n")
-pathlib.Path(sys.argv[2]).write_text(json.dumps(journal) + "\n")
-PY
-      jq() {
-        [ "$1" != -cs ] || touch "$probe/jq-slurp"
-        command jq "$@"
-      }
-      recovery_inspection_diagnostics "$probe/update.json"
-    ' _ "$v0111_recovery" "$probe" "$scenario" >"$output" 2>&1 \
-      || fail "historical inspection diagnostics failed: $scenario"
-    if [ "$scenario" = bounded ]; then
-      [ -e "$probe/jq-slurp" ] \
-        && grep -q '^release-recovery inspection {"parse_valid":true,"report_count":1,' "$output" \
-        || fail 'bounded historical inspection did not summarize its report'
-    else
-      [ ! -e "$probe/jq-slurp" ] \
-        && grep -qx 'release-recovery inspection parse_valid=unavailable size_limit=65536' "$output" \
-        && ! grep -q 'xxxxxxxx' "$output" \
-        || fail "oversized historical inspection reached jq slurp: $scenario"
-    fi
-  done
-}
-assert_v0111_inspection_size_contract
-assert_v0111_materialized_oracle_contract() {
-  local scenario output expected_error
-  for scenario in composed raw-only missing wrong-source body-drift extra host-mutated \
-    pending conflict unselected status-unavailable; do
-    output="$TMP/v0111-materialized-$scenario.log"
-    if bash -c '
-      set -euo pipefail
-      source "$1"
-      scenario="$2"
-      HOME_ROOT="$3/$scenario"
-      FIXTURE=success
-      FIXTURE_MARKER=subyard-p0-v0111-success-123
-      INSTANCE=yard-v0111-success-123
-      PROJECT=subyard-v0111-success-123
-      YARD_NAME=v0111-success-123
-      RUNTIME_ROOT="$HOME_ROOT/runtime"
-      guest="$HOME_ROOT/guest-AGENTS.md"
-      install -d -m 0700 "$HOME_ROOT/host"
-      printf "# %s\nThe v0.11.1 %s fixture owns this file.\n" \
-        "$FIXTURE_MARKER" "$FIXTURE" > "$HOME_ROOT/host/AGENTS.md"
-      {
-        cat "$HOME_ROOT/host/AGENTS.md"
-        printf "\n\n"
-        cat <<"PREVIEW"
-<!-- subyard-preview -->
-For a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. Owner URLs require network reachability (and Tailnet policy access for Tailscale). A loopback URL is local to the yard; provide the operator-machine tunnel recipe from `subyard-preview --help` only when the operator requests it. The helper must stay running.
-<!-- /subyard-preview -->
-PREVIEW
-      } > "$guest"
-      [ "$scenario" = composed ] || cp "$HOME_ROOT/host/AGENTS.md" "$guest"
-      chmod 0600 "$HOME_ROOT/host/AGENTS.md" "$guest"
-      case "$scenario" in
-        raw-only) cp "$HOME_ROOT/host/AGENTS.md" "$guest" ;;
-        missing) guest="$HOME_ROOT/missing-AGENTS.md" ;;
-        wrong-source) sed -i "1s/success/other/" "$guest" ;;
-        body-drift) sed -i "s/The v0.11.1/The changed v0.11.1/" "$guest" ;;
-        extra) printf "unowned content\n" >> "$guest" ;;
-        host-mutated) printf "changed host input\n" >> "$HOME_ROOT/host/AGENTS.md" ;;
-      esac
-      incus() {
-        [ "$*" = "exec $INSTANCE --project $PROJECT -- sha256sum /home/dev/.codex/AGENTS.md" ] \
-          || exit 97
-        command sha256sum "$guest"
-      }
-      fixture_env() {
-        [ "$*" = "$RUNTIME_ROOT/current/bin/yard -Y $YARD_NAME integration status codex --json" ] \
-          || exit 98
-        case "$scenario" in
-          pending) printf "%s\n" "{\"observed\":\"pending\",\"selection\":{\"effective\":[\"codex\"]}}" ;;
-          conflict) printf "%s\n" "{\"observed\":\"conflict\",\"selection\":{\"effective\":[\"codex\"]}}" ;;
-          unselected) printf "%s\n" "{\"observed\":\"ready\",\"selection\":{\"effective\":[]}}" ;;
-          status-unavailable) return 1 ;;
-          *) printf "%s\n" "{\"observed\":\"ready\",\"selection\":{\"effective\":[\"codex\"]}}" ;;
-        esac
-      }
-      assert_materialized_fixed_point
-    ' _ "$v0111_recovery" "$scenario" "$TMP/v0111-materialized" >"$output" 2>&1; then
-      [ "$scenario" = raw-only ] \
-        || fail "v0.11.1 materialization oracle accepted $scenario"
-    else
-      case "$scenario" in
-        raw-only) fail 'v0.11.1 materialization oracle rejected exact configured instructions' ;;
-        host-mutated) expected_error='changed the configured host instructions' ;;
-        missing) expected_error='Codex target is unavailable' ;;
-        pending|conflict|unselected) expected_error='Codex integration is not at its native fixed point' ;;
-        status-unavailable) expected_error='integration status is unavailable' ;;
-        *) expected_error='did not materialize the configured Codex target' ;;
-      esac
-      grep -Fq "$expected_error" "$output" \
-        || fail "v0.11.1 materialization oracle did not check $scenario"
-      case "$scenario" in
-        composed|wrong-source|body-drift|extra)
-          [ "$(grep -Ec '^release-recovery materialized-codex stage=current expected_sha256=[a-f0-9]{64} actual_sha256=[a-f0-9]{64}$' "$output")" = 1 ] \
-            || fail 'materialization mismatch did not retain one bounded digest diagnostic' ;;
-      esac
-    fi
-  done
-}
-assert_v0111_materialized_oracle_contract
-grep -Fq 'OLD_VERSION=0.9.1' "$v0111_recovery" \
-  && grep -Fq 'SOURCE_VERSION=0.11.1' "$v0111_recovery" \
-  && grep -Fq 'CANDIDATE_VERSION=0.11.2' "$v0111_recovery" \
-  && grep -Fq '5bd3c61e3dd39cb2d258be5cd75237383f00eff0512c77a3a5ca75d96e6b992b' \
-    "$v0111_recovery" \
-  && grep -Fq '41acb799e55cf82cdbbef8e7f75e8e17c2df344c1ceeb748181fb6aec7ea6f8d' \
-    "$v0111_recovery" \
-  && [ "$(grep -Fc 'https://github.com/Subyard/Subyard/releases/download/v$version/subyard-install.sh' \
-    "$v0111_recovery")" -eq 1 ] \
-  || fail 'v0.11.1 recovery fixture does not bind both official predecessor installers'
 v0111_fixture_env="$(bash -c '
   set -euo pipefail
   source "$1"
@@ -3170,7 +3034,6 @@ fi
     "$v0111_queued_probe/stderr" \
   || fail 'v0.11.1 observer accepted a queued activation after transition exit'
 grep -Fq 'STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"' "$v0111_recovery" \
-  && grep -Fq -- '-c features.images=false -c user.p0-release-recovery="$FIXTURE_MARKER"' "$v0111_recovery" \
   && grep -Fq 'assert_state_root' "$v0111_recovery" \
   && grep -Fq 'assert_fixture_root' "$v0111_recovery" \
   && grep -Fq 'assert_project_marker' "$v0111_recovery" \
@@ -3227,41 +3090,7 @@ bash -c '
   if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
   exec {coordination_fd}<&-
   require_absent_legacy_power
-  TEST_VMS_SINK="$2/sink"
-  TEST_VMS_SINK_SERVICE="$2/sink.service"
-  TEST_VMS_SINK_TIMER="$2/sink.timer"
-  sink_before="$(sink_coordination_binding)"
-  assert_native_resources_absent
-  [ "$(sink_coordination_binding)" = "$sink_before" ]
-  for resource in sink sink.service sink.timer; do
-    install -m 0600 /dev/null "$2/.$resource.native-install.lock"
-    printf "{\"generation\":\"%064d\",\"owner\":\"test-vms-host-sink\",\"version\":1}\n" 0 > "$2/.$resource.native-custody.json"
-    chmod 0644 "$2/.$resource.native-custody.json"
-  done
-  [ "$(sink_coordination_binding)" != "$sink_before" ]
-  sink_before="$(sink_coordination_binding)"
-  assert_native_resources_absent
-  [ "$(sink_coordination_binding)" = "$sink_before" ]
-  for resource in "$TEST_VMS_SINK" "$TEST_VMS_SINK_SERVICE" "$TEST_VMS_SINK_TIMER"; do
-    printf "foreign survivor\n" > "$resource"
-    if (assert_native_resources_absent) >/dev/null 2>&1; then exit 1; fi
-    [ "$(cat "$resource")" = "foreign survivor" ]
-    rm "$resource"
-  done
-  printf "{\"generation\":\"%064d\",\"owner\":\"test-vms-host-sink\",\"version\":1}\n" 1 > "$2/.sink.native-custody.json"
-  [ "$(sink_coordination_binding)" != "$sink_before" ]
-  chmod 0664 "$2/.sink.native-custody.json"
-  if (sink_coordination_binding) >/dev/null 2>&1; then exit 1; fi
-  chmod 0644 "$2/.sink.native-custody.json"
-  exec {sink_fd}<"$2/.sink.native-install.lock"
-  flock -n "$sink_fd"
-  if (sink_coordination_binding) >/dev/null 2>&1; then exit 1; fi
-  exec {sink_fd}<&-
-  printf "foreign survivor\n" > "$POWER_RECONCILER"
-  if (assert_native_resources_absent) > "$2/survivor.log" 2>&1; then exit 1; fi
-  grep -Fq "resource_kind=power-helper artifact_kind=installed-resource" "$2/survivor.log"
-  [ "$(cat "$POWER_RECONCILER")" = "foreign survivor" ]
-  rm "$POWER_RECONCILER"
+
 ' _ "$v0111_recovery" "$TMP/v0111-default-power" \
   || fail 'historical recovery power boundary did not preserve exact coordination custody'
 # Begin newer fixture handoff contract.
@@ -3340,7 +3169,7 @@ done
 # End newer fixture handoff contract.
 
 # Exercise the actual EXIT cleanup and yard alias with shared default power paths.
-for v0111_cleanup_case in current-refusal failed-exit helper unit enablement loaded active main-pid control-pid late-unit absent; do
+for v0111_cleanup_case in failed-exit helper unit enablement loaded active main-pid control-pid late-unit absent; do
   bash -c '
     set -euo pipefail
     source "$1" 123
@@ -3371,19 +3200,18 @@ for v0111_cleanup_case in current-refusal failed-exit helper unit enablement loa
     fi
     SUCCESS_ARMED=1
     CLEANUP_ARMED=1
-    [ "$scenario" != current-refusal ] || CURRENT_UNINSTALL_REFUSED=success
     case "$scenario" in
-      current-refusal|failed-exit|helper)
+      failed-exit|helper)
         printf "foreign helper\n" > "$POWER_RECONCILER"
         chmod 0751 "$POWER_RECONCILER" ;;
     esac
     case "$scenario" in
-      current-refusal|failed-exit|unit)
+      failed-exit|unit)
         printf "ExecStart=%s _power-reconcile\n" "$POWER_RECONCILER" > "$POWER_UNIT"
         chmod 0640 "$POWER_UNIT" ;;
     esac
     case "$scenario" in
-      current-refusal|failed-exit|enablement) ln -s unit "$POWER_UNIT_ENABLEMENT" ;;
+      failed-exit|enablement) ln -s unit "$POWER_UNIT_ENABLEMENT" ;;
     esac
     capture_fixture_failure_logs() { printf "%s\n" "$FIXTURE" >> "$probe/failure-capture"; }
     snapshot() {
@@ -5072,55 +4900,6 @@ for release_smoke_failure in success prepare reboot finish; do
   fi
 done
 
-# Failed current installers retain their native result and print bounded evidence.
-for current_capture_case in native-one native-seventeen capture-fails; do
-  current_capture_root="$TMP/current-capture-$current_capture_case"
-  install -d -m 0700 "$current_capture_root"
-  set +e
-  CURRENT_CAPTURE_CASE="$current_capture_case" CURRENT_CAPTURE_ROOT="$current_capture_root" \
-    CURRENT_CAPTURE_FUNCTIONS="$(fixture_functions "$ROOT/dev/e2e/release-transition-v0111-recovery.sh" \
-      upgrade_to_current_candidate capture_fixture_failure_logs cleanup_failure_diagnostics fixture_root_is_marked)" \
-    ROOT="$ROOT" bash -c '
-      set -euo pipefail
-      eval "$CURRENT_CAPTURE_FUNCTIONS"
-      FIXTURE=success FIXTURE_ROOT="$CURRENT_CAPTURE_ROOT" FIXTURE_MARKER=capture-synthetic YARD_NAME=synthetic
-      printf "%s\n" "$FIXTURE_MARKER" > "$FIXTURE_ROOT/.subyard-p0-marker"
-      CURRENT_VERSION=candidate CURRENT_RUNTIME_SHA256=fixture CURRENT_RELEASE_ROOT="$FIXTURE_ROOT/release"
-      prepare_current_fixture_inputs() { :; }
-      fixture_env() {
-        [ "$#" = 8 ] && [ "$1" = env ] \
-          && [ "$2" = "YARD_RELEASE_BASE_URL=file://$CURRENT_RELEASE_ROOT" ] \
-          && [ "$3" = "YARD_RELEASE_VERSION=$CURRENT_VERSION" ] \
-          && [ "$4" = bash ] && [ "$5" = "$CURRENT_RELEASE_ROOT/subyard-install.sh" ] \
-          && [ "$6:$7:$8" = "--version:$CURRENT_VERSION:--yes" ] || exit 99
-        printf "Status: migration-required\n" >&2
-        printf "PRIVATE_FIXTURE_VALUE=must-not-print\n"
-        printf "retained source install failure\n" > "$FIXTURE_ROOT/source-install.log"
-        [ "$CURRENT_CAPTURE_CASE" != native-seventeen ] || return 17
-        return 1
-      }
-      if [ "$CURRENT_CAPTURE_CASE" = capture-fails ]; then capture_fixture_failure_logs() { return 23; }; fi
-      upgrade_to_current_candidate
-      exit 98
-    ' > "$current_capture_root/output" 2>&1
-  current_capture_rc=$?
-  set -e
-  current_capture_expected=1
-  [ "$current_capture_case" != native-seventeen ] || current_capture_expected=17
-  [ "$current_capture_rc" = "$current_capture_expected" ] \
-    || fail "current installer lost native exit to capture: $current_capture_case exit=$current_capture_rc"
-  grep -Fq "stage=current-upgrade native_status=$current_capture_expected" "$current_capture_root/output" \
-    || fail 'current installer failure did not identify its stage and native status'
-  if [ "$current_capture_case" = capture-fails ]; then
-    grep -Fq 'failure-log capture_failed=true' "$current_capture_root/output" || fail 'capture failure disappeared'
-  else
-    grep -Fq 'Status: migration-required' "$current_capture_root/output" \
-      && grep -Fq 'retained source install failure' "$current_capture_root/output" \
-      && ! grep -Fq 'must-not-print' "$current_capture_root/output" \
-      || fail 'current installer did not print bounded operation diagnostics safely'
-  fi
-done
-
 # The default fixture's native target must not leak into its cleanup sentinel.
 (
   eval "$(fixture_functions "$ROOT/dev/e2e/integration-selection.sh" write_default_native_target)"
@@ -5367,6 +5146,7 @@ power_rollback_fixture_contract() {
         mv "$STATE_ROOT/project.next" "$STATE_ROOT/project"
       fi
     }
+    verify_legacy_rollback_refusal
     finish_candidate_flow
     assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
     [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] && [ -f "$STATE_ROOT/passed" ] || die 'compatible cycle incomplete'
@@ -5580,6 +5360,7 @@ smoke_rollback_fixture_contract() {
       establish_smoke_ownership
       operator_yard init --yes
     fi
+    verify_predecessor_rollback_refusal
     finish_smoke
     [ "$(wc -l < "$STATE_ROOT/enrollments")" = 1 ] \
       && [ "$(wc -l < "$STATE_ROOT/plain-inits")" = 2 ] || die 'smoke lost enrollment or repeated ordinary init'
@@ -5754,174 +5535,6 @@ for smoke_checkpoint_scenario in success missing-observation wrong-interruption-
     ! grep -q 'fresh-process resume passed' "$smoke_checkpoint_log" \
       || fail 'checkpoint fixture reported PASS before checking preserved state'
   fi
-done
-
-# shellcheck disable=SC2034 # context globals are consumed by the extracted fixture helper
-reliable_migrations_fixture_contract() {
-  (
-    eval "$(sed -n '/^create_local_yard() {/,/^}/p' "$ROOT/dev/e2e/reliable-migrations-recovery.sh")"
-    MARKER=synthetic-reliable-migrations
-    PROJECT_MUTATION_ARMED="$TMP/reliable-migrations-project-armed"
-    OWNED_EXTRA_YARDS=()
-    fixture_state='' fixture_intent='' fixture_starts=0
-    incus() {
-      case "$1 $2" in
-        'project show') return 1 ;;
-        'project create') ;;
-        *) fail 'unexpected reliable migrations fixture Incus call' ;;
-      esac
-    }
-    operator_yard() {
-      [ "$1" = -Y ] || fail 'fixture omitted explicit yard selection'
-      case "$3" in
-        init)
-          fixture_state=STOPPED fixture_intent=stopped
-          [ "$2" != default ] || { fixture_state=RUNNING; fixture_intent=running; }
-          ;;
-        start)
-          fixture_state=RUNNING fixture_intent=running
-          fixture_starts=$((fixture_starts + 1))
-          ;;
-        *) fail 'unexpected reliable migrations fixture yard command' ;;
-      esac
-    }
-    create_local_yard stopped
-    [ "$fixture_state" = STOPPED ] && [ "$fixture_intent" = stopped ] \
-      && [ "$fixture_starts" = 0 ] \
-      || fail 'stopped migration fixture was unnecessarily started or changed power intent'
-    for fixture_yard in default named; do
-      fixture_starts=0
-      create_local_yard "$fixture_yard"
-      [ "$fixture_state" = RUNNING ] && [ "$fixture_intent" = running ] \
-        && [ "$fixture_starts" = 1 ] \
-        || fail 'running migration fixture lost its explicit start'
-    done
-  )
-  local diagnostic_root="$TMP/private-diagnostic-sentinel" diagnostic_output diagnostic_rc=0
-  install -d -m 0700 "$diagnostic_root"
-  cat > "$diagnostic_root/diagnostic-helper.sh" <<'SH'
-helper_failure() { return 37; }
-helper_failure
-SH
-  chmod 0600 "$diagnostic_root/diagnostic-helper.sh"
-  diagnostic_output="$(DIAGNOSTIC_SENTINEL=private-environment-sentinel bash -Eeuo pipefail -c '
-    eval "$(sed -n '\''/^trap .* ERR$/p'\'' "$1")"
-    . "$2"
-  ' _ "$ROOT/dev/e2e/reliable-migrations-recovery.sh" \
-    "$diagnostic_root/diagnostic-helper.sh" private-argument-sentinel 2>&1)" || diagnostic_rc=$?
-  [ "$diagnostic_rc" = 37 ] \
-    && [[ "$diagnostic_output" =~ ^reliable-migrations-recovery:\ diagnostic-helper\.sh\ line\ [0-9]+\ failed\ \(exit\ 37\)$ ]] \
-    || fail 'fixture error diagnostic lost its source basename or original exit, or exposed private data'
-}
-reliable_migrations_fixture_contract
-
-# Read-only failure capture stays bounded, reports both independent queries and
-# never turns the updater's native failure into a diagnostic/cleanup status.
-reliable_migrations_failure_capture_contract() (
-  set -euo pipefail
-  local kind="$1" capture_root="$TMP/reliable-capture-$1"
-  STATE_ROOT="$capture_root/state" OPERATOR_HOME="$capture_root/operator" MARKER=capture-fixture
-  V2_JOURNAL="$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json"
-  install -d -m 0700 "$STATE_ROOT" "${V2_JOURNAL%/*}" "$OPERATOR_HOME/.subyard/runtime"
-  printf '%s\n' "$MARKER" > "$STATE_ROOT/.marker"
-  ln -s releases/candidate-aaaaaaaaaaaa "$OPERATOR_HOME/.subyard/runtime/current"
-  ln -s releases/0.18.6-bbbbbbbbbbbb "$OPERATOR_HOME/.subyard/runtime/previous"
-  jq -n '{checkpoint:"complete", transaction:"tx-fixture", goal:{target:"candidate-aaaaaaaaaaaa",direction:"activate-target"},
-    releases:{from:"0.18.6-bbbbbbbbbbbb",target:"candidate-aaaaaaaaaaaa"}, artifactDigest:("a"*64), registryDigest:("b"*64),
-    catalogDigest:("c"*64), observationScope:("d"*64), authorizationDigest:("e"*64), intentDigest:("f"*64),
-    authorizationPlan:"private-plan-sentinel", steps:[{value:"private-step-sentinel"}]}' > "$V2_JOURNAL"
-  chmod 0600 "$V2_JOURNAL"
-  case "$kind" in
-    missing) rm "$V2_JOURNAL" ;;
-    malformed) printf 'private-malformed-sentinel\n' > "$V2_JOURNAL" ;;
-    symlink) mv "$V2_JOURNAL" "$capture_root/foreign"; ln -s "$capture_root/foreign" "$V2_JOURNAL" ;;
-    valid) ;;
-    *) fail 'unknown reliability capture contract case' ;;
-  esac
-  eval "$(fixture_functions "$ROOT/dev/e2e/reliable-migrations-recovery.sh" recovery_journal_diagnostic recovery_failure_diagnostics)"
-  operator_env() {
-    if [ "$1" = python3 ]; then "$@"; return; fi
-    [ "$1:$2:$3:$4:$5" = "timeout:--signal=TERM:--kill-after=5:30:$OPERATOR_HOME/.local/bin/yard" ] \
-      || fail 'failure capture lost its bounded installed-yard command'
-    printf '%s\n' "${*:6}" >> "$STATE_ROOT/queries"
-    case "${*:6}" in
-      'migrate --check --json') printf 'migration-query\n'; printf '%70000s' ''; return 23 ;;
-      'config status --all-local') printf 'configuration-query\n'; return 11 ;;
-      *) fail 'failure capture attempted a mutating or unexpected command' ;;
-    esac
-  }
-  recovery_failure_diagnostics > "$STATE_ROOT/output" 2>&1
-  recovery_failure_diagnostics >> "$STATE_ROOT/output" 2>&1
-  [ "$(cat "$STATE_ROOT/queries")" = $'migrate --check --json\nconfig status --all-local' ] \
-    || fail 'failure capture hid a query or repeated before cleanup'
-  grep -Fq 'query=migrate-check native_exit=23' "$STATE_ROOT/output" \
-    && grep -Fq 'query=config-status native_exit=11' "$STATE_ROOT/output" \
-    && grep -Fq 'truncated=true' "$STATE_ROOT/output" \
-    && grep -Fq 'configuration-query' "$STATE_ROOT/output" \
-    && [ "$(wc -c < "$STATE_ROOT/output")" -lt 72000 ] \
-    || fail 'failure capture lost native query exits, independent results or its output bound'
-  ! grep -Eq 'private-(plan|step|malformed)-sentinel' "$STATE_ROOT/output" \
-    || fail 'journal header capture disclosed non-header content'
-  [ "$(grep -c 'journal-header {' "$STATE_ROOT/output")" = 2 ] \
-    || fail 'journal header was not captured before and after the queries'
-  case "$kind" in
-    valid) grep -Fq '"checkpoint": "complete"' "$STATE_ROOT/output" && grep -Fq '"current": "candidate-aaaaaaaaaaaa"' "$STATE_ROOT/output" ;;
-    missing) grep -Fq '"journal": null' "$STATE_ROOT/output" ;;
-    malformed|symlink) grep -Fq '"error":' "$STATE_ROOT/output" ;;
-  esac || fail 'journal presence, invalidity or links were hidden'
-)
-for reliable_capture_case in valid missing malformed symlink; do
-  reliable_migrations_failure_capture_contract "$reliable_capture_case"
-done
-reliable_update_capture_block="$(fixture_functions "$ROOT/tests/helpers/test-yard-source-repair.sh" run_source_repair_acceptance |
-  sed -n '/^  operator_env env/,/^    }$/p')"
-for reliable_capture_exit in 0 19; do
-  reliable_capture_rc=0
-  set +e
-  RELIABLE_UPDATE_BLOCK="$reliable_update_capture_block" RELIABLE_CAPTURE_EXIT="$reliable_capture_exit" bash -c '
-    set -euo pipefail
-    OPERATOR_HOME=/fixture RELEASE_ROOT=/release CANDIDATE_VERSION=candidate STATE_ROOT=$1
-    operator_env() {
-      case "$*" in
-        *"env "*" update --version candidate --yes") return 37 ;;
-        *) return 99 ;;
-      esac
-    }
-    source_repair_finish_known_final_check() { return 1; }
-    recovery_failure_diagnostics() { return "$RELIABLE_CAPTURE_EXIT"; }
-    eval "fixture_update() { local rc=0; $RELIABLE_UPDATE_BLOCK; exit 98; }"
-    fixture_update
-  ' _ "$TMP" > "$TMP/reliable-update-capture-$reliable_capture_exit.log" 2>&1
-  reliable_capture_rc=$?
-  set -e
-  [ "$reliable_capture_rc" = 37 ] || fail 'source update lost its native failure'
-done
-python3 -B "$ROOT/tests/helpers/source-repair-final-check-test.py"
-for reliable_cleanup_exit in 0 37; do
-  reliable_cleanup_root="$TMP/reliable-cleanup-capture-$reliable_cleanup_exit"
-  install -d -m 0700 "$reliable_cleanup_root"
-  reliable_capture_rc=0
-  set +e
-  RELIABLE_CLEANUP_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/reliable-migrations-recovery.sh" cleanup_recovery_fixture)" \
-    bash -c '
-      set -euo pipefail
-      eval "$RELIABLE_CLEANUP_FUNCTION"
-      STATE_ROOT=$1 SUBYARD_RELIABILITY_PHASE=source CLEANUP_ARMED=1 CREATED_IMAGE=""
-      OWNED_EXTRA_YARDS=()
-      assert_state_root() { :; }
-      recovery_failure_diagnostics() { printf "capture\n" >> "$STATE_ROOT/events"; return 19; }
-      source_repair_restore_host_sink() { printf "restore\n" >> "$STATE_ROOT/events"; }
-      cleanup() { local rc=$?; printf "cleanup\n" >> "$STATE_ROOT/events"; exit "$rc"; }
-      trap cleanup_recovery_fixture EXIT
-      exit "$2"
-    ' fixture "$reliable_cleanup_root" "$reliable_cleanup_exit" > "$reliable_cleanup_root/log" 2>&1
-  reliable_capture_rc=$?
-  set -e
-  reliable_expected_events=$'restore\ncleanup'
-  [ "$reliable_cleanup_exit" = 0 ] || reliable_expected_events=$'capture\nrestore\ncleanup'
-  [ "$reliable_capture_rc" = "$reliable_cleanup_exit" ] \
-    && [ "$(cat "$reliable_cleanup_root/events")" = "$reliable_expected_events" ] \
-    || fail 'failure capture ran after restoration or changed the native cleanup result'
 done
 
 # Switching fixture operators must isolate identity and the private working directory.

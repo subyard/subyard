@@ -263,6 +263,8 @@ CI_COUNTED_POLICIES = frozenset({
     "e952002eada45e0d6f245fbc61f5403c7325ae5d",
     # Immutable action pins; exact candidate refs, checks and asset export retained.
     "4089769ddfcdfa54fdfeb1d11498acf6af1fd42f",
+    # Test release version moved above the 0.27.0 update anchor.
+    "8e277e88b52fe3c8c3336da9e606e0ae8b6e8314",
 })
 
 
@@ -271,11 +273,14 @@ CI_HOSTED_CHECKS = frozenset({
     "profile:orca/bootstrap", "profile:orca/existing-yard", "profile:orca/resource",
     "profile:orca/projects", "profile:orca/ssh-agent", "profile:orca/codex-permissions",
     "profile:orca/managed-agents", "profile:orca/identity-rename",
-    "vm:published-upgrade/0.11.0", "vm:published-upgrade/0.17.1",
-    "vm:published-upgrade/0.22.1", "vm:published-upgrade/0.23.0",
-    "vm:published-upgrade/0.24.0", "vm:published-upgrade/0.25.5",
-    "vm:published-upgrade/0.26.0", "vm:reliable-migrations",
-    "vm:integration-legacy-upgrade", "vm:integration-selection/container",
+    "vm:published-upgrade/anchor",
+    "vm:published-upgrade/0.11.0",
+    "vm:published-upgrade/0.17.3",
+    "vm:published-upgrade/0.26.0",
+    # The two chains are required only for the first boundary release.
+    "vm:published-upgrade/0.11.0-chain",
+    "vm:published-upgrade/0.26.0-chain",
+    "vm:integration-selection/container",
     "vm:integration-selection/special", "vm:disabled-components",
     "profile:test-vms/full-uninstall", "profile:github", "vm:p0-full-uninstall",
     "profile:subyard-dev", "profile:openclaw", "profile:git-fetch", "profile:hermes",

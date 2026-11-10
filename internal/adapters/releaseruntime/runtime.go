@@ -1211,6 +1211,13 @@ func (runtime *Runtime) prepareRetainedTransition(
 		))
 	}
 	defer verified.Close()
+	if version, err := semver.Parse(verified.version); err == nil && version.LT(semver.MustParse(UpdateAnchorVersion)) {
+		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			observed, release, nil, releasetransition.CodeRollbackIncompatible,
+			fmt.Sprintf("rollback target v%s is below the supported v%s boundary", verified.version, UpdateAnchorVersion),
+			"keep the current release active and retain a verified release at v"+UpdateAnchorVersion+" or newer for rollback",
+		))
+	}
 	verifiedPreparation := func(cause error) error {
 		return verifiedPreparationError{cause: cause, prepared: Prepared{
 			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
@@ -1242,7 +1249,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 		defer active.Close()
 		owner = active
 	}
-	if err := sourceVersionError(verified.version); err != nil {
+	if err := sourceVersionError(verified.version, parsed.root); err != nil {
 		return Prepared{}, err
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)

@@ -7,6 +7,8 @@
 # release-staging-reliability (dev/e2e/release-vm-check.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 cd "$ROOT"
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ "${SUBYARD_E2E_TYPE:-}" = android-test ] \
   && sudo -n test -f /run/subyard-e2e-lease.json \
@@ -398,9 +400,11 @@ reclaim_supported_upgrade_inputs() {
   python3 - "$ROOT" "$OWNER_ROOT" "$BOOTSTRAP_ENGINE_SHA256" "$BOOTSTRAP_ENGINE_VERSION" <<'PYCONSUMED' || return
 import hashlib,json,os,pathlib,re,runpy,shutil,stat,sys
 root,owner=map(pathlib.Path,sys.argv[1:3])
+verifier=runpy.run_path(str(root/'dev/verify-release-upgrades.py'))
+pin=verifier['published_anchor'](root)
 bootstrap_sha,bootstrap_version=sys.argv[3:]
 targets=[root/'.subyard-acceptance/runtime',root/'.subyard-acceptance/release',
-         root.parent/'worktree.tar.gz',root/'.build/yard',owner/'baseline-0.19.0']
+         root.parent/'worktree.tar.gz',root/'.build/yard',owner/('baseline-'+pin[0])]
 def owned(path):
     info=path.lstat()
     if path.resolve()!=path or info.st_uid!=os.geteuid():
@@ -429,7 +433,8 @@ for target in targets:
 # Recheck authentic baseline and candidate bytes before any deletion. The native
 # runtime installations are separate from these downloaded/extracted inputs.
 verifier=runpy.run_path(str(root/'dev/verify-release-upgrades.py'))
-verifier['baseline_assets'](owner,targets[-1],verifier['DIRECT_BASELINE'],verifier['DIRECT_BASELINE_SHA256'],'amd64')
+pin=verifier['published_anchor'](root)
+verifier['baseline_assets'](owner,targets[-1],pin[0],{'amd64':pin[2]},'amd64')
 metadata_path=root/'.subyard-acceptance/candidate.json'
 if not stat.S_ISREG(owned(metadata_path).st_mode):
     raise RuntimeError('candidate metadata is not a plain file')
@@ -983,18 +988,22 @@ CLOUDOWNER
 # The normal staging fixture retains its independent synthetic owner history.
 prepare_supported_upgrade_owner() {
   local baseline assets installer name suffix baseline_owner candidate_engine before_owner after_owner before_state after_state info
-  local retained_sha baseline_engine_sha retained_version retained_config_sha
+  local retained_sha baseline_engine_sha retained_version retained_config_sha installer_sha
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   candidate_engine="$(release_candidate_prepare "$ROOT")" || die 'verified frozen candidate required'
   P0_OWNER_VERSION="$(jq -er .version "$ROOT/.subyard-acceptance/candidate.json")"
   [ "$("$candidate_engine" --version)" = "yard-engine $P0_OWNER_VERSION" ] || die 'candidate engine version mismatch'
-  baseline=0.19.0
+  IFS=$'\t' read -r baseline installer_sha _ < <(
+    published_anchor
+  )
+  [ -n "$baseline" ] || die 'missing direct anchor pin'
   assets="$(python3 - "$ROOT" "$OWNER_ROOT" <<'PYBASELINE'
 import pathlib,runpy,sys
 source,output=map(pathlib.Path,sys.argv[1:])
 verifier=runpy.run_path(str(source/'dev/verify-release-upgrades.py'))
-print(verifier['baseline_assets'](output,None,verifier['DIRECT_BASELINE'],verifier['DIRECT_BASELINE_SHA256'],'amd64'))
+pin=verifier['published_anchor'](source)
+print(verifier['baseline_assets'](output,None,pin[0],{'amd64':pin[2]},'amd64'))
 PYBASELINE
 )"
   # baseline_assets also prints download progress; its path is the final line.
@@ -1004,7 +1013,7 @@ PYBASELINE
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 \
       "https://github.com/Subyard/Subyard/releases/download/v$baseline/$name" -o "$assets/$name"
   done
-  [ "$(sha256sum "$installer" | cut -d' ' -f1)" = eeacda9ded1cc4c095ecc1e0569cf6fd96a737b3af6ab30ce7804833e3d8f1d1 ] \
+  [ "$(sha256sum "$installer" | cut -d' ' -f1)" = "$installer_sha" ] \
     || die 'published baseline installer checksum mismatch'
   env YARD_RELEASE_BASE_URL="file://$assets" YARD_BIN_DIR="$SUBYARD_HOME/bin" \
     YARD_SHELL_RC="$OWNER_CONFIG_HOME/bootstrap.bashrc" YARD_LOGIN_RC="$OWNER_CONFIG_HOME/bootstrap.profile" \
@@ -1053,13 +1062,13 @@ PYBASELINE
   printf 'STAGING_UPDATER_PREREQUISITE={"git_configuration_operation":true,"execution_user":"dev"}\n'
   before_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
   [[ "$before_owner" =~ ^[a-f0-9-]{36}$ ]] || die 'predecessor broker owner missing'
-  outer_exec sh -eu -c 'target=/usr/local/libexec/subyard/.service-retained-v019-worker; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0700 /usr/local/libexec/subyard/test-vms-inner "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:700:1 ]'
-  outer_exec sh -eu -c 'target=/var/lib/subyard/test-vms/.service-retained-v019.env; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0600 /etc/subyard/test-vms.env "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:600:1 ]'
+  outer_exec sh -eu -c 'target=/usr/local/libexec/subyard/.service-retained-anchor-worker; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0700 /usr/local/libexec/subyard/test-vms-inner "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:700:1 ]'
+  outer_exec sh -eu -c 'target=/var/lib/subyard/test-vms/.service-retained-anchor.env; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0600 /etc/subyard/test-vms.env "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:600:1 ]'
   baseline_engine_sha="$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)"
-  retained_sha="$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-v019-worker | cut -d' ' -f1)"
+  retained_sha="$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker | cut -d' ' -f1)"
   [ "$retained_sha" = "$baseline_engine_sha" ] || die 'retained broker is not the authenticated predecessor engine'
   retained_version="$("$SUBYARD_HOME/runtime/current/bin/yard-engine" --version)"
-  retained_config_sha="$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-v019.env | cut -d' ' -f1)"
+  retained_config_sha="$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-anchor.env | cut -d' ' -f1)"
   printf 'STAGING_RETAINED_BINARY='
   jq -cn --arg baseline "$baseline" --arg sha256 "$retained_sha" --arg version "$retained_version" --arg config_sha256 "$retained_config_sha" \
     '{baseline:$baseline,sha256:$sha256,version:$version,config_sha256:$config_sha256}'
@@ -1104,21 +1113,21 @@ def state(path):
             values[key]=shlex.split(value)[0]
     assert values.get('NESTED_E2E_VMS')=='1'
     return values.get('E2E_VM_STATE_DIR','/var/lib/subyard/test-vms')+'/leases.json'
-assert state('/etc/subyard/test-vms.env')==state('/var/lib/subyard/test-vms/.service-retained-v019.env')=='/var/lib/subyard/test-vms/leases.json'
+assert state('/etc/subyard/test-vms.env')==state('/var/lib/subyard/test-vms/.service-retained-anchor.env')=='/var/lib/subyard/test-vms/leases.json'
 PYRETAINED_CONFIG
-  [ "$retained_config_sha" = "$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-v019.env | cut -d' ' -f1)" ] \
-    && [ "$retained_sha" = "$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-v019-worker | cut -d' ' -f1)" ] \
+  [ "$retained_config_sha" = "$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-anchor.env | cut -d' ' -f1)" ] \
+    && [ "$retained_sha" = "$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker | cut -d' ' -f1)" ] \
     || die 'retained predecessor inputs changed during update'
   fence_binding="$(outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status \
     | python3 -c 'import json,runpy,sys; helper=runpy.run_path("config/profiles/test-vms/service-binding.py"); print(helper["project_pool"](json.load(sys.stdin))["binding"])')"
   outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker "fence-pool-expected-$fence_binding"
   fenced_before="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
-  outer_exec env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-v019.env \
-    /usr/local/libexec/subyard/.service-retained-v019-worker _test-vms-worker gc \
+  outer_exec env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-anchor.env \
+    /usr/local/libexec/subyard/.service-retained-anchor-worker _test-vms-worker gc \
     > "$STATE_PARENT/retained-writer.log" 2>&1 || old_writer_rc=$?
   fenced_after="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
   printf 'STAGING_RETAINED_ATTEMPT='
-  jq -cn --arg command 'env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-v019.env /usr/local/libexec/subyard/.service-retained-v019-worker _test-vms-worker gc' \
+  jq -cn --arg command 'env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-anchor.env /usr/local/libexec/subyard/.service-retained-anchor-worker _test-vms-worker gc' \
     --arg binary_sha256 "$retained_sha" --arg before_sha256 "$fenced_before" --arg after_sha256 "$fenced_after" \
     --argjson native_exit "$old_writer_rc" \
     '{command:$command,binary_sha256:$binary_sha256,before_sha256:$before_sha256,after_sha256:$after_sha256,native_exit:$native_exit}'
@@ -1129,7 +1138,7 @@ PYRETAINED_CONFIG
     || die 'retained authentic broker writer did not refuse fenced pool schema'
   [ "$fenced_before" = "$fenced_after" ] || die 'retained writer changed fenced lease state'
   outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker resume-admission
-  printf 'STAGING_RETAINED_WRITER={"baseline":"0.19.0","fenced_schema":3,"native_exit":%s,"state_retained":true}\n' "$old_writer_rc"
+  printf 'STAGING_RETAINED_WRITER={"baseline":"%s","fenced_schema":3,"native_exit":%s,"state_retained":true}\n' "$baseline" "$old_writer_rc"
   printf 'STAGING_SUPPORTED_UPGRADE={"baseline":"%s","candidate":"%s","broker_owner":"%s","lease_state_sha256":"%s","retained_owner":true}\n' \
     "$baseline" "$P0_OWNER_VERSION" "$after_owner" "$after_state"
   outer_exec cat /usr/local/libexec/subyard/e2e-recipes/manifest.sha256 \

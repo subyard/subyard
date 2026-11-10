@@ -54,7 +54,7 @@ grep -Fxq '  push:' "$CI_WORKFLOW" && grep -Fxq '  pull_request:' "$CI_WORKFLOW"
 grep -Fxq '  workflow_dispatch:' "$DEEP_WORKFLOW" \
   && grep -Fxq '  schedule:' "$DEEP_WORKFLOW" \
   || fail 'deep CI must support manual and nightly runs'
-grep -Fxq '        run: make build VERSION=0.22.0-test' "$DEEP_WORKFLOW" \
+grep -Fxq '        run: make build VERSION=0.28.0-test' "$DEEP_WORKFLOW" \
   && grep -Fxq '        run: umask 0022 && go test -race -shuffle=on -count=2 -timeout=60m ./...' "$DEEP_WORKFLOW" \
   && grep -Fxq "        run: go test ./internal/command -run '^\$' -fuzz '^FuzzParseDoesNotPanic\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
   && grep -Fxq "        run: go test ./internal/observation -run '^\$' -fuzz '^FuzzValidateJSON\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
@@ -65,7 +65,7 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   grep -Fxq '    runs-on: ubuntu-24.04-arm' <<<"$native_engine_job" \
     && grep -Fxq '          go-version-file: go.mod' <<<"$native_engine_job" \
     && grep -Fxq '          persist-credentials: false' <<<"$native_engine_job" \
-    && grep -Fxq '          make build VERSION=0.22.0-test' <<<"$native_engine_job" \
+    && grep -Fxq '          make build VERSION=0.28.0-test' <<<"$native_engine_job" \
     && grep -Fxq '          .build/yard --version' <<<"$native_engine_job" \
     && grep -Fxq '        run: go test -count=1 -timeout=20m ./cmd/... ./internal/...' <<<"$native_engine_job" \
     || fail "$(basename "$workflow") must build, run and test the native ARM64 engine"
@@ -157,8 +157,10 @@ for name, command in commands.items():
     if name.startswith("vm:published-upgrade/"):
         assert entries[name] == command + ["--slot", "1"]
 # Baselines outside the catalog keep one agent-free periodic upgrade each.
-baselines = [line.split("\t", 1)[0] for line in (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines() if line]
+baselines = [(fields[0], fields[3]) for line in (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()
+             if line and (fields := line.split("\t"))[3] != "pin"]
 assert {name for name in entries if name.startswith("published:")} == {
-    "published:" + version for version in baselines if "vm:published-upgrade/" + version not in commands}
+    "published:" + version for version, role in baselines
+    if "vm:published-upgrade/" + ("anchor" if role == "anchor" else version) not in commands}
 PY
 printf 'ok: hosted VM workflow binds exact candidates and periodic upgrades retain catalog coverage\n'

@@ -9,6 +9,12 @@ RUN_ID="${SUBYARD_E2E_RUN_ID:-}"
   || { printf 'published-upgrade: run through dev/agent-e2e.sh\n' >&2; exit 2; }
 TOKEN=$((16#$RUN_ID))
 VERSION="${1:-}"
+# shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
+IFS=$'\t' read -r ANCHOR_VERSION _ ANCHOR_SHA256 _ < <(published_anchor)
+[ "$VERSION" != anchor ] || VERSION="$ANCHOR_VERSION"
+PUBLISHED_MODE=direct
+case "${2:-}" in refusal|chain) PUBLISHED_MODE="$2" ;; esac
 published_agent_selection() {
   local selection="${1:-none}" agent
   case "$selection" in
@@ -23,8 +29,12 @@ published_agent_selection() {
   done
   printf '%s\n' "$selection"
 }
-[ "$#" -le 2 ] || { printf 'usage: published-upgrade.sh VERSION [AGENTS|all|none]\n' >&2; exit 2; }
-PUBLISHED_AGENTS="$(published_agent_selection "${2:-none}")" || exit 2
+[ "$#" -le 2 ] || { printf 'usage: published-upgrade.sh VERSION [AGENTS|all|none|refusal|chain]\n' >&2; exit 2; }
+if [ "$PUBLISHED_MODE" = direct ]; then
+  PUBLISHED_AGENTS="$(published_agent_selection "${2:-none}")" || exit 2
+else
+  PUBLISHED_AGENTS=''
+fi
 
 configure_published_agents() {
   [ -n "$PUBLISHED_AGENTS" ] || return 0
@@ -79,7 +89,13 @@ set -- run "$TOKEN"
 # shellcheck source=dev/e2e/power-reconciler-upgrade.sh
 . "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
 
-IFS=$'\t' read -r OLD_VERSION OLD_INSTALLER_SHA256 OLD_BUNDLE_SHA256 <<<"$PINS"
+IFS=$'\t' read -r OLD_VERSION OLD_INSTALLER_SHA256 OLD_BUNDLE_SHA256 EXPECTATION <<<"$PINS"
+if [ "$PUBLISHED_MODE" = direct ]; then
+  [[ "$EXPECTATION" = direct || "$EXPECTATION" = anchor ]] || die 'a refusal baseline cannot run a direct upgrade'
+else
+  [[ "$EXPECTATION" = refusal || ( "$PUBLISHED_MODE" = chain && "$EXPECTATION" = pin ) ]] \
+    || die 'refusal and chain modes require a refusal or chain pin baseline'
+fi
 INSTALLER="$STATE_ROOT/subyard-install-v$OLD_VERSION.sh"
 GUEST_MARKER=/var/tmp/subyard-published-upgrade-data
 CACHED_IMAGE=subyard-e2e-debian-13-cloud-container
@@ -99,8 +115,9 @@ guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 instance_uuid() { incus config get "$INSTANCE" volatile.uuid --project "$PROJECT"; }
 
 assert_ready() {
-  local epochs guest_marker registry="$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json"
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
+  local epochs guest_marker expected="${1:-$CANDIDATE_VERSION}" target="${2:-$CANDIDATE_RELEASE_TARGET}" registry
+  registry="$OPERATOR_HOME/.subyard/runtime/$target/config/release-transition.json"
+  [ "$(operator_yard --version)" = "yard $expected" ] || die 'expected release is not active'
   epochs="$(operator_env jq -c .currentEpochs "$registry")"
   # shellcheck disable=SC2016 # jq binds $epochs itself.
   # The checkpoint is the authority; ledger.json stays a pinned legacy projection.
@@ -117,6 +134,44 @@ assert_ready() {
   [ "$(instance_uuid)" = "$UUID_BEFORE" ] || die 'update replaced the yard instance'
   guest_marker="$(guest cat "$GUEST_MARKER" </dev/null)" || die 'update lost guest data'
   [ "$guest_marker" = "$MARKER" ] || die "update changed guest data: '$guest_marker'"
+}
+
+protected_settings_digest() {
+  operator_env python3 - "$OPERATOR_HOME/.config/subyard" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1]); result = hashlib.sha256()
+for path in sorted(root.rglob('*')):
+    result.update(str(path.relative_to(root)).encode() + b'\0')
+    result.update(str(path.lstat().st_mode).encode() + b'\0')
+    if path.is_symlink(): result.update(str(path.readlink()).encode())
+    elif path.is_file(): result.update(path.read_bytes())
+print(result.hexdigest())
+PY
+}
+
+assert_source_refusal() {
+  local settings before_links arguments status
+  settings="$(protected_settings_digest)"
+  before_links="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  for arguments in update check; do
+    status=0
+    if [ "$arguments" = check ]; then set -- --check; else set --; fi
+    operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" YARD_RELEASE_VERSION="$CANDIDATE_VERSION" \
+      "$OPERATOR_HOME/.local/bin/yard" update "$@" >"$STATE_ROOT/refusal-$arguments.log" 2>"$STATE_ROOT/refusal-$arguments.stderr" || status=$?
+    if [ "$status" = 0 ]; then
+      [ "$arguments" = check ] && jq -e '.outcome.reachedGoal == false and
+        (.outcome.status | type == "string" and . != "ready" and . != "")' "$STATE_ROOT/refusal-$arguments.log" >/dev/null \
+        || die "$arguments did not report refusal (exit=$status)"
+    fi
+    grep -Fq "yard update --version $ANCHOR_VERSION" "$STATE_ROOT/refusal-$arguments.stderr" \
+      || die "$arguments lost the anchor command (exit=$status)"
+    [ "$(protected_settings_digest)" = "$settings" ] \
+      && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$before_links" ] \
+      && [ "$(instance_uuid)" = "$UUID_BEFORE" ] \
+      && [ "$(incus list --project "$PROJECT" --format csv -c s)" = RUNNING ] \
+      && [ "$(guest cat "$GUEST_MARKER")" = "$MARKER" ] \
+      || die 'refusal changed settings, runtime, instance, power or data'
+  done
 }
 
 # Cleanup removes the journal, so a failed update reports its stopping point first.
@@ -170,10 +225,35 @@ write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
 assert_published_agent_configs
 ok 'published runtime created a running yard'
 
+if [ "$PUBLISHED_MODE" != direct ]; then
+  assert_source_refusal
+  ok 'update and --check refused without changing protected state'
+  [ "$PUBLISHED_MODE" != refusal ] || exit 0
+  # Chain catalog entries exist only for the first boundary release.
+  operator_yard update --version "$ANCHOR_VERSION" --yes
+  anchor_target="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$ANCHOR_VERSION/subyard-$ANCHOR_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$ANCHOR_SHA256" ] \
+    || die 'anchor archive checksum changed'
+  assert_ready "$ANCHOR_VERSION" "$anchor_target"
+  # The actual old runtime is still previous here. Staged candidate tooling
+  # must refuse that rollback without first activating the candidate.
+  staged="$(operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --publish-only)"
+  staged_path="$(sed -n 's/^staged release=.* candidate=//p' <<<"$staged")"
+  case "$staged_path" in "$OPERATOR_HOME/.subyard/runtime/releases/$CANDIDATE_VERSION-"*) ;; *) die 'invalid staged candidate path' ;; esac
+  anchor_settings="$(protected_settings_digest)"
+  rollback_status=0
+  operator_env "$staged_path/bin/yard" update --rollback --yes > "$STATE_ROOT/rollback-refusal.log" 2>&1 || rollback_status=$?
+  [ "$rollback_status" != 0 ] && grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/rollback-refusal.log" \
+    && [ "$(protected_settings_digest)" = "$anchor_settings" ] \
+    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$anchor_target" ] \
+    || die 'below-anchor rollback was not refused without mutation'
+fi
+
 info "updating to the frozen candidate $CANDIDATE_VERSION"
 # The published launcher starts the update, as it does for an operator.
-operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-  "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes \
+operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" YARD_RELEASE_VERSION="$CANDIDATE_VERSION" \
+  "$OPERATOR_HOME/.local/bin/yard" update --yes \
   || {
     report_failed_transition
     die 'candidate update failed'

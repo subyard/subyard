@@ -2,10 +2,13 @@
 # One standard disposable owner VM; the guest owns bounded native cleanup.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
-usage() { printf 'Usage: release-activation.sh --slot N [--wait DURATION] [--baseline 0.19.0|0.20.0] [--preflight]\n'; }
+# shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
+IFS=$'\t' read -r ANCHOR_VERSION _ _ _ < <(published_anchor)
+usage() { printf 'Usage: release-activation.sh --slot N [--wait DURATION] [--baseline ANCHOR] [--preflight]\n'; }
 slot=''
 allocation_wait=()
-baseline=0.19.0
+baseline="$ANCHOR_VERSION"
 preflight=0
 STARTED="$(date +%s)"
 while [ "$#" -gt 0 ]; do
@@ -22,7 +25,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [[ "$slot" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }
-case "$baseline" in 0.19.0|0.20.0) ;; *) usage >&2; exit 2 ;; esac
+[ "$baseline" = "$ANCHOR_VERSION" ] || { usage >&2; exit 2; }
 for command in go jq python3 shellcheck tar timeout sha256sum; do
   command -v "$command" >/dev/null || { printf 'release-activation: missing %s\n' "$command" >&2; exit 2; }
 done
@@ -74,6 +77,8 @@ read -r candidate synthetic baseline_installer_sha < <(bash "$ROOT/config/profil
 mkdir "$WORK/source-b"
 bash "$ROOT/tests/helpers/source-files.sh" "$WORK/source-a" \
   | tar -C "$WORK/source-a" --null -T - -cf - | tar -C "$WORK/source-b" -xf -
+# Give B a distinct loaded broker identity while preserving its normal behavior.
+sed -i 's/usage: broker /usage: synthetic-fixture-b broker /' "$WORK/source-b/config/profiles/github/cmd/broker/main.go"
 printf '\nSynthetic release activation fixture B.\n' >> "$WORK/source-b/config/profiles/github/SKILL.md"
 printf '\n# Synthetic release activation fixture B.\n' >> "$WORK/source-b/config/preview/subyard-preview"
 printf 'release_activation_frozen_a_bundle_sha256=%s candidate=%s authentic_predecessor=%s installer_sha256=%s synthetic_b=%s\n' \

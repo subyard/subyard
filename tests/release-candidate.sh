@@ -201,55 +201,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 root = Path(sys.argv[1])
-helper = runpy.run_path(str(root / 'dev/verify-release-upgrades.py'))['history_materialized_fixture']
-with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/tmp') as temporary:
-    base = Path(temporary)
-    for arch, foreign in (('amd64', 'arm64'), ('arm64', 'amd64')):
-        for order in ('native-first', 'foreign-first'):
-            case = base / arch / order
-            release = case / 'release'
-            release.mkdir(parents=True)
-            native = release / f'subyard-1.2.3-linux-{arch}.tar.gz'
-            other = release / f'subyard-1.2.3-linux-{foreign}.tar.gz'
-            # These host-free metadata archives are independent synthetic inputs.
-            archives = ((native, arch), (other, foreign))
-            for archive, archive_arch in archives if order == 'native-first' else reversed(archives):
-                files = {
-                    './scripts/guest-disk-tmp.sh': f'fixture {archive_arch} disk tmp policy\n'.encode(),
-                    './config/release-transition.json': json.dumps({
-                        'currentEpochs': {'fixture': 2},
-                        'migrations': [{'id': f'fixture-{archive_arch}-migration', 'domain': 'fixture',
-                                        'fromEpoch': 1, 'toEpoch': 2}]}).encode()}
-                with tarfile.open(archive, 'w:gz') as output:
-                    for name, payload in files.items():
-                        member = tarfile.TarInfo(name)
-                        member.size = len(payload)
-                        member.mode = 0o644
-                        output.addfile(member, io.BytesIO(payload))
-            state = case / 'fixture'
-            config = state / 'config'
-            config.mkdir(parents=True)
-            fixture = SimpleNamespace(root=state, config=config, data=state/'data', runtime=state/'runtime',
-                                      journal=config/'journal.json', version='1.2.3', arch=arch,
-                                      old_launcher=state/'old/bin/yard',
-                                      env={'YARD_RELEASE_BASE_URL': release.as_uri()})
-            source_registry = fixture.old_launcher.parent.parent/'config/release-transition.json'
-            source_registry.parent.mkdir(parents=True)
-            source_registry.write_text(json.dumps({'currentEpochs': {'fixture': 1}}))
-            captured = []
-            with patch.dict(helper.__globals__, {
-                    'write_observation_incus': lambda *args, **kwargs: None,
-                    'set_fixture_observation': lambda *args, **kwargs: captured.append(kwargs['history'])}):
-                history, _, _, _ = helper(fixture, case, case/'control')
-            expected = '1.2.3-' + hashlib.sha256(native.read_bytes()).hexdigest()[:12]
-            assert history['target'] == expected, (arch, history['target'], expected)
-            assert captured[0]['target'] == expected
-            assert history['diskTmpCheckSHA256'] == hashlib.sha256(f'fixture {arch} disk tmp policy\n'.encode()).hexdigest()
-            assert history['migrations'] == [f'fixture-{arch}-migration']
-            assert history['projectConfig']['user.subyard.data_home'] == str(fixture.data)
-print('ok: migration-history apply control binds the selected architecture in a mixed release inventory')
-
-globals_ = helper.__globals__
+globals_ = runpy.run_path(str(root / 'dev/verify-release-upgrades.py'))['verify'].__globals__
 verify = globals_['verify']
 with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') as temporary:
     base = Path(temporary)
@@ -264,7 +216,6 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
     previous = []
     completed = []
     fail_final = False
-    interrupted_result = -signal.SIGKILL
 
     class ScratchFixture:
         def __init__(self, path, *args):
@@ -273,56 +224,24 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
             self.root = path
             self.root.mkdir()
             (path / 'bulk').write_bytes(b'payload')
-            self.runtime = path / 'runtime'
-            self.runtime.mkdir()
-            self.initial = 'initial'
-            (self.runtime / 'current').symlink_to(self.initial)
-            self.journal = path / 'journal.json'
-            self.journal.write_text(json.dumps({'checkpoint': 'incomplete', 'transaction': 'authorized'}))
-            self.old_launcher = path / 'old/bin/yard'
-            self.env = {}
-            self.checks = 0
-            self.completions = 0
             previous.append(path)
 
         def alive(self):
             assert (self.root / 'bulk').read_bytes() == b'payload'
             assert all(sentinel.read_text() == 'retained' for sentinel in sentinels)
 
-        def check(self):
-            self.alive()
-            self.checks += 1
-            return {'outcome': {'status': 'migration-required' if self.checks == 1 else 'recovering',
-                                'target': 'candidate'}}
-
-        def update(self, *args, **kwargs):
-            self.alive()
-
-        def complete(self):
-            self.alive()
-            self.completions += 1
-            if fail_final and self.completions == 2:
-                raise RuntimeError('workload final assertion')
-            completed.append(self.root)
-
-    def consume(fixture):
+    def consume(fixture, installer=None):
         fixture.alive()
-
-    def interrupted(command, env, timeout):
-        fixture_root = Path(command[command.index('--marker') + 1]).parent
-        assert (fixture_root / 'bulk').is_file()
-        (fixture_root / 'activation-observed.json').write_text('observed')
-        return SimpleNamespace(returncode=interrupted_result, stdout='', stderr='')
+        if fail_final:
+            raise RuntimeError('workload final assertion')
+        completed.append(fixture.root)
 
     with patch.dict(globals_, {'Fixture': ScratchFixture,
-            'compatible_power_release': lambda *args: (owned / 'compatible-power-release', 'bridge'),
-            'verify_checkpoint_refusal': consume, 'verify_completed_activation_drift': consume,
-            'verify_power_rollback_refusal': consume, 'verify_epoch_one_publication_gate': consume,
-            'run_process': interrupted}):
+            'verify_source_anchor_refusal': consume}):
         for baseline_version in ('first', 'second'):
             verify(base, 'candidate', base, 'amd64', owned, baseline_version)
             assert all(not path.exists() for path in previous)
-        assert len(completed) == 10
+        assert len(completed) == 2
         assert all(sentinel.read_text() == 'retained' for sentinel in sentinels)
 
         fail_final = True
@@ -343,13 +262,6 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
                 assert str(error) == 'cleanup refused'
         assert (previous[-1] / 'bulk').is_file()
         previous.clear()
-        interrupted_result = 0
-        try:
-            verify(base, 'candidate', base, 'amd64', owned, 'not-interrupted')
-            raise AssertionError('missing deliberate SIGKILL passed')
-        except RuntimeError as error:
-            assert 'did not interrupt the real update' in str(error)
-        assert (previous[-1] / 'bulk').is_file()
 
     release = base / 'release'
     release.mkdir()
@@ -372,7 +284,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
              patch.object(globals_['subprocess'], 'Popen', process), \
              patch.object(globals_['os'], 'statvfs', return_value=available) as statvfs, \
              patch.object(sys, 'argv', ['verify', '--release-dir', str(release), '--version', 'candidate',
-                                        '--only-direct-019', '--direct-baseline-dir', str(baseline)]), \
+                                        '--only-source-anchor', '--direct-baseline-dir', str(baseline)]), \
              patch.object(globals_['platform'], 'machine', return_value='x86_64'), \
              patch.object(globals_['platform'], 'system', return_value='Linux'):
             try:

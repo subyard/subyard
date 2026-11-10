@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published v0.11.0 owner recreation, retained ordinary yard and installed-runtime recovery.
+# Published anchor owner recreation, retained ordinary yard and installed-runtime recovery.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -35,9 +35,6 @@ ADDRESS_INSTANCE="yard-$ADDRESS_YARD"
 # shellcheck source=dev/e2e/published-baseline.sh
 . "$ROOT/dev/e2e/published-baseline.sh"
 STATE_ROOT="$SHARED_ROOT"
-IFS=$'\t' read -r BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256 < <(
-  awk -F '\t' '$1 == "0.11.0"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
-)
 # The existing published-upgrade pins and local P0 VM matrix are amd64.
 BASELINE_ARM64_SHA256=''
 BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
@@ -337,10 +334,10 @@ prepare_baseline_yards() {
   local checkout
   install_baseline
   [ "$(operator_yard --version)" = "yard $BASELINE_VERSION" ] || die 'published baseline is not active'
-  # v0.11.0 has no yard-add command. Its config sync creates the local named
+  # the published anchor has no yard-add command. Its config sync creates the local named
   # registration from a committed configuration checkout; no runtime state is seeded.
   checkout="$(operator_env mktemp -d /tmp/subyard-p0-owner-config.XXXXXX)"
-  # Direct v0.11.0 sync does not register this source. Keep the real checkout
+  # Direct the published anchor sync does not register this source. Keep the real checkout
   # for the candidate's later, explicitly confirmed ownership migration.
   CONFIG_CHECKOUT="$checkout"
   operator_env bash -s -- "$checkout" <<'BASELINE_CONFIG'
@@ -917,7 +914,7 @@ verify_shared_target_refusals() {
 }
 
 prepare() {
-  [ "$(uname -m)" = x86_64 ] || die 'the published v0.11.0 pin requires an amd64 P0 worker'
+  [ "$(uname -m)" = x86_64 ] || die 'the published the published anchor pin requires an amd64 P0 worker'
   command -v git >/dev/null 2>&1 || die 'Git is required for the published configuration import'
   command -v unshare >/dev/null 2>&1 || die 'unshare is required'
   p0_capacity_reset_build_cache

@@ -407,13 +407,22 @@ internal-child marker prevents recursion.
 
 The approved minimum source version is v0.11.0, inclusive. Earlier installations will use the
 existing full uninstall, removing their owned data, then a clean installation performed by the
-user. Runtime enforcement and uninstall acceptance are pending. This replaces the V1 upgrade-bridge
+user. This replaces the V1 upgrade-bridge
 and six-month notice plan. Full uninstall never requires running or completing migrations, for any
 source version, including pending or invalid V1/V2 journals. It retains ownership guards, explicit
 destructive consent and cleanup recovery. Selected-yard teardown keeps its ordinary release admission.
 Already accepted V2 history with legacy provenance remains readable. Process V1, Ledger V2,
 supported V2 recovery and checkpoint-reader contracts remain independent; see the
 [support policy](legacy-migration-support.md).
+
+For releases above 0.27.x, direct update and new rollback targets require v0.27.0 or newer.
+Sources from v0.11.0 to below that anchor first run `yard update --version 0.27.0`, then
+`yard update` again. The published anchor and its assets remain available; there is no automatic
+chain, new bridge release, state format or epoch-floor increase. This explicitly retires fresh
+pre-anchor migration coverage from later candidates; its full matrix stays in the v0.27.0 tag.
+Accepted history readers and exact unfinished-owner recovery remain supported. The first boundary
+release retains two physical chains through the anchor and separate refusal cases. Follow
+[Moving the update boundary](legacy-migration-support.md#moving-the-update-boundary) for later moves.
 
 The domain upgrade floor is expressed in epochs, separately from the source-version boundary and
 rollback eligibility of intact, compatible retained current/previous runtimes. A supported unfinished

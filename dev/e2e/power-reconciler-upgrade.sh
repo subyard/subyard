@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exact published v0.11.0 -> local candidate migration acceptance on an allocated P0 worker VM.
+# Exact published anchor -> local candidate migration acceptance on an allocated P0 worker VM.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -9,11 +9,11 @@ TOKEN="${2:-}"
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
 # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
 . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
-OLD_VERSION=0.11.0
-OLD_INSTALLER_SHA256=41acb799e55cf82cdbbef8e7f75e8e17c2df344c1ceeb748181fb6aec7ea6f8d
-OLD_BUNDLE_SHA256=30ff2437219dcaaa568599a9df68a62d3f9203d66579d7ee6c802e527ca92163
+IFS=$'\t' read -r OLD_VERSION OLD_INSTALLER_SHA256 OLD_BUNDLE_SHA256 _ < <(
+  published_anchor
+)
 OLD_UNIT_FIXTURE=''
-CANDIDATE_VERSION="0.25.6-power-systemd.$TOKEN"
+CANDIDATE_VERSION="0.28.0-power-systemd.$TOKEN"
 if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
   CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
@@ -23,12 +23,12 @@ OPERATOR="subyardpower$TOKEN"
 OPERATOR_HOME="/home/$OPERATOR"
 OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-power-systemd-home"
 RELEASE_ROOT="$STATE_ROOT/candidate"
-INSTALLER="$STATE_ROOT/subyard-install-v0.11.0.sh"
+INSTALLER="$STATE_ROOT/subyard-install-v$OLD_VERSION.sh"
 # A pinned published runtime at the migration epochs the candidate requires.
-COMPATIBLE_VERSION=0.25.4
+COMPATIBLE_VERSION="$OLD_VERSION"
 COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
 COMPATIBLE_RUNTIME_ROOT="$STATE_ROOT/published-compatible-runtime"
-COMPATIBLE_RELEASE_TARGET=releases/0.25.4-d0e9970ce84d
+COMPATIBLE_RELEASE_TARGET="releases/$COMPATIBLE_VERSION-${OLD_BUNDLE_SHA256:0:12}"
 SUDOERS="/etc/sudoers.d/$MARKER"
 SUDOERS_TEMP=''
 PROJECT=subyard
@@ -551,23 +551,28 @@ prepare_candidate() {
   fi
   chmod -R a+rX "$RELEASE_ROOT"
 
-  info 'installing exact published v0.11.0 runtime'
+  info 'installing exact published anchor runtime'
   prepare_compatible_release
   curl -fsSL --proto '=https' --tlsv1.2 \
     "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" \
     -o "$INSTALLER"
   [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$OLD_INSTALLER_SHA256" ] \
-    || die 'published v0.11.0 installer checksum changed'
+    || die 'published anchor installer checksum changed'
   chmod 0755 "$INSTALLER"
   operator_env env YARD_RELEASE_VERSION="$OLD_VERSION" \
     "$INSTALLER" --version "$OLD_VERSION" --yes
   [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$OLD_VERSION/subyard-$OLD_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$OLD_BUNDLE_SHA256" ] \
-    || die 'published v0.11.0 runtime archive checksum changed'
+    || die 'published anchor runtime archive checksum changed'
 
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-  incus project create "$PROJECT" \
-    -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
-  operator_yard init --yes
+  if ! operator_yard init --yes > "$STATE_ROOT/baseline-init.log" 2>&1; then
+    incus project show "$PROJECT" >/dev/null 2>&1 \
+      && [ -z "$(incus list --project "$PROJECT" --format csv -c n)" ] \
+      || die 'baseline init failed before its image step'
+    incus project set "$PROJECT" features.images=false
+    operator_yard init --yes
+  fi
+  incus project set "$PROJECT" user.p0-power-systemd="$MARKER"
   operator_yard start --yes
   old_load=loaded
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
@@ -577,7 +582,7 @@ prepare_candidate() {
   OLD_UNIT_FIXTURE="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in"
   assert_runtime_state "$OLD_VERSION" "$OLD_UNIT_FIXTURE" "$old_load" released \
     "$OLD_RELEASE_TARGET"
-  ok 'actual supported v0.11.0 runtime and live power unit verified'
+  ok 'actual supported anchor runtime and live power unit verified'
 
   info 'running the candidate-owned supported update from the published predecessor'
   verify_bridge_plan_is_read_only
@@ -591,22 +596,16 @@ prepare_candidate() {
 }
 
 prepare_compatible_release() {
-  local name digest
+  local name archive="subyard-$COMPATIBLE_VERSION-linux-amd64.tar.gz"
   mkdir -p "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
-  # Immutable official e92 assets, not a rebuilt compatibility fixture.
-  while read -r digest name; do
+  for name in "$archive" "$archive.sha256" "$archive.manifest.json" "$archive.provenance.json"; do
     curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
       "https://github.com/Subyard/Subyard/releases/download/v$COMPATIBLE_VERSION/$name" \
       -o "$COMPATIBLE_RELEASE_ROOT/$name"
-    [ "$(sha256sum "$COMPATIBLE_RELEASE_ROOT/$name" | awk '{print $1}')" = "$digest" ] \
-      || die 'published compatible asset checksum changed'
-  done <<'ASSETS'
-d0e9970ce84d8cb177f962797582bf507a2c864b0b9b907f9ff6c23f460c4bd2 subyard-0.25.4-linux-amd64.tar.gz
-ad8ebc26af6dfcdd20b1806027225a7bfef0b3178ca87139ee4860546c8746e8 subyard-0.25.4-linux-amd64.tar.gz.sha256
-c634206d54b2d12eb763508410eadb91851bafda24a61e5e4a21411bb12036d8 subyard-0.25.4-linux-amd64.tar.gz.manifest.json
-f72e0333b189ffaa1fb8d2b59068ed93ab58a145ebf6b39f04c8602f5ae11f5d subyard-0.25.4-linux-amd64.tar.gz.provenance.json
-ASSETS
-  tar -xzf "$COMPATIBLE_RELEASE_ROOT/subyard-0.25.4-linux-amd64.tar.gz" -C "$COMPATIBLE_RUNTIME_ROOT"
+  done
+  [ "$(sha256sum "$COMPATIBLE_RELEASE_ROOT/$archive" | awk '{print $1}')" = "$OLD_BUNDLE_SHA256" ] \
+    || die 'published compatible archive checksum changed'
+  tar -xzf "$COMPATIBLE_RELEASE_ROOT/$archive" -C "$COMPATIBLE_RUNTIME_ROOT"
   (cd "$COMPATIBLE_RUNTIME_ROOT" && sha256sum --check runtime-files.sha256 >/dev/null) \
     || die 'published compatible runtime manifest failed'
   chmod -R a+rX "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
@@ -656,7 +655,7 @@ case "$MODE" in
         [ "$project_presence_rc" = 1 ] \
           || die 'cannot verify power reconciler project absence'
       fi
-      printf 'ok: exact v0.11.0 power reconciler fixture is clean\n'
+      printf 'ok: exact anchor power reconciler fixture is clean\n'
       exit 0
     fi
     assert_state_root
@@ -681,11 +680,11 @@ case "$MODE" in
       record_reboot_baseline
       write_fixture_value "$PHASE_STATE" candidate-ready
       PRESERVE_FIXTURE=1
-      printf 'ok: exact published v0.11.0 update is ready for reboot verification\n'
+      printf 'ok: exact published anchor update is ready for reboot verification\n'
       exit 0
     fi
     finish_candidate_flow
-    printf 'ok: exact published v0.11.0 upgrade and authentic v0.25.4 rollback/roll-forward passed\n'
+    printf 'ok: exact published anchor upgrade and authentic anchor rollback/roll-forward passed\n'
     ;;
   resume)
     assert_state_root
@@ -706,6 +705,6 @@ case "$MODE" in
     assert_fixture_phase candidate-reconciled
     assert_post_reboot_candidate
     finish_candidate_flow
-    printf 'ok: exact published v0.11.0 upgrade survived two reboots and authentic v0.25.4 rollback/roll-forward\n'
+    printf 'ok: exact published anchor upgrade survived two reboots and authentic anchor rollback/roll-forward\n'
     ;;
 esac

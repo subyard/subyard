@@ -14,9 +14,14 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/blang/semver/v4"
 )
 
 func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
+	aboveAnchor := semver.MustParse(UpdateAnchorVersion)
+	aboveAnchor.Patch++
+	activeVersion := aboveAnchor.String() + "-test"
+	activeID, targetID := activeVersion+"-active", UpdateAnchorVersion+"-target"
 	for _, scenario := range []string{"failed-query", "malformed-query", "invalid-inspection", "invalid-payload", "history", "profile-owner-loss", "changed-core", "execute-recheck", "source-work-refusal"} {
 		t.Run(scenario, func(t *testing.T) {
 			runtime, active, target, home, installed := retainedRuntimeFixture(t)
@@ -26,7 +31,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"0.19.1-active","previous":"0.11.2-target","target":"0.11.2-target","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`
+			inspection := fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","previous":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`, activeID, targetID, targetID)
 			if scenario == "source-work-refusal" {
 				inspection = strings.Replace(inspection, `"outcome":`, `"decisions":[{"resource":"setting.YARD_TEMPLATE","scope":"yard.example","decision":"canonicalize","result":"test-vms"}],"outcome":`, 1)
 			}
@@ -37,7 +42,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 			if scenario == "malformed-query" {
 				probe = "printf 'malformed\\n'"
 			}
-			for _, candidate := range []struct{ path, id, version string }{{active, "0.19.1-active", "0.19.1"}, {target, "0.11.2-target", "0.11.2"}} {
+			for _, candidate := range []struct{ path, id, version string }{{active, activeID, activeVersion}, {target, targetID, UpdateAnchorVersion}} {
 				for _, directory := range []string{"bin", "config/preview"} {
 					if err := os.MkdirAll(filepath.Join(candidate.path, directory), 0o700); err != nil {
 						t.Fatal(err)
@@ -73,7 +78,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for name, id := range map[string]string{"current": "0.19.1-active", "previous": "0.11.2-target"} {
+			for name, id := range map[string]string{"current": activeID, "previous": targetID} {
 				if err := os.Symlink("releases/"+id, filepath.Join(runtimeRoot, name)); err != nil {
 					t.Fatal(err)
 				}
@@ -108,7 +113,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 					t.Fatalf("execution did not recheck runtime-owner loss: %v", err)
 				}
 			}
-			for name, expected := range map[string]string{"current": "releases/0.19.1-active", "previous": "releases/0.11.2-target"} {
+			for name, expected := range map[string]string{"current": "releases/" + activeID, "previous": "releases/" + targetID} {
 				if got, err := os.Readlink(filepath.Join(runtimeRoot, name)); err != nil || got != expected {
 					t.Fatalf("inspection changed %s: %q, %v", name, got, err)
 				}

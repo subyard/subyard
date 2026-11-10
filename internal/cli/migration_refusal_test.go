@@ -25,8 +25,8 @@ func TestReleaseTransitionWritesFilteredMigrationDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const target = "0.22.0-test-aaaaaaaaaaaa"
-	digest := writeSealedRollbackTarget(t, runtimeRoot, target, "0.22.0-test", registry)
+	const target = "0.28.0-test-aaaaaaaaaaaa"
+	digest := writeSealedRollbackTarget(t, runtimeRoot, target, "0.28.0-test", registry)
 	if err := os.Symlink("releases/"+target, filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}

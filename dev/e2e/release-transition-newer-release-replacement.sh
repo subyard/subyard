@@ -8,16 +8,19 @@ PREFLIGHT=0
 if [ "${1:-}" = --preflight ]; then PREFLIGHT=1; shift; fi
 TOKEN="${1:-}"
 # Reuse its marked Incus project, isolated runtime paths, native environment and
-# bounded cleanup. Sourcing never runs the frozen v0.11.1 acceptance entrypoint.
+# bounded cleanup. The shared library has no historical acceptance entrypoint.
 # shellcheck source=dev/e2e/release-transition-v0111-recovery.sh
 . "$(dirname "${BASH_SOURCE[0]}")/release-transition-v0111-recovery.sh" "$TOKEN"
 
 STATE_ROOT="/var/tmp/subyard-newer-release-$TOKEN"
+# shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 SUCCESS_ROOT="$STATE_ROOT/success"
 MARKER="subyard-newer-release-$TOKEN"
 SUCCESS_YARD="newer-release-$TOKEN"
-# From v0.25.1, init refuses the unmarked project this fixture shares its image through.
-SOURCE_VERSION=0.19.0
+IFS=$'\t' read -r SOURCE_VERSION SOURCE_INSTALLER_SHA256 SOURCE_AMD64_SHA256 _ < <(
+  published_anchor
+)
 SOURCE_BUNDLE="subyard-$SOURCE_VERSION-linux-amd64.tar.gz"
 ASSET_ROOT="$STATE_ROOT/assets"
 SOURCE_ASSETS="$ASSET_ROOT/source"
@@ -78,19 +81,17 @@ cleanup_newer_release() {
 }
 
 fetch_source_assets() {
-  local digest name
+  local name
+  [ -n "$SOURCE_VERSION" ] || die 'missing direct anchor pin'
   install -d -m 0700 "$SOURCE_ASSETS"
-  while read -r digest name; do
+  for name in "$SOURCE_BUNDLE" "$SOURCE_BUNDLE.sha256" "$SOURCE_BUNDLE.manifest.json" \
+    "$SOURCE_BUNDLE.provenance.json" subyard-install-runtime-release.sh subyard-install-runtime-release.sh.sha256 subyard-install.sh; do
     curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$SOURCE_ASSETS/$name" \
       "https://github.com/Subyard/Subyard/releases/download/v$SOURCE_VERSION/$name"
-    printf '%s  %s\n' "$digest" "$name" | (cd "$SOURCE_ASSETS" && sha256sum --check --quiet -)
-  done <<EOF
-81c55205368ef891976f28ef21b303da5ef97114d80f76c6ec60e9f3a2b698a9 $SOURCE_BUNDLE
-cb04eb56fd54b04a8ef49ee31603cc8fa98811ebab293240df85ddf324ad8969 $SOURCE_BUNDLE.manifest.json
-d889ca7a2af94f207c344c12f64955e655bbee183b19234bb06e9ff2d053cb62 $SOURCE_BUNDLE.provenance.json
-0d2cffd7622edff32ac23c321f44ad603b99d978c0b1687755485c1257d3da31 subyard-install-runtime-release.sh
-EOF
-  (cd "$SOURCE_ASSETS" && sha256sum "$SOURCE_BUNDLE") > "$SOURCE_ASSETS/$SOURCE_BUNDLE.sha256"
+  done
+  [ "$(sha256sum "$SOURCE_ASSETS/$SOURCE_BUNDLE" | awk '{print $1}')" = "$SOURCE_AMD64_SHA256" ] \
+    && [ "$(sha256sum "$SOURCE_ASSETS/subyard-install.sh" | awk '{print $1}')" = "$SOURCE_INSTALLER_SHA256" ] \
+    || die 'published source differs from its immutable pin'
 }
 
 stage() { # version: sets LAUNCHER to the published release's own launcher
@@ -175,13 +176,13 @@ check_refusals() {
   local foreign_reason='foreign guest temporary policy metadata'
   srv="$(incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -c .devices.srv)"
   [ "$srv" != null ] || die 'srv is not a local device'
-  [ -z "$(incus config get "$INSTANCE" "$foreign" --project "$PROJECT")" ] || die 'source already has temporary policy metadata'
+  [ "$(incus config get "$INSTANCE" "$foreign" --project "$PROJECT")" = v1 ] || die 'source temporary policy is not current'
   local settings=()
   mapfile -t settings < <(jq -r 'del(.type)|to_entries[]|"\(.key)=\(.value)"' <<<"$srv")
 
   incus config set "$INSTANCE" "$foreign" foreign --project "$PROJECT"
   require_refusal metadata "$foreign_reason"
-  incus config unset "$INSTANCE" "$foreign" --project "$PROJECT"
+  incus config set "$INSTANCE" "$foreign" v1 --project "$PROJECT"
 
   incus config device remove "$INSTANCE" srv --project "$PROJECT" >/dev/null
   require_refusal srv "$srv_reason"
@@ -231,10 +232,20 @@ main_newer_release() {
   local source_launcher="$RUNTIME_ROOT/current/bin/yard"
   [ "$(fixture_env "$source_launcher" --version)" = "yard $SOURCE_VERSION" ] || die 'source release unavailable'
   ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'fixture project already exists'
-  # The shared project sees the prepared image and fences every later teardown.
-  # Use a source that accepts it: from v0.25.1, init refuses an unmarked project.
-  incus project create "$PROJECT" -c features.images=false -c "user.subyard-e2e.newer-release=$FIXTURE_MARKER" >/dev/null
-  fixture_env "$source_launcher" -Y "$YARD_NAME" init --yes
+  # Ordinary init creates its own proven project ownership before fixture marking.
+  local init_rc=0
+  fixture_env "$source_launcher" -Y "$YARD_NAME" init --yes || init_rc=$?
+  if [ "$init_rc" != 0 ]; then
+    [ "$(incus project get "$PROJECT" user.subyard.installation)" = 1 ] \
+      && [ "$(incus project get "$PROJECT" user.subyard.operator_uid)" = "$(id -u)" ] \
+      && [ "$(incus project get "$PROJECT" user.subyard.data_home)" = "$DATA_ROOT" ] \
+      && [ "$(incus project get "$PROJECT" user.subyard.config_home)" = "$CONFIG_HOME" ] \
+      && [ -z "$(incus list --project "$PROJECT" --format csv -c n)" ] \
+      || die 'source init failed outside its owned empty image namespace'
+    incus project set "$PROJECT" features.images=false
+  fi
+  incus project set "$PROJECT" "user.subyard-e2e.newer-release=$FIXTURE_MARKER"
+  [ "$init_rc" = 0 ] || fixture_env "$source_launcher" -Y "$YARD_NAME" init --yes
   fixture_env "$source_launcher" -Y "$YARD_NAME" start --yes
   fixture_env "$source_launcher" migrate --yes
   incus exec "$INSTANCE" --project "$PROJECT" -- sh -c \

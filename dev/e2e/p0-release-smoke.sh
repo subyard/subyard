@@ -6,10 +6,8 @@ set -euo pipefail
 # shellcheck source=dev/e2e/power-reconciler-upgrade.sh
 . "$(dirname "${BASH_SOURCE[0]}")/power-reconciler-upgrade.sh"
 
-# Advance this checksum-pinned baseline when the supported release baseline changes.
-OLD_VERSION=0.14.0
-OLD_INSTALLER_SHA256=a78c10910c0886a8d01c0a2e77718b21ce58e45fa7f0de6064bc1f351d56028b
-CANDIDATE_VERSION="0.25.6-p0.smoke.$TOKEN"
+# The shared fixture reads the TSV anchor baseline.
+CANDIDATE_VERSION="0.28.0-p0.smoke.$TOKEN"
 if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
   CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
@@ -172,9 +170,14 @@ prepare_smoke() {
   chmod 0755 "$INSTALLER"
   operator_env "$INSTALLER" --version "$OLD_VERSION" --yes
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-  incus project create "$PROJECT" \
-    -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
-  operator_yard init --yes
+  if ! operator_yard init --yes > "$STATE_ROOT/baseline-init.log" 2>&1; then
+    incus project show "$PROJECT" >/dev/null 2>&1 \
+      && [ -z "$(incus list --project "$PROJECT" --format csv -c n)" ] \
+      || die 'baseline init failed before its image step'
+    incus project set "$PROJECT" features.images=false
+    operator_yard init --yes
+  fi
+  incus project set "$PROJECT" user.p0-power-systemd="$MARKER"
   operator_yard start --yes
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
@@ -189,13 +192,10 @@ prepare_smoke() {
   verify_smoke_state "$OLD_VERSION"
 
   info 'upgrading through the published updater'
-  if [ -f "$ROOT/config/release-checkpoint.json" ]; then
-    interrupt_checkpoint_update
-    phase=smoke-checkpoint-interrupted
-  else
-    operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-      "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-  fi
+  # The anchor already owns a compact checkpoint. Its reader/projection is
+  # preserved; publication-cut contracts remain in the host-free reader tests.
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
   CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
@@ -235,7 +235,6 @@ finish_smoke() {
   operator_yard export "$SMOKE_PROJECT" --yes
   exported="$(operator_env grep -Rl guest-change "$OPERATOR_HOME/.subyard/exports")"
   [ -n "$exported" ] || die 'release smoke export lost the guest change'
-  verify_predecessor_rollback_refusal
   # Establish current=A/previous=B using only verified public update operations.
   # This leaves the exact candidate active for its compatible rollback cycle.
   operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \

@@ -2,6 +2,12 @@
 # Shared assertions and state helpers for the power-upgrade and release-smoke fixtures.
 # Definitions only: callers own initialization, lease validation and cleanup traps.
 
+published_anchor() {
+  awk -F '\t' '$4 == "anchor" { row=$0; count++ }
+    END { if (count != 1) { print "expected exactly one published anchor" > "/dev/stderr"; exit 1 }; print row }' \
+    "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
+}
+
 operator_env() {
   local uid
   uid="$(operator_uid)"
@@ -396,7 +402,14 @@ check_compatible_transition() {
 finish_candidate_flow() {
   local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
   load_release_targets
-  verify_legacy_rollback_refusal
+  capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
+  local legacy="$OPERATOR_HOME/.config/subyard/migrations/state.json"
+  if operator_env test ! -e "$legacy" && operator_env test ! -L "$legacy"; then
+    printf 'absent\n' > "$STATE_ROOT/refusal-3.mode"
+  else
+    operator_env stat -c '%a:%u:%g:%d:%i' "$legacy" > "$STATE_ROOT/refusal-3.mode"
+    operator_env cat "$legacy" > "$STATE_ROOT/refusal-3.bytes"
+  fi
   info "retaining the authentic published $COMPATIBLE_VERSION runtime through verified public updates"
   check_compatible_transition "$COMPATIBLE_VERSION" "$COMPATIBLE_RELEASE_ROOT" \
     "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"

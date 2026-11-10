@@ -1102,24 +1102,12 @@ and unfinished-transaction recovery horizon. A runtime version bump alone never 
 contracts. Do not weaken validation or silently discard a new safety requirement to fit an old
 response: the compatibility adapter must preserve its meaning.
 
-Before publication, `dev/verify-release-upgrades.py` runs the unmodified, checksum-pinned v0.11.2
-and v0.18.1 updaters against the built candidate on the runner's architecture. It verifies inspection,
-activation, the completed fixed point, completed activation drift inspection, rollback and forward retry.
-It also kills a real update after journaled activation and uses the old updater to resume the same
-authorized candidate transaction. This released-binary check complements tests of the frozen codecs;
-rebuilding both ends from current source does not establish cross-release compatibility. Both released callers also exercise checkpoint-reader
-bridge ordering and rollback refusal after authoritative epochs exceed the frozen projection. The v0.18.1
-caller reports completed activation drift as a fresh migration-required plan; v0.11.2 retains its frozen
-recovering presentation. Neither reuses completed authorization.
-
-The same harness runs the checksum-pinned v0.17.3 engine to create and interrupt an activation-only
-repair and reproduce its unrelated-template blocker. A standalone candidate with the same registry
-resumes with the original assets. When the latest candidate advances the registry, the harness proves
-its refusal without mutation, resumes through the checksum-pinned v0.18.6 registry/catalog bridge,
-then separately authorizes the latest ordinary update and verifies the new publication epoch while
-preserving historical domains. Its synthetic Incus backend changes
-only observed running/stopped state; settings, ledger and original journal bindings must survive
-recovery. Privileged commands are rejected by fixture shims.
+Before publication, `dev/verify-release-upgrades.py` runs unmodified checksum-pinned old callers
+through update and `--check` refusal, verifies the anchor instruction reaches stderr, and checks
+that protected configuration, active links and project data remain unchanged. The pre-anchor
+migration and original-owner recovery matrix is frozen in the v0.27.0 tag. Current Go reader tests
+retain accepted V2 history and recovery contracts; installed direct upgrade, rollback and the
+one-time anchor chains belong to the published-upgrade and P0 VM lanes.
 
 Historical frozen materialization recipes retain preview composition from the bound runtime's
 `config/preview/instructions.md` asset, or the exact legacy fallback for older runtimes. Recovery
@@ -1129,13 +1117,23 @@ The Release workflow retains the compatibility check's output with its other fai
 
 ### Legacy upgrades
 
-The minimum supported source is **v0.11.0, inclusive**. Fresh upgrades/imports from earlier
-installations and new rollback targets below that boundary refuse before changing active runtime
-links or protected state. There is no V1 upgrade bridge. Existing accepted V2 history and exact
-unfinished V2 owners remain supported, including retained legacy evidence. Process V1, Ledger V2
-and V2 checkpoint-reader bridges have independent compatibility contracts.
+Direct updates require installed **v0.27.0 or newer**. Sources from v0.11.0 to below v0.27.0
+refuse before changing active links, journals, settings or data and print:
 
-For an older installation, stage verified current cleanup tooling in its existing runtime store:
+```sh
+yard update --version 0.27.0
+yard update
+```
+
+The installer over an existing installation and offline update use the same admission. Downloads
+and immutable staging do not authorize activation. There is no automatic chain or new bridge release.
+Rollback targets below v0.27.0 refuse; compatible v0.27.x targets remain eligible. A version alone
+does not establish readiness: protected journals, authoritative checkpoints and sealed bindings
+still apply. An unfinished exact target/direction/artifact retains its original recovery owner.
+
+Sources before **v0.11.0** retain the full-uninstall route; no V1 upgrade bridge exists. Accepted
+V2 history and evidence remain readable independently of fresh update admission.
+For a source before v0.11.0, stage verified current cleanup tooling in its existing runtime store:
 
 ```bash
 VERSION=<current-version>

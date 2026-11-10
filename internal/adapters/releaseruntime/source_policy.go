@@ -12,16 +12,18 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/blang/semver/v4"
 )
 
 const MinimumSourceVersion = "0.11.0"
+const UpdateAnchorVersion = "0.27.0"
 
 const LegacyReinstallGuidance = "Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately."
 
-func sourceVersionError(version string) error {
+func sourceVersionError(version, runtimeRoot string) error {
 	parsed, err := semver.Parse(version)
 	if err != nil {
 		return errors.New("the sealed source release version is invalid; restore a runtime with a valid semantic version, then run yard update --check")
@@ -29,7 +31,25 @@ func sourceVersionError(version string) error {
 	if parsed.LT(semver.MustParse(MinimumSourceVersion)) {
 		return errors.New(LegacyReinstallGuidance)
 	}
+	if parsed.LT(semver.MustParse(UpdateAnchorVersion)) {
+		anchor, retry := sourceUpdateCommands(UpdateAnchorVersion, runtimeRoot)
+		return fmt.Errorf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: %s && %s", version, UpdateAnchorVersion, anchor, retry)
+	}
 	return nil
+}
+
+// Match newerReleaseProbe's command scope and shell quoting without extending
+// the frozen process protocol with caller flag metadata.
+func sourceUpdateCommands(version, runtimeRoot string) (string, string) {
+	dataHome := os.Getenv("SUBYARD_HOME")
+	if dataHome == "" {
+		dataHome = filepath.Join(os.Getenv("HOME"), ".subyard")
+	}
+	scope := ""
+	if runtimeRoot != "" && filepath.Clean(runtimeRoot) != filepath.Join(dataHome, "runtime") {
+		scope = " --runtime-root " + shellWord(runtimeRoot)
+	}
+	return "yard update --version " + version + scope, "yard update" + scope
 }
 
 // VerifyLegacyUninstallSource recognizes the sealed historical project-creator
@@ -123,11 +143,13 @@ func verifyHistoricalUninstallSource(ctx context.Context, runtimeRoot string) (*
 // CheckSourcePolicy verifies the sealed active source before a fresh transition.
 // Exact accepted V2 owners retain their recovery contract even when their source
 // predates the ordinary admission floor; the transition validates that binding.
-func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessRequest) error {
+func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessRequest) (refusal error) {
+	var identityErr, unfinishedErr error
+	defer func() { refusal = domain.CollectRefusals(identityErr, unfinishedErr, refusal) }()
 	if pending, err := config.PendingDeveloperIdentities(request.ConfigHome); err != nil {
-		return err
+		identityErr = err
 	} else if len(pending) != 0 && request.Mode != releasetransition.ProcessInspect {
-		return errors.New("developer identity transition is pending; finish plain init before replacing the runtime")
+		identityErr = errors.New("developer identity transition is pending; finish plain init before replacing the runtime")
 	}
 	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
 	if err != nil {
@@ -146,6 +168,18 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			journal.Goal.Target == request.Target && journal.Goal.Direction == request.Direction &&
 			journal.ArtifactDigest == request.ArtifactDigest {
 			return nil
+		}
+		if journal.Checkpoint != releasetransition.JournalComplete {
+			source, err := releasetransition.ReleaseIDVersion(journal.Releases.From)
+			if err == nil && source.LT(semver.MustParse(UpdateAnchorVersion)) {
+				owner, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)
+				if err != nil {
+					unfinishedErr = fmt.Errorf("source-anchor-required: unfinished update from v%s must be completed by its original owner %s before replacing it", source, journal.Goal.Target)
+				} else {
+					command, _ := sourceUpdateCommands(owner.String(), request.RuntimeRoot)
+					unfinishedErr = fmt.Errorf("source-anchor-required: unfinished update from v%s must be completed by its original owner v%s; next: %s", source, owner, command)
+				}
+			}
 		}
 	}
 	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
@@ -169,7 +203,7 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		return errors.New("source release identity does not match its sealed version")
 	}
 	if verified.registryDigest == "" {
-		if err := sourceVersionError(verified.version); err != nil {
+		if err := sourceVersionError(verified.version, request.RuntimeRoot); err != nil {
 			return err
 		}
 		return errors.New(LegacyReinstallGuidance)
@@ -217,5 +251,5 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			return nil
 		}
 	}
-	return sourceVersionError(verified.version)
+	return sourceVersionError(verified.version, request.RuntimeRoot)
 }

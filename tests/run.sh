@@ -138,7 +138,7 @@ CURRENT_SUITE=go
 printf 'SUITE go\n'
 run_check gofmt check_format
 run_check go-vet go -C "$ROOT" vet ./cmd/... ./internal/...
-run_check build make -C "$ROOT" build VERSION="${SUBYARD_TEST_BUILD_VERSION:-0.22.0-test}"
+run_check build make -C "$ROOT" build VERSION="${SUBYARD_TEST_BUILD_VERSION:-0.28.0-test}"
 run_check build-layout check_build_layout
 run_check go-race check_go_race
 run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x

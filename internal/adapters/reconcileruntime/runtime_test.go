@@ -1159,7 +1159,7 @@ func TestProvisionRequiresExactFactsAfterProfileSelectionChanges(t *testing.T) {
 	runtime, definition, _, desired := lifecycleFixture(t)
 	testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, desired, desired)), 0o600)
 	runtime.RepositoryRoot = "../../.."
-	runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=", "CCUSAGE_VERSION=1.2.3", "ENVIRONMENT_PROFILES=", "YARD_VERSION=0.25.6-test")
+	runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=", "CCUSAGE_VERSION=1.2.3", "ENVIRONMENT_PROFILES=", "YARD_VERSION=0.28.0-test")
 	runtime.Yard = domain.Context{YardName: "synthetic", IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: 1000}
 	runtime.Incus = &testkit.Incus{ServerInfo: ports.ServerInfo{Environment: "incus"}, Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{"user.subyard.ccusage_version": "1.2.3"}}}}
 	executor := &provisionFactsExecutor{provisionLifecycleExecutor: provisionLifecycleExecutor{&retryableIntegrationExecutor{}}}

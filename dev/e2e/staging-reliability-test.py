@@ -5,12 +5,16 @@ import hashlib
 import copy
 import pathlib
 import re
+import runpy
 import shlex
 import subprocess
 import tempfile
 import os
 import sys
 from unittest import mock
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+ANCHOR_VERSION = runpy.run_path(str(REPO/'dev/verify-release-upgrades.py'))['published_anchor'](REPO)[0]
 
 fixture = pathlib.Path(__file__).with_name('staging-reliability.sh').read_text()
 source = fixture.split("<<'PYTHON'", 1)[1].split('\n', 1)[1].split('\nPYTHON', 1)[0]
@@ -1193,17 +1197,17 @@ with tempfile.TemporaryDirectory(prefix='subyard-predecessor-broker-', dir='/tmp
     launcher = root / 'runtime/current/bin/yard'
     launcher.parent.mkdir(parents=True)
     launcher.write_text('''#!/bin/bash
-if [ "$*" = --version ]; then printf 'yard 0.19.0\n'; exit; fi
+if [ "$*" = --version ]; then printf 'yard @ANCHOR@\n'; exit; fi
 if [ "$*" = '-Y test-yard _info' ]; then
   printf 'info\n' >> "$PREDECESSOR_CALLS"
   project=fixture; [ "$PREDECESSOR_FAILURE" != context ] || project=foreign
-  printf '{"yardName":"test-yard","accessKind":"local","incusProject":"%s","yardInstanceName":"owner","version":"0.19.0","state":"RUNNING"}\n' "$project"
+  printf '{"yardName":"test-yard","accessKind":"local","incusProject":"%s","yardInstanceName":"owner","version":"@ANCHOR@","state":"RUNNING"}\n' "$project"
   exit
 fi
 [ "$*" = '-Y test-yard init --yes' ] || exit 99
 printf 'init\n' >> "$PREDECESSOR_CALLS"
 [ "$PREDECESSOR_FAILURE" != init ]
-''')
+'''.replace('@ANCHOR@', ANCHOR_VERSION))
     launcher.chmod(0o700)
     engine = launcher.with_name('yard-engine')
     engine.write_bytes(launcher.read_bytes())
@@ -1215,18 +1219,18 @@ printf 'init\n' >> "$PREDECESSOR_CALLS"
     for failure in ['', 'init', 'version', 'context', 'project-shape', 'native-owner', 'bridge', 'initialized', 'power', 'identity', 'marker', 'worker', 'native-state', 'git-operation', 'retained-worker', 'retained-state']:
         log = root / ('calls-' + (failure or 'success'))
         script = f"""set -euo pipefail
-ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME="$ROOT/config"; baseline=0.19.0; PROJECT=fixture; INSTANCE=owner; MARKER=owned
+ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME="$ROOT/config"; baseline={ANCHOR_VERSION}; PROJECT=fixture; INSTANCE=owner; MARKER=owned
 export PREDECESSOR_CALLS={str(log)!r} PREDECESSOR_FAILURE={failure!r}
 p0_retry_init_after_plan_stale() {{ "$@"; }}
 prepare_minimal_owner() {{ exit 99; }}
-runtime_yard() {{ if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else "0.19.0"}'; else printf '%s\n' '{{"resources":{{"bases":[]}}}}'; fi; }}
+runtime_yard() {{ if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else ANCHOR_VERSION}'; else printf '%s\n' '{{"resources":{{"bases":[]}}}}'; fi; }}
 verify_broker_installation() {{ printf 'verified\n' >> '{log}'; return {1 if failure == 'worker' else 0}; }}
 outer_exec() {{
   case "$*" in
     'python3 - /home/dev off check') printf 'git-operation\n' >> '{log}'; cat >/dev/null; return {1 if failure == 'git-operation' else 0} ;;
     *'_test-vms-worker status') printf 'native-state\n' >> '{log}'; printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}}}}' ;;
     'incus list --all-projects --format csv -c n') return 0 ;;
-    'sha256sum /usr/local/libexec/subyard/.service-retained-v019-worker') printf '%s  retained\\n' '{'b'*64 if failure == 'retained-worker' else engine_sha}' ;;
+    'sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker') printf '%s  retained\\n' '{'b'*64 if failure == 'retained-worker' else engine_sha}' ;;
     *'install -m 0700'*|*'install -m 0600'*) return 0 ;;
     *sha256sum*) printf '%s  leases.json\n' '{'invalid' if failure == 'retained-state' else 'a'*64}' ;;
     *) return 99 ;;
@@ -1319,7 +1323,7 @@ consumed = fixture.split("<<'PYCONSUMED'",1)[1].split('\n',1)[1].split('\nPYCONS
 for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-digest', 'baseline-digest', 'bootstrap-digest', 'bootstrap-mode', 'bootstrap-missing', 'bootstrap-link', 'bootstrap-hardlink', 'bootstrap-mount']:
     with tempfile.TemporaryDirectory(prefix='subyard-worktree.',dir='/tmp') as directory:
         parent=pathlib.Path(directory); root=parent/'src'; owner=parent/'owner'
-        runtime=root/'.subyard-acceptance/runtime'; release=root/'.subyard-acceptance/release'; baseline=owner/'baseline-0.19.0'
+        runtime=root/'.subyard-acceptance/runtime'; release=root/'.subyard-acceptance/release'; baseline=owner/('baseline-'+ANCHOR_VERSION)
         for target in [runtime,release,baseline,root/'dev',root/'.build',owner/'installed/current',owner/'installed/previous']:
             target.mkdir(parents=True,exist_ok=True)
         for target in [runtime/'engine',release/'runtime.tar.gz',baseline/'archive',owner/'installed/current/engine',owner/'installed/previous/engine',parent/'worktree.tar.gz']:
@@ -1327,7 +1331,9 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
         digest=hashlib.sha256(b'verified fixture bytes').hexdigest()
         bootstrap=root/'.build/yard'; bootstrap.write_bytes(b'verified fixture bytes'); bootstrap.chmod(0o755)
         (root/'.subyard-acceptance/candidate.json').write_text(json.dumps({'runtime_file':'runtime.tar.gz','runtime_sha256':digest}))
-        (root/'dev/verify-release-upgrades.py').write_text("import hashlib\nDIRECT_BASELINE='0.19.0'\nDIRECT_BASELINE_SHA256={'amd64':"+repr(digest)+"}\ndef baseline_assets(owner,path,version,hashes,arch):\n    assert hashlib.sha256((path/'archive').read_bytes()).hexdigest()==hashes[arch]\n")
+        (root/'dev/e2e').mkdir()
+        (root/'dev/e2e/published-upgrade-baselines.tsv').write_text(f'{ANCHOR_VERSION}\t{"a"*64}\t{digest}\tanchor\n')
+        (root/'dev/verify-release-upgrades.py').write_text("import hashlib,runpy\npublished_anchor=runpy.run_path("+repr(str(REPO/'dev/verify-release-upgrades.py'))+")["+repr('published_anchor')+"]\ndef baseline_assets(owner,path,version,hashes,arch):\n    assert version=="+repr(ANCHOR_VERSION)+"\n    assert hashlib.sha256((path/'archive').read_bytes()).hexdigest()==hashes[arch]\n")
         if fault=='symlink': (runtime/'foreign').symlink_to(owner/'installed/current')
         if fault=='hardlink': os.link(owner/'installed/current/engine',runtime/'foreign')
         if fault=='candidate-digest': (release/'runtime.tar.gz').write_bytes(b'changed')
@@ -1343,7 +1349,7 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
             prefix="from unittest import mock\n_original_read=pathlib.Path.read_text\ndef read(path,*a,**kw):\n    if str(path)=='/proc/self/mountinfo': return '1 0 0:1 / '+"+repr(str(mounted))+"+' rw - ext4 none rw\\n'\n    return _original_read(path,*a,**kw)\nmock.patch.object(pathlib.Path,'read_text',read).start()\n"
         if fault=='foreign-owner': prefix='from unittest import mock\nmock.patch.object(os,\'geteuid\',return_value=os.geteuid()+1).start()\n'
         program=consumed.replace('root,owner=map(pathlib.Path,sys.argv[1:3])',prefix+'root,owner=map(pathlib.Path,sys.argv[1:3])')
-        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner),digest,'yard 0.11.1-p0.owner'],capture_output=True,text=True,timeout=5)
+        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner),digest,'yard 0.28.0-p0.owner'],capture_output=True,text=True,timeout=5)
         assert (result.returncode==0)==(fault==''),(fault,result)
         for target in [runtime,release,baseline,parent/'worktree.tar.gz']:
             assert target.exists()==bool(fault),(fault,target,result)
@@ -1353,7 +1359,7 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
         if not fault:
             receipt=json.loads(result.stdout.split('STAGING_CONSUMED_INPUTS=',1)[1])
             assert receipt['total_allocated_bytes']==sum(receipt['allocated_bytes'].values())>0,receipt
-            assert receipt['bootstrap_engine']=={'path':'.build/yard','sha256':digest,'version':'yard 0.11.1-p0.owner'},receipt
+            assert receipt['bootstrap_engine']=={'path':'.build/yard','sha256':digest,'version':'yard 0.28.0-p0.owner'},receipt
 
 reclaim = re.search(r'^reclaim_supported_upgrade_inputs\(\) \{\n.*?^\}',fixture,re.MULTILINE|re.DOTALL)[0]
 fingerprint='a'*64
@@ -1363,7 +1369,7 @@ ROOT=/tmp/subyard-worktree.fixture/src; OWNER_ROOT=/tmp/owner
 SUPPORTED_UPGRADE=1; SUPPORTED_UPGRADE_BOUND={0 if fault=='unbound' else 1}
 OWNER_BASE_IMAGE_CREATED=1; OWNER_BASE_IMAGE_FINGERPRINT={fingerprint}
 OWNER_BASELINE_IMAGES={'a'*64 if fault=='baseline-image' else ''}
-BOOTSTRAP_ENGINE_SHA256={'a'*64}; BOOTSTRAP_ENGINE_VERSION='yard 0.11.1-p0.owner'
+BOOTSTRAP_ENGINE_SHA256={'a'*64}; BOOTSTRAP_ENGINE_VERSION='yard 0.28.0-p0.owner'
 p0_capacity_assert_root_marker() {{ return {1 if fault=='marker' else 0}; }}
 verify_broker_installation() {{ return {1 if fault=='identity' else 0}; }}
 incus() {{ printf '%s\\n' '[{{"aliases":[{{"name":"subyard-e2e-debian-13-cloud-container"}}],"fingerprint":"{'b'*64 if fault=='alias' else fingerprint}"}}]'; }}

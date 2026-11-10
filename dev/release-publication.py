@@ -46,6 +46,8 @@ PREPARATION_WORKFLOW_POLICIES = {
     "dcc7d9d2cd7f1f20c41bb7993ffd279af644380f": HISTORICAL_PREPARATION_JOBS | {"host-free-verify"},
     "e952002eada45e0d6f245fbc61f5403c7325ae5d": PREPARATION_JOBS,
     "4089769ddfcdfa54fdfeb1d11498acf6af1fd42f": PREPARATION_JOBS,
+    # Test release version moved above the 0.27.0 update anchor.
+    "8e277e88b52fe3c8c3336da9e606e0ae8b6e8314": PREPARATION_JOBS,
 }
 
 
@@ -1611,6 +1613,33 @@ def release_level(requested, reason, scope, recorded=None):
     return {"level": requested, "reason": reason, "baseline": baseline, "migration_changes": changed}
 
 
+def published_upgrade_baseline_refusals(version, commit):
+    """Pin the highest earlier stable release across all local branches."""
+    target = tuple(int(part) for part in version.split("."))
+    try:
+        tags = subprocess.check_output(["git", "tag", "--list", "v[0-9]*"], cwd=ROOT, text=True,
+                                       stderr=subprocess.DEVNULL).split()
+        released = sorted((tuple(map(int, tag[1:].split("."))), tag) for tag in tags
+                          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag)
+                          and tuple(map(int, tag[1:].split("."))) < target)
+        baseline = released[-1][1] if released else None
+    except (subprocess.CalledProcessError, OSError):
+        baseline = None
+    if baseline is None:
+        return ["cannot determine the previous published release from local tags; fetch release tags before preparing a release"]
+    path = "dev/e2e/published-upgrade-baselines.tsv"
+    try:
+        payload = subprocess.check_output(["git", "show", f"{commit}:{path}"], cwd=ROOT, text=True,
+                                          stderr=subprocess.DEVNULL)
+        pins = {fields[0] for line in payload.splitlines()
+                if len(fields := line.split("\t")) == 4 and fields[3] in ("direct", "anchor")}
+    except (subprocess.CalledProcessError, OSError):
+        return [f"cannot read {path} at the candidate commit"]
+    if baseline[1:] not in pins:
+        return [f"published release {baseline} is missing from direct baselines in dev/e2e/published-upgrade-baselines.tsv; pin its verified release assets before preparing a release"]
+    return []
+
+
 def record_release_level(output, level):
     with a.acceptance_lock(output):
         _, receipt = a.load_bound(output)
@@ -1697,6 +1726,7 @@ def main():
     if args.action == "prepare":
         if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version) or not re.fullmatch(r"[0-9a-f]{40}", args.commit):
             raise ValueError("stable X.Y.Z and full lowercase 40-character commit SHA required")
+        baseline_refusals = published_upgrade_baseline_refusals(args.version, args.commit)
         requests = state_dir / "requests"
         requests.mkdir(exist_ok=True)
         path = requests / (args.version + "-" + args.commit + ".json")
@@ -1704,10 +1734,10 @@ def main():
             if path.exists():
                 state = json.loads(path.read_text())
                 refusals = [] if same_repository(state["repository"], args.repository) else ["request repository mismatch"]
-                refuse(refusals + retained_workflow_ref(state, args.workflow_ref))
+                refuse(refusals + retained_workflow_ref(state, args.workflow_ref) + baseline_refusals)
             else:
                 workflow_ref, refusals = select_workflow_ref(github, args.version, args.commit, args.workflow_ref)
-                refuse(refusals + stable_tag_refusals(github, args.version, args.commit))
+                refuse(refusals + stable_tag_refusals(github, args.version, args.commit) + baseline_refusals)
                 state = {"request": str(uuid.uuid4()), "version": args.version, "commit": args.commit,
                          "repository": args.repository, "workflow_ref": workflow_ref}
             write_json(path, state)
