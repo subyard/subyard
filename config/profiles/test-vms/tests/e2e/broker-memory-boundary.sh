@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Focused physical-memory mount acceptance on VM1 of a disposable allocation.
 # Run: dev/agent-e2e.sh --slot N --type android-test --purpose broker-memory-boundary --vm 1 -- \
-#        bash dev/e2e/broker-memory-boundary.sh
+#        bash config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 cd "$ROOT"
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && sudo -n test -f /run/subyard-e2e-lease.json \
   || { printf 'broker-memory-boundary: run on allocated VM1 through dev/agent-e2e.sh\n' >&2; exit 2; }
@@ -90,14 +90,14 @@ reexec_with_incus_group() {
   local command
   if [ "$PREGRANT_ONLY" = 1 ]; then
     if [ "$PREGRANT_WORKING_ONLY" = 1 ]; then
-      printf -v command 'exec bash %q --pregrant-cancellation --working-creation-only %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
+      printf -v command 'exec bash %q --pregrant-cancellation --working-creation-only %q' "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh" "$TOKEN"
     else
-      printf -v command 'exec bash %q --pregrant-cancellation %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
+      printf -v command 'exec bash %q --pregrant-cancellation %q' "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh" "$TOKEN"
     fi
   elif [ "$TELEMETRY_ONLY" = 1 ]; then
-    printf -v command 'exec bash %q %q %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TELEMETRY_FLAG" "$TOKEN"
+    printf -v command 'exec bash %q %q %q' "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh" "$TELEMETRY_FLAG" "$TOKEN"
   else
-    printf -v command 'exec bash %q %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
+    printf -v command 'exec bash %q %q' "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh" "$TOKEN"
   fi
   exec sg incus-admin -c "$command"
 }
@@ -701,18 +701,7 @@ print(int(stamp(slot["expires_at"])))
   printf '  [ ok ] requester death stopped renew; natural expiry removed both disposable guests\n'
   if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
     python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" --kind vm --stage final --data-dir "$SUBYARD_TELEMETRY_DATA_DIR"
-    python3 -B - "$SUBYARD_TELEMETRY_DATA_DIR" "$prior_generation" "$prior_epoch" <<'PY_ORPHAN'
-import json, pathlib, sqlite3, sys
-with sqlite3.connect((pathlib.Path(sys.argv[1])/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2) as db:
-    rows = [json.loads(row[0]) for row in db.execute("SELECT body FROM records WHERE kind='allocation' AND json_extract(body,'$.object_kind')='vm' AND json_extract(body,'$.resource_generation')=? AND json_extract(body,'$.lease_epoch')=?", (int(sys.argv[2]), int(sys.argv[3])))]
-    objects = {row['object_id'] for row in rows}
-    assert len(objects) == 2
-    for object_id in objects:
-        assert {'draining', 'available'} <= {row['state'] for row in rows if row['object_id'] == object_id}
-        assert db.execute("SELECT 1 FROM samples WHERE object_id=? AND json_extract(body,'$.phase')='pre_stop'", (object_id,)).fetchone()
-        assert db.execute("SELECT 1 FROM gaps WHERE object_id=? AND json_extract(body,'$.reason')='final_tail_missing'", (object_id,)).fetchone()
-print(json.dumps(dict(check='orphan-expiry-archive', draining=True, pre_stop=True, final_gap=True)), flush=True)
-PY_ORPHAN
+
   fi
 
   SUBYARD_E2E_STATE_DIR="$STATE_PARENT/reuse" "$RUNNER" --yard test-yard --prepare >/dev/null
@@ -1289,6 +1278,11 @@ runtime_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/n
 printf '  [ ok ] ordinary rollback preserves telemetry, held lease, guests and yard\n'
 fi
 
+if [ "$TELEMETRY_ONLY" = 1 ]; then
+  printf 'ok: telemetry native VM allocation, held pair, storage failure and final observation\n'
+  exit
+fi
+
 HEARTBEAT_BEFORE="$(held_heartbeat)"
 for ((attempt=0; attempt<165; attempt++)); do
   [ "$(held_heartbeat)" = "$HEARTBEAT_BEFORE" ] || break
@@ -1301,10 +1295,6 @@ assert_held_unchanged
 printf '  [ ok ] held lease renewal continues\n'
 
 assert_orphan_expiry
-if [ "$TELEMETRY_ONLY" = 1 ]; then
-  printf 'ok: telemetry native VM allocation, renewal, orphan expiry and clean reuse\n'
-  exit
-fi
 printf 'evidence: original_engine_sha256=%s candidate_engine_sha256=%s held_identity_sha256=%s\n' \
   "$old_hash" "$new_hash" "$HELD_BEFORE"
 printf 'ok: broker memory bounds, process budget, boot, held update/rollback and orphan expiry\n'

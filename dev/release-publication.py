@@ -2,6 +2,7 @@
 """Prepare exact CI assets, collect local acceptance, publish through serialized Actions."""
 import argparse
 import base64
+import copy
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -185,6 +186,9 @@ def publication_preflight(output, manifest_paths, github):
         checks[name] = {key: result[key] for key in ("status", "exit_code", "log_sha256", "environments", "evidence_transfer") if key in result}
         if result.get("execution") == "ci-preparation":
             checks[name].update(execution="ci-preparation", ci_job=a.CI_PREPARED_CHECKS[name])
+        if result.get("execution") == "ci-hosted":
+            checks[name].update(execution="ci-hosted", ci_hosted=result["ci_hosted"],
+                                execution_environment=result["execution_environment"])
         if "original_attempt" in result:
             record, original = a.original_attempt(output, receipt, name, result)
             checks[name]["original_attempt"] = record
@@ -226,13 +230,30 @@ class GitHub:
         self.repository = repository
         self.prefix = "repos/" + repository + "/"
 
+    def _refresh_token(self, result):
+        stderr = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else result.stderr
+        if BROKER_RUN_CONTEXT not in os.environ or "(HTTP 401)" not in stderr:
+            return False
+        try:
+            refreshed = subprocess.run(["subyard-github", "run", "--repo", self.repository, "--", "printenv", "GH_TOKEN"],
+                                       text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError:
+            return False
+        if refreshed.returncode or not refreshed.stdout.strip():
+            return False
+        os.environ["GH_TOKEN"] = refreshed.stdout.strip()
+        return True
+
     def api(self, path, method="GET", payload=None, missing=False):
         # An empty path reads the repository itself.
         command = ["gh", "api", self.prefix + path if path else self.prefix.rstrip("/"), "--method", method]
         if payload is not None:
             command += ["--input", "-"]
-        result = subprocess.run(command, input=canonical(payload) if payload is not None else None,
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for attempt in range(2):
+            result = subprocess.run(command, input=canonical(payload) if payload is not None else None,
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if not result.returncode or attempt or not self._refresh_token(result):
+                break
         if result.returncode:
             if missing and "(HTTP 404)" in result.stderr:
                 return None
@@ -269,9 +290,12 @@ class GitHub:
 
     def download(self, path, destination):
         accept = "application/json" if re.fullmatch(r"actions/artifacts/[0-9]+/zip", path) else "application/octet-stream"
-        with destination.open("wb") as stream:
-            result = subprocess.run(["gh", "api", self.prefix + path, "-H", "Accept: " + accept],
-                                    stdout=stream, stderr=subprocess.PIPE)
+        for attempt in range(2):
+            with destination.open("wb") as stream:
+                result = subprocess.run(["gh", "api", self.prefix + path, "-H", "Accept: " + accept],
+                                        stdout=stream, stderr=subprocess.PIPE)
+            if not result.returncode or attempt or not self._refresh_token(result):
+                break
         if result.returncode:
             status = re.search(rb"HTTP ([0-9]{3})", result.stderr)
             diagnostic = " HTTP " + status[1].decode() if status else ""
@@ -673,6 +697,9 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
             checks[name]["environments"] = result.get("environments", [])
         if result.get("execution") == "ci-preparation":
             checks[name].update(execution="ci-preparation", ci_job=a.CI_PREPARED_CHECKS[name])
+        if result.get("execution") == "ci-hosted":
+            checks[name].update(execution="ci-hosted", ci_hosted=result["ci_hosted"],
+                                execution_environment=result["execution_environment"])
         if "evidence_transfer" in result:
             checks[name]["execution"] = "inherited"
             checks[name]["evidence_transfer"] = result["evidence_transfer"]
@@ -791,6 +818,10 @@ def validate_attestation(document, identity, root):
                 if name not in a.CI_PREPARED_CHECKS or result.get("ci_job") != a.CI_PREPARED_CHECKS[name]:
                     raise ValueError("CI preparation result names a different job")
                 keys |= {"execution", "ci_job"}
+            if result.get("execution") == "ci-hosted":
+                keys |= {"execution", "ci_hosted", "execution_environment"}
+                if "original_attempt" not in result:
+                    raise ValueError("hosted attestation lacks original attempt")
             if "evidence_transfer" in result:
                 keys |= {"execution", "evidence_transfer"}
             if "original_attempt" in result:
@@ -822,13 +853,26 @@ def validate_attestation(document, identity, root):
                 bind_attempt(record)
                 if (a.evidence_hash(record) != result["attempt_sha256"] or record["result"]["status"] != "passed"
                     or record["result"]["exit_code"] != 0 or record["result"]["capture_status"] != "recorded"
-                    or manifest["environment"] != document["environment"]
-                    or record["result"]["execution_environment"] != document["environment"]
+                    or result.get("execution") != "ci-hosted" and (manifest["environment"] != document["environment"]
+                        or record["result"]["execution_environment"] != document["environment"])
                     or result.get("environments", []) != record["result"]["environments"]
                     or any(manifest["candidate"][key] != value for key, value in {
                         "candidate_sha256": identity_hash(identity), "version": identity["version"],
                         "source_fingerprint": identity["source_fingerprint"], "release_files": identity["release_files"]}.items())):
                     raise ValueError("attestation original attempt changed")
+                if result.get("execution") == "ci-hosted":
+                    hosted = {**record["result"], "execution": "ci-hosted", "ci_hosted": result["ci_hosted"]}
+                    arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(manifest["environment"]["machine"])
+                    runtime = f"subyard-{identity['version']}-linux-{arch}.tar.gz"
+                    candidate = {**manifest["candidate"], "candidate_sha256": identity_hash(identity),
+                                 "version": identity["version"], "source_fingerprint": identity["source_fingerprint"],
+                                 "release_files": identity["release_files"], "runtime_file": runtime,
+                                 "runtime_sha256": identity["release_files"].get(runtime)}
+                    a.validate_hosted_binding(name, hosted, candidate, manifest)
+                    if (result["execution_environment"] != manifest["environment"]
+                        or result["ci_hosted"]["head_sha"] != identity["commit"]
+                        or manifest["candidate"]["release_files"].get(manifest["candidate"]["runtime_file"]) != manifest["candidate"]["runtime_sha256"]):
+                        raise ValueError("hosted attestation runner or runtime binding changed")
             if a.is_live(name):
                 environments = result["environments"]
                 if not isinstance(environments, list) or not environments:
@@ -991,6 +1035,11 @@ def report_ci_checks(document):
         print("PUBLICATION ci_counted=" + ",".join(counted) + " execution=ci-preparation", flush=True)
 
 
+    hosted = sorted(name for name, result in document["checks"].items() if result.get("execution") == "ci-hosted")
+    if hosted:
+        print("PUBLICATION ci_hosted=" + ",".join(hosted) + " execution=ci-hosted", flush=True)
+
+
 def report_unrun_checks(document):
     optional_vms = [name for name, result in document["checks"].items() if a.optional_vm_not_run(name, result)]
     if optional_vms:
@@ -1013,6 +1062,9 @@ def publish_remote(github, prepared, document, root):
     counted = sorted(name for name, result in document["checks"].items() if result.get("execution") == "ci-preparation")
     if counted and run["preparation_policy"] not in CI_COUNTED_POLICIES:
         raise ValueError("preparation workflow policy does not run the counted checks: " + ",".join(counted))
+    for name, result in document["checks"].items():
+        if result.get("execution") == "ci-hosted":
+            hosted_run_job(github, identity, name, result["ci_hosted"])
     report_unrun_checks(document)
     report_inherited_checks(document)
     report_ci_checks(document)
@@ -1091,7 +1143,7 @@ def discover(github, workflow, request):
     return matches[0] if matches else None
 
 
-def dispatch(github, workflow, inputs, state, path):
+def dispatch(github, workflow, inputs, state, path, asynchronous=False):
     request = state["request"]
     if not state.get("dispatch_started"):
         dispatched_inputs = {**inputs, "request": request}
@@ -1104,6 +1156,11 @@ def dispatch(github, workflow, inputs, state, path):
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         run = discover(github, workflow, request)
+        if asynchronous:
+            if run:
+                state.update(run_id=run["id"], run_attempt=run["run_attempt"], status=run["status"])
+                write_json(path, state)
+            return run
         if run:
             if state.get("run_attempt") != run["run_attempt"]:
                 clear_completion(state)
@@ -1155,6 +1212,264 @@ def dispatch(github, workflow, inputs, state, path):
                 write_json(path, state)
                 raise
     raise ValueError("dispatch outcome unknown; repeat command to discover retained request, do not duplicate dispatch")
+
+
+def hosted_run_job(github, identity, name, metadata):
+    """Recheck GitHub-owned execution facts, independently of artifact claims."""
+    run_id, attempt = metadata["run_id"], metadata["run_attempt"]
+    run = github.api(f"actions/runs/{run_id}/attempts/{attempt}")
+    workflow = github.api("actions/workflows/release-vm.yml")
+    if (run.get("workflow_id") != workflow["id"] or run.get("event") != "workflow_dispatch"
+        or run.get("head_sha") != identity["commit"] or run.get("run_attempt") != attempt
+        or not same_repository(run.get("repository", {}).get("full_name", ""), identity["repository"])):
+        raise ValueError("hosted run workflow, candidate SHA or repository mismatch")
+    policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
+    if policy not in a.CI_HOSTED_POLICIES or metadata["policy"] != policy:
+        raise ValueError("unknown hosted workflow policy")
+    jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+    matches = [job for job in jobs if job.get("id") == metadata["job_id"]]
+    if (len(matches) != 1 or matches[0].get("name") != name or matches[0].get("status") != "completed"
+        or matches[0].get("conclusion") != "success" or matches[0].get("head_sha") != identity["commit"]):
+        raise ValueError("hosted check job has not passed on the candidate SHA")
+    return run
+
+
+def start_ci_hosted(github, directory, identity):
+    output = directory / "acceptance"
+    root, receipt = a.load_bound(output)
+    if not a.source_declares(root, "dev/release-acceptance.py", "CI_HOSTED_CHECKS"):
+        return
+    names = a.hosted_checks(root, identity["version"], receipt["profiles"])
+    path = directory / "ci-hosted.json"
+    if path.exists():
+        state = json.loads(path.read_text())
+        if state.get("identity_sha256") != identity_hash(identity) or state.get("checks") != names:
+            raise ValueError("retained hosted request candidate or check inventory changed")
+    else:
+        policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
+        if policy not in a.CI_HOSTED_POLICIES:
+            for name in names:
+                print(f"CI-HOSTED-SKIP {name}: unknown hosted workflow policy", flush=True)
+            return
+        heads = github.api("commits/" + identity["commit"] + "/branches-where-head")
+        refs = sorted(item["name"] for item in heads if item.get("commit", {}).get("sha") == identity["commit"])
+        if not refs:
+            for name in names:
+                print(f"CI-HOSTED-SKIP {name}: no branch at candidate commit", flush=True)
+            return
+        state = {"request": str(uuid.uuid4()), "workflow_ref": refs[0], "checks": names,
+                 "identity_sha256": identity_hash(identity)}
+        write_json(path, state)
+    run_id, attempt = candidate_parts(identity["candidate_id"])
+    # Shared durable intent/discovery, without waiting for jobs or automatically rerunning failures.
+    run = dispatch(github, "release-vm.yml", {"candidate_run": str(run_id), "candidate_attempt": str(attempt),
+                   "commit": identity["commit"], "version": identity["version"], "checks": canonical(names)},
+                   state, path, asynchronous=True)
+    if run:
+        print(f"CI-HOSTED run={run['id']} candidate={identity['candidate_id']}", flush=True)
+
+
+def hosted_artifact(github, artifact, destination):
+    if artifact.get("size_in_bytes", 0) > 128 << 20:
+        raise ValueError("hosted artifact exceeds compressed byte limit")
+    archive = destination / "artifact.zip"
+    github.download(f"actions/artifacts/{artifact['id']}/zip", archive)
+    if archive.stat().st_size > 128 << 20:
+        raise ValueError("hosted artifact exceeds compressed byte limit")
+    total, seen = 0, set()
+    with zipfile.ZipFile(archive) as zipped:
+        for item in zipped.infolist():
+            name = item.filename
+            if (name in seen or not re.fullmatch(r"(?:receipt\.json|ci-execution\.json|events\.jsonl|[A-Za-z0-9._-]+\.log|(?:attempts|manifests|runs)/[0-9a-f]+\.json)", name)
+                or item.file_size > 20 << 20 or item.external_attr >> 16 & 0o170000 == 0o120000):
+                raise ValueError("unsafe hosted artifact member")
+            seen.add(name)
+            total += item.file_size
+            if total > 128 << 20:
+                raise ValueError("hosted evidence exceeds total byte limit")
+        zipped.extractall(destination)
+    archive.unlink()
+
+
+def hosted_open(directory, output):
+    """Hosted checks of a dispatched request that are not yet passed in the local receipt."""
+    if not (directory / "ci-hosted.json").exists():
+        return []
+    checks = json.loads((output / "receipt.json").read_text())["checks"]
+    return sorted(name for name in a.CI_HOSTED_CHECKS if name in checks and checks[name].get("status") != "passed")
+
+
+def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds):
+    """Run local checks while hosted jobs are still going; only then wait, count the hosted
+    results and run the hosted checks that did not pass there."""
+    output = directory / "acceptance"
+    # Only checks this invocation would run anyway; ordinary acceptance leaves optional VM checks not run.
+    hosted = hosted_open(directory, output) if wait_seconds and (with_vms or only) else []
+    if only:
+        hosted = [name for name in hosted if any(name == item or name.startswith(item + "/") for item in only)]
+    if hosted:
+        with a.acceptance_lock(output):
+            first = a.run_checks(output, slots, only, False, exclude=hosted, with_vms=with_vms, previous=previous)
+            failed = first and json.loads((output / "receipt.json").read_text()).get("result") == "failed"
+        if failed:
+            print("CI-HOSTED-SKIP all: a local check failed; not waiting for hosted jobs", flush=True)
+        with a.acceptance_lock(output):
+            if not failed:
+                wait_ci_hosted(github, directory, identity, wait_seconds)
+            collect_ci(github, directory, identity)
+        # Local failures of the first pass are not repeated; the receipt result covers every check.
+        only = hosted
+    with a.acceptance_lock(output):
+        return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous)
+
+
+DISCOVERY_SECONDS = 600
+
+
+def wait_ci_hosted(github, directory, identity, seconds):
+    path = directory / "ci-hosted.json"
+    if not path.exists() or seconds == 0:
+        return
+    state = json.loads(path.read_text())
+    if state.get("identity_sha256") != identity_hash(identity):
+        raise ValueError("retained hosted request candidate changed")
+    started = time.monotonic()
+    deadline, last_report = started + seconds, 0
+    while not a.STOP.is_set():
+        try:
+            run = discover(github, "release-vm.yml", state["request"])
+        except (ValueError, OSError) as error:
+            print(f"CI-HOSTED-SKIP all: {error}", flush=True)
+            return
+        if run and (run.get("status") == "completed" or run.get("head_sha") != identity["commit"]):
+            return
+        # A lost or refused dispatch never produces a run; do not hold acceptance for the whole wait.
+        if not run and time.monotonic() - started >= DISCOVERY_SECONDS:
+            print(f"CI-HOSTED-SKIP all: request {state['request']} has no hosted run after {DISCOVERY_SECONDS}s", flush=True)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        if time.monotonic() - last_report >= 60:
+            print(f"WAIT CI-HOSTED request={state['request']} status={run.get('status') if run else 'not-discovered'} remaining={int(remaining)}s", flush=True)
+            last_report = time.monotonic()
+        a.STOP.wait(min(20, remaining))
+
+
+def collect_ci(github, directory, identity):
+    """Bounded read of finished successful jobs; every refusal leaves local work open."""
+    output, state_path = directory / "acceptance", directory / "ci-hosted.json"
+    if not state_path.exists():
+        return
+    state = json.loads(state_path.read_text())
+    if state.get("identity_sha256") != identity_hash(identity):
+        raise ValueError("retained hosted request candidate changed")
+    try:
+        run = discover(github, "release-vm.yml", state["request"])
+        jobs, artifacts = [], []
+        if run:
+            run_id, attempt = run["id"], run["run_attempt"]
+            jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+            artifacts = [item for item in github.pages(f"actions/runs/{run_id}/artifacts", "artifacts")
+                         if re.fullmatch(r"ci-hosted-[0-9]+", item["name"]) and not item.get("expired")]
+            if len(jobs) > len(a.CI_HOSTED_CHECKS) or len(artifacts) > len(a.CI_HOSTED_CHECKS):
+                raise ValueError("hosted job or artifact inventory exceeds reviewed matrix limit")
+    except (ValueError, OSError) as error:
+        for name in state["checks"]:
+            print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
+        return
+    if not run:
+        for name in state["checks"]:
+            print(f"CI-HOSTED-SKIP {name}: dispatch not discovered", flush=True)
+        return
+    root, receipt = a.load_bound(output)
+    commands = a.commands(root, identity["version"], receipt["profiles"])
+    unavailable_artifacts = set()
+    for name in state["checks"]:
+        if a.STOP.is_set():
+            return
+        if name not in a.CI_HOSTED_CHECKS or name not in commands:
+            print(f"CI-HOSTED-SKIP {name}: unknown check", flush=True)
+            continue
+        if not a.transfer_target_open(name, receipt["checks"][name]):
+            continue
+        try:
+            matches = [job for job in jobs if job.get("name") == name and job.get("status") == "completed" and job.get("conclusion") == "success"]
+            if len(matches) != 1:
+                raise ValueError("job missing, running or unsuccessful")
+            job = matches[0]
+            policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
+            metadata = {"run_id": run_id, "run_attempt": attempt, "job_id": job["id"], "policy": policy,
+                        "head_sha": identity["commit"], "candidate_sha256": identity_hash(identity)}
+            hosted_run_job(github, identity, name, metadata)
+            # Reviewed workflow uploads exactly one selection per artifact. Inspect each bounded
+            # artifact once per collection, without accepting any source tree or candidate bundle.
+            found = []
+            for artifact in artifacts:
+                if not re.fullmatch(r"ci-hosted-[0-9]+", artifact["name"]) or artifact.get("expired"):
+                    continue
+                if artifact["id"] in unavailable_artifacts:
+                    continue
+                cached = directory / "ci-hosted-downloads" / f"{run_id}-{attempt}-{artifact['id']}"
+                try:
+                    if not cached.exists():
+                        cached.parent.mkdir(mode=0o700, exist_ok=True)
+                        with tempfile.TemporaryDirectory(dir=cached.parent) as temporary:
+                            staging = Path(temporary) / "evidence"
+                            staging.mkdir()
+                            hosted_artifact(github, artifact, staging)
+                            staging.rename(cached)
+                    execution = json.loads((cached / "ci-execution.json").read_text())
+                    if not isinstance(execution, dict) or not isinstance(execution.get("check"), str):
+                        raise ValueError("hosted artifact check identity missing")
+                except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
+                    unavailable_artifacts.add(artifact["id"])
+                    print(f"CI-HOSTED-ARTIFACT-SKIP artifact={artifact['id']}: {error}", flush=True)
+                    continue
+                # Failed siblings may upload only their execution header. Associate the
+                # artifact before reading any check evidence; matching evidence still fails closed.
+                if execution["check"] != name:
+                    continue
+                if execution != {"run_id": run_id, "run_attempt": attempt, "head_sha": identity["commit"], "check": name}:
+                    raise ValueError("hosted artifact belongs to another run or attempt")
+                incoming = json.loads((cached / "receipt.json").read_text())
+                selected = [json.loads(path.read_text()) for path in cached.glob("runs/*.json")]
+                if (not isinstance(incoming, dict) or len(selected) != 1
+                    or not isinstance(selected[0], dict) or selected[0].get("selected") != [name]):
+                    raise ValueError("matching hosted artifact selection is incomplete")
+                found.append((cached, incoming, selected[0]))
+            if len(found) != 1:
+                raise ValueError("exact hosted selection artifact unavailable or ambiguous")
+            cached, incoming, selected = found[0]
+            checks = incoming.get("checks")
+            if not isinstance(checks, dict) or not isinstance(checks.get(name), dict):
+                raise ValueError("matching hosted artifact check result is malformed")
+            result = copy.deepcopy(checks[name])
+            if (incoming.get("preparation") != identity or any(incoming.get(key) != receipt.get(key) for key in
+                ("version", "source_fingerprint", "runtime_file", "runtime_sha256", "release_files"))
+                or selected.get("state") != "finished" or selected.get("capture_status") != "recorded"
+                or selected.get("selected_status") != "passed" or selected.get("receipt_sha256") != a.digest(cached / "receipt.json")):
+                raise ValueError("foreign candidate or incomplete hosted selection")
+            record, manifest = a.original_attempt(cached, incoming, name, result)
+            a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
+            result.update(execution="ci-hosted", ci_hosted=metadata)
+            a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
+            # Persist the immutable original evidence before publishing the result reference.
+            for relative in ("attempts/" + record["id"] + ".json", "manifests/" + record["manifest_sha256"] + ".json"):
+                target = output / relative
+                if target.exists() and target.read_bytes() != (cached / relative).read_bytes():
+                    raise ValueError("conflicting hosted immutable evidence")
+                if not target.exists():
+                    a.immutable_json(target, json.loads((cached / relative).read_text()))
+            log = "ci-hosted-" + record["id"] + ".log"
+            shutil.copyfile(cached / result["log"], output / log)
+            result["log"] = log
+            receipt["checks"][name] = result
+            a.save(output, receipt)
+            a.event(output, "ci-hosted-counted", check=name, **metadata)
+            print(f"CI-HOSTED {name} run={run_id} job={job['id']}", flush=True)
+        except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
+            print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
 
 
 def earlier_candidates(state_dir, directory, identity):
@@ -1256,6 +1571,8 @@ def main():
         command.add_argument("--candidate", required=True)
         if action == "accept":
             command.add_argument("--slots", nargs="+", type=int, default=[])
+            command.add_argument("--ci-wait-seconds", type=int, default=21600,
+                                 help="bounded hosted-check wait (default six hours); 0 collects finished jobs immediately")
             command.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
             command.add_argument("--only", action="append", default=[], help="run one exact check or check family; repeat as needed")
             command.add_argument("--level", choices=("ordinary", "full"),
@@ -1339,6 +1656,7 @@ def main():
             write_json(directory / "identity.json", identity)
             with a.acceptance_lock(directory):
                 ensure_acceptance(directory, identity, prepared)
+                start_ci_hosted(github, directory, identity)
             print("CANDIDATE " + candidate + " " + str(directory))
             return 0
     candidate_parts(args.candidate)
@@ -1363,6 +1681,10 @@ def main():
             if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
                 raise ValueError("slots must be unique integers from 1 to 999")
             ensure_acceptance(directory, identity, prepared)
+            if not 0 <= args.ci_wait_seconds <= 86400:
+                raise ValueError("--ci-wait-seconds must be from 0 to 86400")
+            with a.acceptance_lock(output):
+                collect_ci(github, directory, identity)
             recorded = json.loads((output / "receipt.json").read_text()).get("release_level", {})
             requested = args.level or recorded.get("level", "ordinary")
             level = (recorded if args.level is None and args.level_reason is None and recorded
@@ -1371,9 +1693,8 @@ def main():
             print(f"RELEASE_LEVEL {level['level']} reason={level['reason']}", flush=True)
             previous = earlier_candidates(state_dir, directory, identity)
             a.reuse_isolated_tests(output, previous)
-            with a.acceptance_lock(output):
-                result = a.run_checks(output, args.slots, args.only, False,
-                                      with_vms=args.with_vms or level["level"] == "full", previous=previous)
+            result = accept_checks(github, directory, identity, args.slots, args.only,
+                                   args.with_vms or level["level"] == "full", previous, args.ci_wait_seconds)
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result

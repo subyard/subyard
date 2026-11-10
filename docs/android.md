@@ -322,11 +322,16 @@ and temporary state, while preserving the reusable yard definition and an unrela
 runner releases the disposable VM lease. This checks environment removal through the normal
 Yard lifecycle; emulator image-cache work remains in the diagnostic lanes.
 
-The longer emulator, viewer, restart/recovery and two-project workflows are explicit optional
+Release acceptance declares parallel `full` and `memory-lease` lanes. The latter owns
+memory-budget, renewal, requester-death natural expiry and clean reuse assertions.
+The shorter `memory-budget` lane keeps provisioning, memory-budget checks and image
+preparation plus the existing optional observation callbacks; Telemetry uses it without
+the long memory-lease lifecycle. Its resource observer starts its own short allocation.
+
+The longer viewer, restart/recovery and two-project workflows are explicit optional
 diagnostics: `--lane diagnostics` runs the former broad sequence; `recovery`, `viewer`,
-`viewer-native-debug`, `sdk-images` and `memory-lease` select their existing focused diagnostics.
-They use the same controller and fresh disposable allocation. Run them when changes need those
-physical contracts; they are separate from the ordinary release gate.
+`viewer-native-debug` and `sdk-images` select focused diagnostics. They use the same
+controller and fresh disposable allocation. Run them when changes need those physical contracts.
 
 ## Agent guidance
 

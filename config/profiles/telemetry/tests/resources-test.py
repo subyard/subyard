@@ -512,7 +512,10 @@ class Resources(unittest.TestCase):
             self.assertTrue(sources.consume(data, config, periodic))
             # Use native transition state, not an assumed event-kind spelling.
             stop = dict(event_id='stop', timestamp='2026-10-24T00:00:21Z', kind='lease.transition',
-                        to_state='available', allocation=allocation, observations=[sample(20, 1100)])
+                        to_state='available', allocation=allocation, observations=[dict(sample(20, 1100), phase='pre_stop')])
+            expiry = dict(stop, event_id='expiry', timestamp='2026-10-24T00:00:20Z',
+                          kind='lease.expired', to_state='draining', observations=[])
+            self.assertTrue(resources.emit_event(data, config, expiry))
             self.assertTrue(resources.emit_event(data, config, stop))
             # A delayed open sample association must not reopen the confirmed end.
             self.assertTrue(resources.emit_sample(data, config, dict(sample(10, 600), acquired_at=NOW), 'late-periodic'))
@@ -520,6 +523,13 @@ class Resources(unittest.TestCase):
             result = json.loads(subprocess.check_output([str(binary), 'show-run', '--data-dir', str(data), '--run', 'agent-run']))
             self.assertEqual(len(result['selected_nonoverlapping']), 1)
             selected = result['selected_nonoverlapping'][0]
+            archive = json.loads(subprocess.check_output([str(binary), 'query', '--data-dir', str(data),
+                                 '--sql', "SELECT kind,body FROM records WHERE kind IN ('allocation','sample','gap')"]))
+            archive = [(row['kind'], json.loads(row['body'])) for row in archive]
+            archive = [(kind, body) for kind, body in archive if body.get('object_id') == selected['object']['object_id']]
+            self.assertTrue({'draining', 'available'} <= {body['state'] for kind, body in archive if kind == 'allocation'})
+            self.assertTrue(any(kind == 'sample' and body.get('phase') == 'pre_stop' for kind, body in archive))
+            self.assertTrue(any(kind == 'gap' and body.get('reason') == 'final_tail_missing' for kind, body in archive))
             self.assertEqual(selected['cpu_ns_delta'], 1000)
             self.assertEqual(float(selected['allocated_holding_seconds']), 21)
             self.assertEqual(float(selected['allocated_vcpu_seconds']), 84)
@@ -675,6 +685,29 @@ class Resources(unittest.TestCase):
         self.assertFalse(any(row['body'].get('stopped_at') for row in rows))
         self.assertTrue(all(row['body'].get('end_time') is None for row in rows if row['kind'] == 'association'))
         self.assertFalse(any(row['body'].get('reason') == 'final_tail_missing' for row in rows))
+
+        # Replay the native expiry -> stop archive for both guests without
+        # waiting for a real broker lease. Expiry alone cannot invent a stop.
+        stopped = dict(event, event_id='orphan-stopped', kind='lease.transition', to_state='available',
+                       timestamp='2026-10-24T00:20:01Z', observations=[dict(
+                           slot_id='slot-001', resource_generation=2, lease_epoch=3, selector=selector,
+                           source_time='2026-10-24T00:20:00Z', phase='pre_stop',
+                           counter_generation='qemu-generation', cpu_ns=1000, memory_bytes=1024,
+                           io_read_bytes=20, io_write_bytes=30) for selector in ('1', '2')])
+        self.assertTrue(resources.emit_event(self.root, self.config, stopped))
+        rows = self.rows()
+        allocations = [row['body'] for row in rows if row['kind'] == 'allocation']
+        objects = {body['object_id'] for body in allocations}
+        self.assertEqual(len(objects), 2)
+        for object_id in objects:
+            self.assertEqual({body['state'] for body in allocations if body['object_id'] == object_id},
+                             {'draining', 'available'})
+            final = next(body for body in allocations if body['object_id'] == object_id and body['state'] == 'available')
+            self.assertEqual(final['stopped_at'], stopped['timestamp'])
+            for kind, key, value in (('sample', 'phase', 'pre_stop'), ('gap', 'reason', 'final_tail_missing'),
+                                     ('association', 'end_time', stopped['timestamp'])):
+                self.assertTrue(any(row['kind'] == kind and row['body'].get('object_id') == object_id
+                                    and row['body'].get(key) == value for row in rows), (object_id, kind))
 
     def test_retention_gap_preserved_and_replay_stable(self):
         page = self.page()

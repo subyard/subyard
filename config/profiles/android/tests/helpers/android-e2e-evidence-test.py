@@ -202,6 +202,7 @@ for lane, phase, api, diagnostic_status, called in (('sdk-images', 'images', 36,
                                                   ('memory-lease', 'images', 35, 0, True),
                                                   ('memory-lease', 'images', 36, 17, True),
                                                   ('memory-lease', 'images', 34, 0, False),
+                                                  ('memory-budget', 'images', 36, 17, True),
                                                   ('projects', 'images', 35, 0, False)):
     result = subprocess.run(['bash', '-c', 'set -euo pipefail\n'
                              'root="$1"; lane="$2"; failed_phase="$3"; sdk_api="$4"; diagnostic_status="$5"\n'
@@ -227,8 +228,9 @@ for lane, api in (('memory-lease', 35), ('sdk-images', 36)):
 
 # A successful SDK prepare closes its phase before any telemetry hook. Execute
 # those actual dispatch blocks: each failed hook retains23 without an SDK retry.
-start = runtime_source.index('  android_phase_begin images\n', runtime_source.index('if [ "$lane" = memory-lease ]; then'))
-hooks = runtime_source[start:runtime_source.index('  android_phase_begin memory-lease\n', start)]
+memory_start = runtime_source.index('if [ "$lane" = memory-budget ] || [ "$lane" = memory-lease ]; then')
+start = runtime_source.index('  android_phase_begin images\n', memory_start)
+hooks = runtime_source[start:runtime_source.index('  if [ "$lane" = memory-lease ]; then', start)]
 for hook, phase in (('PROFILE_EXERCISE', 'telemetry-profile'), ('NATIVE_EXERCISE', 'telemetry-native'),
                     ('RESOURCE_OBSERVER', 'telemetry-storage')):
     result = subprocess.run(['bash', '-c', 'set -euo pipefail\n'
@@ -246,6 +248,26 @@ for hook, phase in (('PROFILE_EXERCISE', 'telemetry-profile'), ('NATIVE_EXERCISE
     assert result.returncode == 23 and 'unexpected-sdk-diagnostic' not in result.stdout, result.stderr
     assert 'runtime-images state=end' in result.stdout and 'exit_code=0' in result.stdout
     assert f'runtime-{phase} state=end' in result.stdout and 'exit_code=23' in result.stdout
+
+# Execute the owner branch with native boundaries doubled: both lanes retain
+# budget/images and all optional callbacks; only memory-lease runs the lifecycle.
+memory_branch = runtime_source[memory_start:runtime_source.index('\ndirect_catalog=', memory_start)]
+for lane in ('memory-budget', 'memory-lease'):
+    script = '''set -euo pipefail
+lane="$1"; root="$2"; project=fixture; instance=fixture; state=/fixture
+YARD_BIN=fixture; YARD_NAME=fixture; incus_binary=(incus)
+SUBYARD_E2E_PROFILE_EXERCISE=fixture; SUBYARD_E2E_NATIVE_EXERCISE=fixture
+SUBYARD_E2E_RESOURCE_OBSERVER=fixture; SUBYARD_TELEMETRY_DATA_DIR=fixture; SUBYARD_TELEMETRY_NATIVE_STATE=fixture
+android_phase_begin() { printf '%s\n' "$1"; }; android_phase_end() { :; }
+incus() { :; }; yard() { :; }; android_candidate_command() { :; }
+timeout() { printf 'lifecycle\n'; }
+'''
+    result = subprocess.run(['bash', '-c', script + memory_branch, '_', lane, str(ROOT)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ['memory-budget', 'images', 'telemetry-profile', 'telemetry-native',
+        'telemetry-storage', *(['memory-lease', 'lifecycle'] if lane == 'memory-lease' else []),
+        'telemetry-resource-observer'], result.stdout
 
 
 capture = load('android-pool-capture')

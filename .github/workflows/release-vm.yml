@@ -1,0 +1,82 @@
+name: Release VM checks
+run-name: Subyard ${{ inputs.request }}
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Exact preparation run ID
+        type: string
+        required: true
+      candidate_attempt:
+        description: Exact preparation attempt
+        type: string
+        required: true
+      commit:
+        description: Exact candidate commit
+        type: string
+        required: true
+      version:
+        description: Candidate version
+        type: string
+        required: true
+      checks:
+        description: JSON array of exact collector check IDs
+        type: string
+        required: true
+      request:
+        description: Durable dispatch request ID
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    name: ${{ matrix.check }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        check: ${{ fromJSON(inputs.checks) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - name: Require exact workflow and candidate commit
+        env:
+          COMMIT: ${{ inputs.commit }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate-${{ inputs.candidate_attempt }}
+          run-id: ${{ inputs.candidate_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/prepared
+      - name: Run exact collector selection through the shared pool setup
+        env:
+          CHECK: ${{ matrix.check }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          bash dev/ci/periodic-e2e.sh acceptance "$CHECK" "$RUNNER_TEMP/prepared" "$RUNNER_TEMP/acceptance" "$VERSION"
+      - name: Preserve native evidence and verify terminal selection
+        if: always()
+        env:
+          CHECK: ${{ matrix.check }}
+        run: |
+          python3 -B dev/ci/release-vm.py --output "$RUNNER_TEMP/acceptance" \
+            --destination "$RUNNER_TEMP/ci-hosted" --check "$CHECK"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: ci-hosted-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/ci-hosted/
+          if-no-files-found: error
+          retention-days: 90

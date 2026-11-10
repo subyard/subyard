@@ -3,10 +3,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 if [ "${1:-}" = --preflight ] && [ "$#" = 1 ]; then
-  for script in "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/dev/e2e/broker-memory-boundary.sh"; do
+  for script in "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh"; do
     bash -n "$script"
   done
-  shellcheck -x -S warning "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/dev/e2e/broker-memory-boundary.sh"
+  shellcheck -x -S warning "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh"
   python3 -B - "$ROOT/config/profiles/telemetry/tests/e2e" <<'PY'
 import ast, json, os, pathlib, sqlite3, subprocess, sys, tempfile, time
 from unittest import mock
@@ -64,19 +64,19 @@ bash() { printf '%s\\0' "$@"; }
         result = subprocess.run(['bash', '-c', probe+delegation, 'probe', 'all'],
                                 env={**environment, **invalid}, capture_output=True)
         assert result.returncode == 2 and not result.stdout, 'invalid grant reached native command'
-print('ok: only full telemetry receives 120-minute delegation and 125-minute controller budgets; narrow budgets and delegation guards preserved')
+print('ok: only full telemetry receives 175-minute delegation and 180-minute controller budgets; narrow budgets and delegation guards preserved')
 held = 'if [ "$mode" = --held-diagnostic ]; then\n' + owner.split('if [ "$mode" = --held-diagnostic ]; then\n', 1)[1].split('\nfi', 1)[0] + '\nfi'
 assert owner.index(held) < owner.index('python3 -B config/profiles/telemetry/tests/e2e/native-signals.py')
 probe = '''set -eu
 mode=--held-diagnostic; ROOT=/fixture; state=/fixture-state
-subyard-telemetry-run() { [ "$*" = '--agent other --agent-version fixture --scope-mode require --project-id telemetry-fixture -- bash dev/e2e/broker-memory-boundary.sh --telemetry-held-diagnostic' ]; printf 'managed\\n'; }
+subyard-telemetry-run() { [ "$*" = '--agent other --agent-version fixture --scope-mode require --project-id telemetry-fixture -- bash config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh --telemetry-held-diagnostic' ]; printf 'managed\\n'; }
 wait_for_finals() { printf 'finals\\n'; }
 sudo() { [ "$*" = "-n python3 -B /fixture-state/source/guest.py apply 0 dev " ]; printf 'disabled\\n'; }
 test() { [ "$*" = '-f /var/lib/subyard/telemetry/telemetry.sqlite' ]; printf 'history\\n'; }
 '''
 result = subprocess.run(['bash', '-c', probe+held], text=True, capture_output=True, check=True)
 assert result.stdout.splitlines() == ['managed', 'finals', 'disabled', 'history', 'ok: telemetry held-pair diagnostic, final counters and retained history']
-broker = (pathlib.Path(sys.argv[1]).parents[4]/'dev/e2e/broker-memory-boundary.sh').read_text()
+broker = (pathlib.Path(sys.argv[1]).parents[4]/'config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh').read_text()
 dispatch = broker.split('TELEMETRY_ONLY=0\n',1)[1].split('\nTOKEN=',1)[0]
 for flag, expected in [('--telemetry-resources','1 0 --telemetry-resources'), ('--telemetry-held-diagnostic','1 1 --telemetry-held-diagnostic')]:
     script = 'PREGRANT_ONLY=0; PREGRANT_WORKING_ONLY=0; TELEMETRY_ONLY=0; SUBYARD_E2E_RESOURCE_OBSERVER=fixture; SUBYARD_AGENT_RUN_ID=fixture; SUBYARD_TELEMETRY_DATA_DIR=/fixture\n'+dispatch+'\nprintf "%s %s %s\\n" "$TELEMETRY_ONLY" "$HELD_DIAGNOSTIC" "$TELEMETRY_FLAG"'
@@ -90,18 +90,26 @@ for condition in conditions:
         'HELD_DIAGNOSTIC=1; SUBYARD_E2E_NATIVE_EXERCISE=fixture; SUBYARD_E2E_RESOURCE_OBSERVER=fixture\n'+condition+'\nexit 1\nfi'], check=False)
     assert result.returncode == 0, 'held diagnostic must skip native clients and storage faults'
 assert broker.index('if [ "$HELD_DIAGNOSTIC" = 1 ]; then\n  printf') < broker.index('HEARTBEAT_BEFORE="$(held_heartbeat)"')
+short_start = broker.index('if [ "$TELEMETRY_ONLY" = 1 ]; then\n  printf \'ok: telemetry native VM allocation,')
+short = broker[short_start:broker.index('\nfi', short_start)+3]
+assert broker.index(short) < broker.index('HEARTBEAT_BEFORE="$(held_heartbeat)"') < broker.rindex('\nassert_orphan_expiry')
+for telemetry, continues in (('1', False), ('0', True)):
+    result = subprocess.run(['bash', '-eu', '-c', 'TELEMETRY_ONLY="$1"\n'+short+'\nprintf "renewal-and-expiry\\n"', 'probe', telemetry],
+                            text=True, capture_output=True, check=True)
+    assert ('renewal-and-expiry' in result.stdout) == continues
 assert 'stop_holder_child "$HOLDER_PID"' in broker and '--kind vm --stage final' in broker
 print('ok: held diagnostic selects the managed pair only, drains finals and disables with history retained; no workloads launched')
 android_mode = 'android_only=0\n'+owner.split('android_only=0\n',1)[1].split('\n',1)[0]+'\n'
 vm = 'if [ "$android_only" = 0 ]; then\n'+owner.split('if [ "$android_only" = 0 ]; then\n', 1)[1].split('\nfi', 1)[0]+'\nfi'
 android = owner.split(vm, 1)[1].split('\nwait_for_finals', 1)[0]
-for mode, expected in (('--android', ['android']), ('--android-resources', ['android']), ('all', ['vm','android'])):
+for mode, expected in (('--android', ['android']), ('--android-resources', ['android']),
+                       ('--resources', ['vm','android']), ('all', ['vm','android'])):
     probe = '''set -eu
 mode="$1"
 subyard-telemetry-run() {
   case "$*" in
-    *'bash dev/e2e/broker-memory-boundary.sh --telemetry-resources') printf 'vm\\n' ;;
-    *'bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane memory-lease') printf 'android\\n' ;;
+    *'bash config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh --telemetry-resources') printf 'vm\\n' ;;
+    *'bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane memory-budget') printf 'android\\n' ;;
     *) exit 2 ;;
   esac
 }
@@ -112,11 +120,11 @@ for command, calls in (('storage-failure.py --binary', 1), ('measure.py --stack 
     position = owner.rindex('python3 -B config/profiles/telemetry/tests/e2e/'+command)
     start = owner.rfind('\nif ', 0, position)+1
     block = owner[start:owner.index('\nfi', position)+3]
-    for mode, expected in (('--android', 0), ('--android-resources', 0), ('all', calls)):
+    for mode, expected in (('--android', 0), ('--android-resources', 0), ('--resources', 0), ('--local', calls), ('all', calls)):
         result = subprocess.run(['bash','-c', 'set -eu; mode="$1"; asset=fixture; state=fixture; fixture_assets=fixture\npython3() { printf "called\\n"; }\n'+android_mode+block,'probe',mode], text=True, capture_output=True, check=True)
         assert len(result.stdout.splitlines()) == expected
 profile = 'if [ "$mode" != --android-resources ]; then\n'+owner.split('if [ "$mode" != --android-resources ]; then\n',1)[1].split('\nfi',1)[0]+'\nfi'
-for mode in ('all','--android','--android-resources'):
+for mode in ('all','--resources','--android','--android-resources'):
     result = subprocess.run(['bash','-c','set -eu; mode="$1"; ROOT=/fixture; SUBYARD_E2E_PROFILE_EXERCISE=inherited\n'+profile+'\nprintf "%s\\n" "${SUBYARD_E2E_PROFILE_EXERCISE-unset}"','probe',mode],text=True,capture_output=True,check=True)
     if mode == '--android-resources':
         assert result.stdout.splitlines() == ['scope: Android resources continuation; supported profile lifecycle requires separately reviewed evidence','unset']
@@ -133,6 +141,8 @@ for mode, pairs, accepted in (
     ('--android-resources', [('codex','android'),('claude','android')], True),
     ('--android-resources', [('codex','vm'),('claude','vm')], False),
     ('--android-resources', [('codex','android'),('codex','android')], False),
+    ('--resources', [('codex','android'),('claude','android')], False),
+    ('--resources', [(agent, kind) for agent in ('codex','claude') for kind in ('vm','android')], True),
     ('all', [('codex','android'),('claude','android')], False),
     ('all', [(agent, kind) for agent in ('codex','claude') for kind in ('vm','android')], True)):
     db = sqlite3.connect(':memory:')

@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 . "$ROOT/tests/helpers/profile-controller.sh"
 setup_profile_controller "$ROOT" config/profiles/android/tests/e2e/acceptance.sh
 assert_controller_missing_slot
-for lane in full diagnostics projects recovery viewer viewer-native-debug sdk-images memory-lease; do
+for lane in full diagnostics projects recovery viewer viewer-native-debug sdk-images memory-budget memory-lease; do
   arguments=(--slot 7)
   [[ "$lane" = full ]] || arguments+=(--lane "$lane")
   bash "$tmp/$controller" "${arguments[@]}" > "$tmp/calls"

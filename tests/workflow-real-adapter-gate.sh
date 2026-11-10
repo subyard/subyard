@@ -114,9 +114,50 @@ release_publish_line="$(line_of "$RELEASE_WORKFLOW" 'name: Freeze prepared sourc
   || fail 'Release must verify built assets against released updaters before retaining candidate assets'
 grep -Fq '2>&1 | tee .build/ci-logs/verify-release-upgrades.log' "$RELEASE_WORKFLOW" \
   || fail 'Release must preserve failed released-updater compatibility diagnostics'
+grep -Fq 'python3 dev/verify-release-upgrades.py --release-dir .build/release --version 99.0.0' "$CI_WORKFLOW" \
+  || fail 'CI must verify every push against released updaters, not only release preparation'
 ! grep -Fq 'runs-on: ubuntu-latest' "$RELEASE_WORKFLOW" \
   || fail 'Release must use the same explicit Ubuntu baseline as CI'
 grep -Fq 'unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true' "$RELEASE_WORKFLOW" \
   || fail 'Release must preflight producer namespaces'
 
 printf 'ok: CI and Release share the prepared-context real-adapter gate\n'
+
+# Source-level security contract for the exact-candidate hosted VM evidence producer.
+HOSTED_WORKFLOW="$ROOT/.github/workflows/release-vm.yml"
+for contract in '  workflow_dispatch:' '  actions: read' '    runs-on: ubuntu-24.04' \
+  '    timeout-minutes: 350' '      max-parallel: 12' '          ref: ${{ inputs.commit }}' \
+  '          run-id: ${{ inputs.candidate_run }}' '          name: release-candidate-${{ inputs.candidate_attempt }}' \
+  '          name: ci-hosted-${{ strategy.job-index }}' '        if: always()'; do
+  grep -Fq "$contract" "$HOSTED_WORKFLOW" || fail "hosted workflow lacks exact-candidate contract: $contract"
+done
+! grep -Eq 'self-hosted|pull_request|secrets[.[]|:[[:space:]]*write' "$HOSTED_WORKFLOW" \
+  || fail 'hosted VM producer must be manual and read-only'
+grep -Fq 'bash dev/ci/periodic-e2e.sh acceptance' "$HOSTED_WORKFLOW" \
+  && grep -Fq 'python3 -B dev/ci/release-vm.py' "$HOSTED_WORKFLOW" \
+  || fail 'hosted VM workflow must reuse pool setup and verify terminal collector selection'
+PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+def module(name, path):
+    spec = importlib.util.spec_from_file_location(name, root / path)
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+a = module("acceptance", "dev/release-acceptance.py")
+assert a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes()) in a.CI_HOSTED_POLICIES
+p = module("periodic", "dev/ci/plan-periodic-checks.py")
+plan = p.plan(root)
+entries = {entry["id"]: entry["command"] for group in plan.values() for entry in group["include"]}
+commands = a.commands(root, "0.0.0", a.profile_inventory(root))
+for name, command in commands.items():
+    if name.startswith("vm:published-upgrade/"):
+        assert entries[name] == command + ["--slot", "1"]
+# Baselines outside the catalog keep one agent-free periodic upgrade each.
+baselines = [line.split("\t", 1)[0] for line in (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines() if line]
+assert {name for name in entries if name.startswith("published:")} == {
+    "published:" + version for version in baselines if "vm:published-upgrade/" + version not in commands}
+PY
+printf 'ok: hosted VM workflow binds exact candidates and periodic upgrades retain catalog coverage\n'

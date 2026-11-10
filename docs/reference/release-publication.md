@@ -49,12 +49,32 @@ For a CI-prepared candidate, `verify`, ShellCheck, local adapters and released-c
 are counted from the successful preparation jobs and not repeated; `release-acceptance.py run` with
 `--only NAME --rerun` replaces a counted result with a local run. A locally prepared candidate runs them.
 
+After downloading the preparation artifact, `prepare` also dispatches `release-vm.yml` asynchronously
+for the 27 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
+commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`; otherwise it reports the refusal and
+leaves those checks open. It downloads the exact preparation run/attempt artifact, uses the shared
+hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to
+350 minutes). Repeating preparation discovers the durable request instead of dispatching another.
+`accept` waits up to six hours for that request, then collects only completed successful jobs before
+running the remaining requested checks. `--ci-wait-seconds 0` collects the current snapshot immediately;
+a nonzero override is bounded to 86400 seconds. Failed, running, missing or refused results stay open
+for local execution when requested. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
+`CI-HOSTED-SKIP CHECK: REASON`.
+
+Hosted evidence is `execution: ci-hosted`, with the original runner environment, manifest, complete
+PASS attempt and recorded cleanup. Candidate ID, commit, source fingerprint, version, runtime and
+all release assets must match exactly. Independently generated transport gzip checksums may differ;
+the original checksum remains in its manifest. Collection imports bounded evidence files, never source
+or release assets. Publication validates that evidence again and rechecks the GitHub run/attempt,
+job success, exact head SHA and reviewed workflow blob, and prints `PUBLICATION ci_hosted=...`.
+Periodic E2E results remain background evidence and cannot count through this path.
+
 ### Release levels
 
 | Level | When | Checks | Typical time |
 | --- | --- | --- | --- |
 | Continuous | Every push and on a schedule, outside a release | `verify` and the GitHub-hosted matrix and lanes | Background |
-| Ordinary release or hotfix | No product migration or update-contract change since the previous release | CI preparation counted by `accept`; `p0-release-smoke` on the final bytes; the released-caller matrix; VM profile checks stay `not-run` unless requested | About 2 hours |
+| Ordinary release or hotfix | No product migration or update-contract change since the previous release | CI preparation counted by `accept`; `p0-release-smoke` on the final bytes; the released-caller matrix; eligible hosted VM results counted; remaining VM checks stay `not-run` unless requested | About 2 hours |
 | Full release | Product migration or update-contract changes, or an operator request | Ordinary checks plus every VM profile check and every core VM check (`vm:<id>` from `dev/e2e/release-vm-checks.json`) | Up to 8 hours |
 
 `accept --level ordinary|full [--level-reason TEXT]` records the level, its reason, the baseline tag and
@@ -70,7 +90,7 @@ changes supply it, runs every VM check, and its attestation refuses an untouched
 or core VM check; only an explicit `--defer-profile` operator deferral can leave a profile check unrun, and publication prints
 it. The level is a local receipt record: the publication workflow does not recheck it. Before a full release, fix a red continuous
 run before freezing the candidate.
-Long VM smoke and shipped-profile VM checks remain available only on explicit request:
+Local long VM smoke and shipped-profile VM checks run on explicit request:
 
 ```sh
 dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slots 1 2 3
@@ -79,8 +99,8 @@ python3 dev/release-acceptance.py run --output .build/release-local \
   --only p0-release-smoke --slots 1
 ```
 
-`--slots` alone does not request VM execution. Unrequested checks remain `not-run` in acceptance
-and publication; they are not passing physical evidence. Once requested, incomplete or failed
+`--slots` alone does not request local VM execution. Checks without counted hosted evidence or an
+explicit local request remain `not-run` in acceptance and publication; they are not passing physical evidence. Once requested, incomplete or failed
 checks block the candidate, including after interruption or a later default invocation.
 
 `prepare` pins a full lowercase 40-character commit SHA and stable version. Release preparation
@@ -89,11 +109,12 @@ Host-free verification retains core/profile checks, CLI freshness and profile in
 for these same-attempt jobs before running
 local adapters and the complete released-caller compatibility matrix. It builds final-version assets
 once and uploads their source archive, exact inventory and SHA-256 identity manifest for 90 days.
+While waiting under `subyard-github run`, the CLI refreshes an expired broker token after HTTP 401 and retries the failed API call or download once.
 `CANDIDATE` prints the attempt-specific ID and local directory. Before printing it, `prepare` also creates
 that directory's `acceptance/` output from the downloaded assets: it imports the `package` result,
 records `shellcheck` and `verify` as passed by `host-free-verify` and `local-adapters` and `compatibility`
 as passed by `prepare` (`execution: ci-preparation`), leaves every other check pending or optional
-`not-run`, and runs nothing. It counts them only when the candidate's own pinned code declares
+`not-run`, and dispatches the eligible hosted VM checks described above. It counts them only when the candidate's own pinned code declares
 `CI_PREPARED_CHECKS` and its `release.yml` blob is listed in `CI_COUNTED_POLICIES`, which every reviewed
 `release.yml` change must update; older candidates run them locally, so their own publication
 validator still accepts the attestation. Publication rechecks the run's policy and prints counted
@@ -103,6 +124,12 @@ local candidates of the same version when the runtime and release assets are ide
 differs only in other profiles' unshared test files; provenance may differ in its timestamp and, between
 two concrete commits, in `sourceRevision`. Publication shows them as inherited evidence transfers. A
 `REUSE-SKIP` line names why an earlier PASS was not reused. Publication never rebuilds these assets.
+The separate `policy:harness-only-v1` also permits profile/VM reuse for release orchestration,
+CI and documentation changes, with identical runtime/assets and the existing migration guards;
+the collector `dev/release-acceptance.py`, local gates and continuous release smoke are excluded.
+For reviewed changes, `prepare-reviews --output NEW --from OLD --request REQUEST.json` prepares
+unsigned batch drafts without transferring evidence; edit the drafts and bind their paths and
+edited hashes as described in [batch transfer preparation](../testing.md#batch-transfer-preparation-and-application).
 
 Recovery checks the exact same-attempt job inventory against the executed workflow file at the
 native run's immutable `head_sha`. Only explicitly recorded workflow Git-blob identities are accepted:

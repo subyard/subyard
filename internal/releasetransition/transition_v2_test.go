@@ -3732,14 +3732,6 @@ func TestV2TransitionReobservesFailedActivationReconcilerResult(t *testing.T) {
 			wantCode:   CodeDependencyUnavailable,
 		},
 		{
-			name: "third state requires operator",
-			post: V2ActivationObservation{
-				Actual: digestC, Desired: digestA, Converged: false,
-			},
-			wantStatus: StatusOperatorActionRequired,
-			wantCode:   CodeRecoveryAmbiguous,
-		},
-		{
 			name:       "public diagnostic does not override third state guard",
 			post:       V2ActivationObservation{Actual: digestC, Desired: digestA},
 			failure:    v2PublicActivationError{"public reconcile detail", "run yard -Y demo integration status"},

@@ -11,7 +11,7 @@ SLOT = ["--slot", "1"]
 # Checks that boot a VM inside the leased VM. On AMD hosted runners such a VM boots far too slowly
 # under the runner's hypervisor for these checks to finish, so they run only on Intel runners.
 NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnezia",
-          "profile:telemetry", "profile:test-vms/broker-cold-upgrade", "vm:staging-reliability",
+          "profile:telemetry/local", "profile:telemetry/resources", "profile:test-vms/broker-cold-upgrade", "vm:staging-reliability",
           "vm:p0-yard-maintenance"}
 # The release catalog runs the full P0 matrix as one check; here its lanes run on separate runners.
 SPLIT = {"vm:p0-full"}
@@ -45,10 +45,11 @@ def plan(root=ROOT):
     # lane's leftovers, and a fresh runner has none.
     include += [{"id": "p0:" + lane, "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, *SLOT]}
                 for lane in full[0] if lane not in ("boundary", "cleanup")]
+    # The release catalog upgrades a few baselines with agents; the rest keep an agent-free run here.
     baselines = (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()
-    versions = [line.split("\t", 1)[0] for line in baselines if line]
     include += [{"id": "published:" + version, "command": published_upgrade(version, "none")}
-                for version in versions]
+                for version in (line.split("\t", 1)[0] for line in baselines if line)
+                if "vm:published-upgrade/" + version not in declared]
     missing = sorted(SPLIT - set(declared))
     if missing:
         raise SystemExit("plan-periodic-checks: split checks left the collector: " + " ".join(missing))

@@ -85,7 +85,7 @@ done
 # The physical fixture must retain the actual child exit and bounded error
 # classes before teardown, while dropping private paths and arbitrary payloads.
 (
-  eval "$(sed -n '/^pregrant_child_failure() {/,/^}/p; /^holder_failure() {/,/^}/p' "$ROOT/dev/e2e/broker-memory-boundary.sh")"
+  eval "$(sed -n '/^pregrant_child_failure() {/,/^}/p; /^holder_failure() {/,/^}/p' "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh")"
   STATE_PARENT="$TMP/client-diagnostics"
   install -d -m 0700 "$STATE_PARENT"
   printf '%s\n' 'ssh-keygen: /fixture/private/controller.pub: No such file or directory' \

@@ -251,6 +251,14 @@ jobs:
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
           bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \
             "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
+      - name: Preserve failed check diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: diagnostics-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: .build/periodic-diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # Checks that boot a VM inside the leased VM, which runs inside the runner's VM. Hosted runners
   # are Azure Hyper-V VMs on either Intel or AMD CPUs, and the runner label cannot choose one. On
@@ -314,6 +322,14 @@ jobs:
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
           bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \
             "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
+      - name: Preserve failed check diagnostics
+        if: failure() && steps.cpu.outputs.run == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nested-diagnostics-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: .build/periodic-diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # The only job allowed to start runs. It checks out nothing and runs no repository code.
   reschedule:

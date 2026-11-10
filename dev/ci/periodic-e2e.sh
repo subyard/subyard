@@ -181,12 +181,37 @@ controller_env() {
 run_check() {
   local status=0
   cd "$WORKSPACE"
-  controller_env "$@" </dev/null || status=$?
+  if [ "${1:-}" = run_collector_selection ]; then
+    SUBYARD_E2E_ROUTE_REGISTRY="$HOME/.subyard/e2e/routes" "$@" </dev/null || status=$?
+  else
+    controller_env "$@" </dev/null || status=$?
+  fi
   # The runner is gone afterwards, and only these events hold a refusal's or quarantine's reason.
   # Checks lease through either the service route or the yard route, with separate histories.
   [ "$status" = 0 ] || controller_env dev/agent-e2e.sh --logs --slot 1 -n 50 </dev/null \
     || controller_env dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 50 </dev/null || true
+  [ "$status" = 0 ] || keep_diagnostics
   return "$status"
+}
+
+# Uploaded by the workflow after a failure: full lease events of both routes, including a failed
+# stop's console and Incus log tails, and the lanes' evidence and failure logs.
+keep_diagnostics() {
+  local output="$WORKSPACE/.build/periodic-diagnostics"
+  install -d -m 0700 "$output"
+  controller_env dev/agent-e2e.sh --logs --slot 1 -n 200 --json </dev/null > "$output/service-events.json" 2>&1 || true
+  controller_env dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 200 --json </dev/null > "$output/yard-events.json" 2>&1 || true
+  find "$HOME/.subyard/e2e" -path '*/evidence/*' -type f -size -20M -exec cp -t "$output" {} + 2>/dev/null || true
+}
+
+run_collector_selection() {
+  local output="$1" check_id="$2" native_status=0
+  python3 -B "$WORKSPACE/dev/release-acceptance.py" run --output "$output" --only "$check_id" --slots 1 || native_status=$?
+  printf 'Native collector aggregate exit: %s\n' "$native_status"
+  # Full receipt remains incomplete; only one requested terminal selection defines this job.
+  jq -es --arg check "$check_id" 'length == 1 and .[0].state == "finished"
+    and .[0].capture_status == "recorded" and .[0].selected == [$check]
+    and .[0].selected_status == "passed"' "$output"/runs/*.json >/dev/null
 }
 
 check_probes() {
@@ -213,5 +238,15 @@ case "${1:-}" in
     shift
     check_probes "$@"
     ;;
-  *) die 'usage: periodic-e2e.sh check ID BUNDLE COMMAND...' ;;
+  acceptance)
+    [ "$#" = 5 ] || die 'usage: periodic-e2e.sh acceptance ID PREPARED OUTPUT VERSION'
+    check_id="$2" prepared="$3" output="$4" version="$5"
+    collector="$PWD/dev/release-acceptance.py"
+    python3 -B "$collector" prepare --prepared "$prepared" --output "$output" --version "$version" || exit $?
+    # The collector is executed from the managed workspace so its lease attribution is ordinary.
+    # Its aggregate exit remains incomplete while other checks are unrequested.
+    check_probes "$check_id" "$output/candidate-bundle.tar.gz" \
+      run_collector_selection "$output" "$check_id"
+    ;;
+  *) die 'usage: periodic-e2e.sh {check ID BUNDLE COMMAND...|acceptance ID PREPARED OUTPUT VERSION}' ;;
 esac

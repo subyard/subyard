@@ -436,6 +436,17 @@ the same capture policy and SQLite sink. Source/version identities, trial
 conditions and accepted versus persisted counts belong to the measurement
 evidence. Product limits and binary size are not runtime overhead measurements.
 
+Release acceptance splits the disposable fixture into parallel `local` (`--local`)
+and `resources` (`--resources`) lanes. Together they retain the local storage-failure,
+OTLP, overhead, process-scope and native-signal checks, plus VM/Android native allocation,
+profile lifecycle, held-resource and storage-failure observations, final counters,
+resource examples and export/replay. The resource lane uses Android's short
+`memory-budget` exercise and the broker's `--telemetry-resources` mode.
+Long renewal, requester-death natural expiry and reuse assertions run in the owning
+Android `memory-lease` and test-vms `memory-boundary` lanes. Telemetry's host-free
+`resources-test.py` replays synthetic expiry and actual-stop events for both VM guests,
+checking draining → available, pre-stop samples and explicit missing final tails.
+
 ### Verified workload and broker example
 
 A disposable acceptance run launched an explicitly managed fixture workload,

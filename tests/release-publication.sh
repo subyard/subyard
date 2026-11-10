@@ -8,6 +8,7 @@ import copy
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -2097,6 +2098,57 @@ class WorkflowRef(unittest.TestCase):
 
 
 class BrokerRepository(unittest.TestCase):
+    def test_expired_broker_token_is_refreshed_once(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            directory = Path(raw)
+            calls, broker_calls = directory / "gh-calls", directory / "broker-calls"
+            fake = directory / "bin"
+            fake.mkdir()
+            (fake / "gh").write_text(
+                '#!/bin/sh\nprintf "call\\n" >> "$TEST_GH_CALLS"\n'
+                'if [ "$GH_TOKEN" = expired ] || [ "$TEST_RETRY_OK" = no ]; then\n'
+                '  printf partial\n  printf "gh: failed (HTTP %s)\\n" "$TEST_HTTP_STATUS" >&2\n  exit 1\nfi\n'
+                'printf \'{"ok":true}\\n\'\n')
+            (fake / "subyard-github").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_BROKER_CALLS"\n'
+                '[ "$TEST_REFRESH_OK" = yes ] || exit 1\nprintf "refreshed\\n"\n')
+            for name in ("gh", "subyard-github"):
+                (fake / name).chmod(0o755)
+            for broker, status, refresh_ok, retry_ok in ((True, 401, True, True), (False, 401, True, True),
+                                                       (True, 403, True, True), (True, 401, False, True),
+                                                       (True, 401, True, False)):
+                for download in (False, True):
+                    with self.subTest(broker=broker, status=status, refresh_ok=refresh_ok,
+                                      retry_ok=retry_ok, download=download):
+                        calls.unlink(missing_ok=True)
+                        broker_calls.unlink(missing_ok=True)
+                        env = {**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
+                               "GH_TOKEN": "expired", "TEST_HTTP_STATUS": str(status),
+                               "TEST_REFRESH_OK": "yes" if refresh_ok else "no",
+                               "TEST_RETRY_OK": "yes" if retry_ok else "no",
+                               "TEST_GH_CALLS": str(calls), "TEST_BROKER_CALLS": str(broker_calls)}
+                        env.pop(m.BROKER_RUN_CONTEXT, None)
+                        if broker:
+                            env[m.BROKER_RUN_CONTEXT] = "{}"
+                        refreshed = broker and status == 401 and refresh_ok
+                        destination = directory / "download"
+                        with patch.dict(os.environ, env, clear=True):
+                            github = m.GitHub("owner/release")
+                            def call():
+                                return github.download("releases/assets/123", destination) if download else github.api("actions/runs/123")
+                            if refreshed and retry_ok:
+                                result = call()
+                                self.assertEqual(json.loads(destination.read_text()) if download else result, {"ok": True})
+                            else:
+                                with self.assertRaisesRegex(ValueError, "GitHub (API|download) failed.* HTTP " + str(status)):
+                                    call()
+                            self.assertEqual(os.environ["GH_TOKEN"], "refreshed" if refreshed else "expired")
+                        self.assertEqual(calls.read_text().splitlines(), ["call"] * (2 if refreshed else 1))
+                        if broker and status == 401:
+                            self.assertEqual(broker_calls.read_text(), "run --repo owner/release -- printenv GH_TOKEN\n")
+                        else:
+                            self.assertFalse(broker_calls.exists())
+
     def test_guard_accepts_only_the_release_repository_under_the_broker(self):
         broker = {m.BROKER_RUN_CONTEXT: "{}"}
         m.broker_repository_guard("Subyard/Subyard", [], {})
@@ -2131,6 +2183,347 @@ class BrokerRepository(unittest.TestCase):
                 self.assertIn("subyard-github run --repo Subyard/Subyard -- dev/release.sh --state-dir", result.stderr)
             self.assertFalse(calls.exists())
             self.assertFalse((directory / "state").exists())
+
+class HostedChecks(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="subyard-ci-hosted-", dir="/tmp")
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        _, self.prepared, self.identity = fixture(self.directory)
+        self.output, self.root, _ = accepted(self.directory, self.prepared, self.identity)
+        remote = self.directory / "remote"
+        remote.mkdir()
+        self.remote, _, _ = accepted(remote, self.prepared, self.identity)
+        receipt = json.loads((self.remote / "receipt.json").read_text())
+        receipt["environment"] = {"system": "Linux", "machine": "x86_64", "go": "go version hosted-runner"}
+        result = receipt["checks"]["profile:sample"]
+        result["execution_environment"] = receipt["environment"]
+        # Independent prepared collectors can produce different gzip transport bytes.
+        with (self.remote / "candidate-bundle.tar.gz").open("ab") as stream:
+            stream.write(b"\n")
+        receipt["candidate_bundle_sha256"] = m.a.digest(self.remote / "candidate-bundle.tar.gz")
+        m.a.save(self.remote, receipt)
+        capture_attempts(self.remote, {"profile:sample"})
+        root, receipt = m.a.load_bound(self.output)
+        receipt["checks"]["profile:sample"] = {"status": "pending"}
+        m.a.save(self.output, receipt)
+        self.policy = next(iter(m.a.CI_HOSTED_POLICIES))
+        self.run = {"id": 456, "run_attempt": 1, "status": "completed", "conclusion": "success",
+                    "workflow_id": 88, "event": "workflow_dispatch", "head_sha": self.identity["commit"],
+                    "repository": {"full_name": m.REPOSITORY}, "display_title": "Subyard hosted-request"}
+        self.job = {"id": 789, "name": "profile:sample", "status": "completed", "conclusion": "success",
+                    "head_sha": self.identity["commit"]}
+        self.state = {"request": "hosted-request", "identity_sha256": m.identity_hash(self.identity), "checks": ["profile:sample"]}
+        m.write_json(self.directory / "ci-hosted.json", self.state)
+        owner = self
+        class HostedGitHub(FakeGitHub):
+            def api(self, path, method="GET", payload=None, missing=False):
+                if path == "actions/workflows/release-vm.yml":
+                    return {"id": 88}
+                if path == "actions/runs/456/attempts/1":
+                    return copy.deepcopy(owner.run)
+                if path.startswith("contents/.github/workflows/release-vm.yml?ref="):
+                    return {"type": "file", "path": ".github/workflows/release-vm.yml", "sha": owner.policy}
+                return super().api(path, method, payload, missing)
+            def pages(self, path, key=None):
+                if path == "actions/workflows/release-vm.yml/runs?event=workflow_dispatch":
+                    return [copy.deepcopy(owner.run)]
+                if path == "actions/runs/456/attempts/1/jobs":
+                    return [copy.deepcopy(owner.job)]
+                if path == "actions/runs/456/artifacts":
+                    return [{"id": 99, "name": "ci-hosted-0", "expired": False, "size_in_bytes": 10000}]
+                return super().pages(path, key)
+            def download(self, path, destination):
+                if path == "actions/artifacts/99/zip":
+                    destination.write_bytes(owner.archive())
+                    return
+                return super().download(path, destination)
+        self.github = HostedGitHub(self.identity)
+        self.addCleanup(patch.stopall)
+        patch.object(m.a, "CI_HOSTED_CHECKS", frozenset({"profile:sample"})).start()
+        self.receipt_mutation = lambda value: None
+        self.execution_attempt = 1
+
+    def archive(self):
+        receipt = json.loads((self.remote / "receipt.json").read_text())
+        self.receipt_mutation(receipt)
+        selected = {"selected": ["profile:sample"], "state": "finished", "capture_status": "recorded", "selected_status": "passed"}
+        raw = (json.dumps(receipt, sort_keys=True) + "\n").encode()
+        selected["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr("receipt.json", raw)
+            archive.writestr("runs/" + "d" * 32 + ".json", json.dumps(selected))
+            archive.writestr("ci-execution.json", json.dumps({"run_id": 456, "run_attempt": self.execution_attempt,
+                "head_sha": self.identity["commit"], "check": "profile:sample"}))
+            for pattern in ("*.log", "attempts/*.json", "manifests/*.json"):
+                for path in self.remote.glob(pattern):
+                    archive.write(path, str(path.relative_to(self.remote)))
+        return stream.getvalue()
+
+    def collect(self):
+        with redirect_stdout(io.StringIO()) as report:
+            m.collect_ci(self.github, self.directory, self.identity)
+        _, receipt = m.a.load_bound(self.output)
+        return receipt["checks"]["profile:sample"], report.getvalue()
+
+    def test_success_preserves_original_attempt_runner_and_exact_candidate(self):
+        result, report = self.collect()
+        self.assertEqual(result["execution"], "ci-hosted")
+        self.assertIn("CI-HOSTED profile:sample run=456 job=789", report)
+        record, manifest = m.a.original_attempt(self.output, m.a.load_bound(self.output)[1], "profile:sample", result)
+        self.assertEqual(record["result"]["execution_environment"]["go"], "go version hosted-runner")
+        self.assertEqual(manifest["candidate"]["candidate_sha256"], m.identity_hash(self.identity))
+        self.assertNotEqual(manifest["candidate"]["candidate_bundle_sha256"], m.a.load_bound(self.output)[1]["candidate_bundle_sha256"])
+        document = m.attestation(self.output, self.identity)
+        m.validate_attestation(document, self.identity, self.root)
+        self.assertTrue(m.publish_remote(self.github, self.prepared, document, self.root)["immutable"])
+        self.assertFalse((self.directory / "ci-hosted-downloads/456-1-99/source").exists())
+        self.assertEqual(self.collect()[1], "")
+
+    def test_wrong_sha_failed_job_unknown_policy_foreign_candidate_missing_cleanup_and_stale_attempt_stay_open(self):
+        def foreign(receipt):
+            receipt["preparation"]["candidate_id"] = "r999-a1"
+        def cleanup(receipt):
+            receipt["checks"]["profile:sample"].pop("cleanup", None)
+        for case in ("sha", "job", "policy", "candidate", "cleanup", "attempt", "running"):
+            with self.subTest(case=case):
+                original_run, original_job, original_policy = copy.deepcopy(self.run), copy.deepcopy(self.job), self.policy
+                if case == "sha": self.run["head_sha"] = "f" * 40
+                if case == "job": self.job["conclusion"] = "failure"
+                if case == "policy": self.policy = "f" * 40
+                if case == "candidate": self.receipt_mutation = foreign
+                if case == "cleanup": self.receipt_mutation = cleanup
+                if case == "attempt": self.execution_attempt = 2
+                if case == "running": self.job["status"] = "in_progress"
+                result, report = self.collect()
+                self.assertEqual(result, {"status": "pending"})
+                self.assertIn("CI-HOSTED-SKIP profile:sample:", report)
+                self.run, self.job, self.policy = original_run, original_job, original_policy
+                self.receipt_mutation = lambda value: None
+                self.execution_attempt = 1
+                shutil.rmtree(self.directory / "ci-hosted-downloads", ignore_errors=True)
+
+    def test_publication_rechecks_job_and_refuses_tampered_hosted_policy_or_runner(self):
+        self.collect()
+        document = m.attestation(self.output, self.identity)
+        for field, value in (("policy", "f" * 40), ("head_sha", "f" * 40), ("candidate_sha256", "f" * 64)):
+            invalid = copy.deepcopy(document)
+            invalid["checks"]["profile:sample"]["ci_hosted"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                m.validate_attestation(invalid, self.identity, self.root)
+        invalid = copy.deepcopy(document)
+        invalid["checks"]["profile:sample"]["execution_environment"]["go"] = "tampered"
+        with self.assertRaises(ValueError):
+            m.validate_attestation(invalid, self.identity, self.root)
+        self.job["conclusion"] = "failure"
+        with self.assertRaisesRegex(ValueError, "job has not passed"):
+            m.publish_remote(self.github, self.prepared, document, self.root)
+        self.assertIsNone(self.github.release)
+
+    def test_async_dispatch_persists_lost_response_and_resume_does_not_dispatch_again(self):
+        path = self.directory / "async.json"
+        state = {"request": "hosted-request", "workflow_ref": "release-branch"}
+        class Lost:
+            def api(self, *args):
+                raise ValueError("lost response")
+        with self.assertRaisesRegex(ValueError, "lost response"):
+            m.dispatch(Lost(), "release-vm.yml", {"checks": "[]"}, state, path, asynchronous=True)
+        self.assertTrue(json.loads(path.read_text())["dispatch_started"])
+        with patch.object(m, "discover", return_value=self.run):
+            self.assertEqual(m.dispatch(Lost(), "release-vm.yml", {}, state, path, asynchronous=True), self.run)
+        self.assertEqual(json.loads(path.read_text())["run_id"], 456)
+
+    def test_artifact_source_members_refuse_without_import(self):
+        stream = io.BytesIO(self.archive())
+        with zipfile.ZipFile(stream, "a") as archive:
+            archive.writestr("source/foreign.txt", "must never be imported")
+        with patch.object(self, "archive", return_value=stream.getvalue()):
+            result, report = self.collect()
+        self.assertEqual(result, {"status": "pending"})
+        self.assertIn("unsafe hosted artifact member", report)
+        self.assertFalse(any((self.directory / "ci-hosted-downloads").rglob("foreign.txt")))
+
+    def test_counted_hosted_evidence_cannot_be_transferred(self):
+        self.collect()
+        source = m.a.EvidenceCandidate(self.output)
+        target_dir = self.directory / "transfer-target"
+        target_dir.mkdir()
+        target_output, _, _ = accepted(target_dir, self.prepared, self.identity)
+        _, receipt = m.a.load_bound(target_output)
+        receipt["checks"]["profile:sample"] = {"status": "pending"}
+        m.a.save(target_output, receipt)
+        target = m.a.EvidenceCandidate(target_output)
+        with self.assertRaisesRegex(ValueError, "cannot be transfer sources"):
+            m.a.batch_guard(target.root, target.receipt, source.root, source.receipt, "profile:sample", target.context, source.context)
+        with self.assertRaisesRegex(ValueError, "cannot be transfer sources"):
+            m.a.prepare_transfer(target, source, "profile:sample", self.directory / "unused", {})
+        self.assertFalse(m.a.complete_direct_pass("profile:sample", source.receipt["checks"]["profile:sample"],
+            source.context["commands"]["profile:sample"], source.receipt["environment"]))
+
+    def test_start_requires_candidate_head_branch_and_resumes_one_request(self):
+        (self.directory / "ci-hosted.json").unlink()
+        with patch.object(m.a, "source_declares", return_value=True), patch.object(m.a, "hosted_checks", return_value=["profile:sample"]), \
+             patch.object(m, "dispatch", return_value=self.run) as dispatch, redirect_stdout(io.StringIO()) as report:
+            m.start_ci_hosted(self.github, self.directory, self.identity)
+            dispatch.assert_not_called()
+            self.assertIn("no branch at candidate commit", report.getvalue())
+            self.github.heads = ["release-branch"]
+            m.start_ci_hosted(self.github, self.directory, self.identity)
+            first = json.loads((self.directory / "ci-hosted.json").read_text())
+            m.start_ci_hosted(self.github, self.directory, self.identity)
+            second = json.loads((self.directory / "ci-hosted.json").read_text())
+            self.assertEqual(first["request"], second["request"])
+            self.assertEqual(first["workflow_ref"], "release-branch")
+            self.assertTrue(dispatch.call_args.kwargs["asynchronous"])
+
+    def test_export_preserves_incomplete_aggregate_and_uses_terminal_selection(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        _, receipt = m.a.load_bound(self.remote)
+        receipt["checks"]["p0-release-smoke"] = {"status": "pending"}
+        m.a.save(self.remote, receipt)
+        runs = self.remote / "runs"
+        runs.mkdir()
+        selection = {"selected": ["profile:sample"], "state": "finished", "capture_status": "recorded", "selected_status": "passed"}
+        (runs / ("d" * 32 + ".json")).write_text(json.dumps(selection))
+        destination = self.directory / "export"
+        with patch.dict(os.environ, {"GITHUB_RUN_ID": "456", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": self.identity["commit"]}):
+            helper.export(self.remote, destination, "profile:sample")
+            exported = json.loads((destination / "receipt.json").read_text())
+            self.assertEqual(exported["checks"]["p0-release-smoke"], {"status": "pending"})
+            self.assertEqual(exported["reproducible_result"], "incomplete")
+            self.assertFalse((destination / "source").exists())
+            selection["state"] = "running"
+            (runs / ("d" * 32 + ".json")).write_text(json.dumps(selection))
+            with self.assertRaisesRegex(ValueError, "terminal|did not finish"):
+                helper.export(self.remote, self.directory / "failed-export", "profile:sample")
+            self.assertTrue((self.directory / "failed-export/receipt.json").is_file())
+
+    def test_partial_malformed_and_oversized_sibling_artifacts_do_not_hide_success(self):
+        self.run["conclusion"] = "failure"
+        pages, download = self.github.pages, self.github.download
+        for index, case in enumerate(("header-only", "malformed-receipt", "malformed-zip", "oversized")):
+            with self.subTest(case=case):
+                stream = io.BytesIO()
+                with zipfile.ZipFile(stream, "w") as archive:
+                    archive.writestr("ci-execution.json", json.dumps({"run_id": 456, "run_attempt": 1,
+                        "head_sha": self.identity["commit"], "check": "profile:failed"}))
+                    if case == "malformed-receipt":
+                        archive.writestr("receipt.json", "invalid JSON")
+                payload = b"invalid zip" if case == "malformed-zip" else stream.getvalue()
+                sibling = {"id": 100 + index, "name": "ci-hosted-1", "expired": False,
+                           "size_in_bytes": (128 << 20) + 1 if case == "oversized" else len(payload)}
+                def sibling_pages(path, key=None):
+                    items = pages(path, key)
+                    if path == "actions/runs/456/artifacts":
+                        return [sibling, *items]  # Failed sibling precedes the valid artifact.
+                    if path == "actions/runs/456/attempts/1/jobs":
+                        return [*items, {**self.job, "id": 790, "name": "profile:failed", "conclusion": "failure"}]
+                    return items
+                def sibling_download(path, destination):
+                    if path == f"actions/artifacts/{sibling['id']}/zip":
+                        self.assertNotEqual(case, "oversized")
+                        destination.write_bytes(payload)
+                    else:
+                        download(path, destination)
+                with patch.object(m.a, "CI_HOSTED_CHECKS", frozenset({"profile:sample", "profile:failed"})), \
+                     patch.object(self.github, "pages", side_effect=sibling_pages), \
+                     patch.object(self.github, "download", side_effect=sibling_download):
+                    result, report = self.collect()
+                self.assertEqual(result["execution"], "ci-hosted")
+                self.assertIn("CI-HOSTED profile:sample run=456 job=789", report)
+                _, receipt = m.a.load_bound(self.output)
+                receipt["checks"]["profile:sample"] = {"status": "pending"}
+                m.a.save(self.output, receipt)
+
+    def test_matching_partial_or_malformed_artifact_keeps_check_open(self):
+        for case in ("header-only", "malformed-receipt"):
+            with self.subTest(case=case):
+                stream = io.BytesIO()
+                with zipfile.ZipFile(stream, "w") as archive:
+                    archive.writestr("ci-execution.json", json.dumps({"run_id": 456, "run_attempt": 1,
+                        "head_sha": self.identity["commit"], "check": "profile:sample"}))
+                    if case == "malformed-receipt":
+                        archive.writestr("receipt.json", "invalid JSON")
+                with patch.object(self, "archive", return_value=stream.getvalue()):
+                    result, report = self.collect()
+                self.assertEqual(result, {"status": "pending"})
+                self.assertIn("CI-HOSTED-SKIP profile:sample:", report)
+                shutil.rmtree(self.directory / "ci-hosted-downloads")
+
+    def test_matching_malformed_check_mapping_or_result_keeps_check_open(self):
+        for case in ("mapping", "result"):
+            with self.subTest(case=case):
+                def malformed(receipt):
+                    if case == "mapping":
+                        receipt["checks"] = []
+                    else:
+                        receipt["checks"]["profile:sample"] = []
+                # archive() recomputes the selection's receipt digest after mutation,
+                # so the malformed result reaches the matching evidence validator.
+                self.receipt_mutation = malformed
+                result, report = self.collect()
+                self.assertEqual(result, {"status": "pending"})
+                self.assertIn("CI-HOSTED-SKIP profile:sample: matching hosted artifact check result is malformed", report)
+                shutil.rmtree(self.directory / "ci-hosted-downloads")
+
+    def test_successful_job_counts_when_sibling_run_fails(self):
+        self.run["conclusion"] = "failure"
+        result, _ = self.collect()
+        self.assertEqual(result["execution"], "ci-hosted")
+        m.publish_remote(self.github, self.prepared, m.attestation(self.output, self.identity), self.root)
+
+    def test_accept_runs_local_checks_before_waiting_for_hosted_ones(self):
+        calls = []
+        record = lambda name: lambda *args, **kwargs: calls.append((name, kwargs.get("exclude", ()), args[2] if name == "run" else None)) or 0
+        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+             patch.object(m.a, "run_checks", side_effect=record("run")), \
+             patch.object(m, "wait_ci_hosted", side_effect=record("wait")), \
+             patch.object(m, "collect_ci", side_effect=record("collect")):
+            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 0)
+        self.assertEqual(calls, [("run", ["profile:sample"], []), ("wait", (), None), ("collect", (), None),
+                                 ("run", (), ["profile:sample"])])
+        calls.clear()
+        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+             patch.object(m.a, "run_checks", side_effect=record("run")), \
+             patch.object(m, "wait_ci_hosted", side_effect=record("wait")):
+            m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0)
+        self.assertEqual(calls, [("run", (), [])])
+        # Ordinary acceptance leaves optional hosted VM checks not run and does not wait.
+        calls.clear()
+        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+             patch.object(m.a, "run_checks", side_effect=record("run")), \
+             patch.object(m, "wait_ci_hosted", side_effect=record("wait")):
+            m.accept_checks(self.github, self.directory, self.identity, [], [], False, [], 60)
+        self.assertEqual(calls, [("run", (), [])])
+        # A failed local pass is reported without waiting for hosted jobs.
+        calls.clear()
+        receipt = json.loads((self.output / "receipt.json").read_text())
+        failed = {**receipt, "result": "failed"}
+        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+             patch.object(m.a, "run_checks", side_effect=lambda *args, **kwargs: calls.append(("run", kwargs.get("exclude", ()), args[2])) or 1), \
+             patch.object(m.json, "loads", side_effect=lambda text, *args, **kwargs: failed if text == (self.output / "receipt.json").read_text() else json.JSONDecoder().decode(text)), \
+             patch.object(m, "wait_ci_hosted", side_effect=record("wait")), \
+             patch.object(m, "collect_ci", side_effect=record("collect")):
+            m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60)
+        self.assertEqual([call[0] for call in calls], ["run", "collect", "run"])
+
+    def test_wait_is_bounded_and_zero_override_collects_without_wait(self):
+        with patch.object(m, "discover") as discover:
+            m.wait_ci_hosted(self.github, self.directory, self.identity, 0)
+            discover.assert_not_called()
+        with patch.object(m, "discover", return_value={**self.run, "status": "in_progress"}), \
+             patch.object(m.time, "monotonic", side_effect=itertools.count(0, 11).__next__):
+            m.wait_ci_hosted(self.github, self.directory, self.identity, 10)
+        # A request that never produced a run stops waiting after discovery time, not the whole budget.
+        with patch.object(m, "discover", return_value=None), patch.object(m.a.STOP, "wait"), \
+             patch.object(m.time, "monotonic", side_effect=itertools.count(0, m.DISCOVERY_SECONDS).__next__), \
+             redirect_stdout(io.StringIO()) as printed:
+            m.wait_ci_hosted(self.github, self.directory, self.identity, 21600)
+        self.assertIn("has no hosted run", printed.getvalue())
+
 
 unittest.main()
 PY

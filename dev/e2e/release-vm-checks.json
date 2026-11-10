@@ -2,7 +2,7 @@
   "schema_version": 1,
   "checks": [
     {"id": "p0-full", "timeout_seconds": 14400,
-     "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "full"]},
+     "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "full", "--smoke-covered"]},
     {"id": "p0-full-uninstall", "timeout_seconds": 5400,
      "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "full-uninstall"]},
     {"id": "p0-yard-maintenance", "timeout_seconds": 7200,

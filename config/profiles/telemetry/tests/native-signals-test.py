@@ -159,7 +159,7 @@ class NativeSignalsTest(unittest.TestCase):
 
     def test_isolated_home_resolves_only_the_generated_fixture_pin(self):
         source_root = Path(__file__).resolve().parents[4]
-        broker = (source_root/'dev/e2e/broker-memory-boundary.sh').read_text()
+        broker = (source_root/'config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh').read_text()
         prepare = 'prepare_native_route() {'+broker.split('prepare_native_route() {', 1)[1].split('\n}', 1)[0]+'\n}\n'
         p0 = (source_root/'dev/e2e/p0-guest.sh').read_text()
         normalize = 'normalized_ed25519() {'+p0.split('normalized_ed25519() {', 1)[1].split('\n}', 1)[0]+'\n}\n'

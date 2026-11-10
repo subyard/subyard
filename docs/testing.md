@@ -767,6 +767,10 @@ different candidates are skipped and each skip of an existing PASS prints a `REU
 Shared-test detection matches literal `profiles/NAME/tests` references; a reference built from a
 variable or glob must also name the path literally. The release `accept` command runs it before any check against
 earlier local candidates of the same repository and version, newest attempt first.
+The separate `policy:harness-only-v1` also reuses profile and `vm:*` checks when changes are confined
+to `dev/release-publication.py`, `dev/release.sh`, `dev/ci/`, `.github/`, `docs/` or top-level Markdown
+files (plus other profiles' unshared tests for profile checks); local gates, final-byte checks and
+`dev/release-acceptance.py` are excluded, and migration/update-contract refusals still apply.
 
 #### Reviewed evidence transfers
 
@@ -850,9 +854,17 @@ sanitized identities, hashes, command/environment provenance and authorization.
 Use the same transfer command for a batch of independently reviewed checks:
 
 ```sh
+python3 dev/release-acceptance.py prepare-reviews --output NEW --from OLD --request REQUEST.json
 python3 dev/release-acceptance.py transfer --output NEW --batch REQUEST.json --plan > PLAN.json
 python3 dev/release-acceptance.py transfer --output NEW --batch REQUEST.json
 ```
+
+`prepare-reviews` takes repeatable `--from` sources, selects the first qualifying complete direct PASS
+for each open executable check, prints skipped checks with reasons, and writes `REQUEST.json` plus
+unsigned drafts in `REQUEST-reviews/` with source and asset changes; it applies no transfers.
+Edit each draft's scope, reason and authorization reference, then replace that check's `review: null`
+with `{ "path": "REQUEST-reviews/0001.json", "sha256": "<SHA-256 of the edited file>" }` before applying;
+paths must be new, and no request is written when no check qualifies.
 
 `--batch` excludes `--from`, `--check` and `--review`; `--plan` requires `--batch`.
 The exact-key request schema is `schema_version: 1`, `target` and `checks`. `target` is the
@@ -925,6 +937,20 @@ and intermittent tests, and fuzzes each fuzz target for one minute.
 Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
 Veranda and live P0 acceptance remain separate checks.
 
+#### Exact-candidate hosted release checks
+
+`release-vm.yml` runs the explicit `CI_HOSTED_CHECKS` inventory against a downloaded preparation
+artifact, one fresh collector per job. It shares the Periodic E2E pool setup and preserves bounded
+receipts, original attempts/manifests, logs and invocation events even on failure. Job success requires
+a terminal recorded PASS for that exact selection and recorded cleanup; the collector's aggregate
+receipt stays incomplete while other checks are unrequested. `accept` waits up to six hours (override
+with `--ci-wait-seconds`, including `0`), counts verified successful jobs as `ci-hosted`, and runs only
+the remaining requested checks. Wrong SHA, failed jobs, unknown workflow policies, foreign candidates,
+stale attempts and missing cleanup refuse import. Publication rechecks GitHub execution facts.
+See [release publication](reference/release-publication.md) for identity and policy rules. The local
+contracts are `tests/release-acceptance.sh`, `tests/release-publication.sh` and
+`tests/workflow-real-adapter-gate.sh`; they do not establish native hosted VM acceptance.
+
 #### Periodic E2E on hosted runners
 
 The Periodic E2E workflow (`.github/workflows/periodic-e2e.yml`) runs the long VM checks of release
@@ -937,8 +963,9 @@ to fix early. It does not replace [release acceptance](#one-release-candidate) a
 into it.
 
 `dev/ci/plan-periodic-checks.py` takes the checks from their existing owners: the release collector's
-profile lanes, smoke check and core VM catalog (`dev/e2e/release-vm-checks.json`), and the pinned
-published-upgrade baselines without agents. The catalog's full P0 check runs as its separate lanes,
+profile lanes, smoke check and core VM catalog (`dev/e2e/release-vm-checks.json`). Published upgrades
+use the catalog's exact `all` or `claude` agent selections; every other baseline in
+`dev/e2e/published-upgrade-baselines.tsv` runs agent-free as `published:VERSION`. The catalog's full P0 check runs as its separate lanes,
 except `boundary` and `cleanup`. The `pool` job first installs the candidate's `test-vms` service on a
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner

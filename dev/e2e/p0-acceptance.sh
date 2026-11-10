@@ -36,6 +36,8 @@ declare -A DEFAULT_BUILD_CACHE_BEFORE=()
 declare -A MODULE_CACHE_BEFORE=()
 declare -A HOME_STATE_BEFORE=()
 P0_LANE=smoke
+# Release acceptance runs the required smoke on the same candidate bundle; its phases are not repeated.
+P0_SMOKE_COVERED=0
 P0_EVIDENCE=''
 P0_FAILURE_LOG=''
 P0_CURRENT_PHASE='startup'
@@ -93,6 +95,8 @@ Usage:
 
 The --slot N form runs the release smoke. Use --lane full for the complete compatibility and
 recovery matrix. Targeted lanes are diagnostics; they do not replace the release smoke.
+Release acceptance adds --smoke-covered to --lane full: its required smoke runs on the same
+candidate bundle, so newer-release, release-smoke and peer are not repeated there.
 Every lane sets up its own prerequisites on clean VMs. Record passed, failed and pending
 lanes with source/baseline identity and evidence in the current task plan; invoke remaining
 lanes explicitly. A required full P0 must always run fresh within one lease.
@@ -124,6 +128,7 @@ parse_arguments() {
         lane_seen=1
         shift 2
         ;;
+      --smoke-covered) P0_SMOKE_COVERED=1; shift ;;
       --resume|--keep-failed) die 'VM state is disposable between leases; record progress and evidence in the current task plan, then run remaining --lane segments with fresh setup' ;;
       --list-lanes) list_lanes; exit 0 ;;
       -h | --help) usage; exit 0 ;;
@@ -134,6 +139,8 @@ parse_arguments() {
     smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|newer-release|legacy-continuation|yard-maintenance|init-settings|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
+  [ "${P0_SMOKE_COVERED:-0}" = 0 ] || [ "$P0_LANE" = full ] \
+    || die '--smoke-covered applies only to --lane full'
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
     || die 'broker-recovery-only cannot be combined with --lane'
   [ -n "$LEASE_REQUESTED_SLOT" ] \
@@ -580,7 +587,7 @@ cleanup() {
     wait "$PROBE_PID" >/dev/null 2>&1
   fi
   if [ -n "$PROBE_NAME" ]; then
-    p0_guest 1 pkill -f "^$PROBE_NAME 300$" >/dev/null 2>&1 || true
+    p0_guest 1 pkill -f "^$PROBE_NAME 300 cat$" >/dev/null 2>&1 || true
   fi
   if [ -n "$PROBE_MARKER" ]; then
     p0_guest 1 find "$PROBE_MARKER" -delete >/dev/null 2>&1 || cleanup_failed=1
@@ -962,11 +969,13 @@ transport_probes() {
   PROBE_MARKER="/tmp/subyard-p0-disconnect-$TOKEN.ready"
   PROBE_NAME="subyard-p0-disconnect-$TOKEN"
   PROBE_LOG="$(mktemp /tmp/subyard-p0-disconnect.XXXXXX)"
+  # Without a pty, sshd leaves a remote command running after a disconnect; like the RPC server,
+  # the probe ends on its stdin EOF. A held local stdin keeps the channel open until the kill.
   disconnect_command="$(quote_ssh_command runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev \
     bash -c \
-    'printf "ready\n" > "$1"; exec -a "$2" sleep 300' \
+    'printf "ready\n" > "$1"; exec -a "$2" timeout 300 cat' \
     _ "$PROBE_MARKER" "$PROBE_NAME")"
-  setsid ssh -F "$CONFIG" -T e2e-vm-1 -- "$disconnect_command" >"$PROBE_LOG" 2>&1 &
+  setsid bash -c 'sleep 600 | ssh -F "$1" -T e2e-vm-1 -- "$2"' _ "$CONFIG" "$disconnect_command" >"$PROBE_LOG" 2>&1 &
   PROBE_PID=$!
   for _ in $(seq 1 60); do
     if ssh -F "$CONFIG" -T e2e-vm-1 -- test -f "$PROBE_MARKER"; then ready=1; break; fi
@@ -981,7 +990,8 @@ transport_probes() {
   PROBE_PID=''
   [ "$rc" -ne 0 ] || die 'interrupted runner returned success'
   for _ in $(seq 1 20); do
-    if ! ssh -F "$CONFIG" -T e2e-vm-1 -- pgrep -f "^$PROBE_NAME 300$" >/dev/null 2>&1; then
+    # One quoted pattern: ssh joins arguments, and a split pattern fails pgrep as if nothing matched.
+    if ! ssh -F "$CONFIG" -T e2e-vm-1 -- "$(quote_ssh_command pgrep -f "^$PROBE_NAME 300 cat\$")" >/dev/null 2>&1; then
       stopped=1
       break
     fi
@@ -1280,10 +1290,8 @@ release_smoke_lane() {
 }
 
 peer_lane() {
-  local scope="${1:-full}"
   local peer1_info peer2_info peer1_key peer2_key vm1_host_key vm2_host_key vm
   local expected_ssh_state restored_ssh_state
-  case "$scope" in smoke|full) ;; *) die "unknown peer scope '$scope'" ;; esac
   VM1_YARD_ENTRY="$(yard_entry_state 1)"
   VM2_YARD_ENTRY="$(yard_entry_state 2)"
   VM1_SSH_STATE="$(ssh_state 1)"
@@ -1307,16 +1315,12 @@ peer_lane() {
   direct_vm 2 peer-probe "$vm1_ip"
   direct_vm 2 peer-yard-start
   direct_vm 1 peer-projects "$vm2_ip"
-  if [ "$scope" = full ]; then
-    direct_vm 2 peer-deny
-    direct_vm 1 peer-projects-offline "$vm2_ip"
-    direct_vm 2 peer-allow
-  fi
+  direct_vm 2 peer-deny
+  direct_vm 1 peer-projects-offline "$vm2_ip"
+  direct_vm 2 peer-allow
   direct_vm 1 peer-rpc "$vm2_ip"
   direct_vm 1 peer-projects-finish "$vm2_ip"
-  if [ "$scope" = full ]; then
-    direct_vm 1 peer-credentials "$vm2_ip"
-  fi
+  direct_vm 1 peer-credentials "$vm2_ip"
   clean_peers
   PEERS_READY=0
 
@@ -1550,9 +1554,13 @@ case "$P0_LANE" in
     if [ "$P0_LANE" = full ]; then
       # Prerequisites above stop the run; these phases report every failure together.
       run_full_matrix_phase
-      run_independent_phase newer-release 1 run_vm 1 newer-release
-      run_independent_phase release-smoke 1 release_smoke_lane
-      run_independent_phase peer '1 2' peer_lane
+      if [ "${P0_SMOKE_COVERED:-0}" = 1 ]; then
+        printf '  [ ok ] phase=newer-release,release-smoke,peer covered by the release smoke of candidate=%s\n' "${SUBYARD_E2E_CANDIDATE_SHA256:-}"
+      else
+        run_independent_phase newer-release 1 run_vm 1 newer-release
+        run_independent_phase release-smoke 1 release_smoke_lane
+        run_independent_phase peer '1 2' peer_lane
+      fi
       run_independent_phase cleanup '' cleanup_lane
       run_independent_phase final-verify '1 2' full_final_verify
       finish_independent_phases
@@ -1560,7 +1568,7 @@ case "$P0_LANE" in
       run_phase real-incus run_vm 1 real-incus
       run_phase newer-release run_vm 1 newer-release
       run_phase release-smoke release_smoke_lane
-      run_phase peer-smoke peer_lane smoke
+      run_phase peer-smoke peer_lane
       run_phase cleanup cleanup_lane
       P0_CURRENT_PHASE=final-verify
       P0_PHASE_STARTED="$(p0_monotonic_seconds)"
@@ -1572,7 +1580,11 @@ case "$P0_LANE" in
 esac
 
 if [ "$P0_LANE" = full ]; then
-  printf 'ok: full P0 owner, release and peer matrix passed within one broker lease\n'
+  if [ "${P0_SMOKE_COVERED:-0}" = 1 ]; then
+    printf 'ok: full P0 owner and release matrix passed within one broker lease; newer-release, release-smoke and peer are covered by the release smoke\n'
+  else
+    printf 'ok: full P0 owner, release and peer matrix passed within one broker lease\n'
+  fi
 elif [ "$P0_LANE" = smoke ]; then
   printf 'ok: P0 release smoke passed within one broker lease\n'
 else

@@ -204,7 +204,7 @@ if [ "$mode" = --held-diagnostic ]; then
   export SUBYARD_E2E_RESOURCE_OBSERVER="$ROOT/config/profiles/telemetry/tests/e2e/resource-observer.py"
   managed_exit=0
   subyard-telemetry-run --agent other --agent-version fixture --scope-mode require --project-id telemetry-fixture -- \
-    bash dev/e2e/broker-memory-boundary.sh --telemetry-held-diagnostic || managed_exit=$?
+    bash config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh --telemetry-held-diagnostic || managed_exit=$?
   printf '{"schema":"subyard.telemetry.fixture-stage/v1","stage":"managed-held","exit_code":%s}\n' "$managed_exit" >&2
   if [ "$managed_exit" != 0 ]; then
     finals_diagnostic || true
@@ -249,10 +249,10 @@ else
 fi
 if [ "$android_only" = 0 ]; then
   subyard-telemetry-run --agent other --agent-version fixture --scope-mode require --project-id telemetry-fixture -- \
-    bash dev/e2e/broker-memory-boundary.sh --telemetry-resources
+    bash config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh --telemetry-resources
 fi
 subyard-telemetry-run --agent other --agent-version fixture --scope-mode require --project-id telemetry-fixture -- \
-  bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane memory-lease
+  bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane memory-budget
 wait_for_finals
 python3 -B - "$asset" "$mode" <<'PY'
 import hashlib, json, os, pathlib, sqlite3, subprocess, sys, time
@@ -329,9 +329,9 @@ print(json.dumps({'schema': 'subyard.telemetry.export-acceptance/v1', 'records':
                   'sha256': hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest()}), flush=True)
 PY
 if [ "$mode" = --android-resources ]; then
-  printf 'ok: telemetry Android native resources, memory leases and export replay; profile lifecycle evidence is a separate prerequisite\n'
+  printf 'ok: telemetry Android native resources, memory budget and export replay; profile lifecycle evidence is a separate prerequisite\n'
 elif [ "$mode" = --android ]; then
-  printf 'ok: telemetry Android native resources, memory leases, profile lifecycle and export replay\n'
+  printf 'ok: telemetry Android native resources, memory budget, profile lifecycle and export replay\n'
 else
   printf 'ok: telemetry native signals, managed descendants and both native resource owners\n'
 fi

@@ -6,10 +6,10 @@ lane=full
 if [ "$#" -eq 2 ] && [ "$1" = --lane ]; then
   lane="$2"
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: android-pool-runtime.sh [--lane full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
+  printf 'usage: android-pool-runtime.sh [--lane full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease]\n' >&2
   exit 2
 fi
-case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -74,7 +74,7 @@ cleanup() {
   android_phase_begin cleanup
   cleanup_status=0
   touch "$monitor_host_stop"
-  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ] || [ "$lane" = memory-lease ]; } \
+  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ] || [ "$lane" = memory-budget ] || [ "$lane" = memory-lease ]; } \
     && [ "$failed_phase" = images ] && { [ "$sdk_api" = 35 ] || [ "$sdk_api" = 36 ]; } \
     && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout --signal=TERM --kill-after=15 960 "${incus_binary[@]}" --project "$project" exec "$instance" -- python3 - --api "$sdk_api" \
@@ -386,7 +386,7 @@ incus --project "$project" exec "$instance" -- timeout 30 sh -c '
     sleep 0.2
   done
 '
-if [ "$lane" = memory-lease ]; then
+if [ "$lane" = memory-budget ] || [ "$lane" = memory-lease ]; then
   if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
     incus_binary=(sudo -n /usr/bin/incus)
   fi
@@ -445,12 +445,13 @@ print('android storage fault native lifecycle cleanup=PASS')
 PY
     android_phase_end 0
   fi
-  android_phase_begin memory-lease
-  timeout --foreground --kill-after=15 4800 "${incus_binary[@]}" --project "$project" exec "$instance" \
-    --user 1000 --group 1000 --env HOME=/home/dev -- env \
-    PATH=/srv/cache/android-sdk/.subyard/bin:/srv/cache/android-sdk/platform-tools:/opt/jdk-17/bin:/usr/bin:/bin \
-    python3 - --lane memory-lease < "$root/config/profiles/android/tests/e2e/android-pool-lifecycle.py"
-  incus --project "$project" exec "$instance" -- python3 - <<'PY'
+  if [ "$lane" = memory-lease ]; then
+    android_phase_begin memory-lease
+    timeout --foreground --kill-after=15 4800 "${incus_binary[@]}" --project "$project" exec "$instance" \
+      --user 1000 --group 1000 --env HOME=/home/dev -- env \
+      PATH=/srv/cache/android-sdk/.subyard/bin:/srv/cache/android-sdk/platform-tools:/opt/jdk-17/bin:/usr/bin:/bin \
+      python3 - --lane memory-lease < "$root/config/profiles/android/tests/e2e/android-pool-lifecycle.py"
+    incus --project "$project" exec "$instance" -- python3 - <<'PY'
 import json, pathlib, subprocess
 status = json.loads(subprocess.check_output(['/usr/bin/python3', '/usr/local/lib/subyard-android/client.py', 'status']))
 assert all(slot['state'] == 'available' for slot in status['slots'])
@@ -461,7 +462,8 @@ namespaces = subprocess.check_output(['ip', 'netns', 'list'], text=True)
 assert not any(line.startswith('subyard-android-slot-') for line in namespaces.splitlines())
 print('android runtime, network and disposable cleanup=PASS')
 PY
-  android_phase_end 0
+    android_phase_end 0
+  fi
   if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
     android_phase_begin telemetry-resource-observer
     android_candidate_command python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" --kind android --stage exercise \

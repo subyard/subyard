@@ -891,6 +891,11 @@ run_p0_cli_fixture --lane full
   && grep -Fq -- '--slot N is required' "$cli_output" \
   && [ ! -s "$cli_mktemp_log" ] \
   || fail 'explicit P0 lane reached temporary or lease state without --slot N'
+run_p0_cli_fixture --slot 1 --lane smoke --smoke-covered
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--smoke-covered applies only to --lane full' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 accepted --smoke-covered outside the full lane'
 
 run_p0_cli_fixture --slot
 [ "$P0_CLI_RC" = 2 ] \

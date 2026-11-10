@@ -492,7 +492,7 @@ requires terminal native operations and verified absence of owned guests; empty 
 cannot close a late Incus creation. Late guests retain generation/epoch checks. Lost replies use
 the same recovery path, and the wrapper distinguishes unknown server cleanup from local cleanup.
 
-`dev/e2e/broker-memory-boundary.sh --pregrant-cancellation` checks early TERM/KILL, native working
+`config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh --pregrant-cancellation` checks early TERM/KILL, native working
 creation cancellation, zero pending VM/builder memory, and fresh acquire/release. Its native
 subscription is confirmed on a held warm guest; a bounded lifecycle-lock barrier binds the exact
 requester/allocation before the observer signals on a matching live project/resource event.
@@ -849,9 +849,15 @@ checks that renewal stops and waits for the advertised 20-minute expiry and disp
 then verifies SSH fencing and clean reacquisition. Run it with:
 
 ```sh
-dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boundary --vm 1 -- \
-  bash dev/e2e/broker-memory-boundary.sh
+bash config/profiles/test-vms/tests/e2e/acceptance.sh --slot "$slot" --lane memory-boundary
 ```
+
+Release acceptance declares it as `profile:test-vms/memory-boundary`, independently of
+the cold-upgrade and full-uninstall lanes. The controller runs the normal test-vms local
+prerequisites and leases one `android-test` VM for the full broker fixture, including
+renewal, natural expiry and clean reacquisition. Telemetry calls the same fixture with
+`--telemetry-resources` for short allocation/held-pair observations and ordinary release;
+it leaves renewal and natural-expiry waits to this owner lane.
 
 Owner and broker fixtures resolve the default-project container cache alias to its exact
 fingerprint, then use that fingerprint on the public remote selected by
@@ -875,7 +881,7 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `dev/process-coverage.sh` | Go toolchain; selected host-free process contracts | `.build/coverage` and test-owned temporary roots | optional coverage diagnostic |
 | `smoke` (default) | both allocated VMs; capacity/dependency preflight and one reboot | marked Incus, release and peer fixtures described below | publication smoke; see skill policy |
 | `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
-| `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
+| `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote stdin reader that must end on disconnect, and a temporary controller log | required in smoke and full |
 | `nested-teardown` | frozen current candidate, VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM and nested yard, each bootstrapped through the public installer; data-boundary fixtures | targeted diagnostic; required in full |
 | `full-uninstall` | one allocated VM and installed current candidate; bounded phase/reboot deadlines and a sink delay longer than 60 seconds | marker-owned yards, producers, credentials and installation roots; preserve foreign resources and selected-yard neighbors | singleton held-lease uninstall, interruption/retry and reboot acceptance |
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
@@ -890,7 +896,7 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `yard-maintenance` | VM1, frozen candidate and pinned published 0.21.3 → 0.25.1; two containers and one bounded weighted VM | upfront restart disclosure and decline, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
 | `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
 | `release-smoke` | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton targeted checkpoint/reboot evidence; also required in smoke and full |
-| `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
+| `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke and full both cover fresh init/projects/RPC, offline projects and credentials |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
 | `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
 
@@ -1445,6 +1451,9 @@ SUBYARD_P0_WAIT_SECONDS=1200 \
 `--lane full` installs the frozen candidate in its fixtures and refuses before allocation unless
 `SUBYARD_E2E_CANDIDATE_BUNDLE` and `SUBYARD_E2E_CANDIDATE_SHA256` name one prepared by
 `python3 dev/release-acceptance.py prepare`; release acceptance passes them itself.
+Release acceptance runs `vm:p0-full` as `--lane full --smoke-covered`: its required
+`p0-release-smoke` runs on the same candidate bundle, so the full check reports newer-release,
+release smoke and peer as covered instead of repeating them. A standalone `--lane full` runs them.
 
 After capacity preflight, boundary and transport pass, `--lane full` does not stop at the first failed
 phase. The parallel owner and auxiliary chain both finish, auxiliary stages continue after a failure,

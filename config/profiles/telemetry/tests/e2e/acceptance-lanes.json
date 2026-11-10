@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "lanes": [
+    {"id": "local", "arguments": ["--local"]},
+    {"id": "resources", "arguments": ["--resources"]}
+  ]
+}
