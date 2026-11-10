@@ -137,6 +137,9 @@ history. Spawn settings by client; record a comparable available alternative if 
 | Any | Strongest available model, high reasoning effort | A faster model, medium effort | Same worker, not a new one |
 | Codex | `spawn_agent` with `model`, `reasoning_effort="high"`, `fork_turns="none"` | `fork_turns="none"`, faster `model`, `reasoning_effort="medium"` | `followup_task` |
 | Claude Code | Agent tool, `general-purpose`, strongest `model` | `general-purpose`, faster `model` | `SendMessage` to the agent |
+| Claude Code → Codex CLI | `codex exec -C <repo> -m <model> -o <final.md> - < <assignment.md>` | Same, faster `-m` | `codex exec resume <session-id> -o <final.md> - < <next.md>` (session id from the first run's log; not with `--ephemeral`) |
+
+`--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
 
 Neither client enforces the reviewer's read-only rule through these settings; the contract text
 carries it. A necessary long check may use one observer; run it directly if unavailable.
