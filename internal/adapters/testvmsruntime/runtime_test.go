@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
@@ -575,6 +576,76 @@ func TestStopRunningVMAcceptsConcurrentSuccessfulStop(t *testing.T) {
 	runtime := &Runtime{Config: cfg, Runner: runner}
 	if err := runtime.stopRunningVM(context.Background(), "e2e-vm-1"); err != nil {
 		t.Fatalf("concurrent successful stop was rejected: %v", err)
+	}
+}
+
+func TestStopRunningVMFailureIncludesLogTails(t *testing.T) {
+	for _, scenario := range []string{"stop failure", "still running", "state unavailable", "success"} {
+		t.Run(scenario, func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			stopFailure := errors.New("clean stop timed out")
+			console := "old console\n" + strings.Repeat(strings.Repeat("ü", 100)+"\n", 65) +
+				"\x00\x1b\u0085\u202eA stop job is running for fixture.service\npassword=fixture-secret"
+			info := "old info\n" + strings.Repeat(strings.Repeat("i", 200)+"\n", 65) + "recent QEMU log"
+			runner := &fakeRunner{handler: func(
+				_ string, args, _ []string, _ io.Reader,
+			) ([]byte, []byte, error) {
+				switch strings.Join(args, " ") {
+				case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
+					if scenario == "stop failure" {
+						return nil, nil, stopFailure
+					}
+					return nil, nil, nil
+				case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+					if scenario == "success" {
+						return []byte("STOPPED\n"), nil, nil
+					}
+					if scenario == "state unavailable" {
+						return nil, nil, errors.New("state probe failed")
+					}
+					return []byte("RUNNING\n"), nil, nil
+				case "console e2e-vm-1 --project " + cfg.Project + " --show-log":
+					return []byte(console), nil, nil
+				case "info --show-log e2e-vm-1 --project " + cfg.Project:
+					return []byte(info), nil, nil
+				default:
+					t.Fatalf("unexpected call: %s", strings.Join(args, " "))
+					return nil, nil, nil
+				}
+			}}
+			runtime := &Runtime{Config: cfg, Runner: runner}
+			err := runtime.stopRunningVM(context.Background(), "e2e-vm-1")
+			if scenario == "success" {
+				if err != nil || len(runner.calls) != 2 {
+					t.Fatalf("successful stop: error=%v calls=%v", err, runner.calls)
+				}
+				return
+			}
+			if err == nil || len(runner.calls) != 4 {
+				t.Fatalf("failed stop: error=%v calls=%v", err, runner.calls)
+			}
+			if scenario == "stop failure" && !errors.Is(err, stopFailure) {
+				t.Fatal("original stop error was lost")
+			}
+			event, recordErr := runtime.eventRecorder().Record(BrokerEvent{
+				Kind: "slot.quarantined", SlotID: "slot-001", Error: err.Error(),
+			})
+			if recordErr != nil {
+				t.Fatal(recordErr)
+			}
+			for _, text := range []string{err.Error(), event.Error} {
+				for _, expected := range []string{"A stop job is running for fixture.service", "recent QEMU log", "password=[redacted]"} {
+					if !strings.Contains(text, expected) {
+						t.Fatalf("stop diagnostic missing %q", expected)
+					}
+				}
+				if len(text) > 8192 || !utf8.ValidString(text) || strings.ContainsAny(text, "\x00\x1b\u0085\u202e") ||
+					strings.Contains(text, "old console") || strings.Contains(text, "old info") ||
+					strings.Contains(text, "fixture-secret") {
+					t.Fatal("stop diagnostic was not bounded and sanitized")
+				}
+			}
+		})
 	}
 }
 

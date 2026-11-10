@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 const (
@@ -757,14 +758,45 @@ func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
 		"--timeout", "60")
 	state, stateErr := runtime.incus(ctx, "list", vm, "--project",
 		runtime.Config.Project, "-f", "csv", "-c", "s")
-	if stateErr != nil {
-		return errors.Join(stopErr, stateErr)
+	if stateErr == nil && strings.TrimSpace(state) == "STOPPED" {
+		return nil
 	}
-	if strings.TrimSpace(state) != "STOPPED" {
-		return errors.Join(stopErr,
+	if stateErr != nil {
+		stopErr = errors.Join(stopErr, stateErr)
+	} else {
+		stopErr = errors.Join(stopErr,
 			fmt.Errorf("%s remained in state %q after stop", vm, strings.TrimSpace(state)))
 	}
-	return nil
+	// Native logs remain available when the guest agent is already shutting down.
+	// Keep both tails small enough for the existing 8 KiB broker event error.
+	for _, args := range [][]string{
+		{"console", vm, "--project", runtime.Config.Project, "--show-log"},
+		{"info", "--show-log", vm, "--project", runtime.Config.Project},
+	} {
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		value, err := runtime.incus(probeCtx, args...)
+		cancel()
+		if err != nil {
+			value += "\nunavailable: " + err.Error()
+		}
+		value = strings.Map(func(character rune) rune {
+			if character == '\n' || character == '\t' || unicode.IsPrint(character) {
+				return character
+			}
+			return -1
+		}, value)
+		// Redact before taking a tail: secrets may cross the truncation boundary.
+		lines := strings.Split(strings.TrimSpace(sanitizeBrokerText(value)), "\n")
+		if len(lines) > 60 {
+			lines = lines[len(lines)-60:]
+		}
+		value = strings.Join(lines, "\n")
+		if len(value) > 3<<10 {
+			value = strings.ToValidUTF8(value[len(value)-(3<<10):], "")
+		}
+		stopErr = errors.Join(stopErr, fmt.Errorf("%s log tail for %s:\n%s", args[0], vm, value))
+	}
+	return stopErr
 }
 
 func (runtime *Runtime) useLeaseSlot(slot LeaseSlot) {
