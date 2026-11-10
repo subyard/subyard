@@ -58,7 +58,7 @@ func ProjectArchiveContentDigest(input io.Reader, excludeGit bool) (string, erro
 			continue
 		}
 		switch header.Typeflag {
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			hash := sha256.New()
 			if _, err := io.Copy(hash, reader); err != nil {
 				return "", err

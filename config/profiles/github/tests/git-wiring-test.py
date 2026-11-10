@@ -5,7 +5,6 @@ import contextlib
 import io
 import json
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 import os

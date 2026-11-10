@@ -3,7 +3,6 @@ package incusclient
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"maps"
 	"net/http"
 	"testing"
@@ -166,7 +165,7 @@ func TestTeardownInventoryProvesEnabledBucketNamespaceEmpty(t *testing.T) {
 				}
 			}
 			if found != (scenario == "present") {
-				t.Fatal(fmt.Sprintf("incorrect bucket inventory: %s", scenario))
+				t.Fatalf("incorrect bucket inventory: %s", scenario)
 			}
 		})
 	}

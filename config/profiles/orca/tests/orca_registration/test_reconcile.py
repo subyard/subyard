@@ -1544,7 +1544,7 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual("hide", self.rpc.repos[0]["externalWorktreeVisibility"])
 
     def test_remote_same_path_record_is_not_adopted_or_mutated(self):
-        remote = self.rpc.call("repo.add", {"path": str(self.root), "kind": "folder"})["repo"]
+        self.rpc.call("repo.add", {"path": str(self.root), "kind": "folder"})["repo"]
         self.rpc.repos[0].update(executionHostId="ssh:foreign", connectionId="foreign",
                                  displayName="Remote checkout", projectGroupId="manual")
         before = copy.deepcopy(self.rpc.repos[0])

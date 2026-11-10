@@ -304,12 +304,10 @@ fn child_usage_failed_spawn_none_bounds_and_sealed_alive_late_completion() {
         run("print('plain')", None, Duration::from_secs(2)).unwrap(),
         b"plain\n"
     );
-    assert!(
-        serde_json::to_value(plain.seal())
-            .unwrap()
-            .get("child_usage")
-            .is_none()
-    );
+    assert!(serde_json::to_value(plain.seal())
+        .unwrap()
+        .get("child_usage")
+        .is_none());
     let observation = Observation::with_child_usage(1);
     let context = observation.child_usage_context().unwrap();
     assert_eq!(

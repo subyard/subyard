@@ -1,22 +1,32 @@
 //! Bounded Yard RPC sessions. Only the native shell owns process handles and frames.
 use crate::child_usage::{ChildKind, OwnedChild, UsageContext};
-use crate::local_fleet::{NativeError, read_frame_captured, write_frame};
+use crate::local_fleet::{read_frame_captured, write_frame, NativeError};
 use crate::observation::{ReadProof, Source, Ticket, ValidatedEvent};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc, Mutex, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc,
+    mpsc, Arc, Mutex, Weak,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const MAX_PENDING: usize = 64;
 pub type Notify = Arc<dyn Fn(Event) + Send + Sync>;
+type SentRequest = (
+    String,
+    mpsc::Receiver<Result<Value, NativeError>>,
+    Option<ReadProof>,
+);
+
+struct ChildObservation {
+    source: Option<Source>,
+    usage: Option<UsageContext>,
+    kind: ChildKind,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,9 +200,11 @@ impl RpcClient {
             notify,
             processes,
             attempt,
-            None,
-            usage,
-            ChildKind::ProvisionalRpc,
+            ChildObservation {
+                source: None,
+                usage,
+                kind: ChildKind::ProvisionalRpc,
+            },
         )
     }
     pub(crate) fn open_observed(
@@ -209,9 +221,11 @@ impl RpcClient {
             notify,
             processes,
             None,
-            observation,
-            usage,
-            ChildKind::RpcSession,
+            ChildObservation {
+                source: observation,
+                usage,
+                kind: ChildKind::RpcSession,
+            },
         )
     }
     fn open_with_observation(
@@ -220,10 +234,13 @@ impl RpcClient {
         notify: Notify,
         processes: Option<&Processes>,
         attempt: Option<&Processes>,
-        observation: Option<Source>,
-        usage: Option<UsageContext>,
-        child_kind: ChildKind,
+        child_observation: ChildObservation,
     ) -> Result<Self, NativeError> {
+        let ChildObservation {
+            source: observation,
+            usage,
+            kind: child_kind,
+        } = child_observation;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -512,14 +529,7 @@ impl RpcClient {
         operation_id: &str,
         params: Value,
         observed: bool,
-    ) -> Result<
-        (
-            String,
-            mpsc::Receiver<Result<Value, NativeError>>,
-            Option<ReadProof>,
-        ),
-        NativeError,
-    > {
+    ) -> Result<SentRequest, NativeError> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(disconnected());
         }

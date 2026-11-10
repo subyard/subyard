@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/Subyard/Subyard/internal/adapters/remotecontrol"
 	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -243,7 +242,7 @@ func TestRemoteAddAuditedOwnerChild(t *testing.T) {
 		t.Fatalf("actual native remote add failed code=%d: %s", code, stderr.String())
 	}
 	if _, exists, err := runtime.Lookup(context.Background(), "self-fixture"); err != nil || !exists {
-		t.Fatal(fmt.Sprintf("registration missing: %v", err))
+		t.Fatalf("registration missing: %v", err)
 	}
 }
 

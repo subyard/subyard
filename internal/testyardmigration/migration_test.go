@@ -2731,21 +2731,6 @@ func assertNoRegistrationScratch(t *testing.T, directory string) {
 	}
 }
 
-func assertSameTestFile(t *testing.T, first, second string) {
-	t.Helper()
-	firstInfo, err := os.Stat(first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondInfo, err := os.Stat(second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(firstInfo, secondInfo) {
-		t.Fatalf("%s and %s are different inodes", first, second)
-	}
-}
-
 func assertFakeProjectState(t *testing.T, options Options, want string) {
 	t.Helper()
 	path := filepath.Join(filepath.Dir(options.ConfigHome), "incus-state")

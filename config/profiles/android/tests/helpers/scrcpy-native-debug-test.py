@@ -2,7 +2,6 @@
 """Real harmless native child: python3 TEST --gdb GDB (requires cc and GDB Python)."""
 import argparse
 import json
-import os
 import re
 from pathlib import Path
 import signal

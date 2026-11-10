@@ -15,15 +15,18 @@ UI delivery and acceptance remain incomplete.
 
 ## Native client checks
 
-Host-free checks require Python 3 and current stable Rust, selected by the repository's
-[`rust-toolchain.toml`](../rust-toolchain.toml):
+Host-free checks require Python 3 and stable Rust with Clippy/rustfmt (selected by
+[`rust-toolchain.toml`](../rust-toolchain.toml)) for formatting, Clippy and tests:
 
 ```sh
 make verify-veranda
 ```
 
-This is the shared local and CI entrypoint. Use `python3 dev/check-veranda.py --rust-only`
-for just the Rust suite. See [testing](../docs/testing.md#run-veranda-host-free-checks)
+This is the shared local and CI entrypoint. It runs the Python runner contract and
+Linux resource probe first, stopping on a failed prerequisite, then formatting,
+Clippy, and native tests in order while reporting all independent Rust failures.
+Use `python3 dev/check-veranda.py --rust-only` to skip the Python prerequisites and
+run formatting, Clippy, and native tests. See [testing](../docs/testing.md#run-veranda-host-free-checks)
 for setup and coverage.
 
 ## Delivery gates

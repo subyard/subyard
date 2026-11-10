@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory(prefix="subyard-codex-legacy-", dir="/tmp") as 
     program = guest_path.read_text()
     for old, new in (
         ('STATE_ROOT = "@STATE_ROOT@"', "STATE_ROOT = " + json.dumps(str(state_root))),
-        ("STATE_UID = @STATE_UID@", "STATE_UID = " + str(uid)),
+        ('STATE_UID = int("@STATE_UID@")', "STATE_UID = " + str(uid)),
         ('FORMAT = "@FORMAT@"', 'FORMAT = "toml"'),
     ):
         if program.count(old) != 1:

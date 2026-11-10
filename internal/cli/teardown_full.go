@@ -427,9 +427,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 		if len(profilePlan.Blockers) > 0 {
 			return fmt.Errorf("profile %s full cleanup: %s", profilePlan.Profile, strings.Join(profilePlan.Blockers, "; "))
 		}
-		for _, managedRoot := range profilePlan.ManagedRoots {
-			execution.ManagedRoots = append(execution.ManagedRoots, managedRoot)
-		}
+		execution.ManagedRoots = append(execution.ManagedRoots, profilePlan.ManagedRoots...)
 		for index, artifact := range profilePlan.Artifacts {
 			captured, err := uninstall.CaptureArtifact(artifact.Path)
 			if err != nil {
@@ -486,9 +484,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 		}
 	}
 	protected = append(protected, execution.PreservedRoots...)
-	for _, root := range execution.MutableRoots {
-		roots = append(roots, root)
-	}
+	roots = append(roots, execution.MutableRoots...)
 	storageTrees, err := cli.captureFullShared(ctx, execution, knownProjects, unprovenProjects)
 	if err != nil {
 		return err

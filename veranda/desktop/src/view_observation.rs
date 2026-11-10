@@ -16,6 +16,14 @@ pub const SETTINGS: u16 = 32;
 pub const DIAGNOSTICS: u16 = 64;
 pub const SYNC: u16 = 128;
 
+#[derive(Clone, Copy)]
+pub struct FleetAcceptance<'a> {
+    pub generation: u64,
+    pub connection: &'a Option<String>,
+    pub current: bool,
+    pub action: &'a ReadAction,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Key {
     scope: Scope,
@@ -189,12 +197,9 @@ impl ViewObservation {
     pub fn fleet_identified(
         &mut self,
         model: &Model,
-        generation: u64,
-        connection: &Option<String>,
+        acceptance: FleetAcceptance<'_>,
         invalidation: u64,
-        current: bool,
         success: bool,
-        action: &ReadAction,
         returned_owner: Option<&str>,
         metadata: Option<ReadObservation>,
     ) {
@@ -202,10 +207,7 @@ impl ViewObservation {
         if let Some(correlation) = &self.correlation {
             correlation.lock().unwrap().fleet(
                 model,
-                generation,
-                connection,
-                current,
-                action,
+                &acceptance,
                 returned_owner,
                 metadata.as_ref(),
             );
@@ -215,16 +217,7 @@ impl ViewObservation {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = returned_owner;
-        self.fleet(
-            model,
-            generation,
-            connection,
-            invalidation,
-            current,
-            success,
-            action,
-            metadata,
-        );
+        self.fleet(model, acceptance, invalidation, success, metadata);
     }
     fn retire(&self, batch: &Batch) {
         self.observation
@@ -317,14 +310,17 @@ impl ViewObservation {
     pub fn fleet(
         &mut self,
         model: &Model,
-        generation: u64,
-        connection: &Option<String>,
+        acceptance: FleetAcceptance<'_>,
         invalidation: u64,
-        current: bool,
         success: bool,
-        action: &ReadAction,
         metadata: Option<ReadObservation>,
     ) {
+        let FleetAcceptance {
+            generation,
+            connection,
+            current,
+            action,
+        } = acceptance;
         if *action == ReadAction::Retry {
             if let Some(metadata) = &metadata {
                 self.retain(metadata);
@@ -656,12 +652,14 @@ mod tests {
             let batch = observer.view_start(observer.view(), false, false);
             view.fleet(
                 &model,
-                model.generation,
-                &None,
+                crate::view_observation::FleetAcceptance {
+                    generation: model.generation,
+                    connection: &None,
+                    current: true,
+                    action: &action,
+                },
                 0,
                 true,
-                true,
-                &action,
                 Some(ReadObservation {
                     scope: scope.clone(),
                     hint_scope: Some(scope.clone()),
@@ -682,12 +680,10 @@ mod tests {
         view.close();
         assert_eq!(observer.counts().pending, 0);
         assert_eq!(observer.terminals().len(), 4);
-        assert!(
-            observer
-                .terminals()
-                .iter()
-                .all(|row| row.outcome == TerminalOutcome::Retired(Retirement::Unknown))
-        );
+        assert!(observer
+            .terminals()
+            .iter()
+            .all(|row| row.outcome == TerminalOutcome::Retired(Retirement::Unknown)));
     }
     #[test]
     fn rejected_selection_does_not_measure_the_previous_loaded_body() {
@@ -729,15 +725,24 @@ mod tests {
             }),
         );
         assert_eq!(action, ReadAction::Applied);
-        view.fleet(&model, generation, &None, 0, true, false, &action, None);
-        assert!(view.rendered(&model, false).is_none());
-        assert!(
-            observer
-                .terminals()
-                .iter()
-                .any(|row| row.ticket == start.tickets()[0].ordinal()
-                    && row.outcome == TerminalOutcome::Retired(Retirement::Unknown))
+        view.fleet(
+            &model,
+            crate::view_observation::FleetAcceptance {
+                generation,
+                connection: &None,
+                current: true,
+                action: &action,
+            },
+            0,
+            false,
+            None,
         );
+        assert!(view.rendered(&model, false).is_none());
+        assert!(observer
+            .terminals()
+            .iter()
+            .any(|row| row.ticket == start.tickets()[0].ordinal()
+                && row.outcome == TerminalOutcome::Retired(Retirement::Unknown)));
         let start = view.request(&model, false);
         let action = model.read_complete(
             generation + 1,
@@ -749,17 +754,26 @@ mod tests {
             }),
         );
         assert_eq!(action, ReadAction::Ignored);
-        view.fleet(&model, generation + 1, &None, 0, true, false, &action, None);
+        view.fleet(
+            &model,
+            crate::view_observation::FleetAcceptance {
+                generation: generation + 1,
+                connection: &None,
+                current: true,
+                action: &action,
+            },
+            0,
+            false,
+            None,
+        );
         assert!(view.rendered(&model, false).is_none());
         model.select_tab("Settings".into());
         view.changed(&model);
-        assert!(
-            observer
-                .terminals()
-                .iter()
-                .any(|row| row.ticket == start.tickets()[0].ordinal()
-                    && row.outcome == TerminalOutcome::Retired(Retirement::Unknown))
-        );
+        assert!(observer
+            .terminals()
+            .iter()
+            .any(|row| row.ticket == start.tickets()[0].ordinal()
+                && row.outcome == TerminalOutcome::Retired(Retirement::Unknown)));
         assert!(!view.snapshot_ready());
     }
 }

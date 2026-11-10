@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Existing assessed owner-to-guest transport; no host collector or dashboard."""
-import hashlib
 import io
 import json
 import os

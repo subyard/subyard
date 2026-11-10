@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-import support  # Adds the standalone component directory to the import path.
+import support  # noqa: F401 - Adds the standalone component directory to the import path.
 from settings import YOLO, codex_defaults
 from transport import RpcError
 

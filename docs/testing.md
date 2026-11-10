@@ -3,6 +3,31 @@
 Test-selection policy lives in [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 This guide documents how to run checks and interpret their evidence.
 
+## Static checks and dependency audits
+
+`make lint` runs golangci-lint, actionlint (including ShellCheck on workflow `run:` blocks),
+offline zizmor over `.github/workflows`, and Ruff's `F` rules over every tracked Python file.
+`make verify` and CI's verify job include this gate. The pinned official Linux amd64/arm64
+tools are downloaded with SHA-256 verification and cached in `.build/tools`.
+Run `bash dev/lint-workflows.sh` or `bash dev/lint-python.sh` for a focused check;
+workflow linting requires ShellCheck on PATH.
+
+`make verify-veranda` runs client formatting, Clippy with
+`--locked --all-targets -- -D warnings`, and native tests, locally and in Veranda CI.
+Install `stable` with Clippy and rustfmt for formatting, Clippy and tests.
+The GTK desktop job runs the same format/Clippy checks for `veranda/desktop/Cargo.toml`;
+local desktop compilation also requires `libgtk-4-dev`.
+
+Dependency audits use current vulnerability databases separately from `make lint`/`make verify`.
+`dependency-audit.yml` runs daily at 04:47 UTC, on manual dispatch, and on pushes changing
+Go module files, either Veranda Cargo lockfile, or the audit workflow. Run
+`bash dev/audit-go.sh` and `bash dev/audit-rust.sh` locally to audit Go and both Rust lockfiles.
+Go vulnerability findings are report-only pending advisory triage; analyzer and installation
+errors still fail. CI publishes the full Go report in the job log; its step summary is
+capped at 900000 bytes, with a truncation notice pointing to the full job log.
+OSV-Scanner findings remain blocking. These checks need network access; tool downloads and
+Go build/module caches are reused without adding tool dependencies to `go.mod`.
+
 ## Keep tests proportional
 
 Use the skill's [risk-based selection policy](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
@@ -1011,15 +1036,18 @@ make verify-veranda
 
 The target runs `python3 dev/check-veranda.py`; override the interpreter with
 `make verify-veranda PYTHON=python` when needed. CI runs the same entrypoint with
-`python` and current stable Rust. The native client has no npm/WebKit dependencies.
-The entrypoint explicitly selects `+stable`, including when `RUSTUP_TOOLCHAIN` is set.
+`python` and current stable Rust for native tests. The native client has no npm/WebKit dependencies.
+The entrypoint explicitly selects `+stable` for formatting, Clippy and tests,
+including when `RUSTUP_TOOLCHAIN` is set.
 The target and entrypoint do not install toolchains. `make verify` retains its
 separate core and shipped-profile scope.
 
-Checks stop at the first failure: runner temporary-path contract, Linux resource
-probe isolation and native Rust client tests with `--locked`.
-Python fixtures use the entrypoint's own
-interpreter. `python3 dev/check-veranda.py --rust-only` selects only native tests.
+The runner temporary-path contract runs first, then Linux resource probe isolation;
+a failed prerequisite stops the run. Next, Rust formatting, Clippy, and native client
+tests with `--locked` run in that order, reporting every independent failure.
+Python fixtures use the entrypoint's own interpreter.
+`python3 dev/check-veranda.py --rust-only` skips the Python prerequisites and runs
+formatting, Clippy, and native tests in the same order.
 On Linux that suite runs once with a child-only `TMPDIR` alias to a private real
 directory under an owned `/tmp` fixture. This exercises symlink temporary paths
 without mutating the parent environment or parallel Rust tests' global state;

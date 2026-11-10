@@ -33,7 +33,4 @@ if [ ! -x "$tool" ]; then
 fi
 "$tool" version --short | grep -Fx "$version" >/dev/null
 cd "$ROOT"
-"$tool" run --config "$ROOT/.golangci.yml" \
-  ./internal/releasetransition/... ./internal/cli/... \
-  ./internal/adapters/releaseruntime/... ./internal/adapters/reconcileruntime/... \
-  ./internal/migration/... ./internal/testyardmigration/... ./internal/ownerpublication/...
+"$tool" run --config "$ROOT/.golangci.yml" ./cmd/... ./internal/...

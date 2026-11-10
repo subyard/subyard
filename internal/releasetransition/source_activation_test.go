@@ -301,9 +301,9 @@ func TestPreparedSourceActivationSharesOneConsentAndReconstructsAfterRestart(t *
 					t.Fatalf("interrupt: %#v err=%v", outcome, err)
 				}
 				transition, owners = restartSourceProjection(t, transition, owners)
-				resume, err := transition.Inspect(context.Background(), goal)
-				if err != nil || resume.Resume == nil || len(resume.Blockers) != 0 {
-					t.Fatalf("restart inspection: %#v err=%v", resume, err)
+				resume, inspectErr := transition.Inspect(context.Background(), goal)
+				if inspectErr != nil || resume.Resume == nil || len(resume.Blockers) != 0 {
+					t.Fatalf("restart inspection: %#v err=%v", resume, inspectErr)
 				}
 				outcome, err = transition.Converge(context.Background(), Execution{Plan: resume.Plan})
 			}

@@ -1172,13 +1172,6 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 	}
 }
 
-func testDefinition(name string) command.Definition {
-	return command.Definition{
-		Name: name, Effect: command.EffectMutate,
-		Confirmation: command.ConfirmationDynamic, Remote: command.RemoteForward,
-	}
-}
-
 func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=retire-legacy")

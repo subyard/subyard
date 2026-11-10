@@ -14,7 +14,6 @@ import os
 from pathlib import Path
 import pwd
 import re
-import selectors
 import shlex
 import shutil
 import stat

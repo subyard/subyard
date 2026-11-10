@@ -1,0 +1,7 @@
+paths:
+  .github/workflows/release-publish.yml:
+    ignore:
+      # Keep all pending publication retries: GitHub supports queue: max, but
+      # actionlint 1.7.12 predates it (rhysd/actionlint#657). Remove after upgrading.
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+      - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'

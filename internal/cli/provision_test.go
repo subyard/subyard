@@ -92,8 +92,7 @@ func TestDeclaredProvisionSelectionRequiresExplicitLegacyProfiles(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := program.loadContext("default")
-	if err != nil {
+	if _, err := program.loadContext("default"); err != nil {
 		t.Fatal(err)
 	}
 	empty, selected := "", "selected legacy"
@@ -122,7 +121,7 @@ func TestDeclaredProvisionSelectionRequiresExplicitLegacyProfiles(t *testing.T) 
 		if scenario.disabled {
 			values = append(values, "DISABLE_SERVICE=1")
 		}
-		loaded, err = config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: environmentValue(environment, "HOME"), YardName: scenario.yard, Environment: environmentMap(values)})
+		loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: environmentValue(environment, "HOME"), YardName: scenario.yard, Environment: environmentMap(values)})
 		if err != nil {
 			t.Fatal(err)
 		}

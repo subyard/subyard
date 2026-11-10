@@ -47,9 +47,23 @@ def rust_check(env):
     return code
 
 
+def rust_lint(env):
+    manifest = ["--manifest-path", "veranda/client/Cargo.toml"]
+    commands = [
+        ("Rust formatting", ["cargo", "+stable", "fmt", *manifest, "--check"]),
+        ("Rust Clippy", ["cargo", "+stable", "clippy", *manifest,
+                         "--locked", "--all-targets", "--", "-D", "warnings"]),
+    ]
+    code = 0
+    for name, command in commands:
+        result = check(name, command, env)
+        code = code or result
+    return code
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rust-only", action="store_true", help="run only native Rust tests")
+    parser.add_argument("--rust-only", action="store_true", help="run only native Rust checks")
     args = parser.parse_args()
     env = dict(os.environ, VERANDA_TEST_PYTHON=sys.executable)
     if not args.rust_only:
@@ -62,7 +76,9 @@ def main():
                 return code
         else:
             print("Linux resource probe isolation: skipped on this platform", flush=True)
-    code = rust_check(env)
+    code = rust_lint(env)
+    test_code = rust_check(env)
+    code = code or test_code
     if not code:
         print("Veranda native Rust checks passed" if args.rust_only else "Veranda host-free checks passed", flush=True)
     return code

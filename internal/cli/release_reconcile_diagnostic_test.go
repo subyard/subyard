@@ -338,7 +338,7 @@ func writeNativeMigrationJournal(t *testing.T, root, configHome string, goal rel
 	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition/v2/journal.json"), encoded, 0o600)
 }
 
-type changedActivationInventory struct{ activationIntegrationExecutor }
+type changedActivationInventory struct{}
 
 func (changedActivationInventory) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	result, err := (activationIntegrationExecutor{}).Exec(ctx, project, instance, request)

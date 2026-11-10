@@ -103,13 +103,16 @@ impl Cohorts {
     pub fn fleet(
         &mut self,
         model: &crate::model::Model,
-        generation: u64,
-        connection: &Option<String>,
-        current: bool,
-        action: &crate::model::ReadAction,
+        acceptance: &crate::view_observation::FleetAcceptance<'_>,
         returned_owner: Option<&str>,
         metadata: Option<&crate::worker::ReadObservation>,
     ) {
+        let crate::view_observation::FleetAcceptance {
+            generation,
+            connection,
+            current,
+            action,
+        } = *acceptance;
         if self.sealed
             || !current
             || *action != crate::model::ReadAction::Applied
@@ -863,7 +866,7 @@ mod tests {
     use serde_json::json;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+    use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;

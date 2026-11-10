@@ -1,13 +1,13 @@
 //! Typed owner launch descriptors become fixed native invocations, never frontend paths.
 use crate::connections::{ConnectionStore, ConsentedConnection};
-use crate::local_fleet::{NativeError, safe_id, safe_name};
+use crate::local_fleet::{safe_id, safe_name, NativeError};
 use crate::{ssh, transport};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use std::thread;
 
@@ -256,7 +256,11 @@ fn from_arguments(arguments: &[String]) -> Result<Command, NativeError> {
     Ok(command)
 }
 fn code_program() -> &'static str {
-    if cfg!(windows) { "code.cmd" } else { "code" }
+    if cfg!(windows) {
+        "code.cmd"
+    } else {
+        "code"
+    }
 }
 fn require_remote_ssh(usage: Option<&crate::child_usage::UsageContext>) -> Result<(), NativeError> {
     let mut command = Command::new(code_program());
@@ -402,11 +406,9 @@ mod tests {
             descriptor
                 .validate(kind, "default", false, Some("Demo"))
                 .unwrap();
-            assert!(
-                descriptor
-                    .validate(kind, "another", false, Some("Demo"))
-                    .is_err()
-            );
+            assert!(descriptor
+                .validate(kind, "another", false, Some("Demo"))
+                .is_err());
         }
     }
     #[test]

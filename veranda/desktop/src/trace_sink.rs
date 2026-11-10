@@ -599,20 +599,18 @@ mod tests {
     use super::*;
     use std::{
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+        os::unix::fs::{symlink, MetadataExt, PermissionsExt},
         sync::atomic::{AtomicU64, Ordering},
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
     #[test]
     fn renderer_observations_are_bounded_scalar_only_and_sealed() {
         // Only v3 owns this optional registry, including in headless tests.
-        assert!(
-            TraceRun::configured(Some("unused".into()))
-                .unwrap()
-                .view()
-                .renderers
-                .is_none()
-        );
+        assert!(TraceRun::configured(Some("unused".into()))
+            .unwrap()
+            .view()
+            .renderers
+            .is_none());
         let renderers = Renderers::default();
         let first = renderers.begin().unwrap();
         renderers.observed(first, Some("GskGLRenderer"), Some("GdkWaylandToplevel"));
@@ -683,11 +681,9 @@ mod tests {
         assert_eq!(encode(&observer.seal(), true, MAX_BYTES).unwrap(), before);
         let output = value.as_object().unwrap();
         assert_eq!(output.len(), 5);
-        assert!(
-            !String::from_utf8(before)
-                .unwrap()
-                .contains(path.to_str().unwrap())
-        );
+        assert!(!String::from_utf8(before)
+            .unwrap()
+            .contains(path.to_str().unwrap()));
     }
     #[test]
     fn usage_config_is_validated_before_sources_and_exports_only_requested_v3() {
@@ -741,24 +737,20 @@ mod tests {
                 let mut bad = value.clone();
                 bad["child_usage"]["capacity"] = capacity.into();
                 fs::write(&config, serde_json::to_vec(&bad).unwrap()).unwrap();
-                assert!(
-                    TraceRun::configured_observation(
-                        root.0.join("absent").into_os_string(),
-                        config.clone().into_os_string()
-                    )
-                    .is_err()
-                );
+                assert!(TraceRun::configured_observation(
+                    root.0.join("absent").into_os_string(),
+                    config.clone().into_os_string()
+                )
+                .is_err());
             }
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove("correlation");
             fs::write(&config, serde_json::to_vec(&missing).unwrap()).unwrap();
-            assert!(
-                TraceRun::configured_observation(
-                    root.0.join("missing-field").into_os_string(),
-                    config.clone().into_os_string()
-                )
-                .is_err()
-            );
+            assert!(TraceRun::configured_observation(
+                root.0.join("missing-field").into_os_string(),
+                config.clone().into_os_string()
+            )
+            .is_err());
         }
     }
     #[test]

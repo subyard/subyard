@@ -164,7 +164,7 @@ class NativeGitTest(unittest.TestCase):
         reject = self.remote/'hooks/update'
         reject.write_text('#!/bin/sh\n[ "$1" != refs/heads/reject ]\n');reject.chmod(0o755)
         before = self.git('--git-dir='+str(self.remote), 'rev-parse', 'main').stdout
-        result = self.git('push', '--atomic', 'origin', 'main', 'HEAD:reject', cwd=clone, expected=1)
+        self.git('push', '--atomic', 'origin', 'main', 'HEAD:reject', cwd=clone, expected=1)
         self.assertEqual(self.git('--git-dir='+str(self.remote), 'rev-parse', 'main').stdout, before)
         count = self.sshlog.read_text().count('git-receive-pack')
         self.git('push', 'origin', 'main', 'HEAD:reject', cwd=clone, expected=1)

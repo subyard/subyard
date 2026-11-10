@@ -74,11 +74,6 @@ func (restartNetwork) WithStart(_ context.Context, _ yardnetwork.Yard, start fun
 	return start()
 }
 
-func writeConvergedHostNetwork(t *testing.T, root string) {
-	t.Helper()
-	testkit.WriteFile(t, filepath.Join(root, "scripts/06-network.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
-}
-
 func TestGuestTmpPreparesHostBeforeStopping(t *testing.T) {
 	for _, test := range []struct {
 		name    string

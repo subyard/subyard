@@ -171,11 +171,11 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		var err error
 		if !strings.HasPrefix(path, paths.ConfigHome+string(filepath.Separator)) {
 			// Runtime defaults may be addressed through the installed runtime link.
-			resolved, err := filepath.EvalSymlinks(filepath.Dir(path))
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
+			resolved, resolveErr := filepath.EvalSymlinks(filepath.Dir(path))
+			if resolveErr != nil && !errors.Is(resolveErr, os.ErrNotExist) {
+				return resolveErr
 			}
-			if err == nil {
+			if resolveErr == nil {
 				path = filepath.Join(resolved, filepath.Base(path))
 			}
 			snapshot, err = readConfigDependencySnapshot(path)

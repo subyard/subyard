@@ -723,11 +723,6 @@ func (runtime *Runtime) cleanupManaged(ctx context.Context, quiet bool) error {
 	return nil
 }
 
-func (runtime *Runtime) projectExists(ctx context.Context) bool {
-	_, err := runtime.incus(ctx, "project", "show", runtime.Config.Project)
-	return err == nil
-}
-
 // projectPresence distinguishes a genuinely absent managed project from an
 // unavailable inner Incus daemon. Destructive recovery must never treat a
 // failed inventory command as proof that the disposable data is absent.

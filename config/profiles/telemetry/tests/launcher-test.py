@@ -3,7 +3,6 @@ import concurrent.futures
 import contextlib
 import fcntl
 import json
-import os
 import sqlite3
 from pathlib import Path
 import subprocess

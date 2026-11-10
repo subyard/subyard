@@ -13,7 +13,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLCHAIN = 'stable'

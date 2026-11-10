@@ -1,7 +1,6 @@
 """Read-only guest probe against source bytes captured by the owner runtime."""
 import base64
 import json
-import os
 from pathlib import Path
 import pwd
 import sys

@@ -27,6 +27,7 @@
 
 # Native Veranda client artifacts and retained retired-stack caches.
 /veranda/client/target/
+/veranda/desktop/target/
 /veranda/node_modules/
 /veranda/.svelte-kit/
 /veranda/build/

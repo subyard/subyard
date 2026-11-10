@@ -192,7 +192,7 @@ func cleanupVolumeIdle(server incus.InstanceServer, pool, name string) error {
 // Completion is persisted only after native Wait succeeds. An interrupted copy
 // is safely recreated while the source still exists; no partial copy authorizes deletion.
 func copyCleanupVolume(destination, source incus.InstanceServer, pool string, volume api.StorageVolume, name string, p ports.YardCleanupBackup) error {
-	current, etag, err := destination.GetStoragePoolVolume(pool, "custom", name)
+	current, _, err := destination.GetStoragePoolVolume(pool, "custom", name)
 	if err == nil {
 		if !backupOwned(current, p) {
 			return domain.ErrPlanStale
@@ -226,7 +226,7 @@ func copyCleanupVolume(destination, source incus.InstanceServer, pool string, vo
 	if err := operation.Wait(); err != nil {
 		return err
 	}
-	current, etag, err = destination.GetStoragePoolVolume(pool, "custom", name)
+	current, etag, err := destination.GetStoragePoolVolume(pool, "custom", name)
 	if err != nil {
 		return err
 	}

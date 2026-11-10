@@ -44,5 +44,32 @@ class RustTemporaryPathTest(unittest.TestCase):
         self.assertFalse(paths[0].parent.exists())
 
 
+class RustLintTest(unittest.TestCase):
+    def test_lint_failure_does_not_skip_independent_checks(self):
+        env = {"FIXTURE": "inherited", "RUSTUP_TOOLCHAIN": "uninstalled-override"}
+        with patch.object(runner, "check", side_effect=[7, 9]) as check:
+            self.assertEqual(runner.rust_lint(env), 7)
+        self.assertEqual(check.call_args_list, [
+            unittest.mock.call("Rust formatting", [
+                "cargo", "+stable", "fmt", "--manifest-path", "veranda/client/Cargo.toml", "--check"], env),
+            unittest.mock.call("Rust Clippy", [
+                "cargo", "+stable", "clippy", "--manifest-path", "veranda/client/Cargo.toml",
+                "--locked", "--all-targets", "--", "-D", "warnings"], env),
+        ])
+        self.assertEqual(env, {"FIXTURE": "inherited", "RUSTUP_TOOLCHAIN": "uninstalled-override"})
+
+    def test_success(self):
+        with patch.object(runner, "check", return_value=0):
+            self.assertEqual(runner.rust_lint({}), 0)
+
+    def test_rust_only_includes_lints_and_tests_after_failure(self):
+        with patch.object(sys, "argv", ["check-veranda.py", "--rust-only"]), \
+                patch.object(runner, "rust_lint", return_value=7) as lint, \
+                patch.object(runner, "rust_check", return_value=9) as tests:
+            self.assertEqual(runner.main(), 7)
+        lint.assert_called_once()
+        tests.assert_called_once_with(lint.call_args.args[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -141,10 +141,12 @@ impl UsageContext {
     }
 }
 #[cfg(test)]
+type SpawnHook = Arc<dyn Fn(&mut Command) -> io::Result<Child> + Send + Sync>;
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct TestHooks {
     pub wait_error_once: Option<Arc<std::sync::atomic::AtomicBool>>,
-    pub spawn: Option<Arc<dyn Fn(&mut Command) -> io::Result<Child> + Send + Sync>>,
+    pub spawn: Option<SpawnHook>,
     pub capture_pid: Option<u32>,
     pub before_wait: Option<Arc<dyn Fn(u32) + Send + Sync>>,
     pub after_live: Option<Arc<dyn Fn(u32) + Send + Sync>>,
@@ -274,31 +276,7 @@ fn duration_micros(duration: std::time::Duration, end: bool) -> Option<u64> {
     let rounded = if end { nanos.checked_add(999)? } else { nanos };
     u64::try_from(rounded / 1000).ok()
 }
-#[cfg(test)]
-mod interval_tests {
-    use super::*;
-    #[test]
-    fn interval_bounds_round_outward_without_clock_or_integer_clamping() {
-        use std::time::Duration;
-        let origin = Instant::now();
-        for (nanos, floor, ceil) in [
-            (0, 0, 0),
-            (1, 0, 1),
-            (999, 0, 1),
-            (1000, 1, 1),
-            (1001, 1, 2),
-        ] {
-            let at = origin + Duration::from_nanos(nanos);
-            assert_eq!(outward_micros(at, origin, false), Some(floor));
-            assert_eq!(outward_micros(at, origin, true), Some(ceil));
-        }
-        assert_eq!(
-            outward_micros(origin, origin + Duration::from_nanos(1), false),
-            None
-        );
-        assert_eq!(duration_micros(Duration::from_secs(u64::MAX), true), None);
-    }
-}
+
 impl Attempt {
     pub(crate) fn active(&self) -> bool {
         !self.collector.0.lock().unwrap().sealed
@@ -588,4 +566,30 @@ fn raw_terminal(pid: u32, nohang: bool) -> io::Result<Option<(i32, i32, Usage)>>
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn raw_terminal(_: u32, _: bool) -> io::Result<Option<(i32, i32, Usage)>> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+    #[test]
+    fn interval_bounds_round_outward_without_clock_or_integer_clamping() {
+        use std::time::Duration;
+        let origin = Instant::now();
+        for (nanos, floor, ceil) in [
+            (0, 0, 0),
+            (1, 0, 1),
+            (999, 0, 1),
+            (1000, 1, 1),
+            (1001, 1, 2),
+        ] {
+            let at = origin + Duration::from_nanos(nanos);
+            assert_eq!(outward_micros(at, origin, false), Some(floor));
+            assert_eq!(outward_micros(at, origin, true), Some(ceil));
+        }
+        assert_eq!(
+            outward_micros(origin, origin + Duration::from_nanos(1), false),
+            None
+        );
+        assert_eq!(duration_micros(Duration::from_secs(u64::MAX), true), None);
+    }
 }

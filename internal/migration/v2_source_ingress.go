@@ -947,7 +947,13 @@ func bindingIncludesIngressKind(
 
 func (ingress *V2CompatibilityIngress) leaf(kind releasetransition.V2IngressOperationKind) releasetransition.V2Ingress {
 	if kind == releasetransition.V2LegacyV1Import {
+		if ingress.Legacy == nil {
+			return nil
+		}
 		return ingress.Legacy
+	}
+	if ingress.Source == nil {
+		return nil
 	}
 	return ingress.Source
 }

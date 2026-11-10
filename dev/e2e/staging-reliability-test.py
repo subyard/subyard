@@ -10,8 +10,6 @@ import subprocess
 import tempfile
 import os
 import sys
-import signal
-import time
 from unittest import mock
 
 fixture = pathlib.Path(__file__).with_name('staging-reliability.sh').read_text()

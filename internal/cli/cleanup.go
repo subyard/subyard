@@ -61,9 +61,7 @@ func (cli *CLI) cleanupPaths(loaded config.Loaded) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("profile %s cache declaration: %w", name, err)
 		}
-		for _, cache := range caches {
-			paths = append(paths, cache)
-		}
+		paths = append(paths, caches...)
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)

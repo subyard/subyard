@@ -10,7 +10,7 @@ from decimal import Decimal
 from datetime import date, datetime, time
 
 STATE_ROOT = "@STATE_ROOT@"
-STATE_UID = @STATE_UID@
+STATE_UID = int("@STATE_UID@")
 FORMAT = "@FORMAT@"
 
 if FORMAT == "toml":
@@ -498,7 +498,8 @@ def document_payload(current, original):
     if original is not None and json_equal(current, parse_document(original)):
         return original
     if FORMAT == "toml":
-        return _toml_writer["dumps"](current).encode()
+        # The Go materializer prepends the isolated writer namespace for TOML.
+        return globals()["_toml_writer"]["dumps"](current).encode()
     return semantic_payload(current) + b"\n"
 
 

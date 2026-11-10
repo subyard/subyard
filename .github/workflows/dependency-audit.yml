@@ -1,0 +1,45 @@
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: '47 4 * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - go.mod
+      - go.sum
+      - veranda/*/Cargo.lock
+      - .github/workflows/dependency-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Audit Go dependencies
+        # Findings are report-only while unfixed dependency advisories are triaged.
+        # Analyzer and installation errors still fail the job.
+        run: bash dev/audit-go.sh
+      - name: Check module files remain unchanged
+        if: always()
+        run: git diff --exit-code -- go.mod go.sum
+
+  cargo-lockfiles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit Rust dependencies with OSV-Scanner
+        run: bash dev/audit-rust.sh

@@ -74,9 +74,9 @@ func TestLocalSSHMigrationPinsAllPersistentYardsAndResumesCAS(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				resume, err := transition.Inspect(context.Background(), goal)
-				if err != nil || len(resume.Blockers) != 0 {
-					t.Fatalf("resume: %#v %v", resume.Blockers, err)
+				resume, inspectErr := transition.Inspect(context.Background(), goal)
+				if inspectErr != nil || len(resume.Blockers) != 0 {
+					t.Fatalf("resume: %#v %v", resume.Blockers, inspectErr)
 				}
 				outcome, err = transition.Converge(context.Background(), Execution{Plan: resume.Plan})
 			}

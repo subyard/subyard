@@ -18,6 +18,13 @@ pub enum Action {
 }
 pub type Callback = Rc<dyn Fn(Action)>;
 
+#[derive(Clone, Copy)]
+pub struct PageContext<'a> {
+    pub generation: u64,
+    pub scope: &'a Scope,
+    pub state: &'a AppState,
+}
+
 struct SettingRow {
     root: gtk::Box,
     fact: gtk::Label,
@@ -374,14 +381,17 @@ impl Pages {
     pub fn render(
         &self,
         stack: &gtk::Stack,
-        generation: u64,
-        scope: &Scope,
+        context: PageContext<'_>,
         details: &Details,
-        state: &AppState,
         enabled: bool,
         mutable: bool,
         callback: Callback,
     ) {
+        let PageContext {
+            generation,
+            scope,
+            state,
+        } = context;
         self.context(generation, scope);
         self.visibility(stack, scope, Some(details.capabilities()));
         let caps = details.capabilities();
@@ -522,9 +532,8 @@ impl Pages {
                 forms.apply_profiles.as_ref().unwrap().set_sensitive(plans);
                 self.settings(
                     &mut forms,
-                    scope,
+                    &context,
                     details.settings(),
-                    state,
                     plans,
                     mutable,
                     &callback,
@@ -535,9 +544,8 @@ impl Pages {
             Details::Host(details) => {
                 self.settings(
                     &mut forms,
-                    scope,
+                    &context,
                     details.settings(),
-                    state,
                     plans,
                     mutable,
                     &callback,
@@ -546,9 +554,8 @@ impl Pages {
                     .set_text(&diagnostics(details.diagnostics()));
                 self.create(
                     &mut forms,
-                    scope,
+                    &context,
                     details.profiles(),
-                    state,
                     plans
                         && supports(caps, "yard-bootstrap-v1")
                         && supports(caps, "profile-list-v1"),
@@ -557,9 +564,8 @@ impl Pages {
                 );
                 self.synchronize(
                     &mut forms,
-                    scope,
+                    &context,
                     details.sync(),
-                    state,
                     plans && supports(caps, "host-sync-status-v1"),
                     mutable,
                     &callback,
@@ -571,13 +577,14 @@ impl Pages {
     fn settings(
         &self,
         forms: &mut Forms,
-        scope: &Scope,
+        context: &PageContext<'_>,
         settings: &[Setting],
-        state: &AppState,
         plans: bool,
         mutable: bool,
         callback: &Callback,
     ) {
+        let scope = context.scope;
+        let state = context.state;
         let current: BTreeSet<_> = settings.iter().map(|s| s.name()).collect();
         // A removed focused editor remains a visibly unavailable local draft.
         // Unfocused removed rows can be retired, keeping the cache bounded.
@@ -684,13 +691,14 @@ impl Pages {
     fn create(
         &self,
         forms: &mut Forms,
-        scope: &Scope,
+        context: &PageContext<'_>,
         profiles: &[Profile],
-        state: &AppState,
         admitted: bool,
         mutable: bool,
         callback: &Callback,
     ) {
+        let scope = context.scope;
+        let state = context.state;
         if forms.creation.is_none() {
             label(&self.creation, "Create named yard · choose a reported preset. Review and execute its init plan explicitly.");
             let entry = entry(
@@ -802,13 +810,14 @@ impl Pages {
     fn synchronize(
         &self,
         forms: &mut Forms,
-        scope: &Scope,
+        context: &PageContext<'_>,
         sync: &HostSyncStatus,
-        state: &AppState,
         plans: bool,
         mutable: bool,
         callback: &Callback,
     ) {
+        let scope = context.scope;
+        let state = context.state;
         if forms.synchronization.is_none() {
             let fact = label(&self.sync, "");
             let git = label(&self.sync, "");

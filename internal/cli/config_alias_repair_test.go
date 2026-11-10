@@ -150,9 +150,9 @@ func aliasRepairRuntimeFixture(t *testing.T, root string) string {
 }
 
 func TestConfigAliasRepairEarlyExplicitChoiceAndNoOp(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	_, home, configHome, environment := configCommandFixture(t)
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
-	root = sourceAdmissionToolingFixture(t, runtimeRoot)
+	root := sourceAdmissionToolingFixture(t, runtimeRoot)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	path := filepath.Join(configHome, "config.env")
 	before := "# preserved record\nAGENTS='claude'\nCODING_TOOL_INTEGRATIONS='codex'\nSSH_PORT='2398'\n"

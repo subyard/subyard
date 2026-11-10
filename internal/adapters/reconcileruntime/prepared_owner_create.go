@@ -237,12 +237,8 @@ func (runtime Runtime) RenderOwnerVolumeConfig(ctx context.Context, original *Pr
 }
 
 type ownerVolumeExecution struct {
-	original    ports.PreparedOwnerVolume
-	created     *ports.NativeOwnerCreated
-	resolved    *ports.PreparedOwnerInstance
-	sources     *PreparedInstalledRuntime
-	environment []string
-	home        string
+	original ports.PreparedOwnerVolume
+	created  *ports.NativeOwnerCreated
 }
 
 func (runtime Runtime) PrepareOwnerVolume(ctx context.Context, sources *PreparedInstalledRuntime, scope string) (*ports.PreparedOwnerVolume, error) {

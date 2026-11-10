@@ -3,7 +3,6 @@
 import importlib.util
 import os
 import subprocess
-import shutil
 import tarfile
 import pwd
 from pathlib import Path

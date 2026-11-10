@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,41 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestProjectArchiveAcceptsLegacyRegularTypeflag(t *testing.T) {
+	payload := validProjectArchive(t, "legacy content")
+	expected, err := ProjectArchiveTreeDigest(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write the legacy NUL directly: tar.Writer normalizes it to TypeReg.
+	payload[156] = '\x00'
+	for index := 148; index < 156; index++ {
+		payload[index] = ' '
+	}
+	var checksum int
+	for _, value := range payload[:512] {
+		checksum += int(value)
+	}
+	copy(payload[148:156], fmt.Sprintf("%06o\x00 ", checksum))
+	header, err := tar.NewReader(bytes.NewReader(payload)).Next()
+	if err != nil || header.Typeflag != tar.TypeReg {
+		t.Fatalf("legacy typeflag was not normalized: header=%#v err=%v", header, err)
+	}
+	actual, err := ProjectArchiveTreeDigest(bytes.NewReader(payload))
+	if err != nil || actual != expected {
+		t.Fatalf("legacy archive digest=%s want=%s err=%v", actual, expected, err)
+	}
+	manifest, err := readProjectArchiveManifest(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "content.txt"), []byte("legacy content"), 0o600)
+	if err := manifest.verify(context.Background(), projectProcessExecutor{}, domain.Context{}, root); err != nil {
+		t.Fatalf("verify legacy archive: %v", err)
+	}
+}
 
 func TestProjectTreeReadOnlyObservationMatchesArchiveAndDetectsChanges(t *testing.T) {
 	root := testkit.TempDir(t)

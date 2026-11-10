@@ -2091,15 +2091,6 @@ func callsText(calls [][]string) string {
 	return strings.Join(lines, "\n")
 }
 
-func fileMode(t *testing.T, path string) os.FileMode {
-	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return info.Mode().Perm()
-}
-
 func TestWaitForTimeoutReportsOnlyLatestProbeMetadata(t *testing.T) {
 	for _, test := range []struct {
 		name string

@@ -426,8 +426,3 @@ func lifecycleTransitionFacts(
 func clonePlannerIntents(intents []PlannerStepIntent) []PlannerStepIntent {
 	return append([]PlannerStepIntent(nil), intents...)
 }
-
-func transactionPtr(value TransactionID) *TransactionID {
-	copy := value
-	return &copy
-}

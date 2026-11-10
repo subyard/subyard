@@ -47,7 +47,7 @@ func readProjectArchiveManifest(input io.Reader) (*projectArchiveManifest, error
 		}
 		entry := projectArchiveEntry{name: name, kind: header.Typeflag, link: header.Linkname}
 		switch header.Typeflag {
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			hash := sha256.New()
 			if _, err := io.Copy(hash, reader); err != nil {
 				return nil, err
@@ -94,7 +94,7 @@ func (manifest *projectArchiveManifest) verify(ctx context.Context, data ports.Y
 	for _, entry := range manifest.entries {
 		file := shellquote.Word(entry.name)
 		switch entry.kind {
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			fmt.Fprintf(&checks, "[ -f %s ] && [ ! -L %s ]\n", file, file)
 		case tar.TypeDir:
 			fmt.Fprintf(&checks, "[ -d %s ] && [ ! -L %s ]\n", file, file)

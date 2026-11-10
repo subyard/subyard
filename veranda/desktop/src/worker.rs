@@ -101,7 +101,7 @@ impl ReadObservation {
 pub struct NotSubmitted(pub NativeError);
 
 pub enum Details {
-    Host(HostDetails),
+    Host(Box<HostDetails>),
     Yard(YardDetails),
 }
 impl Details {
@@ -203,6 +203,7 @@ struct Hint {
 }
 
 impl Invalidations {
+    #[cfg(test)]
     pub(crate) fn hint(&mut self, connection: Option<String>, available: bool) {
         self.hint_observed(connection, None, available, None);
     }
@@ -355,6 +356,7 @@ impl Pending {
         // for a newer assessment/connection. Only one GUI flow can be active.
         self.cancellation = Some(self.cancellation.map_or(id, |queued| queued.max(id)));
     }
+    #[cfg(test)]
     fn read(
         &mut self,
         generation: u64,
@@ -853,7 +855,7 @@ impl Worker {
                                 }),
                             None => native.host_observed(scope.connection.clone()).map(|read| {
                                 Observed {
-                                    value: Details::Host(read.value),
+                                    value: Details::Host(Box::new(read.value)),
                                     proof: read.proof,
                                 }
                             }),
@@ -1111,13 +1113,15 @@ mod tests {
 
     #[test]
     fn old_cancel_preserves_new_assessment_and_its_review() {
-        let mut pending = Pending::default();
-        pending.trust = Some(TrustCommand::Assess {
-            id: 2,
-            destination: "user@example.test".into(),
-            repair: None,
-            attempt: Arc::new(ConnectionAttempt::default()),
-        });
+        let mut pending = Pending {
+            trust: Some(TrustCommand::Assess {
+                id: 2,
+                destination: "user@example.test".into(),
+                repair: None,
+                attempt: Arc::new(ConnectionAttempt::default()),
+            }),
+            ..Pending::default()
+        };
         // Old reaper finishes after the registration result allowed a new flow.
         pending.queue_cancel(1);
         assert!(

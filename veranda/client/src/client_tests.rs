@@ -349,12 +349,10 @@ fn separate_process_store_lock_and_removal_reject_stale_cached_trust() {
     assert_eq!(run_store_actor(&root, "remove", Some(&record)), "ok");
     assert!(!fixture.session.rpc.is_closed());
     assert_eq!(fixture.stats()["executes"], 0);
-    assert!(
-        fixture
-            .client
-            .execute(&plan.plan_id, &plan.digest, true)
-            .is_err()
-    );
+    assert!(fixture
+        .client
+        .execute(&plan.plan_id, &plan.digest, true)
+        .is_err());
     assert!(fixture.session.rpc.is_closed());
     assert!(fixture.client.fleet(Some(record.id)).is_err());
 }
@@ -1259,16 +1257,14 @@ fn opening_across_trust_change_is_rejected(change: TrustChange) {
         } else {
             assert_eq!(repaired.unwrap(), record);
         }
-        assert!(
-            client
-                .store
-                .lock()
-                .unwrap()
-                .registered_ssh_command(&record.id)
-                .unwrap()
-                .public_pin()
-                .contains("BBBB")
-        );
+        assert!(client
+            .store
+            .lock()
+            .unwrap()
+            .registered_ssh_command(&record.id)
+            .unwrap()
+            .public_pin()
+            .contains("BBBB"));
     } else {
         let removal = client.assess_removal(&record.id).unwrap();
         client.remove(&removal.assessment_id, true).unwrap();
@@ -1284,11 +1280,10 @@ fn opening_across_trust_change_is_rejected(change: TrustChange) {
     }
     assert!(opening.join().unwrap().is_err());
     assert!(old.rpc.is_closed());
-    assert!(
-        old.rpc
-            .call("synthetic.stats", "", json!({}), Duration::from_secs(1))
-            .is_err()
-    );
+    assert!(old
+        .rpc
+        .call("synthetic.stats", "", json!({}), Duration::from_secs(1))
+        .is_err());
     assert!(client.sessions.lock().unwrap().is_empty());
     assert!(client.opening.lock().unwrap().is_empty());
     client.shutdown();
@@ -1399,21 +1394,17 @@ fn native_multiline_settings_preserve_values_and_reject_unsafe_controls() {
             .validate("default")
             .unwrap();
         settings["settings"][0]["value"] = json!("first\u{0}second");
-        assert!(
-            decode::<SettingsList>(settings.clone())
-                .unwrap()
-                .validate("default")
-                .is_err()
-        );
+        assert!(decode::<SettingsList>(settings.clone())
+            .unwrap()
+            .validate("default")
+            .is_err());
     }
     settings["settings"][0]["type"] = json!("string");
     settings["settings"][0]["value"] = json!("first\nsecond");
-    assert!(
-        decode::<SettingsList>(settings)
-            .unwrap()
-            .validate("default")
-            .is_err()
-    );
+    assert!(decode::<SettingsList>(settings)
+        .unwrap()
+        .validate("default")
+        .is_err());
 }
 
 #[test]
@@ -1466,12 +1457,10 @@ fn pending_host_identity_is_still_bound_and_bounded() {
         "".to_string(),
     ] {
         sync["hostId"] = json!(host);
-        assert!(
-            decode::<HostSyncStatus>(sync.clone())
-                .unwrap()
-                .validate("example-owner")
-                .is_err()
-        );
+        assert!(decode::<HostSyncStatus>(sync.clone())
+            .unwrap()
+            .validate("example-owner")
+            .is_err());
     }
 }
 
@@ -1479,22 +1468,18 @@ fn pending_host_identity_is_still_bound_and_bounded() {
 fn unavailable_setting_values_cannot_leak_through_direct_or_provenance_fields() {
     let mut settings = fixture("settings-list");
     settings["settings"][0]["valueAvailable"] = json!(false);
-    assert!(
-        decode::<SettingsList>(settings.clone())
-            .unwrap()
-            .validate("default")
-            .is_err()
-    );
+    assert!(decode::<SettingsList>(settings.clone())
+        .unwrap()
+        .validate("default")
+        .is_err());
     settings["settings"][0]
         .as_object_mut()
         .unwrap()
         .remove("value");
-    assert!(
-        decode::<SettingsList>(settings.clone())
-            .unwrap()
-            .validate("default")
-            .is_err()
-    );
+    assert!(decode::<SettingsList>(settings.clone())
+        .unwrap()
+        .validate("default")
+        .is_err());
     for entry in settings["settings"][0]["provenance"]
         .as_array_mut()
         .unwrap()
@@ -1529,24 +1514,20 @@ fn all_forwarded_setting_and_profile_metadata_remains_bounded() {
     }
     let mut profiles = fixture("profile-list");
     profiles["profiles"][0]["diagnostic"] = json!("x".repeat(129));
-    assert!(
-        decode::<ProfileList>(profiles)
-            .unwrap()
-            .validate("default")
-            .is_err()
-    );
+    assert!(decode::<ProfileList>(profiles)
+        .unwrap()
+        .validate("default")
+        .is_err());
 }
 
 #[test]
 fn owner_expiry_format_is_validated_and_held_deadline_never_exceeds_five_minutes() {
     let mut exact = fixture("operation-exact");
     exact["expiresAt"] = json!("not-a-date");
-    assert!(
-        decode::<ExactPlan>(exact)
-            .unwrap()
-            .validate("selection-1", "config")
-            .is_err()
-    );
+    assert!(decode::<ExactPlan>(exact)
+        .unwrap()
+        .validate("selection-1", "config")
+        .is_err());
     let fixture = ManagerFixture::new("manager-long-expiry");
     let started = Instant::now();
     let plan = fixture.plan();
@@ -1605,14 +1586,12 @@ fn reviewed_execution_is_explicit_and_single_use(mode: &str, confirmation: &str)
             .code,
         "confirmation_required"
     );
-    assert!(
-        fixture
-            .client
-            .plans
-            .lock()
-            .unwrap()
-            .contains_key(&plan.plan_id)
-    );
+    assert!(fixture
+        .client
+        .plans
+        .lock()
+        .unwrap()
+        .contains_key(&plan.plan_id));
     assert_eq!(fixture.stats()["executes"], 0);
     let started = fixture
         .client
@@ -2704,12 +2683,10 @@ fn physical_ssh_recovery_and_churn(
         assert!(event.state != "connected" && event.snapshot.is_none());
         retried |= event.state == "reconnecting";
         if event.state == "disconnected" && retried {
-            assert!(
-                event
-                    .message
-                    .as_ref()
-                    .is_some_and(|message| !message.is_empty())
-            );
+            assert!(event
+                .message
+                .as_ref()
+                .is_some_and(|message| !message.is_empty()));
             break;
         }
     }
@@ -3607,21 +3584,17 @@ fn native_owner_smoke() {
     // negotiation must not leave a saved record or temporary accepted pin.
     if let Ok(destination) = std::env::var("VERANDA_TEST_INCOMPATIBLE_DESTINATION") {
         let review = client.assess(&destination, None).unwrap();
-        assert!(
-            client
-                .connect(&review.assessment_id, true, &review.fingerprint)
-                .is_err()
-        );
+        assert!(client
+            .connect(&review.assessment_id, true, &review.fingerprint)
+            .is_err());
         assert!(client.connections().unwrap().is_empty());
-        assert!(
-            !std::fs::read_dir(fixture.store_root())
+        assert!(!std::fs::read_dir(fixture.store_root())
+            .unwrap()
+            .any(|entry| entry
                 .unwrap()
-                .any(|entry| entry
-                    .unwrap()
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.ends_with(".known_hosts")))
-        );
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".known_hosts"))));
     }
     let connection = std::env::var("VERANDA_TEST_SSH_DESTINATION")
         .ok()
@@ -3801,14 +3774,12 @@ fn cancelled_connection_consumes_review_and_prevents_registration() {
         "cancelled"
     );
     assert!(client.connections().unwrap().is_empty());
-    assert!(
-        client
-            .store
-            .lock()
-            .unwrap()
-            .consented_ssh_command(&review.token, true, &review.fingerprint)
-            .is_err()
-    );
+    assert!(client
+        .store
+        .lock()
+        .unwrap()
+        .consented_ssh_command(&review.token, true, &review.fingerprint)
+        .is_err());
     assert!(!owner.store_root().exists());
     let pin = synthetic_trust(&mut client.store.lock().unwrap(), None);
     let attempt = ConnectionAttempt::default();
@@ -3824,15 +3795,13 @@ fn cancelled_connection_consumes_review_and_prevents_registration() {
         "cancelled"
     );
     assert!(client.connections().unwrap().is_empty());
-    assert!(
-        !std::fs::read_dir(owner.store_root())
+    assert!(!std::fs::read_dir(owner.store_root())
+        .unwrap()
+        .any(|entry| entry
             .unwrap()
-            .any(|entry| entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".known_hosts"))
-    );
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".known_hosts")));
 }
 
 #[test]
@@ -3927,20 +3896,16 @@ fn profile_metadata_is_generic_bounded_and_value_keeps_owner_whitespace() {
     for field in ["reason", "sourceGroup"] {
         let mut bad = wire.clone();
         bad["profiles"][0][field] = json!("x".repeat(8193));
-        assert!(
-            decode::<ProfileList>(bad)
-                .unwrap()
-                .validate("default")
-                .is_err()
-        );
-    }
-    wire["selection"]["requested"] = json!(vec!["a"; 4097]);
-    assert!(
-        decode::<ProfileList>(wire)
+        assert!(decode::<ProfileList>(bad)
             .unwrap()
             .validate("default")
-            .is_err()
-    );
+            .is_err());
+    }
+    wire["selection"]["requested"] = json!(vec!["a"; 4097]);
+    assert!(decode::<ProfileList>(wire)
+        .unwrap()
+        .validate("default")
+        .is_err());
 }
 
 #[test]
@@ -3957,12 +3922,10 @@ fn profile_intent_large_duplicate_lists_use_existing_owner_byte_bound() {
             .unwrap();
     }
     wire["selection"]["requested"] = json!(vec!["a"; 4097]);
-    assert!(
-        decode::<ProfileList>(wire)
-            .unwrap()
-            .validate("default")
-            .is_err()
-    );
+    assert!(decode::<ProfileList>(wire)
+        .unwrap()
+        .validate("default")
+        .is_err());
 }
 
 // Uses the production callback, throttle, monitor, cache and authoritative query path.
@@ -4042,11 +4005,9 @@ fn observation_real_receipts_survive_callback_throttle_and_monitor_coalescing() 
     let tickets = retained.batch.tickets();
     assert!(tickets[0].started() >= before);
     assert!(tickets[2].started().duration_since(tickets[0].started()) < Duration::from_millis(100));
-    assert!(
-        tickets
-            .windows(2)
-            .all(|pair| pair[0].ordinal() < pair[1].ordinal())
-    );
+    assert!(tickets
+        .windows(2)
+        .all(|pair| pair[0].ordinal() < pair[1].ordinal()));
     assert_eq!(observation.counts().received, 3);
     assert_eq!(
         observation.counts().pending,
@@ -4140,12 +4101,10 @@ fn observation_disabled_manager_keeps_local_metadata_and_wire_absent() {
     assert!(read.proof.is_none());
     let event = state_event(&manager.session, "connected", Some(read.value));
     assert!(event.observation.is_none());
-    assert!(
-        serde_json::to_value(event)
-            .unwrap()
-            .get("observation")
-            .is_none()
-    );
+    assert!(serde_json::to_value(event)
+        .unwrap()
+        .get("observation")
+        .is_none());
     let frame = transport::Event {
         operation_id: String::new(),
         event: "incus.lifecycle".into(),
@@ -4154,12 +4113,10 @@ fn observation_disabled_manager_keeps_local_metadata_and_wire_absent() {
         stale: false,
         receipt: None,
     };
-    assert!(
-        serde_json::to_value(frame)
-            .unwrap()
-            .get("receipt")
-            .is_none()
-    );
+    assert!(serde_json::to_value(frame)
+        .unwrap()
+        .get("receipt")
+        .is_none());
 }
 
 #[test]
@@ -4205,12 +4162,10 @@ fn observation_real_cache_and_mixed_effects_do_not_claim_inventory_coverage() {
     }
 
     let pending = session.observation.as_ref().unwrap().batch();
-    assert!(
-        pending
-            .tickets()
-            .iter()
-            .any(|ticket| ticket.effect() == Some(Effect::Operation))
-    );
+    assert!(pending
+        .tickets()
+        .iter()
+        .any(|ticket| ticket.effect() == Some(Effect::Operation)));
     let mut frame = transport::Event {
         operation_id: String::new(),
         event: "incus.lifecycle".into(),
@@ -4384,12 +4339,10 @@ fn correlation_actual_callback_throttle_monitor_and_read_keep_all_original_joins
         assert_eq!(proof.started(), captured.1);
         assert_eq!(proof.ordinal(), ticket.ordinal());
     }
-    assert!(
-        correlation
-            .index
-            .windows(2)
-            .all(|rows| rows[0].ticket < rows[1].ticket)
-    );
+    assert!(correlation
+        .index
+        .windows(2)
+        .all(|rows| rows[0].ticket < rows[1].ticket));
     let scalar = serde_json::to_string(&correlation).unwrap();
     assert!(!scalar.contains("private") && !scalar.contains("data") && !scalar.contains("incus"));
 }

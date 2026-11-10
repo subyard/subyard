@@ -348,10 +348,7 @@ func (view posixV2SettingsSnapshotView) ListYards() ([]string, error) {
 	}
 	names := make(map[string]struct{})
 	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasSuffix(name, ".env") {
-			name = strings.TrimSuffix(name, ".env")
-		}
+		name := strings.TrimSuffix(entry.Name(), ".env")
 		if domain.SafeName(name) {
 			names[name] = struct{}{}
 		}

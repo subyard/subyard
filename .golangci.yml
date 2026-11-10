@@ -11,7 +11,12 @@ linters:
   default: none
   enable:
     - exhaustive
+    - staticcheck
+    - unused
+    - ineffassign
   settings:
+    staticcheck:
+      checks: ["SA*", "S1*", "-QF*", "-ST*"]
     exhaustive:
       default-signifies-exhaustive: false
       # Types whose switches are complete state machines. Classification switches

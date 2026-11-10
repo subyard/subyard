@@ -11,7 +11,7 @@ use subyard_veranda::operation::{Operation, Phase as OperationPhase};
 use subyard_veranda::remote::{Flow, Phase};
 use subyard_veranda::state::{AppState, OperationNote, Scope};
 use subyard_veranda::trace_sink::{
-    CORRELATION_ENV, ENV_NAME, OBSERVATION_ENV, TraceRun, TraceView,
+    TraceRun, TraceView, CORRELATION_ENV, ENV_NAME, OBSERVATION_ENV,
 };
 use subyard_veranda::worker::{Details, OwnerCommand};
 use subyard_veranda::worker::{Update, Worker};
@@ -139,10 +139,12 @@ impl View {
             let enabled = self.model.borrow().host().fresh && self.flow.borrow().is_none();
             self.pages.render(
                 &self.stack,
-                generation,
-                &scope,
+                pages::PageContext {
+                    generation,
+                    scope: &scope,
+                    state: &self.state.borrow(),
+                },
                 details,
-                &self.state.borrow(),
                 enabled,
                 self.state_writable.get(),
                 self.callback(),
@@ -1190,12 +1192,14 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                     if let Some(coordinator) = &view.observation {
                         coordinator.borrow_mut().fleet_identified(
                             &view.model.borrow(),
-                            generation,
-                            &connection,
+                            subyard_veranda::view_observation::FleetAcceptance {
+                                generation,
+                                connection: &connection,
+                                current,
+                                action: &action,
+                            },
                             invalidation,
-                            current,
                             success,
-                            &action,
                             returned_owner.as_deref(),
                             observation,
                         );

@@ -66,7 +66,7 @@ fn child_usage_native_linux_layout_and_syscall_are_bound() {
     assert_eq!(std::mem::size_of::<libc::rusage>(), 144);
     assert_eq!(std::mem::offset_of!(libc::rusage, ru_maxrss), 32);
     assert_eq!(libc::SYS_waitid, 247);
-    assert!(cfg!(target_endian = "little"));
+    const { assert!(cfg!(target_endian = "little")) };
 }
 
 #[test]
@@ -427,10 +427,8 @@ fn child_usage_bounds_none_shape_and_sealed_late_completion_are_inert() {
     assert_eq!(sealed["producer_quiescence"], "Unknown");
     stop_child(&mut first.0);
     assert_eq!(snapshot(&observation), sealed);
-    assert!(
-        observation
-            .source(SourceKind::Local)
-            .child_usage_context()
-            .is_none()
-    );
+    assert!(observation
+        .source(SourceKind::Local)
+        .child_usage_context()
+        .is_none());
 }

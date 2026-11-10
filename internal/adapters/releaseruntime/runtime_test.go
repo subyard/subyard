@@ -3290,10 +3290,6 @@ func countString(values []string, target string) int {
 	return count
 }
 
-func releaseIDPointer(value releasetransition.ReleaseID) *releasetransition.ReleaseID {
-	return &value
-}
-
 func TestRuntimeEngineDiagnosticsDistinguishReadAndMode(t *testing.T) {
 	root := testkit.TempDir(t)
 	state := runtimeLinkState{target: "releases/test"}

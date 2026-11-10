@@ -655,17 +655,15 @@ mod tests {
             vec!["yard", "-Y", "default", "shell", "--", "anything"],
             vec!["yard", "-Y", "default", "shell", "project;bad"],
         ] {
-            assert!(
-                owner_command(
-                    &endpoint,
-                    Path::new("/synthetic"),
-                    "alias",
-                    "ssh-ed25519 AAAA",
-                    &invalid.into_iter().map(str::to_owned).collect::<Vec<_>>(),
-                    true
-                )
-                .is_err()
-            );
+            assert!(owner_command(
+                &endpoint,
+                Path::new("/synthetic"),
+                "alias",
+                "ssh-ed25519 AAAA",
+                &invalid.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                true
+            )
+            .is_err());
         }
     }
     #[test]
@@ -683,22 +681,19 @@ mod tests {
             .get_args()
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
-        assert!(
-            args.windows(2)
-                .any(|values| values == ["-W", "127.0.0.1:2222"])
-        );
+        assert!(args
+            .windows(2)
+            .any(|values| values == ["-W", "127.0.0.1:2222"]));
         assert_eq!(&args[args.len() - 2..], ["--", "host"]);
         assert!(args.contains(&"IdentityFile=none".into()));
-        assert!(
-            proxy_command(
-                &endpoint,
-                Path::new("/synthetic"),
-                "alias",
-                "ssh-ed25519 AAAA",
-                0
-            )
-            .is_err()
-        );
+        assert!(proxy_command(
+            &endpoint,
+            Path::new("/synthetic"),
+            "alias",
+            "ssh-ed25519 AAAA",
+            0
+        )
+        .is_err());
     }
     #[test]
     fn endpoint_options_and_shell_metacharacters_are_rejected() {
@@ -753,11 +748,9 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(
-            command
-                .get_args()
-                .any(|argument| argument == "UserKnownHostsFile=\"/synthetic%%h/pin%%file\"")
-        );
+        assert!(command
+            .get_args()
+            .any(|argument| argument == "UserKnownHostsFile=\"/synthetic%%h/pin%%file\""));
     }
     #[test]
     fn launch_is_fixed_and_strictly_pinned() {

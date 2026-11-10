@@ -727,17 +727,6 @@ func waitSpaceCache(t *testing.T, path, want string) {
 	t.Fatalf("space cache did not reach %q: payload=%q err=%v", want, payload, err)
 }
 
-func mapMerge(base, extra map[string]string) map[string]string {
-	result := make(map[string]string, len(base)+len(extra))
-	for key, value := range base {
-		result[key] = value
-	}
-	for key, value := range extra {
-		result[key] = value
-	}
-	return result
-}
-
 func TestProfileDashboardStatusUsesOwnedReadinessAndExistingProjection(t *testing.T) {
 	root := testkit.TempDir(t)
 	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\n[ \"$1\" = --check ] && [ \"$SUBYARD_PROFILE_SELECTED\" = 1 ] && [ \"$PROFILE_READY\" = 1 ]\n"), 0o700)

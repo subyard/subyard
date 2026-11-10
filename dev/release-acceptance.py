@@ -250,7 +250,11 @@ CI_PREPARED_CHECKS = {"shellcheck": "host-free-verify", "verify": "host-free-ver
 
 # release.yml Git-blob policies reviewed to run each CI_PREPARED_CHECKS command in the
 # named job on the exact candidate commit and exported assets.
-CI_COUNTED_POLICIES = frozenset({"e952002eada45e0d6f245fbc61f5403c7325ae5d"})
+CI_COUNTED_POLICIES = frozenset({
+    "e952002eada45e0d6f245fbc61f5403c7325ae5d",
+    # Immutable action pins; exact candidate refs, checks and asset export retained.
+    "4089769ddfcdfa54fdfeb1d11498acf6af1fd42f",
+})
 
 
 # Exact commands eligible for the reviewed hosted VM workflow. New lanes require review.

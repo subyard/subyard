@@ -144,9 +144,7 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		var loadErr error
 		known := loaded.Context.YardName == "default"
 		if !known {
-			if _, rootErr := os.Stat(options.ConfigHome); errors.Is(rootErr, os.ErrNotExist) {
-				loadErr = config.ErrUnknownYard
-			} else {
+			if _, rootErr := os.Stat(options.ConfigHome); !errors.Is(rootErr, os.ErrNotExist) {
 				_, registrationErr := config.FindYardRegistrationFile(filepath.Join(options.RepositoryRoot, "config"), options.ConfigHome, loaded.Context.YardName)
 				known = registrationErr == nil
 				if registrationErr != nil && !errors.Is(registrationErr, config.ErrUnknownYard) {

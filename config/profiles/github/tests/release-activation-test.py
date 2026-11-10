@@ -3,7 +3,6 @@
 import importlib.util
 import shlex
 import hashlib
-import io
 import json
 import os
 import signal
@@ -12,7 +11,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import tarfile
 import unittest
 from unittest import mock
 

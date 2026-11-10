@@ -1376,12 +1376,11 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		return v2Observation{}, err
 	}
 	ledger := BaselineLedgerV2(transition.registry)
-	checkpointSnapshot := absentProtectedSnapshot()
 	migrationLedgerSnapshot := MigrationLedgerSnapshot{
 		Ledger: ledger, AuthoritySnapshot: ledgerSnapshot,
 		ProjectionSnapshot: ledgerSnapshot,
 	}
-	checkpointSnapshot, err = transition.store.ReadMigrationCheckpoint()
+	checkpointSnapshot, err := transition.store.ReadMigrationCheckpoint()
 	if err != nil {
 		return v2Observation{}, err
 	}
@@ -1582,7 +1581,6 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		)
 	}
 	checkpointWork := checkpointConversion || checkpointCompaction
-	completedHistory = completedHistory && !checkpointWork
 	changed := len(observation.intents) != 0 || links.Active != goal.Target ||
 		!observation.activationFixed || checkpointWork
 	if journal != nil && journal.Checkpoint != JournalComplete {
@@ -2729,7 +2727,7 @@ func (transition *V2Transition) convergeStep(
 					if !actual.Checkpointed && !actual.ProjectionSnapshot.Exists {
 						virtual = nil
 					}
-					virtualSnapshot := ProtectedSnapshot{}
+					var virtualSnapshot ProtectedSnapshot
 					if virtual == nil {
 						virtualSnapshot = absentProtectedSnapshot()
 					} else {

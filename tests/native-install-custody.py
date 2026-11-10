@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Owning host-installer fence checks; no root access or external commands."""
-import fcntl
 import importlib.util
 import os
 from pathlib import Path

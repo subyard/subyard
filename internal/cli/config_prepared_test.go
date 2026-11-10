@@ -441,6 +441,37 @@ func TestConfigExactScalarCreatesAbsentConfigurationRoot(t *testing.T) {
 	}
 }
 
+func TestConfigProspectiveRejectsFailedDependencySnapshot(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, "SSH_PORT=2290\n")
+	dependency := filepath.Join(testkit.TempDir(t), "ports.env")
+	if err := os.Rename(filepath.Join(root, "config/ports.env"), dependency); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dependency, filepath.Join(root, "config/ports.env")); err != nil {
+		t.Fatal(err)
+	}
+	// The scalar loader can read this source, but the retained dependency
+	// snapshot must refuse a symbolic link instead of discarding its error.
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	program := configExactProgram(t, root, environment, nil, nil)
+	plan, err := program.prepareConfigProspective(loaded,
+		configAuthoringRequest{scope: config.ScopeHost}, target,
+		config.PersistentFileSnapshot{Exists: true, Content: []byte("SSH_PORT=2390\n")})
+	if plan != nil {
+		plan.close()
+	}
+	cause := errors.Unwrap(err)
+	if cause == nil || !strings.Contains(cause.Error(), "source is not a regular file") {
+		t.Fatalf("failed dependency snapshot accepted: %v (cause: %v)", err, cause)
+	}
+	if content, err := os.ReadFile(target); err != nil || string(content) != "SSH_PORT=2290\n" {
+		t.Fatalf("rejected draft changed target: %v", err)
+	}
+}
+
 func TestConfigProspectiveExternalReadInputsDoNotRequireWriterPermissions(t *testing.T) {
 	for _, change := range []string{"unchanged", "large unchanged", "bytes", "mode", "same bytes inode"} {
 		t.Run(change, func(t *testing.T) {

@@ -344,8 +344,8 @@ func resourceSettingDefinition(name string) (SettingDefinition, bool) {
 
 func (settings Catalog) SettingCatalog() []SettingDefinition {
 	result := make([]SettingDefinition, 0, len(catalog))
-	for name, definition := range catalog {
-		definition, _ = settings.LookupSetting(name)
+	for name := range catalog {
+		definition, _ := settings.LookupSetting(name)
 		result = append(result, definition)
 	}
 	for _, definition := range settings.profiles {

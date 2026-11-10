@@ -3,21 +3,20 @@ use crate::connections::{
     ConnectionStore, ConnectionSummary, ConsentedConnection, NavigationSelection, RemoveAssessment,
     TrustAssessment,
 };
-use crate::local_fleet::{LocalFleetSnapshot, NativeError, OwnerInventory, safe_id, safe_name};
+use crate::local_fleet::{safe_id, safe_name, LocalFleetSnapshot, NativeError, OwnerInventory};
 use crate::observation::{
     Effect, Observation, Observed, Retirement, Source, SourceKind, UpdateObservation,
 };
 use crate::sessions::{self, Descriptor, Launch};
 use crate::transport::{self, Processes, RpcClient};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
-    Arc, Mutex, Weak,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    mpsc,
+    mpsc, Arc, Mutex, Weak,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -2217,20 +2216,16 @@ mod tests {
         }
         for selection in ["core\0tools", "core\u{001b}tools"] {
             value["selection"]["value"] = json!(selection);
-            assert!(
-                decode::<ProfileList>(value.clone())
-                    .unwrap()
-                    .validate("default")
-                    .is_err()
-            );
+            assert!(decode::<ProfileList>(value.clone())
+                .unwrap()
+                .validate("default")
+                .is_err());
             value["selection"]["value"] = json!("core tools");
             value["selection"]["provenance"][0]["value"] = json!(selection);
-            assert!(
-                decode::<ProfileList>(value.clone())
-                    .unwrap()
-                    .validate("default")
-                    .is_err()
-            );
+            assert!(decode::<ProfileList>(value.clone())
+                .unwrap()
+                .validate("default")
+                .is_err());
         }
     }
     #[test]
@@ -2240,46 +2235,36 @@ mod tests {
             .unwrap()
             .validate("selection-1", "config")
             .unwrap();
-        assert!(
-            decode::<ExactPlan>(value.clone())
-                .unwrap()
-                .validate("another-operation", "config")
-                .is_err()
-        );
+        assert!(decode::<ExactPlan>(value.clone())
+            .unwrap()
+            .validate("another-operation", "config")
+            .is_err());
         value["plan"]["steps"][0]["dependsOn"] = json!(["config.write"]);
-        assert!(
-            decode::<ExactPlan>(value)
-                .unwrap()
-                .validate("selection-1", "config")
-                .is_err()
-        );
+        assert!(decode::<ExactPlan>(value)
+            .unwrap()
+            .validate("selection-1", "config")
+            .is_err());
     }
     #[test]
     fn mismatched_schemas_and_owner_identity_fail_closed() {
         let mut value = fixture("profile-list");
         value["schemaVersion"] = json!(2);
-        assert!(
-            decode::<ProfileList>(value)
-                .unwrap()
-                .validate("default")
-                .is_err()
-        );
-        assert!(
-            decode::<HostSyncStatus>(fixture("host-sync-status"))
-                .unwrap()
-                .validate("different-owner")
-                .is_err()
-        );
+        assert!(decode::<ProfileList>(value)
+            .unwrap()
+            .validate("default")
+            .is_err());
+        assert!(decode::<HostSyncStatus>(fixture("host-sync-status"))
+            .unwrap()
+            .validate("different-owner")
+            .is_err());
     }
     #[test]
     fn owner_execution_must_be_confirmed_and_verified() {
-        assert!(
-            validate_execution(
-                &json!({"plan":{"operationId":"one","confirmed":true},"result":{"status":"ok"}}),
-                "one"
-            )
-            .is_ok()
-        );
+        assert!(validate_execution(
+            &json!({"plan":{"operationId":"one","confirmed":true},"result":{"status":"ok"}}),
+            "one"
+        )
+        .is_ok());
         assert!(validate_execution(
             &json!({"plan":{"operationId":"one","confirmed":true},"result":{"status":"running"}}),
             "one"

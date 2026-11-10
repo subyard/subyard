@@ -323,12 +323,14 @@ fn fleet_membership_actor() {
             let original = proof.batch().tickets()[0].clone();
             view.fleet(
                 &model,
-                generation,
-                &connection,
+                crate::view_observation::FleetAcceptance {
+                    generation,
+                    connection: &connection,
+                    current,
+                    action: &action,
+                },
                 invalidation,
-                current,
                 true,
-                &action,
                 Some(metadata),
             );
             break (source, started, contains, original);
@@ -370,12 +372,10 @@ fn fleet_membership_actor() {
     worker.close();
     while !matches!(updates.recv_blocking().unwrap(), Update::Closed) {}
     assert_eq!(observer.counts().pending, 0);
-    assert!(
-        observer
-            .terminals()
-            .iter()
-            .all(|row| !matches!(row.outcome, TerminalOutcome::Paint { .. }))
-    );
+    assert!(observer
+        .terminals()
+        .iter()
+        .all(|row| !matches!(row.outcome, TerminalOutcome::Paint { .. })));
     assert_ne!(fleet_source, details_ticket.source());
     assert!(fleet_started >= details_ticket.started());
     assert!(!fleet_contains_details);
@@ -458,7 +458,7 @@ fn reopen_actor() {
         }));
         loop {
             if let Update::Executed { result, .. } = updates.recv_blocking().unwrap() {
-                let proof = result.err().expect("wrong digest cannot start execute");
+                let proof = result.expect_err("wrong digest cannot start execute");
                 state.not_submitted(&id, &proof);
                 break;
             }
@@ -616,13 +616,11 @@ fn observation_actor() {
     );
     assert!(!worker.read_is_current(&None, first_invalidation));
     assert_eq!(observer.counts().received, 2);
-    assert!(
-        hints
-            .batch
-            .tickets()
-            .iter()
-            .all(|ticket| ticket.effect() == Some(Effect::Inventory))
-    );
+    assert!(hints
+        .batch
+        .tickets()
+        .iter()
+        .all(|ticket| ticket.effect() == Some(Effect::Inventory)));
     let same_originals = |batch: &Batch| {
         assert_eq!(batch.tickets().len(), 2);
         for (actual, original) in batch.tickets().iter().zip(hints.batch.tickets()) {
@@ -729,7 +727,7 @@ fn observation_actor() {
 fn view_observation_actor() {
     use crate::{
         model::{Model, ReadAction},
-        view_observation::{DIAGNOSTICS, FLEET, Parts, ViewObservation},
+        view_observation::{Parts, ViewObservation, DIAGNOSTICS, FLEET},
     };
     use veranda_lib::observation::{Origin, Retirement, StartKind, TerminalOutcome};
     let root = PathBuf::from(std::env::var_os("VERANDA_REOPEN_FIXTURE").unwrap());
@@ -822,10 +820,12 @@ fn view_observation_actor() {
     {
         cohorts.fleet(
             &model,
-            first.0,
-            &first.1,
-            current,
-            &action,
+            &crate::view_observation::FleetAcceptance {
+                generation: first.0,
+                connection: &first.1,
+                current,
+                action: &action,
+            },
             first_owner.as_deref(),
             first.4.as_ref(),
         );
@@ -835,7 +835,16 @@ fn view_observation_actor() {
         );
     }
     view.fleet(
-        &model, first.0, &first.1, first.2, current, success, &action, first.4,
+        &model,
+        crate::view_observation::FleetAcceptance {
+            generation: first.0,
+            connection: &first.1,
+            current,
+            action: &action,
+        },
+        first.2,
+        success,
+        first.4,
     );
     assert!(
         view.request(&model, true).tickets().is_empty(),
@@ -863,20 +872,24 @@ fn view_observation_actor() {
     {
         cohorts.fleet(
             &model,
-            next.0,
-            &next.1,
-            current,
-            &action,
+            &crate::view_observation::FleetAcceptance {
+                generation: next.0,
+                connection: &next.1,
+                current,
+                action: &action,
+            },
             Some("wrong-owner"),
             next.4.as_ref(),
         );
         assert!(cohorts.bindings().is_empty());
         foreign.fleet(
             &model,
-            next.0,
-            &next.1,
-            current,
-            &action,
+            &crate::view_observation::FleetAcceptance {
+                generation: next.0,
+                connection: &next.1,
+                current,
+                action: &action,
+            },
             returned_owner.as_deref(),
             next.4.as_ref(),
         );
@@ -886,10 +899,12 @@ fn view_observation_actor() {
         );
         cohorts.fleet(
             &model,
-            next.0,
-            &next.1,
-            current,
-            &action,
+            &crate::view_observation::FleetAcceptance {
+                generation: next.0,
+                connection: &next.1,
+                current,
+                action: &action,
+            },
             returned_owner.as_deref(),
             next.4.as_ref(),
         );
@@ -897,7 +912,16 @@ fn view_observation_actor() {
         assert!(!cohorts.complete());
     }
     view.fleet(
-        &model, next.0, &next.1, next.2, current, true, &action, next.4,
+        &model,
+        crate::view_observation::FleetAcceptance {
+            generation: next.0,
+            connection: &next.1,
+            current,
+            action: &action,
+        },
+        next.2,
+        true,
+        next.4,
     );
     let origin = view.fleet_provenance().unwrap();
     assert_eq!(origin.requested.yard.as_deref(), Some("default"));
@@ -934,14 +958,12 @@ fn view_observation_actor() {
     );
     assert!(view.snapshot_ready());
     observer.retire(&later.batch, Retirement::Unknown);
-    assert!(
-        observer
-            .terminals()
-            .iter()
-            .filter_map(|row| row.coverage)
-            .filter(|coverage| !coverage.cached)
-            .all(|coverage| coverage.whole && coverage.parts == FLEET)
-    );
+    assert!(observer
+        .terminals()
+        .iter()
+        .filter_map(|row| row.coverage)
+        .filter(|coverage| !coverage.cached)
+        .all(|coverage| coverage.whole && coverage.parts == FLEET));
 
     // Two ordinary admissions coalesce, while a later start cannot borrow an
     // earlier Fleet frontier even if Details completes after that later start.
@@ -967,7 +989,16 @@ fn view_observation_actor() {
     assert!(current);
     let action = model.read_complete(read.0, &read.1, current, read.3);
     view.fleet(
-        &model, read.0, &read.1, read.2, current, true, &action, read.4,
+        &model,
+        crate::view_observation::FleetAcceptance {
+            generation: read.0,
+            connection: &read.1,
+            current,
+            action: &action,
+        },
+        read.2,
+        true,
+        read.4,
     );
     let late = view.request(&model, false);
     assert!(
@@ -1058,13 +1089,11 @@ fn view_observation_actor() {
             original.started()
         );
     }
-    assert!(
-        !joined
-            .batch
-            .tickets()
-            .iter()
-            .any(|ticket| ticket.ordinal() == late.tickets()[0].ordinal())
-    );
+    assert!(!joined
+        .batch
+        .tickets()
+        .iter()
+        .any(|ticket| ticket.ordinal() == late.tickets()[0].ordinal()));
     observer.retire(&joined.batch, Retirement::Unknown);
     assert!(worker.read(model.generation, None, Some("default".into()), true));
     let read = loop {
@@ -1083,7 +1112,16 @@ fn view_observation_actor() {
     assert!(current);
     let action = model.read_complete(read.0, &read.1, current, read.3);
     view.fleet(
-        &model, read.0, &read.1, read.2, current, true, &action, read.4,
+        &model,
+        crate::view_observation::FleetAcceptance {
+            generation: read.0,
+            connection: &read.1,
+            current,
+            action: &action,
+        },
+        read.2,
+        true,
+        read.4,
     );
     let final_late = view.rendered(&model, true).unwrap();
     assert_eq!(final_late.batch.tickets().len(), 1);
@@ -1116,7 +1154,16 @@ fn view_observation_actor() {
     assert!(current);
     let action = model.read_complete(read.0, &read.1, current, read.3);
     view.fleet(
-        &model, read.0, &read.1, read.2, current, true, &action, read.4,
+        &model,
+        crate::view_observation::FleetAcceptance {
+            generation: read.0,
+            connection: &read.1,
+            current,
+            action: &action,
+        },
+        read.2,
+        true,
+        read.4,
     );
     let provenance = view.fleet_provenance().unwrap();
     assert_eq!(provenance.requested.yard.as_deref(), Some("gone"));
@@ -1151,12 +1198,14 @@ fn view_observation_actor() {
     wrong.scope.connection = Some("synthetic-other-owner".into());
     view.fleet(
         &model,
-        read.0,
-        &read.1,
+        crate::view_observation::FleetAcceptance {
+            generation: read.0,
+            connection: &read.1,
+            current,
+            action: &action,
+        },
         read.2,
-        current,
         true,
-        &action,
         Some(wrong),
     );
     assert!(
@@ -1180,12 +1229,14 @@ fn view_observation_actor() {
     assert_eq!(action, ReadAction::Ignored);
     view.fleet(
         &model,
-        read.0 + 1,
-        &read.1,
+        crate::view_observation::FleetAcceptance {
+            generation: read.0 + 1,
+            connection: &read.1,
+            current: true,
+            action: &action,
+        },
         read.2,
         true,
-        true,
-        &action,
         read.4,
     );
     assert!(
@@ -1193,13 +1244,11 @@ fn view_observation_actor() {
         "ignored generation cannot become accepted content"
     );
     view.close();
-    assert!(
-        observer
-            .terminals()
-            .iter()
-            .any(|row| row.ticket == guarded.tickets()[0].ordinal()
-                && row.outcome == TerminalOutcome::Retired(Retirement::Unknown))
-    );
+    assert!(observer
+        .terminals()
+        .iter()
+        .any(|row| row.ticket == guarded.tickets()[0].ordinal()
+            && row.outcome == TerminalOutcome::Retired(Retirement::Unknown)));
 
     // Real typed YardDetails stays Ok on yard.status failure; diagnostics is
     // failed measurement content rather than a fabricated successful part.
@@ -1224,7 +1273,16 @@ fn view_observation_actor() {
     assert!(current);
     let action = model.read_complete(read.0, &read.1, current, read.3);
     view.fleet(
-        &model, read.0, &read.1, read.2, current, true, &action, read.4,
+        &model,
+        crate::view_observation::FleetAcceptance {
+            generation: read.0,
+            connection: &read.1,
+            current,
+            action: &action,
+        },
+        read.2,
+        true,
+        read.4,
     );
     let scope = Scope {
         connection: None,
@@ -1248,13 +1306,11 @@ fn view_observation_actor() {
         }
     }
     assert!(view.rendered(&model, true).is_none());
-    assert!(
-        observer
-            .terminals()
-            .iter()
-            .any(|row| row.ticket == failed_start.tickets()[0].ordinal()
-                && row.outcome == TerminalOutcome::Retired(Retirement::Unknown))
-    );
+    assert!(observer
+        .terminals()
+        .iter()
+        .any(|row| row.ticket == failed_start.tickets()[0].ordinal()
+            && row.outcome == TerminalOutcome::Retired(Retirement::Unknown)));
     assert!(
         observer
             .terminals()
@@ -1464,12 +1520,14 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
     let action = model.read_complete(first.0, &first.1, current, first.3);
     view.fleet_identified(
         &model,
-        first.0,
-        &first.1,
+        crate::view_observation::FleetAcceptance {
+            generation: first.0,
+            connection: &first.1,
+            current,
+            action: &action,
+        },
         first.2,
-        current,
         true,
-        &action,
         typed_owner.as_deref(),
         first.4,
     );
@@ -1495,12 +1553,14 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
     assert_eq!(action, ReadAction::Applied);
     view.fleet_identified(
         &model,
-        next.0,
-        &next.1,
+        crate::view_observation::FleetAcceptance {
+            generation: next.0,
+            connection: &next.1,
+            current,
+            action: &action,
+        },
         next.2,
-        current,
         true,
-        &action,
         typed_owner.as_deref(),
         next.4,
     );
@@ -1558,12 +1618,14 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
             let action = model.read_complete(generation, &None, true, Ok(changed));
             view.fleet_identified(
                 &model,
-                generation,
-                &None,
+                crate::view_observation::FleetAcceptance {
+                    generation,
+                    connection: &None,
+                    current: true,
+                    action: &action,
+                },
                 next.2,
                 true,
-                true,
-                &action,
                 Some(&owner),
                 None,
             );
@@ -1580,7 +1642,7 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
             }
             second.close();
             loop {
-                if let Update::Closed { .. } = updates.recv_blocking().unwrap() {
+                if let Update::Closed = updates.recv_blocking().unwrap() {
                     break;
                 }
             }
@@ -1588,7 +1650,7 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
         view.close();
         worker.close();
         loop {
-            if let Update::Closed { .. } = updates.recv_blocking().unwrap() {
+            if let Update::Closed = updates.recv_blocking().unwrap() {
                 break;
             }
         }
@@ -1617,12 +1679,14 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
         let sealed = serde_json::to_value(observer.seal()).unwrap();
         view.fleet_identified(
             &model,
-            model.generation,
-            &None,
+            crate::view_observation::FleetAcceptance {
+                generation: model.generation,
+                connection: &None,
+                current: true,
+                action: &ReadAction::Applied,
+            },
             next.2,
             true,
-            true,
-            &ReadAction::Applied,
             Some("synthetic-late-owner"),
             None,
         );
@@ -1639,14 +1703,12 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
             "finished runtime cohort state is immutable to held View callbacks"
         );
         assert_eq!(serde_json::to_value(observer.seal()).unwrap(), sealed);
-        assert!(
-            observer
-                .correlation()
-                .unwrap()
-                .index
-                .iter()
-                .all(|row| row.tag == veranda_lib::observation::EventTag::Unclassifiable)
-        );
+        assert!(observer
+            .correlation()
+            .unwrap()
+            .index
+            .iter()
+            .all(|row| row.tag == veranda_lib::observation::EventTag::Unclassifiable));
         return;
     }
     let mapping = root.join("correlation.json");
@@ -1667,10 +1729,12 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
     // Keep the actual proof; the original Model connection guard must refuse.
     cohorts.lock().unwrap().fleet(
         &model,
-        model.generation,
-        &Some("synthetic-unselected-connection".into()),
-        true,
-        &ReadAction::Applied,
+        &crate::view_observation::FleetAcceptance {
+            generation: model.generation,
+            connection: &Some("synthetic-unselected-connection".into()),
+            current: true,
+            action: &ReadAction::Applied,
+        },
         Some("synthetic-replacement-owner"),
         actual_metadata.as_ref(),
     );
@@ -1695,12 +1759,14 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
     }
     view.fleet_identified(
         &model,
-        generation,
-        &None,
+        crate::view_observation::FleetAcceptance {
+            generation,
+            connection: &None,
+            current: true,
+            action: &action,
+        },
         next.2,
         true,
-        true,
-        &action,
         Some(&replacement_owner),
         if missing_new_proof {
             None
@@ -1715,7 +1781,7 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
     view.close();
     worker.close();
     loop {
-        if let Update::Closed { .. } = updates.recv_blocking().unwrap() {
+        if let Update::Closed = updates.recv_blocking().unwrap() {
             break;
         }
     }

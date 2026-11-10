@@ -6,7 +6,7 @@ import threading
 import time
 import unittest
 
-import support  # Adds the standalone component directory to the import path.
+import support  # noqa: F401 - Adds the standalone component directory to the import path.
 
 
 class TransportTests(unittest.TestCase):

@@ -1443,13 +1443,13 @@ mod windows_access {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
+        CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::*;
     use windows_sys::Win32::Security::*;
     use windows_sys::Win32::Storage::FileSystem::*;
-    use windows_sys::Win32::System::IO::OVERLAPPED;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::IO::OVERLAPPED;
 
     struct LocalAllocation(*mut c_void);
     impl Drop for LocalAllocation {
@@ -1915,15 +1915,13 @@ mod tests {
         assert_eq!(preserved["editor.fontSize"], 17);
         assert_eq!(preserved["unrelated"]["keep"], true);
         assert_eq!(preserved["remote.SSH.configFile"], "new");
-        assert!(
-            fixture
-                .store
-                .write_editor_profile(
-                    &profile,
-                    &[("userdata/User/settings.json", r#"{"unapproved":"change"}"#)]
-                )
-                .is_err()
-        );
+        assert!(fixture
+            .store
+            .write_editor_profile(
+                &profile,
+                &[("userdata/User/settings.json", r#"{"unapproved":"change"}"#)]
+            )
+            .is_err());
         // Persistent profiles do not consume any of the sixteen active leases.
         for index in 0..17 {
             fixture
@@ -1956,18 +1954,16 @@ mod tests {
             .unwrap();
         let target = profile.join("userdata/User/settings.json");
         symlink(profile.join("owner-known-hosts"), &target).unwrap();
-        assert!(
-            fixture
-                .store
-                .write_editor_profile(
-                    &profile,
-                    &[
-                        ("owner-known-hosts", "replacement\n"),
-                        ("userdata/User/settings.json", "{}")
-                    ]
-                )
-                .is_err()
-        );
+        assert!(fixture
+            .store
+            .write_editor_profile(
+                &profile,
+                &[
+                    ("owner-known-hosts", "replacement\n"),
+                    ("userdata/User/settings.json", "{}")
+                ]
+            )
+            .is_err());
         assert_eq!(
             fs::read_to_string(profile.join("owner-known-hosts")).unwrap(),
             "original\n"
@@ -1976,18 +1972,16 @@ mod tests {
         let mut file = create_private_file(&target).unwrap();
         file.write_all(b"not-json").unwrap();
         drop(file);
-        assert!(
-            fixture
-                .store
-                .write_editor_profile(
-                    &profile,
-                    &[
-                        ("owner-known-hosts", "replacement\n"),
-                        ("userdata/User/settings.json", "{}")
-                    ]
-                )
-                .is_err()
-        );
+        assert!(fixture
+            .store
+            .write_editor_profile(
+                &profile,
+                &[
+                    ("owner-known-hosts", "replacement\n"),
+                    ("userdata/User/settings.json", "{}")
+                ]
+            )
+            .is_err());
         assert_eq!(
             fs::read_to_string(profile.join("owner-known-hosts")).unwrap(),
             "original\n"
@@ -2023,49 +2017,41 @@ mod tests {
             "CON.txt",
             "filename.",
         ] {
-            assert!(
-                fixture
-                    .store
-                    .write_editor_profile(&profile, &[(invalid, "metadata")])
-                    .is_err()
-            );
+            assert!(fixture
+                .store
+                .write_editor_profile(&profile, &[(invalid, "metadata")])
+                .is_err());
         }
         for invalid_id in ["../escape", "NUL", "CON.txt", "filename."] {
             assert!(fixture.store.prepare_editor_profile(invalid_id).is_err());
         }
-        assert!(
-            fixture
-                .store
-                .write_editor_profile(
-                    &profile,
-                    &[(
-                        "owner-known-hosts",
-                        "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic forbidden payload"
-                    )]
-                )
-                .is_err()
-        );
-        assert!(
-            fixture
-                .store
-                .write_editor_profile(
-                    &profile,
-                    &[
-                        ("owner-known-hosts", "duplicate"),
-                        ("owner-known-hosts", "duplicate")
-                    ]
-                )
-                .is_err()
-        );
-        assert!(
-            fixture
-                .store
-                .write_editor_profile(
-                    &profile,
-                    &[("owner-known-hosts", &"x".repeat(STORE_LIMIT + 1))]
-                )
-                .is_err()
-        );
+        assert!(fixture
+            .store
+            .write_editor_profile(
+                &profile,
+                &[(
+                    "owner-known-hosts",
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic forbidden payload"
+                )]
+            )
+            .is_err());
+        assert!(fixture
+            .store
+            .write_editor_profile(
+                &profile,
+                &[
+                    ("owner-known-hosts", "duplicate"),
+                    ("owner-known-hosts", "duplicate")
+                ]
+            )
+            .is_err());
+        assert!(fixture
+            .store
+            .write_editor_profile(
+                &profile,
+                &[("owner-known-hosts", &"x".repeat(STORE_LIMIT + 1))]
+            )
+            .is_err());
         assert_eq!(
             fs::read_to_string(profile.join("owner-known-hosts")).unwrap(),
             "public original pin\n"
@@ -2096,18 +2082,14 @@ mod tests {
             )
             .unwrap();
         let path = profile.join("owner-known-hosts");
-        assert!(
-            session
-                .owner_command_with_pin(&["bash".into(), "-l".into()], true, &path)
-                .is_ok()
-        );
+        assert!(session
+            .owner_command_with_pin(&["bash".into(), "-l".into()], true, &path)
+            .is_ok());
         assert!(session.proxy_command_with_pin(2222, &path).is_ok());
         assert!(session.proxy_command_with_pin(0, &path).is_err());
-        assert!(
-            session
-                .owner_command(&["bash".into(), "-l".into()], true)
-                .is_ok()
-        );
+        assert!(session
+            .owner_command(&["bash".into(), "-l".into()], true)
+            .is_ok());
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -2200,7 +2182,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let registered = fixture.register();
         let reloaded = ConnectionStore::new(fixture.store.root.clone());
-        assert_eq!(reloaded.list().unwrap(), [registered.clone()]);
+        assert_eq!(reloaded.list().unwrap(), std::slice::from_ref(&registered));
         assert_eq!(
             reloaded.selected_connection_id().unwrap(),
             Some(registered.id.clone())
@@ -2412,17 +2394,15 @@ mod tests {
         );
         assert_eq!(reopened.desktop_document().unwrap(), b"{}");
         assert!(reopened.save_desktop_document(b"{}", b"invalid").is_err());
-        assert!(
-            reopened
-                .save_desktop_document(b"{}", &vec![b' '; DESKTOP_LIMIT + 1])
-                .is_err()
-        );
+        assert!(reopened
+            .save_desktop_document(b"{}", &vec![b' '; DESKTOP_LIMIT + 1])
+            .is_err());
         assert_eq!(reopened.desktop_document().unwrap(), b"{}");
     }
     #[cfg(unix)]
     #[test]
     fn desktop_document_refuses_public_hardlinked_or_symlinked_state() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
         let fixture = Fixture::new();
         fixture.store.save_desktop_document(&[], b"{}").unwrap();
         let file = fixture.store.root.join(DESKTOP_FILE);
@@ -2448,7 +2428,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinks_hardlinks_and_public_permissions_are_refused() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
         let mut fixture = Fixture::new();
         fixture.register();
         let root = fixture.store.root.clone();

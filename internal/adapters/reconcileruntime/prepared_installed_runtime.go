@@ -322,7 +322,7 @@ func (runtime Runtime) PrepareInstalledRuntime(ctx context.Context, owner string
 	if err != nil {
 		return nil, err
 	}
-	paths := []string{}
+	var paths []string
 	if owner == "core-guest-runtime" {
 		p.leaves = []string{"refresh-installed-guest-runtime.sh"}
 		paths = []string{"scripts/refresh-installed-guest-runtime.sh", "scripts/prepare-preview-route.sh", "config/preview/subyard-preview", "config/agents/ccusage/provision.sh"}

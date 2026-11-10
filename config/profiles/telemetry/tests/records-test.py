@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-import importlib.util
 import fcntl
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest

@@ -2,8 +2,8 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::time::Instant;
 
@@ -1390,12 +1390,11 @@ mod tests {
         let records = serde_json::to_value(observation.records()).unwrap();
         let allowed = ["source", "ticket", "request", "elapsed_micros", "phase"];
         for row in records.as_array().unwrap() {
-            assert!(
-                row.as_object()
-                    .unwrap()
-                    .keys()
-                    .all(|key| allowed.contains(&key.as_str()))
-            );
+            assert!(row
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| allowed.contains(&key.as_str())));
         }
     }
     #[test]
@@ -1426,12 +1425,10 @@ mod tests {
         let foreign = Observation::new();
         let foreign_source = foreign.source(SourceKind::Local);
         foreign_source.request().unwrap();
-        assert!(
-            observation
-                .live(&foreign_source.batch())
-                .tickets()
-                .is_empty()
-        );
+        assert!(observation
+            .live(&foreign_source.batch())
+            .tickets()
+            .is_empty());
         assert_eq!(observation.counts().rejected_batch_tickets, 1);
         observation.retire(&source.batch(), Retirement::Superseded);
         let live = observation.live(&combined);
@@ -1519,12 +1516,10 @@ mod tests {
             Some(SourceKind::Remote),
             "cohort must survive even when this source's phase row was dropped"
         );
-        assert!(
-            !observer
-                .records()
-                .iter()
-                .any(|row| row.source == late_source.ordinal())
-        );
+        assert!(!observer
+            .records()
+            .iter()
+            .any(|row| row.source == late_source.ordinal()));
         for _ in 5004..MAX_TERMINALS + 3 {
             source.request().unwrap();
             observer.complete(&source.batch(), 11, clock, 17, Instant::now());
@@ -1595,12 +1590,10 @@ mod correlation_tests {
         assert!(source.event_tagger().is_none());
         source.received(1, Instant::now()).unwrap();
         assert!(observer.correlation().is_none());
-        assert!(
-            serde_json::to_value(observer.seal())
-                .unwrap()
-                .get("correlation")
-                .is_none()
-        );
+        assert!(serde_json::to_value(observer.seal())
+            .unwrap()
+            .get("correlation")
+            .is_none());
     }
     #[test]
     fn correlation_retains_failed_admissions_and_index_counts_after_phase_overflow() {
@@ -1610,15 +1603,9 @@ mod correlation_tests {
             source.request().unwrap();
         }
         for sequence in 1..=MAX_CORRELATIONS as u64 + 2 {
-            assert!(
-                source
-                    .received_classified(
-                        sequence,
-                        Instant::now(),
-                        Some(EventTag::Matched(sequence))
-                    )
-                    .is_none()
-            );
+            assert!(source
+                .received_classified(sequence, Instant::now(), Some(EventTag::Matched(sequence)))
+                .is_none());
         }
         let correlation = observer.correlation().unwrap();
         assert_eq!(correlation.counts.valid_raw, MAX_CORRELATIONS as u64 + 2);
@@ -1712,24 +1699,20 @@ mod correlation_tests {
         let sealed = serde_json::to_value(observer.seal()).unwrap();
         release.wait();
         worker.join().unwrap();
-        assert!(
-            source
-                .classify_event(ValidatedEvent {
-                    event: "synthetic",
-                    operation_id: "",
-                    sequence: 2,
-                    revision: 2,
-                    received: Instant::now(),
-                    frame: b"{}"
-                })
-                .is_none()
-        );
+        assert!(source
+            .classify_event(ValidatedEvent {
+                event: "synthetic",
+                operation_id: "",
+                sequence: 2,
+                revision: 2,
+                received: Instant::now(),
+                frame: b"{}"
+            })
+            .is_none());
         let later = observer.source(SourceKind::Local);
-        assert!(
-            later
-                .received_classified(1, Instant::now(), Some(EventTag::Other))
-                .is_none()
-        );
+        assert!(later
+            .received_classified(1, Instant::now(), Some(EventTag::Other))
+            .is_none());
         drop(later);
         drop(source);
         assert_eq!(serde_json::to_value(observer.seal()).unwrap(), sealed);
@@ -1771,12 +1754,10 @@ mod unresolved_classification_tests {
             correlation.counts.admission_drops,
             (MAX_CORRELATIONS + 1 - MAX_PENDING) as u64
         );
-        assert!(
-            correlation
-                .index
-                .iter()
-                .all(|row| row.classification == CorrelationClassification::Pending)
-        );
+        assert!(correlation
+            .index
+            .iter()
+            .all(|row| row.classification == CorrelationClassification::Pending));
         let sealed = serde_json::to_value(observer.seal()).unwrap();
         let correlation = observer.correlation().unwrap();
         assert_eq!(correlation.counts.classification_pending, 0);
@@ -1789,12 +1770,10 @@ mod unresolved_classification_tests {
             correlation.counts.classification_unknown
         );
         assert_eq!(observer.counts().unknown, MAX_PENDING as u64);
-        assert!(
-            correlation
-                .index
-                .iter()
-                .all(|row| row.classification == CorrelationClassification::Unknown)
-        );
+        assert!(correlation
+            .index
+            .iter()
+            .all(|row| row.classification == CorrelationClassification::Unknown));
         drop(source);
         assert_eq!(serde_json::to_value(observer.seal()).unwrap(), sealed);
     }

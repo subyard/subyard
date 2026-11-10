@@ -24,7 +24,7 @@ cli-docs-check: build
 	python3 dev/generate-cli-docs.py --check
 
 lint:
-	bash dev/lint-go.sh
+	bash dev/lint.sh
 
 verify:
 	bash dev/test-profiles.sh --permissions-only

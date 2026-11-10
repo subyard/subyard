@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Owner-level retry proof with real unit files and mocked native manager."""
 import importlib.util
-import json
 import os
 from pathlib import Path
 import sys

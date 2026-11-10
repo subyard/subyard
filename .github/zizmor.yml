@@ -1,0 +1,7 @@
+rules:
+  cache-poisoning:
+    ignore:
+      # setup-go caches only the native Go prerequisite for client contract tests.
+      # Veranda's tag/manual triggers run tests and builds; this workflow never
+      # uploads artifacts or publishes releases. Retain its test prerequisite cache.
+      - veranda.yml:38:9

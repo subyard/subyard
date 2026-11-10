@@ -392,10 +392,9 @@ func TestV2CheckpointConversionRequiresConsentAndCompletesAtReadyBoundary(t *tes
 				outcome, err = transition.Converge(context.Background(), Execution{
 					Plan: resume.Plan,
 				})
-			} else if faultPoint == "after-checkpoint-publication" && err == nil {
-				// The injected process loss happened after the atomic authority
-				// switch; the reducer observes ready state on the new authority.
 			}
+			// A process loss after the atomic authority switch already leaves
+			// the reducer observing ready state on the new authority.
 			if err != nil || outcome.Status != StatusReady {
 				t.Fatalf("checkpoint conversion = %#v, err=%v", outcome, err)
 			}

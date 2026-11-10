@@ -185,7 +185,7 @@ func (store *POSIXV2Store) readRecoveryReceiptsAt(parts []string) (map[Transacti
 	predecessors := make(map[TransactionID]TransactionID, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		transactionName := name
+		var transactionName string
 		if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json.pending") {
 			transactionName = strings.TrimSuffix(strings.TrimPrefix(name, "."), ".json.pending")
 		} else if strings.HasSuffix(name, ".json") {

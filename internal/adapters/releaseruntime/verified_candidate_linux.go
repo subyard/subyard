@@ -66,11 +66,6 @@ func experimentalReleaseOwnerPath(path string) bool {
 	return false
 }
 
-func lowerSHA256(value string) bool {
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
-}
-
 func (runtime *Runtime) verifyPublishedCandidate(
 	ctx context.Context,
 	candidate publishedCandidate,
