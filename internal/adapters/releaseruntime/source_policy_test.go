@@ -36,6 +36,9 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 		{"unfinished modern source", aboveAnchor.String(), "", true, false, true},
 		{"complete old-source journal", UpdateAnchorVersion, "", true, false, true},
 		{"exact unfinished anchor owner", UpdateAnchorVersion, "", true, false, true},
+		{"unfinished rollback before activation", "0.26.0", "", true, false, false},
+		{"unfinished rollback after activation", "0.25.5", "", true, false, false},
+		{"pending identity and unfinished rollback", "0.25.5", "", true, false, false},
 		{"missing provenance", "0.11.0", "", false, false, false},
 		{"unparseable source", "development", "", true, false, false},
 		{"invalid fixture version", "0.26.0.next", "", true, false, false},
@@ -100,7 +103,12 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 					journal.Goal.Target = releasetransition.ReleaseID(aboveAnchor.String() + "-bbbbbbbbbbbb")
 					journal.Releases.Target = journal.Goal.Target
 				}
-				if scenario.name != "unfinished before activation" {
+				if strings.Contains(scenario.name, "rollback") {
+					journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+					journal.Goal.Target = "0.25.5-bbbbbbbbbbbb"
+					journal.Releases.Target = journal.Goal.Target
+				}
+				if !strings.Contains(scenario.name, "before activation") {
 					journal.Checkpoint = releasetransition.JournalReconciling
 				}
 				if scenario.name == "complete old-source journal" {
@@ -109,7 +117,7 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 				if scenario.name == "exact unfinished anchor owner" {
 					target, artifact = journal.Goal.Target, journal.ArtifactDigest
 				}
-				if scenario.name != "unfinished before activation" {
+				if !strings.Contains(scenario.name, "before activation") {
 					journal.Goal.Target = releasetransition.ReleaseID(release)
 					journal.Releases.Target = journal.Goal.Target
 					if scenario.name == "exact unfinished anchor owner" {
@@ -121,7 +129,7 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 					t.Fatal(err)
 				}
 				write(filepath.Join(configHome, "release-transition/v2/journal.json"), payload, 0o600)
-				if scenario.name != "unfinished before activation" {
+				if !strings.Contains(scenario.name, "before activation") {
 					if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", string(journal.Releases.From)), 0o700); err != nil {
 						t.Fatal(err)
 					}
@@ -144,8 +152,16 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 				t.Fatalf("source policy allowed=%t: %v", scenario.allowed, err)
 			}
 			if strings.Contains(scenario.name, "unfinished") && !scenario.allowed {
-				if !strings.Contains(err.Error(), "must be completed by its original owner") || !strings.Contains(err.Error(), "yard update --version "+UpdateAnchorVersion) {
+				anchor, plain := sourceUpdateCommands(UpdateAnchorVersion, runtimeRoot)
+				continuation := anchor
+				if strings.Contains(scenario.name, "rollback") {
+					continuation = plain
+				}
+				if !strings.Contains(err.Error(), "must be completed by its original owner") || !strings.Contains(err.Error(), "next: "+continuation) {
 					t.Fatalf("lost owner continuation: %v", err)
+				}
+				if strings.Contains(scenario.name, "rollback") && strings.Contains(err.Error(), "yard update --version") {
+					t.Fatalf("rollback offered a fresh update: %v", err)
 				}
 				if strings.HasPrefix(scenario.name, "pending identity") && !strings.Contains(err.Error(), "developer identity transition is pending") {
 					t.Fatalf("lost independent identity refusal: %v", err)
@@ -157,7 +173,7 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 						t.Fatalf("invalid version became destructive pre-floor guidance: %v", err)
 					}
 				} else if semver.MustParse(scenario.version).GTE(semver.MustParse(MinimumSourceVersion)) {
-					if !strings.Contains(err.Error(), "source-anchor-required") || !strings.Contains(err.Error(), "yard update --version "+UpdateAnchorVersion) || strings.Contains(err.Error(), "uninstall") {
+					if !strings.Contains(err.Error(), "source-anchor-required") || (!strings.Contains(scenario.name, "rollback") && !strings.Contains(err.Error(), "yard update --version "+UpdateAnchorVersion)) || strings.Contains(err.Error(), "uninstall") {
 						t.Fatalf("missing anchor guidance: %v", err)
 					}
 				} else if !strings.Contains(err.Error(), "uninstall --full") {

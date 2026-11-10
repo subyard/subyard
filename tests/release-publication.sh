@@ -865,6 +865,11 @@ class Contracts(unittest.TestCase):
             git("add", "dev")
             git("commit", "-q", "-m", "pin side-branch release")
             self.assertEqual(REAL_BASELINE_REFUSALS("1.2.4", "HEAD"), [])
+            # Hotfix branches retain the original three-column direct-pin format.
+            pins.write_text("\n".join("\t".join(line.split("\t")[:3]) for line in pins.read_text().splitlines()) + "\n")
+            git("add", "dev")
+            git("commit", "-q", "-m", "legacy hotfix pin format")
+            self.assertEqual(REAL_BASELINE_REFUSALS("1.2.4", "HEAD"), [])
 
     def test_accept_records_release_level_and_full_level_requires_every_vm_check(self):
         directory = self.directory / "r123-a1"

@@ -120,8 +120,8 @@ addresses then allow its own instance. A duplicate local registration verifies t
 and config-status refusal text and retention. Collision kinds and activation ownership
 refusal remain host-free.
 
-The `source-upgrade` lane starts from a checksum-pinned installed v0.27.0 release and
-covers explicit test-owner recreation, retained ordinary-yard state and later installed updates.
+The `source-upgrade` lane creates schema-1 settings on pinned v0.11.0, updates through
+the shared published anchor, and covers explicit test-owner recreation, retained ordinary-yard state and later installed updates.
 Fresh pre-v0.11.0 source upgrades are outside the
 [approved support boundary](reference/legacy-migration-support.md).
 
@@ -134,7 +134,7 @@ the no-agent matrix alone does not establish agent migration compatibility.
 | Contract | Owning unit checks | Local integration | Physical gate | Trigger |
 | --- | --- | --- | --- | --- |
 | Legacy config normalization and pure stdin/stdout | `go:migration`: `TestNormalizeLegacyYardConfigContent` | `go:cli`: `TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery` runs CLI stdin/stdout against a real filesystem fixture | None; the CLI filesystem fixture owns normalization | Normalizer or source ingress changes |
-| Source authorization, journal binding and recovery | `go:releasetransition`: journal codecs and in-memory source inspection normalization | `go:releasetransition`: source order/drift/recovery over filesystem fixtures; `go:cli`: candidate process/source ingress checks; `shell:engine-release`: installer/update/rollback | `p0:source-upgrade`: pinned v0.27.0 install, explicit legacy test-owner recreation and retained ordinary-yard data/identity/power | Transition/installer changes |
+| Source authorization, journal binding and recovery | `go:releasetransition`: journal codecs and in-memory source inspection normalization | `go:releasetransition`: source order/drift/recovery over filesystem fixtures; `go:cli`: candidate process/source ingress checks; `shell:engine-release`: installer/update/rollback | `p0:source-upgrade`: pinned v0.11.0 creation through the shared anchor, explicit legacy test-owner recreation and retained ordinary-yard data/identity/power | Transition/installer changes |
 | Config precedence, safe diagnostics and drift | `go:config`: `TestResolveIntegrationSelection` | `go:config`: precedence over persisted layers; `go:cli`: config paths/show/status/apply tests use persisted config fixtures and native materialization; `shell:engine-release`: installed process checks | `p0:source-upgrade`: config apply/status plus actual guest file hash | Config resolver/materializer changes |
 | Status space cache freshness and selectors | `go:adapters/statusruntime`: `TestDescribeSpaceCache` uses fixed time and an injected refresh request | `go:adapters/statusruntime`: cache persistence and synchronous/asynchronous refresh contracts; `go:cli`: `TestStatusRoutesSummaryAndExplicitYardSelectors` and `TestSpace*` | `dev/e2e/status-fast-acceptance.sh`: real container refresh, separate `/srv` mount and verified same-inode storage allocation; `p0:real-incus` retains VM adapter compatibility | Status cache or space measurement changes |
 | Generic resource consent, exact plans and retained data | `go:resource`: `TestStructuredPrepareContract`; `go:cli`: stream prompt logic | `go:resource`: registry/assessment over descriptor files; `go:cli`: resource command/prepared tests execute handlers; `TestResourceExactTerminalConsentAndRetainedData` adds real files and PTY; shipped profile host-free checks own handler semantics | `p0:profile-resource`: bound-resource profile; shipped profile E2E gates own external services | Resource contract or profile changes (`profile-generic` and owning profile sets) |

@@ -76,7 +76,7 @@ trap 'printf "disabled-components-release: line %s failed (exit %s)\n" "$LINENO"
 . "$ROOT/dev/e2e/published-baseline.sh"
 
 seed_sources() {
-  local host_id host_base
+  local host_id host_base name port
   [ ! -e "$GIT_ROOT" ] && [ ! -L "$GIT_ROOT" ] || die 'Git fixture path already exists'
   sudo -n install -d -o "$OPERATOR" -g "$OPERATOR" -m 0700 "$GIT_ROOT"
   operator_env bash -c 'printf "%s\n" "$2" > "$1/.marker"; chmod 0600 "$1/.marker"' _ "$GIT_ROOT" "$MARKER"
@@ -84,35 +84,36 @@ seed_sources() {
   operator_env bash -c '
     set -eu
     root=$1; host=$2
-    install -d -m 0700 "$root/source/hosts/$host/yards/default" "$root/source/hosts/$host/yards/hermes"
+    install -d -m 0700 "$root/source/hosts/$host/yards/default"
     printf "{\"schemaVersion\":1}\n" > "$root/source/subyard-config.json"
-    printf "CODING_TOOL_INTEGRATIONS=\047codex opencode\047\nSSH_PORT=2228\n" > "$root/source/hosts/$host/config.env"
-    printf "CODING_TOOL_INTEGRATIONS=codex\nSSH_PORT=2222\n" > "$root/source/hosts/$host/yards/default/config.env"
-    printf "SSH_PORT=2233\n" > "$root/source/hosts/$host/yards/hermes/config.env"
+    printf "CODING_TOOL_INTEGRATIONS=\047codex opencode\047\n" > "$root/source/hosts/$host/config.env"
+    printf "CODING_TOOL_INTEGRATIONS=codex\n" > "$root/source/hosts/$host/yards/default/config.env"
     find "$root/source" -type f -exec chmod 0600 {} +
     git -C "$root/source" init -q
     git -C "$root/source" add -- .
-    git -C "$root/source" -c user.name="Subyard Test" -c user.email=test@invalid commit -qm "Seed isolated selection and ports"
+    git -C "$root/source" -c user.name="Subyard Test" -c user.email=test@invalid commit -qm "Seed isolated integration selection"
     # Remove the helper fixture legacy empty alias before connecting canonical Git settings.
     sed -i "/^AGENTS=/d" "$3"
   ' _ "$GIT_ROOT" "$host_id" "$CONFIG_HOME/config.env"
+  # The published anchor already owns SSH localization. Seed its normal local
+  # listener settings; this lane covers disabled selections, not the frozen migration.
   for name in default hermes; do
     host_base="$OPERATOR_HOME/host-data"
-    [ "$name" = default ] || host_base="$OPERATOR_HOME/host-data-$name"
+    port=2222
+    [ "$name" = default ] || { host_base="$OPERATOR_HOME/host-data-$name"; port=2233; }
     operator_env install -d -m 0700 "$CONFIG_HOME/yards/$name"
-    operator_env bash -c 'printf "HOST_BASE=%s\nRESTRICTED_DISK_PATHS=%s\nFORWARD_SSH_AGENT=0\n" "$2" "$2" > "$1"; chmod 0600 "$1"' _ \
-      "$CONFIG_HOME/yards/$name/config.env" "$host_base"
+    operator_env bash -c 'printf "HOST_BASE=%s\nRESTRICTED_DISK_PATHS=%s\nFORWARD_SSH_AGENT=0\nSSH_PORT=%s\n" "$2" "$2" "$3" > "$1"; chmod 0600 "$1"' _ \
+      "$CONFIG_HOME/yards/$name/config.env" "$host_base" "$port"
   done
   # Hermes is an environment profile, not a YARD_TEMPLATE. Keep its installed
-  # preset guards, with selection and ports inherited from the isolated Git source.
+  # preset guards, with Git integration selection and the local listener above.
   operator_env bash -c '
     set -eu
     sed -e "/^CODING_TOOL_INTEGRATIONS=/d" -e "/^SSH_PORT=/d" -e "/^FORWARD_SSH_AGENT=/d" "$2" >> "$1"
   ' _ "$CONFIG_HOME/yards/hermes/config.env" "$OPERATOR_HOME/.subyard/runtime/current/config/profiles/hermes/yard.env"
   operator_yard config sync connect "$GIT_ROOT/source" --host-id "$host_id" --checkout "$GIT_ROOT/checkout" --yes
   operator_env sha256sum "$GIT_ROOT/source/hosts/$host_id/config.env" \
-    "$GIT_ROOT/source/hosts/$host_id/yards/default/config.env" \
-    "$GIT_ROOT/source/hosts/$host_id/yards/hermes/config.env" > "$STATE_ROOT/source.before"
+    "$GIT_ROOT/source/hosts/$host_id/yards/default/config.env" > "$STATE_ROOT/source.before"
 }
 
 create_yards() {
@@ -123,8 +124,16 @@ create_yards() {
     ! incus project show "$project" >/dev/null 2>&1 || die 'fixture project already exists'
     [ "$name" != default ] || printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
     [ "$name" != hermes ] || printf '%s\n' "$MARKER" > "$EXTRA_PROJECT_ARMED"
-    incus project create "$project" -c features.images=false -c user.p0-power-systemd="$MARKER" >/dev/null
-    operator_yard -Y "$name" init --yes
+    # Published init owns project creation. Retry against the shared cached image
+    # only after it created an empty project, as in the published-upgrade lane.
+    if ! operator_yard -Y "$name" init --yes > "$STATE_ROOT/$name-init-first.log" 2>&1; then
+      incus project show "$project" >/dev/null 2>&1 \
+        && [ -z "$(incus list --project "$project" --format csv -c n)" ] \
+        || { cat "$STATE_ROOT/$name-init-first.log" >&2; die 'published init failed before its image step'; }
+      incus project set "$project" features.images=false
+      operator_yard -Y "$name" init --yes
+    fi
+    incus project set "$project" user.p0-power-systemd="$MARKER"
     operator_yard -Y "$name" start --yes
   done
 }
@@ -256,7 +265,7 @@ assert_candidate() {
     operator_yard -Y "$name" config show SSH_PORT > "$STATE_ROOT/$name-port.txt"
     grep -Fxq "effective: $expected" "$STATE_ROOT/$name-port.txt" || die 'persistent endpoint changed'
     if ! operator_env grep -Fxq "SSH_PORT='$expected'" "$CONFIG_HOME/yards/$name/config.env"; then
-      operator_env grep -Fxq "SSH_PORT=$expected" "$CONFIG_HOME/yards/$name/config.env" || die 'legacy Git port was not pinned locally'
+      operator_env grep -Fxq "SSH_PORT=$expected" "$CONFIG_HOME/yards/$name/config.env" || die 'local SSH port changed'
     fi
     project=subyard; instance=yard
     [ "$name" = default ] || { project=subyard-hermes; instance=yard-hermes; }

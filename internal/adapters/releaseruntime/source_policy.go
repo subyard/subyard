@@ -145,6 +145,7 @@ func verifyHistoricalUninstallSource(ctx context.Context, runtimeRoot string) (*
 // predates the ordinary admission floor; the transition validates that binding.
 func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessRequest) (refusal error) {
 	var identityErr, unfinishedErr error
+	unfinishedRollback := false
 	defer func() { refusal = domain.CollectRefusals(identityErr, unfinishedErr, refusal) }()
 	if pending, err := config.PendingDeveloperIdentities(request.ConfigHome); err != nil {
 		identityErr = err
@@ -173,7 +174,11 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			source, err := releasetransition.ReleaseIDVersion(journal.Releases.From)
 			if err == nil && source.LT(semver.MustParse(UpdateAnchorVersion)) {
 				owner, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)
-				if err != nil {
+				if journal.Goal.Direction == releasetransition.DirectionActivatePrevious {
+					unfinishedRollback = true
+					_, command := sourceUpdateCommands(source.String(), request.RuntimeRoot)
+					unfinishedErr = fmt.Errorf("source-anchor-required: unfinished rollback from v%s must be completed by its original owner; next: %s", source, command)
+				} else if err != nil {
 					unfinishedErr = fmt.Errorf("source-anchor-required: unfinished update from v%s must be completed by its original owner %s before replacing it", source, journal.Goal.Target)
 				} else {
 					command, _ := sourceUpdateCommands(owner.String(), request.RuntimeRoot)
@@ -202,9 +207,17 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 	if !strings.HasPrefix(string(observed.Active), verified.version+"-") {
 		return errors.New("source release identity does not match its sealed version")
 	}
+	admissionErr := sourceVersionError(verified.version, request.RuntimeRoot)
+	if unfinishedRollback {
+		// Resuming the captured rollback is not a fresh update through the anchor.
+		// Keep invalid-version/provenance refusals independently discoverable.
+		if version, err := semver.Parse(verified.version); err == nil && version.GTE(semver.MustParse(MinimumSourceVersion)) {
+			admissionErr = nil
+		}
+	}
 	if verified.registryDigest == "" {
-		if err := sourceVersionError(verified.version, request.RuntimeRoot); err != nil {
-			return err
+		if admissionErr != nil {
+			return admissionErr
 		}
 		return errors.New(LegacyReinstallGuidance)
 	}
@@ -251,5 +264,5 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			return nil
 		}
 	}
-	return sourceVersionError(verified.version, request.RuntimeRoot)
+	return admissionErr
 }

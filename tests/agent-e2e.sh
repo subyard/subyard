@@ -2774,7 +2774,6 @@ grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' 
     "$ROOT/tests/engine-release.sh" \
   || fail "host-free engine release can observe the physical host power reconciler"
 v0111_recovery="$ROOT/dev/e2e/release-transition-v0111-recovery.sh"
-v0111_observer="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
 v0111_fixture_env="$(bash -c '
   set -euo pipefail
   source "$1"
@@ -2808,231 +2807,6 @@ bash -c '
   ! grep -Eq "^(YARD_TEMPLATE|NESTED_E2E_VMS|E2E_VM_)" "$registration"
 ' _ "$v0111_recovery" "$TMP/v0111-config" \
   || fail 'v0.11.1 config-drift fixture must allow the selected Codex integration'
-prepare_v0111_observer_probe() {
-  local probe="$1"
-  mkdir -p "$probe/runtime/releases/source" "$probe/runtime/releases/0.11.2-candidate"
-  ln -s releases/source "$probe/runtime/current"
-  printf '{"transaction":"source","checkpoint":"reconciling"}\n' > "$probe/journal.json"
-}
-run_v0111_observer() {
-  local probe="$1"
-  shift
-  exec setsid python3 "$v0111_observer" \
-    --runtime-root "$probe/runtime" --journal "$probe/journal.json" \
-    --source-transaction source --candidate-target 0.11.2-candidate \
-    --marker "$probe/observed.json" --timeout 5 "$@"
-}
-assert_no_later_mutations() {
-  local before
-  before="$(sha256sum "$@")"
-  sleep 0.2
-  [ "$(sha256sum "$@")" = "$before" ] || fail "post-CAS process kept mutating: $*"
-}
-v0111_observer_probe="$TMP/v0111-post-cas-observer"
-prepare_v0111_observer_probe "$v0111_observer_probe"
-v0111_observer_rc=0
-run_v0111_observer "$v0111_observer_probe" -- \
-  sh -c '
-    sleep 0.05
-    printf "{\"transaction\":\"candidate\",\"checkpoint\":\"activation-intent\",\"goal\":{\"target\":\"0.11.2-candidate\",\"direction\":\"activate-target\"},\"releases\":{\"from\":\"source\",\"target\":\"0.11.2-candidate\"}}\\n" \
-      > "$1/journal.next"
-    mv "$1/journal.next" "$1/journal.json"
-    ln -s releases/0.11.2-candidate "$1/runtime/current.next"
-    mv -T "$1/runtime/current.next" "$1/runtime/current"
-    sleep 5
-  ' _ "$v0111_observer_probe" \
-  >/dev/null 2>"$v0111_observer_probe/stderr" &
-v0111_observer_pid=$!
-if wait "$v0111_observer_pid"; then
-  v0111_observer_rc=0
-else
-  v0111_observer_rc=$?
-fi
-[ "$v0111_observer_rc" = 137 ] \
-  && [ "$(stat -c '%a' "$v0111_observer_probe/observed.json")" = 600 ] \
-  && jq -e '.transaction == "candidate" and
-    .checkpoint == "activation-intent" and
-    .active == "releases/0.11.2-candidate"' \
-    "$v0111_observer_probe/observed.json" >/dev/null \
-  || fail 'v0.11.1 post-CAS observer did not interrupt its synthetic link activation'
-checkpoint_observer_rc=0
-run_v0111_observer "$v0111_observer_probe" \
-  --checkpoint "$v0111_observer_probe/history-checkpoint.json" \
-  --marker "$v0111_observer_probe/checkpoint-observed.json" -- \
-  sh -c '
-    flock "$1/checkpoint-child.lock" sh -c '\''touch "$1/checkpoint-child.ready"; sleep 10'\'' _ "$1" &
-    while [ ! -f "$1/checkpoint-child.ready" ]; do sleep 0.01; done
-    sleep 0.05
-    printf "{\"schemaVersion\":1,\"domains\":{\"settings\":{\"epoch\":2,\"compactedThrough\":2,\"appliedSuffix\":[]}}}\n" \
-      > "$1/checkpoint.next"
-    mv "$1/checkpoint.next" "$1/history-checkpoint.json"
-    sleep 5
-  ' _ "$v0111_observer_probe" \
-  >/dev/null 2>"$v0111_observer_probe/checkpoint.stderr" &
-checkpoint_observer_pid=$!
-wait "$checkpoint_observer_pid" || checkpoint_observer_rc=$?
-[ "$checkpoint_observer_rc" = 137 ] \
-  && jq -e '.migrationCheckpoint.domains.settings.compactedThrough == 2' \
-    "$v0111_observer_probe/checkpoint-observed.json" >/dev/null \
-  || fail 'checkpoint observer did not interrupt its atomic publication'
-flock -n "$v0111_observer_probe/checkpoint-child.lock" true \
-  || fail 'checkpoint observer left a delegated child alive after interruption'
-ledger_observer_probe="$TMP/v0111-ledger-queued"
-prepare_v0111_observer_probe "$ledger_observer_probe"
-python3 - "$ledger_observer_probe" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-steps = []
-for position, migration in enumerate(('introduce-owner-publication-state-v1', 'localize-ssh-port-settings-v3')):
-    payload = json.dumps({'schemaVersion': 2, 'domains': {'settings': {'epoch': position+2, 'applied': []}}}).encode()+b'\n'
-    (root/('ledger-'+str(position))).write_bytes(payload)
-    steps.append({'id': migration+'.ledger', 'migration': migration,
-                  'desiredFingerprint': hashlib.sha256(payload).hexdigest(), 'checkpoint': 'verified'})
-(root/'prepared-journal').write_text(json.dumps({'transaction': 'candidate', 'checkpoint': 'migrating',
-    'goal': {'target': '0.11.2-candidate'}, 'steps': steps}))
-PY
-ledger_observer_rc=0
-run_v0111_observer "$ledger_observer_probe" --ledger "$ledger_observer_probe/ledger.json" \
-  --migration localize-ssh-port-settings-v3 -- \
-  sh -c '
-    flock "$1/child.lock" sh -c '\''touch "$1/child.ready"; sleep 10'\'' _ "$1" &
-    while [ ! -f "$1/child.ready" ]; do sleep 0.01; done
-    touch "$1/ready"
-    while [ ! -f "$1/release" ]; do sleep 0.01; done
-    for position in 0 1; do
-      cp "$1/ledger-$position" "$1/ledger.next"
-      mv "$1/ledger.next" "$1/ledger.json"
-    done
-    cp "$1/prepared-journal" "$1/journal.next"
-    mv "$1/journal.next" "$1/journal.json"
-    touch "$1/done"
-    sleep 10
-  ' _ "$ledger_observer_probe" > /dev/null 2>"$ledger_observer_probe/stderr" &
-ledger_observer_pid=$!
-for _ in $(seq 1 100); do [ ! -f "$ledger_observer_probe/ready" ] || break; sleep 0.01; done
-[ -f "$ledger_observer_probe/ready" ] || fail 'queued ledger updater did not start'
-kill -STOP "$ledger_observer_pid"
-touch "$ledger_observer_probe/release"
-for _ in $(seq 1 100); do [ ! -f "$ledger_observer_probe/done" ] || break; sleep 0.01; done
-kill -CONT "$ledger_observer_pid"
-[ -f "$ledger_observer_probe/done" ] || fail 'queued ledger updater did not publish both CAS values'
-wait "$ledger_observer_pid" || ledger_observer_rc=$?
-[ "$ledger_observer_rc" = 137 ] \
-  && jq -e --arg desired "$(sha256sum "$ledger_observer_probe/ledger-1" | awk '{print $1}')" \
-    '.transaction == "candidate" and .checkpoint == "migrating" and .ledgerFingerprint == $desired' \
-    "$ledger_observer_probe/observed.json" >/dev/null \
-  && flock -n "$ledger_observer_probe/child.lock" true \
-  || fail 'ledger observer missed queued CAS values or retained a delegated child'
-v0111_unisolated_rc=0
-python3 "$v0111_observer" \
-  --runtime-root "$v0111_observer_probe/runtime" \
-  --journal "$v0111_observer_probe/journal.json" \
-  --source-transaction source --candidate-target 0.11.2-candidate \
-  --marker "$v0111_observer_probe/unisolated.json" --timeout 1 -- true \
-  >/dev/null 2>"$v0111_observer_probe/unisolated.stderr" \
-  || v0111_unisolated_rc=$?
-[ "$v0111_unisolated_rc" = 2 ] \
-  && grep -Fq 'observer must be an isolated process-group leader' \
-    "$v0111_observer_probe/unisolated.stderr" \
-  || fail 'v0.11.1 post-CAS observer accepts an unisolated process group'
-v0111_timeout_probe="$TMP/v0111-post-cas-timeout"
-prepare_v0111_observer_probe "$v0111_timeout_probe"
-v0111_timeout_rc=0
-run_v0111_observer "$v0111_timeout_probe" --timeout 0.2 -- \
-  sh -c '
-    while :; do
-      printf "mutation\n" >> "$1/mutations"
-      sleep 0.02
-    done
-  ' _ "$v0111_timeout_probe" \
-  >/dev/null 2>"$v0111_timeout_probe/stderr" &
-v0111_timeout_pid=$!
-if wait "$v0111_timeout_pid"; then
-  v0111_timeout_rc=0
-else
-  v0111_timeout_rc=$?
-fi
-for _ in $(seq 1 100); do
-  kill -0 -- "-$v0111_timeout_pid" 2>/dev/null || break
-  sleep 0.05
-done
-[ "$v0111_timeout_rc" = 137 ] \
-  && ! kill -0 -- "-$v0111_timeout_pid" 2>/dev/null \
-  && [ ! -e "$v0111_timeout_probe/observed.json" ] \
-  && [ ! -L "$v0111_timeout_probe/observed.json" ] \
-  || fail 'v0.11.1 post-CAS observer timeout did not fence its process group'
-assert_no_later_mutations "$v0111_timeout_probe/mutations"
-v0111_exception_probe="$TMP/v0111-post-cas-exception"
-prepare_v0111_observer_probe "$v0111_exception_probe"
-v0111_exception_rc=0
-run_v0111_observer "$v0111_exception_probe" -- \
-  sh -c '
-    : > "$1/mutations"
-    sleep 0.05
-    printf "{\"transaction\":\"candidate\",\"checkpoint\":\"activation-intent\",\"goal\":null,\"releases\":{\"target\":\"0.11.2-candidate\"}}\\n" \
-      > "$1/journal.next"
-    mv "$1/journal.next" "$1/journal.json"
-    ln -s releases/0.11.2-candidate "$1/runtime/current.next"
-    mv -T "$1/runtime/current.next" "$1/runtime/current"
-    while :; do
-      printf "mutation\n" >> "$1/mutations"
-      sleep 0.02
-    done
-  ' _ "$v0111_exception_probe" \
-  >/dev/null 2>"$v0111_exception_probe/stderr" &
-v0111_exception_pid=$!
-if wait "$v0111_exception_pid"; then
-  v0111_exception_rc=0
-else
-  v0111_exception_rc=$?
-fi
-for _ in $(seq 1 100); do
-  kill -0 -- "-$v0111_exception_pid" 2>/dev/null || break
-  sleep 0.05
-done
-if [ "$v0111_exception_rc" != 137 ] \
-  || kill -0 -- "-$v0111_exception_pid" 2>/dev/null \
-  || [ -e "$v0111_exception_probe/observed.json" ] \
-  || [ -L "$v0111_exception_probe/observed.json" ]; then
-  kill -KILL -- "-$v0111_exception_pid" 2>/dev/null || true
-  fail 'v0.11.1 post-CAS observer exception did not fence its process group'
-fi
-assert_no_later_mutations "$v0111_exception_probe/mutations"
-v0111_queued_probe="$TMP/v0111-post-cas-queued-exit"
-prepare_v0111_observer_probe "$v0111_queued_probe"
-v0111_queued_rc=0
-run_v0111_observer "$v0111_queued_probe" -- \
-  sh -c 'printf "ready\n" > "$1/ready"; sleep 0.5; exit 23' \
-  _ "$v0111_queued_probe" \
-  >/dev/null 2>"$v0111_queued_probe/stderr" &
-v0111_queued_pid=$!
-for _ in $(seq 1 100); do
-  [ -s "$v0111_queued_probe/ready" ] && break
-  sleep 0.01
-done
-[ -s "$v0111_queued_probe/ready" ] \
-  || fail 'v0.11.1 queued-event probe child did not start'
-kill -STOP "$v0111_queued_pid"
-sleep 0.7
-printf '{"transaction":"candidate","checkpoint":"activation-intent","goal":{"target":"0.11.2-candidate","direction":"activate-target"},"releases":{"from":"source","target":"0.11.2-candidate"}}\n' \
-  > "$v0111_queued_probe/journal.next"
-mv "$v0111_queued_probe/journal.next" "$v0111_queued_probe/journal.json"
-ln -s releases/0.11.2-candidate "$v0111_queued_probe/runtime/current.next"
-mv -T "$v0111_queued_probe/runtime/current.next" \
-  "$v0111_queued_probe/runtime/current"
-kill -CONT "$v0111_queued_pid"
-if wait "$v0111_queued_pid"; then
-  v0111_queued_rc=0
-else
-  v0111_queued_rc=$?
-fi
-[ "$v0111_queued_rc" = 137 ] \
-  && [ ! -e "$v0111_queued_probe/observed.json" ] \
-  && [ ! -L "$v0111_queued_probe/observed.json" ] \
-  && grep -Fq 'transition exited with status 23 before exact activation' \
-    "$v0111_queued_probe/stderr" \
-  || fail 'v0.11.1 observer accepted a queued activation after transition exit'
 grep -Fq 'STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"' "$v0111_recovery" \
   && grep -Fq 'assert_state_root' "$v0111_recovery" \
   && grep -Fq 'assert_fixture_root' "$v0111_recovery" \
@@ -5194,10 +4968,7 @@ smoke_rollback_fixture_contract() {
     PHASE_STATE="$STATE_ROOT/phase" BOOT_ID_STATE="$STATE_ROOT/boot-id"
     DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route" SMOKE_PROJECT=ReleaseSmoke PROJECT=subyard INSTANCE=yard MARKER=smoke-fixture-marker
     install -d -m 0700 "$STATE_ROOT" "$V2_STATE_ROOT" "$OPERATOR_HOME/.subyard/runtime"
-    case "$scenario" in
-      checkpoint-*) printf 'smoke-checkpoint-interrupted\n' > "$PHASE_STATE" ;;
-      *) printf 'smoke-ready\n' > "$PHASE_STATE" ;;
-    esac
+    printf 'smoke-ready\n' > "$PHASE_STATE"
     printf 'before-reboot\n' > "$BOOT_ID_STATE"
     printf 'retained-route\n' > "$DEFAULT_ROUTE_STATE"
     printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
@@ -5229,7 +5000,6 @@ smoke_rollback_fixture_contract() {
     }
     operator_uid() { printf '2000\n'; }
     write_fixture_value() { printf '%s\n' "$2" > "$1"; chmod 0600 "$1"; }
-    resume_checkpoint_update() { : > "$STATE_ROOT/resumed"; }
     sudo() { [ "$1" = -n ] || die 'unexpected sudo arguments'; shift; "$@"; }
     ip() { printf 'retained-route\n'; }
     incus() {
@@ -5254,9 +5024,6 @@ smoke_rollback_fixture_contract() {
           if [ "$3" = "$RELEASE_ROOT/subyard-install.sh" ]; then
             [ "$*" = "env YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT $RELEASE_ROOT/subyard-install.sh --version $CANDIDATE_VERSION --publish-only --yes" ] \
               || die 'ownership enrollment did not use the exact public publish-only installer'
-            if [[ "$scenario" = checkpoint-* ]]; then
-              [ -f "$STATE_ROOT/resumed" ] || die 'ownership enrollment preceded completed checkpoint resume'
-            fi
             [ ! -e "$STATE_ROOT/plain-inits" ] || die 'ownership enrollment followed ordinary init'
             [ "$scenario" != enrollment-fail ] || return 45
             case "$scenario" in
@@ -5286,13 +5053,10 @@ smoke_rollback_fixture_contract() {
         check|"shell $SMOKE_PROJECT --yes -- grep -Fxq $MARKER retained.txt"|"shell $SMOKE_PROJECT --yes -- grep -Fxq guest-change retained.txt") return 0 ;;
         'init --yes')
           [ -f "$STATE_ROOT/enrollments" ] || die 'ordinary init preceded public inventory enrollment'
-          if [[ "$scenario" = checkpoint-* ]]; then
-            [ -f "$STATE_ROOT/resumed" ] || die 'ordinary init preceded completed checkpoint resume'
-          fi
           assert_registered_ownership
           printf 'plain-init\n' >> "$STATE_ROOT/plain-inits"
           case "$scenario:$(wc -l < "$STATE_ROOT/plain-inits")" in
-            init-fail:1|checkpoint-init-fail:1) return 45 ;;
+            init-fail:1) return 45 ;;
             repeat-init-fail:2) return 47 ;;
             init-unrelated-fail:1) printf 'unrelated init failure\n' >&2; return 1 ;;
             init-wrong-exit:1) printf 'native init failure\n' >&2; return 23 ;;
@@ -5356,10 +5120,8 @@ smoke_rollback_fixture_contract() {
     printf '%s\n' "$OLD_RELEASE_TARGET" > "$STATE_ROOT/current"
     verify_smoke_state "$OLD_VERSION"
     printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
-    if [[ "$scenario" != checkpoint-* ]]; then
-      establish_smoke_ownership
-      operator_yard init --yes
-    fi
+    establish_smoke_ownership
+    operator_yard init --yes
     verify_predecessor_rollback_refusal
     finish_smoke
     [ "$(wc -l < "$STATE_ROOT/enrollments")" = 1 ] \
@@ -5372,7 +5134,7 @@ smoke_rollback_fixture_contract() {
     [ -f "$STATE_ROOT/passed" ] || die 'smoke did not complete teardown'
   )
 }
-for smoke_rollback_scenario in success checkpoint-success checkpoint-init-fail \
+for smoke_rollback_scenario in success \
   enrollment-fail enrollment-links-change enrollment-symlink-change \
   enrollment-checkpoint-change enrollment-ledger-change enrollment-journal-change \
   enrollment-evidence-change enrollment-mode-change enrollment-project-change \
@@ -5385,7 +5147,7 @@ for smoke_rollback_scenario in success checkpoint-success checkpoint-init-fail \
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success ]]; then
+  if [ "$smoke_rollback_scenario" = success ]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
@@ -5393,7 +5155,7 @@ for smoke_rollback_scenario in success checkpoint-success checkpoint-init-fail \
   else
     smoke_rollback_expected=2
     case "$smoke_rollback_scenario" in
-      enrollment-fail|checkpoint-init-fail|init-fail|rollback-fail|rollforward-fail) smoke_rollback_expected=45 ;;
+      enrollment-fail|init-fail|rollback-fail|rollforward-fail) smoke_rollback_expected=45 ;;
       repeat-init-fail) smoke_rollback_expected=47 ;;
       init-unrelated-fail|init-reboot-required) smoke_rollback_expected=1 ;;
       init-wrong-exit) smoke_rollback_expected=23 ;;
@@ -5416,124 +5178,6 @@ for smoke_rollback_scenario in success checkpoint-success checkpoint-init-fail \
       *) [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/updates" ] \
         || fail 'release smoke continued after invalid ownership, init, enrollment or predecessor refusal' ;;
     esac
-  fi
-done
-
-# Publication must stop before reboot; altered retained state must fail before resume.
-# shellcheck disable=SC2034 # context globals are consumed by the extracted fixture helpers
-smoke_checkpoint_fixture_contract() {
-  (
-    set -euo pipefail
-    umask 0022
-    local scenario="$1" smoke_root="$TMP/smoke-checkpoint-$1"
-    STATE_ROOT="$smoke_root/state" OPERATOR_HOME="$smoke_root/operator"
-    RELEASE_ROOT="$STATE_ROOT/candidate"
-    OPERATOR=synthetic-smoke CANDIDATE_VERSION=candidate
-    OLD_RELEASE_TARGET=releases/predecessor
-    CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
-    V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
-    V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
-    install -d -m 0700 "$STATE_ROOT" "$OPERATOR_HOME" "$OPERATOR_HOME/.config" "$OPERATOR_HOME/.config/subyard"
-    eval "$(sed -n '/^interrupt_checkpoint_update() {/,/^}/p' "$ROOT/dev/e2e/p0-release-smoke.sh")"
-    eval "$(sed -n '/^resume_checkpoint_update() {/,/^}/p' "$ROOT/dev/e2e/p0-release-smoke.sh")"
-    die() { printf '%s\n' "$*" >&2; exit 2; }
-    info() { :; }
-    ok() { printf '%s\n' "$*"; }
-    assert_runtime_links() {
-      case "$1 $2" in
-        'releases/predecessor ') ;;
-        'releases/candidate-aaaaaaaaaaaa releases/predecessor') ;;
-        *) die 'checkpoint fixture selected unexpected release links' ;;
-      esac
-    }
-    sudo() {
-      [ "$1" = -n ] || die 'unexpected fixture sudo call'
-      shift
-      if [ "$1" = install ] && [ "${2:-}" = -o ]; then
-        shift 5
-        command install "$@"
-      else
-        "$@"
-      fi
-    }
-    operator_env() {
-      case "$1" in
-        env)
-          case "${*: -1}" in
-            --check) printf '{"outcome":{"target":"candidate-aaaaaaaaaaaa"},"blockers":[]}\n' ;;
-            --yes)
-              printf 'resume\n' >> "$STATE_ROOT/updates"
-              [ "$scenario" != post-resume-change ] || printf 'changed\n' > "$V2_LEDGER"
-              if [ "$scenario" = post-resume-replacement ]; then
-                jq '.transaction = "replacement-tx"' "$V2_JOURNAL" > "$V2_JOURNAL.next"
-                mv "$V2_JOURNAL.next" "$V2_JOURNAL"
-              fi
-              ;;
-            *) die 'unexpected updater argument or unsupported predecessor flag' ;;
-          esac
-          ;;
-        setsid)
-          printf '%s\n' "$@" > "$STATE_ROOT/observer.argv"
-          printf '{"schemaVersion":1,"domains":{"core":{"epoch":1,"compactedThrough":1,"appliedSuffix":[]}}}\n' \
-            > "$V2_STATE_ROOT/history-checkpoint.json"
-          printf '{"schemaVersion":1,"projection":"retained"}\n' > "$V2_LEDGER"
-          printf '{"transaction":"smoke-tx","checkpoint":"complete","goal":{"direction":"activate-target","target":"candidate-aaaaaaaaaaaa"},"releases":{"target":"candidate-aaaaaaaaaaaa"}}\n' \
-            > "$V2_JOURNAL"
-          if [ "$scenario" != missing-observation ]; then
-            jq -n --slurpfile checkpoint "$V2_STATE_ROOT/history-checkpoint.json" \
-              '{transaction:"smoke-tx",checkpoint:"complete",migrationCheckpoint:$checkpoint[0]}' \
-              > "$OPERATOR_HOME/checkpoint-observed.json"
-          fi
-          if [ "$scenario" = mismatched-observation ]; then
-            jq '.transaction = "different-tx"' "$V2_JOURNAL" > "$V2_JOURNAL.next"
-            mv "$V2_JOURNAL.next" "$V2_JOURNAL"
-          fi
-          [ "$scenario" != wrong-interruption-status ] || return 0
-          return 137
-          ;;
-        test|install) "$@" ;;
-        *) die 'unexpected fixture operator call' ;;
-      esac
-    }
-    interrupt_checkpoint_update
-    [ "$(stat -c %a "$OPERATOR_HOME/.config/subyard/release-transition")" = 700 ] \
-      && [ "$(stat -c %a "$V2_STATE_ROOT")" = 700 ] \
-      || die 'unsafe transition directory mode after a fresh predecessor'
-    [ ! -e "$STATE_ROOT/updates" ] || die 'checkpoint publication resumed before reboot'
-    grep -Fxq -- --checkpoint "$STATE_ROOT/observer.argv"
-    grep -Fxq candidate-aaaaaaaaaaaa "$STATE_ROOT/observer.argv"
-    for record in checkpoint ledger journal; do
-      [ "$(stat -c %a "$STATE_ROOT/$record.before")" = 600 ] || die 'unsafe retained fixture record mode'
-    done
-    case "$scenario" in
-      changed-checkpoint) printf 'changed\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
-      changed-ledger) printf 'changed\n' > "$V2_LEDGER" ;;
-      changed-journal) printf 'changed\n' > "$V2_JOURNAL" ;;
-    esac
-    resume_checkpoint_update
-    [ "$(cat "$STATE_ROOT/updates")" = resume ] || die 'checkpoint resumed more than once'
-  )
-}
-for smoke_checkpoint_scenario in success missing-observation wrong-interruption-status \
-  mismatched-observation changed-checkpoint changed-ledger changed-journal post-resume-change post-resume-replacement; do
-  smoke_checkpoint_log="$TMP/smoke-checkpoint-$smoke_checkpoint_scenario.log"
-  set +e
-  smoke_checkpoint_fixture_contract "$smoke_checkpoint_scenario" > "$smoke_checkpoint_log" 2>&1
-  smoke_checkpoint_rc=$?
-  set -e
-  if [ "$smoke_checkpoint_scenario" = success ]; then
-    if [ "$smoke_checkpoint_rc" != 0 ]; then
-      cat "$smoke_checkpoint_log" >&2
-      fail 'checkpoint publication did not resume with exact retained state'
-    fi
-  else
-    [ "$smoke_checkpoint_rc" = 2 ] || fail "checkpoint fixture hid $smoke_checkpoint_scenario"
-    if [[ "$smoke_checkpoint_scenario" != post-resume-* ]]; then
-      [ ! -e "$TMP/smoke-checkpoint-$smoke_checkpoint_scenario/state/updates" ] \
-        || fail "checkpoint resumed with $smoke_checkpoint_scenario"
-    fi
-    ! grep -q 'fresh-process resume passed' "$smoke_checkpoint_log" \
-      || fail 'checkpoint fixture reported PASS before checking preserved state'
   fi
 done
 
@@ -6215,16 +5859,18 @@ done
 
 # The supported predecessor creates the legacy owner through its own config CLI.
 BASELINE_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" prepare_baseline_yards)" \
-  bash -s -- "$TMP/published-owner" <<'PUBLISHED_OWNER'
+  bash -s -- "$TMP/published-owner" "$ROOT" <<'PUBLISHED_OWNER'
 set -euo pipefail
-F=$1 OPERATOR_HOME=$1/operator SHARED_ROOT=$1/shared
+F=$1 OPERATOR_HOME=$1/operator SHARED_ROOT=$1/shared ROOT=$2
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
+IFS=$'\t' read -r ANCHOR_VERSION _ ANCHOR_SHA _ < <(published_anchor)
 BASELINE_VERSION=0.11.0 BASE_IMAGE=fixture-cache FIXTURE_DEV_UID=1001
 PROJECT=subyard-e2e-yard INSTANCE=yard-e2e-yard DEFAULT_PROJECT=subyard DEFAULT_INSTANCE=yard
 install -d -m 0700 "$OPERATOR_HOME/.local/bin" "$SHARED_ROOT"
 trace="$F/trace"
 eval "$BASELINE_FUNCTION"
 die() { printf '%s\n' "$*" >&2; exit 2; }
-install_baseline() { printf 'install 0.11.0\n' >> "$trace"; }
+install_baseline() { printf 'install 0.11.0\n' >> "$trace"; printf '0.11.0\n' > "$F/active-version"; }
 prepare_project() { printf 'project %s\n' "${1:-$PROJECT}" >> "$trace"; }
 ordinary_yard_facts() { printf 'retained ordinary state\n'; }
 incus() { printf 'incus %s\n' "$*" >> "$trace"; }
@@ -6239,14 +5885,19 @@ operator_env() {
     install -d -m 0700 "$OPERATOR_HOME/.config/subyard/yards/e2e-yard"
     install -m 0600 "$6/hosts/p0-owner/yards/e2e-yard/config.env" \
       "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env"
+    install -d -m 0700 "$OPERATOR_HOME/.config/subyard/.sync"
+    printf '{"schemaVersion":1,"files":[{}]}\n' > "$OPERATOR_HOME/.config/subyard/.sync/manifest.json"
     printf 'config sync\n' >> "$trace"
+  elif [ "$1" = sha256sum ] && [[ "$2" = "$OPERATOR_HOME/.subyard/releases/"* ]]; then
+    printf '%s  %s\n' "$ANCHOR_SHA" "$2"
   else
     "$@"
   fi
 }
 operator_yard() {
   case "$*" in
-    --version) printf 'yard 0.11.0\n'; return ;;
+    --version) printf 'yard %s\n' "$(cat "$F/active-version")"; return ;;
+    "update --version $ANCHOR_VERSION --yes") printf '%s\n' "$ANCHOR_VERSION" > "$F/active-version" ;;
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
@@ -6266,6 +5917,8 @@ done
 grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
+grep -Fxq "yard update --version $ANCHOR_VERSION --yes" "$trace"
+jq -e '.schemaVersion == 1 and (.files | length) > 0' "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
 PUBLISHED_OWNER
 
 # Fresh service setup must prove ownership before fixture cache changes.

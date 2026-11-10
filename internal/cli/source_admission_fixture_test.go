@@ -367,6 +367,87 @@ func TestCompletedSourceAuthoringFixture(t *testing.T) {
 	}
 }
 
+// A supported source version cannot replace missing or contradictory history authority.
+func TestSupportedSourceAdmissionRefusesMissingOrContradictoryCheckpoint(t *testing.T) {
+	for _, damage := range []string{"missing", "contradictory"} {
+		t.Run(damage, func(t *testing.T) {
+			program, _, home := completedRuntimeSourceFixture(t, true, nil)
+			reader := releaseruntime.NewSourceInspector(program.options.RepositoryRoot, io.Discard)
+			defer reader.Close()
+			runtimeRoot := program.env["YARD_RUNTIME_ROOT"]
+			if _, err := reader.InspectSourceAdmission(context.Background(), runtimeRoot, home); err != nil {
+				t.Fatal("intact supported source", err)
+			}
+			path := filepath.Join(home, "release-transition/v2/history-checkpoint.json")
+			var checkpoint releasetransition.LedgerCheckpointV1
+			if err := json.Unmarshal(mustReadConfigFixture(t, path), &checkpoint); err != nil {
+				t.Fatal(err)
+			}
+			// The compatibility projection predates the completed SSH migration.
+			// Losing this checkpoint must not silently restore its older authority.
+			if checkpoint.Domains["settings"].Epoch <= checkpoint.LegacyProjection.Epochs["settings"] {
+				t.Fatal("fixture did not advance checkpoint authority beyond its projection")
+			}
+			if damage == "missing" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				checkpoint.LegacyProjection.Fingerprint = releasetransition.Fingerprint(strings.Repeat("f", 64))
+				payload, err := json.Marshal(checkpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeProfileTestFile(t, path, payload, 0600)
+			}
+			snapshot := func() string {
+				var records bytes.Buffer
+				if err := filepath.WalkDir(home, func(path string, entry fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					info, err := entry.Info()
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(&records, "%s:%v:", path, info.Mode())
+					if entry.Type()&os.ModeSymlink != 0 {
+						target, err := os.Readlink(path)
+						if err != nil {
+							return err
+						}
+						records.WriteString(target)
+					} else if !entry.IsDir() {
+						payload, err := os.ReadFile(path)
+						if err != nil {
+							return err
+						}
+						fmt.Fprintf(&records, "%x", sha256.Sum256(payload))
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"current", "previous"} {
+					target, err := os.Readlink(filepath.Join(runtimeRoot, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					fmt.Fprintf(&records, "%s:%s", name, target)
+				}
+				return records.String()
+			}
+			before := snapshot()
+			if _, err := reader.InspectSourceAdmission(context.Background(), runtimeRoot, home); err == nil {
+				t.Fatal("supported version admitted damaged checkpoint authority")
+			}
+			if snapshot() != before {
+				t.Fatal("refused source inspection changed protected state or runtime links")
+			}
+		})
+	}
+}
+
 // The parent CLI component fixture follows the full normal catalog, while its
 // native guest fixture observes every unselected profile installation absent.
 type completedSourcePlatformFixture struct {
