@@ -74,18 +74,28 @@ func TestServiceContextRereadsShippedPresetAndPreservesCustomPort(t *testing.T) 
 	for key, value := range environment {
 		env = append(env, key+"="+value)
 	}
-	for _, action := range []string{"register", "status"} {
+	for _, action := range []string{"unregistered-status", "register", "status"} {
 		var output, diagnostics bytes.Buffer
 		arguments := []string{"service", "register", "test-vms", "--yard", "test-yard", "--yes"}
 		adapter := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, Status: "ok"}, Stderr: `{"schema_version":1,"status":"ok","pool":{"schema_version":2,"slots":[]}}`}}}
-		if action == "status" {
+		if action != "register" {
 			arguments = []string{"-Y", "missing-work-yard", "test-vms", "status", "--json"}
 		}
 		program, err := cli.New(cli.Options{RepositoryRoot: root, Arguments: arguments, Environment: env, Incus: incus, Executor: incus, AdapterRunner: adapter, Stdout: &output, Stderr: &diagnostics})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code := program.Run(context.Background()); code != 0 {
+		code := program.Run(context.Background())
+		if action == "unregistered-status" {
+			// Init's native worker can be healthy before the operator registers
+			// its public service route. This is not a base-cache status response.
+			if code != 1 || !strings.Contains(output.String(), `"code":"service_absent"`) ||
+				strings.Contains(output.String(), `"resources"`) || len(adapter.Requests) != 0 {
+				t.Fatalf("unregistered status reached worker or resembled cache evidence: exit=%d output=%s diagnostics=%s", code, output.String(), diagnostics.String())
+			}
+			continue
+		}
+		if code != 0 {
 			t.Fatalf("%s exit=%d: %s", action, code, diagnostics.String())
 		}
 		if action == "status" && (!strings.Contains(output.String(), `"runtime_uuid":"service-context-uuid"`) || len(adapter.Requests) != 1 || adapter.Requests[0].Context["YARD_NAME"] != "test-yard" || adapter.Requests[0].Context["SSH_PORT"] != "2299" || adapter.Requests[0].Context["DEV_UID"] != "2007") {

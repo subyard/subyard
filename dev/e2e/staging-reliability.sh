@@ -1047,11 +1047,23 @@ PYBASELINE
   incus project set "$PROJECT" "user.subyard-e2e.image-cache=$MARKER"
   verify_broker_installation || die 'predecessor broker does not match its runtime'
   BROKER_INSTALLED=1
-  outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status \
-    | jq -e '.status=="ok" and .pool.resource_type=="agent-e2e" and
+  # Ordinary init installs the worker; public broker commands additionally need
+  # explicit service registration, which adopts it without warming a base.
+  before_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
+  "$baseline_owner" service register test-vms --yard test-yard --yes
+  [ "$before_owner" = "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" ] \
+    && [ "$before_state" = "$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)" ] \
+    || die 'predecessor service registration changed the runtime or leases'
+  info="$(outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status)" \
+    || die 'cannot query native predecessor broker status'
+  jq -e '.status=="ok" and .pool.resource_type=="agent-e2e" and
       .pool.resource_id=="test-vms" and (.pool.slots | length)==1 and
-      .pool.slots[0].state=="available"' >/dev/null || die 'native predecessor broker state is not available'
+      .pool.slots[0].state=="available"' <<<"$info" >/dev/null || die 'native predecessor broker state is not available'
   [ -z "$(outer_exec incus list --all-projects --format csv -c n)" ] || die 'predecessor init warmed a nested VM or builder'
+  jq -e '(.resources | type)=="object" and (.resources.bases | type)=="array" and
+    (.resources.bases | length)==0 and (.resources | has("builder") | not) and
+    ((.resources.errors // []) | length)==0' <<<"$info" >/dev/null \
+    || die 'native predecessor status does not prove an empty base inventory'
   BROKER_INSTALLED=1
   printf 'STAGING_BASELINE_BROKER={"version":"%s","native_owner_state":true,"vm_and_base_absent":true}\n' "$baseline"
   # Run the exact candidate Git configuration read as its real guest user.
@@ -1074,8 +1086,13 @@ PYBASELINE
     '{baseline:$baseline,sha256:$sha256,version:$version,config_sha256:$config_sha256}'
   before_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
   [[ "$before_state" =~ ^[a-f0-9]{64}$ ]] || die 'predecessor lease state missing'
-  runtime_yard -Y test-yard test-vms status --json \
-    | jq -e '.resources.bases | type=="array" and length==0' >/dev/null || die 'predecessor broker already has a cached base'
+  runtime_yard -Y test-yard test-vms status --json > "$STATE_PARENT/predecessor-status.json" || {
+    jq -c '{status,code}' "$STATE_PARENT/predecessor-status.json" >&2 || true
+    die 'predecessor public broker status query failed'
+  }
+  jq -e '.status=="ok" and (.resources.bases | type)=="array" and
+    (.resources.bases | length)==0' "$STATE_PARENT/predecessor-status.json" >/dev/null \
+    || die 'predecessor public status does not prove an empty base inventory'
   # Stage only verified frozen assets into the normal release cache. Keep the
   # authentic caller and installed broker state intact until its supported update.
   install -d -m 0700 "$SUBYARD_HOME/releases/$P0_OWNER_VERSION"

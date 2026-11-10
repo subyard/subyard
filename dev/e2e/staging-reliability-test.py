@@ -1198,6 +1198,12 @@ with tempfile.TemporaryDirectory(prefix='subyard-predecessor-broker-', dir='/tmp
     launcher.parent.mkdir(parents=True)
     launcher.write_text('''#!/bin/bash
 if [ "$*" = --version ]; then printf 'yard @ANCHOR@\n'; exit; fi
+if [ "$*" = 'service register test-vms --yard test-yard --yes' ]; then
+  printf 'register\n' >> "$PREDECESSOR_CALLS"
+  [ "$PREDECESSOR_FAILURE" != registration ] || exit 1
+  install -m 0600 /dev/null "$PREDECESSOR_CALLS.registered"
+  exit
+fi
 if [ "$*" = '-Y test-yard _info' ]; then
   printf 'info\n' >> "$PREDECESSOR_CALLS"
   project=fixture; [ "$PREDECESSOR_FAILURE" != context ] || project=foreign
@@ -1216,23 +1222,48 @@ printf 'init\n' >> "$PREDECESSOR_CALLS"
     leaf = root / '.subyard-acceptance/runtime/config/profiles/github/git_wiring.py'
     leaf.parent.mkdir(parents=True)
     leaf.write_bytes(pathlib.Path('config/profiles/github/git_wiring.py').read_bytes())
-    for failure in ['', 'init', 'version', 'context', 'project-shape', 'native-owner', 'bridge', 'initialized', 'power', 'identity', 'marker', 'worker', 'native-state', 'git-operation', 'retained-worker', 'retained-state']:
+    setup_failures = ['init', 'version', 'context', 'project-shape', 'native-owner', 'bridge', 'initialized', 'power', 'identity', 'marker']
+    native_failures = ['native-state', 'native-query', 'native-bases-missing', 'native-cached', 'native-registry-error', 'native-builder', 'native-instances']
+    public_failures = ['public-query', 'public-bases-missing', 'public-cached', 'public-status-error']
+    for failure in ['', *setup_failures, 'worker', 'registration', 'registration-mutates', *native_failures, 'git-operation', 'retained-worker', 'retained-state', *public_failures]:
         log = root / ('calls-' + (failure or 'success'))
+        native_resources = {'bases': []}
+        public_status = {'status': 'ok', 'resources': {'bases': []}}
+        if failure == 'native-bases-missing': native_resources.pop('bases')
+        if failure == 'native-cached': native_resources['bases'] = [{'fingerprint': 'a'*64}]
+        if failure == 'native-registry-error': native_resources['errors'] = ['image_registry_unavailable']
+        if failure == 'native-builder': native_resources['builder'] = {'type': 'subyard-pair'}
+        if failure == 'public-bases-missing': public_status['resources'].pop('bases')
+        if failure == 'public-cached': public_status['resources']['bases'] = [{'fingerprint': 'a'*64}]
+        if failure == 'public-status-error': public_status = {'status': 'error', 'code': 'service_unavailable'}
         script = f"""set -euo pipefail
-ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME="$ROOT/config"; baseline={ANCHOR_VERSION}; PROJECT=fixture; INSTANCE=owner; MARKER=owned
+ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME="$ROOT/config"; STATE_PARENT="$ROOT"; baseline={ANCHOR_VERSION}; PROJECT=fixture; INSTANCE=owner; MARKER=owned
 export PREDECESSOR_CALLS={str(log)!r} PREDECESSOR_FAILURE={failure!r}
 p0_retry_init_after_plan_stale() {{ "$@"; }}
 prepare_minimal_owner() {{ exit 99; }}
-runtime_yard() {{ if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else ANCHOR_VERSION}'; else printf '%s\n' '{{"resources":{{"bases":[]}}}}'; fi; }}
+runtime_yard() {{
+  if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else ANCHOR_VERSION}'; return; fi
+  [ "$*" = '-Y test-yard test-vms status --json' ] || return 99
+  printf 'public-status\n' >> '{log}'
+  if [ ! -f "$PREDECESSOR_CALLS.registered" ] || [ "$PREDECESSOR_FAILURE" = public-query ]; then
+    printf '%s\n' '{{"status":"error","code":"service_absent"}}'; return 1
+  fi
+  printf '%s\n' '{json.dumps(public_status)}'
+}}
 verify_broker_installation() {{ printf 'verified\n' >> '{log}'; return {1 if failure == 'worker' else 0}; }}
 outer_exec() {{
   case "$*" in
     'python3 - /home/dev off check') printf 'git-operation\n' >> '{log}'; cat >/dev/null; return {1 if failure == 'git-operation' else 0} ;;
-    *'_test-vms-worker status') printf 'native-state\n' >> '{log}'; printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}}}}' ;;
-    'incus list --all-projects --format csv -c n') return 0 ;;
+    *'_test-vms-worker status')
+      printf 'native-state\n' >> '{log}'
+      [ "$PREDECESSOR_FAILURE" != native-query ] || return 1
+      printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}},"resources":{json.dumps(native_resources)}}}' ;;
+    'incus list --all-projects --format csv -c n') [ "$PREDECESSOR_FAILURE" != native-instances ] || printf 'unexpected-builder\n' ;;
     'sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker') printf '%s  retained\\n' '{'b'*64 if failure == 'retained-worker' else engine_sha}' ;;
     *'install -m 0700'*|*'install -m 0600'*) return 0 ;;
-    *sha256sum*) printf '%s  leases.json\n' '{'invalid' if failure == 'retained-state' else 'a'*64}' ;;
+    *sha256sum*)
+      if [ "$PREDECESSOR_FAILURE" = registration-mutates ] && [ -f "$PREDECESSOR_CALLS.registered" ]; then printf '%s  leases.json\n' '{'c'*64}'
+      else printf '%s  leases.json\n' '{'invalid' if failure == 'retained-state' else 'a'*64}'; fi ;;
     *) return 99 ;;
   esac
 }}
@@ -1251,21 +1282,31 @@ incus() {{
     *) return 99 ;;
   esac
 }}
-die() {{ exit 2; }}
+die() {{ printf '%s\\n' "$*" >&2; exit 2; }}
 """ + predecessor
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
         assert (result.returncode == 0) == (not failure), result
         calls = log.read_text().splitlines()
         expected=['init']
         if failure not in ['init','version']: expected += ['info']
-        if failure not in ['init','version','context','project-shape','native-owner','bridge','initialized','power','identity','marker']:
+        if failure not in setup_failures:
             expected += ['marker','verified']
             if failure != 'worker':
-                expected += ['native-state']
-                if failure != 'native-state': expected += ['git-operation']
+                expected += ['register']
+                if failure not in ['registration', 'registration-mutates']:
+                    expected += ['native-state']
+                    if failure not in native_failures:
+                        expected += ['git-operation']
+                        if failure not in ['git-operation', 'retained-worker', 'retained-state']:
+                            expected += ['public-status']
         assert calls == expected, (failure,calls)
-        assert ('STAGING_BASELINE_BROKER=' in result.stdout) == (failure in ['', 'git-operation', 'retained-worker', 'retained-state']), result
-print('authentic predecessor full-init argv and ownership/power/broker boundaries refuse incomplete setup')
+        marker_expected = failure in ['', 'git-operation', 'retained-worker', 'retained-state', *public_failures]
+        assert ('STAGING_BASELINE_BROKER=' in result.stdout) == marker_expected, result
+        if failure in ['public-query', 'public-status-error']:
+            assert 'cached base' not in result.stderr, result
+        if failure == 'public-query':
+            assert 'service_absent' in result.stderr and 'public broker status query failed' in result.stderr, result
+print('authentic predecessor init, explicit service registration and typed cold inventory refuse incomplete setup')
 
 # The retained historical writer must actually refuse the fenced state without
 # changing it; only that observed refusal permits admission to resume.
