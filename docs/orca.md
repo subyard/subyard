@@ -247,7 +247,7 @@ without Subyard's commit approval, persistence or instructions. Enabling Orca ne
 selects Claude automatically. Subyard leaves `disabledTuiAgents` untouched. Orca's upstream `disabledTuiAgents` setting can contain
 `"claude"` to remove it from TUI launch choices; Subyard does not change that
 preference. It does not prevent manually running Claude in a terminal. The setting
-is defined by the [pinned Orca release](https://github.com/stablyai/orca/blob/b8ec5c8d170bcb9988e65de547a3a4e98b2885a9/src/shared/global-settings-types.ts).
+is defined by the [pinned Orca release](https://github.com/stablyai/orca/blob/084ce0eebbdda3f665251984804f2238be666296/src/shared/global-settings-types.ts).
 
 Orca's Fetch, Pull and Push actions use the yard developer's ordinary Git configuration.
 The service keeps Orca's app profile at `/srv/agents/orca/config/orca` while Git reads
@@ -439,7 +439,7 @@ terminals, saved agent/chat state and linked worktrees until their contents have
 Do not edit Orca's database or manufacture IDs in Subyard's sidecar.
 
 For an explicitly selected local repo-backed setup with no remaining sessions, the pinned
-[native project CLI](https://github.com/stablyai/orca/blob/b8ec5c8d170bcb9988e65de547a3a4e98b2885a9/src/cli/specs/project.ts)
+[native project CLI](https://github.com/stablyai/orca/blob/084ce0eebbdda3f665251984804f2238be666296/src/cli/specs/project.ts)
 supports this manual repair. Run it as the yard's development user against the managed server
 profile, replacing `PROJECT_ID` and `SETUP_ID` with the inspected native identities:
 
@@ -499,14 +499,18 @@ terminal of the development user, including those of another Orca instance that 
 started. It preserves the installed package, projects, saved session data and
 paired-client state. User lingering stays enabled after `down`.
 
-The profile pins Orca 1.4.244. Its [upstream release notes](https://github.com/stablyai/orca/releases/tag/v1.4.244)
-say it shares 1.4.243's terminal host, preserving attached terminals when updating from
-that version. Some terminal fixes require restarting the terminal host. Remote file and
-paired-terminal fixes also require updating the host server; open a new remote shell
-for the manual Codex copy fix. These notes do not establish terminal compatibility
-across every older version.
+The profile pins Orca 1.4.255. The [1.4.245 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.245)
+say that release starts a fresh terminal host for new terminals; terminals opened before
+the update keep running on the previous host and stay attached. The
+[1.4.254 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.254) make pairing
+codes single-use for updated clients, ask once per new repository whether agents may trust it,
+and limit `orca serve` to localhost, LAN and Tailscale sources by default. The Subyard owner
+proxy connects to the server over guest loopback. These notes do not establish terminal
+compatibility across every older version.
 
-Account for terminal-host changes before rolling back the package. In particular,
-the [1.4.224 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.224)
+Account for terminal-host and saved-state changes before rolling back the package. The
+[1.4.252 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.252) warn that chats
+that used Plan mode cannot be opened by 1.4.251 after a downgrade, and the
+[1.4.224 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.224)
 warn that terminals started in 1.4.224 cannot be reached from 1.4.223 after a downgrade
 until Orca is upgraded again.
