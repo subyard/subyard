@@ -208,5 +208,9 @@ chmod 0755 "$stage"
 mv -fT -- "$stage" "$CHECK_PATH"
 stage=""
 release_native_shadow
-"$CHECK_PATH"
+# The integration adapter reruns the check and reports readiness once; keep only its conflicts here.
+check_status=0
+check_output="$("$CHECK_PATH")" || check_status=$?
+printf '%s\n' "$check_output" | grep '^Conflict:' || true
+[ "$check_status" = 0 ]
 

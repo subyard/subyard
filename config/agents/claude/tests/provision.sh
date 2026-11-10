@@ -80,7 +80,8 @@ policy="$policy_dir/50-subyard-git-approval.json"
 install -d -m 0755 "$policy_dir"
 printf '{"permissions":{"deny":["Bash(secret *)"]}}\n' > "$policy_dir/10-foreign.json"
 before="$(sha256sum "$policy_dir/10-foreign.json")"
-run_hook "$root" >/dev/null
+run_hook "$root" >"$tmp/first.out"
+grep -Fq ' ready' "$tmp/first.out" && fail 'provisioning repeated the adapter readiness line'
 [ -x "$runtime" ] && [ ! -L "$runtime" ] || fail 'native CLI was not installed'
 [ "$(stat -c '%a' "$runtime")" = 755 ] || fail 'incorrect runtime mode'
 [ "$(stat -c '%u:%g' "$runtime")" = "$(id -u):$(id -g)" ] || fail 'incorrect runtime owner'
