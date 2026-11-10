@@ -30,15 +30,6 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 		{"pending identity and old source", "0.26.0", "", true, false, false},
 		{"inclusive anchor", UpdateAnchorVersion, "", true, false, true},
 		{"anchor hotfix", aboveAnchor.String(), "", true, false, true},
-		{"unfinished before activation", "0.26.0", "", true, false, false},
-		{"unfinished after activation", UpdateAnchorVersion, "", true, false, false},
-		{"pending identity and unfinished anchor", UpdateAnchorVersion, "", true, false, false},
-		{"unfinished modern source", aboveAnchor.String(), "", true, false, true},
-		{"complete old-source journal", UpdateAnchorVersion, "", true, false, true},
-		{"exact unfinished anchor owner", UpdateAnchorVersion, "", true, false, true},
-		{"unfinished rollback before activation", "0.26.0", "", true, false, false},
-		{"unfinished rollback after activation", "0.25.5", "", true, false, false},
-		{"pending identity and unfinished rollback", "0.25.5", "", true, false, false},
 		{"missing provenance", "0.11.0", "", false, false, false},
 		{"unparseable source", "development", "", true, false, false},
 		{"invalid fixture version", "0.26.0.next", "", true, false, false},
@@ -83,61 +74,6 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 			if scenario.bootstrap {
 				target = releasetransition.ReleaseID(release)
 			}
-			direction := releasetransition.DirectionActivateTarget
-			artifact := releasetransition.Fingerprint("")
-			if strings.Contains(scenario.name, "unfinished") || scenario.name == "complete old-source journal" {
-				original := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
-				payload, err := os.ReadFile(original.journalPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				journal, err := releasetransition.ParseJournal(payload)
-				if err != nil {
-					t.Fatal(err)
-				}
-				journal.Releases.From = "0.26.0-aaaaaaaaaaaa"
-				journal.Goal.Target = releasetransition.ReleaseID(UpdateAnchorVersion + "-bbbbbbbbbbbb")
-				journal.Releases.Target = journal.Goal.Target
-				if scenario.name == "unfinished modern source" {
-					journal.Releases.From = releasetransition.ReleaseID(UpdateAnchorVersion + "-aaaaaaaaaaaa")
-					journal.Goal.Target = releasetransition.ReleaseID(aboveAnchor.String() + "-bbbbbbbbbbbb")
-					journal.Releases.Target = journal.Goal.Target
-				}
-				if strings.Contains(scenario.name, "rollback") {
-					journal.Goal.Direction = releasetransition.DirectionActivatePrevious
-					journal.Goal.Target = "0.25.5-bbbbbbbbbbbb"
-					journal.Releases.Target = journal.Goal.Target
-				}
-				if !strings.Contains(scenario.name, "before activation") {
-					journal.Checkpoint = releasetransition.JournalReconciling
-				}
-				if scenario.name == "complete old-source journal" {
-					journal.Checkpoint = releasetransition.JournalComplete
-				}
-				if scenario.name == "exact unfinished anchor owner" {
-					target, artifact = journal.Goal.Target, journal.ArtifactDigest
-				}
-				if !strings.Contains(scenario.name, "before activation") {
-					journal.Goal.Target = releasetransition.ReleaseID(release)
-					journal.Releases.Target = journal.Goal.Target
-					if scenario.name == "exact unfinished anchor owner" {
-						target = journal.Goal.Target
-					}
-				}
-				payload, err = releasetransition.MarshalJournal(journal)
-				if err != nil {
-					t.Fatal(err)
-				}
-				write(filepath.Join(configHome, "release-transition/v2/journal.json"), payload, 0o600)
-				if !strings.Contains(scenario.name, "before activation") {
-					if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", string(journal.Releases.From)), 0o700); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Symlink("releases/"+string(journal.Releases.From), filepath.Join(runtimeRoot, "previous")); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
 			if strings.HasPrefix(scenario.name, "pending identity") {
 				digest := strings.Repeat("a", 64)
 				marker := config.DeveloperIdentityMarker{Schema: 1, Yard: "default", Inputs: digest, Identity: digest, Release: digest}
@@ -147,25 +83,9 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 				}
 				write(config.DeveloperIdentityMarkerPath(configHome, "default"), payload, 0o600)
 			}
-			err := CheckSourcePolicy(context.Background(), releasetransition.ProcessRequest{RuntimeRoot: runtimeRoot, ConfigHome: configHome, Target: target, Direction: direction, ArtifactDigest: artifact, Mode: releasetransition.ProcessConverge})
+			err := CheckSourcePolicy(context.Background(), releasetransition.ProcessRequest{RuntimeRoot: runtimeRoot, ConfigHome: configHome, Target: target, Direction: releasetransition.DirectionActivateTarget, Mode: releasetransition.ProcessConverge})
 			if (err == nil) != scenario.allowed {
 				t.Fatalf("source policy allowed=%t: %v", scenario.allowed, err)
-			}
-			if strings.Contains(scenario.name, "unfinished") && !scenario.allowed {
-				anchor, plain := sourceUpdateCommands(UpdateAnchorVersion, runtimeRoot)
-				continuation := anchor
-				if strings.Contains(scenario.name, "rollback") {
-					continuation = plain
-				}
-				if !strings.Contains(err.Error(), "must be completed by its original owner") || !strings.Contains(err.Error(), "next: "+continuation) {
-					t.Fatalf("lost owner continuation: %v", err)
-				}
-				if strings.Contains(scenario.name, "rollback") && strings.Contains(err.Error(), "yard update --version") {
-					t.Fatalf("rollback offered a fresh update: %v", err)
-				}
-				if strings.HasPrefix(scenario.name, "pending identity") && !strings.Contains(err.Error(), "developer identity transition is pending") {
-					t.Fatalf("lost independent identity refusal: %v", err)
-				}
 			}
 			if !scenario.allowed {
 				if _, parseErr := semver.Parse(scenario.version); parseErr != nil {
@@ -184,6 +104,127 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Admission uses sealed active state; the engine separately validates checkpoint/link
+// consistency, replacement bindings and consent (including inspect without replacement).
+func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
+	for _, checkpoint := range []releasetransition.JournalCheckpoint{releasetransition.JournalAuthorized, releasetransition.JournalMigrating, releasetransition.JournalActivationIntent, releasetransition.JournalTargetActive, releasetransition.JournalReconciling, releasetransition.JournalComplete} {
+		for _, activated := range []bool{false, true} {
+			for _, modernSource := range []bool{false, true} {
+				for _, direction := range []releasetransition.Direction{releasetransition.DirectionActivateTarget, releasetransition.DirectionActivatePrevious} {
+					for _, replacement := range []bool{false, true} {
+						name := fmt.Sprintf("%s/activated=%t/modern-source=%t/%s/replacement=%t", checkpoint, activated, modernSource, direction, replacement)
+						t.Run(name, func(t *testing.T) {
+							fixture := newProtectedRuntimeTransitionFixture(t, checkpoint)
+							t.Setenv("SUBYARD_HOME", filepath.Dir(fixture.runtimeRoot))
+							scope := ""
+							if replacement {
+								t.Setenv("SUBYARD_HOME", filepath.Dir(fixture.runtimeRoot)+"-other")
+								scope = " --runtime-root " + fixture.runtimeRoot
+							}
+							payload := mustReadFile(t, fixture.journalPath)
+							journal, err := releasetransition.ParseJournal(payload)
+							if err != nil {
+								t.Fatal(err)
+							}
+							sourceVersion, ownerVersion := "0.26.0", UpdateAnchorVersion
+							if modernSource {
+								sourceVersion = UpdateAnchorVersion
+								owner := semver.MustParse(UpdateAnchorVersion)
+								owner.Patch++
+								ownerVersion = owner.String()
+							}
+							if direction == releasetransition.DirectionActivatePrevious {
+								ownerVersion = "0.26.0"
+							}
+							journal.Releases = releasetransition.ReleasePair{From: releasetransition.ReleaseID(sourceVersion + "-aaaaaaaaaaaa"), Target: releasetransition.ReleaseID(ownerVersion + "-bbbbbbbbbbbb")}
+							journal.Goal = releasetransition.Goal{Target: journal.Releases.Target, Direction: direction}
+							if direction == releasetransition.DirectionActivatePrevious {
+								journal.Releases.Previous = &journal.Releases.Target
+							}
+							payload, err = releasetransition.MarshalJournal(journal)
+							if err != nil {
+								t.Fatal(err)
+							}
+							testkit.WriteFile(t, fixture.journalPath, payload, 0600)
+							active, version, previous := journal.Releases.From, sourceVersion, journal.Releases.Previous
+							if activated {
+								active, version, previous = journal.Releases.Target, ownerVersion, &journal.Releases.From
+							}
+							for _, release := range []releasetransition.ReleaseID{journal.Releases.From, journal.Releases.Target} {
+								if err := os.MkdirAll(filepath.Join(fixture.runtimeRoot, "releases", string(release), "bin"), 0700); err != nil {
+									t.Fatal(err)
+								}
+							}
+							root := filepath.Join(fixture.runtimeRoot, "releases", string(active))
+							testkit.WriteFile(t, filepath.Join(root, "bin/yard-engine"), []byte("#!/bin/sh\nprintf 'yard-engine "+version+"\\n'\n"), 0700)
+							if err := os.MkdirAll(filepath.Join(root, "config"), 0700); err != nil {
+								t.Fatal(err)
+							}
+							sealSourceAdmissionCandidate(t, publishedCandidate{release: active, root: root})
+							for _, link := range []string{"current", "previous"} {
+								if err := os.Remove(filepath.Join(fixture.runtimeRoot, link)); err != nil && !os.IsNotExist(err) {
+									t.Fatal(err)
+								}
+							}
+							if err := os.Symlink("releases/"+string(active), filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+								t.Fatal(err)
+							}
+							if previous != nil {
+								if err := os.Symlink("releases/"+string(*previous), filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+									t.Fatal(err)
+								}
+							}
+							request := releasetransition.ProcessRequest{RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Target: "1.2.3-cccccccccccc", Direction: releasetransition.DirectionActivateTarget, Mode: releasetransition.ProcessInspect}
+							if replacement {
+								request.Mode = releasetransition.ProcessConverge
+								request.Replacement = &releasetransition.JournalReplacement{Reason: releasetransition.JournalReplacementNewerRelease}
+							}
+							err = CheckSourcePolicy(context.Background(), request)
+							below := semver.MustParse(version).LT(semver.MustParse(UpdateAnchorVersion))
+							unfinished := checkpoint != releasetransition.JournalComplete
+							blockedHop := unfinished && direction == releasetransition.DirectionActivateTarget && !modernSource && !activated
+							blockedRollback := unfinished && direction == releasetransition.DirectionActivatePrevious && below
+							allowed := !below && !blockedHop
+							if (err == nil) != allowed {
+								t.Fatalf("allowed=%t: %v", allowed, err)
+							}
+							next := "yard update --version " + UpdateAnchorVersion + scope + " && yard update" + scope
+							if blockedRollback {
+								next = "yard update" + scope + " && " + next
+							}
+							if err != nil {
+								if strings.Count(err.Error(), "source-anchor-required:") != 1 || strings.Count(err.Error(), "next:") != 1 || !strings.Contains(err.Error(), "next: "+next) {
+									t.Fatalf("lost single continuation %q: %v", next, err)
+								}
+								if blockedHop && (!strings.Contains(err.Error(), "has not activated") || !strings.Contains(err.Error(), "Do not uninstall.")) {
+									t.Fatalf("lost preactivation repair guidance: %v", err)
+								}
+							}
+							if after := mustReadFile(t, fixture.journalPath); string(after) != string(payload) {
+								t.Fatal("admission changed the original journal")
+							}
+							// Pending identity is independent of the anchor finding.
+							if blockedHop && replacement {
+								digest := strings.Repeat("a", 64)
+								marker, _ := json.Marshal(config.DeveloperIdentityMarker{Schema: 1, Yard: "default", Inputs: digest, Identity: digest, Release: digest})
+								path := config.DeveloperIdentityMarkerPath(fixture.configHome, "default")
+								if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+									t.Fatal(err)
+								}
+								testkit.WriteFile(t, path, marker, 0600)
+								err = CheckSourcePolicy(context.Background(), request)
+								if err == nil || !strings.Contains(err.Error(), "developer identity transition is pending") || strings.Count(err.Error(), "source-anchor-required:") != 1 {
+									t.Fatalf("lost independent refusal: %v", err)
+								}
+							}
+						})
+					}
+				}
+			}
+		}
 	}
 }
 

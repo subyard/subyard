@@ -137,6 +137,10 @@ Move the boundary when the supported matrix's cost or age justifies retiring a s
    boundary alone neither deletes history readers nor raises epoch floors.
 
 The TSV/constant contract and shared fixture readers keep the anchor selection synchronized.
+Post-activation takeover also requires the candidate to retain reconciliation of the anchor's
+activated state. Removing that code makes takeover a refusal again. Before activation, only the
+original owner can finish the hop; if it is defective, an anchor-series fix release (v0.27.x for
+this boundary) is the repair path, not a bridge release or an uninstall.
 
 ## Existing compatibility inventory
 

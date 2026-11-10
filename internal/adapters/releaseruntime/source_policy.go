@@ -145,7 +145,7 @@ func verifyHistoricalUninstallSource(ctx context.Context, runtimeRoot string) (*
 // predates the ordinary admission floor; the transition validates that binding.
 func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessRequest) (refusal error) {
 	var identityErr, unfinishedErr error
-	unfinishedRollback := false
+	var unfinished *releasetransition.JournalRecord
 	defer func() { refusal = domain.CollectRefusals(identityErr, unfinishedErr, refusal) }()
 	if pending, err := config.PendingDeveloperIdentities(request.ConfigHome); err != nil {
 		identityErr = err
@@ -171,20 +171,7 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			return nil
 		}
 		if journal.Checkpoint != releasetransition.JournalComplete {
-			source, err := releasetransition.ReleaseIDVersion(journal.Releases.From)
-			if err == nil && source.LT(semver.MustParse(UpdateAnchorVersion)) {
-				owner, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)
-				if journal.Goal.Direction == releasetransition.DirectionActivatePrevious {
-					unfinishedRollback = true
-					_, command := sourceUpdateCommands(source.String(), request.RuntimeRoot)
-					unfinishedErr = fmt.Errorf("source-anchor-required: unfinished rollback from v%s must be completed by its original owner; next: %s", source, command)
-				} else if err != nil {
-					unfinishedErr = fmt.Errorf("source-anchor-required: unfinished update from v%s must be completed by its original owner %s before replacing it", source, journal.Goal.Target)
-				} else {
-					command, _ := sourceUpdateCommands(owner.String(), request.RuntimeRoot)
-					unfinishedErr = fmt.Errorf("source-anchor-required: unfinished update from v%s must be completed by its original owner v%s; next: %s", source, owner, command)
-				}
-			}
+			unfinished = &journal
 		}
 	}
 	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
@@ -208,10 +195,30 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		return errors.New("source release identity does not match its sealed version")
 	}
 	admissionErr := sourceVersionError(verified.version, request.RuntimeRoot)
-	if unfinishedRollback {
-		// Resuming the captured rollback is not a fresh update through the anchor.
-		// Keep invalid-version/provenance refusals independently discoverable.
-		if version, err := semver.Parse(verified.version); err == nil && version.GTE(semver.MustParse(MinimumSourceVersion)) {
+	if unfinished != nil {
+		anchor := semver.MustParse(UpdateAnchorVersion)
+		active, activeErr := semver.Parse(verified.version)
+		source, sourceErr := releasetransition.ReleaseIDVersion(unfinished.Releases.From)
+		anchorCommand, plain := sourceUpdateCommands(UpdateAnchorVersion, request.RuntimeRoot)
+		if unfinished.Goal.Direction == releasetransition.DirectionActivatePrevious && activeErr == nil && active.LT(anchor) {
+			unfinishedErr = fmt.Errorf("source-anchor-required: unfinished rollback must be completed by its original owner before updating through v%s; next: %s && %s && %s", UpdateAnchorVersion, plain, anchorCommand, plain)
+		} else if unfinished.Goal.Direction == releasetransition.DirectionActivateTarget && sourceErr == nil && source.LT(anchor) {
+			// Match activatedReleaseLinks: the switch may have succeeded before
+			// activation-intent advanced. The engine still owns replacement checks,
+			// fresh consent and preserving the old journal, or its ordinary Retry.
+			activated := observed.Active == unfinished.Releases.Target && observed.Previous != nil && *observed.Previous == unfinished.Releases.From
+			if !activated || activeErr != nil || active.LT(anchor) {
+				owner, err := releasetransition.ReleaseIDVersion(unfinished.Goal.Target)
+				if err != nil {
+					return err
+				}
+				command, _ := sourceUpdateCommands(owner.String(), request.RuntimeRoot)
+				unfinishedErr = fmt.Errorf("source-anchor-required: unfinished update from v%s to v%s has not activated; next: %s && %s\nThis release cannot replace it. If v%s cannot finish, a v%d.%d.x fix release is the repair path. Do not uninstall.", source, owner, command, plain, owner, anchor.Major, anchor.Minor)
+			}
+		}
+		if unfinishedErr != nil && activeErr == nil {
+			// This continuation replaces the version-only refusal for the same
+			// cause; unrelated identity and provenance findings remain independent.
 			admissionErr = nil
 		}
 	}
