@@ -124,6 +124,18 @@ download() {
   curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
     --retry 3 --connect-timeout 20 --max-time 300 --output "$2" "$1"
 }
+# Keep this function local: provision hooks are delivered on stdin, without repo helpers.
+download_artifact() {
+  local attempt
+  for attempt in 1 2 3 4; do
+    # Allow slow links indefinitely; below 1 KiB/s for two minutes indicates a stall.
+    if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --connect-timeout 20 --speed-limit 1024 --speed-time 120 --continue-at - \
+      --output "$2" "$1"; then return 0; fi
+    [ "$attempt" = 4 ] || sleep 2
+  done
+  return 1
+}
 download "$RELEASE_BASE_URL/latest" "$tmp/latest" || die 'latest version download failed'
 VERSION="$(cat "$tmp/latest")"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'invalid latest release version'
@@ -142,7 +154,8 @@ if is_working_binary "$RUNTIME_PATH"; then
   [ "$newest" != "$BINARY_VERSION" ] || current=1
 fi
 if [ "$current" = 0 ]; then
-  download "$RELEASE_BASE_URL/$VERSION/$platform/claude" "$tmp/claude" || die 'release artifact download failed'
+  download_artifact "$RELEASE_BASE_URL/$VERSION/$platform/claude" "$tmp/claude" || die 'release artifact download failed'
+  # Fail closed on a corrupt partial; cleanup discards it before the next invocation.
   [ "$(sha256sum "$tmp/claude" | cut -d' ' -f1)" = "$EXPECTED_SHA256" ] || die "checksum mismatch for Claude $VERSION ($ARCH)"
   runtime_stage="$(mktemp "$INSTALL_ROOT/.claude.XXXXXX")"
   install -m 0755 "$tmp/claude" "$runtime_stage"

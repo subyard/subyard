@@ -288,7 +288,13 @@ if [ "$(/usr/local/bin/node --version 2>/dev/null)" != "v${NODE_VERSION}" ]; the
     amd64) na=x64 ;; arm64) na=arm64 ;; *) echo "unsupported arch" >&2; exit 1 ;;
   esac
   tmp="$(mktemp -d)"; base="node-v${NODE_VERSION}-linux-${na}"
-  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${base}.tar.xz" -o "$tmp/${base}.tar.xz"
+  # Allow slow archive transfers, but abort connections stalled for two minutes.
+  for attempt in 1 2 3 4; do
+    if curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 120 --continue-at - \
+      "https://nodejs.org/dist/v${NODE_VERSION}/${base}.tar.xz" -o "$tmp/${base}.tar.xz"; then break; fi
+    [ "$attempt" != 4 ] || exit 1
+    sleep 2
+  done
   curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$tmp/sha.txt"
   ( cd "$tmp" && grep " ${base}.tar.xz\$" sha.txt | sha256sum -c - )
   # tar won't prune files a new release dropped, so an in-place major upgrade would merge the old

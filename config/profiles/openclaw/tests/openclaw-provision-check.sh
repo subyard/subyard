@@ -33,6 +33,36 @@ with tarfile.open(sys.argv[1], 'w:xz') as archive:
     member.size = len(payload)
     archive.addfile(member, io.BytesIO(payload))
 NODE_ARCHIVE
+# Exercise the actual download loop without running root-only provisioning.
+node_download="$(awk '/^  for attempt in / { copy=1 } copy { print }
+  copy && /^  done$/ { exit } END { if (!copy) exit 1 }' "$HOOK")"
+(
+  curl() {
+    local output='' speed='' seconds='' resume=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --max-time|--retry|--retry-max-time) return 91 ;;
+        --speed-limit) speed="$2"; shift 2 ;;
+        --speed-time) seconds="$2"; shift 2 ;;
+        --continue-at|-C) resume="$2"; shift 2 ;;
+        -o|--output) output="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "$speed:$seconds:$resume" = '1024:120:-' ] || return 92
+    if [ ! -f "$output" ]; then
+      head -c 8 "$archive_root/node-fixture.tar.xz" > "$output"
+      return 28
+    fi
+    [ "$(stat -c %s "$output")" = 8 ] || return 93
+    tail -c +9 "$archive_root/node-fixture.tar.xz" >> "$output"
+  }
+  sleep() { :; }
+  export tmp="$archive_root" base=node-download NODE_VERSION=fixture na=x64
+  eval "$node_download"
+)
+cmp "$archive_root/node-fixture.tar.xz" "$archive_root/node-download.tar.xz"
+printf 'ok: Node artifact stalls then resumes without a total deadline\n'
 node_extract="$(awk '/^  tar -xJf / && / -C \/usr\/local --strip-components=1/ {
   sub(/-C \/usr\/local/, "-C \"$target_prefix\""); print; found++
 } END { if (found != 1) exit 1 }' "$HOOK")"

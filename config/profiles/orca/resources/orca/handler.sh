@@ -250,10 +250,15 @@ download_release() {
   ORCA_TMP_DIR="$(mktemp -d)"
   ORCA_ARTIFACT="$ORCA_TMP_DIR/orca-ide_$ORCA_VERSION.deb"
   info "downloading pinned Orca $ORCA_VERSION deb"
-  curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-    --retry 3 --retry-all-errors --connect-timeout 20 --max-time 1800 \
-    "$ORCA_RELEASE_URL" -o "$ORCA_ARTIFACT" \
-    || die "could not download pinned Orca $ORCA_VERSION"
+  # Large releases may outlast a fixed deadline; stop only a two-minute stall.
+  local attempt
+  for attempt in 1 2 3 4; do
+    if curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+      --connect-timeout 20 --speed-limit 1024 --speed-time 120 --continue-at - \
+      "$ORCA_RELEASE_URL" -o "$ORCA_ARTIFACT"; then break; fi
+    [ "$attempt" != 4 ] || die "could not download pinned Orca $ORCA_VERSION"
+    sleep 2
+  done
   printf '%s  %s\n' "$ORCA_RELEASE_SHA256" "$ORCA_ARTIFACT" |
     sha256sum -c - >/dev/null ||
     die "Orca deb SHA-256 mismatch; installed runtime was not changed"

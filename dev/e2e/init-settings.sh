@@ -171,14 +171,30 @@ yard start --yes
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("diagnostics",None); open(p,"w").write(json.dumps(value))'
 yard init --yes
 printf '{"fixture":"after"}\n' > "$STATE/claude.json"
-yard config status > "$STATE/config-drift.log" 2>&1 || true
-if ! grep -F 'AGENT_claude_CONFIG  content changed' "$STATE/config-drift.log" >/dev/null; then
-  printf '{"fixture":"before"}\n' > "$STATE/claude.json"
+drift_exit=0
+yard config status > "$STATE/config-drift.log" 2>&1 || drift_exit=$?
+if [ "$drift_exit" != 1 ] || ! grep -Fq 'AGENT_claude_CONFIG  content changed' "$STATE/config-drift.log"; then
   cat "$STATE/config-drift.log" >&2
   printf 'init-settings: first config publication did not record source content\n' >&2; exit 1
 fi
-printf '{"fixture":"before"}\n' > "$STATE/claude.json"
 printf 'PASS: first config publication records same-path content changes\n'
+apply_exit=0
+owner timeout --signal=TERM --kill-after=10 120 "$launcher" -Y "$name" config apply --yes \
+  > "$STATE/config-apply.log" 2>&1 || apply_exit=$?
+if [ "$apply_exit" != 0 ]; then
+  cat "$STATE/config-apply.log" >&2
+  case "$apply_exit" in
+    124|137) printf 'init-settings: config apply exceeded the 120s deadline (possible owner-lock deadlock)\n' >&2 ;;
+    *) printf 'init-settings: config apply failed (exit %s)\n' "$apply_exit" >&2 ;;
+  esac
+  exit 1
+fi
+if ! yard config status > "$STATE/config-converged.log" 2>&1 \
+  || ! grep -Fxq "yard $name materialized-config: converged" "$STATE/config-converged.log"; then
+  cat "$STATE/config-converged.log" >&2
+  printf 'init-settings: config apply did not converge the live yard\n' >&2; exit 1
+fi
+printf 'PASS: installed config apply completes under the owner barrier and converges live drift\n'
 # Seed the protected legacy inventory shape, preserving its native ownership.
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("applied_settings",None); open(p,"w").write(json.dumps(value))'
 yard config set AGENT_claude_COMMAND fixture-agent-next --scope yard --yes

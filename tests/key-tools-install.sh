@@ -2,7 +2,7 @@
 # Host-free pinned age/SOPS installer: artifact selection, checksums, atomic replacement, idempotence.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-key-tools.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -27,10 +27,19 @@ sops_sha="$(sha256sum "$TMP/fixture/sops" | cut -d' ' -f1)"
 cat > "$TMP/bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-out=''; url=''
+out=''; url=''; speed=''; seconds=''; resume=''
 while [ $# -gt 0 ]; do
-  case "$1" in -o|--output) out="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
+  case "$1" in
+    -o|--output) out="$2"; shift 2 ;;
+    --speed-limit) speed="$2"; shift 2 ;;
+    --speed-time) seconds="$2"; shift 2 ;;
+    --continue-at) resume="$2"; shift 2 ;;
+    --max-time|--retry-max-time) exit 91 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
 done
+[ "$speed:$seconds:$resume" = '1024:120:-' ]
 [ -n "$out" ] && [ -n "$url" ]
 printf '%s\n' "$url" >> "$KEY_TOOL_CURL_LOG"
 case "$url" in

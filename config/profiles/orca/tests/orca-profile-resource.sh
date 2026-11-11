@@ -425,8 +425,29 @@ MOCK
 
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
+set -euo pipefail
 state_root="$(cd "$(dirname "$0")/.." && pwd)"
 printf 'curl %s\n' "$*" >> "$state_root/commands.log"
+out='' speed='' seconds='' resume='' forbidden=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|--output) out="$2"; shift 2 ;;
+    --speed-limit) speed="$2"; shift 2 ;;
+    --speed-time) seconds="$2"; shift 2 ;;
+    --continue-at|-C) resume="$2"; shift 2 ;;
+    --max-time|--retry|--retry-max-time) forbidden=1; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$out" ] && [ "$out" != /dev/null ]; then
+  [ "$speed:$seconds:$resume:$forbidden" = '1024:120:-:0' ] || exit 91
+  if [ ! -f "$out" ]; then
+    printf 'partial' > "$out"
+    exit 28
+  fi
+  [ "$(cat "$out")" = partial ] || exit 92
+  printf ' complete\n' >> "$out"
+fi
 MOCK
 
 cat >"$TMP/bin/orca-ide" <<'MOCK'
@@ -455,6 +476,22 @@ cat >"$TMP/bin/sleep" <<'MOCK'
 exit 0
 MOCK
 chmod 0755 "$TMP/bin/"*
+
+# Exercise the real artifact downloader, including its checksum after a resumed stall.
+(
+  # shellcheck disable=SC1090
+  . <(awk '/^download_release\(\) \{/ { copy=1 } copy { print }
+    copy && /^\}$/ { exit } END { if (!copy) exit 1 }' "$ROOT/config/profiles/orca/resources/orca/handler.sh")
+  info() { :; }
+  die() { fail "$*"; }
+  export TMPDIR="$TMP"
+  export ORCA_RELEASE_URL=https://example.invalid/orca.deb
+  export ORCA_RELEASE_SHA256
+  ORCA_RELEASE_SHA256="$(printf 'partial complete\n' | sha256sum | cut -d' ' -f1)"
+  download_release
+  printf 'partial complete\n' | cmp - "$ORCA_ARTIFACT"
+)
+printf 'ok: Orca artifact stalls then resumes without a total deadline\n'
 
 run_orca() {
   # Exercise the physical adapter contract in isolation. Native CLI bootstrap,

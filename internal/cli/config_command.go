@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 type configTarget struct {
@@ -1045,6 +1046,20 @@ func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard str
 	}
 	command := exec.CommandContext(ctx, applier.path, arguments...)
 	command.Env = environmentList(applier.environment, map[string]string{"ASSUME_YES": "1"})
+	home := applier.environment["SUBYARD_HOME"]
+	if home == "" {
+		home = filepath.Join(firstNonempty(applier.environment["SUBYARD_OPERATOR_HOME"], applier.environment["HOME"]), ".subyard")
+	}
+	owner, err := uninstall.BorrowOwnerLock(home)
+	if err != nil {
+		return err
+	}
+	if owner != nil {
+		defer owner.Close()
+		// Nested init/config apply must retain this operation's owner barrier.
+		command.Env = append(command.Env, fmt.Sprintf("SUBYARD_OWNER_LOCK_FD=%d", 3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, owner)
+	}
 	command.Stdin = strings.NewReader("")
 	command.Stdout = applier.stdout
 	command.Stderr = applier.stderr
