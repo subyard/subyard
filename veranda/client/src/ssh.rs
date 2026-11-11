@@ -430,7 +430,7 @@ pub(crate) fn bounded_output_with_usage(
     capture_owned(command, input, COMMAND_TIMEOUT, usage, kind)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn bounded_output_until(
     command: &mut Command,
     input: Option<&[u8]>,
@@ -455,7 +455,7 @@ pub(crate) fn require_agent(usage: Option<&UsageContext>) -> Result<(), NativeEr
     command.arg("-l");
     agent_readiness_with_usage(&mut command, usage)
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn agent_readiness(command: &mut Command) -> Result<(), NativeError> {
     agent_readiness_with_usage(command, None)
 }
@@ -473,7 +473,7 @@ fn agent_readiness_with_usage(
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn capture_with_timeout(
     command: &mut Command,
     input: Option<&[u8]>,

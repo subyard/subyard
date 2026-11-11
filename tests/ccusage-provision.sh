@@ -54,15 +54,19 @@ sha_bad_binary="$(make_fixture 8.8.8 8.8.8 x64 8.8.7)"
 cat > "$fake_bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-out='' url=''
+out='' url='' speed='' seconds='' connect=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output|-o) out="$2"; shift 2 ;;
     --output=*) out="${1#*=}"; shift ;;
+    --speed-limit) speed="$2"; shift 2 ;;
+    --speed-time) seconds="$2"; shift 2 ;;
+    --connect-timeout) connect="$2"; shift 2 ;;
     --*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
+[ "$speed:$seconds:$connect" = '1024:120:20' ]
 [ -n "$out" ] && [ -n "$url" ]
 printf '%s\n' "$url" >> "$CCUSAGE_TEST_CURL_LOG"
 case "$url" in file://*) cp -- "${url#file://}" "$out" ;; *) exit 90 ;; esac

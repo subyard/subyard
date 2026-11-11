@@ -84,8 +84,14 @@ bootstrap_rustup() (
   case "$(uname -m)" in x86_64) triple=x86_64-unknown-linux-gnu ;; aarch64) triple=aarch64-unknown-linux-gnu ;; *) exit 2 ;; esac
   tool="$(run_as_dev mktemp -d "$DEV_HOME/.cargo/.rustup-init.XXXXXX")"
   trap 'run_as_dev rm -rf -- "$tool"' EXIT
-  run_as_dev curl --fail --location --retry 2 --connect-timeout 15 --max-time 180 \
-    "https://static.rust-lang.org/rustup/dist/$triple/rustup-init" -o "$tool/rustup-init"
+  # The bootstrap executable can outlast 180s on slow links; bound stalls instead.
+  for attempt in 1 2 3; do
+    if run_as_dev curl --fail --location --connect-timeout 15 \
+      --speed-limit 1024 --speed-time 120 --continue-at - \
+      "https://static.rust-lang.org/rustup/dist/$triple/rustup-init" -o "$tool/rustup-init"; then break; fi
+    [ "$attempt" != 3 ] || exit 1
+    sleep 2
+  done
   run_as_dev curl --fail --location --retry 2 --connect-timeout 15 --max-time 180 \
     "https://static.rust-lang.org/rustup/dist/$triple/rustup-init.sha256" -o "$tool/rustup-init.sha256"
   run_as_dev sh -c 'cd "$1" && sha256sum --check rustup-init.sha256' verifier "$tool"

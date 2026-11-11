@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -181,6 +182,37 @@ class StockProbeTests(unittest.TestCase):
             self.assertEqual({"PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"},
                              set(environment))
             self.assertNotEqual(str(Path.home()), environment["HOME"])
+
+    def test_unreachable_runtime_reports_redacted_output_tail(self):
+        arguments = argparse.Namespace(binary="/synthetic/orca", version="1.4.218",
+                                       registration=str(support.COMPONENT))
+        marker = "synthetic-private-payload"
+
+        def serve(command, **kwargs):
+            self.assertEqual(subprocess.STDOUT, kwargs["stderr"])
+            os.write(kwargs["stdout"], "".join(f"noise {index}\n" for index in range(30)).encode()
+                     + f"\x1b[31mfatal: synthetic listen failure \u2014\x1b[0m\nurl orca://pair/{marker}\n"
+                       f"authToken={marker}\n{'A' * 64}\n".encode())
+            return unittest.mock.Mock(pid=4242, poll=unittest.mock.Mock(return_value=1))
+
+        with patch.object(probe.subprocess, "run", return_value=subprocess.CompletedProcess(
+            [], 0, stdout=b"1.4.218\n")), patch.object(probe.subprocess, "Popen", side_effect=serve), \
+                patch.object(probe.os, "killpg"):
+            # A strict ASCII stderr must not mask the original failure.
+            output = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
+            with contextlib.redirect_stderr(output):
+                self.assertEqual(1, probe.stock_probe(arguments))
+        output.flush()
+        text = output.buffer.getvalue().decode("ascii")
+        lines = text.splitlines()
+        prefix = "orca-stock-probe: stock runtime output: "
+        self.assertEqual(21, len(lines))
+        self.assertTrue(all(line.startswith(prefix) for line in lines[:20]))
+        self.assertEqual(prefix + "fatal: synthetic listen failure \\u2014", lines[16])
+        self.assertEqual([prefix + "url <redacted>"] + [prefix + "<redacted>"] * 2, lines[17:20])
+        self.assertEqual("orca-stock-probe: startup: stock runtime did not become reachable "
+                         "(exited with status 1; last: no runtime metadata)", lines[20])
+        self.assertNotIn(marker, text)
 
     def test_native_failure_does_not_echo_cli_output(self):
         arguments = argparse.Namespace(binary="/synthetic/orca", version="1.4.218",

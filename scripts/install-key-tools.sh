@@ -92,10 +92,17 @@ age_url="https://github.com/FiloSottile/age/releases/download/v$AGE_VERSION/$age
 sops_asset="sops-v$SOPS_VERSION.linux.$arch"
 sops_url="https://github.com/getsops/sops/releases/download/v$SOPS_VERSION/$sops_asset"
 
-# Pinned checksums verify every download, so transient failures are retried.
+# Pinned checksums verify every download, including resumed partial files.
 download() {
-  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 "$1" -o "$2"
+  local attempt
+  for attempt in 1 2 3 4; do
+    # SOPS can outlast a fixed deadline on slow links; abort only a two-minute stall.
+    if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --connect-timeout 20 --speed-limit 1024 --speed-time 120 --continue-at - \
+      --output "$2" "$1"; then return 0; fi
+    [ "$attempt" = 4 ] || sleep 2
+  done
+  return 1
 }
 
 download "$age_url" "$tmp/$age_archive" \

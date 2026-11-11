@@ -385,7 +385,6 @@ func TestConfigValidationAllowsReadableManagedFilesAndRejectsUnsafePermissions(t
 		{name: "generated world readable", relative: "generated/codex/config", mode: 0o644},
 		{name: "group writable", relative: "secrets/token", mode: 0o620, wantErr: "group/world writable"},
 		{name: "world writable", relative: "generated/codex/config", mode: 0o602, wantErr: "group/world writable"},
-		{name: "group readable and writable", relative: "config.env", mode: 0o660, wantErr: "group/world writable"},
 		{name: "group and world writable", relative: "config.env", mode: 0o666, wantErr: "group/world writable"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -210,6 +210,32 @@ def set_isolation(arguments):
     return 1
 
 
+def print_output_tail(path, label, limit=2048):
+    """Report bounded stock output with the bootstrap diagnostics' capability redaction."""
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as source:
+            size = source.seek(0, 2)
+            source.seek(max(0, size - limit))
+            data = source.read(limit)
+        if size > limit:
+            data = data.partition(b"\n")[2]
+    except OSError:
+        data = b""
+    text = data.decode(errors="replace").replace("\r", "\n")
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"(?i)[a-z][a-z0-9+.-]*://\S+", "<redacted>", text)
+    text = re.sub(r"(?im)^.*(?:authorization|bearer|pairing|token|secret|password|publicKeyB64|capability).*$",
+                  "<redacted>", text)
+    text = re.sub(r"[A-Za-z0-9_+/=-]{64,}", "<redacted>", text)
+    lines = [line[:512].encode("ascii", "backslashreplace").decode()
+             for line in text.splitlines()[-20:]] or ["no output"]
+    try:
+        for line in lines:
+            print(f"{label}: {line}", file=sys.stderr)
+    except (OSError, ValueError):
+        pass  # Diagnostics must never mask the original failure.
+
+
 def stock_probe(arguments):
     """Probe only a disposable profile: never use the caller's accounts or runtime."""
     phase = "version"
@@ -239,6 +265,7 @@ def stock_probe(arguments):
                 print("orca-stock-probe: unavailable: pinned stock binary version mismatch", file=sys.stderr)
                 return 2
             metadata = root / "config/orca/orca-runtime.json"
+            server_log = root / "serve.log"
 
             class RPC:
                 def call(self, method, params=None):
@@ -268,11 +295,16 @@ def stock_probe(arguments):
                 with socket.socket() as listener:
                     listener.bind(("127.0.0.1", 0))
                     port = listener.getsockname()[1]
-                server = subprocess.Popen(
-                    [arguments.binary, "serve", "--no-pairing", "--port", str(port)],
-                    env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
+                # Each start owns the log, so a failure tail shows only that start.
+                log = os.open(server_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+                try:
+                    server = subprocess.Popen(
+                        [arguments.binary, "serve", "--no-pairing", "--port", str(port)],
+                        env=environment, stdout=log, stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                finally:
+                    os.close(log)
                 started = time.monotonic()
                 deadline = started + 20
                 last = "no runtime metadata"
@@ -287,6 +319,7 @@ def stock_probe(arguments):
                 status = server.poll()
                 state = (f"exited with status {status}" if status is not None
                          else f"still running after {time.monotonic() - started:.0f}s")
+                print_output_tail(server_log, "orca-stock-probe: stock runtime output")
                 raise SafeRpcError(f"stock runtime did not become reachable ({state}; last: {last})")
 
             try:

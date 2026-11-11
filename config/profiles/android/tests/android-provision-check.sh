@@ -183,7 +183,7 @@ import threading
 
 helper = pathlib.Path(sys.argv[1])
 canary = 'android-download-private-canary'
-payload = b'complete toolchain input\n'
+payload = b'complete toolchain input with enough bytes for four partial responses\n'
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -191,17 +191,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.calls += 1
-        if self.server.scenario == 'transient' and self.server.calls >= 3:
-            self.send_response(200)
-            self.send_header('Content-Length', str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-        # A partial response followed by a reset exercises curl's transport retry.
-        self.send_response(200)
-        self.send_header('Content-Length', '100000')
+        offset = int(self.headers.get('Range', 'bytes=0-')[6:-1])
+        self.server.offsets.append(offset)
+        self.send_response(206 if offset else 200)
+        self.send_header('Content-Length', str(len(payload) - offset))
+        if offset:
+            self.send_header('Content-Range', f'bytes {offset}-{len(payload)-1}/{len(payload)}')
         self.end_headers()
-        self.wfile.write(canary.encode())
+        if self.server.scenario == 'transient' and self.server.calls >= 3:
+            self.wfile.write(payload[offset:])
+            return
+        # A partial response followed by a reset must be resumed, not restarted.
+        self.wfile.write(payload[offset:offset+8])
         self.wfile.flush()
         self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
         self.close_connection = True
@@ -216,9 +217,12 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
                               env=env, capture_output=True, timeout=15)
 
     for scenario in ('transient', 'exhausted'):
+        # A completed prior scenario must not become this scenario's resume input.
+        destination = root / f'download-{scenario}'
         stage = 'jdk' if scenario == 'transient' else 'cmdline-tools'
         with http.server.HTTPServer(('127.0.0.1', 0), Handler) as server:
             server.scenario, server.calls = scenario, 0
+            server.offsets = []
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
@@ -228,39 +232,51 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
                 thread.join()
             assert canary.encode() not in result.stdout + result.stderr
             assert result.stdout == b''
+            assert server.offsets == [8 * index for index in range(server.calls)]
             if scenario == 'transient':
                 assert result.returncode == 0 and server.calls == 3
-                assert destination.read_bytes() == payload  # No retained partial response.
+                assert destination.read_bytes() == payload  # Resumed ranges reconstruct the original payload.
             else:
                 assert result.returncode != 0 and server.calls == 4
                 assert not destination.exists()
 
-    # Shorten only the fixture's clock: native timeout must remain fatal and reap curl.
+    # A low-speed timeout is retried a bounded number of times without a total cap.
     fake_bin = root / 'bin'
     fake_bin.mkdir(mode=0o700)
-    pid_file = root / 'curl.pid'
+    calls = root / 'calls'
     scripts = {
-        'timeout': '#!/bin/bash\nshift 3\nexec /usr/bin/timeout --signal=TERM --kill-after=1s 0.2s "$@"\n',
-        'curl': f'#!/bin/bash\nprintf "%s\\n" "$$" > "{pid_file}"\nexec sleep 20\n',
+        'sleep': '#!/bin/bash\nexit 0\n',
+        'curl': f"""#!/bin/bash
+set -eu
+speed= seconds= resume= connect=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --max-time|--retry-max-time) exit 91 ;;
+    --speed-limit) speed="$2"; shift 2 ;;
+    --speed-time) seconds="$2"; shift 2 ;;
+    --continue-at) resume="$2"; shift 2 ;;
+    --connect-timeout) connect="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ "$speed:$seconds:$resume:$connect" = '1024:120:-:15' ] || exit 92
+printf '%s\\n' call >> '{calls}'
+exit 28
+""",
     }
     for name, text in scripts.items():
         path = fake_bin / name
         path.write_text(text)
         path.chmod(0o700)
-    # A missing output is unknown, rather than a claim that the transfer saw zero bytes.
     for existing_output in (True, False):
+        calls.write_text('')
         if existing_output:
             destination.write_text(canary)
         result = download('http://127.0.0.1/unused', 'jdk',
                           dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'))
-        assert result.returncode == 124 and not destination.exists()
+        assert result.returncode == 28 and not destination.exists()
+        assert calls.read_text().splitlines() == ['call'] * 4
         assert canary.encode() not in result.stdout + result.stderr and not result.stdout
-        try:
-            os.kill(int(pid_file.read_text()), 0)
-        except ProcessLookupError:
-            pass
-        else:
-            raise AssertionError('timed-out curl remains alive')
 print('ok: bounded Android downloads recover or fail without publishing partial inputs')
 PYDOWNLOAD
 

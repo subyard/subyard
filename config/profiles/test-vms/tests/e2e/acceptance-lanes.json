@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "preflight": ["bash", "config/profiles/test-vms/tests/run.sh", "--preflight"],
   "lanes": [
     {"id": "broker-cold-upgrade", "arguments": ["--lane", "broker-cold-upgrade"]},
     {"id": "full-uninstall", "arguments": ["--lane", "full-uninstall"]},

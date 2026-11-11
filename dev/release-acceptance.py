@@ -162,9 +162,17 @@ def profile_inventory(root):
         manifest = (root / path).parent / "acceptance-lanes.json"
         if manifest.exists():
             document = json.loads(manifest.read_text())
-            lanes = document.get("lanes")
-            if kind != "runner" or document.get("schema_version") != 1 or not isinstance(lanes, list) or not lanes:
+            lanes = document.get("lanes", [])
+            if (kind != "runner" or document.get("schema_version") != 1 or not isinstance(lanes, list)
+                or (not lanes and ("lanes" in document or "preflight" not in document))):
                 raise ValueError("invalid profile acceptance lanes")
+            if "preflight" in document:
+                command = document["preflight"]
+                if (not isinstance(command, list) or not command
+                    or any(not isinstance(arg, str) or not arg or len(arg) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in arg) for arg in command)
+                    or "--slot" in command):
+                    raise ValueError("invalid profile acceptance preflight command")
+                result[name]["preflight"] = command
             ids = set()
             for lane in lanes:
                 if (not isinstance(lane, dict) or set(lane) != {"id", "arguments"}
@@ -174,7 +182,8 @@ def profile_inventory(root):
                     or "--slot" in lane["arguments"]):
                     raise ValueError("invalid or duplicate profile acceptance lane")
                 ids.add(lane["id"])
-            result[name]["lanes"] = lanes
+            if lanes:
+                result[name]["lanes"] = lanes
     if not result:
         raise ValueError("empty profile acceptance inventory")
     return result
@@ -459,6 +468,8 @@ def commands(root, version, inventory):
     for check in core_vm_checks(root):
         result["vm:" + check] = ["bash", "dev/e2e/release-vm-check.sh", check]
     for name, entry in inventory.items():
+        if "preflight" in entry:
+            result["profile-preflight:" + name] = entry["preflight"]
         if "lanes" in entry:
             for lane in entry["lanes"]:
                 result["profile:" + name + "/" + lane["id"]] = ["bash", entry["path"], *lane["arguments"]]
@@ -1211,6 +1222,12 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     if "p0-release-smoke" in excluded:
         raise ValueError("p0-release-smoke is required and cannot be excluded")
     selected -= excluded
+    # Full runs select every preflight. Targeted lanes retain their exact selection
+    # for hosted receipt consumers and run their own owning prerequisites.
+    preflights = sorted(name for name in checks if name.startswith("profile-preflight:"))
+    if not only and any(is_live(name) and checks[name] and (rerun or receipt["checks"][name]["status"] != "passed") for name in selected):
+        if excluded.intersection(preflights):
+            raise ValueError("profile preflights are required before live checks and cannot be excluded")
     priority_order = [name for selector in first for name in checks
                       if name in prioritized and (name == selector or name.startswith(selector + "/"))]
     order = list(dict.fromkeys([*priority_order, *checks]))
@@ -1257,12 +1274,13 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             with lock:
                 receipt["checks"][name] = {"status": "running", "command": command_identity(checks[name], root)}
                 save(output, receipt)  # Invalidate a previous PASS before any child can start.
-            result = execute(name, checks[name], root, output, env, slot) if slot else execute(name, checks[name], root, output, env)
+            check_env = dict(env, SUBYARD_E2E_LOCAL_EVIDENCE=str(output)) if name in preflights else env
+            result = execute(name, checks[name], root, output, check_env, slot) if slot else execute(name, checks[name], root, output, check_env)
             result["execution_environment"] = measured_environment
             result["original_attempt"] = completed_attempt(output, root, receipt, name, result)
             return result
 
-        for name in [item for item in pending if item not in live]:
+        for name in [item for item in pending if item not in live and item not in preflights]:
             if STOP.is_set():
                 break
             result = attempt(name)
@@ -1275,12 +1293,41 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             if result["status"] != "passed":
                 failure_reason = "local-check-stop"
                 break
-        local_names = [name for name in checks if not is_live(name)] + (["package"] if "package" in receipt["checks"] else [])
-        if live and any(receipt["checks"][name]["status"] != "passed"
+        local_names = [name for name in checks if not is_live(name) and name not in preflights] + (["package"] if "package" in receipt["checks"] else [])
+        local_ready = not any(receipt["checks"][name]["status"] != "passed"
                         and not (name == "process-coverage" and receipt["checks"][name] == PROCESS_COVERAGE_DIAGNOSTIC)
-                        for name in local_names):
-            print("INCOMPLETE: live checks await successful local gates", flush=True)
-            invocation.finish("interrupted" if STOP.is_set() else "finished", "prerequisite-stop")
+                        for name in local_names)
+        if local_ready:
+            # Keep collecting independent refusals in profile-name order.
+            for name in preflights:
+                if name not in pending or STOP.is_set():
+                    continue
+                result = attempt(name)
+                if result is None:
+                    break
+                receipt["checks"][name] = result
+                invocation.record(name, result)
+                save(output, receipt)
+                invocation.write()
+        # A targeted hosted fallback must honor results recorded by the first pass.
+        # Fresh targeted jobs may leave unselected preflights pending.
+        stopped = [name for name in preflights
+                   if (local_ready and name in selected and receipt["checks"][name]["status"] != "passed")
+                   or (live and receipt["checks"][name]["status"] in ("failed", "blocked", "interrupted", "incomplete", "running"))]
+        if stopped:
+            for label, states in (("refused", ("failed", "blocked")), ("interrupted", ("interrupted",)),
+                                  ("incomplete", ("incomplete", "running")), ("not run", ("pending",))):
+                names = [name for name in stopped if receipt["checks"][name]["status"] in states]
+                if names:
+                    print(f"INCOMPLETE: profile preflights {label}: " + ", ".join(names), flush=True)
+        waiting_local = not local_ready and (live or (only and failure_reason != "local-check-stop"
+                                                     and any(name in pending for name in preflights)))
+        if waiting_local:
+            waiting = "live checks" if live else "profile preflights"
+            print(f"INCOMPLETE: {waiting} await successful local gates", flush=True)
+        if stopped or waiting_local:
+            invocation.finish("interrupted" if STOP.is_set() else "finished",
+                              "profile-preflight-stop" if stopped else "prerequisite-stop")
             return 1
         # Only live checks wait for broker memory or disk instead of draining the queue on a
         # transient refusal; a refusal that outlasts this bound still blocks visibly.

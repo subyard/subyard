@@ -597,7 +597,7 @@ impl RpcClient {
         self.shared.stale.swap(false, Ordering::AcqRel)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn kill_owned_child_for_test(&self) -> Result<(), NativeError> {
         self.child
             .lock()

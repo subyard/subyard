@@ -134,7 +134,7 @@ impl UsageContext {
             Instant::now(),
         )
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
     pub(crate) fn with_hooks(mut self, hooks: TestHooks) -> Self {
         self.hooks = hooks;
         self
@@ -499,11 +499,11 @@ impl OwnedChild {
             matches!(self.child.try_wait(), Ok(Some(_)))
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
     pub(crate) fn has_usage(&self) -> bool {
         self.usage.is_some()
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
     pub(crate) fn capture_for_test(&mut self, pid: u32, nohang: bool) -> io::Result<bool> {
         self.usage.as_mut().unwrap().capture(pid, nohang)
     }
@@ -586,8 +586,9 @@ mod interval_tests {
             assert_eq!(outward_micros(at, origin, false), Some(floor));
             assert_eq!(outward_micros(at, origin, true), Some(ceil));
         }
+        // Windows `Instant` treats sub-tick negative differences as zero.
         assert_eq!(
-            outward_micros(origin, origin + Duration::from_nanos(1), false),
+            outward_micros(origin, origin + Duration::from_millis(1), false),
             None
         );
         assert_eq!(duration_micros(Duration::from_secs(u64::MAX), true), None);

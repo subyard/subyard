@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022, macos-14]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022, macos-15]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:

@@ -91,8 +91,16 @@ cat > "$tmp/fake-bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' download >> "$SUBYARD_DEV_CURL_LOG"
+speed='' seconds='' resume='' total=0
 while [ "$#" -gt 0 ]; do
-  case "$1" in -o) output="$2"; shift 2 ;; *) shift ;; esac
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    --speed-limit) speed="$2"; shift 2 ;;
+    --speed-time) seconds="$2"; shift 2 ;;
+    --continue-at) resume="$2"; shift 2 ;;
+    --max-time) total=1; shift 2 ;;
+    *) shift ;;
+  esac
 done
 case "$output" in
   *.sha256)
@@ -102,6 +110,7 @@ case "$output" in
       (cd "$(dirname "$output")" && sha256sum rustup-init) > "$output"
     fi ;;
   *)
+    [ "$speed:$seconds:$resume:$total" = '1024:120:-:0' ] || exit 98
     cat > "$output" <<'INIT'
 #!/usr/bin/env bash
 set -euo pipefail
