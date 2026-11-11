@@ -57,8 +57,12 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
     class Runtime:
         def __init__(self,source,user,selected,agents): self.selected=selected
         def observe(self):
+            if 'TELEMETRY_FIXTURE_MANAGED' in os.environ:
+                assert sorted(self.managed_agents)==os.environ['TELEMETRY_FIXTURE_MANAGED'].split()
             if os.environ.get('TELEMETRY_FIXTURE_STATE')=='unsafe': raise ValueError('foreign control state')
             observation=dict(state='current' if marker.exists() else ('stale' if self.selected else 'absent'),actual='',desired='')
+            if os.environ.get('TELEMETRY_FIXTURE_PENDING')=='1':
+                observation.update(state='pending',actual='a'*64,desired='b'*64)
             if os.environ.get('TELEMETRY_FIXTURE_DIAGNOSTICS')=='1':
                 observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
             return observation
@@ -101,10 +105,35 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(observations[1].pop('diagnostics'),
                              [dict(parameter='telemetry.asset.collector.py', installed='changed', desired='current')])
             self.assertEqual(observations[0], observations[1])
+            result = invoke('--runtime', 'observe', ENVIRONMENT_PROFILES='telemetry',
+                            TELEMETRY_FIXTURE_DIAGNOSTICS='1', TELEMETRY_FIXTURE_PENDING='1',
+                            SUBYARD_PROFILE_DIAGNOSTICS='0')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            pending = json.loads(result.stdout)
+            self.assertEqual(pending['state'], 'pending')
+            self.assertIn('diagnostics', pending, 'pending dependencies must remain visible without opt-in')
+            self.assertEqual(invoke('--check', TELEMETRY_FIXTURE_PENDING='1').returncode, 1,
+                             'pending configuration is measured drift, not a failed observer')
             self.assertFalse((root/'applied').exists(), 'diagnostic observation applied the profile')
             self.assertEqual(invoke('--yes').returncode,0)
             self.assertEqual((root/'applied').read_text(),'1')
             self.assertEqual(invoke('--check').returncode,0)
+            managed_source = root/'settings.json'
+            managed_source.write_text('{}')
+            result = invoke('--check', CODING_TOOL_INTEGRATIONS='claude codex',
+                            AGENT_claude_CONFIG=str(managed_source), AGENT_codex_CONFIG='',
+                            AGENT_claude_CONFIG_DEST='.claude/settings.json', AGENT_codex_CONFIG_DEST='.codex/config.toml',
+                            TELEMETRY_FIXTURE_MANAGED='claude')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            missing_source = root/'missing-managed.json'
+            result = invoke('--check', CODING_TOOL_INTEGRATIONS='claude', AGENT_claude_CONFIG=str(missing_source),
+                            AGENT_claude_CONFIG_DEST='.claude/settings.json', YARD_NAME='secondary', SUBYARD_YARD='caller-yard')
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(str(missing_source).encode(), result.stderr)
+            self.assertIn(b'managed agent source missing or unreadable', result.stderr)
+            prefix = 'subyard-profile-observation-refusal-v1 '
+            refusal = next(json.loads(line[len(prefix):]) for line in result.stderr.decode().splitlines() if line.startswith(prefix))
+            self.assertEqual(refusal['retry'], 'run yard -Y secondary config paths')
             self.assertEqual((root/'applied').read_text(),'1')
             self.assertEqual(invoke('--remove').returncode,0)
             self.assertEqual((root/'applied').read_text(),'0')
@@ -217,7 +246,7 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
         owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
         safe = 'telemetry: local reconciliation failed (PermissionError at native.py:28)'
         for message, expected in [
-                ('PRIVATE_CREDENTIAL /private/config\n'+safe+'\nPRIVATE_ARGV', safe+'\n'),
+                ('PRIVATE_CREDENTIAL /private/config\n'+safe+'\nPRIVATE_ARGV', safe+'\nsubyard-profile-observation-diagnostic-v1 PermissionError native.py:28\n'),
                 (safe+' PRIVATE_CREDENTIAL', ''),
                 (safe.replace('native.py', '/private/native.py'), ''),
                 (safe.replace(':28', ':0'), ''),
@@ -228,6 +257,16 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                     owner['run']([sys.executable,'-c','import sys;sys.stderr.write(sys.argv[1]);sys.exit(7)', message])
                 self.assertEqual(stderr.getvalue(), expected)
                 self.assertNotIn('PRIVATE', stderr.getvalue())
+
+    def test_invalid_unmanaged_document_has_native_preservation_command(self):
+        from unittest.mock import patch
+        owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
+        env = {'DEV_USER': 'dev', 'YARD_INSTANCE_NAME': 'sample', 'INCUS_PROJECT': 'project'}
+        with patch.dict(os.environ, env), self.assertRaises(owner['Refusal']) as caught:
+            owner['run']([sys.executable, '-c', "import sys; print('telemetry-agent-config-invalid-v1 claude', file=sys.stderr); sys.exit(2)"])
+        self.assertIn('/home/dev/.claude/settings.json', str(caught.exception))
+        self.assertIn('run incus exec sample --project project -- mv --backup=numbered --', caught.exception.retry)
+        self.assertNotIn('config apply', caught.exception.retry)
 
     def test_all_exact_absent_release_observations_are_declared(self):
         source = Path(__file__).resolve().parents[4]

@@ -76,7 +76,7 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	}
 	for index, call := range writes {
 		if call.Project != "subyard" || call.Name != "yard" ||
-			len(call.Request.Command) != 7 ||
+			len(call.Request.Command) != 8 ||
 			call.Request.Command[0] != "sh" ||
 			!strings.Contains(call.Request.Command[3], "mktemp") ||
 			!strings.Contains(call.Request.Command[3], "chmod 0644") ||
@@ -101,6 +101,116 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Agent instructions and configs refreshed") {
 		t.Fatalf("refresh output changed: %q", output.String())
+	}
+}
+
+// Execute the actual guest writer with a prematurely closed transport. Account
+// changes are stubbed because this fixture owns only ordinary /tmp files.
+func TestGuestConfigWriteRefusesIncompleteTransport(t *testing.T) {
+	for _, test := range []struct {
+		desired, received string
+		valid             bool
+	}{
+		{"approved complete instructions\n", "", false},
+		{"approved complete instructions\n", "approved", false},
+		{"approved complete instructions\n", "approved complete instructions\n", true},
+		{"", "", true}, // Explicitly intended empty bytes are different from lost input.
+	} {
+		t.Run(fmt.Sprint(len(test.desired), "-", len(test.received)), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			destination := filepath.Join(root, "instructions")
+			original := []byte("previous complete instructions\n")
+			testkit.WriteFile(t, destination, original, 0644)
+			// SIGKILL may leave unpublished temps. Exact destination writes must
+			// ignore them and must never follow a similarly named symlink.
+			orphan := filepath.Join(root, ".subyard-config.interrupted")
+			testkit.WriteFile(t, orphan, []byte("unpublished"), 0600)
+			orphanLink := filepath.Join(root, ".subyard-config.foreign-link")
+			if err := os.Symlink(orphan, orphanLink); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			incus := runningIncus(1)
+			runtime := Runtime{Executor: incus, Yard: domain.Context{DevUser: "next", DevUID: os.Getuid()}}
+			if err := runtime.writeGuestFile(context.Background(), "/home/next/instructions", []byte(test.desired)); err != nil {
+				t.Fatal(err)
+			}
+			request := incus.ExecCalls[0].Request
+			request.Command[5] = destination
+			bin := filepath.Join(root, "bin")
+			if err := os.Mkdir(bin, 0755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"install", "chown"} {
+				testkit.WriteFile(t, filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0755)
+			}
+			command := exec.Command(request.Command[0], request.Command[1:]...)
+			command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			command.Stdin = strings.NewReader(test.received)
+			output, err := command.CombinedOutput()
+			if (err == nil) != test.valid {
+				t.Errorf("transport valid=%t: err=%v output=%s", test.valid, err, output)
+			}
+			after, statErr := os.Stat(destination)
+			actual, readErr := os.ReadFile(destination)
+			if target, err := os.Readlink(orphanLink); err != nil || target != orphan {
+				t.Fatal("orphan symlink changed", err)
+			}
+			if payload, err := os.ReadFile(orphan); err != nil || string(payload) != "unpublished" {
+				t.Fatal("orphan followed or changed", err)
+			}
+			if test.valid {
+				if statErr != nil || readErr != nil || string(actual) != test.desired || after.Mode().Perm() != 0644 {
+					t.Fatalf("approved write failed: %q %v %v", actual, statErr, readErr)
+				}
+				return
+			}
+			if statErr != nil || readErr != nil || !os.SameFile(before, after) || !bytes.Equal(actual, original) {
+				t.Fatalf("incomplete transport replaced original: bytes=%q stat=%v read=%v", actual, statErr, readErr)
+			}
+		})
+	}
+}
+
+func TestUnownedInvalidConfigRefusalNamesNativePreservationStep(t *testing.T) {
+	fake := runningIncus(1)
+	fake.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: unowned-invalid-destination-v1 JSON; private document details")}}}
+	runtime := Runtime{Executor: fake, Yard: domain.Context{YardName: "default", IncusProject: "sample", YardInstanceName: "sample-yard", DevUser: "dev", DevUID: 1000}}
+	err := runtime.applyGuestConfig(context.Background(), guestConfigFile{destination: "/home/dev/settings.json", ownedFormat: "json"}, []byte(`{"managed":true}`))
+	if err == nil || !strings.Contains(err.Error(), "'incus' 'exec' 'sample-yard' '--project' 'sample'") || !strings.Contains(err.Error(), "--backup=numbered") || !strings.Contains(err.Error(), "then run yard -Y default config apply") || strings.Contains(err.Error(), "private document") || strings.Contains(err.Error(), "yard shell") {
+		t.Fatal("unreachable or unsafe preservation hint", err)
+	}
+}
+
+func TestConfigApplyReadFailureDoesNotClaimUnownedPreservation(t *testing.T) {
+	fake := runningIncus(1)
+	fake.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: invalid current JSON")}}}
+	runtime := Runtime{Executor: fake, Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
+	err := runtime.applyGuestConfig(context.Background(), guestConfigFile{destination: "/home/dev/settings.json", ownedFormat: "json"}, []byte(`{"managed":true}`))
+	if err == nil || strings.Contains(err.Error(), "unowned") || strings.Contains(err.Error(), "preserved") || strings.Contains(err.Error(), "mv") {
+		t.Fatal("read failure misclassified", err)
+	}
+}
+
+func TestPrepareConfigsReportsEveryInvalidSourceBeforeMutation(t *testing.T) {
+	root := testkit.TempDir(t)
+	incus := runningIncus(0)
+	runtime := Runtime{Incus: incus, Executor: incus, Yard: domain.Context{DevUser: "dev"},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_CONFIG=" + filepath.Join(root, "config-directory"), "AGENT_sample_CONFIG_DEST=config", "AGENT_sample_RULES=" + filepath.Join(root, "rules-directory"), "AGENT_sample_RULES_DEST=rules"}}
+	for _, name := range []string{"config-directory", "rules-directory"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := runtime.PrepareConfigs(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "sample config") || !strings.Contains(err.Error(), "sample rules") {
+		t.Fatalf("independent source refusals missing: %v", err)
+	}
+	if len(incus.ExecCalls) != 0 {
+		t.Fatal("invalid sources made guest calls")
 	}
 }
 

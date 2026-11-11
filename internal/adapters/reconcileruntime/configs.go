@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 type guestConfigFile struct {
@@ -185,13 +186,15 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 		return nil, errors.New("prepared config file bound")
 	}
 	bytes := 0
+	var refusals []error
 	for _, file := range files {
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, fmt.Errorf("%s: %w", file.label, err))
+			continue
 		}
 		bytes += len(payload)
 		if bytes > 32<<20 {
@@ -203,6 +206,9 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 			entry.Kind, entry.Format = "structured", file.ownedFormat
 		}
 		entries = append(entries, entry)
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
 	}
 
 	bindings := map[string]string{}
@@ -291,6 +297,16 @@ func (runtime Runtime) CheckPreparedConfigs(ctx context.Context, prepared *Prepa
 func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs, recheck bool) error {
 	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
 		return domain.ErrPlanStale
+	}
+	var refusals []error
+	for _, entry := range prepared.entries {
+		payload, exists := prepared.payloads[entry.Path]
+		if !exists || fmt.Sprintf("%x", sha256.Sum256(payload)) != entry.Digest {
+			refusals = append(refusals, fmt.Errorf("%s: recorded configuration payload missing or changed: %w", entry.Path, domain.ErrPlanStale))
+		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	runtime.legacyPreviewInstructions = !prepared.previewSkillCutover
 	if recheck {
@@ -613,6 +629,15 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err != nil || result.ExitCode != 0 {
+		var completed *ports.GuestExitError
+		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
+			preserve := shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", file.destination, file.destination + ".subyard-invalid"})
+			repair := "yard config apply"
+			if domain.SafeName(runtime.Yard.YardName) {
+				repair = "yard -Y " + runtime.Yard.YardName + " config apply"
+			}
+			return fmt.Errorf("unowned invalid configuration preserved; next: run %s; then run %s", preserve, repair)
+		}
 		return errors.New("structured configuration apply failed")
 	}
 	return nil
@@ -631,16 +656,21 @@ func (runtime Runtime) writeGuestFile(ctx context.Context, destination string, p
 		Command: []string{"sh", "-eu", "-c", `
 destination=$1
 uid=$2
+digest=$3
 directory=${destination%/*}
 install -d -m 0755 -o "$uid" -g "$uid" "$directory"
 temporary=$(mktemp "$directory/.subyard-config.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 cat > "$temporary"
+[ "$(sha256sum "$temporary" | cut -d ' ' -f 1)" = "$digest" ]
 chown "$uid:$uid" "$temporary"
 chmod 0644 "$temporary"
+python3 -B -c 'import os,sys; f=os.open(sys.argv[1],os.O_RDONLY); os.fsync(f); os.close(f)' "$temporary"
 mv -f -- "$temporary" "$destination"
+python3 -B -c 'import os,sys; f=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY); os.fsync(f); os.close(f)' "$directory"
+[ "$(sha256sum "$destination" | cut -d ' ' -f 1)" = "$digest" ]
 trap - EXIT HUP INT TERM
-`, "subyard", destination, fmt.Sprint(uid)},
+`, "subyard", destination, fmt.Sprint(uid), fmt.Sprintf("%x", sha256.Sum256(payload))},
 		Stdin: payload,
 	}
 	return runtime.runGuest(ctx, request)

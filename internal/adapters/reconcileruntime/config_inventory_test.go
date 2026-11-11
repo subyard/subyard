@@ -96,6 +96,30 @@ func (f configInventoryFixture) write(payload []byte, mode os.FileMode) {
 	}
 }
 
+func TestConfigInventoryRepairsEmptyManagedFileButPreservesUnownedEmptyFile(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		t.Run(fmt.Sprint(owned), func(t *testing.T) {
+			f := newConfigInventoryFixture(t)
+			payload := []byte("approved instructions\n")
+			entry := map[string]any{"id": "sample", "kind": "file", "path": f.home + "/settings", "digest": fmt.Sprintf("%x", sha256.Sum256(payload)), "content": base64.StdEncoding.EncodeToString(payload)}
+			if owned {
+				f.save([]map[string]any{entry}, []string{})
+			}
+			f.write(nil, 0644)
+			f.run("observe", []map[string]any{entry}, !owned)
+			f.run("configs-prepare", []map[string]any{entry}, !owned)
+			f.run("apply", []map[string]any{entry}, !owned)
+			actual, err := os.ReadFile(f.home + "/settings")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if owned && string(actual) != string(payload) || !owned && len(actual) != 0 {
+				t.Fatalf("owned=%t: %q", owned, actual)
+			}
+		})
+	}
+}
+
 func (f configInventoryFixture) read() map[string]any {
 	f.t.Helper()
 	payload, err := os.ReadFile(f.state + "/inventory.json")

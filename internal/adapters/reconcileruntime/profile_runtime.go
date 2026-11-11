@@ -13,10 +13,12 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -31,6 +33,88 @@ const (
 )
 
 var profileRuntimeDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+var profileFailureLocation = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_-]{0,63}\.py):([1-9][0-9]{0,5})$`)
+
+// Only a closed error class and a source-owned basename/line cross readiness.
+// Arbitrary stderr, exception messages, paths and configuration remain private.
+func profileFailureDetail(definition profile.Definition, stderr []byte) string {
+	const prefix = "subyard-profile-observation-diagnostic-v1 "
+	var detail string
+	count := 0
+	for _, line := range bytes.Split(stderr, []byte{'\n'}) {
+		if !bytes.HasPrefix(line, []byte(strings.TrimSpace(prefix))) {
+			continue
+		}
+		count++
+		if !bytes.HasPrefix(line, []byte(prefix)) {
+			return ""
+		}
+		fields := strings.Split(strings.TrimPrefix(string(line), prefix), " ")
+		if len(fields) != 2 || !slices.Contains([]string{"OSError", "PermissionError", "FileNotFoundError", "FileExistsError", "NotADirectoryError", "IsADirectoryError", "BlockingIOError", "TimeoutError", "ValueError", "KeyError", "TimeoutExpired", "CalledProcessError", "SubprocessError", "UnicodeDecodeError", "JSONDecodeError"}, fields[0]) {
+			return ""
+		}
+		location := profileFailureLocation.FindStringSubmatch(fields[1])
+		if location == nil {
+			return ""
+		}
+		number, err := strconv.Atoi(location[2])
+		if err != nil || strconv.Itoa(number) != location[2] {
+			return ""
+		}
+		info, err := os.Lstat(filepath.Join(definition.Root, location[1]))
+		if err != nil || !info.Mode().IsRegular() {
+			return ""
+		}
+		detail = " (" + fields[0] + " at " + fields[1] + ")"
+	}
+	if count != 1 {
+		return ""
+	}
+	return detail
+}
+
+func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Definition, cause error, stderr []byte) error {
+	failure := runtime.profileObservationFailure(definition.Runtime.ActivationID, "", cause).(*integrationLifecycleError)
+	failure.message += profileFailureDetail(definition, stderr)
+	failure.retry = "run yard config paths"
+	if domain.SafeName(definition.Name) && domain.SafeName(runtime.Yard.YardName) {
+		failure.retry = "run yard -Y " + runtime.Yard.YardName + " config paths"
+	}
+	// Only explicitly public owner refusals may add a path and executable step.
+	// Exception text and ordinary stderr remain private.
+	const prefix = "subyard-profile-observation-refusal-v1 "
+	var records []string
+	for _, line := range strings.Split(string(stderr), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			records = append(records, strings.TrimPrefix(line, prefix))
+		}
+	}
+	if len(records) == 1 && len(records[0]) <= 2048 {
+		var record struct {
+			Message string `json:"message"`
+			Retry   string `json:"retry"`
+		}
+		decoder := json.NewDecoder(strings.NewReader(records[0]))
+		decoder.DisallowUnknownFields()
+		valid := func(value string) bool {
+			if value == "" || len(value) > 480 {
+				return false
+			}
+			for _, r := range value {
+				if unicode.IsControl(r) {
+					return false
+				}
+			}
+			return true
+		}
+		var tail any
+		if decoder.Decode(&record) == nil && decoder.Decode(&tail) == io.EOF && valid(record.Message) && valid(record.Retry) && strings.HasPrefix(record.Retry, "run ") {
+			failure.message, failure.retry = record.Message, record.Retry
+		}
+	}
+	return failure
+}
 
 // A runtime hook may state one short plan consequence of applying a stale contract.
 const profileRuntimeConsequenceBytes = 200
@@ -129,6 +213,7 @@ func (runtime Runtime) observeProfileRuntimes(
 		return nil, fmt.Errorf("cannot inspect profile runtimes while yard state is %q", instance.Status)
 	}
 	outputs := make([][]byte, len(definitions))
+	diagnostics := make([][]byte, len(definitions))
 	failures := make([]error, len(definitions))
 	slots := make(chan struct{}, 3)
 	var workers sync.WaitGroup
@@ -136,7 +221,7 @@ func (runtime Runtime) observeProfileRuntimes(
 		slots <- struct{}{}
 		workers.Go(func() {
 			defer func() { <-slots }()
-			outputs[index], _, failures[index] = runtime.runProfileRuntimeHandler(ctx, definition, "observe")
+			outputs[index], diagnostics[index], failures[index] = runtime.runProfileRuntimeHandler(ctx, definition, "observe")
 		})
 	}
 	workers.Wait()
@@ -145,7 +230,7 @@ func (runtime Runtime) observeProfileRuntimes(
 	var refusals []error
 	for index, definition := range definitions {
 		if failures[index] != nil {
-			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "", failures[index]))
+			refusals = append(refusals, runtime.profileRuntimeObservationFailure(definition, failures[index], diagnostics[index]))
 			continue
 		}
 		observation, err := decodeProfileRuntimeObservation(outputs[index])
@@ -153,7 +238,7 @@ func (runtime Runtime) observeProfileRuntimes(
 			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", err))
 			continue
 		}
-		if observation.Diagnostics != nil && !runtime.profileDiagnostics {
+		if observation.Diagnostics != nil && !runtime.profileDiagnostics && observation.State != ports.RuntimeStatePending {
 			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", errors.New("unexpected runtime diagnostics")))
 			continue
 		}
@@ -197,6 +282,16 @@ func (runtime Runtime) applyProfileRuntimes(ctx context.Context) error {
 	}
 	observations, err := runtime.observeProfileRuntimes(ctx, definitions)
 	if err != nil {
+		return err
+	}
+	var pending []error
+	for _, definition := range definitions {
+		observation := observations[definition.Runtime.ActivationID]
+		if observation.State == ports.RuntimeStatePending {
+			pending = append(pending, PendingProfileRuntimeError(runtime.Yard.YardName, definition.Runtime.ActivationID, observation))
+		}
+	}
+	if err := domain.CollectRefusals(pending...); err != nil {
 		return err
 	}
 	operationID := runtime.environmentValue("SUBYARD_OPERATION_ID")
@@ -413,7 +508,7 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 		strings.HasSuffix(observation.Consequence, " ")) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation has an invalid consequence")
 	}
-	if observation.Diagnostics != nil && (len(*observation.Diagnostics) > 128 || observation.State != ports.RuntimeStateStale) {
+	if observation.Diagnostics != nil && (len(*observation.Diagnostics) > 128 || observation.State != ports.RuntimeStateStale && observation.State != ports.RuntimeStatePending) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation has invalid diagnostics")
 	}
 	seen := map[string]bool{}
@@ -434,6 +529,9 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation contains trailing data")
 	}
+	if observation.State == ports.RuntimeStatePending && (observation.Diagnostics == nil || len(*observation.Diagnostics) == 0) {
+		return ports.RuntimeObservation{}, errors.New("pending runtime requires diagnostics")
+	}
 	switch observation.State {
 	case ports.RuntimeStateAbsent, ports.RuntimeStateDeferred:
 		if observation.Actual != "" || observation.Desired != "" {
@@ -443,7 +541,7 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 		if !profileRuntimeDigest.MatchString(observation.Actual) || observation.Actual != observation.Desired {
 			return ports.RuntimeObservation{}, errors.New("current runtime observation has invalid digests")
 		}
-	case ports.RuntimeStateStale:
+	case ports.RuntimeStateStale, ports.RuntimeStatePending:
 		if (observation.Actual != "" && !profileRuntimeDigest.MatchString(observation.Actual)) ||
 			!profileRuntimeDigest.MatchString(observation.Desired) {
 			return ports.RuntimeObservation{}, errors.New("stale runtime observation has invalid digests")
@@ -505,4 +603,24 @@ func (runtime Runtime) ProfileServiceBinding(ctx context.Context, name string) (
 		return string(payload), err
 	}
 	return "", nil
+}
+
+// PendingProfileRuntimeError directs another owner's repair without claiming convergence.
+func PendingProfileRuntimeError(yard, id string, observation ports.RuntimeObservation) error {
+	message := "profile " + id + " is pending input repair"
+	if observation.Diagnostics != nil {
+		for index, detail := range *observation.Diagnostics {
+			text := "; " + detail.Parameter + ": " + detail.Installed + " -> " + detail.Desired
+			if len(message)+len(text) > 400 {
+				message += fmt.Sprintf("; %d more inputs: run yard config status", len(*observation.Diagnostics)-index)
+				break
+			}
+			message += text
+		}
+	}
+	retry := "run yard config apply"
+	if domain.SafeName(yard) {
+		retry = "run yard -Y " + yard + " config apply"
+	}
+	return &integrationLifecycleError{message: message, retry: retry}
 }

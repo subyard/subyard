@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -625,6 +626,34 @@ esac
 	}
 	if _, err := os.Stat(filepath.Join(home, "unrelated-observed")); !os.IsNotExist(err) {
 		t.Fatalf("selected owner invoked an unrelated runtime handler: %v", err)
+	}
+}
+
+func TestProfileRuntimePendingRecoveryKeepsItsActionAcrossFreshDiagnostics(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
+	home := filepath.Join(root, "state")
+	seedCurrentReleaseLedger(t, root, home)
+	handler := filepath.Join(root, "config/profiles/sample/runtime.sh")
+	writeCLIFile(t, handler, "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"pending\",\"actual\":\""+strings.Repeat("a", 64)+"\",\"desired\":\""+strings.Repeat("b", 64)+"\",\"diagnostics\":[{\"parameter\":\"sample.input.invalid\",\"installed\":\"changed\",\"desired\":\"current\"}]}'\n", 0700)
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running"}}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := &profileRuntimeActivationReconciler{cli: program, id: "sample-runtime", request: releasetransition.ProcessRequest{ConfigHome: home}}
+	pair, links := releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, releasetransition.ReleaseLinks{Active: "release-a"}
+	if _, err := owner.PrepareActivationRecovery(context.Background(), pair, links); err != nil {
+		t.Fatal(err)
+	}
+	err = owner.Reconcile(context.Background(), links)
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) || errors.Is(err, domain.ErrPlanStale) {
+		t.Fatal("fresh equal diagnostics became stale plan", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	if !strings.Contains(message, "sample.input.invalid") || retry != "run yard -Y default config apply" {
+		t.Fatal(message, retry)
 	}
 }
 

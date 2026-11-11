@@ -344,6 +344,26 @@ func (runtime Runtime) restoreMaterializedConfigs(ctx context.Context, p *Prepar
 	if original.Version != 1 || !bytes.Equal(raw, canonical) {
 		return nil, errors.New("invalid materialized metadata")
 	}
+	var refusals []error
+	checkPayload := func(label, reference string) {
+		payload, exists := p.files[reference]
+		if !exists || reference != materializedBlobPath(payload) {
+			refusals = append(refusals, fmt.Errorf("%s: recorded materialized payload missing or changed: %w", label, domain.ErrPlanStale))
+		}
+	}
+	for _, file := range original.Configs.Files {
+		if file.Payload != "" {
+			checkPayload(string(file.Destination), file.Payload)
+		}
+	}
+	for _, source := range original.Configs.Sources {
+		if source.Exists {
+			checkPayload(string(source.Path), source.Payload)
+		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
+	}
 	if p.owner == "materialized-files" && original.Integrations != nil {
 		return nil, errors.New("unexpected integration metadata")
 	}

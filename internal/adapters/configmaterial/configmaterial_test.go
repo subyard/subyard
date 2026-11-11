@@ -59,6 +59,101 @@ func TestTOMLMaterializationPreservesRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestManagedInvalidDestinationIsDriftAndRepairable(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		for _, broken := range []string{"", "[broken"} {
+			t.Run(format+fmt.Sprint(len(broken)), func(t *testing.T) {
+				h := newGuestHarness(t)
+				h.format = format
+				desired := []byte(`{"managed":true}`)
+				if format == "toml" {
+					desired = []byte("managed = true\n")
+				}
+				h.apply(t, desired)
+				h.writeDestination(t, broken)
+				if h.observe(t, desired).Converged {
+					t.Fatal("invalid managed destination reported current")
+				}
+				h.apply(t, desired)
+				if !h.observe(t, desired).Converged {
+					t.Fatal("repair did not converge")
+				}
+			})
+		}
+	}
+}
+
+func TestMaterializationIgnoresInterruptedTempsWithoutFollowingLinks(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = format
+			desired := []byte(`{"managed":true}`)
+			if format == "toml" {
+				desired = []byte("managed = true\n")
+			}
+			h.apply(t, desired)
+			orphan := filepath.Join(filepath.Dir(h.destination), ".subyard-config.interrupted")
+			testkit.WriteFile(t, orphan, []byte("unpublished partial document"), 0600)
+			link := filepath.Join(filepath.Dir(h.destination), ".subyard-config.foreign-link")
+			if err := os.Symlink(orphan, link); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(orphan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !h.observe(t, desired).Converged {
+				t.Fatal("orphan counted as managed artifact")
+			}
+			h.writeDestination(t, "")
+			if h.observe(t, desired).Converged {
+				t.Fatal("empty managed destination not reported as drift")
+			}
+			h.apply(t, desired)
+			if !h.observe(t, desired).Converged {
+				t.Fatal("orphan prevented repair")
+			}
+			after, err := os.Lstat(orphan)
+			payload, readErr := os.ReadFile(orphan)
+			if err != nil || readErr != nil || !os.SameFile(before, after) || string(payload) != "unpublished partial document" {
+				t.Fatal("orphan followed or changed", err, readErr)
+			}
+			if target, err := os.Readlink(link); err != nil || target != orphan {
+				t.Fatal("unrelated symlink changed", err)
+			}
+		})
+	}
+}
+
+func TestStructuredWriterRefusesChangedTransportBeforeMutation(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = format
+			payload, substituted := []byte(`{"managed":true}`), []byte(`{}`)
+			if format == "toml" {
+				payload, substituted = []byte("sandbox_mode = 'danger-full-access'\napproval_policy = 'on-request'\n"), nil
+				h.writeDestination(t, string(payload)+"[projects.sample]\ntrust_level = 'trusted'\n")
+			}
+			h.apply(t, payload)
+			before := snapshotMaterialization(t, h.root)
+			request, err := h.request(payload, ModeApply)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(request.Command[0], request.Command[1:]...)
+			command.Stdin = bytes.NewReader(substituted)
+			if output, err := command.CombinedOutput(); err == nil {
+				t.Fatalf("changed transport accepted: %s", output)
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("changed transport modified managed state")
+			}
+		})
+	}
+}
+
 func TestTOMLMaterializationRetiresOwnedFieldsAndPreservesScalarTypes(t *testing.T) {
 	h := newGuestHarness(t)
 	h.format = "toml"
@@ -312,12 +407,27 @@ func TestJSONMaterializationRejectsMalformedCurrentAndBaselineWithoutOverwrite(t
 			t.Fatal(err)
 		}
 		stderr, err := harness.run([]byte(`{"managed":1}`), ModeApply)
-		if err == nil || !strings.Contains(stderr, "invalid current JSON") || strings.Contains(stderr, "secret") {
+		if err == nil || !UnownedInvalidDestination([]byte(stderr), "json") || strings.Contains(stderr, "secret") {
 			t.Fatalf("apply error = %v stderr=%q", err, stderr)
+		}
+		if !strings.Contains(stderr, "in the yard run mv --backup=numbered --") || !strings.Contains(stderr, "on the owner run yard config apply") {
+			t.Fatal("invalid unowned destination has no executable preservation step", stderr)
 		}
 		after, readErr := os.ReadFile(harness.destination)
 		if readErr != nil || !bytes.Equal(before, after) {
 			t.Fatalf("malformed destination changed: err=%v before=%q after=%q", readErr, before, after)
+		}
+		backup := harness.destination + ".subyard-invalid"
+		if output, err := exec.Command("mv", "--backup=numbered", "--", harness.destination, backup).CombinedOutput(); err != nil {
+			t.Fatal(err, string(output))
+		}
+		harness.apply(t, []byte(`{"managed":1}`))
+		if !harness.observe(t, []byte(`{"managed":1}`)).Converged {
+			t.Fatal("following preservation step did not allow config repair")
+		}
+		preserved, err := os.ReadFile(backup)
+		if err != nil || !bytes.Equal(before, preserved) {
+			t.Fatal("preservation step lost unowned bytes", err)
 		}
 	})
 
@@ -354,7 +464,7 @@ func TestJSONRequestAndObservationParserRejectUnsafeInputs(t *testing.T) {
 		}
 	}
 	request, err := JSONRequest(ModeApply, "1dev", "/home/1dev/settings.json", 0, []byte(`{}`))
-	if err != nil || request.Command[len(request.Command)-3] != "1000" {
+	if err != nil || request.Command[7] != "1000" {
 		t.Fatalf("legacy uid fallback request=%#v err=%v", request, err)
 	}
 	for _, output := range [][]byte{

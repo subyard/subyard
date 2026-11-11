@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -129,6 +130,8 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	}
 	actual := make([]observation, 0, len(targets))
 	converged := true
+	pendingInputs := false
+	var diagnostics []releasetransition.RedactedDecision
 	disclosed, order := map[string][]string{}, []string{}
 	var failures []error
 	for _, target := range targets {
@@ -147,7 +150,15 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		entry := observation{Yard: target.Name, Project: target.Loaded.Context.IncusProject,
 			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual, Desired: state.Desired}
 		actual = append(actual, entry)
-		converged = converged && state.State != "stale"
+		converged = converged && state.State != "stale" && state.State != ports.RuntimeStatePending
+		if state.State == ports.RuntimeStatePending {
+			pendingInputs = true
+			if state.Diagnostics != nil {
+				for _, detail := range *state.Diagnostics {
+					diagnostics = append(diagnostics, releasetransition.RedactedDecision{Resource: detail.Parameter, Scope: "yard." + target.Name, Decision: releasetransition.DecisionPreserve, Result: detail.Installed + " -> " + detail.Desired})
+				}
+			}
+		}
 		if state.State == "stale" && state.Consequence != "" {
 			if _, seen := disclosed[state.Consequence]; !seen {
 				order = append(order, state.Consequence)
@@ -162,7 +173,7 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	if !converged {
 		actualDigest, err = activationStageFingerprint(actual)
 	}
-	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Consequences: runtimeConsequences(order, disclosed), Warnings: warnings}, err
+	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, PendingInputs: pendingInputs, Diagnostics: diagnostics, Consequences: runtimeConsequences(order, disclosed), Warnings: warnings}, err
 }
 
 // runtimeConsequences states each owner consequence once with its yards, within the
@@ -222,9 +233,13 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 				return domain.ErrPlanStale
 			}
 		}
-		if approved, exists := reconciler.recovery[target.Name]; exists && state != approved &&
-			!(state.State == ports.RuntimeStateCurrent && state.Desired == approved.Desired) {
+		if approved, exists := reconciler.recovery[target.Name]; exists && !reflect.DeepEqual(state, approved) &&
+			!(state.State == ports.RuntimeStateCurrent && state.Desired == approved.Desired) &&
+			!(approved.State == ports.RuntimeStatePending && state.State == ports.RuntimeStateStale && state.Desired == approved.Desired) {
 			return reconciler.failure(target.Name, "apply", domain.ErrPlanStale)
+		}
+		if state.State == ports.RuntimeStatePending {
+			return reconciler.failure(target.Name, "apply", reconcileruntime.PendingProfileRuntimeError(target.Name, reconciler.id, state))
 		}
 		if state.State != "stale" {
 			// Absent and deferred yards have no running guest whose selection could be recorded.

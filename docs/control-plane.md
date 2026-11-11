@@ -725,6 +725,17 @@ these are neither warnings nor consequences and never make a skip step stale.
 The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
+Profile handlers may emit one `subyard-profile-observation-diagnostic-v1 ERROR FILE:LINE`
+record on stderr when observation fails. The adapter accepts only a closed error-class
+vocabulary, a regular Python source basename in that profile package, and a bounded line
+number. Exception messages and arbitrary stderr remain private. The release refusal retains
+this validated location and names the read-only `yard -Y NAME config paths` command
+for inspecting configuration while ordinary mutation admission remains blocked.
+An owner may explicitly publish one `subyard-profile-observation-refusal-v1` JSON
+record with public `message` and `retry` fields (each at most 480 bytes, no control
+characters; retry starts with `run `). Unknown fields, duplicate records and malformed
+values are ignored. This deliberate public record may name a configuration file and
+a preservation command; ordinary stderr and exception text remain private.
 State-drift refusals identify each affected yard and each independently known
 parameter in stable order. The complete status view renders `yard NAME:` followed
 by `PARAM  installed -> desired` rows. Sensitive values render only `changed`.
@@ -2062,7 +2073,7 @@ A `runtime` declaration contains an `activation_id` and relative executable `han
 unique across profile and core activation stages and remains durable across release transitions.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
 bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
-`ownership_absent`. States are `absent`, `deferred`, `current`
+`ownership_absent`. States are `absent`, `deferred`, `pending`, `current`
 and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
 A `stale` observation may add one `consequence`: a short sentence of at most 200 bytes from a
 plain-text alphabet, such as a service restart that apply performs. Update, migrate and `yard init`
@@ -2072,6 +2083,30 @@ Core bounds execution and output, checks the assessment before apply, and verifi
 state separately. Hook paths retain the updater's pinned directory descriptor; symbolic links
 below that anchor are rejected. Missing/stopped yards are absent/deferred without starting them.
 Hooks run in activation-ID order before integration project hooks; update and rollback inspect all local yards.
+A running hook whose input belongs to another owner can report `pending` with installed
+fingerprints and nonempty, validated `diagnostics`. This state is not converged and is
+not a stopped-yard deferral. Config status renders those parameters. Release activation
+postpones pending owners once, runs the other approved owners, then revisits them with
+unchanged desired bindings. Remaining pending input returns an executable config-apply
+step. A config-only repair permit admits pending input only in its selected targets,
+with all other owners current; it never grants that profile mutation authority.
+After successful materialization, remaining profile drift names one fresh
+`yard migrate` step and does not make config apply fail.
+Missing input that the hook can safely create remains ordinary stale work.
+An optional profile merging an agent document must wait for the agent's selected managed
+configuration artifact to create it. In the shipped Telemetry profile, Claude and Codex declare
+such artifacts; their nonempty `AGENT_*_CONFIG` bindings with present, readable source files make
+absent, empty or invalid documents pending inputs. A missing source is a refusal
+naming that source; config apply cannot repair it. Telemetry does not publish partial
+agent policy. With no managed config binding,
+Telemetry may create or merge its native document, treating an empty document as
+empty configuration. Invalid unmanaged documents refuse with a preservation command.
+Its ordinary provision check reports pending input
+as drift, while runtime observation retains the diagnostic and exact config-apply continuation.
+Unpublished `.subyard-config.*` files left by an interrupted materializer are outside its explicit
+artifact inventory. Later observation and replacement ignore them, including similarly named
+symlinks, without reading or deleting unrelated directory entries.
+
 The Orca profile retains its existing `orca-runtime` identity and wire fingerprints.
 `ownership_absent: true` is valid only with `current` and its ordinary equal SHA-256
 digests. It proves no owned artifacts remain for retained-owner admission; successful

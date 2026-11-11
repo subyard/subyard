@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import sys
 from decimal import Decimal
@@ -282,7 +283,7 @@ def validate_state_root():
     return True
 
 
-def read_current(destination):
+def read_current(destination, allow_invalid=False):
     if not os.path.lexists(destination):
         return {}, None
     try:
@@ -291,14 +292,26 @@ def read_current(destination):
             raise MaterializationError("invalid destination path")
         with open(destination, "rb") as source:
             raw = source.read()
-        value = parse_document(raw)
-        if not isinstance(value, dict):
-            raise ValueError()
-        return value, raw
+        try:
+            value = parse_document(raw)
+            if not isinstance(value, dict):
+                raise ValueError()
+            return value, raw
+        except (ValueError, UnicodeError):
+            if allow_invalid:
+                return None, raw
+            raise
     except MaterializationError:
         raise
     except Exception:
         raise MaterializationError("invalid current " + FORMAT.upper())
+
+
+def unowned_invalid_destination(destination):
+    return MaterializationError("unowned-invalid-destination-v1 " + FORMAT.upper() +
+        "; unowned destination preserved; in the yard run mv --backup=numbered -- " +
+        shlex.quote(destination) + " " + shlex.quote(destination + ".subyard-invalid") +
+        "; then on the owner run yard config apply")
 
 
 def validate_destination_parent(destination, allowed_home, uid, create):
@@ -459,17 +472,20 @@ def atomic_write(path, payload, uid, mode):
         directory_flags |= os.O_NOFOLLOW
     directory_descriptor = os.open(directory, directory_flags)
     temporary = ".subyard-config." + secrets.token_hex(12)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(temporary, flags, 0o600, dir_fd=directory_descriptor)
     try:
-        with os.fdopen(descriptor, "wb") as output:
+        with os.fdopen(descriptor, "w+b") as output:
             output.write(payload)
             output.flush()
             os.fchown(output.fileno(), uid, uid)
             os.fchmod(output.fileno(), mode)
             os.fsync(output.fileno())
+            output.seek(0)
+            if output.read() != payload:
+                raise MaterializationError("temporary payload verification failed")
         os.replace(temporary, os.path.basename(path),
                    src_dir_fd=directory_descriptor, dst_dir_fd=directory_descriptor)
         os.fsync(directory_descriptor)
@@ -485,7 +501,7 @@ def atomic_write(path, payload, uid, mode):
 
 def replace_destination(destination, allowed_home, uid, original, payload, create, file_mode=0o644):
     validate_destination_parent(destination, allowed_home, uid, create)
-    _, latest = read_current(destination)
+    _, latest = read_current(destination, allow_invalid=True)
     if latest != original:
         raise MaterializationError("concurrent destination change")
     atomic_write(destination, payload, uid, file_mode)
@@ -495,8 +511,12 @@ def replace_destination(destination, allowed_home, uid, original, payload, creat
 
 
 def document_payload(current, original):
-    if original is not None and json_equal(current, parse_document(original)):
-        return original
+    if original is not None:
+        try:
+            if json_equal(current, parse_document(original)):
+                return original
+        except (ValueError, UnicodeError):
+            pass  # A protected managed destination can be rebuilt from its template.
     if FORMAT == "toml":
         # The Go materializer prepends the isolated writer namespace for TOML.
         return globals()["_toml_writer"]["dumps"](current).encode()
@@ -541,9 +561,9 @@ def retire(mode, baseline, baseline_path, receipt_path, current, original, desti
 
 
 def main():
-    if len(sys.argv) != 7:
+    if len(sys.argv) != 8:
         fail("invalid request")
-    mode, developer, destination, uid_text, desired_digest, allowed_home = sys.argv[1:]
+    mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest = sys.argv[1:]
     if mode not in ("observe", "apply", "assess-adopt", "assess-retire", "retire"):
         fail("invalid request")
     read_only = mode in ("observe", "assess-adopt", "assess-retire")
@@ -552,7 +572,10 @@ def main():
     except ValueError:
         fail("invalid request")
     try:
-        desired = parse_document(sys.stdin.read())
+        payload = sys.stdin.buffer.read()
+        if hashlib.sha256(payload).hexdigest() != payload_digest:
+            fail("desired payload verification failed")
+        desired = parse_document(payload)
     except Exception:
         fail("invalid desired " + FORMAT.upper())
     if not isinstance(desired, dict):
@@ -566,7 +589,13 @@ def main():
 
     if mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
-        current, original = read_current(destination) if parent_exists else ({}, None)
+        current, original = read_current(destination, allow_invalid=True) if parent_exists else ({}, None)
+        if current is None:
+            if mode == "assess-adopt":
+                raise unowned_invalid_destination(destination)
+            print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
+                  hashlib.sha256(original).hexdigest(), "invalid-destination", [])}))
+            return
         if mode == "assess-adopt" and original is not None:
             # Recognize exact pre-baseline templates, or JSON documents whose
             # fields are disjoint from our declaration. Existing managed fields
@@ -624,7 +653,15 @@ def main():
         evidence = read_ownership(receipt_path, baseline, developer, destination)
         compatible = baseline is not None and baseline["schema"] == 1
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
-        current, original = read_current(destination) if parent_exists else ({}, None)
+        current, original = read_current(destination, allow_invalid=mode in ("observe", "apply")) if parent_exists else ({}, None)
+        if current is None:
+            if evidence is None:
+                raise unowned_invalid_destination(destination)
+            if mode == "observe":
+                print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
+                      hashlib.sha256(original).hexdigest(), "invalid-destination", evidence["owned"])}))
+                return
+            current = {}
 
         if mode in ("assess-retire", "retire"):
             retire(mode, evidence, baseline_path, receipt_path, current, original, destination, allowed_home, uid)

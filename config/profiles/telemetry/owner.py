@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -12,7 +13,7 @@ import tarfile
 FILES = ('guest.py', 'native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
          'resources.py', 'sources.py', 'broker-correlation.py')
 GUEST_SCRIPT = 'stage="$(mktemp -d /tmp/subyard-telemetry.XXXXXX)"; trap \'rm -rf -- "$stage"\' EXIT; tar -xf - -C "$stage"; python3 -B "$stage/guest.py" "$@"'
-SAFE_GUEST_FAILURE = re.compile(r'telemetry: local reconciliation failed \((?:OSError|PermissionError|FileNotFoundError|FileExistsError|NotADirectoryError|IsADirectoryError|BlockingIOError|TimeoutError|ValueError|KeyError|TimeoutExpired|CalledProcessError|SubprocessError|UnicodeDecodeError|JSONDecodeError) at (?:guest|native)\.py:[1-9][0-9]{0,4}\)\Z')
+SAFE_GUEST_FAILURE = re.compile(r'telemetry: local reconciliation failed \((?P<kind>OSError|PermissionError|FileNotFoundError|FileExistsError|NotADirectoryError|IsADirectoryError|BlockingIOError|TimeoutError|ValueError|KeyError|TimeoutExpired|CalledProcessError|SubprocessError|UnicodeDecodeError|JSONDecodeError) at (?P<location>(?:guest|native)\.py:[1-9][0-9]{0,4})\)\Z')
 
 
 def run(arguments, **kwargs):
@@ -20,8 +21,15 @@ def run(arguments, **kwargs):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, **kwargs)
     if result.returncode:
         for line in result.stderr[-65536:].decode(errors='replace').splitlines()[-32:]:
-            if SAFE_GUEST_FAILURE.fullmatch(line):
+            if line in ('telemetry-agent-config-invalid-v1 claude', 'telemetry-agent-config-invalid-v1 codex'):
+                agent = line.rsplit(' ', 1)[1]
+                path = '/home/'+os.environ['DEV_USER']+('/.claude/settings.json' if agent == 'claude' else '/.codex/config.toml')
+                command = ['incus', 'exec', os.environ['YARD_INSTANCE_NAME'], '--project', os.environ['INCUS_PROJECT'], '--', 'mv', '--backup=numbered', '--', path, path+'.subyard-invalid']
+                raise Refusal(['invalid unmanaged agent configuration '+path], 'run '+shlex.join(command))
+            match = SAFE_GUEST_FAILURE.fullmatch(line)
+            if match:
                 print(line, file=sys.stderr)
+                print('subyard-profile-observation-diagnostic-v1 '+match['kind']+' '+match['location'], file=sys.stderr)
                 break
         raise ValueError('telemetry owner transport failed')
     return result.stdout.decode().strip()
@@ -29,8 +37,10 @@ def run(arguments, **kwargs):
 
 class Refusal(ValueError):
     """Every independent refusal found before any effect, named for the operator."""
-    def __init__(self, refusals):
+    def __init__(self, refusals, retry=None):
         super().__init__('; '.join(refusals))
+        yard = os.environ.get('YARD_NAME') or os.environ.get('SUBYARD_YARD') or 'default'
+        self.retry = retry if retry is not None else 'run '+shlex.join(['yard', '-Y', yard, 'config', 'paths'])
 
 
 def collector_binary(source, selected):
@@ -97,7 +107,14 @@ def main():
     source = Path(__file__).resolve().parent
     binary, refusals = collector_binary(source, selected and operation != 'startup')
     agents = ' '.join(name for name in ('claude', 'codex') if name in os.environ.get('CODING_TOOL_INTEGRATIONS', '').split())
+    managed_agents = []
     for agent in agents.split():
+        source_path = os.environ.get('AGENT_'+agent+'_CONFIG', '').strip()
+        if source_path:
+            if Path(source_path).is_file() and os.access(source_path, os.R_OK):
+                managed_agents.append(agent)
+            elif selected:
+                refusals.append('managed agent source missing or unreadable: '+source_path)
         destination = os.environ.get('AGENT_'+agent+'_CONFIG_DEST')
         expected = '.claude/settings.json' if agent == 'claude' else '.codex/config.toml'
         if selected and destination != expected:
@@ -116,8 +133,9 @@ def main():
             archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     remaining = os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')
     startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
+    managed = 'managed='+','.join(managed_agents)
     output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
-                  GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
+                  GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, managed, *bindings], input=stream.getvalue())
     if operation == 'check':
         if output == 'telemetry-drift':
             return 1
@@ -126,7 +144,8 @@ def main():
         return 0
     if output and operation == 'observe' and os.environ.get('SUBYARD_PROFILE_DIAGNOSTICS') != '1':
         observation = json.loads(output)
-        observation.pop('diagnostics', None)
+        if observation.get('state') != 'pending':
+            observation.pop('diagnostics', None)
         output = json.dumps(observation)
     if output:
         print(output)
@@ -139,5 +158,6 @@ if __name__ == '__main__':
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         if isinstance(error, Refusal):
             print(f'telemetry: refused: {error}', file=sys.stderr)
+            print('subyard-profile-observation-refusal-v1 '+json.dumps({'message': str(error), 'retry': error.retry}), file=sys.stderr)
         print('telemetry: owner transport or native ownership unavailable', file=sys.stderr)
         raise SystemExit(2)

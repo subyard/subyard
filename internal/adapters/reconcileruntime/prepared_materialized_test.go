@@ -161,6 +161,29 @@ func TestMaterializedConfigsFreshProcessOriginalRecipe(t *testing.T) {
 	}
 }
 
+func TestMaterializedConfigsMissingPayloadReportsAllReferencesWithoutWrites(t *testing.T) {
+	root := testkit.TempDir(t)
+	runtime, source := materializedConfigFixture(t, root)
+	testkit.WriteFile(t, source, []byte("approved original\n"), 0600)
+	prepared, err := runtime.PrepareConfigs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := runtime.PrepareMaterializedConfigs(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	delete(p.files, materializedBlobPath([]byte("approved original\n")))
+	err = runtime.ApplyPreparedMaterializedConfigs(context.Background(), p)
+	if !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), source) || !strings.Contains(err.Error(), "/home/dev/.codex/AGENTS.md") {
+		t.Fatalf("missing payload references were not collected: %v", err)
+	}
+	if len(runtime.Incus.(*testkit.Incus).ExecCalls) != 0 {
+		t.Fatal("missing payload made guest writes")
+	}
+}
+
 func TestMaterializedConfigsRecipeRefusesDriftBeforeGuestEffect(t *testing.T) {
 	for _, change := range []string{"bytes", "identity", "uuid", "destination", "payload", "scope"} {
 		t.Run(change, func(t *testing.T) {

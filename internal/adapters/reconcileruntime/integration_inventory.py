@@ -218,13 +218,16 @@ def atomic(path, payload, mode=0o600, uid=OWNER):
     parent = open_parent(path)
     temporary = '.integration-' + secrets.token_hex(12)
     try:
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
-        with os.fdopen(fd, 'wb') as stream:
+        fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        with os.fdopen(fd, 'w+b') as stream:
             os.fchmod(stream.fileno(), mode)
             os.fchown(stream.fileno(), uid, uid)
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+            stream.seek(0)
+            if stream.read() != payload:
+                raise ValueError('artifact payload verification failed')
         os.replace(temporary, os.path.basename(path), src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
     finally:
@@ -338,6 +341,25 @@ def main():
         # Config refresh acknowledges existing ownership only. It cannot adopt,
         # retire or finish a pending package/link/hook reconciliation.
         by_path = {e.get('path'): e for e in records if e.get('path')}
+        if mode == 'configs-prepare':
+            conflicts = []
+            for entry in desired:
+                record = by_path.get(entry.get('path'))
+                try:
+                    current = actual(entry)
+                    if record is None:
+                        if entry['kind'] == 'file' and current is not None:
+                            raise unowned_selected(entry, current)
+                    elif (any(record.get(k) != entry.get(k) for k in ('id', 'kind', 'path', 'format')) or
+                          entry['kind'] == 'file' and current not in
+                          (None, digest(b''), record['digest'], record.get('pending_digest'), record.get('config_pending_digest'))):
+                        raise OwnershipConflict('owned artifact drift', entry['path'])
+                except OwnershipConflict as error:
+                    conflicts.append(error)
+                except (OSError, ValueError):
+                    conflicts.append(OwnershipConflict('artifact evidence unavailable', entry.get('path', '')))
+            if conflicts:
+                raise OwnershipConflicts(conflicts)
         # Refuse all unsafe config ownership before the preview-only writes.
         if migrations and mode == 'configs-prepare':
             for entry in desired:
@@ -347,7 +369,7 @@ def main():
                     if current is not None:
                         raise unowned_selected(entry, current)
                 elif (any(record.get(k) != entry.get(k) for k in ('id','kind','path','format'))
-                      or current not in (None,record['digest'],record.get('pending_digest'),record.get('config_pending_digest'))):
+                      or current not in (None,digest(b''),record['digest'],record.get('pending_digest'),record.get('config_pending_digest'))):
                     raise OwnershipConflict('owned artifact drift', entry['path'])
             apply_preview_migrations(migrations, inventory, path, uid)
         elif migrations:
@@ -367,7 +389,7 @@ def main():
             current = actual(entry)
             if mode == 'configs-prepare':
                 if entry['kind'] == 'file':
-                    if current not in (None, record['digest'], record.get('pending_digest'), record.get('config_pending_digest')):
+                    if current not in (None, digest(b''), record['digest'], record.get('pending_digest'), record.get('config_pending_digest')):
                         raise OwnershipConflict('owned artifact drift', entry['path'])
                     # A previous refresh may have written its bytes before an
                     # interruption. Preserve that evidence when intent changes.
@@ -463,7 +485,8 @@ def main():
                 metadata[name] = current_metadata
             if name in intent:
                 continue
-            if entry['kind'] in ('file', 'link') and current not in (None, entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest')):
+            repair_empty = name in wanted and entry['kind'] == 'file' and current == digest(b'')
+            if entry['kind'] in ('file', 'link') and not repair_empty and current not in (None, entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest')):
                 raise OwnershipConflict('owned artifact drift', entry['path'])
             if name not in wanted:
                 if (entry['kind'] in ('file', 'link') and current is not None

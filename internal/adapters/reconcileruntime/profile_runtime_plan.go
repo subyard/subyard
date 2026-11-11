@@ -89,7 +89,7 @@ func (runtime Runtime) PrepareProfileRuntimes(ctx context.Context, unavailable, 
 		}
 	}
 	for id, observation := range observations {
-		plan.conditional[id] = reconstruct || observation.State == ports.RuntimeStateDeferred || observation.State == ports.RuntimeStateAbsent && (guestUnavailable || len(dependent) != 0 && dependent[0])
+		plan.conditional[id] = reconstruct || observation.State == ports.RuntimeStatePending || observation.State == ports.RuntimeStateDeferred || observation.State == ports.RuntimeStateAbsent && (guestUnavailable || len(dependent) != 0 && dependent[0])
 	}
 
 	for id, observation := range plan.approved {

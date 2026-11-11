@@ -31,6 +31,88 @@ type sampleRepairPlatformFixture struct {
 	installedID string
 }
 
+type pendingRepairConfigApplier struct{ apply func() }
+
+func (a pendingRepairConfigApplier) ApplyConfig(context.Context, string) error { a.apply(); return nil }
+
+func TestConfigApplyPendingRepairSucceedsThenMigrateConverges(t *testing.T) {
+	f := newConfigApplyRepairFixture(t, false)
+	commandsPath := filepath.Join(f.cli.options.RepositoryRoot, "config/commands.registry")
+	commands := mustReadConfigFixture(t, commandsPath)
+	for _, line := range strings.Split(string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config/commands.registry"))), "\n") {
+		if strings.HasPrefix(line, "config|") {
+			commands = append(commands, []byte(line+"\n")...)
+		}
+	}
+	testkit.WriteFile(t, commandsPath, commands, 0600)
+	diagnostics := ports.RuntimeDiagnostics{{Parameter: "sample.input.invalid", Installed: "changed", Desired: "current"}}
+	state := ports.RuntimeObservation{State: ports.RuntimeStatePending, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Diagnostics: &diagnostics}
+	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &state}
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	f.cli.options.InitPlatform = platform
+	loaded, err := f.cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := f.cli.options.Executor.(*testkit.Incus)
+	fake.ExecSteps = nil
+	for range 12 {
+		appendMismatchedHashSteps(t, fake, loaded, "0")
+	}
+	applied := false
+	f.cli.options.Config = pendingRepairConfigApplier{func() {
+		applied = true
+		state.State, state.Diagnostics = ports.RuntimeStateStale, nil
+		fake.ExecSteps = nil
+		for range 6 {
+			appendHashSteps(t, fake, loaded)
+		}
+	}}
+	// The native owner finishes its remaining profile work on migrate execution.
+	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, f.journalPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := f.cli.env["YARD_RUNTIME_ROOT"]
+	release := filepath.Join(runtimeRoot, "releases", string(journal.Goal.Target))
+	engine := filepath.Join(release, "bin/yard-engine")
+	script := string(mustReadConfigFixture(t, engine))
+	script = strings.Replace(script, "*'\"mode\":\"converge\"'*)", "*'\"mode\":\"converge\"'*)\n      touch "+fmt.Sprintf("%q", f.readyMarker), 1)
+	testkit.WriteFile(t, engine, []byte(script), 0700)
+	registry := mustReadConfigFixture(t, filepath.Join(release, "config/release-transition.json"))
+	manifest := []byte(fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", sha256.Sum256([]byte(script)), sha256.Sum256(registry)))
+	testkit.WriteFile(t, filepath.Join(release, "runtime-files.sha256"), manifest, 0600)
+	journal.ArtifactDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))
+	payload, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, f.journalPath, payload, 0600)
+	run := func(args ...string) string {
+		t.Helper()
+		options := f.cli.options
+		var out, stderr bytes.Buffer
+		options.Arguments, options.Stdout, options.Stderr = args, &out, &stderr
+		if code := runAliasRepairFixture(t, options); code != 0 {
+			t.Fatalf("%v exit=%d: %s %s", args, code, out.String(), stderr.String())
+		}
+		return out.String() + stderr.String()
+	}
+	output := run("config", "apply", "--yes")
+	if !applied || strings.Count(output, "next: run yard migrate") != 1 || strings.Contains(output, "-Y default migrate") {
+		t.Fatal("repair did not complete with one continuation", output)
+	}
+	if _, err := os.Stat(f.readyMarker); !os.IsNotExist(err) {
+		t.Fatal("config apply ran the pending profile", err)
+	}
+	output = run("migrate", "--yes")
+	if !strings.Contains(output, "ready") {
+		t.Fatal("continuation did not converge", output)
+	}
+}
+
 func (fixture *sampleRepairPlatformFixture) ObserveInstalledRuntime(ctx context.Context, id string) (ports.RuntimeObservation, error) {
 	if id == firstNonempty(fixture.installedID, "core-guest-runtime") && fixture.installed != nil {
 		return *fixture.installed, nil
@@ -47,6 +129,28 @@ func (fixture *sampleRepairPlatformFixture) ObserveProfileRuntimes(context.Conte
 		observation.State, observation.Actual = "stale", strings.Repeat("a", 64)
 	}
 	return map[string]ports.RuntimeObservation{"sample-runtime": observation}, nil
+}
+
+func TestConfigApplyRepairAdmitsOnlySelectedPendingInputs(t *testing.T) {
+	for _, scenario := range []string{"pending", "stale", "pending neighbor"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newConfigApplyRepairFixture(t, scenario == "pending neighbor")
+			diagnostics := ports.RuntimeDiagnostics{{Parameter: "sample.input.invalid", Installed: "changed", Desired: "current"}}
+			state := ports.RuntimeObservation{State: ports.RuntimeStatePending, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Diagnostics: &diagnostics}
+			if scenario == "stale" {
+				state.State = ports.RuntimeStateStale
+			}
+			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &state}
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			fixture.cli.options.InitPlatform = platform
+			permit, err := fixture.cli.prepareConfigApplyRepair(context.Background(), "default", false, fixture.outcome)
+			if err != nil || (permit != nil) != (scenario == "pending") {
+				t.Fatalf("pending repair permit=%#v err=%v", permit, err)
+			}
+		})
+	}
 }
 
 type initIntegrationRepairFixture struct {

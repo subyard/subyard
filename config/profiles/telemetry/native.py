@@ -4,6 +4,7 @@ import copy
 import json
 import math
 import os
+import shlex
 import stat
 import tempfile
 import tomllib
@@ -54,13 +55,16 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.telemetry-', dir=path.parent)
     try:
-        with os.fdopen(fd, 'wb') as output:
+        with os.fdopen(fd, 'w+b') as output:
             os.fchmod(output.fileno(), mode)
             if uid is not None:
                 os.fchown(output.fileno(), uid, gid)
             output.write(content)
             output.flush()
             os.fsync(output.fileno())
+            output.seek(0)
+            if output.read() != content:
+                raise ValueError('native payload verification failed')
         if snapshot(path, max_bytes=max_bytes) != expected:
             raise ValueError('native configuration changed')
         os.replace(temporary, path)
@@ -91,7 +95,45 @@ def desired(agent, endpoint, token):
     return result
 
 
-def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=False):
+def agent_document(home, agent):
+    path = home/('.claude/settings.json' if agent == 'claude' else '.codex/config.toml')
+    before = snapshot(path)
+    cause = 'missing' if before is None else 'empty' if not before.strip() else ''
+    try:
+        obj = (json.loads(before) if agent == 'claude' else tomllib.loads(before.decode())) if before and before.strip() else {}
+    except (ValueError, UnicodeError):
+        obj, cause = {}, 'invalid'
+    section = 'env' if agent == 'claude' else 'otel'
+    if not isinstance(obj, dict) or not isinstance(obj.get(section, {}), dict):
+        cause = 'invalid'
+    return path, before, obj, cause
+
+
+class AgentConfigRefusal(ValueError):
+    def __init__(self, agent, path):
+        self.agent = agent
+        super().__init__('invalid unmanaged agent configuration '+str(path)+
+                         '; in the yard run '+shlex.join(['mv', '--backup=numbered', '--', str(path), str(path)+'.subyard-invalid']))
+
+
+def agent_diagnostic(agent, cause):
+    return {'parameter': 'telemetry.agent.'+agent+'.config.'+cause,
+            'installed': 'missing' if cause == 'missing' else 'changed', 'desired': 'current'}
+
+
+def agent_config_diagnostics(home, agents, managed_agents=()):
+    result = []
+    for agent in ('claude', 'codex'):
+        if agent in agents:
+            path, _, _, cause = agent_document(home, agent)
+            if cause == 'invalid' and agent not in managed_agents:
+                raise AgentConfigRefusal(agent, path)
+            if agent in managed_agents and cause in ('missing', 'empty', 'invalid'):
+                result.append(agent_diagnostic(agent, cause))
+    return result
+
+
+def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=False, diagnostics=None, managed_agents=()):
     original = snapshot(state)
     if original is not None:
         info = state.stat()
@@ -107,17 +149,20 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
     next_state = copy.deepcopy(baseline)
     pending = copy.deepcopy(baseline)
     edits = []
+    unavailable = []
     for agent in ('claude', 'codex'):
-        path = home/('.claude/settings.json' if agent == 'claude' else '.codex/config.toml')
         section = 'env' if agent == 'claude' else 'otel'
         owned = baseline['agents'].get(agent, {})
         enabled = agent in agents
         if not enabled and not owned:
             continue
-        before = snapshot(path)
-        obj = (json.loads(before) if agent == 'claude' else tomllib.loads(before.decode())) if before else {}
-        if not isinstance(obj, dict) or not isinstance(obj.get(section, {}), dict):
-            raise ValueError('invalid native configuration')
+        path, before, obj, cause = agent_document(home, agent)
+        if cause == 'invalid' and agent not in managed_agents:
+            raise AgentConfigRefusal(agent, path)
+        blocked = agent in managed_agents and (cause in ('empty', 'invalid') or cause == 'missing' and enabled)
+        if blocked:
+            unavailable.append(agent_diagnostic(agent, cause))
+            continue
         previous = copy.deepcopy(obj)
         group = obj.setdefault(section, {})
         want = desired(agent, endpoint, token) if enabled else {}
@@ -127,7 +172,7 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
             allowed = [old['managed'], *old.get('previous', [])]
             current = {'present': key in group, 'value': group.get(key)}
             prior = {'present': old['present'], 'value': old['value']}
-            if not semantic_equal(current, prior) and not (key in group and any(semantic_equal(group[key], item) for item in allowed)):
+            if key in group and not semantic_equal(current, prior) and not any(semantic_equal(group[key], item) for item in allowed):
                 raise ValueError('native exporter ownership conflict')
             final[key] = {'present': old['present'], 'value': old['value'], 'managed': value}
             transitional[key] = {**final[key], 'previous': allowed}
@@ -149,7 +194,11 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
             content = (json.dumps(obj, indent=2)+'\n').encode() if agent == 'claude' else writer.dumps(obj).encode()
             edits.append((path, content, before))
     if check:
-        return not edits and semantic_equal(baseline, next_state)
+        if diagnostics is not None:
+            diagnostics.extend(unavailable)
+        return not unavailable and not edits and semantic_equal(baseline, next_state)
+    if unavailable:
+        raise ValueError('agent configuration pending; run yard config apply, then yard migrate')
     publish(state, (json.dumps(pending)+'\n').encode(), original)
     for path, content, before in edits:
         publish(path, content, before, uid, gid)

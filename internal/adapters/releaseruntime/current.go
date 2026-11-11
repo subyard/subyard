@@ -475,7 +475,11 @@ func (runtime *Runtime) prepareCurrentReport(parsed currentOptions, report curre
 			}
 		}
 		for _, decision := range report.Decisions {
-			fmt.Fprintf(&output, "Action: %s\n", releaseDecisionConsequence(decision))
+			if strings.HasPrefix(decision.Scope, "yard.") {
+				fmt.Fprintf(&output, "Diagnostic: yard %s %s: %s\n", strings.TrimPrefix(decision.Scope, "yard."), decision.Resource, decision.Result)
+			} else {
+				fmt.Fprintf(&output, "Action: %s\n", releaseDecisionConsequence(decision))
+			}
 		}
 		for _, consequence := range report.Consequences {
 			fmt.Fprintf(&output, "Consequence: %s\n", consequence)

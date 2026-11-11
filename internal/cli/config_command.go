@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -969,8 +970,13 @@ func (cli *CLI) configStatus(
 				} else {
 					observations, runtimeErr = platform.ObserveProfileRuntimes(ctx)
 				}
-				for id, observation := range observations {
-					if observation.State != ports.RuntimeStateStale {
+				for _, id := range slices.Sorted(maps.Keys(observations)) {
+					observation := observations[id]
+					if observation.State == ports.RuntimeStatePending {
+						drift = true
+						fmt.Fprintf(cli.options.Stdout, "profile %s pending input repair; next: run yard -Y %s config apply\n", id, target.Name)
+					}
+					if observation.State != ports.RuntimeStateStale && observation.State != ports.RuntimeStatePending {
 						continue
 					}
 					if observation.Diagnostics == nil || len(*observation.Diagnostics) == 0 {

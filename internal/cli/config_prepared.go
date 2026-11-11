@@ -518,7 +518,7 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		}
 	}
 	if cli.permits.configApply != nil {
-		return cli.finishConfigApplyRepair(ctx, cli.permits.configApply)
+		return copyCLI.finishConfigApplyRepair(ctx, cli.permits.configApply)
 	}
 	return nil
 }

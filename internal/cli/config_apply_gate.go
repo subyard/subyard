@@ -45,6 +45,7 @@ type configApplyRepairPermit struct {
 	selectedRuntimes    map[string]ports.RuntimeObservation
 	profileInit         bool
 	integrationRetry    bool
+	pendingInputs       bool
 	sourceBinding       string
 	toolingBinding      string
 	teardownInputs      *ownerInputBaseline
@@ -434,6 +435,7 @@ func (cli *CLI) prepareActivationRepair(
 		!sameConfigApplyReleaseID(observedLinks.Previous, pair.Previous) {
 		return nil, nil
 	}
+	pendingInputs := false
 	for _, reconciler := range cli.nonConfigActivationReconcilers(request) {
 		observation, observeErr := reconciler.Observe(ctx, pair, observedLinks)
 		if observeErr != nil || !validConfigApplyActivationObservation(observation) {
@@ -470,6 +472,34 @@ func (cli *CLI) prepareActivationRepair(
 					}
 					observation.Actual, observation.Converged = observation.Desired, true
 				}
+			}
+		}
+		if owner, ok := reconciler.(*profileRuntimeActivationReconciler); ok && !profileInit && teardown == nil && !observation.Converged {
+			pending := false
+			for _, target := range allTargets {
+				state, err := owner.observeTarget(ctx, &operation, target)
+				if err != nil {
+					return nil, nil
+				}
+				switch state.State {
+				case ports.RuntimeStatePending:
+					if _, selected := requested[target.Name]; !selected {
+						return nil, nil
+					}
+					pending = true
+				case ports.RuntimeStateCurrent, ports.RuntimeStateAbsent, ports.RuntimeStateDeferred:
+				default:
+					return nil, nil
+				}
+				binding, err := activationStageFingerprint(state)
+				if err != nil {
+					return nil, err
+				}
+				facts.OtherActivations = append(facts.OtherActivations, configApplyActivationFact{ID: owner.ID() + "/" + target.Name, Actual: binding, Desired: binding, Converged: state.State != ports.RuntimeStatePending})
+			}
+			if pending {
+				pendingInputs = true
+				continue
 			}
 		}
 		if !observation.Converged || observation.Actual != observation.Desired {
@@ -509,6 +539,7 @@ func (cli *CLI) prepareActivationRepair(
 		selectedRuntimes:    selectedRuntimes,
 		profileInit:         profileInit,
 		integrationRetry:    integrationRetry,
+		pendingInputs:       pendingInputs,
 		sourceBinding:       sourceBinding, toolingBinding: toolingBinding,
 		teardownInputs: teardown,
 	}, nil
@@ -644,7 +675,12 @@ func (cli *CLI) finishConfigApplyRepair(
 		return err
 	}
 	if outcome != nil {
-		return fmt.Errorf("materialized configuration did not restore release readiness: %s", outcome.Code)
+		if permit.pendingInputs && !permit.profileInit && !permit.integrationRetry && outcome.Status == releasetransition.StatusMigrationRequired &&
+			outcome.Code == releasetransition.CodeTransitionRequired && outcome.Active == permit.gate.Active && outcome.Target == permit.gate.Target {
+			fmt.Fprintln(cli.options.Stdout, "Materialized configuration repaired; next: run yard migrate")
+			return nil
+		}
+		return fmt.Errorf("materialized configuration did not restore release readiness: %s (%s); next: %s", outcome.Code, outcome.Message, releaseruntime.CurrentReleaseRetry(*outcome))
 	}
 	return nil
 }

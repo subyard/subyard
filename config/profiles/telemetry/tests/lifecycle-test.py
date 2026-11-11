@@ -22,6 +22,53 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_missing_managed_document_waits_before_first_telemetry_install(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.selected, runtime.agents, runtime.managed_agents = True, ['claude', 'codex'], {'claude', 'codex'}
+            runtime.home, runtime.control, runtime.library, runtime.data = root, root/'control', root/'library', root/'data'
+            runtime.assets, runtime.retained = {}, {}
+            runtime.owned = lambda: False
+            runtime.desired = lambda: 'a'*64
+            runtime.manager = lambda unit: {}
+            observed = runtime.observe()
+            self.assertEqual(observed['state'], 'pending')
+            self.assertEqual([item['parameter'] for item in observed['diagnostics']],
+                             ['telemetry.agent.claude.config.missing', 'telemetry.agent.codex.config.missing'])
+            with self.assertRaisesRegex(ValueError, 'config apply'):
+                runtime.apply()
+            self.assertEqual(list(root.iterdir()), [], 'pending managed inputs allowed partial installation')
+
+    def test_invalid_agent_document_is_pending_until_config_repair(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            asset = root/'collector'
+            asset.write_bytes(b'stale collector')
+            runtime.assets, runtime.retained = {asset: (b'current collector', 0o755)}, {}
+            runtime.selected, runtime.agents = True, ['claude']
+            runtime.managed_agents = {'claude'}
+            runtime.home, runtime.control = root, root/'control'
+            runtime.library = root/'library'
+            runtime.endpoint, runtime.uid, runtime.gid = 'http://127.0.0.1:14318', os.getuid(), os.getgid()
+            runtime.owned = lambda: True
+            runtime.saved_inventory = lambda: {}
+            runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
+            runtime.running_no_new_privs = lambda state: True
+            runtime.desired = lambda: 'a'*64
+            runtime.token = lambda: 'x'*64
+            (root/'.claude').mkdir()
+            (root/'.claude/settings.json').write_bytes(b'private invalid content')
+            observation = runtime.observe()
+            self.assertEqual(observation['state'], 'pending')
+            self.assertEqual(len(observation['actual']), 64)
+            self.assertEqual(observation['desired'], 'a'*64)
+            self.assertIn('telemetry.agent.claude.config.invalid', str(observation['diagnostics']))
+            self.assertNotIn('private invalid content', str(observation))
+            (root/'.claude/settings.json').write_text('{}')
+            self.assertEqual(runtime.observe()['state'], 'stale', 'repairing the document must reveal pending collector refresh')
+
     def test_runtime_diagnostics_name_changed_asset_without_contents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             path = Path(name)/'collector.py'
@@ -30,6 +77,7 @@ class LifecycleTest(unittest.TestCase):
             runtime.assets = {path: (b'desired content', 0o644)}
             runtime.retained = {}
             runtime.selected = True
+            runtime.home, runtime.agents = Path(name), []
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}

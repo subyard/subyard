@@ -2325,6 +2325,9 @@ func first(value, fallback string) string {
 }
 
 func releaseDecisionConsequence(decision releasetransition.RedactedDecision) string {
+	if strings.HasPrefix(decision.Scope, "yard.") {
+		return "yard " + strings.TrimPrefix(decision.Scope, "yard.") + ": " + decision.Resource + " " + decision.Result
+	}
 	kind := "setting"
 	if decision.Scope == "activation" {
 		kind = "runtime"

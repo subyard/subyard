@@ -1155,12 +1155,19 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		case "config materialization: invalid current TOML":
 			detail = "invalid current TOML"
 		}
+		unownedInvalid := configmaterial.UnownedInvalidDestination(result.Stderr, format)
+		if unownedInvalid {
+			detail = "invalid current " + strings.ToUpper(format)
+		}
 		if detail != "" && result.ExitCode == 2 && (err == nil || (errors.As(err, &completed) && completed.Code == 2)) {
+			retry := shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "sha256sum", "--", path})
+			if unownedInvalid {
+				retry = shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
+			}
 			return configmaterial.Observation{}, integrationOwnershipError{
 				pendingConfiguration: detail == "no protected baseline or exact recognized legacy template" || detail == "owned fields or protected evidence changed",
 				message:              fmt.Sprintf("integration ownership conflict in yard %s at %q: %s; file preserved. Compare with the integration's shipped legacy templates before retrying", runtime.Yard.YardName, path, detail),
-				retry: shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject,
-					"--", "sha256sum", "--", path}),
+				retry:                retry,
 			}
 		}
 		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,11 @@ import (
 func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testing.T) {
 	for _, kind := range []string{"completed", "exit-only", "edited", "invalid-json", "invalid-toml", "transport", "unknown-stderr"} {
 		t.Run(kind, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			home := filepath.Join(root, "home")
+			path := "/home/dev/.fixture/config.toml"
+			physicalPath := filepath.Join(home, ".fixture/config.toml")
+			format, desired := "toml", []byte("managed = 'new'\n")
 			incus := runningIncus(1)
 			step := &incus.ExecSteps[0]
 			step.Result.ExitCode = 2
@@ -39,13 +45,31 @@ func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testin
 				step.Result.Stderr = []byte("config materialization: adoption owned fields or evidence changed\n")
 			case "invalid-json", "invalid-toml":
 				wantDetail = "invalid current " + strings.ToUpper(strings.TrimPrefix(kind, "invalid-"))
-				step.Result.Stderr = []byte("config materialization: " + wantDetail + "\n")
+				if kind == "invalid-json" {
+					format, desired = "json", []byte(`{"managed":true}`)
+				}
+				if err := os.MkdirAll(filepath.Dir(physicalPath), 0755); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, physicalPath, []byte("[broken"), 0644)
+				request, err := configmaterial.Request(format, configmaterial.ModeAssessAdopt, "dev", path, os.Getuid(), desired)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Command[3] = strings.ReplaceAll(request.Command[3], "/var/lib/subyard/config-materialization", filepath.Join(root, "absent-state"))
+				request.Command[6], request.Command[9] = physicalPath, home
+				command := exec.Command(request.Command[0], request.Command[1:]...)
+				command.Stdin = bytes.NewReader(request.Stdin)
+				output, err := command.CombinedOutput()
+				if err == nil || command.ProcessState.ExitCode() != 2 {
+					t.Fatal("real guest did not refuse invalid unowned document", err, string(output))
+				}
+				step.Result.Stderr = output
 			}
 			runtime := Runtime{Executor: incus, Yard: domain.Context{
 				DevUser: "dev", DevUID: 1000, YardName: "sample", IncusProject: "sample-project", YardInstanceName: "sample-instance",
 			}}
-			_, err := runtime.observeIntegrationConfig(context.Background(), "toml", configmaterial.ModeAssessAdopt,
-				"/home/dev/.fixture/config.toml", []byte("managed = 'new'\n"))
+			_, err := runtime.observeIntegrationConfig(context.Background(), format, configmaterial.ModeAssessAdopt, path, desired)
 			if err == nil || strings.Contains(err.Error(), "PRIVATE") {
 				t.Fatal("ownership refusal lost or leaked private data")
 			}
@@ -65,8 +89,10 @@ func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testin
 			}
 			if public {
 				message, retry := diagnostic.ActivationDiagnostic()
-				if !strings.Contains(message, wantDetail) || !strings.Contains(message, "/home/dev/.fixture/config.toml") ||
-					retry != "'incus' 'exec' 'sample-instance' '--project' 'sample-project' '--' 'sha256sum' '--' '/home/dev/.fixture/config.toml'" {
+				if !strings.Contains(message, wantDetail) || !strings.Contains(message, path) ||
+					!strings.Contains(retry, "'"+path+"'") ||
+					(strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'mv' '--backup=numbered'")) ||
+					(!strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'sha256sum'")) {
 					t.Fatalf("unactionable ownership diagnostic: %s; %s", message, retry)
 				}
 			}

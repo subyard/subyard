@@ -55,6 +55,11 @@ type JSONObservation struct {
 
 type Observation = JSONObservation
 
+// UnownedInvalidDestination recognizes only the writer's explicit ownership refusal.
+func UnownedInvalidDestination(stderr []byte, format string) bool {
+	return bytes.HasPrefix(stderr, []byte("config materialization: unowned-invalid-destination-v1 "+strings.ToUpper(format)+";"))
+}
+
 func ParseObservation(payload []byte) (Observation, error) {
 	return ParseJSONObservation(payload)
 }
@@ -338,6 +343,7 @@ func materializationRequest(format, mode, developer, destination string, uid int
 		Command: []string{
 			"python3", "-B", "-c", program,
 			mode, developer, cleanDestination, fmt.Sprint(uid), digest, cleanHome,
+			fmt.Sprintf("%x", sha256.Sum256(payload)),
 		},
 		Stdin: payload,
 	}, nil

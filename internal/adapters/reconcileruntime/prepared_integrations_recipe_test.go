@@ -11,7 +11,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -45,6 +47,118 @@ func TestMaterializedIntegrationExecutionUsesClosedCachedDefinitionsAndAssets(t 
 	testkit.WriteFile(t, foreign, []byte("unapproved"), 0o600)
 	if _, err := execution.SourceReader(config.MaterializedAsset{Source: foreign}); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatal("execution read an uncaptured live asset", err)
+	}
+}
+
+type configFailureTrace struct {
+	*retryableIntegrationExecutor
+	mu              sync.Mutex
+	active, maximum int
+	writes          []ports.InstanceExecRequest
+}
+
+func (e *configFailureTrace) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) > 4 && strings.Contains(request.Command[3], "Version 1 records observed ownership only") && (request.Command[4] == "settings" || request.Command[4] == "selection") {
+		return ports.InstanceExecResult{Stdout: []byte(`{}`)}, nil
+	}
+	if len(request.Command) > 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "config materialization:") && (request.Command[4] == "observe" || request.Command[4] == "assess-adopt") {
+		payload, _ := json.Marshal(map[string]any{"converged": true, "fingerprint": strings.Repeat("b", 64)})
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
+	configWrite := len(request.Command) > 5 && (request.Command[0] == "sh" && strings.Contains(request.Command[3], ".subyard-config.") || request.Command[0] == "python3" && request.Command[4] == "apply" && strings.Contains(request.Command[3], "config materialization:"))
+	if configWrite {
+		e.mu.Lock()
+		e.active++
+		e.maximum = max(e.maximum, e.active)
+		e.writes = append(e.writes, request)
+		e.mu.Unlock()
+		// Keep independent concurrent writes observable if this loop is parallelized.
+		time.Sleep(5 * time.Millisecond)
+		defer func() { e.mu.Lock(); e.active--; e.mu.Unlock() }()
+	}
+	return e.retryableIntegrationExecutor.Exec(ctx, project, name, request)
+}
+
+func TestMaterializedIntegrationProvisionFailureAndReplayKeepEveryApprovedPayload(t *testing.T) {
+	root := testkit.TempDir(t)
+	runtime, base := materializedIntegrationFixture(t, root, true)
+	testkit.WriteFile(t, filepath.Join(root, "scripts/reconcile-integrations.sh"), []byte("#!/bin/sh\nexit 71\n"), 0755)
+	trace := &configFailureTrace{retryableIntegrationExecutor: base}
+	runtime.Executor = trace
+	// Match the three structured and five raw writer shapes with synthetic packages.
+	for index, name := range []string{"sample", "second", "third", "fourth"} {
+		directory := filepath.Join(root, "config/agents", name)
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		definition := profile.IntegrationDefinition{SchemaVersion: 2, Name: name, Root: directory}
+		if index == 0 {
+			definition.Lifecycle = runtime.Integrations[0].Lifecycle
+		}
+		destination, payload, format := "."+name+"/settings.json", `{"managed":true}`, "destination"
+		if index == 1 {
+			destination, payload = "."+name+"/config.toml", "managed = true\n"
+		}
+		if index == 2 {
+			destination = "." + name + "/config.jsonc"
+		}
+		definition.Artifacts = []profile.IntegrationArtifact{{ID: "config", Kind: "config", Source: "config", Destination: destination, Format: format}}
+		testkit.WriteFile(t, filepath.Join(directory, "config"), []byte(payload), 0600)
+		if index < 2 {
+			definition.Artifacts = append(definition.Artifacts, profile.IntegrationArtifact{ID: "rules", Kind: "config", Source: "rules", Destination: "." + name + "/rules", Format: "raw"})
+			testkit.WriteFile(t, filepath.Join(directory, "rules"), []byte("approved rule\n"), 0600)
+		} else {
+			setting := []string{"HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD"}[index-2]
+			path := filepath.Join(root, name+"-instructions")
+			testkit.WriteFile(t, path, []byte("approved instructions\n"), 0600)
+			runtime.Environment = append(runtime.Environment, setting+"="+path)
+			definition.Artifacts = append(definition.Artifacts, profile.IntegrationArtifact{ID: "instructions", Kind: "instructions", SourceSetting: setting, Destination: "." + name + "/instructions", Format: "raw"})
+		}
+		metadata, err := json.Marshal(definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(directory, "integration.json"), metadata, 0600)
+		if index == 0 {
+			runtime.Integrations[0] = definition
+		} else {
+			runtime.Integrations = append(runtime.Integrations, definition)
+		}
+	}
+	runtime.Environment = preparedInstalledEnvironment(runtime.Environment, "CODING_TOOL_INTEGRATIONS", "sample second third fourth")
+	p := prepareMaterializedIntegrationFixture(t, runtime)
+	defer p.Close()
+	recipe := p.Recipe()
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		if err := runtime.ApplyPreparedMaterializedIntegrations(ctx, p); err == nil || !strings.Contains(err.Error(), "exit status 71") {
+			cancel()
+			t.Fatalf("provision failure was not reached: %v", err)
+		}
+		cancel()
+		before := len(trace.writes)
+		if before != (attempt+1)*8 || trace.maximum != 1 {
+			t.Fatalf("attempt %d: writes=%d maximum concurrency=%d", attempt, before, trace.maximum)
+		}
+		for _, write := range trace.writes {
+			if len(write.Stdin) == 0 {
+				t.Fatalf("empty payload after failure: %v", write.Command[:3])
+			}
+		}
+		if _, err := runtime.IntegrationPlan(context.Background()); err != nil {
+			t.Fatal("read-only recovery observation", err)
+		}
+		if len(trace.writes) != before {
+			t.Fatal("failure observation wrote configurations")
+		}
+		if attempt == 0 {
+			var err error
+			p, err = runtime.BindInstalledRuntimeContext(context.Background(), recipe)
+			if err != nil {
+				t.Fatal("bind original replay", err)
+			}
+			defer p.Close()
+		}
 	}
 }
 

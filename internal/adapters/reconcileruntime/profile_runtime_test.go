@@ -760,6 +760,73 @@ func profileRuntimeFixture(t *testing.T, handler string) Runtime {
 	return profileRuntimeFixtureAt(t, testkit.TempDir(t), handler)
 }
 
+func TestPendingProfileRuntimeIsVisibleAndNeverConverged(t *testing.T) {
+	payload := `{"state":"pending","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","diagnostics":[{"parameter":"sample.input.invalid","installed":"changed","desired":"current"}]}`
+	runtime := profileRuntimeFixture(t, "#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n")
+	runtime.Yard.YardName = "default"
+	observations, err := runtime.ObserveProfileRuntimes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	runtime.Stderr = &output
+	if runtime.profileRuntimesConverged(observations) || strings.Contains(output.String(), "stopped") {
+		t.Fatal("pending input was treated as stopped/converged", output.String())
+	}
+	err = runtime.applyProfileRuntimes(context.Background())
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("pending repair action missing: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	if !strings.Contains(message, "sample.input.invalid") || retry != "run yard -Y default config apply" {
+		t.Fatal(message, retry)
+	}
+	if _, err := decodeProfileRuntimeObservation([]byte(strings.Replace(payload, `,"diagnostics":[{"parameter":"sample.input.invalid","installed":"changed","desired":"current"}]`, "", 1))); err == nil {
+		t.Fatal("pending without diagnostics accepted")
+	}
+}
+
+func TestProfileFailureHintRepairsDeselectedOwner(t *testing.T) {
+	runtime := profileRuntimeFixture(t, "#!/bin/sh\nexit 9\n")
+	runtime.Yard.YardName = "default"
+	_, err := runtime.ObserveProfileRuntimes(context.Background())
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatal(err)
+	}
+	_, retry := diagnostic.ActivationDiagnostic()
+	if retry != "run yard -Y default config paths" {
+		t.Fatal("deselected owner retry loops", retry)
+	}
+}
+
+func TestProfilePublicRefusalIsExplicitBoundedAndNotRawStderr(t *testing.T) {
+	runtime := profileRuntimeFixture(t, "#!/bin/sh\nexit 2\n")
+	runtime.Yard.YardName = "default"
+	definitions, err := runtime.profileRuntimeDefinitions()
+	if err != nil || len(definitions) == 0 {
+		t.Fatal(err)
+	}
+	definition := definitions[0]
+	for _, test := range []struct {
+		payload string
+		valid   bool
+	}{
+		{`{"message":"invalid unmanaged configuration /home/dev/config","retry":"run incus exec sample -- mv --backup=numbered -- /home/dev/config /home/dev/config.saved"}`, true},
+		{`{"message":"PRIVATE","retry":"run private","unknown":true}`, false},
+		{`{"message":"PRIVATE\nvalue","retry":"run private"}`, false},
+		{`{"message":"` + strings.Repeat("x", 481) + `","retry":"run private"}`, false},
+	} {
+		stderr := []byte("PRIVATE ordinary stderr\nsubyard-profile-observation-refusal-v1 " + test.payload + "\n")
+		failure := runtime.profileRuntimeObservationFailure(definition, errors.New("PRIVATE"), stderr).(*integrationLifecycleError)
+		message, retry := failure.ActivationDiagnostic()
+		if strings.Contains(message+retry, "PRIVATE") || strings.Contains(message, "invalid unmanaged configuration") != test.valid {
+			t.Fatal(message, retry)
+		}
+	}
+}
+
 func profileRuntimeFixtureAt(t *testing.T, root, handler string) Runtime {
 	t.Helper()
 	profileRoot := filepath.Join(root, "config", "profiles", "synthetic")
@@ -791,6 +858,7 @@ func TestProfileRuntimeObservationFailuresHaveSafePublicDiagnostics(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			runtime := profileRuntimeFixture(t, test.body)
 			runtime.Yard.YardName = "fixture-yard"
+			runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=synthetic")
 			handler := filepath.Join(runtime.RepositoryRoot, "config/profiles/synthetic/runtime.sh")
 			if test.name == "permission" {
 				interpreter := filepath.Join(runtime.RepositoryRoot, "private-interpreter")
@@ -832,7 +900,11 @@ func TestProfileRuntimeObservationFailuresHaveSafePublicDiagnostics(t *testing.T
 			if errors.As(err, &conflict) && conflict.ActivationConflict() {
 				t.Fatal("observation failure became an activation conflict")
 			}
-			if message != want || retry != "run yard update --check" || strings.Contains(message, "private-") || strings.Contains(message, runtime.RepositoryRoot) || strings.Contains(err.Error(), "private-") {
+			wantRetry := "run yard -Y fixture-yard config paths"
+			if test.reason == "invalid-schema" {
+				wantRetry = "run yard update --check"
+			}
+			if message != want || retry != wantRetry || strings.Contains(message, "private-") || strings.Contains(message, runtime.RepositoryRoot) || strings.Contains(err.Error(), "private-") {
 				t.Fatal("imprecise or unsafe runtime observation diagnostic", message, retry)
 			}
 			if test.name == "native-exit" {
@@ -846,6 +918,34 @@ func TestProfileRuntimeObservationFailuresHaveSafePublicDiagnostics(t *testing.T
 			}
 			if test.name == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatal("deadline cause lost", err)
+			}
+		})
+	}
+}
+
+func TestProfileObservationPublishesOnlyValidatedSourceDiagnostic(t *testing.T) {
+	for _, diagnostic := range []string{
+		"subyard-profile-observation-diagnostic-v1 PermissionError worker.py:42",
+		"subyard-profile-observation-diagnostic-v1 PermissionError missing.py:42",
+		"subyard-profile-observation-diagnostic-v1 private-value worker.py:42",
+		"subyard-profile-observation-diagnostic-v1 PermissionError ../private.py:42",
+		"subyard-profile-observation-diagnostic-v1 PermissionError worker.py:42\nsubyard-profile-observation-diagnostic-v1 ValueError worker.py:43",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			body := "#!/bin/sh\nprintf '%s\\n' 'private-token /private/source' '" + diagnostic + "' >&2\nexit 2\n"
+			runtime := profileRuntimeFixture(t, body)
+			runtime.Yard.YardName = "fixture-yard"
+			runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=synthetic")
+			testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "config/profiles/synthetic/worker.py"), []byte("# shipped source\n"), 0600)
+			_, err := runtime.ObserveProfileRuntimes(context.Background())
+			var public interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &public) {
+				t.Fatal(err)
+			}
+			message, retry := public.ActivationDiagnostic()
+			want := diagnostic == "subyard-profile-observation-diagnostic-v1 PermissionError worker.py:42"
+			if strings.Contains(message, "PermissionError at worker.py:42") != want || strings.Contains(message, "private-") || retry != "run yard -Y fixture-yard config paths" {
+				t.Fatalf("unsafe diagnostic: %s / %s", message, retry)
 			}
 		})
 	}
