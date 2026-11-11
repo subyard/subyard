@@ -1,15 +1,21 @@
 # shellcheck shell=bash
 # Source-only provision boundaries; callers own installation and shell options.
-# Downloads are bounded independently of the provision operation. Curl resets file
-# output between retries, so a partial manifest/archive cannot reach its consumer.
+# Downloads resume within a bounded retry count; toolchain.py verifies the pinned
+# checksum before consuming an archive, including a resumed partial file.
 android_download() {
-  local status=0 stage="$3" started=$SECONDS output_bytes=unknown
+  local status=0 stage="$3" started=$SECONDS output_bytes=unknown attempt
   printf 'android provision: download stage=%s state=start\n' "$stage" >&2
-  timeout --signal=TERM --kill-after=1s 300s \
-    curl --fail --silent --location --retry 3 --retry-all-errors --retry-delay 1 \
-      --connect-timeout 15 --max-time 120 --retry-max-time 300 \
-      --output "$2" "$1" || status=$?
-  # This is the final attempt's output, not aggregate progress across retries.
+  for attempt in 1 2 3 4; do
+    # SDK/JDK archives need time on slow links; below 1 KiB/s for 120s is a stall.
+    if curl --fail --silent --location --connect-timeout 15 \
+      --speed-limit 1024 --speed-time 120 --continue-at - --output "$2" "$1"; then
+      status=0
+      break
+    else
+      status=$?
+    fi
+    [ "$attempt" = 4 ] || sleep 1
+  done
   if [ -f "$2" ] && [ ! -L "$2" ]; then
     output_bytes="$(stat -c %s -- "$2" 2>/dev/null)" || output_bytes=unknown
     case "$output_bytes" in ''|*[!0-9]*) output_bytes=unknown ;; esac

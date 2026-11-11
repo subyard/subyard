@@ -44,10 +44,11 @@ cat > "$tmp/bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
 out='' url=''
+args=("$@")
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) out="$2"; shift 2 ;;
-    --proto|--proto-redir|--retry|--connect-timeout|--max-time) shift 2 ;;
+    --proto|--proto-redir|--retry|--connect-timeout|--max-time|--speed-limit|--speed-time|--continue-at) shift 2 ;;
     --*) shift ;;
     *) url="$1"; shift ;;
   esac
@@ -55,12 +56,17 @@ done
 case "$url" in
   https://downloads.claude.ai/claude-code-releases/*)
     printf '%s\n' "$url" >> "$CLAUDE_TEST_ROOT/fetch.log"
-    cp -- "$CLAUDE_TEST_ROOT/releases/${url#https://downloads.claude.ai/claude-code-releases/}" "$out" ;;
+    fixture="$CLAUDE_TEST_ROOT/releases/${url#https://downloads.claude.ai/claude-code-releases/}"
+    case "$url" in
+      */claude) bash "$SUBYARD_TEST_ARTIFACT_CURL" "$fixture" "${args[@]}" ;;
+      *) cp -- "$fixture" "$out" ;;
+    esac ;;
   *) exit 90 ;;
 esac
 CURL
 chmod 0755 "$tmp/bin/curl"
 export CLAUDE_TEST_ROOT="$tmp"
+export SUBYARD_TEST_ARTIFACT_CURL="$ROOT/tests/helpers/artifact-curl.sh" SUBYARD_TEST_TRANSFER_LOG="$tmp/transfer.log"
 run_hook() { # installation root [architecture]
   local root="$1" arch="${2:-amd64}"
   env PATH="$tmp/bin:$PATH" HOME="$tmp/home" TMPDIR=/tmp \
@@ -69,7 +75,7 @@ run_hook() { # installation root [architecture]
     CLAUDE_BIN_LINK="$root/usr/local/bin/claude" \
     CLAUDE_POLICY_DIR="$root/etc/claude-code/managed-settings.d" \
     CLAUDE_POLICY_CHECK_PATH="$root/usr/local/bin/claude-policy-check" \
-    bash "$hook"
+    bash -euo pipefail -s < "$hook"
 }
 root="$tmp/install"
 runtime="$root/opt/subyard/claude/claude"
@@ -263,4 +269,24 @@ mkdir -p "$foreign/usr/local/bin"
 printf 'foreign install\n' > "$foreign/usr/local/bin/claude"
 if run_hook "$foreign" >/dev/null 2>&1; then fail 'foreign command was overwritten'; fi
 [ "$(cat "$foreign/usr/local/bin/claude")" = 'foreign install' ] || fail 'foreign command changed'
-printf 'ok: Claude latest CLI install, repeat, upgrade, checksum, readiness, ownership, managed policy, update lock and native shadow release\n'
+# A stalled upgrade resumes its partial, with the manifest still gating publication.
+make_release 2.3.0
+printf '2.3.0\n' > "$tmp/releases/latest"
+for scenario in corrupt ignore-range range-refused exhausted resume; do
+  : > "$SUBYARD_TEST_TRANSFER_LOG"
+  if SUBYARD_TEST_TRANSFER_SCENARIO="$scenario" run_hook "$root" >"$tmp/transfer.out" 2>"$tmp/transfer.err"; then
+    [ "$scenario" = resume ] || fail "unsafe transfer accepted: $scenario"
+    [ "$("$link" --version)" = '2.3.0 (Claude Code)' ] || fail 'resumed upgrade failed'
+  else
+    [ "$scenario" != resume ] || fail 'stalled download did not resume'
+    [ "$("$link" --version)" = '2.2.0 (Claude Code)' ] || fail "failed transfer replaced runtime: $scenario"
+    case "$scenario" in
+      corrupt|ignore-range) grep -Fq 'checksum mismatch' "$tmp/transfer.err" || fail 'missing checksum diagnostic' ;;
+      *) grep -Fq 'release artifact download failed' "$tmp/transfer.err" || fail 'missing download diagnostic' ;;
+    esac
+  fi
+  expected=$'0\n64'
+  case "$scenario" in range-refused|exhausted) expected=$'0\n64\n64\n64' ;; esac
+  [ "$(cat "$SUBYARD_TEST_TRANSFER_LOG")" = "$expected" ] || fail "wrong resume offsets or retry count: $scenario"
+done
+printf 'ok: Claude latest CLI install, checksum, readiness, policy, native shadow release and stall resume\n'

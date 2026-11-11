@@ -388,11 +388,22 @@ if is_release_target "$current_target" && is_working_binary "$INSTALL_ROOT/$curr
   fi
 fi
 
+# Keep this function local: provision hooks are delivered on stdin, without repo helpers.
+download_artifact() {
+  local attempt
+  for attempt in 1 2 3 4; do
+    # Allow slow links indefinitely; below 1 KiB/s for two minutes indicates a stall.
+    if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --connect-timeout 20 --speed-limit 1024 --speed-time 120 --continue-at - \
+      --output "$2" "$1"; then return 0; fi
+    [ "$attempt" = 4 ] || sleep 2
+  done
+  return 1
+}
 archive="$tmp/$artifact"
-curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --retry 6 --retry-all-errors --retry-max-time 900 --connect-timeout 20 --max-time 300 --output "$archive" "$url" \
-  || die "release artifact download failed"
+download_artifact "$url" "$archive" || die "release artifact download failed"
 
+# Fail closed on a corrupt partial; cleanup discards it before the next invocation.
 actual_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
 [ "$actual_sha256" = "$EXPECTED_SHA256" ] \
   || die "checksum mismatch for Codex $VERSION ($ARCH)"

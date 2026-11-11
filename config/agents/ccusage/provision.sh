@@ -94,7 +94,9 @@ trap cleanup EXIT
 package="ccusage-linux-${PACKAGE_ARCH}"
 url="${REGISTRY_URL%/}/@ccusage/${package}/-/${package}-${VERSION}.tgz"
 archive="$tmp/${package}-${VERSION}.tgz"
-curl --fail --silent --show-error --location --output "$archive" "$url" \
+# Allow slow transfers, but do not leave provisioning hung on a stalled connection.
+curl --fail --silent --show-error --location --connect-timeout 20 \
+  --speed-limit 1024 --speed-time 120 --output "$archive" "$url" \
   || die "download failed: $url"
 
 actual_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"

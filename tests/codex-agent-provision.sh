@@ -95,6 +95,7 @@ cat > "$fake_bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
 out='' url='' retries='' all_errors='' retry_time=''
+args=("$@")
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output|-o) out="$2"; shift 2 ;;
@@ -102,20 +103,21 @@ while [ "$#" -gt 0 ]; do
     --retry) retries="$2"; shift 2 ;;
     --retry-all-errors) all_errors=1; shift ;;
     --retry-max-time) retry_time="$2"; shift 2 ;;
-    --header|-H|--proto|--proto-redir|--connect-timeout|--max-time) shift 2 ;;
+    --header|-H|--proto|--proto-redir|--connect-timeout|--max-time|--speed-limit|--speed-time|--continue-at) shift 2 ;;
     --*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 [ -n "$out" ] && [ -n "$url" ]
-# Every GitHub download outlasts a short 5xx outage.
-[ "$retries" = 6 ] && [ "$all_errors" = 1 ] && [ "$retry_time" -ge 600 ]
 printf '%s\n' "$url" >> "$CODEX_TEST_CURL_LOG"
 case "$url" in
   https://api.github.com/repos/openai/codex/releases/latest)
+    # Metadata still outlasts a short 5xx outage with its own bounded retries.
+    [ "$retries" = 6 ] && [ "$all_errors" = 1 ] && [ "$retry_time" -ge 600 ]
     cp -- "$CODEX_TEST_RELEASES/latest.json" "$out" ;;
   https://github.com/openai/codex/releases/download/*)
-    cp -- "$CODEX_TEST_RELEASES/${url#https://github.com/openai/codex/releases/download/}" "$out" ;;
+    bash "$SUBYARD_TEST_ARTIFACT_CURL" \
+      "$CODEX_TEST_RELEASES/${url#https://github.com/openai/codex/releases/download/}" "${args[@]}" ;;
   *) exit 90 ;;
 esac
 CURL
@@ -141,6 +143,7 @@ chmod +x "$fake_bin/bwrap" "$fake_bin/apt-get"
 original_path="$PATH"
 export PATH="$fake_bin:$original_path"
 export CODEX_TEST_CURL_LOG="$curl_log" CODEX_TEST_RELEASES="$releases"
+export SUBYARD_TEST_ARTIFACT_CURL="$ROOT/tests/helpers/artifact-curl.sh" SUBYARD_TEST_TRANSFER_LOG="$tmp/transfer.log"
 export CODEX_TEST_BWRAP_READY="$tmp/bwrap-ready" CODEX_TEST_APT_LOG="$tmp/apt.log"
 touch "$CODEX_TEST_BWRAP_READY"
 
@@ -171,7 +174,7 @@ run_hook() { # <arch> <root> [environment assignments...]
     CODEX_BIN_LINK="$install_root/usr/local/bin/codex" \
     CODEX_CHECK_PATH="$install_root/usr/local/bin/codex-policy-check" \
     CODEX_REQUIREMENTS_PATH="$install_root/etc/codex/requirements.toml" \
-    "$@" bash "$HOOK"
+    "$@" bash -euo pipefail -s < "$HOOK"
 }
 
 root="$tmp/install"
@@ -603,4 +606,27 @@ else
 fi
 grep -Fq 'must run as root' "$nonroot_err" || fail "non-root refusal is unclear"
 
-printf 'ok: native Codex agent provision\n'
+# Exercise resumable upgrades through the same stdin delivery used by Incus.
+transport_root="$tmp/transport"
+set_latest 0.147.0 "$sha_147_amd64" "$sha_147_arm64"
+run_hook amd64 "$transport_root" >/dev/null
+transport_link="$transport_root/usr/local/bin/codex"
+set_latest 0.148.0 "$sha_148_amd64" "$sha_148_arm64"
+for scenario in corrupt ignore-range range-refused exhausted resume; do
+  : > "$SUBYARD_TEST_TRANSFER_LOG"
+  if SUBYARD_TEST_TRANSFER_SCENARIO="$scenario" run_hook amd64 "$transport_root" >"$tmp/transfer.out" 2>"$tmp/transfer.err"; then
+    [ "$scenario" = resume ] || fail "unsafe transfer accepted: $scenario"
+    [ "$("$transport_link" --version)" = 'codex-cli 0.148.0' ] || fail 'resumed upgrade failed'
+  else
+    [ "$scenario" != resume ] || fail 'stalled download did not resume'
+    [ "$("$transport_link" --version)" = 'codex-cli 0.147.0' ] || fail "failed transfer replaced runtime: $scenario"
+    case "$scenario" in
+      corrupt|ignore-range) grep -Fq 'checksum mismatch' "$tmp/transfer.err" || fail 'missing checksum diagnostic' ;;
+      *) grep -Fq 'release artifact download failed' "$tmp/transfer.err" || fail 'missing download diagnostic' ;;
+    esac
+  fi
+  expected=$'0\n64'
+  case "$scenario" in range-refused|exhausted) expected=$'0\n64\n64\n64' ;; esac
+  [ "$(cat "$SUBYARD_TEST_TRANSFER_LOG")" = "$expected" ] || fail "wrong resume offsets or retry count: $scenario"
+done
+printf 'ok: native Codex agent provision, stall resume and fail-closed partial downloads\n'
