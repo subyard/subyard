@@ -2904,6 +2904,9 @@ while True: time.sleep(1)
     def test_shipped_core_vm_catalog_names_existing_scripts(self):
         catalog = json.loads((root / m.CORE_VM_CATALOG).read_text())
         self.assertEqual(m.core_vm_checks(root), [entry["id"] for entry in catalog["checks"]])
+        default = next(entry for entry in catalog["checks"] if entry["id"] == "integration-selection/default")
+        self.assertEqual(default["command"], ["bash", "dev/e2e/integration-selection.sh", "default"])
+        self.assertEqual(default["lease"], {})
         for entry in catalog["checks"]:
             self.assertTrue((root / entry["command"][1]).is_file(), entry["id"])
         pins = {line.split("\t", 1)[0] for line in (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()}

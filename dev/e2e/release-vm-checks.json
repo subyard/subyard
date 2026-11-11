@@ -29,6 +29,8 @@
      "command": ["bash", "dev/e2e/integration-legacy-upgrade.sh"]},
     {"id": "integration-selection/container", "lease": {}, "timeout_seconds": 3000,
      "command": ["bash", "dev/e2e/integration-selection.sh", "container"]},
+    {"id": "integration-selection/default", "lease": {}, "timeout_seconds": 1200,
+     "command": ["bash", "dev/e2e/integration-selection.sh", "default"]},
     {"id": "integration-selection/special", "lease": {}, "timeout_seconds": 2400,
      "command": ["bash", "dev/e2e/integration-selection.sh", "special"]},
     {"id": "staging-reliability", "lease": {"type": "android-test"}, "timeout_seconds": 7200,
