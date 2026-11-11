@@ -125,7 +125,7 @@ class NativeTest(unittest.TestCase):
                 with self.assertRaises(native.AgentConfigRefusal) as caught:
                     native.reconcile(root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid(), check=True)
                 self.assertIn(str(path), str(caught.exception))
-                self.assertIn('mv --backup=numbered --', str(caught.exception))
+                self.assertEqual(caught.exception.agent, agent)
                 self.assertNotIn('config apply', str(caught.exception))
                 self.assertEqual(state.read_bytes(), before)
                 self.assertEqual(path.read_bytes(), b'[broken')

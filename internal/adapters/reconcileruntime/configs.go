@@ -619,6 +619,10 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
 }
 
+func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
+	return shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
+}
+
 func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
 	if file.ownedFormat == "" {
 		return runtime.writeGuestFile(ctx, file.destination, payload)
@@ -631,7 +635,7 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 	if err != nil || result.ExitCode != 0 {
 		var completed *ports.GuestExitError
 		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
-			preserve := shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", file.destination, file.destination + ".subyard-invalid"})
+			preserve := runtime.preserveInvalidConfigCommand(file.destination)
 			repair := "yard config apply"
 			if domain.SafeName(runtime.Yard.YardName) {
 				repair = "yard -Y " + runtime.Yard.YardName + " config apply"

@@ -1165,7 +1165,7 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		if detail != "" && result.ExitCode == 2 && (err == nil || (errors.As(err, &completed) && completed.Code == 2)) {
 			retry := shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "sha256sum", "--", path})
 			if unownedInvalid {
-				retry = shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
+				retry = runtime.preserveInvalidConfigCommand(path)
 			}
 			return configmaterial.Observation{}, integrationOwnershipError{
 				pendingConfiguration: detail == "no protected baseline or exact recognized legacy template" || detail == "owned fields or protected evidence changed",

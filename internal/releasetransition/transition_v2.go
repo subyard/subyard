@@ -266,7 +266,7 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 			return nil, parseErr
 		}
 		if err := store.ValidateCurrentRecovery(journal); err != nil &&
-			(options.Replacement == nil || options.Replacement.Reason != JournalReplacementNewerRelease || journal.Checkpoint == JournalComplete) {
+			!mayBypassRecoveryValidation(options.Replacement, journal.Checkpoint) {
 			return nil, err
 		}
 		if options.Replacement == nil && options.MigrationOwnerReplacement == nil && journal.Checkpoint != JournalComplete {
@@ -1445,11 +1445,11 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 			return v2Observation{}, parseErr
 		}
 		if graphErr := transition.store.validateCurrentSupersession(parsed); graphErr != nil &&
-			(transition.options.Replacement == nil || transition.options.Replacement.Reason != JournalReplacementNewerRelease || parsed.Checkpoint == JournalComplete) {
+			!mayBypassRecoveryValidation(transition.options.Replacement, parsed.Checkpoint) {
 			return v2Observation{}, graphErr
 		}
 		if err := transition.store.ValidateCurrentRecovery(parsed); err != nil &&
-			(transition.options.Replacement == nil || transition.options.Replacement.Reason != JournalReplacementNewerRelease || parsed.Checkpoint == JournalComplete) {
+			!mayBypassRecoveryValidation(transition.options.Replacement, parsed.Checkpoint) {
 			return v2Observation{}, err
 		}
 		journal = &parsed
@@ -1841,6 +1841,10 @@ func (transition *V2Transition) spendNewerReleaseReplacement() {
 	if request := transition.options.Replacement; request != nil && request.Reason == JournalReplacementNewerRelease {
 		transition.options.Replacement = nil
 	}
+}
+
+func mayBypassRecoveryValidation(replacement *JournalReplacement, checkpoint JournalCheckpoint) bool {
+	return replacement != nil && replacement.Reason == JournalReplacementNewerRelease && checkpoint != JournalComplete
 }
 
 // newerReleaseReplacementBlockers reports every reason this engine cannot take
@@ -3960,10 +3964,7 @@ func validateActivationObservation(id string, observation V2ActivationObservatio
 	}
 	for _, diagnostic := range observation.Diagnostics {
 		values := strings.Split(diagnostic.Result, " -> ")
-		validValue := func(value string) bool {
-			return slices.Contains([]string{"unknown", "absent", "present", "active", "inactive", "enabled", "disabled", "not-found", "failed", "drift", "current", "changed", "matched", "mismatch", "ready", "not-ready", "missing"}, value)
-		}
-		if validateSafeID(diagnostic.Resource, "pending input") != nil || !strings.HasPrefix(diagnostic.Scope, "yard.") || !domain.SafeName(strings.TrimPrefix(diagnostic.Scope, "yard.")) || diagnostic.Decision != DecisionPreserve || len(values) != 2 || !validValue(values[0]) || !validValue(values[1]) {
+		if validateSafeID(diagnostic.Resource, "pending input") != nil || !strings.HasPrefix(diagnostic.Scope, "yard.") || !domain.SafeName(strings.TrimPrefix(diagnostic.Scope, "yard.")) || diagnostic.Decision != DecisionPreserve || len(values) != 2 || !domain.ValidRuntimeDiagnosticValue(values[0]) || !domain.ValidRuntimeDiagnosticValue(values[1]) {
 			return invalid("invalid pending activation diagnostic")
 		}
 	}

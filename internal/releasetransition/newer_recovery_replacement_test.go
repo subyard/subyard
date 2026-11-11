@@ -12,23 +12,51 @@ import (
 	"testing"
 )
 
+func mustRecoveryNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustJournal(t *testing.T, payload []byte) JournalRecord {
+	t.Helper()
+	journal, err := ParseJournal(payload)
+	mustRecoveryNoError(t, err)
+	return journal
+}
+
+func mustCurrentJournal(t *testing.T, store *POSIXV2Store) ProtectedSnapshot {
+	t.Helper()
+	snapshot, err := store.ReadCurrentJournal()
+	mustRecoveryNoError(t, err)
+	return snapshot
+}
+
+func mustConverge(t *testing.T, ctx context.Context, transition *V2Transition, execution Execution) Outcome {
+	t.Helper()
+	outcome, err := transition.Converge(ctx, execution)
+	mustRecoveryNoError(t, err)
+	return outcome
+}
+
+func restartAndInspect(t *testing.T, ctx context.Context, transition *V2Transition, goal Goal) (*V2Transition, Inspection, error) {
+	t.Helper()
+	restarted, err := NewV2Transition(transition.options)
+	mustRecoveryNoError(t, err)
+	inspection, err := restarted.Inspect(ctx, goal)
+	return restarted, inspection, err
+}
+
 func newerRecoveryFixture(t *testing.T, archiveFirst ...bool) (*V2Transition, *ReleaseLinks, ProtectedSnapshot) {
 	t.Helper()
 	ctx := context.Background()
 	owner, reconciler, request, before, _ := interruptedActivationRecoveryFixture(t)
-	journal, err := ParseJournal(before.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
+	journal := mustJournal(t, before.Payload)
 	journal.Goal.Target = newerReleaseBroken
 	journal.Releases = ReleasePair{From: newerReleaseBroken, Target: newerReleaseBroken}
-	payload, err := MarshalJournal(journal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := owner.store.CompareAndSwapCurrentJournal(before, payload); err != nil {
-		t.Fatal(err)
-	}
+	payload := mustJournalPayload(t, journal)
+	mustRecoveryNoError(t, owner.store.CompareAndSwapCurrentJournal(before, payload))
 	request.Fingerprint = fingerprintPayload(payload)
 	links := &ReleaseLinks{Active: newerReleaseBroken}
 	owner.options.Releases = journal.Releases
@@ -52,26 +80,15 @@ func newerRecoveryFixture(t *testing.T, archiveFirst ...bool) (*V2Transition, *R
 		// Retain the first generation's archive-only replacement attempt.
 		// The original owner below advances the same predecessor frontier.
 		first, err := owner.store.ReadRecoveryReceipt(lifecycleTransaction(t, request, 1))
-		if err != nil {
-			t.Fatal(err)
-		}
+		mustRecoveryNoError(t, err)
 		receipt, err := ParseRecoveryReceipt(first.Payload)
-		if err != nil {
-			t.Fatal(err)
-		}
+		mustRecoveryNoError(t, err)
 		before := receipt.Successor
 		before.Checkpoint = JournalReconciling
-		payload, err := MarshalJournal(before)
-		if err != nil {
-			t.Fatal(err)
-		}
+		payload := mustJournalPayload(t, before)
 		snapshot := protectedSnapshotFromPayload(payload)
-		if err := owner.store.PreserveReplacedJournal(snapshot, before.Transaction); err != nil {
-			t.Fatal(err)
-		}
-		if err := owner.store.preserveReplacedRecovery(snapshot); err != nil {
-			t.Fatal(err)
-		}
+		mustRecoveryNoError(t, owner.store.PreserveReplacedJournal(snapshot, before.Transaction))
+		mustRecoveryNoError(t, owner.store.preserveReplacedRecovery(snapshot))
 	}
 	reconciler.desired = digestD
 	plan, err = owner.InspectActivationRecovery(ctx, request)
@@ -87,10 +104,7 @@ func newerRecoveryFixture(t *testing.T, archiveFirst ...bool) (*V2Transition, *R
 	if outcome, err := owner.ConvergeActivationRecovery(ctx, request, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)}); err != nil || outcome.Status != StatusRecovering {
 		t.Fatalf("interrupted recovery: %#v %v", outcome, err)
 	}
-	snapshot, err := owner.store.ReadCurrentJournal()
-	if err != nil {
-		t.Fatal(err)
-	}
+	snapshot := mustCurrentJournal(t, owner.store)
 	current, err := ParseJournal(snapshot.Payload)
 	if err != nil || !strings.HasPrefix(string(current.Transaction), RecoveryTransactionPrefixV2) || current.Checkpoint != JournalReconciling {
 		t.Fatalf("recovery journal: %#v %v", current, err)
@@ -111,12 +125,12 @@ func TestNewerReleaseRecoveryReplacementDurableBoundaries(t *testing.T) {
 			if err != nil || len(inspection.Blockers) != 0 || inspection.Resume != nil {
 				t.Fatalf("replacement plan: %#v %v", inspection, err)
 			}
-			original, _ := ParseJournal(before.Payload)
+			original := mustJournal(t, before.Payload)
 			// Neither the old grant nor absent consent authorizes this plan.
 			for _, grant := range []Authorization{"", v2TestAuthorization(original.AuthorizationPlan)} {
-				outcome, err := candidate.Converge(ctx, Execution{Plan: inspection.Plan, Authorization: grant})
-				if err != nil || outcome.Code != CodeConfirmationRequired {
-					t.Fatalf("old consent: %#v %v", outcome, err)
+				outcome := mustConverge(t, ctx, candidate, Execution{Plan: inspection.Plan, Authorization: grant})
+				if outcome.Code != CodeConfirmationRequired {
+					t.Fatalf("old consent: %#v %v", outcome, nil)
 				}
 			}
 			fired := false
@@ -148,20 +162,14 @@ func TestNewerReleaseRecoveryReplacementDurableBoundaries(t *testing.T) {
 				t.Fatalf("cancelled receipt chain lost: %v", err)
 			}
 			if point == "after-replaced-journal" {
-				current, _ := candidate.store.ReadCurrentJournal()
+				current := mustCurrentJournal(t, candidate.store)
 				if !sameProtectedSnapshot(current, before) {
 					t.Fatal("archive-only crash replaced current journal")
 				}
-				if err := candidate.store.ValidateCurrentRecovery(original); err != nil {
-					t.Fatal(err)
-				}
+				mustRecoveryNoError(t, candidate.store.ValidateCurrentRecovery(original))
 			}
 			candidate.options.fault, candidate.store.fault = nil, nil
-			restarted, err := NewV2Transition(candidate.options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fresh, err := restarted.Inspect(ctx, goal)
+			restarted, fresh, err := restartAndInspect(t, ctx, candidate, goal)
 			if err != nil || len(fresh.Blockers) != 0 {
 				t.Fatalf("retry plan: %#v %v", fresh, err)
 			}
@@ -169,9 +177,9 @@ func TestNewerReleaseRecoveryReplacementDurableBoundaries(t *testing.T) {
 			if fresh.Resume == nil {
 				grant = v2TestAuthorization(fresh.Plan)
 			}
-			outcome, err := restarted.Converge(ctx, Execution{Plan: fresh.Plan, Authorization: grant})
-			if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 0 {
-				t.Fatalf("retry: %#v %v", outcome, err)
+			outcome := mustConverge(t, ctx, restarted, Execution{Plan: fresh.Plan, Authorization: grant})
+			if outcome.Status != StatusReady || len(outcome.Warnings) != 0 {
+				t.Fatalf("retry: %#v %v", outcome, nil)
 			}
 			if links.Active != newerReleaseFix {
 				t.Fatal("fixed release not activated")
@@ -201,11 +209,11 @@ func TestNewerReleaseRecoveryReplacementDurableBoundaries(t *testing.T) {
 			if err != nil || repeat.Outcome == nil || repeat.Outcome.Status != StatusReady {
 				t.Fatalf("repeat: %#v %v", repeat, err)
 			}
-			closed, _ := restarted.store.ReadCurrentJournal()
-			if outcome, err := restarted.Converge(ctx, Execution{Plan: repeat.Plan}); err != nil || outcome.Status != StatusReady {
-				t.Fatalf("repeat convergence: %#v %v", outcome, err)
+			closed := mustCurrentJournal(t, restarted.store)
+			if outcome := mustConverge(t, ctx, restarted, Execution{Plan: repeat.Plan}); outcome.Status != StatusReady {
+				t.Fatalf("repeat convergence: %#v %v", outcome, nil)
 			}
-			unchanged, _ := restarted.store.ReadCurrentJournal()
+			unchanged := mustCurrentJournal(t, restarted.store)
 			if !sameProtectedSnapshot(closed, unchanged) {
 				t.Fatal("repeat rewrote the completed journal")
 			}
@@ -232,9 +240,7 @@ func TestNewerReleaseRecoveryReplacementBlockers(t *testing.T) {
 		{"journal ingress", func(_ *V2Transition, o *v2Observation) { o.journal.SourceIngress = &SourceIngressRequest{} }, []string{"a newer release cannot replace an unfinished source migration", recoveryInvalid}},
 		{"missing provenance", func(c *V2Transition, o *v2Observation) {
 			value, _ := c.store.ReadRecoveryReceipt(o.journal.Transaction)
-			if err := c.store.removeRecoveryPair(recoveryLifecycleParts, o.journal.Transaction, value.Payload); err != nil {
-				t.Fatal(err)
-			}
+			mustRecoveryNoError(t, c.store.removeRecoveryPair(recoveryLifecycleParts, o.journal.Transaction, value.Payload))
 		}, []string{recoveryInvalid}},
 		{"inactive target", func(_ *V2Transition, o *v2Observation) { o.links.Active = newerReleaseFrom }, []string{linksInvalid}},
 		{"not newer", func(c *V2Transition, _ *v2Observation) { c.options.CandidateVersion = "0.11.5" }, []string{"only a release newer than the unfinished target can replace its journal"}},
@@ -248,14 +254,10 @@ func TestNewerReleaseRecoveryReplacementBlockers(t *testing.T) {
 			c.options.Replacement.Transaction = o.journal.Transaction
 		}, []string{"a newer release cannot replace a recovery transaction"}},
 		{"reservation unavailable", func(c *V2Transition, _ *v2Observation) {
-			if err := c.store.createImmutable(recoveryLifecycleParts, "recovery-v2-unrecognized.json", []byte("{}")); err != nil {
-				t.Fatal(err)
-			}
+			mustRecoveryNoError(t, c.store.createImmutable(recoveryLifecycleParts, "recovery-v2-unrecognized.json", []byte("{}")))
 		}, []string{"an interrupted recovery still reserves this journal", recoveryInvalid}},
 		{"already superseded", func(c *V2Transition, o *v2Observation) {
-			if err := c.store.CreateSupersededJournal(o.journal.Transaction, []byte("unrecognized protected archive")); err != nil {
-				t.Fatal(err)
-			}
+			mustRecoveryNoError(t, c.store.CreateSupersededJournal(o.journal.Transaction, []byte("unrecognized protected archive")))
 		}, []string{"a newer release cannot replace a journal that already superseded another", recoveryInvalid}},
 		{"all independent", func(c *V2Transition, o *v2Observation) {
 			c.options.Replacement.Fingerprint = digestD
@@ -269,7 +271,7 @@ func TestNewerReleaseRecoveryReplacementBlockers(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, links, before := newerRecoveryFixture(t)
-			journal, _ := ParseJournal(before.Payload)
+			journal := mustJournal(t, before.Payload)
 			observation := v2Observation{journal: &journal, journalSnapshot: before, links: *links}
 			test.mutate(candidate, &observation)
 			var got []string
@@ -302,26 +304,14 @@ func TestReplacedRecoveryOldFrontierDoesNotBlockLaterReplacement(t *testing.T) {
 	for _, cut := range []bool{false, true} {
 		t.Run(fmt.Sprint(cut), func(t *testing.T) {
 			candidate, _, _ := newerRecoveryFixture(t, true)
-			selected, err := candidate.store.ReadCurrentJournal()
-			if err != nil {
-				t.Fatal(err)
-			}
-			journal, err := ParseJournal(selected.Payload)
-			if err != nil {
-				t.Fatal(err)
-			}
+			selected := mustCurrentJournal(t, candidate.store)
+			journal := mustJournal(t, selected.Payload)
 			snapshot, err := candidate.store.ReadRecoveryReceipt(journal.Transaction)
-			if err != nil {
-				t.Fatal(err)
-			}
+			mustRecoveryNoError(t, err)
 			receipt, err := ParseRecoveryReceipt(snapshot.Payload)
-			if err != nil {
-				t.Fatal(err)
-			}
+			mustRecoveryNoError(t, err)
 			old, err := RecoveryLifecycleTransaction(receipt.Replacement, 1)
-			if err != nil {
-				t.Fatal(err)
-			}
+			mustRecoveryNoError(t, err)
 			name := string(receipt.Replacement.Transaction) + ".json"
 			oldFrontier, err := candidate.store.readRecord(replacedRecoveryParts(old, "frontiers"), name)
 			if err != nil || !oldFrontier.Exists {
@@ -344,25 +334,19 @@ func TestReplacedRecoveryOldFrontierDoesNotBlockLaterReplacement(t *testing.T) {
 				}
 				return nil
 			}
-			outcome, err := candidate.Converge(context.Background(), Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
-			if err != nil || outcome.Status != StatusReady || (len(outcome.Warnings) != 0) != cut {
-				t.Fatalf("first cleanup: %#v %v", outcome, err)
+			outcome := mustConverge(t, context.Background(), candidate, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
+			if outcome.Status != StatusReady || (len(outcome.Warnings) != 0) != cut {
+				t.Fatalf("first cleanup: %#v %v", outcome, nil)
 			}
 			if cut && !fired {
 				t.Fatal("retirement cut did not fire")
 			}
 			candidate.store.fault = nil
-			restarted, err := NewV2Transition(candidate.options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			plan, err = restarted.Inspect(context.Background(), goal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			outcome, err = restarted.Converge(context.Background(), Execution{Plan: plan.Plan})
-			if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 0 {
-				t.Fatalf("retry cleanup: %#v %v", outcome, err)
+			restarted, plan, err := restartAndInspect(t, context.Background(), candidate, goal)
+			mustRecoveryNoError(t, err)
+			outcome = mustConverge(t, context.Background(), restarted, Execution{Plan: plan.Plan})
+			if outcome.Status != StatusReady || len(outcome.Warnings) != 0 {
+				t.Fatalf("retry cleanup: %#v %v", outcome, nil)
 			}
 			for _, parts := range [][]string{recoveryLifecycleParts, recoveryArchiveParts, recoveryFrontierParts} {
 				entries, _, err := restarted.store.readDirectoryEntries(parts, maxRecoveryLifecycleEntries*2)
@@ -383,23 +367,18 @@ func TestNewerReleaseRecoverySuccessorCanBeReplacedAgain(t *testing.T) {
 	candidate, links, _ := newerRecoveryFixture(t)
 	goal := Goal{Target: newerReleaseFix, Direction: DirectionActivateTarget}
 	plan, err := candidate.Inspect(ctx, goal)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustRecoveryNoError(t, err)
 	candidate.options.fault = func(point string) error {
 		if point == "after-reconciling" {
 			return errors.New("fixed release also interrupted")
 		}
 		return nil
 	}
-	if outcome, err := candidate.Converge(ctx, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)}); err != nil || outcome.Status != StatusRecovering {
-		t.Fatalf("first successor: %#v %v", outcome, err)
+	if outcome := mustConverge(t, ctx, candidate, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)}); outcome.Status != StatusRecovering {
+		t.Fatalf("first successor: %#v %v", outcome, nil)
 	}
-	before, err := candidate.store.ReadCurrentJournal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal, _ := ParseJournal(before.Payload)
+	before := mustCurrentJournal(t, candidate.store)
+	journal := mustJournal(t, before.Payload)
 	later := newerReleaseCandidate(t, candidate.options.ConfigHome, links, newerReleaseLater, "0.11.7", &JournalReplacement{
 		Transaction: journal.Transaction, Fingerprint: before.Fingerprint, Reason: JournalReplacementNewerRelease,
 	}, digestD, "tx-recovery-later")
@@ -407,27 +386,19 @@ func TestNewerReleaseRecoverySuccessorCanBeReplacedAgain(t *testing.T) {
 	if err != nil || len(plan.Blockers) != 0 {
 		t.Fatalf("second successor blocked: %#v %v", plan, err)
 	}
-	if outcome, err := later.Converge(ctx, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)}); err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 0 {
-		t.Fatalf("second successor: %#v %v", outcome, err)
+	if outcome := mustConverge(t, ctx, later, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)}); outcome.Status != StatusReady || len(outcome.Warnings) != 0 {
+		t.Fatalf("second successor: %#v %v", outcome, nil)
 	}
 }
 
 func TestReplacedRecoveryRetiresWithoutOrdinaryTransactionDirectories(t *testing.T) {
 	candidate, _, before := newerRecoveryFixture(t)
-	journal, _ := ParseJournal(before.Payload)
-	if err := candidate.store.PreserveReplacedJournal(before, journal.Transaction); err != nil {
-		t.Fatal(err)
-	}
-	if err := candidate.store.preserveReplacedRecovery(before); err != nil {
-		t.Fatal(err)
-	}
+	journal := mustJournal(t, before.Payload)
+	mustRecoveryNoError(t, candidate.store.PreserveReplacedJournal(before, journal.Transaction))
+	mustRecoveryNoError(t, candidate.store.preserveReplacedRecovery(before))
 	// Model an activation-only installation without ordinary migration artifacts.
-	if err := os.RemoveAll(filepath.Join(candidate.options.ConfigHome, "release-transition/v2/transactions")); err != nil {
-		t.Fatal(err)
-	}
-	if err := candidate.store.RetireReplacedTransactions("tx-verified-successor", candidate.registry); err != nil {
-		t.Fatal(err)
-	}
+	mustRecoveryNoError(t, os.RemoveAll(filepath.Join(candidate.options.ConfigHome, "release-transition/v2/transactions")))
+	mustRecoveryNoError(t, candidate.store.RetireReplacedTransactions("tx-verified-successor", candidate.registry))
 	live, err := candidate.store.ReadRecoveryReceipt(journal.Transaction)
 	if err != nil || live.Exists {
 		t.Fatalf("recovery retained without ordinary transaction root: %#v %v", live, err)
@@ -439,21 +410,14 @@ func TestNewerReleaseRecoveryPlanBindsExactJournal(t *testing.T) {
 	candidate, _, before := newerRecoveryFixture(t)
 	goal := Goal{Target: newerReleaseFix, Direction: DirectionActivateTarget}
 	plan, err := candidate.Inspect(ctx, goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal, _ := ParseJournal(before.Payload)
+	mustRecoveryNoError(t, err)
+	journal := mustJournal(t, before.Payload)
 	journal.Checkpoint = JournalTargetActive // Known provenance, ineligible checkpoint.
-	payload, err := MarshalJournal(journal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := candidate.store.CompareAndSwapCurrentJournal(before, payload); err != nil {
-		t.Fatal(err)
-	}
-	outcome, err := candidate.Converge(ctx, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
-	if err != nil || outcome.Status != StatusOperatorActionRequired {
-		t.Fatalf("changed journal used old grant: %#v %v", outcome, err)
+	payload := mustJournalPayload(t, journal)
+	mustRecoveryNoError(t, candidate.store.CompareAndSwapCurrentJournal(before, payload))
+	outcome := mustConverge(t, ctx, candidate, Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
+	if outcome.Status != StatusOperatorActionRequired {
+		t.Fatalf("changed journal used old grant: %#v %v", outcome, nil)
 	}
 	current, err := candidate.store.ReadCurrentJournal()
 	if err != nil || !bytes.Equal(current.Payload, payload) {
@@ -465,10 +429,7 @@ func TestSourceRecoveryAdviceRequiresEligibleD7Journal(t *testing.T) {
 	for _, kind := range []string{"eligible", "ordinary rollback", "ordinary checkpoint", "recovery checkpoint", "older recovery", "missing receipt"} {
 		t.Run(kind, func(t *testing.T) {
 			candidate, _, before := newerRecoveryFixture(t)
-			journal, err := ParseJournal(before.Payload)
-			if err != nil {
-				t.Fatal(err)
-			}
+			journal := mustJournal(t, before.Payload)
 			switch kind {
 			case "ordinary rollback":
 				journal.Transaction = "tx-ordinary"
@@ -482,21 +443,12 @@ func TestSourceRecoveryAdviceRequiresEligibleD7Journal(t *testing.T) {
 				journal.Transaction = RecoveryTransactionPrefixV1 + "unsupported"
 			case "missing receipt":
 				receipt, err := candidate.store.ReadRecoveryReceipt(journal.Transaction)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := candidate.store.removeRecoveryPair(recoveryLifecycleParts, journal.Transaction, receipt.Payload); err != nil {
-					t.Fatal(err)
-				}
+				mustRecoveryNoError(t, err)
+				mustRecoveryNoError(t, candidate.store.removeRecoveryPair(recoveryLifecycleParts, journal.Transaction, receipt.Payload))
 			}
-			payload, err := MarshalJournal(journal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := candidate.store.CompareAndSwapCurrentJournal(before, payload); err != nil {
-				t.Fatal(err)
-			}
-			_, err = candidate.store.InspectSourceMetadata(candidate.registry, candidate.registryDigest)
+			payload := mustJournalPayload(t, journal)
+			mustRecoveryNoError(t, candidate.store.CompareAndSwapCurrentJournal(before, payload))
+			_, err := candidate.store.InspectSourceMetadata(candidate.registry, candidate.registryDigest)
 			if err == nil || errors.Is(err, ErrSourceRecoveryHistory) != (kind == "eligible") {
 				t.Fatalf("source history classification: %v", err)
 			}

@@ -517,10 +517,7 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 		diagnostics = *observation.Diagnostics
 	}
 	for _, item := range diagnostics {
-		validValue := func(value string) bool {
-			return slices.Contains([]string{"unknown", "absent", "present", "active", "inactive", "enabled", "disabled", "not-found", "failed", "drift", "current", "changed", "matched", "mismatch", "ready", "not-ready", "missing"}, value)
-		}
-		if len(item.Parameter) > 96 || !domain.SafeID(item.Parameter) || seen[item.Parameter] || !validValue(item.Installed) || !validValue(item.Desired) {
+		if len(item.Parameter) > 96 || !domain.SafeID(item.Parameter) || seen[item.Parameter] || !domain.ValidRuntimeDiagnosticValue(item.Installed) || !domain.ValidRuntimeDiagnosticValue(item.Desired) {
 			return ports.RuntimeObservation{}, errors.New("runtime observation has invalid diagnostics")
 		}
 		seen[item.Parameter] = true

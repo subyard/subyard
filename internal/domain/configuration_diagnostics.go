@@ -7,6 +7,12 @@ import (
 	"unicode"
 )
 
+// ValidRuntimeDiagnosticValue keeps profile and activation diagnostics within
+// the same closed public vocabulary.
+func ValidRuntimeDiagnosticValue(value string) bool {
+	return slices.Contains([]string{"unknown", "absent", "present", "active", "inactive", "enabled", "disabled", "not-found", "failed", "drift", "current", "changed", "matched", "mismatch", "ready", "not-ready", "missing"}, value)
+}
+
 // ConfigurationDifference describes an independently observed setting difference.
 // Callers must only supply values from a catalog that identifies sensitive inputs.
 type ConfigurationDifferenceKind uint8

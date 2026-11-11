@@ -4,7 +4,6 @@ import copy
 import json
 import math
 import os
-import shlex
 import stat
 import tempfile
 import tomllib
@@ -112,8 +111,7 @@ def agent_document(home, agent):
 class AgentConfigRefusal(ValueError):
     def __init__(self, agent, path):
         self.agent = agent
-        super().__init__('invalid unmanaged agent configuration '+str(path)+
-                         '; in the yard run '+shlex.join(['mv', '--backup=numbered', '--', str(path), str(path)+'.subyard-invalid']))
+        super().__init__('invalid unmanaged agent configuration '+str(path))
 
 
 def agent_diagnostic(agent, cause):
