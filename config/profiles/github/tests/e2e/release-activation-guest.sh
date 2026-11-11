@@ -435,6 +435,16 @@ verify_git_wiring() {
   [ "$(guest stat -c '%a:%u:%g' /home/dev/.config/subyard/github-git.conf)" = "644:$FIXTURE_DEV_UID:$(guest id -g dev)" ] || die 'Git fragment permissions differ'
   guest_dev git config --file /home/dev/.config/git/config --get-all include.path | grep -Fxq /home/dev/.config/subyard/github-git.conf
 }
+verify_github_profile() {
+  local expected="$1" prefix="$2" ready=false
+  [ "$expected" != current ] || ready=true
+  yard profile list --json > "$prefix-list.log"
+  jq -e --arg expected "$expected" '[.profiles[] | select(.name=="github")] |
+    length==1 and .[0].selected==true and .[0].convergence==$expected' "$prefix-list.log" >/dev/null
+  yard profile status github --json > "$prefix-status.log"
+  jq -e --argjson ready "$ready" '.id=="github" and .enabled==true and .configured==true and .ready==$ready' \
+    "$prefix-status.log" >/dev/null
+}
 verify_runtime() {
   local source="$1" wanted preview ccusage
   case "$(setting GITHUB_GIT_MODE)" in broker-first|broker-last) verify_git_wiring ;; esac
@@ -849,6 +859,27 @@ set_git_mode broker-first "$STATE/git-mode"
 yard profile enable github --yes > "$STATE/git-enable.log" 2>&1
 claim_units
 verify_git_wiring
+verify_github_profile current "$STATE/git-first"
+# A converged ordinary provision skips apply; its checks must retain the mode.
+wiring_inode="$(guest stat -c '%i' /home/dev/.config/subyard/github-git.conf)"
+yard provision github --yes > "$STATE/git-provision.log" 2>&1
+claim_units
+[ "$wiring_inode" = "$(guest stat -c '%i' /home/dev/.config/subyard/github-git.conf)" ] || die 'ordinary provision rewrote current Git fragment'
+verify_git_wiring
+verify_github_profile current "$STATE/git-provision"
+verify_github_profile current "$STATE/git-provision-repeat"
+# Reproduce off apply with the product reconciler used by provision.sh, while
+# retaining broker-first in owner settings; no other guest installation is changed.
+guest python3 - /home/dev off apply < "$STATE/runtime/current/config/profiles/github/git_wiring.py" > "$STATE/git-field-off.log" 2>&1
+[ "$(setting GITHUB_GIT_MODE)" = broker-first ] || die 'off fixture changed the selected Git mode'
+guest test ! -e /home/dev/.config/subyard/github-git.conf
+verify_github_profile changes-required "$STATE/git-field-off"
+# Owner-runtime drift directs ordinary mutations through migrate first.
+yard migrate --yes > "$STATE/git-field-repair.log" 2>&1
+claim_units
+verify_git_wiring
+verify_github_profile current "$STATE/git-field-repaired"
+verify_github_profile current "$STATE/git-field-repeat"
 # Configuration delivery may replace .gitconfig; the independent XDG include survives.
 guest_dev sh -c 'printf "[user]\n\tname = Delivered fixture\n" > /home/dev/.gitconfig'
 verify_git_wiring

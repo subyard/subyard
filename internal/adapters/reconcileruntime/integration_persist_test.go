@@ -17,6 +17,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -1059,6 +1060,85 @@ func (f *persistFixture) observation() persistObservation {
 		f.t.Fatal(err)
 	}
 	return observation
+}
+
+// Other guest commands have stable synthetic observations; persist executes its
+// production program against a disposable home instead of the real guest home.
+type localPersistPlanExecutor struct {
+	*preparedAdoptionExecutor
+	home, developer string
+	observation     map[string]any
+}
+
+func (fixture *localPersistPlanExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) != 5 || request.Command[3] != integrationPersistProgram {
+		return fixture.preparedAdoptionExecutor.Exec(ctx, project, instance, request)
+	}
+	command := exec.CommandContext(ctx, request.Command[0], request.Command[1:]...)
+	command.Stdin = strings.NewReader(strings.ReplaceAll(string(request.Stdin), "/home/"+fixture.developer, fixture.home))
+	var stdout, stderr strings.Builder
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	if err == nil {
+		err = json.Unmarshal([]byte(stdout.String()), &fixture.observation)
+	}
+	return ports.InstanceExecResult{Stdout: []byte(stdout.String()), Stderr: []byte(stderr.String())}, err
+}
+
+func TestPersistAbsentSourceStableAcrossParentCreation(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	root := testkit.TempDir(t)
+	home := filepath.Join(root, "home")
+	mkdirs(t, home)
+	mkdirs(t, filepath.Join(root, "config"))
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\n"), 0o644)
+	testkit.WriteFile(t, filepath.Join(root, "integration.json"), []byte(`{"schema_version":1}`), 0o644)
+	developer, _ := inventoryDeveloper(t)
+	executor := &localPersistPlanExecutor{preparedAdoptionExecutor: &preparedAdoptionExecutor{fingerprint: strings.Repeat("a", 64)}, home: home, developer: developer}
+	native := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}}
+	runtime := Runtime{RepositoryRoot: root, Incus: native, Executor: executor,
+		Yard:         domain.Context{IncusProject: "test", YardInstanceName: "yard", DevUser: developer, DevUID: os.Getuid()},
+		Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: root}},
+		Environment:  []string{"CODING_TOOL_INTEGRATIONS=", "AGENT_sample_PERSIST=.sample/nested/sessions:" + filepath.Join(root, "sessions")},
+	}
+	plan := func() IntegrationPlan {
+		t.Helper()
+		result, err := runtime.IntegrationPlan(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	source := filepath.Join(home, ".sample/nested/sessions")
+	approved := plan()
+	before := executor.observation["entries"].([]any)[0].(map[string]any)["identity"]
+	mkdirs(t, filepath.Dir(source))
+	fresh := plan()
+	after := executor.observation["entries"].([]any)[0].(map[string]any)["identity"]
+	if before != nil || after != nil || approved.persist.Fingerprint != fresh.persist.Fingerprint {
+		t.Errorf("absent source changed persistence identity/fingerprint: %v -> %v", before, after)
+	}
+	if approved.Fingerprint != fresh.Fingerprint || approved.StateBinding() != fresh.StateBinding() || CheckIntegrationPlan(approved, fresh) != nil {
+		t.Error("creating only the absent source's parent changed the integration plan")
+	}
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Fatalf("observation created the source: %v", err)
+	}
+	// An appearing source and replacement of that source remain bound, even
+	// for an unselected integration; neither can reuse the earlier approval.
+	mkdirs(t, source)
+	appeared := plan()
+	if fresh.persist.Fingerprint == appeared.persist.Fingerprint || fresh.Fingerprint == appeared.Fingerprint || !errors.Is(CheckIntegrationPlan(fresh, appeared), domain.ErrPlanStale) {
+		t.Fatal("an appearing persistence source retained the absent approval")
+	}
+	if err := os.Rename(source, source+"-retained"); err != nil {
+		t.Fatal(err)
+	}
+	mkdirs(t, source)
+	replaced := plan()
+	if appeared.persist.Fingerprint == replaced.persist.Fingerprint || appeared.Fingerprint == replaced.Fingerprint || !errors.Is(CheckIntegrationPlan(appeared, replaced), domain.ErrPlanStale) {
+		t.Fatal("a replaced persistence source retained its original approval")
+	}
 }
 
 // Init confirms a persist plan before provisioning recomputes it. Execution

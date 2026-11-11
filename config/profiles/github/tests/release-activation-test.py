@@ -44,6 +44,33 @@ class MigrationConsentTest(unittest.TestCase):
             result = subprocess.run(['bash', '-c', script, 'fixture', str(engine)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 23, result.stdout+result.stderr)
 
+    def test_profile_check_rejects_ready_owner_with_pending_provision(self):
+        script = 'set -euo pipefail\n' + self.guest_function('verify_github_profile') + '''
+yard() {
+  case "$*" in
+    'profile list --json') cat "$LIST_INPUT" ;;
+    'profile status github --json') cat "$STATUS_INPUT" ;;
+    *) exit 99 ;;
+  esac
+}
+'''
+        script += '\nLIST_INPUT=$1 STATUS_INPUT=$2\nverify_github_profile "$3" "$4"\n'
+        for expected, convergence, ready, success in (
+                ('current', 'current', True, True),
+                ('current', 'changes-required', True, False),  # Original field disagreement.
+                ('current', 'current', False, False),
+                ('changes-required', 'changes-required', False, True)):
+            with self.subTest(expected=expected, convergence=convergence, ready=ready), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                root = Path(temporary)
+                listing, status = root/'list.json', root/'status.json'
+                listing.write_text(json.dumps({'profiles': [{'name': 'github', 'selected': True, 'convergence': convergence}]}))
+                status.write_text(json.dumps({'id': 'github', 'enabled': True, 'configured': True, 'ready': ready}))
+                listing.chmod(0o600)
+                status.chmod(0o600)
+                result = subprocess.run(['bash', '-c', script, 'fixture', str(listing), str(status), expected, str(root/'observed')],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0 if success else 1, result.stdout+result.stderr)
+
     def test_checkpoint_binds_current_predecessor_after_migration_restart(self):
         code = self.guest_function('interrupt_driver')
         code = code.split('def assert_loaded_predecessor(', 1)[1].split('\ndef save():', 1)[0]

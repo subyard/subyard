@@ -541,7 +541,10 @@ def observe_mapping(mapping, yard, start, problems):
     try:
         base = os.path.basename(source)
         source_st = lstat(parent, base)
-        result['identity'] = [kind(source_st)] + (identity(source_st) or [])
+        # Missing ancestors and a missing leaf are the same absent source.
+        # Still classify transfer records below when the source is absent.
+        if source_st is not None:
+            result['identity'] = [kind(source_st)] + (identity(source_st) or [])
         state, record = classify(parent, mapping, yard, source_st)
         result['state'] = state
         if record:
