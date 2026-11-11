@@ -334,7 +334,7 @@ func TestHistoryResponderFailsOnlyExactPostMigrationApply(t *testing.T) {
 	}
 	value := historyControl{Journal: journal, Runtime: root, Target: "candidate", Source: source, Guest: guest, Destination: "/home/dev/.subyard-fixture/config.txt", Migrations: []string{"first", "second"}, FailOnce: true}
 	respond := historyResponder(value, control)
-	call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"sh", "-eu", "-c", configWriteScript, "subyard", value.Destination, "1000"}, Stdin: []byte("desired\n")}
+	call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"sh", "-eu", "-c", configWriteScript, "subyard", value.Destination, "1000", fmt.Sprintf("%x", sha256.Sum256([]byte("desired\n")))}, Stdin: []byte("desired\n")}
 	verified, err := os.ReadFile(journal)
 	if err != nil {
 		t.Fatal(err)
@@ -359,6 +359,14 @@ func TestHistoryResponderFailsOnlyExactPostMigrationApply(t *testing.T) {
 	if err := os.Remove(control + ".unexpected"); err != nil {
 		t.Fatal(err)
 	}
+	call.Command[7] = fmt.Sprintf("%x", sha256.Sum256([]byte("foreign\n")))
+	if step := respond(call); step.AfterInput == nil || step.AfterInput(call) != 99 {
+		t.Fatal("correct input with foreign digest accepted")
+	}
+	if _, err := os.Stat(control + ".failed"); !os.IsNotExist(err) {
+		t.Fatal("digest refusal consumed the controlled failure")
+	}
+	call.Command[7] = fmt.Sprintf("%x", sha256.Sum256(call.Stdin))
 	step := respond(call)
 	if step.AfterInput == nil || step.AfterInput(call) != 37 {
 		t.Fatal("exact reconciling apply did not fail once")
@@ -375,6 +383,7 @@ func TestHistoryResponderFailsOnlyExactPostMigrationApply(t *testing.T) {
 		t.Fatal("retry did not apply exact captured stdin")
 	}
 	call.Stdin = []byte("foreign\n")
+	call.Command[7] = fmt.Sprintf("%x", sha256.Sum256(call.Stdin))
 	if respond(call).AfterInput(call) != 99 {
 		t.Fatal("foreign input accepted")
 	}

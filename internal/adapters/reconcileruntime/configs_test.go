@@ -104,6 +104,25 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	}
 }
 
+// The compatibility fixture allows only this exact command, including its script.
+func TestGuestConfigWriteMatchesCompatibilityFixture(t *testing.T) {
+	incus := runningIncus(1)
+	runtime := Runtime{Executor: incus, Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
+	payload := []byte("desired\n")
+	if err := runtime.writeGuestFile(context.Background(), "/home/dev/config", payload); err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile("../../testkit/cmd/empty-incus/config-write.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := incus.ExecCalls[0].Request
+	want := []string{"sh", "-eu", "-c", string(script), "subyard", "/home/dev/config", "1000", fmt.Sprintf("%x", sha256.Sum256(payload))}
+	if !slices.Equal(request.Command, want) || !bytes.Equal(request.Stdin, payload) {
+		t.Fatalf("guest writer differs from the compatibility fixture: %#v", request)
+	}
+}
+
 // Execute the actual guest writer with a prematurely closed transport. Account
 // changes are stubbed because this fixture owns only ordinary /tmp files.
 func TestGuestConfigWriteRefusesIncompleteTransport(t *testing.T) {

@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix="subyard-codex-legacy-", dir="/tmp") as 
     def run(mode, expect_observation=True):
         result = subprocess.run(
             [sys.executable, "-B", "-c", program, mode, developer,
-             destination_text, str(uid), desired_digest, str(home)],
+             destination_text, str(uid), desired_digest, str(home), desired_digest],
             input=desired,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -149,7 +149,7 @@ with tempfile.TemporaryDirectory(prefix="subyard-codex-legacy-", dir="/tmp") as 
         before = (destination.read_bytes(), baseline_path.read_bytes())
         refused = subprocess.run(
             [sys.executable, "-B", "-c", program, "assess-adopt", developer,
-             destination_text, str(uid), desired_digest, str(home)],
+             destination_text, str(uid), desired_digest, str(home), desired_digest],
             input=desired, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         if refused.returncode == 0 or before != (destination.read_bytes(), baseline_path.read_bytes()) or receipt_path.exists():

@@ -2647,7 +2647,7 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
                             "internal/testkit/cmd/empty-incus/config-write.sh").read_text()
             require(len(failed_apply) == 1
                     and failed_apply[0].get("command") == ["sh", "-eu", "-c", apply_script,
-                                                           "subyard", history["destination"], "1000"]
+                                                           "subyard", history["destination"], "1000", digest(source)]
                     and failed_apply[0].get("stdinSHA256") == digest(source)
                     and failed_apply[0].get("transaction") == journal,
                     "controlled failure did not capture the exact seeded apply command/stdin and verified journal")

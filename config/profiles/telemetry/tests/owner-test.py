@@ -2,9 +2,10 @@
 """Exact generic release observations use the declared owning transport."""
 import json
 import io
+from itertools import combinations
 import os
 import shutil
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import runpy
 import subprocess
@@ -269,7 +270,10 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
         self.assertNotIn('config apply', caught.exception.retry)
 
     def test_all_exact_absent_release_observations_are_declared(self):
+        from unittest.mock import patch
         source = Path(__file__).resolve().parents[4]
+        package = Path(__file__).resolve().parents[1]
+        owner = runpy.run_path(str(package/'owner.py'))
         provider = runpy.run_path(str(Path(__file__).with_name('release-observation.py')))
         verifier = runpy.run_path(str(source/'dev/verify-release-upgrades.py'))
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -278,11 +282,39 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
             control.write_text('{"instances": []}')
             verifier['write_observation_incus'](root, control, unexpected)
             commands = provider['read_only_commands'](Path(__file__).resolve().parents[1])
-            self.assertEqual(len(commands), 4)
+            self.assertEqual(len(commands), 9)
+            # Published owners without the binding keep their exact old ABI.
+            legacy = root/'legacy'
+            legacy.mkdir()
+            (legacy/'owner.py').write_text('GUEST_SCRIPT = '+repr(owner['GUEST_SCRIPT'])+'\n')
+            legacy_commands = provider['read_only_commands'](legacy)
+            self.assertEqual([arguments[-1] for arguments, _ in legacy_commands], ['', 'claude', 'codex', 'claude codex'])
             for arguments, response in commands:
                 result = subprocess.run([str(root/'incus'), *arguments], input=b'fixture', capture_output=True, timeout=2)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), json.loads(response))
+            # Exercise the real owner argument builder, not just the fixture's
+            # own vectors. Sources may independently be managed or unmanaged.
+            config = root/'agent-config'
+            config.write_text('fixture source')
+            calls = []
+            def transport(arguments, **kwargs):
+                if arguments[1] == 'list':
+                    return 'yard,RUNNING'
+                calls.append(arguments)
+                return '{"state":"absent","actual":"","desired":""}'
+            for agents in ('', 'claude', 'codex', 'claude codex'):
+                names = agents.split()
+                for count in range(len(names)+1):
+                    for managed in combinations(names, count):
+                        env = dict(INCUS_PROJECT='subyard', YARD_INSTANCE_NAME='yard', DEV_USER='dev',
+                                   ENVIRONMENT_PROFILES='', CODING_TOOL_INTEGRATIONS=agents)
+                        env.update({'AGENT_'+agent+'_CONFIG': str(config) for agent in managed})
+                        with patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', ['owner.py','--runtime','observe']), \
+                                patch.dict(owner['main'].__globals__, run=transport), redirect_stdout(io.StringIO()):
+                            self.assertEqual(owner['main'](), 0)
+                        result = subprocess.run([str(root/'incus'), *calls[-1][1:]], input=b'fixture', capture_output=True, timeout=2)
+                        self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(unexpected.exists())
 
 

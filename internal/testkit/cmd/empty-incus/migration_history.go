@@ -195,7 +195,7 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 				return 0
 			}}
 		}
-		if len(command) == 7 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c" && command[3] == configWriteScript && command[4] == "subyard" && command[5] == control.Destination && command[6] == "1000" {
+		if len(command) == 8 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c" && command[3] == configWriteScript && command[4] == "subyard" && command[5] == control.Destination && command[6] == "1000" {
 			expected, err := os.ReadFile(control.Source)
 			if err != nil {
 				return reject()
@@ -203,7 +203,7 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			return testkit.IncusServerExecStep{Stderr: []byte("controlled materialized config apply fixture\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
 				historyMu.Lock()
 				defer historyMu.Unlock()
-				if !bytes.Equal(actual.Stdin, expected) {
+				if !bytes.Equal(actual.Stdin, expected) || command[7] != fmt.Sprintf("%x", sha256.Sum256(actual.Stdin)) {
 					reject()
 					return 99
 				}

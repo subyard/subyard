@@ -199,7 +199,7 @@ func TestNewerReleaseRecoveryReplacementDurableBoundaries(t *testing.T) {
 			if _, err := restarted.store.InspectSourceMetadata(restarted.registry, restarted.registryDigest); err != nil {
 				t.Fatal("retained history unreadable", err)
 			}
-			compatibility := *restarted
+			compatibility := &V2Transition{options: restarted.options, registry: restarted.registry, catalog: restarted.catalog}
 			compatibility.options.Direction = DirectionActivatePrevious
 			compatibility.options.RollbackTarget = &RollbackTarget{Version: "0.27.0", RegistryDigest: restarted.registryDigest}
 			if blocker := compatibility.rollbackCompatibilityBlocker(true); blocker != nil {
