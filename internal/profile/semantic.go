@@ -61,7 +61,10 @@ func (definition *Definition) validateSemantic() error {
 		}
 
 	}
-	if definition.LifecycleOnly && (definition.FullCleanup == "" || len(definition.DefaultYards) > 0 || definition.OwnerService != "" || definition.Setup != nil || definition.Runtime != nil || len(definition.Settings) > 0 || len(definition.Native) > 0 || len(definition.Consumers) > 0 || definition.GuestEnvironment != nil || definition.Dashboard != nil || len(definition.UnmanagedIntegrations) > 0) {
+	if definition.StartupReadiness != "" && !relative(definition.StartupReadiness) {
+		return errors.New("startup readiness path escapes profile")
+	}
+	if definition.LifecycleOnly && (definition.FullCleanup == "" || len(definition.DefaultYards) > 0 || definition.OwnerService != "" || definition.StartupReadiness != "" || definition.Setup != nil || definition.Runtime != nil || len(definition.Settings) > 0 || len(definition.Native) > 0 || len(definition.Consumers) > 0 || definition.GuestEnvironment != nil || definition.Dashboard != nil || len(definition.UnmanagedIntegrations) > 0) {
 		return errors.New("lifecycle-only profiles may declare only full cleanup hooks, managed paths and native publication metadata")
 	}
 	if definition.FullCleanup != "" && !relative(definition.FullCleanup) {

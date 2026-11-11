@@ -27,7 +27,7 @@ GUEST_SCRIPT = 'stage="$(mktemp -d /tmp/subyard-openlit.XXXXXX)"; trap \'rm -rf 
 COLD_GUEST_SCRIPT = 'stage=$1; shift; tar -xf - -C "$stage"; bash "$stage/guest.sh" "$@"'
 # Cold apply shares one deadline across archive delivery, first pinned delivery
 # (900 seconds), the remaining guest phases and host publication.
-GUEST_TIMEOUTS = {'apply':1560, 'refresh':110, 'observe':30, 'pause':120, 'resume':120, 'identity-observe':90, 'identity-apply':110}
+GUEST_TIMEOUTS = {'apply':1560, 'refresh':110, 'observe':30, 'startup':15, 'pause':120, 'resume':120, 'identity-observe':90, 'identity-apply':110}
 COLD_CANCEL_SECONDS = 25
 COLD_KILL_SECONDS = 5
 COLD_DEADLINE = None
@@ -320,7 +320,9 @@ def guest(mode, selected, user, agents, origin, *bindings):
         if mode.startswith('identity-'):
             archive.add(ROOT/'identity.py',arcname='identity.py',recursive=False)
             archive.add(ROOT.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
-    transport = ('incus', 'exec', ENV['YARD_INSTANCE_NAME'], '--project', ENV['INCUS_PROJECT'], '--')
+    remaining = ENV.get('SUBYARD_STARTUP_REMAINING_MS', '')
+    startup_environment = ('--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining) if mode == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else ()
+    transport = ('incus', 'exec', ENV['YARD_INSTANCE_NAME'], '--project', ENV['INCUS_PROJECT'], *startup_environment, '--')
     arguments = ('subyard', mode, str(int(selected)), user, agents, *bindings)
     if mode in ('apply', 'refresh'):
         program = 'import os,selectors,signal,subprocess,sys,tempfile,time\n'+inspect.getsource(supervise_cold)+'\nsupervise_cold(sys.argv[1],sys.argv[2:])\n'
@@ -381,6 +383,9 @@ def operation():
     if mode in ('identity-observe','identity-apply'):
         output=guest(mode,selected,user,agents,'',*bindings)
         if output:print(output)
+        return
+    if mode == 'startup':
+        print(guest(mode, selected, user, agents, ''))
         return
     if mode in ('pause', 'resume'):
         PHASE = 'existing-route'

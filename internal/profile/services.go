@@ -86,12 +86,15 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		return errors.New("invalid profile service arguments")
 	}
 	action := arguments[0]
-	if !slices.Contains([]string{"--check", "--yes", "--pause", "--resume", "--remove"}, action) || len(arguments) == 2 && !slices.Contains([]string{"--check", "--yes", "--remove", "--resume"}, action) {
+	if !slices.Contains([]string{"--check", "--yes", "--pause", "--resume", "--remove", "--wait-ready"}, action) || len(arguments) == 2 && !slices.Contains([]string{"--check", "--yes", "--remove", "--resume"}, action) {
 		return errors.New("invalid profile service action")
 	}
 	definitions, err := Load(root)
 	if err != nil {
 		return err
+	}
+	if action == "--wait-ready" {
+		return waitStartupReadiness(ctx, root, definitions, environment, time.Second)
 	}
 	selectedResume := []string{}
 	if len(arguments) == 2 {

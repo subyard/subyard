@@ -1419,6 +1419,35 @@ The `network-policy` init stage runs after host networking and before instance c
 ordinary starts, init finalization, the test VM backend, boot restoration and teardown
 use the same policy service. Existing NetworkManager and host-route guards still apply.
 
+### Profile startup readiness
+
+Explicit `yard start` waits for installed profiles declaring `startup_readiness` after
+physical startup, desired power commit, publication retry scheduling, any pending `/tmp`
+restart and startup resource activation. A readiness refusal leaves the yard running with
+`desired=running` and reports every transient profile's public reason and hint in stable
+order. Physical adapter entry attributes startup observations to this invocation. The
+30-second readiness polling budget begins when the profile wait starts, after the agent
+is ready; physical boot time does not consume it. Shorter caller deadlines still apply.
+They use the applied account and profile selection, including retained disabled declarations.
+Missing applied account evidence is stable init repair work; desired identity is never a
+fallback. Pending identity recovery skips these service probes.
+
+Positive startup evidence includes a pending unit/timer start job or a container health
+check starting. During this invocation's anchored startup window, GitHub and Telemetry
+also treat auto-restart as `starting`; GitHub/OpenLIT connections and receivers may still
+be coming up. Unit activation timestamps never shorten an anchored invocation's window.
+Failed services and inactive units without a pending job remain stable drift; `migrate`
+owns their repair. Without an invocation anchor, probes retain their standalone semantics.
+A successful startup probe establishes service health,
+not complete installation convergence. Invalid or unavailable probes refuse without exposing
+native output. Checks return state and diagnostics; the operation boundary renders refusals.
+
+Temporary identity-inspection boots, rename recovery, migration and repair restarts, prepared
+power finalization and native host boot restoration do not run these probes. Their owners must
+still reach account and service repair. An explicit start also waits for an already running
+yard. Undeclared profiles, infrastructure, external accounts and background workloads retain
+their existing behavior.
+
 ### Boot address readiness
 
 The boot power reconciler inspects effective Incus devices before starting an initialized,
@@ -1972,6 +2001,32 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   from the same observation. Runtime observation and status JSON stay unchanged.
   Scoped disable invokes only that profile's `--remove`, carrying metadata bindings for its declared
   managed paths so replacement artifacts fail stale guards before deletion.
+- `startup_readiness` optionally names an executable Bash hook relative to the profile
+  (it may be the same file as `owner_service`). Core calls it with `--startup-check`,
+  prepared engine context and `SUBYARD_PROFILE_SELECTED=1`, for the applied profile selection.
+  It must perform read-only observation and return exit 0 with one JSON object, at most
+  1024 bytes: `{"state":"ready"}`, `{"state":"drift"}`, or
+  `{"state":"starting","reason":"transport is starting","hint":"inspect the service, then retry yard start"}`.
+  `starting` requires a public reason and corrective hint, each at most 240 ASCII characters;
+  use fixed profile-owned prose, without secrets or native output. Text admits letters,
+  digits, spaces and `,;:._()'/-`. Unknown fields, states, control characters and extra JSON
+  refuse. A missing handler, unsafe path or non-executable file fails declaration validation.
+  `drift` means stable repair work, not ongoing startup. Observe the installed service even
+  when candidate payloads differ, so boot progress cannot keep changing the deferred repair
+  plan. Do not treat a failed full convergence check as proof of `starting`.
+  Core supplies `SUBYARD_STARTUP_REMAINING_MS` as a nonnegative decimal budget, recomputed
+  for each probe from this invocation's readiness deadline. Owner transports forward it explicitly to
+  guest probes; host and guest monotonic epochs need not match. Core owns expiry: a value
+  of `0` must retain transient classification for the final observation, so expiry produces
+  a refusal rather than turning a crash loop into stable drift. Each started observation
+  gets the existing bounded observation allowance, respecting caller cancellation, even
+  if little polling budget remains. A polling deadline cannot turn a healthy response into
+  a probe failure. Observations and cancellation/drain may finish after that deadline;
+  they cannot hang or reset the polling budget.
+  Core polls transient owners concurrently once per second under one deadline and stops polling an owner
+  once it is ready or has stable drift. Cancellation kills each probe's process group, with
+  up to one additional second for output drain. Lifecycle-only cleanup declarations cannot
+  opt in; infrastructure needs its own owning readiness contract.
 - `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional
   `{yard}` substitution; the hook still owns physical cleanup and ownership checks. Teardown and
   `init --reset` carry approved metadata bindings in `SUBYARD_TEARDOWN_ARTIFACTS`. Removal hooks

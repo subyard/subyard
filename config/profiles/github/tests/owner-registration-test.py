@@ -48,7 +48,7 @@ class OwnerRegistrationTest(unittest.TestCase):
         commands.mkdir()
         shim = commands/'shim'
         shim.write_text('''#!/usr/bin/env python3
-import hashlib,json,os,pathlib,sys
+import hashlib,json,os,pathlib,sys,time
 args=sys.argv[1:]; name=pathlib.Path(sys.argv[0]).name
 control=pathlib.Path(os.environ['CONTROL']); state=json.loads(control.read_text())
 with open(os.environ['CALLS'],'a') as log: log.write(json.dumps([name,*args])+'\\n')
@@ -59,7 +59,7 @@ if name=='incus':
     sys.stdin.buffer.read()
     if 'sha256sum' in args: print(state.get('guest_digest',os.environ['ENGINE_DIGEST'])+'  client')
     if 'status' in args:
-        print(state.get('status_output',json.dumps(dict(protocol=1,broker_sha256=os.environ['ENGINE_DIGEST'],client_sha256=os.environ['ENGINE_DIGEST']))))
+        print(state.get('status_output',json.dumps(dict(configured=False,protocol=1,broker_sha256=os.environ['ENGINE_DIGEST'],client_sha256=os.environ['ENGINE_DIGEST']))))
         sys.exit(state.get('status_exit',0))
     sys.exit(0)
 assert args.pop(0)=='--user'
@@ -69,6 +69,11 @@ if action=='is-active': sys.exit(0 if state['active'] else 3)
 if action=='show':
     if 'default.target' in args: print(unit.name if state['graph'] else '')
     elif '--property=FragmentPath' in args: print(state['fragment'])
+    elif '--property=ActiveState,SubState,ActiveEnterTimestampMonotonic,Job' in args:
+        print('ActiveState='+state.get('active_state','active' if state['active'] else 'inactive'))
+        print('SubState='+state.get('sub_state','running'))
+        print('ActiveEnterTimestampMonotonic='+str(state.get('active_since',int(time.monotonic()*1000000))))
+        print('Job='+state.get('job',''))
     else: raise AssertionError(args)
 elif action=='enable':
     link.parent.mkdir(parents=True,exist_ok=True)
@@ -113,6 +118,67 @@ elif action!='show-environment': raise AssertionError([action,*args])
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def test_startup_distinguishes_transport_delay_from_stable_payload_drift(self):
+        def startup():
+            result = self.run_owner('--startup-check')
+            self.assertEqual(result.stderr, '')
+            self.assertFalse(any(call[0] == 'systemctl' and call[2] in
+                ('start', 'restart', 'enable', 'daemon-reload') for call in self.calls()))
+            self.assertFalse(any('--check' in call for call in self.calls()))
+            return json.loads(result.stdout)
+        self.assertEqual(startup(), {'state': 'ready'})
+        self.drift(active=False)
+        self.assertEqual(startup(), {'state': 'drift'})
+        for state, sub in (('failed','failed'), ('activating','auto-restart')):
+            self.drift(active_state=state, sub_state=sub)
+            self.assertEqual(startup(), {'state': 'drift'})
+        self.drift(active_state='activating', sub_state='start')
+        self.assertEqual(startup()['reason'], 'unit-start-pending')
+        self.drift(active_state='active', sub_state='running')
+        self.drift(active=True, status_exit=1)
+        self.assertEqual(startup()['reason'], 'transport-unavailable')
+        self.drift(active_since=1)
+        self.assertEqual(startup(), {'state': 'drift'})
+        self.drift(active_since=int(__import__('time').monotonic()*1000000))
+        (self.root/'data/github-broker/fixture-engine').write_bytes(b'stable predecessor engine')
+        self.drift(status_exit=0, guest_digest='b'*64,
+                   status_output=json.dumps(dict(configured=False, protocol=1, broker_sha256='c'*64, client_sha256='b'*64)))
+        self.assertEqual(startup(), {'state': 'drift'})
+        self.drift(status_output=json.dumps(dict(configured=False)))
+        self.assertEqual(startup(), {'state': 'drift'})
+        # Deferred repair still waits for the installed broker connection.
+        self.drift(status_exit=1)
+        self.assertEqual(startup()['state'], 'starting')
+        self.drift(enabled=False)
+        self.assertEqual(startup(), {'state': 'drift'})
+
+    def test_startup_anchor_keeps_reconnect_transient_until_core_refuses(self):
+        def startup():
+            result = self.run_owner('--startup-check')
+            self.assertEqual(result.stderr, '')
+            return json.loads(result.stdout)
+        self.drift(active_state='activating', sub_state='auto-restart', active_since=1)
+        self.assertEqual(startup(), {'state':'drift'})
+        for budget in ('30000', '1', '0'):
+            self.environment['SUBYARD_STARTUP_REMAINING_MS'] = budget
+            result = startup()
+            self.assertEqual(result['state'], 'starting')
+            self.assertEqual(result['reason'], 'broker-reconnecting')
+            self.assertIn('yard migrate', result['hint'])
+            self.drift(active_state='active', sub_state='running', status_exit=1)
+            self.assertEqual(startup()['reason'], 'transport-unavailable')
+            self.drift(active_state='activating', sub_state='auto-restart')
+        self.environment.pop('SUBYARD_STARTUP_REMAINING_MS')
+        self.drift(active_state='active', sub_state='running')
+        self.assertEqual(startup(), {'state':'drift'})
+        self.environment['SUBYARD_STARTUP_REMAINING_MS'] = '30000'
+        self.drift(active_state='failed', job='')
+        self.assertEqual(startup(), {'state':'drift'})
+        self.drift(active_state='inactive', job='')
+        self.assertEqual(startup(), {'state':'drift'})
+        self.drift(job='17')
+        self.assertEqual(startup()['reason'], 'unit-start-pending')
 
     def test_read_only_check_requires_exact_link_fragment_and_loaded_dependency(self):
         for kind in ('missing', 'dangling', 'foreign', 'fragment', 'graph'):

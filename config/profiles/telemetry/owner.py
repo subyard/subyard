@@ -60,7 +60,7 @@ def collector_binary(source, selected):
 
 def main():
     arguments = sys.argv[1:]
-    mode = {'--yes': 'apply', '--check': 'check', '--remove': 'apply', '--pause': 'pause', '--resume': 'resume'}
+    mode = {'--startup-check': 'startup', '--yes': 'apply', '--check': 'check', '--remove': 'apply', '--pause': 'pause', '--resume': 'resume'}
     selected = os.environ.get('SUBYARD_PROFILE_SELECTED', '0') == '1'
     bindings = []
     if arguments[:1] == ['--runtime']:
@@ -87,13 +87,15 @@ def main():
     rows = run(['incus', 'list', instance, '--project', project, '-f', 'csv', '-c', 'ns']).splitlines()
     status = next((row[len(instance) + 1:] for row in rows if row.startswith(instance + ',')), '')
     if status in ('', 'STOPPED'):
-        if operation == 'observe':
+        if operation == 'startup':
+            print(json.dumps({'state': 'drift'}))
+        elif operation == 'observe':
             print(json.dumps({'state': 'deferred' if status else 'absent', 'actual': '', 'desired': ''}))
         return 0
     if status != 'RUNNING':
         raise ValueError('yard unavailable')
     source = Path(__file__).resolve().parent
-    binary, refusals = collector_binary(source, selected)
+    binary, refusals = collector_binary(source, selected and operation != 'startup')
     agents = ' '.join(name for name in ('claude', 'codex') if name in os.environ.get('CODING_TOOL_INTEGRATIONS', '').split())
     for agent in agents.split():
         destination = os.environ.get('AGENT_'+agent+'_CONFIG_DEST')
@@ -112,7 +114,9 @@ def main():
         archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
         if operation.startswith('identity-'):
             archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
-    output = run(['incus', 'exec', instance, '--project', project, '--', 'bash', '-euo', 'pipefail', '-c',
+    remaining = os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')
+    startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
+    output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
                   GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
     if operation == 'check':
         if output == 'telemetry-drift':

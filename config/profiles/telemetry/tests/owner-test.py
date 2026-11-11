@@ -47,6 +47,9 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         for member in archive:
             assert member.isfile() and pathlib.Path(member.name).name==member.name
             (stage/member.name).write_bytes(archive.extractfile(member).read())
+    if arguments[0]=='startup':
+        assert not (stage/'subyard-telemetry').exists()
+        assert '--env' in args and 'SUBYARD_STARTUP_REMAINING_MS=1234' in args
     sys.path.insert(0,str(stage))
     import guest
     if os.environ.get('TELEMETRY_FIXTURE_BAD_OUTPUT')=='1': print('unexpected-check-output')
@@ -59,6 +62,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             if os.environ.get('TELEMETRY_FIXTURE_DIAGNOSTICS')=='1':
                 observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
             return observation
+        def startup(self): return {'state':'ready' if marker.exists() else 'drift'}
         def apply(self): marker.write_text(str(int(self.selected)))
     guest.Runtime=Runtime
     guest.os.getuid=lambda:0
@@ -78,6 +82,9 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             def invoke(action, *arguments, **overrides):
                 return subprocess.run(['bash',str(profile/'profile.sh'),action,*arguments],env=dict(environment,**overrides),
                                       capture_output=True,timeout=5)
+            startup = invoke('--startup-check', SUBYARD_STARTUP_REMAINING_MS='1234')
+            self.assertEqual(startup.returncode, 0, startup.stderr)
+            self.assertEqual(json.loads(startup.stdout), {'state':'drift'})
             self.assertEqual(invoke('--check').returncode,1,'fresh selected profile must be measured drift, not an unavailable adapter')
             self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0').returncode,0)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_STATE='unsafe').returncode,2)

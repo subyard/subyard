@@ -15,6 +15,7 @@ extra=()
 case "$1" in
   --yes) ;;
   --check) mode=check ;;
+  --startup-check) mode=startup ;;
   --remove) selected=0 ;;
   --pause) mode=pause ;;
   --resume) mode=resume ;;
@@ -32,15 +33,21 @@ state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" || exit 2
 case "$state" in
   RUNNING) ;;
   ''|STOPPED)
-    if [ "$mode" = observe ]; then
+    if [ "$mode" = startup ]; then
+      printf '{"state":"drift"}\n'
+    elif [ "$mode" = observe ]; then
       if [ -z "$state" ]; then printf '{"state":"absent"}\n'; else printf '{"state":"deferred"}\n'; fi
     elif [ "$mode" = refresh ] || { [[ "$mode" = custody-* ]] || [[ "$mode" = identity-* ]]; }; then exit 2; fi
     exit 0 ;;
   *) printf 'git-fetch: yard is not ready for profile reconciliation\n' >&2; exit 2 ;;
 esac
+startup_environment=()
+if [ "$mode" = startup ] && [[ "${SUBYARD_STARTUP_REMAINING_MS:-}" =~ ^[0-9]{1,9}$ ]]; then
+  startup_environment=(--env "SUBYARD_STARTUP_REMAINING_MS=$SUBYARD_STARTUP_REMAINING_MS")
+fi
 rc=0
 output="$(tar -C "$profile" -cf - guest.py fetch.py subyard-git-fetch.service.in subyard-git-fetch.timer -C "$root/config/identity" authority.py \
-  | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- bash -euo pipefail -c '
+  | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" "${startup_environment[@]}" -- bash -euo pipefail -c '
     bundle="$(mktemp -d /tmp/subyard-git-fetch.XXXXXX)"
     trap '\''rm -rf -- "$bundle"'\'' EXIT
     tar -xf - -C "$bundle"

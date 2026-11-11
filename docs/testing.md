@@ -33,6 +33,11 @@ Go build/module caches are reused without adding tool dependencies to `go.mod`.
 Use the skill's [risk-based selection policy](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
 for both adding tests and choosing which existing checks to run.
 
+A fixture must not repeat a product command until it succeeds. Fix nondeterminism in the
+product and assert the first invocation's result. Bounded waits for observable conditions
+(such as a file, listener, or reboot completion) remain appropriate; they must not hide a
+failed mutation by submitting another command.
+
 Use `testkit.WriteFile` for exact file modes and `testkit.TempDir` for private
 fixture roots. Shell/Python fixtures can use `install -m`, `chmod` on fixture inputs,
 or `tempfile.TemporaryDirectory`. Keep raw creation calls when creation is the operation

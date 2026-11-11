@@ -7,6 +7,9 @@ def read_only_commands(package, *, yard="default", project="subyard", instance="
     owner = (package / 'owner.sh').read_text()
     invocation = owner.split('| incus exec ', 1)[1].split(')" || rc=$?', 1)[0]
     arguments = shlex.split(invocation)
+    # Startup alone forwards its deadline; ordinary observe retains exact argv.
+    if arguments[3:4] == ['${startup_environment[@]}']:
+        arguments = arguments[:3] + arguments[4:]
     assert arguments[:8] == ['$YARD_INSTANCE_NAME', '--project', '$INCUS_PROJECT',
                              '--', 'bash', '-euo', 'pipefail', '-c']
     assert arguments[9:] == ['subyard', '$mode', '$selected', '$DEV_USER',

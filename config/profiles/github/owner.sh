@@ -13,7 +13,7 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 
 mode=apply
-case "${1:-}" in --check) mode=check ;; --remove) mode=remove ;; --pause) mode=pause ;; --resume) mode=resume ;; --yes|'') ;; *) die 'invalid GitHub broker lifecycle argument' ;; esac
+case "${1:-}" in --startup-check) mode=startup ;; --check) mode=check ;; --remove) mode=remove ;; --pause) mode=pause ;; --resume) mode=resume ;; --yes|'') ;; *) die 'invalid GitHub broker lifecycle argument' ;; esac
 yard="${SUBYARD_YARD:-default}"
 case "$yard" in ''|*[!a-zA-Z0-9_-]*) die 'invalid GitHub broker yard' ;; esac
 unit="subyard-github-$yard.service"
@@ -126,6 +126,56 @@ guest_runtime_current() {
   guest_status --runtime | jq -e --arg wanted "$wanted" \
     '.protocol == 1 and .broker_sha256 == $wanted and .client_sha256 == $wanted' >/dev/null
 }
+
+# Startup observes the installed transport independently of candidate payload drift.
+# A missing/disabled installation is stable repair work, not a service still booting.
+if [ "$mode" = startup ]; then
+  startup_state() {
+    if [ "$1" = starting ]; then
+      printf '{"state":"starting","reason":"%s","hint":"run yard migrate to repair; inspect systemctl --user status %s"}\n' "$2" "$unit"
+    else
+      printf '{"state":"%s"}\n' "$1"
+    fi
+  }
+  anchored=0
+  [[ "${SUBYARD_STARTUP_REMAINING_MS:-}" =~ ^[0-9]{1,9}$ ]] && anchored=1
+  if [ "$enabled" != 1 ] || ! owned_service || ! boot_registration_current \
+    || ! user_systemctl is-enabled --quiet "$unit" 2>/dev/null \
+    || [ ! -f "$runtime_file" ] || [ ! -x "$broker_engine" ] \
+    || ! incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- \
+      test -x "$guest_engine"; then
+    startup_state drift
+  else
+    manager="$(user_systemctl show "$unit" --property=ActiveState,SubState,ActiveEnterTimestampMonotonic,Job)" || { startup_state drift; exit; }
+    active="$(sed -n 's/^ActiveState=//p' <<<"$manager")"
+    sub="$(sed -n 's/^SubState=//p' <<<"$manager")"
+    entered="$(sed -n 's/^ActiveEnterTimestampMonotonic=//p' <<<"$manager")"
+    job="$(sed -n 's/^Job=//p' <<<"$manager")"; job="${job%% *}"
+    if [ "$active" = failed ]; then
+      startup_state drift
+    elif [ "$active:$sub" = activating:auto-restart ]; then
+      if [ "$anchored" = 1 ]; then startup_state starting broker-reconnecting; else startup_state drift; fi
+    elif [ "$active" = activating ] || { [ "$active" = inactive ] && [[ "$job" =~ ^[1-9][0-9]*$ ]]; }; then
+      startup_state starting unit-start-pending
+    elif [ "$active" != active ]; then
+      startup_state drift
+    # Plain status also works with predecessor brokers lacking loaded identity.
+    elif guest_status | jq -e 'type == "object" and (.configured | type == "boolean")' >/dev/null 2>&1; then
+      if [ -f "$engine" ] && cmp -s "$engine" "$broker_engine"; then startup_state ready; else startup_state drift; fi
+    else
+      now="$(python3 -c 'import time; print(time.monotonic_ns() // 1000)')"
+      if [ "$anchored" = 1 ]; then
+        startup_state starting transport-unavailable
+      elif [[ "$entered" =~ ^[0-9]{1,16}$ ]] && [ "$entered" -gt 0 ] \
+        && [ "$now" -ge "$entered" ] && [ "$((now - entered))" -lt 30000000 ]; then
+        startup_state starting transport-unavailable
+      else
+        startup_state drift
+      fi
+    fi
+  fi
+  exit
+fi
 
 if [ "$enabled" != 1 ]; then
   if [ "$mode" = check ]; then

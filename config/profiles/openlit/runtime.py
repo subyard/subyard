@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import time
 
 import native
 import trace_cutover
@@ -240,6 +241,62 @@ def valid_receipt(value):
     return True
 
 
+def startup(state, unit, selected):
+    # Startup health is independent of candidate payload/route convergence.
+    if not selected or not state.exists():
+        return {'state': 'drift'}
+    if state.is_symlink() or not state.is_dir() or state.stat().st_uid != os.getuid() or state.stat().st_mode & 0o777 != 0o700:
+        raise ValueError('unsafe runtime directory')
+    if (not owned_file(state/'marker', 0o600) or (state/'marker').read_text().strip() != MARKER
+            or not owned_file(unit, 0o644) or not unit.read_text().startswith('# Managed by Subyard OpenLIT profile.')):
+        return {'state': 'drift'}
+    manager = dict(line.split('=', 1) for line in run(
+        ['systemctl', 'show', unit.name, '--property=ActiveState,SubState,UnitFileState,LoadState,FragmentPath,ActiveEnterTimestampMonotonic']).decode().splitlines() if '=' in line)
+    timer = dict(line.split('=', 1) for line in run(
+        ['systemctl', 'show', 'subyard-openlit-trace-cutover.timer', '--property=ActiveState,UnitFileState,Job']).decode().splitlines() if '=' in line)
+    job = timer.get('Job', '')
+    reason = None
+    if job.isdigit() and int(job) > 0:
+        reason = 'trace cutover timer start job is pending'
+    elif manager.get('UnitFileState') != 'enabled' or manager.get('LoadState') != 'loaded' or manager.get('FragmentPath') != str(unit):
+        return {'state': 'drift'}
+    elif manager.get('ActiveState') == 'activating' and manager.get('SubState') != 'auto-restart':
+        reason = 'stack service is activating'
+    elif manager.get('ActiveState') != 'active' or timer.get('ActiveState') != 'active' or timer.get('UnitFileState') != 'enabled':
+        return {'state': 'drift'}
+    else:
+        ids = run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=subyard-openlit']).decode().split()
+        rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
+        if (len(rows) != len(SERVICES) or
+                {row['Config']['Labels'].get('com.docker.compose.service') for row in rows} != SERVICES or
+                any(row['Config']['Labels'].get('com.docker.compose.project') != 'subyard-openlit' for row in rows)):
+            return {'state': 'drift'}
+        if any(row['State'].get('Health', {}).get('Status') == 'starting' and row['State']['Status'] == 'running' for row in rows):
+            reason = 'stack containers are starting'
+        elif any(row['State']['Status'] != 'running' or
+                 row['Config']['Labels'].get('com.docker.compose.service') != 'collector' and
+                 row['State'].get('Health', {}).get('Status') != 'healthy' for row in rows):
+            return {'state': 'drift'}
+    if not reason:
+        try:
+            for endpoint in ('http://127.0.0.1:13133/', 'http://127.0.0.1:3000/'):
+                run(['curl', '-fsS', '--max-time', '1', endpoint])
+            for signal in ('logs', 'metrics', 'traces'):
+                if run(['curl', '-sS', '--max-time', '1', '-o', '/dev/null', '-w', '%{http_code}',
+                        'http://127.0.0.1:4318/v1/'+signal]) != b'405':
+                    return {'state': 'drift'}
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            entered = manager.get('ActiveEnterTimestampMonotonic', '')
+            if re.fullmatch('[0-9]{1,9}', os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')) or (re.fullmatch('[0-9]{1,16}', entered) and 0 < int(entered) <= time.monotonic_ns()//1000 < int(entered)+30000000):
+                reason = 'stack receivers are starting'
+            else:
+                return {'state': 'drift'}
+    if reason:
+        return {'state': 'starting', 'reason': reason,
+                'hint': 'inspect the guest OpenLIT service and container health, then retry yard start'}
+    return {'state': 'ready'}
+
+
 def observe(state, source, unit, home, selected, agents, user):
     observation, facts = capture(state, source, unit, home, selected, agents, user)
     if not state.exists():
@@ -289,7 +346,7 @@ def guard(values, actual, desired):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('observe', 'publish', 'guard'))
+    parser.add_argument('mode', choices=('observe', 'publish', 'guard', 'startup'))
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--state', type=Path, required=True)
     parser.add_argument('--unit', type=Path, required=True)
@@ -302,7 +359,9 @@ def main():
     args = parser.parse_args()
     values = (args.state, args.source, args.unit, args.home, args.selected == '1', args.agents.split(), args.user)
     try:
-        if args.mode == 'publish':
+        if args.mode == 'startup':
+            observation = startup(args.state, args.unit, args.selected == '1')
+        elif args.mode == 'publish':
             observation = publish(*values)
         elif args.mode == 'guard':
             observation = guard(values, args.actual, args.desired)

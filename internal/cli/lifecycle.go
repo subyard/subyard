@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
@@ -20,6 +21,7 @@ import (
 )
 
 type lifecycleExecution struct {
+	started       time.Time
 	action        string
 	force         bool
 	changed       bool
@@ -241,6 +243,9 @@ func (cli *CLI) executeLifecycle(
 	var result domain.AdapterResult
 	var stderr string
 	run := func() error {
+		if execution.action == "start" {
+			execution.started = time.Now()
+		}
 		var runErr error
 		result, stderr, runErr = orchestrator.RunAdapter(ctx, plan, request, nil)
 		return runErr

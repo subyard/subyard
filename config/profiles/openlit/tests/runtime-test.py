@@ -3,10 +3,13 @@
 import copy
 import importlib.util
 import json
+import io
+from contextlib import redirect_stdout
 import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +23,81 @@ spec.loader.exec_module(dashboard)
 
 
 class RuntimeDiagnostics(unittest.TestCase):
+    def test_startup_uses_only_positive_service_and_container_transitions(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            state = Path(temporary)/'state'
+            state.mkdir(mode=0o700)
+            runtime.native.write(state/'marker', runtime.MARKER)
+            unit = Path(temporary)/'subyard-openlit.service'
+            unit.write_text('# Managed by Subyard OpenLIT profile.\n')
+            unit.chmod(0o644)
+            rows = [dict(Config=dict(Labels={'com.docker.compose.project':'subyard-openlit',
+                                            'com.docker.compose.service':name}),
+                         State=dict(Status='running', Health=dict(Status='healthy')))
+                    for name in sorted(runtime.SERVICES)]
+            manager = dict(ActiveState='active', SubState='running', UnitFileState='enabled', LoadState='loaded', FragmentPath=str(unit))
+            timer = dict(ActiveState='active', UnitFileState='enabled', Job='')
+            receiver_failure = False
+            def run(arguments):
+                if arguments[0] == 'curl':
+                    if receiver_failure: raise ValueError('native runtime probe failed')
+                    return b'405' if '/v1/' in arguments[-1] else b'ok'
+                if arguments[0] == 'systemctl':
+                    fields = timer if arguments[2] == 'subyard-openlit-trace-cutover.timer' else manager
+                    return '\n'.join(key+'='+value for key,value in fields.items()).encode()
+                if arguments[1] == 'ps': return b'one two three'
+                return json.dumps(rows).encode()
+            with patch.object(runtime, 'run', side_effect=run):
+                self.assertEqual(runtime.startup(state, unit, True), {'state':'ready'})
+                for active, job, expected in [('inactive','','drift'), ('failed','','drift'),
+                                             ('inactive','17','starting'), ('active','','ready')]:
+                    timer.update(ActiveState=active, Job=job)
+                    self.assertEqual(runtime.startup(state, unit, True)['state'], expected)
+                timer.update(ActiveState='inactive', Job='')
+                manager.update(ActiveState='activating', SubState='start')
+                self.assertEqual(runtime.startup(state, unit, True)['reason'], 'stack service is activating')
+                timer['Job']='17'
+                manager['ActiveState']='failed'
+                self.assertEqual(runtime.startup(state, unit, True)['reason'], 'trace cutover timer start job is pending')
+                timer.update(ActiveState='active', Job='')
+                for active, sub, expected in [('inactive','dead','drift'), ('failed','failed','drift'),
+                                             ('activating','auto-restart','drift'), ('activating','start','starting')]:
+                    manager.update(ActiveState=active, SubState=sub)
+                    self.assertEqual(runtime.startup(state, unit, True)['state'], expected)
+                manager.update(ActiveState='active', SubState='running')
+                rows[0]['State']['Health']['Status']='starting'
+                self.assertEqual(runtime.startup(state, unit, True)['state'], 'starting')
+                rows[0]['State']['Health']['Status']='unhealthy'
+                self.assertEqual(runtime.startup(state, unit, True), {'state':'drift'})
+                self.assertEqual(runtime.startup(state, unit, False), {'state':'drift'})
+                rows[0]['State']['Health']['Status']='healthy'
+                receiver_failure = True
+                manager['ActiveEnterTimestampMonotonic']=str(time.monotonic_ns()//1000)
+                self.assertEqual(runtime.startup(state, unit, True)['state'], 'starting')
+                manager['ActiveEnterTimestampMonotonic']='1'
+                self.assertEqual(runtime.startup(state, unit, True), {'state':'drift'})
+                for budget in ('1000', '0'):
+                    with patch.dict(os.environ, {'SUBYARD_STARTUP_REMAINING_MS':budget}):
+                        self.assertEqual(runtime.startup(state, unit, True)['state'], 'starting')
+
+    def test_startup_dashboard_transport_skips_full_convergence_and_route(self):
+        result = {'state':'starting','reason':'stack containers are starting','hint':'inspect container health'}
+        with patch.object(sys, 'argv', ['dashboard.py','startup','1','installed-user','']), \
+             patch.object(dashboard, 'guest', return_value=json.dumps(result)) as guest, \
+             patch.object(dashboard, 'observe', side_effect=AssertionError('startup ran full convergence')), \
+             redirect_stdout(io.StringIO()) as output:
+            dashboard.operation()
+        self.assertEqual(json.loads(output.getvalue()), result)
+        guest.assert_called_once_with('startup', True, 'installed-user', '', '')
+
+    def test_startup_guest_transport_forwards_owner_budget(self):
+        with patch.dict(dashboard.ENV, {'YARD_INSTANCE_NAME':'fixture','INCUS_PROJECT':'fixture',
+                                       'SUBYARD_STARTUP_REMAINING_MS':'1234'}), \
+             patch.object(dashboard, 'run', return_value=b'{"state":"ready"}') as run:
+            self.assertEqual(json.loads(dashboard.guest('startup', True, 'fixture', '', '')), {'state':'ready'})
+        self.assertIn('--env', run.call_args.args)
+        self.assertIn('SUBYARD_STARTUP_REMAINING_MS=1234', run.call_args.args)
+
     def test_absent_stale_and_current_native_state(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             state = Path(temporary)/'state'
