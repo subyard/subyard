@@ -33,9 +33,9 @@ func TestMaterializedConfigReconcileIdentifiesFailedYard(t *testing.T) {
 		cause          error
 		message, retry string
 	}{
-		{"raw", errors.New("private transport detail"), "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard -Y default integration status"},
-		{"stale", domain.ErrPlanStale, "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard -Y default integration status"},
-		{"public", fmt.Errorf("private wrapper: %w", publicReconcileTestError{}), "known integration ownership conflict", "run yard -Y default integration status"},
+		{"raw", errors.New("private transport detail"), "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard migrate"},
+		{"stale", domain.ErrPlanStale, "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard migrate"},
+		{"public", fmt.Errorf("private wrapper: %w", publicReconcileTestError{}), "known integration ownership conflict", "run yard migrate"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)

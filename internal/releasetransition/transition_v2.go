@@ -265,7 +265,8 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		if parseErr != nil {
 			return nil, parseErr
 		}
-		if err := store.ValidateCurrentRecovery(journal); err != nil {
+		if err := store.ValidateCurrentRecovery(journal); err != nil &&
+			(options.Replacement == nil || options.Replacement.Reason != JournalReplacementNewerRelease || journal.Checkpoint == JournalComplete) {
 			return nil, err
 		}
 		if options.Replacement == nil && options.MigrationOwnerReplacement == nil && journal.Checkpoint != JournalComplete {
@@ -906,6 +907,12 @@ func (transition *V2Transition) Converge(
 			if err := transition.store.PreserveReplacedJournal(journalSnapshot, observation.replacement.Transaction); err != nil {
 				return Outcome{}, err
 			}
+			if err := transition.store.preserveReplacedRecovery(journalSnapshot); err != nil {
+				return Outcome{}, err
+			}
+			if err := transition.inject("after-replaced-journal"); err != nil {
+				return Outcome{}, err
+			}
 		}
 		if requiresSupersededJournalArchive(observation.replacement) {
 			if observation.supersededJournal == nil {
@@ -1437,10 +1444,12 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		if parseErr != nil {
 			return v2Observation{}, parseErr
 		}
-		if graphErr := transition.store.validateCurrentSupersession(parsed); graphErr != nil {
+		if graphErr := transition.store.validateCurrentSupersession(parsed); graphErr != nil &&
+			(transition.options.Replacement == nil || transition.options.Replacement.Reason != JournalReplacementNewerRelease || parsed.Checkpoint == JournalComplete) {
 			return v2Observation{}, graphErr
 		}
-		if err := transition.store.ValidateCurrentRecovery(parsed); err != nil {
+		if err := transition.store.ValidateCurrentRecovery(parsed); err != nil &&
+			(transition.options.Replacement == nil || transition.options.Replacement.Reason != JournalReplacementNewerRelease || parsed.Checkpoint == JournalComplete) {
 			return v2Observation{}, err
 		}
 		journal = &parsed
@@ -1838,14 +1847,17 @@ func (transition *V2Transition) spendNewerReleaseReplacement() {
 // over the current unfinished journal with a fresh plan.
 func (transition *V2Transition) newerReleaseReplacementBlockers(observation v2Observation) []Blocker {
 	request, journal := transition.options.Replacement, observation.journal
-	var blockers []Blocker
+	var causes []error
 	refuse := func(code OutcomeCode, message string) {
-		blockers = append(blockers, Blocker{
+		causes = append(causes, migrationBlockerError{Blocker{
 			Code: code, Resource: "transition.active", Message: message, Retry: "run yard update --check",
-		})
+		}})
 	}
 	if request.Transaction != journal.Transaction || request.Fingerprint != observation.journalSnapshot.Fingerprint {
 		refuse(CodePlanStale, "the journal selected for replacement changed after inspection")
+	}
+	if err := transition.store.validateCurrentSupersession(*journal); err != nil {
+		refuse(CodeRecoveryAmbiguous, "protected recovery evidence is invalid or inconsistent")
 	}
 	if transition.options.SourceIngress != nil || journal.SourceIngress != nil {
 		refuse(CodeRecoveryAmbiguous, "a newer release cannot replace an unfinished source migration")
@@ -1853,9 +1865,26 @@ func (transition *V2Transition) newerReleaseReplacementBlockers(observation v2Ob
 	if transition.options.Direction != DirectionActivateTarget || journal.Goal.Direction != DirectionActivateTarget {
 		refuse(CodeRecoveryAmbiguous, "a newer release can replace only an unfinished forward update")
 	}
-	if IsRecoveryTransaction(journal.Transaction) ||
+	recoveryV2 := strings.HasPrefix(string(journal.Transaction), RecoveryTransactionPrefixV2)
+	if IsRecoveryTransaction(journal.Transaction) && !recoveryV2 ||
 		strings.HasPrefix(string(journal.Transaction), MigrationOwnerTransactionPrefixV1) {
 		refuse(CodeRecoveryAmbiguous, "a newer release cannot replace a recovery transaction")
+	}
+	if IsRecoveryTransaction(journal.Transaction) {
+		if err := transition.store.ValidateCurrentRecovery(*journal); err != nil {
+			refuse(CodeRecoveryAmbiguous, "protected recovery evidence is invalid or inconsistent")
+		}
+	}
+	if recoveryV2 {
+		if journal.Checkpoint != JournalReconciling {
+			refuse(CodeRecoveryAmbiguous, "recovery replacement requires a reconciling journal")
+		}
+		if len(journal.Steps) != 0 {
+			refuse(CodeRecoveryAmbiguous, "recovery replacement requires an activation-only journal")
+		}
+		if !recoveryActiveLinksMatch(observation.links, journal.Releases) {
+			refuse(CodeActivationAmbiguous, "the release links do not match the unfinished activation")
+		}
 	}
 	archive, archiveErr := transition.store.ReadSupersededJournal(journal.Transaction)
 	if archiveErr != nil || archive.Exists {
@@ -1865,14 +1894,27 @@ func (transition *V2Transition) newerReleaseReplacementBlockers(observation v2Ob
 	if reservedErr != nil || reserved {
 		refuse(CodeRecoveryAmbiguous, "an interrupted recovery still reserves this journal")
 	}
-	source, sourceErr := ReleaseIDVersion(journal.Goal.Target)
-	candidate, candidateErr := semver.Parse(transition.options.CandidateVersion)
-	if sourceErr != nil || candidateErr != nil || !candidate.GT(source) {
-		refuse(CodeRecoveryAmbiguous, "only a release newer than the unfinished target can replace its journal")
-	}
 	if !initialReleaseLinks(observation.links, transition.options.Releases) ||
 		!journalLinksAllowed(*journal, observation.links) {
 		refuse(CodeActivationAmbiguous, "the release links do not match the unfinished activation")
+	}
+	source, sourceErr := ReleaseIDVersion(journal.Goal.Target)
+	candidate, candidateErr := semver.Parse(transition.options.CandidateVersion)
+	if sourceErr != nil || candidateErr != nil || !candidate.GT(source) {
+		retry := "run yard update --check"
+		if recoveryV2 && len(causes) == 0 {
+			// No newer version is known here. VERSION is the operator-selected
+			// published fix, as documented for interrupted release recovery.
+			retry = "run yard update --version \"$VERSION\""
+		}
+		causes = append(causes, migrationBlockerError{Blocker{Code: CodeRecoveryAmbiguous, Resource: "transition.active",
+			Message: "only a release newer than the unfinished target can replace its journal", Retry: retry}})
+	}
+	var blockers []Blocker
+	if collected := domain.CollectRefusals(causes...); collected != nil {
+		for _, cause := range refusalCauses(collected) {
+			blockers = append(blockers, cause.(migrationBlockerError).Blocker)
+		}
 	}
 	return blockers
 }

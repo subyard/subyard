@@ -13,6 +13,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ErrSourceRecoveryHistory identifies the recovery-v2 shape eligible for forward
+// replacement. Actual active links are checked by the source admission adapter.
+// It does not authorize source repair or identify other unfinished history.
+var ErrSourceRecoveryHistory = errors.New("source repair requires completed history or an original activation-only reconciling journal")
+
 // SourceMetadata is read-only admission evidence, never a release authorization
 // or a claim that the original owner's operational resources remain ready.
 type SourceMetadata struct {
@@ -61,7 +66,16 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 			}
 		}
 		if journal.Checkpoint != JournalComplete && (journal.Checkpoint != JournalReconciling || journal.Goal.Direction != DirectionActivateTarget || len(journal.Steps) != 0 || IsRecoveryTransaction(journal.Transaction)) {
-			return proof, errors.New("source repair requires completed history or an original activation-only reconciling journal")
+			if strings.HasPrefix(string(journal.Transaction), RecoveryTransactionPrefixV2) &&
+				journal.Checkpoint == JournalReconciling && journal.Goal.Direction == DirectionActivateTarget && len(journal.Steps) == 0 &&
+				store.ValidateCurrentRecovery(journal) == nil && store.validateCurrentSupersession(journal) == nil {
+				reserved, reservedErr := store.journalIsReserved(journal.Transaction)
+				archive, archiveErr := store.ReadSupersededJournal(journal.Transaction)
+				if reservedErr == nil && !reserved && archiveErr == nil && !archive.Exists {
+					return proof, ErrSourceRecoveryHistory
+				}
+			}
+			return proof, errors.New(ErrSourceRecoveryHistory.Error())
 		}
 		if err := store.ValidateCurrentRecovery(journal); err != nil {
 			return proof, err

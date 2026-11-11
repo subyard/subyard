@@ -463,10 +463,10 @@ def main():
         if mode == 'observe-applied':
             # Apply records intent before writes, including unchanged files.
             # A later hook failure leaves those exact redundant labels behind.
-            # Inside the installed scope, passive release inspection may ignore
-            # only intent identical to the committed artifact; actual
-            # bytes/metadata and source-derived desired records are still
-            # compared below. Init retains the labels.
+            # Installed artifact equality ignores only redundant intent, while
+            # the separate pending bit keeps the apply tail unfinished. Actual
+            # bytes/metadata and source-derived desired records still compare
+            # below; observation never removes the stored labels.
             for field in ('pending_digest', 'config_pending_digest'):
                 if value.get(field) == value.get('digest'):
                     value.pop(field, None)
@@ -565,7 +565,9 @@ def main():
                               comparable_entry(previous.get(name) or {}) == clean(entry) and (
                                   entry['kind'] in ('structured', 'package') or
                                   value == entry['digest'] and metadata.get(name) == expected_metadata(entry, home, uid)))})
-        print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'retired': retired, 'diagnostics': diagnostics,
+        pending = any(key(e) not in intent and any(field in e for field in
+                      ('pending_digest', 'config_pending_digest', 'uncommitted')) for e in records)
+        print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'pending': pending, 'retired': retired, 'diagnostics': diagnostics,
                           'adopted': [clean(e) for e in adopted], 'initial': not established,
                           'facts': facts}))
         return

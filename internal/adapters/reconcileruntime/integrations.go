@@ -145,6 +145,7 @@ type integrationArtifact struct {
 type integrationObservation struct {
 	Fingerprint     string                         `json:"fingerprint"`
 	Changed         bool                           `json:"changed"`
+	Pending         bool                           `json:"pending"`
 	Retired         []integrationArtifact          `json:"retired"`
 	Adopted         []integrationArtifact          `json:"adopted"`
 	Initial         bool                           `json:"initial"`
@@ -726,7 +727,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, nil))
 	}
 	persist = persist.retireUnrecordedLinks(observed.Retired)
-	plan := IntegrationPlan{Changed: observed.Changed || persist.changed(), persist: persist}
+	// Passive installed admission may ignore redundant labels, but apply must
+	// still finish hooks, commit and verification before capturing settings.
+	plan := IntegrationPlan{Changed: observed.Changed || observed.Pending || persist.changed(), persist: persist}
 	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsWithSourceReader(phase, reader)
 	if err != nil {
 		return plan, observed, err
@@ -1231,7 +1234,8 @@ func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retiremen
 }
 
 // AppliedIntegrationPlan inspects committed consumers for passive release admission.
-// It accepts redundant retry labels without completing or modifying pending init.
+// Observation preserves retry labels; in-scope pending intent keeps Changed true
+// so apply finishes its checked tail. Pending init outside this scope stays intact.
 func (runtime Runtime) AppliedIntegrationPlan(ctx context.Context) (IntegrationPlan, error) {
 	runtime.appliedIntegrationInspection = true
 	return runtime.IntegrationPlan(ctx)

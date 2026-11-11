@@ -1204,8 +1204,21 @@ complete counts as closed even if its journal stopped earlier: it stays under or
 journal copy remains. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
 
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
-migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate itself refuses a recovery
-successor, a journal that already superseded another or that a live recovery reserves, and links the journal does not allow.
+migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate refuses a journal that
+already superseded another, a live recovery reservation, and links the journal does not allow.
+A `recovery-v2-` successor is eligible only when it is reconciling, activation-only (zero migration
+steps), forward, without source ingress, with validated recovery provenance and its target already
+active. Older recovery and migration-owner successors still refuse replacement. The journal and
+its recovery receipt chain are copied outside protected history before successor publication;
+exact copied live records retire after verified successor completion, preserving readability by
+retained engines including 0.27.0.
+
+An interrupted integration apply may already have written every desired artifact. Its recorded
+pending digests remain unfinished work: retry observes lifecycles, runs hooks, commits inventory,
+verifies convergence and captures applied settings. It accepts only owned bytes matching the
+recorded pending or committed digests. To leave a recovery dead end on 0.27.0, explicitly select
+the fixed newer release with `yard update --version "$VERSION"`; this route requires the
+integration resume fix and recovery replacement support in the same release.
 
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone

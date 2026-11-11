@@ -1052,7 +1052,16 @@ func (err materializedConfigActivationError) ActivationDiagnostic() (string, str
 	// Preserve more specific, explicitly public diagnostics from the adapter.
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if errors.As(err.cause, &diagnostic) {
-		return diagnostic.ActivationDiagnostic()
+		message, next := diagnostic.ActivationDiagnostic()
+		if next != "" {
+			retry = next
+		}
+		if err.action == "reconcile" && err.phase == "integrations" {
+			retry = integrationActivationRetry(err.cause, retry)
+		}
+		if message != "" {
+			return message, retry
+		}
 	}
 	if source, ok := config.SourceDiagnostic(err.configHome, err.cause); ok {
 		if choice := config.SourceAliasRepairRetry(err.configHome, err.yard, err.cause); choice != "" {
@@ -1083,6 +1092,25 @@ type integrationComparison struct {
 
 func (failure *integrationActivationFailure) Error() string { return failure.cause.Error() }
 func (failure *integrationActivationFailure) Unwrap() error { return failure.cause }
+func (failure *integrationActivationFailure) ActivationDiagnostic() (string, string) {
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if errors.As(failure.cause, &diagnostic) {
+		message, retry := diagnostic.ActivationDiagnostic()
+		return message, integrationActivationRetry(failure.cause, retry)
+	}
+	return "", "run yard migrate"
+}
+
+func integrationActivationRetry(cause error, retry string) string {
+	var conflict interface{ ActivationConflict() bool }
+	if reconcileruntime.IntegrationOwnershipConflict(cause) || errors.As(cause, &conflict) && conflict.ActivationConflict() {
+		return retry
+	}
+	if strings.Contains(retry, " integration status") {
+		return "run yard migrate"
+	}
+	return retry
+}
 func (failure *integrationActivationFailure) diagnostic() string {
 	text := fmt.Sprintf(" (stage=%s projected=%t", failure.stage, failure.projected)
 	if facts := failure.comparison; facts != nil {

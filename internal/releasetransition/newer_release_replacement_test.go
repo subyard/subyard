@@ -187,8 +187,11 @@ func TestNewerReleaseReportsEveryRefusal(t *testing.T) {
 	got := make([]OutcomeCode, 0, len(inspection.Blockers))
 	for _, blocker := range inspection.Blockers {
 		got = append(got, blocker.Code)
+		if blocker.Retry != "run yard update --check" {
+			t.Fatal("unrelated refusal changed its retry", blocker)
+		}
 	}
-	want := []OutcomeCode{CodePlanStale, CodeRecoveryAmbiguous, CodeRecoveryAmbiguous, CodeActivationAmbiguous}
+	want := []OutcomeCode{CodeRecoveryAmbiguous, CodeRecoveryAmbiguous, CodePlanStale, CodeActivationAmbiguous}
 	if !slices.Equal(got, want) {
 		t.Fatalf("blockers = %#v", inspection.Blockers)
 	}
@@ -204,7 +207,7 @@ func TestNewerReleaseRefusesWhatItCannotOwn(t *testing.T) {
 			fixture.transition.options.CandidateVersion = version
 			inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
 			if err != nil || len(inspection.Blockers) != 1 ||
-				inspection.Blockers[0].Message != "only a release newer than the unfinished target can replace its journal" {
+				inspection.Blockers[0].Message != "only a release newer than the unfinished target can replace its journal" || inspection.Blockers[0].Retry != "run yard update --check" {
 				t.Fatalf("inspection = %#v, err=%v", inspection, err)
 			}
 		})
@@ -222,7 +225,7 @@ func TestNewerReleaseRefusesWhatItCannotOwn(t *testing.T) {
 		observation.journal.Releases = ReleasePair{From: v2PostActivationPreviousRelease, Target: v2PostActivationSourceRelease}
 		observation.links = *fixture.links
 		blockers := fixture.transition.newerReleaseReplacementBlockers(observation)
-		if len(blockers) != 1 || blockers[0].Message != "a newer release cannot replace a recovery transaction" {
+		if len(blockers) != 1 || blockers[0].Message != "a newer release cannot replace a recovery transaction" || blockers[0].Retry != "run yard update --check" {
 			t.Fatalf("blockers = %#v", blockers)
 		}
 	})
@@ -450,7 +453,7 @@ func TestNewerReleaseRefusesJournalThatSupersededAnother(t *testing.T) {
 	}, digestC, "tx-fix")
 	refused, err := candidate.Inspect(context.Background(), Goal{Target: newerReleaseFix, Direction: DirectionActivateTarget})
 	if err != nil || len(refused.Blockers) != 1 ||
-		refused.Blockers[0].Message != "a newer release cannot replace a journal that already superseded another" {
+		refused.Blockers[0].Message != "a newer release cannot replace a journal that already superseded another" || refused.Blockers[0].Retry != "run yard update --check" {
 		t.Fatalf("inspection = %#v, err=%v", refused, err)
 	}
 }
@@ -536,7 +539,7 @@ func TestNewerReleaseRefusesReservedJournal(t *testing.T) {
 		journalSnapshot: ProtectedSnapshot{Fingerprint: fixture.transition.options.Replacement.Fingerprint},
 		links:           *fixture.links,
 	})
-	if len(blockers) != 1 || blockers[0].Message != "an interrupted recovery still reserves this journal" {
+	if len(blockers) != 1 || blockers[0].Message != "an interrupted recovery still reserves this journal" || blockers[0].Retry != "run yard update --check" {
 		t.Fatalf("blockers = %#v", blockers)
 	}
 }

@@ -81,6 +81,9 @@ func (err sourceAdmissionError) Error() string {
 		case "resource declarations", "V2 history", "journal consistency", "legacy history":
 			detail = " (" + err.phase + ")"
 		}
+		if err.phase == "V2 history" && errors.Is(err.cause, releasetransition.ErrSourceRecoveryHistory) {
+			return "release source admission: source repair requires completed history or an original activation-only reconciling journal (V2 history); next: yard update --version \"$VERSION\""
+		}
 		return "release source admission: protected metadata is unsupported or unresolved" + detail + "; finish pending publications or recovery intent with the exact sealed original owner before source repair"
 	}
 }

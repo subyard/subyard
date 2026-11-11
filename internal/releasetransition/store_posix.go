@@ -177,10 +177,12 @@ func (store *POSIXV2Store) RetireReplacedTransactions(current TransactionID, reg
 	}
 	defer unix.Close(destination)
 	source, present, err := store.openParent([]string{"release-transition", "v2", "transactions"}, false)
-	if err != nil || !present {
+	if err != nil {
 		return err
 	}
-	defer unix.Close(source)
+	if present {
+		defer unix.Close(source)
+	}
 	entries, err := os.ReadDir(filepath.Join(append([]string{store.configHome}, replacedJournalParts...)...))
 	if err != nil {
 		return err
@@ -194,6 +196,12 @@ func (store *POSIXV2Store) RetireReplacedTransactions(current TransactionID, reg
 		}
 		transaction := record[:index]
 		if validateTransactionID(TransactionID(transaction)) != nil || TransactionID(transaction) == current {
+			continue
+		}
+		if err := store.retireReplacedRecovery(TransactionID(transaction)); err != nil {
+			return err
+		}
+		if !present {
 			continue
 		}
 		if _, err := store.closedTransactionEvidence(TransactionID(transaction), registry); err == nil {

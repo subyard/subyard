@@ -274,6 +274,14 @@ no previous runtime runs. The plan binds the exact journal fingerprint. Its byte
 unclosed transaction directory leave the transaction graph, so replacements may repeat and older engines read a clean graph. See
 [Interrupted release recovery](../control-plane.md#interrupted-release-recovery).
 
+This also admits a validated `recovery-v2-` successor only at `reconciling`, with zero migration
+steps, forward activation, no source ingress, an activated target and no live reservation.
+The fresh plan and consent bind its exact journal fingerprint. Before publishing the successor,
+the owner preserves the superseded journal and its existing recovery receipt, cancellation and
+frontier records outside the transaction graph. Only after verified successor completion do
+the exact copied live records leave the recovery namespaces. Archive-only crashes retain the
+original authority; retries observe the selected journal and reuse exact archived bytes.
+
 Activation recognizes only the exact enumerated link checkpoints. Unknown/foreign link pairs yield
 `operator-action-required/activation-ambiguous` without heuristic switching. Once the candidate is
 active, recovery proceeds forward to its verified fixed point; the owner does not blindly run a
@@ -387,6 +395,8 @@ transaction directory. Other earlier releases and arbitrary same-registry target
 The candidate registry must equal the predecessor's, so supersession runs through v0.25.1, the last
 release with that registry, and an ordinary update continues from there.
 Unrecognized state, conflicting publication, ingress and recovery chains refuse supersession.
+The newer-release recovery above is a separate forward-update contract; it does not expand
+source repair or the migration-owner exception.
 
 A fresh candidate assessment and grant bind these facts and current activation consequences.
 Under the update lock, the candidate revalidates the proof, publishes an immutable receipt in
