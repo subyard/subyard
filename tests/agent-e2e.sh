@@ -5121,6 +5121,32 @@ for current_capture_case in native-one native-seventeen capture-fails; do
   fi
 done
 
+# The default fixture's native target must not leak into its cleanup sentinel.
+(
+  eval "$(fixture_functions "$ROOT/dev/e2e/integration-selection.sh" write_default_native_target)"
+  SUBYARD_CONFIG_HOME="$TMP/selection-native-target"
+  config="$SUBYARD_CONFIG_HOME/yards/default/config.env"
+  install -d -m 0700 "${config%/*}" "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
+  printf 'SSH_PORT=33001\n' > "$config"
+  printf 'SSH_PORT=64997\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
+  PROJECT=selection-project INSTANCE=selection-instance
+  write_default_native_target
+  # Resolve the two scalar scopes as separate shell environments, like the loader.
+  for selection_yard in default platform-sentinel; do
+    (
+      unset INCUS_PROJECT YARD_INSTANCE_NAME
+      if [ -f "$SUBYARD_CONFIG_HOME/config.env" ]; then . "$SUBYARD_CONFIG_HOME/config.env"; fi
+      # shellcheck source=/dev/null
+      . "$SUBYARD_CONFIG_HOME/yards/$selection_yard/config.env"
+      if [ "$selection_yard" = default ]; then
+        [ "$INCUS_PROJECT:$YARD_INSTANCE_NAME" = "$PROJECT:$INSTANCE" ]
+      else
+        [ -z "${INCUS_PROJECT:-}${YARD_INSTANCE_NAME:-}" ]
+      fi
+    ) || fail "selection native target escaped yard scope: $selection_yard"
+  done
+) || fail 'selection native target isolation failed'
+
 # Installer inspection needs the same fresh group as subsequent yard commands.
 (
   eval "$(fixture_functions "$ROOT/dev/e2e/integration-selection.sh" command_with_group)"

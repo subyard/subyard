@@ -152,6 +152,7 @@ p = module("periodic", "dev/ci/plan-periodic-checks.py")
 plan = p.plan(root)
 entries = {entry["id"]: entry["command"] for group in plan.values() for entry in group["include"]}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
+assert entries["vm:integration-selection/default"] == commands["vm:integration-selection/default"] + ["--slot", "1"]
 for name, command in commands.items():
     if name.startswith("vm:published-upgrade/"):
         assert entries[name] == command + ["--slot", "1"]

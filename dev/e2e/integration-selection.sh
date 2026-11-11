@@ -82,6 +82,10 @@ command_with_group() {
 yard() { command_with_group "$launcher" -Y "$YARD_NAME" "$@"; }
 host_yard() { command_with_group "$launcher" "$@"; }
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
+write_default_native_target() {
+  # Yard-local names keep the cleanup sentinel from inspecting this live guest.
+  printf 'INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\n' "$PROJECT" "$INSTANCE" >> "$config"
+}
 cleanup() {
   local rc=$? managed='' cleanup_rc=0
   trap - EXIT INT TERM ERR
@@ -135,8 +139,7 @@ HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
 EOF
 if [ "$KIND" = default ]; then
-  printf 'INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\n' "$PROJECT" "$INSTANCE" > "$SUBYARD_CONFIG_HOME/config.env"
-  chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+  write_default_native_target
   printf 'YARD_KIND=container\n' >> "$config"
 elif [ "$KIND" = upgrade ] || [ "$KIND" = local-first ]; then
   printf 'YARD_KIND=container\n' >> "$config"
