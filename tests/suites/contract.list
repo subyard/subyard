@@ -19,6 +19,7 @@ preview.sh
 preview-proxy.sh
 release-candidate.sh
 release-acceptance.sh
+release-acceptance-preflight.sh
 lint-tools.sh
 release-publication.sh
 provision-profile-check.sh
