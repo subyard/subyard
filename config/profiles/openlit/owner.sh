@@ -31,6 +31,7 @@ else
 case "${1-}" in
   --yes) ;;
   --check) mode=check ;;
+  --startup-check) mode=startup ;;
   --remove) selected=0 ;;
   --pause) mode=pause ;;
   --resume) mode=resume ;;
@@ -42,7 +43,9 @@ state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
 case "$state" in
   RUNNING) ;;
   ''|STOPPED)
-    if [ "$mode" = observe ]; then
+    if [ "$mode" = startup ]; then
+      printf '{"state":"drift"}\n'
+    elif [ "$mode" = observe ]; then
       [ -n "$state" ] && printf '{"state":"deferred","actual":"","desired":""}\n' || printf '{"state":"absent","actual":"","desired":""}\n'
     fi
     exit 0

@@ -3,6 +3,7 @@
   "disabled": true,
   "selected_provision_only": true,
   "owner_service": "owner.sh",
+  "startup_readiness": "owner.sh",
   "runtime": {
     "activation_id": "openlit-runtime",
     "handler": "runtime.sh"

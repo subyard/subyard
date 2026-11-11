@@ -103,6 +103,12 @@ Debian 13 currently ships an older bootstrap Go than the Incus client requires. 
 for source development because Go follows the module's `toolchain` directive. Confirm the selected
 compiler with `go version` after the first build.
 
+Profiles whose services start after the guest agent should declare the optional
+[`startup_readiness` hook](control-plane.md#profile-extensions) in `profile.json`.
+Its read-only response must distinguish transient startup from stable repairable drift;
+keep its implementation and tests in the owning profile. See the
+[profile startup contract](control-plane.md#profile-startup-readiness).
+
 ## Build and test
 
 `make cli-docs` builds the current CLI and regenerates [the command reference](cli-reference.md)

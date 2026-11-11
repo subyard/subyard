@@ -52,6 +52,7 @@ type Definition struct {
 	DisabledWhen               map[string]string              `json:"disabled_when,omitempty"`
 	SelectedProvisionOnly      bool                           `json:"selected_provision_only,omitempty"`
 	OwnerService               string                         `json:"owner_service,omitempty"`
+	StartupReadiness           string                         `json:"startup_readiness,omitempty"`
 	InfrastructureService      *InfrastructureService         `json:"infrastructure_service,omitempty"`
 	InstancePublication        *RevisionedSettingsPublication `json:"instance_publication,omitempty"`
 	LifecycleOnly              bool                           `json:"lifecycle_only,omitempty"`
@@ -127,6 +128,11 @@ func (definition *Definition) validatePackage() error {
 	if service := definition.InfrastructureService; service != nil && service.BindingHandler != "" {
 		if err := definition.validateExecutable(service.BindingHandler); err != nil {
 			return fmt.Errorf("infrastructure service binding handler: %w", err)
+		}
+	}
+	if definition.StartupReadiness != "" {
+		if err := definition.validateExecutable(definition.StartupReadiness); err != nil {
+			return fmt.Errorf("startup readiness: %w", err)
 		}
 	}
 	if definition.OwnerService != "" {

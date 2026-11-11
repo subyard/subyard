@@ -227,6 +227,25 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'],'current runtime must satisfy the generic activation digest contract')
+                self.assertEqual(runtime.startup(), {'state': 'ready'})
+                for unit in (guest.COLLECTOR, guest.MANAGER):
+                    states[unit].update(ActiveState='inactive', Job='17')
+                    self.assertEqual(runtime.startup()['state'], 'starting')
+                    states[unit].update(ActiveState='active', Job='')
+                states[guest.COLLECTOR]['ActiveState'] = 'inactive'
+                self.assertEqual(runtime.startup(), {'state': 'drift'})
+                states[guest.COLLECTOR]['ActiveState'] = 'failed'
+                states[guest.MANAGER].update(ActiveState='inactive', Job='23')
+                self.assertEqual(runtime.startup()['state'], 'starting')
+                states[guest.MANAGER].update(ActiveState='active', Job='')
+                self.assertEqual(runtime.startup(), {'state': 'drift'})
+                states[guest.COLLECTOR].update(ActiveState='activating', SubState='auto-restart')
+                self.assertEqual(runtime.startup(), {'state': 'drift'})
+                for budget in ('30000', '0'):
+                    with patch.dict(os.environ, {'SUBYARD_STARTUP_REMAINING_MS':budget}):
+                        self.assertEqual(runtime.startup()['state'], 'starting')
+                states[guest.COLLECTOR]['SubState'] = 'running'
+                states[guest.COLLECTOR]['ActiveState'] = 'active'
                 marker = root/'data/retained.db'
                 marker.write_bytes(b'history')
                 # Recover an active interrupted previous install. Unit text and
@@ -240,6 +259,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     states[unit].update(DropInPaths='/run/systemd/system/service.d/zzz-lxc-service.conf',NoNewPrivileges='no')
                 (root/'control/assets.json').write_text(json.dumps(saved))
                 self.assertEqual(runtime.observe()['state'],'stale')
+                self.assertEqual(runtime.startup(), {'state': 'ready'})
                 runtime.apply()
                 self.assertIn(('restart',guest.COLLECTOR,guest.MANAGER),calls)
                 self.assertEqual(runtime.observe()['state'],'current')

@@ -161,8 +161,8 @@ class Runtime:
             raise ValueError('foreign runtime directory')
         return True
 
-    def manager_details(self, unit):
-        raw = systemctl('show', unit, '--property=ActiveState,UnitFileState,LoadState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group,Type,KillMode,UMask,LimitCORE,TimeoutStartUSec,TimeoutStopUSec,ExecStart,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,TimersMonotonic,AccuracyUSec')
+    def manager_details(self, unit, startup=False):
+        raw = systemctl('show', unit, '--property=ActiveState,UnitFileState,LoadState,FragmentPath,NeedDaemonReload,DropInPaths,User,Group,Type,KillMode,UMask,LimitCORE,TimeoutStartUSec,TimeoutStopUSec,ExecStart,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,TimersMonotonic,AccuracyUSec'+(',Job' if startup else ''))
         fields = {}
         for line in raw.splitlines():
             if '=' in line:
@@ -222,6 +222,22 @@ class Runtime:
             return (ready and enabled == 'enabled' and active == ('inactive' if stopped else 'active')
                     and (not stopped or details[SERVICE].get('ActiveState') in ('inactive', 'failed')))
         return ready and enabled == 'disabled' and active == 'inactive' and details[SERVICE].get('ActiveState') in ('inactive', 'failed')
+
+    def startup(self):
+        # The timer can be queued behind boot work after the guest agent answers.
+        # Preserve disabled intent and stable payload drift for ordinary repair.
+        if self.check():
+            return {'state': 'ready'}
+        details = {unit: self.manager_details(unit, startup=True) for unit in (TIMER, SERVICE)}
+        if (not self.selected or self.stopped or not self.owned()
+                or any(not self.loaded_owned(unit, fields) for unit, fields in details.items())
+                or details[TIMER].get('UnitFileState') != 'enabled'):
+            return {'state': 'drift'}
+        job = details[TIMER].get('Job', '').split()
+        if details[TIMER].get('ActiveState') != 'failed' and job and job[0].isdigit() and int(job[0]) > 0:
+            return {'state': 'starting', 'reason': 'fetch timer start job is pending',
+                    'hint': 'run yard migrate to repair; inspect the guest fetch timer'}
+        return {'state': 'drift'}
 
     def publish(self, path, content):
         self.safe(path)
@@ -493,7 +509,7 @@ def ordinary_custody(runtime, fd, lock):
 
 def main():
     mode, selected, user, stopped, *extra = sys.argv[1:]
-    if mode not in ('check', 'apply', 'pause', 'resume', 'observe', 'refresh', 'custody-observe', 'custody-refresh', 'custody-fence', 'identity-observe', 'identity-apply') or selected not in ('0', '1') or stopped not in ('0', '1'):
+    if mode not in ('check', 'startup', 'apply', 'pause', 'resume', 'observe', 'refresh', 'custody-observe', 'custody-refresh', 'custody-fence', 'identity-observe', 'identity-apply') or selected not in ('0', '1') or stopped not in ('0', '1'):
         raise ValueError('invalid lifecycle request')
     if len(extra) != {'observe': 1, 'refresh': 4, 'custody-observe': 1, 'custody-refresh': 6, 'custody-fence': 4, 'identity-observe': 3, 'identity-apply': 2}.get(mode, 0):
         raise ValueError('invalid lifecycle arguments')
@@ -531,6 +547,9 @@ def main():
         runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1', stopped == '1')
     if mode == 'observe':
         print(json.dumps(runtime.observe(*extra)))
+        return
+    if mode == 'startup':
+        print(json.dumps(runtime.startup()))
         return
     if mode == 'check':
         if not runtime.check():

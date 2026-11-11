@@ -949,6 +949,9 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 		if err := startup.apply(ctx, prepared.CLI, prepared.Plan.OperationID); err != nil {
 			return result, fmt.Errorf("yard started but resource activation is pending: %w", err)
 		}
+		if execution.action == "start" {
+			return result, prepared.CLI.waitForStartedProfiles(ctx, prepared.Loaded, execution.started, diagnostics)
+		}
 		return result, nil
 	}
 	return nil

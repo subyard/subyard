@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import grp
 from types import SimpleNamespace
 import secrets
@@ -183,12 +184,12 @@ class Runtime:
             raise ValueError('invalid collector token')
         return token
 
-    def manager(self, unit):
-        raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate')
+    def manager(self, unit, startup=False):
+        raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate'+(',Job' if startup else ''))
         fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
         # A failed service waiting for Restart= has failed, e.g. after a reboot
         # during a rename, while its unit still names the previous account.
-        if fields.get('ActiveState') == 'activating' and fields.get('SubState') == 'auto-restart':
+        if not startup and fields.get('ActiveState') == 'activating' and fields.get('SubState') == 'auto-restart':
             fields['ActiveState'] = 'failed'
         if fields.get('LoadState') not in ('not-found', None):
             dropins = fields.get('DropInPaths', '').split()
@@ -230,6 +231,24 @@ class Runtime:
             return status.get('NoNewPrivs', '').strip() == '1' and all(int(uid) == self.uid for uid in status.get('Uid', '').split()) and bool(status.get('Uid'))
         except (OSError, ValueError):
             return False
+
+    def startup(self):
+        if not self.selected or not self.owned():
+            return {'state': 'drift'}
+        states = [self.manager(unit, startup=True) for unit in (COLLECTOR, MANAGER)]
+        anchored = bool(re.fullmatch('[0-9]{1,9}', os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')))
+        def pending(state):
+            if state.get('UnitFileState') != 'enabled' or state.get('ActiveState') == 'failed':
+                return False
+            if state.get('SubState') == 'auto-restart':
+                return anchored
+            job = state.get('Job', '').split()
+            return bool(job and job[0].isdigit() and int(job[0]) > 0)
+        # Queued jobs and this start's auto-restart are distinct from stable failure.
+        if any(pending(state) for state in states):
+            return {'state': 'starting', 'reason': 'collector services are starting',
+                    'hint': 'run yard migrate to repair; inspect the guest collector services'}
+        return {'state': 'ready' if all(state.get('ActiveState') == 'active' and state.get('UnitFileState') == 'enabled' for state in states) else 'drift'}
 
     def observe(self):
         installed = self.owned()
@@ -368,7 +387,8 @@ def main():
         if mode=='identity-observe':print(json.dumps(recipe))
         else:runtime.identity_apply(recipe,phase)
         return
-    runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1', agents.split())
+    runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1' and mode != 'startup', agents.split())
+    runtime.selected = selected == '1'
     if mode == 'pause':
         if runtime.owned() and runtime.manager(COLLECTOR).get('ActiveState') == 'active':
             systemctl('stop', COLLECTOR)
@@ -377,6 +397,9 @@ def main():
     if mode == 'resume':
         if runtime.selected and runtime.owned():
             systemctl('start', COLLECTOR, MANAGER)
+        return
+    if mode == 'startup':
+        print(json.dumps(runtime.startup()))
         return
     observation = runtime.observe()
     if mode == 'observe':

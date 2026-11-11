@@ -17,6 +17,26 @@ spec.loader.exec_module(guest)
 
 
 class GuestTests(unittest.TestCase):
+    def test_startup_waits_for_timer_but_preserves_disabled_intent_and_drift(self):
+        runtime = self.runtime()
+        self.assertEqual(runtime.startup(), {'state': 'drift'})
+        runtime.apply()
+        self.assertEqual(runtime.startup(), {'state': 'ready'})
+        self.timer[0] = 'inactive'
+        self.assertEqual(runtime.startup(), {'state': 'drift'})
+        self.jobs[guest.TIMER] = '17'
+        self.assertEqual(runtime.startup()['state'], 'starting')
+        self.timer[1] = 'disabled'
+        self.assertEqual(runtime.startup(), {'state': 'drift'})
+        self.timer[:] = ['inactive', 'enabled']
+        (self.state/'fetch.py').write_bytes(b'stable payload drift')
+        self.assertEqual(runtime.startup()['state'], 'starting')
+        self.jobs[guest.TIMER] = ''
+        self.assertEqual(runtime.startup(), {'state': 'drift'})
+        self.jobs[guest.TIMER] = '23'
+        self.timer[0] = 'failed'
+        self.assertEqual(runtime.startup(), {'state': 'drift'})
+
     def test_identity_requiesces_enabled_timer_only_after_verified_reboot(self):
         runtime=self.runtime(stopped=True)
         runtime.apply()
@@ -95,6 +115,7 @@ class GuestTests(unittest.TestCase):
         self.fragments = {}
         self.dropins = {}
         self.overrides = {}
+        self.jobs = {}
         self.addCleanup(patch.stopall)
         patch.object(guest, 'systemctl', self.systemctl).start()
         self.user = pwd.getpwuid(os.getuid()).pw_name
@@ -110,6 +131,7 @@ class GuestTests(unittest.TestCase):
             import grp
             fields = {'User':self.user,'Group':grp.getgrgid(account.pw_gid).gr_name, 'Type':'oneshot','KillMode':'control-group','UMask':'0077','LimitCORE':'0','TimeoutStartUSec':'infinity','TimeoutStopUSec':'5s','Environment':f'HOME={account.pw_dir} SSH_AUTH_SOCK={account.pw_dir}/.ssh/subyard-agent.sock','EnvironmentFiles':'','ExecStartPre':'','ExecStartPost':'','ExecStop':'','ExecStopPost':'','ExecStart':'{ path=/usr/bin/setpriv ; argv[]=/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B /var/lib/subyard/git-fetch/fetch.py ; ignore_errors=no ; start_time=none ; }','TimersMonotonic':'{ OnBootUSec=5min ; next_elapse=123 }\nTimersMonotonic={ OnUnitInactiveUSec=5min ; next_elapse=456 }','AccuracyUSec':'1s'}
             fields.update(self.overrides.get(unit, {}))
+            if any('Job' in argument.split(',') for argument in args): fields['Job'] = self.jobs.get(unit, '')
             omitted_empty_arrays = {'EnvironmentFiles','ExecStartPre','ExecStartPost','ExecStop','ExecStopPost'}
             envelope = '\n'.join(key+'='+value for key,value in fields.items() if value or key not in omitted_empty_arrays)
             return envelope+f'\nActiveState={state[0]}\nUnitFileState={state[1]}\nLoadState={"loaded" if loaded else "not-found"}\nFragmentPath={fragment}\nNeedDaemonReload=no\nDropInPaths={self.dropins.get(unit, "")}'

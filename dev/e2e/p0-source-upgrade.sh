@@ -896,26 +896,7 @@ resume() {
   verify_v2_release_transition "$VERSION_B"
   operator_yard -Y "$YARD_NAME" stop --yes
   operator_yard start --yes
-  # Start waits for the agent, but profile services can become ready between
-  # planning and convergence. Every plan-stale retry prepares a fresh plan.
-  local attempt report migrate_rc
-  for attempt in $(seq 1 60); do
-    if report="$(operator_yard migrate --yes 2>&1)"; then
-      printf '%s\n' "$report"
-      break
-    else
-      migrate_rc=$?
-    fi
-    printf '%s\n' "$report" >&2
-    if ! grep -Eq '^yard: migrate: .*release transition [^:]+: code=plan-stale([[:space:];]|$)' \
-        <<<"${report##*$'\n'}"; then
-      return "$migrate_rc"
-    fi
-    printf 'source-upgrade: migrate after start plan-stale attempt=%s/60 native_exit=%s\n' \
-      "$attempt" "$migrate_rc" >&2
-    if [ "$attempt" = 60 ]; then return "$migrate_rc"; fi
-    sleep 1
-  done
+  operator_yard migrate --yes
   verify_config_workflow
   operator_env chmod 0600 \
     "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
@@ -956,7 +937,6 @@ current_migration_readiness_diagnostics() {
 
 finish() {
   local transaction_before target_before previous_before report releases_before host_hash guest_hash
-  local ready=0 attempt
 	local transition_root="$OPERATOR_HOME/.config/subyard/release-transition/v2"
   local ledger_before="$SHARED_ROOT/post-reboot-ledger.before"
   local journal_before="$SHARED_ROOT/post-reboot-journal.before"
@@ -977,33 +957,20 @@ finish() {
     || die 'updated boot power reconciliation did not finish successfully'
   verify_power_retry_probe
   restore_operator_passwordless_sudo
+  # Boot restoration owns physical power; explicit start establishes profile readiness.
+  operator_yard start --yes
   operator_yard -Y "$YARD_NAME" start --yes
   operator_yard status >/dev/null
   operator_yard check
   operator_yard -Y "$YARD_NAME" status >/dev/null
   operator_yard -Y "$YARD_NAME" check
-  # Yard start waits for its agent; inner Incus may still be starting. Establish
-  # broker readiness before binding a plan to the intentional config drift.
+  # The test-vms lifecycle-only declaration has no startup readiness hook.
+  # Establish inner broker readiness before binding the intentional config drift.
   wait_for_test_vm_broker || die 'test VM broker did not become ready after yard start'
-  # Starting the yard does not wait for every broker service. Establish the
-  # release fixed point before injecting drift into the default workspace.
-  for attempt in $(seq 1 60); do
-    report="$(operator_yard migrate --check --json)"
-    if jq -e '.schemaVersion == 1 and .current == .outcome.target and
-        .outcome.status == "ready" and .outcome.reachedGoal == true' \
-        <<<"$report" >/dev/null; then
-      ready=1
-      break
-    fi
-    if ! jq -e '.schemaVersion == 1 and .current == .outcome.target and
-        .outcome.status == "migration-required" and .outcome.code == "transition-required"' \
-        <<<"$report" >/dev/null; then
-      printf '%s\n' "$report" >&2
-      die 'unexpected current-release readiness failure after yard start'
-    fi
-    sleep 1
-  done
-  if [ "$ready" != 1 ]; then
+  report="$(operator_yard migrate --check --json)"
+  if ! jq -e '.schemaVersion == 1 and .current == .outcome.target and
+      .outcome.status == "ready" and .outcome.reachedGoal == true' \
+      <<<"$report" >/dev/null; then
     printf '%s\n' "$report" >&2
     die 'current release did not reach readiness after yard start'
   fi

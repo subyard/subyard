@@ -15,7 +15,7 @@ agents=${4-}
 if [ "$mode" = identity-observe ] || [ "$mode" = identity-apply ]; then
   exec python3 -B "$root/identity.py" "$@"
 fi
-case "$mode" in apply|check|pause|resume|observe|refresh) ;; *) exit 2 ;; esac
+case "$mode" in apply|check|pause|resume|observe|refresh|startup) ;; *) exit 2 ;; esac
 case "$selected" in 0|1) ;; *) exit 2 ;; esac
 [[ "$user" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || exit 2
 [ "$(id -u)" = 0 ] || { echo 'openlit: guest root required' >&2; exit 1; }
@@ -57,6 +57,7 @@ for timer_asset in "$cutover_unit" "$cutover_timer"; do
     [ "$(head -n 1 "$timer_asset")" = '# Managed by Subyard OpenLIT profile.' ] || die 'unmanaged trace migration unit'
   fi
 done
+if [ "$mode" = startup ]; then runtime startup; exit; fi
 if [ "$mode" = observe ]; then runtime observe; exit; fi
 if [ "$mode" = check ]; then
   if ! owned; then [ "$selected" = 0 ]; exit; fi

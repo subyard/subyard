@@ -22,6 +22,7 @@ arguments=args[args.index('subyard')+1:]
 Path(os.environ['GIT_FETCH_FIXTURE_CALLS']).write_text(json.dumps(arguments))
 if arguments[0]=='check' and os.environ.get('GIT_FETCH_FIXTURE_DRIFT')=='1': print('git-fetch-drift')
 if arguments[0]=='pause': print('paused')
+if arguments[0]=='startup': print(json.dumps({'state':'ready'}))
 if arguments[0] in ('observe','refresh'):
     observation={'state':'current','actual':'a'*64,'desired':'a'*64}
     if arguments[0]=='observe' and os.environ.get('GIT_FETCH_FIXTURE_DIAGNOSTICS')=='1':
@@ -45,6 +46,13 @@ python3 - "$state/calls" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))==['apply','1','dev','0']
 PY
+SUBYARD_STARTUP_REMAINING_MS=1234 bash "$root/config/profiles/git-fetch/owner.sh" --startup-check > "$state/startup"
+python3 - "$state/calls" "$state/startup" "$state/calls.argv" <<'PY_STARTUP'
+import json,sys
+assert json.load(open(sys.argv[1]))==['startup','1','dev','0']
+assert json.load(open(sys.argv[2]))=={'state':'ready'}
+assert 'SUBYARD_STARTUP_REMAINING_MS=1234' in json.load(open(sys.argv[3]))
+PY_STARTUP
 bash "$root/config/profiles/git-fetch/owner.sh" --remove
 python3 - "$state/calls" <<'PY'
 import json,sys
