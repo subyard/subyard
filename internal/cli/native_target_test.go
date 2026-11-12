@@ -179,6 +179,27 @@ func TestNativeTargetGateAdmitsAddressRepair(t *testing.T) {
 	if !bytes.Equal(history, mustReadConfigFixture(t, journalPath)) || len(native.ConfigUpdates) != 0 || len(native.ExecCalls) != 0 {
 		t.Fatal("address repair changed release history or native state")
 	}
+	t.Run("pending-legacy-transition", func(t *testing.T) {
+		installUnfinishedMutationGateFixture(t, root, environment, filepath.Join(root, "legacy-runtime"))
+		path := filepath.Join(home, "yards/named/config.env")
+		before := mustReadConfigFixture(t, path)
+		output.Reset()
+		options.Arguments = []string{"-Y", "named", "config", "set", "INCUS_PROJECT", "another-project", "--scope", "yard", "--yes"}
+		program, err := New(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "named")
+		if err != nil || outcome == nil || !nativeTargetAddressRepair("@config", options.Arguments[3:], inspection) {
+			t.Fatalf("expected native-target-only V2 gate: outcome=%+v err=%v", outcome, err)
+		}
+		if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), "legacy release transition journal-invalid:") {
+			t.Fatalf("pending legacy transition admitted address repair: exit=%d %s", code, &output)
+		}
+		if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
+			t.Fatal("refused address repair changed configuration")
+		}
+	})
 }
 
 func TestNativeTargetAddressRepairIsBounded(t *testing.T) {

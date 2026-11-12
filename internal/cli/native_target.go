@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
@@ -80,6 +82,29 @@ func (cli *CLI) loadNativeTargetContext(yard, home string, files *config.Prospec
 		environment["SUBYARD_CONFIG_DIR"] = configDir
 	}
 	return config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: firstNonempty(environment["SUBYARD_OPERATOR_HOME"], environment["HOME"]), YardName: yard, Environment: environment, NativeTargetOnly: true, ProspectiveFiles: files})
+}
+
+// Address repair can bypass native-target blockers, but those may mask a legacy
+// transition in the ordinary gate. Both journal families must permit the repair.
+func (cli *CLI) inspectCommandMutationGate(
+	ctx context.Context, yard, handler string, arguments []string,
+) (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
+	if err != nil || outcome == nil || !nativeTargetAddressRepair(handler, arguments, inspection) {
+		return outcome, inspection, err
+	}
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return nil, nil, err
+	}
+	legacy, err := migration.InspectMutationGate(ctx, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	if legacy != nil {
+		return nil, nil, fmt.Errorf("legacy release transition %s: %s", legacy.Code, legacy.Message)
+	}
+	return nil, nil, nil
 }
 
 // Address repair changes only explicit local scalar configuration. Every gate

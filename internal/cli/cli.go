@@ -4317,13 +4317,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, operationRPCError("identity_recovery_failed", identityErr)
 		}
 		if !releaseRecoveryCommand(definition) && !cleanupRecovery && !identityRecovery {
-			outcome, gateInspection, gateErr := operationCLI.inspectMutationGateInspection(
-				ctx, operationLoaded.Context.YardName,
+			outcome, gateInspection, gateErr := operationCLI.inspectCommandMutationGate(
+				ctx, operationLoaded.Context.YardName, definition.Handler, params.Arguments,
 			)
 			if gateErr != nil {
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
-			if outcome != nil && !nativeTargetAddressRepair(definition.Handler, params.Arguments, gateInspection) && !(ordinaryCommandDuringPendingConfiguration(definition.Handler) && operationCLI.pendingIntegrationConfigurationGate(outcome, gateInspection)) {
+			if outcome != nil && !(ordinaryCommandDuringPendingConfiguration(definition.Handler) && operationCLI.pendingIntegrationConfigurationGate(outcome, gateInspection)) {
 				if definition.Handler == "@init" {
 					var permit *configApplyRepairPermit
 					permit, outcome, gateErr = operationCLI.prepareInitAdmission(
@@ -4450,13 +4450,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, operationRPCError("identity_recovery_failed", identityErr)
 		}
 		if !releaseRecoveryCommand(planned.Definition) && !cleanupRecovery && !identityRecovery {
-			outcome, gateInspection, gateErr := planned.CLI.inspectMutationGateInspection(
-				ctx, planned.Loaded.Context.YardName,
+			outcome, gateInspection, gateErr := planned.CLI.inspectCommandMutationGate(
+				ctx, planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments,
 			)
 			if gateErr != nil {
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
-			if outcome != nil && !nativeTargetAddressRepair(planned.Definition.Handler, planned.Arguments, gateInspection) && !(ordinaryCommandDuringPendingConfiguration(planned.Definition.Handler) && planned.CLI.pendingIntegrationConfigurationGate(outcome, gateInspection)) {
+			if outcome != nil && !(ordinaryCommandDuringPendingConfiguration(planned.Definition.Handler) && planned.CLI.pendingIntegrationConfigurationGate(outcome, gateInspection)) {
 				if planned.Definition.Handler != "@init" || planned.CLI.permits.profileInit == nil ||
 					!sameConfigApplyGate(planned.CLI.permits.profileInit.gate, *outcome) {
 					return nil, mutationGateRPCError(outcome, gateInspection)

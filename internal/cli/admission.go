@@ -298,15 +298,12 @@ func (cli *CLI) admitReleaseGate(
 	arguments []string,
 	yes bool,
 ) (permits recoveryPermits, code int, done bool) {
-	outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
+	outcome, gateInspection, gateErr := cli.inspectCommandMutationGate(ctx, yard, admission.handler, arguments)
 	if gateErr != nil {
 		cli.errorf("inspect release transition: %v", gateErr)
 		return permits, 1, true
 	}
 	if outcome == nil {
-		return permits, 0, false
-	}
-	if nativeTargetAddressRepair(admission.handler, arguments, gateInspection) {
 		return permits, 0, false
 	}
 	switch admission.recovery {
