@@ -29,6 +29,31 @@ def load(path, name):
     return module
 
 
+failure_evidence = load(Path(__file__).with_name('failure-evidence.py'), 'telemetry_failure_evidence')
+
+
+def claude_failure(phase, result, token):
+    failure_evidence.emit(phase, {'claude.stdout': getattr(result, 'stdout', None),
+        'claude.stderr': getattr(result, 'stderr', None)}, secrets=(token, 'local-fixture-only'),
+        return_code=getattr(result, 'returncode', None), timed_out=isinstance(result, subprocess.TimeoutExpired))
+
+
+def claude_command(command, token, **kwargs):
+    try:
+        return subprocess.run(command, **kwargs)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        claude_failure('claude-command', error, token)
+        raise
+
+
+def wait_claude_sessions(data, expected, result, token):
+    try:
+        return wait_sessions(data, 'claude', expected, stderr=result.stderr)
+    except AssertionError:
+        claude_failure('claude-session-binding', result, token)
+        raise
+
+
 class ClaudeProvider(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -530,9 +555,9 @@ def exercise(args):
             env.update(ANTHROPIC_BASE_URL=f'http://127.0.0.1:{provider.server_port}', ANTHROPIC_API_KEY='local-fixture-only',
                        DISABLE_AUTOUPDATER='1', CLAUDE_CODE_PROPAGATE_TRACEPARENT='1')
             try:
-                result = subprocess.run(['subyard-telemetry-run', '--agent', agent, '--scope-mode', 'require', '--project-id', 'telemetry-fixture', '--', str(binaries/agent),
+                result = claude_command(['subyard-telemetry-run', '--agent', agent, '--scope-mode', 'require', '--project-id', 'telemetry-fixture', '--', str(binaries/agent),
                     '-p', 'Run the fixture command.', '--allowedTools', 'Bash', '--output-format', 'stream-json', '--verbose', '--max-turns', '3'],
-                    env=env, cwd=project, capture_output=True, timeout=630, check=True)
+                    token, env=env, cwd=project, capture_output=True, timeout=630, check=True)
                 frames = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
                 session = next(frame['session_id'] for frame in frames if frame.get('session_id'))
                 assert provider.requests >= 2, 'native Claude did not complete its real tool call'
@@ -541,7 +566,8 @@ def exercise(args):
                 provider.server_close()
         if agent != 'codex':
             require_command_success(receipt, agent)
-        runs = wait_sessions(args.data_dir, agent, {session}, stderr=result.stderr if agent == 'claude' else b'')
+        runs = (wait_claude_sessions(args.data_dir, {session}, result, token) if agent == 'claude'
+                else wait_sessions(args.data_dir, agent, {session}))
         assert len(runs) == 1
         run = next(iter(runs))
         deadline = time.monotonic()+45
@@ -707,16 +733,16 @@ def main():
                  ANTHROPIC_API_KEY='local-fixture-only', DISABLE_AUTOUPDATER='1', CLAUDE_CODE_PROPAGATE_TRACEPARENT='1')
     native.publish(state/'claude/settings.json', (json.dumps({'env': native.desired('claude', endpoint, token)})+'\n').encode(), None)
     try:
-        result = subprocess.run(['subyard-telemetry-run', '--agent', 'claude', '--scope-mode', 'require', '--', str(binaries/'claude'),
+        result = claude_command(['subyard-telemetry-run', '--agent', 'claude', '--scope-mode', 'require', '--', str(binaries/'claude'),
                                  '-p', 'Return probe.', '--output-format', 'stream-json', '--verbose', '--max-turns', '1'],
-                                env=local, cwd=state/'project', capture_output=True, timeout=60, check=True)
+                                token, env=local, cwd=state/'project', capture_output=True, timeout=60, check=True)
         frames = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         session = next(frame['session_id'] for frame in frames if frame.get('session_id'))
         assert server.requests > 0
     finally:
         server.shutdown()
         server.server_close()
-    wait_sessions(args.data_dir, 'claude', {session}, stderr=result.stderr)
+    wait_claude_sessions(args.data_dir, {session}, result, token)
     kinds = {row[0] for row in query(args.data_dir, "SELECT DISTINCT kind FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces')")}
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
     assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir)

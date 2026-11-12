@@ -5,6 +5,7 @@ from contextlib import closing, contextmanager
 import errno
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,9 @@ MARKER = b'subyard-telemetry-storage-v1\n'
 SOURCE = 'subyard-telemetry-storage'
 SIZE = 16*1024*1024
 HOOK = Path('/usr/local/lib/subyard-telemetry/broker-correlation.py')
+spec = importlib.util.spec_from_file_location('failure_evidence', Path(__file__).with_name('failure-evidence.py'))
+evidence = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(evidence)
 
 # Executed as root only by the leased-stage fixture. Local checks run this same
 # atomic boundary on their own private file, without sudo or system writes.
@@ -167,7 +171,7 @@ SOURCES = %r
 PROOF = %r
 held_enospc = False
 def trace(frame, event, value):
-    if event != 'call':
+    if event != 'call' or frame.f_code.co_name not in ('atomic_json', 'emit', 'register'):
         return None
     filename = os.path.realpath(frame.f_code.co_filename)
     if frame.f_code.co_name == 'atomic_json' and filename == RECORDS and frame.f_back.f_code.co_name == 'store_intent' and os.path.realpath(frame.f_back.f_code.co_filename) == SOURCES:
@@ -202,8 +206,6 @@ def trace(frame, event, value):
                 pass
         return observe
     return observe
-if os.path.realpath(sys.argv[0]) == HELPER:
-    sys.settrace(trace)
 ''' % (str(helper), str(helper.parent/'records.py'), str(helper.parent/'sources.py'), str(directory))
     private_file(directory/'sitecustomize.py', code.encode())
 
@@ -211,9 +213,13 @@ if os.path.realpath(sys.argv[0]) == HELPER:
 def probe_wrapper(directory, helper, original):
     # No loader environment is needed; argv, __file__, import path and the real
     # register code filename remain those of the installed optional hook.
-    return ('exec(compile(open(%r, "rb").read(), %r, "exec"))\n'
-            'exec(compile(%r, %r, "exec"))\n' %
-            (str(directory/'sitecustomize.py'), str(directory/'sitecustomize.py'), original, str(helper))).encode()
+    # Import the real hook before tracing; keep its original code filenames.
+    return ('namespace = dict(globals(), __name__="telemetry_probe_imports")\n'
+            'exec(compile(%r, %r, "exec"), namespace)\n'
+            'exec(compile(open(%r, "rb").read(), %r, "exec"))\n'
+            'sys.settrace(trace)\n'
+            'raise SystemExit(namespace["main"]())\n' %
+            (original, str(helper), str(directory/'sitecustomize.py'), str(directory/'sitecustomize.py'))).encode()
 
 
 def replace_hook(helper, expected, content):
@@ -361,6 +367,7 @@ def run(args):
     mount = root/'filesystem'
     mount.mkdir(mode=0o700)
     process, identity, failure, cleanup_failure = None, None, None, None
+    token = None
     mounted, inner_marked = False, False
     result = {'schema': 1, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
               'filesystem_bytes': SIZE, 'broker_failure_physical': 'not_exercised'}
@@ -456,8 +463,10 @@ def run(args):
                     'run', '--data-dir', str(data), '--agent', 'other', '--agent-version', 'storage-broker-fixture',
                     '--scope-mode', 'partial', '--', *command], capture_output=True, timeout=1830)
             private_file(args.evidence/'broker-command.stderr', callback.stderr)
+            result['broker_native_exit'] = callback.returncode
             assert callback.returncode == 0, 'storage failure changed native broker lifecycle result'
             for phase in ('request', 'held'):
+                assert (probe/(phase+'.json')).is_file(), phase+' ENOSPC proof missing; callback exit='+str(callback.returncode)
                 assert json.loads((probe/(phase+'.json')).read_text()) == {'enospc': True,
                     ('emit_failed' if phase == 'request' else 'intent_failed'): True}, \
                     'actual native correlation hook did not encounter ENOSPC'
@@ -508,6 +517,13 @@ def run(args):
                       'committed_after_recovery': result.get('committed_after_recovery'), 'native_exit': result.get('native_exit'),
                       'broker_failure_physical': result['broker_failure_physical'],
                       'broker_native_exit': result.get('broker_native_exit')}), flush=True)
+    if failure is not None or cleanup_failure is not None:
+        # Stream contents before Android's EXIT trap deletes this evidence root.
+        evidence.emit('storage', {name: args.evidence/name for name in (
+            'managed-command.stderr', 'broker-command.stderr', 'result.json', 'collector-before.log', 'collector-restarted.log')},
+            secrets=(token,), return_code=result.get('broker_native_exit', result.get('native_exit')),
+            timed_out=isinstance(failure, subprocess.TimeoutExpired),
+            proofs={phase: (args.evidence/'hook-probe'/(phase+'.json')).is_file() for phase in ('request', 'held')})
     if failure is not None:
         raise failure
     if cleanup_failure is not None:

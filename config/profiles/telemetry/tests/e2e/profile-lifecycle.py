@@ -3,6 +3,7 @@
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,9 @@ import subprocess
 import sys
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
+spec = importlib.util.spec_from_file_location('telemetry_failure_evidence', Path(__file__).with_name('failure-evidence.py'))
+failure_evidence = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(failure_evidence)
 
 SNAPSHOT = '''import hashlib,json,pathlib,pwd,subprocess
 account=pwd.getpwnam('dev')
@@ -251,8 +255,12 @@ class CommandFailure(RuntimeError):
 def command(argv, payload=None, timeout=120, operation='guest-command', env=None):
     try:
         result = subprocess.run(argv, input=payload, capture_output=True, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
+        failure_evidence.relay(error.stdout)
+        failure_evidence.relay(error.stderr)
         raise CommandFailure(operation) from None
+    failure_evidence.relay(result.stdout)
+    failure_evidence.relay(result.stderr)
     if result.returncode:
         raise CommandFailure(operation, result)
     return result.stdout.decode()
@@ -344,6 +352,7 @@ def main():
     fixture = json.loads(guest(SETUP))
     stage = Path(fixture['root'])
     files = {'source/config/profiles/telemetry/tests/e2e/native-signals.py': args.source/'config/profiles/telemetry/tests/e2e/native-signals.py',
+             'source/config/profiles/telemetry/tests/e2e/failure-evidence.py': args.source/'config/profiles/telemetry/tests/e2e/failure-evidence.py',
              'source/config/profiles/telemetry/native.py': args.source/'config/profiles/telemetry/native.py',
              'source/internal/adapters/configmaterial/tomli_w.py': args.source/'internal/adapters/configmaterial/tomli_w.py',
              'source/config/profiles/orca/tests/e2e/codex-permissions.py': args.source/'config/profiles/orca/tests/e2e/codex-permissions.py',
