@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -79,6 +80,79 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_hosted_acceptance_installs_collector_tools_before_verification(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            tools = directory / "bin"
+            tools.mkdir()
+            script = (root / "dev/ci/periodic-e2e.sh").read_text()
+            # Replace only the opaque VM boundary; execute the real dispatch and
+            # package helper with unavailable tools until the mocked install.
+            script, count = re.subn(r"(?ms)^check_probes\(\) \{.*?^\}",
+                'check_probes() { printf "probes\\\\n" >> "$TRACE"; }', script, count=1)
+            self.assertEqual(count, 1)
+            runner = directory / "runner.sh"
+            runner.write_text(script)
+            (tools / "sudo").write_text('''#!/bin/bash
+[ "$1" = -n ] && [ "$2" = apt-get ] || exit 99
+printf '%s\\n' "$3" >> "$TRACE"
+if [ "$3" = update ]; then exit "$UPDATE_EXIT"; fi
+[ "$3" = install ] || exit 99
+case " $* " in *' jq '*) ;; *) exit 98;; esac
+case " $* " in *' ripgrep '*) ;; *) exit 98;; esac
+[ "$INSTALL_EXIT" = 0 ] || exit "$INSTALL_EXIT"
+touch "$READY"
+''')
+            (tools / "python3").write_text('''#!/bin/bash
+[ -f "$READY" ] || exit 127
+[ "$1" = -B ] && [ "$3" = prepare ] && [ "$4" = --prepared ] || exit 97
+printf 'collector\\n' >> "$TRACE"
+exit "$COLLECTOR_EXIT"
+''')
+            for tool in tools.iterdir():
+                tool.chmod(0o700)
+            for update, install, collector, expected, trace in (
+                (0, 0, 0, 0, ["update", "install", "collector", "probes"]),
+                (23, 0, 0, 23, ["update"]),
+                (0, 24, 0, 24, ["update", "install"]),
+                (0, 0, 25, 25, ["update", "install", "collector"]),
+            ):
+                with self.subTest(update=update, install=install, collector=collector):
+                    ready, log = directory / "ready", directory / "trace"
+                    ready.unlink(missing_ok=True)
+                    log.unlink(missing_ok=True)
+                    env = dict(os.environ, PATH=str(tools) + ":" + os.environ["PATH"],
+                        GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", READY=str(ready), TRACE=str(log),
+                        UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector))
+                    result = subprocess.run(["bash", str(runner), "acceptance", "fixture", "prepared", "output", "test"],
+                        cwd=directory, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual(log.read_text().splitlines(), trace)
+
+    def test_early_collector_failure_identifies_command_and_exit_without_output(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            tool = directory / "rg"
+            tool.write_text("#!/bin/sh\nprintf 'fixture-secret-output\\n' >&2\nexit 47\n")
+            tool.chmod(0o700)
+            env = dict(os.environ, PATH=str(directory) + ":" + os.environ["PATH"], FIXTURE_SECRET="fixture-secret-env")
+            result = subprocess.run([sys.executable, "-B", str(root / "dev/release-acceptance.py"),
+                "prepare", "--output", str(directory / "candidate"), "--version", "test"],
+                cwd=directory, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('command=["bash", "tests/helpers/source-files.sh", ".", "--include-client-aliases"]', result.stderr)
+            self.assertIn("exit_code=47", result.stderr)
+            self.assertNotIn("fixture-secret", result.stderr)
+
+    def test_subprocess_failure_redacts_arbitrary_argv_and_shell_programs(self):
+        for command in (["bash", "-c", "fixture-secret-script"],
+                        ["env", "TOKEN=fixture-secret-env", "bash"], "fixture-secret-command"):
+            with self.subTest(command=command):
+                error = subprocess.CalledProcessError(19, command, output="fixture-secret-output", stderr="fixture-secret-stderr")
+                message = m.subprocess_failure_message(error)
+                self.assertIn("exit_code=19", message)
+                self.assertNotIn("fixture-secret", message)
+
     def test_release_check_gets_eof_and_preserves_operator_input(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output = Path(temporary)

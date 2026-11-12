@@ -2961,6 +2961,19 @@ def main():
         return run_checks(output, args.slots, args.only, args.rerun, args.first, args.exclude, args.with_vms)
 
 
+def subprocess_failure_message(error):
+    # Only fixed collector argv may be printed in full; never print shell
+    # programs, environment assignments, arbitrary arguments or subprocess output.
+    command = error.cmd
+    known = (["bash", "tests/helpers/source-files.sh", ".", "--include-client-aliases"],
+             ["bash", "dev/test-profiles.sh", "--e2e", "--list"], ["go", "version"])
+    if not isinstance(command, (list, tuple)) or list(command) not in known:
+        executable = command[0] if isinstance(command, (list, tuple)) and command else None
+        command = [executable if executable in ("bash", "go", "python3") else "<executable redacted>",
+                   "<arguments redacted>"]
+    return f"CalledProcessError: command={json.dumps(command)} exit_code={error.returncode}"
+
+
 if __name__ == "__main__":
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda signum, frame: STOP.set())
@@ -2968,5 +2981,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
         message = str(error) if isinstance(error, (ValueError, KeyError)) else type(error).__name__
+        if isinstance(error, subprocess.CalledProcessError):
+            message = subprocess_failure_message(error)
         print(f"release-acceptance: {message}", file=sys.stderr)
         sys.exit(2)

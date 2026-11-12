@@ -86,9 +86,13 @@ enable_kvm() {
   ls -l /dev/kvm
 }
 
-prepare_host() {
-  sudo -n apt-get update -qq
+prepare_packages() {
+  sudo -n apt-get update -qq || return $?
   sudo -n apt-get install -y -qq --no-install-recommends "${PACKAGES[@]}"
+}
+
+prepare_host() {
+  prepare_packages
   if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
     sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
   fi
@@ -242,6 +246,8 @@ case "${1:-}" in
     [ "$#" = 5 ] || die 'usage: periodic-e2e.sh acceptance ID PREPARED OUTPUT VERSION'
     check_id="$2" prepared="$3" output="$4" version="$5"
     collector="$PWD/dev/release-acceptance.py"
+    # Source verification and profile inventory need tools before any VM setup.
+    prepare_packages || exit $?
     python3 -B "$collector" prepare --prepared "$prepared" --output "$output" --version "$version" || exit $?
     # The collector is executed from the managed workspace so its lease attribution is ordinary.
     # Its aggregate exit remains incomplete while other checks are unrequested.
