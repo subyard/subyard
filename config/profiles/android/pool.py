@@ -87,6 +87,20 @@ def report_failure(exc):
     print(f'Android pool: {type(exc).__name__} at {locations}', file=sys.stderr, flush=True)
 
 
+def sdk_output_labels(output):
+    # Only recognized failure labels cross the public boundary, never native text.
+    return ','.join(name for name, pattern in (
+        ('dns', rb'\bUnknownHostException\b'),
+        ('tls', rb'\bSSLHandshakeException\b'),
+        ('connect', rb'\bConnectException\b'),
+        ('network_timeout', rb'\bSocketTimeoutException\b'),
+        ('no_space', rb'No space left on device'),
+        ('license_rejected', rb'license[^\n]{0,256}(?:not accepted|not been accepted)'),
+        ('checksum', rb'checksum (?:mismatch|verification failed)'),
+        ('package_missing', rb'Failed to find package'),
+    ) if re.search(pattern, output, re.IGNORECASE)) or 'unknown'
+
+
 class Images:
     """Only this private directory is pruneable; build SDK and user AVDs are external."""
     def __init__(self, root, sdk, java_home='/opt/jdk-17', disk_headroom=1024**3, image_policy='latest-stable'):
@@ -202,6 +216,8 @@ class Images:
                     'capacity', 'insufficient space for image download and extraction')
             stage = self.root / ('download-' + secrets.token_hex(12))
             stage.mkdir(mode=0o700)
+            phase, process = 'stage', None
+            prefix, tail, seen = b'', b'', 0
             try:
                 atomic(stage / '.download-owner.json', dict(schema=SCHEMA, kind='image-download'))
                 sdk = stage / 'sdk'
@@ -213,6 +229,7 @@ class Images:
                     shutil.copytree(self.sdk / 'licenses', sdk / 'licenses')
                 # Use the installed SDK tool's licensing, integrity and extraction semantics.
                 # Command-line Tools 23 replaced --licenses with Android CLI installation policy.
+                phase = 'sdk-start'
                 process = subprocess.Popen([
                     str(self.sdk / 'cmdline-tools/latest/bin/sdkmanager'),
                     '--sdk_root=' + str(sdk), image['package']],
@@ -220,8 +237,8 @@ class Images:
                              ANDROID_USER_HOME=str(home / '.android'), XDG_CACHE_HOME=str(home / '.cache')),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+                phase = 'sdk-install'
                 deadline = time.monotonic() + 900
-                prefix, tail, seen = b'', b'', 0
                 nonblocking = False
 
                 def drain():
@@ -264,16 +281,7 @@ class Images:
                 if process.returncode != 0:
                     truncated = seen > len(prefix) + len(tail)
                     output = prefix + (b'\n' if truncated else b'') + tail
-                    observed = [name for name, pattern in (
-                        ('dns', rb'\bUnknownHostException\b'),
-                        ('tls', rb'\bSSLHandshakeException\b'),
-                        ('connect', rb'\bConnectException\b'),
-                        ('network_timeout', rb'\bSocketTimeoutException\b'),
-                        ('no_space', rb'No space left on device'),
-                        ('license_rejected', rb'license[^\n]{0,256}(?:not accepted|not been accepted)'),
-                        ('checksum', rb'checksum (?:mismatch|verification failed)'),
-                        ('package_missing', rb'Failed to find package'),
-                    ) if re.search(pattern, output, re.IGNORECASE)]
+                    observed = sdk_output_labels(output)
                     try:
                         free_bytes = shutil.disk_usage(self.root).free
                     except OSError:
@@ -281,8 +289,9 @@ class Images:
                     raise PoolError('download',
                         f'SDK image installation failed (exit {process.returncode}); '
                         'check licensing, disk space and download access; '
-                        f'observed={",".join(observed) or "unknown"} free_bytes={free_bytes} '
+                        f'observed={observed} free_bytes={free_bytes} '
                         f'truncated={int(truncated)}')
+                phase = 'metadata'
                 installed = sdk.joinpath(*image['package'].split(';'))
                 properties = dict(line.split('=', 1) for line in (installed / 'source.properties').read_text().splitlines()
                                   if '=' in line and not line.startswith('#'))
@@ -299,6 +308,7 @@ class Images:
                         (self.root / (package[2] + '.xml')).unlink(missing_ok=True)
                     raise PoolError('revision', 'repository revision changed; retry with refreshed catalog')
                 require((installed / 'system.img').is_file(), 'download', 'installed image has no system image')
+                phase = 'staging'
                 installed.rename(stage / 'image')
                 shutil.rmtree(sdk)
                 shutil.rmtree(home)
@@ -312,6 +322,7 @@ class Images:
                 require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
                 destination = self.root / image['key']
                 require(not destination.exists(), 'cache', 'unrecognized image cache entry; refusing replacement')
+                phase = 'publish'
                 stage.rename(destination)
                 fd = os.open(self.root, os.O_DIRECTORY)
                 try:
@@ -322,7 +333,12 @@ class Images:
             except PoolError:
                 raise
             except (OSError, ValueError) as exc:
-                raise PoolError('download', 'Android image download/extraction failed') from exc
+                facts = f'phase={phase} exception={type(exc).__name__[:64]}'
+                if isinstance(getattr(exc, 'errno', None), int):
+                    facts += f' errno={exc.errno}'
+                if process is not None:
+                    facts += f' sdk_exit={process.returncode} sdk_tail={sdk_output_labels((prefix + tail)[-8192:])}'
+                raise PoolError('download', f'Android image download/extraction failed ({facts})') from exc
             finally:
                 if stage.exists():
                     shutil.rmtree(stage)

@@ -2025,6 +2025,47 @@ raise SystemExit(7)
                 self.assertEqual(process.returncode, 7)
 
     @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
+    def test_image_os_and_value_errors_retain_only_bounded_failure_facts(self, _disk):
+        sdk = self.root / 'failed-metadata-sdk'
+        installer = sdk / 'cmdline-tools/latest/bin/sdkmanager'
+        installer.parent.mkdir(parents=True)
+        image = dict(key='a' * 64, package='system-images;android-36;google_apis;x86_64',
+                     revision='1.0.0', size=16, sha1='b' * 40)
+        images = poolmod.Images(self.root / 'failed-metadata-images', sdk)
+        for failure in ('sdk-start', 'metadata-missing', 'metadata-invalid'):
+            with self.subTest(failure=failure):
+                if failure != 'sdk-start':
+                    installer.write_text(f'#!{sys.executable}\n' + """
+import os
+os.write(1, b'private-token https://private.example/image?token=secret /private/path ' * 1000)
+os.write(1, b'java.net.SocketTimeoutException checksum mismatch\\n')
+""")
+                    installer.chmod(0o755)
+                metadata = (patch.object(poolmod.Path, 'read_text', side_effect=ValueError('private-token /private/path'))
+                            if failure == 'metadata-invalid' else contextlib.nullcontext())
+                with metadata, self.assertRaises(poolmod.PoolError) as raised:
+                    images.ensure(image, threading.Event())
+                error = raised.exception
+                message = str(error)
+                self.assertEqual(error.code, 'download')
+                self.assertLess(len(message), 512)
+                self.assertIsInstance(error.__cause__, ValueError if failure == 'metadata-invalid' else FileNotFoundError)
+                self.assertIn('phase=' + ('sdk-start' if failure == 'sdk-start' else 'metadata'), message)
+                self.assertIn('exception=' + type(error.__cause__).__name__, message)
+                if failure == 'metadata-invalid':
+                    self.assertNotIn('errno=', message)
+                else:
+                    self.assertIn('errno=2', message)
+                if failure == 'sdk-start':
+                    self.assertNotIn('sdk_exit=', message)
+                else:
+                    self.assertIn('sdk_exit=0 sdk_tail=network_timeout,checksum', message)
+                for private in ('private-token', 'private.example', 'secret', '/private/path', str(self.root)):
+                    self.assertNotIn(private, message)
+                self.assertFalse(images.cached(image))
+                self.assertFalse(list(images.root.glob('download-*')))
+
+    @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
     def test_noisy_sdk_installer_cancellation_still_kills_reaps_and_removes_stage(self, _disk):
         sdk = self.root / 'noisy-sdk'
         installer = sdk / 'cmdline-tools/latest/bin/sdkmanager'

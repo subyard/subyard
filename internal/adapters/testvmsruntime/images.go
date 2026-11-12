@@ -415,9 +415,16 @@ func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseG
 	// Replace pending metadata with the observed failure when possible. If this
 	// write fails, the earlier staging record still protects cleanup after restart.
 	defer func() {
-		var failure *readinessFailure
-		if registry.Build == nil || !errors.As(buildErr, &failure) {
+		if buildErr == nil || registry.Build == nil || registry.Build.Failure == nil {
 			return
+		}
+		var failure *readinessFailure
+		if !errors.As(buildErr, &failure) {
+			failure = registry.Build.Failure
+			failure.ObservedAt = rt.Now()
+			failure.LastProbe = readinessProbeMetadata(buildErr)
+			// Quarantine must link the private builder's durable incident too.
+			buildErr = errors.Join(buildErr, failure)
 		}
 		failure.Project = cfg.Project
 		registry.Build.Failure = failure

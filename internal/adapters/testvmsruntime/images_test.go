@@ -611,7 +611,7 @@ func TestPruneRetainsUnusableForeignImageWithoutBlockingHealthyBase(t *testing.T
 }
 
 func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
-	for _, phase := range []string{"project-create", "init-empty", "partial-init", "init-active", "project-unavailable", "inventory-unavailable"} {
+	for _, phase := range []string{"project-create", "init-empty", "partial-init", "init-active", "project-unavailable", "inventory-unavailable", "ssh-policy"} {
 		t.Run(phase, func(t *testing.T) {
 			cfg := fixtureConfig(t)
 			if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
@@ -620,6 +620,7 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 			project, owner := cfg.Project+"-builder", strings.Repeat("a", 32)
 			projectExists, vmExists := false, false
 			buildKey := ""
+			nativeFailure := &CommandError{Name: "incus", ExitCode: 1, Duration: 188 * time.Millisecond, Message: "private native failure"}
 			stops, deletes, consoles := 0, 0, 0
 			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 				command := strings.Join(args, " ")
@@ -647,7 +648,18 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 				case "profile device list default --project " + project:
 					return []byte("root\neth0"), nil, nil
 				case "info e2e-base-1 --project " + project:
+					if vmExists {
+						return nil, nil, nil
+					}
 					return nil, nil, errors.New("instance absent before init")
+				case "query /1.0/instances/e2e-base-1?project=" + project:
+					body, err := json.Marshal(map[string]any{"type": "virtual-machine", "status": "Stopped", "stateful": false,
+						"config":           map[string]string{"user.subyard.managed": managedMarker, "user.subyard.base_owner": owner, "user.subyard.base_key": buildKey, "volatile.uuid": "00000000-0000-0000-0000-000000000001"},
+						"devices":          map[string]any{cloudInitDevice: map[string]string{"type": "disk", "source": "cloud-init:config"}},
+						"expanded_devices": map[string]any{cloudInitDevice: map[string]string{"type": "disk", "source": "cloud-init:config"}}})
+					return body, nil, err
+				case "start e2e-base-1 --project " + project:
+					return nil, nil, nil
 				case "operation list --project " + project + " --format json":
 					if phase == "init-active" {
 						return []byte(`[{"class":"task","description":"Creating instance","status_code":103}]`), nil, nil
@@ -681,6 +693,19 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 					return []byte("[]"), nil, nil
 				}
 				switch {
+				case strings.HasPrefix(command, "query /1.0/instances/e2e-base-1/metadata?"):
+					return []byte(`{"templates":{}}`), nil, nil
+				case strings.HasPrefix(command, "exec e2e-base-1 "):
+					if strings.HasSuffix(command, "systemctl reload ssh") {
+						return nil, nil, nativeFailure
+					}
+					if strings.Contains(command, "cloud-init status --wait") {
+						return []byte(`{"status":"done"}`), nil, nil
+					}
+					if strings.HasSuffix(command, "-- passwd --status dev") {
+						return []byte("dev P fixture"), nil, nil
+					}
+					return nil, nil, nil
 				case strings.HasPrefix(command, "project create "+project+" "):
 					if phase == "project-create" {
 						return nil, nil, errors.New("native project creation failed")
@@ -693,7 +718,10 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 							buildKey = value
 						}
 					}
-					vmExists = phase == "partial-init"
+					vmExists = phase == "partial-init" || phase == "ssh-policy"
+					if phase == "ssh-policy" {
+						return nil, nil, nil
+					}
 					return nil, nil, errors.New("native init failed")
 				case strings.HasPrefix(command, "project set "+project+" "), strings.HasPrefix(command, "profile device set default root "):
 					return nil, nil, nil
@@ -713,6 +741,44 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 			}
 			store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
 			registry := ImageRegistry{SchemaVersion: 1, Owner: owner}
+			grant := LeaseGrant{Environment: &spec}
+			if phase == "ssh-policy" {
+				grant, err = store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "run", "tests", "slot-001")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error { slot.Reserved = true; return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, buildErr := runtime.buildBase(context.Background(), store, grant, &registry, "recipe")
+			if phase == "ssh-policy" {
+				persisted, err := runtime.imageRegistry()
+				if !errors.Is(buildErr, nativeFailure) || err != nil || persisted.Build == nil || persisted.Build.IncidentID == "" || persisted.Build.Failure == nil || persisted.Build.Failure.Phase != "builder-preparation" {
+					t.Fatalf("raw SSH failure lost durable builder receipt: %+v %v %v", persisted.Build, err, buildErr)
+				}
+				if err := runtime.QuarantineSlot(context.Background(), store, grant, buildErr); err != nil {
+					t.Fatal(err)
+				}
+				batch, err := runtime.eventRecorder().Export()
+				if err != nil || len(batch.Incidents) != 2 {
+					t.Fatalf("missing builder/slot incidents: %+v %v", batch, err)
+				}
+				for _, incident := range batch.Incidents {
+					if incident.SlotID != grant.SlotID || incident.ResourceGeneration != grant.ResourceGeneration || incident.LeaseEpoch != grant.LeaseEpoch {
+						t.Fatalf("incident belongs to another allocation: %+v", incident)
+					}
+					if incident.IncidentID == persisted.Build.IncidentID {
+						resource := incidentJSON(map[string]string{"resource_kind": "base_builder", "project": project, "vm": "e2e-base-1", "build_key": persisted.Build.Key})
+						if incident.Diagnostics["resource"] != resource || !strings.Contains(incident.Diagnostics["readiness"], "exit_code=1 duration=188ms") || strings.Contains(incident.FailureReason, "private") {
+							t.Fatalf("unsafe or missing native builder facts: %+v", incident)
+						}
+					} else if incident.Diagnostics["builder_incident"] != persisted.Build.IncidentID {
+						t.Fatalf("quarantine lost builder incident reference: %+v", incident)
+					}
+				}
+				return
+			}
 			failedStep := "native init failed"
 			if phase == "project-create" {
 				failedStep = "native project creation failed"
@@ -721,8 +787,8 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 			} else if phase == "inventory-unavailable" {
 				failedStep = "native instance inventory unavailable"
 			}
-			if _, err := runtime.buildBase(context.Background(), store, LeaseGrant{Environment: &spec}, &registry, "recipe"); err == nil || !strings.Contains(err.Error(), failedStep) {
-				t.Fatalf("native pre-creation/init failure missing: %v", err)
+			if buildErr == nil || !strings.Contains(buildErr.Error(), failedStep) {
+				t.Fatalf("native pre-creation/init failure missing: %v", buildErr)
 			}
 			// Drop all in-memory build state before cleanup.
 			restarted := Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard, Now: time.Now}
