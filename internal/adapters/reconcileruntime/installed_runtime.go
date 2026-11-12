@@ -259,6 +259,9 @@ func (runtime Runtime) installedGuestPresence(ctx context.Context) (ports.Runtim
 	if err != nil {
 		return ports.RuntimePresence{}, ports.InstanceInfo{}, err
 	}
+	if err := domain.NativeTargetOwnership(runtime.Yard, instance.Config); err != nil {
+		return ports.RuntimePresence{}, ports.InstanceInfo{}, err
+	}
 	preview, _ := instance.EffectiveConfig("user.subyard.preview_sha256")
 	usage, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
 	presence := ports.RuntimePresence{Preview: preview != "", CCUsage: usage != ""}

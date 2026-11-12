@@ -208,6 +208,14 @@ operations need the owning backup/consent policy; do not promise unimplemented c
 
 ## Settings and effective configuration
 
+Local yards, including the implicit `default`, cannot share a project/instance pair
+or a project/`SRV_VOLUME` pair. Refusals identify all known collisions,
+address sources and already known marker owners. Host/shared values of `INCUS_PROJECT`,
+`YARD_INSTANCE_NAME`, `SSH_HOST`, `SRV_VOLUME`, `HOST_BASE` and `RESTRICTED_DISK_PATHS`
+retain their existing inheritance. Operators configure a new named yard's addresses at
+yard scope for the non-owner when host values conflict. No automatic address change, rename, move,
+deletion or ownership claim repairs a collision.
+
 Immutable shipped defaults, typed persistent Subyard settings, and temporary command overrides
 combine into effective configuration. One catalog owns types, scopes, syncability,
 merge/application mode, and domain ownership for scalar/file settings. Shared, host, and yard

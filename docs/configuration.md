@@ -122,6 +122,40 @@ Configuration inspection and editing remain available to repair existing setting
 in the yard name also requires a valid `YARD_INSTANCE_NAME` override because Incus instance names
 use hostname rules.
 
+Host/shared values for `INCUS_PROJECT`, `YARD_INSTANCE_NAME`, `SSH_HOST`, `SRV_VOLUME`,
+`HOST_BASE` and `RESTRICTED_DISK_PATHS` are inherited by every yard as before. Generic
+values keep their existing named-yard derivations. Loading or initializing a yard never
+changes its resolved addresses automatically.
+
+Two local configured yards cannot share a project/instance pair or a project/`SRV_VOLUME`
+pair. The implicit `default` is always included; remote registrations are
+excluded. Init, release activation, teardown, hard cleanup, config status and config apply refuse every
+known collision, naming both yards, keys, source files/scopes and any already known marker
+owner. Set the conflicting keys at yard scope for the non-owner. When ownership is
+unknown, inspect the instance marker before choosing which yard to reconfigure. For a
+shared `/srv` volume, separate its data before changing the volume address. A foreign `user.subyard.name` marker also refuses guest
+inspection and power metadata writes. No live yard or data is renamed, moved, deleted or
+relabeled automatically.
+
+When every release gate blocker is a native-target collision or foreign marker, local
+`config set` and `config unset` of `INCUS_PROJECT`, `YARD_INSTANCE_NAME` and `SRV_VOLUME`
+remain available at yard or host scope. Other blockers and Git/shared-scope writes retain
+their ordinary admission checks.
+
+For a new named yard under custom host values, create its protected `config.env` definition
+and set its native addresses at yard scope before init:
+
+```sh
+yard -Y demo config set INCUS_PROJECT subyard-demo --scope yard
+yard -Y demo config set YARD_INSTANCE_NAME yard-demo --scope yard
+yard -Y demo config set SSH_HOST yard-demo --scope yard
+yard -Y demo config set SRV_VOLUME yard-srv-demo --scope yard
+yard -Y demo init
+```
+
+An unmarked existing instance is preserved; a conflicting definition still requires the
+same explicit yard-scope repair.
+
 ### Git identity
 
 `GIT_USER_NAME` and `GIT_USER_EMAIL` are syncable string settings. Set them in shared,

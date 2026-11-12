@@ -1,12 +1,15 @@
 package releasetransition
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 func TestActivationDiagnosticsPreserveFreshProcessPreflightBlocker(t *testing.T) {
@@ -238,5 +241,67 @@ func TestActivationDiagnosticsDistinguishInvalidObservationFromRemainingDrift(t 
 				}
 			})
 		}
+	}
+}
+
+func TestNativeTargetActivationDiagnostics(t *testing.T) {
+	native := &domain.NativeTargetRefusal{Message: "alpha and beta; /config/config.env (host scope)", Action: "repair beta"}
+	for _, tc := range []struct {
+		cause    error
+		resource string
+	}{
+		{nativeDiagnosticWrapper{native}, "activation.fixture.native-target"},
+		{otherMigrationRefusal{errors.New("unrelated migration")}, "activation.fixture"},
+		{nativeDiagnosticWrapper{domain.CollectRefusals(native, errors.New("unrelated dependency"))}, "activation.fixture"},
+		{domain.CollectRefusals(native, &domain.NativeTargetRefusal{Message: "alpha and gamma", Action: "repair gamma"}, errors.New("unrelated dependency")), "activation.fixture"},
+	} {
+		var output bytes.Buffer
+		ctx, flush := captureMigrationDiagnostics(WithMigrationDiagnosticWriter(context.Background(), &output))
+		blocker := activationObservationBlocker(ctx, "fixture", tc.cause)
+		flush()
+		if blocker.Resource != tc.resource || blocker.Code != CodeDependencyUnavailable {
+			t.Fatalf("wrong classification: %+v", blocker)
+		}
+		if strings.Contains(output.String(), "unrelated") {
+			t.Fatal("unrelated diagnostic leaked", &output)
+		}
+		if _, other := tc.cause.(otherMigrationRefusal); !other && !strings.Contains(output.String(), "/config/config.env (host scope)") {
+			t.Fatal("source details lost", &output)
+		}
+		if strings.Contains(tc.cause.Error(), "alpha and gamma") && !strings.Contains(output.String(), "alpha and gamma") {
+			t.Fatal("independent native finding lost", &output)
+		}
+	}
+}
+
+func TestNativeTargetRefusalPassesProtocolValidation(t *testing.T) {
+	for _, phase := range []string{"observe", "reconcile"} {
+		t.Run(phase, func(t *testing.T) {
+			fixture := &activationDiagnosticPostApplyFixture{v2TestReconciler: &v2TestReconciler{id: "fixture"}, postErr: &domain.NativeTargetRefusal{Message: "yards default and named share native target", Action: "repair the non-owner"}}
+			refusal := fixture.postErr.(*domain.NativeTargetRefusal)
+			transition, _, _ := v2TransitionFixture(t, func(point string) error {
+				if point == "before-reconciler-0" {
+					fixture.applied = true
+				}
+				return nil
+			})
+			transition.options.Reconcilers = []V2ActivationReconciler{fixture}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			inspection, err := transition.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := StatusRecovering
+			if phase == "observe" {
+				fixture.applied, want = true, StatusOperatorActionRequired
+			}
+			outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+			if err != nil || outcome.Status != want || outcome.Code != CodeDependencyUnavailable || outcome.Message != refusal.Message || outcome.Retry != refusal.Action {
+				t.Fatalf("lost refusal: %+v %v", outcome, err)
+			}
+			if err := ValidateProcessConvergence(goal, inspection, outcome); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

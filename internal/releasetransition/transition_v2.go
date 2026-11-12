@@ -3441,14 +3441,14 @@ func (transition *V2Transition) observeActivation(
 			observation.activationFixed = false
 			observation.blockers = append(
 				observation.blockers,
-				activationObservationBlocker(id, err),
+				activationObservationBlocker(ctx, id, err),
 			)
 			continue
 		}
 		if err := validateActivationObservation(id, actual); err != nil {
 			var capacity pendingDiagnosticCapacityError
 			if errors.As(err, &capacity) {
-				observation.blockers = append(observation.blockers, activationObservationBlocker(id, err))
+				observation.blockers = append(observation.blockers, activationObservationBlocker(ctx, id, err))
 				continue
 			}
 			return err
@@ -3605,7 +3605,7 @@ func (transition *V2Transition) reconcileActivation(
 			}
 			before, observeErr := reconciler.Observe(ctx, journal.Releases, links)
 			if observeErr != nil {
-				blocker := activationObservationBlocker(id, observeErr)
+				blocker := activationObservationBlocker(ctx, id, observeErr)
 				if blocker.Code == CodeActivationAmbiguous {
 					return v2OperatorOutcome(
 						links, journal.Goal.Target, transactionIDPointer(journal.Transaction),
@@ -3660,7 +3660,7 @@ func (transition *V2Transition) reconcileActivation(
 				return guardOutcome, guardErr
 			}
 			if err != nil {
-				blocker := activationObservationBlocker(id, err)
+				blocker := activationObservationBlocker(ctx, id, err)
 				outcome := v2RecoveringOutcome(links, journal.Goal.Target,
 					transactionIDPointer(journal.Transaction), blocker.Code, blocker.Message)
 				if blocker.Code == CodeActivationAmbiguous {
@@ -3716,7 +3716,7 @@ func (transition *V2Transition) reconcileActivation(
 					fmt.Sprintf("activation reconciler %q reported an invalid state during aggregate verification", id),
 					"run yard migrate --check"), warnings), nil
 			}
-			blocker := activationObservationBlocker(id, verifyErr)
+			blocker := activationObservationBlocker(ctx, id, verifyErr)
 			outcome := v2RecoveringOutcome(links, journal.Goal.Target,
 				transactionIDPointer(journal.Transaction), blocker.Code, blocker.Message)
 			if blocker.Code == CodeActivationAmbiguous {
@@ -3830,7 +3830,31 @@ func pendingConfiguration(err error) bool {
 	return pendingConfiguration(errors.Unwrap(err))
 }
 
-func activationObservationBlocker(id string, err error) Blocker {
+func nativeTargetRefusalsOnly(err error) bool {
+	switch typed := err.(type) {
+	case nil:
+		return false
+	case *domain.NativeTargetRefusal:
+		return true
+	case interface{ Unwrap() []error }:
+		causes := typed.Unwrap()
+		for _, cause := range causes {
+			if !nativeTargetRefusalsOnly(cause) {
+				return false
+			}
+		}
+		return len(causes) != 0
+	}
+	return nativeTargetRefusalsOnly(errors.Unwrap(err))
+}
+
+func activationObservationBlocker(ctx context.Context, id string, err error) Blocker {
+	for _, cause := range refusalCauses(err) {
+		var nativeTarget *domain.NativeTargetRefusal
+		if errors.As(cause, &nativeTarget) {
+			recordMigrationDiagnostics(ctx, nativeTarget)
+		}
+	}
 	code := CodeDependencyUnavailable
 	message := fmt.Sprintf("activation reconciler %q cannot be observed safely", id)
 	retry := "run yard update --check"
@@ -3841,6 +3865,9 @@ func activationObservationBlocker(id string, err error) Blocker {
 	}
 	message, retry = publicActivationDiagnostic(err, message, retry)
 	resource := "activation." + id
+	if nativeTargetRefusalsOnly(err) {
+		resource += ".native-target"
+	}
 	if pendingConfiguration(err) {
 		resource += ".pending-configuration"
 	}

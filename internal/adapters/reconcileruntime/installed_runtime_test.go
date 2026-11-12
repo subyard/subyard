@@ -327,7 +327,7 @@ func TestInstalledHostKeyRuntimeDoesNotRequireIncus(t *testing.T) {
 
 func TestInstalledStoppedGuestPresenceIsConservativeAndBound(t *testing.T) {
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/i": {Status: "Stopped"}}}
-	runtime := Runtime{Incus: incus, Yard: domain.Context{IncusProject: "p", YardInstanceName: "i"}}
+	runtime := Runtime{Incus: incus, Executor: incus, Yard: domain.Context{IncusProject: "p", YardInstanceName: "i"}}
 	before, err := runtime.InstalledRuntimePresence(context.Background(), "core-guest-runtime")
 	if err != nil || !before.Preview || !before.CCUsage || len(incus.ExecCalls) != 0 {
 		t.Fatalf("stopped unknown markers treated as absent or woken: %#v %v", before, err)
@@ -337,6 +337,14 @@ func TestInstalledStoppedGuestPresenceIsConservativeAndBound(t *testing.T) {
 	if err != nil || before.Actual == after.Actual {
 		t.Fatalf("stopped marker metadata not bound: %v", err)
 	}
+	for _, state := range []string{"Running", "Stopped"} {
+		incus.Instances["p/i"] = ports.InstanceInfo{Status: state, Config: map[string]string{"user.subyard.name": "foreign", "user.subyard.preview_sha256": "installed"}}
+		_, err := runtime.ObserveInstalledRuntime(context.Background(), "core-guest-runtime")
+		if err == nil || !strings.Contains(err.Error(), "belongs to yard foreign") || len(incus.ExecCalls) != 0 {
+			t.Fatalf("foreign guest inspected: %v", err)
+		}
+	}
+
 }
 
 func projectedReleaseFixture(t *testing.T, runtime Runtime) Runtime {

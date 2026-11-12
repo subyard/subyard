@@ -1397,6 +1397,9 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 	if err != nil || !strings.EqualFold(instance.Status, "running") {
 		return target, false, nil // The ordinary assessment owns absent/stopped/read failures.
 	}
+	if err := domain.NativeTargetOwnership(target.Loaded.Context, instance.Config); err != nil {
+		return target, false, err
+	}
 	applied, err := observer.AppliedIntegrationConfiguration(ctx)
 	if err != nil {
 		return target, false, err
@@ -1562,7 +1565,7 @@ func (reconciler *materializedConfigActivationReconciler) PrepareActivationRecov
 		return "", err
 	}
 	operation := reconciler.reconcileCLI()
-	loaded, _, err := operation.releaseActivationTargets(ctx, "default", reconciler.configHome, false, nil)
+	loaded, err := operation.resolveReleaseTransitionContext(ctx, "default", reconciler.configHome, nil)
 	if err != nil {
 		return "", (materializedConfigActivationError{err, "default", "configuration", "config status", "inspect", reconciler.configHome}).collected()
 	}
@@ -1603,7 +1606,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	if yard == "" || reconciler.allLocal {
 		yard = "default"
 	}
-	loaded, _, err := operation.releaseActivationTargets(ctx, yard, reconciler.configHome, false, nil)
+	loaded, err := operation.resolveReleaseTransitionContext(ctx, yard, reconciler.configHome, nil)
 	if err != nil {
 		return (materializedConfigActivationError{err, yard, "configuration", "config status", "apply", reconciler.configHome}).collected()
 	}
@@ -1715,8 +1718,14 @@ func (cli *CLI) releaseActivationTargets(ctx context.Context, yard, home string,
 	if err != nil {
 		return loaded, nil, err
 	}
-	targets, err := cli.releaseConfigTargets(ctx, loaded, allLocal)
-	return loaded, targets, err
+	targets, addresses, err := cli.configTargets(ctx, loaded, allLocal, true)
+	if !allLocal {
+		return loaded, targets, domain.CollectRefusals(err, cli.checkNativeTargets(loaded, false, nil))
+	}
+	for _, target := range targets {
+		addresses = append(addresses, target.Loaded)
+	}
+	return loaded, targets, domain.CollectRefusals(err, config.NativeTargetCollisions(addresses, nil, ""))
 }
 
 func (cli *CLI) loadReleaseTransitionContext(yard, configHome string, sources map[string]string, files ...*config.ProspectiveFiles) (config.Loaded, error) {

@@ -78,6 +78,11 @@ func recordMigrationDiagnostics(ctx context.Context, err error) {
 			capture.messages["release transition dependency: "+dependency.Error()] = true
 			continue
 		}
+		var nativeTarget *domain.NativeTargetRefusal
+		if errors.As(cause, &nativeTarget) {
+			capture.messages[nativeTarget.Error()] = true
+			continue
+		}
 		message, action := publicActivationDiagnostic(cause, "", "")
 		if message == "" {
 			continue

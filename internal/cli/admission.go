@@ -306,6 +306,9 @@ func (cli *CLI) admitReleaseGate(
 	if outcome == nil {
 		return permits, 0, false
 	}
+	if nativeTargetAddressRepair(admission.handler, arguments, gateInspection) {
+		return permits, 0, false
+	}
 	switch admission.recovery {
 	case recoveryConfigApply:
 		permit, err := cli.prepareConfigApplyRepair(ctx, yard, admission.configApplyAll, *outcome)

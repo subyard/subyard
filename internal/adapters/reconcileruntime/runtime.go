@@ -1219,6 +1219,7 @@ func (runtime Runtime) importPowerState(ctx context.Context) error {
 	if runtime.ConfigWriter == nil {
 		return errors.New("Incus instance config writer is required")
 	}
+	var refusals []error
 	for _, yard := range runtime.powerYards() {
 		if yard.AccessKind == domain.AccessRemote {
 			continue
@@ -1228,14 +1229,15 @@ func (runtime Runtime) importPowerState(ctx context.Context) error {
 			continue
 		}
 		if err != nil {
-			return err
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", yard.YardName, err))
+			continue
 		}
 		if intent.Imported && runtime.Stderr != nil {
 			fmt.Fprintf(runtime.Stderr, "  [ ok ] imported %s power state: %s\n",
 				yard.YardName, intent.Desired)
 		}
 	}
-	return nil
+	return domain.CollectRefusals(refusals...)
 }
 
 func (runtime Runtime) powerService() application.PowerService {

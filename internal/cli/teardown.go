@@ -52,7 +52,7 @@ func (execution *teardownExecution) networkRemoval() *yardnetwork.RemovalPlan {
 }
 func (execution *teardownExecution) selectYard(loaded config.Loaded) {
 	for index := range execution.Yards {
-		if execution.Yards[index].Context.IncusProject == loaded.Context.IncusProject && execution.Yards[index].Context.YardInstanceName == loaded.Context.YardInstanceName {
+		if execution.Yards[index].Context.YardName == loaded.Context.YardName && execution.Yards[index].Context.IncusProject == loaded.Context.IncusProject && execution.Yards[index].Context.YardInstanceName == loaded.Context.YardInstanceName {
 			execution.activeYard = &execution.Yards[index]
 			return
 		}
@@ -255,6 +255,14 @@ func (cli *CLI) observeTeardownExecution(ctx context.Context, loaded config.Load
 func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, execution *teardownExecution, checkNetwork bool) error {
 	if execution == nil {
 		return errors.New("teardown execution is required")
+	}
+	owners, ownershipErr := cli.observeNativeOwner(ctx, loaded)
+	var collisions error
+	if !execution.full {
+		collisions = cli.checkNativeTargets(loaded, false, owners)
+	}
+	if err := domain.CollectRefusals(collisions, ownershipErr); err != nil {
+		return err
 	}
 	execution.selectYard(loaded)
 	if err := cli.bindTeardownOwner(ctx, loaded, execution); err != nil {

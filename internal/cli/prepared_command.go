@@ -702,6 +702,10 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			return errors.New(warning)
 		}
 	}
+	owners, ownershipErr := cli.observeNativeOwner(ctx, prepared.Loaded)
+	if err := domain.CollectRefusals(cli.checkNativeTargets(prepared.Loaded, false, owners), ownershipErr); err != nil {
+		return err
+	}
 	if handled, err := prepared.prepareStoppedIdentityInspection(ctx, bootstrap); handled || err != nil {
 		return err
 	}
@@ -1098,6 +1102,9 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 		return err
 	}
 	if execution.full {
+		if err := prepared.CLI.checkNativeTargets(prepared.Loaded, true, nil); err != nil {
+			return err
+		}
 		if err := prepared.bindFullInstallation(); err != nil {
 			return err
 		}

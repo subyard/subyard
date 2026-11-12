@@ -96,11 +96,18 @@ func (service PowerService) Set(
 	desired domain.DesiredPower,
 	initialized bool,
 ) error {
-	if service.Config == nil {
-		return errors.New("Incus instance config writer is required")
+	if service.Instances == nil || service.Config == nil {
+		return errors.New("Incus instance reader and config writer are required")
 	}
 	if desired != domain.PowerRunning && desired != domain.PowerStopped {
 		return fmt.Errorf("invalid desired power %q", desired)
+	}
+	instance, err := service.Instances.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
+	if err != nil {
+		return err
+	}
+	if err := domain.NativeTargetOwnership(yard, instance.Config); err != nil {
+		return err
 	}
 	name, bridge := powerIdentity(yard)
 	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.YardInstanceName, map[string]string{
@@ -205,6 +212,9 @@ func powerMetadataUpdate(
 	instance ports.InstanceInfo,
 	yard domain.Context,
 ) (map[string]string, PowerIntent, error) {
+	if err := domain.NativeTargetOwnership(yard, instance.Config); err != nil {
+		return nil, PowerIntent{}, err
+	}
 	name, bridge := powerIdentity(yard)
 	values := map[string]string{
 		powerYardNameKey: name, powerBridgeKey: bridge, powerAutostartKey: "false",

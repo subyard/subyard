@@ -115,6 +115,12 @@ installed-runtime, real Incus/systemd, routing, reboot and retained-data evidenc
 Choose the owning packages, scripts and lanes below by the changed contract, rather
 than repeating their logical matrices in P0.
 
+The `source-upgrade` lane creates a named yard under a custom host `INCUS_PROJECT`
+with the candidate: conflicting init must refuse before mutation; explicit yard-scope
+addresses then allow its own instance. A duplicate local registration verifies teardown
+and config-status refusal text and retention. Collision kinds and activation ownership
+refusal remain host-free.
+
 The `source-upgrade` lane starts from a checksum-pinned installed v0.11.0 release and
 covers explicit test-owner recreation, retained ordinary-yard state and later installed updates.
 Fresh pre-v0.11.0 source upgrades are outside the

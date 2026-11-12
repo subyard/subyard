@@ -149,6 +149,12 @@ func (cli *CLI) installedReleaseTarget(ctx context.Context, target configTarget)
 // refusal; it would otherwise apply desired values over unread installed ones.
 // A guest exit status, invalid evidence or a stale read remains a refusal.
 func (cli *CLI) observeInstalledReleaseTarget(ctx context.Context, target configTarget, unavailableUnknown bool) (configTarget, bool, error) {
+	if err := cli.checkNativeOwner(ctx, target.Loaded); err != nil {
+		var refusal *domain.NativeTargetRefusal
+		if errors.As(err, &refusal) {
+			return target, false, err
+		}
+	}
 	observing := cli
 	var probe *guestExecProbe
 	if unavailableUnknown {

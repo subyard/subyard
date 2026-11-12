@@ -423,7 +423,7 @@ func TestPowerImportIsNativeAcrossRegisteredLocalYards(t *testing.T) {
 				Name: "yard-demo", Project: "subyard-demo", Status: "Stopped",
 				Config: map[string]string{
 					"user.subyard.managed": "true", "user.subyard.initialized": "false",
-					"user.subyard.desired_power": "stopped", "user.subyard.name": "old",
+					"user.subyard.desired_power": "stopped", "user.subyard.name": "demo",
 					"user.subyard.bridge": "old", "boot.autostart": "true",
 				},
 			},
@@ -2379,5 +2379,25 @@ func TestVMDeviceBoundaryReportsEveryFinding(t *testing.T) {
 	want := `effective device "foreign" violates ALLOWS_HOST_ACCESS=false; effective eth0 differs from the managed project profile; local root disk overrides the managed project profile`
 	if bounded || err == nil || err.Error() != want {
 		t.Fatalf("bounded=%t err=%v", bounded, err)
+	}
+}
+
+func TestPowerImportCollectsForeignOwnersAndContinuesOtherYards(t *testing.T) {
+	native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	runtime := Runtime{Incus: native, ConfigWriter: native}
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		instance := ports.InstanceInfo{Name: name, Project: name, Status: "Stopped", Config: map[string]string{"user.subyard.name": "unregistered"}}
+		if name == "gamma" {
+			instance.Config = nil
+		}
+		native.Instances[name+"/"+name] = instance
+		runtime.PowerYards = append(runtime.PowerYards, domain.Context{YardName: name, IncusProject: name, YardInstanceName: name})
+	}
+	err := runtime.importPowerState(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "yard alpha:") || !strings.Contains(err.Error(), "yard beta:") || !strings.Contains(err.Error(), "set INCUS_PROJECT or YARD_INSTANCE_NAME at yard scope") {
+		t.Fatalf("lost per-yard refusal or exit: %v", err)
+	}
+	if len(native.ConfigUpdates) != 1 || native.ConfigUpdates[0].Project != "gamma" || native.Instances["alpha/alpha"].Config["user.subyard.name"] != "unregistered" {
+		t.Fatalf("other yards not imported: %#v", native.ConfigUpdates)
 	}
 }

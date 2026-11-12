@@ -90,7 +90,7 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 		if err != nil {
 			return nil, fmt.Errorf("yard %s: %w", loaded.Context.YardName, err)
 		}
-		var refusals []error
+		refusals := []error{domain.NativeTargetOwnership(loaded.Context, instance.Config)}
 		identityInvalid := false
 		var parameters []domain.MigrationParameter
 		if instance.Config["volatile.uuid"] == "" {
@@ -102,6 +102,9 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 			{"user.subyard.managed", instance.Config["user.subyard.managed"], "true"},
 			{"user.subyard.bridge", instance.Config["user.subyard.bridge"], loaded.Context.IncusBridge},
 		} {
+			if field.name == "user.subyard.name" && field.installed != "" && field.installed != field.desired {
+				continue // The ownership finding above names this foreign marker and its exit.
+			}
 			if field.installed != field.desired {
 				parameter := domain.MigrationParameter{Name: field.name, Installed: domain.MigrationDiagnosticValue(field.installed), Desired: domain.MigrationDiagnosticValue(field.desired)}
 				parameters = append(parameters, parameter)

@@ -98,7 +98,7 @@ func TestConfigAssessmentKeepsIndependentDriftAfterSourceFailure(t *testing.T) {
 	platform.settings["DEV_USER"] = "before"
 	platform.settings["AGENT_codex_COMMAND"] = "before-command"
 	program := &CLI{options: Options{RepositoryRoot: root, Incus: incus, Executor: incus, InitPlatform: platform, Stdout: &stdout, Stderr: &stderr}}
-	err = program.configStatus(context.Background(), []configTarget{{Name: "default", Loaded: loaded}}, true)
+	_, err = program.configStatus(context.Background(), []configTarget{{Name: "default", Loaded: loaded}}, true)
 	if err == nil || !strings.Contains(err.Error(), "claude.config") {
 		t.Fatalf("missing read failure: %v", err)
 	}

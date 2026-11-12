@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -249,5 +250,30 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 	if len(physical.Requests) != 1 || len(physical.Requests[0].Arguments) != 1 ||
 		physical.Requests[0].Arguments[0] != "start" {
 		t.Fatalf("physical adapter did not receive typed start: %#v", physical.Requests)
+	}
+}
+
+func TestPowerRefusesForeignMarkerBeforeMutation(t *testing.T) {
+	for _, operation := range []string{"set", "ensure-managed", "ensure-unmanaged"} {
+		t.Run(operation, func(t *testing.T) {
+			yard := domain.Context{YardName: "named", IncusProject: "same", YardInstanceName: "same"}
+			values := validPowerMetadata()
+			values["user.subyard.name"] = "owner"
+			if operation == "ensure-unmanaged" {
+				delete(values, "user.subyard.managed")
+			}
+			native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"same/same": {Status: "Running", Config: values}}}
+			before := maps.Clone(values)
+			service := PowerService{Instances: native, Config: native}
+			var err error
+			if operation == "set" {
+				err = service.Set(context.Background(), yard, domain.PowerRunning, true)
+			} else {
+				_, err = service.Ensure(context.Background(), yard)
+			}
+			if err == nil || !strings.Contains(err.Error(), "belongs to yard owner") || !maps.Equal(before, native.Instances["same/same"].Config) || len(native.ConfigUpdates) != 0 {
+				t.Fatalf("foreign marker changed: %v", err)
+			}
+		})
 	}
 }

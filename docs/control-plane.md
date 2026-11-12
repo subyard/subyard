@@ -466,6 +466,12 @@ does not offer it, so run `yard migrate` once after that update. Init-embedded m
 offer it either: init keeps its own plan and names its own provision continuation.
 
 Registered local yards run missing compatibility migrations before ordinary init admission.
+Activation checks `user.subyard.name` before reading any guest settings. A foreign marker
+is a state refusal naming the owner and repair route. Local registered target collisions
+report every shared instance and /srv volume with address keys, values and
+source files/scopes. Operators repair conflicting addresses at yard scope; configuration
+loading, init and release migrations never change addresses automatically.
+
 Their native ownership and selected resource receipts use per-yard steps in the same release
 journal. The migration cannot be rolled back, so existing state does not stop it: local devices
 are taken under management as they are and ordinary `yard init` owns later convergence. Device

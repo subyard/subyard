@@ -526,6 +526,10 @@ func (cli *CLI) prepareInitExecution(
 	arguments []string,
 	bootstrap *initBootstrap,
 ) (*initExecution, error) {
+	owners, ownershipErr := cli.observeNativeOwner(ctx, loaded)
+	if err := domain.CollectRefusals(cli.checkNativeTargets(loaded, false, owners), ownershipErr); err != nil {
+		return nil, err
+	}
 	return cli.prepareInitExecutionPlan(ctx, loaded, arguments, bootstrap, false)
 }
 

@@ -31,6 +31,7 @@ type configTarget struct {
 }
 
 type configTargetAssessment struct {
+	NativeOwner             string
 	Target                  configTarget
 	State                   string
 	Changed                 bool
@@ -178,16 +179,22 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 		return 2
 	}
 	targets, err := cli.localConfigTargets(loaded, allLocal)
-	if err != nil {
-		cli.errorf("config %s: %v", action, err)
-		return 1
-	}
 	if action == "status" {
-		if err := cli.configStatus(ctx, targets, true); err != nil {
+		owners, statusErr := cli.configStatus(ctx, targets, true)
+		err = domain.CollectRefusals(err, cli.checkNativeTargets(loaded, allLocal, owners), statusErr)
+		if err == nil && len(targets) == 0 {
+			err = errors.New("no local yards selected")
+		}
+		if err != nil {
 			cli.errorf("config status: %v", err)
 			return 1
 		}
 		return 0
+	}
+	if err != nil {
+		err = domain.CollectRefusals(err, cli.checkNativeTargets(loaded, allLocal, nil))
+		cli.errorf("config %s: %v", action, err)
+		return 1
 	}
 	selector := func() ([]configTarget, error) {
 		return cli.refreshLocalConfigTargets(loaded, allLocal)
@@ -836,32 +843,33 @@ func configPathScope(path string, values map[string]string) string {
 }
 
 func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]configTarget, error) {
-	return cli.configTargets(context.Background(), loaded, allLocal, false)
+	targets, _, err := cli.configTargets(context.Background(), loaded, allLocal, false)
+	return targets, err
 }
 
-func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLocal, release bool) ([]configTarget, error) {
+func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLocal, release bool) ([]configTarget, []config.Loaded, error) {
 	if !allLocal {
 		if release && (loaded.Context.YardName == "test-yard" || loaded.Context.YardName == "e2e-yard") {
 			warning, err := cli.releaseTestYardRecreation(ctx, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if warning != "" {
-				return nil, nil
+				return nil, nil, nil
 			}
 		}
-		return []configTarget{{Name: loaded.Context.YardName, Loaded: loaded}}, nil
+		return []configTarget{{Name: loaded.Context.YardName, Loaded: loaded}}, nil, nil
 	}
 	names, err := config.YardNames(
 		loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if loaded.ProspectiveFiles != nil {
 		for _, name := range loaded.ProspectiveFiles.Yards {
 			if !domain.SafeName(name) {
-				return nil, errors.New("invalid prospective yard name")
+				return nil, nil, errors.New("invalid prospective yard name")
 			}
 			if !slices.Contains(names, name) {
 				names = append(names, name)
@@ -869,11 +877,13 @@ func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLoca
 		}
 	}
 	targets := make([]configTarget, 0, len(names))
+	var findings []error
+	var addressOnly []config.Loaded
 	for _, name := range names {
 		if release && (name == "test-yard" || name == "e2e-yard") {
 			warning, err := cli.releaseTestYardRecreation(ctx, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if warning != "" {
 				continue
@@ -887,14 +897,21 @@ func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLoca
 			targetLoaded, err = cli.loadInventoryLoaded(name, loaded)
 		}
 		if err != nil {
-			return nil, materializedConfigActivationError{err, name, "configuration", "config status", "inspect", loaded.Context.Paths.ConfigHome}
+			findings = append(findings, materializedConfigActivationError{err, name, "configuration", "config status", "inspect", loaded.Context.Paths.ConfigHome})
+			if release {
+				addresses, err := cli.loadNativeTargetContext(name, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles, loaded.Context.Paths.ConfigDir)
+				if err == nil && addresses.Context.AccessKind != domain.AccessRemote {
+					addressOnly = append(addressOnly, addresses)
+				}
+			}
+			continue
 		}
 		if targetLoaded.Context.AccessKind == domain.AccessRemote {
 			continue
 		}
 		targets = append(targets, configTarget{Name: name, Loaded: targetLoaded})
 	}
-	return targets, nil
+	return targets, addressOnly, domain.CollectRefusals(findings...)
 }
 
 func (cli *CLI) refreshLocalConfigTargets(
@@ -916,28 +933,36 @@ func (cli *CLI) configStatus(
 	targets []configTarget,
 	checkDrift bool,
 	expectedDesired ...map[string]string,
-) error {
+) (map[string]string, error) {
 	if len(targets) == 0 {
-		return errors.New("no local yards selected")
+		return nil, nil
 	}
 	configHome := targets[0].Loaded.Context.Paths.ConfigHome
 	if err := validateManagedConfigTree(configHome); err != nil {
-		return err
+		return nil, err
 	}
 	legacy, err := legacyConfigInputs(targets[0].Loaded)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, path := range legacy {
 		fmt.Fprintf(cli.options.Stdout, "attention: legacy input requires review/import: %s\n", path)
 	}
 	var drifted []string
 	var findings []error
+	owners := map[string]string{}
 	for _, target := range targets {
 		assessment, err := cli.assessConfigTarget(ctx, target, checkDrift)
+		if assessment.NativeOwner != "" {
+			owners[target.Loaded.Context.IncusProject+"/"+target.Loaded.Context.YardInstanceName] = assessment.NativeOwner
+		}
 		if err != nil {
 			findings = append(findings, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "verify", configHome})
 			if len(expectedDesired) != 0 {
+				continue
+			}
+			var foreign *domain.NativeTargetRefusal
+			if errors.As(err, &foreign) {
 				continue
 			}
 			state, stateErr := cli.configDiagnosticState(ctx, target)
@@ -1007,7 +1032,7 @@ func (cli *CLI) configStatus(
 	if len(drifted) != 0 {
 		findings = append(findings, fmt.Errorf("materialized agent config drift in yards: %s", strings.Join(drifted, ", ")))
 	}
-	return domain.CollectRefusals(findings...)
+	return owners, domain.CollectRefusals(findings...)
 }
 
 func (cli *CLI) applyConfig(
@@ -1133,6 +1158,7 @@ func (cli *CLI) assessConfigTarget(
 	check bool,
 ) (configTargetAssessment, error) {
 	desired, assets, desiredPayloads, prepareErr := materializationDesired(target, check, target.Loaded.ProspectiveFiles.ReadAsset)
+	nativeOwner := ""
 	facts := []config.MaterializedArtifactAssessment{}
 	var differences []domain.ConfigurationDifference
 	finish := func(state string) (configTargetAssessment, error) {
@@ -1140,7 +1166,7 @@ func (cli *CLI) assessConfigTarget(
 		if err != nil {
 			return configTargetAssessment{}, err
 		}
-		return configTargetAssessment{Target: target, State: assessment.State, Changed: assessment.Changed,
+		return configTargetAssessment{NativeOwner: nativeOwner, Target: target, State: assessment.State, Changed: assessment.Changed,
 			DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint, Differences: differences}, prepareErr
 	}
 	if target.Loaded.Context.AccessKind == domain.AccessRemote {
@@ -1157,6 +1183,10 @@ func (cli *CLI) assessConfigTarget(
 	}
 	if err != nil {
 		return configTargetAssessment{}, domain.CollectRefusals(prepareErr, err)
+	}
+	nativeOwner = info.Config["user.subyard.name"]
+	if err := domain.NativeTargetOwnership(target.Loaded.Context, info.Config); err != nil {
+		return configTargetAssessment{NativeOwner: nativeOwner}, domain.CollectRefusals(prepareErr, err)
 	}
 	if !strings.EqualFold(info.Status, "running") {
 		assessment, err := finish("stopped")
@@ -1213,7 +1243,7 @@ func (cli *CLI) assessConfigTarget(
 		}
 	}
 	if err := domain.CollectRefusals(failures...); err != nil {
-		return configTargetAssessment{State: "running", Differences: differences}, err
+		return configTargetAssessment{NativeOwner: nativeOwner, State: "running", Differences: differences}, err
 	}
 	return finish("running")
 }

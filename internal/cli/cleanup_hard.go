@@ -340,6 +340,9 @@ func (prepared *preparedCommand) prepareHardCleanup(ctx context.Context) error {
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return errors.New("hard cleanup must execute on the selected yard owner")
 	}
+	if err := cli.checkNativeTargets(loaded, false, nil); err != nil {
+		return err
+	}
 	reader, _ := cli.statusPorts()
 	native, ok := reader.(ports.YardBackupManager)
 	if !ok {

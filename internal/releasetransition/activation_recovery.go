@@ -110,7 +110,7 @@ func (transition *V2Transition) assessActivationRecovery(ctx context.Context, re
 	for _, reconciler := range fresh.options.Reconcilers {
 		actual, observeErr := reconciler.Observe(ctx, options.Releases, observation.links)
 		if observeErr != nil {
-			b := activationObservationBlocker(reconciler.ID(), observeErr)
+			b := activationObservationBlocker(ctx, reconciler.ID(), observeErr)
 			return blocked(b.Code, b.Resource, b.Message, b.Retry)
 		}
 		if err := validateActivationObservation(reconciler.ID(), actual); err != nil {
@@ -120,7 +120,7 @@ func (transition *V2Transition) assessActivationRecovery(ctx context.Context, re
 		if planner, ok := reconciler.(V2ActivationRecoveryPlanner); ok {
 			binding, err = planner.PrepareActivationRecovery(ctx, options.Releases, observation.links)
 			if err != nil {
-				b := activationObservationBlocker(reconciler.ID(), err)
+				b := activationObservationBlocker(ctx, reconciler.ID(), err)
 				return blocked(b.Code, b.Resource, b.Message, b.Retry)
 			}
 		} else if !actual.Converged {

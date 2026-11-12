@@ -375,6 +375,18 @@ func TestRegisteredMigrationCollectsResourceAndOwnerRefusals(t *testing.T) {
 	if native.grants != 0 {
 		t.Fatal("refused observation published native grants")
 	}
+	instance.Config["user.subyard.name"], instance.LocalConfig["user.subyard.name"] = "foreign", "foreign"
+	instance.Config["user.subyard.desired_power"], instance.LocalConfig["user.subyard.desired_power"] = "invalid", "invalid"
+	native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
+	_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err == nil || strings.Count(err.Error(), "user.subyard.name") != 1 {
+		t.Fatalf("foreign finding missing or duplicated: %v", err)
+	}
+	for _, want := range []string{"belongs to yard foreign", "no canonical desired power", "foreign or inherited receipt", "registered project owner differs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("lost %q: %v", want, err)
+		}
+	}
 }
 
 func TestRegisteredMigrationReportsIndependentIdentityDifferences(t *testing.T) {

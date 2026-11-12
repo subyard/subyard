@@ -119,6 +119,9 @@ func TestFindYardSettingsFileRejectsSymlink(t *testing.T) {
 	if _, err := FindYardSettingsFile(repositoryRoot, "demo", configHome); !errors.Is(err, ErrUnknownYard) {
 		t.Fatalf("FindYardSettingsFile() error = %v, want unknown yard", err)
 	}
+	if _, err := Load(LoadOptions{RepositoryRoot: "../..", OperatorHome: configHome, YardName: "demo", NativeTargetOnly: true, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}}); err == nil {
+		t.Fatal("address-only load accepted symlink registration")
+	}
 }
 
 func TestFindYardRegistrationFileRejectsUnsafeName(t *testing.T) {

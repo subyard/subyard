@@ -27,6 +27,11 @@ type profileRuntimeActivationReconciler struct {
 }
 
 func (reconciler *profileRuntimeActivationReconciler) observeTarget(ctx context.Context, operation *CLI, target configTarget) (ports.RuntimeObservation, error) {
+	if reconciler.id != "key-tools-runtime" {
+		if err := operation.checkNativeOwner(ctx, target.Loaded); err != nil {
+			return ports.RuntimeObservation{}, err
+		}
+	}
 	return observeProfileRuntime(ctx, profileActivationPlatform(operation, target), reconciler.id)
 }
 

@@ -17,7 +17,10 @@ import (
 )
 
 type LoadOptions struct {
-	Catalog *Catalog
+	// NativeTargetOnly resolves scalar address/paths for registry assessment. Its
+	// result must never be used for guest access, provisioning or activation.
+	NativeTargetOnly bool
+	Catalog          *Catalog
 	// Resources supplies operation-scoped declarations on demand.
 	// Saved endpoint state is always read fresh. Standalone callers may omit it.
 	Resources               func(string) (resource.Registry, error)
@@ -442,6 +445,14 @@ func load(
 	normalizationLayer := tracker.addLayer(
 		"derived", "derived", "resolver normalization", true, settingScalar, "E2E_VM_CPU",
 	)
+	if options.NativeTargetOnly {
+		// Address discovery does not require guest-account, port or provisioner
+		// readiness. Scalar source parsing and registration checks above still apply.
+		for _, entry := range []struct{ key, value string }{{"ACCESS_KIND", "local"}, {"INCUS_PROJECT", "subyard"}, {"YARD_INSTANCE_NAME", "yard"}, {"SSH_HOST", "yard"}} {
+			setDefault(values, entry.key, entry.value, tracker, defaultLayer)
+		}
+		return domain.Context{YardName: yardName, AccessKind: domain.AccessKind(values["ACCESS_KIND"]), IncusProject: values["INCUS_PROJECT"], YardInstanceName: values["YARD_INSTANCE_NAME"], SSHHost: values["SSH_HOST"], Paths: domain.RuntimePaths{RepositoryRoot: root, ConfigDir: configDir, ConfigHome: configHome, OperatorHome: values["SUBYARD_OPERATOR_HOME"], DataHome: values["SUBYARD_HOME"], HostBase: values["HOST_BASE"]}}, values, nil
+	}
 	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
 		return domain.Context{}, nil, err
 	}

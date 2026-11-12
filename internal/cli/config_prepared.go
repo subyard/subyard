@@ -367,6 +367,9 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 	if len(targets) == 0 {
 		return nil, errors.New("config apply: no local yards selected")
 	}
+	if err := cli.checkNativeTargets(targets[0].Loaded, len(targets) > 1, nil); err != nil {
+		return nil, err
+	}
 	if err := validateManagedConfigTree(targets[0].Loaded.Context.Paths.ConfigHome); err != nil {
 		return nil, err
 	}
@@ -417,6 +420,9 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 	}
 	if !sameConfigTargetSet(execution.approved, targets) {
 		return fmt.Errorf("%w: selected local yard set changed after confirmation", domain.ErrPlanStale)
+	}
+	if err := cli.checkNativeTargets(targets[0].Loaded, len(targets) > 1, nil); err != nil {
+		return err
 	}
 	if err := validateManagedConfigTree(targets[0].Loaded.Context.Paths.ConfigHome); err != nil {
 		return err
@@ -507,7 +513,7 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		for _, target := range execution.approved {
 			expected[target.Target.Name] = target.DesiredFingerprint
 		}
-		if err := copyCLI.configStatus(ctx, targets, true, expected); err != nil {
+		if _, err := copyCLI.configStatus(ctx, targets, true, expected); err != nil {
 			return fmt.Errorf("config apply verification: %w", err)
 		}
 	} else {

@@ -27,6 +27,10 @@ PROJECT="subyard-e2e-yard"
 INSTANCE="yard-e2e-yard"
 DEFAULT_PROJECT="subyard"
 DEFAULT_INSTANCE="yard"
+ADDRESS_YARD="address-$TOKEN"
+ADDRESS_HOST_PROJECT="subyard-address-host-$TOKEN"
+ADDRESS_PROJECT="subyard-$ADDRESS_YARD"
+ADDRESS_INSTANCE="yard-$ADDRESS_YARD"
 # Reuse the exact published-release download/verification helper.
 # shellcheck source=dev/e2e/published-baseline.sh
 . "$ROOT/dev/e2e/published-baseline.sh"
@@ -122,7 +126,8 @@ assert_fixture_project() {
   local project="${1:-$PROJECT}" marker
   marker="$(incus project get "$project" user.p0-source 2>/dev/null)"
   [ "$marker" = "$MARKER" ] && return 0
-  [ -z "$marker" ] && is_markerless_migrated_fixture_project "$project" \
+  [ -z "$marker" ] && { is_markerless_migrated_fixture_project "$project" \
+    || is_markerless_address_fixture_project "$project"; } \
     || die "refusing unmarked Incus project $project"
 }
 
@@ -166,6 +171,17 @@ is_markerless_migrated_fixture_project() {
       *) return 1 ;;
     esac
   fi
+}
+
+# A failed init may leave the token-scoped fixture project without ownership properties.
+is_markerless_address_fixture_project() {
+  local project="$1" instances
+  [ "$project" = "$ADDRESS_PROJECT" ] || return 1
+  instances="$(incus list --project "$project" --format csv -c n)" || return
+  [ -n "$instances" ] || return 0
+  [ "$instances" = "$ADDRESS_INSTANCE" ] \
+    && [ "$(incus config get "$ADDRESS_INSTANCE" user.subyard.managed --project "$project")" = true ] \
+    && [ "$(incus config get "$ADDRESS_INSTANCE" user.subyard.name --project "$project")" = "$ADDRESS_YARD" ]
 }
 
 cleanup_owned_project() {
@@ -224,6 +240,7 @@ cleanup_fixture() {
     fi
   fi
   cleanup_owned_project "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE"
+  cleanup_owned_project "$ADDRESS_PROJECT" "$ADDRESS_INSTANCE"
   if id "$OPERATOR" >/dev/null 2>&1; then
     sudo -n loginctl disable-linger "$OPERATOR" >/dev/null 2>&1 || true
     sudo -n systemctl stop "user@$(operator_uid).service" >/dev/null 2>&1 || true
@@ -796,6 +813,109 @@ complete_refused_disk_tmp() {
     || die 'the printed retry did not complete the guest /tmp policy'
 }
 
+# A service-purpose ordinary yard has no coding integrations. It exercises only
+# core address ownership; optional service-profile contracts retain their owners.
+prove_address_project_ownership() {
+  local init_rc="$1"
+  incus project show "$ADDRESS_PROJECT" >/dev/null 2>&1 || return 0
+  DEFAULT_PROJECT="$ADDRESS_PROJECT" DEFAULT_INSTANCE="$ADDRESS_INSTANCE" \
+    mark_created_default_project "$ADDRESS_YARD" \
+    || { [ "$init_rc" -ne 0 ] && is_markerless_address_fixture_project "$ADDRESS_PROJECT"; } \
+    || die 'new named fixture project ownership could not be proved'
+}
+
+prepare_address_service() {
+  local definition="$OPERATOR_HOME/.config/subyard/yards/$ADDRESS_YARD/config.env"
+  local before="$SHARED_ROOT/address-definition.before" report="$SHARED_ROOT/address-init-refused.log"
+  local inventory_before rc=0 init_rc=0
+  operator_yard -Y "$YARD_NAME" config set INCUS_PROJECT "$PROJECT" --scope yard --yes
+  operator_yard config set INCUS_PROJECT "$ADDRESS_HOST_PROJECT" --scope host --yes
+  operator_env install -d -m 0700 "$(dirname "$definition")"
+  operator_env bash -c 'printf "SSH_PORT=2227\nCODING_TOOL_INTEGRATIONS=\nENVIRONMENT_PROFILES=\nYARD_INSTANCE_NAME=yard\n" > "$1"; chmod 0600 "$1"' _ "$definition"
+  # Default and the uninitialised named yard now inherit the same project/instance.
+  operator_env cat "$definition" > "$before"
+  inventory_before="$(incus project list --format csv -c n)"
+  operator_yard -Y "$ADDRESS_YARD" init --yes > "$report" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] && grep -Fq 'share native target' "$report" \
+    && grep -Fq "yards $ADDRESS_YARD and default" "$report" \
+    && grep -Fq 'INCUS_PROJECT' "$report" && grep -Fq 'YARD_INSTANCE_NAME' "$report" \
+    && grep -Fq 'yard scope for' "$report" || die 'new named init did not explain its shared target'
+  operator_env cat "$definition" | cmp "$before" - || die 'refused init rewrote the yard definition'
+  [ "$(incus project list --format csv -c n)" = "$inventory_before" ] || die 'refused init created a project'
+  # Repair configuration explicitly, preserving the actual ordinary default yard.
+  operator_yard config set INCUS_PROJECT "$DEFAULT_PROJECT" --scope yard --yes
+  operator_yard -Y "$ADDRESS_YARD" config set INCUS_PROJECT "$ADDRESS_PROJECT" --scope yard --yes
+  operator_yard -Y "$ADDRESS_YARD" config set YARD_INSTANCE_NAME "$ADDRESS_INSTANCE" --scope yard --yes
+  operator_yard -Y "$ADDRESS_YARD" config set SSH_HOST "$ADDRESS_INSTANCE" --scope yard --yes
+  operator_yard -Y "$ADDRESS_YARD" config set SRV_VOLUME "yard-srv-$ADDRESS_YARD" --scope yard --yes
+  ! incus project show "$ADDRESS_PROJECT" >/dev/null 2>&1 || die 'new named fixture requires an absent project'
+  local init_log="$SHARED_ROOT/address-init.log" instances
+  operator_yard -Y "$ADDRESS_YARD" init --yes > "$init_log" 2>&1 || init_rc=$?
+  cat "$init_log"
+  # A failing init can leave a project before its ownership properties exist.
+  # Cleanup rechecks the token-scoped name and any instance ownership markers.
+  prove_address_project_ownership "$init_rc"
+  # Modern init owns project creation. Its private image namespace may not have
+  # the fixture alias yet; share the cache only after proving this exact ownership,
+  # and only for that image-lookup failure.
+  if [ "$init_rc" != 0 ] && grep -Fq "Image \"$BASE_IMAGE\" not found" "$init_log" \
+    && incus project show "$ADDRESS_PROJECT" >/dev/null 2>&1; then
+    instances="$(incus list --project "$ADDRESS_PROJECT" --format csv -c n)" \
+      || die 'cannot inspect the new named fixture project'
+    [ -z "$instances" ] || die 'new named init failed after image lookup'
+    incus project set "$ADDRESS_PROJECT" features.images=false
+    incus image info "$BASE_IMAGE" --project "$ADDRESS_PROJECT" >/dev/null \
+      || die 'new named yard cannot access the shared fixture image'
+    init_rc=0
+    operator_yard -Y "$ADDRESS_YARD" init --yes || init_rc=$?
+    prove_address_project_ownership "$init_rc"
+  fi
+  [ "$init_rc" = 0 ] || return "$init_rc"
+  [ "$(incus config get "$ADDRESS_INSTANCE" user.subyard.name --project "$ADDRESS_PROJECT")" = "$ADDRESS_YARD" ] \
+    || die 'explicit named addresses did not create its own instance'
+  ! incus info "$ADDRESS_INSTANCE" --project "$ADDRESS_HOST_PROJECT" >/dev/null 2>&1 \
+    || die 'new named yard created an instance at the inherited host address'
+  operator_yard -Y "$ADDRESS_YARD" start --yes
+  incus exec "$ADDRESS_INSTANCE" --project "$ADDRESS_PROJECT" -- sh -c \
+    'printf "retained service data\n" > /srv/address-service-retained'
+  address_service_facts > "$SHARED_ROOT/address-service-before"
+  chmod 0600 "$SHARED_ROOT/address-service-before"
+}
+
+address_service_facts() {
+  incus config get "$ADDRESS_INSTANCE" volatile.uuid --project "$ADDRESS_PROJECT"
+  incus config get "$ADDRESS_INSTANCE" user.subyard.name --project "$ADDRESS_PROJECT"
+  incus config get "$ADDRESS_INSTANCE" user.subyard.desired_power --project "$ADDRESS_PROJECT"
+  incus exec "$ADDRESS_INSTANCE" --project "$ADDRESS_PROJECT" -- sha256sum /srv/address-service-retained
+}
+
+verify_shared_target_refusals() {
+  local alias=address-alias definition report command rc=0
+  local -a arguments=()
+  definition="$OPERATOR_HOME/.config/subyard/yards/$alias/config.env"
+  operator_env install -d -m 0700 "$(dirname "$definition")"
+  operator_env bash -c 'printf "INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\n" "$2" "$3" > "$1"; chmod 0600 "$1"' \
+    _ "$definition" "$ADDRESS_PROJECT" "$ADDRESS_INSTANCE"
+  # These are independently refusing public boundaries. None may inspect the
+  # foreign guest or collapse the alias into the owner's teardown selection.
+  for command in 'config status' 'teardown --yes'; do
+    report="$SHARED_ROOT/shared-target-${command%% *}.log"
+    rc=0
+    read -r -a arguments <<< "$command"
+    operator_yard -Y "$alias" "${arguments[@]}" > "$report" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "shared target unexpectedly accepted: $command"
+    grep -Fq "$alias" "$report" && grep -Fq "$ADDRESS_YARD" "$report" \
+      && grep -Fq 'INCUS_PROJECT' "$report" && grep -Fq 'YARD_INSTANCE_NAME' "$report" \
+      && grep -Fq 'share native target' "$report" \
+      || die "shared target refusal hid the yards or address keys: $command"
+  done
+  address_service_facts | cmp "$SHARED_ROOT/address-service-before" - \
+    || die 'a collision refusal changed the service target'
+  # Only remove this fixture-owned duplicate definition, never its native target.
+  operator_env unlink "$definition"
+  operator_env rmdir "$(dirname "$definition")"
+}
+
 prepare() {
   [ "$(uname -m)" = x86_64 ] || die 'the published v0.11.0 pin requires an amd64 P0 worker'
   command -v git >/dev/null 2>&1 || die 'Git is required for the published configuration import'
@@ -840,6 +960,9 @@ prepare() {
     || die 'first candidate runtime is not active'
   verify_v2_release_transition "$VERSION_A"
   complete_refused_disk_tmp
+  prepare_address_service
+  verify_shared_target_refusals
+  operator_yard config unset INCUS_PROJECT --scope host --yes
   bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"
   [ "$(operator_env grep -Fc '# Subyard CLI completion' "$OPERATOR_HOME/.bashrc")" = 1 ] \
     || die 'repeated bootstrap duplicated shell integration'
@@ -1058,6 +1181,11 @@ finish() {
   operator_yard -Y "$YARD_NAME" teardown --yes
   ! incus project show "$PROJECT" >/dev/null 2>&1 \
     || die 'upgraded yard remains after teardown'
+  operator_yard -Y "$ADDRESS_YARD" teardown --yes
+  ! incus project show "$ADDRESS_PROJECT" >/dev/null 2>&1 \
+    || die 'new named yard project remains after teardown'
+  ! incus info "$ADDRESS_INSTANCE" --project "$ADDRESS_PROJECT" >/dev/null 2>&1 \
+    || die 'named service instance remains after teardown'
   operator_yard teardown --yes
   ! incus project show "$DEFAULT_PROJECT" >/dev/null 2>&1 \
     || die 'upgraded default yard remains after teardown'

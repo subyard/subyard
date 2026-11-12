@@ -35,5 +35,6 @@ func (cli *CLI) releaseTestYardRecreation(ctx context.Context, home string, file
 }
 
 func (cli *CLI) releaseConfigTargets(ctx context.Context, loaded config.Loaded, allLocal bool) ([]configTarget, error) {
-	return cli.configTargets(ctx, loaded, allLocal, true)
+	targets, _, err := cli.configTargets(ctx, loaded, allLocal, true)
+	return targets, err
 }
