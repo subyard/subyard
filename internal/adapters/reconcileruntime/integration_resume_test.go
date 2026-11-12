@@ -3,8 +3,11 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -23,6 +27,108 @@ type interruptedInventoryExecutor struct {
 	retryableIntegrationExecutor
 	cut       string
 	committed bool
+}
+
+func newInterruptedInventoryExecutor(t *testing.T) *interruptedInventoryExecutor {
+	t.Helper()
+	f := &interruptedInventoryExecutor{configInventoryFixture: newConfigInventoryFixture(t)}
+	// Model the fixture account's actual primary group, not a guest-only group.
+	f.program = strings.NewReplacer(
+		"os.fchown(stream.fileno(), uid, uid)", "os.fchown(stream.fileno(), uid, os.getgid())",
+		"os.chown(directory, uid, uid if gid is None else gid)", "os.chown(directory, uid, os.getgid() if gid is None else gid)",
+		"group = entry.get('gid', owner) if entry['kind'] == 'link' else owner", "group = entry.get('gid', os.getgid()) if entry['kind'] == 'link' else os.getgid()",
+	).Replace(f.program)
+	return f
+}
+
+func TestInstalledReadinessPreservesFailedInitIntent(t *testing.T) {
+	for _, labelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leftover-pending=%t", labelled), func(t *testing.T) {
+			executor := newInterruptedInventoryExecutor(t)
+			root := testkit.TempDir(t)
+			if err := os.Mkdir(filepath.Join(root, "config"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+			runtime := Runtime{RepositoryRoot: root, Executor: executor, Integrations: []profile.IntegrationDefinition{},
+				Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
+				Yard:  domain.Context{DevUser: "dev", DevUID: os.Getuid()}}
+			ctx := context.Background()
+			installed, err := runtime.integrationArtifactsPhase("apply")
+			if err != nil {
+				t.Fatal(err)
+			}
+			inventory := func(mode string, entries []integrationArtifact) {
+				t.Helper()
+				if _, err := runtime.integrationInventory(ctx, mode, entries, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inventory("apply", installed)
+			inventory("commit", installed)
+			runtime = runtime.WithInstalledConfiguration()
+			if labelled {
+				inventory("apply", installed)
+			}
+			before, err := runtime.IntegrationPlan(ctx)
+			if err != nil || before.InstalledChanged() {
+				t.Fatalf("installed baseline: %#v %v", before, err)
+			}
+			if !labelled {
+				// Labels appearing between inspect and converge change the bound
+				// state. Observation itself must never cause this write.
+				inventory("apply", installed)
+				pending, err := runtime.IntegrationPlan(ctx)
+				if err != nil || !pending.Changed || pending.Fingerprint == before.Fingerprint ||
+					!errors.Is(CheckIntegrationPlan(before, pending), domain.ErrPlanStale) {
+					t.Fatalf("intervening apply was not guarded as stale: %#v %v", pending, err)
+				}
+				inventory("commit", installed)
+				committed, err := runtime.IntegrationPlan(ctx)
+				if err != nil || committed.StateBinding() != before.StateBinding() || CheckIntegrationPlan(pending, committed) != nil {
+					t.Fatalf("finishing redundant intent did not restore the original plan: %#v %v", committed, err)
+				}
+			}
+			// Init selects a new integration. It labels the shared installed files
+			// and writes the new config, then native provisioning fails before commit.
+			payload := []byte("pending integration config\n")
+			desired := append(append([]integrationArtifact{}, installed...), integrationArtifact{
+				ID: "sample", Kind: "file", Path: executor.home + "/new-config", Mode: 0644,
+				Digest: fmt.Sprintf("%x", sha256.Sum256(payload)), Content: base64.StdEncoding.EncodeToString(payload)})
+			inventory("apply", desired)
+			path := executor.state + "/inventory.json"
+			saved := mustReadIntegrationFile(t, path)
+			first, err := runtime.IntegrationPlan(ctx)
+			if err != nil || !first.Changed || first.InstalledChanged() {
+				t.Fatalf("failed init revoked installed readiness or lost apply tail: %#v %v", first, err)
+			}
+			second, err := runtime.IntegrationPlan(ctx)
+			if err != nil || first.StateBinding() != second.StateBinding() || !bytes.Equal(saved, mustReadIntegrationFile(t, path)) {
+				t.Fatalf("unchanged observation moved the plan or wrote inventory: %v", err)
+			}
+			executor.serviceChanged = true
+			drift, err := runtime.IntegrationPlan(ctx)
+			if err != nil || !drift.InstalledChanged() {
+				t.Fatalf("pending init hid installed service drift: %#v %v", drift, err)
+			}
+			executor.serviceChanged = false
+			// Real installed drift must still require repair and retain its refusal.
+			file := executor.home + "/projects-changed"
+			testkit.WriteFile(t, file, []byte("foreign bytes"), 0755)
+			if _, err := runtime.IntegrationPlan(ctx); err == nil {
+				t.Fatal("pending init hid foreign installed bytes")
+			}
+		})
+	}
+}
+
+func mustReadIntegrationFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func (f *interruptedInventoryExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
@@ -76,14 +182,7 @@ func TestIntegrationInterruptedInstalledApplyFinishesInventoryTail(t *testing.T)
 				}
 				testkit.WriteFile(t, filepath.Join(root, name), []byte("#!/bin/sh\nif [ -s \"$CUT\" ]; then : > \"$CUT\"; exit 1; fi\nexit 0\n"), 0755)
 			}
-			executor := &interruptedInventoryExecutor{configInventoryFixture: newConfigInventoryFixture(t)}
-			// Model the fixture account's actual primary group. The transport
-			// has no authority to chown to a guest-only numeric group.
-			executor.program = strings.NewReplacer(
-				"os.fchown(stream.fileno(), uid, uid)", "os.fchown(stream.fileno(), uid, os.getgid())",
-				"os.chown(directory, uid, uid if gid is None else gid)", "os.chown(directory, uid, os.getgid() if gid is None else gid)",
-				"group = entry.get('gid', owner) if entry['kind'] == 'link' else owner", "group = entry.get('gid', os.getgid()) if entry['kind'] == 'link' else os.getgid()",
-			).Replace(executor.program)
+			executor := newInterruptedInventoryExecutor(t)
 			runtime := Runtime{RepositoryRoot: root, Executor: executor, Environment: []string{"CUT=" + cutPath},
 				Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
 				Yard:  domain.Context{YardName: "sample", IncusProject: "sample", YardInstanceName: "sample", DevUser: "dev", DevUID: os.Getuid()}}

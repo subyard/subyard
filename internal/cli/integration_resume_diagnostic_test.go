@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,8 +13,87 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+type pendingInventoryExecutor struct {
+	installedSettingsExecutor
+	selectionOnlyIntegrationExecutor
+	pending bool
+}
+
+func (e *pendingInventoryExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) == 5 && request.Command[0] == "python3" && request.Command[3] == reconcileruntime.IntegrationInventoryReader() {
+		switch request.Command[4] {
+		case "settings", "selection":
+			return e.installedSettingsExecutor.Exec(ctx, project, instance, request)
+		case "observe", "observe-applied":
+			body, _ := json.Marshal(map[string]any{"fingerprint": strings.Repeat("a", 64), "changed": false, "pending": e.pending})
+			return ports.InstanceExecResult{Stdout: body}, nil
+		default:
+			return ports.InstanceExecResult{}, errors.New("unexpected inventory mutation")
+		}
+	}
+	if len(request.Command) == 4 && strings.HasPrefix(request.Command[3], "__name__ = 'subyard_") {
+		return e.installedSettingsExecutor.Exec(ctx, project, instance, request)
+	}
+	if len(request.Command) == 4 && request.Command[0] == "test" && request.Command[1] == "!" {
+		return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
+	}
+	return e.selectionOnlyIntegrationExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestCompletedReleaseObservationPreservesPendingInitTail(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		for _, mode := range []releasetransition.ProcessMode{releasetransition.ProcessInspect, releasetransition.ProcessConverge} {
+			f := newPendingInitFixture(t, false, nil)
+			request, journal := repairRequest(t, f)
+			request.Mode = mode
+			if !complete {
+				journal.Checkpoint = releasetransition.JournalReconciling
+				journal.Releases.From = journal.Releases.Target
+				payload, err := releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, f.journalPath, payload, 0600)
+			}
+			ctx := context.Background()
+			loaded, err := f.cli.resolveReleaseTransitionContext(ctx, "default", request.ConfigHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := &pendingInventoryExecutor{installedSettingsExecutor: f.cli.options.Executor.(installedSettingsExecutor),
+				selectionOnlyIntegrationExecutor: selectionOnlyIntegrationExecutor{source: loaded.Environment["AGENT_codex_RULES"]}}
+			options := f.cli.options
+			options.Executor, options.InitPlatform = e, nil
+			native := options.Incus.(*testkit.Incus)
+			native.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: native.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName]}
+			var before releasetransition.V2ActivationObservation
+			for _, pending := range []bool{false, true} {
+				e.pending = pending
+				program, err := New(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actor := &materializedConfigActivationReconciler{cli: program.releaseActivationOperation(request), configHome: request.ConfigHome,
+					goal: journal.Goal, artifactDigest: journal.ArtifactDigest, registryDigest: journal.RegistryDigest}
+				observed, err := actor.Observe(ctx, journal.Releases, releasetransition.ReleaseLinks{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !pending {
+					before = observed
+				} else if complete && !reflect.DeepEqual(before, observed) {
+					t.Fatalf("completed release changed after failed init: before=%#v after=%#v", before, observed)
+				} else if !complete && (observed.Converged || !strings.Contains(strings.Join(observed.Consequences, "\n"), "reconcile selected integrations")) {
+					t.Fatalf("unfinished repair lost its pending apply tail: %#v", observed)
+				}
+			}
+		}
+	}
+}
 
 type resumeConflictCause struct{ error }
 

@@ -111,7 +111,12 @@ type IntegrationPlan struct {
 	fingerprints           []string
 	profileRoutes          []integrationProfileRoute
 	retirementProofPending bool
+	pendingOnly            bool
 }
+
+// InstalledChanged excludes a redundant apply tail from installed readiness.
+// Changed still requires that tail for authorized apply and recovery.
+func (plan IntegrationPlan) InstalledChanged() bool { return plan.Changed && !plan.pendingOnly }
 
 // NeedsRetirementProof requests the existing guarded apply even for a clean
 // guest. The proof is an apply receipt, outside integration equality and Desired.
@@ -729,7 +734,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	persist = persist.retireUnrecordedLinks(observed.Retired)
 	// Passive installed admission may ignore redundant labels, but apply must
 	// still finish hooks, commit and verification before capturing settings.
-	plan := IntegrationPlan{Changed: observed.Changed || observed.Pending || persist.changed(), persist: persist}
+	plan := IntegrationPlan{Changed: observed.Changed || persist.changed(), persist: persist}
 	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsWithSourceReader(phase, reader)
 	if err != nil {
 		return plan, observed, err
@@ -898,6 +903,8 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "deselected managed services inactive; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
 	plan.fingerprints = slices.Clone(fingerprints)
+	plan.pendingOnly = observed.Pending && !plan.Changed
+	plan.Changed = plan.Changed || observed.Pending
 	if plan.Changed {
 		plan.Steps = []string{reconcileIntegrationsStep(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))}
 		for _, step := range plan.PersistOperationSteps(runtime.Yard.IncusProject + "/" + runtime.Yard.YardInstanceName) {

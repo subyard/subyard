@@ -19,36 +19,44 @@ import (
 // activeReleaseRepair is the only installed-versus-desired decision. The
 // request identifies the operation; the journal and current link prove repair.
 func activeReleaseRepair(request releasetransition.ProcessRequest) bool {
+	return activeReleaseRepairCheckpoint(request) != ""
+}
+
+func activeReleaseRepairCheckpoint(request releasetransition.ProcessRequest) releasetransition.JournalCheckpoint {
 	if request.Mode != releasetransition.ProcessInspect && request.Mode != releasetransition.ProcessConverge {
-		return false
+		return ""
 	}
 	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
 	if err != nil {
-		return false
+		return ""
 	}
 	active, err := links.Observe()
 	if err != nil || active.Active == "" || active.Active != request.Target {
-		return false
+		return ""
 	}
 	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
 	if err != nil {
-		return false
+		return ""
 	}
 	snapshot, err := store.ReadCurrentJournal()
 	if err != nil || !snapshot.Exists {
-		return false
+		return ""
 	}
 	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	return err == nil && journal.Goal.Target == active.Active &&
+	if err == nil && journal.Goal.Target == active.Active &&
 		(journal.Checkpoint == releasetransition.JournalComplete ||
-			journal.Releases.From == journal.Goal.Target && journal.ArtifactDigest == request.ArtifactDigest && journal.RegistryDigest == request.RegistryDigest)
+			journal.Releases.From == journal.Goal.Target && journal.ArtifactDigest == request.ArtifactDigest && journal.RegistryDigest == request.RegistryDigest) {
+		return journal.Checkpoint
+	}
+	return ""
 }
 
 type releaseConfiguration struct {
-	request releasetransition.ProcessRequest
-	repair  bool
-	mutex   sync.Mutex
-	yards   map[string]releaseYardConfiguration
+	request  releasetransition.ProcessRequest
+	repair   bool
+	complete bool
+	mutex    sync.Mutex
+	yards    map[string]releaseYardConfiguration
 }
 
 type releaseYardConfiguration struct {

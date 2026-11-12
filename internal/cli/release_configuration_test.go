@@ -60,6 +60,10 @@ func TestActiveReleaseRepairDecision(t *testing.T) {
 			if got := activeReleaseRepair(request); got != want {
 				t.Fatalf("repair=%t want=%t", got, want)
 			}
+			operation := fixture.cli.releaseActivationOperation(request)
+			if got := operation.activation.complete; got != (want && journal.Checkpoint == releasetransition.JournalComplete) {
+				t.Fatalf("completed installed readiness=%t, repair=%t checkpoint=%s", got, want, journal.Checkpoint)
+			}
 		})
 	}
 }

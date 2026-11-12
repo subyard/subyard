@@ -1132,7 +1132,8 @@ func (cli *CLI) releaseActivationOperation(requests ...releasetransition.Process
 			if request.RuntimeRoot == "" {
 				request.RuntimeRoot = cli.env["YARD_RUNTIME_ROOT"]
 			}
-			operation.activation = &releaseConfiguration{request: request, repair: activeReleaseRepair(request), yards: map[string]releaseYardConfiguration{}}
+			checkpoint := activeReleaseRepairCheckpoint(request)
+			operation.activation = &releaseConfiguration{request: request, repair: checkpoint != "", complete: checkpoint == releasetransition.JournalComplete, yards: map[string]releaseYardConfiguration{}}
 		}
 		// Binding owners must preserve their ordinary applicability inputs.
 		// Yard loaders below already discard resolved caller settings.
@@ -1248,6 +1249,12 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 				}
 			}
 		}
+		integrationChanged := integration.Changed
+		if operation.activation != nil && operation.activation.complete {
+			// A failed ordinary init does not reopen the completed release. Keep
+			// the full captured plan for any subsequently authorized repair.
+			integrationChanged = integration.InstalledChanged()
+		}
 		// An installed-view repair must not rewrite owned integration state that the
 		// pending yard init could not retire: that would discard the operator's change.
 		if reconciler.cli.activation != nil && reconciler.cli.activation.repair &&
@@ -1256,7 +1263,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 				refusals = append(refusals, err)
 			}
 		}
-		if integration.Changed {
+		if integrationChanged {
 			if integration.AdoptionFingerprint != "" {
 				for _, path := range managedPaths {
 					consequences = append(consequences, fmt.Sprintf("yard %s: manage integration path (create if absent, adopt only exact matching legacy state): %s", target.Name, path))
@@ -1283,7 +1290,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		}
 		activationTargets = append(activationTargets, config.MaterializationActivationTarget{
 			Name: target.Name, Assessment: config.MaterializationAssessment{State: assessment.State, Changed: assessment.Changed, DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint},
-			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integration.Changed || integration.NeedsRetirementProof(),
+			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integrationChanged || integration.NeedsRetirementProof(),
 		})
 	}
 	if err := collectActivationRefusals(refusals); err != nil {
