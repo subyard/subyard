@@ -182,6 +182,7 @@ printf 'ok: fresh release fixture installs isolated entrypoints and requires uns
 python3 -B "$ROOT/tests/helpers/skills-transport-test.py" "$ROOT"
 python3 -B "$ROOT/tests/helpers/release-candidate-test.py"
 python3 -B "$ROOT/tests/helpers/evidence-oracle-test.py"
+python3 -B "$ROOT/tests/helpers/failure-tails-test.py"
 
 # Compatibility controls bind the native runtime and bound owned scratch lifetime
 # without changing deliberate interruption or shared fixture ownership.

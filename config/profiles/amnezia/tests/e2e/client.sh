@@ -173,6 +173,8 @@ if ! docker exec "$CONTAINER" ip link show awg0 >/dev/null 2>&1; then
 fi
 docker cp "$ROOT/config/profiles/amnezia/tests/e2e/dns-probe.sh" "$CONTAINER:/tmp/subyard-amnezia-dns-probe.sh" \
   >/dev/null || die 'could not copy the owned DNS probe'
+docker cp "$ROOT/config/profiles/amnezia/tests/e2e/https-probe.sh" "$CONTAINER:/tmp/subyard-amnezia-https-probe.sh" \
+  >/dev/null || die 'could not copy the owned HTTPS probe'
 
 docker exec -i -e "PROBE_OWNER_IP=$owner_ip" -e "PROBE_OWNER_PORT=$owner_port" \
   -e "PROBE_PRIVATE_IP=$private_ip" -e "PROBE_TUNNEL_IP=$TUNNEL_IP" "$CONTAINER" sh -eu -s <<'CLIENT' \
@@ -216,9 +218,7 @@ counts="$(awg show awg0 transfer | awk 'NF == 3 { if (++n > 1) exit 1; print $2,
 set -- $counts
 [ "$#" = 2 ] || fail 'cannot read native peer counters'
 before_rx="$1" before_tx="$2"
-download_metrics="$(curl -4 --noproxy '*' -fsS --max-time 45 \
-  --write-out '%{time_total} %{speed_download}' --output /tmp/subyard-amnezia-download \
-  'https://speed.cloudflare.com/__down?bytes=1048576')" || fail 'HTTPS download through tunnel failed'
+download_metrics="$(timeout 95 sh /tmp/subyard-amnezia-https-probe.sh)" || fail 'HTTPS download through tunnel failed'
 set -- $download_metrics
 [ "$#" = 2 ] || fail 'HTTPS timing metrics were unavailable'
 download_seconds="$1" download_bytes_per_second="$2"

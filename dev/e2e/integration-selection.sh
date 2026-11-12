@@ -103,7 +103,6 @@ cleanup() {
       yard teardown --yes >"$STATE/cleanup.log" 2>&1 || {
         cleanup_rc=$?
         printf 'integration-selection: cleanup native_exit=%s bounded_log=true\n' "$cleanup_rc" >&2
-        tail -c 16384 "$STATE/cleanup.log" >&2
         rc=3
       }
     else
@@ -116,6 +115,7 @@ cleanup() {
     sudo -n find "$STATE" -depth -delete || rc=3
   else
     printf 'integration-selection: retained evidence at %s\n' "$STATE" >&2
+    python3 -B "$ROOT/tests/helpers/failure-tails.py" "$STATE" "$MARKER" || true
   fi
   exit "$rc"
 }

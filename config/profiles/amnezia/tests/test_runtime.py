@@ -43,6 +43,57 @@ def result(stdout=b'', code=0):
 
 
 class AcceptanceDiagnosticsTest(unittest.TestCase):
+    def test_https_probe_retries_with_timings_and_peer_deltas_but_requires_full_download(self):
+        source = (PROFILE/'tests/e2e/client.sh').read_text()
+        acceptance = 'download_metrics='+source.split('download_metrics=', 1)[1].split('\nsh /tmp/subyard-amnezia-dns-probe.sh', 1)[0]
+        for codes, size, expected in (([0], 1048576, 0), ([28, 0], 1048576, 0),
+                                      ([28, 28], 1048576, 1), ([0], 64, 1)):
+            with self.subTest(codes=codes, size=size), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                root = Path(temporary)
+                (root/'curl').write_text('''#!/usr/bin/env python3
+import json,os,pathlib,sys
+root=pathlib.Path(os.environ['FIXTURE'])
+codes=json.loads(os.environ['CODES'])
+path=root/'attempts'
+attempt=int(path.read_text())+1 if path.exists() else 1
+path.write_text(str(attempt))
+assert sys.argv[sys.argv.index('--max-time')+1]=='45'
+assert sys.argv[-1]=='https://speed.cloudflare.com/__down?bytes=1048576'
+(root/'download').write_bytes(b'x'*int(os.environ['SIZE']))
+print('0.01 0.02 0.03 0.04 1.5 699050')
+sys.exit(codes[attempt-1])
+''')
+                (root/'awg').write_text('''#!/usr/bin/env python3
+import os,pathlib
+root=pathlib.Path(os.environ['FIXTURE'])
+path=root/'counts'
+count=int(path.read_text())+1 if path.exists() else 1
+path.write_text(str(count))
+print('private-peer-key',100+count*10,200+count*5)
+''')
+                (root/'timeout').write_text('''#!/bin/sh
+test "$1" = 95 || exit 99
+exec /usr/bin/timeout 95 sh "$PROBE"
+''')
+                for name in ('curl', 'awg', 'timeout'):
+                    (root/name).chmod(0o755)
+                script = ('fail() { printf "%s\\n" "$*" >&2; exit 1; }\n'
+                          +acceptance.replace('/tmp/subyard-amnezia-download', str(root/'download'))+'\nprintf "accepted\\n"\n')
+                observed = subprocess.run(['sh', '-eu', '-c', script], capture_output=True, text=True, timeout=5,
+                    env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], FIXTURE=temporary,
+                             CODES=json.dumps(codes), SIZE=str(size), PROBE=str(PROFILE/'tests/e2e/https-probe.sh')))
+                self.assertEqual(observed.returncode, expected, observed.stderr)
+                self.assertEqual((root/'attempts').read_text(), str(len(codes)))
+                self.assertEqual('accepted' in observed.stdout, expected == 0)
+                self.assertEqual(observed.stderr.count('WARN amnezia-client:'), int(codes == [28, 0]))
+                if codes == [28, 0]:
+                    self.assertIn('WARN amnezia-client: HTTPS download succeeded only after retry (attempt 1 curl_exit=28)\n', observed.stderr)
+                for attempt, code in enumerate(codes, 1):
+                    self.assertIn(f'attempt={attempt} curl_exit={code} dns_seconds=0.01 connect_seconds=0.02 tls_seconds=0.03 first_byte_seconds=0.04', observed.stderr)
+                    if code:
+                        self.assertIn(f'attempt={attempt} rx_bytes_delta=10 tx_bytes_delta=5', observed.stderr)
+                self.assertNotIn('private-peer-key', observed.stdout+observed.stderr)
+
     def test_post_reboot_probes_wait_for_terminal_power_success(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
         functions = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]

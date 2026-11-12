@@ -93,10 +93,11 @@ if NATIVE_STAGE:
     os.environ['SUBYARD_YARD_NAME']=FIXTURE_YARD
     subprocess.run(['git','init','--quiet',str(prepared/'project')],check=True,timeout=10)
     exercise=pathlib.Path(NATIVE_STAGE)/'source/config/profiles/telemetry/tests/e2e/native-signals.py'
-    subprocess.run([sys.executable,'-B',str(exercise),'--exercise','--state',str(prepared/'exercise'),
+    failure_evidence.run([sys.executable,'-B',str(exercise),'--exercise','--state',str(prepared/'exercise'),
         '--data-dir',str(data),'--source',str(pathlib.Path(NATIVE_STAGE)/'source'),'--kind','android','--',
         '/srv/cache/android-sdk/.subyard/bin/android-broker','run','--api','36','--yard',FIXTURE_YARD,'--project','telemetry-fixture',
-        '--purpose','telemetry-incus-native','--','python3','-c','import time;time.sleep(2)'],check=True,timeout=1200)
+        '--purpose','telemetry-incus-native','--','python3','-c','import time;time.sleep(2)'],
+        evidence_root,secrets=secrets,check=True,timeout=1200)
     bindings=json.loads((prepared/'exercise/native-resource-bindings.json').read_text())
     claude=next(run for run in bindings['runs'] if run['agent']=='claude')
     document=json.loads(subprocess.check_output(['/usr/local/lib/subyard-telemetry/subyard-telemetry','show-run',
@@ -134,7 +135,7 @@ os.chown(marker,account.pw_uid,account.pw_gid)
 print(json.dumps({'root':str(root),'unit':'subyard-telemetry-fixture-'+root.name.rsplit('.',1)[1]+'.service'}))
 '''
 
-START = '''import json,pathlib,subprocess,sys,time
+START = '''import importlib.util,json,os,pathlib,stat,subprocess,sys,time
 fixture=json.loads(sys.argv[1])
 root=pathlib.Path(fixture['root'])
 assert root.parent==pathlib.Path('/tmp') and root.name.startswith('subyard-telemetry-delegated.') and not root.is_symlink()
@@ -151,7 +152,15 @@ while time.monotonic()<deadline:
         print((root/'result').read_text(),end='',flush=True)
         break
     if (root/'failure').is_file():
-        raise RuntimeError('delegated fixture failed: '+(root/'failure').read_text())
+        spec=importlib.util.spec_from_file_location('failure_evidence',root/'source/config/profiles/telemetry/tests/e2e/failure-evidence.py')
+        evidence=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(evidence)
+        for name in ('native-command','failure'):
+            if (root/name).exists():
+                with os.fdopen(os.open(root/name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as stream:
+                    assert stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+                    evidence.relay(stream.read(262144))
+        raise RuntimeError('delegated fixture failed; see telemetry-failure-evidence')
     time.sleep(.2)
 else:
     raise AssertionError('delegated fixture did not report its result')
@@ -366,18 +375,24 @@ def main():
     body = 'FIXTURE_SOURCE='+repr(source)+'\nNATIVE_STAGE='+repr(str(stage))+'\nFIXTURE_YARD='+repr(args.yard)+'\n'+PREPARE
     # Keep the delegated caller alive until the external observer has durably
     # finalized every child scope; systemd must not remove empty counters first.
-    payload = '''import contextlib,io,json,os,pathlib,time,traceback
+    payload = '''import contextlib,importlib.util,io,json,os,pathlib,time,traceback
 root=pathlib.Path(__file__).parent
+spec=importlib.util.spec_from_file_location('failure_evidence',root/'source/config/profiles/telemetry/tests/e2e/failure-evidence.py')
+failure_evidence=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(failure_evidence)
+output=io.StringIO()
+secrets=('local-fixture-only',)
 try:
+    secrets+=(pathlib.Path('/var/lib/subyard/telemetry/auth.token').read_text().strip(),)
     membership=pathlib.Path('/proc/self/cgroup').read_text().strip().split('::',1)[1]
     delegated=pathlib.Path('/sys/fs/cgroup')/membership.lstrip('/')
     assert delegated.name=='caller'
     delegated=delegated.parent
     limits={name:(delegated/name).read_text() for name in ('memory.max','pids.max')}
     assert limits['memory.max'].strip()==str(2*1024**3) and limits['pids.max'].strip()=='128'
-    output=io.StringIO()
     with contextlib.redirect_stdout(output):
-        exec(compile(BODY,'incus-profile-payload','exec'),{'__name__':'__main__'})
+        exec(compile(BODY,'incus-profile-payload','exec'),{'__name__':'__main__',
+            'failure_evidence':failure_evidence,'evidence_root':root,'secrets':secrets})
     assert limits=={name:(delegated/name).read_text() for name in limits}
     (root/'result.tmp').write_text(output.getvalue())
     os.chmod(root/'result.tmp',0o600)
@@ -387,9 +402,8 @@ try:
         assert time.monotonic()<deadline,'fixture scopes did not drain'
         time.sleep(.2)
 except BaseException as error:
-    frame=traceback.extract_tb(error.__traceback__)[-1]
-    (root/'failure').write_text(type(error).__name__+' at '+pathlib.Path(frame.filename).name+':'+str(frame.lineno))
-    os.chmod(root/'failure',0o600)
+    failure_evidence.retain(root,'failure',{'python.stdout':output.getvalue().encode(),
+        'traceback':traceback.format_exc().encode()},secrets,error)
     raise SystemExit(1)
 '''
     ast.parse(payload)

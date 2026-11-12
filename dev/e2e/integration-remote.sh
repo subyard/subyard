@@ -157,6 +157,7 @@ cleanup() {
     sudo -n find "$STATE" -depth -delete || rc=3
   else
     printf 'integration-remote: retained evidence at %s\n' "$STATE" >&2
+    python3 -B "$ROOT/tests/helpers/failure-tails.py" "$STATE" "$MARKER" || true
   fi
   exit "$rc"
 }
