@@ -249,7 +249,7 @@ def defer_external(output, obligations, reason, authorization_reference):
     return 0
 
 
-LIVE_CAPACITY_WAIT = "30m"
+LIVE_CAPACITY_WAIT = "120m"
 # Successful release preparation jobs run these exact commands on the exact
 # candidate commit and assets; a prepared candidate counts them instead of
 # repeating them locally. Publication rechecks the job and workflow policy.

@@ -469,8 +469,8 @@ and the runner never switches protocols in response to acquire failure. Only a t
 capacity response plus bounded `--wait` permits another request for the same slot; a transport
 failure or any other unknown outcome ends the attempt. Without `--wait`,
 `SUBYARD_E2E_CAPACITY_WAIT` (for example `30m` or `90s`) bounds capacity retries alone and a busy
-slot still fails at once; the release acceptance collector sets it to `30m` for VM checks unless
-already set. The runner retries only while another request can start before the deadline, so a
+slot still fails at once; the release acceptance collector sets it to `120m` for VM checks unless
+already set, and hosted CI collector selections set `30m` to stay inside their job limits. The runner retries only while another request can start before the deadline, so a
 late grant is never needed. When the bound expires, the final typed capacity refusal and exit 4
 remain visible. A `held` busy response
 contains exactly the safe owner fields `display_label`, `yard`, `project`, `run`, `purpose`,
