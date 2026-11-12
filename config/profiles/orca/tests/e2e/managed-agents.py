@@ -365,6 +365,36 @@ def peer_executable(client_port, server_port):
     return 'unknown'
 
 
+class RoutingRequests:
+    """Timestamp admission before peer lookup, which can outlive the client."""
+
+    def __init__(self):
+        self.entries = []
+        self.lock = threading.Lock()
+
+    def record(self, client_port, server_port, path):
+        entry = {'monotonic': time.monotonic(), 'peer': 'pending',
+                 'path': path.split('?', 1)[0][:200]}
+        with self.lock:
+            self.entries.append(entry)
+        peer = peer_executable(client_port, server_port)
+        with self.lock:
+            entry['peer'] = peer
+        return peer
+
+    def peers_since(self, instant):
+        with self.lock:
+            return {entry['peer'] for entry in self.entries if entry['monotonic'] >= instant}
+
+    def evidence(self, killed_at, exited_at):
+        with self.lock:
+            return {'killed_at': killed_at, 'exited_at': exited_at, 'total': len(self.entries),
+                    'requests': [dict(entry, peer=entry['peer'][:512],
+                                      after_kill=None if killed_at is None else entry['monotonic'] >= killed_at,
+                                      after_exit=None if exited_at is None else entry['monotonic'] >= exited_at)
+                                 for entry in self.entries[-40:]]}
+
+
 def codex_routing(arguments):
     """Assert where a Codex client from a login shell, as over SSH, runs its turns and tools."""
     spec = importlib.util.spec_from_file_location('provider', arguments.provider)
@@ -373,7 +403,8 @@ def codex_routing(arguments):
 
     class Provider(module.Provider):
         def do_POST(self):
-            self.server.peers.add(peer_executable(self.client_address[1], self.server.server_port))
+            self.server.peers.add(self.server.request_log.record(
+                self.client_address[1], self.server.server_port, self.path))
             super().do_POST()
 
     class Client(module.Terminal):
@@ -397,6 +428,8 @@ def codex_routing(arguments):
     root = Path(tempfile.mkdtemp(prefix='subyard-codex-routing-', dir='/tmp'))
     provider = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
     provider.command, provider.failure, provider.workspace, provider.peers = None, None, None, set()
+    provider.request_log = RoutingRequests()
+    killed_at = exited_at = None
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     command = 'git commit --allow-empty -m routing-fixture'
     plain = ['--no-alt-screen', PROMPT]
@@ -418,9 +451,9 @@ def codex_routing(arguments):
         return result.returncode
 
     def report(name, client_arguments, client, error):
-        # Enough to diagnose a recurrence: the command, the error and what the terminal showed.
-        print('codex-routing: %s failed: command: codex %s; %s: %s; provider failure: %s; terminal output tail:\n%s' % (
+        print('codex-routing: %s failed: command: codex %s; %s: %s; provider failure: %s; requests: %s; terminal output tail:\n%s' % (
             name, shlex.join(client_arguments), type(error).__name__, str(error)[:2000], provider.failure,
+            json.dumps(provider.request_log.evidence(killed_at, exited_at), sort_keys=True),
             client.text()[-3000:]), file=sys.stderr, flush=True)
 
     def prompted(client, path, before):
@@ -429,6 +462,8 @@ def codex_routing(arguments):
         assert commits(path) == before, 'Git ran before approval'
 
     def turn(name, client_arguments, expected, prompts):
+        nonlocal killed_at, exited_at
+        killed_at = exited_at = None
         path = workspaces[name]
         provider.peers.clear()
         provider.workspace, provider.command = path, 'readlink /proc/$PPID/exe > executor.txt; command -v rg > helper.txt'
@@ -474,6 +509,8 @@ def codex_routing(arguments):
         print('codex-routing: %s: Git prompt named the command, decline kept history, approval added one commit' % name, flush=True)
 
     def disconnect(name, client_arguments, expected, survives):
+        nonlocal killed_at, exited_at
+        killed_at = exited_at = None
         path = workspaces[name]
         provider.workspace, provider.command, provider.command_timeout_ms = path, 'touch started.txt; sleep 15; touch done.txt', 60000
         client = Client(client_arguments, path)
@@ -482,13 +519,21 @@ def codex_routing(arguments):
             while not (path / 'started.txt').exists():
                 assert time.monotonic() < deadline, name + ': the slow tool did not start'
                 client.read()
-            provider.peers.clear()
+            # Use request entry time, not completion of the potentially slow peer lookup.
+            killed_at = time.monotonic()
             os.kill(client.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 5
+            while os.waitid(os.P_PID, client.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+                assert time.monotonic() < deadline, name + ': the killed client did not exit'
+                time.sleep(0.01)
+            # Leave reaping to Terminal.close(), which also cleans up the process group.
+            exited_at = time.monotonic()
             time.sleep(25)
+            peers = provider.request_log.peers_since(killed_at)
             assert (path / 'done.txt').exists() == survives, name + ': the tool outcome after the disconnect changed'
-            assert provider.peers == ({expected} if survives else set()), name + ': unexpected requests after the disconnect'
+            assert peers == ({expected} if survives else set()), name + ': unexpected requests after the disconnect: ' + repr(sorted(peers))
             print('codex-routing: %s: client killed during a slow tool; tool %s, model peers %s' % (
-                name, 'finished' if survives else 'did not finish', sorted(provider.peers)), flush=True)
+                name, 'finished' if survives else 'did not finish', sorted(peers)), flush=True)
         except Exception as error:
             report(name, client_arguments, client, error)
             raise

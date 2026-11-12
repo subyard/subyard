@@ -139,5 +139,42 @@ class ManagedClaudeLaunchTest(unittest.TestCase):
                 self.assertEqual(writes, ([b'\x1b[B', b'\r'] if offer else []) + [b'hello', b'\r'])
 
 
+class ManagedCodexDisconnectTest(unittest.TestCase):
+    def test_request_start_not_peer_lookup_completion_defines_disconnect(self):
+        spec = importlib.util.spec_from_file_location('managed_agents', FIXTURE.with_suffix('.py'))
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        requests = helper.RoutingRequests()
+        killed_at, exited_at = 2, 3
+
+        def delayed_peer(*_):
+            # Lookup is still pending after the kill, but this request began before it.
+            self.assertEqual(requests.peers_since(killed_at), set())
+            self.assertEqual(requests.evidence(killed_at, exited_at)['requests'][0]['peer'], 'pending')
+            return '/fixture/codex'
+
+        with patch.object(helper.time, 'monotonic', return_value=1), \
+                patch.object(helper, 'peer_executable', side_effect=delayed_peer):
+            requests.record(1, 2, '/v1/responses?token=private')
+        self.assertEqual(requests.peers_since(killed_at), set())
+        for instant in (killed_at, exited_at + 1):
+            with patch.object(helper.time, 'monotonic', return_value=instant), \
+                    patch.object(helper, 'peer_executable', return_value='unknown'):
+                requests.record(1, 2, '/v1/responses')
+            self.assertEqual(requests.peers_since(killed_at), {'unknown'})
+        evidence = requests.evidence(killed_at, exited_at)
+        self.assertEqual([entry['after_kill'] for entry in evidence['requests']], [False, True, True])
+        self.assertEqual([entry['after_exit'] for entry in evidence['requests']], [False, False, True])
+        self.assertEqual(evidence['requests'][0]['path'], '/v1/responses')
+        self.assertNotIn('private', str(evidence))
+        for _ in range(40):
+            with patch.object(helper, 'peer_executable', return_value='/fixture/codex'):
+                requests.record(1, 2, '/v1/responses')
+        self.assertEqual(requests.evidence(killed_at, exited_at)['total'], 43)
+        self.assertEqual(len(requests.evidence(killed_at, exited_at)['requests']), 40)
+        # Truncating diagnostics must never discard a leak from the assertion's history.
+        self.assertIn('unknown', requests.peers_since(killed_at))
+
+
 if __name__ == '__main__':
     unittest.main()
