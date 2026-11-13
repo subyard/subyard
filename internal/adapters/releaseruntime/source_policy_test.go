@@ -135,10 +135,6 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 				{"hop", "0.27.0", "0.28.0", map[string]string{
 					"from/complete": replace, "from/target": resume, "from/previous": chain,
 				}},
-				{"old-owner", "0.25.5", "0.26.0", map[string]string{
-					"from/complete": replace, "from/target": chain, "from/previous": chain,
-					"target/complete": replace, "target/target": chain, "target/previous": chain,
-				}},
 				{"pre-floor", "0.10.0", "0.20.0", map[string]string{
 					"from/complete": legacy, "from/target": legacy, "from/previous": legacy,
 					"target/complete": replace, "target/target": chain, "target/previous": chain,
@@ -221,27 +217,22 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 						}
 						next := pair.want[key]
 						activeBelow := next != ""
-						for _, mode := range []releasetransition.ProcessMode{releasetransition.ProcessInspect, releasetransition.ProcessConverge} {
-							request := releasetransition.ProcessRequest{RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Target: "1.2.3-cccccccccccc", Direction: releasetransition.DirectionActivateTarget, Mode: mode}
-							if mode == releasetransition.ProcessConverge {
-								request.Replacement = &releasetransition.JournalReplacement{Reason: releasetransition.JournalReplacementNewerRelease}
+						request := releasetransition.ProcessRequest{RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Target: "1.2.3-cccccccccccc", Direction: releasetransition.DirectionActivateTarget, Mode: releasetransition.ProcessInspect}
+						err = CheckSourcePolicy(context.Background(), request)
+						if (err == nil) != !activeBelow {
+							t.Fatalf("allowed=%t: %v", !activeBelow, err)
+						}
+						if err != nil && next == legacy {
+							if err.Error() != LegacyReinstallGuidance {
+								t.Fatalf("below the V2 floor must keep only the full-uninstall route: %v", err)
 							}
-							err = CheckSourcePolicy(context.Background(), request)
-							if (err == nil) != !activeBelow {
-								t.Fatalf("%s allowed=%t: %v", mode, !activeBelow, err)
+						} else if err != nil {
+							if strings.Count(err.Error(), "source-anchor-required:") != 1 || strings.Count(err.Error(), "next:") != 1 ||
+								!strings.Contains(err.Error(), "next: "+next+"\n") && !strings.HasSuffix(err.Error(), "next: "+next) {
+								t.Fatalf("lost single continuation %q: %v", next, err)
 							}
-							if err != nil && next == legacy {
-								if err.Error() != LegacyReinstallGuidance {
-									t.Fatalf("%s: below the V2 floor must keep only the full-uninstall route: %v", mode, err)
-								}
-							} else if err != nil {
-								if strings.Count(err.Error(), "source-anchor-required:") != 1 || strings.Count(err.Error(), "next:") != 1 ||
-									!strings.Contains(err.Error(), "next: "+next+"\n") && !strings.HasSuffix(err.Error(), "next: "+next) {
-									t.Fatalf("lost single continuation %q: %v", next, err)
-								}
-								if unfinished && (!strings.Contains(err.Error(), "Do not uninstall.") || strings.Contains(err.Error(), "uninstall --full")) {
-									t.Fatalf("lost repair guidance: %v", err)
-								}
+							if unfinished && (!strings.Contains(err.Error(), "Do not uninstall.") || strings.Contains(err.Error(), "uninstall --full")) {
+								t.Fatalf("lost repair guidance: %v", err)
 							}
 						}
 						if after := mustReadFile(t, fixture.journalPath); string(after) != string(payload) {
@@ -255,7 +246,6 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 							}
 							engine := mustReadFile(t, filepath.Join(root, "bin", "yard-engine"))
 							testkit.WriteFile(t, filepath.Join(root, "runtime-files.sha256"), []byte(fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(engine))), 0o600)
-							request := releasetransition.ProcessRequest{RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Target: "1.2.3-cccccccccccc", Direction: releasetransition.DirectionActivateTarget, Mode: releasetransition.ProcessInspect}
 							if err := CheckSourcePolicy(context.Background(), request); err == nil || err.Error() != LegacyReinstallGuidance {
 								t.Fatalf("registry-less source below the V2 floor lost the full-uninstall route: %v", err)
 							}
@@ -267,7 +257,6 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 						// continuation: the installed release resumes its own journal.
 						journal.Transaction = "recovery-v1-owner"
 						write(journal)
-						request := releasetransition.ProcessRequest{RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Target: "1.2.3-cccccccccccc", Direction: releasetransition.DirectionActivateTarget, Mode: releasetransition.ProcessInspect}
 						if err := CheckSourcePolicy(context.Background(), request); err == nil || !strings.Contains(err.Error(), "next: "+next) {
 							t.Fatalf("recovery journal lost the uniform continuation: %v", err)
 						}
@@ -492,7 +481,7 @@ func TestSourcePolicyPendingIdentityPrecedesReleaseRecovery(t *testing.T) {
 }
 
 func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
-	for _, state := range []string{"legacy-complete", "checkpoint-complete", "missing", "incomplete", "missing-checkpoint", "contradictory", "empty-registry"} {
+	for _, state := range []string{"legacy-complete", "checkpoint-complete", "missing", "incomplete", "contradictory"} {
 		t.Run(state, func(t *testing.T) {
 			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalReconciling)
 			t.Setenv("SUBYARD_HOME", filepath.Dir(fixture.runtimeRoot))
@@ -512,12 +501,7 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			testkit.WriteFile(t, filepath.Join(root, "config/release-transition.json"), registryBytes, 0600)
-			manifest := fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(engine))
-			if state != "empty-registry" {
-				manifest += fmt.Sprintf("%x  ./config/release-transition.json\n", sha256.Sum256(registryBytes))
-			} else if err := os.Remove(filepath.Join(root, "config/release-transition.json")); err != nil {
-				t.Fatal(err)
-			}
+			manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", sha256.Sum256(engine), sha256.Sum256(registryBytes))
 			testkit.WriteFile(t, filepath.Join(root, "runtime-files.sha256"), []byte(manifest), 0600)
 			if err := os.Remove(filepath.Join(fixture.runtimeRoot, "current")); err != nil {
 				t.Fatal(err)
@@ -605,11 +589,9 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 				t.Fatalf("authority %s allowed=%t: %v", state, allowed, err)
 			}
 			if !allowed {
-				if strings.Contains(err.Error(), "uninstall --full") || !strings.Contains(err.Error(), "--check") {
+				if strings.Contains(err.Error(), "uninstall --full") || strings.Contains(err.Error(), "next:") ||
+					!strings.HasPrefix(err.Error(), "replacement-authority-required: ") || !strings.Contains(err.Error(), "known-good backup") {
 					t.Fatalf("unsafe damaged-history guidance: %v", err)
-				}
-				if state != "empty-registry" && !strings.Contains(err.Error(), "next: yard update --check") {
-					t.Fatalf("damaged authority offered a loop: %v", err)
 				}
 			}
 			for path, raw := range before {

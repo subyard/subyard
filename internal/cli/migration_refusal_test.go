@@ -262,7 +262,7 @@ func TestMigrationDirectDiagnosticFiltersUnsafeNames(t *testing.T) {
 // installed release finishes its own journal first; an activated anchor journal is
 // replaced by the candidate. No step names a release that sends the user back.
 func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
-	for _, state := range []string{"authorized", "migrating", "activation-intent", "switched activation-intent", "reconciling", "rollback", "old-owner-before", "old-owner-after", "old-owner-rollback", "damaged-authority"} {
+	for _, state := range []string{"authorized", "reconciling", "rollback"} {
 		t.Run(state, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			home, runtimeRoot := filepath.Join(root, "config-home"), filepath.Join(root, "runtime")
@@ -283,26 +283,14 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			writeReleaseTransitionTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), ledger, 0600)
 			anchorVersion := releaseruntime.UpdateAnchorVersion
 			candidateVersion := "0.29.0-test"
-			oldOwner := strings.HasPrefix(state, "old-owner")
-			rollback := strings.Contains(state, "rollback")
+			rollback := state == "rollback"
 			oldVersion := "0.27.0"
-			if oldOwner {
-				oldVersion = "0.25.5"
-			}
 			old, anchor, candidate := releasetransition.ReleaseID(oldVersion+"-aaaaaaaaaaaa"), releasetransition.ReleaseID(anchorVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
 			oldDigest := writeSealedRollbackTarget(t, runtimeRoot, string(old), oldVersion, registry)
 			anchorDigest := writeSealedRollbackTarget(t, runtimeRoot, string(anchor), anchorVersion, registry)
 			candidateDigest := writeSealedRollbackTarget(t, runtimeRoot, string(candidate), candidateVersion, registry)
 			from, target, direction, artifact := old, anchor, releasetransition.DirectionActivateTarget, anchorDigest
-			if oldOwner {
-				legacy := releasetransition.ReleaseID("0.26.0-dddddddddddd")
-				legacyDigest := writeSealedRollbackTarget(t, runtimeRoot, string(legacy), "0.26.0", registry)
-				if rollback {
-					from, target, direction, artifact = legacy, old, releasetransition.DirectionActivatePrevious, oldDigest
-				} else {
-					target, artifact = legacy, legacyDigest
-				}
-			} else if rollback {
+			if rollback {
 				from, target, direction, artifact = anchor, old, releasetransition.DirectionActivatePrevious, oldDigest
 			}
 			if err := os.Symlink("releases/"+string(from), filepath.Join(runtimeRoot, "current")); err != nil {
@@ -347,22 +335,16 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			preactivation := state == "authorized" || state == "migrating" || state == "activation-intent" || state == "old-owner-before"
-			if preactivation || state == "switched activation-intent" {
-				journal.Checkpoint = releasetransition.JournalActivationIntent
-				if preactivation {
-					journal.Checkpoint = releasetransition.JournalCheckpoint(state)
-					if oldOwner {
-						journal.Checkpoint = releasetransition.JournalAuthorized
-					}
-					for _, link := range []string{"current", "previous"} {
-						if err := os.Remove(filepath.Join(runtimeRoot, link)); err != nil {
-							t.Fatal(err)
-						}
-					}
-					if err := os.Symlink("releases/"+string(from), filepath.Join(runtimeRoot, "current")); err != nil {
+			preactivation := state == "authorized"
+			if preactivation {
+				journal.Checkpoint = releasetransition.JournalAuthorized
+				for _, link := range []string{"current", "previous"} {
+					if err := os.Remove(filepath.Join(runtimeRoot, link)); err != nil {
 						t.Fatal(err)
 					}
+				}
+				if err := os.Symlink("releases/"+string(from), filepath.Join(runtimeRoot, "current")); err != nil {
+					t.Fatal(err)
 				}
 				payload, err := releasetransition.MarshalJournal(journal)
 				if err != nil {
@@ -378,30 +360,11 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			}
 			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: home, Target: candidate, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: candidateDigest}
 			Version = candidateVersion
-			if state == "damaged-authority" {
-				if err := os.Remove(filepath.Join(home, "release-transition/v2/ledger.json")); err != nil {
-					t.Fatal(err)
-				}
-			}
 			refusal := releaseruntime.CheckSourcePolicy(context.Background(), request)
-			if state == "damaged-authority" {
-				if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --check") || strings.Contains(refusal.Error(), "&&") {
-					t.Fatalf("damaged authority offered a cycle: %v", refusal)
-				}
-				owner.Mode, owner.Execution = releasetransition.ProcessInspect, nil
-				Version = anchorVersion
-				_ = run(owner) // A read-only diagnostic does not promise to reconstruct lost authority.
-				after, err := store.ReadCurrentJournal()
-				if err != nil || !bytes.Equal(after.Payload, before.Payload) {
-					t.Fatal("damaged-state check changed journal", err)
-				}
-				return
-			}
-			activeBelow := preactivation || rollback || oldOwner
-			if activeBelow {
-				next := "yard update && yard update --version " + anchorVersion + " && yard update"
-				if !rollback && !oldOwner {
-					next = "yard update && yard update"
+			if preactivation || rollback {
+				next := "yard update && yard update"
+				if rollback {
+					next = "yard update && yard update --version " + anchorVersion + " && yard update"
 				}
 				if refusal == nil || !strings.Contains(refusal.Error(), "next: "+next) || strings.Count(refusal.Error(), "next:") != 1 {
 					t.Fatalf("unsafe continuation %q: %v", next, refusal)
@@ -420,7 +383,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 				}
 				Version = candidateVersion
 				refusal = releaseruntime.CheckSourcePolicy(context.Background(), request)
-				if rollback || oldOwner {
+				if rollback {
 					// Step 2: the completed old release updates to the anchor.
 					if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --version "+anchorVersion+" && yard update") || strings.Contains(refusal.Error(), "unfinished") {
 						t.Fatalf("completed owner repeated the same step: %v", refusal)

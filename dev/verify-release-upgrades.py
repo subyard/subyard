@@ -23,11 +23,6 @@ import time
 import urllib.request
 
 
-BASELINE = "0.11.2"
-BASELINE_SHA256 = {
-    "amd64": "9cadb47ba14bf9407f30eeeeccbbe737fa23bcf50c5b3e6589d55722f39bb818",
-    "arm64": "868e6a64acd30f4091d78a5bfa5ee348e8eb96b44acb749258965c1469f28295",
-}
 LEGACY_BASELINE = "0.9.1"
 LEGACY_BASELINE_SHA256 = {
     "amd64": "a5256e985fa5dd0d392df75515f9dca7e239888c3e101867bbd0285035644a90",
@@ -57,30 +52,9 @@ ACTIVATION_BASELINE_SHA256 = {
     "amd64": "3ea73ca51dae023600997a07bbfaa5df8be1f4c1c4f5c9ead1b261b5aec4363b",
     "arm64": "dcc1ae42dc25760b9f4fd290c8aec23c09b729d4a04f780107022710f1247e79",
 }
-PUBLISHED_BASELINE = "0.18.1"
-PUBLISHED_BASELINE_SHA256 = {
-    "amd64": "a2e4a18ac806079b70b35a5b679ef6c616bc22137453d6f3f0e0e34ef491ef74",
-    "arm64": "2172f375871fe280297f69e9ae88a7d1ca1df5678c02d6189551cfa98aa07d9a",
-}
-DIRECT_BASELINE = "0.19.0"
-DIRECT_BASELINE_SHA256 = {
-    "amd64": "81c55205368ef891976f28ef21b303da5ef97114d80f76c6ec60e9f3a2b698a9",
-    "arm64": "5b8646eabda155eb48203eac80fba81bde2a773050a35839fc6d9216b6ec47d7",
-}
-MIGRATION_OWNER_BASELINE = "0.21.0"
-MIGRATION_OWNER_SHA256 = {"amd64": "1fee6251856ede2c1cbd0c01f48d226fbce64915f712df97085d35abb4991282"}
-SOURCE_BASELINE = "0.18.6"
-SOURCE_BASELINE_SHA256 = {
-    "amd64": "458950eccd3831df8d4ed059ccc51a5dece6f8a85aedaae38f863b7252f635f2",
-    "arm64": "a3b52c39edfc4930f0e0ab4c697d60db6b39a00b022d344053bc4f4131fca4fa",
-}
-
-
-# Immutable amd64 archive pins retained from the published-baseline table history.
-RECENT_BASELINES = {
-    "0.25.5": {"amd64": "061fa1e4616224e3a32c6424a62c8c2eff95818186cb089642265f75056113fd"},
-    "0.26.0": {"amd64": "12c443cd103b014de27047c6eca1ea8af3612236b3031940b8b0df0cbad1022c"},
-}
+# Immutable amd64 archive pin of the newest refused release; see the published-baseline table.
+RECENT_BASELINE = "0.27.0"
+RECENT_BASELINE_SHA256 = {"amd64": "b339acd76299a7c301d79e502459d9f4ab6e8d6f486c83e76c53aff1f6bc5e61"}
 
 
 def published_anchor(root):
@@ -166,14 +140,10 @@ def selected_baseline_archives(args, release, arch):
 
 
 def ordinary_baselines(args):
+    # The oldest, a middle and the newest refused caller render the same refusal.
     return [(MINIMUM_BASELINE, MINIMUM_BASELINE_SHA256, None),
-            (BASELINE, BASELINE_SHA256, args.baseline_dir),
             (ACTIVATION_BASELINE, ACTIVATION_BASELINE_SHA256, args.activation_baseline_dir),
-            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir),
-            (SOURCE_BASELINE, SOURCE_BASELINE_SHA256, args.source_baseline_dir),
-            (DIRECT_BASELINE, DIRECT_BASELINE_SHA256, args.direct_baseline_dir),
-            (MIGRATION_OWNER_BASELINE, MIGRATION_OWNER_SHA256, args.migration_owner_baseline_dir),
-            *[(version, hashes, None) for version, hashes in RECENT_BASELINES.items()]]
+            (RECENT_BASELINE, RECENT_BASELINE_SHA256, args.recent_baseline_dir)]
 
 
 def skills_transport_contract(root):
@@ -328,11 +298,11 @@ def snapshot(root):
     }
 
 
-def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
-                interrupt_replacement=None, interrupt_checkpoint=None, allow_failed_checkpoint=False):
+def run_process(command, env, timeout, input_text=None, interrupt_checkpoint=None,
+                allow_failed_checkpoint=False):
     watch = None
-    if interrupt_replacement is not None or interrupt_checkpoint is not None:
-        journal, _, _ = interrupt_replacement or interrupt_checkpoint
+    if interrupt_checkpoint is not None:
+        journal, _, _ = interrupt_checkpoint
         libc = ctypes.CDLL(None, use_errno=True)
         watch = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
         require(watch >= 0, "cannot observe the owned recovery journal")
@@ -360,37 +330,6 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                              text=True, start_new_session=True)
     failure = None
     try:
-        if interrupt_replacement is not None:
-            journal, predecessor, marker = interrupt_replacement
-            deadline = time.monotonic() + timeout
-            observed = False
-            while child.poll() is None and time.monotonic() < deadline:
-                readable, _, _ = select.select([watch], [], [], 0.02)
-                if not readable:
-                    continue
-                os.read(watch, 65536)
-                # Pause this owned session before reading the durable state;
-                # no journal phase edits or runtime-link changes are fixtures.
-                try:
-                    os.killpg(child.pid, signal.SIGSTOP)
-                except ProcessLookupError:
-                    break
-                current = read_observed_journal()
-                if current is None:
-                    os.killpg(child.pid, signal.SIGCONT)
-                    continue
-                if current["transaction"] != predecessor:
-                    require(current["transaction"].startswith(("recovery-v1-", "recovery-v2-", "migration-owner-v1-"))
-                            and current["checkpoint"] != "complete",
-                            "fresh recovery passed its observed publication boundary")
-                    marker.write_text(json.dumps({"transaction": current["transaction"],
-                                                  "checkpoint": current["checkpoint"]}) + "\n")
-                    marker.chmod(0o600)
-                    os.killpg(child.pid, signal.SIGKILL)
-                    observed = True
-                    break
-                os.killpg(child.pid, signal.SIGCONT)
-            require(observed, "fresh recovery did not publish an observable successor")
         if interrupt_checkpoint is not None:
             journal, checkpoint, marker = interrupt_checkpoint
             deadline = time.monotonic() + timeout
@@ -425,14 +364,6 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                     marker.chmod(0o600)
                     observed = True
             require(observed, "released migration owner did not reach its checkpoint")
-        if interrupt_marker is not None:
-            deadline = time.monotonic() + timeout
-            while not interrupt_marker.is_file() and child.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise subprocess.TimeoutExpired(command, timeout)
-                time.sleep(0.02)
-            if interrupt_marker.is_file():
-                os.killpg(child.pid, signal.SIGKILL)
         stdout, stderr = child.communicate(input=input_text, timeout=timeout)
         result = subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
         return result
@@ -454,8 +385,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
             failure.stdout = final_stdout
             failure.stderr = final_stderr
             failure.child_after_cleanup_returncode = child.returncode
-        interrupted = interrupt_replacement or interrupt_checkpoint
-        marker = interrupted[2] if interrupted is not None else interrupt_marker
+        marker = interrupt_checkpoint[2] if interrupt_checkpoint is not None else None
         if marker is not None:
             for suffix, payload in ((".stdout", final_stdout), (".stderr", final_stderr)):
                 with os.fdopen(os.open(str(marker) + suffix, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as output:
@@ -463,24 +393,8 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                     output.write(payload)
 
 
-def set_fixture_observation(control, status=None, journal=None, history=None, owned_project=None, guest=None):
-    instances = [] if status is None else [{"project": "subyard", "name": "yard",
-                                            "info": {"name": "yard", "status": status,
-                                                     "type": "container", "config": {}, "devices": {}}}]
-    if (history is not None or owned_project is not None) and instances:
-        # Explicit owned cases model an existing managed, disk-backed container;
-        # it exercises materialized activation, not physical legacy enrollment.
-        config = {"volatile.uuid": "history-owned-yard", "user.subyard.managed": "true",
-                  "user.subyard.name": "default", "user.subyard.bridge": "incusbr0",
-                  "user.subyard.desired_power": status.lower(), "user.subyard.disk_tmp": "v1"}
-        instances[0]["info"].update(config=config, expanded_config=config,
-                                    devices={}, expanded_devices={})
-    observation = {"instances": instances, "holdJournal": str(journal) if journal else "", "migrationHistory": history}
-    if guest is not None and instances:
-        observation["observedGuest"] = guest
-    project_config = history.get("projectConfig") if history is not None else owned_project
-    if project_config is not None:
-        observation["projects"] = {"subyard": {"name": "subyard", "config": project_config}}
+def set_fixture_observation(control):
+    observation = {"instances": [], "holdJournal": "", "migrationHistory": None}
     payload = json.dumps(observation)
     control.write_text(payload)
     control.chmod(0o600)
@@ -494,8 +408,7 @@ def set_fixture_observation(control, status=None, journal=None, history=None, ow
 
 
 class Fixture:
-    def __init__(self, root, release, version, baseline, arch, baseline_version=BASELINE,
-                 preserve_observation=False):
+    def __init__(self, root, release, version, baseline, arch, baseline_version):
         check_scratch_capacity(release / f"subyard-{version}-linux-{arch}.tar.gz",
                                [baseline / f"subyard-{baseline_version}-linux-{arch}.tar.gz"])
         self.root = root
@@ -509,7 +422,7 @@ class Fixture:
         self.baseline_version = baseline_version
         self.config.mkdir(parents=True)
         control = root.parent / "incus-observation.json"
-        if control.exists() and not preserve_observation:
+        if control.exists():
             set_fixture_observation(control)
         self.env = {
             "PATH": "/usr/bin:/bin", "HOME": str(self.home), "SHELL": "/bin/bash",
@@ -652,7 +565,7 @@ def verify_minimum_source(release, version, baseline, arch, root):
     shutil.rmtree(fixture.root)
 
 
-def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
+def verify(release, version, baseline, arch, root, baseline_version):
     normal = Fixture(root / f"normal-{baseline_version}", release, version, baseline, arch, baseline_version)
     verify_source_anchor_refusal(normal, release / "subyard-install.sh" if baseline_version == MINIMUM_BASELINE else None)
     shutil.rmtree(normal.root)
@@ -741,8 +654,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
-    for name in ("baseline", "legacy-baseline", "activation-baseline", "published-baseline",
-                 "source-baseline", "direct-baseline", "migration-owner-baseline"):
+    for name in ("legacy-baseline", "activation-baseline", "recent-baseline"):
         parser.add_argument("--" + name + "-dir", type=Path)
     focused = parser.add_mutually_exclusive_group()
     focused.add_argument("--only-source-anchor", action="store_true",
@@ -751,7 +663,7 @@ def main():
                          help="run retired-source refusal, staged full uninstall and separate clean installation")
     args = parser.parse_args()
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
-    require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
+    require(platform.system() == "Linux" and arch in MINIMUM_BASELINE_SHA256, "unsupported platform")
     release = args.release_dir.resolve()
     require(args.version not in {version for version, _, _ in ordinary_baselines(args)},
             "candidate must differ from the released baselines")

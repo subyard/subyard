@@ -1717,7 +1717,7 @@ done
 # Independent historical homes must not inherit the owner fixture's unit directory.
 bash -euo pipefail -c '
   export SUBYARD_KEYS_SYSTEMD_DIR=/unrelated-fixture-units
-  source "$1/dev/e2e/release-transition-v0111-recovery.sh" 123
+  source "$1/dev/e2e/release-transition-fixture.sh" 123
   select_fixture success
   [ "$(fixture_env printenv SUBYARD_KEYS_SYSTEMD_DIR)" = "$HOME_ROOT/.config/systemd/user" ]
 ' fixture-units "$ROOT" || fail 'historical fixture inherited another installation credential timer'
@@ -2773,7 +2773,7 @@ grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' 
   && grep -Fq 'export SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit"' \
     "$ROOT/tests/engine-release.sh" \
   || fail "host-free engine release can observe the physical host power reconciler"
-v0111_recovery="$ROOT/dev/e2e/release-transition-v0111-recovery.sh"
+v0111_recovery="$ROOT/dev/e2e/release-transition-fixture.sh"
 v0111_fixture_env="$(bash -c '
   set -euo pipefail
   source "$1"
@@ -2874,7 +2874,7 @@ for newer_case in empty retained partial helper unit enablement; do
   newer_rc=0
   bash -c '
     set -euo pipefail
-    source "$1/dev/e2e/release-transition-v0111-recovery.sh" 123
+    source "$1/dev/e2e/release-transition-fixture.sh" 123
     newer="$1/dev/e2e/release-transition-newer-release-replacement.sh"
     probe=$2 scenario=$3
     STATE_ROOT="$probe/state" SUCCESS_ROOT="$probe/state/success"
@@ -2926,7 +2926,7 @@ for newer_original in 0 2 23; do
   newer_rc=0
   bash -c '
     set -euo pipefail
-    source "$1/dev/e2e/release-transition-v0111-recovery.sh" 123
+    source "$1/dev/e2e/release-transition-fixture.sh" 123
     eval "$(sed -n "/^cleanup_newer_release() {/,/^}/p" "$1/dev/e2e/release-transition-newer-release-replacement.sh")"
     STATE_ROOT="$2/state" SUCCESS_ROOT="$2/state/success"
     MARKER=newer-early CLEANUP_ARMED=1
@@ -6349,57 +6349,10 @@ source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
   [ "$(current_migration_readiness_diagnostics approved-release <<<not-json 2>&1)" = \
     'current migration readiness report is invalid' ] || fail 'invalid readiness diagnostic exposed parser output'
 ) || fail 'source-upgrade final readiness regression'
-# Execute the released journal predicates and the real three-variant driver.
-python3 - "$ROOT" "$TMP" <<'PY_BOUNDARY'
-import json, os, pathlib, re, runpy, subprocess, sys, tempfile
-root=pathlib.Path(sys.argv[1]); temporary=pathlib.Path(sys.argv[2])
-source=(root/'dev/e2e/published-upgrade.sh').read_text()
-module=runpy.run_path(str(root/'dev/verify-release-upgrades.py'))
-anchor=module['published_anchor'](root)[0]
-body=source.split('interrupt_anchor_hop() {',1)[1].split('\n# Cleanup removes the journal',1)[0]
-predicate=re.search(r'^  operator_env jq -e --arg checkpoint.*?\|\| die [^\n]+',body,re.M|re.S)[0]
-links=body.split('  # candidate, whose own inspection/consent decides whether takeover is safe.\n',1)[1].split('  operator_env "$staged_path/bin/yard" update --check',1)[0]
-for checkpoint in ('authorized','reconciling'):
- for fault in ('none','prefixed-source','checkpoint','direction'):
-  path=temporary/f'journal-{checkpoint}-{fault}.json'
-  journal={'schemaVersion':2,'checkpoint':checkpoint,'releases':{'from':'0.27.0-b339acd76299','target':anchor+'-d4d3cc991923'},'goal':{'target':anchor+'-d4d3cc991923','direction':'activate-target'}}
-  if fault=='prefixed-source': journal['releases']['from']='releases/'+journal['releases']['from']
-  if fault=='checkpoint': journal['checkpoint']='complete'
-  if fault=='direction': journal['goal']['direction']='activate-previous'
-  path.write_text(json.dumps(journal))
-  setup='set -euo pipefail\noperator_env() { "$@"; }\ndie() { exit 2; }\n'
-  setup+=f'checkpoint={checkpoint}; OLD_RELEASE_TARGET=releases/0.27.0-b339acd76299; V2_JOURNAL={path}\n'
-  result=subprocess.run(['bash','-c',setup+predicate],capture_output=True,text=True)
-  assert (result.returncode==0)==(fault=='none'),(fault,result)
-# Journal target is bare; filesystem links carry releases/.
-operator=temporary/'boundary-operator'; runtime=operator/'.subyard/runtime'; runtime.mkdir(parents=True)
-saved=temporary/'hop-before.json'; saved.write_text(json.dumps(journal|{'goal':{'target':anchor+'-d4d3cc991923'}}))
-(runtime/'current').symlink_to('releases/'+anchor+'-d4d3cc991923')
-(runtime/'previous').symlink_to('releases/0.27.0-b339acd76299')
-setup=f'set -euo pipefail\noperator_env() {{ "$@"; }}\ndie() {{ exit 2; }}\nOPERATOR_HOME={operator}; STATE_ROOT={temporary}; OLD_RELEASE_TARGET=releases/0.27.0-b339acd76299\n'
-assert subprocess.run(['bash','-c',setup+links],capture_output=True).returncode==0
-(runtime/'previous').unlink(); (runtime/'previous').symlink_to('releases/foreign')
-assert subprocess.run(['bash','-c',setup+links],capture_output=True).returncode!=0
-driver=source.split('if [ "$PUBLISHED_MODE" = chain ] && [ "$VERSION" = 0.27.0 ]',1)[1].split('\nfi',1)[0]
-driver='if [ "$PUBLISHED_MODE" = chain ] && [ "$VERSION" = 0.27.0 ]'+driver+'\nfi\n'
-for failed in ('none','uninterrupted','authorized','reconciling'):
- trace=temporary/f'boundary-driver-{failed}'
- script='''set -euo pipefail
-PUBLISHED_MODE=chain VERSION=0.27.0 ROOT=/fixture SUBYARD_E2E_RUN_ID=1234abcd
-bash() {
- test "$SUBYARD_E2E_RUN_ID" = 1234abcd
- test ! -e "$TRACE.owned"
- touch "$TRACE.owned"
- printf '%s\\n' "$SUBYARD_PUBLISHED_HOP_CHECKPOINT" >> "$TRACE"
- if [ "$SUBYARD_PUBLISHED_HOP_CHECKPOINT" = "$FAILED" ]; then return 3; fi
- rm "$TRACE.owned"
-}
-'''+driver
- result=subprocess.run(['bash','-c',script],env=os.environ|{'TRACE':str(trace),'FAILED':failed},capture_output=True,text=True)
- order=['uninterrupted','authorized','reconciling']; expected=order if failed=='none' else order[:order.index(failed)+1]
- assert trace.read_text().splitlines()==expected,(failed,result,trace.read_text())
- assert result.returncode==(0 if failed=='none' else 3),(failed,result)
 # Observe the actual first atomic publication; never create protected state.
+python3 - "$ROOT" <<'PY_BOUNDARY'
+import json, os, pathlib, runpy, sys, tempfile
+module=runpy.run_path(str(pathlib.Path(sys.argv[1])/'dev/verify-release-upgrades.py'))
 run=module['run_process']
 for shape in ('missing-parent','missing-journal','unrelated-rename'):
  with tempfile.TemporaryDirectory(prefix='subyard-boundary-watch-',dir='/tmp') as directory:
@@ -6415,7 +6368,7 @@ time.sleep(10)
 '''
   result=run([sys.executable,'-c',publisher,str(journal)],os.environ.copy(),timeout=5,interrupt_checkpoint=(journal,'reconciling',marker))
   assert result.returncode!=0 and json.loads(marker.read_text())['checkpoint']=='reconciling',(shape,result)
-print('ok: published hop IDs, sequential cleanup and first atomic journal observation')
+print('ok: first atomic journal observation')
 PY_BOUNDARY
 
 # Render the released unit contract, including its publication snapshot.

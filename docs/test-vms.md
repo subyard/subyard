@@ -968,13 +968,20 @@ proofs. After start has completed disk-backed `/tmp`, the stopped-yard init path
 removal before consent, leave an unconfirmed yard untouched, retire after confirmation and restore
 stopped power. Repeated init of the proven, stopped yard must not boot it again.
 
+The AI Observer payload likewise seeds its managed controls, container, route, receipts and retained
+data after direct anchor activation in one running and one stopped yard. It verifies retirement,
+retained data and unchanged retired settings, follows the action printed for the stopped yard, and
+repeats init and migrate without further changes. Both payloads share
+`dev/e2e/retired-integration-fixture.sh`.
+
 ```sh
 dev/e2e/disabled-components-release.sh --slot "$slot"
 config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot"
+config/retired-integrations/aiobserver/tests/e2e/acceptance.sh --slot "$slot"
 ```
 
-The published-baseline matrix reads immutable pins and a `direct`/`refusal` expectation from
-`dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0 (with agents selected
+The published-baseline matrix reads immutable pins and an `anchor`, `direct`, `refusal` or
+fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0 (with agents selected
 by `all`); later distinct anchor patches and previous releases remain direct baselines.
 Refusal runs at v0.11.0, v0.17.3 and v0.27.0 check both update and `--check`, the exact anchor
 command, unchanged settings, active runtime, native instance, power and guest data.

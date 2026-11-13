@@ -213,11 +213,8 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		}
 	}
 	if verified.registryDigest == "" {
-		if unfinished != nil && !belowFloor {
-			if unfinishedErr != nil {
-				return nil
-			}
-			return errors.New("unfinished release transition has no verified registry provenance; restore its exact sealed owner and protected history from a known-good backup; do not uninstall; next: yard update --check")
+		if unfinishedErr != nil {
+			return nil
 		}
 		if admissionErr != nil {
 			return admissionErr
@@ -244,7 +241,7 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 			pending, historyErr = registry.PendingPath(history.Ledger)
 		}
 		if historyErr != nil || !history.AuthoritySnapshot.Exists || len(pending) != 0 {
-			return errors.New("source-anchor-required: activated owner history is missing, inconsistent, or incomplete; this release cannot replace damaged migration authority. Restore the exact protected history from a known-good backup or use a compatible owner-series repair release; do not uninstall; next: yard update --check")
+			return errors.New("replacement-authority-required: the activated release's migration history is missing, inconsistent, or incomplete; this release cannot replace its unfinished transition. Restore the exact protected history from a known-good backup, or use a fix release of the activated series; do not uninstall")
 		}
 	}
 	// A just-installed development runtime has no predecessor or accepted state.

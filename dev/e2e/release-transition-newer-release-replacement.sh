@@ -9,8 +9,8 @@ if [ "${1:-}" = --preflight ]; then PREFLIGHT=1; shift; fi
 TOKEN="${1:-}"
 # Reuse its marked Incus project, isolated runtime paths, native environment and
 # bounded cleanup. The shared library has no historical acceptance entrypoint.
-# shellcheck source=dev/e2e/release-transition-v0111-recovery.sh
-. "$(dirname "${BASH_SOURCE[0]}")/release-transition-v0111-recovery.sh" "$TOKEN"
+# shellcheck source=dev/e2e/release-transition-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/release-transition-fixture.sh" "$TOKEN"
 
 STATE_ROOT="/var/tmp/subyard-newer-release-$TOKEN"
 # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh

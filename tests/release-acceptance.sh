@@ -54,9 +54,8 @@ def published_baseline_refusals(source, catalog):
                 errors.append(f"anchor {version}: differs from UpdateAnchorVersion {anchor}")
         key = lambda version: tuple(map(int, version.split(".")))
         for version, role in pins.items():
-            if role == "refusal" and not (key(version) < key(anchor)
-                    and (key(version) >= (0, 11, 0) or version == "0.10.0")):
-                errors.append(f"refusal {version}: outside the supported refusal/removal window")
+            if role == "refusal" and not (0, 11, 0) <= key(version) < key(anchor):
+                errors.append(f"refusal {version}: outside the supported refusal window")
     for entry in catalog["checks"]:
         command = entry["command"]
         if command[1] != "dev/e2e/published-upgrade.sh":
@@ -3058,7 +3057,7 @@ while True: time.sleep(1)
             catalog = {"checks": [{"id": "bad-chain", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.0.0", "chain"]}]}
             self.assertEqual(published_baseline_refusals(source, catalog), [
                 "anchor 1.0.0: differs from UpdateAnchorVersion 2.0.0",
-                "refusal 3.0.0: outside the supported refusal/removal window",
+                "refusal 3.0.0: outside the supported refusal window",
                 "bad-chain: chain source 1.0.0 has role anchor"])
             (source / "dev/e2e/published-upgrade-baselines.tsv").write_text("")
             self.assertEqual(published_baseline_refusals(source, catalog), [

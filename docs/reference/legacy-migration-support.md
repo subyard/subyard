@@ -21,6 +21,10 @@ The same boundary applies to the installer over an existing runtime and offline 
 staging remains available for cleanup tooling. Rollback below v0.28.0 refuses; compatible v0.28.x
 rollback remains supported. Incomplete or contradictory state cannot be repaired by comparing
 versions: exact unfinished transactions retain their sealed owner, artifacts and evidence.
+Any other unfinished transition while the installed release is below v0.28.0 refuses once with
+`next: yard update && yard update --version 0.28.0 && yard update`, or `yard update && yard update`
+when it already targets v0.28.0 or newer: the installed release first finishes its own journal. If
+it cannot, the repair path is a v0.28.x release that owns that recovery; do not uninstall.
 The anchor does not change `minimumEpochs`, persistent formats or retained history readers.
 
 Sources before **v0.11.0** retain full uninstall followed by the user's separate clean installation.
@@ -137,12 +141,9 @@ Move the boundary when the supported matrix's cost or age justifies retiring a s
    boundary alone neither deletes history readers nor raises epoch floors.
 
 The TSV/constant contract and shared fixture readers keep the anchor selection synchronized.
-An unfinished transition below the anchor is always finished first by the installed release that
-started it (`yard update`); the candidate never routes it through another release. Post-activation
-takeover of an anchor journal relies on the candidate still reconciling the anchor's activated
-state and on intact migration authority; removing that code makes takeover a refusal again. A
-defective hop that its owner cannot finish is repaired by an anchor-series fix release (v0.28.x
-for this boundary), not a bridge release or an uninstall.
+Post-activation takeover of an anchor journal relies on the candidate still reconciling the
+anchor's activated state and on intact migration authority; removing that code makes takeover a
+refusal again. A defective hop is repaired by an anchor-series fix release, not a bridge release.
 
 ## Existing compatibility inventory
 
@@ -170,12 +171,12 @@ The historical released producers and their retained contracts are:
 | v0.18.6 | Historical completed/interrupted source-repair producer; original-owner recovery stays in the anchor branch |
 | v0.18.1 | Historical process V1/Ledger V2 and checkpoint-reader bridge producer; current anchor refusal |
 | v0.19.0 | Historical independent completed domain history producer; current anchor refusal |
-| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession through v0.25.1, whose registry matches, then an ordinary update; later candidates refuse the replacement and unknown artifacts fail closed |
+| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession through v0.25.1, whose registry matches, then the v0.28.0 anchor hop; later candidates refuse the replacement and unknown artifacts fail closed |
 
 The [historical reader](../../internal/migration/v1_import.go) binds the exact retained runtime
 pair, registry, journal and observed postconditions. It does not admit arbitrary historical
 journals. The [released compatibility check](../../dev/verify-release-upgrades.py) pins official
-v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtime checksums
+v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0 and v0.17.3 runtime checksums, the amd64 v0.27.0 checksum
 and the exact legacy runtime installers. These binaries remain current refusal/uninstall inputs. Their successful migration and original-owner recovery
 corpora are frozen in the v0.28.0 tag; current Go readers retain accepted history coverage. Rebuilding
 old versions from current source does not replace authentic released inputs.

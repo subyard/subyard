@@ -37,7 +37,7 @@ TEST_VMS_SINK_SERVICE=
 TEST_VMS_SINK_TIMER_NAME=
 TEST_VMS_SINK_TIMER=
 
-die() { printf 'release-transition-v0111-recovery: %s\n' "$*" >&2; exit 2; }
+die() { printf 'release-transition-fixture: %s\n' "$*" >&2; exit 2; }
 valid_token() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 assert_state_root() {
@@ -150,7 +150,7 @@ cleanup_test_vms_sink() {
       "$TEST_VMS_SINK_SERVICE" || unsafe=1
   fi
   if [ "$unsafe" -ne 0 ]; then
-    printf 'release-transition-v0111-recovery: refusing unsafe test-vms sink artifact for %s\n' \
+    printf 'release-transition-fixture: refusing unsafe test-vms sink artifact for %s\n' \
       "$FIXTURE" >&2
     return 1
   fi
@@ -187,7 +187,7 @@ cleanup_fixture() { # success
   }
   if incus project show "$PROJECT" >/dev/null 2>&1; then
     if ! project_is_marked; then
-      printf 'release-transition-v0111-recovery: refusing unmarked project %s\n' \
+      printf 'release-transition-fixture: refusing unmarked project %s\n' \
         "$PROJECT" >&2
       failed=1
     elif [ -x "$BIN_ROOT/yard" ]; then
@@ -227,7 +227,7 @@ cleanup_fixture() { # success
   }
   if [ -e "$FIXTURE_ROOT" ]; then
     if ! fixture_root_is_marked; then
-      printf 'release-transition-v0111-recovery: refusing unmarked fixture root %s\n' \
+      printf 'release-transition-fixture: refusing unmarked fixture root %s\n' \
         "$FIXTURE_ROOT" >&2
       failed=1
     elif [ "$failed" -eq 0 ]; then

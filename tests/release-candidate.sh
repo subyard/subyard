@@ -273,18 +273,18 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
     assert globals_['archive_footprint'](archive) == (32, 2)
     baseline = base / 'baseline'
     baseline.mkdir()
-    baseline_archive = baseline / 'subyard-0.19.0-linux-amd64.tar.gz'
+    baseline_archive = baseline / 'subyard-0.17.3-linux-amd64.tar.gz'
     baseline_archive.write_bytes(archive.read_bytes())
     process = Mock(side_effect=AssertionError('subprocess started before capacity refusal'))
     for resource, available in (
             ('bytes', SimpleNamespace(f_bavail=15, f_frsize=4, f_files=100, f_favail=100)),
             ('inodes', SimpleNamespace(f_bavail=100, f_frsize=4, f_files=100, f_favail=3))):
         with patch.dict(globals_, {'run_process': process}), \
-             patch.dict(globals_['DIRECT_BASELINE_SHA256'], {'amd64': hashlib.sha256(archive.read_bytes()).hexdigest()}), \
+             patch.dict(globals_['ACTIVATION_BASELINE_SHA256'], {'amd64': hashlib.sha256(archive.read_bytes()).hexdigest()}), \
              patch.object(globals_['subprocess'], 'Popen', process), \
              patch.object(globals_['os'], 'statvfs', return_value=available) as statvfs, \
              patch.object(sys, 'argv', ['verify', '--release-dir', str(release), '--version', 'candidate',
-                                        '--only-source-anchor', '--direct-baseline-dir', str(baseline)]), \
+                                        '--only-source-anchor', '--activation-baseline-dir', str(baseline)]), \
              patch.object(globals_['platform'], 'machine', return_value='x86_64'), \
              patch.object(globals_['platform'], 'system', return_value='Linux'):
             try:
@@ -296,7 +296,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') a
             statvfs.reset_mock()
             refused_root = base / 'refused-fixture'
             try:
-                globals_['Fixture'](refused_root, release, 'candidate', baseline, 'amd64', '0.19.0')
+                globals_['Fixture'](refused_root, release, 'candidate', baseline, 'amd64', '0.17.3')
                 raise AssertionError('fixture install ignored capacity shortage')
             except RuntimeError as error:
                 assert 'insufficient /tmp ' + resource in str(error)

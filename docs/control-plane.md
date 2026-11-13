@@ -1031,7 +1031,7 @@ Receipt replay validates these identities and evidence; recorded transaction IDs
 from cleanup. Other earlier releases and arbitrary same-registry targets are unsupported, and
 unknown artifacts and graphs remain blocked. The candidate registry must equal the predecessor's,
 which holds through v0.25.1: a host interrupted on v0.21.0 is replaced by standalone v0.25.1 and
-then updates normally, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
+then takes the v0.28.0 anchor hop, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
 and initial-successor evidence under `release-transition/migration-owner/v1/transactions` before
 current-journal CAS. The original activation remains unfinished superseded evidence; ordinary V2
 resume belongs to the candidate successor. This exception does not widen either activation-only
@@ -1117,24 +1117,11 @@ The Release workflow retains the compatibility check's output with its other fai
 
 ### Legacy upgrades
 
-Direct updates require installed **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0
-refuse before changing active links, journals, settings or data and print:
-
-```sh
-yard update --version 0.28.0
-yard update
-```
-
-The installer over an existing installation and offline update use the same admission. Downloads
-and immutable staging do not authorize activation. There is no automatic chain or new bridge release.
-Rollback targets below v0.28.0 refuse; compatible v0.28.x targets remain eligible. A version alone
-does not establish readiness: protected journals, authoritative checkpoints and sealed bindings
-still apply. An unfinished exact target/direction/artifact retains its original recovery owner.
-Any other unfinished transition while the installed release is v0.11.0 or newer but below v0.28.0
-refuses once with
-`next: yard update && yard update --version 0.28.0 && yard update` (or `yard update && yard update`
-when it is an update that already targets v0.28.0 or newer): the installed release first finishes its own journal.
-If it cannot, a v0.28.x fix release is the repair path; do not uninstall.
+Direct updates, the installer over an existing installation and offline update require installed
+**v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0 refuse before any change and print
+`yard update --version 0.28.0 && yard update`; rollback targets below v0.28.0 refuse. The
+[approved support boundary](reference/legacy-migration-support.md#approved-support-boundary)
+owns the complete rules, including unfinished transitions below the anchor.
 
 Sources before **v0.11.0** retain the full-uninstall route; no V1 upgrade bridge exists. Accepted
 V2 history and evidence remain readable independently of fresh update admission.
@@ -1212,6 +1199,11 @@ contract too when it picks a newer release, and `--yes` consents without showing
 complete counts as closed even if its journal stopped earlier: it stays under ordinary retention, and after that only the
 journal copy remains. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
 
+Below the [update boundary](reference/legacy-migration-support.md#approved-support-boundary),
+releases after v0.28.x refuse the installed source. There, `$VERSION` must be a v0.28.x release:
+v0.28.x is the last series that owns the recoveries of earlier releases described below. After
+recovery, continue with `yard update --version 0.28.0 && yard update`.
+
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
 migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate refuses a journal that
 already superseded another, a live recovery reservation, and links the journal does not allow.
@@ -1226,8 +1218,8 @@ An interrupted integration apply may already have written every desired artifact
 pending digests remain unfinished work: retry observes lifecycles, runs hooks, commits inventory,
 verifies convergence and captures applied settings. It accepts only owned bytes matching the
 recorded pending or committed digests. To leave a recovery dead end on 0.27.0, explicitly select
-the fixed newer release with `yard update --version "$VERSION"`; this route requires the
-integration resume fix and recovery replacement support in the same release.
+v0.28.0, which has the integration resume fix and recovery replacement support:
+`yard update --version 0.28.0`, then `yard update`.
 
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone
@@ -1237,7 +1229,7 @@ links, and do not retry mutating commands. Download the official HTTPS asset and
 candidate own the replacement plan, archive, compare-and-swap, reconciliation, and link update:
 
 ```bash
-PATCH_VERSION=0.11.2 # or a later supported patch release
+PATCH_VERSION=0.11.2 # or a later release up to v0.28.x
 (
   set -eu
   installer="$(mktemp)"
