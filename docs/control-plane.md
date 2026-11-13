@@ -1718,6 +1718,20 @@ nested E2E access. These constraints are validated after configuration precedenc
 Before startup and during convergence, effective Incus devices are checked too: inherited host
 mappings and local root-disk overrides cannot bypass the role or its root disk bound.
 
+Only a profile's own `profile.conf` declares `YARD_MOUNTS`, `YARD_CAPS` and `YARD_DEVICES`; the
+extras resolver evaluates it without operator values for them and reports every independent
+declaration refusal together. The catalog allows these settings only at shipped scope. The loader
+discards each operator assignment, at any scope or in the command environment, in one place, as it
+discards retired settings: the expression is evaluated in isolation, so its nested defaults change
+no other setting. A non-empty one is returned as configuration state (`Loaded.IgnoredAssignments`)
+with its exact repair. It is never a refusal: `config show`, `status`, `update --check` and the init
+plan render it, `update --check` also as the structured `configuration` field of its JSON report,
+and `config unset` remains available at operator scopes. Config sync accepts and materializes a
+persisted one unchanged. The init plan names each owned `yx-*`
+extras device that the pending extras stage detaches, resolved as `09-yard-extras.sh` resolves it.
+The extras stage observation carries each declared device of a VM yard as a "not applicable to VM
+yards" diagnostic that `init` renders; it is readiness state, not a refusal or a warning.
+
 Every VM yard is headless. The owner sets a fixed local `raw.qemu.conf` whose empty
 `[device "qemu_gpu"]` section removes the Incus default emulated GPU (virtio-vga); with
 `VM_FREE_PAGE_REPORTING=1` it also carries the balloon reporting property. The yard's restricted

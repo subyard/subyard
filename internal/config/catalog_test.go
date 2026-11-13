@@ -68,7 +68,14 @@ func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, definition := range SettingCatalog() {
-		if _, ok := assignments[definition.Name]; !ok {
+		_, ok := assignments[definition.Name]
+		if IsProfileOnlySetting(definition.Name) {
+			if ok {
+				t.Errorf("public settings example offers profile-only %s", definition.Name)
+			}
+			continue
+		}
+		if !ok {
 			t.Errorf("public settings example is missing %s", definition.Name)
 		}
 	}

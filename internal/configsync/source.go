@@ -245,6 +245,10 @@ func (snapshot *sourceSnapshot) readConfig(
 		return err
 	}
 	for _, name := range names {
+		if config.IsProfileOnlySetting(name) {
+			// The loader ignores and reports a persisted operator value; it never refuses it.
+			continue
+		}
 		requireSyncable := name != "SSH_PORT"
 		if !requireSyncable {
 			if err := config.LegacyGitSSHPort(source, content); err != nil {
@@ -571,7 +575,7 @@ func settingApplications(catalog config.Catalog, path string) ([]config.SettingA
 	var result []config.SettingApplication
 	for _, name := range names {
 		definition, ok := catalog.LookupSetting(name)
-		if !ok {
+		if !ok || config.IsProfileOnlySetting(name) {
 			continue
 		}
 		if _, exists := seen[definition.Application]; exists {

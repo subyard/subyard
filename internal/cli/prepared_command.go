@@ -183,6 +183,7 @@ type preparedCommand struct {
 	execute              func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
 	closeResource        func() error
 	preview              func()
+	readiness            func() // configuration state rendered with the plan
 	displayOnly          func()
 	printResult          func(domain.AdapterResult)
 	remoteArguments      func([]string) ([]string, error)
@@ -693,6 +694,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		return nil
 	}
 	cli := prepared.CLI
+	prepared.readiness = func() { printIgnoredAssignments(cli.options.Stdout, "  ", "", prepared.Loaded) }
 	if prepared.Loaded.Context.YardName == "e2e-yard" || prepared.Loaded.Context.YardName == "test-yard" {
 		warning, err := cli.releaseTestYardRecreation(ctx, prepared.Loaded.Context.Paths.ConfigHome, prepared.Loaded.ProspectiveFiles)
 		if err != nil {
@@ -1232,6 +1234,20 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	prepared.executeNoOp = true
 	prepared.preview = func() {
 		prepared.CLI.printUpdatePreview(execution)
+	}
+	if execution.prepared.Action == "update.check" && !slices.Contains(prepared.Arguments, "--json") {
+		// The JSON report carries the same state as its configuration field.
+		prepared.readiness = func() {
+			targets, err := prepared.CLI.localConfigTargets(prepared.Loaded, true)
+			if err != nil {
+				return // an unreadable yard list is the check's own finding
+			}
+			yards := make([]config.Loaded, len(targets))
+			for index, target := range targets {
+				yards[index] = target.Loaded
+			}
+			printIgnoredAssignments(prepared.CLI.options.Stdout, "", "", yards...)
+		}
 	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return execution.prepared.Action, domain.ActionDelta{Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences}, nil

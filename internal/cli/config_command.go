@@ -627,6 +627,7 @@ func (cli *CLI) writeConfigShow(loaded config.Loaded, requested string) int {
 			return 2
 		}
 		writeSettingTrace(cli.options.Stdout, name, trace)
+		printIgnoredAssignments(cli.options.Stdout, "", name, loaded)
 		return 0
 	}
 
@@ -648,7 +649,54 @@ func (cli *CLI) writeConfigShow(loaded config.Loaded, requested string) int {
 			scope, source, trace.Application)
 	}
 	_ = writer.Flush()
+	printIgnoredAssignments(cli.options.Stdout, "", "", loaded)
 	return 0
+}
+
+// printIgnoredAssignments renders the profile-only assignments the loader
+// ignored, optionally for one setting, as configuration state with each exact
+// repair. An assignment that several yards see, such as a host one, is
+// rendered once.
+func printIgnoredAssignments(output io.Writer, indent, setting string, yards ...config.Loaded) {
+	seen := map[string]bool{}
+	for _, loaded := range yards {
+		for _, assignment := range loaded.IgnoredAssignments() {
+			if setting != "" && assignment.Name != setting {
+				continue
+			}
+			key := ignoredAssignmentKey(assignment)
+			if !seen[key] {
+				seen[key] = true
+				fmt.Fprintf(output, "%signored: %s\n", indent, assignment)
+			}
+		}
+	}
+}
+
+// localConfigurationState returns the ignored assignments of every local yard
+// in stable order, each source assignment once. An unreadable yard list or yard
+// is the owning check's own finding, not configuration state.
+func (cli *CLI) localConfigurationState(loaded config.Loaded) []config.ConfigurationState {
+	targets, err := cli.localConfigTargets(loaded, true)
+	if err != nil {
+		return nil
+	}
+	var result []config.ConfigurationState
+	seen := map[string]bool{}
+	for _, target := range targets {
+		for _, assignment := range target.Loaded.IgnoredAssignments() {
+			if key := ignoredAssignmentKey(assignment); !seen[key] {
+				seen[key] = true
+				result = append(result, assignment.ConfigurationState())
+			}
+		}
+	}
+	return result
+}
+
+// ignoredAssignmentKey identifies one source assignment across yards.
+func ignoredAssignmentKey(assignment config.IgnoredAssignment) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d", assignment.Name, assignment.Scope, assignment.Path, assignment.Line)
 }
 
 func findSettingTrace(

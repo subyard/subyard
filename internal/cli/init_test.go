@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -502,9 +504,6 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 		{name: "Codex instructions", override: "HOST_CODEX_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_CODEX_AGENTS_MD"},
 		{name: "OpenCode instructions", override: "HOST_OPENCODE_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_OPENCODE_AGENTS_MD"},
 		{name: "capabilities", override: "YARD_CAPABILITIES=sample-device", want: "YARD_CAPABILITIES"},
-		{name: "caps", override: "YARD_CAPS=fuse", want: "YARD_CAPS"},
-		{name: "devices", override: "YARD_DEVICES=gpu", want: "YARD_DEVICES"},
-		{name: "yard mounts", override: "YARD_MOUNTS=cache:/srv/cache:rw:0755", want: "YARD_MOUNTS"},
 		{name: "SSH forwarding", override: "FORWARD_SSH_AGENT=1", want: "FORWARD_SSH_AGENT"},
 		{name: "sudo", override: "DEV_SUDO=1", want: "DEV_SUDO"},
 		{name: "nested VMs", override: "NESTED_E2E_VMS=1", want: "NESTED_E2E_VMS"},
@@ -537,9 +536,6 @@ HOST_CLAUDE_MD=
 HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
 YARD_CAPABILITIES=
-YARD_CAPS=
-YARD_DEVICES=
-YARD_MOUNTS=
 FORWARD_SSH_AGENT=0
 DEV_SUDO=0
 NESTED_E2E_VMS=0
@@ -561,6 +557,122 @@ SSH_PORT=2234
 				t.Fatalf("profile command override: bootstrap=%#v err=%v", bootstrap, err)
 			}
 		})
+	}
+}
+
+// Operator YARD_CAPS, YARD_DEVICES and YARD_MOUNTS are ignored at every scope:
+// only environment profiles declare them. No operation refuses because of
+// them; readiness views report each with its exact removal command.
+func TestProfileOnlySettingsAreIgnoredAndReported(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	if err := os.MkdirAll(filepath.Join(root, "config", "yards", "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "config", "yards", "profiles", "hostless.env"), "ALLOWS_HOST_ACCESS=false\n", 0o600)
+	host := filepath.Join(configHome, "config.env")
+	yard := filepath.Join(configHome, "yards", "default", "config.env")
+	if err := os.MkdirAll(filepath.Dir(yard), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := os.ReadFile(host)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, host, string(settings)+"YARD_CAPS=fuse\n", 0o600)
+	writeCLIFile(t, yard, "YARD_TEMPLATE=hostless\nYARD_DEVICES=gpu\n", 0o600)
+	environment = append(environment, "YARD_MOUNTS=cache:/srv/cache:rw:0755")
+	want := []string{
+		"ignored: YARD_CAPS in " + host + ":" + strconv.Itoa(strings.Count(string(settings), "\n")+1) + " is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_CAPS --scope host --local",
+		"ignored: YARD_DEVICES in " + yard + ":2 is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_DEVICES --scope yard --local",
+		"ignored: YARD_MOUNTS in the command environment is ignored: only environment profiles declare it; unset it",
+	}
+	reports := func(output string) bool {
+		for _, line := range want {
+			if strings.Count(output, line) != 1 {
+				return false
+			}
+		}
+		return true
+	}
+	run := func(arguments []string, options Options) (int, string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		options.RepositoryRoot, options.Program, options.Arguments, options.WorkingDir = root, "yard", arguments, root
+		options.Stdout, options.Stderr = &stdout, &stderr
+		if options.Environment == nil {
+			options.Environment = environment
+		}
+		program, err := New(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := program.Run(context.Background())
+		return code, stdout.String(), stderr.String()
+	}
+
+	// The loader keeps the hostless role and discards the assignments without an error.
+	reader, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := reader.resolveContextWithYardSettings("default", ""); err != nil || len(loaded.IgnoredAssignments()) != 3 || loaded.Environment["ALLOWS_HOST_ACCESS"] != "false" {
+		t.Fatalf("fixture role is not hostless or lost its observations: role=%q err=%v", loaded.Environment["ALLOWS_HOST_ACCESS"], err)
+	}
+
+	// The init plan reports the observations and init proceeds.
+	platform := newInitPlatformFixture()
+	if code, stdout, stderr := run([]string{"init", "--yes"}, Options{InitPlatform: platform}); code != 0 || !reports(stdout) {
+		t.Fatalf("init refused or hid ignored assignments: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	// Status renders them as state; so does config show below.
+	if code, stdout, stderr := run([]string{"status"}, Options{Incus: lifecycleIncus()}); code != 0 || !reports(stdout) || strings.Contains(stderr, "ignored") {
+		t.Fatalf("status refused or hid ignored assignments: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	// No operation refuses because of them, including operations that apply yard settings.
+	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
+	if code, stdout, stderr := run([]string{"config", "show"}, Options{}); code != 0 || !reports(stdout) {
+		t.Fatalf("config show hid ignored assignments: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	for _, arguments := range [][]string{
+		{"provision"},
+		{"migrate"},
+		{"integration", "enable", "codex"},
+		{"config", "apply", "--yes"},
+		{"teardown"},
+		{"network", "reconcile"},
+		{"down"},
+		{"start"},
+	} {
+		_, stdout, stderr := run(arguments, Options{
+			InitPlatform: newInitPlatformFixture(), AdapterRunner: &testkit.ScriptedAdapter{},
+			Prompt: &testkit.Prompt{Answers: []bool{false, false, false}}, Incus: lifecycleIncus(),
+		})
+		if strings.Contains(stdout+stderr, "only environment profiles declare") && !reports(stdout) {
+			t.Errorf("%v refused because of ignored assignments: stdout=%q stderr=%q", arguments, stdout, stderr)
+		}
+		if strings.Contains(stderr, "only environment profiles declare") {
+			t.Errorf("%v rendered ignored assignments as an error: %q", arguments, stderr)
+		}
+	}
+	if code, _, stderr := run([]string{"config", "set", "SSH_PORT", "2299", "--scope", "yard", "--local", "--yes"}, Options{}); code != 0 {
+		t.Fatalf("config set of another key refused: code=%d stderr=%q", code, stderr)
+	}
+
+	// config unset removes an ignored assignment through ordinary authoring.
+	if code, _, stderr := run([]string{"config", "unset", "YARD_DEVICES", "--scope", "yard", "--local", "--yes"}, Options{}); code != 0 {
+		t.Fatalf("config unset of an ignored assignment failed: code=%d stderr=%q", code, stderr)
+	}
+	if after, err := os.ReadFile(yard); err != nil || string(after) != "YARD_TEMPLATE=hostless\nSSH_PORT='2299'\n" {
+		t.Fatalf("config unset left %q: %v", after, err)
+	}
+	if _, stdout, _ := run([]string{"config", "show"}, Options{}); strings.Contains(stdout, "YARD_DEVICES in") || !strings.Contains(stdout, want[0]) {
+		t.Fatalf("removed assignment is still reported: %q", stdout)
 	}
 }
 
@@ -1729,5 +1841,30 @@ func TestPreparedEmptyInitSkipsDispatchAfterLockedRefresh(t *testing.T) {
 				t.Fatalf("repair completion omitted hooks: applicable=%t err=%v", applicable, err)
 			}
 		})
+	}
+}
+
+// The init plan names each owned extras device the pending extras stage
+// detaches, and renders an extras diagnostic of a VM yard as observed state.
+func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
+	extras := application.ReconcileStage{ID: ports.ReconcileStageExtras, Label: "yard extras"}
+	execution := &initExecution{mode: initReconcile, loaded: config.Loaded{Context: domain.Context{YardName: "box", IncusProject: "subyard-box", YardInstanceName: "yard-box"}}}
+	execution.plan = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: extras, Diagnostic: `YARD_DEVICES entry "kvm" in /p/profile.conf is not applicable to VM yards`}}}
+	execution.extrasDetach = []string{"yx-dev-dri-renderD128", "yx-dev-fuse"}
+	steps := execution.operationSteps()
+	index := slices.IndexFunc(steps, func(step domain.OperationStep) bool { return step.ID == "init.stage.extras" })
+	if index < 0 {
+		t.Fatalf("plan lacks the extras stage: %#v", steps)
+	}
+	step := steps[index]
+	if step.Consequence != "yard box: detaches devices no selected profile requests: yx-dev-dri-renderD128 yx-dev-fuse" ||
+		!strings.Contains(step.Observed, "is not applicable to VM yards") || step.Decision != domain.StepApply {
+		t.Fatalf("extras step = %#v", step)
+	}
+	execution.extrasDetach = nil
+	execution.plan.Steps[0].Converged = true
+	step = execution.operationSteps()[index]
+	if step.Consequence != "yard extras" || step.Observed != `converged; YARD_DEVICES entry "kvm" in /p/profile.conf is not applicable to VM yards` {
+		t.Fatalf("converged extras step = %#v", step)
 	}
 }

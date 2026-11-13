@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -136,9 +139,13 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 			scope = "owner host networking for " + target + " bridge " + yard.IncusBridge
 			desired = fmt.Sprintf("host NetworkManager and route safety; bridge DHCP/DNS and forwarding rules if UFW is active; native policy lock access for operator UID %d", os.Getuid())
 		}
+		consequence := desired
+		if native.Stage.ID == ports.ReconcileStageExtras && len(execution.extrasDetach) != 0 {
+			consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests: %s", yard.YardName, strings.Join(execution.extrasDetach, " "))
+		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
-			"native VerifyStage "+string(native.Stage.ID)+" returns converged", desired, native.Converged, native.Conditional)
-		if native.Converged && native.Diagnostic != "" {
+			"native VerifyStage "+string(native.Stage.ID)+" returns converged", consequence, native.Converged, native.Conditional)
+		if native.Diagnostic != "" {
 			steps[len(steps)-1].Observed += "; " + native.Diagnostic
 		}
 		if execution.mode == initReconcile && native.Stage.ID == ports.ReconcileStageProvision {
@@ -286,4 +293,21 @@ func (execution *provisionExecution) stateBinding() string {
 		Endpoint *endpoint
 		Seeds    any
 	}{execution.approvedProfiles, execution.approvedPowerCycle, saved, execution.startupSeeds})
+}
+
+// assessExtrasDetach records the owned extras devices that the pending extras
+// stage detaches, so the plan names each device loss before confirmation.
+func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime reconcileruntime.Runtime) error {
+	execution.extrasDetach = nil
+	if execution.mode == initReset || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
+		return step.Stage.ID == ports.ReconcileStageExtras && !step.Converged
+	}) {
+		return nil
+	}
+	detach, err := runtime.ExtrasDetachPlanned(ctx)
+	if err != nil {
+		return fmt.Errorf("check init stage %q: %w", ports.ReconcileStageExtras, err)
+	}
+	execution.extrasDetach = detach
+	return nil
 }

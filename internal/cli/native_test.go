@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -707,6 +708,57 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 		if target, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil ||
 			target != "releases/release-old" {
 			t.Fatalf("check changed active runtime: target=%q err=%v", target, err)
+		}
+	})
+
+	t.Run("check reports ignored profile-only assignments as structured state and does not refuse", func(t *testing.T) {
+		root, environment, runtimeRoot := updateReleaseFixture(t)
+		host := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_HOME"), "config.env")
+		settings, err := os.ReadFile(host)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(host), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, host, string(settings)+"YARD_DEVICES=fuse\n", 0o600)
+		line := strings.Count(string(settings), "\n") + 1
+		for _, arguments := range [][]string{
+			{"update", "--check", "--json", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+			{"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+		} {
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{}, Config: &recordingConfigApplier{},
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			var report struct {
+				Configuration []config.ConfigurationState `json:"configuration"`
+			}
+			// Without --json the same state precedes the report as text lines.
+			text, payload := "", stdout.String()
+			if !slices.Contains(arguments, "--json") {
+				text, payload, _ = strings.Cut(payload, "\n")
+			}
+			if code != 0 || json.Unmarshal([]byte(payload), &report) != nil {
+				t.Fatalf("%v refused or broke its report: code=%d stdout=%q stderr=%q", arguments, code, stdout.String(), stderr.String())
+			}
+			want := config.ConfigurationState{
+				State: "ignored", Yard: "default", Setting: "YARD_DEVICES", Scope: "host", Path: host, Line: line,
+				Repair:  "yard -Y default config unset YARD_DEVICES --scope host --local",
+				Message: "YARD_DEVICES in " + host + ":" + strconv.Itoa(line) + " is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_DEVICES --scope host --local",
+			}
+			if len(report.Configuration) != 1 || report.Configuration[0] != want {
+				t.Fatalf("%v configuration = %#v, want %#v", arguments, report.Configuration, want)
+			}
+			if !slices.Contains(arguments, "--json") && text != "ignored: "+want.Message {
+				t.Fatalf("check text state = %q, want %q", text, "ignored: "+want.Message)
+			}
 		}
 	})
 

@@ -74,14 +74,18 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 		defer file.Close()
 		input = file
 	}
-	return applyEnvReaderObservedRetired(input, path, values, observer, retired)
+	return applyEnvReaderObservedRetired(input, path, values, observer, retired, nil)
 }
 
 func applyEnvReaderObserved(reader io.Reader, source string, values environment, observer assignmentObserver) error {
-	return applyEnvReaderObservedRetired(reader, source, values, observer, isRetiredSetting)
+	return applyEnvReaderObservedRetired(reader, source, values, observer, isRetiredSetting, nil)
 }
 
-func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool) error {
+// applyEnvReaderObservedRetired evaluates every record. A name matched by
+// retired is evaluated in isolation: neither it nor any nested default it
+// performs changes values or reaches observer. discarded, when set, receives
+// such a top-level assignment with its evaluated value.
+func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool, discarded assignmentObserver) error {
 	discardRetiredSettings(values)
 
 	scanner := bufio.NewScanner(reader)
@@ -112,7 +116,11 @@ func applyEnvReaderObservedRetired(reader io.Reader, source string, values envir
 				observer(name, value, recordLine)
 			}
 		}
-		if err := applyRecordRetired(record.String(), values, recordObserver, retired); err != nil {
+		var recordDiscarded func(name, value string)
+		if discarded != nil {
+			recordDiscarded = func(name, value string) { discarded(name, value, recordLine) }
+		}
+		if err := applyRecordRetired(record.String(), values, recordObserver, retired, recordDiscarded); err != nil {
 			return sourceContext(source, recordLine, recordSettingKey(record.String()), "scalar settings", err)
 		}
 		record.Reset()
@@ -150,10 +158,10 @@ func scanQuote(line string, quote byte) byte {
 }
 
 func applyRecord(record string, values environment, observer func(name, value string)) error {
-	return applyRecordRetired(record, values, observer, isRetiredSetting)
+	return applyRecordRetired(record, values, observer, isRetiredSetting, nil)
 }
 
-func applyRecordRetired(record string, values environment, observer func(name, value string), retired func(string) bool) error {
+func applyRecordRetired(record string, values environment, observer func(name, value string), retired func(string) bool, discarded func(name, value string)) error {
 	record = strings.TrimSpace(record)
 	if strings.HasPrefix(record, ":") {
 		expression := strings.TrimSpace(strings.TrimPrefix(record, ":"))
@@ -175,7 +183,8 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	if !ValidVariable(name) {
 		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
-	if isRetiredSetting(name) || retired(name) {
+	discard := isRetiredSetting(name) || retired(name)
+	if discard {
 		// Validate the old expression without allowing its assignments or nested
 		// defaults to affect current settings, provenance, or sync exports.
 		values = cloneEnvironment(values)
@@ -183,16 +192,17 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
-	if !expand {
-		values[name] = value
-		if observer != nil {
-			observer(name, value)
+	if expand {
+		var err error
+		if value, err = expandValue(value, values, observer); err != nil {
+			return err
+		}
+	}
+	if discard {
+		if discarded != nil {
+			discarded(name, value)
 		}
 		return nil
-	}
-	value, err := expandValue(value, values, observer)
-	if err != nil {
-		return err
 	}
 	values[name] = value
 	if observer != nil {

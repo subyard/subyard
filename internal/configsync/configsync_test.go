@@ -1272,3 +1272,19 @@ func TestSourceExecutableDiagnosticEscapesPathAndOmitsContents(t *testing.T) {
 		t.Fatal("source ancestor facts or provenance lost", diagnostic, err)
 	}
 }
+
+// A persisted profile-only assignment in versioned configuration is synced as
+// is: the loader ignores and reports it, so sync never refuses it.
+func TestVersionedConfigSyncKeepsIgnoredProfileOnlyAssignments(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\nYARD_DEVICES=gpu\n")
+	fixture.commit("legacy device")
+	plan, err := BuildPlan(fixture.options(false))
+	if err != nil {
+		t.Fatalf("sync refused an ignored profile-only assignment: %v", err)
+	}
+	if err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	assertSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "DEV_UID=2233\nYARD_DEVICES=gpu\n", 0o600)
+}

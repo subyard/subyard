@@ -4089,3 +4089,49 @@ func TestConfigTemplateTransitionChecksDestinationRoleBeforeConsent(t *testing.T
 		})
 	}
 }
+
+func TestConfigUnsetRemovesIgnoredProfileOnlyAssignments(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	host := filepath.Join(configHome, "config.env")
+	settings, err := os.ReadFile(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfigCommandFile(t, host, string(settings)+"YARD_DEVICES=fuse\nYARD_CAPS=nesting\n")
+	run := func(arguments ...string) (int, string) {
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
+			Stdout: &stdout, Stderr: &stderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return program.Run(context.Background()), stdout.String() + stderr.String()
+	}
+	if code, output := run("config", "show"); code != 0 || !strings.Contains(output, "YARD_CAPS in "+host+":") || !strings.Contains(output, "YARD_DEVICES in "+host+":") {
+		t.Fatalf("config show hid ignored profile-only assignments: code=%d %s", code, output)
+	}
+	// Showing one setting discloses only its own ignored assignments.
+	if code, output := run("config", "show", "YARD_DEVICES"); code != 0 || !strings.Contains(output, "ignored: YARD_DEVICES in "+host+":") ||
+		!strings.Contains(output, "config unset YARD_DEVICES --scope host --local") || strings.Contains(output, "YARD_CAPS in") {
+		t.Fatalf("config show YARD_DEVICES hid its ignored assignment: code=%d %s", code, output)
+	}
+	if code, output := run("config", "set", "YARD_MOUNTS", "cache:/srv/cache:rw:0755", "--scope", "yard", "--local", "--yes"); code == 0 ||
+		!strings.Contains(output, "YARD_MOUNTS is declared only by environment profiles") {
+		t.Fatalf("config set assigned a profile-only setting: code=%d %s", code, output)
+	}
+	for _, name := range []string{"YARD_DEVICES", "YARD_CAPS"} {
+		if code, output := run("config", "unset", name, "--scope", "host", "--local", "--yes"); code != 0 {
+			t.Fatalf("unset %s failed: code=%d %s", name, code, output)
+		}
+	}
+	// Removing the last assignment of an otherwise empty file removes the file.
+	if after, err := os.ReadFile(host); !bytes.Equal(after, settings) || err != nil && !(errors.Is(err, os.ErrNotExist) && len(settings) == 0) {
+		t.Fatalf("unset left %q, want %q: %v", after, settings, err)
+	}
+	if code, output := run("config", "show"); code != 0 || strings.Contains(output, "environment profiles declare") {
+		t.Fatalf("observation remained after unset: code=%d %s", code, output)
+	}
+}
