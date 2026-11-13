@@ -60,7 +60,6 @@ _yard() {
     '(-h --help)'{-h,--help}'[show help]' \
     '(-l --list)'{-l,--list}'[list command names]' \
     '--resources[list profile resource commands and verbs]' \
-    '(-V --version)'{-V,--version}'[show version]' \
     '(-y --yes)'{-y,--yes}'[skip confirmation prompt]' \
     '1: :->cmd' \
     '*:: :->args' \

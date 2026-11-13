@@ -36,7 +36,7 @@ _yard() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cword=$COMP_CWORD
 
-  local globals='-Y --yard -h --help -l --list --resources -V --version -y --yes'
+  local globals='-Y --yard -h --help -l --list --resources -y --yes'
 
   # A named-yard context may precede the command: -Y <name> / --yard <name> / --yard=<name>
   # / @<name>. Complete its VALUE with registry yard names, and skip it when locating the

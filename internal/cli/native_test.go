@@ -2525,7 +2525,7 @@ func TestReadQueriesDoNotFinalizeInvalidPendingReleaseMigration(t *testing.T) {
 		arguments []string
 		want      string
 	}{
-		{name: "version", arguments: []string{"--version"}, want: "yard " + Version + "\n"},
+		{name: "version", arguments: []string{"version"}, want: "yard " + Version + "\n"},
 		{name: "status", arguments: []string{"status"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2590,7 +2590,8 @@ func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
 			name      string
 			arguments []string
 		}{
-			{name: "global version", arguments: []string{"--version"}},
+			{name: "version", arguments: []string{"version"}},
+			{name: "version flag", arguments: []string{"--version"}},
 			{name: "status", arguments: []string{"status"}},
 			{name: "project list", arguments: []string{"list"}},
 			{name: "yard list", arguments: []string{"yards"}},
