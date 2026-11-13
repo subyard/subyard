@@ -83,8 +83,8 @@ coordinator, and do not create or close shared task files or start another full 
 - Fix findings and red checks with new commits; never rewrite reviewed commits. Rebase only for a
   conflict or a base change the task needs, resolve conflicts by hand, and force-push only your
   branch with `--force-with-lease`.
-- Merging needs the operator's OK. After it, with the PR ready and its checks and your dispatched
-  runs green, update the statistics and run
+- Merging needs the operator's OK; put the PR URL in the message that asks for it. After it, with
+  the PR ready and its checks and your dispatched runs green, update the statistics and run
   `subyard-github run -- gh pr merge NUMBER --auto --squash`; it merges when required checks pass,
   at once if there are none. If you want another review before merging, do not enable it; that
   review is a task step. While it is still open push small fixes; after a substantial change with
