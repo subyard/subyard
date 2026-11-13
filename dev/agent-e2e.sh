@@ -734,8 +734,8 @@ lease_acquire_frame() {
 }
 
 finish_acquire_session() {
-  # A guard reaped while draining the final frames keeps its recorded exit status.
-  [ -n "$LEASE_ACQUIRE_PID" ] || return "${LEASE_ACQUIRE_GUARD_RC:-0}"
+  # Handoff needs the ack; a guard reaped while draining the grant could not send it.
+  [ -n "$LEASE_ACQUIRE_PID" ] || return 1
   : > "$LEASE_ACQUIRE_ACK"
   local rc=0
   wait "$LEASE_ACQUIRE_PID" || rc=$?
