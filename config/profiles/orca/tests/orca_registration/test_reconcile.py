@@ -65,26 +65,32 @@ class ReconcileTests(unittest.TestCase):
                              for method, _ in self.rpc.calls))
 
     def test_known_nested_root_binding_rejects_drift_without_recursive_discovery(self):
+        # Config-file identity alone (for example a .git/config symlink retarget to
+        # identical content) is not drift: Git resolves the same repository.
         for change in ("missing root", "missing Git metadata", "catalog membership",
-                       "replaced repository", "Git config changed", "linked Git marker changed",
-                       "Git config symlink changed", "symlinked Git config changed"):
+                       "replaced repository", "replaced root directory",
+                       "work tree redirected", "bare repository",
+                       "linked Git marker retargeted", "replaced linked Git directory",
+                       "replaced symlinked Git directory", "symlinked Git marker retargeted"):
             with self.subTest(change=change), tempfile.TemporaryDirectory(dir="/tmp") as directory:
                 workspaces = Path(directory) / "workspaces"
                 state = Path(directory) / "state"
                 nested = project(workspaces) / ".build" / "nested"
                 rpc = Catalog()
-                if change == "linked Git marker changed":
+                if change in ("linked Git marker retargeted", "replaced linked Git directory"):
                     upstream = Path(directory) / "upstream"
                     init_git(upstream, commit=True)
                     git(upstream, "worktree", "add", "-q", "--detach", str(nested))
+                elif change == "symlinked Git marker retargeted":
+                    for name in ("first", "second"):
+                        init_git(Path(directory) / name, commit=True)
+                    marker = Path(directory) / "marker"
+                    marker.write_text("gitdir: " + str(Path(directory) / "first" / ".git") + "\n")
+                    nested.mkdir(parents=True)
+                    (nested / ".git").symlink_to(marker)
                 else:
                     init_git(nested)
-                config = nested / ".git" / "config"
-                if change == "Git config symlink changed":
-                    config.rename(config.with_name("original-config"))
-                    config.with_name("other-config").write_text(config.with_name("original-config").read_text())
-                    config.symlink_to("original-config")
-                elif change == "symlinked Git config changed":
+                if change in ("bare repository", "replaced symlinked Git directory"):
                     metadata = Path(directory) / "Git-metadata"
                     (nested / ".git").rename(metadata)
                     (nested / ".git").symlink_to(metadata, target_is_directory=True)
@@ -103,15 +109,37 @@ class ReconcileTests(unittest.TestCase):
                 elif change == "replaced repository":
                     nested.rename(Path(directory) / "original-repository")
                     init_git(nested)
-                elif change in ("Git config changed", "symlinked Git config changed"):
-                    with config.open("a") as output:
-                        output.write("\n# changed fixture metadata\n")
-                elif change == "Git config symlink changed":
-                    config.unlink()
-                    config.symlink_to("other-config")
-                elif change == "linked Git marker changed":
-                    marker = nested / ".git"
-                    marker.chmod(marker.stat().st_mode ^ 0o040)
+                elif change == "replaced root directory":
+                    # The same Git directory moved into a new root directory.
+                    nested.rename(Path(directory) / "original-root")
+                    nested.mkdir()
+                    (Path(directory) / "original-root" / ".git").rename(nested / ".git")
+                elif change == "work tree redirected":
+                    (Path(directory) / "elsewhere").mkdir()
+                    git(nested, "config", "core.worktree", str(Path(directory) / "elsewhere"))
+                elif change == "bare repository":
+                    git(nested, "config", "core.bare", "true")
+                elif change == "replaced symlinked Git directory":
+                    # Same symlink and the same resolved path, but another repository.
+                    metadata.rename(Path(directory) / "original-Git-metadata")
+                    init_git(Path(directory) / "other")
+                    (Path(directory) / "other" / ".git").rename(metadata)
+                elif change == "symlinked Git marker retargeted":
+                    # Same .git symlink; the marker it names now selects another repository.
+                    with marker.open("w") as output:
+                        output.write("gitdir: " + str(Path(directory) / "second" / ".git") + "\n")
+                elif change == "linked Git marker retargeted":
+                    other = Path(directory) / "other-worktree"
+                    git(upstream, "worktree", "add", "-q", "--detach", str(other))
+                    # Rewrite in place: same inode, only the named Git directory differs.
+                    with (nested / ".git").open("w") as output:
+                        output.write((other / ".git").read_text())
+                elif change == "replaced linked Git directory":
+                    # Same marker content, but the named Git directory is a copy.
+                    admin = Path((nested / ".git").read_text().removeprefix("gitdir: ").strip())
+                    shutil.copytree(admin, admin.with_name("copy"), symlinks=True)
+                    admin.rename(admin.with_name("original"))
+                    admin.with_name("copy").rename(admin)
                 else:
                     repo = next(repo for repo in rpc.repos if repo["path"] == str(nested))
                     repo["projectGroupId"] = None
@@ -122,6 +150,68 @@ class ReconcileTests(unittest.TestCase):
                 self.assertIn("plan_stale", " ".join(report["errors"]))
                 self.assertFalse(any(method not in ("repo.list", "projectGroup.list", "folderWorkspace.list")
                                      for method, _ in rpc.calls))
+
+    def test_unobservable_root_is_reported_without_losing_the_catalog_digest(self):
+        import discovery
+        init_git(self.root)
+        broken = project(self.workspaces, "broken-id", "Broken")
+        init_git(broken)
+        (broken / ".git" / "config").write_text("[core\n")
+        report = self.run_sync()
+        self.assertRegex(report.get("catalogDigest", ""), "^[0-9a-f]{64}$")
+        self.assertIn("Git root could not be verified: " + str(broken), report["errors"])
+        self.assertEqual([str(self.root)], [repo["path"] for repo in self.rpc.repos])
+        with mock.patch.object(discovery.subprocess, "run", side_effect=FileNotFoundError("git")):
+            report = self.run_sync(apply=False)
+        self.assertRegex(report.get("catalogDigest", ""), "^[0-9a-f]{64}$")
+        self.assertIn("Git root could not be verified: " + str(self.root), report["errors"])
+
+    def test_approved_binding_survives_ordinary_project_activity(self):
+        for recursive in (True, False):
+            with self.subTest(recursive=recursive), tempfile.TemporaryDirectory(dir="/tmp") as directory:
+                workspaces = Path(directory) / "workspaces"
+                state = Path(directory) / "state"
+                root = project(workspaces)
+                nested = root / "nested"
+                upstream = Path(directory) / "upstream.git"
+                init_git(nested, commit=True)
+                git(Path(directory), "init", "-q", "--bare", str(upstream))
+                git(upstream, "config", "uploadpack.allowFilter", "true")
+                git(nested, "push", "-q", str(upstream), "HEAD:refs/heads/shared")
+                rpc = Catalog()
+                self.assertTrue(self.reconcile(self.discover(workspaces), rpc, state)["ready"])
+
+                def sync(apply):
+                    return self.reconcile(self.discover(workspaces, recursive=recursive),
+                                          rpc, state, apply=apply, host_name=self.host_name,
+                                          known_paths=None if recursive else [str(nested)])
+
+                approved = sync(False)["catalogDigest"]
+                (root / "notes.txt").write_text("root work\n")
+                (nested / "change.txt").write_text("nested work\n")
+                git(nested, "add", "change.txt")
+                git(nested, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-q", "-m", "Work")
+                git(nested, "branch", "feature")
+                git(nested, "remote", "add", "origin", str(upstream))
+                git(nested, "fetch", "-q", "origin")
+                git(nested, "push", "-q", "-u", "origin", "HEAD:refs/heads/topic")
+                git(nested, "branch", "--set-upstream-to", "origin/shared", "feature")
+                git(nested, "config", "core.abbrev", "12")
+                git(nested, "fetch", "-q", "--filter=blob:none", "origin")
+                (nested / "sparse").mkdir()
+                git(nested, "sparse-checkout", "set", "sparse")
+                # Include keys may embed credentials; they never enter the binding.
+                git(nested, "config", "includeIf.hasconfig:remote.*.url:"
+                    "https://user:secret@example.invalid/r.path", "included")
+                git(nested, "config", "include.path", "included")
+                self.assertIn("repositoryformatversion = 1", (nested / ".git" / "config").read_text())
+                rpc.calls.clear()
+                with mock.patch.dict(os.environ, {"SUBYARD_ORCA_REGISTRATION_SCOPE": approved}):
+                    report = sync(True)
+                self.assertTrue(report["ready"], report["errors"])
+                self.assertEqual(report["catalogDigest"], approved)
+                self.assertNotIn("plan_stale", " ".join(report["errors"]))
 
     def test_exact_scope_does_not_prune_record_appearing_after_first_write(self):
         self.assertTrue(self.run_sync()["ready"])

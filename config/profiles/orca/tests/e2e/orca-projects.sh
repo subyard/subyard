@@ -330,6 +330,59 @@ guest_dev /usr/local/libexec/subyard/projects-changed >/dev/null
 yard init --yes >/dev/null
 assert_no_managed_duplicates
 
+stage 'converging init while a registered project keeps changing'
+# Active agents commit and write files between plan and apply; ordinary work
+# inside an unchanged project scope must not make the approved plan stale.
+activity_stop="/tmp/orca-projects-activity-stop-$token"
+activity_count="/tmp/orca-projects-activity-count-$token"
+guest_dev bash -se -- "$clone_root" "$activity_stop" "$activity_count" <<'YARD' &
+set -euo pipefail
+root=$1 stop=$2 count=$3
+iterations=0
+printf '0\n' > "$count"
+deadline=$((SECONDS + 600))
+while [ ! -e "$stop" ] && [ "$SECONDS" -lt "$deadline" ]; do
+  date +%s%N > "$root/activity.txt"
+  git -C "$root" add activity.txt
+  git -C "$root" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    commit -qm activity
+  iterations=$((iterations + 1))
+  printf '%s\n' "$iterations" > "$count"
+  sleep 0.2
+done
+YARD
+activity_pid=$!
+# Start init only once the writer is committing, so the two overlap.
+activity_started=0
+for _ in $(seq 1 120); do
+  activity_started="$(guest_dev cat "$activity_count" 2>/dev/null || printf '0')"
+  [ "$activity_started" -ge 1 ] 2>/dev/null && break
+  kill -0 "$activity_pid" 2>/dev/null || break
+  sleep 0.5
+done
+[ "$activity_started" -ge 1 ] 2>/dev/null \
+  || { guest_dev touch "$activity_stop"; die "project activity writer did not start: $activity_started"; }
+init_status=0
+init_output="$(yard init --yes 2>&1 >/dev/null)" || init_status=$?
+guest_dev touch "$activity_stop"
+activity_status=0
+wait "$activity_pid" || activity_status=$?
+[ "$init_status" -eq 0 ] \
+  || die "init failed while project worktree changed: $init_output"
+[ "$activity_status" -eq 0 ] || die "project activity writer failed: $activity_status"
+activity_iterations="$(guest_dev cat "$activity_count")"
+[ "$activity_iterations" -gt "$activity_started" ] 2>/dev/null \
+  || die "project activity writer made no commits during init: $activity_started -> $activity_iterations"
+guest_dev bash -se -- "$clone_root" "$activity_stop" "$activity_count" <<'YARD'
+set -euo pipefail
+git -C "$1" rm -qf --ignore-unmatch -- activity.txt
+rm -f -- "$1/activity.txt"
+git -C "$1" diff --cached --quiet \
+  || git -C "$1" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm 'remove activity'
+rm -f -- "$2" "$3"
+YARD
+assert_no_managed_duplicates
+
 stage 'repairing legacy missing metadata through repeated init and Orca up'
 clone_repo_before="$(repo_id "$clone_root")"
 clone_source_before="$(guest_dev sha256sum "$clone_root/fixture.txt")"

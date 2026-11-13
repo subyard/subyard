@@ -23,29 +23,42 @@ class AdmissionLimit(RpcError):
     pass
 
 
-def _root_metadata(path, deadline):
-    """Bind known-root identities without reading or discovering tree contents."""
-    paths = [path, os.path.join(path, ".git")]
-    metadata = []
-    for index, candidate in enumerate(paths):
-        if time.monotonic() >= deadline:
-            raise RpcError("Orca registration time budget exhausted")
+def _identity(path):
+    """Stable identity only: size and times change with ordinary work and are not bound."""
+    observed = os.lstat(path)
+    target = os.readlink(path) if stat.S_ISLNK(observed.st_mode) else None
+    return [[observed.st_mode, observed.st_uid, observed.st_gid,
+             observed.st_dev, observed.st_ino], target]
+
+
+def _root_metadata(root, deadline):
+    """Bind a known root to where Git resolved its repository, without reading contents.
+
+    Discovery's single Git probe resolves core.worktree, core.bare, includes,
+    config.worktree, gitfiles and symlinks, so binding the resolved locations and
+    their identities catches redirection while commits, fetches, branch and config
+    writes, sparse checkout and partial clone leave the binding unchanged. Only
+    paths and inode facts are bound; config values, which may carry credentials,
+    never enter. Accepted gap: an in-place re-init, or a deletion and re-creation
+    at the same path, is undetected when the filesystem reuses the freed inode
+    numbers (common on ext4); registration is keyed by path and kind and acts
+    identically on such a root.
+    """
+    if time.monotonic() >= deadline:
+        raise RpcError("Orca registration time budget exhausted")
+    try:
+        metadata = [_identity(root.path)]
+    except FileNotFoundError:
+        raise RpcError("Known repository root disappeared during observation: " + root.path) from None
+    except OSError:
+        raise RpcError("Known repository metadata could not be observed: " + root.path) from None
+    for directory in dict.fromkeys(path for path in (root.git_dir, root.common_dir) if path):
         try:
-            observed = os.lstat(candidate)
-            identity = [observed.st_mode, observed.st_uid, observed.st_gid,
-                        observed.st_dev, observed.st_ino, observed.st_size,
-                        observed.st_mtime_ns, observed.st_ctime_ns]
-            target = os.readlink(candidate) if stat.S_ISLNK(observed.st_mode) else None
-            metadata.append([identity, target])
-            if index == 1 and (stat.S_ISDIR(observed.st_mode)
-                               or stat.S_ISLNK(observed.st_mode) and os.path.isdir(candidate)):
-                paths.append(os.path.join(candidate, "config"))
-        except FileNotFoundError:
-            if index == 0:
-                raise RpcError("Known repository root disappeared during observation: " + path) from None
-            metadata.append(None)
+            identity = _identity(directory)
         except OSError:
-            raise RpcError("Known repository metadata could not be observed: " + path) from None
+            # Reported per root by the apply-time probe; never abort the catalog.
+            identity = None
+        metadata.append([directory, identity])
     return metadata
 
 
@@ -821,7 +834,7 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
             scope_digest = hashlib.sha256(json.dumps(scope, ensure_ascii=False, sort_keys=True,
                                            separators=(",", ":")).encode()).hexdigest()
             report["scopeDigest"] = scope_digest
-            # Only registration metadata and known-root filesystem identities are
+            # Only registration metadata and known-root Git-resolved identities are
             # fingerprinted; saved tabs and credentials never enter a fact or digest.
             keys = ("id", "path", "displayName", "kind", "projectGroupId", "parentPath",
                     "name", "createdFrom", "connectionId", "executionHostId", "parentGroupId",
@@ -833,7 +846,7 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                 key=lambda record: record["id"])
             catalog = {"scope": scope, "repos": safe_records(repos),
                        "groups": safe_records(groups), "registration": state.data,
-                       "rootMetadata": [{"path": root.path, "metadata": _root_metadata(root.path, deadline)}
+                       "rootMetadata": [{"path": root.path, "metadata": _root_metadata(root, deadline)}
                                         for project in sorted(scan.projects, key=lambda project: project.project_id)
                                         for root in sorted(project.roots, key=lambda root: root.path)]}
             catalog_digest = hashlib.sha256(json.dumps(catalog, ensure_ascii=False, sort_keys=True,
