@@ -55,15 +55,21 @@ func (runtime Runtime) codexRulesStatus(ctx context.Context, yard domain.Context
 		status.State, status.Hint = "incompatible", "installed Codex policy check failed; repair the Codex installation"
 	case result.ExitCode == 127:
 		status.State, status.Hint = "missing", "Codex CLI not found on the default developer PATH"
+	case result.ExitCode == codexRulesPromptsOff:
+		status.State, status.Hint = "rules-ok", "installed policy: managed Git prompts off; session approvals unverified"
 	case result.ExitCode != 0:
 		status.State, status.Hint = "incompatible", "home rule check failed; review rules or update Subyard"
 	case err != nil:
 		status.Hint = "home rule check unavailable; check installation or update Subyard"
 	default:
-		status.State, status.Hint = "rules-ok", "installed policy + home matcher: commit/push prompt; session approvals unverified"
+		status.State, status.Hint = "rules-ok", "installed policy: commit/push prompt; home matcher ok; session approvals unverified"
 	}
 	return status
 }
+
+// Exit status of a passing check whose installed requirements carry no Git
+// prompt rules (CODING_TOOL_GIT_APPROVAL=off).
+const codexRulesPromptsOff = 3
 
 // Codex owns rule parsing. The guest returns only an exit code; commands after
 // -- are matcher input, never executed. Coreutils bounds time and captured output.
@@ -90,12 +96,8 @@ check() {
         else (has("decision") | not) or .decision == "allow" end)
     ' >/dev/null || exit 1
 }
-check prompt git commit
-check prompt git commit -m msg
-check prompt git commit --amend
-check prompt git push
-check prompt git push origin main
-check prompt git push --force-with-lease
 check local git status
 check local sh dev-check.sh
+# Managed requirements own the Git gate; home Git rules are the operator's own choice.
+grep -Fq 'decision = "prompt"' /etc/codex/requirements.toml || exit 3
 `

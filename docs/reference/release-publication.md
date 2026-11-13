@@ -393,7 +393,7 @@ Agents preparing a release apply the
   never passed; requested incomplete or failed checks block acceptance/publication.
   Optional external checks follow [external checks](#external-checks).
   Existing CI/merge checks and risk-based development validation are unchanged.
-- For release repairs, accumulate fixes and commit the verified set at the end. Before preparation
+- Release repairs land as reviewed PRs to the release base. Before preparation
   CI, run the [publication preflight](#operator-commands-and-retained-state)
   and assign every required local check and explicitly requested VM gate in the existing task plan:
   frozen local candidate, full command, slot budget and runner owner. Build locally and start ready
@@ -403,12 +403,15 @@ Agents preparing a release apply the
   then transfer equivalent complete original PASS evidence through the reviewed workflow.
   Rerun only affected or missing gates.
 - A release directly from the default branch needs no extra branch. A hotfix, whose default branch
-  has changes beyond the candidate, gets its own release branch. If hotfix fixes are still
-  uncommitted, the agent prepares them on a local branch from the hotfix base and asks the
-  operator to commit them. At the candidate commit the agent creates the local branch named by the
-  refusal (`git branch release/X.Y.Z-SHORT12 FULL_SHA`) and asks the operator to push it, then
-  repeats `prepare` without `--workflow-ref`. Any pushed branch whose head is the candidate is
-  selected automatically, as described in [workflow ref selection](#workflow-ref-selection).
+  has changes beyond the candidate, gets a release branch that the agent creates and pushes from
+  the hotfix base; release-task PRs target it. At the candidate commit the agent creates and
+  pushes the branch named by the refusal (`git branch release/X.Y.Z-SHORT12 FULL_SHA`, then
+  `git push origin release/X.Y.Z-SHORT12`), then repeats `prepare` without `--workflow-ref`. Any
+  pushed branch whose head is the candidate is selected automatically, as described in
+  [workflow ref selection](#workflow-ref-selection). As soon as the release branch has the fixes,
+  the agent opens a PR returning them to the default branch and asks for the operator's OK once
+  its CI checks pass; the release is complete only after it merges. Publication, attestation and
+  their confirmations stay with the operator.
 
 ## Development verification
 

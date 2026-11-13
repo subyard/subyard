@@ -16,6 +16,7 @@ ARCH="${CODEX_ARCH:-}"
 DEV_USER="${DEV_USER:-dev}"
 DEV_HOME="${CODEX_DEV_HOME:-}"
 MANAGED_CHECK_MARKER='# Managed by Subyard Codex provision.'
+GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
 
 # Native requirements apply across projects, CODEX_HOME and client launch modes.
 # Keep this in the self-contained provision hook copied into the yard.
@@ -25,6 +26,8 @@ requirements() {
 allowed_approval_policies = ["on-request"]
 allowed_approvals_reviewers = ["user"]
 check_for_update_on_startup = false
+REQUIREMENTS
+  [ "$GIT_APPROVAL" = off ] || cat <<'REQUIREMENTS'
 
 [rules]
 prefix_rules = [
@@ -46,6 +49,7 @@ for path in "$INSTALL_ROOT" "$BIN_LINK" "$CHECK_PATH" "$REQUIREMENTS_PATH"; do
   case "$path" in /*) ;; *) refuse "install paths must be absolute" ;; esac
 done
 case "$DEV_USER" in ''|*[!A-Za-z0-9._-]*) refuse "DEV_USER is invalid" ;; esac
+case "$GIT_APPROVAL" in prompt|off) ;; *) refuse "CODING_TOOL_GIT_APPROVAL must be prompt or off" ;; esac
 
 if [ -z "$ARCH" ]; then
   if command -v dpkg >/dev/null 2>&1; then
@@ -327,6 +331,10 @@ prune_releases() { # version previous-target
   done
 }
 
+# The approval policy precedes package installation, every download, the binary it governs and
+# every developer-tree repair, so a failed or slow step never leaves the CLI without it.
+install_requirements
+
 # Reconcile the system sandbox runtime on current-version reruns as well as fresh installs.
 if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --version >/dev/null 2>&1; then
   command -v apt-get >/dev/null 2>&1 || die 'apt-get is required to install the bubblewrap sandbox runtime'
@@ -379,7 +387,6 @@ if is_release_target "$current_target" && is_working_binary "$INSTALL_ROOT/$curr
   if [ "$BINARY_VERSION" = "$VERSION" ] || \
     { [ "$current_base" != "$VERSION" ] && [ "$newest_base" = "$current_base" ]; } || \
     { [ "$current_base" = "$VERSION" ] && [[ "$BINARY_VERSION" = "$VERSION"+* ]]; }; then
-    install_requirements
     install_check
     release_standalone_shadow
     run_check
@@ -420,8 +427,6 @@ chmod -R u+w,go-w,go+rX "$stage"
 if [ "$(id -u)" -eq 0 ]; then chown -R 0:0 "$stage"; fi
 is_working_binary "$stage/bin/codex" && [ "$BINARY_VERSION" = "$VERSION" ] \
   || die "staged package failed version or app-server validation for '$VERSION'"
-# The approval policy precedes the binary it governs and every developer-tree repair.
-install_requirements
 # A same-version reinstall moves the old tree aside, so a failed move can put it back.
 release_dir="$RELEASES_ROOT/$VERSION"
 aside=''

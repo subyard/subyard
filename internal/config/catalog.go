@@ -106,6 +106,9 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1024, 65535), hostListener()),
 	"CODING_TOOL_INTEGRATIONS": scalar("coding-tool-integration", SettingNameList, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand)),
+	// Off removes the managed Claude and Codex commit/push approval rules.
+	"CODING_TOOL_GIT_APPROVAL": scalar("coding-tool-integration", SettingString, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), enum("prompt", "off")),
 	"YARD_IMAGE": scalar("yard-runtime", SettingImageReference, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand)),
 	"YARD_IMAGE_FALLBACK": scalar("yard-runtime", SettingImageReference, SettingYardInit, true,

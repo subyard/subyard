@@ -17,15 +17,17 @@ import (
 func TestCodexRulesProbe(t *testing.T) {
 	for _, tc := range []struct {
 		name, protected, local, state string
-		cliFailure, missingRules      bool
+		off, cliFailure, missingRules bool
 		policyFailure, missingPolicy  bool
 	}{
-		{name: "prompt", protected: `{"decision":"prompt"}`, local: `{}`, state: "rules-ok"},
-		{name: "allow override", protected: `{"decision":"allow"}`, local: `{}`, state: "incompatible"},
-		{name: "local gated", protected: `{"decision":"prompt"}`, local: `{"decision":"prompt"}`, state: "incompatible"},
-		{name: "changed schema", protected: `{}`, local: `{}`, state: "incompatible"},
-		{name: "invalid JSON", protected: `private diagnostic`, state: "incompatible"},
-		{name: "oversized response", protected: `{"decision":"prompt","extra":"` + strings.Repeat("x", 32768) + `"}`, state: "incompatible"},
+		{name: "prompt", protected: `{}`, local: `{}`, state: "rules-ok"},
+		{name: "prompt keeps operator home prompts", protected: `{"decision":"prompt"}`, local: `{}`, state: "rules-ok"},
+		{name: "off", protected: `{}`, local: `{}`, state: "rules-ok", off: true},
+		{name: "off keeps operator home prompts", protected: `{"decision":"prompt"}`, local: `{}`, state: "rules-ok", off: true},
+		{name: "local gated", protected: `{}`, local: `{"decision":"prompt"}`, state: "incompatible"},
+		{name: "off local gated", protected: `{}`, local: `{"decision":"prompt"}`, state: "incompatible", off: true},
+		{name: "invalid JSON", protected: `{}`, local: `private diagnostic`, state: "incompatible"},
+		{name: "oversized response", protected: `{}`, local: `{"extra":"` + strings.Repeat("x", 32768) + `"}`, state: "incompatible"},
 		{name: "CLI failure", state: "incompatible", cliFailure: true},
 		{name: "missing rules", state: "incompatible", missingRules: true},
 		{name: "managed policy check failure", state: "incompatible", policyFailure: true},
@@ -50,6 +52,11 @@ func TestCodexRulesProbe(t *testing.T) {
 			// A user PATH shadow must not satisfy the managed check.
 			write("bin/codex-policy-check", "#!/bin/sh\nexit 0\n", 0o700)
 			write("protected", tc.protected, 0o600)
+			requirements := "check_for_update_on_startup = false\n"
+			if !tc.off {
+				requirements += "[rules]\nprefix_rules = [{ decision = \"prompt\" }]\n"
+			}
+			write("requirements.toml", requirements, 0o600)
 			write("local", tc.local, 0o600)
 			if !tc.missingPolicy {
 				policyCheck := "#!/bin/sh\nexit 0\n"
@@ -78,6 +85,7 @@ esac
 			runtime := Runtime{Executor: statusExecutorFunc(func(ctx context.Context, _, _ string, req ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 				args := append([]string(nil), req.Command[1:]...)
 				args[len(args)-1] = strings.ReplaceAll(args[len(args)-1], "/usr/local/bin/codex-policy-check", filepath.Join(home, "managed-check"))
+				args[len(args)-1] = strings.ReplaceAll(args[len(args)-1], "/etc/codex/requirements.toml", filepath.Join(home, "requirements.toml"))
 				command := exec.CommandContext(ctx, req.Command[0], args...)
 				command.Env = []string{"HOME=" + home, "CODEX_HOME=" + home + "/.codex", "PATH=" + home + "/bin:/usr/bin:/bin"}
 				output, err := command.CombinedOutput()
@@ -90,12 +98,13 @@ esac
 				}
 				return ports.InstanceExecResult{}, err
 			})}
-			if got := runtime.codexRulesStatus(context.Background(), domain.Context{}, true); got.State != tc.state {
+			got := runtime.codexRulesStatus(context.Background(), domain.Context{}, true)
+			if got.State != tc.state || tc.state == "rules-ok" && strings.Contains(got.Hint, "managed Git prompts off") != tc.off {
 				t.Fatalf("got %#v; want %s", got, tc.state)
 			}
 			if tc.state == "rules-ok" {
 				calls, err := os.ReadFile(filepath.Join(home, "calls"))
-				want := "git commit\ngit commit -m msg\ngit commit --amend\ngit push\ngit push origin main\ngit push --force-with-lease\ngit status\nsh dev-check.sh\n"
+				want := "git status\nsh dev-check.sh\n"
 				if err != nil || string(calls) != want {
 					t.Fatalf("matcher inputs = %q, err=%v", calls, err)
 				}

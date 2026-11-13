@@ -1,6 +1,6 @@
 ---
 name: subyard-dev-flow
-description: Use when developing Subyard in this repository, including features, bug fixes, refactoring, tests, and developer documentation.
+description: Always use when developing Subyard project itself.
 ---
 
 # Subyard dev-flow
@@ -12,7 +12,8 @@ add automatic test gates. Explicit user instructions take precedence over this s
 Terms used below:
 
 - **Candidate:** the exact public source being checked or reviewed, including uncommitted and
-  untracked files; its identity is the recorded hash/manifest of those inputs.
+  untracked files; its identity is the recorded hash/manifest of those inputs, or the pushed
+  commit SHA for CI checks.
 - **Freeze:** stop editing and record or package the final candidate so later checks use the same bytes.
 - **Native terminal outcome:** the client's own final result object for a command (exit code,
   output, duration), not a summary or log tail.
@@ -62,6 +63,38 @@ coordinator, and do not create or close shared task files or start another full 
 4. Before handoff or compaction, update the concise task plan: remaining work, decisions,
    evidence and candidate identities. Preserve required rules and relevant architecture,
    without a chat journal or full history.
+
+## Pull requests
+
+- Branch each task from the default branch, or from the release branch for a release in
+  preparation, and target that base; branch from an unmerged PR branch only with the operator's
+  agreement. Commit and push your branch without asking. Never commit or push the private overlay.
+- After review accepts the candidate, commit it. A fresh [describer](roles/describer.md) session
+  returns the title and body. Save the body outside the repository, append the output of
+  `python3 dev/pr-stats.py --base origin/BASE --review-cycles N --purpose AREA=TEXT ...
+  [--check NAME=URL ...]`, push, and run
+  `subyard-github run -- gh pr create --base BASE --title TITLE --body-file FILE`; add `--draft`
+  while checks you still owe must pass before merging, then
+  `subyard-github run -- gh pr ready NUMBER`. Update the body with
+  `subyard-github run -- gh pr edit NUMBER --body-file FILE`.
+- Run standard VM checks as a [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners)
+  on the PR branch and watch them; use leased VMs for non-standard states, reproduction and
+  targeted cases. Dispatched runs are not PR checks: pass their run URLs as `--check`.
+- Fix findings and red checks with new commits; never rewrite reviewed commits. Rebase only for a
+  conflict or a base change the task needs, resolve conflicts by hand, and force-push only your
+  branch with `--force-with-lease`.
+- Merging needs the operator's OK or an approving review of the current head by a repository
+  member (`subyard-github run -- gh pr view NUMBER --json headRefOid,latestReviews`); put the PR
+  URL in the message that asks for it. After either, with the PR ready and its checks and your
+  dispatched runs green, update the statistics and run
+  `subyard-github run -- gh pr merge NUMBER --auto --squash`; it merges when required checks pass,
+  at once if there are none. If you want another review before merging, do not enable it; that
+  review is a task step. While it is still open push small fixes; after a substantial change with
+  auto-merge on, run `subyard-github run -- gh pr merge NUMBER --disable-auto` and ask again.
+  After the merge, fixes go into a new PR.
+- After a task, fix your red open PRs:
+  `subyard-github run -- gh pr list --author @me --json number,statusCheckRollup`.
+- Public PRs, commits and comments carry no attribution and no operator conversation.
 
 ## Choose checks by risk
 
@@ -127,7 +160,7 @@ reviewer only for an explicit two-axis request or a concrete independent risk. P
 risk-based checks above; orchestration does not add acceptance runs.
 
 Role-specific obligations live in the client-neutral [developer](roles/developer.md),
-[reviewer](roles/reviewer.md) and [observer](roles/observer.md) contracts. They are not
+[reviewer](roles/reviewer.md), [observer](roles/observer.md) and [describer](roles/describer.md) contracts. They are not
 registered as native custom agents. Read the selected contract when assigning a role and include
 its instructions in a self-contained assignment to a fresh subagent without inherited conversation
 history. Spawn settings by client; record a comparable available alternative if needed:
@@ -189,13 +222,13 @@ Keep global settings and existing runner infrastructure unchanged.
 - Use allocated test targets within the VM guide's ownership boundary. The outer
   yard's lifecycle belongs to the operator. Ask the user to run exact commands
   when operator access or `sudo` is required.
-- Commit, push, or rewrite Git history only on explicit user instruction.
 
 ## Completion
 
-**Done means the agreed change is verified, required checks and review have passed,
-and the final code is ready to commit and hand to the operator.** Close or delete
-the development plan according to the governing task workflow.
+**Report done only when the agreed change is verified, required review has passed, its PR is open
+and not a draft, or already merged, and no check you started, including dispatched E2E runs, is
+still running.** Keep the plan, with the PR link, until squash auto-merge is enabled or the PR is
+merged; then close or delete it per the governing task workflow.
 
 When ending an implementation session with a development plan still present, link it in
 the final response, explain why it is unfinished, and list the concrete remaining work
@@ -212,5 +245,4 @@ Moving an in-scope step to another file or ending a session does not complete it
 
 Report what changed, what was actually checked, and the operator handoff. A component or
 host-free pass proves only that scope; it does not prove the planned yard lifecycle
-or full release acceptance. End file-changing work with a short imperative
-suggested commit message.
+or full release acceptance. End file-changing work with the PR link.

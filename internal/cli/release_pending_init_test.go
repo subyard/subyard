@@ -368,6 +368,25 @@ func TestPendingInitComparesEffectiveSelection(t *testing.T) {
 	}
 }
 
+// A snapshot from before the approval setting records no mode; the shipped
+// default is not pending, while off is listed against that absence.
+func TestPendingInitTreatsUnrecordedGitApprovalAsDefault(t *testing.T) {
+	catalog, err := config.LoadCatalog(repositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := config.IntegrationSelection{Effective: []string{"codex"}, AllowsCodingTools: true}
+	installed := config.Loaded{Catalog: catalog, Environment: map[string]string{"DEV_USER": "dev"}, Integrations: selection}
+	desired := config.Loaded{Catalog: catalog, Environment: map[string]string{"DEV_USER": "dev", "CODING_TOOL_GIT_APPROVAL": "prompt"}, Integrations: selection}
+	if settings := pendingInitSettings(desired, installed); len(settings) != 0 {
+		t.Fatalf("default approval mode reported pending: %#v", settings)
+	}
+	desired.Environment["CODING_TOOL_GIT_APPROVAL"] = "off"
+	if settings := pendingInitSettings(desired, installed); len(settings) != 1 || settings[0].Name != "CODING_TOOL_GIT_APPROVAL" || settings[0].Desired != "off" || settings[0].InstalledSet {
+		t.Fatalf("off mode not listed against the unrecorded default: %#v", settings)
+	}
+}
+
 // The sealed fixture owner becomes ready only at its convergence boundary. Each
 // nested init can prove the release repair already ran; planning remains read-only.
 func enablePendingRepair(t *testing.T, fixture *pendingInitFixture) {

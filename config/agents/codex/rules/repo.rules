@@ -1,6 +1,5 @@
 # Codex command rules for the yard (laid down at ~/.codex/rules/repo.rules).
-# Request approval for canonical direct git commit/push commands at the Codex level.
-# Provisioning also installs mandatory native requirements independent of these home rules.
+# Commit/push approval lives in the managed requirements that provisioning installs.
 # These argv-prefix rules are not a boundary for other Git spellings or direct Git metadata writes.
 # Routine local work (edits, builds, tests,
 # git reset) stays free.
@@ -11,26 +10,4 @@ prefix_rule(
     pattern = ["rm"],
     decision = "allow",
     match = ["rm -rf -- .build/fixture-hardening", "rm generated-file"],
-)
-
-prefix_rule(
-    pattern = ["git", "commit"],
-    decision = "prompt",
-    justification = "Creating or amending a commit must be explicitly approved by the operator.",
-    match = [
-        "git commit",
-        "git commit -m msg",
-        "git commit --amend",
-    ],
-)
-
-prefix_rule(
-    pattern = ["git", "push"],
-    decision = "prompt",
-    justification = "Pushing to a remote must be explicitly approved by the operator.",
-    match = [
-        "git push",
-        "git push origin main",
-        "git push --force-with-lease",
-    ],
 )

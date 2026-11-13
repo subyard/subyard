@@ -1023,6 +1023,16 @@ A manual dispatch can name the check ids to run in `checks`. The separate Stale 
 runs of any workflow left queued or in progress for over a day, since such a run holds its
 concurrency group.
 
+Standard VM checks for a pull request run here, not as a required status check. Dispatch the lanes
+selected by the risk policy on the pushed branch (ids as printed by `dev/ci/plan-periodic-checks.py`)
+and watch the run; its candidate identity is the branch head commit at dispatch:
+
+```sh
+subyard-github run -- gh workflow run periodic-e2e.yml --ref BRANCH -f checks='ID ...'
+subyard-github run -- gh run list --workflow periodic-e2e.yml --branch BRANCH --limit 1
+subyard-github run -- gh run watch RUN_ID --exit-status
+```
+
 Agent compatibility regressions run locally with
 `go test ./internal/adapters/statusruntime` and `bash tests/codex-agent-provision.sh`.
 They use temporary rules, fake CLI programs and release metadata; they do not start VMs,

@@ -54,3 +54,22 @@ func TestAppliedIntegrationSettingsPreserveAbsentInputs(t *testing.T) {
 		t.Fatal("legacy unknown baseline was treated as a complete snapshot")
 	}
 }
+
+// Default-mode snapshots stay readable by readers that predate the setting;
+// such readers refuse any unknown field, so only off is recorded.
+func TestAppliedIntegrationSettingsRecordOnlyNonDefaultGitApproval(t *testing.T) {
+	catalog := Catalog{}
+	for _, value := range []string{"", "prompt"} {
+		settings := catalog.IntegrationInitSettings(map[string]string{"DEV_USER": "dev", "CODING_TOOL_GIT_APPROVAL": value})
+		if len(settings) != 1 || settings["DEV_USER"] != "dev" {
+			t.Fatalf("default mode %q entered the snapshot: %#v", value, settings)
+		}
+	}
+	settings := catalog.IntegrationInitSettings(map[string]string{"CODING_TOOL_GIT_APPROVAL": "off"})
+	if settings["CODING_TOOL_GIT_APPROVAL"] != "off" || catalog.ValidateIntegrationInitSettings(settings) != nil {
+		t.Fatalf("off mode was not recorded: %#v", settings)
+	}
+	if catalog.ValidateIntegrationInitSettings(map[string]string{"CODING_TOOL_FUTURE_SETTING": "off"}) == nil {
+		t.Fatal("closed applied-settings domain accepted an unknown field")
+	}
+}

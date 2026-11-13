@@ -28,6 +28,7 @@ ssh-agent-environment.sh
 test-runner.sh
 test-vms.sh
 workflow-real-adapter-gate.sh
+pr-stats.sh
 yard-extras-convergence.sh
 yard-usage.sh
 installed-runtime-refresh.sh
