@@ -1036,6 +1036,17 @@ type configApplyRepairFixture struct {
 func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixture {
 	root, environment, _ := nativeFixture(t)
 	writeRuntimeProfileFixture(t, root)
+	for _, name := range []string{"config/profiles/test-vms/profile.json", "config/profiles/test-vms/service-binding.py", "config/profiles/test-vms/full-cleanup.py", "scripts/lib/teardown-plan.py"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mode := os.FileMode(0o755)
+		if filepath.Ext(path) == ".json" {
+			mode = 0o644
+		}
+		testkit.WriteFile(t, path, mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), name)), mode)
+	}
 	sampleHandler := filepath.Join(root, "config", "profiles", "sample", "runtime.sh")
 	if err := os.MkdirAll(filepath.Dir(sampleHandler), 0o700); err != nil {
 		t.Fatal(err)
