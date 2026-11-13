@@ -403,6 +403,60 @@ fencing and recovery logic also have focused host-free race tests, which do not 
 physical isolation evidence. The operator-owned outer broker's successful lease does not prove
 the candidate broker code.
 
+## Client for any yard
+
+The shared broker client lives in the opt-in `test-vms-client` profile. Selecting it delivers the
+client and the short `subyard-test-vms` skill into the yard's installed runtime, so agents in any
+yard can use the pool without a Subyard checkout or a coding-tool integration, for example in the
+Hermes yard:
+
+```sh
+yard -Y hermes provision test-vms-client
+```
+
+`provision` adds the profile to the yard's local selection. To remove it, set
+`ENVIRONMENT_PROFILES` without `test-vms-client` and run `yard -Y NAME init`; static skill refresh
+removes the client, the skill and its links. The route mount itself is unchanged: every yard
+without `ALLOWS_HOST_ACCESS=false` receives the read-only route registry. A role with
+`ALLOWS_HOST_ACCESS=false` refuses the profile. The client runs as the ordinary `dev` user and
+needs no sudo.
+
+The client and skill are one skill directory, `/usr/local/share/subyard/skills/subyard-test-vms/`,
+owned by the shared skill receipts. It is linked for Codex, Claude Code, OpenCode, pi and
+Hermes (`~/.hermes/skills`). Release refresh updates it with the other static skills.
+
+```sh
+client=/usr/local/share/subyard/skills/subyard-test-vms/client.sh
+bash "$client" status
+handle="$(bash "$client" acquire --slot 1 --purpose my-check)"
+bash "$client" exec "$handle" -- apt-get install -y some-package
+bash "$client" exec "$handle" -- systemctl status some-service
+bash "$client" release "$handle"
+```
+
+`acquire` uses the same broker protocol, capabilities, attribution, exact slot, `--wait` and
+typed busy/capacity refusals as the runner below, and requests one standard VM unless
+`--vm-count 2` or `--type android-test` is given. Attribution uses the yard name from the guest
+facts and `--project NAME`, defaulting to the yard name. It prints a handle: a private directory
+under `~/.subyard/e2e/handles/` with the captured route and host-key pin, lease credentials and an
+ephemeral guest key. `exec` runs a command as root in the leased VM and returns its exit status;
+`--stdin` forwards input. `ssh HANDLE` opens an interactive root shell. Separate `exec` calls share
+one lease and one VM until `release`. `leases` lists handles; `logs` and `incident` read this
+controller's diagnostics as described below.
+
+A detached keeper, started before a streaming grant is acknowledged, owns each handle. It renews
+every five minutes only while that exact handle exists. A released, replaced or removed handle
+stops it without another renewal. It releases the lease after `--idle` (default 30 minutes,
+between 1 minute and 12 hours) without `exec` use; a running `exec` counts as use. If the keeper
+stops, `exec` refuses and the broker expires the lease twenty minutes after its last renewal. A
+failed renewal marks the handle `lost`. Release a lost or keeper-less handle and acquire again.
+Deselecting the profile does not interrupt a held lease: its running keeper still releases it
+after the idle limit.
+
+`dev/agent-e2e.sh` is the Subyard development special case of this client: it sources the same
+file from the checkout and adds worktree copy, guest run directories, lanes and phase evidence.
+Its lease remains bound to the wrapper and its launching process as described below.
+
 ## Agent workflow
 
 The agent resolves the owner's trusted public service registration and its pinned restricted
@@ -1544,7 +1598,8 @@ and lease capability are internal temporary files and are not an agent API.
 Every wrapper invocation is a new lease for only the requested slot. For a two-VM `subyard-pair`,
 `e2e-vm-1` and `e2e-vm-2` select its two guests; any singleton has only `e2e-vm-1`. These are
 guests within the allocation, never global slot names. Stateful multi-step work must stay in one
-script invocation or one interactive SSH session. Once leased, the agent has unrestricted root
+script invocation or one interactive SSH session, or use a
+[client handle](#client-for-any-yard) across separate commands. Once leased, the agent has unrestricted root
 in its allocated guests and may create arbitrary nested yards,
 brokers and leases. Nested slots are a separate namespace: inspect the nested broker's local status
 and choose its slot locally instead of copying the outer `SUBYARD_E2E_SLOT`. `--slot N` requests only

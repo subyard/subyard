@@ -32,7 +32,7 @@ spec.loader.exec_module(m)
 def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
             manifest_sources=False):
     root = directory / "source"
-    for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
+    for name in ("dev/agent-e2e.sh", "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, target)
