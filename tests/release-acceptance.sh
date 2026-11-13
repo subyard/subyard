@@ -30,7 +30,7 @@ spec.loader.exec_module(m)
 
 def fixture_checkout(directory, optional_vms=False):
     checkout = directory / "checkout"
-    for name in ("dev/agent-e2e.sh", "dev/e2e/p0-acceptance.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
+    for name in ("dev/agent-e2e.sh", "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "dev/e2e/p0-acceptance.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = checkout / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, target)
@@ -1738,7 +1738,7 @@ exit "$COLLECTOR_EXIT"
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             checkout = directory / "checkout"
-            for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
+            for name in ("dev/agent-e2e.sh", "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
                 target = checkout / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(root / name, target)

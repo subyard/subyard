@@ -10,7 +10,9 @@ import unittest
 
 PROFILE = pathlib.Path(__file__).resolve().parents[1]
 ROOT = PROFILE.parents[2]
-spec = importlib.util.spec_from_file_location("service_route", PROFILE / "service-route.py")
+# The shared client owns the reader of this profile's public route publication.
+ROUTE = ROOT / "config/profiles/test-vms-client/skills/subyard-test-vms/service-route.py"
+spec = importlib.util.spec_from_file_location("service_route", ROUTE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 binding_spec = importlib.util.spec_from_file_location("service_binding", PROFILE / "service-binding.py")
@@ -92,7 +94,7 @@ class ServiceRoute(unittest.TestCase):
         self.assertIn("resource_generation=7 lease_epoch=4", binding_module.project_pool(response)["facts"][0])
 
     def test_cli_absence_has_stable_safe_diagnostic(self):
-        result = subprocess.run(["python3", str(PROFILE / "service-route.py"), "--registry",
+        result = subprocess.run(["python3", str(ROUTE), "--registry",
                                  str(self.root / "missing")], text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("test environment unavailable: service_absent", result.stderr)
@@ -114,7 +116,7 @@ class ServiceRoute(unittest.TestCase):
 
     def test_trusted_route_returns_only_safe_public_locator(self):
         self.install_route()
-        result = subprocess.run(["python3", str(PROFILE / "service-route.py"), "--registry", str(self.root)],
+        result = subprocess.run(["python3", str(ROUTE), "--registry", str(self.root)],
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip().split("\t"),
@@ -129,7 +131,7 @@ class ServiceRoute(unittest.TestCase):
                 saved = target.with_name(target.name + "-missing")
                 target.rename(saved)
                 try:
-                    result = subprocess.run(["python3", str(PROFILE / "service-route.py"),
+                    result = subprocess.run(["python3", str(ROUTE),
                                              "--registry", str(self.root)], text=True, capture_output=True)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("service_unavailable", result.stderr)
@@ -142,7 +144,7 @@ class ServiceRoute(unittest.TestCase):
     def test_missing_registration_is_absent_even_with_transport(self):
         self.install_route()
         (self.root / "services/test-vms/main.json").unlink()
-        result = subprocess.run(["python3", str(PROFILE / "service-route.py"), "--registry", str(self.root)],
+        result = subprocess.run(["python3", str(ROUTE), "--registry", str(self.root)],
                                 text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("service_absent", result.stderr)
