@@ -34,7 +34,7 @@ materialize_unit() {
     *) die 'unsupported power unit template context' ;;
   esac
   "${reader[@]}" sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER|g" "$template" > "$output"
-  [ "$template" != "$OLD_UNIT_FIXTURE" ] || return 0
+  [ -n "$runtime_root" ] || return 0
   # Current templates bind to the captured immutable candidate, including when
   # the controller-owned source template is used to verify rollback's boot unit.
   case "$runtime_root" in

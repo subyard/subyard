@@ -83,7 +83,7 @@ func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.
 			case "resuming":
 				inspection.Resume = &tx
 			case "different-target":
-				outcome.Target = "0.28.0-fixture"
+				outcome.Target = "0.29.0-fixture"
 			case "different-inspection":
 				copy := *outcome
 				inspection.Outcome = &copy

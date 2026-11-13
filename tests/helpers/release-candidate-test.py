@@ -52,11 +52,11 @@ class SourceAnchorRefusalTest(unittest.TestCase):
                 (runtime/'current').symlink_to('releases/source')
                 fixture = SimpleNamespace(config=config, runtime=runtime, project_marker=marker,
                     retained=retained, retained_hash=module['digest'](retained), env={},
-                    version='0.28.0', baseline_version='0.11.0', old_launcher=root/'old-yard')
+                    version='0.29.0', baseline_version='0.11.0', old_launcher=root/'old-yard')
                 calls = []
                 def run(command, environment, timeout):
                     calls.append(command[1:])
-                    self.assertEqual(environment['YARD_RELEASE_VERSION'], '0.28.0')
+                    self.assertEqual(environment['YARD_RELEASE_VERSION'], '0.29.0')
                     if failure == 'config' or (failure == 'installer-config' and command[0] == 'bash'): retained.write_text('changed')
                     if failure == 'data': marker.write_text('changed')
                     if failure == 'installer-journal' and command[0] == 'bash':
@@ -71,7 +71,7 @@ class SourceAnchorRefusalTest(unittest.TestCase):
                 with patch.dict(verify.__globals__, {'run_process':run}):
                     if failure in ('none', 'check-json'):
                         verify(fixture, root/'subyard-install.sh')
-                        self.assertEqual(calls, [['update'], ['update', '--check'], [str(root/'subyard-install.sh'), '--version', '0.28.0', '--yes']])
+                        self.assertEqual(calls, [['update'], ['update', '--check'], [str(root/'subyard-install.sh'), '--version', '0.29.0', '--yes']])
                     else:
                         with self.assertRaises(RuntimeError): verify(fixture, root/'subyard-install.sh')
 

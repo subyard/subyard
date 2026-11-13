@@ -26,8 +26,8 @@ value["autoMemoryDirectory"] = "~/.claude-memory-upgrade-fixture"
 path.write_text(json.dumps(value) + "\n")
 PY_UPGRADE_DEFAULT
   fi
-  release_version=0.28.0-orca-bootstrap-e2e
-  [ -z "$HANDLER_ACCEPTANCE" ] || release_version=0.28.0-orca-handler-e2e
+  release_version=0.29.0-orca-bootstrap-e2e
+  [ -z "$HANDLER_ACCEPTANCE" ] || release_version=0.29.0-orca-handler-e2e
   if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
     release_version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
     mkdir -p "$STATE/release"

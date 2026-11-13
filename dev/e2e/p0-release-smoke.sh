@@ -7,7 +7,7 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/power-reconciler-upgrade.sh"
 
 # The shared fixture reads the TSV anchor baseline.
-CANDIDATE_VERSION="0.28.0-p0.smoke.$TOKEN"
+CANDIDATE_VERSION="0.29.0-p0.smoke.$TOKEN"
 if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
   CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi

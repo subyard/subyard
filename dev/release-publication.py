@@ -46,8 +46,8 @@ PREPARATION_WORKFLOW_POLICIES = {
     "dcc7d9d2cd7f1f20c41bb7993ffd279af644380f": HISTORICAL_PREPARATION_JOBS | {"host-free-verify"},
     "e952002eada45e0d6f245fbc61f5403c7325ae5d": PREPARATION_JOBS,
     "4089769ddfcdfa54fdfeb1d11498acf6af1fd42f": PREPARATION_JOBS,
-    # Test release version moved above the 0.27.0 update anchor.
-    "8e277e88b52fe3c8c3336da9e606e0ae8b6e8314": PREPARATION_JOBS,
+    # Test release version moved above the 0.28.0 update anchor.
+    "3115d9c5cc9bd132d73e1782380f8526b6ded2a1": PREPARATION_JOBS,
 }
 
 

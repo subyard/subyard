@@ -8,17 +8,17 @@ updated: 2026-11-10
 
 ## Approved support boundary
 
-Direct update requires installed **v0.27.0 or newer**. Sources from v0.11.0 to below v0.27.0
+Direct update requires installed **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0
 refuse with `source-anchor-required` before changing active runtime links, journals, settings or data.
 Run the exact published anchor, then retry the latest release:
 
 ```sh
-yard update --version 0.27.0
+yard update --version 0.28.0
 yard update
 ```
 
 The same boundary applies to the installer over an existing runtime and offline update. Immutable
-staging remains available for cleanup tooling. Rollback below v0.27.0 refuses; compatible v0.27.x
+staging remains available for cleanup tooling. Rollback below v0.28.0 refuses; compatible v0.28.x
 rollback remains supported. Incomplete or contradictory state cannot be repaired by comparing
 versions: exact unfinished transactions retain their sealed owner, artifacts and evidence.
 The anchor does not change `minimumEpochs`, persistent formats or retained history readers.
@@ -28,9 +28,9 @@ This removal route deletes owned data only after its existing explicit confirmat
 refusal never authorizes deletion. There is no automatic update chain or new bridge release.
 
 Retirement removes fresh V1 upgrades and journal imports, including unfinished source V1
-recovery and new rollback targets below v0.27.0. Detection must refuse before changing the
-active installation and explain the full data removal and clean-install path. Refusal never
-deletes evidence. An installation that already completed its transition to supported V2 state
+recovery. Detection must refuse before changing the active installation and explain the full
+data removal and clean-install path. New rollback targets below v0.28.0 also refuse, but keep
+the current release active and offer no uninstall path. Refusal never deletes evidence. An installation that already completed its transition to supported V2 state
 remains supported, including necessary historical evidence and recovery bindings with legacy
 provenance. The source version, authoritative state and retained bindings must be assessed
 together; an old directory or version string alone does not establish eligibility.
@@ -57,7 +57,7 @@ preserved and are listed in the plan and final result. Full removal does not cla
 were deleted. Modern receipt-owned namespaces retain their existing deletion and stale-plan guards.
 
 
-The cutoff concerns legacy migration V1. Fresh v0.27.0+ updates, process V1, Ledger V2,
+The cutoff concerns legacy migration V1. Fresh v0.28.0+ updates, process V1, Ledger V2,
 recovery receipts and checkpoint-reader contracts retain their own compatibility requirements.
 The source-version cutoff does not raise the domain epoch floor or retire V2 checkpoint history.
 
@@ -106,7 +106,7 @@ data; this synthetic boundary does not claim an authenticated historical grant. 
 also verifies that continuation alone never authorizes full removal. Current-owned
 projects retain their ordinary repeatable initialization contract.
 
-Published direct baselines are v0.27.0, the latest v0.27.x patch if different, and the previous
+Published direct baselines are v0.28.0, the latest v0.28.x patch if different, and the previous
 published release if distinct. The immutable installer and archive digests live in
 [`published-upgrade-baselines.tsv`](../../dev/e2e/published-upgrade-baselines.tsv); its fourth column
 labels `anchor` (also direct), `direct` and `refusal` expectations; `pin` rows supply immutable assets for fixture lookups
@@ -114,10 +114,10 @@ only and never create matrix or periodic checks. Release preparation refuses if 
 release is not a direct or anchor row or local release tags are unavailable. Candidate versions must sort
 above their direct baselines.
 
-Refusal coverage includes v0.11.0, v0.17.3 and v0.26.0; pre-v0.11.0 removal retains its own pinned
+Refusal coverage includes v0.11.0, v0.17.3 and v0.27.0; pre-v0.11.0 removal retains its own pinned
 harness and full-uninstall lane. The first boundary release additionally runs
-v0.11.0 → v0.27.0 → candidate and v0.26.0 → v0.27.0 → candidate. The complete old-source matrix
-remains frozen in the v0.27.0 tag; later candidate acceptance does not repeat it.
+v0.11.0 → v0.28.0 → candidate and v0.27.0 → v0.28.0 → candidate. The complete old-source matrix
+remains frozen in the v0.28.0 tag; later candidate acceptance does not repeat it.
 
 ## Moving the update boundary
 
@@ -137,10 +137,12 @@ Move the boundary when the supported matrix's cost or age justifies retiring a s
    boundary alone neither deletes history readers nor raises epoch floors.
 
 The TSV/constant contract and shared fixture readers keep the anchor selection synchronized.
-Post-activation takeover also requires the candidate to retain reconciliation of the anchor's
-activated state. Removing that code makes takeover a refusal again. Before activation, only the
-original owner can finish the hop; if it is defective, an anchor-series fix release (v0.27.x for
-this boundary) is the repair path, not a bridge release or an uninstall.
+An unfinished transition below the anchor is always finished first by the installed release that
+started it (`yard update`); the candidate never routes it through another release. Post-activation
+takeover of an anchor journal relies on the candidate still reconciling the anchor's activated
+state and on intact migration authority; removing that code makes takeover a refusal again. A
+defective hop that its owner cannot finish is repaired by an anchor-series fix release (v0.28.x
+for this boundary), not a bridge release or an uninstall.
 
 ## Existing compatibility inventory
 
@@ -175,7 +177,7 @@ pair, registry, journal and observed postconditions. It does not admit arbitrary
 journals. The [released compatibility check](../../dev/verify-release-upgrades.py) pins official
 v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtime checksums
 and the exact legacy runtime installers. These binaries remain current refusal/uninstall inputs. Their successful migration and original-owner recovery
-corpora are frozen in the v0.27.0 tag; current Go readers retain accepted history coverage. Rebuilding
+corpora are frozen in the v0.28.0 tag; current Go readers retain accepted history coverage. Rebuilding
 old versions from current source does not replace authentic released inputs.
 
 Completed-history source admission proves sealed original assets, the supported registry/catalog,
@@ -219,7 +221,7 @@ and projection epochs, and pinned records before dispatch; captured records are 
 It preserves frozen transition owners and catalog/journal bindings. Marked targets read checkpoint
 authority themselves; incompatible history blocks mutation.
 
-The frozen v0.27.0 released-caller acceptance exercises the actual v0.11.2 and v0.18.1 binaries against matching epoch-2
+The frozen v0.28.0 released-caller acceptance exercises the actual v0.11.2 and v0.18.1 binaries against matching epoch-2
 history, then a separately sealed synthetic epoch-3 owner built from the same bound source. It requires
 bridge-first refusal, successful advance after the bridge, an unchanged epoch-2 projection and
 refusal of epoch-2 rollback through each released caller and the candidate. The synthetic owner is not a

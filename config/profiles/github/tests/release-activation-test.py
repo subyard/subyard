@@ -179,7 +179,7 @@ bash() { printf '%s\\n' "$@"; return 23; }
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 2)
 
-    def identity(self, version='0.28.0', baseline=ANCHOR_VERSION, **changes):
+    def identity(self, version='0.29.0', baseline=ANCHOR_VERSION, **changes):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             metadata = Path(temporary)/'candidate.json'
             value = dict(version=version,
@@ -191,8 +191,8 @@ bash() { printf '%s\\n' "$@"; return 23; }
                 capture_output=True, text=True, check=False)
 
     def test_current_and_original_candidate_select_greater_synthetic_successor(self):
-        for candidate, baseline, successor in (('0.28.0', ANCHOR_VERSION, '0.28.1-activation-fixture'),
-                ('0.28.0-activation-e2e', ANCHOR_VERSION, '0.28.1-activation-fixture')):
+        for candidate, baseline, successor in (('0.29.0', ANCHOR_VERSION, '0.29.1-activation-fixture'),
+                ('0.29.0-activation-e2e', ANCHOR_VERSION, '0.29.1-activation-fixture')):
             with self.subTest(candidate=candidate, baseline=baseline):
                 result = self.identity(candidate, baseline)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -201,7 +201,7 @@ bash() { printf '%s\\n' "$@"; return 23; }
     def test_mismatched_archive_checksum_or_predecessor_is_refused(self):
         for changes in ({'runtime_file': 'subyard-0.19.1-activation-e2e-linux-amd64.tar.gz'},
                 {'runtime_file': 'subyard-0.21.0-linux-riscv64.tar.gz'},
-                {'runtime_sha256': 'invalid'}, {'baseline': '0.28.0'}, {'version': ANCHOR_VERSION}):
+                {'runtime_sha256': 'invalid'}, {'baseline': '0.27.0'}, {'version': ANCHOR_VERSION}):
             with self.subTest(changes=changes):
                 self.assertNotEqual(self.identity(**changes).returncode, 0)
 

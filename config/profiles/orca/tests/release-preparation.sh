@@ -8,7 +8,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 ROOT="$tmp/source"
 mkdir -p "$ROOT/.subyard-acceptance/release" "$ROOT/config/agents/claude" "$ROOT/dev" "$ROOT/tests/helpers"
-printf '{"version":"0.28.0-immutable-test"}\n' > "$ROOT/.subyard-acceptance/candidate.json"
+printf '{"version":"0.29.0-immutable-test"}\n' > "$ROOT/.subyard-acceptance/candidate.json"
 printf 'original release asset\n' > "$ROOT/.subyard-acceptance/release/runtime.tar.gz"
 printf '{"autoMemoryDirectory":"original"}\n' > "$ROOT/config/agents/claude/settings.json"
 export ORCA_PREPARATION_CALLS="$tmp/package-calls"
@@ -33,7 +33,7 @@ HANDLER_ACCEPTANCE=direct
 STATE="$tmp/$HANDLER_ACCEPTANCE"
 mkdir "$STATE"
 orca_prepare_bootstrap_release
-[ "$release_version" = 0.28.0-immutable-test ]
+[ "$release_version" = 0.29.0-immutable-test ]
 cmp "$ROOT/.subyard-acceptance/release/runtime.tar.gz" "$STATE/release/runtime.tar.gz"
 [ ! -e "$STATE/source" ] && [ ! -e "$ORCA_PREPARATION_CALLS" ]
 snapshot > "$tmp/after"

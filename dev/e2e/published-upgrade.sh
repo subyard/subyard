@@ -82,11 +82,11 @@ print(hashlib.sha256(raw).hexdigest())'
   || { printf 'published-upgrade: a frozen candidate bundle is required\n' >&2; exit 2; }
 PINS="$(awk -F '\t' -v version="$VERSION" '$1 == version' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")"
 [ -n "$PINS" ] || { printf 'published-upgrade: unpinned baseline %q\n' "$VERSION" >&2; exit 2; }
-# The first boundary release exercises both cuts on fresh .26 installations.
-# Ready .26 and the anchor share epochs: zero-step updates skip migrating.
+# The first boundary release retains the uninterrupted chain and both cuts.
+# Ready .27 and the anchor share epochs: zero-step updates skip migrating.
 # Each child retains the existing marked lifecycle and cleanup in this lane.
-if [ "$PUBLISHED_MODE" = chain ] && [ "$VERSION" = 0.26.0 ] && [ -z "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" ]; then
-  for checkpoint in authorized reconciling; do
+if [ "$PUBLISHED_MODE" = chain ] && [ "$VERSION" = 0.27.0 ] && [ -z "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" ]; then
+  for checkpoint in uninterrupted authorized reconciling; do
     SUBYARD_PUBLISHED_HOP_CHECKPOINT="$checkpoint" bash "$ROOT/dev/e2e/published-upgrade.sh" "$VERSION" chain
   done
   exit 0
@@ -195,6 +195,9 @@ interrupt_anchor_hop() {
   local checkpoint="$1" before links transaction fingerprint rc=0 evidence
   case "$checkpoint" in authorized|reconciling) ;; *) die 'invalid published hop checkpoint' ;; esac
   stage_candidate
+  # The zero-step hop still durably publishes reconciling. Keep a real native
+  # failure there if its publication is too brief for the process observer.
+  [ "$checkpoint" != reconciling ] || install_activation_reconcile_fault
   # Observe and stop the real published owner; never edit its journal or links.
   operator_env python3 - "$ROOT" "$OPERATOR_HOME/.local/bin/yard" "$ANCHOR_VERSION" "$V2_JOURNAL" \
     "$OPERATOR_HOME/hop-interrupted" "$checkpoint" > "$STATE_ROOT/hop-interrupt.log" 2>&1 <<'PYTHON'
@@ -202,12 +205,19 @@ import os, pathlib, runpy, sys
 root, launcher, version, journal, marker, checkpoint = sys.argv[1:]
 run = runpy.run_path(str(pathlib.Path(root) / "dev/verify-release-upgrades.py"))["run_process"]
 result = run([launcher, "update", "--version", version, "--yes"], os.environ.copy(), timeout=900,
-             interrupt_checkpoint=(pathlib.Path(journal), checkpoint, pathlib.Path(marker)))
+             interrupt_checkpoint=(pathlib.Path(journal), checkpoint, pathlib.Path(marker)),
+             allow_failed_checkpoint=checkpoint == "reconciling")
 print(result.stdout, result.stderr)
 if result.returncode == 0 or not pathlib.Path(marker).is_file():
     raise SystemExit("published anchor hop did not reach the observed interruption")
 PYTHON
-  operator_env jq -e --arg checkpoint "$checkpoint" --arg from "$OLD_RELEASE_TARGET" \
+  if [ "$checkpoint" = reconciling ]; then
+    if operator_env jq -e 'has("nativeFailureExit")' "$OPERATOR_HOME/hop-interrupted" >/dev/null; then
+      operator_env test -f "$ACTIVATION_FAULT_PROBE" || die 'reconciling native failure was not the owned interruption'
+    fi
+    operator_env find "$ACTIVATION_SYSTEMCTL_WRAPPER" -delete
+  fi
+  operator_env jq -e --arg checkpoint "$checkpoint" --arg from "${OLD_RELEASE_TARGET#releases/}" \
     '.checkpoint == $checkpoint and .releases.from == $from and .goal.direction == "activate-target"' "$V2_JOURNAL" >/dev/null \
     || die 'interruption missed the authentic published hop'
   [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$ANCHOR_VERSION/subyard-$ANCHOR_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$ANCHOR_SHA256" ] \
@@ -225,17 +235,22 @@ PYTHON
     before="$(protected_settings_digest)"
     links="$(for link in current previous next; do operator_env readlink "$OPERATOR_HOME/.subyard/runtime/$link" 2>/dev/null || true; done)"
     [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$OLD_RELEASE_TARGET" ] || die 'preactivation hop activated early'
-    operator_env "$staged_path/bin/yard" update --offline --version "$CANDIDATE_VERSION" --yes \
+    # Exercise the real published outer CLI's forwarding and terminal output.
+    operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+      "$OPERATOR_HOME/.local/bin/yard" update --offline --version "$CANDIDATE_VERSION" --yes \
       > "$STATE_ROOT/hop-refusal.log" 2>&1 || rc=$?
-    [ "$rc" != 0 ] && [ "$(grep -Fc 'source-anchor-required:' "$STATE_ROOT/hop-refusal.log")" = 1 ] \
-      && grep -Fq "unfinished update from v$OLD_VERSION to v$ANCHOR_VERSION has not activated; next: yard update --version $ANCHOR_VERSION && yard update" "$STATE_ROOT/hop-refusal.log" \
+    # Single-cause collection belongs to the policy Go test; an older outer
+    # CLI may render the same diagnostic in more than one presentation layer.
+    [ "$rc" != 0 ] && grep -Fq 'source-anchor-required:' "$STATE_ROOT/hop-refusal.log" \
+      && grep -Fq 'must first be completed by the installed release that started it; next: yard update && yard update' "$STATE_ROOT/hop-refusal.log" \
       && grep -Fq 'Do not uninstall.' "$STATE_ROOT/hop-refusal.log" || die 'preactivation refusal lost its one safe continuation'
     [ "$(protected_settings_digest)" = "$before" ] \
       && [ "$(for link in current previous next; do operator_env readlink "$OPERATOR_HOME/.subyard/runtime/$link" 2>/dev/null || true; done)" = "$links" ] \
       && [ "$(instance_uuid)" = "$UUID_BEFORE" ] && [ "$(guest cat "$GUEST_MARKER")" = "$MARKER" ] \
       && [ "$(incus list --project "$PROJECT" --format csv -c s)" = RUNNING ] \
       || die 'preactivation refusal changed protected state'
-    operator_yard update --version "$ANCHOR_VERSION" --yes > "$STATE_ROOT/hop-resume.log" 2>&1
+    # Follow the printed first step: plain update resumes the installed owner's journal.
+    operator_yard update --yes > "$STATE_ROOT/hop-resume.log" 2>&1
     cp "$STATE_ROOT/hop-refusal.log" "$STATE_ROOT/hop-resume.log" "$evidence/"
     if grep -Fq "yard update --version $CANDIDATE_VERSION" "$STATE_ROOT/hop-resume.log"; then printf 'resume_newer_hint=true\n'; else printf 'resume_newer_hint=false\n'; fi >> "$evidence/hint.txt"
     return
@@ -320,7 +335,7 @@ if [ "$PUBLISHED_MODE" != direct ]; then
   ok 'update and --check refused without changing protected state'
   [ "$PUBLISHED_MODE" != refusal ] || exit 0
   # Chain catalog entries exist only for the first boundary release.
-  if [ "$OLD_VERSION" = 0.26.0 ] && [ -n "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" ]; then
+  if [ "$OLD_VERSION" = 0.27.0 ] && [[ "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" = authorized || "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" = reconciling ]]; then
     interrupt_anchor_hop "$SUBYARD_PUBLISHED_HOP_CHECKPOINT"
   else
     operator_yard update --version "$ANCHOR_VERSION" --yes

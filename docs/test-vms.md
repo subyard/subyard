@@ -891,13 +891,13 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1 when targeted/smoke and in the full owner chain; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
-| `newer-release` | VM1; published v0.27.0 direct pin, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
+| `newer-release` | VM1; published v0.28.0 direct pin, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | pinned v0.11.0 settings creation → shared anchor → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
-| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.27.0 upgrade, incompatible rollback refusal and authentic v0.27.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
+| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.28.0 upgrade, incompatible rollback refusal and authentic v0.28.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full |
-| `yard-maintenance` | VM1, frozen candidate and pinned published 0.27.0; two containers and one bounded weighted VM | upfront restart disclosure and decline, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
+| `yard-maintenance` | VM1, frozen candidate and pinned published 0.28.0; two containers and one bounded weighted VM | upfront restart disclosure and decline, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
 | `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
 | `release-smoke` | VM1, shared published anchor, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton retained-data/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke and full both cover fresh init/projects/RPC, offline projects and credentials |
@@ -917,7 +917,7 @@ materialized configuration and retained migration history. It does not interrupt
 bridge: published releases before v0.21.2 cannot resume an empty journal staging file left by a kill
 inside a compare-and-swap, which is not a supported state. The current reader's handling of that
 file is covered by the `journal-zero` case in `internal/releasetransition/pending_recovery_test.go`.
-Pre-anchor migration and original-owner recovery acceptance is frozen in the v0.27.0 tag.
+Pre-anchor migration and original-owner recovery acceptance is frozen in the v0.28.0 tag.
 Current Go contracts retain journal, checkpoint and projection reader coverage.
 The newer-release fixture shares marker-owned runtime and cleanup helpers. It binds valid
 power coordination state before preparing its isolated history; busy or unsafe coordination
@@ -959,7 +959,7 @@ ordinary-yard artifacts retired when adopting the test-vms role). The `default` 
 all four fresh-default integrations and needs their normal package download access. Test config,
 physical project and instance names, and teardown are isolated from the retained host baseline.
 
-The retained-lease disabled-components controller installs the published v0.27.0 baseline, updates
+The retained-lease disabled-components controller installs the published v0.28.0 baseline, updates
 to the frozen candidate and reboots once. Its default payload belongs to the Hermes profile.
 After direct anchor activation, the Paseo payload explicitly seeds package-shaped leftovers and a foreign service. It verifies removal, retention
 of only non-empty worktrees, and the printed `start` then `migrate` sequence for a stopped
@@ -974,21 +974,21 @@ config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot"
 ```
 
 The published-baseline matrix reads immutable pins and a `direct`/`refusal` expectation from
-`dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.27.0 (with agents selected
+`dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0 (with agents selected
 by `all`); later distinct anchor patches and previous releases remain direct baselines.
-Refusal runs at v0.11.0, v0.17.3 and v0.26.0 check both update and `--check`, the exact anchor
+Refusal runs at v0.11.0, v0.17.3 and v0.27.0 check both update and `--check`, the exact anchor
 command, unchanged settings, active runtime, native instance, power and guest data.
 
 The second argument is an agent selection for direct rows, or `refusal`/`chain` for refusal rows.
-The first boundary release includes chains from v0.11.0 and v0.26.0: refusal, explicit published
-v0.27.0 update and Ready, then plain update to the frozen candidate and Ready. These two catalog
+The first boundary release includes chains from v0.11.0 and v0.27.0: refusal, explicit published
+v0.28.0 update and Ready, then plain update to the frozen candidate and Ready. These two catalog
 entries are temporary first-boundary-release acceptance. Each scenario gets a fresh lease.
 
 ```sh
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
   dev/agent-e2e.sh --slot "$slot" --purpose published-upgrade --vm-count 1 --vm 1 -- \
-  bash dev/e2e/published-upgrade.sh 0.27.0 all
+  bash dev/e2e/published-upgrade.sh 0.28.0 all
 ```
 
 The remote fixture runs a temporary loopback OpenSSH server with a synthetic key forced to the
@@ -1116,7 +1116,7 @@ The controller runs the installer regression before the archived recipe contract
 missing, skipped or failed required cases before allocation. A validated collector `make verify`
 PASS is reusable under the existing binding rules. It selects one Android disposable stage for
 the owner, cold builder and singleton, with native memory and backing-storage preflight before
-acquire. Its authentic TSV-pinned 0.27.0 owner upgrades through its supported updater to the
+acquire. Its authentic TSV-pinned 0.28.0 owner upgrades through its supported updater to the
 frozen candidate and retains broker state. No refresh warms the candidate base: the first acquire
 runs the real recipe, validates a new base, boots a singleton, checks SSH and a second boot, then
 releases and proves available without pending work. Candidate engine/recipe, base fingerprint and
@@ -1129,25 +1129,25 @@ For GitHub/native-helper release activation, the owning singleton controller req
 frozen public bundle used by supported candidate transport. Include its normal
 `.subyard-acceptance` metadata/assets; the lane derives the candidate version from that
 checksum-verified package and checks the engine identity. For a current candidate newer than
-0.27.0, use the authentic published predecessor from its direct TSV pin:
+0.28.0, use the authentic published predecessor from its direct TSV pin:
 
 ```sh
-bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.27.0 --preflight
+bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.28.0 --preflight
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
-  bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.27.0
+  bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.28.0
 ```
 
 `SUBYARD_E2E_ROLLOUT_YARD=NAME` passes the same explicit outer route as the test-vms lanes.
 
 The controller packages its explicitly synthetic compatible successor (the next patch version
 with an `activation-fixture` suffix) before lease acquisition; the original candidate's verified
-assets remain intact. The guest uses the actual TSV-pinned 0.27.0 installer/updater, verified
+assets remain intact. The guest uses the actual TSV-pinned 0.28.0 installer/updater, verified
 against immutable published release metadata, two container yards and a config-only absent yard.
 Normal invocation runs the same cheap local checks as `--preflight` before packaging/allocation;
 `--preflight` exits before allocation. A valid local shape alone does not authenticate an archive:
 normal execution still checks its actual bytes, architecture, engine version and pinned installer.
-The default `--baseline 0.27.0` checks the current supported source. The synthetic successor tests
+The default `--baseline 0.28.0` checks the current supported source. The synthetic successor tests
 interruption after broker delivery with a distinct fixture broker binary. A transition may
 download unchanged native tool pins once to establish trustworthy activation receipts. The lane
 has a 60-minute work budget and bounded marker-owned cleanup; its terminal output retains native
@@ -1335,7 +1335,7 @@ boundaries; they do not prove real service behavior.
 
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
-Use the `0.27.0` direct TSV pin for supported predecessor checks. Handler acceptance defaults
+Use the `0.28.0` direct TSV pin for supported predecessor checks. Handler acceptance defaults
 to that pin and supports only the direct path; configured pre-anchor sources receive the
 product's update refusal.
 This mode starts Orca on a converged published release with two local yards, changes the candidate's
@@ -1367,7 +1367,7 @@ Standalone `reboot-verify` prepares its own power reconciler through the same ma
 published-release upgrade fixture used by `power-systemd`. It works after the last test yard
 was torn down, when the power service may be absent. This adds release installation and migration
 to the two reboots; the fixture restores the previous host runtime afterward. It does not run the
-additional systemd parser fixtures from `power-systemd`. The exact published v0.27.0,
+additional systemd parser fixtures from `power-systemd`. The exact published v0.28.0,
 the inclusive direct-update anchor, remains the published upgrade baseline.
 Its verified update registers the local yard through the release journal, so repeated plain
 init and both reboots must retain that ownership without a legacy continuation grant. The
@@ -1376,10 +1376,10 @@ without changing links or protected state. The power lane preserves checkpoint/h
 native identity and retained V1 evidence through compatible anchor rollback and forward retry.
 Fresh sources below v0.11.0 remain refused; accepted completed V2 history and recovery
 retain their separate supported contracts.
-The guest verifies checksum-pinned official v0.27.0 assets, the newest published runtime at the
+The guest verifies checksum-pinned official v0.28.0 assets, the newest published runtime at the
 candidate's migration epochs, and compiled activation capabilities before creating the cold
 legacy baseline. Public update checks must identify the exact unblocked target before installing
-v0.27.0, restoring the candidate, then performing a real compatible rollback and candidate
+v0.28.0, restoring the candidate, then performing a real compatible rollback and candidate
 roll-forward. Both passages preserve native policy and the registered ownership.
 
 List or run one lane:

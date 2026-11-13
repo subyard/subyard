@@ -415,11 +415,11 @@ Already accepted V2 history with legacy provenance remains readable. Process V1,
 supported V2 recovery and checkpoint-reader contracts remain independent; see the
 [support policy](legacy-migration-support.md).
 
-For releases above 0.27.x, direct update and new rollback targets require v0.27.0 or newer.
-Sources from v0.11.0 to below that anchor first run `yard update --version 0.27.0`, then
+For releases above 0.28.x, direct update and new rollback targets require v0.28.0 or newer.
+Sources from v0.11.0 to below that anchor first run `yard update --version 0.28.0`, then
 `yard update` again. The published anchor and its assets remain available; there is no automatic
 chain, new bridge release, state format or epoch-floor increase. This explicitly retires fresh
-pre-anchor migration coverage from later candidates; its full matrix stays in the v0.27.0 tag.
+pre-anchor migration coverage from later candidates; its full matrix stays in the v0.28.0 tag.
 Accepted history readers and exact unfinished-owner recovery remain supported. The first boundary
 release retains two physical chains through the anchor and separate refusal cases. Follow
 [Moving the update boundary](legacy-migration-support.md#moving-the-update-boundary) for later moves.

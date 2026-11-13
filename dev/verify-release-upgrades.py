@@ -336,8 +336,24 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
         libc = ctypes.CDLL(None, use_errno=True)
         watch = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
         require(watch >= 0, "cannot observe the owned recovery journal")
-        require(libc.inotify_add_watch(watch, os.fsencode(journal.parent), 0x00000080) >= 0,
-                "cannot watch the owned recovery journal directory")
+        def watch_directory():
+            # First publication may create the protected namespace itself.
+            # Observe its nearest existing ancestor without creating any state.
+            directory = journal.parent
+            while not directory.is_dir():
+                directory = directory.parent
+            require(libc.inotify_add_watch(watch, os.fsencode(directory), 0x00000100 | 0x00000080) >= 0,
+                    "cannot watch the owned recovery journal directory")
+        watch_directory()
+
+        def read_observed_journal():
+            watch_directory()
+            try:
+                return json.loads(journal.read_text())
+            except FileNotFoundError:
+                # An unrelated rename or a new parent directory is not journal
+                # publication. Resume the owned writer and keep observing.
+                return None
     child = subprocess.Popen(command, env=env,
                              stdin=subprocess.DEVNULL if input_text is None else subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -355,8 +371,14 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                 os.read(watch, 65536)
                 # Pause this owned session before reading the durable state;
                 # no journal phase edits or runtime-link changes are fixtures.
-                os.killpg(child.pid, signal.SIGSTOP)
-                current = json.loads(journal.read_text())
+                try:
+                    os.killpg(child.pid, signal.SIGSTOP)
+                except ProcessLookupError:
+                    break
+                current = read_observed_journal()
+                if current is None:
+                    os.killpg(child.pid, signal.SIGCONT)
+                    continue
                 if current["transaction"] != predecessor:
                     require(current["transaction"].startswith(("recovery-v1-", "recovery-v2-", "migration-owner-v1-"))
                             and current["checkpoint"] != "complete",
@@ -378,8 +400,14 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                 if not readable:
                     continue
                 os.read(watch, 65536)
-                os.killpg(child.pid, signal.SIGSTOP)
-                current = json.loads(journal.read_text())
+                try:
+                    os.killpg(child.pid, signal.SIGSTOP)
+                except ProcessLookupError:
+                    break
+                current = read_observed_journal()
+                if current is None:
+                    os.killpg(child.pid, signal.SIGCONT)
+                    continue
                 if current["checkpoint"] == checkpoint:
                     marker.write_text(json.dumps({"transaction": current["transaction"],
                                                   "checkpoint": checkpoint}) + "\n")
@@ -389,7 +417,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                     break
                 os.killpg(child.pid, signal.SIGCONT)
             if not observed and allow_failed_checkpoint and child.poll() is not None:
-                current = json.loads(journal.read_text())
+                current = read_observed_journal() or {}
                 if child.returncode != 0 and current.get("checkpoint") == checkpoint:
                     marker.write_text(json.dumps({"transaction": current["transaction"],
                                                   "checkpoint": checkpoint,

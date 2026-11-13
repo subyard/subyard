@@ -141,7 +141,7 @@ make verify
 `make build` writes the ignored developer candidate `.build/yard` atomically and builds declared
 profile binaries under `.build/profiles/<name>/`. It also publishes the complete Go tooling
 runtime under `.build/runtime/current`. `make test` and `make verify` stage a source-compatible test version before Go consumers;
-targeted source-repair tests require `make build VERSION=0.28.0-test` first. A delivery gate may instead supply its
+targeted source-repair tests require `make build VERSION=0.29.0-test` first. A delivery gate may instead supply its
 once-built normal runtime through `SUBYARD_SOURCE_QUERY_TOOLING_ROOT`.
 `make verify` runs core and profile host-free
 checks together. Packaging builds the same declared binaries for the target architecture, excluding
@@ -260,7 +260,7 @@ These local contracts complement the complete packaged compatibility gate below.
 acceptance remains a CI result; cross-building does not establish it.
 
 This Linux check needs Python 3 and Go for its empty-instance Incus API fixture.
-It runs checksum-pinned released callers through update and `--check` refusal below v0.27.0,
+It runs checksum-pinned released callers through update and `--check` refusal below v0.28.0,
 requiring the exact anchor command and unchanged settings, runtime links and data. Sources before
 v0.11.0 retain staged full-uninstall and separate clean-install coverage. Use
 `--only-source-anchor` or `--only-legacy-retirement` for the corresponding focused check;
@@ -268,9 +268,9 @@ publication requires the complete default invocation. Named `--*-baseline-dir` o
 verified official assets. All mutable fixtures remain under `/tmp`.
 
 The old-source migration, rollback, original-owner recovery and migration-history process corpora
-are frozen in the v0.27.0 tag. Current Go tests retain V2 journal, checkpoint, frozen projection,
-evidence and recovery readers. Published v0.27.0 direct upgrades and the first-boundary-release
-chains from v0.11.0 and v0.26.0 cover the installed transition to the candidate on disposable VMs.
+are frozen in the v0.28.0 tag. Current Go tests retain V2 journal, checkpoint, frozen projection,
+evidence and recovery readers. Published v0.28.0 direct upgrades and the first-boundary-release
+chains from v0.11.0 and v0.27.0 cover the installed transition to the candidate on disposable VMs.
 The host-free verifier does not claim those physical contracts.
 
 Before preparing fixtures, the verifier compares available `/tmp` bytes and inodes with the
@@ -294,8 +294,8 @@ capability boundary. Keep generalized alias authoring safety and actual released
 for both completed history and retained unfinished history; rebuilding an old binary is insufficient.
 
 The [legacy migration support policy](reference/legacy-migration-support.md) requires installed
-v0.27.0 or newer for direct update and retained rollback. Sources from v0.11.0 to below v0.27.0
-first run `yard update --version 0.27.0`, then plain `yard update`. Earlier sources retain the
+v0.28.0 or newer for direct update and retained rollback. Sources from v0.11.0 to below v0.28.0
+first run `yard update --version 0.28.0`, then plain `yard update`. Earlier sources retain the
 full-uninstall route. Exact unfinished transitions retain their original owner and bindings.
 
 Choose local checks with [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).

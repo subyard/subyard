@@ -1105,7 +1105,7 @@ response: the compatibility adapter must preserve its meaning.
 Before publication, `dev/verify-release-upgrades.py` runs unmodified checksum-pinned old callers
 through update and `--check` refusal, verifies the anchor instruction reaches stderr, and checks
 that protected configuration, active links and project data remain unchanged. The pre-anchor
-migration and original-owner recovery matrix is frozen in the v0.27.0 tag. Current Go reader tests
+migration and original-owner recovery matrix is frozen in the v0.28.0 tag. Current Go reader tests
 retain accepted V2 history and recovery contracts; installed direct upgrade, rollback and the
 one-time anchor chains belong to the published-upgrade and P0 VM lanes.
 
@@ -1117,19 +1117,24 @@ The Release workflow retains the compatibility check's output with its other fai
 
 ### Legacy upgrades
 
-Direct updates require installed **v0.27.0 or newer**. Sources from v0.11.0 to below v0.27.0
+Direct updates require installed **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0
 refuse before changing active links, journals, settings or data and print:
 
 ```sh
-yard update --version 0.27.0
+yard update --version 0.28.0
 yard update
 ```
 
 The installer over an existing installation and offline update use the same admission. Downloads
 and immutable staging do not authorize activation. There is no automatic chain or new bridge release.
-Rollback targets below v0.27.0 refuse; compatible v0.27.x targets remain eligible. A version alone
+Rollback targets below v0.28.0 refuse; compatible v0.28.x targets remain eligible. A version alone
 does not establish readiness: protected journals, authoritative checkpoints and sealed bindings
 still apply. An unfinished exact target/direction/artifact retains its original recovery owner.
+Any other unfinished transition while the installed release is v0.11.0 or newer but below v0.28.0
+refuses once with
+`next: yard update && yard update --version 0.28.0 && yard update` (or `yard update && yard update`
+when it is an update that already targets v0.28.0 or newer): the installed release first finishes its own journal.
+If it cannot, a v0.28.x fix release is the repair path; do not uninstall.
 
 Sources before **v0.11.0** retain the full-uninstall route; no V1 upgrade bridge exists. Accepted
 V2 history and evidence remain readable independently of fresh update admission.

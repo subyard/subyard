@@ -17,7 +17,6 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
-	"github.com/blang/semver/v4"
 )
 
 func TestReleaseTransitionWritesFilteredMigrationDiagnostics(t *testing.T) {
@@ -27,8 +26,8 @@ func TestReleaseTransitionWritesFilteredMigrationDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const target = "0.28.0-test-aaaaaaaaaaaa"
-	digest := writeSealedRollbackTarget(t, runtimeRoot, target, "0.28.0-test", registry)
+	const target = "0.29.0-test-aaaaaaaaaaaa"
+	digest := writeSealedRollbackTarget(t, runtimeRoot, target, "0.29.0-test", registry)
 	if err := os.Symlink("releases/"+target, filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
@@ -259,21 +258,11 @@ func TestMigrationDirectDiagnosticFiltersUnsafeNames(t *testing.T) {
 	}
 }
 
-// The hint rule/text is frozen from v0.27.0 newer_release_hint.go: an ordinary
-// failed forward resume names a newer target without consulting its admission.
+// Every printed step is followed through the engine: below the anchor the
+// installed release finishes its own journal first; an activated anchor journal is
+// replaced by the candidate. No step names a release that sends the user back.
 func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
-	frozenOwnerHint := func(journal releasetransition.JournalRecord, latest string) string {
-		pinned, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)
-		if err != nil || journal.Checkpoint == releasetransition.JournalComplete ||
-			journal.Goal.Direction != releasetransition.DirectionActivateTarget || journal.SourceIngress != nil ||
-			releasetransition.IsRecoveryTransaction(journal.Transaction) ||
-			strings.HasPrefix(string(journal.Transaction), releasetransition.MigrationOwnerTransactionPrefixV1) ||
-			!semver.MustParse(latest).GT(pinned) {
-			return ""
-		}
-		return "yard update --version " + latest
-	}
-	for _, state := range []string{"authorized", "migrating", "activation-intent", "switched activation-intent", "reconciling", "rollback"} {
+	for _, state := range []string{"authorized", "migrating", "activation-intent", "switched activation-intent", "reconciling", "rollback", "old-owner-before", "old-owner-after", "old-owner-rollback", "damaged-authority"} {
 		t.Run(state, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			home, runtimeRoot := filepath.Join(root, "config-home"), filepath.Join(root, "runtime")
@@ -283,20 +272,43 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			t.Setenv("SUBYARD_HOME", root)
 			registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
 			writeReleaseTransitionTestFile(t, filepath.Join(root, "config/release-transition.json"), registry, 0600)
+			parsedRegistry, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsedRegistry), parsedRegistry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeReleaseTransitionTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), ledger, 0600)
 			anchorVersion := releaseruntime.UpdateAnchorVersion
-			candidateVersion := "0.28.0-test"
-			old, anchor, candidate := releasetransition.ReleaseID("0.26.0-aaaaaaaaaaaa"), releasetransition.ReleaseID(anchorVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
-			oldDigest := writeSealedRollbackTarget(t, runtimeRoot, string(old), "0.26.0", registry)
+			candidateVersion := "0.29.0-test"
+			oldOwner := strings.HasPrefix(state, "old-owner")
+			rollback := strings.Contains(state, "rollback")
+			oldVersion := "0.27.0"
+			if oldOwner {
+				oldVersion = "0.25.5"
+			}
+			old, anchor, candidate := releasetransition.ReleaseID(oldVersion+"-aaaaaaaaaaaa"), releasetransition.ReleaseID(anchorVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
+			oldDigest := writeSealedRollbackTarget(t, runtimeRoot, string(old), oldVersion, registry)
 			anchorDigest := writeSealedRollbackTarget(t, runtimeRoot, string(anchor), anchorVersion, registry)
 			candidateDigest := writeSealedRollbackTarget(t, runtimeRoot, string(candidate), candidateVersion, registry)
 			from, target, direction, artifact := old, anchor, releasetransition.DirectionActivateTarget, anchorDigest
-			if state == "rollback" {
+			if oldOwner {
+				legacy := releasetransition.ReleaseID("0.26.0-dddddddddddd")
+				legacyDigest := writeSealedRollbackTarget(t, runtimeRoot, string(legacy), "0.26.0", registry)
+				if rollback {
+					from, target, direction, artifact = legacy, old, releasetransition.DirectionActivatePrevious, oldDigest
+				} else {
+					target, artifact = legacy, legacyDigest
+				}
+			} else if rollback {
 				from, target, direction, artifact = anchor, old, releasetransition.DirectionActivatePrevious, oldDigest
 			}
 			if err := os.Symlink("releases/"+string(from), filepath.Join(runtimeRoot, "current")); err != nil {
 				t.Fatal(err)
 			}
-			if state == "rollback" {
+			if rollback {
 				if err := os.Symlink("releases/"+string(target), filepath.Join(runtimeRoot, "previous")); err != nil {
 					t.Fatal(err)
 				}
@@ -318,7 +330,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			owner.Mode = releasetransition.ProcessConverge
 			owner.Execution = &releasetransition.Execution{Plan: plan.Inspection.Plan, Authorization: "confirmed"}
 			// Author the historical transaction without the candidate's fresh-admission
-			// guard: v0.27.0 permits both the forward hop and this compatible rollback.
+			// guard: the anchor release permits both the forward hop and this compatible rollback.
 			interrupted := run(owner)
 			if interrupted.Outcome == nil || interrupted.Outcome.Status != releasetransition.StatusRecovering {
 				t.Fatalf("no interruption: %#v", interrupted)
@@ -335,15 +347,14 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			hint := frozenOwnerHint(journal, candidateVersion)
-			if (hint == "") != (state == "rollback") {
-				t.Fatalf("frozen owner offered unsafe recovery: %q", hint)
-			}
-			preactivation := state == "authorized" || state == "migrating" || state == "activation-intent"
+			preactivation := state == "authorized" || state == "migrating" || state == "activation-intent" || state == "old-owner-before"
 			if preactivation || state == "switched activation-intent" {
 				journal.Checkpoint = releasetransition.JournalActivationIntent
 				if preactivation {
 					journal.Checkpoint = releasetransition.JournalCheckpoint(state)
+					if oldOwner {
+						journal.Checkpoint = releasetransition.JournalAuthorized
+					}
 					for _, link := range []string{"current", "previous"} {
 						if err := os.Remove(filepath.Join(runtimeRoot, link)); err != nil {
 							t.Fatal(err)
@@ -367,39 +378,55 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			}
 			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: home, Target: candidate, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: candidateDigest}
 			Version = candidateVersion
-			refusal := releaseruntime.CheckSourcePolicy(context.Background(), request)
-			next := "yard update --version " + anchorVersion + " && yard update"
-			if state == "rollback" {
-				next = "yard update && " + next
-			}
-			if preactivation || state == "rollback" {
-				if refusal == nil || !strings.Contains(refusal.Error(), "next: "+next) || strings.Count(refusal.Error(), "next:") != 1 {
-					t.Fatalf("unsafe continuation: %v", refusal)
+			if state == "damaged-authority" {
+				if err := os.Remove(filepath.Join(home, "release-transition/v2/ledger.json")); err != nil {
+					t.Fatal(err)
 				}
-				// Follow the first command using the original owner's exact journal. It
-				// must finish, not offer a fresh replacement which refuses a rollback.
+			}
+			refusal := releaseruntime.CheckSourcePolicy(context.Background(), request)
+			if state == "damaged-authority" {
+				if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --check") || strings.Contains(refusal.Error(), "&&") {
+					t.Fatalf("damaged authority offered a cycle: %v", refusal)
+				}
+				owner.Mode, owner.Execution = releasetransition.ProcessInspect, nil
+				Version = anchorVersion
+				_ = run(owner) // A read-only diagnostic does not promise to reconstruct lost authority.
+				after, err := store.ReadCurrentJournal()
+				if err != nil || !bytes.Equal(after.Payload, before.Payload) {
+					t.Fatal("damaged-state check changed journal", err)
+				}
+				return
+			}
+			activeBelow := preactivation || rollback || oldOwner
+			if activeBelow {
+				next := "yard update && yard update --version " + anchorVersion + " && yard update"
+				if !rollback && !oldOwner {
+					next = "yard update && yard update"
+				}
+				if refusal == nil || !strings.Contains(refusal.Error(), "next: "+next) || strings.Count(refusal.Error(), "next:") != 1 {
+					t.Fatalf("unsafe continuation %q: %v", next, refusal)
+				}
+				// Step 1: plain yard update on the installed release resumes its own journal.
 				if err := releaseruntime.CheckSourcePolicy(context.Background(), owner); err != nil {
 					t.Fatal(err)
 				}
 				Version = anchorVersion
-				owner.Mode = releasetransition.ProcessInspect
-				owner.Execution = nil
+				owner.Mode, owner.Execution = releasetransition.ProcessInspect, nil
 				resume := run(owner)
 				owner.Mode = releasetransition.ProcessConverge
 				owner.Execution = &releasetransition.Execution{Plan: resume.Inspection.Plan, Authorization: "confirmed"}
-				finished := run(owner)
-				if finished.Outcome == nil || !finished.Outcome.ReachedGoal {
+				if finished := run(owner); finished.Outcome == nil || !finished.Outcome.ReachedGoal {
 					t.Fatalf("owner made no progress: %#v", finished)
 				}
 				Version = candidateVersion
 				refusal = releaseruntime.CheckSourcePolicy(context.Background(), request)
-				if state == "rollback" {
+				if rollback || oldOwner {
+					// Step 2: the completed old release updates to the anchor.
 					if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --version "+anchorVersion+" && yard update") || strings.Contains(refusal.Error(), "unfinished") {
-						t.Fatalf("rollback repeated the same step: %v", refusal)
+						t.Fatalf("completed owner repeated the same step: %v", refusal)
 					}
-					// The second command advances from the now-completed rollback to anchor.
 					owner.Direction, owner.Target, owner.ArtifactDigest = releasetransition.DirectionActivateTarget, anchor, anchorDigest
-					owner.Mode, owner.Execution = releasetransition.ProcessInspect, nil
+					owner.Mode, owner.Execution, owner.Replacement = releasetransition.ProcessInspect, nil, nil
 					Version = anchorVersion
 					plan = run(owner)
 					owner.Mode = releasetransition.ProcessConverge
@@ -411,11 +438,11 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 					refusal = releaseruntime.CheckSourcePolicy(context.Background(), request)
 				}
 				if refusal != nil {
-					t.Fatalf("completed owner sent back to itself: %v", refusal)
+					t.Fatalf("completed anchor sent back: %v", refusal)
 				}
 			} else {
 				if refusal != nil {
-					t.Fatalf("activated anchor rejected newer hint: %v", refusal)
+					t.Fatalf("activated anchor rejected the candidate: %v", refusal)
 				}
 				// Ordinary inspection follows the journal's goal; only an explicit
 				// newer selection requests a different goal and replacement.
@@ -425,12 +452,6 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 				if inspection == nil || inspection.Outcome == nil || inspection.Outcome.Retry == "" || strings.Contains(inspection.Outcome.Retry, "--version "+anchorVersion) {
 					t.Fatalf("plain inspection lost engine recovery: %#v", inspection)
 				}
-				// Apply the frozen old-owner hint, not its failing resume again.
-				command := strings.Fields(hint)
-				if len(command) != 4 || command[3] != candidateVersion {
-					t.Fatalf("old-owner hint cycles: %q", hint)
-				}
-				request.Target = releasetransition.ReleaseID(command[3] + "-cccccccccccc")
 				request.Replacement = &releasetransition.JournalReplacement{Transaction: journal.Transaction, Fingerprint: before.Fingerprint, Reason: releasetransition.JournalReplacementNewerRelease}
 			}
 			inspection := run(request).Inspection

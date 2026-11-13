@@ -1249,7 +1249,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 		defer active.Close()
 		owner = active
 	}
-	if err := sourceVersionError(verified.version, parsed.root); err != nil {
+	if err := sourceVersionError(verified.version); err != nil {
 		return Prepared{}, err
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)

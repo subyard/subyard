@@ -83,7 +83,7 @@ finally:
 print('ok: actual signing PTY waits for OpenSSH prompts, refuses repeats, retains exits and cleans only its child')
 PY_SIGNING_PTY
 # This is the current installed-runtime cold-uninstall contract, not an old-source upgrade.
-version=0.28.0-test.full-uninstall
+version=0.29.0-test.full-uninstall
 release="$fixture/release"
 bash "$ROOT/dev/package-engine.sh" --output-dir "$release" --version "$version" --arch amd64 >/dev/null
 bundle="$release/subyard-$version-linux-amd64.tar.gz"

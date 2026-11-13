@@ -6349,4 +6349,111 @@ source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
   [ "$(current_migration_readiness_diagnostics approved-release <<<not-json 2>&1)" = \
     'current migration readiness report is invalid' ] || fail 'invalid readiness diagnostic exposed parser output'
 ) || fail 'source-upgrade final readiness regression'
+# Execute the released journal predicates and the real three-variant driver.
+python3 - "$ROOT" "$TMP" <<'PY_BOUNDARY'
+import json, os, pathlib, re, runpy, subprocess, sys, tempfile
+root=pathlib.Path(sys.argv[1]); temporary=pathlib.Path(sys.argv[2])
+source=(root/'dev/e2e/published-upgrade.sh').read_text()
+module=runpy.run_path(str(root/'dev/verify-release-upgrades.py'))
+anchor=module['published_anchor'](root)[0]
+body=source.split('interrupt_anchor_hop() {',1)[1].split('\n# Cleanup removes the journal',1)[0]
+predicate=re.search(r'^  operator_env jq -e --arg checkpoint.*?\|\| die [^\n]+',body,re.M|re.S)[0]
+links=body.split('  # candidate, whose own inspection/consent decides whether takeover is safe.\n',1)[1].split('  operator_env "$staged_path/bin/yard" update --check',1)[0]
+for checkpoint in ('authorized','reconciling'):
+ for fault in ('none','prefixed-source','checkpoint','direction'):
+  path=temporary/f'journal-{checkpoint}-{fault}.json'
+  journal={'schemaVersion':2,'checkpoint':checkpoint,'releases':{'from':'0.27.0-b339acd76299','target':anchor+'-d4d3cc991923'},'goal':{'target':anchor+'-d4d3cc991923','direction':'activate-target'}}
+  if fault=='prefixed-source': journal['releases']['from']='releases/'+journal['releases']['from']
+  if fault=='checkpoint': journal['checkpoint']='complete'
+  if fault=='direction': journal['goal']['direction']='activate-previous'
+  path.write_text(json.dumps(journal))
+  setup='set -euo pipefail\noperator_env() { "$@"; }\ndie() { exit 2; }\n'
+  setup+=f'checkpoint={checkpoint}; OLD_RELEASE_TARGET=releases/0.27.0-b339acd76299; V2_JOURNAL={path}\n'
+  result=subprocess.run(['bash','-c',setup+predicate],capture_output=True,text=True)
+  assert (result.returncode==0)==(fault=='none'),(fault,result)
+# Journal target is bare; filesystem links carry releases/.
+operator=temporary/'boundary-operator'; runtime=operator/'.subyard/runtime'; runtime.mkdir(parents=True)
+saved=temporary/'hop-before.json'; saved.write_text(json.dumps(journal|{'goal':{'target':anchor+'-d4d3cc991923'}}))
+(runtime/'current').symlink_to('releases/'+anchor+'-d4d3cc991923')
+(runtime/'previous').symlink_to('releases/0.27.0-b339acd76299')
+setup=f'set -euo pipefail\noperator_env() {{ "$@"; }}\ndie() {{ exit 2; }}\nOPERATOR_HOME={operator}; STATE_ROOT={temporary}; OLD_RELEASE_TARGET=releases/0.27.0-b339acd76299\n'
+assert subprocess.run(['bash','-c',setup+links],capture_output=True).returncode==0
+(runtime/'previous').unlink(); (runtime/'previous').symlink_to('releases/foreign')
+assert subprocess.run(['bash','-c',setup+links],capture_output=True).returncode!=0
+driver=source.split('if [ "$PUBLISHED_MODE" = chain ] && [ "$VERSION" = 0.27.0 ]',1)[1].split('\nfi',1)[0]
+driver='if [ "$PUBLISHED_MODE" = chain ] && [ "$VERSION" = 0.27.0 ]'+driver+'\nfi\n'
+for failed in ('none','uninterrupted','authorized','reconciling'):
+ trace=temporary/f'boundary-driver-{failed}'
+ script='''set -euo pipefail
+PUBLISHED_MODE=chain VERSION=0.27.0 ROOT=/fixture SUBYARD_E2E_RUN_ID=1234abcd
+bash() {
+ test "$SUBYARD_E2E_RUN_ID" = 1234abcd
+ test ! -e "$TRACE.owned"
+ touch "$TRACE.owned"
+ printf '%s\\n' "$SUBYARD_PUBLISHED_HOP_CHECKPOINT" >> "$TRACE"
+ if [ "$SUBYARD_PUBLISHED_HOP_CHECKPOINT" = "$FAILED" ]; then return 3; fi
+ rm "$TRACE.owned"
+}
+'''+driver
+ result=subprocess.run(['bash','-c',script],env=os.environ|{'TRACE':str(trace),'FAILED':failed},capture_output=True,text=True)
+ order=['uninterrupted','authorized','reconciling']; expected=order if failed=='none' else order[:order.index(failed)+1]
+ assert trace.read_text().splitlines()==expected,(failed,result,trace.read_text())
+ assert result.returncode==(0 if failed=='none' else 3),(failed,result)
+# Observe the actual first atomic publication; never create protected state.
+run=module['run_process']
+for shape in ('missing-parent','missing-journal','unrelated-rename'):
+ with tempfile.TemporaryDirectory(prefix='subyard-boundary-watch-',dir='/tmp') as directory:
+  journal=pathlib.Path(directory)/'new/namespace/journal.json'; marker=pathlib.Path(directory)/'interrupted'
+  if shape!='missing-parent': journal.parent.mkdir(parents=True)
+  publisher='''import json,os,pathlib,sys,time
+p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True)
+q=p.with_name('unrelated.tmp'); q.write_text('other'); os.replace(q,q.with_suffix('.published'))
+time.sleep(.05)
+q=p.with_suffix('.tmp'); q.write_text(json.dumps({'transaction':'tx-owned','checkpoint':'reconciling'}))
+os.replace(q,p)
+time.sleep(10)
+'''
+  result=run([sys.executable,'-c',publisher,str(journal)],os.environ.copy(),timeout=5,interrupt_checkpoint=(journal,'reconciling',marker))
+  assert result.returncode!=0 and json.loads(marker.read_text())['checkpoint']=='reconciling',(shape,result)
+print('ok: published hop IDs, sequential cleanup and first atomic journal observation')
+PY_BOUNDARY
+
+# Render the released unit contract, including its publication snapshot.
+(
+  . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
+  OPERATOR_HOME="$TMP/power-unit-operator"
+  IFS=$'\t' read -r unit_anchor _ < <(published_anchor)
+  runtime="$OPERATOR_HOME/.subyard/runtime/releases/$unit_anchor-aaaaaaaaaaaa"
+  STATE_ROOT="$TMP/power-unit-state" RECONCILER=/fixture/yard-boot-reconcile
+  mkdir -p "$runtime/bin" "$runtime/config/systemd" "$STATE_ROOT"
+  cp "$ROOT/config/systemd/subyard-power-reconcile.service.in" "$runtime/config/systemd/"
+  printf '#!/bin/sh\nprintf "QUJD\\n"\n' > "$runtime/bin/yard-engine"
+  chmod 0700 "$runtime/bin/yard-engine"
+  OLD_UNIT_FIXTURE="$runtime/config/systemd/subyard-power-reconcile.service.in"
+  operator_env() { "$@"; }
+  die() { exit 2; }
+  materialize_unit "$OLD_UNIT_FIXTURE" "$STATE_ROOT/released"
+  sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER|g" "$OLD_UNIT_FIXTURE" > "$STATE_ROOT/want"
+  printf '\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=QUJD\n' >> "$STATE_ROOT/want"
+  cmp "$STATE_ROOT/want" "$STATE_ROOT/released"
+  cp "$OLD_UNIT_FIXTURE" "$STATE_ROOT/historical.in"
+  OLD_UNIT_FIXTURE="$STATE_ROOT/historical.in"
+  materialize_unit "$OLD_UNIT_FIXTURE" "$STATE_ROOT/historical"
+  ! grep -q 'SUBYARD_PUBLICATION_CONTRACTS' "$STATE_ROOT/historical"
+  OLD_UNIT_FIXTURE="$runtime/config/systemd/subyard-power-reconcile.service.in"
+  UNIT="$STATE_ROOT/released"
+  eval "$(sed -n '/^assert_unit_matches() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+  sudo() { shift; "$@"; }
+  systemctl() {
+    [ "$1" != is-enabled ] || return 0
+    printf '%s\n' 'LoadState=loaded' 'NeedDaemonReload=no' 'Type=exec' 'Restart=no' 'RestartForceExitStatus=75' 'TimeoutStartUSec=2min' 'RuntimeMaxUSec=2min'
+    if [ "$manager" = modern ]; then printf '%s\n' 'StartLimitIntervalUSec=0' 'RestartUSec=30s'
+    else printf '%s\n' 'StartLimitIntervalUSec=15min' 'StartLimitBurst=6' 'RestartUSec=10s'; fi
+  }
+  manager=modern
+  assert_unit_matches "$OLD_UNIT_FIXTURE" loaded released
+  manager=obsolete
+  if (assert_unit_matches "$OLD_UNIT_FIXTURE" loaded released); then fail 'obsolete released power manager contract passed'; fi
+) || fail 'released power unit rendering contract failed'
+
 printf 'ok: agent E2E lease transport is pinned, fenced and cleanup-owned\n'

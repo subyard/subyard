@@ -19,11 +19,11 @@ import (
 )
 
 const MinimumSourceVersion = "0.11.0"
-const UpdateAnchorVersion = "0.27.0"
+const UpdateAnchorVersion = "0.28.0"
 
 const LegacyReinstallGuidance = "Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately."
 
-func sourceVersionError(version, runtimeRoot string) error {
+func sourceVersionError(version string) error {
 	parsed, err := semver.Parse(version)
 	if err != nil {
 		return errors.New("the sealed source release version is invalid; restore a runtime with a valid semantic version, then run yard update --check")
@@ -32,24 +32,22 @@ func sourceVersionError(version, runtimeRoot string) error {
 		return errors.New(LegacyReinstallGuidance)
 	}
 	if parsed.LT(semver.MustParse(UpdateAnchorVersion)) {
-		anchor, retry := sourceUpdateCommands(UpdateAnchorVersion, runtimeRoot)
-		return fmt.Errorf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: %s && %s", version, UpdateAnchorVersion, anchor, retry)
+		return fmt.Errorf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: yard update --version %s && yard update", version, UpdateAnchorVersion, UpdateAnchorVersion)
 	}
 	return nil
 }
 
-// Match newerReleaseProbe's command scope and shell quoting without extending
-// the frozen process protocol with caller flag metadata.
-func sourceUpdateCommands(version, runtimeRoot string) (string, string) {
-	dataHome := os.Getenv("SUBYARD_HOME")
-	if dataHome == "" {
-		dataHome = filepath.Join(os.Getenv("HOME"), ".subyard")
+// unfinishedBelowAnchorError routes an unfinished transition only through the
+// release that started it: plain yard update resumes its own journal on every
+// supported release. It never predicts which journals another release replaces.
+func unfinishedBelowAnchorError(journal releasetransition.JournalRecord) error {
+	anchor := semver.MustParse(UpdateAnchorVersion)
+	next := "yard update && yard update --version " + UpdateAnchorVersion + " && yard update"
+	if target, err := releasetransition.ReleaseIDVersion(journal.Goal.Target); err == nil &&
+		journal.Goal.Direction == releasetransition.DirectionActivateTarget && target.GTE(anchor) {
+		next = "yard update && yard update"
 	}
-	scope := ""
-	if runtimeRoot != "" && filepath.Clean(runtimeRoot) != filepath.Join(dataHome, "runtime") {
-		scope = " --runtime-root " + shellWord(runtimeRoot)
-	}
-	return "yard update --version " + version + scope, "yard update" + scope
+	return fmt.Errorf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: %s\nThis release cannot replace it. If the installed release cannot finish it, a v%d.%d.x fix release is the repair path. Do not uninstall.", next, anchor.Major, anchor.Minor)
 }
 
 // VerifyLegacyUninstallSource recognizes the sealed historical project-creator
@@ -146,6 +144,7 @@ func verifyHistoricalUninstallSource(ctx context.Context, runtimeRoot string) (*
 func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessRequest) (refusal error) {
 	var identityErr, unfinishedErr error
 	var unfinished *releasetransition.JournalRecord
+	activatedTakeover := false
 	defer func() { refusal = domain.CollectRefusals(identityErr, unfinishedErr, refusal) }()
 	if pending, err := config.PendingDeveloperIdentities(request.ConfigHome); err != nil {
 		identityErr = err
@@ -194,35 +193,32 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 	if !strings.HasPrefix(string(observed.Active), verified.version+"-") {
 		return errors.New("source release identity does not match its sealed version")
 	}
-	admissionErr := sourceVersionError(verified.version, request.RuntimeRoot)
-	if unfinished != nil {
+	admissionErr := sourceVersionError(verified.version)
+	// Sources below the V2 floor cannot resume a V2 journal; they keep the
+	// full-uninstall route whatever journal they hold.
+	active, activeErr := semver.Parse(verified.version)
+	belowFloor := activeErr == nil && active.LT(semver.MustParse(MinimumSourceVersion))
+	if unfinished != nil && !belowFloor {
 		anchor := semver.MustParse(UpdateAnchorVersion)
-		active, activeErr := semver.Parse(verified.version)
-		source, sourceErr := releasetransition.ReleaseIDVersion(unfinished.Releases.From)
-		anchorCommand, plain := sourceUpdateCommands(UpdateAnchorVersion, request.RuntimeRoot)
-		if unfinished.Goal.Direction == releasetransition.DirectionActivatePrevious && activeErr == nil && active.LT(anchor) {
-			unfinishedErr = fmt.Errorf("source-anchor-required: unfinished rollback must be completed by its original owner before updating through v%s; next: %s && %s && %s", UpdateAnchorVersion, plain, anchorCommand, plain)
-		} else if unfinished.Goal.Direction == releasetransition.DirectionActivateTarget && sourceErr == nil && source.LT(anchor) {
+		if err := activeErr; err == nil && active.LT(anchor) {
+			// This continuation replaces the version-only refusal for the same
+			// cause; unrelated identity and provenance findings remain independent.
+			unfinishedErr, admissionErr = unfinishedBelowAnchorError(*unfinished), nil
+		} else if err == nil && unfinished.Goal.Direction == releasetransition.DirectionActivateTarget {
 			// Match activatedReleaseLinks: the switch may have succeeded before
 			// activation-intent advanced. The engine still owns replacement checks,
 			// fresh consent and preserving the old journal, or its ordinary Retry.
-			activated := observed.Active == unfinished.Releases.Target && observed.Previous != nil && *observed.Previous == unfinished.Releases.From
-			if !activated || activeErr != nil || active.LT(anchor) {
-				owner, err := releasetransition.ReleaseIDVersion(unfinished.Goal.Target)
-				if err != nil {
-					return err
-				}
-				command, _ := sourceUpdateCommands(owner.String(), request.RuntimeRoot)
-				unfinishedErr = fmt.Errorf("source-anchor-required: unfinished update from v%s to v%s has not activated; next: %s && %s\nThis release cannot replace it. If v%s cannot finish, a v%d.%d.x fix release is the repair path. Do not uninstall.", source, owner, command, plain, owner, anchor.Major, anchor.Minor)
-			}
-		}
-		if unfinishedErr != nil && activeErr == nil {
-			// This continuation replaces the version-only refusal for the same
-			// cause; unrelated identity and provenance findings remain independent.
-			admissionErr = nil
+			activatedTakeover = observed.Active == unfinished.Releases.Target &&
+				observed.Previous != nil && *observed.Previous == unfinished.Releases.From
 		}
 	}
 	if verified.registryDigest == "" {
+		if unfinished != nil && !belowFloor {
+			if unfinishedErr != nil {
+				return nil
+			}
+			return errors.New("unfinished release transition has no verified registry provenance; restore its exact sealed owner and protected history from a known-good backup; do not uninstall; next: yard update --check")
+		}
 		if admissionErr != nil {
 			return admissionErr
 		}
@@ -237,9 +233,19 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 	if err != nil {
 		return err
 	}
-	_, registryDigest, err := releasetransition.ParseRegistryV2(registryPayload, releasetransition.BuiltinCapabilityCatalog())
+	registry, registryDigest, err := releasetransition.ParseRegistryV2(registryPayload, releasetransition.BuiltinCapabilityCatalog())
 	if err != nil || registryDigest != verified.registryDigest {
 		return errors.New("source release has invalid or foreign V2 registry provenance")
+	}
+	if activatedTakeover {
+		history, historyErr := store.ReadMigrationLedger(registry, registryDigest)
+		var pending []releasetransition.MigrationDefinitionV2
+		if historyErr == nil {
+			pending, historyErr = registry.PendingPath(history.Ledger)
+		}
+		if historyErr != nil || !history.AuthoritySnapshot.Exists || len(pending) != 0 {
+			return errors.New("source-anchor-required: activated owner history is missing, inconsistent, or incomplete; this release cannot replace damaged migration authority. Restore the exact protected history from a known-good backup or use a compatible owner-series repair release; do not uninstall; next: yard update --check")
+		}
 	}
 	// A just-installed development runtime has no predecessor or accepted state.
 	// Its first self-activation is bootstrap, not admission of an older source.

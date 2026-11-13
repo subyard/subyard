@@ -54,7 +54,7 @@ grep -Fxq '  push:' "$CI_WORKFLOW" && grep -Fxq '  pull_request:' "$CI_WORKFLOW"
 grep -Fxq '  workflow_dispatch:' "$DEEP_WORKFLOW" \
   && grep -Fxq '  schedule:' "$DEEP_WORKFLOW" \
   || fail 'deep CI must support manual and nightly runs'
-grep -Fxq '        run: make build VERSION=0.28.0-test' "$DEEP_WORKFLOW" \
+grep -Fxq '        run: make build VERSION=0.29.0-test' "$DEEP_WORKFLOW" \
   && grep -Fxq '        run: umask 0022 && go test -race -shuffle=on -count=2 -timeout=60m ./...' "$DEEP_WORKFLOW" \
   && grep -Fxq "        run: go test ./internal/command -run '^\$' -fuzz '^FuzzParseDoesNotPanic\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
   && grep -Fxq "        run: go test ./internal/observation -run '^\$' -fuzz '^FuzzValidateJSON\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
@@ -65,7 +65,7 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   grep -Fxq '    runs-on: ubuntu-24.04-arm' <<<"$native_engine_job" \
     && grep -Fxq '          go-version-file: go.mod' <<<"$native_engine_job" \
     && grep -Fxq '          persist-credentials: false' <<<"$native_engine_job" \
-    && grep -Fxq '          make build VERSION=0.28.0-test' <<<"$native_engine_job" \
+    && grep -Fxq '          make build VERSION=0.29.0-test' <<<"$native_engine_job" \
     && grep -Fxq '          .build/yard --version' <<<"$native_engine_job" \
     && grep -Fxq '        run: go test -count=1 -timeout=20m ./cmd/... ./internal/...' <<<"$native_engine_job" \
     || fail "$(basename "$workflow") must build, run and test the native ARM64 engine"

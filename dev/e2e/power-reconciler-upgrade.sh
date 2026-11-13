@@ -13,7 +13,7 @@ IFS=$'\t' read -r OLD_VERSION OLD_INSTALLER_SHA256 OLD_BUNDLE_SHA256 _ < <(
   published_anchor
 )
 OLD_UNIT_FIXTURE=''
-CANDIDATE_VERSION="0.28.0-power-systemd.$TOKEN"
+CANDIDATE_VERSION="0.29.0-power-systemd.$TOKEN"
 if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
   CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
@@ -391,9 +391,8 @@ assert_unit_matches() {
     released)
       grep -Fxq 'Type=exec' <<<"$manager_state" \
         && grep -Fxq 'RuntimeMaxUSec=2min' <<<"$manager_state" \
-        && grep -Fxq 'StartLimitIntervalUSec=15min' <<<"$manager_state" \
-        && grep -Fxq 'StartLimitBurst=6' <<<"$manager_state" \
-        && grep -Fxq 'RestartUSec=10s' <<<"$manager_state" \
+        && grep -Fxq 'StartLimitIntervalUSec=0' <<<"$manager_state" \
+        && grep -Fxq 'RestartUSec=30s' <<<"$manager_state" \
         || die "released power reconciler manager properties differ: ${manager_state//$'\n'/, }"
       ;;
     candidate)

@@ -1390,7 +1390,7 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
             prefix="from unittest import mock\n_original_read=pathlib.Path.read_text\ndef read(path,*a,**kw):\n    if str(path)=='/proc/self/mountinfo': return '1 0 0:1 / '+"+repr(str(mounted))+"+' rw - ext4 none rw\\n'\n    return _original_read(path,*a,**kw)\nmock.patch.object(pathlib.Path,'read_text',read).start()\n"
         if fault=='foreign-owner': prefix='from unittest import mock\nmock.patch.object(os,\'geteuid\',return_value=os.geteuid()+1).start()\n'
         program=consumed.replace('root,owner=map(pathlib.Path,sys.argv[1:3])',prefix+'root,owner=map(pathlib.Path,sys.argv[1:3])')
-        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner),digest,'yard 0.28.0-p0.owner'],capture_output=True,text=True,timeout=5)
+        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner),digest,'yard 0.29.0-p0.owner'],capture_output=True,text=True,timeout=5)
         assert (result.returncode==0)==(fault==''),(fault,result)
         for target in [runtime,release,baseline,parent/'worktree.tar.gz']:
             assert target.exists()==bool(fault),(fault,target,result)
@@ -1400,7 +1400,7 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
         if not fault:
             receipt=json.loads(result.stdout.split('STAGING_CONSUMED_INPUTS=',1)[1])
             assert receipt['total_allocated_bytes']==sum(receipt['allocated_bytes'].values())>0,receipt
-            assert receipt['bootstrap_engine']=={'path':'.build/yard','sha256':digest,'version':'yard 0.28.0-p0.owner'},receipt
+            assert receipt['bootstrap_engine']=={'path':'.build/yard','sha256':digest,'version':'yard 0.29.0-p0.owner'},receipt
 
 reclaim = re.search(r'^reclaim_supported_upgrade_inputs\(\) \{\n.*?^\}',fixture,re.MULTILINE|re.DOTALL)[0]
 fingerprint='a'*64
@@ -1410,7 +1410,7 @@ ROOT=/tmp/subyard-worktree.fixture/src; OWNER_ROOT=/tmp/owner
 SUPPORTED_UPGRADE=1; SUPPORTED_UPGRADE_BOUND={0 if fault=='unbound' else 1}
 OWNER_BASE_IMAGE_CREATED=1; OWNER_BASE_IMAGE_FINGERPRINT={fingerprint}
 OWNER_BASELINE_IMAGES={'a'*64 if fault=='baseline-image' else ''}
-BOOTSTRAP_ENGINE_SHA256={'a'*64}; BOOTSTRAP_ENGINE_VERSION='yard 0.28.0-p0.owner'
+BOOTSTRAP_ENGINE_SHA256={'a'*64}; BOOTSTRAP_ENGINE_VERSION='yard 0.29.0-p0.owner'
 p0_capacity_assert_root_marker() {{ return {1 if fault=='marker' else 0}; }}
 verify_broker_installation() {{ return {1 if fault=='identity' else 0}; }}
 incus() {{ printf '%s\\n' '[{{"aliases":[{{"name":"subyard-e2e-debian-13-cloud-container"}}],"fingerprint":"{'b'*64 if fault=='alias' else fingerprint}"}}]'; }}

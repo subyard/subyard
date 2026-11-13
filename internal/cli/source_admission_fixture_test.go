@@ -157,7 +157,7 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 	}
 	version, err := semver.Parse(versionFields[1])
 	if err != nil || version.LT(semver.MustParse(releaseruntime.UpdateAnchorVersion)) {
-		t.Fatalf("source-authoring fixture needs normal tooling >= %s, got %q; build VERSION=0.28.0-test or supply a supported SUBYARD_SOURCE_QUERY_TOOLING_ROOT", releaseruntime.UpdateAnchorVersion, versionFields[1])
+		t.Fatalf("source-authoring fixture needs normal tooling >= %s, got %q; build VERSION=0.29.0-test or supply a supported SUBYARD_SOURCE_QUERY_TOOLING_ROOT", releaseruntime.UpdateAnchorVersion, versionFields[1])
 	}
 	targetID := versionFields[1] + "-aaaaaaaaaaaa"
 	root := filepath.Join(runtimeRoot, "releases", targetID)

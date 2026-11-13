@@ -8,7 +8,6 @@ import hashlib
 import io
 import json
 import os
-import re
 from pathlib import Path
 import re
 import shutil
