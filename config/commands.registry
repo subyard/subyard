@@ -39,6 +39,7 @@ host||@host||local|mutate|dynamic|public|remote|simple|host <command>|manage own
 remote||@remote||local|mutate|dynamic|hidden|remote|remote|remote <command>|compatibility adapter for legacy remote-yard contexts|--yard --yes --help|add repair-key remove list
 update||@update||local|mutate|dynamic|public|lifecycle|simple|update|check, install or roll back the release runtime|--check --json --version --offline --rollback --force --yes --help|
 migrate||@current-migration||deny|mutate|dynamic|public|lifecycle|simple|migrate|inspect or finish migrations for the installed release|--check --json --yes --help|
+version||@version||local|read|never|public|lifecycle|simple|version|show the installed Subyard version|--help|
 integration||@integration||forward|mutate|dynamic|public|lifecycle|integration|integration <command>|select and reconcile coding tools for this yard|--json --yes --help|enable disable status
 profile||@profile||deny|mutate|dynamic|public|lifecycle|profile|profile <command> [id]|list profiles or manage one profile without yard init|--json --yes --help|list enable disable setup status
 config||@config||local|mutate|dynamic|public|lifecycle|config|config <command>|inspect, author, sync and reconcile Subyard settings|--all-local --json --check --adopt --host-id --checkout --offline --apply --init --scope --local --git -m --message --yes --help|fields show paths validate repair-alias reduce-selection set unset import edit repair-registration status apply sync

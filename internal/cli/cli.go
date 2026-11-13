@@ -3668,7 +3668,11 @@ func (cli *CLI) globalQuery(arguments []string) (int, bool) {
 			fmt.Fprintf(cli.options.Stdout, "%s\t%s\n", definition.Command, strings.Join(definition.Verbs, " "))
 		}
 		return 0, true
-	case "-V", "--version":
+	case "version", "-V", "--version": // the flags stay for release tooling and published runtimes
+		if query == "version" && commandHelpRequested(arguments[1:]) {
+			fmt.Fprintf(cli.options.Stdout, "Usage: %s version\n\nShow the installed Subyard version.\n", cli.options.Program)
+			return 0, true
+		}
 		fmt.Fprintf(cli.options.Stdout, "%s %s\n", cli.options.Program, Version)
 		return 0, true
 	case "--command-manifest":
@@ -3749,7 +3753,6 @@ Options:
   -h, --help         show this help and exit
   -l, --list         list command names (one per line) and exit
       --resources    list profile-resource commands + verbs and exit
-  -V, --version      show version and exit
   -y, --yes          skip a command's confirmation prompt (pass-through)
 
 Run '%s <command> -h' for a command's own help.

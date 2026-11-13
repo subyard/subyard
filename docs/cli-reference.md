@@ -332,6 +332,16 @@ Inspect or complete migrations and runtime readiness for the installed current r
 After success, offer provisioning for selected profiles that need it.
 ```
 
+## version
+
+show the installed Subyard version.
+
+```text
+Usage: yard version
+
+Show the installed Subyard version.
+```
+
 ## integration
 
 select and reconcile coding tools for this yard.
