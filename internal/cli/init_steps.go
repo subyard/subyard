@@ -145,7 +145,7 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
 			"native VerifyStage "+string(native.Stage.ID)+" returns converged", consequence, native.Converged, native.Conditional)
-		if native.Diagnostic != "" {
+		if native.Converged && native.Diagnostic != "" {
 			steps[len(steps)-1].Observed += "; " + native.Diagnostic
 		}
 		if execution.mode == initReconcile && native.Stage.ID == ports.ReconcileStageProvision {

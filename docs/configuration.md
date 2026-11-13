@@ -125,7 +125,8 @@ file and line and its removal: `yard -Y NAME config unset NAME --scope SCOPE --l
 flat `yards/NAME.env` registration. The JSON report of `update --check` carries them in its
 `configuration` array. If such a value supplied a device, the `init` plan names each device that
 the extras stage now detaches. A VM yard does not apply a profile's container-only
-`YARD_DEVICES`; the `init` plan reports each entry as not applicable to VM yards.
+`YARD_DEVICES`; the `init` plan reports each entry as not applicable to VM yards on the
+converged extras stage.
 
 `init` validates the effective `INCUS_PROJECT` before confirmation or host changes, including
 with `--reset` and `--configs`. Incus project names cannot contain underscores, must start and

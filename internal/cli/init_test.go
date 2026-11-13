@@ -1845,7 +1845,8 @@ func TestPreparedEmptyInitSkipsDispatchAfterLockedRefresh(t *testing.T) {
 }
 
 // The init plan names each owned extras device the pending extras stage
-// detaches, and renders an extras diagnostic of a VM yard as observed state.
+// detaches, and renders an extras diagnostic of a converged VM yard stage as
+// observed state.
 func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 	extras := application.ReconcileStage{ID: ports.ReconcileStageExtras, Label: "yard extras"}
 	execution := &initExecution{mode: initReconcile, loaded: config.Loaded{Context: domain.Context{YardName: "box", IncusProject: "subyard-box", YardInstanceName: "yard-box"}}}
@@ -1858,7 +1859,7 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 	}
 	step := steps[index]
 	if step.Consequence != "yard box: detaches devices no selected profile requests: yx-dev-dri-renderD128 yx-dev-fuse" ||
-		!strings.Contains(step.Observed, "is not applicable to VM yards") || step.Decision != domain.StepApply {
+		step.Observed != "not converged" || step.Decision != domain.StepApply {
 		t.Fatalf("extras step = %#v", step)
 	}
 	execution.extrasDetach = nil

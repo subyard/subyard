@@ -1730,7 +1730,8 @@ and `config unset` remains available at operator scopes. Config sync accepts and
 persisted one unchanged. The init plan names each owned `yx-*`
 extras device that the pending extras stage detaches, resolved as `09-yard-extras.sh` resolves it.
 The extras stage observation carries each declared device of a VM yard as a "not applicable to VM
-yards" diagnostic that `init` renders; it is readiness state, not a refusal or a warning.
+yards" diagnostic that `init` renders on the converged stage; it is readiness state, not a refusal
+or a warning.
 
 Every VM yard is headless. The owner sets a fixed local `raw.qemu.conf` whose empty
 `[device "qemu_gpu"]` section removes the Incus default emulated GPU (virtio-vga); with
