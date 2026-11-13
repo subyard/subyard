@@ -1172,6 +1172,83 @@ func TestIntegrationHookFailureLeavesInventoryPendingForRetry(t *testing.T) {
 	}
 }
 
+// structuredRetirementExecutor reports one committed structured record that the
+// desired selection no longer contains and logs the effects in their order.
+type structuredRetirementExecutor struct {
+	*retryableIntegrationExecutor
+	recorded, owned bool
+	events          []string
+}
+
+func (fixture *structuredRetirementExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	command := request.Command
+	if len(command) == 5 && command[0] == "python3" && strings.Contains(command[3], "Version 1 records observed ownership only") {
+		switch command[4] {
+		case "observe":
+			observation := integrationObservation{Fingerprint: strings.Repeat("a", 64), Changed: fixture.pending || fixture.recorded}
+			if fixture.recorded {
+				observation.Retired = []integrationArtifact{{ID: "codex", Kind: "structured", Format: "json", Path: "/home/dev/.codex/settings.json", Digest: strings.Repeat("b", 64)}}
+			}
+			payload, _ := json.Marshal(observation)
+			return ports.InstanceExecResult{Stdout: payload}, nil
+		case "commit":
+			fixture.events = append(fixture.events, "commit")
+			fixture.recorded = false
+		}
+	}
+	if len(command) > 4 && command[0] == "python3" && (command[4] == configmaterial.ModeRetire || command[4] == configmaterial.ModeAssessRetire) {
+		if command[4] == configmaterial.ModeRetire {
+			fixture.events = append(fixture.events, "retire")
+			fixture.owned = false
+		}
+		payload, _ := json.Marshal(map[string]any{"converged": !fixture.owned, "fingerprint": fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprint(fixture.owned))))})
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
+	if strings.Contains(strings.Join(command, "\x00"), "exec timeout --kill-after=5s 120s") {
+		fixture.events = append(fixture.events, "hooks")
+	}
+	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
+}
+
+// Deselection releases structured owned fields only after the hooks succeed:
+// a failed init leaves the installed fields for the next successful init.
+func TestIntegrationHookFailureLeavesStructuredRetirementForRetry(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, path := range []string{"config/projects-changed.sh", "scripts/reconcile-integrations.sh"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, path), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	}
+	executor := &structuredRetirementExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{failFirstHook: true}, recorded: true, owned: true}
+	instance := ports.InstanceInfo{Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{}}
+	runtime := Runtime{RepositoryRoot: root, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}, Executor: executor,
+		Yard: domain.Context{IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}}
+	apply := func() error {
+		plan, err := runtime.IntegrationPlan(context.Background())
+		if err != nil {
+			return err
+		}
+		if !plan.Changed {
+			return errors.New("pending retirement is not planned")
+		}
+		return runtime.ApplyIntegrations(context.Background(), plan)
+	}
+	if err := apply(); err == nil {
+		t.Fatal("fixture hook failure was accepted")
+	}
+	if !slices.Equal(executor.events, []string{"hooks"}) || !executor.owned || !executor.recorded {
+		t.Fatalf("failed hooks retired installed structured fields: events=%v owned=%v", executor.events, executor.owned)
+	}
+	executor.events = nil
+	if err := apply(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(executor.events, []string{"hooks", "retire", "commit"}) || executor.owned || executor.recorded {
+		t.Fatalf("successful init did not retire after its hooks: events=%v owned=%v", executor.events, executor.owned)
+	}
+}
+
 func TestIntegrationInventoryAdoptsOnlyExactProtectedCoreArtifacts(t *testing.T) {
 	for _, asset := range []struct {
 		path string

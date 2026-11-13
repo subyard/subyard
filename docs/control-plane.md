@@ -593,6 +593,13 @@ readiness and repair own only the committed installed scope: they neither report
 records outside that scope as drift nor retire or drop them, so the release stays ready and the
 next successful init commits or retires them. Committed records that leave the installed scope
 are still retired, even when a failed apply left intent labels on them.
+Retirement follows the hook boundary: the inventory commit removes deselected owned files and
+links, and structured owned fields are released only after the hooks succeed. A failed init that
+deselects an installed integration therefore leaves its assets and committed records in place;
+installed-view readiness stays converged, repair has nothing to restore, and the next successful
+init retires them. A removed owned asset, foreign bytes or metadata remain drift or ownership
+conflicts. A failed init that changes the bytes of a file that stays selected is not covered;
+installed-view readiness reports that file as drift.
 RPC execution prints the listing and commands without running in-process inits. With no pending
 integration settings, no init steps are added.
 When a running yard's repair would change installed integration state while its integration
