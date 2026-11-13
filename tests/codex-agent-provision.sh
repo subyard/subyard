@@ -8,6 +8,10 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing test dependency: $1"; }
 for command in cc jq sha256sum tar; do need "$command"; done
 [ -x "$HOOK" ] || fail "Codex provision hook is not executable"
+# The home rules carry no Git gate; the provisioned requirements own it.
+if grep -Fq 'pattern = ["git"' "$ROOT/config/agents/codex/rules/repo.rules"; then
+  fail "Codex home rules carry a Git gate"
+fi
 
 tmp="$(mktemp -d /tmp/subyard-codex-provision.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
@@ -242,13 +246,38 @@ run_hook amd64 "$root" >/dev/null
 [ "$(fetch_count)" -eq 6 ] || fail "older release metadata downloaded an artifact"
 [ "$("$link" --version)" = 'codex-cli 0.148.0' ] || fail "older release metadata downgraded a working runtime"
 
+# The approval mode converges on -> off -> on; other requirements stay mandatory.
+cp "$check" "$tmp/prompt-check"
+run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=off >/dev/null
+python3 - "$requirements" <<'PY'
+import pathlib, sys, tomllib
+policy = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+assert policy == {'allowed_approval_policies': ['on-request'], 'allowed_approvals_reviewers': ['user'],
+                  'check_for_update_on_startup': False}, policy
+PY
+[ "$(stat -c '%a' "$requirements")" = 644 ] || fail "off-mode requirements mode drifted"
+CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "off-mode readiness failed"
+if CODEX_CHECK_DEV_USER="$(id -un)" "$tmp/prompt-check" >/dev/null 2>&1; then
+  fail "prompt-mode readiness accepted off-mode requirements"
+fi
+if run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=sometimes >/dev/null 2>"$tmp/mode.err"; then
+  fail "invalid approval mode accepted"
+fi
+grep -Fq 'CODING_TOOL_GIT_APPROVAL must be prompt or off' "$tmp/mode.err" || fail "invalid mode was not named"
+run_hook amd64 "$root" >/dev/null
+grep -Fq 'decision = "prompt"' "$requirements" || fail "prompt mode was not restored"
+CODEX_CHECK_DEV_USER="$(id -un)" "$tmp/prompt-check" >/dev/null || fail "restored prompt mode failed readiness"
+
 # Artifact failures preserve the previous working runtime and authorization.
 before="$(sha256sum "$runtime" | cut -d' ' -f1)"
 rm "$CODEX_TEST_BWRAP_READY"
 count="$(fetch_count)"
+rm "$requirements"
 if run_hook amd64 "$root" CODEX_TEST_APT_FAIL=1 >/dev/null 2>"$tmp/dependency.err"; then
   fail "failed sandbox dependency installation unexpectedly succeeded"
 fi
+# The approval policy precedes package installation and every download.
+[ -f "$requirements" ] || fail "failed dependency repair left no approval requirements"
 [ "$(fetch_count)" -eq "$count" ] || fail "failed dependency repair fetched a release"
 [ "$(sha256sum "$runtime" | cut -d' ' -f1)" = "$before" ] || fail "dependency failure replaced the runtime"
 touch "$CODEX_TEST_BWRAP_READY"

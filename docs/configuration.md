@@ -644,11 +644,42 @@ decide it, though a login shell can run it instead of the managed binary. `yard 
 check directly, and in `yard init` output only when provisioning runs, so a `yard init` with nothing to
 provision prints none.
 
+### Commit and push approval prompts
+
+`CODING_TOOL_GIT_APPROVAL` is a syncable setting with the values `prompt` (default) and `off`.
+It governs Claude and Codex only; OpenCode keeps its home ask patterns. The prompts live only in
+the root-owned files that provisioning writes, the Claude managed drop-in and the Codex managed
+requirements; the Claude and Codex home defaults carry no Git rules. To turn the prompts off for
+one yard:
+
+```sh
+yard -Y <yard> config set CODING_TOOL_GIT_APPROVAL off --scope yard
+yard -Y <yard> init
+```
+
+Set `prompt` the same way to restore them; shared or host scope applies the choice to more yards.
+Until `yard init` applies a change, it is listed as a pending init-owned setting.
+`off` removes only these rules: the Claude update lock and the Codex approval policy, reviewer and
+`rm` rule stay. `claude-policy-check`, `codex-policy-check` and `yard status` verify the installed
+mode, so `off` is expected state, not drift. Existing sessions keep their loaded policy until restarted.
+With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
+
+Limits:
+
+- When Claude runs under an organization's server-managed settings, the yard's drop-in is not the
+  effective source, so that policy must carry the commit/push ask rules itself.
+- Installed snapshots record only `off`; an older release refuses them. With `off` applied, set
+  `prompt` and run `yard init` before rolling back to an older release.
+- Updating an installation older than v0.14.0 (Codex) or v0.23.0 (Claude): agent sessions started
+  after the home defaults are refreshed and before that agent's provision hook writes the managed
+  policy get no commit/push prompt. Hooks run in the yard's agent order and stop at the first
+  failure, so a failed earlier hook extends this until the next successful `yard init`.
+
 ### Codex permissions across projects
 
 The default yard configuration permits local edits, builds, tests and network access without
-approval. Managed rules classify canonical direct `git commit` (including `--amend`) and
-`git push` as requiring user approval across projects. Repeated single-use approval also depends
+approval. In `prompt` mode, managed rules classify canonical direct `git commit` (including
+`--amend`) and `git push` as requiring user approval across projects. Repeated single-use approval also depends
 on the client's response behavior:
 
 | Client | Yard mode | Approval evidence |
@@ -665,8 +696,8 @@ the Orca terminal and built-in chat are separate approval surfaces.
 
 Codex provisioning installs root-owned `/etc/codex/requirements.toml` using Codex's native
 [managed requirements](https://learn.chatgpt.com/docs/enterprise/managed-configuration).
-It requires `on-request`, the `user` reviewer and commit/push prompt rules independently of the
-home rules. Project settings, profiles, alternate `CODEX_HOME` and client flags cannot remove
+It requires `on-request`, the `user` reviewer and, in `prompt` mode, commit/push prompt rules
+independently of the home rules. Project settings, profiles, alternate `CODEX_HOME` and client flags cannot remove
 these requirements. Incompatible overrides such as `never` or automatic review cannot take effect.
 The home config supplies the existing `danger-full-access` yard sandbox default; stricter sandbox
 choices remain available. Use **Custom** in clients that offer permission presets: unrestricted
@@ -699,7 +730,7 @@ rules. Unknown approval protocols fail closed. VS Code's actual approval UI rema
 
 | State | Evidence |
 | --- | --- |
-| `rules-ok` | The installed policy passed readiness; Codex's native home-rules matcher returned `prompt` for the checked commit/push forms and left the checked local commands ungated. |
+| `rules-ok` | The installed policy, including its commit/push prompt rules in `prompt` mode, passed readiness; Codex's native home-rules matcher left the checked local commands ungated. The hint names the mode. |
 | `incompatible` | Installed policy drifted, the native command failed, or the home rules did not meet the contract. Run `yard init` or review the rules. |
 | `unverified` | Claude, OpenCode and pi have no supported offline approval check in Subyard. |
 | `missing` / `?` | The CLI was not found, or the check was unavailable, timed out, or not run because the yard is stopped. |
@@ -711,9 +742,9 @@ configuration never appear in status; the guest returns only a result code. No m
 agent sessions or updates are started by the check.
 
 Codex uses its offline [`execpolicy check`](https://learn.chatgpt.com/docs/agent-configuration/rules)
-for `git commit`, `git commit -m msg`, `git commit --amend`, `git push`, `git push origin main`
-and `git push --force-with-lease`. It also checks that `git status` and `sh dev-check.sh` are
-not gated by a rule. These commands are arguments to the matcher; Git and scripts are never
+to check that `git status` and `sh dev-check.sh` are not gated by a home rule. The commit/push
+rules are verified by the installed policy check; an operator's own home Git rule is accepted.
+These commands are arguments to the matcher; Git and scripts are never
 executed. All default-home `*.rules` files participate.
 
 `rules-ok` proves installed policy readiness and the home matcher result. Subyard does not inspect
@@ -728,17 +759,17 @@ sessions. Installation checks do not certify an interactive approval UI:
 
 | Backend | Shipped yard setting | Limit of the evidence |
 | --- | --- | --- |
-| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and mandatory native managed commit/push ask rules. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. Those checks also cover `auto` with a synthetic classifier and the installed managed binary; they use the client's own classifier requests, so server-side auto-mode review is not covered. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. The Orca `managed-agents` lane covers stock Orca terminal arguments and Orca's built-in Claude chat with a synthetic model. Other IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
+| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and, in `prompt` mode, native managed commit/push ask rules. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. Those checks also cover `auto` with a synthetic classifier and the installed managed binary; they use the client's own classifier requests, so server-side auto-mode review is not covered. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. The Orca `managed-agents` lane covers stock Orca terminal arguments and Orca's built-in Claude chat with a synthetic model. Other IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
 | OpenCode V1 | Global allow, with commit/push ask patterns under `permission.bash`. | **Unsupported for the strict single-use contract.** Native `once` prompts again; `always` permits a later matching command without another prompt. Project/agent/UI overrides can weaken the defaults. Direct launch remains available. |
 | pi | `defaultProjectTrust = "always"`. | Project trust is not a per-command approval gate; Subyard supplies no verified outer gate. |
 
-`bypassPermissions` is the standard Claude mode in a yard. Claude Code can offer on first launch to make
+`bypassPermissions` is the standard Claude mode in a yard, with `autoCompactEnabled: true`. Claude Code can offer on first launch to make
 auto mode the default, with **Yes** preselected; decline it. Accepting writes
 `permissions.defaultMode = "auto"` to `~/.claude/settings.json`, which `yard config status` reports as drift
 and `yard config apply` restores. Declining leaves `yard config status` clean.
 
 Claude provisioning installs its own root-owned drop-in at
-`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds ask rules and the
+`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds ask rules (in `prompt` mode) and the
 update lock described above; it preserves other managed files and user/project denies, and
 refuses foreign files at its own managed path. It does not enable `allowManagedPermissionRulesOnly`,
 which would discard those user/project restrictions. `claude-policy-check` verifies the managed
@@ -847,7 +878,7 @@ ordinary init. Corrupt installed artifacts and unsafe configuration retain their
 | --- | --- |
 | Preview endpoint | `WEB_PREVIEW_HOST_PORT` |
 | Guest usage reporter | `CCUSAGE_VERSION`, `CCUSAGE_SHA256_AMD64`, `CCUSAGE_SHA256_ARM64` |
-| Coding tools and skills | `CODING_TOOL_INTEGRATIONS`, `ENVIRONMENT_PROFILES`, `ALLOWS_CODING_TOOLS`, `DEV_USER` |
+| Coding tools and skills | `CODING_TOOL_INTEGRATIONS`, `CODING_TOOL_GIT_APPROVAL`, `ENVIRONMENT_PROFILES`, `ALLOWS_CODING_TOOLS`, `DEV_USER` |
 | Custom integration inputs | `AGENT_<id>_COMMAND`, `_CHECK`, `_HEALTH`, `_PROJECTS_CHANGED`, `_DEPENDS`, `_PERSIST` and configured provisioning paths |
 | Credential tools | `SUBYARD_AGE_VERSION`, `SUBYARD_SOPS_VERSION` and their `SHA256_AMD64`/`SHA256_ARM64` pins |
 

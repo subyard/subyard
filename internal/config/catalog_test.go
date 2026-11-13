@@ -30,6 +30,21 @@ func TestGitIdentitySettingsArePortableStrings(t *testing.T) {
 	}
 }
 
+func TestGitApprovalModeIsAPortableEnum(t *testing.T) {
+	for _, scope := range []SettingScope{ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand} {
+		for _, value := range []string{"prompt", "off"} {
+			if err := ValidateSetting(scope, "CODING_TOOL_GIT_APPROVAL", value, true); err != nil {
+				t.Fatalf("%s %s: %v", scope, value, err)
+			}
+		}
+		for _, value := range []string{"", "on", "0", "Prompt"} {
+			if ValidateSetting(scope, "CODING_TOOL_GIT_APPROVAL", value, true) == nil {
+				t.Fatalf("%s accepted %q", scope, value)
+			}
+		}
+	}
+}
+
 func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))

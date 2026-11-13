@@ -46,17 +46,6 @@ case "$AGENT_opencode_PERSIST" in
   *) fail "OpenCode SQLite session database is not persisted" ;;
 esac
 
-# Shipped templates retain commit/push rules; runtime enforcement needs separate acceptance.
-jq -e '
-  (.permissions.ask | index("Bash(git commit)")) != null and
-  (.permissions.ask | index("Bash(git commit:*)")) != null and
-  (.permissions.ask | index("Bash(git push)")) != null and
-  (.permissions.ask | index("Bash(git push:*)")) != null
-' "$ROOT/config/agents/claude/settings.json" >/dev/null || fail "Claude commit/push ask entries drifted"
-for command in commit push; do
-  grep -Fq "pattern = [\"git\", \"$command\"]" "$ROOT/config/agents/codex/rules/repo.rules" \
-    || fail "Codex $command gate missing"
-done
 grep -Fq 'approval_policy = "on-request"' \
   "$ROOT/config/agents/codex/config.toml" \
   || fail "Codex yard approvals are not interactive"

@@ -128,8 +128,11 @@ if run_hook "$root" >/dev/null 2>"$tmp/error"; then fail 'incorrect executable v
 [ "$(sha256sum "$runtime")" = "$runtime_before" ] || fail 'bad executable replaced the runtime'
 printf '../../bad\n' > "$tmp/releases/latest"
 count="$(wc -l < "$tmp/fetch.log")"
+rm -f "$policy_dir/50-subyard-git-approval.json"
 if run_hook "$root" >/dev/null 2>"$tmp/error"; then fail 'invalid latest version accepted'; fi
 [ "$(wc -l < "$tmp/fetch.log")" -eq "$((count + 1))" ] || fail 'invalid latest version reached manifest download'
+# A failed release download still leaves the approval policy in place.
+[ -f "$policy_dir/50-subyard-git-approval.json" ] || fail 'failed download left no approval policy'
 printf '2.2.0\n' > "$tmp/releases/latest"
 
 # Readiness includes the CLI, and provisioning repairs owned binary/policy drift.
@@ -164,6 +167,21 @@ cp "$tmp/legacy-policy.json" "$policy"
 if "$check" >/dev/null 2>&1; then fail 'policy without the update lock passed readiness'; fi
 run_hook "$root" >/dev/null
 jq -e '.env == {DISABLE_UPDATES: "1"}' "$policy" >/dev/null || fail 'legacy policy did not converge'
+
+# The approval mode converges on -> off -> on, keeping the update lock and foreign policies.
+jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'default mode lacks the Git ask rules'
+CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null
+jq -e '. == {"$comment":"Subyard Claude permission policy","env":{DISABLE_UPDATES:"1"}}' "$policy" >/dev/null \
+  || fail 'off mode kept the Git ask rules or dropped the update lock'
+[ "$(stat -c '%a' "$policy")" = 644 ] || fail 'off mode policy mode drifted'
+"$check" | grep -Fq 'managed Git prompts off' || fail 'off mode readiness did not name the mode'
+jq '.env = {DISABLE_UPDATES: "1"}' "$tmp/legacy-policy.json" > "$policy"
+if "$check" >/dev/null 2>&1; then fail 'off mode accepted the prompt policy'; fi
+if CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
+run_hook "$root" >/dev/null
+jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'prompt mode was not restored'
+"$check" >/dev/null || fail 'restored prompt mode failed readiness'
+[ "$before" = "$(sha256sum "$policy_dir/10-foreign.json")" ] || fail 'mode change modified a foreign policy'
 
 # Only the native installer's exact link is released, and never the files it points to.
 dev_home="$tmp/dev-home"
@@ -289,4 +307,7 @@ for scenario in corrupt ignore-range range-refused exhausted resume; do
   case "$scenario" in range-refused|exhausted) expected=$'0\n64\n64\n64' ;; esac
   [ "$(cat "$SUBYARD_TEST_TRANSFER_LOG")" = "$expected" ] || fail "wrong resume offsets or retry count: $scenario"
 done
+# The home template carries no Git ask rules; the managed drop-in owns them.
+jq -e '.permissions.ask == []' "$ROOT/config/agents/claude/settings.json" >/dev/null \
+  || fail 'Claude home template carries Git ask rules'
 printf 'ok: Claude latest CLI install, checksum, readiness, policy, native shadow release and stall resume\n'

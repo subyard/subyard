@@ -482,6 +482,11 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 				return nil, err
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
+			// Provision hooks own the approval rules. Only off adds a digest input;
+			// changed hooks or templates still change the digest as before.
+			if runtime.environmentValue("CODING_TOOL_GIT_APPROVAL") == "off" {
+				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
+			}
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
 	}

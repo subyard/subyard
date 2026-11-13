@@ -354,7 +354,7 @@ agent_client_ready() {
 # These reads precede every fixture snapshot, so a real Orca rewrite cannot be restored away.
 stage 'keeping managed Claude settings across a real Orca hook install and launch'
 managed_before="$(managed_settings)"
-jq -e '(.autoMemoryDirectory | type == "string") and (.permissions.ask | length > 0)' <<<"$managed_before" >/dev/null \
+jq -e '(.autoMemoryDirectory | type == "string") and (.permissions.defaultMode | type == "string")' <<<"$managed_before" >/dev/null \
   || die 'fresh yard settings do not hold the managed keys'
 log_claude_settings fresh-yard
 guest_root runuser -u dev -- sh -c "jq 'del(.hooks)' $settings_file > $settings_file.stage && cat $settings_file.stage > $settings_file && rm -f $settings_file.stage"

@@ -18,6 +18,7 @@ from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient,
                               PermissionResultAllow, PermissionResultDeny, PermissionUpdate)
 from claude_agent_sdk.types import PermissionRuleValue
 
+PROMPTS_OFF = os.environ.get("PARITY_GIT_APPROVAL") == "off"
 COMMANDS = ["./ordinary.sh", "./private-denied.sh", "./project-denied.sh", "git commit --allow-empty -m parity-one",
             "git commit --allow-empty -m parity-two",
             "git commit --amend --allow-empty -m parity-amended", "git push"]
@@ -180,10 +181,12 @@ async def run_case(source, mode, decision, base, server):
         # Commit, amend and push must be decided by the ask rules, never by the classifier.
         assert "git commit" not in STATE["classifier_text"], result
         assert "git push" not in STATE["classifier_text"], result
-        assert asks == ([COMMANDS[0], *COMMANDS[3:]] if host else COMMANDS[3:]), result
+        # With CODING_TOOL_GIT_APPROVAL=off the managed drop-in carries no ask rules.
+        gated = decision == "deny" and not PROMPTS_OFF
+        assert asks == ([] if PROMPTS_OFF else [COMMANDS[0], *COMMANDS[3:]] if host else COMMANDS[3:]), result
         assert result["ordinary"] == (not (host and decision == "deny")), result
-        assert result["commits"] == (1 if decision == "deny" else 3), result
-        assert result["subject"] == ("seed" if decision == "deny" else "parity-amended"), result
+        assert result["commits"] == (1 if gated else 3), result
+        assert result["subject"] == ("seed" if gated else "parity-amended"), result
         assert not (repo / "private.marker").exists(), "user deny lost"
         assert not (repo / "project.marker").exists(), "project deny lost"
         assert result["model_steps"] == len(COMMANDS) + 1, result
@@ -194,6 +197,7 @@ async def main():
     assert os.geteuid() != 0, "run native CLI as the developer"
     policy = Path("/etc/claude-code/managed-settings.d/50-subyard-git-approval.json")
     assert policy.is_file(), "managed drop-in missing"
+    assert ("ask" in json.loads(policy.read_text()).get("permissions", {})) != PROMPTS_OFF, "drop-in mode mismatch"
     source = json.loads(Path(sys.argv[1]).read_text())
     base = Path(sys.argv[2]).resolve()
     base.mkdir(parents=True, exist_ok=True)
@@ -212,6 +216,7 @@ async def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         modes = (["default"] if os.environ.get("PARITY_HOST_PROBE") == "1" else
+                 [source["permissions"]["defaultMode"]] if PROMPTS_OFF else
                  [source["permissions"]["defaultMode"], "default", "auto"])
         for mode in modes:
             for decision in ["deny", "allow"]:

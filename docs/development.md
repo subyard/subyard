@@ -109,6 +109,23 @@ Its read-only response must distinguish transient startup from stable repairable
 keep its implementation and tests in the owning profile. See the
 [profile startup contract](control-plane.md#profile-startup-readiness).
 
+## Pull requests
+
+PR conventions live in the [development workflow](../.agents/skills/subyard-dev-flow/SKILL.md#pull-requests).
+`dev/pr-stats.py` prints the PR statistics block; its host-free test is `bash tests/pr-stats.sh`.
+
+Repository settings the workflow expects:
+
+- a branch ruleset on the default branch and `release/**`: pull request required (0 approvals),
+  required status checks `verify`, `compatibility` and `native-engine-arm64` without "require
+  branches to be up to date", force pushes and deletions blocked, no bypass for the GitHub App;
+- merge options: squash merging only, squash commit message "Pull request title", auto-merge
+  allowed, head branches deleted after merge;
+- on `release/**`, if required status checks block the agent from creating the branch, allow
+  creation without checks.
+
+Without required checks, `gh pr merge --auto` merges immediately.
+
 ## Build and test
 
 `make cli-docs` builds the current CLI and regenerates [the command reference](cli-reference.md)

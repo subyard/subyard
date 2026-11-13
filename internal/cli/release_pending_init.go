@@ -237,7 +237,7 @@ func pendingInitValues(loaded config.Loaded) map[string]string {
 	values := map[string]string{"ALLOWS_CODING_TOOLS": strconv.FormatBool(loaded.Integrations.AllowsCodingTools), "ENVIRONMENT_PROFILES": strings.Join(loaded.EnvironmentProfiles.Effective, " ")}
 	for name, value := range loaded.Environment {
 		owned := loaded.Catalog.IntegrationInitSetting(name) || name == "INTEGRATION_HOST_LINKS" || name == "ENVIRONMENT_PROFILES" || name == "WEB_PREVIEW_HOST_PORT"
-		if owned && name != "CODING_TOOL_INTEGRATIONS" {
+		if owned && name != "CODING_TOOL_INTEGRATIONS" && !config.DefaultGitApproval(name, value) {
 			switch name {
 			case "ENVIRONMENT_PROFILES":
 				value = strings.Join(loaded.EnvironmentProfiles.Effective, " ")

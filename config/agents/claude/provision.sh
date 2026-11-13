@@ -18,6 +18,12 @@ if [ -z "$DEV_HOME" ] && [ "$(id -u)" = 0 ]; then
 fi
 expected_owner="$(id -u):$(id -g)"
 die() { printf 'Claude policy: %s\n' "$*" >&2; exit 1; }
+GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
+case "$GIT_APPROVAL" in
+  prompt) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"},"permissions":{"ask":["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]}}' ;;
+  off) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"}}' ;;
+  *) die 'CODING_TOOL_GIT_APPROVAL must be prompt or off' ;;
+esac
 [ "$(id -u)" = 0 ] || [ "${CLAUDE_POLICY_TEST_ALLOW_NON_ROOT:-0}" = 1 ] || die 'must run as root'
 for path in "$INSTALL_ROOT" "$BIN_LINK"; do
   case "$path" in /*) ;; *) die 'install paths must be absolute' ;; esac
@@ -136,6 +142,14 @@ download_artifact() {
   done
   return 1
 }
+# The approval policy precedes every download, the binary it governs and every developer-tree
+# repair, so a failed or slow download never leaves the CLI without it.
+install -d -m 0755 "$(dirname "$POLICY_DIR")" "$POLICY_DIR" "$(dirname "$CHECK_PATH")"
+stage="$(mktemp "$POLICY_DIR/.subyard.XXXXXX")"
+jq . <<<"$POLICY_JSON" > "$stage"
+chmod 0644 "$stage"
+mv -fT -- "$stage" "$policy"
+stage=""
 download "$RELEASE_BASE_URL/latest" "$tmp/latest" || die 'latest version download failed'
 VERSION="$(cat "$tmp/latest")"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'invalid latest release version'
@@ -161,21 +175,6 @@ if [ "$current" = 0 ]; then
   install -m 0755 "$tmp/claude" "$runtime_stage"
   is_working_binary "$runtime_stage" && [ "$BINARY_VERSION" = "$VERSION" ] || die 'staged CLI failed version validation'
 fi
-# The approval policy precedes the binary it governs and every developer-tree repair.
-install -d -m 0755 "$(dirname "$POLICY_DIR")" "$POLICY_DIR" "$(dirname "$CHECK_PATH")"
-stage="$(mktemp "$POLICY_DIR/.subyard.XXXXXX")"
-cat > "$stage" <<'JSON'
-{
-  "$comment": "Subyard Claude permission policy",
-  "env": {"DISABLE_UPDATES": "1"},
-  "permissions": {
-    "ask": ["Bash(git commit)", "Bash(git commit:*)", "Bash(git push)", "Bash(git push:*)"]
-  }
-}
-JSON
-chmod 0644 "$stage"
-mv -fT -- "$stage" "$policy"
-stage=""
 if [ -n "$runtime_stage" ]; then
   mv -fT -- "$runtime_stage" "$RUNTIME_PATH"
   runtime_stage=""
@@ -187,6 +186,7 @@ stage="$(mktemp "$(dirname "$CHECK_PATH")/.claude-policy-check.XXXXXX")"
   printf 'policy=%q\npolicy_dir=%q\nexpected_owner=%q\n' "$policy" "$POLICY_DIR" "$(id -u):$(id -g)"
   printf 'runtime=%q\nlink=%q\n' "$RUNTIME_PATH" "$BIN_LINK"
   printf 'DEV_USER=%q\nDEV_HOME=%q\n' "$DEV_USER" "$DEV_HOME"
+  printf 'git_approval=%q\npolicy_json=%q\n' "$GIT_APPROVAL" "$POLICY_JSON"
   declare -f is_working_binary dev_owned_directory native_shadow_state
   cat <<'CHECK'
 # Report every refusal that does not depend on a failed read, in this order.
@@ -197,7 +197,7 @@ refuse() { printf 'claude-policy-check: %s\n' "$*" >&2; refusals=$((refusals + 1
 if [ -f "$policy" ] && [ ! -L "$policy" ]; then
   [ "$(stat -c '%a:%u:%g' "$policy")" = "644:$expected_owner" ] \
     || refuse 'managed policy permissions drifted; run yard init'
-  jq -e '. == {"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"},"permissions":{"ask":["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]}}' "$policy" >/dev/null 2>&1 \
+  jq -e --argjson expected "$policy_json" '. == $expected' "$policy" >/dev/null 2>&1 \
     || refuse 'managed policy drifted or could not be read; run yard init'
 else
   refuse 'managed policy is missing; run yard init'
@@ -209,7 +209,11 @@ shadow="$(native_shadow_state)" || shadow=foreign
 [ "$shadow" != native ] || refuse "a native self-installed link shadows $link; run yard init"
 if [ "$refusals" = 0 ]; then
   printf 'Claude %s ready. ' "$BINARY_VERSION"
-  printf 'Managed Claude Git ask rules and update lock installed; inspect /status and /permissions in the active client.\n'
+  if [ "$git_approval" = off ]; then
+    printf 'Managed Claude update lock installed; managed Git prompts off (CODING_TOOL_GIT_APPROVAL=off).\n'
+  else
+    printf 'Managed Claude Git ask rules and update lock installed; inspect /status and /permissions in the active client.\n'
+  fi
 fi
 if [ "$shadow" = foreign ]; then
   printf 'Conflict: %s/.local/bin/claude is not Subyard-owned and was left unchanged; login shells can run it instead of %s.\n' "$DEV_HOME" "$link"
