@@ -175,6 +175,84 @@ class ManagedCodexDisconnectTest(unittest.TestCase):
         # Truncating diagnostics must never discard a leak from the assertion's history.
         self.assertIn('unknown', requests.peers_since(killed_at))
 
+    def disconnect_requests(self, *late):
+        """Replay the periodic failure, then record late (admission, peer, lookup start) requests."""
+        spec = importlib.util.spec_from_file_location('managed_agents', FIXTURE.with_suffix('.py'))
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        requests = helper.RoutingRequests()
+        # The turn's follow-up request was admitted 1.1 ms after the kill, and its peer lookup
+        # found the client gone.
+        for instant, peer, lookup in ((563.42677696, '/fixture/codex', 563.427), (563.487311291, 'unknown', 563.4874),
+                                      *late):
+            clock = iter((instant, lookup))
+            with patch.object(helper.time, 'monotonic', side_effect=lambda: next(clock)), \
+                    patch.object(helper, 'peer_executable', return_value=peer):
+                requests.record(1, 2, '/v1/responses')
+        return helper, requests
+
+    def test_request_in_flight_at_the_disconnect_is_not_a_survivor(self):
+        killed_at, exited_at = 563.486200839, 563.510118461
+        helper, requests = self.disconnect_requests()
+        self.assertEqual(requests.peers_since(killed_at), {'unknown'})
+        self.assertEqual(requests.survivors(killed_at, exited_at), set())
+        evidence = requests.evidence(killed_at, exited_at)
+        self.assertEqual(evidence['grace_until'], exited_at + helper.DISCONNECT_GRACE)
+        self.assertEqual([entry['after_grace'] for entry in evidence['requests']], [False, False])
+        self.assertEqual(evidence['requests'][1]['lookup'], 563.4874)
+        # A lookup that began before the exit may have seen the dying client, however long it ran.
+        helper, requests = self.disconnect_requests((563.5, '/fixture/codex', 563.505))
+        self.assertEqual(requests.survivors(killed_at, exited_at), set())
+
+    def test_late_or_live_requests_after_the_disconnect_are_survivors(self):
+        killed_at, exited_at = 563.486200839, 563.510118461
+        grace = 1.0
+        for case, request in {
+                'unknown after the grace': (exited_at + grace + 0.01, 'unknown', exited_at + grace + 0.02),
+                'live survivor within the grace': (563.6, '/fixture/survivor', 563.61),
+                'lookup started at the exit': (563.5, '/fixture/codex', exited_at),
+                'live survivor after the grace': (580.0, '/fixture/survivor', 580.01),
+                'admitted before the kill, live after the exit': (563.48, '/fixture/survivor', 563.52)}.items():
+            with self.subTest(case):
+                helper, requests = self.disconnect_requests(request)
+                self.assertEqual(helper.DISCONNECT_GRACE, grace)
+                self.assertEqual(requests.survivors(killed_at, exited_at), {request[1]})
+                self.assertEqual(requests.evidence(killed_at, exited_at)['requests'][-1]['after_grace'],
+                                 request[0] > exited_at + grace)
+
+    def test_survivors_wait_for_lookups_but_never_name_an_unfinished_one(self):
+        killed_at, exited_at = 563.486200839, 563.510118461
+        for case, (instant, finished, expected) in {
+                'finished during the wait': (563.6, True, {'/fixture/survivor'}),
+                'unfinished within the grace': (563.6, False, set()),
+                'unfinished after the grace': (565.0, False, {'pending'})}.items():
+            with self.subTest(case):
+                helper, requests = self.disconnect_requests((instant, 'pending', instant))
+                sleeps = []
+
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    if finished:
+                        requests.entries[-1]['peer'] = '/fixture/survivor'
+                with patch.object(helper.time, 'sleep', side_effect=sleep):
+                    self.assertEqual(requests.survivors(killed_at, exited_at, wait=0 if not finished else 5), expected)
+                self.assertEqual(len(sleeps), 1 if finished else 0)
+
+    def test_holder_in_teardown_is_not_named(self):
+        spec = importlib.util.spec_from_file_location('managed_agents', FIXTURE.with_suffix('.py'))
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        table = 'header\n 0: 0100007F:A0A0 0100007F:0002 01 0:0 0:0 0 1000 0 7 x\n'
+        for holders, expected in (({'11': '/proc/11/exe'}, 'unknown'),
+                                  ({'11': '/proc/11/exe', '12': '/fixture/survivor'}, '/fixture/survivor'),
+                                  ({'11': None}, 'unknown')):
+            with self.subTest(holders=holders), \
+                    patch.object(helper.Path, 'read_text', return_value=table), \
+                    patch.object(helper.glob, 'glob', return_value=['/proc/%s/fd/3' % pid for pid in holders]), \
+                    patch.object(helper.os, 'readlink', return_value='socket:[7]'), \
+                    patch.object(helper, 'resolved_exe', side_effect=holders.get):
+                self.assertEqual(helper.peer_executable(0xA0A0, 2), expected)
+
 
 if __name__ == '__main__':
     unittest.main()
