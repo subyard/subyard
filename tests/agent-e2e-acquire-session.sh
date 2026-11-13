@@ -82,6 +82,60 @@ done
   [ "$rc" = 4 ] && [ -z "$LEASE_ID" ] && [ -z "$LEASE_ACQUIRE_PID" ] || exit 32
 ) || fail 'v4 admission refusal retained an aborted lease'
 
+# The guard may exit after the parent saw EOF but before its liveness check.
+# The final frames are then already on disk and must be drained, not declared unknown.
+(
+  LOCAL_TEMP="$TMP/late-capacity"
+  STATE_ROOT="$TMP/late-capacity-client"
+  IDENTITY="$TMP/late-capacity-key"
+  install -d -m 0700 "$LOCAL_TEMP"
+  LEASE_REQUESTED_SLOT='slot-001'
+  LEASE_RUN=abcdef13
+  LEASE_PURPOSE=capacity-fixture
+  resolve_bastion_route() { :; }
+  resolve_workspace_attribution() { printf 'yard\tProject\n'; }
+  telemetry_correlation() { :; }
+  facade_request() {
+    local frame
+    if [ "$1" = status ]; then
+      printf '%s\n' '{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","process-acquire-v4","disposable-v1"]}'
+      return
+    fi
+    while [ ! -e "$LOCAL_TEMP/parent-saw-eof" ]; do sleep 0.05; done
+    printf '%s\n' "$reservation_json"
+    IFS= read -r frame
+    # The final frame has no newline; the stream end still completes it.
+    printf '%s' '{"schema_version":1,"status":"error","code":"capacity","reason":"disk","message":"fixture capacity refusal"}'
+  }
+  # Hold the parent's first liveness check until the guard has exited.
+  kill() {
+    if [ "$1" = -0 ] && [ -n "${2:-}" ] && [ "$2" = "${LEASE_ACQUIRE_PID:-}" ] &&
+      [ ! -e "$LOCAL_TEMP/parent-saw-eof" ]; then
+      : > "$LOCAL_TEMP/parent-saw-eof"
+      while lease_process_identity "$2" >/dev/null; do sleep 0.05; done
+      return 1
+    fi
+    builtin kill "$@"
+  }
+  rc=0
+  acquire_lease 2> "$LOCAL_TEMP/stderr" || rc=$?
+  [ "$rc" = 4 ] && [ -e "$LOCAL_TEMP/parent-saw-eof" ] && [ -z "$LEASE_ID" ] && [ -z "$LEASE_ACQUIRE_PID" ] &&
+    grep -Fqx 'agent-e2e: retryable capacity refusal for slot-001: resource=disk; retry after resources become available' "$LOCAL_TEMP/stderr" ||
+    { cat "$LOCAL_TEMP/stderr" >&2; exit 33; }
+) || fail 'capacity frames landing before the guard exit were declared unknown'
+
+# A guard that exits without a terminal frame stays unknown and names its cause.
+(
+  LOCAL_TEMP="$TMP/no-frame"
+  install -d -m 0700 "$LOCAL_TEMP"
+  LEASE_REQUESTED_SLOT='slot-001'
+  LEASE_RUN=fixture
+  # shellcheck disable=SC2317 # Invoked by the guard.
+  facade_request() { printf '%s\n' "$reservation_json"; return 23; }
+  if lease_acquire_stream 'acquire-v4 fixture'; then exit 34; fi
+  [ "$LEASE_ACQUIRE_FAILURE" = 'stream-ended-no-frame guard-rc=23' ] && [ -z "$LEASE_ACQUIRE_PID" ] || exit 35
+) || fail 'stream without a terminal frame lost its unknown outcome or cause'
+
 # The physical fixture must retain the actual child exit and bounded error
 # classes before teardown, while dropping private paths and arbitrary payloads.
 (

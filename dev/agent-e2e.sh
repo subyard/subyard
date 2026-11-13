@@ -38,6 +38,8 @@ LEASE_KEEPER_PID=""
 LEASE_ACQUIRE_PID=""
 LEASE_ACQUIRE_ACK=""
 LEASE_ACQUIRE_REPLY=""
+LEASE_ACQUIRE_FAILURE=""
+LEASE_ACQUIRE_GUARD_RC=""
 LEASE_ACQUIRE_PROTOCOL=acquire-v3
 LEASE_KEEPER_LOG=""
 LEASE_YARD=""
@@ -62,6 +64,11 @@ declare -A VM_IP=()
 declare -A VM_HOST_KEY=()
 
 die() { printf 'agent-e2e: %s\n' "$*" >&2; exit 2; }
+# Log parsers match the fixed refusal line; the preceding cause line names the die point.
+die_acquire_unknown() {
+  printf 'agent-e2e: lease acquire unknown-outcome cause=%s\n' "$1" >&2
+  die "lease acquire outcome is unknown; refusing a second allocation"
+}
 info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
 
@@ -636,6 +643,7 @@ lease_acquire_guard() {
     keeper_job_pid=''
     return "$rc"
   fi
+  : > "$LEASE_ACQUIRE_REPLY.owner-lost" 2>/dev/null || true
   kill -KILL -- "-$keeper_job_pid" >/dev/null 2>&1 || true
   wait "$keeper_job_pid" >/dev/null 2>&1 || true
   keeper_job_pid=''
@@ -661,12 +669,17 @@ parse_lease_reservation() {
 
 lease_acquire_stream() {
   local request="$1" owner_pid="$BASHPID" owner_identity requester_pid requester_identity response fd partial=''
+  local guard_rc='' frame_rc
+  LEASE_ACQUIRE_FAILURE='identity-unreadable'
+  LEASE_ACQUIRE_GUARD_RC=''
   owner_identity="$(lease_process_identity "$owner_pid")" || return 1
   requester_pid="${owner_identity#*:}"
   [ "$requester_pid" -gt 1 ] && requester_identity="$(lease_process_identity "$requester_pid")" || return 1
+  LEASE_ACQUIRE_FAILURE=''
   LEASE_ACQUIRE_REPLY="$LOCAL_TEMP/acquire-replies"
   LEASE_ACQUIRE_ACK="$LOCAL_TEMP/acquire-ack"
   : > "$LEASE_ACQUIRE_REPLY"
+  rm -f "$LEASE_ACQUIRE_REPLY.owner-lost"
   chmod 0600 "$LEASE_ACQUIRE_REPLY"
   lease_acquire_guard "$owner_pid" "$owner_identity" "$requester_pid" "$requester_identity" "$request" &
   LEASE_ACQUIRE_PID=$!
@@ -675,31 +688,54 @@ lease_acquire_stream() {
     if IFS= read -r response <&"$fd"; then
       response="$partial$response"
       partial=''
-      if [ "$(jq -r '.status // empty' <<<"$response")" = reserved ]; then
-        parse_lease_reservation "$response" || { exec {fd}<&-; return 1; }
-        [ "$LEASE_SLOT" = "$LEASE_REQUESTED_SLOT" ] || { exec {fd}<&-; return 1; }
-      else
-        ACQUIRE_RESPONSE="$response"
-        exec {fd}<&-
-        return 0
-      fi
     else
       partial+="$response"
-      [ "${#partial}" -le 65536 ] || { exec {fd}<&-; return 1; }
-      if ! kill -0 "$LEASE_ACQUIRE_PID" >/dev/null 2>&1; then
-        wait "$LEASE_ACQUIRE_PID" 2>/dev/null || true
+      [ "${#partial}" -le 65536 ] || { LEASE_ACQUIRE_FAILURE='oversized-frame'; exec {fd}<&-; return 1; }
+      if [ -n "$guard_rc" ]; then
+        # The guard exited before the final read, so this EOF is final; an unterminated
+        # last frame is still complete. Only a stream without a terminal frame is unknown.
+        if [ -z "$partial" ]; then
+          LEASE_ACQUIRE_FAILURE="stream-ended-no-frame guard-rc=$guard_rc"
+          [ ! -e "$LEASE_ACQUIRE_REPLY.owner-lost" ] || LEASE_ACQUIRE_FAILURE+=' owner-or-requester-lost'
+          exec {fd}<&-
+          return 1
+        fi
+        response="$partial"
+        partial=''
+      elif ! kill -0 "$LEASE_ACQUIRE_PID" >/dev/null 2>&1; then
+        # Frames may land between the EOF read and this check; drain once more.
+        guard_rc=0
+        wait "$LEASE_ACQUIRE_PID" 2>/dev/null || guard_rc=$?
         LEASE_ACQUIRE_PID=''
-        exec {fd}<&-
-        return 1
+        LEASE_ACQUIRE_GUARD_RC="$guard_rc"
+        continue
       else
         sleep 0.1
+        continue
       fi
     fi
+    frame_rc=0
+    lease_acquire_frame "$response" || frame_rc=$?
+    [ "$frame_rc" = 2 ] && continue
+    exec {fd}<&-
+    return "$frame_rc"
   done
 }
 
+# Returns 0 for a terminal frame, 1 for an invalid reservation and 2 to keep reading.
+lease_acquire_frame() {
+  local response="$1"
+  if [ "$(jq -r '.status // empty' <<<"$response")" = reserved ]; then
+    parse_lease_reservation "$response" || { LEASE_ACQUIRE_FAILURE='invalid-reservation'; return 1; }
+    [ "$LEASE_SLOT" = "$LEASE_REQUESTED_SLOT" ] || { LEASE_ACQUIRE_FAILURE='reservation-slot-mismatch'; return 1; }
+    return 2
+  fi
+  ACQUIRE_RESPONSE="$response"
+}
+
 finish_acquire_session() {
-  [ -n "$LEASE_ACQUIRE_PID" ] || return 0
+  # A guard reaped while draining the final frames keeps its recorded exit status.
+  [ -n "$LEASE_ACQUIRE_PID" ] || return "${LEASE_ACQUIRE_GUARD_RC:-0}"
   : > "$LEASE_ACQUIRE_ACK"
   local rc=0
   wait "$LEASE_ACQUIRE_PID" || rc=$?
@@ -957,7 +993,7 @@ acquire_lease() {
   local status_response workspace_context elapsed sleep_seconds capacity_wait attempt=0 last_state='' last_reason=''
   local owner_display='' owner_yard='' owner_project='' owner_run='' owner_purpose=''
   local owner_acquired='' owner_expires='' owner_acquired_epoch='' owner_expires_epoch=''
-  local owner_summary='' last_owner_summary=''
+  local owner_summary='' last_owner_summary='' transport_rc guard_rc
   [ -n "$LEASE_REQUESTED_SLOT" ] \
     || die "an exact --slot is required before acquiring an E2E lease"
   command -v jq >/dev/null 2>&1 || die "jq is required"
@@ -1018,15 +1054,17 @@ acquire_lease() {
     fi
     attempt=$((attempt + 1))
     if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ]; then
-      lease_acquire_stream "$request" || die "lease acquire outcome is unknown; refusing a second allocation"
+      lease_acquire_stream "$request" || die_acquire_unknown "${LEASE_ACQUIRE_FAILURE:-stream-failed}"
       response="$ACQUIRE_RESPONSE"
-    elif ! response="$(facade_request "$request")"; then
-      die "lease acquire outcome is unknown; refusing a second allocation"
+    else
+      transport_rc=0
+      response="$(facade_request "$request")" || transport_rc=$?
+      [ "$transport_rc" = 0 ] || die_acquire_unknown "transport-rc=$transport_rc"
     fi
     jq -e 'type == "object" and .schema_version == 1 and
       (.status == "ok" or .status == "error")' \
       <<<"$response" >/dev/null 2>&1 \
-      || die "lease acquire outcome is unknown; refusing a second allocation"
+      || die_acquire_unknown invalid-envelope
     code="$(jq -r '.code // empty' <<<"$response")"
     if parse_lease_grant "$response"; then
       elapsed=$((SECONDS - started))
@@ -1057,8 +1095,12 @@ acquire_lease() {
       return 0
     fi
     if [ -n "$LEASE_ACQUIRE_PID" ]; then
-      wait "$LEASE_ACQUIRE_PID" || die "lease acquire outcome is unknown; refusing a second allocation"
+      guard_rc=0
+      wait "$LEASE_ACQUIRE_PID" || guard_rc=$?
+      [ "$guard_rc" = 0 ] || die_acquire_unknown "refusal-guard-rc=$guard_rc"
       LEASE_ACQUIRE_PID=''
+    elif [ "${LEASE_ACQUIRE_GUARD_RC:-0}" != 0 ]; then
+      die_acquire_unknown "refusal-guard-rc=$LEASE_ACQUIRE_GUARD_RC"
     fi
     reason="$(jq -r '.reason // empty' <<<"$response")"
     state="$(jq -r '.state // empty' <<<"$response")"
@@ -1069,7 +1111,7 @@ acquire_lease() {
         (.reason == "memory" or .reason == "disk") and
         (.message | type == "string" and length > 0 and length <= 1024 and test("^[^\\x00-\\x1f\\x7f]+$"))
       ' <<<"$response" >/dev/null 2>&1 \
-        || die "lease acquire outcome is unknown; refusing a second allocation"
+        || die_acquire_unknown invalid-capacity-refusal
       # A validated capacity refusal confirms the broker aborted before creating guests.
       [ "$LEASE_ACQUIRE_PROTOCOL" != acquire-v4 ] || LEASE_ID=''
       elapsed=$((SECONDS - started))
@@ -1103,7 +1145,7 @@ acquire_lease() {
       die "lease acquire failed (${code:-invalid_response}: ${reason:-unspecified})"
     fi
     validate_exact_busy_response "$response" \
-      || die "lease acquire outcome is unknown; refusing a second allocation"
+      || die_acquire_unknown invalid-busy-refusal
     owner_summary=''
     if [ "$state" = held ]; then
       owner_display="$(jq -r '.owner.display_label' <<<"$response")"
@@ -1114,11 +1156,11 @@ acquire_lease() {
       owner_acquired="$(jq -r '.owner.acquired_at' <<<"$response")"
       owner_expires="$(jq -r '.owner.expires_at' <<<"$response")"
       owner_acquired_epoch="$(date -u -d "$owner_acquired" +%s 2>/dev/null)" \
-        || die "lease acquire outcome is unknown; refusing a second allocation"
+        || die_acquire_unknown invalid-busy-owner-acquired
       owner_expires_epoch="$(date -u -d "$owner_expires" +%s 2>/dev/null)" \
-        || die "lease acquire outcome is unknown; refusing a second allocation"
+        || die_acquire_unknown invalid-busy-owner-expires
       [ "$owner_acquired_epoch" -le "$owner_expires_epoch" ] \
-        || die "lease acquire outcome is unknown; refusing a second allocation"
+        || die_acquire_unknown invalid-busy-owner-window
       owner_summary="owner=$owner_yard/$owner_project run=$owner_run purpose=$owner_purpose acquired=$owner_acquired expires=$owner_expires label=$owner_display"
     fi
     last_state="$state"
