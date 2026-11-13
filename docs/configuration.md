@@ -668,8 +668,10 @@ Limits:
 
 - When Claude runs under an organization's server-managed settings, the yard's drop-in is not the
   effective source, so that policy must carry the commit/push ask rules itself.
-- Installed snapshots record only `off`; an older release refuses them. With `off` applied, set
-  `prompt` and run `yard init` before rolling back to an older release.
+- A release without this setting refuses it wherever it is set, and refuses an installed snapshot
+  that records `off`. Before switching to such a release, run
+  `yard -Y <yard> config unset CODING_TOOL_GIT_APPROVAL --scope <scope>` at every scope that sets it
+  (add `--git` for a synced assignment), then `yard init`.
 - Updating an installation older than v0.14.0 (Codex) or v0.23.0 (Claude): agent sessions started
   after the home defaults are refreshed and before that agent's provision hook writes the managed
   policy get no commit/push prompt. Hooks run in the yard's agent order and stop at the first
