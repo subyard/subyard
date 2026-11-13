@@ -29,7 +29,8 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True):
+def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
+            manifest_sources=False):
     root = directory / "source"
     for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
@@ -60,7 +61,8 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
         shutil.copy2(ROOT / ".github/workflows/release.yml", root / ".github/workflows/release.yml")
         if not optional_vms:
             (root / "dev/release-acceptance.py").write_text("CI_PREPARED_CHECKS = {}\n")
-        (root / "dev/release-publication.py").write_text("def release_level():\n    pass\n")
+        (root / "dev/release-publication.py").write_text("def release_level():\n    pass\n" +
+                                                         ("def expand_manifests():\n    pass\n" if manifest_sources else ""))
     prepared = directory / "prepared"
     prepared.mkdir()
     assets = prepared / "assets"
@@ -2320,6 +2322,89 @@ class HostedChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "job has not passed"):
             m.publish_remote(self.github, self.prepared, document, self.root)
         self.assertIsNone(self.github.release)
+
+    def test_candidate_without_v6_publisher_keeps_v5_and_v6_candidate_shares_manifest_sources(self):
+        capture_attempts(self.output)
+        self.collect()
+        # Publication runs the candidate's own publisher, so a candidate without v6 support keeps v5.
+        self.assertFalse(m.supports_manifest_sources(self.root))
+        document = m.attestation(self.output, self.identity)
+        self.assertEqual(document["schema_version"], 5)
+        self.assertEqual(len(document["manifests"]), 2)
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            self.assertTrue(m.supports_manifest_sources(fixture(Path(temporary), manifest_sources=True)[0]))
+        compact, sources = m.compact_manifests(document["manifests"])
+        self.assertEqual(len(sources), 1)
+        v6 = {**document, "schema_version": 6, "manifests": compact, "manifest_sources": sources}
+        with patch.object(m, "supports_manifest_sources", return_value=True):
+            compacted = m.attestation(self.output, self.identity)
+            self.assertEqual(m.publication_preflight(self.output, [], self.github)["manifest_count"], 2)
+        self.assertEqual(compacted, v6)
+        self.assertEqual(m.v5_attestation(compacted), document)
+        pointer = json.loads(base64.b64decode(m.encode_attestation(compacted, self.github, force_blob=True)))
+        self.assertEqual(m.decode_attestation(pointer, self.github), compacted)
+        source, manifest = next(iter(sources)), next(iter(compact))
+        other = next(sha for sha in compact if sha != manifest)
+        def entry(item):
+            next(iter(item["manifest_sources"][source].values()))[1] = "0" * 64
+        for mutate in (lambda item: item["manifest_sources"].update({"a" * 64: item["manifest_sources"][source]}),
+                       lambda item: item["manifest_sources"].update({"b" * 64: {}}), entry,
+                       lambda item: item["manifests"][manifest].update(source_entries_sha256="c" * 64),
+                       lambda item: item["manifests"][manifest].update(source_entries={}),
+                       lambda item: item["manifests"][manifest]["candidate"].update(candidate_bundle_sha256="d" * 64),
+                       lambda item: item["manifests"].update({manifest: item["manifests"][other]}),
+                       lambda item: item.pop("manifest_sources"),
+                       lambda item: item.update(schema_version=5)):
+            invalid = copy.deepcopy(compacted)
+            mutate(invalid)
+            with self.assertRaises(ValueError):
+                m.validate_attestation(invalid, self.identity, self.root)
+        with patch.object(m, "ATTESTATION_EXPANDED_MANIFEST_BYTE_LIMIT", len(m.a.evidence_bytes(sources[source]))), \
+             self.assertRaisesRegex(ValueError, "expanded attestation manifests exceed"):
+            m.validate_attestation(compacted, self.identity, self.root)
+        # publish_remote is publish-ci validation by the candidate's own module.
+        self.assertTrue(m.publish_remote(self.github, self.prepared, pointer, self.root)["immutable"])
+
+    def test_resume_keeps_dispatched_v5_state_and_rebinds_undispatched_v5_state(self):
+        capture_attempts(self.output)
+        self.collect()
+        legacy = m.attestation(self.output, self.identity)
+        with patch.object(m, "supports_manifest_sources", return_value=True):
+            document = m.attestation(self.output, self.identity)
+        self.assertEqual(document["schema_version"], 6)
+        state = {"request": "r", "attestation_sha256": m.identity_hash(document)}
+        self.assertIs(m.resumed_attestation(state, document), document)
+        state = {"request": "r", "attestation_sha256": m.identity_hash(legacy), "dispatch_started": True}
+        self.assertEqual(m.resumed_attestation(state, document), legacy)
+        self.assertEqual(state["attestation_sha256"], m.identity_hash(legacy))
+        state = {"request": "r", "attestation_sha256": m.identity_hash(legacy)}
+        with redirect_stdout(io.StringIO()) as printed:
+            self.assertIs(m.resumed_attestation(state, document), document)
+        self.assertEqual(state["attestation_sha256"], m.identity_hash(document))
+        self.assertIn("replaces_undispatched_v5=" + m.identity_hash(legacy), printed.getvalue())
+        state = {"request": "r", "attestation_sha256": "f" * 64}
+        self.assertIs(m.resumed_attestation(state, document), document)
+        self.assertEqual(state["attestation_sha256"], "f" * 64)  # Other changes still refuse in publish.
+
+    def test_many_hosted_manifests_fit_transport_limits_with_shared_sources(self):
+        # Shape of a full release: one manifest per hosted check, identical ~250 KiB source inventories.
+        entries = {f"src/file-{index:05}.go": ["regular", hashlib.sha256(str(index).encode()).hexdigest()]
+                   for index in range(2500)}
+        candidate = {"version": "1.2.3", "source_fingerprint": "1" * 64, "runtime_file": "subyard.tar.gz",
+                     "runtime_sha256": "2" * 64, "release_files": {"subyard.tar.gz": "2" * 64}, "candidate_sha256": "3" * 64}
+        manifests = {}
+        for index in range(100):
+            manifest = {"schema_version": 1, "environment": {"system": "Linux", "machine": "x86_64", "go": "go"},
+                        "candidate": {**candidate, "candidate_bundle_sha256": hashlib.sha256(str(index).encode()).hexdigest()},
+                        "source_entries": entries}
+            manifests[m.a.evidence_hash(manifest)] = manifest
+        self.assertGreater(len(m.a.evidence_bytes(entries)), 200 << 10)
+        self.assertGreater(len(m.canonical(manifests).encode()), m.ATTESTATION_BYTE_LIMIT)
+        compact, sources = m.compact_manifests(manifests)
+        compact_bytes = m.canonical({"manifests": compact, "manifest_sources": sources}).encode()
+        self.assertLess(len(compact_bytes), 1 << 20)
+        self.assertLess(len(zlib.compress(compact_bytes)), m.ATTESTATION_BLOB_BYTE_LIMIT)
+        self.assertEqual(m.expand_manifests(compact, sources), manifests)
 
     def test_async_dispatch_persists_lost_response_and_resume_does_not_dispatch_again(self):
         path = self.directory / "async.json"
