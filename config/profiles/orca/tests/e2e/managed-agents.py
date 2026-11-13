@@ -359,10 +359,20 @@ def peer_executable(client_port, server_port):
             for descriptor in glob.glob('/proc/[0-9]*/fd/*'):
                 try:
                     if os.readlink(descriptor) == target:
-                        return resolved_exe(descriptor.split('/')[2])
+                        executable = resolved_exe(descriptor.split('/')[2])
+                        # A holder in teardown has no image left to name; look for another one.
+                        if executable and not executable.startswith('/proc/'):
+                            return executable
                 except OSError:
                     pass
     return 'unknown'
+
+
+# One request the client sent before the kill may be admitted afterwards; only thread
+# scheduling on the fixture side delays it (the periodic failure admitted one 1.1 ms after
+# the kill, 23 ms before the observed exit). One second covers such stalls on a loaded VM and
+# stays far below the 15 s slow tool, after which a surviving turn would call the model again.
+DISCONNECT_GRACE = 1.0
 
 
 class RoutingRequests:
@@ -377,6 +387,7 @@ class RoutingRequests:
                  'path': path.split('?', 1)[0][:200]}
         with self.lock:
             self.entries.append(entry)
+            entry['lookup'] = time.monotonic()
         peer = peer_executable(client_port, server_port)
         with self.lock:
             entry['peer'] = peer
@@ -386,12 +397,34 @@ class RoutingRequests:
         with self.lock:
             return {entry['peer'] for entry in self.entries if entry['monotonic'] >= instant}
 
+    def survivors(self, killed_at, exited_at, wait=5):
+        """Peers showing that a killed client's turn continued.
+
+        A request admitted after the grace is new work. Within the grace a request may be the
+        one already in flight, unless a lookup started after the client exited still named a
+        process: the client's descriptors close before it becomes a zombie, so that holder
+        survived, whenever its request was admitted. A lookup still unfinished after the
+        bounded wait names nobody.
+        """
+        deadline = time.monotonic() + wait
+        while True:
+            with self.lock:
+                entries = [dict(entry) for entry in self.entries
+                           if entry['monotonic'] >= killed_at or entry['lookup'] >= exited_at]
+            if all(entry['peer'] != 'pending' for entry in entries) or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        return {entry['peer'] for entry in entries if entry['monotonic'] > exited_at + DISCONNECT_GRACE or (
+            entry['peer'] not in ('unknown', 'pending') and entry['lookup'] >= exited_at)}
+
     def evidence(self, killed_at, exited_at):
+        grace = None if exited_at is None else exited_at + DISCONNECT_GRACE
         with self.lock:
-            return {'killed_at': killed_at, 'exited_at': exited_at, 'total': len(self.entries),
+            return {'killed_at': killed_at, 'exited_at': exited_at, 'grace_until': grace, 'total': len(self.entries),
                     'requests': [dict(entry, peer=entry['peer'][:512],
                                       after_kill=None if killed_at is None else entry['monotonic'] >= killed_at,
-                                      after_exit=None if exited_at is None else entry['monotonic'] >= exited_at)
+                                      after_exit=None if exited_at is None else entry['monotonic'] >= exited_at,
+                                      after_grace=None if grace is None else entry['monotonic'] > grace)
                                  for entry in self.entries[-40:]]}
 
 
@@ -529,7 +562,10 @@ def codex_routing(arguments):
             # Leave reaping to Terminal.close(), which also cleans up the process group.
             exited_at = time.monotonic()
             time.sleep(25)
-            peers = provider.request_log.peers_since(killed_at)
+            # A survived turn reaches the model from its own process; a killed one may only
+            # leave the request it had in flight.
+            peers = (provider.request_log.peers_since(killed_at) if survives
+                     else provider.request_log.survivors(killed_at, exited_at))
             assert (path / 'done.txt').exists() == survives, name + ': the tool outcome after the disconnect changed'
             assert peers == ({expected} if survives else set()), name + ': unexpected requests after the disconnect: ' + repr(sorted(peers))
             print('codex-routing: %s: client killed during a slow tool; tool %s, model peers %s' % (
