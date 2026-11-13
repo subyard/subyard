@@ -87,6 +87,12 @@ case "$command" in
     fi
     ;;
   renew\ *)
+    if [ -e "$FAKE/renew-transport-fails" ]; then log renew-transport-failure; exit 255; fi
+    if [ -e "$FAKE/renew-delay" ]; then
+      # The request is accepted only after transport latency; a killed transport never arrives.
+      log connect-renew
+      sleep 3
+    fi
     log renew
     if [ -e "$FAKE/renew-fails" ]; then
       printf '%s\n' '{"schema_version":1,"status":"error","code":"lease_lost","message":"lease is no longer current"}'
@@ -96,7 +102,9 @@ case "$command" in
     ;;
   release\ *)
     log release
-    if [ -e "$FAKE/renew-fails" ]; then
+    if [ -e "$FAKE/release-rejected" ]; then
+      printf '%s\n' '{"schema_version":1,"status":"error","code":"quarantined","message":"slot fencing or stop failed"}'
+    elif [ -e "$FAKE/renew-fails" ]; then
       printf '%s\n' '{"schema_version":1,"status":"error","code":"lease_lost","message":"lease is no longer current"}'
     else
       printf '%s\n' '{"schema_version":1,"status":"ok","message":"released"}'
@@ -109,6 +117,7 @@ chmod 0755 "$TMP/bin/ssh"
 
 export PATH="$TMP/bin:$PATH" FAKE="$TMP"
 export SUBYARD_E2E_TEST_MODE=1 SUBYARD_E2E_TEST_RENEW_SECONDS=1
+export SUBYARD_E2E_TEST_RENEW_RETRY_SECONDS=1 SUBYARD_E2E_TEST_RENEW_STALE_SECONDS=5
 export SUBYARD_E2E_STATE_DIR="$TMP/client" SUBYARD_E2E_ROUTE_REGISTRY="$TMP/routes"
 export SUBYARD_E2E_GUEST_FACTS="$TMP/facts.json"
 unset SUBYARD_E2E_ROLLOUT_YARD SUBYARD_E2E_CAPACITY_WAIT
@@ -124,6 +133,12 @@ wait_for() {
   return 1
 }
 : > "$TMP/facade.log"
+
+# The idle limit defaults to 20 minutes and is bounded by 2 hours outside test mode.
+if SUBYARD_E2E_TEST_MODE=0 client acquire --yard test-yard --slot 2 --idle 3h >/dev/null 2>"$TMP/err"; then
+  fail 'acquire accepted an idle limit above 2h'
+fi
+grep -Fq -- '--idle must be between 1m and 2h' "$TMP/err" || fail 'missing idle bound diagnostic'
 
 # Acquire is explicit about its slot and allocates nothing without it.
 if client acquire >/dev/null 2>"$TMP/err"; then fail 'acquire without --slot succeeded'; fi
@@ -144,6 +159,7 @@ for protocol in v3 v4; do
     grep -Fxq ack-after-keeper "$TMP/facade.log" || fail 'grant was acknowledged before the detached keeper owned it'
   fi
   dir="$TMP/client/handles/$handle"
+  [ "$(jq -r .idle_seconds "$dir/lease.json")" = 1200 ] || fail "$protocol default idle limit is not 20 minutes"
   [ "$(stat -c %a "$dir")" = 700 ] && [ "$(stat -c %a "$dir/lease.json")" = 600 ] \
     || fail 'handle state is not private'
   client exec "$handle" -- sh -c 'printf token > state' || fail "$protocol first exec failed"
@@ -163,6 +179,9 @@ for protocol in v3 v4; do
   client release "$handle" 2>"$TMP/release.err" || { cat "$TMP/release.err" >&2; fail "$protocol release failed"; }
   mv "$TMP/routes.away" "$TMP/routes"
   [ "$(count release)" = 1 ] || fail "$protocol release did not reach the broker once"
+  grep -Fxq 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0' "$TMP/release.err" \
+    && grep -Eq '^E2E_RELEASE state=end duration_seconds=[0-9]+ budget_seconds=180 grace_seconds=5 exit_code=0$' "$TMP/release.err" \
+    || fail "$protocol handle release left no release evidence: $(cat "$TMP/release.err")"
   [ ! -e "$dir" ] || fail "$protocol release kept the handle"
   wait_for '! kill -0 "$keeper" 2>/dev/null' || fail "$protocol keeper outlived its released handle"
   renewals="$(count renew)"
@@ -203,13 +222,79 @@ sleep 2
 [ "$(count renew)" = "$renewals" ] || fail 'orphaned keeper renewed'
 client release "$handle" 2>/dev/null || fail 'release of a replaced handle failed'
 
+# An in-flight renewal transport dies with its keeper or handle before its request arrives.
+for orphan in keeper-killed handle-replaced; do
+  : > "$TMP/facade.log"
+  touch "$TMP/renew-delay"
+  handle="$(client acquire --yard test-yard --slot 2 2>/dev/null)"
+  dir="$TMP/client/handles/$handle"
+  keeper="$(keeper_pid "$handle")"
+  wait_for '[ "$(count connect-renew)" -ge 1 ]' || fail "$orphan: renewal transport did not start"
+  if [ "$orphan" = keeper-killed ]; then
+    kill -KILL "$keeper"
+  else
+    cp -p "$dir/lease.json" "$dir/lease.copy"
+    mv -f "$dir/lease.copy" "$dir/lease.json"
+  fi
+  wait_for '! kill -0 "$keeper" 2>/dev/null' || fail "$orphan: keeper survived"
+  sleep 4
+  [ "$(grep -cx renew "$TMP/facade.log" || true)" = 0 ] \
+    || fail "$orphan: an orphaned renewal transport reached the broker"
+  rm -f "$TMP/renew-delay"
+  client release "$handle" 2>/dev/null || fail "$orphan: release failed"
+done
+
+# Renewal transport failures are retried while the lease is safely current; a longer
+# outage, unlike a single failure, marks the handle lost.
+: > "$TMP/facade.log"
+handle="$(client acquire --yard test-yard --slot 2 2>/dev/null)"
+touch "$TMP/renew-transport-fails"
+wait_for '[ "$(count renew-transport-failure)" -ge 2 ]' || fail 'renewal transport failure was not retried'
+[ ! -e "$TMP/client/handles/$handle/lost" ] || fail 'one transport failure marked the lease lost'
+rm -f "$TMP/renew-transport-fails"
+wait_for '[ "$(grep -cx renew "$TMP/facade.log" || true)" -ge 1 ]' || fail 'renewal did not recover after the transport returned'
+[ ! -e "$TMP/client/handles/$handle/lost" ] || fail 'a recovered renewal left the lease lost'
+client exec "$handle" -- true || fail 'exec failed after renewal recovered'
+touch "$TMP/renew-transport-fails"
+wait_for '[ -e "$TMP/client/handles/$handle/lost" ]' || fail 'a long renewal outage did not mark the lease lost'
+rm -f "$TMP/renew-transport-fails"
+client release "$handle" 2>/dev/null || fail 'release after a renewal outage failed'
+
+# A running exec shows as in use; exec of a trivial command resets the idle timer.
+: > "$TMP/facade.log"
+handle="$(client acquire --yard test-yard --slot 2 --idle 3s 2>/dev/null)"
+client exec "$handle" -- sleep 3 &
+exec_pid=$!
+wait_for 'grep -q "^guest-start sleep" "$TMP/facade.log"' || fail 'background exec did not start'
+client leases | grep -E "^$handle .* active +in-use$" >/dev/null || fail "leases did not show the running exec: $(client leases)"
+wait "$exec_pid" || fail 'background exec failed'
+sleep 2
+client exec "$handle" -- true || fail 'idle reset exec failed'
+sleep 2
+[ "$(count release)" = 0 ] || fail 'exec HANDLE -- true did not reset the idle timer'
+wait_for '[ "$(count release)" = 1 ]' || fail 'idle lease was not released after the reset'
+
+# Repeatedly rejected idle releases stop renewal so broker expiry reclaims the slot.
+: > "$TMP/facade.log"
+touch "$TMP/release-rejected"
+handle="$(client acquire --yard test-yard --slot 2 --idle 1s 2>/dev/null)"
+keeper="$(keeper_pid "$handle")"
+wait_for '[ -e "$TMP/client/handles/$handle/lost" ]' || fail 'rejected idle releases were retried without bound'
+wait_for '! kill -0 "$keeper" 2>/dev/null' || fail 'keeper kept running after abandoning idle release'
+[ "$(count release)" = 3 ] || fail "idle release attempts were not bounded at 3: $(count release)"
+renewals="$(count renew)"
+sleep 2
+[ "$(count renew)" = "$renewals" ] || fail 'keeper renewed after abandoning the lease'
+rm -f "$TMP/release-rejected"
+client release "$handle" 2>/dev/null || fail 'release after abandoned idle release failed'
+
 # Idle limit: the keeper releases an unused lease, but not while an exec runs.
 : > "$TMP/facade.log"
 handle="$(client acquire --yard test-yard --slot 2 --idle 2s 2>/dev/null)"
 client exec "$handle" -- sleep 4
 grep -Fq release "$TMP/facade.log" && fail 'idle release interrupted a running exec'
 wait_for '[ "$(count release)" = 1 ]' || fail 'idle lease was not released'
-[ ! -e "$TMP/client/handles/$handle" ] || fail 'idle release kept the handle'
+wait_for '[ ! -e "$TMP/client/handles/$handle" ]' || fail 'idle release kept the handle'
 awk '/^guest-end/ {ended=NR} /^release/ {released=NR} END {exit !(ended && released > ended)}' "$TMP/facade.log" \
   || fail 'idle release did not wait for the running exec'
 
@@ -222,6 +307,8 @@ if client exec "$handle" -- true 2>"$TMP/err"; then fail 'exec succeeded on a lo
 grep -Fq "lease $handle was lost" "$TMP/err" || fail 'missing lost-lease diagnostic'
 client release "$handle" 2>"$TMP/err" || fail 'release of a lost lease failed'
 grep -Fq 'had already ended' "$TMP/err" || fail 'release did not report the ended lease'
+grep -Eq '^E2E_RELEASE state=end duration_seconds=[0-9]+ budget_seconds=180 grace_seconds=5 exit_code=1$' "$TMP/err" \
+  || fail 'an unconfirmed release was recorded as a successful cleanup'
 [ ! -e "$TMP/client/handles/$handle" ] || fail 'lost handle was kept after release'
 rm -f "$TMP/renew-fails"
 

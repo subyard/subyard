@@ -445,11 +445,18 @@ one lease and one VM until `release`. `leases` lists handles; `logs` and `incide
 controller's diagnostics as described below.
 
 A detached keeper, started before a streaming grant is acknowledged, owns each handle. It renews
-every five minutes only while that exact handle exists. A released, replaced or removed handle
-stops it without another renewal. It releases the lease after `--idle` (default 30 minutes,
-between 1 minute and 12 hours) without `exec` use; a running `exec` counts as use. If the keeper
-stops, `exec` refuses and the broker expires the lease twenty minutes after its last renewal. A
-failed renewal marks the handle `lost`. Release a lost or keeper-less handle and acquire again.
+every five minutes only while that exact handle exists. Each renewal transport runs in its own
+process group, checks the handle and keeper right before sending and is killed as a whole when
+either is gone, so a released, replaced or removed handle or a killed keeper cannot renew. The
+keeper releases the lease after `--idle` (default 20 minutes, between 1 minute and 2 hours)
+without `exec` use; a running `exec` counts as use, and `exec HANDLE -- true` resets the timer.
+`leases` shows `in-use` while an `exec` runs. A renewal transport failure or timeout is retried
+every minute for up to fifteen minutes after the last successful renewal, below the broker's
+twenty-minute expiry; an explicit broker rejection or a longer outage marks the handle `lost`.
+After three failed idle releases the keeper also marks it `lost` and stops renewing, so broker
+expiry reclaims the slot. If the keeper stops, `exec` refuses and the broker expires the lease
+twenty minutes after its last renewal. Release a lost or keeper-less handle and acquire again.
+Handle release prints the same `E2E_RELEASE` evidence as the runner.
 Deselecting the profile does not interrupt a held lease: its running keeper still releases it
 after the idle limit.
 
