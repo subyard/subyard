@@ -2,6 +2,7 @@
   "schema_version": 1,
   "infrastructure_service": {
     "id": "test-vms",
+    "registration_activation": "test-vm-broker",
     "default_yard": "test-yard",
     "required_settings": {"NESTED_E2E_VMS": "1", "YARD_KIND": "container"},
     "route_root": "e2e/routes",

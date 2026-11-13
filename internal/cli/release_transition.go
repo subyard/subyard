@@ -117,7 +117,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		return 1
 	}
 	operation := cli.releaseActivationOperation(request)
-	reconcilers := operation.activationReconcilers(request)
+	reconcilers := operation.bindServiceRegistrationActivation(request, operation.activationReconcilers(request))
 	ownerRegistration := operation.ownerRegistrationTransition(request)
 	ingressFactory := operation.releaseTransitionIngressFactory(request)
 	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
@@ -309,6 +309,8 @@ type activationStageReconciler struct {
 	inspectApplicability func(context.Context) (activationApplicability, error)
 	platform             func(context.Context, activationApplicability) (ports.ReconcileStageRunner, error)
 	authorize            func(context.Context) error
+	planned              func() []string
+	after                func(context.Context) error
 }
 
 type activationStageError struct {
@@ -548,6 +550,9 @@ func (reconciler *activationStageReconciler) ObserveProspective(ctx context.Cont
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
+	if projected != nil {
+		projected.planned = reconciler.planned
+	}
 	return projected.Observe(ctx, releases, links)
 }
 
@@ -572,9 +577,13 @@ func (reconciler *activationStageReconciler) Observe(
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
+	var planned []string
+	if reconciler.planned != nil {
+		planned = reconciler.planned()
+	}
 	if !applicability.applies {
 		return releasetransition.V2ActivationObservation{
-			Actual: desired, Desired: desired, Converged: true,
+			Actual: desired, Desired: desired, Converged: true, Planned: planned,
 		}, nil
 	}
 	platform, err := reconciler.platform(ctx, applicability)
@@ -599,7 +608,7 @@ func (reconciler *activationStageReconciler) Observe(
 		}
 	}
 	return releasetransition.V2ActivationObservation{
-		Actual: actual, Desired: desired, Converged: converged,
+		Actual: actual, Desired: desired, Converged: converged, Planned: planned,
 	}, nil
 }
 
@@ -647,6 +656,9 @@ func (reconciler *activationStageReconciler) Reconcile(
 			"post-verify",
 			fmt.Errorf("activation stage %s did not converge", reconciler.stage),
 		)
+	}
+	if reconciler.after != nil {
+		return reconciler.after(ctx)
 	}
 	return nil
 }

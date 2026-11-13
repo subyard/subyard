@@ -3,7 +3,7 @@ package profile
 import "testing"
 
 func TestInfrastructureServiceMetadata(t *testing.T) {
-	content := []byte(`{"schema_version":1,"infrastructure_service":{"id":"fixture-service","default_yard":"service-container","required_settings":{"FIXTURE_ENABLED":"1"},"route_root":"fixture/routes"}}`)
+	content := []byte(`{"schema_version":1,"infrastructure_service":{"id":"fixture-service","default_yard":"service-container","required_settings":{"FIXTURE_ENABLED":"1"},"route_root":"fixture/routes","registration_activation":"fixture-owner"}}`)
 	metadata, err := Decode("fixture", content)
 	if err != nil {
 		t.Fatal(err)
@@ -11,6 +11,9 @@ func TestInfrastructureServiceMetadata(t *testing.T) {
 	data, _ := metadata.Data()
 	data.InfrastructureService.RequiredSettings["FIXTURE_ENABLED"] = "changed"
 	definition := metadata.definition()
+	if definition.InfrastructureService.RegistrationActivation != "fixture-owner" {
+		t.Fatal("registration activation lost")
+	}
 	if definition.InfrastructureService.RequiredSettings["FIXTURE_ENABLED"] != "1" || !definition.InfrastructureService.Matches(map[string]string{"FIXTURE_ENABLED": "1"}) {
 		t.Fatal("service metadata aliased or lost")
 	}
@@ -28,6 +31,7 @@ func TestInfrastructureServiceMetadata(t *testing.T) {
 		`{"schema_version":1,"infrastructure_service":{"id":"fixture","default_yard":"default","required_settings":{"ENABLE":"1"},"route_root":"routes"}}`,
 		`{"schema_version":1,"infrastructure_service":{"id":"fixture","default_yard":"service","required_settings":{"ENABLE":"1"},"route_root":"../escape"}}`,
 		`{"schema_version":1,"infrastructure_service":{"id":"fixture","default_yard":"service","required_settings":{},"route_root":"routes"}}`,
+		`{"schema_version":1,"infrastructure_service":{"id":"fixture","default_yard":"service","required_settings":{"ENABLE":"1"},"route_root":"routes","registration_activation":"../owner"}}`,
 	} {
 		if _, err := Decode("fixture", []byte(invalid)); err == nil {
 			t.Fatalf("unsafe metadata accepted: %s", invalid)

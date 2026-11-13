@@ -130,6 +130,7 @@ type V2ActivationObservation struct {
 	PendingInputs bool               `json:"pendingInputs,omitempty"`
 	Diagnostics   []RedactedDecision `json:"diagnostics,omitempty"`
 	Consequences  []string           `json:"consequences,omitempty"`
+	Planned       []string           `json:"planned,omitempty"`
 	Warnings      []string           `json:"warnings,omitempty"`
 }
 
@@ -3458,6 +3459,7 @@ func (transition *V2Transition) observeActivation(
 		if len(observation.activationWarnings) > 64 {
 			return invalid("release transition reported too many activation warnings")
 		}
+		observation.activationConsequences = append(observation.activationConsequences, actual.Planned...)
 		if !actual.Converged {
 			observation.activationConsequences = append(observation.activationConsequences, actual.Consequences...)
 			observation.decisions = append(observation.decisions, RedactedDecision{

@@ -1077,6 +1077,10 @@ PYBASELINE
   env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
     "$baseline_owner" update --version "$P0_OWNER_VERSION" --offline --yes
   [ "$(runtime_yard --version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not activated'
+  [ -f "$SUBYARD_HOME/services/test-vms/default.json" ] || die 'upgrade did not register the broker'
+  timeout --signal=TERM --kill-after=10 30 env -u SUBYARD_E2E_ROLLOUT_YARD \
+    SUBYARD_E2E_STATE_DIR="$STATE_PARENT/registration-probe" SUBYARD_E2E_ROUTE_REGISTRY="$SUBYARD_HOME/e2e/routes" "$RUNNER" --status --json \
+    | jq -e '.status == "ok"' >/dev/null || die 'agent status without --yard did not discover the broker'
   runtime_yard -Y test-yard check
   verify_broker_installation || die 'activated broker differs from candidate'
   [ "$(sha256sum "$candidate_engine" | cut -d' ' -f1)" = "$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)" ] \

@@ -164,6 +164,10 @@ selection, including `-Y` and `SUBYARD_YARD`, does not select the service. Ordin
 checks owner port collisions before effects. Existing runtimes keep their configured
 settings, including an implicit UID from their existing template configuration.
 
+A new-release update registers a uniquely proven owned broker after reconciliation, retaining its
+runtime and leases. Same-release commands keep their normal behavior; registration findings
+and manual recovery follow the [service activation contract](control-plane.md#owner-infrastructure-services).
+
 Adopt an already owned broker without initialization, container restart or lease interruption:
 
 ```sh

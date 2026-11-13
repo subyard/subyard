@@ -2327,6 +2327,15 @@ A shipped profile can declare `infrastructure_service` with a unique `id`, `defa
 role; ordinary prepared init, power and teardown remain its lifecycle owners. Core never identifies
 services from a container or profile name. The test-vms profile owns its broker and allocation semantics.
 
+The optional `registration_activation` attaches metadata registration after the declared native
+owner reconciles during a new-release transition. Its conditional plan line names the service
+and default pool; successful registration reports the exact runtime. Exactly one proven owned
+runtime is registered; several candidates and proof/write failures report guidance without changing
+readiness. Zero runtimes produce a hint only when matching yard settings exist. Observation and
+same-release repair remain native. Existing entries,
+including interrupted publications, are never changed; explicit `yard service register` repairs them.
+An unreadable yard configuration withholds registration because its service role is unknown and is reported separately.
+
 The protected owner registry is `$SUBYARD_HOME/services/SERVICE/POOL.json`. Each binding carries
 owner HostID, exact yard/project/instance, native UUID, stable installation ownership digest and a random
 registration generation. Registration verifies native ownership again under the ordinary owner mutation
