@@ -210,7 +210,9 @@ keep_diagnostics() {
 
 run_collector_selection() {
   local output="$1" check_id="$2" native_status=0
-  python3 -B "$WORKSPACE/dev/release-acceptance.py" run --output "$output" --only "$check_id" --slots 1 || native_status=$?
+  # Hosted jobs have their own time limits; keep the capacity bound well inside them.
+  SUBYARD_E2E_CAPACITY_WAIT="${SUBYARD_E2E_CAPACITY_WAIT:-30m}" \
+    python3 -B "$WORKSPACE/dev/release-acceptance.py" run --output "$output" --only "$check_id" --slots 1 || native_status=$?
   printf 'Native collector aggregate exit: %s\n' "$native_status"
   # Full receipt remains incomplete; only one requested terminal selection defines this job.
   jq -es --arg check "$check_id" 'length == 1 and .[0].state == "finished"
