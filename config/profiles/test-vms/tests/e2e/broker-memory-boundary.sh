@@ -1020,6 +1020,7 @@ holder_failure() {
       /^agent-e2e: broker capability probe failed$/ { print; next }
       /[.]pub.*No such file or directory|No such file or directory.*[.]pub/ { print "controller public identity unavailable before acquire"; next }
       /^agent-e2e: (incomplete agent identity|cannot read the agent private identity|agent identity public and private halves do not match)/ { print "controller identity preparation failed"; next }
+      /^agent-e2e: lease acquire unknown-outcome cause=(identity-unreadable|oversized-frame|invalid-reservation|reservation-slot-mismatch|stream-failed|invalid-envelope|invalid-capacity-refusal|invalid-busy-(refusal|owner-acquired|owner-expires|owner-window)|(transport|refusal-guard)-rc=[0-9]+|stream-ended-no-frame guard-rc=[0-9]+( owner-or-requester-lost)?)$/ { print; next }
       /^agent-e2e: lease acquire outcome is unknown; refusing a second allocation$/ { print "pregrant acquire transport outcome unknown"; next }
       /^agent-e2e: test environment unavailable: no pinned host key for / { print "holder has no pinned SSH host key"; next }
       /^agent-e2e: (cannot canonicalize|E2E runner must execute|managed workspace|project metadata)/ { print "holder workspace attribution failed"; next }

@@ -82,12 +82,16 @@ done
   [ "$rc" = 4 ] && [ -z "$LEASE_ID" ] && [ -z "$LEASE_ACQUIRE_PID" ] || exit 32
 ) || fail 'v4 admission refusal retained an aborted lease'
 
-# The guard may exit after the parent saw EOF but before its liveness check.
-# The final frames are then already on disk and must be drained, not declared unknown.
-(
-  LOCAL_TEMP="$TMP/late-capacity"
-  STATE_ROOT="$TMP/late-capacity-client"
-  IDENTITY="$TMP/late-capacity-key"
+# Run acquire_lease with one final frame and guard exit status. "drained" makes the
+# guard exit after the parent saw EOF but before its liveness check, so the final
+# frames are drained from disk; "live" holds the guard until the parent waits for it.
+late_frame_case() {
+  local name="$1" rc=0
+  # Distinct names: the dynamically scoped transport must not see acquire locals.
+  fixture_final="$2" fixture_guard_rc="$3" fixture_mode="$4"
+  LOCAL_TEMP="$TMP/$name"
+  STATE_ROOT="$TMP/$name-client"
+  IDENTITY="$TMP/$name-key"
   install -d -m 0700 "$LOCAL_TEMP"
   LEASE_REQUESTED_SLOT='slot-001'
   LEASE_RUN=abcdef13
@@ -95,34 +99,90 @@ done
   resolve_bastion_route() { :; }
   resolve_workspace_attribution() { printf 'yard\tProject\n'; }
   telemetry_correlation() { :; }
+  write_client_config() { :; }
+  start_lease_keeper() { :; }
   facade_request() {
-    local frame
+    local frame attempt
     if [ "$1" = status ]; then
       printf '%s\n' '{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","process-acquire-v4","disposable-v1"]}'
       return
     fi
-    while [ ! -e "$LOCAL_TEMP/parent-saw-eof" ]; do sleep 0.05; done
+    if [ "$fixture_mode" = drained ]; then
+      while [ ! -e "$LOCAL_TEMP/parent-saw-eof" ]; do sleep 0.05; done
+    fi
     printf '%s\n' "$reservation_json"
     IFS= read -r frame
-    # The final frame has no newline; the stream end still completes it.
-    printf '%s' '{"schema_version":1,"status":"error","code":"capacity","reason":"disk","message":"fixture capacity refusal"}'
-  }
-  # Hold the parent's first liveness check until the guard has exited.
-  kill() {
-    if [ "$1" = -0 ] && [ -n "${2:-}" ] && [ "$2" = "${LEASE_ACQUIRE_PID:-}" ] &&
-      [ ! -e "$LOCAL_TEMP/parent-saw-eof" ]; then
-      : > "$LOCAL_TEMP/parent-saw-eof"
-      while lease_process_identity "$2" >/dev/null; do sleep 0.05; done
-      return 1
+    if [ "$fixture_mode" = drained ]; then
+      # The final frame has no newline; the stream end still completes it.
+      printf '%s' "$fixture_final"
+      return "$fixture_guard_rc"
     fi
-    builtin kill "$@"
+    printf '%s\n' "$fixture_final"
+    for ((attempt=0; attempt<200; attempt++)); do
+      [ ! -e "$LOCAL_TEMP/parent-waits" ] || return "$fixture_guard_rc"
+      sleep 0.05
+    done
+    return 99
   }
-  rc=0
+  if [ "$fixture_mode" = drained ]; then
+    # Hold the parent's first liveness check until the guard has exited.
+    kill() {
+      if [ "$1" = -0 ] && [ -n "${2:-}" ] && [ "$2" = "${LEASE_ACQUIRE_PID:-}" ] &&
+        [ ! -e "$LOCAL_TEMP/parent-saw-eof" ]; then
+        : > "$LOCAL_TEMP/parent-saw-eof"
+        while lease_process_identity "$2" >/dev/null; do sleep 0.05; done
+        return 1
+      fi
+      builtin kill "$@"
+    }
+  else
+    # Release the guard only once the parent waits for the still-live guard.
+    wait() {
+      if [ -n "${1:-}" ] && [ "$1" = "${LEASE_ACQUIRE_PID:-}" ]; then : > "$LOCAL_TEMP/parent-waits"; fi
+      builtin wait "$@"
+    }
+  fi
   acquire_lease 2> "$LOCAL_TEMP/stderr" || rc=$?
+  return "$rc"
+}
+capacity_disk='{"schema_version":1,"status":"error","code":"capacity","reason":"disk","message":"fixture capacity refusal"}'
+
+# Capacity frames landing before the guard exit must be drained, not declared unknown.
+(
+  rc=0
+  late_frame_case late-capacity "$capacity_disk" 0 drained || rc=$?
   [ "$rc" = 4 ] && [ -e "$LOCAL_TEMP/parent-saw-eof" ] && [ -z "$LEASE_ID" ] && [ -z "$LEASE_ACQUIRE_PID" ] &&
     grep -Fqx 'agent-e2e: retryable capacity refusal for slot-001: resource=disk; retry after resources become available' "$LOCAL_TEMP/stderr" ||
     { cat "$LOCAL_TEMP/stderr" >&2; exit 33; }
 ) || fail 'capacity frames landing before the guard exit were declared unknown'
+
+# A refusal whose guard failed, reaped while draining or still live, is unknown.
+# die exits the case subshell, so its status is the subshell status.
+for mode in drained live; do
+  rc=0
+  (late_frame_case "refusal-guard-$mode" "$capacity_disk" 23 "$mode") || rc=$?
+  marker=parent-waits
+  [ "$mode" = live ] || marker=parent-saw-eof
+  [ "$rc" = 2 ] && [ -e "$TMP/refusal-guard-$mode/$marker" ] &&
+    grep -Fqx 'agent-e2e: lease acquire unknown-outcome cause=refusal-guard-rc=23' "$TMP/refusal-guard-$mode/stderr" ||
+    { cat "$TMP/refusal-guard-$mode/stderr" >&2; fail "refusal guard failure ($mode) rc=$rc lost its unknown outcome or cause"; }
+done
+
+# A grant drained after the guard exited 0 was never acked, so the broker did not hand it off.
+# The wrapper EXIT trap must then release it with the granted credentials.
+rc=0
+full_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":1,"lease_id":"aabb","lease_epoch":1,"capability":"ccdd","context":{"schema_version":2,"yard":"yard","project":"Project","run":"abcdef13","purpose":"capacity-fixture"},"data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
+(
+  release_lease() {
+    [ "$LEASE_ID:$LEASE_CAPABILITY:$LEASE_EPOCH" = aabb:ccdd:1 ] || return 1
+    : > "$TMP/grant-guard-gone/release-attempted"
+  }
+  trap cleanup_on_exit EXIT
+  late_frame_case grant-guard-gone "$full_grant" 0 drained
+) 2> "$TMP/grant-guard-gone.cleanup" || rc=$?
+[ "$rc" = 2 ] && [ -e "$TMP/grant-guard-gone/parent-saw-eof" ] && [ -e "$TMP/grant-guard-gone/release-attempted" ] &&
+  grep -Fqx 'agent-e2e: lease acquire handoff is unknown; cleanup required' "$TMP/grant-guard-gone/stderr" ||
+  { cat "$TMP/grant-guard-gone/stderr" >&2; fail "grant after guard exit rc=$rc was accepted as handed off"; }
 
 # A guard that exits without a terminal frame stays unknown and names its cause.
 (
@@ -143,6 +203,10 @@ done
   STATE_PARENT="$TMP/client-diagnostics"
   install -d -m 0700 "$STATE_PARENT"
   printf '%s\n' 'ssh-keygen: /fixture/private/controller.pub: No such file or directory' \
+    'agent-e2e: lease acquire unknown-outcome cause=stream-ended-no-frame guard-rc=23 owner-or-requester-lost' \
+    'agent-e2e: lease acquire unknown-outcome cause=/fixture/private' \
+    'agent-e2e: lease acquire unknown-outcome cause=fixture-secret capability=ccdd' \
+    'agent-e2e: lease acquire unknown-outcome cause=transport-rc=1 fixture-secret' \
     'grant capability=fixture-secret' > "$STATE_PARENT/pregrant-TERM.log"
   (exit 23) &
   # shellcheck disable=SC2034 # Consumed by the extracted child failure handler.
@@ -152,7 +216,8 @@ done
 [ "$diagnostics_rc" = 2 ] &&
   grep -Fq 'pregrant child outcome: client=pregrant-TERM exit_code=23' "$TMP/client-diagnostics.log" &&
   grep -Fq 'controller public identity unavailable before acquire' "$TMP/client-diagnostics.log" &&
-  ! grep -Eq '/fixture/private|fixture-secret' "$TMP/client-diagnostics.log" \
+  grep -Fqx 'agent-e2e: lease acquire unknown-outcome cause=stream-ended-no-frame guard-rc=23 owner-or-requester-lost' "$TMP/client-diagnostics.log" &&
+  ! grep -Eq '/fixture/private|fixture-secret|ccdd' "$TMP/client-diagnostics.log" \
   || fail 'child diagnostics lost native exit or disclosed untrusted detail'
 
 # SIGKILL cannot run the wrapper EXIT trap. Its existing process watcher must
