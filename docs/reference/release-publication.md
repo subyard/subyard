@@ -266,6 +266,18 @@ status, log and environment facts; a transferred record must match the reviewed 
 Extra, dangling or conflicting references fail before remote mutation. This is deduplication
 inside one attestation, without an external artifact store. Legacy v1 declarations and attestation
 versions 1–4 remain readable; mixed legacy evidence and v2 transfers can coexist in v5.
+
+Attestation v6 is v5 with each distinct manifest `source_entries` stored once. It adds
+`manifest_sources`, keyed by SHA-256 of the canonical inventory; each `manifests` entry has exactly
+`schema_version`, `candidate`, `environment` and `source_entries_sha256`. The validator rebuilds each
+v1 manifest, rechecks its table hash and applies the v5 rules; every source must be referenced, and
+the rebuilt manifests are bounded to 128 MiB. Remote publication validates with the candidate
+commit's own publisher, so the schema follows the candidate source, not the local checkout or the
+size: v6 for every manifest-carrying attestation of a candidate whose publisher supports it, v5 for
+earlier candidates. An earlier candidate whose v5 attestation exceeds the limits, such as one with
+many hosted checks, cannot be published; prepare a new candidate that contains v6 support.
+A publication state recorded for the equivalent v5 form keeps that form once dispatched; before
+dispatch it is rebound to v6 and the replaced hash is printed.
 Package preparation and explicit publication exceptions retain their existing provenance and gates.
 Batch preparation and atomic application use the same
 [transfer command](../testing.md#batch-transfer-preparation-and-application). A batch contributes the

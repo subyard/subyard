@@ -31,6 +31,8 @@ REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "Subyard/Subyard")
 DISPATCH_INPUT_LIMIT = 65535
 ATTESTATION_BYTE_LIMIT = 4 << 20
 ATTESTATION_BLOB_BYTE_LIMIT = 2 << 20
+# v6 stores each distinct manifest source inventory once; bound the CPU spent re-hashing expanded manifests.
+ATTESTATION_EXPANDED_MANIFEST_BYTE_LIMIT = 128 << 20
 ATTESTATION_TRANSPORT = "subyard-attestation-zlib-v1"
 ATTESTATION_BLOB_TRANSPORT = "subyard-attestation-git-blob-v1"
 # Earlier candidates ran the bundle jobs of a since retired integration.
@@ -170,6 +172,67 @@ def decode_attestation(document, github=None):
     return decoded
 
 
+def supports_manifest_sources(root):
+    """Whether the pinned candidate publisher, which validates remote publication, accepts v6."""
+    return a.source_declares(root, "dev/release-publication.py", "expand_manifests")
+
+
+def compact_manifests(manifests):
+    """Return manifests referencing shared source inventories by hash, and those inventories."""
+    compact, sources = {}, {}
+    for sha, manifest in manifests.items():
+        entries = a.evidence_hash(manifest["source_entries"])
+        sources[entries] = manifest["source_entries"]
+        compact[sha] = {**{key: value for key, value in manifest.items() if key != "source_entries"},
+                        "source_entries_sha256": entries}
+    return compact, sources
+
+
+def expand_manifests(compact, sources):
+    """Rebuild full manifests; callers verify each manifest against its referencing hash."""
+    if not isinstance(compact, dict) or not compact or not isinstance(sources, dict) or not sources:
+        raise ValueError("missing attestation manifests")
+    sizes = {}
+    for sha, entries in sources.items():
+        if not a.is_sha(sha) or a.evidence_hash(entries) != sha:
+            raise ValueError("attestation manifest source hash mismatch")
+        sizes[sha] = len(a.evidence_bytes(entries))
+    manifests, used, expanded = {}, set(), 0
+    for sha, item in compact.items():
+        if (not isinstance(item, dict) or set(item) != {"schema_version", "candidate", "environment", "source_entries_sha256"}
+            or not isinstance(item["source_entries_sha256"], str) or item["source_entries_sha256"] not in sources):
+            raise ValueError("invalid compact attestation manifest")
+        reference = item["source_entries_sha256"]
+        used.add(reference)
+        expanded += sizes[reference]
+        if expanded > ATTESTATION_EXPANDED_MANIFEST_BYTE_LIMIT:
+            raise ValueError("expanded attestation manifests exceed byte limit")
+        manifests[sha] = {**{key: value for key, value in item.items() if key != "source_entries_sha256"},
+                          "source_entries": sources[reference]}
+    if used != set(sources):
+        raise ValueError("extra attestation manifest sources")
+    return manifests
+
+
+def v5_attestation(document):
+    """The v5 form of a v6 attestation, for publication state recorded before v6 existed."""
+    expanded = {key: value for key, value in document.items() if key != "manifest_sources"}
+    return {**expanded, "schema_version": 5, "manifests": expand_manifests(document["manifests"], document["manifest_sources"])}
+
+
+def resumed_attestation(state, document):
+    """Resume publication state that an earlier publisher recorded for the equivalent v5 form."""
+    if (document["schema_version"] != 6 or state["attestation_sha256"] == identity_hash(document)
+        or state["attestation_sha256"] != identity_hash(v5_attestation(document))):
+        return document
+    if state.get("dispatch_started"):
+        return v5_attestation(document)  # The remote request may carry v5; keep it.
+    # An undispatched request was never sent, so it moves to the deduplicated form.
+    print("PUBLICATION attestation_schema=6 replaces_undispatched_v5=" + state["attestation_sha256"], flush=True)
+    state["attestation_sha256"] = identity_hash(document)
+    return document
+
+
 def read_attestation(path):
     with path.open("rb") as stream:
         raw = stream.read(ATTESTATION_BYTE_LIMIT + 1)
@@ -205,6 +268,8 @@ def publication_preflight(output, manifest_paths, github):
     document = {"diagnostic": "publication-preflight-v1", "candidate_id": "diagnostic-local",
                 "manifests": manifests, "checks": checks,
                 "external_obligations": {name: {"status": item["status"]} for name, item in receipt["external_obligations"].items()}}
+    if supports_manifest_sources(root):
+        document["manifests"], document["manifest_sources"] = compact_manifests(manifests)
     encoded = encode_attestation(document, github, force_blob=True)
     envelope = json.loads(base64.b64decode(encoded, validate=True))
     if decode_attestation(envelope, github) != document:
@@ -732,6 +797,12 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
             **({"operator_acceptances": sorted(accepted)} if accepted or deferred_profiles or manifests else {}),
             **({"profile_deferrals": sorted(deferred_profiles)} if deferred_profiles or manifests else {}),
             **({"manifests": manifests} if manifests else {})}
+    if manifests and supports_manifest_sources(root):
+        # The candidate's own publisher validates publication; earlier candidates accept only v5.
+        document.update(zip(("manifests", "manifest_sources"), compact_manifests(manifests)), schema_version=6)
+    elif manifests and len(canonical(document).encode()) > ATTESTATION_BYTE_LIMIT:
+        raise ValueError("acceptance attestation exceeds uncompressed byte limit; this candidate's publisher "
+                         "predates shared manifest sources (attestation v6): prepare a candidate that contains them")
     validate_attestation(document, identity, root)
     return document
 
@@ -739,30 +810,32 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
 def validate_attestation(document, identity, root):
     version = document.get("schema_version")
     keys = {"schema_version", "candidate_id", "identity_sha256", "receipt_sha256", "environment", "checks", "external_obligations"}
-    if version in (2, 3, 4, 5):
+    if version in (2, 3, 4, 5, 6):
         keys.add("reviewed_transfers")
-    if version in (3, 4, 5):
+    if version in (3, 4, 5, 6):
         keys.add("operator_acceptances")
-    if version in (4, 5):
+    if version in (4, 5, 6):
         keys.add("profile_deferrals")
-    if version == 5:
+    if version in (5, 6):
         keys.add("manifests")
+    if version == 6:
+        keys.add("manifest_sources")
     if len(canonical(document).encode()) > ATTESTATION_BYTE_LIMIT:
         raise ValueError("acceptance attestation exceeds uncompressed byte limit")
-    if (set(document) != keys or type(version) is not int or version not in (1, 2, 3, 4, 5) or document["candidate_id"] != identity["candidate_id"]
+    if (set(document) != keys or type(version) is not int or version not in (1, 2, 3, 4, 5, 6) or document["candidate_id"] != identity["candidate_id"]
         or document["identity_sha256"] != identity_hash(identity)
         or not re.fullmatch(r"[0-9a-f]{64}", document["receipt_sha256"])):
         raise ValueError("acceptance attestation identity mismatch")
     transfers = sorted(name for name, result in document["checks"].items() if "evidence_transfer" in result)
-    if (version == 1 and transfers or version in (2, 3, 4, 5) and
+    if (version == 1 and transfers or version in (2, 3, 4, 5, 6) and
         (version == 2 and not transfers or document["reviewed_transfers"] != transfers)):
         raise ValueError("reviewed transfer attestation inventory mismatch")
     accepted = sorted(name for name, result in document["checks"].items() if "operator_acceptance" in result)
-    if (version not in (3, 4, 5) and accepted or version in (3, 4, 5) and
+    if (version not in (3, 4, 5, 6) and accepted or version in (3, 4, 5, 6) and
         (version == 3 and not accepted or document["operator_acceptances"] != accepted)):
         raise ValueError("operator acceptance attestation inventory mismatch")
     deferred_profiles = sorted(name for name, result in document["checks"].items() if "profile_deferral" in result)
-    if (version not in (4, 5) and deferred_profiles or version in (4, 5) and
+    if (version not in (4, 5, 6) and deferred_profiles or version in (4, 5, 6) and
         (version == 4 and not deferred_profiles or document["profile_deferrals"] != deferred_profiles)):
         raise ValueError("profile deferral attestation inventory mismatch")
     manifests, referenced, attempt_ids = document.get("manifests", {}), set(), {}
@@ -772,7 +845,9 @@ def validate_attestation(document, identity, root):
             raise ValueError("conflicting original attempt references")
         attempt_ids[identifier] = sha
 
-    if version == 5:
+    if version == 6:
+        manifests = expand_manifests(manifests, document["manifest_sources"])
+    if version in (5, 6):
         if not isinstance(manifests, dict) or not manifests:
             raise ValueError("missing attestation manifests")
         for sha, manifest in manifests.items():
@@ -835,7 +910,7 @@ def validate_attestation(document, identity, root):
                           "source_fingerprint": identity["source_fingerprint"], "release_files": identity["release_files"]}
                 transfer = result["evidence_transfer"]
                 if transfer.get("schema_version") == 2:
-                    if version != 5:
+                    if version not in (5, 6):
                         raise ValueError("original attempt transfer requires v5 attestation")
                     referenced.update(transfer[key] for key in ("tested_manifest_sha256", "target_manifest_sha256"))
                 a.validate_evidence_transfer(transfer, name, a.command_identity(command, root), target, result["log_sha256"], manifests, root)
@@ -845,7 +920,7 @@ def validate_attestation(document, identity, root):
                     raise ValueError("reviewed transfer execution provenance changed")
             if "original_attempt" in result:
                 record = result["original_attempt"]
-                if version != 5 or "evidence_transfer" in result or not isinstance(record, dict) or record.get("manifest_sha256") not in manifests:
+                if version not in (5, 6) or "evidence_transfer" in result or not isinstance(record, dict) or record.get("manifest_sha256") not in manifests:
                     raise ValueError("dangling or conflicting original attempt reference")
                 manifest_sha = record["manifest_sha256"]
                 referenced.add(manifest_sha)
@@ -1717,6 +1792,7 @@ def main():
         path = directory / "publication.json"
         if path.exists():
             state = json.loads(path.read_text())
+            document = resumed_attestation(state, document)
             refuse((["publication attestation changed; preserve original unfinished state"]
                     if state["attestation_sha256"] != identity_hash(document) else [])
                    + retained_workflow_ref(state, args.workflow_ref))
