@@ -763,11 +763,12 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
 
 
 def capacity_reason(log):
-    # The runner emits this only after validating the typed broker refusal.
+    # The shared broker client emits this only after validating the typed broker refusal,
+    # as the runner (agent-e2e) or as the installed standalone client (subyard-test-vms).
     reason = None
     with log.open("rb") as stream:
         for line in stream:
-            match = re.fullmatch(rb"agent-e2e: retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", line)
+            match = re.fullmatch(rb"(?:agent-e2e|subyard-test-vms): retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", line)
             if match:
                 reason = match[1].decode()
             elif line.startswith(b"E2E lease:") or re.match(rb"E2E_PHASE phase=guest state=start ", line):

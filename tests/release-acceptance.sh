@@ -2214,6 +2214,31 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             log = output / "refusal.log"
             log.write_text("agent-e2e: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\nE2E lease: slot=slot-1\nproduct failure\n")
             self.assertIsNone(m.capacity_reason(log))
+            # The installed standalone client prints the same typed refusal under its own name.
+            script.write_text("#!/bin/bash\nprintf 'subyard-test-vms: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\\n'\nexit 4\n")
+            result = m.execute("profile:sample/three", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_disk"))
+            log.write_text("other-tool: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\n")
+            self.assertIsNone(m.capacity_reason(log))
+
+    def test_client_handle_release_evidence_keeps_the_slot_after_a_lane_failure(self):
+        # The standalone client's acquire line and handle-release markers, then a lane failure.
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            script = output / "client-lane.sh"
+            script.write_text("#!/bin/bash\n"
+                "printf 'E2E lease: yard=hermes project=hermes run=0123abcd purpose=test-vms-client slot=slot-001 type=subyard-pair vms=1 base=%s\\n' " + "a" * 64 + " >&2\n"
+                "printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\\n' >&2\n"
+                "printf 'E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\\n' >&2\n"
+                "printf 'E2E lease released: handle=0123abcd slot=slot-001 reason=explicit\\n' >&2\n"
+                "exit 1\n")
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"]), ("failed", 1))
+            self.assertEqual(result["cleanup"]["lease-release"], {"exit_code": 0, "duration_seconds": 2})
+            self.assertTrue(m.slot_continues_after(result))
+            script.write_text(script.read_text().replace("duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0", "duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=1"))
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertFalse(m.slot_continues_after(result))
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:

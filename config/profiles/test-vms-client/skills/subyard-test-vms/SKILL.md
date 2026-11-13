@@ -28,9 +28,10 @@ Slot states and refusals:
 - `capacity` (memory or disk): wait, or `acquire --slot N --wait 20m`.
 - `quarantined`, `stopped`, `legacy*`, `unavailable`: ask the operator.
 
-Lifetime: a keeper renews the lease every 5 minutes. After `--idle` (default 30m) without `exec`
-it releases the lease. If the keeper stops, the broker expires the lease 20 minutes after the last
-renewal. `client.sh leases` lists your handles; release a `lost` or `no-keeper` one and acquire again.
+Lifetime: a keeper renews the lease every 5 minutes. After `--idle` (default 20m, at most 2h)
+without `exec` it releases the lease; `exec HANDLE -- true` resets that timer. If the keeper stops,
+the broker expires the lease 20 minutes after the last renewal. `client.sh leases` lists your
+handles; release a `lost` or `no-keeper` one and acquire again.
 
 Reach: the VM has root and public Internet egress. It cannot reach this yard, the broker, other
 slots, the host or private networks. Only this client reaches the VM. Nothing in the VM survives
