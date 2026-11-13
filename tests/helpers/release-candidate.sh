@@ -77,4 +77,3 @@ release_candidate_install() {
     | jq -e '.outcome.status == "ready"' >/dev/null || return
   printf '%s\n' "$launcher"
 }
-
