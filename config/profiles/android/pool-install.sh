@@ -59,7 +59,7 @@ MemorySwapMax=2G
 WantedBy=multi-user.target
 EOF
 update=0
-for source in pool.py client.py runtime.sh; do
+for source in pool.py client.py runtime.sh toolchain.json toolchain-metadata.xml; do
   cmp -s "$PROFILE_DIR/$source" "$INSTALL_ROOT/$source" || update=1
 done
 cmp -s "$stage/config.json" /etc/subyard-android.json || update=1
@@ -90,7 +90,7 @@ done
 install -d -o root -g root -m 0711 "$STATE_ROOT"
 install -d -o root -g root -m 0700 "$STATE_ROOT/images"
 install -d -o root -g root -m 0755 "$STATE_ROOT/runtimes" "$PUBLIC_ROOT" "$PUBLIC_ROOT/bin" "$INSTALL_ROOT"
-for source in pool.py client.py runtime.sh; do
+for source in pool.py client.py runtime.sh toolchain.json toolchain-metadata.xml; do
   install -m 0644 -o root -g root "$PROFILE_DIR/$source" "$INSTALL_ROOT/$source"
 done
 chmod 0755 "$INSTALL_ROOT/runtime.sh"

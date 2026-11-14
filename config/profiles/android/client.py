@@ -2,6 +2,7 @@
 """Unprivileged Android lease client; the same client runs in L1, L2 and on the owner."""
 import argparse
 import contextlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ CONTROL = os.environ.get('ANDROID_PUBLIC_ROOT', '/srv/cache/android-sdk/.subyard
 TTL = 1200
 HEARTBEAT = 300
 VIEWER_START_TIMEOUT = 60
+ADB_PREFLIGHT_TIMEOUT = 30
+SDK_INSTALL_TIMEOUT = 1800
 
 
 class Error(Exception):
@@ -142,6 +145,53 @@ def bridge(local, channel):
 class Relay(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     block_on_close = False
+
+
+def proc_address(value):
+    host, port = value.split(':')
+    raw = bytes.fromhex(host)
+    # /proc/net/tcp{,6} print each 32-bit address word in host (little-endian) order.
+    address = ipaddress.ip_address(b''.join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4)))
+    if address.version == 6 and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return str(address), int(port, 16)
+
+
+def loopback_peer_uid(stream, tables=('/proc/net/tcp', '/proc/net/tcp6')):
+    """Owner uid of the connecting loopback socket, or None when it is not uniquely known."""
+    local, peer = stream.getsockname()[:2], stream.getpeername()[:2]
+    owners = set()
+    for table in tables:
+        try:
+            rows = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            # Only the established connecting socket identifies its owner; timewait rows have no inode.
+            if len(fields) < 10 or fields[3] != '01' or fields[9] == '0':
+                continue
+            try:
+                if proc_address(fields[1]) == tuple(peer) and proc_address(fields[2]) == tuple(local):
+                    owners.add(int(fields[7]))
+            except ValueError:
+                continue
+    return owners.pop() if len(owners) == 1 else None
+
+
+class TcpRelay(socketserver.ThreadingTCPServer):
+    """Loopback ADB server port for clients such as ddmlib that cannot use ADB_SERVER_SOCKET."""
+    daemon_threads = True
+    block_on_close = False
+
+    def verify_request(self, request, client_address):
+        # Loopback is shared by every local account; accept only this client's own uid.
+        if loopback_peer_uid(request) == os.getuid():
+            return True
+        if not self.rejected:
+            self.rejected = True
+            print('Android ADB relay: refused a loopback connection owned by another account', file=sys.stderr)
+        return False
 
 
 class RelayHandler(socketserver.BaseRequestHandler):
@@ -343,7 +393,13 @@ def attribution(args):
     yard = args.yard or os.environ.get('SUBYARD_YARD_NAME') or os.environ.get('YARD_NAME', 'unknown')
     for directory in (Path.cwd(), *Path.cwd().parents):
         metadata = directory / '.subyard-meta.json'
-        if metadata.is_file():
+        try:
+            present = metadata.is_file()
+        except OSError:
+            # An unreadable directory (e.g. /root after runuser) has no visible metadata;
+            # attribution is display-only and must not fail the command.
+            continue
+        if present:
             try:
                 if metadata.is_symlink() or metadata.stat().st_size > 65536:
                     raise ValueError('invalid metadata file')
@@ -440,8 +496,51 @@ def start_relay(token, path):
     return server
 
 
-def context(allocation, endpoint):
-    return dict(ANDROID_SERIAL=allocation['android_serial'], ADB_SERVER_SOCKET='localfilesystem:' + str(endpoint),
+def tcp_listener():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(socket.SOMAXCONN)
+    except OSError:
+        listener.close()
+        raise
+    return listener
+
+
+def start_tcp_relay(token, listener):
+    """Serve an already bound loopback listener through the same lease-capability tunnel."""
+    server = TcpRelay(listener.getsockname(), RelayHandler, bind_and_activate=False)
+    server.socket.close()
+    server.socket, server.server_address = listener, listener.getsockname()
+    server.token, server.rejected = token, False
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def adb_preflight(port):
+    """Answer host:version through the TCP relay before any command starts."""
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=ADB_PREFLIGHT_TIMEOUT) as stream:
+            adb_request(stream, 'host:version')
+            int(adb_read(stream, int(adb_read(stream, 4), 16)), 16)
+    except (Error, OSError, ValueError) as exc:
+        raise Error('transport', 'allocation ADB server did not answer host:version through the relay; '
+                    'the command was not started') from exc
+
+
+def gradle_without_daemon(options):
+    """A Gradle daemon leaves the command's process group, outlives the lease and keeps the
+    closed ADB port it read once. Gradle's client honors this property over project settings;
+    an explicit caller choice is kept."""
+    options = options or ''
+    if re.search(r'(?:^|\s)-Dorg\.gradle\.daemon(?:=|\s|$)', options):
+        return {}
+    return dict(GRADLE_OPTS=(options + ' ' if options.strip() else '') + '-Dorg.gradle.daemon=false')
+
+
+def context(allocation, endpoint, port=None):
+    port = {} if port is None else dict(ANDROID_ADB_SERVER_PORT=str(port))
+    return dict(ANDROID_SERIAL=allocation['android_serial'], ADB_SERVER_SOCKET='localfilesystem:' + str(endpoint), **port,
                 SUBYARD_EMU_SLOT=allocation['slot_id'], SUBYARD_EMU_GENERATION=str(allocation['generation']),
                 SUBYARD_EMU_DEVICE=allocation['request']['device'], SUBYARD_EMU_API=str(allocation['request']['api']),
                 SUBYARD_EMU_ANDROID_VERSION=allocation['request']['android_version'],
@@ -478,6 +577,11 @@ def parser():
             command.add_argument('command', nargs=argparse.REMAINDER)
     for name in ('renew', 'release'):
         commands.add_parser(name).add_argument('--lease-file', required=True)
+    sdk = commands.add_parser('sdk', help='list or add shared build SDK packages').add_subparsers(dest='sdk_verb', required=True)
+    sdk.add_parser('list', help='installed packages: defaults and added')
+    install = sdk.add_parser('install', help='add packages; Google SDK licenses are accepted automatically')
+    install.add_argument('packages', nargs='+', metavar='ID',
+                         help="platforms;android-N[.M], build-tools;X.Y.Z[-rcN], ndk;X.Y.Z or cmake;X.Y.Z")
     cache = commands.add_parser('cache').add_subparsers(dest='cache_verb', required=True)
     cache.add_parser('prune').add_argument('--dry-run', action='store_true')
     prepare = cache.add_parser('prepare')
@@ -487,9 +591,11 @@ def parser():
     return result
 
 
-def relay_daemon(path):
+def relay_daemon(path, descriptor):
+    listener = socket.socket(fileno=int(descriptor))
     lease = read_lease(path)
     server = start_relay(lease['token'], lease['endpoint'])
+    tcp = start_tcp_relay(lease['token'], listener)
     try:
         while True:
             try:
@@ -498,8 +604,9 @@ def relay_daemon(path):
                 return
             time.sleep(2)
     finally:
-        server.shutdown()
-        server.server_close()
+        for relay in (tcp, server):
+            relay.shutdown()
+            relay.server_close()
         Path(lease['endpoint']).unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             Path(lease['endpoint']).parent.rmdir()
@@ -591,6 +698,16 @@ def main(argv=None):
     if args.verb in ('status', 'catalog'):
         print(json.dumps(rpc(args.verb), indent=2))
         return 0
+    if args.verb == 'sdk':
+        if args.sdk_verb == 'list':
+            result = rpc('sdk-list')
+        else:
+            result = rpc('sdk-install', timeout=SDK_INSTALL_TIMEOUT + 60, packages=args.packages)
+            if result.get('accepted_for'):
+                print('Android: accepted Google Android SDK licenses for ' + ', '.join(result['accepted_for']),
+                      file=sys.stderr)
+        print(json.dumps(result, indent=2))
+        return 0
     if args.verb == 'cache':
         if args.cache_verb == 'prune':
             result = rpc('prune', dry_run=args.dry_run)
@@ -622,6 +739,8 @@ def main(argv=None):
         token = read_lease(args.lease_file)['token'] if attached else secrets.token_hex(32)
     retained = False
     server = None
+    tcp_server = None
+    listener = None
     viewer_server = None
     temporary = None
     child = None
@@ -642,21 +761,34 @@ def main(argv=None):
             raise Error('unavailable', 'lease is not ready for a viewer')
         temporary = Path(tempfile.mkdtemp(prefix='subyard-emu-'))
         endpoint = temporary / 'adb.sock'
-        environment = context(allocation, endpoint)
+        port = None
+        if args.verb in ('run', 'acquire'):
+            # ddmlib (AGP connected tests) uses only a loopback TCP ADB server port.
+            listener = tcp_listener()
+            port = listener.getsockname()[1]
+        environment = context(allocation, endpoint, port)
         if args.verb == 'acquire':
-            save_lease(args.lease_file, dict(token=token, endpoint=str(endpoint), allocation=allocation))
-            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_relay', args.lease_file],
+            save_lease(args.lease_file, dict(token=token, endpoint=str(endpoint), adb_port=port, allocation=allocation))
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_relay', args.lease_file,
+                                        str(listener.fileno())], pass_fds=(listener.fileno(),),
                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        start_new_session=True)
+            listener.close()
+            listener = None
             deadline = time.monotonic() + 10
             while not endpoint.exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.05)
             if not endpoint.exists():
                 raise Error('transport', 'could not start allocation ADB relay')
+            adb_preflight(port)
             retained = True
             print(json.dumps(dict(allocation=allocation, environment=environment, lease_file=args.lease_file), indent=2))
             return 0
         server = start_relay(token, endpoint)
+        if listener is not None:
+            tcp_server = start_tcp_relay(token, listener)
+            listener = None
+            adb_preflight(port)
         def heartbeat():
             last_renew = args.last_renew
             while not finished.wait(1):
@@ -684,7 +816,10 @@ def main(argv=None):
             port = str(viewer_server.server_address[1])
             command = ['scrcpy', *(command or []), *([] if args.control else ['--no-control']),
                        '--port=' + port, '--tunnel-host=127.0.0.1', '--tunnel-port=' + port]
-        child = subprocess.Popen(command, env=dict(os.environ, **environment), start_new_session=True)
+        child_environment = dict(os.environ, **environment)
+        if args.verb == 'run':
+            child_environment.update(gradle_without_daemon(os.environ.get('GRADLE_OPTS')))
+        child = subprocess.Popen(command, env=child_environment, start_new_session=True)
         if not attached:
             threading.Thread(target=heartbeat, daemon=True).start()
         code = child.wait()
@@ -715,6 +850,11 @@ def main(argv=None):
         if viewer_server:
             viewer_server.shutdown()
             viewer_server.server_close()
+        if listener is not None:
+            listener.close()
+        if tcp_server:
+            tcp_server.shutdown()
+            tcp_server.server_close()
         if server:
             server.shutdown()
             server.server_close()
@@ -738,7 +878,7 @@ if __name__ == '__main__':
             wire()
             code = 0
         elif sys.argv[1:2] == ['_relay']:
-            relay_daemon(sys.argv[2])
+            relay_daemon(sys.argv[2], sys.argv[3])
             code = 0
         else:
             code = main()

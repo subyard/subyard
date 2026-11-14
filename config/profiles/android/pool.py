@@ -101,6 +101,92 @@ def sdk_output_labels(output):
     ) if re.search(pattern, output, re.IGNORECASE)) or 'unknown'
 
 
+class SdkManagerRun:
+    """One bounded installed-SDK-manager run into a private staging root.
+
+    Output is drained without blocking guards and retained only as bounded labels."""
+    def __init__(self):
+        self.process = None
+        self.prefix, self.tail, self.seen = b'', b'', 0
+
+    def run(self, sdk, root, packages, java_home, home, temporary, cancel, timeout, disk_root, headroom,
+            subject, cancel_message):
+        self.process = process = subprocess.Popen([
+            str(Path(sdk) / 'cmdline-tools/latest/bin/sdkmanager'), '--sdk_root=' + str(root), *packages],
+            env=dict(os.environ, JAVA_HOME=java_home, HOME=str(home), TMPDIR=str(temporary),
+                     ANDROID_USER_HOME=str(Path(home) / '.android'), XDG_CACHE_HOME=str(Path(home) / '.cache')),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.monotonic() + timeout
+        nonblocking = False
+
+        def drain():
+            drained = 0
+            # At most 64 KiB per turn; noisy output cannot starve guards.
+            for _ in range(4):
+                try:
+                    chunk = os.read(process.stdout.fileno(), 16384)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                drained += len(chunk)
+                self.seen += len(chunk)
+                take = min(len(chunk), 8192 - len(self.prefix))
+                self.prefix += chunk[:take]
+                self.tail = (self.tail + chunk[take:])[-8192:]
+            return drained
+
+        def exited():
+            # Observe exit without reaping: the zombie leader keeps its process group id reserved.
+            try:
+                return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+            except ChildProcessError:
+                return True
+
+        try:
+            os.set_blocking(process.stdout.fileno(), False)
+            nonblocking = True
+            while not exited():
+                drained = drain()
+                require(not cancel.wait(0 if drained else 0.2), 'cancelled', cancel_message)
+                require(time.monotonic() < deadline, 'download', f'{subject} exceeded {timeout} seconds')
+                require(shutil.disk_usage(disk_root).free > headroom, 'capacity',
+                        f'{subject} stopped to preserve yard disk headroom')
+        finally:
+            # Also stop helpers left in the installer's session, such as the Android CLI's
+            # background metrics upload, before staging is removed.
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            try:
+                if nonblocking:
+                    drain()
+            finally:
+                process.stdout.close()
+        if process.returncode != 0:
+            truncated = self.seen > len(self.prefix) + len(self.tail)
+            output = self.prefix + (b'\n' if truncated else b'') + self.tail
+            observed = sdk_output_labels(output)
+            try:
+                free_bytes = shutil.disk_usage(disk_root).free
+            except OSError:
+                free_bytes = -1
+            raise PoolError('download',
+                f'SDK {subject} failed (exit {process.returncode}); '
+                'check licensing, disk space and download access; '
+                f'observed={observed} free_bytes={free_bytes} '
+                f'truncated={int(truncated)}')
+
+    def facts(self, phase, exc):
+        facts = f'phase={phase} exception={type(exc).__name__[:64]}'
+        if isinstance(getattr(exc, 'errno', None), int):
+            facts += f' errno={exc.errno}'
+        if self.process is not None:
+            facts += f' sdk_exit={self.process.returncode} sdk_tail={sdk_output_labels((self.prefix + self.tail)[-8192:])}'
+        return facts
+
+
 class Images:
     """Only this private directory is pruneable; build SDK and user AVDs are external."""
     def __init__(self, root, sdk, java_home='/opt/jdk-17', disk_headroom=1024**3, image_policy='latest-stable'):
@@ -216,8 +302,7 @@ class Images:
                     'capacity', 'insufficient space for image download and extraction')
             stage = self.root / ('download-' + secrets.token_hex(12))
             stage.mkdir(mode=0o700)
-            phase, process = 'stage', None
-            prefix, tail, seen = b'', b'', 0
+            phase, installer = 'stage', SdkManagerRun()
             try:
                 atomic(stage / '.download-owner.json', dict(schema=SCHEMA, kind='image-download'))
                 sdk = stage / 'sdk'
@@ -230,67 +315,9 @@ class Images:
                 # Use the installed SDK tool's licensing, integrity and extraction semantics.
                 # Command-line Tools 23 replaced --licenses with Android CLI installation policy.
                 phase = 'sdk-start'
-                process = subprocess.Popen([
-                    str(self.sdk / 'cmdline-tools/latest/bin/sdkmanager'),
-                    '--sdk_root=' + str(sdk), image['package']],
-                    env=dict(os.environ, JAVA_HOME=self.java_home, HOME=str(home), TMPDIR=str(temporary),
-                             ANDROID_USER_HOME=str(home / '.android'), XDG_CACHE_HOME=str(home / '.cache')),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-                phase = 'sdk-install'
-                deadline = time.monotonic() + 900
-                nonblocking = False
-
-                def drain():
-                    nonlocal prefix, tail, seen
-                    drained = 0
-                    # At most 64 KiB per turn; noisy output cannot starve guards.
-                    for _ in range(4):
-                        try:
-                            chunk = os.read(process.stdout.fileno(), 16384)
-                        except BlockingIOError:
-                            break
-                        if not chunk:
-                            break
-                        drained += len(chunk)
-                        seen += len(chunk)
-                        take = min(len(chunk), 8192 - len(prefix))
-                        prefix += chunk[:take]
-                        tail = (tail + chunk[take:])[-8192:]
-                    return drained
-
-                try:
-                    os.set_blocking(process.stdout.fileno(), False)
-                    nonblocking = True
-                    while process.poll() is None:
-                        drained = drain()
-                        require(not cancel.wait(0 if drained else 0.2), 'cancelled', 'allocation cancelled')
-                        require(time.monotonic() < deadline, 'download', 'image installation exceeded 900 seconds')
-                        require(shutil.disk_usage(self.root).free > self.disk_headroom, 'capacity',
-                                'image installation stopped to preserve yard disk headroom')
-                finally:
-                    if process.poll() is None:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
-                    try:
-                        if nonblocking:
-                            drain()
-                    finally:
-                        process.stdout.close()
-                if process.returncode != 0:
-                    truncated = seen > len(prefix) + len(tail)
-                    output = prefix + (b'\n' if truncated else b'') + tail
-                    observed = sdk_output_labels(output)
-                    try:
-                        free_bytes = shutil.disk_usage(self.root).free
-                    except OSError:
-                        free_bytes = -1
-                    raise PoolError('download',
-                        f'SDK image installation failed (exit {process.returncode}); '
-                        'check licensing, disk space and download access; '
-                        f'observed={observed} free_bytes={free_bytes} '
-                        f'truncated={int(truncated)}')
+                installer.run(self.sdk, sdk, [image['package']], self.java_home, home, temporary, cancel,
+                              900, self.root, self.disk_headroom, 'image installation',
+                              'allocation cancelled')
                 phase = 'metadata'
                 installed = sdk.joinpath(*image['package'].split(';'))
                 properties = dict(line.split('=', 1) for line in (installed / 'source.properties').read_text().splitlines()
@@ -333,12 +360,9 @@ class Images:
             except PoolError:
                 raise
             except (OSError, ValueError) as exc:
-                facts = f'phase={phase} exception={type(exc).__name__[:64]}'
-                if isinstance(getattr(exc, 'errno', None), int):
-                    facts += f' errno={exc.errno}'
-                if process is not None:
-                    facts += f' sdk_exit={process.returncode} sdk_tail={sdk_output_labels((prefix + tail)[-8192:])}'
-                raise PoolError('download', f'Android image download/extraction failed ({facts})') from exc
+                if phase == 'sdk-start' and installer.process is not None:
+                    phase = 'sdk-install'
+                raise PoolError('download', f'Android image download/extraction failed ({installer.facts(phase, exc)})') from exc
             finally:
                 if stage.exists():
                     shutil.rmtree(stage)
@@ -365,6 +389,296 @@ class Images:
                 freed += size
         return dict(dry_run=dry_run, candidates=removed if dry_run else [],
                     removed=[] if dry_run else removed, skipped=skipped, bytes=freed)
+
+
+# Agent-installable SDK packages beside the provisioned defaults: stable platforms (including
+# minor API levels and SDK extensions), build tools, NDK and CMake. Platform previews and betas,
+# system images (pool-owned), add-ons, sources, extras and the tools the pool runs are refused.
+SDK_PACKAGE = re.compile(r'platforms;android-[1-9][0-9]{0,2}(?:\.[0-9]{1,2}|-ext[1-9][0-9]{0,2})?'
+                         r'|build-tools;[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:-rc[0-9]{1,2})?'
+                         r'|ndk;[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,10}'
+                         r'|cmake;[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,10}(?:\.[0-9]{1,10})?')
+# Provisioned default identifiers and vendored repository entries, installed beside the pool.
+TOOLCHAIN_MANIFEST = Path(__file__).with_name('toolchain.json')
+TOOLCHAIN_METADATA = Path(__file__).with_name('toolchain-metadata.xml')
+SDK_INSTALL_TIMEOUT = 1800
+SDK_BASE = {'cmdline-tools;latest': 'cmdline-tools/latest', 'platform-tools': 'platform-tools', 'emulator': 'emulator'}
+
+
+class SdkPackages:
+    """Add-only installation into the shared, read-only build SDK.
+
+    A package is installed by the installed SDK manager into private staging, verified, and
+    published by one rename of a directory that did not exist. Existing component directories,
+    including binaries a running emulator uses, are never replaced. Installation holds the SDK
+    maintenance lock shared: emulator leases continue, while provisioning and image preparation
+    (exclusive holders) are serialized against it; one install runs at a time."""
+    STAGING = '.subyard-staging'
+
+    def __init__(self, sdk, java_home='/opt/jdk-17', disk_headroom=1024**3,
+                 sdk_lock='/run/lock/subyard-android/sdk.lock', manifest=TOOLCHAIN_MANIFEST,
+                 metadata=TOOLCHAIN_METADATA):
+        self.metadata = Path(metadata)
+        self.sdk, self.java_home, self.disk_headroom, self.sdk_lock = Path(sdk), java_home, disk_headroom, sdk_lock
+        try:
+            self.defaults = set(json.loads(Path(manifest).read_text())['sdk'])
+        except (OSError, ValueError, KeyError, TypeError):
+            self.defaults = set()
+        self.lock = threading.Lock()
+        # Called only by the singleton owner: remove interrupted, marker-owned installs.
+        staging = self.sdk / self.STAGING
+        if staging.is_dir() and not staging.is_symlink():
+            for stage in staging.glob('install-*'):
+                if stage.is_symlink() or not re.fullmatch('install-[a-f0-9]{24}', stage.name):
+                    continue
+                try:
+                    marker = json.loads((stage / '.install-owner.json').read_text())
+                except (OSError, ValueError):
+                    if stage.is_dir() and stage.stat().st_uid == os.geteuid() and not any(stage.iterdir()):
+                        stage.rmdir()
+                    continue
+                if marker == {'schema': SCHEMA, 'kind': 'sdk-install'}:
+                    shutil.rmtree(stage)
+
+    @staticmethod
+    def validate(packages):
+        require(isinstance(packages, list) and packages and len(packages) <= 16
+                and all(isinstance(package, str) for package in packages),
+                'request', 'sdk install accepts 1 to 16 package identifiers')
+        # Report every invalid identifier at once, in request order.
+        invalid = [package for package in packages if not SDK_PACKAGE.fullmatch(package)]
+        require(not invalid, 'request', 'unsupported SDK package identifiers: ' + ', '.join(
+            repr(package[:80]) for package in invalid) + '; allowed: platforms;android-N[.M], '
+            'platforms;android-N-extM, build-tools;X.Y.Z[-rcN], ndk;X.Y.Z, cmake;X.Y.Z[.W]')
+        return list(dict.fromkeys(packages))
+
+    def path(self, package):
+        return self.sdk.joinpath(*package.split(';'))
+
+    @staticmethod
+    def revision(directory):
+        try:
+            values = dict(line.split('=', 1) for line in (directory / 'source.properties').read_text().splitlines()
+                          if '=' in line and not line.startswith('#'))
+        except (OSError, ValueError):
+            return None
+        return values.get('Pkg.Revision', '').strip() or None
+
+    @staticmethod
+    def declared(directory):
+        """The package path recorded by the SDK manager in package.xml."""
+        try:
+            tree = ET.fromstring((directory / 'package.xml').read_bytes())
+        except (OSError, ET.ParseError):
+            return None
+        paths = [node.get('path') for node in tree.iter() if node.tag.rsplit('}', 1)[-1] == 'localPackage']
+        return paths[0] if len(paths) == 1 else None
+
+    def installed(self, package):
+        # Only package.xml makes a component visible to AGP on the read-only SDK.
+        directory = self.path(package)
+        return (not directory.is_symlink() and directory.is_dir()
+                and (directory / 'source.properties').is_file() and self.declared(directory) == package)
+
+    def vendored(self, package):
+        """Whether provisioning can write package.xml for this receipted component: the profile
+        vendors the repository entry for its recorded archive."""
+        try:
+            digest = json.loads((self.path(package) / '.subyard-toolchain.json').read_text())['archive']
+            text = self.metadata.read_text()
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        if not isinstance(digest, str) or not re.fullmatch('[a-f0-9]{40}', digest):
+            return False
+        return any(digest in block for block in re.findall(
+            r'<remotePackage\b[^>]*\bpath="' + re.escape(package) + r'"[^>]*>.*?</remotePackage>', text, re.S))
+
+    def source(self, package, directory):
+        # Provisioning records a receipt for every component it installs. A receipted component
+        # that is no longer a default stays on disk and is never replaced.
+        if (directory / '.subyard-toolchain.json').is_file():
+            return 'default' if package in self.defaults else 'previous-default'
+        return 'added'
+
+    def list(self):
+        packages = []
+        candidates = [(package, self.sdk / relative) for package, relative in SDK_BASE.items()]
+        for category in ('platforms', 'build-tools', 'ndk', 'cmake'):
+            root = self.sdk / category
+            if root.is_dir() and not root.is_symlink():
+                candidates += [(category + ';' + child.name, child) for child in sorted(root.iterdir())
+                               if not child.name.startswith('.')]
+        for package, directory in candidates:
+            if directory.is_symlink() or not directory.is_dir() or not (directory / 'source.properties').is_file():
+                continue
+            packages.append(dict(package=package, revision=self.revision(directory),
+                                 source=self.source(package, directory), metadata=self.declared(directory) == package))
+        return dict(sdk_root=str(self.sdk), packages=packages)
+
+    def verify(self, directory, package):
+        require(not directory.is_symlink() and directory.is_dir(), 'download',
+                f'SDK manager did not install {package}')
+        require(self.declared(directory) == package and self.revision(directory), 'download',
+                f'installed {package} does not match its requested identifier')
+        if package.startswith('platforms;'):
+            values = dict(line.split('=', 1) for line in (directory / 'source.properties').read_text().splitlines()
+                          if '=' in line and not line.startswith('#'))
+            level, _, extension = package.removeprefix('platforms;android-').partition('-ext')
+            require(values.get('AndroidVersion.ApiLevel', '').strip() == level
+                    and (not extension or values.get('AndroidVersion.ExtensionLevel', '').strip() == extension),
+                    'download', f'installed {package} has a different API or extension level')
+
+    def merge_licenses(self, staged):
+        accepted = []
+        target = self.sdk / 'licenses'
+        if not staged.is_dir():
+            return accepted
+        require(not target.is_symlink() and (target.is_dir() or not target.exists()),
+                'ownership', 'SDK license directory is not a managed directory')
+        target.mkdir(mode=0o755, exist_ok=True)
+        for source in sorted(staged.iterdir()):
+            if not re.fullmatch(r'[a-z0-9-]{1,64}', source.name) or source.is_symlink() or not source.is_file():
+                continue
+            hashes = [line.strip() for line in source.read_text().splitlines() if re.fullmatch('[a-f0-9]{40}', line.strip())]
+            if not hashes:
+                continue
+            existing = target / source.name
+            current = []
+            if existing.is_file() and not existing.is_symlink():
+                current = [line.strip() for line in existing.read_text().splitlines()
+                           if re.fullmatch('[a-f0-9]{40}', line.strip())]
+            merged = current + [value for value in hashes if value not in current]
+            if merged != current:
+                temporary = target / ('.' + source.name + '.new')
+                temporary.write_text(''.join('\n' + value for value in merged))
+                os.chmod(temporary, 0o644)
+                os.replace(temporary, existing)
+            accepted.append(source.name)
+        return accepted
+
+    def install(self, packages, cancel):
+        packages = self.validate(packages)
+        require(self.lock.acquire(blocking=False), 'busy', 'another Android SDK package installation is in progress')
+        try:
+            sdk_lock = open(self.sdk_lock, 'a')
+            try:
+                fcntl.flock(sdk_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                sdk_lock.close()
+                raise PoolError('busy', 'Android SDK maintenance is in progress; retry after provisioning or image preparation')
+            try:
+                return self._install(packages, cancel)
+            finally:
+                sdk_lock.close()
+        finally:
+            self.lock.release()
+
+    @staticmethod
+    def announce(packages):
+        if packages:
+            print('Android: accepted Google Android SDK licenses for ' + ', '.join(packages), file=sys.stderr, flush=True)
+
+    def _install(self, packages, cancel):
+        present = [package for package in packages if self.installed(package)]
+        missing = [package for package in packages if package not in present]
+        staging = self.sdk / self.STAGING
+        # Every independent refusal, in stable order.
+        refusals = []
+        sdk_ready = not self.sdk.is_symlink() and self.sdk.is_dir()
+        if not sdk_ready:
+            refusals.append(PoolError('preflight', 'Android SDK is not installed'))
+        unrepaired = [package for package in missing
+                      if (self.path(package) / '.subyard-toolchain.json').is_file() and not self.path(package).is_symlink()]
+        blocked = [package for package in missing if os.path.lexists(self.path(package)) and package not in unrepaired]
+        repairable = [package for package in unrepaired if self.vendored(package)]
+        kept = [package for package in unrepaired if package not in repairable]
+        if repairable:
+            refusals.append(PoolError('ownership', 'profile-installed SDK packages lack package metadata and are never '
+                                      'replaced here, repair them with yard provision android: ' + ', '.join(repairable)))
+        if kept:
+            refusals.append(PoolError('ownership', 'profile-installed SDK packages are kept without package metadata '
+                                      'and are not replaced: ' + ', '.join(kept)))
+        if blocked:
+            refusals.append(PoolError('ownership', 'existing SDK paths are not installed packages, refusing replacement: '
+                                      + ', '.join(blocked)))
+        if missing and (staging.is_symlink() or (os.path.lexists(staging) and not staging.is_dir())):
+            refusals.append(PoolError('ownership', 'SDK staging path is not a pool-owned directory'))
+        if missing and sdk_ready:
+            try:
+                free = shutil.disk_usage(self.sdk).free
+            except OSError:
+                free = -1
+            if free <= 8 * 1024**3 + self.disk_headroom:
+                refusals.append(PoolError('capacity', 'insufficient space for SDK package download and extraction'))
+        if refusals:
+            raise PoolError(refusals[0].code, '; '.join(str(refusal) for refusal in refusals))
+        result = dict(installed=[], already_installed=present, licenses=[], accepted_for=[])
+        if not missing:
+            return result
+        staging.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(staging, 0o700)
+        stage = staging / ('install-' + secrets.token_hex(12))
+        stage.mkdir(mode=0o700)
+        phase, installer = 'stage', SdkManagerRun()
+        try:
+            atomic(stage / '.install-owner.json', dict(schema=SCHEMA, kind='sdk-install'))
+            root, home, temporary = stage / 'sdk', stage / 'home', stage / 'tmp'
+            for directory in (root, home, temporary):
+                directory.mkdir()
+            phase = 'sdk-start'
+            installer.run(self.sdk, root, missing, self.java_home, home, temporary, cancel, SDK_INSTALL_TIMEOUT,
+                          self.sdk, self.disk_headroom, 'package installation', 'Android pool is stopping')
+            phase = 'metadata'
+            staged = {package: root.joinpath(*package.split(';')) for package in missing}
+            for package, directory in staged.items():
+                self.verify(directory, package)
+            phase = 'license'
+            result['licenses'] = self.merge_licenses(root / 'licenses')
+            phase = 'publish'
+            try:
+                for package, directory in staged.items():
+                    require(not cancel.is_set(), 'cancelled', 'Android pool is stopping')
+                    destination = self.path(package)
+                    # Never replace an existing component; another route may have added it meanwhile.
+                    if os.path.lexists(destination):
+                        result['already_installed'].append(package)
+                        continue
+                    for path, directories, files in os.walk(directory):
+                        os.chmod(path, 0o755)
+                        for name in files:
+                            file = Path(path) / name
+                            if not file.is_symlink():
+                                os.chmod(file, (os.stat(file).st_mode & 0o111 and 0o755) or 0o644)
+                    destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                    directory.rename(destination)
+                    fd = os.open(destination.parent, os.O_DIRECTORY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    result['installed'].append(package)
+            except (PoolError, OSError) as exc:
+                # Each publication is one atomic rename; report exactly what became visible.
+                published = result['installed']
+                self.announce(published if result['licenses'] else [])
+                code = exc.code if isinstance(exc, PoolError) else 'download'
+                reason = str(exc) if isinstance(exc, PoolError) else f'publication failed ({type(exc).__name__})'
+                raise PoolError(code, f'{reason}; published before the failure: {", ".join(published) or "none"}') from exc
+            result['accepted_for'] = list(result['installed']) if result['licenses'] else []
+            self.announce(result['accepted_for'])
+            return result
+        except PoolError:
+            raise
+        except (OSError, ValueError) as exc:
+            if phase == 'sdk-start' and installer.process is not None:
+                phase = 'sdk-install'
+            raise PoolError('download', f'Android SDK package installation failed ({installer.facts(phase, exc)})') from exc
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+            # Leave no staging directory for provisioning to normalize between installs.
+            with contextlib.suppress(OSError):
+                staging.rmdir()
 
 
 class Runtime:
@@ -1064,6 +1378,9 @@ class Pool:
         self.runtime = runtime or Runtime(config)
         self.images = images or Images(self.root / 'images', config['sdk_root'],
                                       config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3, config.get('image_policy', 'latest-stable'))
+        self.sdk_packages = SdkPackages(config['sdk_root'], config.get('java_home', '/opt/jdk-17'),
+                                        (2 * config['size'] + 1) * 1024**3,
+                                        config.get('sdk_lock', '/run/lock/subyard-android/sdk.lock'))
         self.cancel, self.workers, self.connections, self.sdk_locks = {}, {}, {}, {}
         self.prepare_cancel = threading.Event()
         data = {}
@@ -1428,6 +1745,15 @@ class Pool:
         finally:
             sdk_lock.close()
 
+    def sdk_install(self, packages):
+        with self.lock:
+            require(not self.closed and not self.prepare_cancel.is_set(), 'unavailable', 'Android pool is stopping')
+        # A disconnected client does not cancel bounded installation; pool shutdown does.
+        return self.sdk_packages.install(packages, self.prepare_cancel)
+
+    def sdk_list(self):
+        return self.sdk_packages.list()
+
     def reap(self, recovery=False):
         with self.lock:
             victims = [(s, s['generation']) for s in self.slots if s['state'] != 'available'
@@ -1556,6 +1882,11 @@ class Handler(socketserver.StreamRequestHandler):
                 result = pool.prune(request['dry_run'])
             elif operation == 'prepare':
                 result = pool.prepare(request.get('request', {}))
+            elif operation == 'sdk-install':
+                require(set(request) <= {'operation', 'packages'}, 'request', 'invalid SDK install request')
+                result = pool.sdk_install(request.get('packages'))
+            elif operation == 'sdk-list':
+                result = pool.sdk_list()
             elif operation in ('revoke', 'drain'):
                 _, uid, _ = struct.unpack('3i', self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                 require(getattr(self.server, 'admin', False) and uid == 0, 'permission', 'operator authority required')

@@ -45,8 +45,10 @@ def diagnose(module, config, directory, api=36):
     except module.PoolError as error:
         result.update(retry='failed', sdk_output_present=False)
         trace = error.__traceback__
+        # The bounded installer output lives in the shared SDK manager runner.
+        codes = {module.SdkManagerRun.run.__code__}
         while trace:
-            if trace.tb_frame.f_code is module.Images.ensure.__code__:
+            if trace.tb_frame.f_code in codes:
                 output = trace.tb_frame.f_locals.get('output')
                 if isinstance(output, bytes) and len(output) <= 16385:
                     process = trace.tb_frame.f_locals.get('process')

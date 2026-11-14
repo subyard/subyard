@@ -24,6 +24,12 @@ def fixture(directory, name, entry):
             metadata += 'AndroidVersion.ApiLevel=' + name.removeprefix('platforms;android-') + '\n'
         (directory / 'source.properties').write_text(metadata)
     (directory / 'supporting.jar').write_bytes(b'verified supporting payload')
+    if name != 'jdk':
+        major, minor, micro = entry['version'].split('.')
+        (directory / 'package.xml').write_text(
+            '<common:repository xmlns:common="' + toolchain.COMMON + '"><localPackage path="' + name + '">'
+            f'<revision><major>{major}</major><minor>{minor}</minor><micro>{micro}</micro></revision>'
+            '</localPackage></common:repository>')
     (directory / '.subyard-toolchain.json').write_text(json.dumps(dict(archive=entry['digest'],
         algorithm=entry['digest_algorithm'], version=entry['version'],
         payload_sha256=toolchain.payload_digest(directory))))

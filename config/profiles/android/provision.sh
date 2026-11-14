@@ -68,7 +68,7 @@ if [ "$check_only" -eq 1 ]; then
     && grep -Fxq "export PATH=\"$PUBLIC_ROOT/bin:$JDK_HOME/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:\$PATH\"" "$profile_env" \
     || changed=1
   install_root="$(rooted /usr/local/lib/subyard-android)"
-  for source in pool.py client.py runtime.sh; do
+  for source in pool.py client.py runtime.sh toolchain.json toolchain-metadata.xml; do
     [ -f "$install_root/$source" ] && [ ! -L "$install_root/$source" ] \
       && cmp -s "$PROFILE_DIR/$source" "$install_root/$source" || changed=1
   done
@@ -163,6 +163,12 @@ while IFS=$'\t' read -r component url; do
   python3 "$PROFILE_DIR/toolchain.py" install "$TOOLCHAIN_MANIFEST" "$component" "$tmp/archive"
   rm -f -- "$tmp/archive"
 done <<< "$toolchain_plan"
+# AGP sees archive-installed components on a read-only SDK only through package.xml; write the
+# SDK manager's metadata for the verified archives (and earlier profile defaults still on disk).
+python3 "$PROFILE_DIR/toolchain.py" metadata "$TOOLCHAIN_MANIFEST"
+# Google SDK licenses are accepted automatically through the installed SDK manager; the
+# helper logs the accepted packages and keeps existing hashes.
+python3 "$PROFILE_DIR/toolchain.py" licenses "$TOOLCHAIN_MANIFEST"
 printf 'android provision: toolchain elapsed_seconds=%s installed_bytes=%s\n' \
   "$((SECONDS - started))" "$(du -sb "$ANDROID_SDK_ROOT" "$JDK_HOME" | awk '{total += $1} END {print total}')" >&2
 rm -rf -- "$tmp"

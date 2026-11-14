@@ -8,11 +8,11 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot) [ "$#" -ge 2 ] || { printf 'acceptance: --slot needs a value\n' >&2; exit 2; }; slot="$2"; shift 2 ;;
     --lane) [ "$#" -ge 2 ] || { printf 'acceptance: --lane needs a value\n' >&2; exit 2; }; lane="$2"; shift 2 ;;
-    *) printf 'usage: acceptance.sh --slot N [--lane full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease]\n' >&2; exit 2 ;;
+    *) printf 'usage: acceptance.sh --slot N [--lane full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease|gradle]\n' >&2; exit 2 ;;
   esac
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || { printf 'acceptance: --slot N is required\n' >&2; exit 2; }
-case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease) ;; *) printf 'acceptance: invalid Android lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease|gradle) ;; *) printf 'acceptance: invalid Android lane\n' >&2; exit 2 ;; esac
 vm_type=android-test
 # Skill discovery provisions the SDK and pool, but never allocates an emulator.
 [ "$lane" != skills ] || vm_type=subyard-pair

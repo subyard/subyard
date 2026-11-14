@@ -2,6 +2,7 @@
   "schema_version": 1,
   "lanes": [
     {"id": "full", "arguments": ["--lane", "full"]},
-    {"id": "memory-lease", "arguments": ["--lane", "memory-lease"]}
+    {"id": "memory-lease", "arguments": ["--lane", "memory-lease"]},
+    {"id": "gradle", "arguments": ["--lane", "gradle"]}
   ]
 }
