@@ -245,7 +245,16 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 	// Typed yard-scoped failures do not stop the other yards; every one is
 	// recorded and reported. Any other failure stops as before.
 	var pendingYards []error
-	stop := func(err error) error { return domain.CollectRefusals(append(pendingYards, err)...) }
+	// A blocking failure keeps the release recovering. Recorded yard failures are
+	// then reported without the release-ready wording or their init step, which
+	// the recovering release would refuse.
+	stop := func(err error) error {
+		causes := []error{err}
+		for _, pending := range pendingYards {
+			causes = append(causes, pending.(runtimePendingConfiguration).blocked())
+		}
+		return domain.CollectRefusals(causes...)
+	}
 	for _, target := range targets {
 		if _, ok := deferred[target.Name]; ok {
 			continue
@@ -338,6 +347,19 @@ func (runtimePendingConfiguration) ActivationPendingConfiguration() bool { retur
 func (pending runtimePendingConfiguration) ActivationDiagnostic() (string, string) {
 	return pending.record.Message, shellquote.Command([]string{"yard", "-Y", pending.record.Yard, "init"})
 }
+
+// blockedRuntimeFailure is a recorded yard failure reported while another
+// failure keeps the release recovering.
+type blockedRuntimeFailure struct{ record activationPendingRecord }
+
+func (failure blockedRuntimeFailure) Error() string {
+	return fmt.Sprintf("yard %s: %s runtime failed in this yard (recorded); the release is not ready", failure.record.Yard, failure.record.Owner)
+}
+func (failure blockedRuntimeFailure) ActivationDiagnostic() (string, string) {
+	return failure.Error(), ""
+}
+
+func (pending runtimePendingConfiguration) blocked() error { return blockedRuntimeFailure(pending) }
 
 // runtimePendingConfigurationOnly reports whether every cause is a recorded
 // yard-scoped runtime failure.

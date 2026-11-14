@@ -688,9 +688,12 @@ func (cli *CLI) finishConfigApplyRepair(
 	if err := cli.checkConfigApplyRepairHistory(permit); err != nil {
 		return err
 	}
-	outcome, err := cli.inspectMutationGate(ctx, permit.yard)
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, permit.yard)
 	if err != nil {
 		return err
+	}
+	if outcome != nil && permit.profileInit && cli.otherYardsPendingOnly(outcome, inspection, permit.yard) {
+		return nil
 	}
 	if outcome != nil {
 		if permit.pendingInputs && !permit.profileInit && !permit.integrationRetry && outcome.Status == releasetransition.StatusMigrationRequired &&

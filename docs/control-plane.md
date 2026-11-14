@@ -1242,7 +1242,12 @@ a converged repair of the owner, a new apply attempt for that yard and teardown 
 remove the record; any change of the bound facts makes it stale, so it never hides a later failure.
 The `yard migrate` result names every pending finding within the diagnostic bound, and
 `yard migrate --check` lists each one. Admission keeps each named yard's init open whatever other
-yards or owners are pending, and keeps teardown open as over RPC.
+yards or owners are pending, and keeps teardown open as over RPC; any unconverged owner keeps the
+ordinary gate. A successful init of one yard reports other yards' remaining pending items and
+succeeds. The journal completes only while a deferred owner still reports the exact observation its
+failure left; any change keeps the repair recovering. When a blocking failure accompanies typed
+ones, the release stays recovering and recorded yards are reported without the release-ready
+wording. A handler's failed cleanup also keeps its failure blocking.
 
 ### Interrupted release recovery
 

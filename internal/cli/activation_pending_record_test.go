@@ -65,3 +65,29 @@ func TestActivationPendingRecordBindsExactFacts(t *testing.T) {
 		}
 	}
 }
+
+// A crashed persistent write leaves the writer's own temporary file beside the
+// records; retirement removes it, and refuses only foreign entries.
+func TestYardRecordRetirementIgnoresOwnWriterDebris(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := activationPendingRecord{Yard: "named", Project: "p", Instance: "i", Owner: "sample-runtime",
+		Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "x"}
+	if err := writeActivationPendingRecord(home, record); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(home, "activation-pending", "v1", "named")
+	testkit.WriteFile(t, filepath.Join(directory, ".sample-runtime.json.tmp-123456"), []byte("partial"), 0o600)
+	if err := removeYardActivationPendingRecords(home, "named"); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 0 {
+		t.Fatalf("records or debris kept: %v %v", entries, err)
+	}
+	testkit.WriteFile(t, filepath.Join(directory, "foreign.txt"), []byte("x"), 0o600)
+	if err := removeYardActivationPendingRecords(home, "named"); err == nil {
+		t.Fatal("a foreign entry was accepted")
+	}
+}

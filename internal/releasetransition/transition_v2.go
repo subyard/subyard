@@ -3601,9 +3601,10 @@ func (transition *V2Transition) reconcileActivation(
 	journal JournalRecord,
 	expected []v2ActivationScope,
 ) (Outcome, bool, error) {
-	// Owners whose typed pending configuration waits for yard init. They do not
-	// hold the journal; completed readiness keeps reporting them.
-	deferred := map[string]bool{}
+	// Owners whose typed pending configuration waits for yard init, with the
+	// observation their failure left. They do not hold the journal while that
+	// exact observation persists; completed readiness keeps reporting them.
+	deferred := map[string]*V2ActivationObservation{}
 	outcome, err := transition.reconcileActivationOwners(ctx, journal, expected, deferred)
 	return outcome, len(deferred) != 0, err
 }
@@ -3612,7 +3613,7 @@ func (transition *V2Transition) reconcileActivationOwners(
 	ctx context.Context,
 	journal JournalRecord,
 	expected []v2ActivationScope,
-	deferred map[string]bool,
+	deferred map[string]*V2ActivationObservation,
 ) (Outcome, error) {
 	pending := map[int]bool{}
 	for pass := 0; pass < 2; pass++ {
@@ -3670,8 +3671,12 @@ func (transition *V2Transition) reconcileActivationOwners(
 				// while its owner stays observable; anything else keeps recovery.
 				if pendingConfiguration(err) {
 					after, observeErr := reconciler.Observe(ctx, journal.Releases, links)
-					if observeErr == nil && validateActivationObservation(id, after) == nil || observeErr != nil && pendingConfiguration(observeErr) {
-						deferred[id] = true
+					if observeErr == nil && validateActivationObservation(id, after) == nil {
+						deferred[id] = &after
+						continue
+					}
+					if observeErr != nil && pendingConfiguration(observeErr) {
+						deferred[id] = nil
 						continue
 					}
 				}
@@ -4257,13 +4262,14 @@ func (transition *V2Transition) activationFixedPointStatus(
 	return id, fixed, warnings
 }
 
-// A deferred owner is outside the fixed point while it remains observable as
-// itself or as pending configuration; completed readiness reports it.
+// A deferred owner is outside the fixed point only while it still reports the
+// exact observation its typed failure left, or pending configuration. Any
+// change, including another yard of that owner drifting, is not fixed.
 func (transition *V2Transition) activationFixedPointDiagnostic(
 	ctx context.Context,
 	releases ReleasePair,
 	links ReleaseLinks,
-	deferred map[string]bool,
+	deferred map[string]*V2ActivationObservation,
 ) (string, bool, []string, error) {
 	warnings := []string{}
 	for _, reconciler := range transition.options.Reconcilers {
@@ -4274,8 +4280,9 @@ func (transition *V2Transition) activationFixedPointDiagnostic(
 		if validateSafeID(id, "activation reconciler ID") != nil {
 			return "", false, warnings, invalid("activation reconciler identity is invalid")
 		}
+		left, isDeferred := deferred[id]
 		actual, err := reconciler.Observe(ctx, releases, links)
-		if err != nil && deferred[id] && pendingConfiguration(err) {
+		if err != nil && isDeferred && pendingConfiguration(err) {
 			continue
 		}
 		if err != nil {
@@ -4284,7 +4291,10 @@ func (transition *V2Transition) activationFixedPointDiagnostic(
 		if err := validateActivationObservation(id, actual); err != nil {
 			return id, false, warnings, err
 		}
-		if deferred[id] {
+		if isDeferred {
+			if left == nil || actual.Actual != left.Actual || actual.Desired != left.Desired || actual.Binding != left.Binding {
+				return id, false, warnings, nil
+			}
 			warnings = canonicalWarnings(append(warnings, actual.Warnings...))
 			continue
 		}

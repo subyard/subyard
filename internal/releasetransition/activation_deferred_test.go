@@ -23,6 +23,8 @@ type deferringActivation struct {
 	recorded   bool
 	converged  bool
 	reconciled *[]string
+	// driftAfter changes the observation at this observation after the failure.
+	driftAfter, observedAfter int
 }
 
 func (owner *deferringActivation) ID() string { return owner.id }
@@ -34,6 +36,10 @@ func (owner *deferringActivation) Observe(context.Context, ReleasePair, ReleaseL
 		return V2ActivationObservation{}, errors.New("owner state cannot be observed")
 	}
 	if owner.recorded {
+		owner.observedAfter++
+		if owner.driftAfter != 0 && owner.observedAfter >= owner.driftAfter {
+			return V2ActivationObservation{Actual: digestA, Desired: digestC}, nil
+		}
 		snapshot, err := owner.store.ReadCurrentJournal()
 		if err != nil {
 			return V2ActivationObservation{}, err
@@ -211,5 +217,29 @@ func TestManyPendingYardsKeepTheirOwnInitSteps(t *testing.T) {
 	}
 	if err := ValidateProcessInspection(goal, readiness); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A deferred owner whose observation changes between its typed failure and the
+// aggregate verification no longer matches what was deferred: the journal stays
+// unfinished instead of completing without matching pending facts.
+func TestDeferredOwnerDriftBeforeAggregateVerificationKeepsRecovery(t *testing.T) {
+	transition, _, _ := v2TransitionFixture(t, nil)
+	reconciled := []string{}
+	// Observation 1 after the failure proves the deferral; 2 is the aggregate check.
+	transition.options.Reconcilers = []V2ActivationReconciler{&deferringActivation{id: "hook-runtime", store: transition.store,
+		failure: pendingConfigurationFinding("yard named: hook failed"), reconciled: &reconciled, driftAfter: 2}}
+	ctx := context.Background()
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(ctx, goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := transition.Converge(ctx, Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+	if err != nil || outcome.Status == StatusReady || outcome.Status == StatusOperatorActionRequired && outcome.Code == CodeDependencyUnavailable && strings.Contains(outcome.Message, "hook failed") {
+		t.Fatalf("drifted deferral completed: %#v %v", outcome, err)
+	}
+	if journal := readDeferredJournal(t, transition); journal.Checkpoint == JournalComplete {
+		t.Fatalf("journal completed after the deferred owner drifted: %#v", outcome)
 	}
 }

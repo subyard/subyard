@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 // A completed owner's pending configuration, such as integration configuration
@@ -22,7 +24,36 @@ func pendingIntegrationConfigurationShape(outcome *releasetransition.Outcome, in
 			return false
 		}
 	}
+	// An unconverged owner is release work, reported as a decision rather than
+	// a blocker; it is never pending configuration.
+	for _, decision := range inspection.Decisions {
+		if decision.Scope == "activation" && decision.Decision == releasetransition.DecisionCanonicalize {
+			return false
+		}
+	}
 	return true
+}
+
+// otherYardsPendingOnly reports a completed readiness whose remaining blockers
+// are only typed pending configuration of other yards: after this yard's init,
+// those items wait for their own inits and do not fail this one.
+func (cli *CLI) otherYardsPendingOnly(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection, yard string) bool {
+	if !cli.pendingIntegrationConfigurationGate(outcome, inspection) {
+		return false
+	}
+	retry := shellquote.Command([]string{"yard", "-Y", yard, "init"})
+	for _, blocker := range inspection.Blockers {
+		if blocker.Retry == retry {
+			return false
+		}
+	}
+	return true
+}
+
+func (cli *CLI) reportOtherYardsPending(inspection *releasetransition.Inspection) {
+	for _, blocker := range inspection.Blockers {
+		fmt.Fprintf(cli.options.Stdout, "Still pending: %s; next: %s\n", blocker.Message, blocker.Retry)
+	}
 }
 
 // pendingConfigurationResource accepts only the typed resource of one owner:

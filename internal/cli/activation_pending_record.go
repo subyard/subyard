@@ -150,6 +150,14 @@ func removeYardActivationPendingRecords(configHome, yard string) error {
 	}
 	var failures []error
 	for _, entry := range entries {
+		// The persistent writer stages ".NAME.tmp-*" files beside a record; a
+		// crashed write leaves one behind, which is this tool's own debris.
+		if strings.HasPrefix(entry.Name(), ".") && strings.Contains(entry.Name(), ".json.tmp") && entry.Type().IsRegular() {
+			if err := os.Remove(filepath.Join(filepath.Clean(configHome), "activation-pending", "v1", yard, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				failures = append(failures, err)
+			}
+			continue
+		}
 		owner, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || !entry.Type().IsRegular() {
 			failures = append(failures, fmt.Errorf("unexpected pending activation entry %q", entry.Name()))

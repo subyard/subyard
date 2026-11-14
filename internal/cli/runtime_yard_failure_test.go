@@ -536,3 +536,125 @@ func TestTeardownRetiresRemovedYardPendingRecords(t *testing.T) {
 		}
 	}
 }
+
+// A typed failure on one yard and a blocking failure on another keep the release
+// recovering; the recorded failure is then not presented as release-ready
+// pending configuration with an init step the recovering release refuses.
+func TestMixedTypedAndBlockingFailuresDoNotClaimReady(t *testing.T) {
+	scenario := newYardFailureScenario(t, true, true, "default", "named")
+	handler := filepath.Join(scenario.fixture.cli.options.RepositoryRoot, "config/profiles/sample/runtime.sh")
+	payload := string(mustReadConfigFixture(t, handler))
+	patched := strings.Replace(payload, "printf '%s\\n' 'subyard-profile-runtime-diagnostic-v1 apply yard-local' >&2",
+		"[ \"$yard\" = default ] && printf '%s\\n' 'subyard-profile-runtime-diagnostic-v1 apply yard-local' >&2", 1)
+	if patched == payload {
+		t.Fatal("fixture handler was not patched")
+	}
+	testkit.WriteFile(t, handler, []byte(patched), 0o700)
+	scenario.runtime.failing(t, "default", true)
+	scenario.runtime.failing(t, "named", true)
+	outcome := scenario.converge(t)
+	if outcome.ReachedGoal || scenario.journal(t).Checkpoint == releasetransition.JournalComplete {
+		t.Fatalf("blocking failure completed the journal: %#v", outcome)
+	}
+	if strings.Contains(outcome.Message, "release ready") || strings.Contains(outcome.Message, "init") || strings.Contains(outcome.Retry, "init") {
+		t.Fatalf("mixed outcome: %#v", outcome)
+	}
+}
+
+// materializedCurrentExecutor reports every yard's materialized assets as
+// current, so only the runtime owner differs between yards.
+type materializedCurrentExecutor struct {
+	installedSettingsExecutor
+	hashes map[string]string
+}
+
+func (fixture materializedCurrentExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) == 3 && request.Command[0] == "sha256sum" {
+		if hash, ok := fixture.hashes[request.Command[2]]; ok {
+			return ports.InstanceExecResult{Stdout: []byte(hash + "  " + request.Command[2] + "\n")}, nil
+		}
+	}
+	return fixture.installedSettingsExecutor.Exec(ctx, project, instance, request)
+}
+
+// With two yards pending, the init of one yard succeeds and leaves the other
+// yard's pending item for its own init.
+func TestInitOfOnePendingYardSucceedsWhileAnotherStaysPending(t *testing.T) {
+	scenario := newYardFailureScenario(t, true, true, "default", "named")
+	root := scenario.fixture.cli.options.RepositoryRoot
+	before, after, marker := filepath.Join(root, "inspect-before.json"), filepath.Join(root, "inspect-after.json"), filepath.Join(root, "default-initialized")
+	writePendingRepairEngine(t, &scenario.fixture, []byte(fmt.Sprintf(`#!/bin/sh
+if [ "$1" = --version ]; then printf 'yard-engine 1.2.3\n'; exit; fi
+[ "$1" = _release-transition ] || exit 64
+cat >/dev/null
+if [ -e '%s' ]; then cat '%s'; else cat '%s'; fi
+`, marker, after, before)))
+	request, _ := repairRequest(t, scenario.fixture)
+	scenario.request.ArtifactDigest = request.ArtifactDigest
+	scenario.runtime.failing(t, "default", true)
+	scenario.runtime.failing(t, "named", true)
+	requirePendingRuntimeOutcome(t, scenario.converge(t), "default", "named")
+	snapshot := func(path string) {
+		payload, err := json.Marshal(scenario.invoke(t, releasetransition.ProcessInspect, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, payload, 0o600)
+	}
+	snapshot(before)
+	// Readiness once default's init converged: only named stays pending.
+	partial := mustReadConfigFixture(t, scenario.runtime.state("default"))
+	testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("b", 64)), 0o600)
+	snapshot(after)
+	testkit.WriteFile(t, scenario.runtime.state("default"), partial, 0o600)
+
+	base := scenario.fixture.cli.options.Executor.(installedSettingsExecutor)
+	hashes := map[string]string{}
+	for _, yard := range []string{"default", "named"} {
+		loaded, err := scenario.fixture.cli.resolveReleaseTransitionContext(context.Background(), yard, scenario.request.ConfigHome)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assets, err := effectiveConfigAssets(loaded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, asset := range assets {
+			hash, err := config.HashRegularFile(asset.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hashes[asset.Destination] = hash
+		}
+	}
+	scenario.fixture.cli.options.Executor = materializedCurrentExecutor{installedSettingsExecutor: base, hashes: hashes}
+	integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("c", 64), Scope: strings.Repeat("c", 64)}}
+	scenario.fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return integrations }
+	stale := ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64)}
+	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &stale}
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	platform.converged[ports.ReconcileStageProfileRuntimes] = false
+	platform.converged[ports.ReconcileStageFinalize] = true
+	platform.readyOnProfileRuntime = marker
+	scenario.fixture.cli.options.InitPlatform = platform
+	writeCLIFile(t, filepath.Join(scenario.request.ConfigHome, "host-id"), "owner-a\n", 0o600)
+
+	program, _, stdout, stderr := scenario.fixture.program(t, []string{"-Y", "default", "init", "--yes"}, nil, func(nestedCall, io.Writer) int { return 0 })
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("init of default: code=%d\nstdout=%s\nstderr=%s", code, stdout, stderr)
+	}
+	if !slices.Contains(platform.applied, ports.ReconcileStageProfileRuntimes) {
+		t.Fatalf("init did not apply the runtime: %v", platform.applied)
+	}
+	if !strings.Contains(stdout.String(), "Still pending: yard named: profile sample runtime failed") {
+		t.Fatalf("init did not name the other pending yard: %s", stdout)
+	}
+	for yard, kept := range map[string]bool{"default": false, "named": true} {
+		path, _ := activationPendingRecordPath(scenario.request.ConfigHome, yard, "sample-runtime")
+		if _, err := os.Stat(path); (err == nil) != kept {
+			t.Fatalf("yard %s record kept=%v: %v", yard, !kept, err)
+		}
+	}
+}
