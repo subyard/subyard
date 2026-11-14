@@ -19,8 +19,8 @@ bash "$ROOT/tests/helpers/vm-page-reporting.sh"
 export SUBYARD_E2E_STATE_DIR="$TMP/client"
 
 grep -Fq 'SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes' \
-  "$ROOT/dev/agent-e2e.sh" \
-  || fail 'runner does not use the boot-stable product route registry'
+  "$ROOT/config/profiles/test-vms-client/skills/subyard-test-vms/client.sh" \
+  || fail 'shared client does not use the boot-stable product route registry'
 grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.sh" \
   || fail 'yard route mount and runner registry path diverged'
 
@@ -3600,8 +3600,9 @@ grep -Fq "$long_project" <<<"$long_rendered_status" \
 # caller checkout here would make these tests pass only when that checkout itself
 # happens to live below /srv/workspaces.
 RUNNER_UNDER_TEST="$fixture/dev/agent-e2e.sh"
-mkdir -p "$fixture/dev" "$fixture/scripts/lib"
+mkdir -p "$fixture/dev" "$fixture/scripts/lib" "$fixture/config/profiles/test-vms-client/skills"
 cp "$ROOT/dev/agent-e2e.sh" "$RUNNER_UNDER_TEST"
+cp -R "$ROOT/config/profiles/test-vms-client/skills/subyard-test-vms" "$fixture/config/profiles/test-vms-client/skills/"
 cp "$ROOT/scripts/lib/runtime.sh" "$fixture/scripts/lib/runtime.sh"
 
 new_runner_fixture() {

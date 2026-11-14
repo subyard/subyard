@@ -62,6 +62,21 @@ survive repeat provision, stop/start and an instance restart. Repeat `yard provi
 only the generic prerequisites and does not inspect or change Hermes-owned files. A confirmed
 `yard teardown` destroys the yard and its state while retaining the reusable named-yard definition.
 
+## Optional test VMs
+
+Hermes can use disposable root VMs from the operator's test-VM pool. Enable the opt-in client
+profile; it needs no coding-tool integration or Subyard checkout:
+
+```sh
+yard -Y hermes provision test-vms-client
+```
+
+This adds the shared broker client and the `subyard-test-vms` skill, linked as
+`~/.hermes/skills/subyard-test-vms`. Hermes then acquires a VM, runs root commands in it across
+separate calls with one lease handle, and releases it; see the
+[client for any yard](test-vms.md#client-for-any-yard). Remove `test-vms-client` from
+`ENVIRONMENT_PROFILES` and run `yard -Y hermes init` to retire the client and skill.
+
 ## Optional browser route over Tailscale
 
 The yard can publish an already-running Hermes loopback endpoint through the owner host. The owner
