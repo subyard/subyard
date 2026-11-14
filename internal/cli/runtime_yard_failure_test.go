@@ -184,7 +184,7 @@ func requirePendingRuntimeOutcome(t *testing.T, outcome releasetransition.Outcom
 		t.Fatalf("pending outcome: %#v", outcome)
 	}
 	for _, yard := range yards {
-		if !strings.Contains(outcome.Message, "yard "+yard+": profile sample runtime failed (diagnose: yard -Y "+yard+" profile status sample); "+
+		if !strings.Contains(outcome.Message, "yard "+yard+": profile sample runtime failed (diagnose: yard -Y "+yard+" profile list); "+
 			"profile not applied; fix it and run yard -Y "+yard+" init, or run yard -Y "+yard+" profile disable sample then init; the release is ready") {
 			t.Fatalf("pending message omits yard %s: %s", yard, outcome.Message)
 		}
