@@ -768,20 +768,24 @@ def capacity_reason(log):
     # A lane may take sequential leases; a refusal of a later acquire still blocks on
     # capacity when every earlier lease ended with a witnessed clean release.
     reason = None
-    held = False
+    held = 0
     with log.open("rb") as stream:
         for line in stream:
             match = re.fullmatch(rb"(?:agent-e2e|subyard-test-vms): retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", line)
             release = re.fullmatch(rb"E2E_RELEASE state=end duration_seconds=[0-9]{1,9} budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n", line)
             if match:
                 reason = None if held else match[1].decode()
-            elif line.startswith(b"E2E lease:") or re.match(rb"E2E_PHASE phase=guest state=start ", line):
-                held = True
+            elif line.startswith(b"E2E lease:"):
+                held += 1
+                reason = None
+            elif re.match(rb"E2E_PHASE phase=guest state=start ", line):
+                # Guest work runs inside an already counted lease.
+                held = max(held, 1)
                 reason = None
             elif release:
                 if release[1] != b"0":
                     return None
-                held = False
+                held = max(held - 1, 0)
     return None if held else reason
 
 

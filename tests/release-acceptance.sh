@@ -2230,6 +2230,9 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertEqual(m.capacity_reason(log), expected, released)
             log.write_text(lease + refusal)
             self.assertIsNone(m.capacity_reason(log))
+            # Two overlapping leases with one released still hold a lease at the refusal.
+            log.write_text(lease + lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal)
+            self.assertIsNone(m.capacity_reason(log))
             log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
             self.assertIsNone(m.capacity_reason(log))
             script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
