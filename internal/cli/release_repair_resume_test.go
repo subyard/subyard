@@ -434,7 +434,7 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 				return ports.InstanceExecResult{}, errors.New("synthetic transport failure")
 			}
 			observation := map[string]any{"fingerprint": strings.Repeat("b", 64), "changed": true}
-			if desired == "release" || desired == "release+conflict" {
+			if strings.HasPrefix(desired, "release") {
 				retired := []map[string]any{{"id": "codex", "kind": "structured", "format": "toml", "path": "/home/dev/.codex/config.toml", "digest": strings.Repeat("c", 64)}}
 				if desired == "release+conflict" {
 					retired = append(retired, map[string]any{"id": "codex", "kind": "structured", "format": "json", "path": "/home/dev/.codex/unproven.json", "digest": strings.Repeat("e", 64)})
@@ -453,8 +453,9 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 			// An independent document whose ownership cannot be proven.
 			return ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: retirement ownership evidence unavailable\n")}, &ports.GuestExitError{Code: 2}
 		}
-		// The desired view releases changed owned fields of the deselected integration.
-		payload, _ := json.Marshal(map[string]any{"converged": false, "fingerprint": strings.Repeat("d", 64), "release": "changed", "released": []string{"/approval_policy"}, "released_count": 1})
+		// The desired view releases changed owned fields of the deselected integration;
+		// after the guest release, before the inventory commit, it stays converged.
+		payload, _ := json.Marshal(map[string]any{"converged": fixture.desired == "release-completed", "fingerprint": strings.Repeat("d", 64), "release": "changed", "released": []string{"/approval_policy"}, "released_count": 1})
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
 	if len(command) == 3 && command[0] == "sha256sum" && command[2] == fixture.destination {
@@ -474,7 +475,7 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 // state, or cannot be inspected, the repair refuses instead of first rewriting
 // the change. Another yard's independent read failure is reported together.
 func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
-	for _, desired := range []string{"conflict", "unavailable", "", "conflict+unreadable-named", "release", "release+conflict"} {
+	for _, desired := range []string{"conflict", "unavailable", "", "conflict+unreadable-named", "release", "release+conflict", "release-completed"} {
 		t.Run("desired="+desired, func(t *testing.T) {
 			named := desired == "conflict+unreadable-named"
 			fixture := newPendingInitFixture(t, named, map[string]string{"default": "CODING_TOOL_INTEGRATIONS=\n"})

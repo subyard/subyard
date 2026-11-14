@@ -636,10 +636,10 @@ A failed inspection also refuses, with its own diagnostic rather than a conflict
 `yard -Y NAME integration status` reports, then run `yard migrate`. When that init would instead
 release ownership of a deselected integration's changed or missing owned configuration in place,
 the repair refuses with a pending-configuration blocker whose next step is `yard -Y NAME init`;
-an independent conflict in the same view is reported with it. The guest derives a resumed release
-from the state it left rather than from a separate record. An interrupted release that left no
-owned field therefore raises no blocker, but its pending ownership record already refuses a
-rewrite of that document. That init is admitted and
+an independent conflict in the same view is reported with it. The guest keeps a release's reason
+until fresh ownership, so the blocker also holds after the guest released ownership and before
+the integration inventory commit forgets the record; without it, the repair would overlay the
+released document. That init is admitted and
 performs the release without first restoring the installed state. Desired integration sources
 that cannot be read are not inspected, as in the pending-init listing, and the repair proceeds.
 Each yard is observed independently: refusals of all yards are reported together in target

@@ -324,21 +324,21 @@ includes a document the operator renamed or moved away. `yard integration status
 command that performs the release prints a result line naming the yard, the file and the fields
 left in place, which Subyard no longer manages; when the list is too long it states only their
 number. Remove those fields by hand if they are unwanted. A later enable applies the shipped
-fields again with fresh ownership. An interrupted release resumes from the state it left. Its
-result line can then be missing when no owned field remains, or when the interruption came after
-its final ownership record was written; status and the `yard init` plan show it before the first
-attempt. If the operator restores Subyard's exact values before the retry, the retry retires them
-normally.
-An interrupted ordinary retirement still accepts only the exact recorded before and after
-fields. A symlink or invalid document at the destination, ownership evidence recorded for a
+fields again with fresh ownership. A release records its reason before any ownership write and
+keeps it until that fresh ownership, so an interrupted release resumes as the same release and
+never edits the document, even if the operator restored Subyard's values in between. An
+interrupted ordinary retirement still accepts only the exact recorded before and after fields;
+if its document is deleted meanwhile, it completes without a notice when nothing owned was left
+in it, and otherwise refuses. A symlink or invalid document at the destination, ownership evidence recorded for a
 different destination path, and missing or unproven ownership evidence still block retirement.
 A disable after such a change or removal while release activation is stale stores only the
 selection. `yard migrate --check` then names `yard -Y NAME init`, and `yard migrate` refuses,
 because its installed-view repair would first restore the owned fields. Run `yard -Y NAME init`
 to perform the release; a yard left in this state by an earlier release recovers the same way.
 Materialization baselines keep the v0.14.0 format for retained-runtime rollback; extra
-retirement evidence uses a protected companion record under the same lock. The root-owned
-inventory under `/var/lib/subyard/integrations` records artifact identity and digests;
+retirement evidence, including a release's reason, uses protected companion records under the
+same lock. A corrupt release record refuses retirement and apply instead of being discarded.
+The root-owned inventory under `/var/lib/subyard/integrations` records artifact identity and digests;
 it is ownership evidence, not another desired-state store. Missing, legacy, corrupt
 or changed ownership evidence can block cleanup with a conflict instead of deleting
 unproven artifacts. After inventory initialization, newly created unrecorded runtime
