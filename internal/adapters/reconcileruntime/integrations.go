@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
@@ -106,8 +107,9 @@ type IntegrationPlan struct {
 	sources             string
 
 	// ownershipReleases lists structured documents whose retirement releases
-	// changed owned fields instead of removing them.
-	ownershipReleases []string
+	// changed or missing owned configuration instead of removing it.
+	ownershipReleases       []string
+	ownershipReleaseNotices []string
 
 	// Attribution only; the existing aggregate source binding remains the guard.
 	packageSources         map[string]string
@@ -872,8 +874,10 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
 		if observation.Release != "" || len(observation.Released) != 0 {
-			plan.Warnings = append(plan.Warnings, ownershipReleaseNotice(entry.ID, entry.Path, observation))
+			notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
+			plan.Warnings = append(plan.Warnings, notice)
 			plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
+			plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
 		}
 	}
 	if err := domain.CollectRefusals(causes...); err != nil {
@@ -1215,8 +1219,8 @@ func ownershipReleaseNotice(integration, path string, observation configmaterial
 	return boundedNotice("retiring "+integration+" releases ownership of "+path+": ", observation, "")
 }
 
-// Activation warnings share the release diagnostic bound, so the field list
-// shrinks to fit and names how many pointers it omitted.
+// Activation warnings share the release diagnostic bound, so the notice keeps
+// its reason, field count and suffix and shortens only the path or pointers.
 const ownershipNoticeLimit = 384
 
 func boundedNotice(prefix string, observation configmaterial.Observation, suffix string) string {
@@ -1224,36 +1228,58 @@ func boundedNotice(prefix string, observation configmaterial.Observation, suffix
 	if observation.Release == configmaterial.ReleaseMissingDocument {
 		reason = "the document is missing"
 	}
+	if maximum := ownershipNoticeLimit / 2; len(prefix) > maximum {
+		prefix = truncateText(prefix, maximum-len("...: ")) + "...: "
+	}
 	head := prefix + reason + "; "
-	var fields string
+	return head + ownershipReleaseFields(observation, ownershipNoticeLimit-len(head)-len(suffix)) + suffix
+}
+
+// ownershipReleaseFields names the retained pointers within budget bytes. A
+// pointer that does not fit is shortened or counted, never cut off silently.
+func ownershipReleaseFields(observation configmaterial.Observation, budget int) string {
 	switch {
 	case observation.Release == configmaterial.ReleaseMissingDocument:
-		fields = "nothing to remove"
+		return "nothing to remove"
 	case len(observation.Released) == 0:
-		fields = "no owned fields remain"
-	default:
-		fields = "fields left in place: "
-		for index, pointer := range observation.Released {
-			rest := ""
-			if remaining := len(observation.Released) - index - 1; remaining != 0 {
-				rest = fmt.Sprintf(" and %d more", remaining)
-			}
-			separator := ""
-			if index != 0 {
-				separator = ", "
-			}
-			if index != 0 && len(head)+len(fields)+len(separator)+len(pointer)+len(rest)+len(suffix) > ownershipNoticeLimit {
-				fields += fmt.Sprintf(" and %d more", len(observation.Released)-index)
-				break
-			}
-			fields += separator + pointer
+		return "no owned fields remain"
+	}
+	pointers := observation.Released
+	fields := "fields left in place: "
+	for index, pointer := range pointers {
+		more := ""
+		if remaining := len(pointers) - index - 1; remaining != 0 {
+			more = fmt.Sprintf(" and %d more", remaining)
 		}
+		separator := ""
+		if index != 0 {
+			separator = ", "
+		}
+		if len(fields)+len(separator)+len(pointer)+len(more) <= budget {
+			fields += separator + pointer
+			continue
+		}
+		if index != 0 {
+			return fields + fmt.Sprintf(" and %d more", len(pointers)-index)
+		}
+		room := budget - len(fields) - len(more) - len("...")
+		if room < len("/x") {
+			return fmt.Sprintf("%d fields left in place", len(pointers))
+		}
+		return fields + truncateText(pointer, room) + "..." + more
 	}
-	notice := head + fields + suffix
-	if len(notice) > ownershipNoticeLimit {
-		notice = strings.ToValidUTF8(notice[:ownershipNoticeLimit-3], "") + "..."
+	return fields
+}
+
+// truncateText cuts at a UTF-8 boundary within limit bytes.
+func truncateText(text string, limit int) string {
+	if len(text) <= limit {
+		return text
 	}
-	return notice
+	for limit > 0 && !utf8.RuneStart(text[limit]) {
+		limit--
+	}
+	return text[:limit]
 }
 
 // RetiredIntegrationNotices previews retired package state for operations such as
@@ -1308,6 +1334,10 @@ func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retiremen
 			warnings = append(warnings, observation.Notice)
 		}
 	}
+	// Preview structured ownership releases before consent. A refused or failed
+	// inspection is reported by the plan that applies it, not by this preview.
+	plan, _ := runtime.IntegrationPlan(ctx)
+	warnings = append(warnings, plan.ownershipReleaseNotices...)
 	return retirements, warnings, nil
 }
 

@@ -524,6 +524,33 @@ def document_payload(current, original):
     return semantic_payload(current) + b"\n"
 
 
+RELEASES = ("changed", "missing-document")
+
+
+def read_release_marker(path):
+    # A release records its reason before any ownership write, so an interrupted
+    # release resumes with the same notice. The shared receipt schema stays as is.
+    if not os.path.lexists(path):
+        return ""
+    validate_regular(path, STATE_UID, 0o600)
+    with open(path, "rb") as source:
+        try:
+            value = parse_json(source.read())
+        except Exception:
+            raise MaterializationError("invalid materialization state")
+    if (not isinstance(value, dict) or set(value) != {"schema", "release"} or
+            not isinstance(value["schema"], Decimal) or value["schema"] != 1 or
+            value["release"] not in RELEASES):
+        raise MaterializationError("invalid materialization state")
+    return value["release"]
+
+
+def remove_release_marker(path):
+    if os.path.lexists(path):
+        validate_regular(path, STATE_UID, 0o600)
+        os.remove(path)
+
+
 def retained_paths(current, owned):
     # Owned paths that a full retirement would remove from this document.
     trial = copy.deepcopy(current)
@@ -537,9 +564,10 @@ def retained_paths(current, owned):
             not any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for c in path)][:256]
 
 
-def retire(mode, baseline, baseline_path, receipt_path, current, original, destination, allowed_home, uid):
+def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid):
     if baseline is None or baseline["schema"] != 2:
         raise MaterializationError("retirement ownership evidence unavailable")
+    marker = read_release_marker(release_path)
     phase = baseline["phase"]
     missing = original is None
     if missing:
@@ -560,17 +588,24 @@ def retire(mode, baseline, baseline_path, receipt_path, current, original, desti
             release = "changed"
         elif missing and actual != baseline["retired_digest"]:
             raise MaterializationError("retirement destination missing")
+        if phase == "retiring":
+            release = marker
+    else:
+        # Completed ownership writes whose release has not been reported yet.
+        release = marker
     # A release, or its interrupted tail, leaves owned paths in place; an
     # interrupted ordinary retirement has already removed them.
     released = (retained_paths(current, baseline["owned"])
-                if phase != "retired" and actual != baseline["projection_digest"] else [])
+                if release or phase != "retired" and actual != baseline["projection_digest"] else [])
     if mode == "retire" and phase != "retired":
-        if release:
+        if phase == "applied" and release:
+            atomic_write(release_path, semantic_payload({"schema": 1, "release": release}) + b"\n", STATE_UID, 0o600)
             baseline["phase"] = "retiring"
             baseline["retired_digest"] = actual
             atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
             atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
-        elif not missing and (phase == "applied" or actual == baseline["projection_digest"]):
+        elif phase == "applied" or phase == "retiring" and not missing and actual == baseline["projection_digest"]:
+            remove_release_marker(release_path)
             for entry in sorted(baseline["owned"], key=lambda item: item["path"].count("/"), reverse=True):
                 remove_owned(current, entry)
             # Commit intent before replacing the document. A retry accepts only
@@ -587,9 +622,13 @@ def retire(mode, baseline, baseline_path, receipt_path, current, original, desti
         baseline["phase"] = "retired"
         atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
         phase = "retired"
-    report = {"converged": phase == "retired",
+    if mode == "retire":
+        # Clearing the reason completes the release; the caller reports it once.
+        remove_release_marker(release_path)
+    converged = phase == "retired" and (mode == "retire" or not release)
+    report = {"converged": converged,
               "fingerprint": fingerprint(current, {}, baseline["projection_digest"],
-                                         "release-" + release if release and phase != "retired" else phase,
+                                         "release-" + release if release and not converged else phase,
                                          [] if phase == "retired" else baseline["owned"])}
     if release:
         report["release"] = release
@@ -623,6 +662,7 @@ def main():
     baseline_path = os.path.join(STATE_ROOT, identity + ".json")
     receipt_path = os.path.join(STATE_ROOT, identity + ".ownership")
     lock_path = os.path.join(STATE_ROOT, identity + ".lock")
+    release_path = os.path.join(STATE_ROOT, identity + ".release")
     state_exists = validate_state_root()
 
     if mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
@@ -702,7 +742,7 @@ def main():
             current = {}
 
         if mode in ("assess-retire", "retire"):
-            retire(mode, evidence, baseline_path, receipt_path, current, original, destination, allowed_home, uid)
+            retire(mode, evidence, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid)
             return
 
         if evidence is not None:
@@ -752,6 +792,8 @@ def main():
 
         if baseline is not None and baseline.get("phase") == "retiring":
             raise MaterializationError("materialization retirement pending")
+        # Fresh ownership supersedes an unreported earlier release.
+        remove_release_marker(release_path)
         if baseline is not None and baseline.get("phase") != "retired":
             wanted_keys = {(entry["path"], entry["kind"]) for entry in wanted_owned}
             wanted_objects = object_paths(desired)
