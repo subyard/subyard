@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -962,5 +963,53 @@ func TestProfileRuntimeDiagnosticRejectsUnsafeLabels(t *testing.T) {
 	message, _ := diagnostic.ActivationDiagnostic()
 	if message != "yard unknown: profile unknown observation failed (invalid-schema)" || strings.Contains(err.Error(), "private-") {
 		t.Fatal("unsafe diagnostic label", message)
+	}
+}
+
+// Only a declared yard-scoped runtime whose handler exits with exactly one
+// apply/verify yard-local record yields the typed yard failure.
+func TestProfileRuntimeYardFailureRequiresDeclarationAndRecord(t *testing.T) {
+	const record = "subyard-profile-runtime-diagnostic-v1 "
+	for _, test := range []struct {
+		name, scope, stderr string
+		exit                int
+		want                bool
+	}{
+		{name: "declared apply", scope: "yard", stderr: record + "apply yard-local", exit: 7, want: true},
+		{name: "declared verify", scope: "yard", stderr: "private output\n" + record + "verify yard-local", exit: 1, want: true},
+		{name: "undeclared", stderr: record + "apply yard-local", exit: 7},
+		{name: "inspect record", scope: "yard", stderr: record + "inspect yard-local", exit: 7},
+		{name: "other reason", scope: "yard", stderr: record + "apply operation-failed", exit: 7},
+		{name: "duplicate", scope: "yard", stderr: record + "apply yard-local\n" + record + "apply yard-local", exit: 7},
+		{name: "malformed", scope: "yard", stderr: record + "apply yard-local extra", exit: 7},
+		{name: "no record", scope: "yard", stderr: "yard-local", exit: 7},
+		{name: "lifecycle record", scope: "yard", stderr: "subyard-lifecycle-diagnostic-v1 apply yard-local", exit: 7},
+		{name: "success with mismatch", scope: "yard", stderr: record + "apply yard-local", exit: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			handler := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+observe) printf '{"state":"stale","actual":"%%s","desired":"%%s"}\n' "$OLD" "$NEW" ;;
+apply) printf '%%s\n' "$RECORD" >&2; [ "$CODE" = 0 ] && printf '{"state":"current","actual":"%%s","desired":"%%s"}\n' "$OLD" "$OLD"; exit "$CODE" ;;
+esac
+`)
+			runtime := profileRuntimeFixtureAt(t, root, handler)
+			declaration := `{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh"}}`
+			if test.scope != "" {
+				declaration = `{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh","failure_scope":"` + test.scope + `"}}`
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config", "profiles", "synthetic", "profile.json"), []byte(declaration), 0o600)
+			runtime.Yard.YardName = "named"
+			runtime.Environment = []string{"OLD=" + testRuntimeOldDigest, "NEW=" + testRuntimeNewDigest, "RECORD=" + test.stderr, "CODE=" + strconv.Itoa(test.exit)}
+			err := runtime.ApplyProfileRuntime(context.Background(), "synthetic-runtime", "op-12345678", testRuntimeOldDigest, testRuntimeNewDigest)
+			var failure *ProfileRuntimeYardFailure
+			if err == nil || errors.As(err, &failure) != test.want {
+				t.Fatalf("typed yard failure=%t want %t: %v", errors.As(err, &failure), test.want, err)
+			}
+			if test.want && (failure.Yard != "named" || failure.ActivationID != "synthetic-runtime" || !strings.HasPrefix(test.stderr[strings.LastIndex(test.stderr, record)+len(record):], failure.Phase)) {
+				t.Fatalf("typed failure facts: %#v", failure)
+			}
+		})
 	}
 }

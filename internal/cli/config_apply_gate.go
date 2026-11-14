@@ -445,6 +445,15 @@ func (cli *CLI) prepareActivationRepair(
 	pendingInputs := false
 	for _, reconciler := range cli.nonConfigActivationReconcilers(request) {
 		observation, observeErr := reconciler.Observe(ctx, pair, observedLinks)
+		if runtime, ok := reconciler.(*profileRuntimeActivationReconciler); ok && pendingInit && runtimePendingConfigurationOnly(observeErr) {
+			// Recorded yard failures wait for their inits; each record binds its
+			// own yard's contract and is rechecked by that owner.
+			desired, err := runtime.desired(pair)
+			if err != nil {
+				return nil, nil
+			}
+			observation, observeErr = releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true}, nil
+		}
 		if observeErr != nil || !validConfigApplyActivationObservation(observation) {
 			return nil, nil
 		}
