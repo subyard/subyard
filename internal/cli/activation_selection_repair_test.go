@@ -479,6 +479,9 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 	if _, pending := extraAssets["config/fixture-pending-ownership"]; pending {
 		enginePath := filepath.Join(root, "bin/yard-engine")
 		engine := string(mustReadConfigFixture(t, enginePath))
+		// The native inspection reads the configuration root, as config loading does.
+		engine = strings.Replace(engine, `request="$(cat)"`, `request="$(cat)"
+  flock -n -s "$(printf '%s' "$request" | jq -r .configHome)" true || { echo 'native inspection found the configuration root locked' >&2; exit 75; }`, 1)
 		engine = strings.Replace(engine, `"status":"migration-required"`, `"status":"operator-action-required"`, 1)
 		engine = strings.Replace(engine, `"code":"transition-required"`, `"code":"dependency-unavailable"`, 1)
 		engine = strings.Replace(engine, `"message":"activation drift","retry":"run yard update"`, `"message":"fixture unowned selected artifact","retry":"move fixture file aside","transaction":"tx-0123456789abcdef"`, 1)
