@@ -639,7 +639,9 @@ the repair refuses with a pending-configuration blocker whose next step is `yard
 an independent conflict in the same view is reported with it. The guest keeps a release's reason
 until fresh ownership, so the blocker also holds after the guest released ownership and before
 the integration inventory commit forgets the record; without it, the repair would overlay the
-released document. That init is admitted and
+released document. After that commit, while the installed configuration still selects the
+document, the installed-view inspection itself refuses it with the same pending-configuration
+blocker. A deliberate enable from the desired selection is not refused and takes fresh ownership. That init is admitted and
 performs the release without first restoring the installed state. Desired integration sources
 that cannot be read are not inspected, as in the pending-init listing, and the repair proceeds.
 Each yard is observed independently: refusals of all yards are reported together in target

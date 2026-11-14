@@ -840,6 +840,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			mode = configmaterial.ModeAssessAdopt
 		}
 		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
+		if err == nil {
+			err = runtime.releasedInstalledDocument(file.destination, observation)
+		}
 		if err != nil {
 			causes = append(causes, err)
 			continue
@@ -1085,7 +1088,10 @@ func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, rea
 		if observed.Initial && runtime.AdoptLegacyIntegrations {
 			mode = configmaterial.ModeAssessAdopt
 		}
-		_, err = runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
+		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
+		if err == nil {
+			err = runtime.releasedInstalledDocument(file.destination, observation)
+		}
 		causes = append(causes, err)
 	}
 	for _, entry := range observed.Retired {
@@ -1210,6 +1216,24 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+path+": ", observation, "; Subyard no longer manages it"))
 	}
 	return observation, err
+}
+
+// releasedInstalledDocument refuses an installed-view inspection of a document
+// whose ownership a retirement released while the installed view still selects
+// it, as after an init interrupted before its applied settings were stored.
+// Repairing that view would overlay the operator's document; plain init of the
+// desired selection finishes instead. A deliberate enable from the desired
+// selection takes fresh ownership and is not refused.
+func (runtime Runtime) releasedInstalledDocument(path string, observation configmaterial.Observation) error {
+	if !runtime.appliedIntegrationInspection || observation.Release == "" {
+		return nil
+	}
+	return integrationOwnershipError{
+		pendingConfiguration: true,
+		message: fmt.Sprintf("integration ownership of %q in yard %s was released while its installed configuration still selects it; a release repair would overwrite the released document; run yard -Y %s init instead",
+			path, runtime.Yard.YardName, runtime.Yard.YardName),
+		retry: shellquote.Command([]string{"yard", "-Y", runtime.Yard.YardName, "init"}),
+	}
 }
 
 // ownershipReleaseNotice previews a retirement that only releases ownership:

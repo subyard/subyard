@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -63,7 +65,7 @@ func (fixture *ownershipReleaseExecutor) Exec(ctx context.Context, project, inst
 	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
 }
 
-func ownershipReleaseRuntime(t *testing.T, executor *ownershipReleaseExecutor, output *bytes.Buffer) Runtime {
+func ownershipReleaseRuntime(t *testing.T, executor ports.InstanceExecutor, output *bytes.Buffer) Runtime {
 	t.Helper()
 	root := testkit.TempDir(t)
 	for _, directory := range []string{"config", "scripts"} {
@@ -175,5 +177,59 @@ func TestRetiredIntegrationNoticesPreviewOwnershipRelease(t *testing.T) {
 	}
 	if executor.retires != 0 || output.Len() != 0 {
 		t.Fatalf("preview performed or reported the release: retires=%d output=%q", executor.retires, output.String())
+	}
+}
+
+// releasedInstalledExecutor reports a selected document whose ownership was
+// released, as after an init interrupted between its inventory commit and the
+// store of its applied settings.
+type releasedInstalledExecutor struct {
+	*retryableIntegrationExecutor
+	writes int
+}
+
+func (fixture *releasedInstalledExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	command := request.Command
+	if len(command) >= 5 && command[0] == "python3" && strings.Contains(command[3], "Version 1 records observed ownership only") &&
+		(command[4] == "observe" || command[4] == "observe-applied") {
+		payload, _ := json.Marshal(integrationObservation{Fingerprint: strings.Repeat("a", 64)})
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
+	if len(command) >= 5 && command[0] == "python3" && strings.Contains(command[3], "def retire(") {
+		if command[4] != "observe" {
+			fixture.writes++
+			return ports.InstanceExecResult{ExitCode: 2}, &ports.GuestExitError{Code: 2}
+		}
+		payload, _ := json.Marshal(map[string]any{"converged": false, "fingerprint": strings.Repeat("c", 64), "release": "changed"})
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
+	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
+}
+
+// A release repair of the installed view must not overlay a document whose
+// ownership was released: it refuses with a pending-configuration finding that
+// names plain init. The desired view, a deliberate enable, may take ownership.
+func TestInstalledViewRefusesReleasedDocument(t *testing.T) {
+	executor := &releasedInstalledExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}}
+	var output bytes.Buffer
+	runtime := ownershipReleaseRuntime(t, executor, &output)
+	asset := filepath.Join(runtime.RepositoryRoot, "settings.json")
+	testkit.WriteFile(t, asset, []byte(`{"managed":{"mode":"subyard"}}`), 0o600)
+	runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_CONFIG=" + asset, "AGENT_sample_CONFIG_DEST=.sample/settings.json"}
+	if _, err := runtime.IntegrationPlan(context.Background()); err != nil {
+		t.Fatalf("desired view refused a deliberate enable: %v", err)
+	}
+	installed := runtime.WithInstalledConfiguration()
+	_, err := installed.IntegrationPlan(context.Background())
+	var finding integrationOwnershipError
+	if !errors.As(err, &finding) || !finding.PendingIntegrationConfiguration() {
+		t.Fatalf("installed view did not refuse the released document: %v", err)
+	}
+	message, retry := finding.ActivationDiagnostic()
+	if retry != shellquote.Command([]string{"yard", "-Y", "example", "init"}) || !strings.Contains(message, "/home/dev/.sample/settings.json") || len(message) > 512 {
+		t.Fatalf("diagnostic=%q retry=%q", message, retry)
+	}
+	if err := installed.ApplyIntegrations(context.Background(), IntegrationPlan{}); err == nil || executor.writes != 0 {
+		t.Fatalf("installed-view apply reached the released document: %v writes=%d", err, executor.writes)
 	}
 }
