@@ -26,7 +26,7 @@ seed_settings() {
   for name in "${YARDS[@]}"; do
     case "$name" in
       default) port=2222; selection=codex ;;
-      solo) port=2233; selection=none ;;
+      solo) port=2233; selection= ;;
       foreign) port=2244; selection=codex ;;
     esac
     operator_env install -d -m 0700 "$CONFIG_HOME/yards/$name"
@@ -64,14 +64,6 @@ seed_guests() {
     '
     wait_active "$name"
   done
-  operator_env python3 - "$CONFIG_HOME/yards" <<'PY'
-import pathlib, re, sys
-for name, selection in (('default', "'codex paseo'"), ('solo', 'paseo')):
-    path = pathlib.Path(sys.argv[1]) / name / 'config.env'
-    path.write_text(re.sub(r'^CODING_TOOL_INTEGRATIONS=.*$', 'CODING_TOOL_INTEGRATIONS=' + selection,
-                           path.read_text(), flags=re.M))
-PY
-  operator_env bash -c 'sha256sum "$1"/yards/*/config.env' _ "$CONFIG_HOME" > "$STATE_ROOT/settings.before"
   guest_yard default test -f /var/lib/subyard/paseo-ownership
   guest_yard default sh -eu -c 'install -d "$(dirname "$1")"; printf "%s\n" "$2" > "$1"' subyard "$SENTINEL" "$MARKER"
   # Removal also deletes this unrelated same-name service and its non-worktree data.
@@ -84,6 +76,19 @@ PY
     systemctl daemon-reload
     systemctl enable --now paseo.service
   ' subyard "$FOREIGN_UNIT" "$FOREIGN_DATA"
+}
+
+# Select the retired package only after solo is stopped: a changed selection
+# makes activation repair pending, which gates ordinary stop until migrate.
+select_retired() {
+  operator_env python3 - "$CONFIG_HOME/yards" <<'PY'
+import pathlib, re, sys
+for name, selection in (('default', "'codex paseo'"), ('solo', 'paseo')):
+    path = pathlib.Path(sys.argv[1]) / name / 'config.env'
+    path.write_text(re.sub(r'^CODING_TOOL_INTEGRATIONS=.*$', 'CODING_TOOL_INTEGRATIONS=' + selection,
+                           path.read_text(), flags=re.M))
+PY
+  operator_env bash -c 'sha256sum "$1"/yards/*/config.env' _ "$CONFIG_HOME" > "$STATE_ROOT/settings.before"
 }
 
 assert_removed() {
@@ -138,22 +143,20 @@ prepare_acceptance() {
   [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active before retirement setup'
   seed_guests
   operator_yard -Y solo stop --yes
-  update_candidate --check --json > "$STATE_ROOT/update-check.json" || die 'update check failed with Paseo selected'
-  jq -e '(.blockers | length) == 0' "$STATE_ROOT/update-check.json" >/dev/null || die 'Paseo produced an update blocker'
-  # The candidate assesses the explicitly seeded retained artifacts.
-  update_candidate --check > "$STATE_ROOT/update-check.txt" 2>&1 || true
+  select_retired
+  # The changed selection is activation repair; migrate is its printed entry.
+  operator_yard migrate --check --json > "$STATE_ROOT/update-check.json" || true
+  check_json "$STATE_ROOT/update-check.json" 'Paseo produced a migration blocker' '(.blockers // []) == []'
+  operator_yard migrate --check > "$STATE_ROOT/update-check.txt" 2>&1 || true
   grep -Fq 'retire integration paseo' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
-    || die 'candidate preview omitted the retirement'
+    || die 'migration preview omitted the retirement'
   grep -Fq 'run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
-    || die 'update check omitted the stopped yard action'
-  update_candidate --yes > "$STATE_ROOT/update.log" 2>&1 \
-    || { report_failure 'candidate retirement failed' "$STATE_ROOT/update.log"; return 1; }
-  grep -Fq 'Warning: yard default: retire integration paseo' "$STATE_ROOT/update.log" \
-    || die 'unattended update omitted the retirement warning'
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate was not activated'
-  grep -Fq 'Warning: retired integration paseo may still be installed in yard solo; run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update.log" \
-    || die 'unattended update omitted the stopped yard warning'
-  [ "$(yard_power solo)" = STOPPED ] || die 'update started the stopped yard'
+    || die 'migration preview omitted the stopped yard action'
+  run_checked update.log 'candidate retirement' operator_yard migrate --yes
+  grep -Fq 'retire integration paseo' "$STATE_ROOT/update.log" || die 'unattended migration omitted the retirement warning'
+  grep -Fq 'retired integration paseo may still be installed in yard solo; run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update.log" \
+    || die 'unattended migration omitted the stopped yard warning'
+  [ "$(yard_power solo)" = STOPPED ] || die 'migration started the stopped yard'
   assert_stopped_yard_finishes
   assert_converged
   run_checked repeat-init.log 'repeat default init' operator_yard -Y default init --yes

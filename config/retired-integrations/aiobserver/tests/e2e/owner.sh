@@ -56,7 +56,12 @@ seed_observer() { # yard, host port
     listen="tcp:127.0.0.1:$port" connect=tcp:127.0.0.1:8080 --project "$(project_of "$name")" >/dev/null
   guest_yard "$name" sh -c 'stat -c "%d:%i" "$1/ai-observer.duckdb"; sha256sum "$1/ai-observer.duckdb" "$1/.retirement-history"' \
     subyard "$DATA" > "$STATE_ROOT/data-$name.before"
-  # Old selections and the retired port setting must keep loading unchanged.
+}
+
+# Old selections and the retired port setting must keep loading unchanged. Write
+# them after solo stops: a changed selection gates ordinary stop until migrate.
+select_retired() { # yard, host port
+  local name="$1" port="$2"
   operator_env bash -c 'sed -i "s/^CODING_TOOL_INTEGRATIONS=.*/CODING_TOOL_INTEGRATIONS=$2/" "$1"; printf "AI_OBSERVER_HOST_PORT=%s\n" "$3" >> "$1"' \
     _ "$CONFIG_HOME/yards/$name/config.env" "$([ "$name" = default ] && printf "'codex aiobserver'" || printf aiobserver)" "$port"
 }
@@ -101,7 +106,7 @@ assert_ready() { # log name
 follow_stopped_action() {
   local action
   action="$(tr -d '\r' < "$STATE_ROOT/update.log" | sed -n \
-    's/^Warning: retired integration aiobserver may still be installed in yard solo; run: //p' | head -n 1)"
+    's/^.*retired integration aiobserver may still be installed in yard solo; run: //p' | head -n 1)"
   case "$action" in
     'yard -Y solo start; then run yard migrate')
       run_checked solo-follow.log 'printed solo start' operator_yard -Y solo start --yes
@@ -122,15 +127,18 @@ prepare_acceptance() {
   [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active before retirement setup'
   seed_observer default 22222
   seed_observer solo 22233
-  operator_env bash -c 'sha256sum "$1"/yards/*/config.env' _ "$CONFIG_HOME" > "$STATE_ROOT/settings.before"
   operator_yard -Y solo stop --yes
-  update_candidate --check --json > "$STATE_ROOT/update-check.json" || die 'update check failed with AI Observer selected'
-  check_json "$STATE_ROOT/update-check.json" 'AI Observer produced an update blocker' '(.blockers | length) == 0'
-  update_candidate --check > "$STATE_ROOT/update-check.txt" 2>&1 || true
+  select_retired default 22222
+  select_retired solo 22233
+  operator_env bash -c 'sha256sum "$1"/yards/*/config.env' _ "$CONFIG_HOME" > "$STATE_ROOT/settings.before"
+  # The changed selection is activation repair; migrate is its printed entry.
+  operator_yard migrate --check --json > "$STATE_ROOT/update-check.json" || true
+  check_json "$STATE_ROOT/update-check.json" 'AI Observer produced a migration blocker' '(.blockers // []) == []'
+  operator_yard migrate --check > "$STATE_ROOT/update-check.txt" 2>&1 || true
   grep -Fq 'retired integration aiobserver may still be installed in yard solo' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
-    || die 'update check omitted the stopped yard action'
-  run_checked update.log 'candidate retirement' update_candidate --yes
-  [ "$(yard_power solo)" = STOPPED ] || die 'update started the stopped yard'
+    || die 'migration preview omitted the stopped yard action'
+  run_checked update.log 'candidate retirement' operator_yard migrate --yes
+  [ "$(yard_power solo)" = STOPPED ] || die 'migration started the stopped yard'
   assert_retired default '["codex"]'
   follow_stopped_action
   [ "$(yard_power solo)" = RUNNING ] || die 'printed action did not leave solo running'

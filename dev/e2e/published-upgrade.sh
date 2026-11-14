@@ -200,7 +200,8 @@ interrupt_anchor_hop() {
   [ "$checkpoint" != reconciling ] || install_activation_reconcile_fault
   # Observe and stop the real published owner; never edit its journal or links.
   operator_env python3 - "$ROOT" "$OPERATOR_HOME/.local/bin/yard" "$ANCHOR_VERSION" "$V2_JOURNAL" \
-    "$OPERATOR_HOME/hop-interrupted" "$checkpoint" > "$STATE_ROOT/hop-interrupt.log" 2>&1 <<'PYTHON'
+    "$OPERATOR_HOME/hop-interrupted" "$checkpoint" > "$STATE_ROOT/hop-interrupt.log" 2>&1 <<'PYTHON' \
+    || { tail -c 16384 "$STATE_ROOT/hop-interrupt.log" >&2; die "published anchor hop interruption at $checkpoint failed"; }
 import os, pathlib, runpy, sys
 root, launcher, version, journal, marker, checkpoint = sys.argv[1:]
 run = runpy.run_path(str(pathlib.Path(root) / "dev/verify-release-upgrades.py"))["run_process"]

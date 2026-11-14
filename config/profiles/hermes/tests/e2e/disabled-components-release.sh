@@ -211,14 +211,8 @@ install_candidate_with_evidence() {
 }
 
 assert_one_run_ready() {
-  grep -Fq 'Release is active; additional activation repair requires a fresh plan.' "$STATE_ROOT/installer.log" \
-    || die 'installer did not assess the follow-up activation repair'
-  grep -Fq 'Current release repaired successfully' "$STATE_ROOT/installer.log" \
-    || die 'installer did not complete the follow-up activation repair'
-  # The repair observes installed configuration and explains each yard's own installed selection.
-  grep -Fq 'yard default: requested coding integrations [], effective [], from installed configuration (applied record)' "$STATE_ROOT/installer.log" \
-    && grep -Fq 'yard hermes: requested coding integrations [codex], effective [codex], from installed configuration (applied record)' "$STATE_ROOT/installer.log" \
-    || die 'activation repair plan misstated per-yard installed selection provenance'
+  # The anchor already localized listener settings, so one installer run activates
+  # without a follow-up repair.
   # Inspect the installed release without another update or release lookup.
   operator_yard migrate --check --json > "$STATE_ROOT/installer-ready.json"
   jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true and

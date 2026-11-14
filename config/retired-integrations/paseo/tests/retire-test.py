@@ -56,10 +56,15 @@ exit 0
 '''
 
 
+def payload_source():
+    # The payload sources shared retained-lease helpers; test both together.
+    return ((PACKAGE/'tests/e2e/owner.sh').read_text()
+            + (PACKAGE.parents[2]/'dev/e2e/retired-integration-fixture.sh').read_text())
+
 
 class FixtureCreationTest(unittest.TestCase):
     def test_stopped_path_requires_disclosure_and_power_restoration(self):
-        source = (PACKAGE/'tests/e2e/owner.sh').read_text()
+        source = payload_source()
         functions = ''.join(name+'() {'+source.split(name+'() {', 1)[1].split('\n}\n', 1)[0]+'\n}\n'
                             for name in ('report_failure', 'check_json', 'run_checked', 'stop_owned_solo', 'assert_stopped_yard_finishes')
                             if name+'() {' in source)
@@ -158,7 +163,7 @@ operator_yard() {
                     self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
     def test_candidate_update_preserves_arguments_and_native_exit(self):
-        source = (PACKAGE/'tests/e2e/owner.sh').read_text()
+        source = payload_source()
         function = 'update_candidate() {'+source.split('update_candidate() {', 1)[1].split('\n}\n', 1)[0]+'\n}\n'
         for arguments in (['--check', '--json'], ['--yes']):
             for native in (0, 23):
@@ -173,7 +178,7 @@ operator_yard() {
                     self.assertEqual((Path(temporary)/'calls').read_text().splitlines(), command)
 
     def test_failure_capture_names_native_and_json_failures(self):
-        source = (PACKAGE/'tests/e2e/owner.sh').read_text()
+        source = payload_source()
         functions = ''.join(name+'() {'+source.split(name+'() {', 1)[1].split('\n}\n', 1)[0]+'\n}\n'
                             for name in ('report_failure', 'check_json', 'run_checked'))
         for code in (0, 23):
@@ -196,7 +201,7 @@ operator_yard() {
             self.assertIn(path.read_text().strip(), result.stderr)
 
     def test_image_is_resolvable_in_baseline_created_projects(self):
-        source = (PACKAGE/'tests/e2e/owner.sh').read_text()
+        source = payload_source()
         seed = source.split('seed_settings() {', 1)[1].split('\n}\n', 1)[0]
         for names in (('default', 'solo', 'foreign'),):
             with self.subTest(names=names), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
@@ -217,7 +222,7 @@ operator_yard() {
                     self.assertIn('BASE_IMAGE_FALLBACK=images:debian/13/cloud', settings)
 
     def test_native_init_precedes_cleanup_claim(self):
-        source = (PACKAGE/'tests/e2e/owner.sh').read_text()
+        source = payload_source()
         create = source.split('create_yards() {', 1)[1].split('\n}\n', 1)[0]
         for names in (('default', 'solo', 'foreign'),):
             for failure in (0, 23):

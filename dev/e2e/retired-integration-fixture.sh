@@ -17,7 +17,7 @@ CONFIG_HOME="$OPERATOR_HOME/.config/subyard"
 report_failure() { # message, captured files...
   local message="$1" file
   shift
-  printf '%s: %s\n' "$FIXTURE_LABEL" "$message" >&2
+  printf '%s: %s\n' "${FIXTURE_LABEL:-retirement}" "$message" >&2
   for file; do
     [ -f "$file" ] || continue
     printf '\n== %s ==\n' "${file##*/}" >&2
