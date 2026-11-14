@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published v0.11.0 owner recreation, retained ordinary yard and installed-runtime recovery.
+# Published anchor owner recreation, retained ordinary yard and installed-runtime recovery.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -35,9 +35,6 @@ ADDRESS_INSTANCE="yard-$ADDRESS_YARD"
 # shellcheck source=dev/e2e/published-baseline.sh
 . "$ROOT/dev/e2e/published-baseline.sh"
 STATE_ROOT="$SHARED_ROOT"
-IFS=$'\t' read -r BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256 < <(
-  awk -F '\t' '$1 == "0.11.0"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
-)
 # The existing published-upgrade pins and local P0 VM matrix are amd64.
 BASELINE_ARM64_SHA256=''
 BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
@@ -334,13 +331,19 @@ prepare_operator() {
 }
 
 prepare_baseline_yards() {
-  local checkout
+  local checkout anchor_version anchor_sha manifest_before
+  local BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256
+  # Create the legacy Git-owned settings with its authentic schema-1 producer.
+  IFS=$'\t' read -r BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256 _ < <(
+    awk -F '\t' '$1 == "0.11.0"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
+  )
+  [ "$BASELINE_VERSION" = 0.11.0 ] || die 'legacy settings creation pin is missing'
   install_baseline
   [ "$(operator_yard --version)" = "yard $BASELINE_VERSION" ] || die 'published baseline is not active'
-  # v0.11.0 has no yard-add command. Its config sync creates the local named
+  # The creation release's config sync creates the local named
   # registration from a committed configuration checkout; no runtime state is seeded.
   checkout="$(operator_env mktemp -d /tmp/subyard-p0-owner-config.XXXXXX)"
-  # Direct v0.11.0 sync does not register this source. Keep the real checkout
+  # Its direct sync does not register this source. Keep the real checkout
   # for the candidate's later, explicitly confirmed ownership migration.
   CONFIG_CHECKOUT="$checkout"
   operator_env bash -s -- "$checkout" <<'BASELINE_CONFIG'
@@ -385,6 +388,17 @@ BASELINE_CONFIG
   printf '%s\n' "$ORDINARY_BEFORE" > "$SHARED_ROOT/ordinary-before"
   # Preserve the stopped legacy owner until the explicitly advertised teardown.
   incus stop "$INSTANCE" --project "$PROJECT"
+  operator_env jq -e '.schemaVersion == 1 and (.files | length) > 0' \
+    "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
+  manifest_before="$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")"
+  IFS=$'\t' read -r anchor_version _ anchor_sha _ < <(published_anchor)
+  operator_yard update --version "$anchor_version" --yes
+  [ "$(operator_yard --version)" = "yard $anchor_version" ] || die 'anchor update did not activate'
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$anchor_version/subyard-$anchor_version-linux-amd64.tar.gz" | awk '{print $1}')" = "$anchor_sha" ] \
+    || die 'anchor archive differs from its immutable pin'
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")" = "$manifest_before" ] \
+    || die 'anchor update changed the retained schema-1 manifest'
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'anchor update changed the ordinary yard'
 }
 
 package_candidates() {
@@ -774,15 +788,13 @@ run_incus_installer() {
   )
 }
 
-# Real installs entered updates with shapes that fresh fixtures never create: a parent of the
-# guest disk-/tmp policy owned by the guest user, and the revision-only marker that a disabled
-# publication owner left on the instance (no schema key). Keys come from profile declarations,
+# Real installs entered updates with a shape that fresh fixtures never create: the
+# revision-only marker that a disabled publication owner left on the instance (no schema key).
+# The anchor already completed the guest disk-/tmp policy, so its refused-parent case is frozen. Keys come from profile declarations,
 # so this core fixture names no profile; only owners whose current revision proves them disabled
 # (mode field 0) get the marker, as on real installs.
 seed_installed_shapes() {
   local schema_key revision_key revision worker agent seeded=0
-  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- \
-    chown "$FIXTURE_DEV_UID:$FIXTURE_DEV_UID" /usr/local/lib
   worker="$(printf 'historical worker revision' | sha256sum | awk '{print $1}')"
   agent="$(printf 'historical agent key' | sha256sum | awk '{print $1}')"
   while IFS=$'\t' read -r schema_key revision_key; do
@@ -795,22 +807,6 @@ seed_installed_shapes() {
   done < <(jq -r '.instance_publication // empty | [.schema_key, .revision_key] | @tsv' "$ROOT"/config/profiles/*/profile.json)
   [ "$seeded" -gt 0 ] || die 'no disabled publication owner on the baseline yard to carry the historical marker'
   printf 'evidence: historical_disabled_markers=%s\n' "$seeded"
-}
-
-# The refused guest policy names the yard and the reason, and the printed retry completes it.
-complete_refused_disk_tmp() {
-  local retry
-  retry="$(sed -nE "s#^warning: yard [a-z0-9-]+: disk-/tmp migration pending: yard [a-z0-9-]+: guest disk /tmp policy refused: unsafe guest temporary policy directory: /usr/local/lib owner $FIXTURE_DEV_UID:$FIXTURE_DEV_UID mode [0-7]+; run (.*)\$#\\1#p" \
-    "$SHARED_ROOT/first-update.log")"
-  [ "$retry" = 'yard update --yes' ] \
-    || die "update did not name the yard, reason and running-yard retry of the refused guest /tmp policy: '$retry'"
-  [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.disk_tmp --project "$DEFAULT_PROJECT")" != v1 ] \
-    || die 'refused guest /tmp policy was recorded as complete'
-  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- chown 0:0 /usr/local/lib
-  operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/a" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_A" --yes
-  [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.disk_tmp --project "$DEFAULT_PROJECT")" = v1 ] \
-    || die 'the printed retry did not complete the guest /tmp policy'
 }
 
 # A service-purpose ordinary yard has no coding integrations. It exercises only
@@ -917,7 +913,7 @@ verify_shared_target_refusals() {
 }
 
 prepare() {
-  [ "$(uname -m)" = x86_64 ] || die 'the published v0.11.0 pin requires an amd64 P0 worker'
+  [ "$(uname -m)" = x86_64 ] || die 'the published anchor pin requires an amd64 P0 worker'
   command -v git >/dev/null 2>&1 || die 'Git is required for the published configuration import'
   command -v unshare >/dev/null 2>&1 || die 'unshare is required'
   p0_capacity_reset_build_cache
@@ -959,7 +955,6 @@ prepare() {
   [ "$(operator_yard --version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'
   verify_v2_release_transition "$VERSION_A"
-  complete_refused_disk_tmp
   prepare_address_service
   verify_shared_target_refusals
   operator_yard config unset INCUS_PROJECT --scope host --yes

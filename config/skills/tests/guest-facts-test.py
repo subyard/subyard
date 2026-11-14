@@ -25,7 +25,7 @@ class Facts(unittest.TestCase):
         self.path = self.root/'guest-runtime.json'
         self.machine = self.root/'machine-id'
         self.machine.write_text('a'*32+'\n')
-        self.target = dict(version='0.22.0-test', yard=dict(name='default', project='project', instance='yard'), selected_profiles=[])
+        self.target = dict(version='0.29.0-test', yard=dict(name='default', project='project', instance='yard'), selected_profiles=[])
         # The host-free worker is unprivileged. Keep real file modes/fsync/replace;
         # substitute only ownership and the root-only ancestor admission.
         self.addCleanup(patch.stopall)
@@ -76,7 +76,7 @@ class Facts(unittest.TestCase):
 
     def test_failed_refresh_retains_success_and_retry_does_not_promote_target(self):
         self.apply('begin'); self.apply('commit')
-        newer = dict(self.target, version='0.23.0-test', selected_profiles=['synthetic'])
+        newer = dict(self.target, version='0.30.0-test', selected_profiles=['synthetic'])
         self.apply('begin', newer)
         self.assertEqual(self.read()['last_success'], self.target)
         self.assertEqual(self.read()['status'], 'incomplete')
@@ -103,7 +103,7 @@ class Facts(unittest.TestCase):
 
     def test_atomic_commit_failure_keeps_incomplete_and_successful_version(self):
         self.apply('begin'); self.apply('commit')
-        newer = dict(self.target, version='0.23.0-test')
+        newer = dict(self.target, version='0.30.0-test')
         self.apply('begin', newer)
         before = self.path.read_bytes()
         with patch.object(facts.os, 'replace', side_effect=OSError('fixture cut')):
@@ -117,7 +117,7 @@ class Facts(unittest.TestCase):
         original_read = facts.read
         with patch.object(facts, 'read', side_effect=lambda: original_read(self.path, self.machine)), patch.object(facts.sys, 'argv', ['facts.py', 'check']), patch.object(facts.json, 'load', return_value=dict(self.target, selected_profiles=['synthetic'])):
             self.assertEqual(facts.main(), 11)
-        self.apply('begin', dict(self.target, version='0.23.0-test'))
+        self.apply('begin', dict(self.target, version='0.30.0-test'))
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.object(facts, 'read', side_effect=lambda: original_read(self.path, self.machine)), patch.object(facts.sys, 'argv', ['facts.py']), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             self.assertEqual(facts.main(), 1)
@@ -131,7 +131,7 @@ class Facts(unittest.TestCase):
         pending = dict(self.target, selected_profiles=['synthetic'])
         self.assertEqual(self.check(pending), 11)
         self.assertEqual(self.path.read_bytes(), before, 'checking must not apply configuration')
-        targets = [dict(self.target, version='0.23.0-test'), dict(pending, version='0.23.0-test')]
+        targets = [dict(self.target, version='0.30.0-test'), dict(pending, version='0.30.0-test')]
         for key in ('name', 'project', 'instance'):
             targets.append(dict(pending, yard=dict(self.target['yard'], **{key: 'different'})))
             targets.append(dict(self.target, yard=dict(self.target['yard'], **{key: 'different'})))
@@ -185,7 +185,7 @@ class Ownership(unittest.TestCase):
         self.metadata[self.path] = self.info(stat.S_IFREG | 0o644)
         self.maps = {'uid': '1000 0 1\n', 'gid': '1001 0 1\n'}
         self.writable = set()
-        target = dict(version='0.22.0-test', yard=dict(name='yard', project='project', instance='yard'), selected_profiles=[])
+        target = dict(version='0.29.0-test', yard=dict(name='yard', project='project', instance='yard'), selected_profiles=[])
         value = dict(schema=1, machine_id='a'*32, status='current', target=target,
                      last_success=target, capabilities='unknown', readiness='unknown')
         stack = contextlib.ExitStack()

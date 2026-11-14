@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 # shellcheck source=config/profiles/orca/release.env
 . "$ROOT/config/profiles/orca/release.env"
 
@@ -29,6 +31,11 @@ UPGRADE_FROM="${SUBYARD_E2E_ORCA_UPGRADE_FROM:-}"
 UPGRADE_INSTALLER_SHA256="${SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256:-}"
 UPGRADE_TARGET="${SUBYARD_E2E_ORCA_UPGRADE_TARGET:-}"
 HANDLER_ACCEPTANCE="${SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE:-}"
+if [ -n "$HANDLER_ACCEPTANCE" ] && [ -z "$UPGRADE_FROM" ]; then
+  IFS=$'\t' read -r UPGRADE_FROM UPGRADE_INSTALLER_SHA256 _ _ < <(
+    published_anchor
+  )
+fi
 
 
 stage() { printf 'orca-bootstrap-e2e: %s\n' "$*" >&2; }
@@ -92,8 +99,8 @@ if [ -n "$UPGRADE_TARGET" ]; then
     || die 'upgrade target must be an exact published version'
 fi
 case "$HANDLER_ACCEPTANCE" in
-  ''|direct|inherited) ;;
-  *) die 'SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE must be direct or inherited' ;;
+  ''|direct) ;;
+  *) die 'SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE must be direct' ;;
 esac
 [ -z "$HANDLER_ACCEPTANCE" ] || [ -n "$UPGRADE_FROM" ] \
   || die 'Orca handler acceptance requires a published predecessor'
@@ -287,10 +294,10 @@ YARD
 run_candidate_handler_acceptance() {
   local mode="$1" target_version="$release_version"
   local upgrade_source gone keep_session keep_id keep_tab keep_tab_id
-  local legacy_helper legacy_hook target_root target_helper target_hook rolled_back_version
+  local legacy_helper target_root target_helper target_hook rolled_back_version
   local rollback_root rollback_helper restored_helper restored_hook
   local primary_project="$PROJECT" primary_instance="$INSTANCE" primary_pid
-  local secondary_helper secondary_hook secondary_helper_after secondary_hook_after
+  local secondary_helper_after secondary_hook_after
   local secondary_active secondary_enabled secondary_ssh_port secondary_orca_port
 
   stage "seeding missing-checkout records for $mode candidate handler acceptance"
@@ -311,8 +318,8 @@ run_candidate_handler_acceptance() {
     "$(jq -cn --arg selector "id:$keep_id::$keep_session" \
       '{worktree:$selector,activate:false,clientMutationId:"orca-handler-candidate-keep"}')")"
   keep_tab_id="$(jq -er '.tab.id' <<<"$keep_tab")" || die 'saved session tab was not created'
+  # Leave registered missing paths for the candidate to reconcile.
   guest_dev rm -rf -- "$gone" "$keep_session"
-  yard orca sync --yes >/dev/null
   orca_catalog_has "$gone" || die 'predecessor unexpectedly pruned the gone checkout'
 
   stage 'installing Orca in a named yard and stopping only its service'
@@ -342,23 +349,12 @@ EOF_SECONDARY_HANDLER
   yard -Y secondary orca down --yes >/dev/null
   PROJECT="$primary_project-secondary"
   INSTANCE="$primary_instance-secondary"
-  secondary_helper="$(orca_registration_hash)"
-  secondary_hook="$(orca_hook_hash)"
   secondary_active="$(guest_root systemctl is-active subyard-orca.service 2>/dev/null || true)"
   PROJECT="$primary_project"
   INSTANCE="$primary_instance"
   [ "$secondary_active" = inactive ] || die 'named-yard Orca did not become inactive after down'
 
-  if [ "$mode" = inherited ]; then
-    stage 'creating inherited 0.14.0 release with the 0.13.13 installed helper'
-    YARD_RELEASE_BASE_URL=https://github.com/subyard/subyard/releases/download/v0.14.0 \
-      yard update --version 0.14.0 --yes >/dev/null
-    [ "$(yard --version)" = 'yard 0.14.0' ] || die 'published 0.14.0 is not active'
-    yard orca sync --yes >/dev/null
-    orca_catalog_has "$gone" || die 'inherited stale helper unexpectedly pruned the gone checkout'
-  fi
   legacy_helper="$(orca_registration_hash)"
-  legacy_hook="$(orca_hook_hash)"
   primary_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
 
   stage 'seeding a representative cache before candidate activation'
@@ -376,8 +372,6 @@ EOF_SECONDARY_HANDLER
   target_helper="$(release_orca_helper_hash "$target_root")"
   [ "$(orca_registration_hash)" = "$target_helper" ] \
     || die 'candidate update did not install the target registration helpers'
-  [ "$(orca_hook_hash)" != "$legacy_hook" ] \
-    || die 'candidate update retained the legacy Orca hook'
   target_hook="$(orca_hook_hash)"
   guest_root systemctl is-enabled --quiet subyard-orca-discovery.timer \
     || die 'candidate activation did not enable periodic discovery'
@@ -394,12 +388,10 @@ EOF_SECONDARY_HANDLER
   PROJECT="$primary_project"
   INSTANCE="$primary_instance"
   [ "$secondary_helper_after" = "$target_helper" ] \
-    && [ "$secondary_hook_after" != "$secondary_hook" ] \
+    && [ "$secondary_hook_after" = "$target_hook" ] \
     || die 'candidate update did not refresh the named-yard helper contract'
   [ "$secondary_active" = inactive ] || die 'candidate update changed stopped named-yard Orca state'
   [ "$secondary_enabled" = disabled ] || die 'candidate update changed disabled named-yard Orca state'
-  [ "$secondary_helper" != "$target_helper" ] \
-    || die 'named-yard fixture did not begin with stale registration helpers'
   yard orca sync --yes >"$STATE/handler-candidate-sync.out" 2>"$STATE/handler-candidate-sync.err"
   orca_catalog_has "$gone" && die 'candidate helper retained the empty missing checkout'
   [ "$(orca_repo_id "$keep_session")" = "$keep_id" ] \
@@ -410,7 +402,7 @@ EOF_SECONDARY_HANDLER
   assert_orca_runtime_json_preserved
   client_status "$pairing" upgrade-client
 
-  stage 'checking legacy rollback retention and explicit old Orca restoration'
+  stage 'checking anchor rollback retention and explicit Orca restoration'
   yard update --rollback --yes >/dev/null || die 'legacy rollback failed'
   rolled_back_version="$(yard --version)"
   rollback_root="$SUBYARD_HOME/runtime/$(readlink "$SUBYARD_HOME/runtime/current")"
@@ -423,16 +415,14 @@ EOF_SECONDARY_HANDLER
     || die 'rollback with the candidate helper lost the saved checkout'
   assert_orca_runtime_json_preserved
   client_status "$pairing" upgrade-client
-  # Deliberately restoring published legacy code also restores its file limit.
-  # Keep the cache for candidate/retained-helper checks, not this legacy repair.
+  # Keep the explicit published-owner repair separate from the cache assay.
   guest_dev rm -rf -- /srv/workspaces/handler-upgrade/src/.build/cache
   yard orca up --yes >/dev/null
   restored_helper="$(orca_registration_hash)"
   restored_hook="$(orca_hook_hash)"
   # Published old installers overwrite their files without deleting new modules.
   [ "$(orca_registration_hash "$rollback_root")" = "$rollback_helper" ] \
-    && [ "$restored_hook" != "$target_hook" ] \
-    || die 'old Orca up did not restore its helper contract'
+    || die 'anchor Orca up did not restore its helper contract'
 
   stage 'checking stopped-yard deferred repair with simultaneous candidate config drift'
   seed_handler_cache

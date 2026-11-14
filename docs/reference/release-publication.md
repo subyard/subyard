@@ -50,7 +50,7 @@ are counted from the successful preparation jobs and not repeated; `release-acce
 `--only NAME --rerun` replaces a counted result with a local run. A locally prepared candidate runs them.
 
 After downloading the preparation artifact, `prepare` also dispatches `release-vm.yml` asynchronously
-for the 27 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
+for the 24 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
 commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`; otherwise it reports the refusal and
 leaves those checks open. It downloads the exact preparation run/attempt artifact, uses the shared
 hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to

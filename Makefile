@@ -1,7 +1,7 @@
 GO ?= go
 PYTHON ?= python3
 VERSION ?= 0.1.0-dev
-TEST_VERSION ?= 0.22.0-test
+TEST_VERSION ?= 0.29.0-test
 
 .PHONY: build package test lint verify verify-veranda clean cli-docs cli-docs-check
 

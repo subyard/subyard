@@ -82,7 +82,8 @@ finally:
  sentinel.terminate();sentinel.wait(timeout=5)
 print('ok: actual signing PTY waits for OpenSSH prompts, refuses repeats, retains exits and cleans only its child')
 PY_SIGNING_PTY
-version=0.17.0-test.full-uninstall
+# This is the current installed-runtime cold-uninstall contract, not an old-source upgrade.
+version=0.29.0-test.full-uninstall
 release="$fixture/release"
 bash "$ROOT/dev/package-engine.sh" --output-dir "$release" --version "$version" --arch amd64 >/dev/null
 bundle="$release/subyard-$version-linux-amd64.tar.gz"

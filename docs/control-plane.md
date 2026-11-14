@@ -1031,7 +1031,7 @@ Receipt replay validates these identities and evidence; recorded transaction IDs
 from cleanup. Other earlier releases and arbitrary same-registry targets are unsupported, and
 unknown artifacts and graphs remain blocked. The candidate registry must equal the predecessor's,
 which holds through v0.25.1: a host interrupted on v0.21.0 is replaced by standalone v0.25.1 and
-then updates normally, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
+then takes the v0.28.0 anchor hop, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
 and initial-successor evidence under `release-transition/migration-owner/v1/transactions` before
 current-journal CAS. The original activation remains unfinished superseded evidence; ordinary V2
 resume belongs to the candidate successor. This exception does not widen either activation-only
@@ -1102,24 +1102,12 @@ and unfinished-transaction recovery horizon. A runtime version bump alone never 
 contracts. Do not weaken validation or silently discard a new safety requirement to fit an old
 response: the compatibility adapter must preserve its meaning.
 
-Before publication, `dev/verify-release-upgrades.py` runs the unmodified, checksum-pinned v0.11.2
-and v0.18.1 updaters against the built candidate on the runner's architecture. It verifies inspection,
-activation, the completed fixed point, completed activation drift inspection, rollback and forward retry.
-It also kills a real update after journaled activation and uses the old updater to resume the same
-authorized candidate transaction. This released-binary check complements tests of the frozen codecs;
-rebuilding both ends from current source does not establish cross-release compatibility. Both released callers also exercise checkpoint-reader
-bridge ordering and rollback refusal after authoritative epochs exceed the frozen projection. The v0.18.1
-caller reports completed activation drift as a fresh migration-required plan; v0.11.2 retains its frozen
-recovering presentation. Neither reuses completed authorization.
-
-The same harness runs the checksum-pinned v0.17.3 engine to create and interrupt an activation-only
-repair and reproduce its unrelated-template blocker. A standalone candidate with the same registry
-resumes with the original assets. When the latest candidate advances the registry, the harness proves
-its refusal without mutation, resumes through the checksum-pinned v0.18.6 registry/catalog bridge,
-then separately authorizes the latest ordinary update and verifies the new publication epoch while
-preserving historical domains. Its synthetic Incus backend changes
-only observed running/stopped state; settings, ledger and original journal bindings must survive
-recovery. Privileged commands are rejected by fixture shims.
+Before publication, `dev/verify-release-upgrades.py` runs unmodified checksum-pinned old callers
+through update and `--check` refusal, verifies the anchor instruction reaches stderr, and checks
+that protected configuration, active links and project data remain unchanged. The pre-anchor
+migration and original-owner recovery matrix is frozen in the v0.28.0 tag. Current Go reader tests
+retain accepted V2 history and recovery contracts; installed direct upgrade, rollback and the
+one-time anchor chains belong to the published-upgrade and P0 VM lanes.
 
 Historical frozen materialization recipes retain preview composition from the bound runtime's
 `config/preview/instructions.md` asset, or the exact legacy fallback for older runtimes. Recovery
@@ -1129,13 +1117,15 @@ The Release workflow retains the compatibility check's output with its other fai
 
 ### Legacy upgrades
 
-The minimum supported source is **v0.11.0, inclusive**. Fresh upgrades/imports from earlier
-installations and new rollback targets below that boundary refuse before changing active runtime
-links or protected state. There is no V1 upgrade bridge. Existing accepted V2 history and exact
-unfinished V2 owners remain supported, including retained legacy evidence. Process V1, Ledger V2
-and V2 checkpoint-reader bridges have independent compatibility contracts.
+Direct updates, the installer over an existing installation and offline update require installed
+**v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0 refuse before any change and print
+`yard update --version 0.28.0 && yard update`; rollback targets below v0.28.0 refuse. The
+[approved support boundary](reference/legacy-migration-support.md#approved-support-boundary)
+owns the complete rules, including unfinished transitions below the anchor.
 
-For an older installation, stage verified current cleanup tooling in its existing runtime store:
+Sources before **v0.11.0** retain the full-uninstall route; no V1 upgrade bridge exists. Accepted
+V2 history and evidence remain readable independently of fresh update admission.
+For a source before v0.11.0, stage verified current cleanup tooling in its existing runtime store:
 
 ```bash
 VERSION=<current-version>
@@ -1209,6 +1199,11 @@ contract too when it picks a newer release, and `--yes` consents without showing
 complete counts as closed even if its journal stopped earlier: it stays under ordinary retention, and after that only the
 journal copy remains. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
 
+Below the [update boundary](reference/legacy-migration-support.md#approved-support-boundary),
+releases after v0.28.x refuse the installed source. There, `$VERSION` must be a v0.28.x release:
+v0.28.x is the last series that owns the recoveries of earlier releases described below. After
+recovery, continue with `yard update --version 0.28.0 && yard update`.
+
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
 migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate refuses a journal that
 already superseded another, a live recovery reservation, and links the journal does not allow.
@@ -1223,8 +1218,8 @@ An interrupted integration apply may already have written every desired artifact
 pending digests remain unfinished work: retry observes lifecycles, runs hooks, commits inventory,
 verifies convergence and captures applied settings. It accepts only owned bytes matching the
 recorded pending or committed digests. To leave a recovery dead end on 0.27.0, explicitly select
-the fixed newer release with `yard update --version "$VERSION"`; this route requires the
-integration resume fix and recovery replacement support in the same release.
+v0.28.0, which has the integration resume fix and recovery replacement support:
+`yard update --version 0.28.0`, then `yard update`.
 
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone
@@ -1234,7 +1229,7 @@ links, and do not retry mutating commands. Download the official HTTPS asset and
 candidate own the replacement plan, archive, compare-and-swap, reconciliation, and link update:
 
 ```bash
-PATCH_VERSION=0.11.2 # or a later supported patch release
+PATCH_VERSION=0.11.2 # or a later release up to v0.28.x
 (
   set -eu
   installer="$(mktemp)"

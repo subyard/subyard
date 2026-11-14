@@ -38,68 +38,43 @@ class SkillPackageTest(unittest.TestCase):
                     self.assertFalse((base/'unexpected').exists())
 
 
-class HistoryLedgerCutTest(unittest.TestCase):
-    def test_actual_observer_command_selects_final_pending_packaged_edge(self):
-        helper = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))['verify_history_process_cuts']
-        observer = runpy.run_path(str(ROOT/'dev/e2e/release-transition-post-cas-observer.py'))
-        with tempfile.TemporaryDirectory(prefix='subyard-ledger-cut-', dir='/tmp') as temporary:
-            root = Path(temporary)
-            release, config = root/'release', root/'config'
-            release.mkdir()
-            state = config/'release-transition/v2'
-            state.mkdir(parents=True)
-            ledger, journal = state/'ledger.json', state/'journal.json'
-            ledger.write_text(json.dumps({'schemaVersion':2, 'domains':{
-                'settings':{'epoch':2}, 'power':{'epoch':1}, 'owner':{'epoch':2}}}))
-            journal.write_text(json.dumps({'transaction':'source'}))
-            fixture = SimpleNamespace(root=root, config=config, journal=journal, runtime=root/'runtime',
-                                      old_launcher=root/'old/yard', env={})
-            registry = {'schemaVersion':2, 'migrations':[
-                {'id':'completed', 'domain':'settings', 'fromEpoch':1, 'toEpoch':2},
-                {'id':'first', 'domain':'power', 'fromEpoch':1, 'toEpoch':2},
-                {'id':'final', 'domain':'settings', 'fromEpoch':2, 'toEpoch':3},
-                {'id':'completed-tail', 'domain':'owner', 'fromEpoch':1, 'toEpoch':2}]}
-            bundle = release/'subyard-candidate-linux-amd64.tar.gz'
-            payload = json.dumps(registry).encode()
-            with tarfile.open(bundle, 'w:gz') as archive:
-                member = tarfile.TarInfo('./config/release-transition.json')
-                member.size = len(payload)
-                archive.addfile(member, io.BytesIO(payload))
-            calls = []
-            class ObservedCut(Exception): pass
-            def observe(command, environment, timeout):
-                calls.append(command)
-                self.assertEqual(timeout, 120)
-                with patch.object(sys, 'argv', ['observer', *command[2:]]):
-                    args = observer['parse_args']()
-                self.assertEqual(args.migration, 'final')
-                # Model delayed event delivery: both real ledger edges are now
-                # reflected in the journal and only the final bytes remain.
-                first = json.dumps({'schemaVersion':2, 'domains':{
-                    'settings':{'epoch':2}, 'power':{'epoch':2}, 'owner':{'epoch':2}}}).encode()
-                final = json.dumps({'schemaVersion':2, 'domains':{
-                    'settings':{'epoch':3}, 'power':{'epoch':2}, 'owner':{'epoch':2}}}).encode()
-                ledger.write_bytes(final)
-                value = {'transaction':'candidate', 'checkpoint':'migrating', 'goal':{'target':args.candidate_target}, 'steps':[
-                    {'id':'first.ledger', 'migration':'first', 'checkpoint':'verified',
-                     'desiredFingerprint':hashlib.sha256(first).hexdigest()},
-                    {'id':'final.ledger', 'migration':'final', 'checkpoint':'evidence',
-                     'desiredFingerprint':hashlib.sha256(final).hexdigest()}]}
-                journal.write_text(json.dumps(value))
-                result = observer['observe_ledger'](args)
-                self.assertEqual(result['ledgerFingerprint'], hashlib.sha256(final).hexdigest())
-                self.assertFalse((state/'history-checkpoint.json').exists())
-                for change in ({'migration':'first'}, {'migration':'foreign'},
-                               {'candidate_target':'foreign'}, {'source_transaction':'candidate'}):
-                    self.assertIsNone(observer['observe_ledger'](SimpleNamespace(**(vars(args)|change))))
-                value['steps'][-1]['desiredFingerprint'] = '0'*64
-                journal.write_text(json.dumps(value))
-                self.assertIsNone(observer['observe_ledger'](args))
-                raise ObservedCut()
-            with patch.dict(helper.__globals__, {'history_chain':lambda *args: (fixture, 'prior', {}),
-                                                 'run_process':observe}):
-                with self.assertRaises(ObservedCut): helper(release, 'candidate', 'amd64', root, {})
-            self.assertEqual(len(calls), 1)
+class SourceAnchorRefusalTest(unittest.TestCase):
+    def test_refusal_requires_guidance_and_preserves_every_protected_input(self):
+        module = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))
+        verify = module['verify_source_anchor_refusal']
+        for failure in ('none', 'success', 'guidance', 'config', 'data', 'link', 'installer-config', 'installer-journal', 'check-json'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                root = Path(temporary)
+                config, runtime = root/'config', root/'runtime'
+                config.mkdir(); runtime.mkdir()
+                retained, marker = config/'settings.env', root/'project-data'
+                retained.write_text('operator settings'); marker.write_text('project data')
+                (runtime/'current').symlink_to('releases/source')
+                fixture = SimpleNamespace(config=config, runtime=runtime, project_marker=marker,
+                    retained=retained, retained_hash=module['digest'](retained), env={},
+                    version='0.29.0', baseline_version='0.11.0', old_launcher=root/'old-yard')
+                calls = []
+                def run(command, environment, timeout):
+                    calls.append(command[1:])
+                    self.assertEqual(environment['YARD_RELEASE_VERSION'], '0.29.0')
+                    if failure == 'config' or (failure == 'installer-config' and command[0] == 'bash'): retained.write_text('changed')
+                    if failure == 'data': marker.write_text('changed')
+                    if failure == 'installer-journal' and command[0] == 'bash':
+                        journal = config/'release-transition/v2/journal.json'
+                        journal.parent.mkdir(parents=True); journal.write_text('changed')
+                    if failure == 'link':
+                        (runtime/'current').unlink()
+                        (runtime/'current').symlink_to('releases/target')
+                    return subprocess.CompletedProcess(command, 0 if failure == 'success' or (failure == 'check-json' and '--check' in command) else 1,
+                        json.dumps({'outcome':{'reachedGoal':False,'status':'operator-action-required'}}) if failure == 'check-json' else '',
+                        'source-anchor-required: ' + ('' if failure == 'guidance' else 'next: yard update --version ' + module['published_anchor'](ROOT)[0] + ' && yard update'))
+                with patch.dict(verify.__globals__, {'run_process':run}):
+                    if failure in ('none', 'check-json'):
+                        verify(fixture, root/'subyard-install.sh')
+                        self.assertEqual(calls, [['update'], ['update', '--check'], [str(root/'subyard-install.sh'), '--version', '0.29.0', '--yes']])
+                    else:
+                        with self.assertRaises(RuntimeError): verify(fixture, root/'subyard-install.sh')
+
 
 class CandidateArchiveTest(unittest.TestCase):
     def test_actual_archive_verification_repeat_refusal_and_partial_retry(self):

@@ -156,8 +156,8 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 		t.Fatal("normal helper has invalid version")
 	}
 	version, err := semver.Parse(versionFields[1])
-	if err != nil || version.LT(semver.MustParse(releaseruntime.MinimumSourceVersion)) {
-		t.Fatalf("source-authoring fixture needs normal tooling >= %s, got %q; build VERSION=0.22.0-test or supply a supported SUBYARD_SOURCE_QUERY_TOOLING_ROOT", releaseruntime.MinimumSourceVersion, versionFields[1])
+	if err != nil || version.LT(semver.MustParse(releaseruntime.UpdateAnchorVersion)) {
+		t.Fatalf("source-authoring fixture needs normal tooling >= %s, got %q; build VERSION=0.29.0-test or supply a supported SUBYARD_SOURCE_QUERY_TOOLING_ROOT", releaseruntime.UpdateAnchorVersion, versionFields[1])
 	}
 	targetID := versionFields[1] + "-aaaaaaaaaaaa"
 	root := filepath.Join(runtimeRoot, "releases", targetID)
@@ -364,6 +364,87 @@ func TestCompletedSourceAuthoringFixture(t *testing.T) {
 	proof, err := reader.InspectSourceAdmission(context.Background(), program.env["YARD_RUNTIME_ROOT"], home)
 	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete {
 		t.Fatal("real completed source admission", err)
+	}
+}
+
+// A supported source version cannot replace missing or contradictory history authority.
+func TestSupportedSourceAdmissionRefusesMissingOrContradictoryCheckpoint(t *testing.T) {
+	for _, damage := range []string{"missing", "contradictory"} {
+		t.Run(damage, func(t *testing.T) {
+			program, _, home := completedRuntimeSourceFixture(t, true, nil)
+			reader := releaseruntime.NewSourceInspector(program.options.RepositoryRoot, io.Discard)
+			defer reader.Close()
+			runtimeRoot := program.env["YARD_RUNTIME_ROOT"]
+			if _, err := reader.InspectSourceAdmission(context.Background(), runtimeRoot, home); err != nil {
+				t.Fatal("intact supported source", err)
+			}
+			path := filepath.Join(home, "release-transition/v2/history-checkpoint.json")
+			var checkpoint releasetransition.LedgerCheckpointV1
+			if err := json.Unmarshal(mustReadConfigFixture(t, path), &checkpoint); err != nil {
+				t.Fatal(err)
+			}
+			// The compatibility projection predates the completed SSH migration.
+			// Losing this checkpoint must not silently restore its older authority.
+			if checkpoint.Domains["settings"].Epoch <= checkpoint.LegacyProjection.Epochs["settings"] {
+				t.Fatal("fixture did not advance checkpoint authority beyond its projection")
+			}
+			if damage == "missing" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				checkpoint.LegacyProjection.Fingerprint = releasetransition.Fingerprint(strings.Repeat("f", 64))
+				payload, err := json.Marshal(checkpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeProfileTestFile(t, path, payload, 0600)
+			}
+			snapshot := func() string {
+				var records bytes.Buffer
+				if err := filepath.WalkDir(home, func(path string, entry fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					info, err := entry.Info()
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(&records, "%s:%v:", path, info.Mode())
+					if entry.Type()&os.ModeSymlink != 0 {
+						target, err := os.Readlink(path)
+						if err != nil {
+							return err
+						}
+						records.WriteString(target)
+					} else if !entry.IsDir() {
+						payload, err := os.ReadFile(path)
+						if err != nil {
+							return err
+						}
+						fmt.Fprintf(&records, "%x", sha256.Sum256(payload))
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"current", "previous"} {
+					target, err := os.Readlink(filepath.Join(runtimeRoot, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					fmt.Fprintf(&records, "%s:%s", name, target)
+				}
+				return records.String()
+			}
+			before := snapshot()
+			if _, err := reader.InspectSourceAdmission(context.Background(), runtimeRoot, home); err == nil {
+				t.Fatal("supported version admitted damaged checkpoint authority")
+			}
+			if snapshot() != before {
+				t.Fatal("refused source inspection changed protected state or runtime links")
+			}
+		})
 	}
 }
 

@@ -52,7 +52,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq ripgrep
       - name: Build and run native engine
         run: |
-          make build VERSION=0.22.0-test
+          make build VERSION=0.29.0-test
           .build/yard --version
       - name: Native engine tests
         run: go test -count=1 -timeout=20m ./cmd/... ./internal/...

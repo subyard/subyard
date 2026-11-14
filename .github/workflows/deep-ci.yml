@@ -34,7 +34,7 @@ jobs:
           fi
       # Source admission and the prepared profile tests read the built runtime.
       - name: Build runtime
-        run: make build VERSION=0.22.0-test
+        run: make build VERSION=0.29.0-test
       - name: Shuffled repeated race tests
         run: umask 0022 && go test -race -shuffle=on -count=2 -timeout=60m ./...
       - name: Parser fuzzing

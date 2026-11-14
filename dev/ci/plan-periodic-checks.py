@@ -49,9 +49,16 @@ def plan(root=ROOT):
                 for lane in full[0] if lane not in ("boundary", "cleanup")]
     # The release catalog upgrades a few baselines with agents; the rest keep an agent-free run here.
     baselines = (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()
-    include += [{"id": "published:" + version, "command": published_upgrade(version, "none")}
-                for version in (line.split("\t", 1)[0] for line in baselines if line)
-                if "vm:published-upgrade/" + version not in declared]
+    for line in baselines:
+        if not line:
+            continue
+        version, _, _, expectation = line.split("\t")
+        if expectation == "pin":
+            continue
+        catalog_version = "anchor" if expectation == "anchor" else version
+        if "vm:published-upgrade/" + catalog_version not in declared:
+            include.append({"id": "published:" + version,
+                            "command": published_upgrade(version, "none" if expectation in ("direct", "anchor") else "refusal")})
     missing = sorted(SPLIT - set(declared))
     if missing:
         raise SystemExit("plan-periodic-checks: split checks left the collector: " + " ".join(missing))
