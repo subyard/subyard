@@ -63,7 +63,7 @@ if [ -n "$RUNTIME_DIR" ]; then
   artifact="/proc/self/fd/$stage_engine_fd"
   [ "$(stat -Lc '%d:%i:%f:%u:%g:%h' "$artifact")" = "$engine_identity" ] || exit 2
   engine_before="$(sha256sum "$artifact" | cut -d' ' -f1)"
-  [ "$(bash -c 'exec -a yard-engine "$1" --version' stage-version "$artifact")" = "yard-engine $VERSION" ] || { printf 'package-engine: prebuilt engine version differs\n' >&2; exit 2; }
+  [ "$(bash -c 'exec -a yard-engine "$1" version' stage-version "$artifact")" = "yard-engine $VERSION" ] || { printf 'package-engine: prebuilt engine version differs\n' >&2; exit 2; }
   build_info="$(go version -m "$artifact")"
   if grep -Eq -- '(-tags=|GOFLAGS=)' <<< "$build_info"; then
     printf 'package-engine: development tooling requires an untagged normal engine\n' >&2; exit 2

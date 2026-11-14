@@ -505,7 +505,7 @@ bootstrap_candidate() {
 
 verify_v2_release_transition() { # <version>
   local expected="$1"
-  [ "$(operator_yard --version)" = "yard $expected" ] \
+  [ "$(operator_yard version)" = "yard $expected" ] \
     || die "release transition did not activate $expected"
   operator_env jq -e --slurpfile registry \
     "$OPERATOR_HOME/.subyard/runtime/current/config/release-transition.json" '
@@ -956,7 +956,7 @@ prepare() {
     || die 'update changed the retained legacy owner'
   recreate_legacy_test_owner
   incus project set "$PROJECT" user.p0-source="$MARKER"
-  [ "$(operator_yard --version)" = "yard $VERSION_A" ] \
+  [ "$(operator_yard version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'
   verify_v2_release_transition "$VERSION_A"
   complete_refused_disk_tmp
@@ -1065,7 +1065,7 @@ finish() {
   local journal_before="$SHARED_ROOT/post-reboot-journal.before"
   local journal_ready="$SHARED_ROOT/post-reboot-journal.ready"
   load_rebooted_fixture
-  [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
+  [ "$(operator_yard version)" = "yard $VERSION_B" ] \
     || die 'runtime entrypoint did not survive reboot'
   wait_for_desired_yards STOPPED RUNNING \
     || die 'updated boot reconciler did not restore named stopped/default running states'

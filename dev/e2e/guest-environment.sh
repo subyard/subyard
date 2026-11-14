@@ -58,7 +58,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 launcher="$(command_with_group bash -c '. "$1/tests/helpers/release-candidate.sh"; release_candidate_install "$1" "$2"' _ "$root" "$state")"
-version="$("$launcher" --version)"; version="${version#yard }"
+version="$("$launcher" version)"; version="${version#yard }"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
 port=$((30000 + $$ % 10000))
 while ss -H -ltn "sport = :$port" | grep -q .; do port=$((port+1)); done

@@ -1060,7 +1060,7 @@ class EvidenceChecks(unittest.TestCase):
                     if argv[0] == 'dpkg-deb':
                         return 'Package: subyard-veranda\nVersion: 0.99.1\nArchitecture: amd64'
                     if argv[0] == '/usr/bin/subyard-veranda': return 'Subyard Veranda 0.99.1'
-                    self.assertEqual(argv, [str(engine), '--version']); return 'yard 0.99.1'
+                    self.assertEqual(argv, [str(engine), 'version']); return 'yard 0.99.1'
                 argv = ['resources', str(deb), str(engine), *flags]
                 if enabled: argv += ['--prepared-assets', str(assets)]
                 with patch.object(sys, 'argv', argv), \

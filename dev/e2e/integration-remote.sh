@@ -184,7 +184,7 @@ install -m 0755 dev/e2e/exact-resource-fixture.py "$resource_root/handler.sh"
 SUBYARD_CONFIG_HOME="$OWNER_CONFIG" SUBYARD_HOME="$STATE/owner-data" \
   release_candidate_install "$ROOT" "$STATE" > "$STATE/launcher"
 fixture_launcher="$(cat "$STATE/launcher")"
-candidate_version="$("$fixture_launcher" --version)"
+candidate_version="$("$fixture_launcher" version)"
 candidate_version="${candidate_version#yard }"
 YARD_BUILD_VERSION="$candidate_version" "$ROOT/dev/build-engine.sh" --force
 cmp -s "$ROOT/.build/yard" "$YARD_RUNTIME_ROOT/current/bin/yard-engine" \

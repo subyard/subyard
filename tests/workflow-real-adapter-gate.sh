@@ -66,7 +66,7 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
     && grep -Fxq '          go-version-file: go.mod' <<<"$native_engine_job" \
     && grep -Fxq '          persist-credentials: false' <<<"$native_engine_job" \
     && grep -Fxq '          make build VERSION=0.22.0-test' <<<"$native_engine_job" \
-    && grep -Fxq '          .build/yard --version' <<<"$native_engine_job" \
+    && grep -Fxq '          .build/yard version' <<<"$native_engine_job" \
     && grep -Fxq '        run: go test -count=1 -timeout=20m ./cmd/... ./internal/...' <<<"$native_engine_job" \
     || fail "$(basename "$workflow") must build, run and test the native ARM64 engine"
   mapfile -t native_runners < <(sed -nE 's/^[[:space:]]+run: bash ([^[:space:]]+).*/\1/p' <<<"$native_engine_job")

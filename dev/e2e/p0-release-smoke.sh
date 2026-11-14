@@ -257,7 +257,7 @@ finish_smoke() {
   operator_yard remove "$SMOKE_PROJECT" --yes
   operator_yard teardown --yes
   ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'release smoke teardown left its project'
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] \
+  [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] \
     || die 'last-yard teardown removed the installed runtime'
   ok 'release smoke upgrade, reboot, data preservation, rollback refusal, compatible rollback/roll-forward and teardown passed'
 }

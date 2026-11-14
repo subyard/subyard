@@ -319,7 +319,7 @@ canonical_broker_release_migration_contract() {
   local rolled_back_hash
   local current_registration registration_archive old_yard state
 
-  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
+  [ "$("$runtime_root/current/bin/yard" version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'broker update fixture requires its supported synthetic base runtime'
   old_yard="$runtime_root/current/bin/yard"
 
@@ -344,7 +344,7 @@ canonical_broker_release_migration_contract() {
 
   "$runtime_root/current/bin/yard" update \
     --runtime-root "$runtime_root" --rollback --yes >/dev/null
-  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
+  [ "$("$runtime_root/current/bin/yard" version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'active broker fixture did not restore the previous runtime'
   old_yard="$runtime_root/current/bin/yard"
   "$old_yard" -Y test-yard start --yes
@@ -374,7 +374,7 @@ canonical_broker_release_migration_contract() {
 
   "$runtime_root/current/bin/yard" update \
     --runtime-root "$runtime_root" --rollback --yes >/dev/null
-  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
+  [ "$("$runtime_root/current/bin/yard" version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'canonical fixture did not restore its synthetic base runtime'
   rolled_back_hash="$(incus exec yard-test-yard --project subyard-test-yard -- \
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
@@ -488,7 +488,7 @@ owner_release_contract() {
   local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard yard_info project_marker
   install_current_base_runtime
   yard="$runtime_root/current/bin/yard"
-  [ "$("$yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
+  [ "$("$yard" version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'supported synthetic base runtime was not installed'
   canonical_broker_release_migration_contract
 
@@ -498,7 +498,7 @@ owner_release_contract() {
   write_owner_registration test-yard test-vms 2224 1
   install_owner_runtime
   yard="$runtime_root/current/bin/yard"
-  [ "$("$yard" --version)" = "yard $P0_OWNER_VERSION" ] \
+  [ "$("$yard" version)" = "yard $P0_OWNER_VERSION" ] \
     || die 'current owner runtime was not installed'
   p0_retry_init_after_plan_stale "$yard" -Y test-yard init --yes
   "$yard" service register test-vms --yard test-yard --yes >/dev/null
@@ -725,7 +725,7 @@ owner() (
   mv "$descriptor.next" "$descriptor"
   PROJECT_CONTRACT_BIN="$OWNER_ROOT/project-runtime/runtime/bin/yard" owner_project_contract synthetic
   unset YARD_ENGINE_PATH
-  env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard --version >/dev/null
+  env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard version >/dev/null
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard list >/dev/null
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard status >/dev/null
   ./bin/yard -Y test-yard teardown --yes
@@ -733,7 +733,7 @@ owner() (
   [ -x "$SUBYARD_HOME/runtime/current/bin/yard" ] \
     || die 'last-yard teardown removed the installed candidate runtime'
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
-    "$SUBYARD_HOME/runtime/current/bin/yard" --version >/dev/null \
+    "$SUBYARD_HOME/runtime/current/bin/yard" version >/dev/null \
     || die 'installed candidate runtime is unusable after last-yard teardown'
   printf 'ok: VM1 owner, broker reconciliation, lifecycle, Incus and rollback\n'
 )
@@ -1116,7 +1116,7 @@ peer_prepare_finish() {
     PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     "$release/subyard-install.sh" --yes >/dev/null
   [ "$(readlink "$PEER_ROOT/bin/yard")" = "$PEER_DATA_ROOT/runtime/current/bin/yard" ] \
-    && [ "$("$PEER_ROOT/bin/yard" --version)" = "yard $version" ] \
+    && [ "$("$PEER_ROOT/bin/yard" version)" = "yard $version" ] \
     || die 'peer standalone release is not active'
   (
     # Keep the synthetic declaration outside the installed immutable release.
@@ -1124,7 +1124,7 @@ peer_prepare_finish() {
     . "$PEER_ROOT/src/tests/helpers/test-context.sh"
     setup_test_repository "$PEER_ROOT/credentials" "$PEER_DATA_ROOT/runtime/current" \
       "$PEER_DATA_ROOT/runtime/current/bin/yard-engine"
-    [ "$("$PEER_ROOT/credentials/runtime/bin/yard" --version)" = "yard $version" ] \
+    [ "$("$PEER_ROOT/credentials/runtime/bin/yard" version)" = "yard $version" ] \
       || die 'synthetic credential runtime did not select the installed peer engine'
   )
   (

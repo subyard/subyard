@@ -371,7 +371,7 @@ EOF_SECONDARY_HANDLER
         report_config_failure "$STATE/handler-candidate-update.err"
         die 'candidate handler update failed'
       }
-  [ "$(yard --version)" = "yard $target_version" ] || die 'candidate release is not active'
+  [ "$(yard version)" = "yard $target_version" ] || die 'candidate release is not active'
   target_root="$SUBYARD_HOME/runtime/$(readlink "$SUBYARD_HOME/runtime/current")"
   target_helper="$(release_orca_helper_hash "$target_root")"
   [ "$(orca_registration_hash)" = "$target_helper" ] \
@@ -1101,7 +1101,7 @@ if [ "$CODEX_PERMISSIONS" = 1 ]; then
     YARD_BIN_DIR="$HOME/.local/bin" SHELL=/bin/bash \
     "$STATE/release/subyard-install.sh" --yes >/dev/null
   YARD_BIN="$HOME/.local/bin/yard"
-  [ "$(yard --version)" = "yard $release_version" ] || die 'focused candidate release is not active'
+  [ "$(yard version)" = "yard $release_version" ] || die 'focused candidate release is not active'
   jq -e '.domains["power-metadata"].epoch == 3' \
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null \
     || die 'focused candidate release did not commit the publication reader boundary'
@@ -1402,7 +1402,7 @@ for line in text.splitlines()[-20:]:
 PY_UPGRADE_ERROR
       die 'published release upgrade failed'
     }
-  [ "$(yard --version)" = "yard $release_version" ] || die 'upgrade did not activate the candidate'
+  [ "$(yard version)" = "yard $release_version" ] || die 'upgrade did not activate the candidate'
   installed_target="$(readlink "$SUBYARD_HOME/runtime/current")"
   [ "$installed_target" != "$published_target" ] || die 'upgrade retained the predecessor'
   INSTALLED_RELEASE="${installed_target#releases/}"
@@ -1442,7 +1442,7 @@ YARD_RELEASE_BASE_URL="file://$STATE/release" YARD_RELEASE_VERSION="$release_ver
   YARD_BIN_DIR="$HOME/.local/bin" SHELL=/bin/bash \
   "$STATE/release/subyard-install.sh" --yes >/dev/null
 YARD_BIN="$HOME/.local/bin/yard"
-[ "$(yard --version)" = "yard $release_version" ] || die 'packaged candidate is not active'
+[ "$(yard version)" = "yard $release_version" ] || die 'packaged candidate is not active'
 installed_target="$(readlink "$SUBYARD_HOME/runtime/current")"
 case "$installed_target" in
   releases/*) ;;

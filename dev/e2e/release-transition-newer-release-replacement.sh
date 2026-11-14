@@ -103,7 +103,7 @@ stage() { # version: sets LAUNCHER to the published release's own launcher
 }
 
 active_version() {
-  fixture_env "$RUNTIME_ROOT/current/bin/yard" --version
+  fixture_env "$RUNTIME_ROOT/current/bin/yard" version
 }
 
 interrupt_at_reconciling() { # version

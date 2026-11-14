@@ -324,7 +324,7 @@ candidate_yard="$CANDIDATE_ROOT/bin/yard"
 candidate_engine="$CANDIDATE_ROOT/bin/yard-engine"
 [ -x "$candidate_yard" ] && [ -x "$candidate_engine" ] \
   || fail "verified candidate runtime is incomplete"
-"$candidate_yard" --version >/dev/null \
+"$candidate_yard" version >/dev/null \
   || fail "candidate runtime self-check failed"
 
 bootstrap_paths="$("$candidate_yard" _migrate paths)" \

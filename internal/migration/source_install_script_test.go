@@ -825,7 +825,7 @@ func newSourceInstallFixture(t *testing.T, marker string) sourceInstallFixture {
 	candidate := filepath.Join(fixture.data, "runtime/current/bin/yard")
 	writeTestFile(t, candidate, 0o700, `#!/bin/sh
 case "$*" in
-  --version) printf 'yard fixture\n' ;;
+  version) printf 'yard fixture\n' ;;
   '_migrate check'|'_migrate apply'|'_migrate finalize'|'_migrate cleanup'|'-Y named _migrate check'|'-Y named _migrate apply') ;;
 	  '_migrate paths') printf '{"dataHome":"%s","configHome":"%s"}\n' "$TEST_DATA_HOME" "$TEST_CONFIG_HOME" ;;
 	  _migrate\ overlay-manifest\ *)

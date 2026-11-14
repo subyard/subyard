@@ -988,7 +988,7 @@ prepare_supported_upgrade_owner() {
   . "$ROOT/tests/helpers/release-candidate.sh"
   candidate_engine="$(release_candidate_prepare "$ROOT")" || die 'verified frozen candidate required'
   P0_OWNER_VERSION="$(jq -er .version "$ROOT/.subyard-acceptance/candidate.json")"
-  [ "$("$candidate_engine" --version)" = "yard-engine $P0_OWNER_VERSION" ] || die 'candidate engine version mismatch'
+  [ "$("$candidate_engine" version)" = "yard-engine $P0_OWNER_VERSION" ] || die 'candidate engine version mismatch'
   baseline=0.19.0
   assets="$(python3 - "$ROOT" "$OWNER_ROOT" <<'PYBASELINE'
 import pathlib,runpy,sys
@@ -1076,7 +1076,7 @@ PYBASELINE
   done
   env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
     "$baseline_owner" update --version "$P0_OWNER_VERSION" --offline --yes
-  [ "$(runtime_yard --version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not activated'
+  [ "$(runtime_yard version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not activated'
   [ -f "$SUBYARD_HOME/services/test-vms/default.json" ] || die 'upgrade did not register the broker'
   timeout --signal=TERM --kill-after=10 30 env -u SUBYARD_E2E_ROLLOUT_YARD \
     SUBYARD_E2E_STATE_DIR="$STATE_PARENT/registration-probe" SUBYARD_E2E_ROUTE_REGISTRY="$SUBYARD_HOME/e2e/routes" "$RUNNER" --status --json \
@@ -1146,7 +1146,7 @@ p0_capacity_prepare_subtree "$STATE_PARENT"
 YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
 [ -f "$ROOT/.build/yard" ] && [ ! -L "$ROOT/.build/yard" ] && [ -O "$ROOT/.build/yard" ] \
   && [ "$(stat -c %a:%h "$ROOT/.build/yard")" = 755:1 ] || die 'run-built bootstrap engine is unsafe'
-BOOTSTRAP_ENGINE_VERSION="$("$ROOT/.build/yard" --version)"
+BOOTSTRAP_ENGINE_VERSION="$("$ROOT/.build/yard" version)"
 [ "$BOOTSTRAP_ENGINE_VERSION" = "yard $P0_OWNER_VERSION" ] || die 'run-built bootstrap engine version differs'
 BOOTSTRAP_ENGINE_SHA256="$(sha256sum "$ROOT/.build/yard" | cut -d' ' -f1)"
 printf 'STAGING_BOOTSTRAP_ENGINE='

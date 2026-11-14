@@ -105,7 +105,7 @@ else
   YARD_BIN="$fixture/bin/yard"
   [ -L "$YARD_BIN" ] \
     && [ "$(readlink "$YARD_BIN")" = "$SUBYARD_HOME/runtime/current/bin/yard" ] \
-    && [ "$("$YARD_BIN" --version)" = "yard $candidate_version" ] \
+    && [ "$("$YARD_BIN" version)" = "yard $candidate_version" ] \
     || die 'installed candidate runtime is not active'
   printf 'amnezia_installed_candidate_verified=true\n'
 fi

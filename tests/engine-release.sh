@@ -367,7 +367,7 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
 [ "$(directory_identity "$standalone_home")" = "$standalone_home_before" ] \
   && [ "$(directory_identity "$standalone_bin")" = "$standalone_bin_before" ] \
   || fail 'bootstrap changed existing default shell parent or binary directory identity'
-[ "$($standalone_bin/yard --version)" = 'yard 1.0.0-test' ] \
+[ "$($standalone_bin/yard version)" = 'yard 1.0.0-test' ] \
   && [ -L "$standalone_bin/sy" ] && [ ! -e "$TMP/standalone-go-invoked" ] \
   || fail 'standalone installer did not publish a usable runtime without a checkout'
 standalone_ledger="$standalone_home/.config/subyard/release-transition/v2/ledger.json"
@@ -420,7 +420,7 @@ grep -Fq 'Subyard CLI login PATH' "$standalone_home/.profile" \
   && grep -Fq 'Subyard CLI completion' "$standalone_home/.bashrc" \
   || fail 'standalone installer did not configure new login and interactive shells'
 HOME="$standalone_home" PATH=/usr/bin:/bin SHELL=/bin/bash bash -lc \
-  'command -v yard >/dev/null && yard --version >/dev/null' \
+  'command -v yard >/dev/null && yard version >/dev/null' \
   || fail 'standalone installer is not available to a new login shell'
 HOME="$standalone_home" PATH=/usr/bin:/bin SHELL=/bin/bash bash -lic \
   'complete -p yard >/dev/null' >/dev/null 2>&1 \
@@ -901,14 +901,14 @@ chmod 0600 "$SUBYARD_CONFIG_HOME/yards/hermes/config.env"
   --bundle "$bundle_one" --checksum "$bundle_one.sha256" \
   --manifest "$bundle_one.manifest.json" --provenance "$bundle_one.provenance.json" >/dev/null
 initial_target="$(readlink "$runtime_root/current")"
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
+[ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.0.0-test ] \
   && [ ! -e "$runtime_root/previous" ] && [ ! -L "$runtime_root/previous" ] \
   || fail 'verified bootstrap did not create the initial runtime boundary'
 
 YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
   installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
 candidate_target="$(readlink "$runtime_root/current")"
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
+[ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.1.0-test ] \
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   && [ "$candidate_target" != "$initial_target" ] \
   || fail 'release transition did not activate and retain the exact release pair'
@@ -947,7 +947,7 @@ installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
 installed_update --runtime-root "$runtime_root" --rollback >/dev/null
 [ "$(readlink "$runtime_root/current")" = "$initial_target" ] \
   && [ "$(readlink "$runtime_root/previous")" = "$candidate_target" ] \
-  && [ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
+  && [ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.0.0-test ] \
   || fail 'explicit rollback did not assess and activate the retained runtime'
 
 YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
@@ -1183,7 +1183,7 @@ jq -s -e --arg active "$recovery_candidate" '
   $reports[0].assessment.changed == false and
   (($reports[0].blockers // []) | length) == 0' "$recovery_repeat_output" >/dev/null \
   || fail 'same-version recovery check did not report the structured ready fixed point'
-[ "$("$recovery_runtime/current/bin/yard" --version)" = 'yard 0.11.2' ] \
+[ "$("$recovery_runtime/current/bin/yard" version)" = 'yard 0.11.2' ] \
   || fail 'terminal recovery runtime is not readable'
 
 snapshot_recovery_state() { # <runtime-root> <config-home>

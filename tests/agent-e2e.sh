@@ -773,11 +773,11 @@ grep -Fxq "chown -R dev:dev $command_root_q" "$TMP/run.sh" \
   && grep -Fq 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev sh -c' \
     "$TMP/run.sh" \
   || fail "guest command does not run as dev"
-write_guest_command 1 "$command_root" ./bin/yard --version > "$TMP/yard-run.sh"
+write_guest_command 1 "$command_root" ./bin/yard version > "$TMP/yard-run.sh"
 grep -Fxq '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev make build' \
   "$TMP/yard-run.sh" \
   || fail "direct guest yard command does not build its explicit development engine"
-grep -Fxq 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./bin/yard --version' \
+grep -Fxq 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./bin/yard version' \
   "$TMP/yard-run.sh" \
   || fail "direct guest yard command changed its argv after the development build"
 quoted="$(quote_ssh_command bash -c 'test "$1" = "argument with spaces"' _ 'argument with spaces')"
@@ -1964,7 +1964,7 @@ set -e
 #!/bin/sh
 set -eu
 case "$*" in
-  --version) printf 'yard %s\n' "$P0_ORDER_VERSION";;
+  --version|version) printf 'yard %s\n' "$P0_ORDER_VERSION";;
   update\ *)
     [ "$YARD_RELEASE_BASE_URL" = "$P0_ORDER_RELEASE_URL" ] || exit 42
     case " $* " in
@@ -2046,7 +2046,7 @@ for scenario in ready init-failure foreign-identity; do
 #!/bin/sh
 set -eu
 case "$*" in
-  --version) printf 'yard %s\n' "$(cat "$CASE_ROOT/version")";;
+  --version|version) printf 'yard %s\n' "$(cat "$CASE_ROOT/version")";;
   '-Y test-yard init --yes')
     [ "$(tail -n 1 "$CASE_ROOT/calls")" = public-owner-install ] || exit 42
     printf 'init\n' >> "$CASE_ROOT/calls"
@@ -5503,7 +5503,7 @@ smoke_rollback_fixture_contract() {
       local current previous next
       current="$(cat "$STATE_ROOT/current")" previous="$(cat "$STATE_ROOT/previous")"
       case "$*" in
-        --version) printf 'yard %s\n' "${current#releases/}" | sed 's/-[ab]\{12\}$//' ;;
+        --version|version) printf 'yard %s\n' "${current#releases/}" | sed 's/-[ab]\{12\}$//' ;;
         check|"shell $SMOKE_PROJECT --yes -- grep -Fxq $MARKER retained.txt"|"shell $SMOKE_PROJECT --yes -- grep -Fxq guest-change retained.txt") return 0 ;;
         'init --yes')
           [ -f "$STATE_ROOT/enrollments" ] || die 'ordinary init preceded public inventory enrollment'

@@ -58,7 +58,7 @@ info=pathlib.Path(sys.argv[1]).lstat()
 assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and info.st_nlink==1
 assert os.access(sys.argv[1],os.X_OK) and not stat.S_IMODE(info.st_mode)&0o022
 PY
-  [ "$(timeout 5s "$YARD_ENGINE" --version)" = "$(basename -- "$YARD_ENGINE") 0.1.1" ] || die 'frozen engine release version mismatch'
+  [ "$(timeout 5s "$YARD_ENGINE" version)" = "$(basename -- "$YARD_ENGINE") 0.1.1" ] || die 'frozen engine release version mismatch'
 else
   "$ROOT/dev/build-engine.sh"
 fi

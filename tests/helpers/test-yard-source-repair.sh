@@ -12,7 +12,7 @@ source_repair_finish_known_final_check() {
   [ "$original" = 1 ] || return 1
   tr -d '\r' < "$STATE_ROOT/source-update.log" | grep -Fx \
     'yard: update: final update check: the inspected release transition has not started; next: run yard update' >/dev/null || return 1
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || return 1
+  [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] || return 1
   current="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" || return 1
   [[ "$current" = "releases/$CANDIDATE_VERSION-"* ]] || return 1
   current="${current#releases/}"

@@ -210,7 +210,7 @@ finish_known_final_check() {
   tr -d '\r' < "$STATE_ROOT/update.log" | grep -Fx \
     'yard: update: final update check: the inspected release transition has not started; next: run yard update' >/dev/null \
     || report_failure 'released caller did not report the exact known final-check refusal' "$STATE_ROOT/update.log" || return 1
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || report_failure 'candidate is not active after released caller' || return 1
+  [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] || report_failure 'candidate is not active after released caller' || return 1
   current="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" || report_failure 'cannot read active candidate link' || return 1
   [[ "$current" = "releases/$CANDIDATE_VERSION-"* ]] || report_failure "unexpected active release: $current" || return 1
   current="${current#releases/}"
@@ -265,7 +265,7 @@ prepare_acceptance() {
   }
   grep -Fq 'Warning: yard default: retire integration paseo' "$STATE_ROOT/update.log" \
     || die 'unattended update omitted the retirement warning'
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate was not activated'
+  [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate was not activated'
   grep -Fq 'Warning: retired integration paseo may still be installed in yard solo; run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update.log" \
     || die 'unattended update omitted the stopped yard warning'
   [ "$(yard_power solo)" = STOPPED ] || die 'update started the stopped yard'

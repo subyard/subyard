@@ -13,7 +13,7 @@ grep -qx security <<<"$commands" || fail "security command missing"
 "$ROOT/bin/yard" -y --list >/dev/null || fail "leading global --yes is not accepted"
 "$ROOT/bin/yard" --help >/dev/null
 "$ROOT/bin/yard" --resources >/dev/null
-"$ROOT/bin/yard" --version >/dev/null
+"$ROOT/bin/yard" version >/dev/null
 if "$ROOT/bin/yard" rpc >/dev/null 2>&1; then fail "rpc accepted a non-stdio invocation"; fi
 
 set +e

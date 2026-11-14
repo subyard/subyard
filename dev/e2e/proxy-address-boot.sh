@@ -243,7 +243,7 @@ assert_release() {
   digest="$(read_fixture_value "$RUNTIME_DIGEST_STATE")"
   [ "$(sha256sum "$RUNTIME_ARCHIVE" | awk '{print $1}')" = "$digest" ] \
     || die 'candidate artifact changed across reboot'
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'unexpected installed candidate'
+  [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] || die 'unexpected installed candidate'
   target="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   [ "$target" = "releases/$CANDIDATE_VERSION-${digest:0:12}" ] \
     && [ "$target" = "$(read_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE")" ] \

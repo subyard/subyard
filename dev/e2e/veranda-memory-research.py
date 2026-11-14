@@ -412,7 +412,7 @@ def main():
     for deb in (args.deb, *([args.candidate_deb] if args.candidate_deb else [])):
         require(probe.command_output(['dpkg-deb', '-f', str(deb), 'Package', 'Version', 'Architecture']).splitlines()
                 == ['Package: subyard-veranda', 'Version: 0.1.1', 'Architecture: amd64'])
-    require(probe.command_output([str(args.engine), '--version']) == args.engine.name + ' 0.1.1')
+    require(probe.command_output([str(args.engine), 'version']) == args.engine.name + ' 0.1.1')
     initial = subprocess.run(['dpkg-query', '-W', '-f=${Status}', 'subyard-veranda'],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
     require(initial.returncode != 0)

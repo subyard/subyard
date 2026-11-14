@@ -237,7 +237,7 @@ rollback_refusal_code="$(cat "$ROOT/config/retired-integrations/aiobserver/tests
 operator_env python3 -c "$rollback_refusal_code" \
   "$OPERATOR_HOME/.config/subyard" "$OPERATOR_HOME/.subyard/runtime" \
   "$OPERATOR_HOME/.local/bin/yard" update --rollback --yes
-[ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'rollback refusal lost the actual candidate'
+[ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] || die 'rollback refusal lost the actual candidate'
 [ "$(incus exec "$INSTANCE" --project "$PROJECT" -- sha256sum /srv/agents/ai-observer/data/ai-observer.duckdb)" = "$database_before_rollback" ] || die 'rollback refusal changed retained database history'
 assert_retired
 assert_history

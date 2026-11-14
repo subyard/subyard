@@ -634,7 +634,7 @@ upgrade_to_current_candidate() {
     capture_fixture_failure_logs || printf 'release-recovery failure-log capture_failed=true\n' >&2
     return "$status"
   fi
-  [ "$("$RUNTIME_ROOT/current/bin/yard" --version)" = "yard $CURRENT_VERSION" ] \
+  [ "$("$RUNTIME_ROOT/current/bin/yard" version)" = "yard $CURRENT_VERSION" ] \
     || die 'true current candidate is not active after the historical bridge'
   manifest="$(sha256sum "$RUNTIME_ROOT/current/runtime-files.sha256" | awk '{print $1}')"
   [ "$manifest" = "$CURRENT_MANIFEST_SHA256" ] \

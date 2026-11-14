@@ -174,7 +174,7 @@ chmod 0755 "$ROOT/config/profiles/$profile/provision.sh"
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
 fixture_launcher="$(release_candidate_install "$ROOT" "$STATE")"
-candidate_version="$("$fixture_launcher" --version)"
+candidate_version="$("$fixture_launcher" version)"
 candidate_version="${candidate_version#yard }"
 YARD_BUILD_VERSION="$candidate_version" "$ROOT/dev/build-engine.sh" --force
 cmp -s "$ROOT/.build/yard" "$YARD_RUNTIME_ROOT/current/bin/yard-engine" \
