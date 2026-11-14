@@ -48,7 +48,10 @@ fixture_cleanup() {
         activation-journal.before activation-ledger.before postboot-ready.json upgrade-capture-status.txt \
         upgrade-inspection.json upgrade-journal.json upgrade-ledger.json upgrade-identities.txt \
         installer.log installer-ready.json installer-config-status.txt \
-        inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt 2>/dev/null || failed=1
+        inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt \
+        deselect-assets.before deselect-assets.failed deselect-assets.repaired deselect-assets.after deselect-plan.json \
+        deselect-failure.log deselect-recovery-plan.json deselect-repair.log deselect-init.txt deselect-status.json \
+        deselect-repeat.txt 2>/dev/null || failed=1
     fi
     # shellcheck source=config/profiles/hermes/tests/e2e/disabled-release-resource.sh
     . "$ROOT/config/profiles/hermes/tests/e2e/disabled-release-resource.sh"
@@ -334,6 +337,85 @@ FAULT
   assert_disabled hermes
 }
 
+# Deselection fingerprint of the installed claude assets in the hermes yard: its
+# structured settings document and any recorded persist links.
+claude_assets() {
+  guest_yard hermes sh -euc '
+    home="$(getent passwd dev | cut -d: -f6)"
+    for path in "$home/.claude/settings.json" "$home/.claude/projects" "$home/.claude-memory"; do
+      if [ -L "$path" ]; then printf "%s link %s %s\n" "$path" "$(stat -c %u:%g "$path")" "$(readlink "$path")"
+      elif [ -f "$path" ]; then printf "%s file %s %s\n" "$path" "$(stat -c %u:%g:%a "$path")" "$(sha256sum < "$path" | cut -d " " -f 1)"
+      elif [ -e "$path" ]; then printf "%s other\n" "$path"
+      else printf "%s absent\n" "$path"; fi
+    done
+  '
+}
+
+# A failed post-repair init that deselects an installed integration leaves its owned
+# assets: the release stays ready, repair restores nothing, and the next init retires them.
+exercise_failed_deselect() {
+  local rc=0 transaction
+  claude_assets > "$STATE_ROOT/deselect-assets.before"
+  # Persist links exist only where the session mount does; the settings document always does.
+  grep -q '/\.claude/settings\.json file ' "$STATE_ROOT/deselect-assets.before" \
+    || { cat "$STATE_ROOT/deselect-assets.before"; die 'installed claude settings are missing before deselection'; }
+  operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS codex --scope yard --local --yes
+  # The remaining selected provisioner fails after inventory apply, before the hooks.
+  cat > "$STATE_ROOT/deselect-curl.sh" <<'FAULT'
+#!/bin/sh
+# subyard-disabled-components-curl-v1
+printf '%s\n' hook-failed > /var/tmp/subyard-disabled-components-hook
+chmod 0600 /var/tmp/subyard-disabled-components-hook
+exit 75
+FAULT
+  chmod 0755 "$STATE_ROOT/deselect-curl.sh"
+  guest_yard hermes sh -euc 'test ! -e /usr/local/bin/curl; test ! -e /var/tmp/subyard-disabled-components-hook'
+  incus file push "$STATE_ROOT/deselect-curl.sh" yard-hermes/usr/local/bin/curl --project subyard-hermes
+  guest_yard hermes sh -euc 'chown root:root /usr/local/bin/curl; chmod 0755 /usr/local/bin/curl; test "$(command -v curl)" = /usr/local/bin/curl'
+  operator_yard migrate --check --json > "$STATE_ROOT/deselect-plan.json"
+  jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/deselect-plan.json" >/dev/null \
+    || die 'init-owned deselection entered release readiness'
+  transaction="$(sudo -n jq -er .transaction "$V2_JOURNAL")"
+  operator_yard migrate --yes > "$STATE_ROOT/deselect-failure.log" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || { cat "$STATE_ROOT/deselect-failure.log"; die 'native deselecting init fault was not reached'; }
+  guest_yard hermes grep -Fxq hook-failed "$FAULT_MARKER" || die 'deselecting init did not reach the native fault'
+  grep -Fq 'pending yard init did not complete: yard hermes:' "$STATE_ROOT/deselect-failure.log" \
+    || { cat "$STATE_ROOT/deselect-failure.log"; die 'failed deselecting init did not name its yard init continuation'; }
+  claude_assets > "$STATE_ROOT/deselect-assets.failed"
+  cmp -s "$STATE_ROOT/deselect-assets.before" "$STATE_ROOT/deselect-assets.failed" \
+    || { diff "$STATE_ROOT/deselect-assets.before" "$STATE_ROOT/deselect-assets.failed" || true; die 'failed deselecting init retired installed assets before its hooks'; }
+  operator_yard migrate --check --json > "$STATE_ROOT/deselect-recovery-plan.json"
+  jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/deselect-recovery-plan.json" >/dev/null \
+    || die 'failed deselecting init undid release readiness'
+  # The repair itself is complete; with the fault in place only the pending init fails again.
+  rc=0
+  operator_yard migrate --yes > "$STATE_ROOT/deselect-repair.log" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && grep -Fq 'pending yard init did not complete: yard hermes:' "$STATE_ROOT/deselect-repair.log" \
+    || { cat "$STATE_ROOT/deselect-repair.log"; die 'repeated repair did not leave only the pending deselecting init'; }
+  sudo -n jq -e --arg transaction "$transaction" '.checkpoint == "complete" and .transaction == $transaction' \
+    "$V2_JOURNAL" >/dev/null || die 'failed deselecting init changed the release journal'
+  claude_assets > "$STATE_ROOT/deselect-assets.repaired"
+  cmp -s "$STATE_ROOT/deselect-assets.before" "$STATE_ROOT/deselect-assets.repaired" \
+    || { diff "$STATE_ROOT/deselect-assets.before" "$STATE_ROOT/deselect-assets.repaired" || true; die 'release repair changed assets awaiting the deselecting init'; }
+  guest_yard hermes sh -euc '
+    test "$(head -n 2 /usr/local/bin/curl | tail -n 1)" = "# subyard-disabled-components-curl-v1"
+    rm /usr/local/bin/curl /var/tmp/subyard-disabled-components-hook
+  '
+  operator_yard -Y hermes init --yes > "$STATE_ROOT/deselect-init.txt" 2>&1 \
+    || { cat "$STATE_ROOT/deselect-init.txt"; die 'deselecting yard init did not complete after the fault was removed'; }
+  operator_yard -Y hermes integration status --json > "$STATE_ROOT/deselect-status.json"
+  jq -e '.selection.effective == ["codex"]' "$STATE_ROOT/deselect-status.json" >/dev/null \
+    || die 'recovered yard init did not apply the deselection'
+  claude_assets > "$STATE_ROOT/deselect-assets.after"
+  ! grep -q ' link ' "$STATE_ROOT/deselect-assets.after" \
+    && ! cmp -s "$STATE_ROOT/deselect-assets.before" "$STATE_ROOT/deselect-assets.after" \
+    || { cat "$STATE_ROOT/deselect-assets.after"; die 'successful yard init did not retire the deselected assets'; }
+  operator_yard migrate --yes > "$STATE_ROOT/deselect-repeat.txt" 2>&1 \
+    || { cat "$STATE_ROOT/deselect-repeat.txt"; die 'repeated repair after deselecting yard init failed'; }
+  ! grep -Fq 'release.init.' "$STATE_ROOT/deselect-repeat.txt" || die 'yard init left the deselection pending'
+  assert_disabled hermes
+}
+
 prepare_acceptance() {
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
@@ -395,6 +477,7 @@ prepare_acceptance() {
   . "$ROOT/config/profiles/hermes/tests/e2e/disabled-release-resource.sh"
   hermes_disabled_resource_prepare
   exercise_recovery
+  exercise_failed_deselect
   operator_yard migrate --yes
   hermes_disabled_resource_assert preboot
   assert_candidate

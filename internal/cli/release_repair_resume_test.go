@@ -2,15 +2,18 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -515,6 +518,167 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 			}
 		})
 	}
+}
+
+// guestInventoryExecutor runs this release's real inventory program against a
+// private fixture guest root. Installed settings and other guest reads keep
+// the synthetic pending-init receipts.
+type guestInventoryExecutor struct {
+	installedSettingsExecutor
+	root      string
+	installed []map[string]any
+}
+
+func (fixture *guestInventoryExecutor) home() string { return fixture.root + "/home/dev" }
+
+// relocate maps source-owned guest destinations into the fixture home without
+// altering digests.
+func (fixture *guestInventoryExecutor) relocate(value []byte) []byte {
+	return []byte(strings.NewReplacer("/home/dev/", fixture.home()+"/",
+		"/usr/local/libexec/subyard/", fixture.home()+"/libexec-", "/etc/subyard/", fixture.home()+"/etc-").Replace(string(value)))
+}
+
+func (fixture *guestInventoryExecutor) inventory(ctx context.Context, mode string, request map[string]any) (ports.InstanceExecResult, error) {
+	request["home"], request["uid"] = fixture.home(), os.Getuid()
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return ports.InstanceExecResult{}, err
+	}
+	// Model the fixture account's actual primary group, not a guest-only group.
+	program := strings.NewReplacer(
+		"ROOT = '/var/lib/subyard/integrations'", "ROOT = '"+fixture.root+"/state'",
+		"OWNER = int('0')", "OWNER = int('"+fmt.Sprint(os.Getuid())+"')",
+		"os.fchown(stream.fileno(), uid, uid)", "os.fchown(stream.fileno(), uid, os.getgid())",
+		"os.chown(directory, uid, uid if gid is None else gid)", "os.chown(directory, uid, os.getgid() if gid is None else gid)",
+		"group = entry.get('gid', owner) if entry['kind'] == 'link' else owner", "group = entry.get('gid', os.getgid()) if entry['kind'] == 'link' else os.getgid()",
+	).Replace(reconcileruntime.IntegrationInventoryReader())
+	command := exec.CommandContext(ctx, "python3", "-B", "-c", program, mode)
+	command.Stdin = strings.NewReader(string(payload))
+	var result ports.InstanceExecResult
+	result.Stdout, err = command.Output()
+	var failure *exec.ExitError
+	if errors.As(err, &failure) {
+		result.ExitCode, result.Stderr = failure.ExitCode(), failure.Stderr
+		return result, &ports.GuestExitError{Code: failure.ExitCode()}
+	}
+	return result, err
+}
+
+func (fixture *guestInventoryExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	command := request.Command
+	if len(command) == 5 && command[0] == "python3" && command[3] == reconcileruntime.IntegrationInventoryReader() && command[4] != "settings" && command[4] != "selection" {
+		var input map[string]any
+		if err := json.Unmarshal(fixture.relocate(request.Stdin), &input); err != nil {
+			return ports.InstanceExecResult{}, err
+		}
+		if command[4] == "observe-applied" {
+			entries, _ := json.Marshal(input["entries"])
+			fixture.installed = nil
+			if err := json.Unmarshal(entries, &fixture.installed); err != nil {
+				return ports.InstanceExecResult{}, err
+			}
+		}
+		return fixture.inventory(ctx, command[4], input)
+	}
+	if len(command) == 3 && command[0] == "sha256sum" {
+		payload, err := os.ReadFile(string(fixture.relocate([]byte(command[2]))))
+		if err != nil {
+			return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
+		}
+		return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(payload), command[2]))}, nil
+	}
+	if len(command) >= 4 && command[0] == "sh" && strings.Contains(strings.Join(command, " "), "changed=0") {
+		return ports.InstanceExecResult{Stdout: []byte("changed=0\n")}, nil
+	}
+	return fixture.installedSettingsExecutor.Exec(ctx, project, instance, request)
+}
+
+// A post-repair yard init that deselects an installed integration and then
+// fails before its commit leaves the installed assets in place. Release
+// readiness stays converged, so neither the check nor the repair has anything
+// to restore. A third-party removal of an owned asset remains installed drift.
+func TestFailedDeselectingInitKeepsInstalledReleaseReady(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("third-party-removal=%t", removed), func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newPendingInitFixture(t, false, map[string]string{"default": "CODING_TOOL_INTEGRATIONS=\n"})
+			request, journal := repairRequest(t, fixture)
+			executor := &guestInventoryExecutor{installedSettingsExecutor: fixture.cli.options.Executor.(installedSettingsExecutor), root: testkit.TempDir(t)}
+			if err := os.MkdirAll(executor.home(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fixture.cli.options.Executor = executor
+			fixture.cli.options.InitPlatform = nil
+			owner := fixture.cli.activationReconcilers(request)[len(fixture.cli.profileRuntimeIDs())].(*materializedConfigActivationReconciler)
+			if !owner.cli.activation.repair {
+				t.Fatal("fixture does not repair the active release")
+			}
+			loaded, err := owner.cli.resolveReleaseTransitionContext(ctx, "default", request.ConfigHome)
+			if err != nil || !slices.Equal(loaded.Integrations.Effective, []string{"codex"}) {
+				t.Fatalf("installed selection=%v err=%v", loaded.Integrations.Effective, err)
+			}
+			assets, err := effectiveConfigAssets(loaded)
+			if err != nil || len(assets) != 1 {
+				t.Fatalf("assets=%v err=%v", assets, err)
+			}
+			destination := string(executor.relocate([]byte(assets[0].Destination)))
+			fake := fixture.cli.options.Incus.(*testkit.Incus)
+			fake.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName]}
+			// The installed view names the entries the completed init committed.
+			if _, err := owner.Observe(ctx, journal.Releases, releasetransition.ReleaseLinks{}); err != nil || len(executor.installed) == 0 {
+				t.Fatalf("installed entries were not observed: %v", err)
+			}
+			installed := executor.installed
+			desired := []map[string]any{}
+			for _, entry := range installed {
+				if entry["id"] != "codex" {
+					desired = append(desired, entry)
+				}
+			}
+			for _, step := range []struct {
+				mode    string
+				entries []map[string]any
+			}{{"apply", installed}, {"commit", installed}, {"apply", desired}} {
+				if result, err := executor.inventory(ctx, step.mode, map[string]any{"developer": "dev", "entries": step.entries}); err != nil {
+					t.Fatalf("seed %s: %v %s", step.mode, err, result.Stderr)
+				}
+			}
+			// The deselecting init's hooks failed: no commit.
+			if hash, err := config.HashRegularFile(destination); err != nil || hash != mustHashConfigSource(t, assets[0].Source) {
+				t.Fatalf("failed init retired the installed asset before its hook boundary: %v", err)
+			}
+			if removed {
+				if err := os.Remove(destination); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inventory := mustReadConfigFixture(t, executor.root+"/state/inventory.json")
+			owner.integrationPlans = nil
+			observation, err := owner.Observe(ctx, journal.Releases, releasetransition.ReleaseLinks{})
+			if err != nil {
+				t.Fatalf("readiness refused: %v", err)
+			}
+			if removed {
+				if observation.Converged {
+					t.Fatal("readiness hid a third-party removal of an owned asset")
+				}
+			} else if !observation.Converged || owner.integrationPlans["default"].InstalledChanged() {
+				t.Fatalf("failed deselecting init revoked release readiness: %#v %#v", observation, owner.integrationPlans["default"])
+			}
+			if after := mustReadConfigFixture(t, executor.root+"/state/inventory.json"); string(after) != string(inventory) {
+				t.Fatal("readiness observation wrote the inventory")
+			}
+		})
+	}
+}
+
+func mustHashConfigSource(t *testing.T, path string) string {
+	t.Helper()
+	hash, err := config.HashRegularFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
 }
 
 func TestActivationRefusalsStayWithinDiagnosticBound(t *testing.T) {

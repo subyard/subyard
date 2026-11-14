@@ -611,6 +611,22 @@ def main():
             value['diagnostic_binding'] = inventory.get('diagnostic_binding')
         atomic(path, encode(value))
     if mode == 'commit':
+        # Retire owned assets before forgetting them, so an interrupted commit
+        # keeps the records that a retry needs to finish their removal.
+        for entry in retired:
+            # Preview cutover retains unmarked instruction text when its host source
+            # disappears or its client is disabled. The tombstone releases ownership.
+            if entry.get('preview_migrated'):
+                continue
+            if entry['kind'] in ('file', 'link') and os.path.lexists(entry['path']):
+                parent = open_parent(entry['path'])
+                try:
+                    if (actual(entry) not in (entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest'))
+                            or actual_metadata(entry) != expected_metadata(entry, home, uid)):
+                        raise OwnershipConflict('owned artifact drift', entry['path'])
+                    os.unlink(os.path.basename(entry['path']), dir_fd=parent)
+                finally:
+                    os.close(parent)
         # Structured retirement releases fields, preserving the user's document.
         # Tombstones prove why these known paths are no longer owned.
         released += [e['path'] for e in retired if e['kind'] == 'structured' or e.get('preview_migrated')]
@@ -633,21 +649,9 @@ def main():
         elif observed[name] is not None:
             candidate['digest'] = observed[name]
         pending[name] = candidate
+    # Retired assets stay until commit, after the hooks: a failed init leaves
+    # the installed state, which the next successful init retires.
     save(list(pending.values()))
-    for entry in retired:
-        # Preview cutover retains unmarked instruction text when its host source
-        # disappears or its client is disabled. The tombstone releases ownership.
-        if entry.get('preview_migrated'):
-            continue
-        if entry['kind'] in ('file', 'link') and os.path.lexists(entry['path']):
-            parent = open_parent(entry['path'])
-            try:
-                if (actual(entry) not in (entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest'))
-                        or actual_metadata(entry) != expected_metadata(entry, home, uid)):
-                    raise OwnershipConflict('owned artifact drift', entry['path'])
-                os.unlink(os.path.basename(entry['path']), dir_fd=parent)
-            finally:
-                os.close(parent)
     for name, entry in wanted.items():
         if entry.get('path') == '/usr/local/libexec/subyard/projects-changed':
             mkdir_owned(entry['path'] + '.d', OWNER)

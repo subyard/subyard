@@ -1550,13 +1550,6 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 	if err := runtime.retireIntegrationServices(ctx); err != nil {
 		return err
 	}
-	for _, entry := range observed.Retired {
-		if entry.Kind == "structured" {
-			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
-				return err
-			}
-		}
-	}
 	var entries []integrationArtifact
 	if prepared != nil {
 		entries = prepared.entries
@@ -1623,6 +1616,15 @@ func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPl
 	}
 	if err := execution.RunProjectHooks(ctx); err != nil {
 		return err
+	}
+	// Retirement effects follow the hooks: a failed init leaves the installed
+	// state, which the next successful init retires.
+	for _, entry := range observed.Retired {
+		if entry.Kind == "structured" {
+			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
 		return err
