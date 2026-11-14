@@ -145,6 +145,14 @@ if client acquire >/dev/null 2>"$TMP/err"; then fail 'acquire without --slot suc
 grep -Fq 'acquire requires --slot N' "$TMP/err" || fail 'missing --slot diagnostic'
 [ "$(count acquire)" = 0 ] || fail 'acquire without --slot reached the broker'
 
+# A refused attribution label ends the command before the broker sees a request.
+if client acquire --yard test-yard --slot 2 --project 'bad label' >/dev/null 2>"$TMP/err"; then
+  fail 'acquire accepted an unsafe project label'
+fi
+grep -Fq -- '--project must be a safe project label' "$TMP/err" || fail 'missing project label diagnostic'
+[ "$(count acquire)" = 0 ] || fail "acquire with an unsafe project label reached the broker: $(cat "$TMP/facade.log")"
+[ -z "$(ls -A "$TMP/client/handles")" ] || fail 'a refused project label left a handle'
+
 # One lease spans separate processes: state written by one exec is read by the next.
 for protocol in v3 v4; do
   rm -f "$TMP/v4" "$TMP/vm/state"

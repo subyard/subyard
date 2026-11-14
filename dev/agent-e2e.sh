@@ -225,16 +225,7 @@ cleanup_on_exit() {
   for vm in "${!GUEST_DIRS[@]}"; do
     cleanup_guest "$vm" quiet >/dev/null || cleanup_failed=1
   done
-  if [ -n "$LEASE_ACQUIRE_PID" ] && [ -z "$LEASE_ID" ]; then
-    printf 'agent-e2e: acquire cleanup remains unconfirmed: slot=%s run=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
-    cleanup_failed=1
-  fi
-  release_lease || cleanup_failed=1
-  if [ -n "$LEASE_ACQUIRE_PID" ]; then
-    kill "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
-    wait "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
-    LEASE_ACQUIRE_PID=''
-  fi
+  abandon_acquired_lease || cleanup_failed=1
   if [ -n "$LOCAL_TEMP" ]; then
     case "$LOCAL_TEMP" in /tmp/subyard-agent-e2e.*|"${TMPDIR:-/tmp}"/subyard-agent-e2e.*)
       find "$LOCAL_TEMP" -depth -delete >/dev/null 2>&1 || cleanup_failed=1
@@ -402,37 +393,28 @@ run_direct_ssh() {
   rc=$?; phase_end "$rc"; return "$rc"
 }
 
+# Take the run's lease; from here the exit trap owns guest, lease and local cleanup.
+acquire_run_lease() {
+  trap cleanup_on_exit EXIT
+  trap 'cleanup_on_exit interrupted 130' INT
+  trap 'cleanup_on_exit interrupted 143' TERM
+  LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
+  phase_start allocation
+  acquire_lease
+  phase_end "$?"
+  start_lease_keeper
+}
+
 main() {
   local selector=all root bundle bundle_hash vm guest_rc run_failed=0 cleanup_failed=0
-  local mode=run ssh_vm='' ssh_stdin=0 wait_value purpose_override='' status_json=0 slot_value=''
+  local mode=run ssh_vm='' ssh_stdin=0 wait_value purpose_override='' status_json=0
   local log_count=50 log_count_set=0 incident_id='' diagnostic_mode=''
   local status_response observer_cursor=''
   local -a selected=() command=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --yard) [ "$#" -ge 2 ] || die "--yard needs a yard name"; E2E_YARD="$2"; E2E_LEGACY_ROUTE=1; shift 2 ;;
-      --owner) [ "$#" -ge 2 ] && [ -z "$E2E_OWNER" ] || die '--owner requires one owner ID'; E2E_OWNER="$2"; shift 2 ;;
-      --pool) [ "$#" -ge 2 ] && [ -z "$E2E_POOL" ] || die '--pool requires one pool ID'; E2E_POOL="$2"; shift 2 ;;
-	    --slot)
-	      [ "$#" -ge 2 ] || die "--slot needs a number from 1 to 999"
-	      [ -z "$slot_value" ] || die "--slot may be specified only once"
-	      slot_value="$2"
-	      set_requested_slot "$slot_value" --slot
-	      shift 2
-        ;;
-      --type)
-        [ "$#" -ge 2 ] || die "--type needs subyard-pair or android-test"
-        ENVIRONMENT_TYPE="$2"; shift 2 ;;
-      --disk)
-        [ "$#" -ge 2 ] || die '--disk needs 50GiB'
-        [ -z "$DISK_REQUESTED" ] || die '--disk may be specified only once'
-        [ "$2" = 50GiB ] || die '--disk must be 50GiB'
-        DISK_REQUESTED="$2"; shift 2 ;;
-      --vm-count)
-        [ "$#" -ge 2 ] || die '--vm-count needs 1 or 2'
-        [ -z "$VM_COUNT_REQUESTED" ] || die '--vm-count may be specified only once'
-        case "$2" in 1|2) VM_COUNT_REQUESTED="$2" ;; *) die '--vm-count must be 1 or 2' ;; esac
-        shift 2 ;;
+      --yard | --owner | --pool) route_option "$@"; shift 2 ;;
+      --slot | --type | --disk | --vm-count) allocation_option "$@"; shift 2 ;;
       --vm) [ "$#" -ge 2 ] || die "--vm needs 1, 2 or both"; selector="$2"; shift 2 ;;
       --ssh) [ "$#" -ge 2 ] || die "--ssh needs 1 or 2"; mode=ssh; ssh_vm="$2"; shift 2 ;;
       --ssh-stdin)
@@ -485,15 +467,11 @@ main() {
     esac
   done
   resolve_vm_count
-  case "$ENVIRONMENT_TYPE" in
-    subyard-pair) ;;
-    android-test)
-      [ "$selector" != 2 ] && [ "$selector" != both ] && [ "$ssh_vm" != 2 ] \
-        || die "android-test has only VM 1; selectors 2 and both are invalid"
-      [ "$mode" != verify ] || die "--verify-boundary requires subyard-pair"
-      ;;
-    *) die "--type must be subyard-pair or android-test" ;;
-  esac
+  if [ "$ENVIRONMENT_TYPE" = android-test ]; then
+    [ "$selector" != 2 ] && [ "$selector" != both ] && [ "$ssh_vm" != 2 ] \
+      || die "android-test has only VM 1; selectors 2 and both are invalid"
+    [ "$mode" != verify ] || die "--verify-boundary requires subyard-pair"
+  fi
   if [ "$VM_COUNT" = 1 ]; then
     [ "$selector" != 2 ] && [ "$selector" != both ] && [ "$ssh_vm" != 2 ] \
       || die 'one-VM allocation has only VM 1; selectors 2 and both are invalid'
@@ -525,12 +503,6 @@ main() {
     [ "$mode" != status ] && [ "$mode" != prepare ] \
       || die "--slot is valid only for commands that acquire a lease"
   }
-  case "$mode" in
-    run|ssh|verify)
-      [ -n "$LEASE_REQUESTED_SLOT" ] \
-        || die "an exact --slot is required before acquiring an E2E lease"
-      ;;
-  esac
   LEASE_PURPOSE="$(derive_purpose "$mode" "$purpose_override" "${command[@]}")"
   case "$mode" in
     prepare)
@@ -550,27 +522,13 @@ main() {
       ;;
     verify)
       [ "${#command[@]}" -eq 0 ] || die "--verify-boundary takes no command"
-      trap cleanup_on_exit EXIT
-      trap 'cleanup_on_exit interrupted 130' INT
-      trap 'cleanup_on_exit interrupted 143' TERM
-      LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
-      phase_start allocation
-      acquire_lease
-      phase_end "$?"
-      start_lease_keeper
+      acquire_run_lease
       verify_boundary
       return
       ;;
     ssh)
       case "$ssh_vm" in 1 | 2) ;; *) die "--ssh needs VM selector 1 or 2" ;; esac
-      trap cleanup_on_exit EXIT
-      trap 'cleanup_on_exit interrupted 130' INT
-      trap 'cleanup_on_exit interrupted 143' TERM
-      LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
-      phase_start allocation
-      acquire_lease
-      phase_end "$?"
-      start_lease_keeper
+      acquire_run_lease
       run_direct_ssh "$ssh_vm" "$ssh_stdin" "${command[@]}"
       return
       ;;
@@ -583,14 +541,7 @@ main() {
   command -v tar >/dev/null 2>&1 || die "tar is required"
   command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 
-  trap cleanup_on_exit EXIT
-  trap 'cleanup_on_exit interrupted 130' INT
-  trap 'cleanup_on_exit interrupted 143' TERM
-  LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
-  phase_start allocation
-  acquire_lease
-  phase_end "$?"
-  start_lease_keeper
+  acquire_run_lease
   bundle="$LOCAL_TEMP/worktree.tar.gz"
   info "packing current public worktree"
   phase_start packing
