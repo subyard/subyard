@@ -1308,8 +1308,8 @@ die() {{ printf '%s\\n' "$*" >&2; exit 2; }}
             assert 'service_absent' in result.stderr and 'public broker status query failed' in result.stderr, result
 print('authentic predecessor init, explicit service registration and typed cold inventory refuse incomplete setup')
 
-# The retained historical writer must actually refuse the fenced state without
-# changing it; only that observed refusal permits admission to resume.
+# The retained anchor writer either honors the fence or refuses it as unsupported;
+# it never changes fenced state, and only then may admission resume.
 retained_writer = fixture.split('  outer_exec env SUBYARD_TEST_VMS_CONFIG=', 1)[1].split("  printf 'STAGING_RETAINED_WRITER=", 1)[0]
 retained_writer = 'outer_exec env SUBYARD_TEST_VMS_CONFIG=' + retained_writer
 for fault in ['', 'accepted', 'mutated', 'wrong-error', 'resume']:
@@ -1329,11 +1329,11 @@ outer_exec() {{
 die() {{ exit 2; }}
 ''' + retained_writer
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
-        assert (result.returncode == 0) == (fault == ''), (fault, result)
-        assert ('RESUMED' in result.stdout) == (fault in ['', 'resume']), (fault, result)
+        assert (result.returncode == 0) == (fault in ['', 'accepted']), (fault, result)
+        assert ('RESUMED' in result.stdout) == (fault in ['', 'accepted', 'resume']), (fault, result)
         receipt = json.loads(result.stdout.split('STAGING_RETAINED_ATTEMPT=', 1)[1].splitlines()[0])
         assert receipt['native_exit'] == (0 if fault == 'accepted' else 1), (fault, receipt)
-print('retained historical writer requires native refusal and unchanged leases before successful resume')
+print('retained anchor writer honors or refuses the fence and keeps leases unchanged before resume')
 
 # Execute the candidate's real Git configuration function as the process user.
 # Physical preflight uses the same leaf's CLI, which drops to native guest dev.

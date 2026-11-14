@@ -503,11 +503,13 @@ record_reboot_baseline() {
   mv -f -- "$route_temporary" "$DEFAULT_ROUTE_STATE"
 }
 
-# Supported updates register local yards, so no separate continuation grant remains.
+# The anchor creates owned projects (1); a migrated legacy registration carries
+# adopted-v1. Either way no separate continuation grant remains.
 assert_registered_ownership() {
-  local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
-  [ "$(incus project get "$PROJECT" user.subyard.installation)" = adopted-v1 ] \
-    || die 'registered yard migration did not record project ownership'
+  local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json" owner
+  owner="$(incus project get "$PROJECT" user.subyard.installation)"
+  [ "$owner" = 1 ] || [ "$owner" = adopted-v1 ] \
+    || die "yard project lacks registered installation ownership: '$owner'"
   operator_env test ! -e "$grant" && operator_env test ! -L "$grant" \
     || die 'registered yard unexpectedly holds a legacy continuation grant'
 }

@@ -225,10 +225,10 @@ main_newer_release() {
     bash "$ROOT/dev/package-engine.sh" --version "$version" --output-dir "$ASSET_ROOT/$version" >/dev/null
   done
   prepare_newer_fixture
-  local installed="$SOURCE_ASSETS/$SOURCE_BUNDLE"
-  fixture_env bash "$SOURCE_ASSETS/subyard-install-runtime-release.sh" --runtime-root "$RUNTIME_ROOT" \
-    --bundle "$installed" --checksum "$installed.sha256" \
-    --manifest "$installed.manifest.json" --provenance "$installed.provenance.json"
+  # The anchor needs its own completed activation before init, so use its installer
+  # rather than only publishing the runtime.
+  fixture_env env YARD_RELEASE_BASE_URL="file://$SOURCE_ASSETS" \
+    bash "$SOURCE_ASSETS/subyard-install.sh" --version "$SOURCE_VERSION" --yes
   local source_launcher="$RUNTIME_ROOT/current/bin/yard"
   [ "$(fixture_env "$source_launcher" --version)" = "yard $SOURCE_VERSION" ] || die 'source release unavailable'
   ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'fixture project already exists'

@@ -1151,8 +1151,12 @@ PYRETAINED_CONFIG
   printf 'STAGING_RETAINED_OUTPUT_BEGIN\n'
   head -c 4096 "$STATE_PARENT/retained-writer.log"
   printf '\nSTAGING_RETAINED_OUTPUT_END\n'
-  [ "$old_writer_rc" != 0 ] && grep -Fq 'unsupported lease state' "$STATE_PARENT/retained-writer.log" \
-    || die 'retained authentic broker writer did not refuse fenced pool schema'
+  # The anchor writer already honors the fence; an older one must refuse it. Either
+  # way the fenced lease state stays unchanged.
+  if [ "$old_writer_rc" != 0 ]; then
+    grep -Fq 'unsupported lease state' "$STATE_PARENT/retained-writer.log" \
+      || die 'retained broker writer failed for a reason other than the fenced pool schema'
+  fi
   [ "$fenced_before" = "$fenced_after" ] || die 'retained writer changed fenced lease state'
   outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker resume-admission
   printf 'STAGING_RETAINED_WRITER={"baseline":"%s","fenced_schema":3,"native_exit":%s,"state_retained":true}\n' "$baseline" "$old_writer_rc"
