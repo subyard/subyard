@@ -31,14 +31,18 @@ type ownershipReleaseExecutor struct {
 func (fixture *ownershipReleaseExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	command := request.Command
 	if len(command) >= 5 && command[0] == "python3" && strings.Contains(command[3], "Version 1 records observed ownership only") && command[4] == "observe" {
-		payload, _ := json.Marshal(integrationObservation{Fingerprint: strings.Repeat("a", 64), Changed: fixture.pending,
-			Retired: []integrationArtifact{{ID: "sample", Kind: "structured", Format: "json", Path: fixture.path, Digest: strings.Repeat("b", 64)}}})
+		observation := integrationObservation{Fingerprint: strings.Repeat("a", 64), Changed: fixture.pending}
+		if fixture.commits == 0 {
+			// The inventory forgets a retired record only at its commit.
+			observation.Retired = []integrationArtifact{{ID: "sample", Kind: "structured", Format: "json", Path: fixture.path, Digest: strings.Repeat("b", 64)}}
+		}
+		payload, _ := json.Marshal(observation)
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
 	if len(command) >= 5 && command[0] == "python3" && strings.Contains(command[3], "def retire(") {
 		fixture.requests = append(fixture.requests, request)
 		observation := map[string]any{"converged": fixture.released, "fingerprint": strings.Repeat("c", 64)}
-		pending := !fixture.released
+		// The guest keeps reporting a completed release until fresh ownership.
 		switch command[4] {
 		case "assess-retire":
 		case "retire":
@@ -47,7 +51,7 @@ func (fixture *ownershipReleaseExecutor) Exec(ctx context.Context, project, inst
 		default:
 			return ports.InstanceExecResult{ExitCode: 2}, nil
 		}
-		if pending {
+		{
 			observation["release"] = "changed"
 			if len(fixture.pointers) != 0 {
 				observation["released"], observation["released_count"] = fixture.pointers, len(fixture.pointers)
@@ -114,6 +118,18 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 				t.Fatalf("completed release is still reported: %v %q %q", err, after.Warnings, output.String())
 			}
 		})
+	}
+}
+
+// Between the guest release and the inventory commit, the completed release
+// still marks the plan, so the installed-view repair guard keeps blocking.
+func TestCompletedReleaseStillMarksThePlanBeforeInventoryCommit(t *testing.T) {
+	path := "/home/dev/.sample/settings.json"
+	executor := &ownershipReleaseExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}, path: path, pointers: []string{"/kept"}, released: true}
+	var output bytes.Buffer
+	plan, err := ownershipReleaseRuntime(t, executor, &output).IntegrationPlan(context.Background())
+	if err != nil || !slices.Equal(plan.OwnershipReleases(), []string{path}) || len(plan.Warnings) != 1 {
+		t.Fatalf("completed release lost its plan signal: %v releases=%v warnings=%q", err, plan.OwnershipReleases(), plan.Warnings)
 	}
 }
 

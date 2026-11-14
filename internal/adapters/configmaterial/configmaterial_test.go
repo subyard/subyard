@@ -1264,7 +1264,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				}
 				before = snapshotMaterialization(t, h.root)
 				for _, mode := range []string{ModeAssessRetire, ModeRetire} {
-					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != "" || len(repeated.Released) != 0 {
+					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != ReleaseChanged || !slices.Equal(repeated.Released, released) {
 						t.Fatalf("released retirement is not idempotent: %s %#v", mode, repeated)
 					}
 				}
@@ -1312,8 +1312,8 @@ func TestRetirementReleasesWithoutRetainedPaths(t *testing.T) {
 			if !jsonEqual(home, snapshotMaterialization(t, filepath.Join(h.root, "home"))) {
 				t.Fatal("release changed or created the destination")
 			}
-			if repeated := h.observeMode(t, nil, ModeAssessRetire); !repeated.Converged || repeated.Release != "" {
-				t.Fatalf("released retirement is still pending: %#v", repeated)
+			if repeated := h.observeMode(t, nil, ModeAssessRetire); !repeated.Converged || repeated.Release != want {
+				t.Fatalf("completed release lost its reason: %#v", repeated)
 			}
 		})
 	}
@@ -1348,6 +1348,163 @@ func TestReleaseListsOrCountsRetainedFields(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An interrupted release keeps its reason at every ownership write, so the
+// retry still previews the release, signals it and reports it exactly once.
+func TestInterruptedReleaseKeepsItsReason(t *testing.T) {
+	points := []string{
+		"\n            atomic_write(release_path, ",
+		"\n            atomic_write(receipt_path, ",
+		"\n            atomic_write(baseline_path, ",
+		"\n        atomic_write(baseline_path, ",
+		"\n        atomic_write(receipt_path, ",
+	}
+	for _, kind := range []string{"missing-document", "replaced-object"} {
+		for index, point := range points {
+			t.Run(fmt.Sprintf("%s/write-%d", kind, index+1), func(t *testing.T) {
+				h := newGuestHarness(t)
+				h.apply(t, []byte(`{"managed":{"mode":"ask"}}`))
+				want := ReleaseMissingDocument
+				if kind == "replaced-object" {
+					h.writeDestination(t, `{"managed":"operator-data"}`)
+					want = ReleaseChanged
+				} else if err := os.Remove(h.destination); err != nil {
+					t.Fatal(err)
+				}
+				home := snapshotMaterialization(t, filepath.Join(h.root, "home"))
+				request, err := h.request(nil, ModeRetire)
+				if err != nil {
+					t.Fatal(err)
+				}
+				program := request.Command[3]
+				start := strings.Index(program, "def retire(")
+				offset := strings.Index(program[start:], point)
+				if start < 0 || offset < 0 {
+					t.Fatalf("interruption point %q not found", point)
+				}
+				end := start + offset + 1 + strings.Index(program[start+offset+1:], "\n")
+				indent := point[1 : len(point)-len(strings.TrimLeft(point[1:], " "))+1]
+				request.Command[3] = program[:end] + "\n" + indent + "raise MaterializationError(\"synthetic interruption\")" + program[end:]
+				command := exec.Command(request.Command[0], request.Command[1:]...)
+				command.Stdin = bytes.NewReader(request.Stdin)
+				var stderr bytes.Buffer
+				command.Stderr = &stderr
+				if err := command.Run(); err == nil || !strings.Contains(stderr.String(), "synthetic interruption") {
+					t.Fatalf("interruption did not occur: %v %q", err, stderr.String())
+				}
+				if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged || resumed.Release != want || len(resumed.Released) != 0 {
+					t.Fatalf("interrupted release lost its reason: %#v", resumed)
+				}
+				if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want {
+					t.Fatalf("resumed release was not reported: %#v", result)
+				}
+				// The completed release stays visible until fresh ownership, so the
+				// installed-view guard holds until the inventory forgets the record.
+				for _, mode := range []string{ModeAssessRetire, ModeRetire} {
+					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != want {
+						t.Fatalf("completed release lost its reason: %s %#v", mode, repeated)
+					}
+				}
+				if !jsonEqual(home, snapshotMaterialization(t, filepath.Join(h.root, "home"))) {
+					t.Fatal("interrupted release changed or created the destination")
+				}
+			})
+		}
+	}
+}
+
+// The release reason is protected evidence: a corrupt record refuses retirement
+// and apply without mutation, and fresh ownership supersedes a valid stale one.
+func TestReleaseReasonIsProtectedAndSupersededByApply(t *testing.T) {
+	h := newGuestHarness(t)
+	h.apply(t, []byte(`{"managed":1}`))
+	marker := strings.TrimSuffix(h.baselinePath(t), ".json") + ".release"
+	testkit.WriteFile(t, marker, []byte(`{"schema":1,"release":"other"}`), 0o600)
+	before := snapshotMaterialization(t, h.root)
+	for _, mode := range []string{ModeAssessRetire, ModeRetire} {
+		if stderr, err := h.run(nil, mode); err == nil || !strings.Contains(stderr, "invalid materialization state") {
+			t.Fatalf("corrupt release reason accepted: %s %v %q", mode, err, stderr)
+		}
+	}
+	if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+		t.Fatal("refused release changed files")
+	}
+	if stderr, err := h.run([]byte(`{"managed":1}`), ModeApply); err == nil || !strings.Contains(stderr, "invalid materialization state") {
+		t.Fatalf("apply deleted a corrupt release reason: %v %q", err, stderr)
+	}
+	if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+		t.Fatal("refused apply changed files")
+	}
+	testkit.WriteFile(t, marker, []byte(`{"schema":1,"release":"changed"}`), 0o600)
+	h.apply(t, []byte(`{"managed":1}`))
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("apply kept a stale release reason: %v", err)
+	}
+	if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != "" {
+		t.Fatalf("ordinary retirement reported a stale release: %#v", result)
+	}
+}
+
+// A committed release finishes as a release even when the operator restores
+// Subyard's values before the retry: the document is never edited afterwards.
+func TestResumedReleaseNeverRemovesRestoredFields(t *testing.T) {
+	h := newGuestHarness(t)
+	h.apply(t, []byte(`{"managed":{"mode":"ask"}}`))
+	h.writeDestination(t, `{"managed":{"mode":"operator"}}`)
+	request, err := h.request(nil, ModeRetire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := request.Command[3]
+	start := strings.Index(program, "def retire(")
+	point := "\n            atomic_write(baseline_path, "
+	offset := strings.Index(program[start:], point)
+	if start < 0 || offset < 0 {
+		t.Fatal("interruption point not found")
+	}
+	end := start + offset + 1 + strings.Index(program[start+offset+1:], "\n")
+	request.Command[3] = program[:end] + "\n            raise MaterializationError(\"synthetic interruption\")" + program[end:]
+	command := exec.Command(request.Command[0], request.Command[1:]...)
+	command.Stdin = bytes.NewReader(request.Stdin)
+	if err := command.Run(); err == nil {
+		t.Fatal("interruption did not occur")
+	}
+	h.writeDestination(t, `{"managed":{"mode":"ask"}}`)
+	document := snapshotMaterialization(t, filepath.Dir(h.destination))
+	result := h.observeMode(t, nil, ModeRetire)
+	if !result.Converged || result.Release != ReleaseChanged || !slices.Equal(result.Released, []string{"/managed/mode"}) || result.ReleasedCount != 1 {
+		t.Fatalf("resumed release misreported: %#v", result)
+	}
+	if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
+		t.Fatal("resumed release removed restored fields")
+	}
+}
+
+// After the final retired receipt, before the inventory forgets the record, the
+// completed release still signals: an installed-view repair is refused, and the
+// operator's document stays unchanged.
+func TestCompletedReleaseKeepsItsSignalUntilFreshOwnership(t *testing.T) {
+	h := newGuestHarness(t)
+	desired := []byte(`{"managed":{"mode":"subyard"}}`)
+	h.apply(t, desired)
+	h.writeDestination(t, `{"managed":{"mode":"operator"}}`)
+	if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != ReleaseChanged {
+		t.Fatalf("release did not complete: %#v", result)
+	}
+	document := snapshotMaterialization(t, filepath.Dir(h.destination))
+	if assessed := h.observeMode(t, nil, ModeAssessRetire); !assessed.Converged || assessed.Release != ReleaseChanged ||
+		!slices.Equal(assessed.Released, []string{"/managed/mode"}) {
+		t.Fatalf("completed release lost the guard signal: %#v", assessed)
+	}
+	if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
+		t.Fatal("assessment changed the released document")
+	}
+	// Only fresh ownership, a deliberate enable, clears the signal.
+	h.apply(t, desired)
+	if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != "" {
+		t.Fatalf("fresh ownership kept a stale release: %#v", result)
 	}
 }
 
