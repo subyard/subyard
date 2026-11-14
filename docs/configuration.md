@@ -318,20 +318,23 @@ owned fields while retaining the document and unrelated fields. If owned fields 
 Subyard applied them, for example an operator removed, edited or replaced one, they no longer
 prove which values Subyard wrote. Retirement then releases their ownership and leaves the
 document byte-for-byte unchanged instead of refusing. A missing document, or a missing parent
-directory, is released the same way: there is nothing to remove and nothing is created.
-`yard integration status` warns which file is released and which owned fields stay in it. The
+directory, is released the same way: there is nothing to remove and nothing is created. This
+includes a document the operator renamed or moved away. `yard integration status` and the
+`yard init` plan warn which file is released and which owned fields stay in it. The
 command that performs the release prints a result line naming the yard, the file and the fields
 left in place, which Subyard no longer manages. A long field list is shortened and states how
 many fields it omits. Remove those fields by hand if they are unwanted. A later enable applies
-the shipped fields again with fresh ownership. An interrupted retirement still accepts only the
-exact recorded before and after fields. A symlinked, renamed or invalid destination, and missing
-or unproven ownership evidence, still block retirement. A disable after such a change or
-removal while release activation is stale stores only the selection. `yard migrate --check`
-then names `yard -Y NAME init`, and `yard migrate` refuses, because its installed-view repair
-would first restore the owned fields. Run `yard -Y NAME init` to perform the release; a yard
-left in this state by an earlier release recovers the same way. Materialization baselines
-keep the v0.14.0 format for retained-runtime rollback; extra retirement evidence uses a
-protected companion record under the same lock. The root-owned
+the shipped fields again with fresh ownership. An interrupted release resumes with the same
+notice. An interrupted ordinary retirement still accepts only the exact recorded before and after
+fields. A symlink or invalid document at the destination, ownership evidence recorded for a
+different destination path, and missing or unproven ownership evidence still block retirement.
+A disable after such a change or removal while release activation is stale stores only the
+selection. `yard migrate --check` then names `yard -Y NAME init`, and `yard migrate` refuses,
+because its installed-view repair would first restore the owned fields. Run `yard -Y NAME init`
+to perform the release; a yard left in this state by an earlier release recovers the same way.
+Materialization baselines keep the v0.14.0 format for retained-runtime rollback; extra
+retirement evidence, including the reason of an unfinished release, uses protected companion
+records under the same lock. The root-owned
 inventory under `/var/lib/subyard/integrations` records artifact identity and digests;
 it is ownership evidence, not another desired-state store. Missing, legacy, corrupt
 or changed ownership evidence can block cleanup with a conflict instead of deleting

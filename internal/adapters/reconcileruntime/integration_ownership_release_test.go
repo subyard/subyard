@@ -118,26 +118,56 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 }
 
 // Activation warnings reject text above the release diagnostic bound; a long
-// field list is shortened and counts what it omitted.
+// field list is shortened, and its count and suffix always survive.
 func TestOwnershipReleaseNoticeStaysWithinDiagnosticBound(t *testing.T) {
-	pointers := make([]string, 256)
-	for index := range pointers {
-		pointers[index] = fmt.Sprintf("/%03d/%s", index, strings.Repeat("p", 500))
+	long := "/" + strings.Repeat("p", 500)
+	many := make([]string, 256)
+	for index := range many {
+		many[index] = fmt.Sprintf("/%03d/%s", index, strings.Repeat("q", 500))
 	}
-	pointers[0] = "/000"
-	slices.Sort(pointers)
-	observation := configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: pointers}
-	for _, notice := range []string{
-		ownershipReleaseNotice("sample", "/home/dev/.sample/settings.json", observation),
-		boundedNotice("  [ ok ] yard "+strings.Repeat("y", 63)+": released ownership of /home/dev/.sample/settings.json: ", observation, "; Subyard no longer manages it"),
-		ownershipReleaseNotice("sample", "/home/dev/"+strings.Repeat("d", 600), observation),
+	many[0] = "/000"
+	slices.Sort(many)
+	suffix := "; Subyard no longer manages it"
+	for _, scenario := range []struct {
+		name, path string
+		pointers   []string
+		count      string
+	}{
+		{"many", "/home/dev/.sample/settings.json", many, " and 255 more"},
+		{"long-first", "/home/dev/.sample/settings.json", []string{long, "/z"}, " and 1 more"},
+		{"long-only", "/home/dev/.sample/settings.json", []string{long}, ""},
+		{"long-path", "/home/dev/" + strings.Repeat("d", 600), []string{long, "/z"}, " and 1 more"},
 	} {
-		if len(notice) > ownershipNoticeLimit || !utf8.ValidString(notice) {
-			t.Fatalf("notice exceeds the bound: %d %q", len(notice), notice)
-		}
+		t.Run(scenario.name, func(t *testing.T) {
+			observation := configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: scenario.pointers}
+			result := boundedNotice("  [ ok ] yard "+strings.Repeat("y", 63)+": released ownership of "+scenario.path+": ", observation, suffix)
+			for _, notice := range []string{ownershipReleaseNotice("sample", scenario.path, observation), result} {
+				if len(notice) > ownershipNoticeLimit || !utf8.ValidString(notice) || !strings.Contains(notice, "fields left in place: ") {
+					t.Fatalf("notice exceeds the bound or lost its fields: %d %q", len(notice), notice)
+				}
+				if scenario.count != "" && !strings.Contains(notice, scenario.count) {
+					t.Fatalf("omitted pointers are not counted: %q", notice)
+				}
+			}
+			if !strings.HasSuffix(result, suffix) {
+				t.Fatalf("result line lost its suffix: %q", result)
+			}
+		})
 	}
-	short := ownershipReleaseNotice("sample", "/home/dev/.sample/settings.json", observation)
-	if !strings.Contains(short, "fields left in place: /000 and 255 more") {
-		t.Fatalf("omitted pointers are not counted: %q", short)
+}
+
+// The init plan previews a pending ownership release before consent.
+func TestRetiredIntegrationNoticesPreviewOwnershipRelease(t *testing.T) {
+	path := "/home/dev/.sample/settings.json"
+	executor := &ownershipReleaseExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}, path: path, pointers: []string{"/kept"}}
+	var output bytes.Buffer
+	runtime := ownershipReleaseRuntime(t, executor, &output)
+	retirements, warnings, err := runtime.RetiredIntegrationNotices(context.Background())
+	notice := "retiring sample releases ownership of " + path + ": owned fields changed after Subyard applied them; fields left in place: /kept"
+	if err != nil || len(retirements) != 0 || !slices.Equal(warnings, []string{notice}) {
+		t.Fatalf("init preview: retirements=%q warnings=%q err=%v", retirements, warnings, err)
+	}
+	if executor.retires != 0 || output.Len() != 0 {
+		t.Fatalf("preview performed or reported the release: retires=%d output=%q", executor.retires, output.String())
 	}
 }
