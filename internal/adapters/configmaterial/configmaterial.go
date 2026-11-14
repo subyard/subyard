@@ -24,6 +24,9 @@ import (
 const (
 	ModeObserve = "observe"
 	ModeApply   = "apply"
+	// ModeApplyInstalled applies for an installed-view repair: it refuses a
+	// document whose ownership a retirement released, whatever its content.
+	ModeApplyInstalled = "apply-installed"
 	// ModeAssessAdopt permits creation or verifies existing managed fields against
 	// protected ownership evidence or exact recognized pre-baseline templates,
 	// without writing.
@@ -320,7 +323,7 @@ func jsonRequest(
 }
 
 func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome string, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
-	if mode != ModeObserve && mode != ModeApply && mode != ModeAssessAdopt && mode != ModeAssessRetire && mode != ModeRetire {
+	if mode != ModeObserve && mode != ModeApply && mode != ModeApplyInstalled && mode != ModeAssessAdopt && mode != ModeAssessRetire && mode != ModeRetire {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization mode")
 	}
 	if !domain.SafeName(developer) || uid <= 0 {

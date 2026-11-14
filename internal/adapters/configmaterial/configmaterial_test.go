@@ -1518,6 +1518,50 @@ func TestCompletedReleaseKeepsItsSignalUntilFreshOwnership(t *testing.T) {
 	}
 }
 
+// After a release, the installed view never writes the document, whatever it
+// now holds: observation reports the release before reading it, and an
+// installed-view apply refuses. A deliberate apply still takes ownership.
+func TestInstalledViewNeverWritesReleasedDocument(t *testing.T) {
+	for _, kind := range []string{"invalid", "missing", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newGuestHarness(t)
+			desired := []byte(`{"managed":{"mode":"subyard"}}`)
+			h.apply(t, desired)
+			h.writeDestination(t, `{"managed":{"mode":"operator"}}`)
+			if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != ReleaseChanged {
+				t.Fatalf("release did not complete: %#v", result)
+			}
+			switch kind {
+			case "invalid":
+				h.writeDestination(t, `{"managed":`)
+			case "missing":
+				if err := os.Remove(h.destination); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				target := filepath.Join(h.root, "foreign.json")
+				testkit.WriteFile(t, target, []byte(`{"managed":"foreign"}`), 0o600)
+				if err := os.Remove(h.destination); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, h.destination); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := snapshotMaterialization(t, h.root)
+			if observed := h.observe(t, desired); observed.Converged || observed.Release != ReleaseChanged {
+				t.Fatalf("installed-view observation missed the release: %#v", observed)
+			}
+			if stderr, err := h.run(desired, ModeApplyInstalled); err == nil || !strings.Contains(stderr, "released ownership refused") {
+				t.Fatalf("installed-view apply wrote a released document: %v %q", err, stderr)
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("installed view changed the released document or its evidence")
+			}
+		})
+	}
+}
+
 // A release record bound to another projection, such as one an older runtime
 // left behind, does not turn an interrupted ordinary retirement into a release.
 func TestStaleReleaseRecordDoesNotChangeOrdinaryRetirement(t *testing.T) {
