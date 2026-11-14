@@ -524,11 +524,13 @@ def document_payload(current, original):
     return semantic_payload(current) + b"\n"
 
 
-def read_release_marker(path):
-    # A release records its reason before any ownership write. It outlives the
-    # retired receipt until fresh ownership: the host consults it only while the
-    # integration inventory still lists this document, and an installed-view
-    # repair in that window must not overlay the released document.
+def read_release_marker(path, evidence=None):
+    # A release records its reason, bound to its recorded projection, before any
+    # ownership write. It outlives the retired receipt until fresh ownership: the
+    # host consults it only while the inventory still lists this document, and an
+    # installed-view repair must not overlay the released document meanwhile.
+    # A record for another projection, such as one an older runtime left behind
+    # before an ordinary retirement, is stale and ignored.
     if not os.path.lexists(path):
         return ""
     validate_regular(path, STATE_UID, 0o600)
@@ -536,17 +538,22 @@ def read_release_marker(path):
         try:
             value = parse_json(source.read())
         except Exception:
-            raise MaterializationError("invalid materialization state")
-    if (not isinstance(value, dict) or set(value) != {"schema", "release"} or
+            raise MaterializationError("invalid release record")
+    if (not isinstance(value, dict) or set(value) != {"schema", "release", "retired_digest"} or
             not isinstance(value["schema"], Decimal) or value["schema"] != 1 or
-            value["release"] not in ("changed", "missing-document")):
-        raise MaterializationError("invalid materialization state")
+            value["release"] not in ("changed", "missing-document") or
+            not isinstance(value["retired_digest"], str) or
+            not re.fullmatch(r"[0-9a-f]{64}", value["retired_digest"])):
+        raise MaterializationError("invalid release record")
+    if evidence is not None and evidence.get("retired_digest") != value["retired_digest"]:
+        return ""
     return value["release"]
 
 
 def remove_release_marker(path):
     # A corrupt record refuses here too, never disappears silently.
-    if read_release_marker(path):
+    if os.path.lexists(path):
+        read_release_marker(path)
         os.remove(path)
 
 
@@ -572,7 +579,7 @@ def printable_paths(paths):
 def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid):
     if baseline is None or baseline["schema"] != 2:
         raise MaterializationError("retirement ownership evidence unavailable")
-    marker = read_release_marker(release_path)
+    marker = read_release_marker(release_path, baseline)
     phase = baseline["phase"]
     missing = original is None
     if missing:
@@ -604,7 +611,8 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
                 if release or phase != "retired" and actual != baseline["projection_digest"] else [])
     if mode == "retire" and phase != "retired":
         if phase == "applied" and release:
-            atomic_write(release_path, semantic_payload({"schema": 1, "release": release}) + b"\n", STATE_UID, 0o600)
+            record = {"schema": 1, "release": release, "retired_digest": actual}
+            atomic_write(release_path, semantic_payload(record) + b"\n", STATE_UID, 0o600)
             baseline["phase"] = "retiring"
             baseline["retired_digest"] = actual
             atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
@@ -789,6 +797,11 @@ def main():
                                                  baseline["owned"])}
             if mode == "assess-adopt":
                 report["adoptable"] = adoptable
+            elif evidence is not None and evidence.get("phase") == "retired":
+                # Ownership was released; only a deliberate enable may take it again.
+                release = read_release_marker(release_path, evidence)
+                if release:
+                    report["release"] = release
             print(json.dumps(report, separators=(",", ":"), sort_keys=True))
             return
 
