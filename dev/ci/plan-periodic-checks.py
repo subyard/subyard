@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the periodic E2E matrices of release acceptance VM checks from their existing owners."""
+"""Print the periodic E2E matrices: release acceptance VM checks from their existing owners, plus Veranda GUI checks."""
 import importlib.util
 import json
 import pathlib
@@ -17,6 +17,12 @@ NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnez
           "vm:p0-yard-maintenance"}
 # The release catalog runs the full P0 matrix as one check; here its lanes run on separate runners.
 SPLIT = {"vm:p0-full"}
+# Veranda GUI SHORT scenarios (veranda/desktop/README.md). They gate no CLI or engine release, so
+# they are periodic only and use their own bundle, which adds the GUI and engine ELFs. A manual
+# check runs only when a dispatch names it.
+VERANDA = {"veranda:x11": ["--x11"], "veranda:wayland": [],
+           "veranda:x11-remote-ui": ["--x11", "--remote", "--ui"]}
+VERANDA_MANUAL = {"veranda:wayland-ime": ["--ime"]}
 
 
 def collector():
@@ -29,6 +35,12 @@ def collector():
 def published_upgrade(version, agents):
     return ["dev/agent-e2e.sh", "--slot", "1", "--purpose", "published-upgrade", "--vm-count", "1",
             "--vm", "1", "--", "bash", "dev/e2e/published-upgrade.sh", version, agents]
+
+
+def veranda_short(name, options):
+    return {"id": name, "bundle": "veranda-bundle",
+            "command": ["dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1",
+                        "--purpose", name.replace(":", "-"), "--", "bash", "dev/e2e/veranda-short.sh", *options]}
 
 
 def plan(root=ROOT):
@@ -52,6 +64,8 @@ def plan(root=ROOT):
     include += [{"id": "published:" + version, "command": published_upgrade(version, "none")}
                 for version in (line.split("\t", 1)[0] for line in baselines if line)
                 if "vm:published-upgrade/" + version not in declared]
+    include += [veranda_short(name, options) for name, options in VERANDA.items()]
+    include += [veranda_short(name, options) | {"manual": True} for name, options in VERANDA_MANUAL.items()]
     missing = sorted(SPLIT - set(declared))
     if missing:
         raise SystemExit("plan-periodic-checks: split checks left the collector: " + " ".join(missing))

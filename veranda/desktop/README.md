@@ -291,30 +291,14 @@ PY
 SUBYARD_E2E_CANDIDATE_BUNDLE="$PWD/.build/veranda-gtk-short.tar.gz" \
 SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum .build/veranda-gtk-short.tar.gz | cut -d' ' -f1)" \
 dev/agent-e2e.sh --slot 1 --vm-count 1 --purpose veranda-gtk-short -- \
-  bash -euc '
-root="$PWD"
-operator="$(id -un)"
-operator_home="$(getent passwd "$operator" | cut -d: -f6)"
-bash dev/build-profiles.sh
-. tests/helpers/test-context.sh
-setup_test_context "$root/.build/incus-bootstrap"
-export SUBYARD_USER="$operator" SUBYARD_OPERATOR_HOME="$operator_home"
-export STORAGE_PATH="$operator_home/.cache/subyard-e2e-platform/incus/incus/storage"
-SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
-export SUBYARD_INSTALLATION_CONTEXT
-bash scripts/01-install-incus.sh --yes --zabbly
-sudo -n runuser -u "$operator" -- env -i \
-  HOME="$operator_home" USER="$operator" LOGNAME="$operator" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR=/tmp \
-  SUBYARD_E2E_VM=1 SUBYARD_E2E_RUN_ID="${SUBYARD_E2E_RUN_ID:-}" SUBYARD_E2E_SLOT="${SUBYARD_E2E_SLOT:-}" \
-  python3 "$root/veranda/desktop/wayland-short.py" \
-    "$root/.subyard-acceptance/veranda" "$root/.subyard-acceptance/yard" --x11
-'
+  bash dev/e2e/veranda-short.sh --x11
 ```
 
 Choose an available owned slot using the VM guide; the example does not authorize
 another holder's slot. Keep the original exit, full logs, cleanup and exact release
-outcomes. In the disposable guest, the product Phase 1 installer prepares Incus
-and enrolls the operator before the whole helper starts in a fresh group session.
+outcomes. In the disposable guest, `dev/e2e/veranda-short.sh` runs the product Phase 1
+installer, which prepares Incus and enrolls the operator, and then starts the whole helper
+in a fresh group session with the bundle's two ELFs and its own arguments.
 This follows the [existing Phase 1 caller](../../dev/e2e/entity-naming-acceptance.sh)
 and [VM guide](../../docs/test-vms.md); running the helper directly on the raw base
 can fail with Incus socket permission denied. Remove `--x11` to run the separate
@@ -324,6 +308,9 @@ the disposable fixture state and runs its supported `migrate --yes` boundary bef
 source `init`; Go and the source packaging prerequisites must be available in the VM.
 The installed engine must match the supplied engine bytes. The fixture removes its
 isolated runtime with the rest of its owned state.
+[Periodic E2E](../../docs/testing.md#periodic-e2e-on-hosted-runners) runs the same entrypoint
+as `veranda:x11`, `veranda:wayland` and `veranda:x11-remote-ui` (`--x11 --remote --ui`);
+`veranda:wayland-ime` (`--ime`) runs only when a dispatch names it.
 Add `--remote` to run three same-build lifetimes against an isolated real loopback
 SSH server and system SSH agent with synthetic keys on the disposable VM. This
 checks first-key decline/accept, compatible owner discovery, cancellation during
