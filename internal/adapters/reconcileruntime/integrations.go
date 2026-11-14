@@ -871,8 +871,8 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		fingerprints = append(fingerprints, observation.Fingerprint)
 		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
-		if len(observation.Released) != 0 {
-			plan.Warnings = append(plan.Warnings, ownershipReleaseNotice(entry.ID, entry.Path, observation.Released))
+		if observation.Release != "" || len(observation.Released) != 0 {
+			plan.Warnings = append(plan.Warnings, ownershipReleaseNotice(entry.ID, entry.Path, observation))
 			plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
 		}
 	}
@@ -1201,19 +1201,59 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)
 	}
 	observation, err := configmaterial.ParseObservation(result.Stdout)
-	if err == nil && mode == configmaterial.ModeRetire && len(observation.Released) != 0 && runtime.Stdout != nil {
+	if err == nil && mode == configmaterial.ModeRetire && (observation.Release != "" || len(observation.Released) != 0) && runtime.Stdout != nil {
 		// Report the completed release once, from the call that performed it.
-		fmt.Fprintf(runtime.Stdout, "  [ ok ] yard %s: released ownership of changed fields in %s; left in place and no longer managed by Subyard: %s\n",
-			runtime.Yard.YardName, path, strings.Join(observation.Released, ", "))
+		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+path+": ", observation, "; Subyard no longer manages it"))
 	}
 	return observation, err
 }
 
-// ownershipReleaseNotice previews a retirement that leaves changed owned fields
-// in place: they no longer prove Subyard's values, so only ownership is released.
-func ownershipReleaseNotice(integration, path string, released []string) string {
-	return fmt.Sprintf("owned fields in %s changed after Subyard applied them; retiring %s leaves them in place and releases their ownership: %s",
-		path, integration, strings.Join(released, ", "))
+// ownershipReleaseNotice previews a retirement that only releases ownership:
+// changed owned fields no longer prove Subyard's values, and a missing document
+// has nothing to remove. The document itself stays unchanged.
+func ownershipReleaseNotice(integration, path string, observation configmaterial.Observation) string {
+	return boundedNotice("retiring "+integration+" releases ownership of "+path+": ", observation, "")
+}
+
+// Activation warnings share the release diagnostic bound, so the field list
+// shrinks to fit and names how many pointers it omitted.
+const ownershipNoticeLimit = 384
+
+func boundedNotice(prefix string, observation configmaterial.Observation, suffix string) string {
+	reason := "owned fields changed after Subyard applied them"
+	if observation.Release == configmaterial.ReleaseMissingDocument {
+		reason = "the document is missing"
+	}
+	head := prefix + reason + "; "
+	var fields string
+	switch {
+	case observation.Release == configmaterial.ReleaseMissingDocument:
+		fields = "nothing to remove"
+	case len(observation.Released) == 0:
+		fields = "no owned fields remain"
+	default:
+		fields = "fields left in place: "
+		for index, pointer := range observation.Released {
+			rest := ""
+			if remaining := len(observation.Released) - index - 1; remaining != 0 {
+				rest = fmt.Sprintf(" and %d more", remaining)
+			}
+			separator := ""
+			if index != 0 {
+				separator = ", "
+			}
+			if index != 0 && len(head)+len(fields)+len(separator)+len(pointer)+len(rest)+len(suffix) > ownershipNoticeLimit {
+				fields += fmt.Sprintf(" and %d more", len(observation.Released)-index)
+				break
+			}
+			fields += separator + pointer
+		}
+	}
+	notice := head + fields + suffix
+	if len(notice) > ownershipNoticeLimit {
+		notice = strings.ToValidUTF8(notice[:ownershipNoticeLimit-3], "") + "..."
+	}
+	return notice
 }
 
 // RetiredIntegrationNotices previews retired package state for operations such as

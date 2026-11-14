@@ -477,6 +477,7 @@ func TestJSONRequestAndObservationParserRejectUnsafeInputs(t *testing.T) {
 		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/b","/a"]}`),
 		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/a","/a"]}`),
 		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/a\u001b[2J"]}`),
+		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","release":"other"}`),
 	} {
 		if _, err := ParseJSONObservation(output); err == nil {
 			t.Fatalf("accepted invalid observation %q", output)
@@ -1133,7 +1134,7 @@ func TestRetirementPreservesDocumentAndRuntimeFields(t *testing.T) {
 }
 
 func TestRetirementRejectsUnprovenOwnershipWithoutMutation(t *testing.T) {
-	for _, kind := range []string{"missing-baseline", "legacy", "corrupt", "missing-document", "symlink", "renamed"} {
+	for _, kind := range []string{"missing-baseline", "legacy", "corrupt", "symlink", "renamed"} {
 		t.Run(kind, func(t *testing.T) {
 			h := newGuestHarness(t)
 			h.apply(t, []byte(`{"managed":["synthetic-secret"]}`))
@@ -1154,18 +1155,16 @@ func TestRetirementRejectsUnprovenOwnershipWithoutMutation(t *testing.T) {
 				if err := os.WriteFile(baselinePath, []byte(`{"secret":"invalid"}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
-			case "missing-document", "symlink":
+			case "symlink":
 				if err := os.Remove(h.destination); err != nil {
 					t.Fatal(err)
 				}
-				if kind == "symlink" {
-					target := filepath.Join(h.root, "foreign.json")
-					if err := os.WriteFile(target, []byte(`{"managed":["synthetic-secret"]}`), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Symlink(target, h.destination); err != nil {
-						t.Fatal(err)
-					}
+				target := filepath.Join(h.root, "foreign.json")
+				if err := os.WriteFile(target, []byte(`{"managed":["synthetic-secret"]}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, h.destination); err != nil {
+					t.Fatal(err)
 				}
 			case "renamed":
 				h.destination += ".renamed"
@@ -1215,7 +1214,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				released := []string{"/edited/mode", "/kept"}
 				before := snapshotMaterialization(t, h.root)
 				assessed := h.observeMode(t, nil, ModeAssessRetire)
-				if assessed.Converged || !slices.Equal(assessed.Released, released) {
+				if assessed.Converged || assessed.Release != ReleaseChanged || !slices.Equal(assessed.Released, released) {
 					t.Fatalf("assessment did not report the release: %#v", assessed)
 				}
 				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
@@ -1241,7 +1240,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 					}
 				}
 				result := h.observeMode(t, nil, ModeRetire)
-				if !result.Converged || !slices.Equal(result.Released, released) {
+				if !result.Converged || !slices.Equal(result.Released, released) || result.Release != map[bool]string{false: ReleaseChanged, true: ""}[interrupted] {
 					t.Fatalf("release did not converge or name its fields: %#v", result)
 				}
 				if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
@@ -1263,7 +1262,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				}
 				before = snapshotMaterialization(t, h.root)
 				for _, mode := range []string{ModeAssessRetire, ModeRetire} {
-					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || len(repeated.Released) != 0 {
+					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != "" || len(repeated.Released) != 0 {
 						t.Fatalf("released retirement is not idempotent: %s %#v", mode, repeated)
 					}
 				}
@@ -1277,6 +1276,44 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+// A release is reported even when no owned path remains to name: the change
+// replaced every owned path, or the document or its directory is gone.
+func TestRetirementReleasesWithoutRetainedPaths(t *testing.T) {
+	for _, kind := range []string{"all-paths-replaced", "missing-document", "missing-parent"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.apply(t, []byte(`{"managed":{"mode":"ask"}}`))
+			want := ReleaseMissingDocument
+			switch kind {
+			case "all-paths-replaced":
+				h.writeDestination(t, `{"managed":"operator-data"}`)
+				want = ReleaseChanged
+			case "missing-document":
+				if err := os.Remove(h.destination); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-parent":
+				if err := os.RemoveAll(filepath.Dir(h.destination)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			home := snapshotMaterialization(t, filepath.Join(h.root, "home"))
+			if assessed := h.observeMode(t, nil, ModeAssessRetire); assessed.Converged || assessed.Release != want || len(assessed.Released) != 0 {
+				t.Fatalf("pending release not detectable: %#v", assessed)
+			}
+			if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want || len(result.Released) != 0 {
+				t.Fatalf("release did not complete: %#v", result)
+			}
+			if !jsonEqual(home, snapshotMaterialization(t, filepath.Join(h.root, "home"))) {
+				t.Fatal("release changed or created the destination")
+			}
+			if repeated := h.observeMode(t, nil, ModeAssessRetire); !repeated.Converged || repeated.Release != "" {
+				t.Fatalf("released retirement is still pending: %#v", repeated)
+			}
+		})
 	}
 }
 

@@ -479,18 +479,20 @@ func (cli *CLI) pendingInitIntegrationRefusal(ctx context.Context, installed con
 	if runtime, ok = platform.(reconcileruntime.Runtime); !ok {
 		return refusal(errors.New("prepared integration runtime is unavailable"))
 	}
+	// Report a release together with any independent inspection refusal.
 	plan, err := runtime.IntegrationPlan(ctx)
+	var causes []error
 	if err != nil {
-		return refusal(err)
+		causes = append(causes, refusal(err))
 	}
 	if releases := plan.OwnershipReleases(); len(releases) != 0 {
-		return pendingInitOwnershipRelease{yard: installed.Name, paths: releases}
+		causes = append(causes, pendingInitOwnershipRelease{yard: installed.Name, paths: releases})
 	}
-	return nil
+	return collectActivationRefusals(causes)
 }
 
 // pendingInitOwnershipRelease refuses an installed-view repair that would rewrite
-// changed owned fields which the pending yard init releases in place. Plain init
+// owned state whose ownership the pending yard init releases in place. Plain init
 // of that yard performs the release without the repair, so it is the next step.
 type pendingInitOwnershipRelease struct {
 	yard  string
@@ -498,14 +500,14 @@ type pendingInitOwnershipRelease struct {
 }
 
 func (err pendingInitOwnershipRelease) Error() string {
-	return fmt.Sprintf("yard %s: pending yard init releases changed owned fields in %s", err.yard, strings.Join(err.paths, ", "))
+	return fmt.Sprintf("yard %s: pending yard init releases ownership of %s", err.yard, strings.Join(err.paths, ", "))
 }
 
 // The pending init owns this state, so ordinary init remains admitted.
 func (pendingInitOwnershipRelease) ActivationPendingConfiguration() bool { return true }
 
 func (err pendingInitOwnershipRelease) ActivationDiagnostic() (string, string) {
-	return "yard " + err.yard + ": integration configuration awaiting yard init releases changed owned fields in place; the release repair would overwrite them first; run yard -Y " + err.yard + " init instead",
+	return "yard " + err.yard + ": integration configuration awaiting yard init releases ownership of changed or missing owned configuration in place; the release repair would overwrite it first; run yard -Y " + err.yard + " init instead",
 		shellquote.Command([]string{"yard", "-Y", err.yard, "init"})
 }
 
