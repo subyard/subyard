@@ -135,9 +135,14 @@ grep -Fxq "$disclosure" "$STATE/config-show-setting.log" || die 'config show YAR
 owner env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
   "$launcher" update --check --json --version "$CANDIDATE_VERSION" >"$STATE/update-check.json" 2>"$STATE/update-check.log" \
   || printf 'update --check exit=%s (outcome not asserted)\n' "$?"
-jq -e --arg path "$host_config" --arg repair "$repair" '[.configuration[]? | select(.state == "ignored" and .setting == "YARD_DEVICES"
-  and .scope == "host" and .path == $path and .line == 1 and .repair == $repair)] | length == 1' \
-  "$STATE/update-check.json" >/dev/null || die 'update --check --json did not report the ignored assignment'
+# A host assignment is reported once across local yards; any yard's unset removes it.
+jq -e --arg path "$host_config" '[.configuration[]? | select(.state == "ignored" and .setting == "YARD_DEVICES"
+  and .scope == "host" and .path == $path and .line == 1
+  and (.repair | test("^yard -Y [a-z0-9-]+ config unset YARD_DEVICES --scope host --local$")))] | length == 1' \
+  "$STATE/update-check.json" >/dev/null || {
+  jq -c '.configuration' "$STATE/update-check.json" >&2 || head -c 2000 "$STATE/update-check.json" >&2
+  die 'update --check --json did not report the ignored assignment'
+}
 pass 'config show, config show YARD_DEVICES and update --check --json disclose the assignment and its repair'
 
 # Without consent init only plans: it names the device loss and changes nothing.
