@@ -116,7 +116,9 @@ exercise_activation_only_repair() {
     || die 'completed candidate transaction is unavailable'
   sudo -n install -m 0600 "$V2_LEDGER" "$ACTIVATION_LEDGER_BASELINE"
   materialize_unit "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" "$candidate_unit"
-  materialize_unit "$OLD_UNIT_FIXTURE" "$drift_unit"
+  # The anchor ships the same unit as the candidate, so derive a minimal drift
+  # from the candidate's own unit instead of relying on an older release.
+  sed 's/^RestartSec=30s$/RestartSec=31s/' "$candidate_unit" > "$drift_unit"
   sudo -n install -o root -g root -m 0644 "$drift_unit" "$UNIT"
   sudo -n systemctl daemon-reload
   sudo -n cmp "$drift_unit" "$UNIT" >/dev/null \

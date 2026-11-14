@@ -5294,7 +5294,7 @@ run_activation_repair_contract() (
   mkdir -p "$STATE_ROOT" "$ROOT/config/systemd" "$OPERATOR_HOME/.local/bin" \
     "$V2_STATE_ROOT" "$RELEASE_ROOT" "$candidate_runtime/config/systemd" \
     "$candidate_runtime/bin"
-  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=candidate\n' \
+  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=candidate\nRestartSec=30s\n' \
     > "$ROOT/config/systemd/subyard-power-reconcile.service.in"
   cp "$ROOT/config/systemd/subyard-power-reconcile.service.in" \
     "$candidate_runtime/config/systemd/subyard-power-reconcile.service.in"
