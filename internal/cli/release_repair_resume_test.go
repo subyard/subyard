@@ -454,7 +454,7 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 			return ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: retirement ownership evidence unavailable\n")}, &ports.GuestExitError{Code: 2}
 		}
 		// The desired view releases changed owned fields of the deselected integration.
-		payload, _ := json.Marshal(map[string]any{"converged": false, "fingerprint": strings.Repeat("d", 64), "release": "changed", "released": []string{"/approval_policy"}})
+		payload, _ := json.Marshal(map[string]any{"converged": false, "fingerprint": strings.Repeat("d", 64), "release": "changed", "released": []string{"/approval_policy"}, "released_count": 1})
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
 	if len(command) == 3 && command[0] == "sha256sum" && command[2] == fixture.destination {

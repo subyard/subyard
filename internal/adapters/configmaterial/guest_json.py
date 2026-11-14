@@ -546,8 +546,8 @@ def read_release_marker(path):
 
 
 def remove_release_marker(path):
-    if os.path.lexists(path):
-        validate_regular(path, STATE_UID, 0o600)
+    # A corrupt record refuses here too, never disappears silently.
+    if read_release_marker(path):
         os.remove(path)
 
 
@@ -556,10 +556,14 @@ def retained_paths(current, owned):
     trial = copy.deepcopy(current)
     for entry in sorted(owned, key=lambda item: item["path"].count("/"), reverse=True):
         remove_owned(trial, entry)
-    paths = sorted(entry["path"] for entry in owned
-                   if lookup(current, pointer_parts(entry["path"]))[0] and
-                   not lookup(trial, pointer_parts(entry["path"]))[0])
-    # The host renders these names: keep a bounded list without control characters.
+    return sorted(entry["path"] for entry in owned
+                  if lookup(current, pointer_parts(entry["path"]))[0] and
+                  not lookup(trial, pointer_parts(entry["path"]))[0])
+
+
+def printable_paths(paths):
+    # The host renders these names: a bounded list without control characters.
+    # The caller reports the full count, so filtered names are still counted.
     return [path for path in paths if len(path.encode()) <= 512 and
             not any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for c in path)][:256]
 
@@ -589,10 +593,14 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
         elif missing and actual != baseline["retired_digest"]:
             raise MaterializationError("retirement destination missing")
         if phase == "retiring":
+            # A committed release finishes as a release; it never edits the document.
             release = marker
     else:
         # Completed ownership writes whose release has not been reported yet.
         release = marker
+    if release == "missing-document" and not missing:
+        # The document reappeared after the release was committed; it stays as is.
+        release = "changed"
     # A release, or its interrupted tail, leaves owned paths in place; an
     # interrupted ordinary retirement has already removed them.
     released = (retained_paths(current, baseline["owned"])
@@ -604,7 +612,8 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
             baseline["retired_digest"] = actual
             atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
             atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
-        elif phase == "applied" or phase == "retiring" and not missing and actual == baseline["projection_digest"]:
+        elif not release and (phase == "applied" or phase == "retiring" and not missing and
+                              actual == baseline["projection_digest"]):
             remove_release_marker(release_path)
             for entry in sorted(baseline["owned"], key=lambda item: item["path"].count("/"), reverse=True):
                 remove_owned(current, entry)
@@ -633,7 +642,8 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
     if release:
         report["release"] = release
     if released:
-        report["released"] = released
+        report["released"] = printable_paths(released)
+        report["released_count"] = len(released)
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
 
 

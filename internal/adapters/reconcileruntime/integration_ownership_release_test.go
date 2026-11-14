@@ -50,7 +50,7 @@ func (fixture *ownershipReleaseExecutor) Exec(ctx context.Context, project, inst
 		if pending {
 			observation["release"] = "changed"
 			if len(fixture.pointers) != 0 {
-				observation["released"] = fixture.pointers
+				observation["released"], observation["released_count"] = fixture.pointers, len(fixture.pointers)
 			}
 		}
 		payload, _ := json.Marshal(observation)
@@ -169,5 +169,23 @@ func TestRetiredIntegrationNoticesPreviewOwnershipRelease(t *testing.T) {
 	}
 	if executor.retires != 0 || output.Len() != 0 {
 		t.Fatalf("preview performed or reported the release: retires=%d output=%q", executor.retires, output.String())
+	}
+}
+
+// Retained pointers the guest could not print are counted in the notice.
+func TestOwnershipReleaseNoticeCountsUnprintedFields(t *testing.T) {
+	for _, scenario := range []struct {
+		observation configmaterial.Observation
+		want        string
+	}{
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 300}, "fields left in place: /a, /b and 298 more"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, ReleasedCount: 1}, "1 fields left in place"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged}, "no owned fields remain"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseMissingDocument}, "nothing to remove"},
+	} {
+		notice := ownershipReleaseNotice("sample", "/home/dev/.sample/settings.json", scenario.observation)
+		if !strings.HasSuffix(notice, "; "+scenario.want) {
+			t.Fatalf("notice=%q want suffix %q", notice, scenario.want)
+		}
 	}
 }

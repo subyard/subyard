@@ -42,6 +42,7 @@ const (
 
 	maxReleasedPointers     = 256
 	maxReleasedPointerBytes = 512
+	maxReleasedCount        = 1 << 20
 )
 
 //go:embed guest_json.py
@@ -62,9 +63,11 @@ type JSONObservation struct {
 	// Release names why retirement releases ownership without changing the
 	// document: ReleaseChanged or ReleaseMissingDocument. Empty otherwise.
 	Release string `json:"release,omitempty"`
-	// Released lists the owned field pointers that such a release leaves in
-	// place. It can be empty, for example when no owned path remains.
-	Released []string `json:"released,omitempty"`
+	// Released lists the printable owned field pointers that such a release
+	// leaves in place; ReleasedCount counts all of them, including pointers too
+	// long or unsafe to print. Both are empty when no owned path remains.
+	Released      []string `json:"released,omitempty"`
+	ReleasedCount int      `json:"released_count,omitempty"`
 }
 
 const (
@@ -372,11 +375,12 @@ func materializationRequest(format, mode, developer, destination string, uid int
 
 func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	type encodedObservation struct {
-		Converged   *bool    `json:"converged"`
-		Adoptable   bool     `json:"adoptable,omitempty"`
-		Fingerprint string   `json:"fingerprint"`
-		Release     string   `json:"release,omitempty"`
-		Released    []string `json:"released,omitempty"`
+		Converged     *bool    `json:"converged"`
+		Adoptable     bool     `json:"adoptable,omitempty"`
+		Fingerprint   string   `json:"fingerprint"`
+		Release       string   `json:"release,omitempty"`
+		Released      []string `json:"released,omitempty"`
+		ReleasedCount int      `json:"released_count,omitempty"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -392,12 +396,13 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	if _, err := hex.DecodeString(encoded.Fingerprint); err != nil {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
-	if !validReleasedPointers(encoded.Released) ||
+	if !validReleasedPointers(encoded.Released) || encoded.ReleasedCount < len(encoded.Released) ||
+		encoded.ReleasedCount > maxReleasedCount ||
 		encoded.Release != "" && encoded.Release != ReleaseChanged && encoded.Release != ReleaseMissingDocument {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
 	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint,
-		Release: encoded.Release, Released: encoded.Released}, nil
+		Release: encoded.Release, Released: encoded.Released, ReleasedCount: encoded.ReleasedCount}, nil
 }
 
 // Released pointers are rendered to the operator: accept only a bounded,
