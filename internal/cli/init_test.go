@@ -1869,3 +1869,28 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 		t.Fatalf("converged extras step = %#v", step)
 	}
 }
+
+// Before Incus is installed the conditional extras stage still plans, and its
+// detach preview reads nothing: a cold init must reach the Incus stage.
+func TestInitExtrasDetachPreviewNeedsNoIncusBeforeItConverges(t *testing.T) {
+	stages := application.InitStages(domain.Context{IncusProject: "subyard", YardInstanceName: "yard"})
+	incusStage, extrasStage := stages[0], stages[slices.IndexFunc(stages, func(stage application.ReconcileStage) bool { return stage.ID == ports.ReconcileStageExtras })]
+	missing := errors.New("dial unix /var/lib/incus/unix.socket: connect: no such file or directory")
+	runtime := reconcileruntime.Runtime{RepositoryRoot: testkit.TempDir(t), Incus: &testkit.Incus{Err: missing},
+		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard"}}
+	execution := &initExecution{mode: initReconcile, extrasDetach: []string{"stale"}}
+	execution.plan = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: incusStage}, {Stage: extrasStage, Conditional: true}}}
+	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || execution.extrasDetach != nil {
+		t.Fatalf("cold init detach preview = %q, %v", execution.extrasDetach, err)
+	}
+	// Once Incus is converged, an unreadable instance is a planning refusal.
+	execution.plan.Steps[0].Converged = true
+	if err := execution.assessExtrasDetach(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), `check init stage "extras"`) {
+		t.Fatalf("converged Incus hid an instance read failure: %v", err)
+	}
+	// A yard being registered has no instance to inspect.
+	execution.bootstrap = &initBootstrap{}
+	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || execution.extrasDetach != nil {
+		t.Fatalf("registration detach preview = %q, %v", execution.extrasDetach, err)
+	}
+}

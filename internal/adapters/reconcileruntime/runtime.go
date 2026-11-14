@@ -1483,9 +1483,6 @@ func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsrunti
 	}, nil
 }
 
-// extrasHostDevices lists the host device nodes matching a pattern.
-var extrasHostDevices = filepath.Glob
-
 // ExtrasDetachPlanned names the Subyard-owned yx-* devices of the yard that the
 // extras stage detaches because no selected profile requests them, resolved as
 // 09-yard-extras.sh resolves them. This includes a device that only an operator
@@ -1502,9 +1499,13 @@ func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context) ([]string, error
 	if err != nil {
 		return nil, err
 	}
+	root := runtime.HostDeviceRoot
+	if root == "" {
+		root = "/dev"
+	}
 	wanted := map[string]bool{}
 	want := func(pattern, prefix string) {
-		nodes, _ := extrasHostDevices(pattern)
+		nodes, _ := filepath.Glob(filepath.Join(root, strings.TrimPrefix(pattern, "/dev/")))
 		for _, node := range nodes {
 			wanted[prefix+filepath.Base(node)] = true
 		}

@@ -77,15 +77,29 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 	return applyEnvReaderObservedRetired(input, path, values, observer, retired, nil)
 }
 
+// discardPolicy names inputs that are evaluated in isolation and discarded:
+// retired settings always, plus those match selects. Neither such an
+// assignment nor any nested default it performs changes values or reaches the
+// observer, so later records never see it. report, when set, receives each
+// discarded assignment; nested marks a default performed inside another
+// record's expression.
+type discardPolicy struct {
+	match  func(string) bool
+	report func(name, value string, nested bool)
+}
+
+func (policy discardPolicy) discards(name string) bool {
+	return isRetiredSetting(name) || policy.match != nil && policy.match(name)
+}
+
 func applyEnvReaderObserved(reader io.Reader, source string, values environment, observer assignmentObserver) error {
 	return applyEnvReaderObservedRetired(reader, source, values, observer, isRetiredSetting, nil)
 }
 
-// applyEnvReaderObservedRetired evaluates every record. A name matched by
-// retired is evaluated in isolation: neither it nor any nested default it
-// performs changes values or reaches observer. discarded, when set, receives
-// such a top-level assignment with its evaluated value.
-func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool, discarded assignmentObserver) error {
+// applyEnvReaderObservedRetired evaluates every record under the discard
+// policy of retired (see discardPolicy). discarded, when set, receives each
+// discarded assignment with its record line.
+func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool, discarded func(name, value string, line int, nested bool)) error {
 	discardRetiredSettings(values)
 
 	scanner := bufio.NewScanner(reader)
@@ -116,11 +130,11 @@ func applyEnvReaderObservedRetired(reader io.Reader, source string, values envir
 				observer(name, value, recordLine)
 			}
 		}
-		var recordDiscarded func(name, value string)
+		policy := discardPolicy{match: retired}
 		if discarded != nil {
-			recordDiscarded = func(name, value string) { discarded(name, value, recordLine) }
+			policy.report = func(name, value string, nested bool) { discarded(name, value, recordLine, nested) }
 		}
-		if err := applyRecordRetired(record.String(), values, recordObserver, retired, recordDiscarded); err != nil {
+		if err := applyRecordRetired(record.String(), values, recordObserver, policy); err != nil {
 			return sourceContext(source, recordLine, recordSettingKey(record.String()), "scalar settings", err)
 		}
 		record.Reset()
@@ -158,10 +172,10 @@ func scanQuote(line string, quote byte) byte {
 }
 
 func applyRecord(record string, values environment, observer func(name, value string)) error {
-	return applyRecordRetired(record, values, observer, isRetiredSetting, nil)
+	return applyRecordRetired(record, values, observer, discardPolicy{})
 }
 
-func applyRecordRetired(record string, values environment, observer func(name, value string), retired func(string) bool, discarded func(name, value string)) error {
+func applyRecordRetired(record string, values environment, observer func(name, value string), policy discardPolicy) error {
 	record = strings.TrimSpace(record)
 	if strings.HasPrefix(record, ":") {
 		expression := strings.TrimSpace(strings.TrimPrefix(record, ":"))
@@ -169,7 +183,7 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 		if !expand {
 			return nil
 		}
-		_, err := expandValue(value, values, observer)
+		_, err := expandValue(value, values, observer, policy)
 		return err
 	}
 	if strings.HasPrefix(record, "export ") {
@@ -183,24 +197,32 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	if !ValidVariable(name) {
 		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
-	discard := isRetiredSetting(name) || retired(name)
+	discard := policy.discards(name)
+	inner := policy
 	if discard {
 		// Validate the old expression without allowing its assignments or nested
-		// defaults to affect current settings, provenance, or sync exports.
+		// defaults to affect current settings, provenance, or sync exports. The
+		// discarded record itself is the only disclosure for its line.
 		values = cloneEnvironment(values)
 		observer = nil
+		inner.report = nil
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
 	if expand {
-		var err error
-		if value, err = expandValue(value, values, observer); err != nil {
+		expanded, err := expandValue(value, values, observer, inner)
+		if err != nil && !(discard && policy.report != nil && IsProfileOnlySetting(name)) {
 			return err
+		}
+		// An ignored profile-only expression never refuses loading; its
+		// unevaluated text is what the disclosure reports.
+		if err == nil {
+			value = expanded
 		}
 	}
 	if discard {
-		if discarded != nil {
-			discarded(name, value)
+		if policy.report != nil {
+			policy.report(name, value, false)
 		}
 		return nil
 	}
@@ -228,6 +250,7 @@ func expandValue(
 	value string,
 	values environment,
 	observer func(name, value string),
+	policy discardPolicy,
 ) (string, error) {
 	if strings.Contains(value, "$(") || strings.ContainsRune(value, '`') {
 		return "", sourceError("", 0, "", "scalar settings", "command substitution is not allowed in config", nil)
@@ -254,7 +277,7 @@ func expandValue(
 			if err != nil {
 				return "", err
 			}
-			expanded, err := expandParameter(value[index+2:end], values, observer)
+			expanded, err := expandParameter(value[index+2:end], values, observer, policy)
 			if err != nil {
 				return "", err
 			}
@@ -299,12 +322,15 @@ func expandParameter(
 	expression string,
 	values environment,
 	observer func(name, value string),
+	policy discardPolicy,
 ) (string, error) {
 	name, operator, fallback := splitParameter(expression)
 	if !ValidVariable(name) {
 		return "", sourceError("", 0, "", "scalar settings", "invalid parameter name", nil)
 	}
-	if isRetiredSetting(name) {
+	discard := policy.discards(name)
+	if discard {
+		// A default of a discarded name stays inside this expansion.
 		values = cloneEnvironment(values)
 		observer = nil
 	}
@@ -316,7 +342,7 @@ func expandParameter(
 		if current != "" {
 			return current, nil
 		}
-		expanded, err := expandValue(fallback, values, observer)
+		expanded, err := expandValue(fallback, values, observer, policy)
 		if err != nil {
 			return "", err
 		}
@@ -330,6 +356,9 @@ func expandParameter(
 			values[name] = expanded
 			if observer != nil {
 				observer(name, expanded)
+			}
+			if discard && policy.report != nil {
+				policy.report(name, expanded, true)
 			}
 		}
 		return expanded, nil

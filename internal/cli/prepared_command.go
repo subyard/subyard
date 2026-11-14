@@ -1237,16 +1237,12 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	}
 	if execution.prepared.Action == "update.check" && !slices.Contains(prepared.Arguments, "--json") {
 		// The JSON report carries the same state as its configuration field.
+		// A yard load refusal is reported once, with the report.
 		prepared.readiness = func() {
-			targets, err := prepared.CLI.localConfigTargets(prepared.Loaded, true)
-			if err != nil {
-				return // an unreadable yard list is the check's own finding
+			ignored, _ := prepared.CLI.localIgnoredAssignments(prepared.Loaded)
+			for _, assignment := range ignored {
+				fmt.Fprintf(prepared.CLI.options.Stdout, "ignored: %s\n", assignment)
 			}
-			yards := make([]config.Loaded, len(targets))
-			for index, target := range targets {
-				yards[index] = target.Loaded
-			}
-			printIgnoredAssignments(prepared.CLI.options.Stdout, "", "", yards...)
 		}
 	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {

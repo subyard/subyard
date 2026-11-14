@@ -137,8 +137,34 @@ func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
 	if loaded.Environment["LIMITS_MEMORY"] != "2GiB" || loaded.Environment["YARD_DEVICES"] != "" {
 		t.Fatalf("nested default leaked: LIMITS_MEMORY=%q YARD_DEVICES=%q", loaded.Environment["LIMITS_MEMORY"], loaded.Environment["YARD_DEVICES"])
 	}
-	if got := renderedIgnored(loaded); len(got) != 1 || !strings.HasPrefix(got[0], "YARD_DEVICES in "+host+":1 is ignored") {
-		t.Fatalf("nested assignment observations = %q", got)
+	// config unset cannot remove a nested default, so the repair names its line.
+	if ignored := loaded.IgnoredAssignments(); len(ignored) != 1 || !ignored[0].Nested || ignored[0].Repair() != "remove line 1 from "+host ||
+		ignored[0].String() != "YARD_DEVICES in "+host+":1 is ignored: only environment profiles declare it; remove that line" {
+		t.Fatalf("nested assignment observations = %q", renderedIgnored(loaded))
+	}
+
+	// Later records never see a nested default of a discarded name, and a
+	// default inside its own fallback stays isolated too.
+	fixture.write(t, host, "LIMITS_CPU=\"${YARD_CAPS:=4}\"\nLIMITS_MEMORY=\"${YARD_CAPS:-2}GiB\"\n: \"${YARD_DEVICES:=${LIMITS_MEMORY:=bogus}}\"\n")
+	loaded, err = fixture.load("default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Environment["LIMITS_CPU"] != "4" || loaded.Environment["LIMITS_MEMORY"] != "2GiB" || loaded.Environment["YARD_CAPS"] != "" || loaded.Environment["YARD_DEVICES"] != "" {
+		t.Fatalf("discarded defaults leaked: CPU=%q MEMORY=%q CAPS=%q DEVICES=%q", loaded.Environment["LIMITS_CPU"], loaded.Environment["LIMITS_MEMORY"], loaded.Environment["YARD_CAPS"], loaded.Environment["YARD_DEVICES"])
+	}
+	if got := renderedIgnored(loaded); len(got) != 2 || !strings.HasPrefix(got[0], "YARD_CAPS in "+host+":1 ") || !strings.HasPrefix(got[1], "YARD_DEVICES in "+host+":3 ") {
+		t.Fatalf("nested observations = %q", got)
+	}
+
+	// Evaluating an ignored expression never refuses loading.
+	fixture.write(t, host, "YARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\n")
+	loaded, err = fixture.load("default", nil)
+	if err != nil {
+		t.Fatalf("an ignored expression refused the load: %v", err)
+	}
+	if got := renderedIgnored(loaded); len(got) != 1 || got[0] != "YARD_DEVICES in "+host+":1 is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_DEVICES --scope host --local" {
+		t.Fatalf("failed ignored expression observations = %q", got)
 	}
 }
 

@@ -296,15 +296,23 @@ func (execution *provisionExecution) stateBinding() string {
 }
 
 // assessExtrasDetach records the owned extras devices that the pending extras
-// stage detaches, so the plan names each device loss before confirmation.
+// stage detaches, so the plan names each device loss before confirmation. A
+// conditional extras stage counts too. A yard being registered has no instance
+// yet, and before Incus converges an unreadable instance cannot be inspected:
+// both have nothing to detach.
 func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime reconcileruntime.Runtime) error {
 	execution.extrasDetach = nil
-	if execution.mode == initReset || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
+	if execution.mode == initReset || execution.bootstrap != nil || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
 		return step.Stage.ID == ports.ReconcileStageExtras && !step.Converged
 	}) {
 		return nil
 	}
 	detach, err := runtime.ExtrasDetachPlanned(ctx)
+	if err != nil && !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
+		return step.Stage.ID == ports.ReconcileStageIncus && step.Converged
+	}) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("check init stage %q: %w", ports.ReconcileStageExtras, err)
 	}

@@ -21,7 +21,11 @@ type IgnoredAssignment struct {
 	Yard, Name, Scope, Path string
 	Line                    int
 	Git                     bool
-	// authored reports that config unset at Scope writes exactly Path.
+	// Nested marks a default performed inside another assignment's expression,
+	// which config unset of the name cannot remove.
+	Nested bool
+	// authored reports that config unset at Scope writes exactly Path and
+	// removes the assignment.
 	authored bool
 }
 
@@ -65,13 +69,13 @@ func (loaded Loaded) IgnoredAssignments() []IgnoredAssignment {
 
 // observeProfileOnly records a non-empty operator assignment of a
 // profile-only setting; empty ones are tolerated.
-func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, value, path string, line int) {
+func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, value, path string, line int, nested bool) {
 	if !IsProfileOnlySetting(name) || strings.TrimSpace(value) == "" {
 		return
 	}
 	definition := tracker.layers[layer]
 	tracker.ignored = append(tracker.ignored, IgnoredAssignment{
-		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "),
+		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "), Nested: nested,
 	})
 }
 
@@ -82,7 +86,8 @@ func (tracker *settingTracker) ignoredAssignments(yard, configHome string) []Ign
 	ignored := slices.Clone(tracker.ignored)
 	for index := range ignored {
 		ignored[index].Yard = yard
-		ignored[index].authored = configHome != "" && ignored[index].Path == authoredSettingsPath(configHome, yard, ignored[index].Scope, ignored[index].Git)
+		ignored[index].authored = configHome != "" && !ignored[index].Nested &&
+			ignored[index].Path == authoredSettingsPath(configHome, yard, ignored[index].Scope, ignored[index].Git)
 	}
 	slices.SortStableFunc(ignored, func(left, right IgnoredAssignment) int { return strings.Compare(left.String(), right.String()) })
 	return slices.CompactFunc(ignored, func(left, right IgnoredAssignment) bool { return left.String() == right.String() })
@@ -116,13 +121,12 @@ type ConfigurationState struct {
 	Path    string `json:"path,omitempty"`
 	Line    int    `json:"line,omitempty"`
 	Repair  string `json:"repair,omitempty"`
-	Message string `json:"message"`
 }
 
 // ConfigurationState returns the structured form of the ignored assignment.
 func (assignment IgnoredAssignment) ConfigurationState() ConfigurationState {
 	return ConfigurationState{
 		State: "ignored", Yard: assignment.Yard, Setting: assignment.Name, Scope: assignment.Scope,
-		Path: assignment.Path, Line: assignment.Line, Repair: assignment.Repair(), Message: assignment.String(),
+		Path: assignment.Path, Line: assignment.Line, Repair: assignment.Repair(),
 	}
 }

@@ -2445,15 +2445,19 @@ func TestExtrasDetachPlannedNamesUnrequestedOwnedDevices(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "profile.conf"), []byte("YARD_MOUNTS='cache:/srv/cache:rw:0755'\nYARD_DEVICES='kvm'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hostDevices := extrasHostDevices
-	extrasHostDevices = func(pattern string) ([]string, error) {
-		return map[string][]string{"/dev/kvm": {"/dev/kvm"}, "/dev/fuse": {"/dev/fuse"}, "/dev/dri/renderD*": {"/dev/dri/renderD128"}}[pattern], nil
+	devices := t.TempDir()
+	for _, node := range []string{"kvm", "fuse", "dri/renderD128"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(devices, node)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(devices, node), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	t.Cleanup(func() { extrasHostDevices = hostDevices })
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Name: "yard", Project: "subyard", LocalDevices: map[string]map[string]string{
 		"eth0": {}, "yx-cache": {}, "yx-dev-kvm": {}, "yx-dev-fuse": {}, "yx-dev-dri-renderD128": {},
 	}}}}
-	runtime := Runtime{RepositoryRoot: root, Incus: incus, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer},
+	runtime := Runtime{RepositoryRoot: root, Incus: incus, HostDeviceRoot: devices, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer},
 		Environment: []string{"ENVIRONMENT_PROFILES=a", "YARD_DEVICES=fuse gpu"}}
 	detached, err := runtime.ExtrasDetachPlanned(context.Background())
 	if err != nil || strings.Join(detached, " ") != "yx-dev-dri-renderD128 yx-dev-fuse" {

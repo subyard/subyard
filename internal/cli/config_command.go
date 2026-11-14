@@ -673,23 +673,35 @@ func printIgnoredAssignments(output io.Writer, indent, setting string, yards ...
 	}
 }
 
-// localConfigurationState returns the ignored assignments of every local yard
-// in stable order, each source assignment once. An unreadable yard list or yard
-// is the owning check's own finding, not configuration state.
-func (cli *CLI) localConfigurationState(loaded config.Loaded) []config.ConfigurationState {
+// localIgnoredAssignments returns the ignored assignments of every local yard
+// that loaded, in stable order and each source assignment once, together with
+// the load refusals of the others. A yard that fails to load hides none of the
+// others' state.
+func (cli *CLI) localIgnoredAssignments(loaded config.Loaded) ([]config.IgnoredAssignment, error) {
 	targets, err := cli.localConfigTargets(loaded, true)
-	if err != nil {
-		return nil
-	}
-	var result []config.ConfigurationState
+	var result []config.IgnoredAssignment
 	seen := map[string]bool{}
 	for _, target := range targets {
 		for _, assignment := range target.Loaded.IgnoredAssignments() {
 			if key := ignoredAssignmentKey(assignment); !seen[key] {
 				seen[key] = true
-				result = append(result, assignment.ConfigurationState())
+				result = append(result, assignment)
 			}
 		}
+	}
+	return result, err
+}
+
+// localConfigurationState is the structured form of localIgnoredAssignments.
+// The update check reports a yard load refusal on stderr, beside its report.
+func (cli *CLI) localConfigurationState(loaded config.Loaded) []config.ConfigurationState {
+	ignored, err := cli.localIgnoredAssignments(loaded)
+	if err != nil {
+		cli.errorf("configuration state: %v", err)
+	}
+	var result []config.ConfigurationState
+	for _, assignment := range ignored {
+		result = append(result, assignment.ConfigurationState())
 	}
 	return result
 }

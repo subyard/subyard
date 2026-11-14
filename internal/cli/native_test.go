@@ -723,6 +723,13 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 		}
 		writeCLIFile(t, host, string(settings)+"YARD_DEVICES=fuse\n", 0o600)
 		line := strings.Count(string(settings), "\n") + 1
+		// A yard that fails to load hides none of the others' state; its
+		// refusal is reported beside the report.
+		broken := filepath.Join(filepath.Dir(host), "yards", "broken", "config.env")
+		if err := os.MkdirAll(filepath.Dir(broken), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, broken, "SSH_PORT=not-a-port\n", 0o600)
 		for _, arguments := range [][]string{
 			{"update", "--check", "--json", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 			{"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot},
@@ -750,14 +757,17 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 			}
 			want := config.ConfigurationState{
 				State: "ignored", Yard: "default", Setting: "YARD_DEVICES", Scope: "host", Path: host, Line: line,
-				Repair:  "yard -Y default config unset YARD_DEVICES --scope host --local",
-				Message: "YARD_DEVICES in " + host + ":" + strconv.Itoa(line) + " is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_DEVICES --scope host --local",
+				Repair: "yard -Y default config unset YARD_DEVICES --scope host --local",
 			}
+			message := "YARD_DEVICES in " + host + ":" + strconv.Itoa(line) + " is ignored: only environment profiles declare it; remove it with " + want.Repair
 			if len(report.Configuration) != 1 || report.Configuration[0] != want {
 				t.Fatalf("%v configuration = %#v, want %#v", arguments, report.Configuration, want)
 			}
-			if !slices.Contains(arguments, "--json") && text != "ignored: "+want.Message {
-				t.Fatalf("check text state = %q, want %q", text, "ignored: "+want.Message)
+			if !slices.Contains(arguments, "--json") && text != "ignored: "+message {
+				t.Fatalf("check text state = %q, want %q", text, "ignored: "+message)
+			}
+			if strings.Count(stderr.String(), "configuration state: ") != 1 || !strings.Contains(stderr.String(), "broken") {
+				t.Fatalf("%v hid the yard load refusal: stderr=%q", arguments, stderr.String())
 			}
 		}
 	})
