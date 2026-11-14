@@ -373,7 +373,7 @@ import json, sys
 from pathlib import Path
 actual = json.loads(Path("/tmp/subyard-codex-launch.json").read_text())
 expected = (["--no-daemon"] if sys.argv[2] == "1" else []) + ["--model", "fixture", sys.argv[1]]
-assert actual["args"] == expected, "paired Codex launch lost isolation or overrode the yard configuration"
+assert actual["args"] == expected, "paired Codex launch lost isolation or overrode the yard configuration: " + json.dumps(actual)
 assert actual["isolate"] == (None if sys.argv[2] == "1" else "0"), "paired Codex did not follow server settings"
 ' "$profile" "$isolation" || terminal_fail 'Codex configuration arguments' 0 "$read_result"
 
@@ -758,7 +758,7 @@ stage 'probing pinned stock operations in a disposable profile'
 assert_no_pairing_journal
 assert_repos
 
-stage 'checking fresh Codex defaults and repairing an existing YOLO preference'
+stage 'checking fresh Codex and Claude defaults and repairing existing YOLO preferences'
 "${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
 import sys
 sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
@@ -766,8 +766,10 @@ from transport import RuntimeRPC
 rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
 arguments = rpc.call("settings.get")["settings"]["agentDefaultArgs"]
 assert arguments["codex"] == "", "fresh Orca still overrides the yard Codex config"
+assert arguments["claude"] == "", "fresh Orca still overrides the yard Claude approvals"
 rpc.call("settings.update", {"agentDefaultArgs": {
-    **arguments, "codex": "--dangerously-bypass-approvals-and-sandbox", "claude": "--verbose"
+    **arguments, "codex": "--dangerously-bypass-approvals-and-sandbox",
+    "claude": "--dangerously-skip-permissions", "opencode": "--verbose"
 }})
 PY
 run_orca up
@@ -778,7 +780,8 @@ from transport import RuntimeRPC
 rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
 arguments = rpc.call("settings.get")["settings"]["agentDefaultArgs"]
 assert arguments["codex"] == "", "existing Orca YOLO preference was not repaired"
-assert arguments["claude"] == "--verbose", "repair changed another agent's preference"
+assert arguments["claude"] == "", "existing Orca Claude YOLO preference was not repaired"
+assert arguments["opencode"] == "--verbose", "repair changed another agent's preference"
 # This argv recorder is not Codex's app-server. Isolate the launch contract from
 # Orca's separate status-hook trust handshake, which requires that real server.
 rpc.call("settings.update", {"agentStatusHooksEnabled": False})
@@ -823,8 +826,10 @@ deadline = time.monotonic() + 15
 while not record.exists() and time.monotonic() < deadline:
     time.sleep(0.1)
 assert record.exists(), "Orca agent launcher did not execute native Codex"
-assert json.loads(record.read_text()) == {"args": ["--no-daemon"], "isolate": None}, \
-    "Orca agent launcher lost isolation or overrode the yard Codex config"
+launch = json.loads(record.read_text())
+# Orca adds its Codex paste-detection setting to server-built launches; nothing else may change.
+assert launch == {"args": ["--no-daemon", "-c", "disable_paste_burst=true"], "isolate": None}, \
+    "Orca agent launcher lost isolation or overrode the yard Codex config: " + json.dumps(launch)
 rpc.call("terminal.close", {"terminal": created["terminal"]["handle"]})
 PY
 

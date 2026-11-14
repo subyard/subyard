@@ -436,6 +436,65 @@ value["env"] = {**value.get("env", {}), "ANTHROPIC_AUTH_TOKEN": "synthetic-local
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:" + port}
 settings.write_text(json.dumps(value))
 ' "$workspace" "$model_port"
+
+stage 'resetting saved Full access Claude chats, restarting Orca once and asking for Git approval'
+# Count dev-owned processes in the Orca unit's cgroup that started with the stock Claude flag.
+flagged_claude_processes() {
+  guest_root bash -se <<'YARD'
+set -euo pipefail
+group="/sys/fs/cgroup$(systemctl show -p ControlGroup --value subyard-orca.service)"
+[ -d "$group" ] || { printf 'Orca unit cgroup is missing\n' >&2; exit 1; }
+count=0
+while read -r pid; do
+  [ "$(stat -c %U "/proc/$pid" 2>/dev/null)" = dev ] || continue
+  if tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | grep -Fxq -- --dangerously-skip-permissions; then
+    count=$((count + 1))
+  fi
+done < <(find "$group" -name cgroup.procs -exec cat {} +)
+printf '%s\n' "$count"
+YARD
+}
+chat_state=/srv/agents/orca/subyard-claude-chat-permissions.json
+runtime_metadata=/srv/agents/orca/config/orca/orca-runtime.json
+guest_root jq -e '.complete == true and .reset == []' "$chat_state" >/dev/null \
+  || die 'fresh Orca setup did not complete the saved-chat permission reset'
+guest_root rm -f /tmp/subyard-managed-command
+as_dev python3 -B "$helper" saved-chat create "$workspace" \
+  || die 'could not save Claude chats under the stock Claude flag'
+# Remove the state to reproduce an installation from before the reset existed.
+guest_root rm -- "$chat_state"
+flagged="$(flagged_claude_processes)" || die 'cannot inspect the Orca unit processes'
+[ "$flagged" -ge 1 ] || die 'the open saved chat is not running with the stock Claude flag'
+yard orca sync --yes >"$STATE/saved-chat-sync.out" 2>&1 || die 'Orca sync failed to reset saved Claude chats'
+restart_warning='saved Claude chats may still run Git without approval until Orca restarts'
+if ! grep -Fq 'Orca reset 2 saved Claude chat(s) from Full access to the default permission mode' \
+    "$STATE/saved-chat-sync.out" || ! grep -Fq "$restart_warning" "$STATE/saved-chat-sync.out"; then
+  grep -E 'Orca reset|Warning' "$STATE/saved-chat-sync.out" >&2 || :
+  die 'Orca sync did not reset both saved Claude chats and warn until a restart'
+fi
+yard orca status >"$STATE/saved-chat-status.out" 2>&1 || :
+grep -Fq "$restart_warning" "$STATE/saved-chat-status.out" \
+  || die 'Orca status did not warn about the pending restart'
+runtime_before="$(guest_root jq -er .runtimeId "$runtime_metadata")"
+yard orca up --yes >"$STATE/saved-chat-up.out" 2>&1 || die 'Orca up failed to restart for saved Claude chats'
+grep -Fq 'Orca restarted so no Claude chat keeps Full access from before the reset' "$STATE/saved-chat-up.out" \
+  || die 'Orca up did not restart Orca for the reset saved Claude chats'
+[ "$(guest_root jq -er .runtimeId "$runtime_metadata")" != "$runtime_before" ] \
+  || die 'Orca runtime id did not change across the restart'
+printf 'managed-agents-status: Orca runtime id changed across the saved-chat restart\n'
+flagged="$(flagged_claude_processes)" || die 'cannot inspect the Orca unit processes'
+[ "$flagged" = 0 ] || die 'a Claude process started with Full access survived the Orca restart'
+yard orca status >"$STATE/saved-chat-status.out" 2>&1 || :
+! grep -Fq "$restart_warning" "$STATE/saved-chat-status.out" || die 'Orca status still warns after the restart'
+yard orca sync --yes >/dev/null || die 'Orca sync failed after the saved-chat restart'
+guest_root jq -e '.complete == true and (.reset | length) == 2' "$chat_state" >/dev/null \
+  || die 'saved-chat reset did not record completion'
+[ "$(guest_root stat -c '%a %U' "$chat_state")" = '600 dev' ] || die 'saved-chat reset state is not private'
+guest_root sh -c 'printf "%s\n" "git commit --allow-empty -m saved-chat" > /tmp/subyard-managed-command; chmod 0644 /tmp/subyard-managed-command'
+as_dev python3 -B "$helper" saved-chat verify "$workspace" \
+  || die 'reopened saved Claude chat did not keep Git approval'
+guest_root rm -f /tmp/subyard-managed-command
+
 claude_terminal_ready() { # title, accept|decline (default: decline)
   local choice="${2:-decline}" screen offered=0 accepted=0 ready_since=0 deadline=$((SECONDS + 65))
   orca_terminal_open 'claude --dangerously-skip-permissions' "$1"

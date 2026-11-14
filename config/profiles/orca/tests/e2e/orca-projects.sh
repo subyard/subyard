@@ -789,22 +789,24 @@ adopt_source="$STATE/host/adopt-source"
 mkdir -p "$adopt_source"
 printf 'existing project\n' > "$adopt_source/content.txt"
 adopt_root=/srv/workspaces/adopt-project/src
-# Pinned Orca accepts a future folder without creating its workspace.
-# Seed the unowned native record before the first Subyard project event.
+# Seed the unowned native record before the first Subyard project event. Pinned Orca
+# registers only an existing folder, so the seed folder is removed again before sync.
 guest_dev test ! -e "${adopt_root%/src}" && guest_dev test ! -L "${adopt_root%/src}" \
   || die 'first-adoption workspace already exists'
 assert_absent_repo "$adopt_root"
 guest_dev jq -e --arg path "$adopt_root" '.projects | all(.root != $path)' \
   /srv/agents/orca/subyard-registration.json >/dev/null \
   || die 'first-adoption root already has registration ownership'
+guest_root install -d -o 1000 -g 1000 "${adopt_root%/src}" "$adopt_root"
 adopt_json="$(orca_rpc repo.add "$(rpc_params --arg path "$adopt_root" '{path:$path,kind:"folder"}')")"
 adopt_id="$(jq -er '.repo.id' <<<"$adopt_json")"
+guest_root rm -r -- "${adopt_root%/src}"
 rpc_write repo.update "$(rpc_params --arg repo "id:$adopt_id" \
   '{repo:$repo,updates:{displayName:"Existing manual root"}}')"
 rpc_write projectGroup.moveProject "$(rpc_params --arg repo "id:$adopt_id" --arg group "$manual_group" \
   '{repo:$repo,groupId:$group,order:44}')"
 guest_dev test ! -e "${adopt_root%/src}" && guest_dev test ! -L "${adopt_root%/src}" \
-  || die 'manual folder registration created the workspace'
+  || die 'manual folder registration kept or recreated the workspace'
 guest_dev jq -e --arg path "$adopt_root" '.projects | all(.root != $path)' \
   /srv/agents/orca/subyard-registration.json >/dev/null \
   || die 'manual folder registration acquired Subyard ownership'
@@ -970,7 +972,23 @@ done
 for pending_selector in "${pending_selectors[@]}"; do
   guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal absent "$pending_selector"
 done
-# This terminal's checkout is gone, so reconciling removes its record and layout.
+# Orca may reattach the saved terminal across restart. A worktree selector no longer resolves
+# for the missing checkout, so close any restored PTY by its native handle.
+restored_pty="$(orca_rpc session.tabs.listAll | jq -r --arg tab "$saved_session_id" '
+  [.snapshots[].tabs[] | select(.id == $tab) | .ptyId | strings] | if length > 1 then error else (.[0] // "") end')" \
+  || die 'restored saved terminal tab has several PTYs'
+[ -z "$restored_pty" ] || saved_session_pty_id="$restored_pty"
+saved_handle="$(orca_rpc terminal.list '{"limit":1000,"requireFreshPtyLiveness":true,"includeVisualLayouts":false}' \
+  | jq -r --arg pty "$saved_session_pty_id" '
+    [.terminals[] | select(.ptyId == $pty and .connected == true) | .handle]
+    | if length > 1 then error else (.[0] // "") end')" \
+  || die 'restored saved terminal has several live PTYs'
+if [ -n "$saved_handle" ]; then
+  rpc_write terminal.close "$(rpc_params --arg handle "$saved_handle" '{terminal:$handle}')"
+  guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+    absent "id:$saved_gone_id::$saved_gone" --tab-id "$saved_session_id" \
+    --pty-id "$saved_session_pty_id"
+fi
 # Reconcile explicitly so the assertion does not race periodic discovery.
 yard orca sync --yes >/dev/null
 assert_absent_repo "$saved_gone"
