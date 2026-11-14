@@ -7,7 +7,7 @@ MODE="${1:-}"
 PEER="${2:-}"
 STATE="/var/lib/subyard-config-sync-e2e"
 REMOTE_ROOT="/srv/subyard-config-sync-e2e"
-VERSION="config-sync-e2e"
+VERSION="0.22.0-config-sync-e2e"
 
 if [ "$(id -u)" -ne 0 ]; then
   exec sudo -n env HOME=/root USER=root LOGNAME=root PATH="$PATH" "$0" "$@"
