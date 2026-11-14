@@ -436,6 +436,32 @@ value["env"] = {**value.get("env", {}), "ANTHROPIC_AUTH_TOKEN": "synthetic-local
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:" + port}
 settings.write_text(json.dumps(value))
 ' "$workspace" "$model_port"
+
+stage 'resetting saved Full access Claude chats once and asking for Git approval after reopen'
+chat_marker=/srv/agents/orca/subyard-claude-chat-permissions-v1
+[ "$(guest_root stat -c '%a %U' "$chat_marker")" = '600 dev' ] \
+  || die 'fresh Orca setup did not complete the saved-chat permission reset'
+guest_root rm -f /tmp/subyard-managed-command
+as_dev python3 -B "$helper" saved-chat create "$workspace" \
+  || die 'could not save Claude chats under the stock Claude flag'
+# Remove the marker to reproduce an installation from before the reset existed. An update
+# restarts Orca, so the saved chats are not running when the reset pass reaches them.
+guest_root rm -- "$chat_marker"
+yard orca restart --yes >/dev/null
+yard orca up --yes >"$STATE/saved-chat-up.out" 2>&1 || die 'Orca up failed to reset saved Claude chats'
+if ! grep -Fq 'Orca reset 2 saved Claude chat(s) from Full access to the default permission mode' \
+    "$STATE/saved-chat-up.out"; then
+  grep -E 'Orca reset|Warning' "$STATE/saved-chat-up.out" >&2 || :
+  die 'Orca up did not report resetting both saved Claude chats'
+fi
+[ "$(guest_root stat -c '%a %U' "$chat_marker")" = '600 dev' ] \
+  || die 'saved-chat permission reset did not record completion'
+yard orca restart --yes >/dev/null
+guest_root sh -c 'printf "%s\n" "git commit --allow-empty -m saved-chat" > /tmp/subyard-managed-command; chmod 0644 /tmp/subyard-managed-command'
+as_dev python3 -B "$helper" saved-chat verify "$workspace" \
+  || die 'reopened saved Claude chat did not keep Git approval'
+guest_root rm -f /tmp/subyard-managed-command
+
 claude_terminal_ready() { # title, accept|decline (default: decline)
   local choice="${2:-decline}" screen offered=0 accepted=0 ready_since=0 deadline=$((SECONDS + 65))
   orca_terminal_open 'claude --dangerously-skip-permissions' "$1"
