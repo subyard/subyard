@@ -1068,6 +1068,11 @@ func testMemfdImage(t *testing.T, label string) (*os.File, string) {
 }
 
 func TestMain(m *testing.M) {
+	// Config Git SSH sessions re-run this executable as their watchdog.
+	RegisterConfigGitSSHWatchdog()
+	if len(os.Args) > 1 && os.Args[1] == ConfigGitSSHWatchdogVerb {
+		os.Exit(RunConfigGitSSHWatchdog(os.Args[2:], os.Stdin))
+	}
 	if len(os.Args) >= 4 && os.Args[1] == "_profile-services" && os.Getenv("SUBYARD_TEST_DISPATCH_ROOT") != "" {
 		environment := map[string]string{}
 		for _, entry := range os.Environ() {

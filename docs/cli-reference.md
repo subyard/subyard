@@ -375,7 +375,7 @@ Usage: yard config fields [SETTING] | show [SETTING] | paths | validate [--all-l
   validate  check selected or all local configuration schemas without a successful base load (read-only)
   reduce-selection  during unfinished activation, store only a reduced persistent optional selection; sealed-owner recovery requires separate consent
   repair-alias  canonicalize one to four explicit non-sensitive alias choices in one local scalar file; release readiness requires a separate assessment
-  set     save a typed scalar locally (default/--local) or commit/push it (--git)
+  set     save a typed scalar locally (default/--local) or commit/push it (--git); with --git, several SETTING VALUE pairs share one commit
   unset   remove a local scalar override or a Git assignment (--git)
   import  save a typed file locally or commit/push it (--git)
   edit    edit a typed file with VISUAL/EDITOR; --git commits and pushes

@@ -150,7 +150,7 @@ func (cli *CLI) fetchRegisteredConfigUpstream(
 ) error {
 	actualURL, err := cli.configGitOutput(ctx, checkout, "remote", "get-url", remote)
 	if err != nil || strings.TrimSpace(actualURL) != expectedURL {
-		return errors.New("upstream remote changed after preview")
+		return fmt.Errorf("%w: upstream remote changed after preview", domain.ErrPlanStale)
 	}
 	if err := cli.configGitRun(
 		ctx, checkout, "fetch", "--quiet", "--prune", "--", remote,
@@ -161,7 +161,7 @@ func (cli *CLI) fetchRegisteredConfigUpstream(
 		ctx, checkout, "rev-parse", "--verify", "@{upstream}",
 	)
 	if err != nil || strings.TrimSpace(upstream) != expectedCommit {
-		return errors.New("upstream changed after preview; rerun operation")
+		return fmt.Errorf("%w: upstream changed after preview; rerun operation", domain.ErrPlanStale)
 	}
 	return nil
 }
@@ -686,7 +686,9 @@ func (cli *CLI) configGitOutputBytesWithEnvironment(
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
+	err := command.Run()
+	cli.configGitSSH.record()
+	if err != nil {
 		detail := boundedConfigGitText(strings.TrimSpace(stderr.String()))
 		if detail == "" {
 			detail = err.Error()
@@ -700,6 +702,9 @@ func (cli *CLI) configGitEnvironment(overrides map[string]string) []string {
 	environment := map[string]string{
 		"GIT_TERMINAL_PROMPT": "0",
 		"LC_ALL":              "C",
+	}
+	if command, open := cli.configGitSSH.environment(); open {
+		environment["GIT_SSH_COMMAND"] = command
 	}
 	for name, value := range overrides {
 		environment[name] = value

@@ -193,7 +193,10 @@ func (prepared *preparedCommand) prepareConfigSync(ctx context.Context, argument
 	return nil
 }
 
-func (cli *CLI) checkPreparedConfigGit(ctx context.Context, checkout, head, remote, remoteURL, expectedRemote string) error {
+// checkPreparedConfigGit rechecks the local checkout facts after consent. The
+// remote upstream is fetched again only by an apply, once and before its first
+// write; a no-op changes nothing that a moved upstream could invalidate.
+func (cli *CLI) checkPreparedConfigGit(ctx context.Context, checkout, head, remote, remoteURL string) error {
 	current, err := cli.configGitInspectOutput(ctx, checkout, "rev-parse", "--verify", "HEAD")
 	if err != nil || strings.TrimSpace(current) != head {
 		return fmt.Errorf("%w: checkout HEAD changed after preview", domain.ErrPlanStale)
@@ -202,15 +205,64 @@ func (cli *CLI) checkPreparedConfigGit(ctx context.Context, checkout, head, remo
 	if state.Problem != nil || state.RemoteName != remote || state.RemoteRaw != remoteURL {
 		return fmt.Errorf("%w: registered upstream changed after preview", domain.ErrPlanStale)
 	}
-	candidate, err := cli.prepareConfigGitCandidate(ctx, checkout, state)
-	if err != nil {
-		return fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
-	}
-	defer candidate.cleanup()
-	if candidate.remoteCommit != expectedRemote {
-		return fmt.Errorf("%w: upstream changed after preview; rerun operation", domain.ErrPlanStale)
-	}
 	return nil
+}
+
+// shareRegisteredConfigGitSSH scopes one SSH connection per endpoint to this
+// command's registered configuration upstream. Git resolves insteadOf and
+// pushInsteadOf locally, so the effective fetch and push URLs decide sharing.
+func (cli *CLI) shareRegisteredConfigGitSSH(ctx context.Context, loaded config.Loaded, push bool) func() {
+	record, exists, err := configsync.ReadSourceRecord(loaded.Context.Paths.ConfigHome)
+	if err != nil || !exists {
+		return func() {}
+	}
+	remotes, err := cli.configGitEffectiveRemotes(ctx, record.Checkout, push)
+	if err != nil {
+		return func() {}
+	}
+	return cli.shareConfigGitSSH(ctx, record.Checkout, remotes)
+}
+
+func (cli *CLI) configGitEffectiveRemotes(ctx context.Context, checkout string, push bool) ([]configGitSSHRemote, error) {
+	upstream, err := cli.configGitInspectOutput(ctx, checkout, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	if err != nil {
+		return nil, err
+	}
+	name, _, found := strings.Cut(strings.TrimSpace(upstream), "/")
+	if !found || name == "" {
+		return nil, errors.New("upstream has no remote")
+	}
+	// A custom remote program changes the command that OpenSSH matches; the
+	// isolated candidate fetches through a remote named origin.
+	for _, remote := range []string{name, "origin"} {
+		for _, key := range []string{"uploadpack", "receivepack"} {
+			value, err := cli.configGitInspectOutput(ctx, checkout, "config", "--get", "--default=", "remote."+remote+"."+key)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(value) != "" {
+				return nil, errors.New("remote uses a custom Git program")
+			}
+		}
+	}
+	fetch, err := cli.configGitInspectOutput(ctx, checkout, "remote", "get-url", "--", name)
+	if err != nil {
+		return nil, err
+	}
+	remotes := []configGitSSHRemote{{url: strings.TrimRight(fetch, "\r\n"), program: "git-upload-pack"}}
+	if push {
+		urls, err := cli.configGitInspectOutput(ctx, checkout, "remote", "get-url", "--push", "--all", "--", name)
+		if err != nil {
+			return nil, err
+		}
+		// One URL per line; a URL may contain spaces.
+		for _, url := range strings.Split(urls, "\n") {
+			if url = strings.TrimRight(url, "\r"); url != "" {
+				remotes = append(remotes, configGitSSHRemote{url: url, program: "git-receive-pack"})
+			}
+		}
+	}
+	return remotes, nil
 }
 
 func (prepared *preparedCommand) prepareConfigPull(ctx context.Context, arguments []string) error {
@@ -225,11 +277,13 @@ func (prepared *preparedCommand) prepareConfigPull(ctx context.Context, argument
 		}
 	}
 	cli := prepared.CLI
+	release := cli.shareRegisteredConfigGitSSH(ctx, prepared.Loaded, false)
 	native, err := cli.prepareConfigSyncPull(ctx, prepared.Loaded)
 	if err != nil {
+		release()
 		return err
 	}
-	prepared.closeResource = func() error { native.cleanup(cli, context.Background()); return nil }
+	prepared.closeResource = func() error { native.cleanup(cli, context.Background()); release(); return nil }
 	execution := &configSyncExecution{approved: native.preview, action: "config.sync.pull", metadata: []domain.OperationStep{
 		configSyncMetadata("checkout", "registered configuration checkout", native.expectedHead, native.expectedRemote, "fast-forward the registered configuration checkout", native.fastForward),
 		configSyncMetadata("permissions", "configuration checkout permissions", "native permission baseline", "operator-owned protected files", "remove group/world write permissions from the registered configuration checkout", native.repairPermissions),
@@ -250,7 +304,7 @@ func (prepared *preparedCommand) prepareConfigPull(ctx context.Context, argument
 		if err := execution.refreshCheckoutPermissions(native.checkout); err != nil {
 			return err
 		}
-		return cli.checkPreparedConfigGit(ctx, native.checkout, native.expectedHead, native.remote, native.remoteURL, native.expectedRemote)
+		return cli.checkPreparedConfigGit(ctx, native.checkout, native.expectedHead, native.remote, native.remoteURL)
 	}
 	execution.run = func(ctx context.Context, copyCLI *CLI, request domain.AdapterRequest) (configsync.Plan, error) {
 		native.preview = execution.current
@@ -270,13 +324,15 @@ func (prepared *preparedCommand) prepareConfigPull(ctx context.Context, argument
 
 func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request configSyncPushOptions) error {
 	cli, loaded := prepared.CLI, prepared.Loaded
+	release := cli.shareRegisteredConfigGitSSH(ctx, loaded, true)
 	native, err := cli.prepareConfigSyncPush(ctx, loaded, request)
 	if err != nil {
+		release()
 		return err
 	}
-	prepared.closeResource = func() error { native.cleanup(cli, context.Background()); return nil }
-	if request.authoring != nil && (native.createdCommit || native.preview.NeedsApply()) {
-		if err := cli.checkResourceConfigChange(ctx, loaded, *request.authoring); err != nil {
+	prepared.closeResource = func() error { native.cleanup(cli, context.Background()); release(); return nil }
+	if len(request.authoring) != 0 && (native.createdCommit || native.preview.NeedsApply()) {
+		if err := cli.checkResourceConfigChanges(ctx, loaded, request.authoring); err != nil {
 			return err
 		}
 	}
@@ -305,16 +361,14 @@ func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request 
 		if err := execution.refreshCheckoutPermissions(native.checkout); err != nil {
 			return err
 		}
-		if request.authoring != nil {
-			if err := cli.checkResourceConfigChange(ctx, loaded, *request.authoring); err != nil {
-				return err
-			}
+		if err := cli.checkResourceConfigChanges(ctx, loaded, request.authoring); err != nil {
+			return err
 		}
-		return cli.checkPreparedConfigGit(ctx, native.checkout, native.expectedHead, native.remote, native.remoteURL, native.expectedRemote)
+		return cli.checkPreparedConfigGit(ctx, native.checkout, native.expectedHead, native.remote, native.remoteURL)
 	}
 	execution.run = func(ctx context.Context, copyCLI *CLI, adapterRequest domain.AdapterRequest) (configsync.Plan, error) {
 		unlock := func() {}
-		if request.authoring != nil && request.authoring.scope == config.ScopeYard {
+		if len(request.authoring) != 0 && request.authoring[0].scope == config.ScopeYard {
 			var err error
 			unlock, err = lockIntegrationYard(ctx, loaded)
 			if err != nil {
@@ -322,10 +376,8 @@ func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request 
 			}
 		}
 		defer unlock()
-		if request.authoring != nil {
-			if err := cli.checkResourceConfigChange(ctx, loaded, *request.authoring); err != nil {
-				return configsync.Plan{}, err
-			}
+		if err := cli.checkResourceConfigChanges(ctx, loaded, request.authoring); err != nil {
+			return configsync.Plan{}, err
 		}
 		native.preview = execution.current
 		adapter := &configSyncPushAdapter{cli: copyCLI, prepared: native}

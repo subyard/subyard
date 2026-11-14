@@ -43,12 +43,17 @@ func configExactInvocation(loaded config.Loaded, arguments []string) bool {
 		ok, _ := configApplyInvocation(arguments)
 		return ok
 	case "set", "unset":
-		request, err := parseConfigAuthoringRequest(arguments[0], arguments[1:], false)
+		requests, err := parseConfigAuthoringRequests(arguments[0], arguments[1:], false)
 		if err != nil {
 			return false
 		}
-		definition, err := loaded.Catalog.ValidateSettingName(request.scope, request.name, false)
-		return err == nil && definition.Kind == config.SettingScalar && !definition.Sensitive
+		for _, request := range requests {
+			definition, err := loaded.Catalog.ValidateSettingName(request.scope, request.name, false)
+			if err != nil || definition.Kind != config.SettingScalar || definition.Sensitive {
+				return false
+			}
+		}
+		return true
 	case "sync":
 		_, check, _ := configSyncInvocation(arguments)
 		if check || (len(arguments) > 1 && (arguments[1] == "status" || arguments[1] == "path" || arguments[1] == "help")) {
@@ -91,11 +96,17 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 }
 
 func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action string, arguments []string, protected ...bool) error {
-	request, err := parseConfigAuthoringRequest(action, arguments, false)
+	requests, err := parseConfigAuthoringRequests(action, arguments, false)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errConfigUsage, err)
 	}
-	return prepared.prepareConfigScalarRequest(ctx, action, request, protected...)
+	if len(requests) > 1 {
+		if err := prepared.CLI.configGitScalarsRefusal(prepared.Loaded, requests); err != nil {
+			return fmt.Errorf("%w: %v", errConfigUsage, err)
+		}
+		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage(requests), authoring: requests})
+	}
+	return prepared.prepareConfigScalarRequest(ctx, action, requests[0], protected...)
 }
 
 func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context, action string, request configAuthoringRequest, protected ...bool) error {
@@ -113,7 +124,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		if !definition.Syncable {
 			return fmt.Errorf("%w: %s cannot be saved in Git", errConfigUsage, request.name)
 		}
-		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: fmt.Sprintf("%s %s in %s settings", action, request.name, request.scope), authoring: &request})
+		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage([]configAuthoringRequest{request}), authoring: []configAuthoringRequest{request}})
 	}
 	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
 		return err

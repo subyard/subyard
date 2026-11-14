@@ -81,7 +81,7 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 		t.Fatalf("effective resource profile=%q", loaded.Environment["ENVIRONMENT_PROFILES"])
 	}
 	request := configAuthoringRequest{action: "set", name: "ENVIRONMENT_PROFILES", scope: config.ScopeYard, git: true}
-	prepared, err := program.prepareConfigSyncPush(context.Background(), loaded, configSyncPushOptions{authoring: &request})
+	prepared, err := program.prepareConfigSyncPush(context.Background(), loaded, configSyncPushOptions{authoring: []configAuthoringRequest{request}})
 	if err != nil {
 		t.Fatal(err)
 	}
