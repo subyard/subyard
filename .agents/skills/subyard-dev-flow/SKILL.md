@@ -193,6 +193,11 @@ The coordinator owns original requirements, editable scope, one shared task and 
    change stays review-pending if an independent reviewer is unavailable; self-review cannot
    replace it. Only the coordinator closes the shared task and responds to the operator.
 
+A review round is one review of a frozen candidate that returns confirmed findings. After the
+third failed round, before another repair, ask a fresh session of the strongest available model
+why the candidate does not converge. After the fourth, and no later than the fifth, stop and
+consult the operator.
+
 Keep assignments compact: role and canonical coordinator/developer targets, working directory,
 requirements, editable scope/exclusions, known facts and source links, acceptance,
 candidate/evidence pointers, checkpoint/stop conditions and expected result. Long-check
