@@ -43,15 +43,62 @@ not flags to `yard init`. Setup never changes the outer yard's trust lane or ena
 privileges to work around missing devices. Both container and VM yards are supported.
 
 The profile's [`toolchain.json`](../config/profiles/android/toolchain.json) selects exact Linux
-x86_64 JDK 17 and SDK revisions, archive URLs and upstream checksums. `ANDROID_API` and
-`BUILD_TOOLS_VERSION` select the platform and build tools from that manifest. Updating a manifest
-pin and provisioning again replaces the affected component under the exclusive SDK maintenance
-lock; active emulator leases retain their shared lock until release. The setup check compares the
-installed package revision, JDK runtime version and recorded component payload digest with the selection.
-A missing or invalid installation receipt causes a verified reinstall. Existing SDK/JDK mounts
-remain read-only in L2 environments. The profile currently keeps JDK 17 and API 34/35/36 compatibility;
-changing the JDK major requires matching manifest pins and `JDK_VERSION` in `profile.conf`.
-The profile derives its JDK environment and mount paths from that setting.
+x86_64 JDK 17 and SDK revisions, archive URLs and upstream checksums from Google's
+[repository metadata](https://dl.google.com/android/repository/repository2-3.xml). Every SDK
+package in that manifest is a default and is installed:
+
+| Default | Packages |
+| --- | --- |
+| Platforms | `platforms;android-35`, `platforms;android-37.2` |
+| Build tools | `build-tools;36.0.0` (AGP 9.x default), `build-tools;37.0.0` (latest stable) |
+| Tools | `platform-tools`, `cmdline-tools;latest`, `emulator` |
+
+The list is kept small to save disk space; other platforms and build tools are added on demand with
+[`android-broker sdk install`](#additional-sdk-packages). Minor API levels are separate packages: AGP's
+`compileSdk` 36 with minor level 1 uses `platforms;android-36.1`, whose metadata reports API level
+`36.1`. `ANDROID_API` remains the emulator default API (an integer system-image level, 36 by default)
+and needs no installed build platform; `BUILD_TOOLS_VERSION` is kept for compatibility and must name a
+default build-tools package (36.0.0). Neither narrows the default list.
+
+Archives do not contain the `package.xml` the SDK manager writes for installed packages, and AGP
+cannot see a minor-API platform without it on a read-only SDK: it reports the platform missing and
+tries to download it. The profile vendors Google's repository entries in
+[`toolchain-metadata.xml`](../config/profiles/android/toolchain-metadata.xml): the repository root,
+the SDK license and the unmodified entry, including archive checksums, for every pin and for earlier
+defaults that existing yards may still have. After verifying each pinned archive, provisioning writes
+`package.xml` offline from the vendored entry whose path and archive checksum match, so the metadata
+describes exactly the verified bytes and provisioning does not depend on Google still listing a pinned
+revision. A pin without a unique vendored entry is refused as a configuration error before any change.
+`package.xml` is outside the recorded payload digest, the setup check reports a missing or mismatched
+one as drift, and repeated provisioning adds it to existing components without downloading them again.
+
+To update a pin, change its revision, URL and digest in `toolchain.json`, then run the developer helper,
+which needs network access and rewrites the vendored file for all pins while keeping retired entries:
+
+```sh
+python3 config/profiles/android/toolchain.py vendor-metadata config/profiles/android/toolchain.json
+```
+
+Platforms and build tools installed by earlier profile defaults stay on disk after an upgrade: no
+migration removes them and provisioning never replaces them. `sdk list` labels them
+`previous-default`. Provisioning also writes their `package.xml` when their installation receipt and
+payload are unchanged and the profile vendors the entry for their archive (currently
+`platforms;android-34` r2 and r3, `platforms;android-36` r2 and `build-tools;35.0.0`). Otherwise
+`sdk list` reports `"metadata": false`; the broker keeps such a package, never replaces it and does not
+treat it as installed.
+Updating a manifest pin and provisioning again replaces the affected component under the exclusive
+SDK maintenance lock; active emulator leases retain their shared lock until release. The setup check
+compares the installed package revision, JDK runtime version and recorded component payload digest
+with the selection. A missing or invalid installation receipt causes a verified reinstall. Existing
+SDK/JDK mounts remain read-only in L2 environments. The profile currently keeps JDK 17 and emulator
+API 34/35/36 compatibility; changing the JDK major requires matching manifest pins and `JDK_VERSION`
+in `profile.conf`. The profile derives its JDK environment and mount paths from that setting.
+
+Google Android SDK licenses are accepted automatically. When `licenses/android-sdk-license` has no
+accepted hash, provisioning lets the installed SDK manager install one default package into private
+staging and keeps only the license files it records; it logs
+`Android: accepted Google Android SDK licenses for <packages>`. Existing hashes are kept, and the
+setup check reports a missing license record as drift.
 
 System images use the manifest's explicit `latest-stable` policy for the requested API, variant
 and ABI. The pool refreshes upstream metadata at most daily, verifies the installed package and
@@ -126,13 +173,21 @@ should allow a bounded connection retry.
 | Variable | Meaning |
 | --- | --- |
 | `ANDROID_SERIAL` | Serial of this allocation (`emulator-5554` inside its private ADB server) |
-| `ADB_SERVER_SOCKET` | Private local Unix socket for this allocation's ADB server |
+| `ADB_SERVER_SOCKET` | Private local Unix socket for this allocation's ADB server (used by the `adb` CLI) |
+| `ANDROID_ADB_SERVER_PORT` | Loopback TCP port relaying to the same ADB server (used by AGP/ddmlib) |
 | `SUBYARD_EMU_SLOT`, `SUBYARD_EMU_GENERATION` | Public slot and generation identifiers |
 | `SUBYARD_EMU_DEVICE`, `SUBYARD_EMU_API`, `SUBYARD_EMU_ANDROID_VERSION` | Resolved device and Android version |
 | `SUBYARD_EMU_VARIANT`, `SUBYARD_EMU_ABI` | Resolved image variant and ABI |
 
-Use both `ANDROID_SERIAL` and `ADB_SERVER_SOCKET`; the serial alone is not an allocation identity.
-ADB uses the supplied socket automatically. Every connection authenticates to the pool with the
+Use `ANDROID_SERIAL` with `ADB_SERVER_SOCKET` or `ANDROID_ADB_SERVER_PORT`; the serial alone is not
+an allocation identity. The `adb` CLI prefers the supplied socket; AGP's ddmlib connects only to
+`127.0.0.1:$ANDROID_ADB_SERVER_PORT` and runs `adb -P PORT start-server`, which reaches the same relay
+instead of starting its own server. `run` and `acquire` always open this port on the invoking
+environment's loopback. Loopback is shared by every local account, so the relay accepts a connection
+only when the kernel reports the connecting socket's owner as the client's own user; other connections
+are closed before a lease channel opens. Before starting the command, `run` (and `acquire`, before
+printing its environment) checks `host:version` through the port and fails without running the command
+when the allocation's ADB server does not answer. Release closes the port. Every connection authenticates to the pool with the
 lease capability; neither shared TCP ports nor a host Incus ADB proxy grant access. Release closes
 existing connections, and an old socket/capability cannot reach a later generation. The runtime's
 network namespace contains only its own ADB server and emulator. A per-allocation `slirp4netns`
@@ -151,6 +206,68 @@ Renewal also stops when the requesting parent session exits or changes identity.
 wrapper stops its renewal thread; the remaining command or detached ADB relay cannot renew it.
 The server checks expiry every five seconds, independently of the renewal cadence, and removes
 disposable userdata after stopping runtime and network helpers. Shared images and SDK caches remain.
+
+### Gradle and connected tests
+
+```sh
+android-broker run --device phone --api 35 -- ./gradlew :app:connectedDebugAndroidTest
+```
+
+A Gradle daemon detaches from the command's process group, so it survives the wrapper's stop and the
+lease release. AGP reads `ANDROID_ADB_SERVER_PORT` once per daemon JVM when it initializes ddmlib, so a
+reused daemon would keep the previous lease's closed port and try to start a private ADB server there.
+`run` therefore appends `-Dorg.gradle.daemon=false` to the command's `GRADLE_OPTS`, keeping the
+caller's other options; Gradle honors it over `org.gradle.daemon=true` in a project's
+`gradle.properties`. A caller that already passes `-Dorg.gradle.daemon` in `GRADLE_OPTS` keeps its
+choice; other `org.gradle.daemon.*` properties do not count.
+The build, or Gradle's single-use daemon when the project's JVM arguments require one, stays inside the
+lease and exits with it; the yard's Gradle caches are still reused. `acquire` does not change Gradle
+settings: with an explicit lease, pass `--no-daemon`.
+
+`adb forward` and `adb reverse` work, but their TCP endpoints are inside the emulator runtime's private
+network namespace: a forwarded local port is not reachable from the command, and a reversed device port
+reaches nothing in the invoking environment. AGP's connected and orchestrated instrumentation tests,
+install, shell, logcat and file transfer use ADB services only and do not need them. Features that
+require a host-side TCP connection through a forward, such as AGP's emulator control access for tests,
+are not supported. Compose screenshot tests and other layoutlib-based screenshot tests run on the host
+JVM without a device.
+
+### Additional SDK packages
+
+The shared SDK is read-only to agents; AGP reports `SDK directory is not writable` or
+`Failed to find target` when a project needs a package outside the defaults. Add it through the pool:
+
+```sh
+android-broker sdk list
+android-broker sdk install 'platforms;android-33' 'build-tools;34.0.0'
+```
+
+Allowed identifiers are `platforms;android-N[.M]`, `platforms;android-N-extM` (for
+`compileSdkExtension`), `build-tools;X.Y.Z[-rcN]`, `ndk;X.Y.Z` and `cmake;X.Y.Z[.W]`. Platform previews
+and betas, system images (the pool manages them), add-ons, sources, extras and the tools the pool runs
+are refused. Every invalid identifier in a request is reported together and nothing is installed.
+The pool service runs the installed SDK manager into private staging under the SDK root, accepts the
+Google SDK licenses automatically (logged as above, in the service journal and on the client), verifies
+each package's recorded identifier and platform API level, and publishes it by renaming one new
+directory into the shared SDK. It never replaces an existing directory: packages with valid
+`package.xml` are reported as already installed, and other existing paths are refused (a
+profile-installed one with the hint to rerun provisioning). Independent refusals are reported together.
+If a publication fails part-way, the error names the packages that were already published; the license
+log lists only installed packages. Installation holds the SDK
+maintenance lock shared, so held emulator leases continue; provisioning and image preparation hold it
+exclusively and are serialized against it, and one installation runs at a time. Installation is
+bounded to 30 minutes and needs 8 GiB free disk space beyond the pool's headroom; a disconnected client
+does not cancel it, while pool shutdown does and removes its staging. `sdk list` reports `default`
+packages, `previous-default` ones from an earlier default list and `added` ones, each with whether its
+`package.xml` is valid. Repeated `yard setup` and provisioning keep added packages; a manifest default
+with the same identifier replaces an added copy only when provisioning converges that default.
+
+Installation is add-only: there is no uninstall route, and removing an added package requires an
+owner-side change to the yard. Any local account that can reach the pool socket, including L2 project
+environments, can request installs of allowed identifiers; their total size is bounded only by the disk
+headroom check.
+
+### Explicit leases
 
 For explicit multi-step use, choose a new private lease-file path:
 
@@ -287,8 +404,8 @@ The installed SDK manager handles download integrity and licensing in a private 
 the pool verifies the requested API, variant, ABI and exact revision before publishing the image.
 
 The shared build SDK is read-only to agents. Setup serializes changes and waits for emulator
-leases to release their SDK read locks; repeated setup installs missing components without
-upgrading binaries under a running emulator. Changing the pool service/configuration requires idle
+leases and SDK package installations to release their SDK read locks; repeated setup installs
+missing components without upgrading binaries under a running emulator. Changing the pool service/configuration requires idle
 slots. The legacy manual launch/controller entrypoints reject new starts. An existing legacy
 emulator must be stopped explicitly before activating the new pool; setup does not claim unknown
 processes or erase existing Android data.
@@ -322,7 +439,18 @@ and temporary state, while preserving the reusable yard definition and an unrela
 runner releases the disposable VM lease. This checks environment removal through the normal
 Yard lifecycle; emulator image-cache work remains in the diagnostic lanes.
 
-Release acceptance declares parallel `full` and `memory-lease` lanes. The latter owns
+The `gradle` lane provisions the same way, then runs the reported scenario on a minimal AGP 9 project:
+it builds with `compileSdk` 37 minor 2 and 35 on default packages, confirms that 36 minor 1 fails
+without changing the SDK, adds `platforms;android-36.1` with `android-broker sdk install`, builds
+against it and runs `connectedDebugAndroidTest` through `run` without `--no-daemon`, checking that no
+Gradle daemon survives. It checks that the relay port refuses another local account and that
+repeated provisioning keeps the added package. It downloads the pinned Gradle distribution and Maven dependencies from Google and Maven Central.
+
+```sh
+bash config/profiles/android/tests/e2e/acceptance.sh --slot "$slot" --lane gradle
+```
+
+Release acceptance declares parallel `full`, `memory-lease` and `gradle` lanes. `memory-lease` owns
 memory-budget, renewal, requester-death natural expiry and clean reuse assertions.
 The shorter `memory-budget` lane keeps provisioning, memory-budget checks and image
 preparation plus the existing optional observation callbacks; Telemetry uses it without

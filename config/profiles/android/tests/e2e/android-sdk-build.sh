@@ -7,7 +7,7 @@ export JAVA_HOME=/opt/jdk-17
 export PATH="$JAVA_HOME/bin:$PATH"
 sdk=/srv/cache/android-sdk
 tools="$sdk/build-tools/36.0.0"
-platform="$sdk/platforms/android-36/android.jar"
+platform="$sdk/platforms/android-35/android.jar"
 [ ! -w "$sdk" ] && [ -s "$platform" ]
 [ "$(readlink -f "$sdk")" = "$sdk" ] && [ "$(findmnt -n -o TARGET -T "$sdk")" = /srv ]
 for tool in aapt2 d8 dexdump zipalign apksigner; do test -x "$tools/$tool"; done
@@ -69,7 +69,7 @@ public final class MainActivity extends android.app.Activity {
 JAVA
 "$tools/aapt2" compile res/values/strings.xml -o .
 "$tools/aapt2" link values_strings.arsc.flat -I "$platform" --manifest AndroidManifest.xml \
-  --java generated --min-sdk-version 26 --target-sdk-version 36 -o unsigned.apk
+  --java generated --min-sdk-version 26 --target-sdk-version 35 -o unsigned.apk
 javac --release 8 -classpath "$platform" -d classes \
   src/org/subyard/acceptance/MainActivity.java generated/org/subyard/acceptance/R.java
 mapfile -t bytecode < <(find classes -name '*.class' -type f)
@@ -106,7 +106,7 @@ for field, observed, expected in (
         ('version code', int(package.get('versionCode', -1)), 1),
         ('version name', package.get('versionName'), '1.0'),
         ('minimum API', int(records.get('minSdkVersion', records.get('sdkVersion', -1))), 26),
-        ('target API', int(records.get('targetSdkVersion', -1)), 36),
+        ('target API', int(records.get('targetSdkVersion', -1)), 35),
         ('resource label', records.get('application', {}).get('label'), 'Subyard SDK acceptance'),
         ('launcher Activity', records.get('launchable-activity', {}).get('name'),
          'org.subyard.acceptance.MainActivity')):

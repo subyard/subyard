@@ -72,6 +72,35 @@ class ClientBridge(unittest.TestCase):
                         dict(operation='allocation', token='a' * 64)]
             self.assertEqual(requests, expected * 2)  # Native wire has no managed-context fields.
 
+    def test_attribution_skips_unreadable_directories_but_refuses_invalid_metadata(self):
+        args = SimpleNamespace(project=None, yard=None, purpose='fixture')
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory(prefix='android-attribution-', dir='/tmp') as name:
+            root = Path(name)
+            hidden = root / 'hidden'
+            hidden.mkdir()
+            invalid = root / 'workspace'
+            invalid.mkdir()
+            (invalid / '.subyard-meta.json').write_text('{"schema": 2}')
+            try:
+                # Like /root after runuser: the caller may stand in a directory it cannot search.
+                os.chdir(hidden)
+                hidden.chmod(0)
+                if os.geteuid() != 0:
+                    with self.assertRaises(PermissionError):
+                        (hidden / '.subyard-meta.json').is_file()
+                with patch.dict(os.environ, SUBYARD_PROJECT_ID='', SUBYARD_YARD_NAME='fixture-yard'):
+                    owner = client.attribution(args)
+                self.assertEqual((owner['project'], owner['yard']), ('hidden', 'fixture-yard'))
+                # A present but invalid workspace record is still refused.
+                hidden.chmod(0o700)
+                os.chdir(invalid)
+                with self.assertRaisesRegex(client.Error, 'attribution metadata is invalid'):
+                    client.attribution(args)
+            finally:
+                os.chdir(previous)
+                hidden.chmod(0o700)
+
     def test_coalesced_process_ack_and_payload_are_delivered_before_eof(self):
         payload = b'\x00synthetic-stream-payload\xff'
         output = b'{"ok":true,"result":{}}\n' + payload
@@ -264,7 +293,26 @@ class Runtime:
         self.stopped.append(key)
 
     def connect(self, slot):
-        return subprocess.Popen(['cat'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        return subprocess.Popen([sys.executable, '-I', '-B', '-c', FAKE_ADB], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+
+# A private ADB server stand-in: answers the relay preflight, otherwise echoes raw bytes.
+FAKE_ADB = '''
+import os
+expected = b'000chost:version'
+data = b''
+while len(data) < len(expected) and expected.startswith(data):
+    chunk = os.read(0, 65536)
+    if not chunk:
+        break
+    data += chunk
+if data == expected:
+    os.write(1, b'OKAY00040029')
+    raise SystemExit(0)
+while data:
+    os.write(1, data)
+    data = os.read(0, 65536)
+'''
 
 
 class Images:
@@ -1630,6 +1678,144 @@ os.write(1, result.stdout)
             server.shutdown()
             server.server_close()
 
+    def serve_control(self):
+        address = str(self.root / 'control.sock')
+        server = poolmod.Server(address, poolmod.Handler)
+        server.pool = self.pool
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return address
+
+    @staticmethod
+    def refused(port):
+        try:
+            socket.create_connection(('127.0.0.1', port), timeout=2).close()
+        except ConnectionRefusedError:
+            return True
+        return False
+
+    def test_run_tcp_relay_serves_ddmlib_port_and_closes_with_release(self):
+        address = self.serve_control()
+        record = self.root / 'tcp-run.json'
+        # ddmlib connects to 127.0.0.1:ANDROID_ADB_SERVER_PORT; ADB_SERVER_SOCKET stays for the adb CLI.
+        payload = ('import json,os,socket,sys; port=int(os.environ["ANDROID_ADB_SERVER_PORT"]); '
+                   's=socket.create_connection(("127.0.0.1",port)); s.sendall(b"hello"); data=s.recv(5); '
+                   f'open({str(record)!r},"w").write(json.dumps(dict(port=port, data=data.decode(), '
+                   'socket=os.environ["ADB_SERVER_SOCKET"], serial=os.environ["ANDROID_SERIAL"], '
+                   'gradle=os.environ.get("GRADLE_OPTS")))); '
+                   'raise SystemExit(23)')
+        with patch.object(client, 'CONTROL', address), patch.dict(os.environ, GRADLE_OPTS='-Xmx1g'):
+            self.assertEqual(client.main(['run', '--', sys.executable, '-c', payload]), 23)
+        result = json.loads(record.read_text())
+        self.assertEqual(result['data'], 'hello')
+        # A Gradle daemon would outlive the lease; the caller's options are kept and extended.
+        self.assertEqual(result['gradle'], '-Xmx1g -Dorg.gradle.daemon=false')
+        self.assertEqual(client.gradle_without_daemon(None), dict(GRADLE_OPTS='-Dorg.gradle.daemon=false'))
+        self.assertEqual(client.gradle_without_daemon('-Dorg.gradle.daemon=true'), {})
+        self.assertEqual(client.gradle_without_daemon('-Xmx1g -Dorg.gradle.daemon'), {})
+        # Only the exact property counts: a related daemon setting still gets the guard.
+        self.assertEqual(client.gradle_without_daemon('-Dorg.gradle.daemon.idletimeout=60000'),
+                         dict(GRADLE_OPTS='-Dorg.gradle.daemon.idletimeout=60000 -Dorg.gradle.daemon=false'))
+        self.assertTrue(result['socket'].startswith('localfilesystem:'))
+        self.assertEqual(result['serial'], 'emulator-5554')
+        self.assertFalse(self.runtime.running)
+        self.assertTrue(self.refused(result['port']))
+
+    def test_relay_preflight_failure_stops_before_the_command(self):
+        address = self.serve_control()
+        marker = self.root / 'started'
+        # An ADB server that never answers host:version (raw echo) must fail fast.
+        self.runtime.connect = lambda slot: subprocess.Popen(['cat'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        with patch.object(client, 'CONTROL', address), patch.object(client, 'ADB_PREFLIGHT_TIMEOUT', 2):
+            with self.assertRaisesRegex(client.Error, 'host:version'):
+                client.main(['run', '--', 'touch', str(marker)])
+        self.assertFalse(marker.exists())
+        self.assertFalse(self.runtime.running)
+        self.assertTrue(all(slot['state'] == 'available' for slot in self.pool.status()['slots']))
+
+    def test_loopback_peer_owner_is_required_for_the_tcp_relay(self):
+        # Kernel tables print addresses as host-order words; IPv4-mapped IPv6 maps back to IPv4.
+        self.assertEqual(client.proc_address('0100007F:1F90'), ('127.0.0.1', 8080))
+        self.assertEqual(client.proc_address('0000000000000000FFFF00000100007F:0035'), ('127.0.0.1', 53))
+        table = self.root / 'tcp'
+        class Stream:
+            def getsockname(self):
+                return ('127.0.0.1', 5037)
+            def getpeername(self):
+                return ('127.0.0.1', 40000)
+        header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
+        row = '   1: 0100007F:9C40 0100007F:13AD {state} 00000000:00000000 00:00000000 00000000  {uid}        0 {inode} 1\n'
+        cases = [([dict(state='01', uid=1234, inode=77)], 1234),
+                 # Server-side and timewait rows never identify the connecting owner.
+                 ([dict(state='06', uid=0, inode=0), dict(state='01', uid=1234, inode=77)], 1234),
+                 ([dict(state='01', uid=1234, inode=77), dict(state='01', uid=0, inode=78)], None),
+                 ([], None)]
+        for rows, expected in cases:
+            table.write_text(header + ''.join(row.format(**values) for values in rows))
+            self.assertEqual(client.loopback_peer_uid(Stream(), (str(table), str(self.root / 'missing'))), expected)
+        # The real kernel table resolves this process as the owner of its loopback connection.
+        listener = client.tcp_listener()
+        try:
+            own = socket.create_connection(listener.getsockname(), timeout=2)
+            accepted, _ = listener.accept()
+            try:
+                self.assertEqual(client.loopback_peer_uid(accepted), os.getuid())
+            finally:
+                own.close()
+                accepted.close()
+        finally:
+            listener.close()
+        listener = client.tcp_listener()
+        port = listener.getsockname()[1]
+        tunnels = []
+        def tunnel(request, timeout=400):
+            tunnels.append(request['operation'])
+            raise client.Error('transport', 'fixture tunnel')
+        with patch.object(client, 'connection', side_effect=tunnel):
+            relay = client.start_tcp_relay('a' * 64, listener)
+            try:
+                with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
+                    own.settimeout(2)
+                    self.assertEqual(own.recv(1), b'')
+                # Another local account's connection is closed before any lease tunnel opens.
+                with patch.object(client, 'loopback_peer_uid', return_value=os.getuid() + 1), \
+                        contextlib.redirect_stderr(io.StringIO()) as output:
+                    with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
+                        foreign.settimeout(2)
+                        self.assertEqual(foreign.recv(1), b'')
+                self.assertIn('another account', output.getvalue())
+            finally:
+                relay.shutdown()
+                relay.server_close()
+        self.assertEqual(tunnels, ['tunnel'])
+        self.assertTrue(self.refused(port))
+
+    def test_acquire_retains_tcp_relay_until_release(self):
+        address = self.serve_control()
+        lease = self.root / 'tcp-lease.json'
+        environment = dict(os.environ, ANDROID_PUBLIC_ROOT=str(self.root))
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'config/profiles/android/client.py'), 'acquire',
+                                 '--lease-file', str(lease)], env=environment, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        printed = json.loads(result.stdout)
+        port = int(printed['environment']['ANDROID_ADB_SERVER_PORT'])
+        self.assertEqual(client.read_lease(lease)['adb_port'], port)
+        self.assertTrue(printed['environment']['ADB_SERVER_SOCKET'].startswith('localfilesystem:'))
+        with socket.create_connection(('127.0.0.1', port), timeout=5) as stream:
+            stream.sendall(b'hello')
+            stream.settimeout(5)
+            self.assertEqual(stream.recv(5), b'hello')
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'config/profiles/android/client.py'), 'release',
+                                 '--lease-file', str(lease)], env=environment, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        endpoint = Path(printed['environment']['ADB_SERVER_SOCKET'].split(':', 1)[1])
+        deadline = time.monotonic() + 10
+        while (endpoint.exists() or not self.refused(port)) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        self.assertTrue(self.refused(port))
+        self.assertFalse(endpoint.exists())
+
     def test_viewer_reports_signed_child_status_and_releases_its_lease(self):
         address = str(self.root / 'control.sock')
         server = poolmod.Server(address, poolmod.Handler)
@@ -2249,6 +2435,183 @@ image.mkdir(parents=True)
             pool.prepare(request)
         except poolmod.PoolError as exc:
             failures.append(exc.code)
+
+    @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
+    def test_sdk_install_is_add_only_verified_licensed_and_lease_compatible(self, _disk):
+        sdk = self.root / 'shared-sdk'
+        # A current default, an earlier default with metadata and one provisioning has not repaired yet.
+        # android-34 r03 is a vendored retired entry; android-30 has no vendored entry at all.
+        for name, metadata in (('android-37.2', True), ('android-36', True), ('android-34', False), ('android-30', False)):
+            component = sdk / 'platforms' / name
+            component.mkdir(parents=True)
+            (component / 'source.properties').write_text('Pkg.Revision=2\nAndroidVersion.ApiLevel=' + name[8:] + '\n')
+            archive = '1f2e9478d6a7601425ceaa553311dc43191f103d' if name == 'android-34' else 'a' * 40
+            (component / '.subyard-toolchain.json').write_text(json.dumps(dict(archive=archive)) + '\n')
+            if metadata:
+                (component / 'package.xml').write_text('<repository><localPackage path="platforms;' + name + '"/></repository>')
+        (sdk / 'licenses').mkdir()
+        (sdk / 'licenses/android-sdk-license').write_text('\n' + 'b' * 40)
+        installer = sdk / 'cmdline-tools/latest/bin/sdkmanager'
+        installer.parent.mkdir(parents=True)
+        (sdk / 'cmdline-tools/latest/source.properties').write_text('Pkg.Revision=23.0\n')
+        calls = self.root / 'sdk-calls'
+        installer.write_text(f'#!{sys.executable}\n' + f"""
+import os, pathlib, sys
+target = pathlib.Path(sys.argv[1].removeprefix('--sdk_root='))
+with open({str(calls)!r}, 'a') as log:
+    log.write(' '.join(sys.argv[2:]) + '\\n')
+assert os.environ['HOME'] == str(target.parent / 'home') and os.environ['TMPDIR'] == str(target.parent / 'tmp')
+if os.environ.get('FIXTURE_SDK_LINGER'):
+    # Like the Android CLI's metrics upload: a helper outliving the installer writes into HOME.
+    import subprocess
+    subprocess.Popen([sys.executable, '-c', 'import os, pathlib, time; time.sleep(1); '
+                      'pathlib.Path(os.environ["HOME"], "late").mkdir(parents=True)'])
+if os.environ.get('FIXTURE_SDK_FAIL'):
+    target.joinpath('platforms', 'android-33').mkdir(parents=True)
+    raise SystemExit(7)
+for package in sys.argv[2:]:
+    directory = target.joinpath(*package.split(';'))
+    directory.mkdir(parents=True)
+    declared = 'cmake;9.9.9' if package == 'cmake;3.22.1' else package
+    (directory / 'package.xml').write_text('<repository><localPackage path="' + declared + '"/></repository>')
+    revision = package.split(';')[1].removeprefix('android-')
+    metadata = 'Pkg.Revision=' + revision + '\\n'
+    if package.startswith('platforms;'):
+        metadata = 'Pkg.Revision=1\\nAndroidVersion.ApiLevel=' + revision + '\\n'
+    (directory / 'source.properties').write_text(metadata)
+    tool = directory / 'tool'
+    tool.write_text('#!/bin/sh\\n')
+    tool.chmod(0o700)
+licenses = target / 'licenses'
+licenses.mkdir()
+(licenses / 'android-sdk-license').write_text('\\n' + 'c' * 40)
+""")
+        installer.chmod(0o755)
+        packages = poolmod.SdkPackages(sdk, sdk_lock=self.config['sdk_lock'])
+        self.pool.sdk_packages = packages
+        def invocations():
+            return calls.read_text().splitlines() if calls.exists() else []
+        # Every invalid identifier is reported at once, before any SDK manager run.
+        with self.assertRaises(poolmod.PoolError) as refused:
+            self.pool.sdk_install(['bad', 'platforms;android-36.1', 'system-images;android-36;google_apis;x86_64',
+                                   'build-tools;1.2', 'emulator'])
+        self.assertEqual(refused.exception.code, 'request')
+        message = str(refused.exception)
+        self.assertLess(message.index("'bad'"), message.index("'system-images"))
+        self.assertLess(message.index("'system-images"), message.index("'build-tools;1.2'"))
+        self.assertLess(message.index("'build-tools;1.2'"), message.index("'emulator'"))
+        self.assertNotIn("'platforms;android-36.1'", message)
+        self.assertEqual(invocations(), [])
+        # An add-only install does not wait for, or disturb, a held emulator lease.
+        token, allocation = self.acquire()
+        with contextlib.redirect_stderr(io.StringIO()) as log, patch.dict(os.environ, FIXTURE_SDK_LINGER='1'):
+            result = self.pool.sdk_install(['platforms;android-36.1', 'build-tools;37.0.0-rc2', 'platforms;android-36'])
+        self.assertEqual(result, dict(installed=['platforms;android-36.1', 'build-tools;37.0.0-rc2'],
+                                      already_installed=['platforms;android-36'], licenses=['android-sdk-license'],
+                                      accepted_for=['platforms;android-36.1', 'build-tools;37.0.0-rc2']))
+        self.assertEqual(log.getvalue(), 'Android: accepted Google Android SDK licenses for '
+                         'platforms;android-36.1, build-tools;37.0.0-rc2\n')
+        self.assertEqual(invocations(), ['platforms;android-36.1 build-tools;37.0.0-rc2'])
+        self.assertEqual(self.pool.allocation(token)['generation'], allocation['generation'])
+        self.assertEqual(poolmod.SdkPackages.revision(sdk / 'platforms/android-36'), '2')
+        self.assertEqual((sdk / 'licenses/android-sdk-license').read_text(), '\n' + 'b' * 40 + '\n' + 'c' * 40)
+        published = sdk / 'build-tools/37.0.0-rc2'
+        self.assertEqual(published.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((published / 'tool').stat().st_mode & 0o777, 0o755)
+        self.assertEqual((published / 'source.properties').stat().st_mode & 0o777, 0o644)
+        time.sleep(1.5)
+        self.assertFalse((sdk / '.subyard-staging').exists())
+        self.pool.release(token)
+        # Repeats are no-ops; existing unrecognized paths are never replaced.
+        self.assertEqual(self.pool.sdk_install(['platforms;android-36.1'])['already_installed'], ['platforms;android-36.1'])
+        (sdk / 'ndk/27.0.12077973').mkdir(parents=True)
+        (sdk / 'ndk/27.0.12077973/user-file').write_text('keep')
+        with self.assertRaisesRegex(poolmod.PoolError, 'refusing replacement: ndk;27.0.12077973'):
+            self.pool.sdk_install(['ndk;27.0.12077973'])
+        self.assertEqual((sdk / 'ndk/27.0.12077973/user-file').read_text(), 'keep')
+        # Independent refusals are reported together, in stable order, before any installer run.
+        (sdk / '.subyard-staging').write_text('not a directory')
+        _disk.return_value = SimpleNamespace(free=1024**3)
+        before = invocations()
+        with self.assertRaises(poolmod.PoolError) as refused:
+            self.pool.sdk_install(['ndk;27.0.12077973', 'platforms;android-34', 'platforms;android-30', 'platforms;android-33'])
+        _disk.return_value = SimpleNamespace(free=64 * 1024**3)
+        (sdk / '.subyard-staging').unlink()
+        self.assertEqual(refused.exception.code, 'ownership')
+        parts = str(refused.exception).split('; ')
+        self.assertEqual(len(parts), 5, parts)
+        self.assertIn('repair them with yard provision android: platforms;android-34', parts[0])
+        # Without a vendored entry provisioning cannot repair it; it is only kept.
+        self.assertEqual(parts[1], 'profile-installed SDK packages are kept without package metadata and are not '
+                         'replaced: platforms;android-30')
+        self.assertIn('refusing replacement: ndk;27.0.12077973', parts[2])
+        self.assertIn('staging path is not a pool-owned directory', parts[3])
+        self.assertIn('insufficient space', parts[4])
+        self.assertEqual(invocations(), before)
+        self.assertFalse((sdk / 'platforms/android-34/package.xml').exists())
+        # A failed publication reports exactly the packages that became visible.
+        original_rename = Path.rename
+        def rename(path, target):
+            if str(target).endswith('build-tools/34.0.0'):
+                raise OSError('fixture rename failure')
+            return original_rename(path, target)
+        with patch.object(poolmod.Path, 'rename', rename), contextlib.redirect_stderr(io.StringIO()) as log:
+            with self.assertRaisesRegex(poolmod.PoolError, 'published before the failure: platforms;android-31$'):
+                self.pool.sdk_install(['platforms;android-31', 'build-tools;34.0.0'])
+        self.assertEqual(log.getvalue(), 'Android: accepted Google Android SDK licenses for platforms;android-31\n')
+        self.assertTrue(self.pool.sdk_packages.installed('platforms;android-31'))
+        self.assertFalse((sdk / 'build-tools/34.0.0').exists())
+        self.assertFalse((sdk / '.subyard-staging').exists())
+        # Provisioning and image preparation hold the SDK lock exclusively; another install is serialized.
+        with open(self.config['sdk_lock'], 'a') as exclusive:
+            poolmod.fcntl.flock(exclusive, poolmod.fcntl.LOCK_EX)
+            with self.assertRaisesRegex(poolmod.PoolError, 'maintenance is in progress'):
+                self.pool.sdk_install(['platforms;android-35'])
+        with packages.lock:
+            with self.assertRaisesRegex(poolmod.PoolError, 'another Android SDK package installation'):
+                self.pool.sdk_install(['platforms;android-35'])
+        # Installer failure or a mismatched package publishes nothing.
+        with patch.dict(os.environ, FIXTURE_SDK_FAIL='1'):
+            with self.assertRaisesRegex(poolmod.PoolError, 'exit 7'):
+                self.pool.sdk_install(['platforms;android-33'])
+        with self.assertRaisesRegex(poolmod.PoolError, 'does not match'):
+            self.pool.sdk_install(['cmake;3.22.1', 'platforms;android-35'])
+        for missing in ('platforms/android-33', 'platforms/android-35', 'cmake/3.22.1'):
+            self.assertFalse((sdk / missing).exists())
+        self.assertFalse((sdk / '.subyard-staging').exists())
+        # list separates provisioned defaults (receipt) from added packages, also over the client.
+        listed = {item['package']: item for item in self.pool.sdk_list()['packages']}
+        self.assertEqual(listed['platforms;android-37.2'], dict(package='platforms;android-37.2', revision='2',
+                                                                source='default', metadata=True))
+        self.assertEqual(listed['platforms;android-36']['source'], 'previous-default')
+        self.assertEqual(listed['platforms;android-34'], dict(package='platforms;android-34', revision='2',
+                                                              source='previous-default', metadata=False))
+        self.assertTrue(listed['platforms;android-36.1']['metadata'])
+        self.assertEqual(listed['platforms;android-36.1']['source'], 'added')
+        self.assertEqual(listed['build-tools;37.0.0-rc2']['source'], 'added')
+        self.assertEqual(listed['cmdline-tools;latest']['source'], 'added')
+        self.assertNotIn('ndk;27.0.12077973', listed)
+        address = self.serve_control()
+        with patch.object(client, 'CONTROL', address):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(client.main(['sdk', 'list']), 0)
+            self.assertEqual(json.loads(output.getvalue())['packages'], self.pool.sdk_list()['packages'])
+            with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as log:
+                self.assertEqual(client.main(['sdk', 'install', 'platforms;android-35']), 0)
+            self.assertEqual(json.loads(output.getvalue())['installed'], ['platforms;android-35'])
+            self.assertIn('Android: accepted Google Android SDK licenses for platforms;android-35\n', log.getvalue())
+            with self.assertRaisesRegex(client.Error, 'unsupported SDK package identifiers'):
+                client.main(['sdk', 'install', 'add-ons;addon-google_apis-google-24'])
+        # The singleton owner removes only its interrupted marker-owned staging.
+        interrupted = sdk / '.subyard-staging' / ('install-' + 'c' * 24)
+        interrupted.mkdir(parents=True)
+        poolmod.atomic(interrupted / '.install-owner.json', dict(schema=poolmod.SCHEMA, kind='sdk-install'))
+        unknown = sdk / '.subyard-staging' / ('install-' + 'd' * 24)
+        unknown.mkdir()
+        (unknown / 'foreign').write_text('preserve')
+        poolmod.SdkPackages(sdk)
+        self.assertFalse(interrupted.exists())
+        self.assertTrue((unknown / 'foreign').exists())
 
     def test_prune_only_managed_unused_images(self):
         root = self.root / 'images'

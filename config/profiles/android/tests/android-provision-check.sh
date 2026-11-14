@@ -39,6 +39,9 @@ entries = fixture.toolchain.selected(profile / 'toolchain.json', environment=os.
 for name, entry in entries.items():
     fixture.fixture(pathlib.Path(str(root) + entry['destination']), name, entry)
 PYTOOLCHAIN
+# The SDK manager records accepted license hashes; the check requires one per default license.
+install -d "$test_root/srv/cache/android-sdk/licenses"
+printf '\n%s' "$(printf '%040d' 0 | tr 0 a)" > "$test_root/srv/cache/android-sdk/licenses/android-sdk-license"
 cat > "$test_root/etc/profile.d/subyard-android.sh" <<ENV
 export JAVA_HOME="/opt/jdk-$fixture_jdk"
 export ANDROID_HOME="/srv/cache/android-sdk"
@@ -57,7 +60,7 @@ MemoryMax=2G
 MemorySwapMax=2G
 Slice=system.slice
 UNIT
-for source in pool.py client.py runtime.sh; do
+for source in pool.py client.py runtime.sh toolchain.json toolchain-metadata.xml; do
   cp "$ROOT/config/profiles/android/$source" "$test_root/usr/local/lib/subyard-android/$source"
 done
 printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/srv/cache/android-sdk/.subyard/bin/android-broker"
@@ -164,6 +167,25 @@ cp "$profile_env" "$tmp/profile-env"
 sed -i 's@:/srv/cache/android-sdk/cmdline-tools/latest/bin@@' "$profile_env"
 expect_check 10
 cp "$tmp/profile-env" "$profile_env"
+
+# Every default package and the accepted SDK license are part of the converged toolchain.
+license_file="$test_root/srv/cache/android-sdk/licenses/android-sdk-license"
+mv "$license_file" "$tmp/license"
+expect_check 10
+printf 'unrecorded\n' > "$license_file"
+expect_check 10
+mv "$tmp/license" "$license_file"
+minor_platform="$test_root/srv/cache/android-sdk/platforms/android-37.2"
+mv "$minor_platform" "$tmp/minor-platform"
+expect_check 10
+mv "$tmp/minor-platform" "$minor_platform"
+# Without package.xml AGP cannot see a component on the read-only SDK.
+mv "$minor_platform/package.xml" "$tmp/package.xml"
+expect_check 10
+mv "$tmp/package.xml" "$minor_platform/package.xml"
+# A broker-added package beside the defaults is not configuration drift.
+install -d "$test_root/srv/cache/android-sdk/platforms/android-33"
+expect_check 0
 
 rm -f "$test_root/srv/cache/android-sdk/platform-tools/adb"
 expect_check 10

@@ -27,9 +27,9 @@ E2E = ROOT / 'config/profiles/android/tests/e2e'
 # substitutes. Native compilation/signing remains the allocated VM's contract.
 sdk_source = (E2E / 'android-sdk-build.sh').read_text()
 manifest_validator = sdk_source.split("python3 - <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
-badging = """package: versionName='1.0' name='org.subyard.acceptance' versionCode='1' compileSdkVersion='36'
+badging = """package: versionName='1.0' name='org.subyard.acceptance' versionCode='1' compileSdkVersion='35'
 minSdkVersion:'26'
-targetSdkVersion:'36'
+targetSdkVersion:'35'
 application: icon='' label='Subyard SDK acceptance'
 launchable-activity: label='' name='org.subyard.acceptance.MainActivity' icon=''
 """
@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix='android-sdk-manifest-', dir='/tmp') as 
             (badging, None),
             (badging.replace('minSdkVersion:', 'sdkVersion:'), None),
             (badging.replace("minSdkVersion:'26'", "minSdkVersion:'25'"), 'minimum API'),
-            (badging.replace("targetSdkVersion:'36'", "targetSdkVersion:'35'"), 'target API'),
+            (badging.replace("targetSdkVersion:'35'", "targetSdkVersion:'34'"), 'target API'),
             (badging.replace("name='org.subyard.acceptance'", "name='org.other.app'"), 'package'),
             (badging.replace('Subyard SDK acceptance', 'wrong label'), 'resource label'),
             (badging.replace('org.subyard.acceptance.MainActivity', 'org.other.Activity'), 'launcher Activity')):

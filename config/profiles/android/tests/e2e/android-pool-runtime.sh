@@ -6,10 +6,10 @@ lane=full
 if [ "$#" -eq 2 ] && [ "$1" = --lane ]; then
   lane="$2"
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: android-pool-runtime.sh [--lane full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease]\n' >&2
+  printf 'usage: android-pool-runtime.sh [--lane full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease|gradle]\n' >&2
   exit 2
 fi
-case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease|gradle) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -74,7 +74,7 @@ cleanup() {
   android_phase_begin cleanup
   cleanup_status=0
   touch "$monitor_host_stop"
-  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ] || [ "$lane" = memory-budget ] || [ "$lane" = memory-lease ]; } \
+  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ] || [ "$lane" = memory-budget ] || [ "$lane" = memory-lease ] || [ "$lane" = gradle ]; } \
     && [ "$failed_phase" = images ] && { [ "$sdk_api" = 35 ] || [ "$sdk_api" = 36 ]; } \
     && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout --signal=TERM --kill-after=15 960 "${incus_binary[@]}" --project "$project" exec "$instance" -- python3 - --api "$sdk_api" \
@@ -369,6 +369,44 @@ if [ "$lane" = projects ]; then
   bash "$root/config/profiles/android/tests/e2e/android-pool-projects.sh" "$root" "$state" "$YARD_NAME" "$project" "$instance"
   android_phase_end 0
   printf 'android_projects=passed\n'
+  exit 0
+fi
+if [ "$lane" = gradle ]; then
+  incus --project "$project" exec "$instance" -- timeout 30 sh -c '
+    until runuser -u dev -- /usr/bin/python3 /usr/local/lib/subyard-android/client.py status >/dev/null 2>&1; do
+      sleep 0.2
+    done
+  '
+  android_phase_begin images
+  sdk_api=36
+  yard emu cache prepare --api 36
+  android_phase_end 0
+  android_phase_begin gradle
+  if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
+    incus_binary=(sudo -n /usr/bin/incus)
+  fi
+  # Default-package build, broker SDK addition and connected tests through one lease.
+  timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
+    --user 1000 --group 1000 --env HOME=/home/dev -- bash -se \
+    < "$root/config/profiles/android/tests/e2e/android-gradle.sh"
+  android_phase_end 0
+  android_phase_begin relay-owner
+  # The loopback relay refuses a connection owned by another local account.
+  timeout --foreground --kill-after=30 1800 "${incus_binary[@]}" --project "$project" exec "$instance" -- bash -se \
+    < "$root/config/profiles/android/tests/e2e/android-relay-owner.sh"
+  android_phase_end 0
+  # Repeated provisioning neither downloads nor removes the broker-added package.
+  android_repeat_provision gradle-repeat gradle_repeat_provision
+  incus --project "$project" exec "$instance" -- runuser -u dev -- bash -lc '
+    test -s /srv/cache/android-sdk/platforms/android-36.1/android.jar &&
+    android-broker sdk list | python3 -c "
+import json, sys
+sources = {item[\"package\"]: item[\"source\"] for item in json.load(sys.stdin)[\"packages\"]}
+assert sources[\"platforms;android-36.1\"] == \"added\", sources
+"
+  '
+  printf 'android gradle: repeated provisioning kept the added SDK package=PASS\n'
+  printf 'android_gradle=passed\n'
   exit 0
 fi
 incus --project "$project" exec "$instance" --user 1000 --group 1000 --env HOME=/home/dev -- bash -ceu '
