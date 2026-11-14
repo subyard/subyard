@@ -61,44 +61,61 @@ def claude_chats(rpc):
     for snapshot in rpc.call("session.tabs.listAll")["snapshots"]:
         sessions.update(tab["sessionId"] for tab in snapshot["tabs"]
                         if tab.get("type") == "agent-session" and tab.get("agent") == "claude")
-    for entry in rpc.call("aiVault.listSessions", {"unlimited": True, "force": True})["sessions"]:
+    history = rpc.call("aiVault.listSessions", {"unlimited": True, "force": True})
+    # A scan with diagnostics or paging may omit a closed chat; never complete from it.
+    if history["issues"] or any(history.get(key) for key in ("truncated", "hasMore", "nextFingerprint")):
+        raise RpcError("Orca Session History scan is incomplete")
+    for entry in history["sessions"]:
         if entry.get("agent") == "claude" and entry.get("structuredSession"):
             sessions.add(entry["structuredSession"]["sessionId"])
     return sorted(sessions)
 
 
+def _chat(rpc, session):
+    """Return (saved mode, running) for a saved chat."""
+    current = rpc.call("agentSession.options", {"sessionId": session})["current"]
+    # Orca reports provider facts only once a chat's process starts; any of them means running.
+    running = any(current.get(key) is not None for key in ("reportedPermissionMode", "reportedModel", "confirmed"))
+    return current["permissionMode"], running
+
+
 def reset_chat_permissions(rpc, state):
-    """Reset saved Full access Claude chats once; return (reset, chats still pending)."""
+    """Reset saved Full access Claude chats once; return (reset, chats still running)."""
     marker = Path(state) / MIGRATED
     if marker.exists():
         return 0, 0
-    reset = pending = 0
+    reset = running = 0
     for session in claude_chats(rpc):
-        current = rpc.call("agentSession.options", {"sessionId": session})["current"]
-        if current["permissionMode"] != "full-access":
+        mode, live = _chat(rpc, session)
+        if live:
+            # A process started from a Full access chat keeps it until the chat closes.
+            running += 1
             continue
-        # Orca reports the provider's mode only while the chat's process runs; retry later.
-        if current.get("reportedPermissionMode") is not None:
-            pending += 1
+        if mode != "full-access":
             continue
         fields = {"key": "permissionMode", "value": "own"}
         payload = json.dumps({"method": "agentSession.setOption", "sessionId": session, "fields": fields},
                              sort_keys=True, separators=(",", ":")).encode()
+        # The fence makes Orca refuse the write if the chat's lease moved since this read.
         envelope = {"sessionId": session, "clientOperationId": f"{time.time_ns() // 1_000_000}-{uuid.uuid4().hex}",
                     "expectedRuntimeFence": rpc.call("agentSession.history", {
                         "sessionId": session, "direction": "tail"})["page"]["fence"],
                     "payloadFingerprint": hashlib.sha256(payload).hexdigest()}
-        if (rpc.call("agentSession.setOption", {"envelope": envelope, **fields}).get("ok") is not True
-                or rpc.call("agentSession.options", {"sessionId": session})["current"]["permissionMode"] != "own"):
+        if rpc.call("agentSession.setOption", {"envelope": envelope, **fields}).get("ok") is not True:
+            raise RpcError("Orca refused a chat permission reset")
+        mode, live = _chat(rpc, session)
+        if live:
+            running += 1
+        elif mode != "own":
             raise RpcError("Orca did not reset a chat permission mode")
         reset += 1
-    if not pending:
+    if not running:
         descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "w") as output:
             output.write("1\n")
             output.flush()
             os.fsync(output.fileno())
-    return reset, pending
+    return reset, running
 
 
 def main():
@@ -106,8 +123,8 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--state", default="/srv/agents/orca")
     args = parser.parse_args()
-    # Session History scans saved transcripts, which can take longer than a settings call.
-    rpc = RuntimeRPC(Path(args.state) / "config/orca/orca-runtime.json", timeout=30)
+    runtime = Path(args.state) / "config/orca/orca-runtime.json"
+    rpc = RuntimeRPC(runtime)
     try:
         ready = launch_defaults(rpc, apply=not args.check)
     except Exception:
@@ -117,7 +134,8 @@ def main():
     if args.check or not ready:
         return 0 if ready else 1
     try:
-        reset, pending = reset_chat_permissions(rpc, args.state)
+        # Session History scans saved transcripts, which can take longer than a settings call.
+        reset, running = reset_chat_permissions(RuntimeRPC(runtime, timeout=30), args.state)
     except (RpcError, OSError, KeyError, TypeError, AttributeError):
         # Without the marker, every later apply retries the whole pass and warns again.
         print("Warning: Orca could not reset saved Claude chats from Full access; they may still run "
@@ -126,9 +144,10 @@ def main():
     if reset:
         print(f"Orca reset {reset} saved Claude chat(s) from Full access to the default permission mode; "
               "choose Full access in a chat again to opt out")
-    if pending:
-        print(f"Warning: {pending} open saved Claude chat(s) still use Full access and may run Git without "
-              "approval. Close them and run yard orca sync, or switch each chat's mode to Ask.", file=sys.stderr)
+    if running:
+        print(f"Warning: {running} running Claude chat(s) may still run Git without approval if they started "
+              "with Full access. Close them and run yard orca sync, or switch each chat's mode to Ask.",
+              file=sys.stderr)
     return 0
 
 
