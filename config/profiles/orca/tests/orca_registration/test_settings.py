@@ -12,7 +12,7 @@ from unittest import mock
 
 import support  # noqa: F401 - Adds the standalone component directory to the import path.
 import settings
-from settings import MIGRATED, STOCK, YOLO, launch_defaults, reset_chat_permissions
+from settings import CHAT_STATE, STOCK, YOLO, launch_defaults, reset_chat_permissions
 from transport import RpcError
 
 
@@ -70,11 +70,11 @@ class SettingsTests(unittest.TestCase):
                     self.assertEqual([], rpc.writes)
 
     def test_invalid_settings_fail_without_mutation(self):
-        for settings in (None, [], {"agentDefaultArgs": None},
-                         {"agentDefaultArgs": []}, {"agentDefaultArgs": {"codex": False}},
-                         {"agentDefaultArgs": {"codex": "", "claude": None}}):
-            with self.subTest(settings=settings):
-                rpc = SettingsRPC(settings)
+        for value in (None, [], {"agentDefaultArgs": None},
+                      {"agentDefaultArgs": []}, {"agentDefaultArgs": {"codex": False}},
+                      {"agentDefaultArgs": {"codex": "", "claude": None}}):
+            with self.subTest(settings=value):
+                rpc = SettingsRPC(value)
                 with self.assertRaises(RpcError):
                     launch_defaults(rpc, apply=True)
                 self.assertEqual([], rpc.writes)
@@ -105,12 +105,14 @@ class SettingsTests(unittest.TestCase):
 class ChatRPC:
     """Synthetic Orca chat catalog: open tabs, Session History and saved chat options."""
 
-    def __init__(self, chats, tabs=(), vault=(), refuse=(), ignore=(), start_on_reset=(), history=None):
+    def __init__(self, chats, tabs=(), vault=(), refuse=(), ignore=(), moved=(), history=None):
         self.chats = copy.deepcopy(chats)
         self.tabs, self.vault = list(tabs), list(vault)
-        self.refuse, self.ignore, self.start_on_reset = set(refuse), set(ignore), set(start_on_reset)
+        self.refuse, self.ignore = set(refuse), set(ignore)
+        self.moved = {session: count for session, count in moved}
         self.history = history or {}
         self.calls = []
+        self.runtime_id = "runtime-1"
         self.settings = {"agentDefaultArgs": {"codex": "", "claude": ""}}
 
     def call(self, method, params=None):
@@ -125,28 +127,28 @@ class ChatRPC:
         session = params["sessionId"] if "sessionId" in params else params["envelope"]["sessionId"]
         chat = self.chats[session]
         if method == "agentSession.options":
-            current = {"permissionMode": chat["mode"]}
-            if chat.get("live"):
-                current.update(reportedPermissionMode="full-access", reportedModel="model", confirmed=["model"])
-            elif chat.get("starting"):
-                # A starting provider confirms options before it reports a permission mode.
-                current["confirmed"] = []
-            return {"current": current}
+            # A running or starting chat answers with the same saved mode as a resting one.
+            return {"current": {"permissionMode": chat["mode"]}}
         if method == "agentSession.history":
             return {"page": {"fence": "fence-" + session, "items": []}}
         if method == "agentSession.setOption":
+            if self.moved.get(session):
+                self.moved[session] -= 1
+                return {"ok": False, "refusal": {"code": "agent_session_ownership_unknown",
+                                                 "details": {"reason": "leaseMoved"}}}
             if session in self.refuse:
                 return {"ok": False, "refusal": {"code": "synthetic"}}
             if session not in self.ignore:
                 chat["mode"] = params["value"]
-            if session in self.start_on_reset:
-                chat["live"] = True
             return {"ok": True, "value": params["value"]}
         raise AssertionError(method)
 
     def resets(self):
         return [params["envelope"]["sessionId"] for method, params in self.calls
                 if method == "agentSession.setOption"]
+
+    def listed(self):
+        return any(method == "session.tabs.listAll" for method, _ in self.calls)
 
 
 def tab(session, agent="claude", kind="agent-session"):
@@ -161,139 +163,150 @@ class ChatPermissionMigrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="subyard-orca-settings.", dir="/tmp")
         self.state = Path(self.tmp.name)
-        self.marker = self.state / MIGRATED
+        self.path = self.state / CHAT_STATE
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_resets_full_access_claude_chats_from_tabs_and_history_then_writes_marker(self):
+    def saved(self):
+        return json.loads(self.path.read_text())
+
+    def test_resets_running_starting_open_and_closed_chats_once_then_waits_for_a_restart(self):
         rpc = ChatRPC({"open": {"mode": "full-access"}, "closed": {"mode": "full-access"},
-                       "ask": {"mode": "ask"}, "own": {"mode": "own"},
+                       "running": {"mode": "full-access"}, "ask": {"mode": "ask"}, "own": {"mode": "own"},
                        "codex-tab": {"mode": "full-access"}, "codex-history": {"mode": "full-access"}},
-                      tabs=[tab("open"), tab("ask"), tab("codex-tab", "codex"),
+                      tabs=[tab("open"), tab("running"), tab("ask"), tab("codex-tab", "codex"),
                             tab("open", kind="terminal"), {"type": "terminal", "id": "plain"}],
                       vault=[history_entry("closed"), history_entry("open"), history_entry("own"),
                              history_entry("codex-history", "codex"), {"agent": "claude", "structuredSession": None}])
-        self.assertEqual((2, 0), reset_chat_permissions(rpc, self.state))
-        self.assertEqual(["closed", "open"], rpc.resets())
-        self.assertEqual({"open": "own", "closed": "own", "ask": "ask", "own": "own",
+        self.assertEqual((False, 3), reset_chat_permissions(rpc, self.state, "runtime-1"))
+        self.assertEqual(["closed", "open", "running"], rpc.resets())
+        self.assertEqual({"open": "own", "closed": "own", "running": "own", "ask": "ask", "own": "own",
                           "codex-tab": "full-access", "codex-history": "full-access"},
                          {session: chat["mode"] for session, chat in rpc.chats.items()})
-        self.assertEqual(b"1\n", self.marker.read_bytes())
-        self.assertEqual(0o600, stat.S_IMODE(self.marker.stat().st_mode))
+        self.assertEqual({"version": 1, "reset": ["closed", "open", "running"], "runtime": "runtime-1",
+                          "scanned": True, "complete": False}, self.saved())
+        self.assertEqual(0o600, stat.S_IMODE(self.path.stat().st_mode))
+        self.assertTrue(settings.restart_pending(self.saved(), "runtime-1"))
+        self.assertFalse(settings.restart_pending(self.saved(), "runtime-2"))
 
-    def test_reset_uses_the_saved_chat_fence_and_payload_fingerprint(self):
-        rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")])
-        reset_chat_permissions(rpc, self.state)
-        params = next(params for method, params in rpc.calls if method == "agentSession.setOption")
+    def test_reset_uses_a_fresh_fence_and_retries_once_after_a_lease_move(self):
+        rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], moved=[("chat", 1)])
+        self.assertEqual((False, 1), reset_chat_permissions(rpc, self.state, "runtime-1"))
+        writes = [params for method, params in rpc.calls if method == "agentSession.setOption"]
         fields = {"key": "permissionMode", "value": "own"}
         payload = json.dumps({"method": "agentSession.setOption", "sessionId": "chat", "fields": fields},
                              sort_keys=True, separators=(",", ":")).encode()
-        self.assertEqual(fields, {key: params[key] for key in ("key", "value")})
-        self.assertEqual({"sessionId": "chat", "expectedRuntimeFence": "fence-chat",
-                          "payloadFingerprint": hashlib.sha256(payload).hexdigest()},
-                         {key: params["envelope"][key] for key in
-                          ("sessionId", "expectedRuntimeFence", "payloadFingerprint")})
-        self.assertRegex(params["envelope"]["clientOperationId"], r"^[0-9]{13}-[0-9a-f]{32}$")
+        self.assertEqual(2, len(writes))
+        self.assertEqual(2, sum(method == "agentSession.history" for method, _ in rpc.calls))
+        for params in writes:
+            self.assertEqual(fields, {key: params[key] for key in ("key", "value")})
+            self.assertEqual({"sessionId": "chat", "expectedRuntimeFence": "fence-chat",
+                              "payloadFingerprint": hashlib.sha256(payload).hexdigest()},
+                             {key: params["envelope"][key] for key in
+                              ("sessionId", "expectedRuntimeFence", "payloadFingerprint")})
+            self.assertRegex(params["envelope"]["clientOperationId"], r"^[0-9]{13}-[0-9a-f]{32}$")
+        self.assertNotEqual(writes[0]["envelope"]["clientOperationId"], writes[1]["envelope"]["clientOperationId"])
 
-    def test_live_chats_stay_pending_without_marker_and_a_later_pass_completes(self):
-        rpc = ChatRPC({"live": {"mode": "full-access", "live": True}, "idle": {"mode": "full-access"}},
-                      tabs=[tab("live"), tab("idle")])
-        self.assertEqual((1, 1), reset_chat_permissions(rpc, self.state))
-        self.assertEqual(["idle"], rpc.resets())
-        self.assertEqual("full-access", rpc.chats["live"]["mode"])
-        self.assertFalse(self.marker.exists())
-        rpc.chats["live"]["live"] = False
-        self.assertEqual((1, 0), reset_chat_permissions(rpc, self.state))
-        self.assertEqual(["idle", "live"], rpc.resets())
-        self.assertTrue(self.marker.exists())
+    def test_each_chat_is_reset_at_most_once_and_a_restart_completes(self):
+        rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")])
+        self.assertEqual((False, 1), reset_chat_permissions(rpc, self.state, "runtime-1"))
+        rpc.chats["chat"]["mode"] = "full-access"  # An explicit choice after the reset.
+        self.assertEqual((False, 0), reset_chat_permissions(rpc, self.state, "runtime-1"))
+        self.assertEqual(["chat"], rpc.resets())
+        calls = len(rpc.calls)
+        self.assertEqual((True, 0), reset_chat_permissions(rpc, self.state, "runtime-2"))
+        self.assertEqual(calls, len(rpc.calls), "a completed reset must not list or write chats")
+        self.assertTrue(self.saved()["complete"])
+        rpc.tabs.append(tab("later"))
+        rpc.chats["later"] = {"mode": "full-access"}
+        self.assertEqual((True, 0), reset_chat_permissions(rpc, self.state, "runtime-3"))
+        self.assertEqual("full-access", rpc.chats["chat"]["mode"])
+        self.assertEqual("full-access", rpc.chats["later"]["mode"])
+
+    def test_nothing_to_reset_completes_in_the_same_runtime(self):
+        rpc = ChatRPC({"own": {"mode": "own"}}, tabs=[tab("own")])
+        self.assertEqual((True, 0), reset_chat_permissions(rpc, self.state, "runtime-1"))
+        self.assertEqual({"version": 1, "reset": [], "runtime": None, "scanned": True, "complete": True},
+                         self.saved())
 
     def test_incomplete_history_scan_never_completes(self):
         for history in ({"issues": [{"kind": "unreadable"}]}, {"truncated": True}, {"hasMore": True},
-                        {"nextFingerprint": "next"}):
+                        {"nextFingerprint": "next"}, {"unchanged": True}):
             with self.subTest(history=history):
                 rpc = ChatRPC({"closed": {"mode": "full-access"}}, vault=[history_entry("closed")], history=history)
                 with self.assertRaises(RpcError):
-                    reset_chat_permissions(rpc, self.state)
+                    reset_chat_permissions(rpc, self.state, "runtime-1")
                 self.assertEqual([], rpc.resets())
-                self.assertFalse(self.marker.exists())
+                self.assertFalse(self.path.exists())
+                with self.assertRaises(RpcError):
+                    reset_chat_permissions(rpc, self.state, "runtime-2")
+                self.assertFalse(self.path.exists())
 
-    def test_chat_starting_during_the_reset_keeps_the_pass_incomplete_until_it_stops(self):
-        rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], start_on_reset={"chat"})
-        self.assertEqual((1, 1), reset_chat_permissions(rpc, self.state))
-        self.assertFalse(self.marker.exists())
-        # The saved mode now reads "own", but the running process may still hold Full access.
-        self.assertEqual((0, 1), reset_chat_permissions(rpc, self.state))
-        self.assertFalse(self.marker.exists())
-        rpc.chats["chat"]["live"] = False
-        self.assertEqual((0, 0), reset_chat_permissions(rpc, self.state))
-        self.assertTrue(self.marker.exists())
-        self.assertEqual(["chat"], rpc.resets())
+    def test_failures_keep_recorded_resets_and_never_complete(self):
+        for name, rpc in {
+                "refused": ChatRPC({"a": {"mode": "full-access"}, "b": {"mode": "full-access"}},
+                                   tabs=[tab("a"), tab("b")], refuse={"b"}),
+                "moved twice": ChatRPC({"a": {"mode": "full-access"}, "b": {"mode": "full-access"}},
+                                       tabs=[tab("a"), tab("b")], moved=[("b", 2)]),
+                "not converged": ChatRPC({"a": {"mode": "full-access"}, "b": {"mode": "full-access"}},
+                                         tabs=[tab("a"), tab("b")], ignore={"b"}),
+        }.items():
+            with self.subTest(case=name):
+                if self.path.exists():
+                    os.unlink(self.path)
+                with self.assertRaises(RpcError):
+                    reset_chat_permissions(rpc, self.state, "runtime-1")
+                self.assertEqual({"version": 1, "reset": ["a"], "runtime": "runtime-1", "scanned": False,
+                                  "complete": False}, self.saved())
+                self.assertTrue(settings.restart_pending(self.saved(), "runtime-1"))
+                # A restart ends the reset chat's process; the next full pass may still need to reset b.
+                rpc.refuse, rpc.ignore, rpc.moved = set(), set(), {}
+                self.assertEqual((False, 1), reset_chat_permissions(rpc, self.state, "runtime-2"))
+                self.assertEqual(["a", "b"], self.saved()["reset"])
+                self.assertEqual((True, 0), reset_chat_permissions(rpc, self.state, "runtime-3"))
 
-    def test_starting_chat_without_a_reported_mode_is_not_reset(self):
-        rpc = ChatRPC({"chat": {"mode": "full-access", "starting": True}}, tabs=[tab("chat")])
-        self.assertEqual((0, 1), reset_chat_permissions(rpc, self.state))
-        self.assertEqual([], rpc.resets())
-        self.assertFalse(self.marker.exists())
+    def test_invalid_state_is_refused(self):
+        for value in ("[]", '{"version": 2}', json.dumps({"version": 1, "reset": [""], "runtime": None,
+                                                           "scanned": False, "complete": False})):
+            with self.subTest(value=value):
+                self.path.write_text(value)
+                with self.assertRaises(ValueError):
+                    reset_chat_permissions(ChatRPC({}), self.state, "runtime-1")
 
-    def test_any_running_claude_chat_defers_completion(self):
-        rpc = ChatRPC({"chat": {"mode": "own", "live": True}}, tabs=[tab("chat")])
-        self.assertEqual((0, 1), reset_chat_permissions(rpc, self.state))
-        self.assertFalse(self.marker.exists())
+    def run_main(self, rpc, *arguments):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(settings, "RuntimeRPC", return_value=rpc), \
+                mock.patch.object(settings.sys, "argv", ["settings.py", *arguments, "--state", str(self.state)]), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = settings.main()
+        return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_marker_leaves_later_explicit_full_access_untouched_without_rpc(self):
+    def test_apply_reports_resets_and_warns_until_orca_restarts(self):
+        restart = ("Warning: saved Claude chats may still run Git without approval until Orca restarts; "
+                   "run yard orca restart\n")
         rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")])
-        self.assertEqual((1, 0), reset_chat_permissions(rpc, self.state))
-        rpc.chats["chat"]["mode"] = "full-access"
-        calls = len(rpc.calls)
-        for _ in range(2):
-            self.assertEqual((0, 0), reset_chat_permissions(rpc, self.state))
-        self.assertEqual(calls, len(rpc.calls))
-        self.assertEqual("full-access", rpc.chats["chat"]["mode"])
+        self.assertEqual((0, "Orca reset 1 saved Claude chat(s) from Full access to the default permission "
+                          "mode; choose Full access in a chat again to opt out\n", restart), self.run_main(rpc))
+        self.assertEqual((3, "", ""), self.run_main(rpc, "--check"))
+        self.assertEqual((0, "", restart), self.run_main(rpc))
+        rpc.runtime_id = "runtime-2"
+        self.assertEqual((0, "", ""), self.run_main(rpc, "--check"))
+        self.assertEqual((0, "", ""), self.run_main(rpc))
+        self.assertTrue(self.saved()["complete"])
 
-    def test_no_saved_chats_completes_at_once(self):
-        self.assertEqual((0, 0), reset_chat_permissions(ChatRPC({}), self.state))
-        self.assertTrue(self.marker.exists())
-
-    def test_failures_never_write_the_marker(self):
-        cases = {
-            "refused": ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], refuse={"chat"}),
-            "not converged": ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], ignore={"chat"}),
-            "invalid catalog": ChatRPC({}, tabs=[{"type": "agent-session", "agent": "claude"}]),
-            "unknown chat": ChatRPC({}, vault=[history_entry("missing")]),
-        }
-        for name, rpc in cases.items():
-            with self.subTest(case=name):
-                with self.assertRaises((RpcError, KeyError)):
-                    reset_chat_permissions(rpc, self.state)
-                self.assertFalse(self.marker.exists())
-
-    def test_apply_reports_resets_and_warns_until_migration_completes(self):
-        for name, rpc, code, out, err in (
-                ("reset", ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")]), 0,
-                 "Orca reset 1 saved Claude chat(s) from Full access to the default permission mode; "
-                 "choose Full access in a chat again to opt out\n", ""),
-                ("live", ChatRPC({"chat": {"mode": "full-access", "live": True}}, tabs=[tab("chat")]), 0,
-                 "", "Warning: 1 running Claude chat(s) may still run Git without approval if they started "
-                 "with Full access. Close them and run yard orca sync, or switch each chat's mode to Ask.\n"),
-                ("failure", ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], refuse={"chat"}), 0,
-                 "", "Warning: Orca could not reset saved Claude chats from Full access; they may still run "
-                 "Git without approval. Run yard orca sync, or switch each chat's mode to Ask.\n")):
-            with self.subTest(case=name):
-                if self.marker.exists():
-                    os.unlink(self.marker)
-                stdout, stderr = io.StringIO(), io.StringIO()
-                with mock.patch.object(settings, "RuntimeRPC", return_value=rpc), \
-                        mock.patch.object(settings.sys, "argv", ["settings.py", "--state", str(self.state)]), \
-                        contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                    self.assertEqual(code, settings.main())
-                self.assertEqual((out, err), (stdout.getvalue(), stderr.getvalue()))
-                self.assertEqual(name == "reset", self.marker.exists())
+    def test_apply_failure_warns_and_check_never_wedges(self):
+        rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], refuse={"chat"})
+        self.assertEqual((0, "", "Warning: Orca could not finish resetting saved Claude chats from Full access; "
+                          "they may still run Git without approval. Run yard orca sync, or switch each chat's "
+                          "mode to Ask.\n"), self.run_main(rpc))
+        self.assertEqual((0, "", ""), self.run_main(rpc, "--check"))
+        self.path.write_text("not json")
+        self.assertEqual((0, "", ""), self.run_main(rpc, "--check"))
+        self.assertEqual(0, self.run_main(rpc)[0])
 
     def test_check_never_runs_the_migration(self):
         rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")])
-        with mock.patch.object(settings, "RuntimeRPC", return_value=rpc), \
-                mock.patch.object(settings.sys, "argv", ["settings.py", "--check", "--state", str(self.state)]):
-            self.assertEqual(0, settings.main())
+        self.assertEqual((0, "", ""), self.run_main(rpc, "--check"))
         self.assertEqual(["settings.get"], [method for method, _ in rpc.calls])
-        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.path.exists())

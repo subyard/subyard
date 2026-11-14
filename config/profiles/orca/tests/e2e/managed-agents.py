@@ -832,6 +832,12 @@ def saved_chat(arguments):
         # A closed tab keeps the saved chat; only Session History lists it.
         rpc.call('agentSession.close', {'sessionId': chats['closed']})
         SAVED_CHATS.write_text(json.dumps(chats))
+        issues = rpc.call('aiVault.listSessions', {'unlimited': True, 'force': True})['issues']
+        # Record only the issue shape: whether each names its agent, and of which kind it is.
+        print('orca-session-history-issues: ' + json.dumps({
+            'count': len(issues), 'with_agent': sum(isinstance(item, dict) and bool(item.get('agent'))
+                                                    for item in issues),
+            'kinds': sorted({str(item.get('kind')) for item in issues if isinstance(item, dict)})}), flush=True)
         return 0
     chats = json.loads(SAVED_CHATS.read_text())
     assert {name: mode(session) for name, session in chats.items()} == {'open': 'own', 'closed': 'own'}, \

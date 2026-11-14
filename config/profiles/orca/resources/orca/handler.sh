@@ -642,6 +642,14 @@ codex_defaults_ready() {
     "$ORCA_REGISTRATION/settings.py" --check >/dev/null 2>&1
 }
 
+# Saved Claude chats were reset in the running Orca, so a process may still hold Full access.
+claude_chat_restart_pending() {
+  local status=0
+  yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
+    "$ORCA_REGISTRATION/settings.py" --check >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 3 ]
+}
+
 linger_ready() {
   [ "$(yexec loginctl show-user "${DEV_USER:-dev}" --property=Linger --value 2>/dev/null)" = yes ]
 }
@@ -881,6 +889,12 @@ cmd_up() {
     die "Orca owner endpoint failed readiness; route and service were rolled back"
   fi
   run_project_sync
+  if claude_chat_restart_pending; then
+    # Agent processes are children of the service and end with it.
+    yexec systemctl restart "$ORCA_UNIT"
+    wait_service_endpoint_ready || die "Orca did not become ready after restarting for saved Claude chats"
+    ok "Orca restarted so no Claude chat keeps Full access from before the reset"
+  fi
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   codex_defaults_ready || die "Orca agent launch defaults did not converge"
   automatic_project_hook_ready && projects_synced || die "Orca project registration did not converge"
@@ -1062,6 +1076,8 @@ cmd_status() {
   if [ "$service_is_ready" -eq 1 ]; then
     if codex_defaults_ready; then
       ok "Codex and Claude stock YOLO launch defaults disabled; yard config supplies defaults"
+    elif claude_chat_restart_pending; then
+      warn "saved Claude chats may still run Git without approval until Orca restarts; run '$(yard_cmd_hint) orca restart'"
     else
       warn "Orca agent launch defaults need repair; run '$(yard_cmd_hint) orca up'"
     fi
@@ -1239,6 +1255,9 @@ emit_up_assessment() {
         observed=absent
         observed="$(orca_route_state)" || die 'Orca route metadata is invalid'
       fi
+      if [ "$id" = codex-defaults ] && [ "$decision" = apply ] && claude_chat_restart_pending;then
+        observed='saved-claude-chats-await-orca-restart'
+      fi
     fi
     dependencies='[]'
     if [ "$id" = service ];then
@@ -1301,7 +1320,8 @@ emit_sync_assessment() {
   registration_contract_ready || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
   ORCA_STEPS='[]'
   observed=unready;decision=apply
-  if codex_defaults_ready;then observed=custom-arguments-retained-or-stock-default-disabled;decision=skip;fi
+  if codex_defaults_ready;then observed=custom-arguments-retained-or-stock-default-disabled;decision=skip
+  elif claude_chat_restart_pending;then observed='saved-claude-chats-await-orca-restart';fi
   orca_step_add codex-defaults settings/codex-defaults "$observed" custom-arguments-retained-or-stock-default-disabled "$decision" \
     'native Codex and Claude custom arguments are retained or stock defaults disabled' 'converge the bounded Orca Codex and Claude launch defaults'
   observed="$(orca_registration_observation)";decision=apply
