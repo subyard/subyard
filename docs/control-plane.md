@@ -1724,15 +1724,19 @@ declaration refusal together. The catalog allows these settings only at shipped 
 discards each operator assignment, at any scope or in the command environment, in one place, as it
 discards retired settings, while the file is read: its expression, and a default of the name inside
 another record's expression, is evaluated in isolation, so no later record sees it or any default
-it performs, and an evaluation error does not refuse loading. A non-empty one is returned as
-configuration state (`Loaded.IgnoredAssignments`) with its exact repair; a nested default names its
-line to remove, since `config unset` cannot remove it. It is never a refusal: `config show`,
-`status`, `update --check` and the init plan render it, `update --check` also as the structured
-`configuration` field of its JSON report for every local yard that loads, with the load refusals of
-the others on stderr, and `config unset` remains available at operator scopes. Config sync accepts
-and materializes a persisted one unchanged. The init plan names each owned `yx-*` extras device
-that the pending extras stage detaches, resolved as `09-yard-extras.sh` resolves it. A yard being
-registered, or one whose instance cannot be read before Incus converges, has nothing to detach. The
+it performs, and neither an evaluation error nor a required check of the name refuses loading.
+Persistent-settings parsing for `config set`/`unset`, `init` and config sync discards it the same
+way. A non-empty one is returned as configuration state (`Loaded.IgnoredAssignments`) with its
+exact repair; a nested default, which `config unset` cannot remove, names the exact replacement of
+its parameter on its line that keeps the other setting's value. It is never a refusal:
+`config show`, `status`, `update --check` and the init plan render it, `update --check` also as the
+structured `configuration` field of its JSON report for every local yard that loads, with the load
+refusals of the others on stderr, and `config unset` remains available at operator scopes. Config
+sync accepts and materializes a persisted one unchanged. The init plan names each owned `yx-*`
+extras device that the pending extras stage detaches, resolved as `09-yard-extras.sh` resolves it.
+A declaration refusal refuses planning. A yard without an instance detaches nothing. When the
+instance cannot be read, for example while Incus is stopped, the plan names each device the ignored
+operator assignments requested and no selected profile requests, as detached if attached. The
 extras stage observation carries each declared device of a VM yard as a "not applicable to VM
 yards" diagnostic that `init` renders on the converged stage; it is readiness state, not a refusal
 or a warning.

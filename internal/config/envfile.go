@@ -33,17 +33,19 @@ func ReadAssignmentsOver(path string, base map[string]string) (map[string]string
 	return result, nil
 }
 
+// AssignedSettingNames lists the settings an operator file assigns. A
+// profile-only assignment is discarded as the loader discards it.
 func AssignedSettingNames(path string) ([]string, error) {
 	values := environment{}
 	seen := map[string]struct{}{}
 	var result []string
-	if err := applyEnvFileObserved(path, values, func(name, _ string, _ int) {
+	if err := applyEnvFileObservedRetired(path, values, func(name, _ string, _ int) {
 		if _, exists := seen[name]; exists {
 			return
 		}
 		seen[name] = struct{}{}
 		result = append(result, name)
-	}); err != nil {
+	}, IsProfileOnlySetting); err != nil {
 		return nil, err
 	}
 	sort.Strings(result)
@@ -81,15 +83,30 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 // retired settings always, plus those match selects. Neither such an
 // assignment nor any nested default it performs changes values or reaches the
 // observer, so later records never see it. report, when set, receives each
-// discarded assignment; nested marks a default performed inside another
-// record's expression.
+// discarded assignment. A discarded profile-only expression never refuses:
+// an evaluation error, or a required check of the name, is ignored with it.
 type discardPolicy struct {
 	match  func(string) bool
-	report func(name, value string, nested bool)
+	report func(discardedValue)
+}
+
+// discardedValue is one discarded assignment. A nested one is a default
+// performed inside another record's expression: Expression is its exact
+// parameter text and Replacement the text that keeps that record's value.
+type discardedValue struct {
+	Name, Value             string
+	Expression, Replacement string
+	Nested                  bool
 }
 
 func (policy discardPolicy) discards(name string) bool {
 	return isRetiredSetting(name) || policy.match != nil && policy.match(name)
+}
+
+// operatorDiscardPolicy is the policy for operator-authored files: they may
+// still contain profile-only settings, which only environment profiles declare.
+func operatorDiscardPolicy(report func(discardedValue)) discardPolicy {
+	return discardPolicy{match: IsProfileOnlySetting, report: report}
 }
 
 func applyEnvReaderObserved(reader io.Reader, source string, values environment, observer assignmentObserver) error {
@@ -99,7 +116,7 @@ func applyEnvReaderObserved(reader io.Reader, source string, values environment,
 // applyEnvReaderObservedRetired evaluates every record under the discard
 // policy of retired (see discardPolicy). discarded, when set, receives each
 // discarded assignment with its record line.
-func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool, discarded func(name, value string, line int, nested bool)) error {
+func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool, discarded func(discardedValue, int)) error {
 	discardRetiredSettings(values)
 
 	scanner := bufio.NewScanner(reader)
@@ -132,7 +149,7 @@ func applyEnvReaderObservedRetired(reader io.Reader, source string, values envir
 		}
 		policy := discardPolicy{match: retired}
 		if discarded != nil {
-			policy.report = func(name, value string, nested bool) { discarded(name, value, recordLine, nested) }
+			policy.report = func(value discardedValue) { discarded(value, recordLine) }
 		}
 		if err := applyRecordRetired(record.String(), values, recordObserver, policy); err != nil {
 			return sourceContext(source, recordLine, recordSettingKey(record.String()), "scalar settings", err)
@@ -211,7 +228,7 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	value, expand := decodeValue(raw)
 	if expand {
 		expanded, err := expandValue(value, values, observer, inner)
-		if err != nil && !(discard && policy.report != nil && IsProfileOnlySetting(name)) {
+		if err != nil && !(discard && IsProfileOnlySetting(name)) {
 			return err
 		}
 		// An ignored profile-only expression never refuses loading; its
@@ -222,7 +239,7 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	}
 	if discard {
 		if policy.report != nil {
-			policy.report(name, value, false)
+			policy.report(discardedValue{Name: name, Value: value})
 		}
 		return nil
 	}
@@ -346,6 +363,10 @@ func expandParameter(
 		if err != nil {
 			return "", err
 		}
+		if operator == ":?" && discard && IsProfileOnlySetting(name) {
+			// Operators never assign it, so a required check of it is ignored too.
+			return "", nil
+		}
 		if operator == ":?" {
 			if expanded == "" {
 				expanded = name + " is required"
@@ -358,7 +379,13 @@ func expandParameter(
 				observer(name, expanded)
 			}
 			if discard && policy.report != nil {
-				policy.report(name, expanded, true)
+				// Replacing the parameter with its fallback keeps the record's
+				// value; a fallback that itself assigns is frozen to its value.
+				replacement := fallback
+				if strings.Contains(fallback, ":=") {
+					replacement = expanded
+				}
+				policy.report(discardedValue{Name: name, Value: expanded, Expression: "${" + expression + "}", Replacement: replacement, Nested: true})
 			}
 		}
 		return expanded, nil

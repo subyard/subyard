@@ -137,9 +137,11 @@ func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
 	if loaded.Environment["LIMITS_MEMORY"] != "2GiB" || loaded.Environment["YARD_DEVICES"] != "" {
 		t.Fatalf("nested default leaked: LIMITS_MEMORY=%q YARD_DEVICES=%q", loaded.Environment["LIMITS_MEMORY"], loaded.Environment["YARD_DEVICES"])
 	}
-	// config unset cannot remove a nested default, so the repair names its line.
-	if ignored := loaded.IgnoredAssignments(); len(ignored) != 1 || !ignored[0].Nested || ignored[0].Repair() != "remove line 1 from "+host ||
-		ignored[0].String() != "YARD_DEVICES in "+host+":1 is ignored: only environment profiles declare it; remove that line" {
+	// config unset cannot remove a nested default, so the repair replaces it
+	// in its line and keeps the other setting's value.
+	if ignored := loaded.IgnoredAssignments(); len(ignored) != 1 || !ignored[0].Nested ||
+		ignored[0].Repair() != `replace "${YARD_DEVICES:=2GiB}" with "2GiB" on line 1 of `+host ||
+		ignored[0].String() != "YARD_DEVICES in "+host+`:1 is ignored: only environment profiles declare it; replace "${YARD_DEVICES:=2GiB}" with "2GiB" on that line` {
 		t.Fatalf("nested assignment observations = %q", renderedIgnored(loaded))
 	}
 
@@ -155,6 +157,15 @@ func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
 	}
 	if got := renderedIgnored(loaded); len(got) != 2 || !strings.HasPrefix(got[0], "YARD_CAPS in "+host+":1 ") || !strings.HasPrefix(got[1], "YARD_DEVICES in "+host+":3 ") {
 		t.Fatalf("nested observations = %q", got)
+	}
+
+	// A required check of a discarded name never refuses either.
+	fixture.write(t, host, "YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n")
+	if loaded, err = fixture.load("default", nil); err != nil || len(loaded.IgnoredAssignments()) != 1 {
+		t.Fatalf("a required check of an ignored name refused the load: %v %q", err, renderedIgnored(loaded))
+	}
+	if _, err := ParsePersistentAssignments(host, []byte("YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n")); err != nil {
+		t.Fatalf("persistent parse refused a required check of an ignored name: %v", err)
 	}
 
 	// Evaluating an ignored expression never refuses loading.
@@ -193,5 +204,30 @@ func TestIgnoredProfileOnlyRepairTargetsTheSourceFile(t *testing.T) {
 	ignored = loaded.IgnoredAssignments()
 	if len(ignored) != 1 || ignored[0].Path != nested || ignored[0].Repair() != "yard -Y box config unset YARD_DEVICES --scope yard --local" {
 		t.Fatalf("canonical registration repair = %#v", ignored)
+	}
+}
+
+// Every operator-file parse path discards a profile-only assignment as the
+// loader does: a failing expression refuses none, and the advertised config
+// unset still removes the assignment.
+func TestIgnoredProfileOnlyExpressionsParseOnEveryOperatorPath(t *testing.T) {
+	fixture := newProfileOnlyFixture(t)
+	path := filepath.Join(fixture.configHome, "config.env")
+	content := []byte("SSH_PORT=2290\nYARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\nLIMITS_MEMORY=\"${YARD_DEVICES:-2}GiB\"\n")
+	fixture.write(t, path, string(content))
+	assignments, err := ParsePersistentAssignments(path, content)
+	if err != nil {
+		t.Fatalf("persistent parse refused an ignored expression: %v", err)
+	}
+	if len(assignments) != 3 || assignments[1].Name != "YARD_DEVICES" || assignments[2].Value != "2GiB" {
+		t.Fatalf("persistent assignments = %#v", assignments)
+	}
+	names, err := AssignedSettingNames(path)
+	if err != nil || strings.Join(names, " ") != "LIMITS_MEMORY SSH_PORT" {
+		t.Fatalf("assigned names = %q, %v", names, err)
+	}
+	edited, err := EditPersistentAssignmentContent(path, content, "YARD_DEVICES", nil)
+	if err != nil || string(edited) != "SSH_PORT=2290\nLIMITS_MEMORY=\"${YARD_DEVICES:-2}GiB\"\n" {
+		t.Fatalf("config unset of an ignored expression = %q, %v", edited, err)
 	}
 }

@@ -140,8 +140,12 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 			desired = fmt.Sprintf("host NetworkManager and route safety; bridge DHCP/DNS and forwarding rules if UFW is active; native policy lock access for operator UID %d", os.Getuid())
 		}
 		consequence := desired
-		if native.Stage.ID == ports.ReconcileStageExtras && len(execution.extrasDetach) != 0 {
-			consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests: %s", yard.YardName, strings.Join(execution.extrasDetach, " "))
+		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && len(detach.Devices) != 0 {
+			consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests: %s", yard.YardName, strings.Join(detach.Devices, " "))
+			if detach.Unverified {
+				consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests, each if attached (the instance is not readable now): %s",
+					yard.YardName, strings.Join(detach.Devices, " "))
+			}
 		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
 			"native VerifyStage "+string(native.Stage.ID)+" returns converged", consequence, native.Converged, native.Conditional)
@@ -297,22 +301,18 @@ func (execution *provisionExecution) stateBinding() string {
 
 // assessExtrasDetach records the owned extras devices that the pending extras
 // stage detaches, so the plan names each device loss before confirmation. A
-// conditional extras stage counts too. A yard being registered has no instance
-// yet, and before Incus converges an unreadable instance cannot be inspected:
-// both have nothing to detach.
+// conditional extras stage counts too. A profile declaration refusal refuses
+// planning. A yard without an instance detaches nothing; when the instance
+// cannot be read, the plan names the devices ignored operator assignments
+// request as detached if attached.
 func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime reconcileruntime.Runtime) error {
-	execution.extrasDetach = nil
-	if execution.mode == initReset || execution.bootstrap != nil || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
+	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
+	if execution.mode == initReset || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
 		return step.Stage.ID == ports.ReconcileStageExtras && !step.Converged
 	}) {
 		return nil
 	}
-	detach, err := runtime.ExtrasDetachPlanned(ctx)
-	if err != nil && !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
-		return step.Stage.ID == ports.ReconcileStageIncus && step.Converged
-	}) {
-		return nil
-	}
+	detach, err := runtime.ExtrasDetachPlanned(ctx, execution.loaded.IgnoredAssignments())
 	if err != nil {
 		return fmt.Errorf("check init stage %q: %w", ports.ReconcileStageExtras, err)
 	}

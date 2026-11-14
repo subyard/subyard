@@ -85,7 +85,7 @@ type initExecution struct {
 	hookPlan                                    *reconcileruntime.ProjectHookPlan
 	hookProjects                                []domain.ProjectRecord
 	// extrasDetach names the owned extras devices the extras stage detaches.
-	extrasDetach []string
+	extrasDetach reconcileruntime.ExtrasDetach
 }
 
 type initExecutionLockKey struct{}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -21,9 +22,14 @@ type IgnoredAssignment struct {
 	Yard, Name, Scope, Path string
 	Line                    int
 	Git                     bool
+	// Value is the evaluated value the assignment would have supplied, or its
+	// unevaluated text when evaluation failed.
+	Value string
 	// Nested marks a default performed inside another assignment's expression,
-	// which config unset of the name cannot remove.
-	Nested bool
+	// which config unset of the name cannot remove. Replacing Expression with
+	// Replacement on its line removes it and keeps that assignment's value.
+	Nested                  bool
+	Expression, Replacement string
 	// authored reports that config unset at Scope writes exactly Path and
 	// removes the assignment.
 	authored bool
@@ -33,12 +39,15 @@ type IgnoredAssignment struct {
 func (assignment IgnoredAssignment) Command() bool { return assignment.Scope == "command" }
 
 // Repair is the exact action that removes the assignment: the config unset
-// command when it writes the file the value came from, otherwise the file
-// line to remove. It is "" for the command environment.
+// command when it writes the file the value came from, the in-line
+// replacement for a nested default, otherwise the file line to remove. It is
+// "" for the command environment.
 func (assignment IgnoredAssignment) Repair() string {
 	switch {
 	case assignment.Command():
 		return ""
+	case assignment.Nested:
+		return fmt.Sprintf("replace %s with %s on line %d of %s", strconv.Quote(assignment.Expression), strconv.Quote(assignment.Replacement), assignment.Line, assignment.Path)
 	case assignment.authored:
 		storage := "--local"
 		if assignment.Git {
@@ -55,7 +64,10 @@ func (assignment IgnoredAssignment) String() string {
 		return assignment.Name + " in the command environment is ignored: only environment profiles declare it; unset it"
 	}
 	repair := "remove that line"
-	if assignment.authored {
+	switch {
+	case assignment.Nested:
+		repair = fmt.Sprintf("replace %s with %s on that line", strconv.Quote(assignment.Expression), strconv.Quote(assignment.Replacement))
+	case assignment.authored:
 		repair = "remove it with " + assignment.Repair()
 	}
 	return fmt.Sprintf("%s in %s:%d is ignored: only environment profiles declare it; %s",
@@ -69,13 +81,14 @@ func (loaded Loaded) IgnoredAssignments() []IgnoredAssignment {
 
 // observeProfileOnly records a non-empty operator assignment of a
 // profile-only setting; empty ones are tolerated.
-func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, value, path string, line int, nested bool) {
-	if !IsProfileOnlySetting(name) || strings.TrimSpace(value) == "" {
+func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, value discardedValue, path string, line int) {
+	if !IsProfileOnlySetting(value.Name) || strings.TrimSpace(value.Value) == "" {
 		return
 	}
 	definition := tracker.layers[layer]
 	tracker.ignored = append(tracker.ignored, IgnoredAssignment{
-		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "), Nested: nested,
+		Name: value.Name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "),
+		Value: value.Value, Nested: value.Nested, Expression: value.Expression, Replacement: value.Replacement,
 	})
 }
 

@@ -580,7 +580,8 @@ func TestProfileOnlySettingsAreIgnoredAndReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, host, string(settings)+"YARD_CAPS=fuse\n", 0o600)
-	writeCLIFile(t, yard, "YARD_TEMPLATE=hostless\nYARD_DEVICES=gpu\n", 0o600)
+	// An ignored expression that cannot be evaluated refuses neither init nor unset.
+	writeCLIFile(t, yard, "YARD_TEMPLATE=hostless\nYARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\n", 0o600)
 	environment = append(environment, "YARD_MOUNTS=cache:/srv/cache:rw:0755")
 	want := []string{
 		"ignored: YARD_CAPS in " + host + ":" + strconv.Itoa(strings.Count(string(settings), "\n")+1) + " is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_CAPS --scope host --local",
@@ -1851,7 +1852,7 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 	extras := application.ReconcileStage{ID: ports.ReconcileStageExtras, Label: "yard extras"}
 	execution := &initExecution{mode: initReconcile, loaded: config.Loaded{Context: domain.Context{YardName: "box", IncusProject: "subyard-box", YardInstanceName: "yard-box"}}}
 	execution.plan = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: extras, Diagnostic: `YARD_DEVICES entry "kvm" in /p/profile.conf is not applicable to VM yards`}}}
-	execution.extrasDetach = []string{"yx-dev-dri-renderD128", "yx-dev-fuse"}
+	execution.extrasDetach = reconcileruntime.ExtrasDetach{Devices: []string{"yx-dev-dri-renderD128", "yx-dev-fuse"}}
 	steps := execution.operationSteps()
 	index := slices.IndexFunc(steps, func(step domain.OperationStep) bool { return step.ID == "init.stage.extras" })
 	if index < 0 {
@@ -1862,7 +1863,12 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 		step.Observed != "not converged" || step.Decision != domain.StepApply {
 		t.Fatalf("extras step = %#v", step)
 	}
-	execution.extrasDetach = nil
+	// An unreadable instance names possible losses, each if attached.
+	execution.extrasDetach.Unverified = true
+	if step := execution.operationSteps()[index]; step.Consequence != "yard box: detaches devices no selected profile requests, each if attached (the instance is not readable now): yx-dev-dri-renderD128 yx-dev-fuse" {
+		t.Fatalf("unverified extras step = %#v", step)
+	}
+	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
 	execution.plan.Steps[0].Converged = true
 	step = execution.operationSteps()[index]
 	if step.Consequence != "yard extras" || step.Observed != `converged; YARD_DEVICES entry "kvm" in /p/profile.conf is not applicable to VM yards` {
@@ -1870,27 +1876,52 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 	}
 }
 
-// Before Incus is installed the conditional extras stage still plans, and its
-// detach preview reads nothing: a cold init must reach the Incus stage.
-func TestInitExtrasDetachPreviewNeedsNoIncusBeforeItConverges(t *testing.T) {
+// A cold host has no instance to inspect, so its conditional extras stage
+// plans without Incus. An unreadable instance on an installed host still
+// discloses the ignored operator devices; a declaration refusal still refuses.
+func TestInitExtrasDetachPreviewReadsNoIncusOnColdHost(t *testing.T) {
 	stages := application.InitStages(domain.Context{IncusProject: "subyard", YardInstanceName: "yard"})
 	incusStage, extrasStage := stages[0], stages[slices.IndexFunc(stages, func(stage application.ReconcileStage) bool { return stage.ID == ports.ReconcileStageExtras })]
-	missing := errors.New("dial unix /var/lib/incus/unix.socket: connect: no such file or directory")
-	runtime := reconcileruntime.Runtime{RepositoryRoot: testkit.TempDir(t), Incus: &testkit.Incus{Err: missing},
+	root, devices := testkit.TempDir(t), testkit.TempDir(t)
+	writeCLIFile(t, filepath.Join(devices, "kvm"), "", 0o600)
+	incus := &testkit.Incus{Err: errors.New("dial unix /var/lib/incus/unix.socket: connect: no such file or directory")}
+	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: incus, HostDeviceRoot: devices,
 		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard"}}
-	execution := &initExecution{mode: initReconcile, extrasDetach: []string{"stale"}}
+	execution := &initExecution{mode: initReconcile}
 	execution.plan = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: incusStage}, {Stage: extrasStage, Conditional: true}}}
-	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || execution.extrasDetach != nil {
-		t.Fatalf("cold init detach preview = %q, %v", execution.extrasDetach, err)
+	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || len(execution.extrasDetach.Devices) != 0 {
+		t.Fatalf("cold init detach preview = %#v, %v", execution.extrasDetach, err)
 	}
-	// Once Incus is converged, an unreadable instance is a planning refusal.
-	execution.plan.Steps[0].Converged = true
-	if err := execution.assessExtrasDetach(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), `check init stage "extras"`) {
-		t.Fatalf("converged Incus hid an instance read failure: %v", err)
+	// Incus stopped on an installed host: the ignored kvm device is named.
+	home := testkit.TempDir(t)
+	configHome := filepath.Join(home, ".config", "subyard")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	// A yard being registered has no instance to inspect.
-	execution.bootstrap = &initBootstrap{}
-	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || execution.extrasDetach != nil {
-		t.Fatalf("registration detach preview = %q, %v", execution.extrasDetach, err)
+	writeCLIFile(t, filepath.Join(configHome, "config.env"), "YARD_DEVICES=kvm\n", 0o600)
+	var err error
+	execution.loaded, err = config.Load(config.LoadOptions{RepositoryRoot: repositoryRoot(t), OperatorHome: home, DisablePrivate: true,
+		Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || !execution.extrasDetach.Unverified || strings.Join(execution.extrasDetach.Devices, " ") != "yx-dev-kvm" {
+		t.Fatalf("unreadable instance hid the ignored device: %#v, %v", execution.extrasDetach, err)
+	}
+	// A leftover instance of a yard being registered is inspected too.
+	incus.Err, execution.bootstrap = nil, &initBootstrap{}
+	incus.Instances = map[string]ports.InstanceInfo{"subyard/yard": {Name: "yard", Project: "subyard", LocalDevices: map[string]map[string]string{"yx-dev-kvm": {}}}}
+	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || execution.extrasDetach.Unverified || strings.Join(execution.extrasDetach.Devices, " ") != "yx-dev-kvm" {
+		t.Fatalf("leftover instance detach = %#v, %v", execution.extrasDetach, err)
+	}
+	// A declaration refusal refuses planning even when Incus is unreadable.
+	incus.Err = errors.New("Incus is stopped")
+	if err := os.MkdirAll(filepath.Join(root, "config", "profiles", "bad"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "config", "profiles", "bad", "profile.conf"), "YARD_DEVICES='tape'\n", 0o600)
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=bad"}
+	if err := execution.assessExtrasDetach(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), `invalid YARD_DEVICES entry "tape"`) {
+		t.Fatalf("declaration refusal hidden: %v", err)
 	}
 }

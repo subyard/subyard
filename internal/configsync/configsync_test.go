@@ -1287,4 +1287,12 @@ func TestVersionedConfigSyncKeepsIgnoredProfileOnlyAssignments(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "DEV_UID=2233\nYARD_DEVICES=gpu\n", 0o600)
+
+	// An ignored expression that cannot be evaluated refuses no sync either.
+	failing := newSyncFixture(t, "owner-a")
+	failing.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\nYARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\n")
+	failing.commit("failing legacy device")
+	if _, err := BuildPlan(failing.options(false)); err != nil {
+		t.Fatalf("sync refused an ignored failing expression: %v", err)
+	}
 }

@@ -116,17 +116,20 @@ is the authoritative explanation of the actual chain, including derived values. 
 
 `YARD_MOUNTS`, `YARD_CAPS` and `YARD_DEVICES` belong to environment profiles. Only a selected
 profile's own `profile.conf` declares them, and operator values never reach its evaluation:
-select the profile instead. `config set` refuses to assign them. The loader ignores a value already
-in a host, shared, yard or Git settings file, or in the command environment, as it ignores retired
-settings, and no operation refuses because of it. `config show`, `status`, `yard update --check`
-and the `init` plan report each non-empty one as configuration state, not as a warning, with its
-file and line and its removal: `yard -Y NAME config unset NAME --scope SCOPE --local` (or
-`--git`) when that command writes the file, otherwise the line to remove from that file, such as a
-flat `yards/NAME.env` registration. The JSON report of `update --check` carries them in its
-`configuration` array. If such a value supplied a device, the `init` plan names each device that
-the extras stage now detaches. A VM yard does not apply a profile's container-only
-`YARD_DEVICES`; the `init` plan reports each entry as not applicable to VM yards on the
-converged extras stage.
+select the profile instead. `config set` refuses to assign them. The loader ignores a value
+already in a host, shared, yard or Git settings file, or in the command environment, as it
+ignores retired settings, and no operation refuses because of it. `config show`, `status`,
+`yard update --check` and the `init` plan report each non-empty one as configuration state, not
+as a warning, with its file and line and its removal:
+`yard -Y NAME config unset NAME --scope SCOPE --local` (or `--git`) when that command writes the
+file, otherwise the line to remove from that file, such as a flat `yards/NAME.env` registration.
+A default of the setting inside another assignment, such as
+`LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"`, names the replacement that keeps the other value. The
+JSON report of `update --check` carries them in its `configuration` array. If such a value
+supplied a device, the `init` plan names each device that the extras stage now detaches; while
+the yard's instance cannot be read, it names the devices those values requested, each detached if
+attached. A VM yard does not apply a profile's container-only `YARD_DEVICES`; the `init` plan
+reports each entry as not applicable to VM yards on the converged extras stage.
 
 `init` validates the effective `INCUS_PROJECT` before confirmation or host changes, including
 with `--reset` and `--configs`. Incus project names cannot contain underscores, must start and
