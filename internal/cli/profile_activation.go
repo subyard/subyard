@@ -346,7 +346,7 @@ func (reconciler *profileRuntimeActivationReconciler) pendingFacts(target config
 		Inputs: digest,
 		// Each yard's finding is its own readiness blocker, so this bounded
 		// message and its init step never depend on the number of yards.
-		Message: fmt.Sprintf("yard %[1]s: profile %[2]s runtime failed (diagnose: yard -Y %[1]s profile status %[2]s); "+
+		Message: fmt.Sprintf("yard %[1]s: profile %[2]s runtime failed (diagnose: yard -Y %[1]s profile list); "+
 			"profile not applied; fix it and run yard -Y %[1]s init, or run yard -Y %[1]s profile disable %[2]s then init", yard, definition.Name),
 	}, nil
 }

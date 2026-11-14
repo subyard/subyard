@@ -1244,7 +1244,7 @@ release work remains, findings are warnings, so `yard migrate` still plans and r
 `yard migrate` and `yard update` then exit non-zero; their result names every finding within the
 diagnostic bound and states that the release is ready, and `yard migrate --check`, `config status`
 and `yard status` show each one. A finding names the yard, the profile, the diagnostic command
-`yard -Y NAME profile status ID`, that the profile is not applied, and both exits: fix the cause and
+`yard -Y NAME profile list`, that the profile is not applied, and both exits: fix the cause and
 run `yard -Y NAME init`, which repeats the same apply from the partial state, or run
 `yard -Y NAME profile disable ID` and then init.
 
