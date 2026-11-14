@@ -715,8 +715,8 @@ packages the transported worktree the same way. It changes
 network policy only inside the disposable VM and does not enable isolation on the operator's host.
 The skill's risk criteria determine whether the focused network lane needs broader lifecycle coverage.
 
-The operator-extras upgrade lane installs published 0.27.0 with a host-scope `YARD_DEVICES=fuse`,
-checks the attached `yx-dev-fuse`, then updates to the frozen candidate. The candidate must disclose
+The operator-extras upgrade lane installs published 0.27.0 with a host-scope `YARD_DEVICES=kvm`,
+checks the attached `yx-dev-kvm`, then updates to the frozen candidate. The candidate must disclose
 the ignored assignment in `config show` and `update --check --json`, name the device in the
 unconfirmed `init` plan without changing it, remove it with the printed `config unset` and detach it
 on `init`:

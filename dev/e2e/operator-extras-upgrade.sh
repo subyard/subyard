@@ -23,7 +23,7 @@ name="extras-${STATE##*.}"
 name="${name,,}"
 project="subyard-$name" instance="yard-$name" launcher=''
 host_config=''
-device=yx-dev-fuse
+device=yx-dev-kvm
 
 die() { printf 'operator-extras-upgrade: %s\n' "$*" >&2; exit 2; }
 pass() { printf 'PASS: %s\n' "$*"; }
@@ -66,7 +66,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
-[ -c /dev/fuse ] || die 'the VM has no /dev/fuse for the operator device'
+[ -c /dev/kvm ] || die "the VM has no /dev/kvm for the operator device"
 bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
 export SUBYARD_OPERATOR_HOME="$STATE/home" SUBYARD_CONFIG_HOME="$STATE/config" SUBYARD_HOME="$STATE/data"
 export YARD_RUNTIME_ROOT="$STATE/runtime" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
@@ -92,7 +92,7 @@ launcher="$STATE/bin/yard"
 
 # The operator assignment the published release applies through a selected profile that
 # does not assign YARD_DEVICES itself, and that the candidate ignores.
-printf 'YARD_DEVICES=fuse\n' > "$host_config"
+printf 'YARD_DEVICES=kvm\n' > "$host_config"
 chmod 0600 "$host_config"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
 port=$((36000 + $$ % 10000))
