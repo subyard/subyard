@@ -47,7 +47,7 @@ yard_named() {
 yard() { yard_named "$YARD_NAME" "$@"; }
 
 cleanup() {
-  local original=$? cleanup_rc=0
+  local original=$? cleanup_rc=0 teardown_rc=0
   trap - EXIT INT TERM
   set +e
   # The refusal definition is never initialized; remove it so it cannot affect teardown.
@@ -60,7 +60,11 @@ cleanup() {
     install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
     printf 'SSH_PORT=64998\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
     chmod 0600 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
-    yard teardown --yes >&2 || cleanup_rc=3
+    # Label the outcome so a refused teardown is not read as the failed stage's output.
+    printf 'test-vms-client_e2e_cleanup=teardown state=start\n' >&2
+    yard teardown --yes >&2 || teardown_rc=$?
+    printf 'test-vms-client_e2e_cleanup=teardown state=end exit_code=%s\n' "$teardown_rc" >&2
+    [ "$teardown_rc" -eq 0 ] || cleanup_rc=3
   fi
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-test-vms-client.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = test-vms-client-yard-e2e-v1 ]; then

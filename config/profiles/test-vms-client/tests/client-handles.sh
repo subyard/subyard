@@ -102,7 +102,9 @@ case "$command" in
     ;;
   release\ *)
     log release
-    if [ -e "$FAKE/release-rejected" ]; then
+    if [ -e "$FAKE/release-error-code-ok" ]; then
+      printf '%s\n' '{"schema_version":1,"status":"error","code":"ok"}'
+    elif [ -e "$FAKE/release-rejected" ]; then
       printf '%s\n' '{"schema_version":1,"status":"error","code":"quarantined","message":"slot fencing or stop failed"}'
     elif [ -e "$FAKE/renew-fails" ]; then
       printf '%s\n' '{"schema_version":1,"status":"error","code":"lease_lost","message":"lease is no longer current"}'
@@ -319,6 +321,19 @@ grep -Eq '^E2E_RELEASE state=end duration_seconds=[0-9]+ budget_seconds=180 grac
   || fail 'an unconfirmed release was recorded as a successful cleanup'
 [ ! -e "$TMP/client/handles/$handle" ] || fail 'lost handle was kept after release'
 rm -f "$TMP/renew-fails"
+
+# Only the reply status releases: a refusal whose code reads "ok" keeps the handle.
+: > "$TMP/facade.log"
+handle="$(client acquire --yard test-yard --slot 2 2>/dev/null)"
+touch "$TMP/release-error-code-ok"
+if client release "$handle" 2>"$TMP/err"; then fail 'an error reply with code ok released the handle'; fi
+grep -Fq "release rejected for handle=$handle slot=slot-002 (ok)" "$TMP/err" \
+  && grep -Eq '^E2E_RELEASE state=end duration_seconds=[0-9]+ budget_seconds=180 grace_seconds=5 exit_code=1$' "$TMP/err" \
+  && ! grep -Fq 'E2E lease released' "$TMP/err" \
+  || fail "an error reply with code ok was recorded as released: $(cat "$TMP/err")"
+[ -f "$TMP/client/handles/$handle/lease.json" ] || fail 'a refused release removed the handle'
+rm -f "$TMP/release-error-code-ok"
+client release "$handle" 2>/dev/null || fail 'release after a refused release failed'
 
 # Refusals leave no handle and keep the typed outcome and holder.
 for scenario in busy capacity; do
