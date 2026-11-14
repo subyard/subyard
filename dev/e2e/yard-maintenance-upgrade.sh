@@ -48,7 +48,7 @@ install -d "$RELEASE_ROOT"
 cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
 chmod -R a+rX "$RELEASE_ROOT"
 operator_env bash -c 'printf "%s\n" "AGENTS=none" "CODING_TOOL_INTEGRATIONS=" "ENVIRONMENT_PROFILES=" "YARD_IMAGE=subyard-e2e-debian-13-cloud-container" "YARD_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container" "DEV_UID=2000" > "$HOME/.config/subyard/config.env"; chmod 0600 "$HOME/.config/subyard/config.env"'
-read -r creation installer_sha archive_sha < <(awk -F '\t' '$1=="0.21.3"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
+read -r creation installer_sha archive_sha _ < <(awk -F '\t' '$1=="0.21.3" && $4=="pin"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
 [ "$creation" = 0.21.3 ] || die 'creation baseline missing'
 curl -fsSL --proto '=https' --tlsv1.2 "https://github.com/Subyard/Subyard/releases/download/v$creation/subyard-install.sh" -o "$INSTALLER"
 [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$installer_sha" ] || die 'creation installer changed'
@@ -82,7 +82,7 @@ grants() { local name value; for name in weighted z-last; do value="$(lowlevel "
 [ "$(grants)" = 'weighted= z-last= ' ] || die 'VM yards already carry the VM start policy grant'
 # Published 0.28.0 pins the project grant that its own VM start policy writes, so its
 # direct update stops at the first restarted VM yard and keeps the old release active.
-read -r stuck _ archive_sha < <(awk -F '\t' '$1=="0.28.0"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
+read -r stuck _ archive_sha _ < <(published_anchor)
 [ "$stuck" = 0.28.0 ] || die 'stuck baseline missing'
 rc=0
 operator_yard update --version "$stuck" --yes > "$STATE_ROOT/stuck.log" 2>&1 || rc=$?

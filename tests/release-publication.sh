@@ -94,6 +94,7 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
 
 
 REAL_RELEASE_SCOPE = m.release_scope
+REAL_BASELINE_REFUSALS = m.published_upgrade_baseline_refusals
 ORDINARY_LEVEL = {"level": "ordinary", "reason": "no migration or update-contract changes since v1.2.2",
                   "baseline": "v1.2.2", "migration_changes": []}
 
@@ -666,6 +667,7 @@ class Contracts(unittest.TestCase):
         self.output, self.frozen, self.document = accepted(self.directory, self.prepared, self.identity)
         self.github = FakeGitHub(self.identity)
         self.enterContext(patch.object(m, "release_scope", return_value=("v1.2.2", [])))
+        self.enterContext(patch.object(m, "published_upgrade_baseline_refusals", return_value=[]))
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -818,6 +820,56 @@ class Contracts(unittest.TestCase):
         for reason in ("", " ", "two\nlines", "x" * 501):
             with self.assertRaisesRegex(ValueError, "one line"):
                 m.release_level("full", reason, changed)
+
+    def test_published_baseline_requires_known_scope_and_a_pinned_previous_release(self):
+        repository = self.directory / "baseline-repository"
+        repository.mkdir()
+        def git(*arguments):
+            return subprocess.check_output(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                            "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *arguments],
+                                           cwd=repository, text=True).strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "fixture")
+        with patch.object(m, "ROOT", repository), patch.object(m, "release_scope", side_effect=REAL_RELEASE_SCOPE):
+            self.assertIn("fetch release tags", REAL_BASELINE_REFUSALS("1.2.3", "HEAD")[0])
+            git("tag", "v1.2.2")
+            self.assertIn("cannot read", REAL_BASELINE_REFUSALS("1.2.3", "HEAD")[0])
+            pins = repository / "dev/e2e/published-upgrade-baselines.tsv"
+            pins.parent.mkdir(parents=True)
+            pins.write_text("1.2.1\t" + "a" * 64 + "\t" + "b" * 64 + "\tdirect\n")
+            git("add", "dev")
+            git("commit", "-q", "-m", "fixture pins")
+            self.assertIn("v1.2.2 is missing", REAL_BASELINE_REFUSALS("1.2.3", "HEAD")[0])
+            with pins.open("a") as stream:
+                stream.write("1.2.2\t" + "c" * 64 + "\t" + "d" * 64 + "\tdirect\n")
+            # A dirty pin must not authorize a candidate that lacks it.
+            self.assertIn("v1.2.2 is missing", REAL_BASELINE_REFUSALS("1.2.3", "HEAD")[0])
+            pins.write_text(pins.read_text().replace("1.2.2\t" + "c" * 64 + "\t" + "d" * 64 + "\tdirect", "1.2.2\t" + "c" * 64 + "\t" + "d" * 64 + "\trefusal"))
+            git("add", "dev")
+            git("commit", "-q", "-m", "refusal fixture pin")
+            self.assertIn("v1.2.2 is missing", REAL_BASELINE_REFUSALS("1.2.3", "HEAD")[0])
+            pins.write_text(pins.read_text().replace("\trefusal\n", "\tdirect\n"))
+            git("add", "dev")
+            git("commit", "-q", "-m", "complete fixture pins")
+            self.assertEqual(REAL_BASELINE_REFUSALS("1.2.3", "HEAD"), [])
+            # An unmerged hotfix is still the latest published release.
+            git("switch", "-q", "-c", "hotfix")
+            git("commit", "-q", "--allow-empty", "-m", "side-branch hotfix")
+            git("tag", "v1.2.3")
+            git("switch", "-q", "main")
+            self.assertEqual(subprocess.run(["git", "merge-base", "--is-ancestor", "v1.2.3", "HEAD"],
+                                          cwd=repository).returncode, 1)
+            self.assertIn("v1.2.3 is missing", REAL_BASELINE_REFUSALS("1.2.4", "HEAD")[0])
+            with pins.open("a") as stream:
+                stream.write("1.2.3\t" + "e" * 64 + "\t" + "f" * 64 + "\tanchor\n")
+            git("add", "dev")
+            git("commit", "-q", "-m", "pin side-branch release")
+            self.assertEqual(REAL_BASELINE_REFUSALS("1.2.4", "HEAD"), [])
+            # Hotfix branches retain the original three-column direct-pin format.
+            pins.write_text("\n".join("\t".join(line.split("\t")[:3]) for line in pins.read_text().splitlines()) + "\n")
+            git("add", "dev")
+            git("commit", "-q", "-m", "legacy hotfix pin format")
+            self.assertEqual(REAL_BASELINE_REFUSALS("1.2.4", "HEAD"), [])
 
     def test_accept_records_release_level_and_full_level_requires_every_vm_check(self):
         directory = self.directory / "r123-a1"
@@ -1973,6 +2025,7 @@ class WorkflowRef(unittest.TestCase):
         self.request = self.state_dir / "requests" / ("1.2.3-" + self.commit + ".json")
         self.branch = "release/1.2.3-" + self.commit[:12]
         self.dispatched = []
+        self.enterContext(patch.object(m, "published_upgrade_baseline_refusals", return_value=[]))
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -2015,6 +2068,13 @@ class WorkflowRef(unittest.TestCase):
         self.assertEqual(self.prepare(), 0)
         self.assertEqual(self.dispatched, ["0.26.y"])
         self.assertEqual(json.loads(self.request.read_text())["workflow_ref"], "0.26.y")
+
+    def test_missing_published_baseline_blocks_preparation_and_reports_other_refusals(self):
+        self.move_master()
+        with patch.object(m, "published_upgrade_baseline_refusals", return_value=["published release v1.2.2 is missing from the baseline matrix"]):
+            message = self.refused()
+        self.assertIn("no workflow ref runs candidate", message)
+        self.assertIn("published release v1.2.2 is missing", message)
 
     def test_each_release_workflow_file_must_match_the_candidate(self):
         for path in m.WORKFLOW_REF_FILES[1:]:

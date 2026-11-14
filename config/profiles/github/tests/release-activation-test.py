@@ -8,6 +8,7 @@ import os
 import signal
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -16,7 +17,8 @@ from unittest import mock
 
 
 GUEST = Path(__file__).parent/'e2e/release-activation-guest.sh'
-INSTALLER_SHA = 'eeacda9ded1cc4c095ecc1e0569cf6fd96a737b3af6ab30ce7804833e3d8f1d1'
+REPO = Path(__file__).resolve().parents[4]
+ANCHOR_VERSION, INSTALLER_SHA, _, _ = runpy.run_path(str(REPO/'dev/verify-release-upgrades.py'))['published_anchor'](REPO)
 
 
 def source_fixture(name):
@@ -142,6 +144,7 @@ class ActivationIdentityTest(unittest.TestCase):
     def test_controller_forwards_optional_native_wait_and_preserves_exit(self):
         controller = GUEST.with_name('release-activation.sh').read_text()
         parser = controller.split('for command in ', 1)[0]
+        parser = re.sub(r'^ROOT=.*$', 'ROOT='+shlex.quote(str(REPO)), parser, flags=re.MULTILINE)
         allocation = 'bash "$ROOT/dev/agent-e2e.sh"'+controller.rsplit('bash "$ROOT/dev/agent-e2e.sh"', 1)[1]
         script = parser + '''
 ROOT=/fixture
@@ -158,7 +161,7 @@ bash() { printf '%s\\n' "$@"; return 23; }
                 self.assertEqual(result.stdout.splitlines(), ['/fixture/dev/agent-e2e.sh', *forwarded,
                     '--slot', '4', '--vm-count', '1', '--vm', '1', '--purpose', 'github-release-activation',
                     '--', 'timeout', '--signal=TERM', '--kill-after=360', '300', 'bash',
-                    'config/profiles/github/tests/e2e/release-activation-guest.sh', '--baseline', '0.19.0'])
+                    'config/profiles/github/tests/e2e/release-activation-guest.sh', '--baseline', ANCHOR_VERSION])
         for arguments in (['--wait'], ['--wait', ''], ['--wait', 'invalid'],
                           ['--wait', '1s', '--wait', '2s']):
             with self.subTest(arguments=arguments):
@@ -176,7 +179,7 @@ bash() { printf '%s\\n' "$@"; return 23; }
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 2)
 
-    def identity(self, version='0.21.0', baseline='0.20.0', **changes):
+    def identity(self, version='0.29.0', baseline=ANCHOR_VERSION, **changes):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             metadata = Path(temporary)/'candidate.json'
             value = dict(version=version,
@@ -188,8 +191,8 @@ bash() { printf '%s\\n' "$@"; return 23; }
                 capture_output=True, text=True, check=False)
 
     def test_current_and_original_candidate_select_greater_synthetic_successor(self):
-        for candidate, baseline, successor in (('0.21.0', '0.20.0', '0.21.1-activation-fixture'),
-                ('0.19.1-activation-e2e', '0.19.0', '0.19.2-activation-fixture')):
+        for candidate, baseline, successor in (('0.29.0', ANCHOR_VERSION, '0.29.1-activation-fixture'),
+                ('0.29.0-activation-e2e', ANCHOR_VERSION, '0.29.1-activation-fixture')):
             with self.subTest(candidate=candidate, baseline=baseline):
                 result = self.identity(candidate, baseline)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -198,7 +201,7 @@ bash() { printf '%s\\n' "$@"; return 23; }
     def test_mismatched_archive_checksum_or_predecessor_is_refused(self):
         for changes in ({'runtime_file': 'subyard-0.19.1-activation-e2e-linux-amd64.tar.gz'},
                 {'runtime_file': 'subyard-0.21.0-linux-riscv64.tar.gz'},
-                {'runtime_sha256': 'invalid'}, {'baseline': '0.21.0'}, {'version': '0.20.0'}):
+                {'runtime_sha256': 'invalid'}, {'baseline': '0.27.0'}, {'version': ANCHOR_VERSION}):
             with self.subTest(changes=changes):
                 self.assertNotEqual(self.identity(**changes).returncode, 0)
 

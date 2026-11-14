@@ -141,6 +141,77 @@ for scenario in absent present symlink dangling file teardown-failure; do
   esac
 done
 
+# Execute the disabled-components baseline setup with native effects replaced.
+# A ready anchor has local listener settings; Git only supplies integration selection.
+(
+  STATE_ROOT="$fixture/disabled-baseline"
+  OPERATOR_HOME="$STATE_ROOT/operator"
+  CONFIG_HOME="$OPERATOR_HOME/.config/subyard"
+  GIT_ROOT="$STATE_ROOT/git"
+  # Consumed by the actual fixture functions evaluated below.
+  # shellcheck disable=SC2034
+  TOKEN=123 MARKER=disabled-baseline OPERATOR="$(id -un)"
+  PROJECT_MUTATION_ARMED="$STATE_ROOT/default-armed"
+  EXTRA_PROJECT_ARMED="$STATE_ROOT/hermes-armed"
+  install -d -m 0700 "$CONFIG_HOME" "$OPERATOR_HOME/.subyard/runtime"
+  ln -s "$ROOT" "$OPERATOR_HOME/.subyard/runtime/current"
+  printf 'AGENTS=none\n' > "$CONFIG_HOME/config.env"
+  chmod 0600 "$CONFIG_HOME/config.env"
+  die() { fail "$@"; }
+  operator_env() { "$@"; }
+  sudo() {
+    [ "$1 $2" = '-n install' ] || fail 'unexpected privileged baseline setup'
+    install -d -m 0700 "$GIT_ROOT"
+  }
+  operator_yard() {
+    if [ "$1 $2 $3" = 'config sync connect' ]; then
+      ! grep -rEq '^SSH_PORT=' "$GIT_ROOT/source/hosts" || fail 'baseline authors SSH ports in Git'
+      grep -Fxq 'SSH_PORT=2222' "$CONFIG_HOME/yards/default/config.env"
+      grep -Fxq 'SSH_PORT=2233' "$CONFIG_HOME/yards/hermes/config.env"
+      grep -Fxq 'ENVIRONMENT_PROFILES="hermes github"' "$CONFIG_HOME/yards/hermes/config.env"
+      ! grep -q '^CODING_TOOL_INTEGRATIONS=' "$CONFIG_HOME/yards/hermes/config.env" \
+        || fail 'baseline masks inherited integration selection'
+      : > "$STATE_ROOT/sync-connected"
+      return
+    fi
+    [ -f "$STATE_ROOT/sync-connected" ] || fail 'init preceded config sync'
+    local name="$2" project=subyard
+    [ "$name" = default ] || project=subyard-hermes
+    case "$3" in
+      init)
+        [ ! -e "$STATE_ROOT/$project-marked" ] || fail 'project was precreated before published init'
+        : > "$STATE_ROOT/$project"
+        # The named yard exercises the same cached-image retry as the VM lane.
+        if [ "$name" = hermes ] && [ ! -f "$STATE_ROOT/$project-images" ]; then return 1; fi
+        : > "$STATE_ROOT/$project-ready" ;;
+      start) [ -f "$STATE_ROOT/$project-ready" ] && [ -f "$STATE_ROOT/$project-marked" ] ;;
+      *) fail 'unexpected baseline yard operation' ;;
+    esac
+  }
+  incus() {
+    case "$1 $2" in
+      'project show') [ -f "$STATE_ROOT/$3" ] ;;
+      'project set')
+        [ -f "$STATE_ROOT/$3" ] || fail 'project mutation preceded published init'
+        case "$4" in
+          features.images=false) : > "$STATE_ROOT/$3-images" ;;
+          user.p0-power-systemd=*) [ -f "$STATE_ROOT/$3-ready" ]; : > "$STATE_ROOT/$3-marked" ;;
+          *) fail 'unexpected project setting' ;;
+        esac ;;
+      'list --project') return 0 ;;
+      *) fail 'baseline precreated a native project' ;;
+    esac
+  }
+  setup="$(sed -n '/^seed_sources()/,/^assert_disabled()/p' "$PROFILE/tests/e2e/disabled-components-release.sh" | sed '$d')"
+  [ -n "$setup" ] || fail 'disabled baseline setup is missing'
+  eval "$setup"
+  seed_sources
+  create_yards
+  sha256sum -c "$STATE_ROOT/source.before" >/dev/null
+  [ "$(cat "$PROJECT_MUTATION_ARMED")" = "$MARKER" ] && [ "$(cat "$EXTRA_PROJECT_ARMED")" = "$MARKER" ]
+  [ -f "$STATE_ROOT/subyard-marked" ] && [ -f "$STATE_ROOT/subyard-hermes-marked" ]
+)
+
 # Execute the disabled-resource setup with stale preview admission at the CLI boundary.
 # Model currentReport (not internal Inspection): the public JSON has no plan token.
 cat > "$fixture/disabled-resource-contract.sh" <<'CONTRACT'

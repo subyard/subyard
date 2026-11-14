@@ -144,7 +144,7 @@ func TestInstalledGuestFactsSelectionPendingKeepsReadinessAndNativeBinding(t *te
 	}
 	observe := func(selection string, exit int) ports.RuntimeObservation {
 		t.Helper()
-		runtime.Environment = []string{"ALLOWS_CODING_TOOLS=false", "YARD_VERSION=0.25.6-test", "ENVIRONMENT_PROFILES=" + selection}
+		runtime.Environment = []string{"ALLOWS_CODING_TOOLS=false", "YARD_VERSION=0.29.0-test", "ENVIRONMENT_PROFILES=" + selection}
 		var nativeErr error
 		if exit != 0 {
 			nativeErr = &ports.GuestExitError{Code: exit}

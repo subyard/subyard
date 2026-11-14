@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -25,8 +26,8 @@ func TestReleaseTransitionWritesFilteredMigrationDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const target = "0.22.0-test-aaaaaaaaaaaa"
-	digest := writeSealedRollbackTarget(t, runtimeRoot, target, "0.22.0-test", registry)
+	const target = "0.29.0-test-aaaaaaaaaaaa"
+	digest := writeSealedRollbackTarget(t, runtimeRoot, target, "0.29.0-test", registry)
 	if err := os.Symlink("releases/"+target, filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
@@ -254,5 +255,185 @@ func TestMigrationDirectDiagnosticFiltersUnsafeNames(t *testing.T) {
 	message, retry := diagnostic.ActivationDiagnostic()
 	if strings.Contains(message+retry, "private") || strings.Contains(message, "/outside") || !strings.Contains(message, "safe-device") || !strings.Contains(message, "unrecognized name") {
 		t.Fatalf("direct unsafe-name filter failed: %q / %q", message, retry)
+	}
+}
+
+// Every printed step is followed through the engine: below the anchor the
+// installed release finishes its own journal first; an activated anchor journal is
+// replaced by the candidate. No step names a release that sends the user back.
+func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
+	for _, state := range []string{"authorized", "reconciling", "rollback"} {
+		t.Run(state, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			home, runtimeRoot := filepath.Join(root, "config-home"), filepath.Join(root, "runtime")
+			if err := os.MkdirAll(home, 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SUBYARD_HOME", root)
+			registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
+			writeReleaseTransitionTestFile(t, filepath.Join(root, "config/release-transition.json"), registry, 0600)
+			parsedRegistry, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsedRegistry), parsedRegistry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeReleaseTransitionTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), ledger, 0600)
+			anchorVersion := releaseruntime.UpdateAnchorVersion
+			candidateVersion := "0.29.0-test"
+			rollback := state == "rollback"
+			oldVersion := "0.27.0"
+			old, anchor, candidate := releasetransition.ReleaseID(oldVersion+"-aaaaaaaaaaaa"), releasetransition.ReleaseID(anchorVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
+			oldDigest := writeSealedRollbackTarget(t, runtimeRoot, string(old), oldVersion, registry)
+			anchorDigest := writeSealedRollbackTarget(t, runtimeRoot, string(anchor), anchorVersion, registry)
+			candidateDigest := writeSealedRollbackTarget(t, runtimeRoot, string(candidate), candidateVersion, registry)
+			from, target, direction, artifact := old, anchor, releasetransition.DirectionActivateTarget, anchorDigest
+			if rollback {
+				from, target, direction, artifact = anchor, old, releasetransition.DirectionActivatePrevious, oldDigest
+			}
+			if err := os.Symlink("releases/"+string(from), filepath.Join(runtimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			if rollback {
+				if err := os.Symlink("releases/"+string(target), filepath.Join(runtimeRoot, "previous")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			savedVersion := Version
+			Version = anchorVersion
+			t.Cleanup(func() { Version = savedVersion })
+			owner := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: home, Target: target, Direction: direction, ArtifactDigest: artifact}
+			reconciler := &processDriftReconciler{failOnce: true}
+			run := func(request releasetransition.ProcessRequest) releasetransition.ProcessResponse {
+				t.Helper()
+				response, err := executeReleaseTransitionRequest(context.Background(), root, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{reconciler}, nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response
+			}
+			plan := run(owner)
+			owner.Mode = releasetransition.ProcessConverge
+			owner.Execution = &releasetransition.Execution{Plan: plan.Inspection.Plan, Authorization: "confirmed"}
+			// Author the historical transaction without the candidate's fresh-admission
+			// guard: the anchor release permits both the forward hop and this compatible rollback.
+			interrupted := run(owner)
+			if interrupted.Outcome == nil || interrupted.Outcome.Status != releasetransition.StatusRecovering {
+				t.Fatalf("no interruption: %#v", interrupted)
+			}
+			store, err := releasetransition.NewPOSIXV2Store(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := releasetransition.ParseJournal(before.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preactivation := state == "authorized"
+			if preactivation {
+				journal.Checkpoint = releasetransition.JournalAuthorized
+				for _, link := range []string{"current", "previous"} {
+					if err := os.Remove(filepath.Join(runtimeRoot, link)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink("releases/"+string(from), filepath.Join(runtimeRoot, "current")); err != nil {
+					t.Fatal(err)
+				}
+				payload, err := releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.CompareAndSwapCurrentJournal(before, payload); err != nil {
+					t.Fatal(err)
+				}
+				before, err = store.ReadCurrentJournal()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: home, Target: candidate, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: candidateDigest}
+			Version = candidateVersion
+			refusal := releaseruntime.CheckSourcePolicy(context.Background(), request)
+			if preactivation || rollback {
+				next := "yard update && yard update"
+				if rollback {
+					next = "yard update && yard update --version " + anchorVersion + " && yard update"
+				}
+				if refusal == nil || !strings.Contains(refusal.Error(), "next: "+next) || strings.Count(refusal.Error(), "next:") != 1 {
+					t.Fatalf("unsafe continuation %q: %v", next, refusal)
+				}
+				// Step 1: plain yard update on the installed release resumes its own journal.
+				if err := releaseruntime.CheckSourcePolicy(context.Background(), owner); err != nil {
+					t.Fatal(err)
+				}
+				Version = anchorVersion
+				owner.Mode, owner.Execution = releasetransition.ProcessInspect, nil
+				resume := run(owner)
+				owner.Mode = releasetransition.ProcessConverge
+				owner.Execution = &releasetransition.Execution{Plan: resume.Inspection.Plan, Authorization: "confirmed"}
+				if finished := run(owner); finished.Outcome == nil || !finished.Outcome.ReachedGoal {
+					t.Fatalf("owner made no progress: %#v", finished)
+				}
+				Version = candidateVersion
+				refusal = releaseruntime.CheckSourcePolicy(context.Background(), request)
+				if rollback {
+					// Step 2: the completed old release updates to the anchor.
+					if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --version "+anchorVersion+" && yard update") || strings.Contains(refusal.Error(), "unfinished") {
+						t.Fatalf("completed owner repeated the same step: %v", refusal)
+					}
+					owner.Direction, owner.Target, owner.ArtifactDigest = releasetransition.DirectionActivateTarget, anchor, anchorDigest
+					owner.Mode, owner.Execution, owner.Replacement = releasetransition.ProcessInspect, nil, nil
+					Version = anchorVersion
+					plan = run(owner)
+					owner.Mode = releasetransition.ProcessConverge
+					owner.Execution = &releasetransition.Execution{Plan: plan.Inspection.Plan, Authorization: "confirmed"}
+					if result := run(owner); result.Outcome == nil || !result.Outcome.ReachedGoal {
+						t.Fatalf("anchor hop failed: %#v", result)
+					}
+					Version = candidateVersion
+					refusal = releaseruntime.CheckSourcePolicy(context.Background(), request)
+				}
+				if refusal != nil {
+					t.Fatalf("completed anchor sent back: %v", refusal)
+				}
+			} else {
+				if refusal != nil {
+					t.Fatalf("activated anchor rejected the candidate: %v", refusal)
+				}
+				// Ordinary inspection follows the journal's goal; only an explicit
+				// newer selection requests a different goal and replacement.
+				ordinary := request
+				ordinary.Target = journal.Goal.Target
+				inspection := run(ordinary).Inspection
+				if inspection == nil || inspection.Outcome == nil || inspection.Outcome.Retry == "" || strings.Contains(inspection.Outcome.Retry, "--version "+anchorVersion) {
+					t.Fatalf("plain inspection lost engine recovery: %#v", inspection)
+				}
+				request.Replacement = &releasetransition.JournalReplacement{Transaction: journal.Transaction, Fingerprint: before.Fingerprint, Reason: releasetransition.JournalReplacementNewerRelease}
+			}
+			inspection := run(request).Inspection
+			if inspection == nil || len(inspection.Blockers) != 0 || inspection.Resume != nil {
+				t.Fatalf("next step did not advance: %#v", inspection)
+			}
+			request.Mode = releasetransition.ProcessConverge
+			request.Execution = &releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"}
+			completed := run(request)
+			if completed.Outcome == nil || !completed.Outcome.ReachedGoal {
+				t.Fatalf("candidate failed: %#v", completed)
+			}
+			if request.Replacement != nil {
+				path := filepath.Join(home, "release-transition-replaced-journals/v1", string(journal.Transaction)+"-"+string(before.Fingerprint)+".json")
+				preserved, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(preserved, before.Payload) {
+					t.Fatalf("journal not preserved: %v", err)
+				}
+			}
+		})
 	}
 }

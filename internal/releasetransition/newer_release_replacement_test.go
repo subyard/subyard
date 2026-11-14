@@ -75,7 +75,9 @@ func requireNewerReleasePlan(t *testing.T, fixture *v2PostActivationRecoveryFixt
 }
 
 func TestNewerReleaseReplacesActivatedJournalAndKeepsItsBytes(t *testing.T) {
-	for _, checkpoint := range []JournalCheckpoint{JournalTargetActive, JournalReconciling} {
+	// The original From is below the update anchor. Replacement starts from
+	// activated state even if the switch preceded its checkpoint publication.
+	for _, checkpoint := range []JournalCheckpoint{JournalActivationIntent, JournalTargetActive, JournalReconciling} {
 		t.Run(string(checkpoint), func(t *testing.T) {
 			fixture, snapshot := newerReleaseFixture(t)
 			snapshot = rewriteNewerReleaseJournal(t, fixture, snapshot, func(journal *JournalRecord) {

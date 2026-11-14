@@ -141,7 +141,7 @@ make verify
 `make build` writes the ignored developer candidate `.build/yard` atomically and builds declared
 profile binaries under `.build/profiles/<name>/`. It also publishes the complete Go tooling
 runtime under `.build/runtime/current`. `make test` and `make verify` stage a source-compatible test version before Go consumers;
-targeted source-repair tests require `make build VERSION=0.22.0-test` first. A delivery gate may instead supply its
+targeted source-repair tests require `make build VERSION=0.29.0-test` first. A delivery gate may instead supply its
 once-built normal runtime through `SUBYARD_SOURCE_QUERY_TOOLING_ROOT`.
 `make verify` runs core and profile host-free
 checks together. Packaging builds the same declared binaries for the target architecture, excluding
@@ -259,82 +259,23 @@ retry removes staging. The normal transition validator still proves the full rec
 These local contracts complement the complete packaged compatibility gate below. Native ARM
 acceptance remains a CI result; cross-building does not establish it.
 
-This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
-downloads checksum-pinned v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1, v0.18.6 and v0.19.0 runtimes for the local architecture
-and verifies retired-source refusal/full-uninstall, the inclusive v0.11.0 source boundary, frozen and
-published updater contracts, and activation-only recovery. It confines all state to a temporary directory and interrupts only its own update process
-group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH`, `--activation-baseline-dir PATH`
-`--published-baseline-dir PATH` and `--source-baseline-dir PATH` to reuse downloaded official assets (including the legacy runtime
-installer). For a focused legacy-retirement regression, use `--only-legacy-retirement`.
-For a focused v0.17.3 regression, add `--only-activation-recovery`; publication requires
-the complete check after building the release assets.
+This Linux check needs Python 3 and Go for its empty-instance Incus API fixture.
+It runs checksum-pinned released callers through update and `--check` refusal below v0.28.0,
+requiring the exact anchor command and unchanged settings, runtime links and data. Sources before
+v0.11.0 retain staged full-uninstall and separate clean-install coverage. Use
+`--only-source-anchor` or `--only-legacy-retirement` for the corresponding focused check;
+publication requires the complete default invocation. Named `--*-baseline-dir` options reuse
+verified official assets. All mutable fixtures remain under `/tmp`.
 
-The check releases each successful normal, compatible-rollback and interrupted-update fixture
-immediately after its final assertions, retaining the shared bridge and control assets. Before
-preparation, after baseline assets arrive and before fixture installation, it compares `/tmp`
-available bytes and meaningful inode counts with a known unpacked archive lower bound for the
-selected cases. Unavailable archives, download/build/output overhead and the full peak remain
-unknown; passing the floor does not guarantee capacity or reserve space against concurrent work.
-Full peak usage and elapsed-time savings require measurement during the next complete gate.
+The old-source migration, rollback, original-owner recovery and migration-history process corpora
+are frozen in the v0.28.0 tag. Current Go tests retain V2 journal, checkpoint, frozen projection,
+evidence and recovery readers. Published v0.28.0 direct upgrades and the first-boundary-release
+chains from v0.11.0 and v0.27.0 cover the installed transition to the candidate on disposable VMs.
+The host-free verifier does not claim those physical contracts.
 
-The fresh recovery fixture preserves stopped-yard deferred evidence: equal migration epochs do
-not make its installed component contracts compatible with v0.11.2, which has no preview owner
-payload or runtime-owner advertisement. That branch requires typed rollback refusal with unchanged
-history; a separate compatible fixture proves successful matching-epoch rollback and forward update.
-
-For producer/delivery changes, `--only-runtime-recovery` runs actual v0.18.6
-caller continuation and eligible rollback plus exact sealed v0.17.3
-activation-only owner recovery. It retains the same published pins and does not
-replace the complete publication compatibility gate.
-
-The actual v0.18.6 cases retain completed history and authentically interrupted activation-only
-history, reproduce the released alias writer defect, stage verified repair tooling, require fresh source
-consent, and require separate original-owner recovery consent before ordinary upgrade. Use
-`--only-source-repair` for this focused check. It does not replace the complete released-caller matrix.
-
-The ordinary released-caller compatibility gate includes the unmodified, checksum-pinned
-v0.19.0 updater on both architectures: direct upgrade to the fixed candidate, a controlled
-activation observation failure after verified migration effects, preservation of the owning
-diagnostic during reread, and fresh-process resume without replaying completed migrations.
-It verifies retained config/data, checkpoint/projection and a normal readiness-gated command.
-`--only-direct-019` selects this vector alone; supplying the authentic custom predecessor flags
-adds that incident-specific history without making public CI depend on a private artifact.
-
-For the exact migration-ledger owner defect, `--only-migration-owner-replacement` additionally
-requires `--migration-owner-baseline-dir` containing the checksum-pinned official v0.21.0 Linux
-amd64 bundle and `--migration-owner-source-dir` / `--migration-owner-source-version` identifying
-an authentic retained predecessor. The fixture preserves both update generations' transaction
-evidence, reproduces the released reader failure, checks fresh consent, interrupts successor
-publication and resumes the ordinary V2 candidate journal. This local fixture uses observation-only
-Incus responses and does not establish installed Incus/systemd activation behavior.
-
-The default compatibility invocation also runs the migration-history process corpus.
-Checkpoint fixtures must pass supported source admission before and after repair; the legacy
-fixture must retain its exact known unsupported-history refusal. The controlled apply failure
-must preserve the public materialized-config diagnostic and retry, with one recorded exit37
-for the exact seeded command and stdin. Use
-`--only-migration-history` to isolate it and `--migration-history-baselines PATH` to reuse
-checksum-pinned `baseline-VERSION` directories. Add `--migration-history-case checkpoint`, `legacy`, or `cuts`
-with the focused flag to isolate a diagnostic; the default gate runs all cases. It retains authentic completed transactions
-from v0.18.6 → v0.19.0 and v0.11.2 → v0.18.1, then exercises the same packaged candidate's
-independent power and SSH-settings migrations, activation failure, fresh-process retry,
-ledger/checkpoint interruption, and refusal of changed evidence or stale consent. Runtime
-readiness must come from the ordinary update gate after migration completion.
-
-The synthetic integration uses a regular text source and the generic materialized-config
-contract. Its Incus API fixture accepts exact core command grammars and captured stdin;
-it never executes guest commands. Known simulated config drift is armed once only after the
-candidate is current, the journal is reconciling, and the migration steps are verified; this
-keeps the released predecessor ready before ordinary update. Profile observations remain in each profile's existing
-fixture provider. These process checks establish packaged caller, history and reducer
-behavior with simulated guest effects; physical file durability, Incus and systemd behavior
-still require the owning VM acceptance lanes. Evidence and pin mutants exercise unfinished
-verified recovery before further effects, including the journal's embedded evidence. Completed
-runtime readiness alone does not require every retained sidecar. The existing read-only
-`config repair-alias ... --check` source-admission route validates those separate artifact triples;
-unsupported admission is recorded explicitly and grants no repair authority.
-Run this corpus when migration history,
-source admission, recovery authorization or the activation readiness boundary changes.
+Before preparing fixtures, the verifier compares available `/tmp` bytes and inodes with the
+selected archives' known unpacked lower bound. Unknown downloads, build overhead and total peak
+remain explicit; passing that floor neither reserves capacity nor proves enough space.
 
 The packaged bootstrap supports pinned staging without loading broken configuration:
 
@@ -352,18 +293,10 @@ Future persistent schema changes must retain a compatible reader or provide a ty
 capability boundary. Keep generalized alias authoring safety and actual released-caller regressions
 for both completed history and retained unfinished history; rebuilding an old binary is insufficient.
 
-The complete check also uses the actual v0.11.2 and v0.18.1 callers to verify checkpoint-reader bridge
-ordering and rollback refusal after authoritative epochs exceed the frozen projection. It packages a
-synthetic epoch-3 owner from the invoking bound source with an explicit test version and unchanged published
-baseline pins. Add `--only-checkpoint-source` for this focused regression; it does not replace the
-complete release compatibility gate or publish the reader bridge.
-
-The [legacy migration support policy](reference/legacy-migration-support.md) sets the approved
-minimum source version to v0.11.0, inclusive. Earlier V1 sources are refused and use the existing
-full-uninstall route, followed by a separate clean installation. No V1 upgrade bridge or notice
-window is provided. Supported V2 caller,
-producer, recovery and checkpoint-reader contracts remain covered, including actual acceptance
-of the v0.11.0 lower bound.
+The [legacy migration support policy](reference/legacy-migration-support.md) requires installed
+v0.28.0 or newer for direct update and retained rollback. Sources from v0.11.0 to below v0.28.0
+first run `yard update --version 0.28.0`, then plain `yard update`. Earlier sources retain the
+full-uninstall route. Exact unfinished transitions retain their original owner and bindings.
 
 Choose local checks with [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 `./tests/run.sh` is the full unprivileged suite. It runs formatting, vet, race-enabled Go tests, a

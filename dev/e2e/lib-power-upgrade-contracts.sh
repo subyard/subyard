@@ -2,6 +2,12 @@
 # Shared assertions and state helpers for the power-upgrade and release-smoke fixtures.
 # Definitions only: callers own initialization, lease validation and cleanup traps.
 
+published_anchor() {
+  awk -F '\t' '$4 == "anchor" { row=$0; count++ }
+    END { if (count != 1) { print "expected exactly one published anchor" > "/dev/stderr"; exit 1 }; print row }' \
+    "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
+}
+
 operator_env() {
   local uid
   uid="$(operator_uid)"
@@ -28,7 +34,7 @@ materialize_unit() {
     *) die 'unsupported power unit template context' ;;
   esac
   "${reader[@]}" sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER|g" "$template" > "$output"
-  [ "$template" != "$OLD_UNIT_FIXTURE" ] || return 0
+  [ -n "$runtime_root" ] || return 0
   # Current templates bind to the captured immutable candidate, including when
   # the controller-owned source template is used to verify rollback's boot unit.
   case "$runtime_root" in
@@ -110,7 +116,9 @@ exercise_activation_only_repair() {
     || die 'completed candidate transaction is unavailable'
   sudo -n install -m 0600 "$V2_LEDGER" "$ACTIVATION_LEDGER_BASELINE"
   materialize_unit "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" "$candidate_unit"
-  materialize_unit "$OLD_UNIT_FIXTURE" "$drift_unit"
+  # The anchor ships the same unit as the candidate, so derive a minimal drift
+  # from the candidate's own unit instead of relying on an older release.
+  sed 's/^RestartSec=30s$/RestartSec=31s/' "$candidate_unit" > "$drift_unit"
   sudo -n install -o root -g root -m 0644 "$drift_unit" "$UNIT"
   sudo -n systemctl daemon-reload
   sudo -n cmp "$drift_unit" "$UNIT" >/dev/null \
@@ -120,14 +128,12 @@ exercise_activation_only_repair() {
   fi
 
   sudo -n install -m 0600 "$V2_JOURNAL" "$ACTIVATION_JOURNAL_BASELINE"
-  set +e
+  unconfirmed_rc=0
   unconfirmed_output="$(
     operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
       "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" \
       </dev/null 2>&1
-  )"
-  unconfirmed_rc=$?
-  set -e
+  )" || unconfirmed_rc=$?
   [ "$unconfirmed_rc" = 1 ] \
     && [ "$(grep -Fc 'confirmation required: interactive terminal required' \
       <<<"$unconfirmed_output")" = 1 ] \
@@ -139,14 +145,12 @@ exercise_activation_only_repair() {
   assert_activation_ledger_unchanged
 
   install_activation_reconcile_fault
-  set +e
+  interrupted_rc=0
   interrupted_output="$(
     operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
       "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes \
       </dev/null 2>&1
-  )"
-  interrupted_rc=$?
-  set -e
+  )" || interrupted_rc=$?
   [ "$interrupted_rc" -ne 0 ] \
     || die 'injected activation reconciliation unexpectedly completed'
   if ! operator_env test -f "$ACTIVATION_FAULT_PROBE"; then
@@ -396,7 +400,14 @@ check_compatible_transition() {
 finish_candidate_flow() {
   local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
   load_release_targets
-  verify_legacy_rollback_refusal
+  capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
+  local legacy="$OPERATOR_HOME/.config/subyard/migrations/state.json"
+  if operator_env test ! -e "$legacy" && operator_env test ! -L "$legacy"; then
+    printf 'absent\n' > "$STATE_ROOT/refusal-3.mode"
+  else
+    operator_env stat -c '%a:%u:%g:%d:%i' "$legacy" > "$STATE_ROOT/refusal-3.mode"
+    operator_env cat "$legacy" > "$STATE_ROOT/refusal-3.bytes"
+  fi
   info "retaining the authentic published $COMPATIBLE_VERSION runtime through verified public updates"
   check_compatible_transition "$COMPATIBLE_VERSION" "$COMPATIBLE_RELEASE_ROOT" \
     "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
