@@ -457,6 +457,13 @@ After three failed idle releases the keeper also marks it `lost` and stops renew
 expiry reclaims the slot. If the keeper stops, `exec` refuses and the broker expires the lease
 twenty minutes after its last renewal. Release a lost or keeper-less handle and acquire again.
 Handle release prints the same `E2E_RELEASE` evidence as the runner.
+
+`config/profiles/test-vms-client/tests/e2e/acceptance.sh --slot N` takes three sequential
+singleton leases. The first installs the candidate through the supported installer on the leased
+VM, provisions the profile into a Hermes-preset yard and checks the client, the skill, the Hermes
+link and the unregistered-broker diagnostic, then checks retirement after deselection and the
+refusal in a role without host access. The second runs an installed client copy outside the
+checkout against the pool; the third runs `--verify-boundary`.
 Deselecting the profile does not interrupt a held lease: its running keeper still releases it
 after the idle limit.
 
