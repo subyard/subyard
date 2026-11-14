@@ -1891,7 +1891,19 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 		}
 	}
 	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
-	execution.plan.Steps[0].Converged = true
+	// Many VM not-applicable diagnostics stay within the step text bound too.
+	var diagnostics []string
+	for index := range 12 {
+		diagnostics = append(diagnostics, fmt.Sprintf(`YARD_DEVICES entry "kvm" in /srv/%s-%02d/profile.conf is not applicable to VM yards`, strings.Repeat("profile-path", 3), index))
+	}
+	execution.plan.Steps[0].Converged, execution.plan.Steps[0].Diagnostic = true, strings.Join(diagnostics, "; ")
+	step = execution.operationSteps()[index]
+	step.DependsOn = nil
+	if err := domain.ValidateOperationSteps([]domain.OperationStep{step}); err != nil || !strings.HasPrefix(step.Observed, "converged; "+diagnostics[0]) ||
+		!regexp.MustCompile(` and \d+ more$`).MatchString(step.Observed) {
+		t.Fatalf("unbounded diagnostics %q: %v", step.Observed, err)
+	}
+	execution.plan.Steps[0].Diagnostic = `YARD_DEVICES entry "kvm" in /p/profile.conf is not applicable to VM yards`
 	step = execution.operationSteps()[index]
 	if step.Consequence != "yard extras" || step.Observed != `converged; YARD_DEVICES entry "kvm" in /p/profile.conf is not applicable to VM yards` {
 		t.Fatalf("converged extras step = %#v", step)

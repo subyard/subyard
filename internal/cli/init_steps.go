@@ -143,15 +143,16 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && detach.Unverified {
 			consequence = fmt.Sprintf("yard %s: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)", yard.YardName)
 			if len(detach.Devices) != 0 {
-				consequence = boundedDeviceList(consequence+", including each of these if attached:", detach.Devices)
+				consequence = boundedStepList(consequence+", including each of these if attached: ", detach.Devices, " ", "devices")
 			}
 		} else if native.Stage.ID == ports.ReconcileStageExtras && len(detach.Devices) != 0 {
-			consequence = boundedDeviceList(fmt.Sprintf("yard %s: detaches devices no selected profile requests:", yard.YardName), detach.Devices)
+			consequence = boundedStepList(fmt.Sprintf("yard %s: detaches devices no selected profile requests: ", yard.YardName), detach.Devices, " ", "devices")
 		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
 			"native VerifyStage "+string(native.Stage.ID)+" returns converged", consequence, native.Converged, native.Conditional)
 		if native.Converged && native.Diagnostic != "" {
-			steps[len(steps)-1].Observed += "; " + native.Diagnostic
+			// Stage diagnostics are joined with "; "; bound them like any step text.
+			steps[len(steps)-1].Observed = boundedStepList(steps[len(steps)-1].Observed+"; ", strings.Split(native.Diagnostic, "; "), "; ", "diagnostics")
 		}
 		if execution.mode == initReconcile && native.Stage.ID == ports.ReconcileStageProvision {
 			for index, path := range execution.integrationAdoption.Adoption {
@@ -325,17 +326,18 @@ func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime 
 // operationStepTextLimit is the byte bound of one operation step text.
 const operationStepTextLimit = 512
 
-// boundedDeviceList appends devices to prefix within the step text bound,
-// ending with "and N more" when they do not all fit.
-func boundedDeviceList(prefix string, devices []string) string {
-	for shown := len(devices); shown > 0; shown-- {
-		text := prefix + " " + strings.Join(devices[:shown], " ")
-		if rest := len(devices) - shown; rest != 0 {
+// boundedStepList appends items joined by separator to prefix within the step
+// text bound, ending with "and N more" when they do not all fit, or naming
+// only their count when none fits.
+func boundedStepList(prefix string, items []string, separator, noun string) string {
+	for shown := len(items); shown > 0; shown-- {
+		text := prefix + strings.Join(items[:shown], separator)
+		if rest := len(items) - shown; rest != 0 {
 			text += fmt.Sprintf(" and %d more", rest)
 		}
 		if len(text) <= operationStepTextLimit {
 			return text
 		}
 	}
-	return fmt.Sprintf("%s %d devices", prefix, len(devices))
+	return fmt.Sprintf("%s%d %s", prefix, len(items), noun)
 }
