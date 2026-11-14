@@ -19,7 +19,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/application"
-	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -2460,37 +2459,22 @@ func TestExtrasDetachPlannedNamesUnrequestedOwnedDevices(t *testing.T) {
 	}}}}
 	runtime := Runtime{RepositoryRoot: root, Incus: incus, HostDeviceRoot: devices, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer},
 		Environment: []string{"ENVIRONMENT_PROFILES=a", "YARD_DEVICES=fuse gpu"}}
-	ignored := []config.IgnoredAssignment{{Name: "YARD_DEVICES", Value: "kvm fuse gpu"}, {Name: "YARD_MOUNTS", Value: "old:/srv/old:ro:0755"}}
-	detach, err := runtime.ExtrasDetachPlanned(context.Background(), ignored)
+	// The fixture's host nodes and mount directory are unverified; their
+	// devices are still requested.
+	detach, err := runtime.ExtrasDetachPlanned(context.Background())
 	if err != nil || detach.Unverified || strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD128 yx-dev-fuse" {
 		t.Fatalf("detach = %#v, %v", detach, err)
 	}
-	// An unreadable instance still names the devices the ignored assignments
-	// requested beyond the profiles, as detached if attached.
+	// An unreadable instance names no device.
 	incus.Err = errors.New("Incus is stopped")
-	detach, err = runtime.ExtrasDetachPlanned(context.Background(), ignored)
-	if err != nil || !detach.Unverified || strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD* yx-dev-fuse yx-old" {
+	if detach, err := runtime.ExtrasDetachPlanned(context.Background()); err != nil || !detach.Unverified || len(detach.Devices) != 0 {
 		t.Fatalf("unreadable detach = %#v, %v", detach, err)
-	}
-	// Without a host node the device can still be attached: names are derived
-	// from declarations alone.
-	if err := os.Remove(filepath.Join(devices, "kvm")); err != nil {
-		t.Fatal(err)
-	}
-	runtime.Environment = []string{"ENVIRONMENT_PROFILES="}
-	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), ignored[:1]); err != nil || !detach.Unverified ||
-		strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD* yx-dev-fuse yx-dev-kvm" {
-		t.Fatalf("unreadable detach without host nodes = %#v, %v", detach, err)
-	}
-	runtime.Environment = []string{"ENVIRONMENT_PROFILES=a", "YARD_DEVICES=fuse gpu"}
-	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), nil); err != nil || !detach.Unverified || len(detach.Devices) != 0 {
-		t.Fatalf("unreadable detach without ignored assignments = %#v, %v", detach, err)
 	}
 	// A declaration refusal surfaces even when the instance is unreadable.
 	if err := os.WriteFile(filepath.Join(directory, "profile.conf"), []byte("YARD_DEVICES='tape'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.ExtrasDetachPlanned(context.Background(), ignored); err == nil || !strings.Contains(err.Error(), `invalid YARD_DEVICES entry "tape"`) {
+	if _, err := runtime.ExtrasDetachPlanned(context.Background()); err == nil || !strings.Contains(err.Error(), `invalid YARD_DEVICES entry "tape"`) {
 		t.Fatalf("declaration refusal hidden: %v", err)
 	}
 	incus.Err = nil
@@ -2498,7 +2482,7 @@ func TestExtrasDetachPlannedNamesUnrequestedOwnedDevices(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "profile.conf"), []byte("YARD_DEVICES='kvm'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), ignored); err != nil || len(detach.Devices) != 0 {
+	if detach, err := runtime.ExtrasDetachPlanned(context.Background()); err != nil || len(detach.Devices) != 0 {
 		t.Fatalf("absent yard detaches %#v, %v", detach, err)
 	}
 }

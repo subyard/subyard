@@ -1864,31 +1864,24 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 		step.Observed != "not converged" || step.Decision != domain.StepApply {
 		t.Fatalf("extras step = %#v", step)
 	}
-	// An unreadable instance always discloses the generic loss, plus the
-	// names ignored operator assignments requested.
-	execution.extrasDetach = reconcileruntime.ExtrasDetach{Devices: []string{"yx-dev-kvm"}, Unverified: true}
-	if step := execution.operationSteps()[index]; step.Consequence != "yard box: detaches any attached yx-* device that no selected profile requests (the instance is not readable now), including each of these if attached: yx-dev-kvm" {
-		t.Fatalf("unverified extras step = %#v", step)
-	}
+	// An unreadable instance discloses the generic loss.
 	execution.extrasDetach = reconcileruntime.ExtrasDetach{Unverified: true}
 	if step := execution.operationSteps()[index]; step.Consequence != "yard box: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)" {
-		t.Fatalf("unverified extras step without ignored assignments = %#v", step)
+		t.Fatalf("unverified extras step = %#v", step)
 	}
-	// Many long device names stay within the step text bound on both paths.
+	// Many long device names stay within the step text bound.
 	var many []string
 	for index := range 25 {
 		many = append(many, fmt.Sprintf("yx-%s-%02d", strings.Repeat("long-mount-name", 3), index))
 	}
-	for _, unverified := range []bool{false, true} {
-		execution.extrasDetach = reconcileruntime.ExtrasDetach{Devices: many, Unverified: unverified}
-		step := execution.operationSteps()[index]
-		step.DependsOn = nil
-		if err := domain.ValidateOperationSteps([]domain.OperationStep{step}); err != nil {
-			t.Fatalf("unverified=%t: bounded step refused: %v", unverified, err)
-		}
-		if consequence := step.Consequence; len(consequence) > 512 || !strings.Contains(consequence, many[0]) || !regexp.MustCompile(` and \d+ more$`).MatchString(consequence) {
-			t.Fatalf("unverified=%t: unbounded consequence %q", unverified, consequence)
-		}
+	execution.extrasDetach = reconcileruntime.ExtrasDetach{Devices: many}
+	step = execution.operationSteps()[index]
+	step.DependsOn = nil
+	if err := domain.ValidateOperationSteps([]domain.OperationStep{step}); err != nil {
+		t.Fatalf("bounded step refused: %v", err)
+	}
+	if consequence := step.Consequence; len(consequence) > 512 || !strings.Contains(consequence, many[0]) || !regexp.MustCompile(` and \d+ more$`).MatchString(consequence) {
+		t.Fatalf("unbounded consequence %q", consequence)
 	}
 	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
 	// Many VM not-applicable diagnostics stay within the step text bound too.
@@ -1911,8 +1904,8 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 }
 
 // A cold host plans its conditional extras stage without Incus. An unreadable
-// instance discloses the generic device loss and the ignored operator devices;
-// a declaration refusal still refuses.
+// instance discloses the generic device loss; a declaration refusal still
+// refuses.
 func TestInitExtrasDetachPreviewReadsNoIncusOnColdHost(t *testing.T) {
 	stages := application.InitStages(domain.Context{IncusProject: "subyard", YardInstanceName: "yard"})
 	incusStage, extrasStage := stages[0], stages[slices.IndexFunc(stages, func(stage application.ReconcileStage) bool { return stage.ID == ports.ReconcileStageExtras })]
@@ -1922,27 +1915,10 @@ func TestInitExtrasDetachPreviewReadsNoIncusOnColdHost(t *testing.T) {
 		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard"}}
 	execution := &initExecution{mode: initReconcile}
 	execution.plan = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: incusStage}, {Stage: extrasStage, Conditional: true}}}
-	// Without ignored assignments the unreadable instance still discloses the
-	// generic loss, since a deselected profile's device can remain attached.
+	// The unreadable instance discloses the generic loss, since a deselected
+	// profile's device can remain attached.
 	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || len(execution.extrasDetach.Devices) != 0 || !execution.extrasDetach.Unverified {
 		t.Fatalf("cold init detach preview = %#v, %v", execution.extrasDetach, err)
-	}
-	// Incus stopped on an installed host: the ignored kvm device is named even
-	// without a host /dev/kvm node.
-	home := testkit.TempDir(t)
-	configHome := filepath.Join(home, ".config", "subyard")
-	if err := os.MkdirAll(configHome, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(configHome, "config.env"), "YARD_DEVICES=kvm\n", 0o600)
-	var err error
-	execution.loaded, err = config.Load(config.LoadOptions{RepositoryRoot: repositoryRoot(t), OperatorHome: home, DisablePrivate: true,
-		Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard")}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := execution.assessExtrasDetach(context.Background(), runtime); err != nil || !execution.extrasDetach.Unverified || strings.Join(execution.extrasDetach.Devices, " ") != "yx-dev-kvm" {
-		t.Fatalf("unreadable instance hid the ignored device: %#v, %v", execution.extrasDetach, err)
 	}
 	// A leftover instance of a yard being registered is inspected too.
 	incus.Err, execution.bootstrap = nil, &initBootstrap{}

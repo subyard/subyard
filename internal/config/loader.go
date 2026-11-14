@@ -428,7 +428,7 @@ func load(
 	)
 	for name, value := range commandEnvironment {
 		if IsProfileOnlySetting(name) {
-			tracker.observeProfileOnly(commandLayer, discardedValue{Name: name, Value: value}, "", 0)
+			tracker.observeProfileOnly(commandLayer, name, value, "", 0)
 			continue
 		}
 		if _, ok := tracker.catalog.LookupSetting(name); ok {
@@ -978,8 +978,8 @@ func applyEnvFileTrackedValidated(
 	return tracker.catalog.applyEnvFileValidatedFrom(path, source, values, scope, requireSyncable,
 		func(name, value string, line int) {
 			tracker.record(layer, name, value, path, line, "")
-		}, func(value discardedValue, line int) {
-			tracker.observeProfileOnly(layer, value, path, line)
+		}, func(name, value string, line int) {
+			tracker.observeProfileOnly(layer, name, value, path, line)
 		}, tracker.prospectiveReader())
 }
 
@@ -1013,31 +1013,27 @@ func (settings Catalog) applyEnvReaderValidated(reader io.Reader, path string, v
 	return settings.applyEnvReaderValidatedIgnoring(reader, path, values, scope, requireSyncable, observer, nil)
 }
 
-// ignoredObserver receives a discarded profile-only assignment and its line.
-type ignoredObserver func(discardedValue, int)
+// ignoredObserver receives an ignored profile-only assignment and its line.
+type ignoredObserver func(name, value string, line int)
 
 // applyEnvReaderValidatedIgnoring evaluates and validates one scalar layer.
-// Outside shipped scope, a profile-only assignment is discarded like a retired
-// setting while the file is read: evaluated in isolation, so neither it nor a
-// nested default of it changes any value a later record sees. It is reported
-// to ignored, never validated, applied or observed as a setting.
+// Outside shipped scope, a profile-only assignment is ignored like a retired
+// setting while the file is read (see discardPolicy). It is reported to
+// ignored, never validated, applied or observed as a setting.
 func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
-	type discardedAssignment struct {
-		discardedValue
-		line int
-	}
-	var discarded []discardedAssignment
+	var discarded []observedAssignment
 	var content bytes.Buffer
-	operatorScope := scope != ScopeShipped
+	policy := discardPolicy{retired: settings.retiredSetting}
+	if scope != ScopeShipped {
+		policy.ignored = IsProfileOnlySetting
+	}
 	if err := applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, func(name, value string, line int) {
 		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
-	}, func(name string) bool {
-		return settings.retiredSetting(name) || operatorScope && IsProfileOnlySetting(name)
-	}, func(value discardedValue, line int) {
-		if operatorScope && IsProfileOnlySetting(value.Name) {
-			discarded = append(discarded, discardedAssignment{value, line})
+	}, policy, func(name, value string, line int) {
+		if policy.ignores(name) {
+			discarded = append(discarded, observedAssignment{name: name, value: value, line: line})
 		}
 	}); err != nil {
 		return err
@@ -1097,7 +1093,7 @@ func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path s
 	}
 	if ignored != nil {
 		for _, assignment := range discarded {
-			ignored(assignment.discardedValue, assignment.line)
+			ignored(assignment.name, assignment.value, assignment.line)
 		}
 	}
 	return nil

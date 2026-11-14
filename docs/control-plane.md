@@ -1724,23 +1724,22 @@ declaration refusal together. The catalog allows these settings only at shipped 
 discards each operator assignment, at any scope or in the command environment, in one place, as it
 discards retired settings, while the file is read: its expression, and a default of the name inside
 another record's expression, is evaluated in isolation, so no later record sees it or any default
-it performs, and neither an evaluation error nor a required check of the name refuses loading.
-Persistent-settings parsing for `config set`/`unset`, `init` and config sync discards it the same
-way. A non-empty one is returned as configuration state (`Loaded.IgnoredAssignments`) with its
-exact repair; a nested default, which `config unset` cannot remove, is described as a default to
-remove from the named assignment on its line, with its current value Go-quoted; no replacement text
-is computed. It is never a refusal: `config show`, `status`, `update --check` and the init plan
-render it, `update --check` also as the structured `configuration` field of its JSON report for
-every local yard that loads, with the load refusals of the others on stderr, and `config unset`
-remains available at operator scopes. Config sync accepts and materializes a persisted one
+it performs, and its evaluation error does not refuse loading. Such a nested default is not
+reported, and a required check of the name refuses as for a retired setting. Persistent-settings
+parsing for `config set`/`unset`, `init` and config sync discards it the same way. A non-empty one
+is returned as configuration state (`Loaded.IgnoredAssignments`) with its exact repair. It is never
+a refusal: `config show`, `status`, `update --check` and the init plan render it, `update --check`
+also as the structured `configuration` field of its JSON report for every local yard that loads,
+with the load refusals of the others on stderr, and `config unset` remains available at operator
+scopes. Config sync accepts and materializes a persisted one
 unchanged. The init plan names each owned `yx-*` extras device that the pending extras stage
 detaches, resolved as `09-yard-extras.sh` resolves it. A declaration refusal refuses planning. A
 yard without an instance detaches nothing. When the instance cannot be read, for example while
 Incus is stopped, the plan states that any attached `yx-*` device no selected profile requests is
-detached, and names each device the ignored operator assignments requested and no selected profile
-declares, regardless of host device nodes. The extras stage observation carries each declared
-device of a VM yard as a "not applicable to VM yards" diagnostic that `init` renders on the
-converged stage; it is readiness state, not a refusal or a warning.
+detached. The extras stage observation carries each declared device of a VM yard as a "not
+applicable to VM yards" diagnostic that `init` renders on the converged stage; it is readiness state, not a refusal or a warning. Ignoring and reporting operator
+assignments is migration code for files written before these settings became profile-only; it can
+be removed once operator files no longer contain them.
 
 Every VM yard is headless. The owner sets a fixed local `raw.qemu.conf` whose empty
 `[device "qemu_gpu"]` section removes the Incus default emulated GPU (virtio-vga); with
