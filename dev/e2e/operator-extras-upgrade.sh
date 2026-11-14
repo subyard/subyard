@@ -145,10 +145,15 @@ jq -e --arg path "$host_config" '[.configuration[]? | select(.state == "ignored"
 }
 pass 'config show, config show YARD_DEVICES and update --check --json disclose the assignment and its repair'
 
-# Without consent init only plans: it names the device loss and changes nothing.
-if yard init </dev/null >"$STATE/init-plan.log" 2>&1; then
+# Declined init only plans: its confirmation names the device loss and nothing changes.
+# The consequences are shown at the interactive prompt, so answer it on a terminal.
+command -v script >/dev/null || die 'util-linux script is required'
+plan_command="$(python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' "$launcher" -Y "$name" init)"
+if printf 'n\n' | owner script -qefc "$plan_command" /dev/null >"$STATE/init-plan.log" 2>&1; then
   die 'init applied without confirmation'
 fi
+grep -Fq 'operation declined' "$STATE/init-plan.log" || die 'init did not reach its confirmation'
+
 grep -Fq "  $disclosure" "$STATE/init-plan.log" || die 'the init plan did not disclose the ignored assignment'
 grep -Fq "detaches devices no selected profile requests: $device" "$STATE/init-plan.log" \
   || die "the init plan did not name $device"
