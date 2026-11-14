@@ -201,11 +201,13 @@ interrupt_anchor_hop() {
   # failure there if its publication is too brief for the process observer.
   [ "$checkpoint" != reconciling ] || install_activation_reconcile_fault
   # Observe and stop the real published owner; never edit its journal or links.
-  operator_env python3 - "$ROOT" "$OPERATOR_HOME/.local/bin/yard" "$ANCHOR_VERSION" "$V2_JOURNAL" \
+  # The operator cannot read this checkout, so it runs a private copy of the observer.
+  sudo -n install -o "$OPERATOR" -g "$OPERATOR" -m 0600 "$ROOT/dev/verify-release-upgrades.py" "$OPERATOR_HOME/hop-observer.py"
+  operator_env python3 - "$OPERATOR_HOME/hop-observer.py" "$OPERATOR_HOME/.local/bin/yard" "$ANCHOR_VERSION" "$V2_JOURNAL" \
     "$OPERATOR_HOME/hop-interrupted" "$checkpoint" > "$STATE_ROOT/hop-interrupt.log" 2>&1 <<'PYTHON' || hop_rc=$?
 import os, pathlib, runpy, sys
-root, launcher, version, journal, marker, checkpoint = sys.argv[1:]
-run = runpy.run_path(str(pathlib.Path(root) / "dev/verify-release-upgrades.py"))["run_process"]
+observer, launcher, version, journal, marker, checkpoint = sys.argv[1:]
+run = runpy.run_path(observer)["run_process"]
 result = run([launcher, "update", "--version", version, "--yes"], os.environ.copy(), timeout=900,
              interrupt_checkpoint=(pathlib.Path(journal), checkpoint, pathlib.Path(marker)),
              allow_failed_checkpoint=checkpoint == "reconciling")
