@@ -92,11 +92,22 @@ if [ ! -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
 fi
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
+# Phase 1 grants this session socket access through the native dispatcher helper.
+set +e
+CANDIDATE_ENGINE="$(release_candidate_prepare "$ROOT")"
+candidate_status=$?
+set -e
+case "$candidate_status" in
+  0) ;;
+  1) "$ROOT/dev/build-engine.sh" --force ;;
+  *) die 'frozen release candidate is invalid' ;;
+esac
 (
   # shellcheck source=tests/helpers/test-context.sh
   . "$ROOT/tests/helpers/test-context.sh"
   setup_test_context "$STATE/incus-foundation"
   export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_DIR="$ROOT/config"
+  export SUBYARD_DISPATCHER_PATH="${CANDIDATE_ENGINE:-$ROOT/.build/yard}"
   export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
   set -a
   # shellcheck source=config/host.env
