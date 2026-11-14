@@ -138,6 +138,8 @@ type CLI struct {
 	ownerAdmission               *ownerWriteAdmission
 	ownerAdmissionMutex          *sync.Mutex
 	localMetadataDiagnostics     bool
+	// configGitSSH shares one SSH connection across a configuration command.
+	configGitSSH *configGitSSHSession
 
 	// profileOfferSuppressed keeps init-embedded migration from offering provisioning.
 	profileOfferSuppressed bool

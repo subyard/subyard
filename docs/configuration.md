@@ -1020,7 +1020,12 @@ alone does not make a setting portable.
 
 The default is local storage; `--local` makes that choice explicit and needs no Git source.
 `--git` saves only the selected assignment or file in the registered source, creates one commit
-with an automatic message that omits the value, and pushes the exact upstream immediately. It
+with an automatic message that omits the value, and pushes the exact upstream immediately.
+`config set` with `--git` accepts several `SETTING VALUE` pairs in one scope and saves them in
+one commit and push, for example
+`yard config set GIT_USER_NAME 'Jane Doe' GIT_USER_EMAIL jane@example.com --scope shared --git`.
+Every pair is validated before planning, and each setting may appear once. Constraints between
+settings, such as a yard template that forbids coding tools, apply to the combined result. It
 does not publish unrelated local overrides. Local values still take precedence: an explicit empty
 assignment is a value, while `config unset` removes the local assignment and reveals the Git
 fallback. `config unset --git` removes the Git assignment and leaves any local value intact.
@@ -1237,6 +1242,33 @@ or creates a commit. Its optional `-m`/`--message` argument remains accepted for
 Use typed writers with `--git` to create and push a setting change. Dirty, conflicted, detached,
 upstream-less or diverged checkouts fail closed; Subyard does not stash, merge, rebase, reset or
 resolve conflicts.
+
+`sync pull`, `sync push` and typed writers with `--git` fetch the upstream once to plan. A change
+fetches it once more after confirmation, before its first write, and fails if the upstream moved;
+the push itself never forces. A no-op makes no further remote request. Over SSH, one command
+shares one OpenSSH connection per remote host across these requests, so a key without an agent
+asks for its passphrase at most once, however long the confirmation waits. Git's first connection
+authenticates with your usual OpenSSH configuration. Its master socket lives in a private
+temporary directory and is closed when the command ends, including when the process is killed.
+Only if both the command and its cleanup helper are killed with SIGKILL, or the connection's
+process was never verified as the command's own, can the connection outlive the command; stop it with
+`ssh -O exit -o ControlPath=<socket> <host>` or by ending its `ssh: <socket> [mux]` process.
+Unless you set `ServerAliveInterval` yourself, the shared connection uses
+`ServerAliveInterval=15`, so a connection dropped during the confirmation ends instead of hanging;
+the next request then opens a new connection and asks for the passphrase again.
+The decision uses the remote URLs after Git's `insteadOf` and `pushInsteadOf` rewriting. Subyard
+leaves Git's SSH selection unchanged when `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`,
+`core.sshCommand`, `ssh.variant`, or the remote's `uploadpack` or `receivepack` is set; when `ssh -G`, given the remote command Git runs
+(`git-upload-pack`, and `git-receive-pack` for a push), reports your own `ControlMaster` or
+`ControlPath`, or, for endpoints that resolve to the same control socket (for example two `Host`
+aliases of one host, port and user), configurations that differ, such as a fetch-only deploy key and
+a push key; or when no short private socket path is available. HTTPS and file remotes are unaffected.
+
+`ssh -G` reports an explicit `ControlMaster no` or `ControlPath none` the same way as the default,
+so such a setting does not prevent sharing. While the command runs, including during its
+confirmation, other processes of the same user can open sessions through its master socket without
+the key. To opt out, run the command with `GIT_SSH_COMMAND=ssh`, or set `core.sshCommand` in the
+registered checkout, for example `git -C <checkout> config core.sshCommand ssh`.
 
 Native `sync pull` and `sync push` remove group/world write permissions from the registered
 checkout before importing it. Permission repair is included in their confirmed plan even when

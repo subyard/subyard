@@ -18,7 +18,7 @@ import (
 type configSyncPushOptions struct {
 	message     string
 	materialize bool
-	authoring   *configAuthoringRequest
+	authoring   []configAuthoringRequest
 	content     []byte
 }
 
@@ -209,8 +209,8 @@ func (cli *CLI) prepareConfigSyncPush(
 		return nil, fmt.Errorf("prepare legacy SSH source cleanup: %w", err)
 	}
 	prepared.sshCleanupPaths = slices.Clone(paths)
-	if request.authoring != nil {
-		selected, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, *request.authoring, request.content)
+	for _, authoring := range request.authoring {
+		selected, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, authoring, request.content)
 		if err != nil {
 			prepared.cleanup(cli, ctx)
 			return nil, fmt.Errorf("prepare selected configuration change: %w", err)

@@ -110,7 +110,7 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 				"  validate  check selected or all local configuration schemas without a successful base load (read-only)\n"+
 				"  reduce-selection  during unfinished activation, store only a reduced persistent optional selection; sealed-owner recovery requires separate consent\n"+
 				"  repair-alias  canonicalize one to four explicit non-sensitive alias choices in one local scalar file; release readiness requires a separate assessment\n"+
-				"  set     save a typed scalar locally (default/--local) or commit/push it (--git)\n"+
+				"  set     save a typed scalar locally (default/--local) or commit/push it (--git); with --git, several SETTING VALUE pairs share one commit\n"+
 				"  unset   remove a local scalar override or a Git assignment (--git)\n"+
 				"  import  save a typed file locally or commit/push it (--git)\n"+
 				"  edit    edit a typed file with VISUAL/EDITOR; --git commits and pushes\n"+
@@ -366,8 +366,9 @@ func (cli *CLI) writeConfigSyncHelp() {
 			"  %s config sync status\n"+
 			"  %s config sync pull --apply\n"+
 			"  %s config sync push --apply\n\n"+
-			"Use config set/unset/import/edit --scope <scope> --git to save one setting\n"+
-			"with immediate commit and push. The default (or --local) saves locally.\n"+
+			"Use config set/unset/import/edit --scope <scope> --git to save one setting,\n"+
+			"or several config set SETTING VALUE pairs, with one immediate commit and\n"+
+			"push. The default (or --local) saves locally.\n"+
 			"Sync refreshes the Git cache and preserves local overrides. Secrets, keys,\n"+
 			"project data and runtime state never enter Git settings. Legacy -m is\n"+
 			"accepted by sync push, which creates no commits.\n",

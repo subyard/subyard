@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // Changing the authority or endpoint of a public resource must not strand its
@@ -49,4 +50,14 @@ func (cli *CLI) checkResourceConfigChange(ctx context.Context, loaded config.Loa
 		}
 	}
 	return nil
+}
+
+// checkResourceConfigChanges reports every selected change that a running
+// owner ingress resource refuses.
+func (cli *CLI) checkResourceConfigChanges(ctx context.Context, loaded config.Loaded, requests []configAuthoringRequest) error {
+	var refusals []error
+	for _, request := range requests {
+		refusals = append(refusals, cli.checkResourceConfigChange(ctx, loaded, request))
+	}
+	return domain.CollectRefusals(refusals...)
 }

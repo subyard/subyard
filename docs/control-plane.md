@@ -417,6 +417,26 @@ added; login and exact-key verification must pass again afterward. Existing keys
 and cannot enter first trust or bypass explicit repair. Network deadlines start after this prerequisite,
 so reviewing a fingerprint does not exhaust a status or inventory request's network timeout.
 
+Private configuration Git transport is separate: it uses the operator's Git and OpenSSH
+configuration, not this gate. A configuration command that plans and applies against an SSH remote
+shares one OpenSSH control master per endpoint through `GIT_SSH_COMMAND`: Git's first connection
+starts it in a private temporary directory, and it persists until the prepared command closes
+(`internal/cli/config_git_ssh.go`). Each master reports its own PID over its socket after the Git
+command that started it; it is pinned by a pidfd and accepted only as this user's process with the
+exact `ssh: <socket> [mux]` title. A watchdog, the engine re-run as the hidden
+`_config-git-ssh-watchdog` verb, reads a pipe whose only writer is the CLI process and pins each
+reported master the same way. On EOF from a normal close or process death, including SIGKILL, it
+requests a bounded exit from every master socket, terminates still-running masters through their
+pidfds, removes the sockets and then the empty directory; a directory with any other entry is left
+and reported. A normal close then repeats that stop for anything left. The verb accepts only a pipe
+as input and only a real, caller-owned mode-0700 session directory. Only executables that register
+the verb (the engine and the CLI test binary) start the watchdog; other programs linking the CLI
+package keep only the normal-close cleanup. Signals
+go only through pidfds of verified masters and through the exit requests' own process handles. A
+master that never verified, or one left when both the CLI process and the watchdog are killed by
+SIGKILL, survives until it is stopped manually. An explicit operator SSH command, variant or
+multiplexing setting disables this sharing; see [Versioned private configuration](configuration.md#versioned-private-configuration).
+
 Structured system adapters are selected from the validated command manifest and receive only declared
 non-secret context keys. Metadata uses a dedicated file descriptor and protected input uses stdin.
 Leaf commands report diagnostics normally; the runner converts their exit status into a typed result.

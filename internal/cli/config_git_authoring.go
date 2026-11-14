@@ -3,16 +3,15 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/config"
 )
 
-func (cli *CLI) runConfigGitAuthoring(ctx context.Context, loaded config.Loaded, request configAuthoringRequest, content []byte) int {
-	return cli.runPreparedConfigMutation(ctx, loaded, []string{request.action}, request.assumeYes, func(prepared *preparedCommand) error {
-		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: fmt.Sprintf("%s %s in %s settings", request.action, request.name, request.scope), authoring: &request, content: content})
+func (cli *CLI) runConfigGitAuthoring(ctx context.Context, loaded config.Loaded, requests []configAuthoringRequest, content []byte) int {
+	return cli.runPreparedConfigMutation(ctx, loaded, []string{requests[0].action}, requests[0].assumeYes, func(prepared *preparedCommand) error {
+		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage(requests), authoring: requests, content: content})
 	})
 }
 

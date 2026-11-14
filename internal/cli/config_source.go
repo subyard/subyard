@@ -408,7 +408,8 @@ func (cli *CLI) cloneConfigSourceWithEnvironment(
 	var diagnostics bytes.Buffer
 	command.Stdout = io.Discard
 	command.Stderr = &diagnostics
-	if err := command.Run(); err != nil {
+	command.WaitDelay = configGitWaitDelay
+	if err := runConfigGitCommand(command); err != nil {
 		message := strings.TrimSpace(diagnostics.String())
 		if len(message) > 4096 {
 			message = message[:4096] + "..."
