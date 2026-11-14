@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Run the retirement payloads' real guest removal checks against stubbed guests."""
-import os
 import pathlib
 import subprocess
 import tempfile
