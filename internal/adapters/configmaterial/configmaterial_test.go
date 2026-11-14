@@ -473,11 +473,13 @@ func TestJSONRequestAndObservationParserRejectUnsafeInputs(t *testing.T) {
 		[]byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
 		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","extra":1}`),
 		[]byte(`{"converged":false,"adoptable":"yes","fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
-		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["relative"]}`),
-		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/b","/a"]}`),
-		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/a","/a"]}`),
-		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/a\u001b[2J"]}`),
+		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["relative"],"released_count":1}`),
+		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/b","/a"],"released_count":2}`),
+		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/a","/a"],"released_count":2}`),
+		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/a\u001b[2J"],"released_count":1}`),
 		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","release":"other"}`),
+		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released":["/a","/b"],"released_count":1}`),
+		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","released_count":-1}`),
 	} {
 		if _, err := ParseJSONObservation(output); err == nil {
 			t.Fatalf("accepted invalid observation %q", output)
@@ -1382,8 +1384,8 @@ func TestInterruptedReleaseKeepsItsReason(t *testing.T) {
 	}
 }
 
-// The release reason is protected evidence: a corrupt record refuses without
-// mutation, and fresh ownership from a re-enable supersedes a stale one.
+// The release reason is protected evidence: a corrupt record refuses retirement
+// and apply without mutation, and fresh ownership supersedes a valid stale one.
 func TestReleaseReasonIsProtectedAndSupersededByApply(t *testing.T) {
 	h := newGuestHarness(t)
 	h.apply(t, []byte(`{"managed":1}`))
@@ -1398,6 +1400,12 @@ func TestReleaseReasonIsProtectedAndSupersededByApply(t *testing.T) {
 	if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
 		t.Fatal("refused release changed files")
 	}
+	if stderr, err := h.run([]byte(`{"managed":1}`), ModeApply); err == nil || !strings.Contains(stderr, "invalid materialization state") {
+		t.Fatalf("apply deleted a corrupt release reason: %v %q", err, stderr)
+	}
+	if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+		t.Fatal("refused apply changed files")
+	}
 	testkit.WriteFile(t, marker, []byte(`{"schema":1,"release":"changed"}`), 0o600)
 	h.apply(t, []byte(`{"managed":1}`))
 	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
@@ -1405,6 +1413,76 @@ func TestReleaseReasonIsProtectedAndSupersededByApply(t *testing.T) {
 	}
 	if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != "" {
 		t.Fatalf("ordinary retirement reported a stale release: %#v", result)
+	}
+}
+
+// A committed release finishes as a release even when the operator restores
+// Subyard's values before the retry: the document is never edited afterwards.
+func TestResumedReleaseNeverRemovesRestoredFields(t *testing.T) {
+	h := newGuestHarness(t)
+	h.apply(t, []byte(`{"managed":{"mode":"ask"}}`))
+	h.writeDestination(t, `{"managed":{"mode":"operator"}}`)
+	request, err := h.request(nil, ModeRetire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := request.Command[3]
+	start := strings.Index(program, "def retire(")
+	point := "\n            atomic_write(baseline_path, "
+	offset := strings.Index(program[start:], point)
+	if start < 0 || offset < 0 {
+		t.Fatal("interruption point not found")
+	}
+	end := start + offset + 1 + strings.Index(program[start+offset+1:], "\n")
+	request.Command[3] = program[:end] + "\n            raise MaterializationError(\"synthetic interruption\")" + program[end:]
+	command := exec.Command(request.Command[0], request.Command[1:]...)
+	command.Stdin = bytes.NewReader(request.Stdin)
+	if err := command.Run(); err == nil {
+		t.Fatal("interruption did not occur")
+	}
+	h.writeDestination(t, `{"managed":{"mode":"ask"}}`)
+	document := snapshotMaterialization(t, filepath.Dir(h.destination))
+	result := h.observeMode(t, nil, ModeRetire)
+	if !result.Converged || result.Release != ReleaseChanged || !slices.Equal(result.Released, []string{"/managed/mode"}) || result.ReleasedCount != 1 {
+		t.Fatalf("resumed release misreported: %#v", result)
+	}
+	if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
+		t.Fatal("resumed release removed restored fields")
+	}
+}
+
+// Retained fields that cannot be printed are still counted, never reported as
+// absent.
+func TestReleaseCountsUnprintableRetainedFields(t *testing.T) {
+	many := map[string]any{"edited": "changed"}
+	for index := range 300 {
+		many[fmt.Sprintf("k%03d", index)] = index
+	}
+	for _, scenario := range []struct {
+		name             string
+		desired, drifted any
+		listed, count    int
+	}{
+		{"many", map[string]any{"edited": "ask", "fields": many}, map[string]any{"edited": "ask", "fields": many}, 256, 302},
+		{"long-key", map[string]any{strings.Repeat("k", 600): 1, "edited": "ask"}, map[string]any{strings.Repeat("k", 600): 1, "edited": "operator"}, 1, 2},
+		{"long-only", map[string]any{strings.Repeat("k", 600): 1, "edited": "ask"}, map[string]any{strings.Repeat("k", 600): 1}, 0, 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			h := newGuestHarness(t)
+			desired, _ := json.Marshal(scenario.desired)
+			h.apply(t, desired)
+			if scenario.name == "many" {
+				scenario.drifted.(map[string]any)["edited"] = "operator"
+			}
+			drifted, _ := json.Marshal(scenario.drifted)
+			h.writeDestination(t, string(drifted))
+			for _, mode := range []string{ModeAssessRetire, ModeRetire} {
+				result := h.observeMode(t, nil, mode)
+				if result.Release != ReleaseChanged || len(result.Released) != scenario.listed || result.ReleasedCount != scenario.count {
+					t.Fatalf("%s: listed=%d count=%d release=%q", mode, len(result.Released), result.ReleasedCount, result.Release)
+				}
+			}
+		})
 	}
 }
 
