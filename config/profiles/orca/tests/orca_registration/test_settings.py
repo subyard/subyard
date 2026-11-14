@@ -105,10 +105,11 @@ class SettingsTests(unittest.TestCase):
 class ChatRPC:
     """Synthetic Orca chat catalog: open tabs, Session History and saved chat options."""
 
-    def __init__(self, chats, tabs=(), vault=(), refuse=(), ignore=()):
+    def __init__(self, chats, tabs=(), vault=(), refuse=(), ignore=(), start_on_reset=(), history=None):
         self.chats = copy.deepcopy(chats)
         self.tabs, self.vault = list(tabs), list(vault)
-        self.refuse, self.ignore = set(refuse), set(ignore)
+        self.refuse, self.ignore, self.start_on_reset = set(refuse), set(ignore), set(start_on_reset)
+        self.history = history or {}
         self.calls = []
         self.settings = {"agentDefaultArgs": {"codex": "", "claude": ""}}
 
@@ -120,13 +121,16 @@ class ChatRPC:
             return {"snapshots": [{"worktree": "repo::/work", "tabs": copy.deepcopy(self.tabs)}]}
         if method == "aiVault.listSessions":
             assert params == {"unlimited": True, "force": True}
-            return {"sessions": copy.deepcopy(self.vault), "issues": []}
+            return {"issues": [], "scanId": "scan", **copy.deepcopy(self.history), "sessions": copy.deepcopy(self.vault)}
         session = params["sessionId"] if "sessionId" in params else params["envelope"]["sessionId"]
         chat = self.chats[session]
         if method == "agentSession.options":
             current = {"permissionMode": chat["mode"]}
             if chat.get("live"):
-                current["reportedPermissionMode"] = "full-access"
+                current.update(reportedPermissionMode="full-access", reportedModel="model", confirmed=["model"])
+            elif chat.get("starting"):
+                # A starting provider confirms options before it reports a permission mode.
+                current["confirmed"] = []
             return {"current": current}
         if method == "agentSession.history":
             return {"page": {"fence": "fence-" + session, "items": []}}
@@ -135,6 +139,8 @@ class ChatRPC:
                 return {"ok": False, "refusal": {"code": "synthetic"}}
             if session not in self.ignore:
                 chat["mode"] = params["value"]
+            if session in self.start_on_reset:
+                chat["live"] = True
             return {"ok": True, "value": params["value"]}
         raise AssertionError(method)
 
@@ -147,7 +153,7 @@ def tab(session, agent="claude", kind="agent-session"):
     return {"type": kind, "id": "tab-" + session, "sessionId": session, "agent": agent}
 
 
-def history(session, agent="claude"):
+def history_entry(session, agent="claude"):
     return {"agent": agent, "structuredSession": {"sessionId": session, "workspaceId": "workspace"}}
 
 
@@ -166,8 +172,8 @@ class ChatPermissionMigrationTests(unittest.TestCase):
                        "codex-tab": {"mode": "full-access"}, "codex-history": {"mode": "full-access"}},
                       tabs=[tab("open"), tab("ask"), tab("codex-tab", "codex"),
                             tab("open", kind="terminal"), {"type": "terminal", "id": "plain"}],
-                      vault=[history("closed"), history("open"), history("own"),
-                             history("codex-history", "codex"), {"agent": "claude", "structuredSession": None}])
+                      vault=[history_entry("closed"), history_entry("open"), history_entry("own"),
+                             history_entry("codex-history", "codex"), {"agent": "claude", "structuredSession": None}])
         self.assertEqual((2, 0), reset_chat_permissions(rpc, self.state))
         self.assertEqual(["closed", "open"], rpc.resets())
         self.assertEqual({"open": "own", "closed": "own", "ask": "ask", "own": "own",
@@ -202,6 +208,39 @@ class ChatPermissionMigrationTests(unittest.TestCase):
         self.assertEqual(["idle", "live"], rpc.resets())
         self.assertTrue(self.marker.exists())
 
+    def test_incomplete_history_scan_never_completes(self):
+        for history in ({"issues": [{"kind": "unreadable"}]}, {"truncated": True}, {"hasMore": True},
+                        {"nextFingerprint": "next"}):
+            with self.subTest(history=history):
+                rpc = ChatRPC({"closed": {"mode": "full-access"}}, vault=[history_entry("closed")], history=history)
+                with self.assertRaises(RpcError):
+                    reset_chat_permissions(rpc, self.state)
+                self.assertEqual([], rpc.resets())
+                self.assertFalse(self.marker.exists())
+
+    def test_chat_starting_during_the_reset_keeps_the_pass_incomplete_until_it_stops(self):
+        rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], start_on_reset={"chat"})
+        self.assertEqual((1, 1), reset_chat_permissions(rpc, self.state))
+        self.assertFalse(self.marker.exists())
+        # The saved mode now reads "own", but the running process may still hold Full access.
+        self.assertEqual((0, 1), reset_chat_permissions(rpc, self.state))
+        self.assertFalse(self.marker.exists())
+        rpc.chats["chat"]["live"] = False
+        self.assertEqual((0, 0), reset_chat_permissions(rpc, self.state))
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(["chat"], rpc.resets())
+
+    def test_starting_chat_without_a_reported_mode_is_not_reset(self):
+        rpc = ChatRPC({"chat": {"mode": "full-access", "starting": True}}, tabs=[tab("chat")])
+        self.assertEqual((0, 1), reset_chat_permissions(rpc, self.state))
+        self.assertEqual([], rpc.resets())
+        self.assertFalse(self.marker.exists())
+
+    def test_any_running_claude_chat_defers_completion(self):
+        rpc = ChatRPC({"chat": {"mode": "own", "live": True}}, tabs=[tab("chat")])
+        self.assertEqual((0, 1), reset_chat_permissions(rpc, self.state))
+        self.assertFalse(self.marker.exists())
+
     def test_marker_leaves_later_explicit_full_access_untouched_without_rpc(self):
         rpc = ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")])
         self.assertEqual((1, 0), reset_chat_permissions(rpc, self.state))
@@ -221,7 +260,7 @@ class ChatPermissionMigrationTests(unittest.TestCase):
             "refused": ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], refuse={"chat"}),
             "not converged": ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], ignore={"chat"}),
             "invalid catalog": ChatRPC({}, tabs=[{"type": "agent-session", "agent": "claude"}]),
-            "unknown chat": ChatRPC({}, vault=[history("missing")]),
+            "unknown chat": ChatRPC({}, vault=[history_entry("missing")]),
         }
         for name, rpc in cases.items():
             with self.subTest(case=name):
@@ -235,8 +274,8 @@ class ChatPermissionMigrationTests(unittest.TestCase):
                  "Orca reset 1 saved Claude chat(s) from Full access to the default permission mode; "
                  "choose Full access in a chat again to opt out\n", ""),
                 ("live", ChatRPC({"chat": {"mode": "full-access", "live": True}}, tabs=[tab("chat")]), 0,
-                 "", "Warning: 1 open saved Claude chat(s) still use Full access and may run Git without "
-                 "approval. Close them and run yard orca sync, or switch each chat's mode to Ask.\n"),
+                 "", "Warning: 1 running Claude chat(s) may still run Git without approval if they started "
+                 "with Full access. Close them and run yard orca sync, or switch each chat's mode to Ask.\n"),
                 ("failure", ChatRPC({"chat": {"mode": "full-access"}}, tabs=[tab("chat")], refuse={"chat"}), 0,
                  "", "Warning: Orca could not reset saved Claude chats from Full access; they may still run "
                  "Git without approval. Run yard orca sync, or switch each chat's mode to Ask.\n")):

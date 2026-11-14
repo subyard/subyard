@@ -252,14 +252,19 @@ custom Claude arguments is an explicit opt-out: Orca then approves commit and pu
 chat without asking.
 
 Orca saves each chat's permission mode when the chat is created, so chats saved under the
-stock default keep Full access. The first project sync after this update, run by `yard init`,
-`yard orca sync` or an `orca up` that repairs the launch defaults, resets those saved Claude
-chats, including ones whose tab is closed, to Orca's default mode and reports how many it reset.
-A chat that is open during that pass keeps Full access, with a warning, until a later
-`yard orca sync` resets it. After the reset, choosing Full access again is respected.
-The reset finds chats through Orca's open tabs and Session History: a chat that never ran a
-turn and whose tab is closed appears in neither, and coverage of chats in other workspaces and
-worktrees has not been verified.
+stock default keep Full access. After this update, Subyard's launch-default repair resets those
+saved Claude chats, including ones whose tab is closed, to Orca's default mode and reports how
+many it reset. The repair runs after project registration is ready: on `yard init`, project
+events, `yard orca sync` and an `orca up` whose registration or launch-default step applies.
+Until registration is ready
+it does not run and shows no chat warning. A running Claude chat keeps the permissions it
+started with, so while any Claude chat is running the reset stays incomplete and each repair
+warns; close those chats and run `yard orca sync`. Until the reset completes, each repair also
+resets a newly chosen Full access; once it completes without a warning, choosing Full access
+again is respected. The reset finds chats through Orca's open tabs and Session History, and an
+incomplete Session History scan keeps it incomplete. A chat that never ran a turn and whose tab
+is closed appears in neither, and coverage of chats in other workspaces and worktrees has not
+been verified.
 
 Without the Claude integration, an Orca-installed Claude copy is reported as
 **unmanaged** by `yard integration status claude` and detailed `yard -Y NAME status`: self-updating,
