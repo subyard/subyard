@@ -61,7 +61,8 @@ print('{"state":"absent","actual":"","desired":""}')
                          'RESTRICTED_DISK_PATHS ACCESS_KIND YARD_KIND INCUS_BRIDGE SSH_HOST DEV_UID '
                          'DEV_SUDO FORWARD_SSH_AGENT NESTED_E2E_VMS').split():
                 env[name] = ''
-            env.update(YARD_INSTANCE_NAME='yard', INCUS_PROJECT='subyard', DEV_USER='dev')
+            env.update(YARD_INSTANCE_NAME='yard', INCUS_PROJECT='subyard', DEV_USER='dev',
+                       ENVIRONMENT_PROFILES='orca')
             producer = subprocess.run([str(PROFILE/'runtime.sh'), 'observe'], input='', text=True,
                                       capture_output=True, env=env, timeout=10)
             self.assertEqual(producer.returncode, 0, producer.stderr)
