@@ -269,9 +269,9 @@ verified official assets. All mutable fixtures remain under `/tmp`.
 
 The old-source migration, rollback, original-owner recovery and migration-history process corpora
 are frozen in the v0.28.0 tag. Current Go tests retain V2 journal, checkpoint, frozen projection,
-evidence and recovery readers. Published v0.28.0 and v0.28.1 direct upgrades and the
-first-boundary-release chains from v0.11.0 and v0.27.0 through the v0.28.1 hop cover the installed
-transition to the candidate on disposable VMs.
+evidence and recovery readers. The published v0.28.0 direct upgrade, the first-boundary-release
+chains from v0.11.0 and v0.27.0 through the v0.28.1 hop, and the agent-free Periodic E2E upgrade
+from v0.28.1 cover the installed transition to the candidate on disposable VMs.
 The host-free verifier does not claim those physical contracts.
 
 Before preparing fixtures, the verifier compares available `/tmp` bytes and inodes with the

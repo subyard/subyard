@@ -33,8 +33,9 @@ versions: exact unfinished transactions retain their sealed owner, artifacts and
 Any other unfinished transition while the installed release is below v0.28.0 refuses once with
 `next: yard update && yard update --version 0.28.1 && yard update`, or `yard update && yard update`
 when it already targets v0.28.0 or newer: the installed release first finishes its own journal. If
-it cannot, re-run the v0.28.1 installer or use a later v0.28.x release that owns that recovery; do
-not uninstall.
+it cannot, for example when `yard update` reports that the journal-selected release cannot provide
+a valid transition inspection (a v0.28.0 update stopped at a restarted VM yard), re-run the v0.28.1
+installer or use a later v0.28.x release that owns that recovery; do not uninstall.
 The anchor does not change `minimumEpochs`, persistent formats or retained history readers.
 
 Sources before **v0.11.0** retain full uninstall followed by the user's separate clean installation.
@@ -146,7 +147,7 @@ Move the boundary when the supported matrix's cost or age justifies retiring a s
    The anchor also supplies the direct baseline; retain a `direct` row for the previous release
    when distinct, and choose representative below-anchor `refusal` rows.
    Set `UpdateHopVersion` to the published fix release of the anchor series that completes the
-   hop from older sources, and mark its own verified row `hop` (exactly one, above the anchor).
+   hop from older sources, and mark its own verified row `hop` (exactly one, at or above the anchor).
    Refusals print the hop; admission and rollback use the anchor.
 3. Add one-time chain catalog entries through the hop for the first boundary release, then
    remove them after that release. Each release refuses with its own hop: successive boundaries

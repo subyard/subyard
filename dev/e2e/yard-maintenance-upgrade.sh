@@ -100,7 +100,7 @@ BOOT[default]="$(yard_boot default)"
 # Only z-last becomes eligible for the candidate's restart; weighted keeps its foreign policy.
 yard_guest z-last rm -- /etc/systemd/system/tmp.mount
 # The update from the hop runs no migration step, so pending yards wait for the current-release retry.
-update_candidate --offline --yes > "$STATE_ROOT/candidate.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/candidate.log" >&2; exit "$rc"; }
+update_candidate --yes > "$STATE_ROOT/candidate.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/candidate.log" >&2; exit "$rc"; }
 [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
 for name in "${NAMES[@]}"; do [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] && [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] || die 'update from the hop restarted a yard'; done
 [ -z "$(marker weighted)" ] && [ -z "$(marker z-last)" ] || die 'update from the hop changed a pending marker'
