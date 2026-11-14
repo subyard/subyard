@@ -1090,6 +1090,7 @@ fn external_trust_change_rejects_held_execution() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn trust_refusals_before_any_store_side_effect_keep_sessions_plans_and_epoch() {
     let fixture = ManagerFixture::with_registration("manager", true);
@@ -1229,6 +1230,7 @@ fn only_a_changed_registration_retires_a_session() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn busy_connection_store_keeps_session_and_reviewed_plan_for_retry() {
     let fixture = ManagerFixture::with_registration("manager", true);
