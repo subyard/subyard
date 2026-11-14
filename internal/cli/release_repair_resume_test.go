@@ -434,8 +434,12 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 				return ports.InstanceExecResult{}, errors.New("synthetic transport failure")
 			}
 			observation := map[string]any{"fingerprint": strings.Repeat("b", 64), "changed": true}
-			if desired == "release" {
-				observation["retired"] = []map[string]any{{"id": "codex", "kind": "structured", "format": "toml", "path": "/home/dev/.codex/config.toml", "digest": strings.Repeat("c", 64)}}
+			if desired == "release" || desired == "release+conflict" {
+				retired := []map[string]any{{"id": "codex", "kind": "structured", "format": "toml", "path": "/home/dev/.codex/config.toml", "digest": strings.Repeat("c", 64)}}
+				if desired == "release+conflict" {
+					retired = append(retired, map[string]any{"id": "codex", "kind": "structured", "format": "json", "path": "/home/dev/.codex/unproven.json", "digest": strings.Repeat("e", 64)})
+				}
+				observation["retired"] = retired
 			}
 			payload, _ := json.Marshal(observation)
 			return ports.InstanceExecResult{Stdout: payload}, nil
@@ -444,9 +448,13 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 		}
 		return ports.InstanceExecResult{}, fmt.Errorf("unexpected inventory mutation: %s", command[4])
 	}
-	if len(command) >= 5 && command[0] == "python3" && strings.Contains(command[3], "def retire(") && command[4] == "assess-retire" {
+	if len(command) >= 7 && command[0] == "python3" && strings.Contains(command[3], "def retire(") && command[4] == "assess-retire" {
+		if command[6] == "/home/dev/.codex/unproven.json" {
+			// An independent document whose ownership cannot be proven.
+			return ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: retirement ownership evidence unavailable\n")}, &ports.GuestExitError{Code: 2}
+		}
 		// The desired view releases changed owned fields of the deselected integration.
-		payload, _ := json.Marshal(map[string]any{"converged": false, "fingerprint": strings.Repeat("d", 64), "released": []string{"/approval_policy"}})
+		payload, _ := json.Marshal(map[string]any{"converged": false, "fingerprint": strings.Repeat("d", 64), "release": "changed", "released": []string{"/approval_policy"}})
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
 	if len(command) == 3 && command[0] == "sha256sum" && command[2] == fixture.destination {
@@ -466,7 +474,7 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 // state, or cannot be inspected, the repair refuses instead of first rewriting
 // the change. Another yard's independent read failure is reported together.
 func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
-	for _, desired := range []string{"conflict", "unavailable", "", "conflict+unreadable-named", "release"} {
+	for _, desired := range []string{"conflict", "unavailable", "", "conflict+unreadable-named", "release", "release+conflict"} {
 		t.Run("desired="+desired, func(t *testing.T) {
 			named := desired == "conflict+unreadable-named"
 			fixture := newPendingInitFixture(t, named, map[string]string{"default": "CODING_TOOL_INTEGRATIONS=\n"})
@@ -504,15 +512,31 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 				}
 				return
 			}
-			if desired == "release" {
+			if strings.HasPrefix(desired, "release") {
 				// Plain init releases the changed fields in place; the repair must not rewrite them first.
 				var release pendingInitOwnershipRelease
 				if !errors.As(err, &release) || release.yard != "default" || !slices.Equal(release.paths, []string{"/home/dev/.codex/config.toml"}) || !release.ActivationPendingConfiguration() {
 					t.Fatalf("repair would rewrite fields pending init releases: %#v %v", observation, err)
 				}
 				message, retry := release.ActivationDiagnostic()
-				if !strings.HasPrefix(message, "yard default: integration configuration awaiting yard init releases changed owned fields in place") || retry != shellquote.Command([]string{"yard", "-Y", "default", "init"}) || len(message) > 512 {
+				want := "yard default: integration configuration awaiting yard init releases ownership of changed or missing owned configuration in place"
+				if !strings.HasPrefix(message, want) || retry != shellquote.Command([]string{"yard", "-Y", "default", "init"}) || len(message) > 512 {
 					t.Fatalf("diagnostic=%q retry=%q", message, retry)
+				}
+				var diagnostic interface{ ActivationDiagnostic() (string, string) }
+				if !errors.As(err, &diagnostic) {
+					t.Fatal("refusal has no public diagnostic")
+				}
+				combined, _ := diagnostic.ActivationDiagnostic()
+				var conflict pendingInitConflictError
+				if desired == "release+conflict" {
+					// Both independent findings are reported, the conflict first.
+					if !errors.As(err, &conflict) || !conflict.conflict ||
+						!strings.HasPrefix(combined, "yard default: integration configuration awaiting yard init has an ownership conflict") || !strings.Contains(combined, "; "+want) {
+						t.Fatalf("release hid an independent conflict: %v %q", err, combined)
+					}
+				} else if errors.As(err, &conflict) {
+					t.Fatalf("release reported a conflict: %v", err)
 				}
 				return
 			}

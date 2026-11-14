@@ -30,11 +30,11 @@ const (
 	ModeAssessAdopt = "assess-adopt"
 	// ModeAssessRetire reports whether ownership has already been released and
 	// rejects missing, stale, or unproven ownership receipts without changing state.
-	// Applied owned fields that changed are reported as released, not refused.
+	// Changed applied owned fields or a missing document report a pending release.
 	ModeAssessRetire = "assess-retire"
 	// ModeRetire removes only the unchanged, previously applied owned fields.
-	// When applied owned fields changed, it releases their ownership and leaves
-	// the document unchanged. Both retirement modes ignore payload and preserve
+	// When applied owned fields changed or the document is missing, it releases
+	// ownership and leaves the document unchanged. Both retirement modes ignore payload and preserve
 	// the destination document.
 	ModeRetire = "retire"
 
@@ -59,10 +59,20 @@ type JSONObservation struct {
 	Converged   bool   `json:"converged"`
 	Adoptable   bool   `json:"adoptable,omitempty"`
 	Fingerprint string `json:"fingerprint"`
-	// Released lists the owned field pointers that retirement leaves in place
-	// because they changed after apply; their ownership is released instead.
+	// Release names why retirement releases ownership without changing the
+	// document: ReleaseChanged or ReleaseMissingDocument. Empty otherwise.
+	Release string `json:"release,omitempty"`
+	// Released lists the owned field pointers that such a release leaves in
+	// place. It can be empty, for example when no owned path remains.
 	Released []string `json:"released,omitempty"`
 }
+
+const (
+	// ReleaseChanged releases owned fields that changed after apply.
+	ReleaseChanged = "changed"
+	// ReleaseMissingDocument releases ownership of a document that no longer exists.
+	ReleaseMissingDocument = "missing-document"
+)
 
 type Observation = JSONObservation
 
@@ -365,6 +375,7 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 		Converged   *bool    `json:"converged"`
 		Adoptable   bool     `json:"adoptable,omitempty"`
 		Fingerprint string   `json:"fingerprint"`
+		Release     string   `json:"release,omitempty"`
 		Released    []string `json:"released,omitempty"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -381,10 +392,12 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	if _, err := hex.DecodeString(encoded.Fingerprint); err != nil {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
-	if !validReleasedPointers(encoded.Released) {
+	if !validReleasedPointers(encoded.Released) ||
+		encoded.Release != "" && encoded.Release != ReleaseChanged && encoded.Release != ReleaseMissingDocument {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
-	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint, Released: encoded.Released}, nil
+	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint,
+		Release: encoded.Release, Released: encoded.Released}, nil
 }
 
 // Released pointers are rendered to the operator: accept only a bounded,

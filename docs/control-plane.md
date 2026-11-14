@@ -634,8 +634,9 @@ reports there, such as changed owned fields of a deselected integration, refuses
 restoring the installed state first would let the following init retire the operator's change.
 A failed inspection also refuses, with its own diagnostic rather than a conflict. Fix what
 `yard -Y NAME integration status` reports, then run `yard migrate`. When that init would instead
-release changed owned fields of a deselected integration in place, the repair refuses with a
-pending-configuration blocker whose next step is `yard -Y NAME init`. That init is admitted and
+release ownership of a deselected integration's changed or missing owned configuration in place,
+the repair refuses with a pending-configuration blocker whose next step is `yard -Y NAME init`;
+an independent conflict in the same view is reported with it. That init is admitted and
 performs the release without first restoring the installed state. Desired integration sources
 that cannot be read are not inspected, as in the pending-init listing, and the repair proceeds.
 Each yard is observed independently: refusals of all yards are reported together in target
