@@ -115,6 +115,10 @@ fi
 exec sh -c "$*"
 `
 
+// configSSHWatchdogRace keeps a race-built watchdog, this test binary re-run,
+// from sleeping a second at exit (the race runtime's atexit_sleep_ms default).
+const configSSHWatchdogRace = "GORACE=atexit_sleep_ms=0"
+
 type configSSHFixture struct {
 	*configGitAuthoringFixture
 	publisher, log, ssh string
@@ -212,7 +216,7 @@ func newConfigSSHFixtureFrom(t *testing.T, root string, environment []string, ex
 	remote, publisher := configBareSourceRepository(t, "owner-a", "# Preserve source records\nDEV_UID=2297\nDEV_SUDO=0\n")
 	bin, ssh, log := writeConfigFakeSSH(t)
 	environment = append(environment, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"SUBYARD_TEST_SSH_LOG="+log,
+		"SUBYARD_TEST_SSH_LOG="+log, configSSHWatchdogRace,
 		"GIT_AUTHOR_NAME=Subyard Test", "GIT_AUTHOR_EMAIL=test@invalid",
 		"GIT_COMMITTER_NAME=Subyard Test", "GIT_COMMITTER_EMAIL=test@invalid")
 	f := &configSSHFixture{configGitAuthoringFixture: &configGitAuthoringFixture{t: t, root: root, home: home,
@@ -747,7 +751,7 @@ func TestConfigGitSSHClosesOnlyItsMasterWhenOwnerIsKilled(t *testing.T) {
 			helper.Stderr = &helperErr
 			// The go command exports GIT_SSH_COMMAND to tests; an owner must not have it.
 			helper.Env = append(slices.DeleteFunc(os.Environ(), func(entry string) bool { return strings.HasPrefix(entry, "GIT_SSH_COMMAND=") }),
-				"SUBYARD_TEST_SSH_HELPER=1", "SUBYARD_TEST_SSH_LOG="+log, "SUBYARD_TEST_SSH_REMOTE="+remote,
+				"SUBYARD_TEST_SSH_HELPER=1", "SUBYARD_TEST_SSH_LOG="+log, "SUBYARD_TEST_SSH_REMOTE="+remote, configSSHWatchdogRace,
 				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			if stall {
 				helper.Env = append(helper.Env, "SUBYARD_TEST_SSH_STALL_EXIT=1")
