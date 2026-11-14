@@ -2,7 +2,7 @@ import copy
 import unittest
 
 import support  # noqa: F401 - Adds the standalone component directory to the import path.
-from settings import YOLO, codex_defaults
+from settings import STOCK, YOLO, launch_defaults
 from transport import RpcError
 
 
@@ -22,40 +22,51 @@ class SettingsRPC:
 
 class SettingsTests(unittest.TestCase):
     def test_fresh_and_existing_stock_defaults_use_config_without_losing_other_settings(self):
-        for arguments in ({}, {"codex": YOLO}):
+        claude = STOCK["claude"]
+        for arguments, repaired in (({"claude": "--verbose"}, ["codex"]),
+                                    ({"claude": "--verbose", "codex": YOLO}, ["codex"]),
+                                    ({"codex": ""}, ["claude"]),
+                                    ({"codex": "", "claude": " " + claude + " "}, ["claude"]),
+                                    ({}, ["claude", "codex"]),
+                                    ({"codex": YOLO, "claude": claude}, ["claude", "codex"])):
             with self.subTest(arguments=arguments):
-                original = {"agentDefaultArgs": {"claude": "--verbose", **arguments},
+                original = {"agentDefaultArgs": {"opencode": "--verbose", **arguments},
                             "agentDefaultEnv": {"codex": {"EXAMPLE": "retained"}},
                             "futurePreference": False,
                             "theme": "dark", "unrelated": {"retained": True}}
                 rpc = SettingsRPC(original)
-                self.assertFalse(codex_defaults(rpc))
+                self.assertFalse(launch_defaults(rpc))
                 self.assertEqual([], rpc.writes, "assessment must be read-only")
-                self.assertTrue(codex_defaults(rpc, apply=True))
+                self.assertTrue(launch_defaults(rpc, apply=True))
                 expected = copy.deepcopy(original)
-                expected["agentDefaultArgs"]["codex"] = ""
+                expected["agentDefaultArgs"].update(dict.fromkeys(repaired, ""))
                 self.assertEqual(expected, rpc.settings)
                 self.assertEqual([{"agentDefaultArgs": expected["agentDefaultArgs"]}], rpc.writes)
-                self.assertTrue(codex_defaults(rpc, apply=True))
+                self.assertTrue(launch_defaults(rpc, apply=True))
                 self.assertEqual(1, len(rpc.writes), "repeat apply must be a no-op")
 
     def test_missing_map_is_initialized_and_explicit_custom_arguments_are_preserved(self):
         rpc = SettingsRPC({})
-        self.assertTrue(codex_defaults(rpc, apply=True))
-        self.assertEqual({"agentDefaultArgs": {"codex": ""}}, rpc.settings)
-        for value in ("", "--model example", "--sandbox workspace-write", "--yolo"):
-            with self.subTest(value=value):
-                rpc = SettingsRPC({"agentDefaultArgs": {"codex": value}})
-                self.assertTrue(codex_defaults(rpc, apply=True))
-                self.assertEqual([], rpc.writes)
+        self.assertTrue(launch_defaults(rpc, apply=True))
+        self.assertEqual({"agentDefaultArgs": {"codex": "", "claude": ""}}, rpc.settings)
+        for agent, values in (("codex", ("", "--model example", "--sandbox workspace-write", "--yolo")),
+                              ("claude", ("", "--model example", "--permission-mode default",
+                                          STOCK["claude"] + " --model example"))):
+            for value in values:
+                with self.subTest(agent=agent, value=value):
+                    other = {"codex": "", "claude": ""}
+                    rpc = SettingsRPC({"agentDefaultArgs": {**other, agent: value}})
+                    self.assertTrue(launch_defaults(rpc, apply=True))
+                    self.assertEqual([], rpc.writes)
 
     def test_invalid_settings_fail_without_mutation(self):
         for settings in (None, [], {"agentDefaultArgs": None},
-                         {"agentDefaultArgs": []}, {"agentDefaultArgs": {"codex": False}}):
+                         {"agentDefaultArgs": []}, {"agentDefaultArgs": {"codex": False}},
+                         {"agentDefaultArgs": {"codex": "", "claude": None}}):
             with self.subTest(settings=settings):
                 rpc = SettingsRPC(settings)
                 with self.assertRaises(RpcError):
-                    codex_defaults(rpc, apply=True)
+                    launch_defaults(rpc, apply=True)
                 self.assertEqual([], rpc.writes)
 
     def test_failed_write_is_not_retried_and_success_requires_readback(self):
@@ -70,7 +81,7 @@ class SettingsTests(unittest.TestCase):
 
         rpc.call = reject
         with self.assertRaises(RpcError):
-            codex_defaults(rpc, apply=True)
+            launch_defaults(rpc, apply=True)
         self.assertEqual(1, len(rpc.writes))
 
         def discard(method, params=None):
@@ -78,4 +89,4 @@ class SettingsTests(unittest.TestCase):
 
         rpc.call = discard
         with self.assertRaisesRegex(RpcError, "did not converge"):
-            codex_defaults(rpc, apply=True)
+            launch_defaults(rpc, apply=True)

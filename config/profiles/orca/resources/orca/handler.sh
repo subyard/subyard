@@ -882,7 +882,7 @@ cmd_up() {
   fi
   run_project_sync
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
-  codex_defaults_ready || die "Orca Codex launch defaults did not converge"
+  codex_defaults_ready || die "Orca agent launch defaults did not converge"
   automatic_project_hook_ready && projects_synced || die "Orca project registration did not converge"
   ok "Orca ready through $ORCA_TRANSPORT at $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT"
 }
@@ -1061,9 +1061,9 @@ cmd_status() {
   fi
   if [ "$service_is_ready" -eq 1 ]; then
     if codex_defaults_ready; then
-      ok "Codex stock YOLO launch override disabled; yard config supplies defaults"
+      ok "Codex and Claude stock YOLO launch defaults disabled; yard config supplies defaults"
     else
-      warn "Codex launch defaults need repair; run '$(yard_cmd_hint) orca up'"
+      warn "Orca agent launch defaults need repair; run '$(yard_cmd_hint) orca up'"
     fi
     if report="$(project_registration_report)"; then
       registered="$(jq -r '.registered' <<<"$report")"
