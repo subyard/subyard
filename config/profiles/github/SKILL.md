@@ -16,11 +16,19 @@ by their actual URL, including across installations. Direct Git commands do not
 mint an initial CLI token; use `--repo` when a Git hook also needs `GH_TOKEN`.
 The App's installed repository and permission grants apply. No token combines installations.
 
-For ordinary Git, check `subyard-github status --git`. With the owner-selected
-`GITHUB_GIT_MODE=broker-first` or `broker-last`, use ordinary `git clone/fetch/pull/push/ls-remote`;
-`broker-first` tries permitted App access before original HTTPS/SSH authentication.
-`broker-last` tries original authentication (including anonymous HTTPS) first and only
-requests App access if ref discovery fails. Cancellation stops selection; if both
+For ordinary Git, check `subyard-github status --git`. The owner-selected `GITHUB_GIT_MODE` is one of:
+- `off` (default): ordinary Git keeps its original authentication and never uses the broker;
+  only `subyard-github run` does.
+- `broker-first`: tries permitted App access before original HTTPS/SSH authentication.
+- `broker-last`: tries original authentication (including anonymous HTTPS) first and only
+  requests App access if ref discovery fails.
+
+To change the mode, ask the operator to run on the owner host
+`yard -Y <yard> config set GITHUB_GIT_MODE <off|broker-first|broker-last> --scope yard`,
+then `yard migrate`; the mode applies only after that migration.
+
+With `broker-first` or `broker-last`, use ordinary `git clone/fetch/pull/push/ls-remote`
+for canonical GitHub HTTPS and SSH URLs. Cancellation stops selection; if both
 attempts fail, the operation fails without retrying the original transport.
 Reads require Contents read/write; App pushes require Contents write, plus Workflows write for workflow-file changes.
 Backend selection stays fixed after ref discovery: never retry a failed/partial push
