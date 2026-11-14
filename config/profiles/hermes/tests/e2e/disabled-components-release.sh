@@ -338,7 +338,7 @@ FAULT
 }
 
 # Deselection fingerprint of the installed claude assets in the hermes yard: its
-# structured settings document and recorded persist links.
+# structured settings document and any recorded persist links.
 claude_assets() {
   guest_yard hermes sh -euc '
     home="$(getent passwd dev | cut -d: -f6)"
@@ -356,9 +356,9 @@ claude_assets() {
 exercise_failed_deselect() {
   local rc=0 transaction
   claude_assets > "$STATE_ROOT/deselect-assets.before"
+  # Persist links exist only where the session mount does; the settings document always does.
   grep -q '/\.claude/settings\.json file ' "$STATE_ROOT/deselect-assets.before" \
-    && grep -q '/\.claude/projects link ' "$STATE_ROOT/deselect-assets.before" \
-    || { cat "$STATE_ROOT/deselect-assets.before"; die 'installed claude assets are missing before deselection'; }
+    || { cat "$STATE_ROOT/deselect-assets.before"; die 'installed claude settings are missing before deselection'; }
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS codex --scope yard --local --yes
   # The remaining selected provisioner fails after inventory apply, before the hooks.
   cat > "$STATE_ROOT/deselect-curl.sh" <<'FAULT'
