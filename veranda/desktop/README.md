@@ -309,8 +309,8 @@ source `init`; Go and the source packaging prerequisites must be available in th
 The installed engine must match the supplied engine bytes. The fixture removes its
 isolated runtime with the rest of its owned state.
 [Periodic E2E](../../docs/testing.md#periodic-e2e-on-hosted-runners) runs the same entrypoint
-as `veranda:x11`, `veranda:wayland` and `veranda:x11-remote-ui` (`--x11 --remote --ui`);
-`veranda:wayland-ime` (`--ime`) runs only when a dispatch names it.
+as `veranda:x11` and `veranda:wayland`; `veranda:x11-remote-ui` (`--x11 --remote --ui`) and
+`veranda:wayland-ime` (`--ime`) run only when a dispatch names them.
 Add `--remote` to run three same-build lifetimes against an isolated real loopback
 SSH server and system SSH agent with synthetic keys on the disposable VM. This
 checks first-key decline/accept, compatible owner discovery, cancellation during

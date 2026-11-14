@@ -1020,7 +1020,8 @@ at the branch's latest commit. A retry runs each check on three runners at once 
 start runs, and the `supersede` job cancels replaced ones; neither checks out code.
 
 The Veranda GUI SHORT scenarios run here only, not in release acceptance, so they never gate a CLI or
-engine release: `veranda:x11`, `veranda:wayland` and `veranda:x11-remote-ui` lease one VM each through
+engine release: `veranda:x11`, `veranda:wayland` and the manual `veranda:x11-remote-ui` and
+`veranda:wayland-ime` lease one VM each through
 `dev/e2e/veranda-short.sh`, as the [Veranda SHORT recipe](../veranda/desktop/README.md#disposable-x11-and-wayland-short)
 does. A separate `veranda-bundle` job builds the GUI and a matching engine with the stable version
 `VERANDA_VERSION` and adds them to a copy of the candidate bundle; other checks keep the unchanged

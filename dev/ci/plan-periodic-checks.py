@@ -20,9 +20,8 @@ SPLIT = {"vm:p0-full"}
 # Veranda GUI SHORT scenarios (veranda/desktop/README.md). They gate no CLI or engine release, so
 # they are periodic only and use their own bundle, which adds the GUI and engine ELFs. A manual
 # check runs only when a dispatch names it.
-VERANDA = {"veranda:x11": ["--x11"], "veranda:wayland": [],
-           "veranda:x11-remote-ui": ["--x11", "--remote", "--ui"]}
-VERANDA_MANUAL = {"veranda:wayland-ime": ["--ime"]}
+VERANDA = {"veranda:x11": ["--x11"], "veranda:wayland": []}
+VERANDA_MANUAL = {"veranda:x11-remote-ui": ["--x11", "--remote", "--ui"], "veranda:wayland-ime": ["--ime"]}
 
 
 def collector():
