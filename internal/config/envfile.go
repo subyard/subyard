@@ -92,11 +92,25 @@ type discardPolicy struct {
 
 // discardedValue is one discarded assignment. A nested one is a default
 // performed inside another record's expression: Expression is its exact
-// parameter text and Replacement the text that keeps that record's value.
+// parameter text and Within names that record's setting, or ":" for a no-op
+// record.
 type discardedValue struct {
-	Name, Value             string
-	Expression, Replacement string
-	Nested                  bool
+	Name, Value        string
+	Expression, Within string
+	Nested             bool
+}
+
+// within reports nested defaults as performed inside record's expression.
+func (policy discardPolicy) within(record string) discardPolicy {
+	if report := policy.report; report != nil {
+		policy.report = func(value discardedValue) {
+			if value.Nested {
+				value.Within = record
+			}
+			report(value)
+		}
+	}
+	return policy
 }
 
 func (policy discardPolicy) discards(name string) bool {
@@ -196,7 +210,7 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 		if !expand {
 			return nil
 		}
-		_, err := expandValue(value, values, observer, policy)
+		_, err := expandValue(value, values, observer, policy.within(":"))
 		return err
 	}
 	if strings.HasPrefix(record, "export ") {
@@ -211,7 +225,7 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
 	discard := policy.discards(name)
-	inner := policy
+	inner := policy.within(name)
 	if discard {
 		// Validate the old expression without allowing its assignments or nested
 		// defaults to affect current settings, provenance, or sync exports. The
@@ -376,14 +390,7 @@ func expandParameter(
 				observer(name, expanded)
 			}
 			if discard && policy.report != nil {
-				// Replacing the parameter with its fallback keeps the record's
-				// value; a fallback that itself assigns is frozen to its value,
-				// escaped so that evaluating the record again yields it exactly.
-				replacement := fallback
-				if strings.Contains(fallback, ":=") {
-					replacement = escapeExpansion(expanded)
-				}
-				policy.report(discardedValue{Name: name, Value: expanded, Expression: "${" + expression + "}", Replacement: replacement, Nested: true})
+				policy.report(discardedValue{Name: name, Value: expanded, Expression: "${" + expression + "}", Nested: true})
 			}
 		}
 		return expanded, nil
@@ -437,10 +444,4 @@ func EvaluateAssignments(reader io.Reader, source string, base map[string]string
 		return nil, err
 	}
 	return values, nil
-}
-
-// escapeExpansion quotes value for an expanding (unquoted or double-quoted)
-// context, so that evaluating it yields value itself.
-func escapeExpansion(value string) string {
-	return strings.NewReplacer(`\`, `\\`, `$`, `\$`, "`", "\\`", `"`, `\"`).Replace(value)
 }

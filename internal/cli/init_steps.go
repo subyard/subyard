@@ -143,10 +143,10 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && detach.Unverified {
 			consequence = fmt.Sprintf("yard %s: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)", yard.YardName)
 			if len(detach.Devices) != 0 {
-				consequence += ", including each of these if attached: " + strings.Join(detach.Devices, " ")
+				consequence = boundedDeviceList(consequence+", including each of these if attached:", detach.Devices)
 			}
 		} else if native.Stage.ID == ports.ReconcileStageExtras && len(detach.Devices) != 0 {
-			consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests: %s", yard.YardName, strings.Join(detach.Devices, " "))
+			consequence = boundedDeviceList(fmt.Sprintf("yard %s: detaches devices no selected profile requests:", yard.YardName), detach.Devices)
 		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
 			"native VerifyStage "+string(native.Stage.ID)+" returns converged", consequence, native.Converged, native.Conditional)
@@ -320,4 +320,22 @@ func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime 
 	}
 	execution.extrasDetach = detach
 	return nil
+}
+
+// operationStepTextLimit is the byte bound of one operation step text.
+const operationStepTextLimit = 512
+
+// boundedDeviceList appends devices to prefix within the step text bound,
+// ending with "and N more" when they do not all fit.
+func boundedDeviceList(prefix string, devices []string) string {
+	for shown := len(devices); shown > 0; shown-- {
+		text := prefix + " " + strings.Join(devices[:shown], " ")
+		if rest := len(devices) - shown; rest != 0 {
+			text += fmt.Sprintf(" and %d more", rest)
+		}
+		if len(text) <= operationStepTextLimit {
+			return text
+		}
+	}
+	return fmt.Sprintf("%s %d devices", prefix, len(devices))
 }

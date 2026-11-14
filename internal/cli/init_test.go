@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1872,6 +1873,22 @@ func TestInitPlanDisclosesExtrasDetachAndDiagnostics(t *testing.T) {
 	execution.extrasDetach = reconcileruntime.ExtrasDetach{Unverified: true}
 	if step := execution.operationSteps()[index]; step.Consequence != "yard box: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)" {
 		t.Fatalf("unverified extras step without ignored assignments = %#v", step)
+	}
+	// Many long device names stay within the step text bound on both paths.
+	var many []string
+	for index := range 25 {
+		many = append(many, fmt.Sprintf("yx-%s-%02d", strings.Repeat("long-mount-name", 3), index))
+	}
+	for _, unverified := range []bool{false, true} {
+		execution.extrasDetach = reconcileruntime.ExtrasDetach{Devices: many, Unverified: unverified}
+		step := execution.operationSteps()[index]
+		step.DependsOn = nil
+		if err := domain.ValidateOperationSteps([]domain.OperationStep{step}); err != nil {
+			t.Fatalf("unverified=%t: bounded step refused: %v", unverified, err)
+		}
+		if consequence := step.Consequence; len(consequence) > 512 || !strings.Contains(consequence, many[0]) || !regexp.MustCompile(` and \d+ more$`).MatchString(consequence) {
+			t.Fatalf("unverified=%t: unbounded consequence %q", unverified, consequence)
+		}
 	}
 	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
 	execution.plan.Steps[0].Converged = true

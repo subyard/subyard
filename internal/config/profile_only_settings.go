@@ -25,11 +25,11 @@ type IgnoredAssignment struct {
 	// Value is the evaluated value the assignment would have supplied, or its
 	// unevaluated text when evaluation failed.
 	Value string
-	// Nested marks a default performed inside another assignment's expression,
-	// which config unset of the name cannot remove. Replacing Expression with
-	// Replacement on its line removes it and keeps that assignment's value.
-	Nested                  bool
-	Expression, Replacement string
+	// Nested marks a default performed inside another assignment's
+	// expression, which config unset of the name cannot remove. Expression is
+	// its exact parameter text and Within that assignment's setting, or ":".
+	Nested             bool
+	Expression, Within string
 	// authored reports that config unset at Scope writes exactly Path and
 	// removes the assignment.
 	authored bool
@@ -47,7 +47,7 @@ func (assignment IgnoredAssignment) Repair() string {
 	case assignment.Command():
 		return ""
 	case assignment.Nested:
-		return fmt.Sprintf("replace %s with %s on line %d of %s", strconv.Quote(assignment.Expression), strconv.Quote(assignment.Replacement), assignment.Line, assignment.Path)
+		return fmt.Sprintf("line %d of %s: %s", assignment.Line, assignment.Path, assignment.nestedRepair())
 	case assignment.authored:
 		storage := "--local"
 		if assignment.Git {
@@ -66,12 +66,22 @@ func (assignment IgnoredAssignment) String() string {
 	repair := "remove that line"
 	switch {
 	case assignment.Nested:
-		repair = fmt.Sprintf("replace %s with %s on that line", strconv.Quote(assignment.Expression), strconv.Quote(assignment.Replacement))
+		repair = assignment.nestedRepair() + " on that line"
 	case assignment.authored:
 		repair = "remove it with " + assignment.Repair()
 	}
 	return fmt.Sprintf("%s in %s:%d is ignored: only environment profiles declare it; %s",
 		assignment.Name, assignment.Path, assignment.Line, repair)
+}
+
+// nestedRepair describes removing a nested default without inserting any
+// text. The current value is Go-quoted.
+func (assignment IgnoredAssignment) nestedRepair() string {
+	from := assignment.Within
+	if from == ":" {
+		from = "the : record"
+	}
+	return fmt.Sprintf("remove the %s default from %s; it currently evaluates to %s", assignment.Name, from, strconv.Quote(assignment.Value))
 }
 
 // IgnoredAssignments returns every ignored profile-only assignment in stable order.
@@ -88,7 +98,7 @@ func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, value di
 	definition := tracker.layers[layer]
 	tracker.ignored = append(tracker.ignored, IgnoredAssignment{
 		Name: value.Name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "),
-		Value: value.Value, Nested: value.Nested, Expression: value.Expression, Replacement: value.Replacement,
+		Value: value.Value, Nested: value.Nested, Expression: value.Expression, Within: value.Within,
 	})
 }
 

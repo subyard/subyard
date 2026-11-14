@@ -137,12 +137,12 @@ func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
 	if loaded.Environment["LIMITS_MEMORY"] != "2GiB" || loaded.Environment["YARD_DEVICES"] != "" {
 		t.Fatalf("nested default leaked: LIMITS_MEMORY=%q YARD_DEVICES=%q", loaded.Environment["LIMITS_MEMORY"], loaded.Environment["YARD_DEVICES"])
 	}
-	// config unset cannot remove a nested default, so the repair replaces it
-	// in its line and keeps the other setting's value.
+	// config unset cannot remove a nested default, so the repair describes
+	// removing it from the other setting without inserting any text.
 	if ignored := loaded.IgnoredAssignments(); len(ignored) != 1 || !ignored[0].Nested ||
-		ignored[0].Repair() != `replace "${YARD_DEVICES:=2GiB}" with "2GiB" on line 1 of `+host ||
-		ignored[0].String() != "YARD_DEVICES in "+host+`:1 is ignored: only environment profiles declare it; replace "${YARD_DEVICES:=2GiB}" with "2GiB" on that line` {
-		t.Fatalf("nested assignment observations = %q", renderedIgnored(loaded))
+		ignored[0].Repair() != "line 1 of "+host+`: remove the YARD_DEVICES default from LIMITS_MEMORY; it currently evaluates to "2GiB"` ||
+		ignored[0].String() != "YARD_DEVICES in "+host+`:1 is ignored: only environment profiles declare it; remove the YARD_DEVICES default from LIMITS_MEMORY; it currently evaluates to "2GiB" on that line` {
+		t.Fatalf("nested assignment observations = %q / %q", renderedIgnored(loaded), loaded.IgnoredAssignments()[0].Repair())
 	}
 
 	// Later records never see a nested default of a discarded name, and a
@@ -159,20 +159,18 @@ func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
 		t.Fatalf("nested observations = %q", got)
 	}
 
-	// A frozen replacement keeps the other setting's literal value when the
-	// record is evaluated again.
-	content := "GIT_USER_NAME=\"${YARD_DEVICES:=${UNSET_VALUE:=literal-\\$SSH_PORT}}\"\n"
-	fixture.write(t, host, content)
+	// A nested default inside a no-op record names that record; the current
+	// value is Go-quoted, never inserted into the file.
+	fixture.write(t, host, "GIT_USER_NAME=\"${YARD_DEVICES:=${UNSET_VALUE:=literal-\\$SSH_PORT}}\"\n: \"${YARD_CAPS:=fuse}\"\n")
 	if loaded, err = fixture.load("default", nil); err != nil || loaded.Environment["GIT_USER_NAME"] != "literal-$SSH_PORT" {
 		t.Fatalf("nested literal fixture = %q, %v", loaded.Environment["GIT_USER_NAME"], err)
 	}
-	ignored := loaded.IgnoredAssignments()
-	if len(ignored) != 1 || !ignored[0].Nested {
-		t.Fatalf("nested literal observations = %q", renderedIgnored(loaded))
+	want := []string{
+		`line 2 of ` + host + `: remove the YARD_CAPS default from the : record; it currently evaluates to "fuse"`,
+		`line 1 of ` + host + `: remove the YARD_DEVICES default from GIT_USER_NAME; it currently evaluates to "literal-$SSH_PORT"`,
 	}
-	fixture.write(t, host, strings.Replace(content, ignored[0].Expression, ignored[0].Replacement, 1))
-	if loaded, err = fixture.load("default", nil); err != nil || loaded.Environment["GIT_USER_NAME"] != "literal-$SSH_PORT" || len(loaded.IgnoredAssignments()) != 0 {
-		t.Fatalf("applied replacement changed the value: %q, %v, %q", loaded.Environment["GIT_USER_NAME"], err, renderedIgnored(loaded))
+	if ignored := loaded.IgnoredAssignments(); len(ignored) != 2 || ignored[0].Repair() != want[0] || ignored[1].Repair() != want[1] {
+		t.Fatalf("nested repairs = %q", renderedIgnored(loaded))
 	}
 
 	// A required check of a discarded name never refuses either, nor is its
