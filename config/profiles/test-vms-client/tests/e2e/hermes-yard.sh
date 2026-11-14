@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 STATE=''
 YARD_NAME=''
+REFUSED_YARD=''
 CANDIDATE_ENGINE=''
 SKILL=/usr/local/share/subyard/skills/subyard-test-vms
 LINKS='.agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills .codex/skills'
@@ -46,18 +47,28 @@ yard_named() {
 yard() { yard_named "$YARD_NAME" "$@"; }
 
 cleanup() {
-  local rc=$?
+  local original=$? cleanup_rc=0
   trap - EXIT INT TERM
   set +e
+  # The refusal definition is never initialized; remove it so it cannot affect teardown.
+  if [ -n "$REFUSED_YARD" ]; then
+    rm -rf -- "${SUBYARD_CONFIG_HOME:?}/yards/$REFUSED_YARD" || cleanup_rc=3
+  fi
   if [ -n "$YARD_NAME" ] && [ -f "${SUBYARD_CONFIG_HOME:-}/yards/$YARD_NAME/config.env" ]; then
-    yard teardown --yes >/dev/null 2>&1 || rc=3
+    # A registered sentinel keeps the last-yard teardown from retiring the shared base
+    # platform (bridge, storage pool and host guards) used by later leases' fixtures.
+    install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
+    printf 'SSH_PORT=64998\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
+    chmod 0600 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
+    yard teardown --yes >&2 || cleanup_rc=3
   fi
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-test-vms-client.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = test-vms-client-yard-e2e-v1 ]; then
-    sudo -n find "$STATE" -depth -delete || rc=3
+    sudo -n find "$STATE" -depth -delete || cleanup_rc=3
   fi
-  printf 'TEST_VMS_CLIENT_YARD_RESULT exit_code=%s\n' "$rc"
-  exit "$rc"
+  printf 'TEST_VMS_CLIENT_YARD_RESULT original_exit_code=%s cleanup_exit_code=%s\n' "$original" "$cleanup_rc"
+  [ "$original" -eq 0 ] || exit "$original"
+  exit "$cleanup_rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -76,6 +87,9 @@ install -d -m 0700 "$SUBYARD_CONFIG_HOME"
 
 # A release run installs the frozen packaged candidate; development runs package the
 # current worktree. Both go through the supported installer.
+if [ ! -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  command -v go >/dev/null 2>&1 || die 'Go is required to package the development candidate'
+fi
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
 (
@@ -159,6 +173,8 @@ printf '  [ ok ] client and skill delivered into the Hermes yard without a check
 printf 'test-vms-client_e2e_stage=deselect\n'
 yard config set ENVIRONMENT_PROFILES 'hermes github' --scope yard --yes
 yard init --yes
+# Retirement is asserted on the running guest; start is a no-op when init kept it running.
+yard start --yes
 # shellcheck disable=SC2016
 as_dev sh -euc '
 fail() { printf "retirement assertion failed: %s\n" "$*" >&2; exit 1; }
@@ -173,7 +189,8 @@ incus exec "$instance" --project "$project" -- test ! -e /var/lib/subyard/agent-
 printf '  [ ok ] deselection and init retired the client, skill and links\n'
 
 # The shipped role without host access refuses the profile before any guest effect.
-refused="vpn-$token"
+REFUSED_YARD="vpn-$token"
+refused="$REFUSED_YARD"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$refused"
 {
   grep -v '^ENVIRONMENT_PROFILES=' "$ROOT/config/profiles/amnezia/yard.env"
@@ -187,4 +204,5 @@ set -e
 [ "$refusal_rc" != 0 ] && grep -Fq 'profile "test-vms-client" requires host access' <<<"$refusal" \
   || die "a role without host access accepted the profile: $refusal"
 rm -rf -- "${SUBYARD_CONFIG_HOME:?}/yards/$refused"
+REFUSED_YARD=''
 printf 'ok: Hermes yard delivery, retirement and host-access refusal\n'
