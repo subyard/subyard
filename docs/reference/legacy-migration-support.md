@@ -93,10 +93,10 @@ data; this synthetic boundary does not claim an authenticated historical grant. 
 also verifies that continuation alone never authorizes full removal. Current-owned
 projects retain their ordinary repeatable initialization contract.
 
-Published direct-upgrade baselines run from **v0.11.0 through v0.25.5**, inclusive,
+Published direct-upgrade baselines run from **v0.11.0 through v0.28.0**, inclusive,
 using the immutable release asset digests in
 [`published-upgrade-baselines.tsv`](../../dev/e2e/published-upgrade-baselines.tsv).
-Candidate versions for this window must sort above v0.25.5. The released-caller
+Candidate versions for this window must sort above v0.28.0. The released-caller
 fixtures below retain their distinct protocol and recovery baselines.
 
 ## Existing compatibility inventory

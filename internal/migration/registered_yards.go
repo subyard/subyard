@@ -465,10 +465,11 @@ func registeredMigrationDefault(trace config.SettingTrace) bool {
 func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) {
 	configuration := maps.Clone(plan.instance.LocalConfig)
 	expanded := maps.Clone(plan.instance.Config)
+	virtualMachine := plan.runtime.Yard.YardKind == domain.YardVM && plan.instance.Type == domain.YardVM
 	for _, values := range []map[string]string{configuration, expanded} {
 		// Only exact lifecycle outputs and independently validated producer results.
 		// Every start rewrites these for an accepted device; the journal must not pin them.
-		reconcileruntime.NormalizeInstanceLifecycleConfig(values, append(slices.Collect(maps.Keys(plan.instance.LocalDevices)), "eth0"), plan.runtime.Yard.YardKind == domain.YardVM && plan.instance.Type == domain.YardVM)
+		reconcileruntime.NormalizeInstanceLifecycleConfig(values, append(slices.Collect(maps.Keys(plan.instance.LocalDevices)), "eth0"), virtualMachine)
 		for key, value := range plan.receipts {
 			values[key] = value
 		}
@@ -483,6 +484,12 @@ func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) 
 	project := maps.Clone(plan.before)
 	for key, value := range plan.metadata {
 		project[key] = value
+	}
+	// A VM yard's project policy includes the low-level grant that its owner
+	// raw.qemu.conf needs, and every product start may write it. Removing the
+	// exact grant keeps the Desired of an earlier plan; any other value stays bound.
+	if virtualMachine && project["restricted.virtual-machines.lowlevel"] == "allow" {
+		delete(project, "restricted.virtual-machines.lowlevel")
 	}
 	// Verified asset handles are process-local labels, not persisted yard identity.
 	assetRoot, yard := plan.runtime.RepositoryRoot, plan.loaded.Context
