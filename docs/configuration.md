@@ -195,6 +195,19 @@ activation while it exists, suggests commands to import its identity keys, and l
 keys for manual preservation. Move or delete the file after preserving its settings;
 Subyard never edits or deletes it during migration.
 
+On an update from 0.27.x the refusal comes from the new release while 0.27.x stays active, and
+0.27.x does not know the `GIT_USER_*` settings, so the suggested `config set` commands fail if run
+at that point. Follow this order instead:
+
+1. Save the refusal output: it holds the identity values, the exact commands and the other keys.
+2. Move the file it names out of `$DATA_HOME`, for example to a backup next to it.
+3. Repeat the update; it now activates the new release.
+4. Run the saved `yard -Y <yard> config set GIT_USER_* ... --scope yard` commands, then
+   `yard -Y <yard> init`. Restore any other listed keys manually inside the yard.
+
+After step 4, rollback to 0.27.x cannot load a configuration that contains `GIT_USER_*`;
+unset those settings before rolling back.
+
 ### Yard resource limits
 
 `LIMITS_CPU` and `LIMITS_MEMORY` are optional Incus resource limits for both container and VM
