@@ -1784,7 +1784,9 @@ mod read_source_tests {
     use super::*;
     #[test]
     fn relative_micros_is_read_only_and_shares_original_receipt_origin() {
-        let before = Instant::now();
+        // Consecutive `Instant::now()` reads can be equal on coarse clocks (Windows), so
+        // pick an instant strictly before the origin rather than merely read earlier.
+        let before = Instant::now() - std::time::Duration::from_millis(1);
         let observation = Observation::new();
         assert!(observation.relative_micros(before).is_none());
         let source = observation.source(SourceKind::Local);
