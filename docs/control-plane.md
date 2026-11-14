@@ -633,7 +633,16 @@ including planning and `--check`, so a refusal precedes any effect. An ownership
 reports there, such as changed owned fields of a deselected integration, refuses the repair:
 restoring the installed state first would let the following init retire the operator's change.
 A failed inspection also refuses, with its own diagnostic rather than a conflict. Fix what
-`yard -Y NAME integration status` reports, then run `yard migrate`. Desired integration sources
+`yard -Y NAME integration status` reports, then run `yard migrate`. When that init would instead
+release ownership of a deselected integration's changed or missing owned configuration in place,
+the repair refuses with a pending-configuration blocker whose next step is `yard -Y NAME init`;
+an independent conflict in the same view is reported with it. The guest keeps a release's reason
+until fresh ownership, so the blocker also holds after the guest released ownership and before
+the integration inventory commit forgets the record; without it, the repair would overlay the
+released document. After that commit, while the installed configuration still selects the
+document, the installed-view inspection itself refuses it with the same pending-configuration
+blocker. A deliberate enable from the desired selection is not refused and takes fresh ownership. That init is admitted and
+performs the release without first restoring the installed state. Desired integration sources
 that cannot be read are not inspected, as in the pending-init listing, and the repair proceeds.
 Each yard is observed independently: refusals of all yards are reported together in target
 order (default first, then by name), and only findings that depend on a yard's failed read are

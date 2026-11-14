@@ -314,10 +314,45 @@ selection override that conflicts with persistent configuration is rejected.
 Disable stops only proven-owned services and removes only unchanged owned wiring.
 Credentials, session history, session storage targets, explicit operator links,
 unmanaged binaries and user CLI sessions are preserved. JSON/TOML retirement removes
-owned fields while retaining the document and unrelated fields. Materialization baselines
-keep the v0.14.0 format for retained-runtime rollback; extra retirement evidence uses a
-protected companion record under the same lock. The root-owned
-inventory under `/var/lib/subyard/integrations` records artifact identity and digests;
+owned fields while retaining the document and unrelated fields. If owned fields changed after
+Subyard applied them, for example an operator removed, edited or replaced one, they no longer
+prove which values Subyard wrote. Retirement then releases their ownership and leaves the
+document byte-for-byte unchanged instead of refusing. A missing document, or a missing parent
+directory, is released the same way: there is nothing to remove and nothing is created. This
+includes a document the operator renamed or moved away. `yard integration status` and the
+`yard init` plan warn which file is released and which owned fields stay in it. The
+command that performs the release prints a result line naming the yard, the file and the fields
+left in place, which Subyard no longer manages; when the list is too long it states only their
+number. Remove those fields by hand if they are unwanted. A later enable applies the shipped
+fields again with fresh ownership. A release records its reason, bound to the recorded fields,
+before any ownership write and keeps it until that fresh ownership. Once its pending-retirement
+receipt is written, an interrupted release resumes as the same release and never edits the
+document, even if the operator restored Subyard's values in between. An interruption before that
+receipt decides again from the document: restored values are then retired normally. An
+interrupted ordinary retirement still accepts only the exact recorded before and after fields;
+if its document is deleted meanwhile, it completes without a notice when nothing owned was left
+in it, and otherwise refuses. A reason left behind by an older runtime after a rollback is
+ignored when its recorded fields differ from the current retirement. It still counts when both
+recorded no remaining owned field, for example a missing-document release followed there by an
+ordinary retirement of the same document; the only effect is a release notice for that
+retirement. While an installed configuration still selects a released document, for example
+after an init interrupted before it stored its applied settings, `yard migrate` refuses and names
+`yard -Y NAME init`; the installed view never writes a released document, whether it is changed,
+invalid, missing or replaced by a link. A symlink or invalid document at the destination, ownership evidence recorded for a
+different destination path, and missing or unproven ownership evidence still block retirement.
+A disable after such a change or removal while release activation is stale stores only the
+selection. `yard migrate --check` then names `yard -Y NAME init`, and `yard migrate` refuses,
+because its installed-view repair would first restore the owned fields. Run `yard -Y NAME init`
+to perform the release; a yard left in this state by an earlier release recovers the same way.
+Materialization baselines keep the v0.14.0 format for retained-runtime rollback; extra
+retirement evidence, including a release's reason, uses protected companion records under the
+same lock. A corrupt release record refuses retirement and apply instead of being discarded. To
+recover, inspect the record in the yard as root: it is
+`/var/lib/subyard/config-materialization/<id>.release`, where `<id>` is the digest that
+`printf '%s\0%s' dev /home/dev/.claude/settings.json | sha256sum` prints for the yard's
+developer user and the destination. Remove only that file and retry; Subyard then decides from
+the document and its ownership records alone.
+The root-owned inventory under `/var/lib/subyard/integrations` records artifact identity and digests;
 it is ownership evidence, not another desired-state store. Missing, legacy, corrupt
 or changed ownership evidence can block cleanup with a conflict instead of deleting
 unproven artifacts. After inventory initialization, newly created unrecorded runtime

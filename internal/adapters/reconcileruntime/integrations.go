@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
@@ -104,6 +105,12 @@ type IntegrationPlan struct {
 	facts               []integrationFact
 	persist             persistObservation
 	sources             string
+
+	// ownershipReleases lists structured documents whose retirement releases
+	// changed or missing owned configuration instead of removing it.
+	ownershipReleases       []string
+	ownershipReleaseNotices []string
+
 	// Attribution only; the existing aggregate source binding remains the guard.
 	packageSources         map[string]string
 	instance               ports.InstanceInfo
@@ -121,6 +128,10 @@ func (plan IntegrationPlan) InstalledChanged() bool { return plan.Changed && !pl
 // NeedsRetirementProof requests the existing guarded apply even for a clean
 // guest. The proof is an apply receipt, outside integration equality and Desired.
 func (plan IntegrationPlan) NeedsRetirementProof() bool { return plan.retirementProofPending }
+
+// OwnershipReleases lists structured documents whose retirement releases changed
+// owned fields in place. Rewriting them first would discard the operator's change.
+func (plan IntegrationPlan) OwnershipReleases() []string { return slices.Clone(plan.ownershipReleases) }
 
 type integrationProfileRoute struct {
 	Owner, MarkerKey, DeviceName, Marker string
@@ -829,6 +840,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			mode = configmaterial.ModeAssessAdopt
 		}
 		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
+		if err == nil {
+			err = runtime.releasedInstalledDocument(file.destination, observation)
+		}
 		if err != nil {
 			causes = append(causes, err)
 			continue
@@ -862,6 +876,12 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		fingerprints = append(fingerprints, observation.Fingerprint)
 		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
+		if observation.Release != "" {
+			notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
+			plan.Warnings = append(plan.Warnings, notice)
+			plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
+			plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
+		}
 	}
 	if err := domain.CollectRefusals(causes...); err != nil {
 		return plan, observed, err
@@ -1068,7 +1088,10 @@ func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, rea
 		if observed.Initial && runtime.AdoptLegacyIntegrations {
 			mode = configmaterial.ModeAssessAdopt
 		}
-		_, err = runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
+		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
+		if err == nil {
+			err = runtime.releasedInstalledDocument(file.destination, observation)
+		}
 		causes = append(causes, err)
 	}
 	for _, entry := range observed.Retired {
@@ -1187,7 +1210,75 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		}
 		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)
 	}
-	return configmaterial.ParseObservation(result.Stdout)
+	observation, err := configmaterial.ParseObservation(result.Stdout)
+	if err == nil && mode == configmaterial.ModeRetire && observation.Release != "" && runtime.Stdout != nil {
+		// Report the completed release once, from the call that performed it.
+		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+path+": ", observation, "; Subyard no longer manages it"))
+	}
+	return observation, err
+}
+
+// releasedInstalledDocument refuses an installed-view inspection of a document
+// whose ownership a retirement released while the installed view still selects
+// it, as after an init interrupted before its applied settings were stored.
+// Repairing that view would overlay the operator's document; plain init of the
+// desired selection finishes instead. A deliberate enable from the desired
+// selection takes fresh ownership and is not refused.
+func (runtime Runtime) releasedInstalledDocument(path string, observation configmaterial.Observation) error {
+	if !runtime.appliedIntegrationInspection || observation.Release == "" {
+		return nil
+	}
+	return integrationOwnershipError{
+		pendingConfiguration: true,
+		message: fmt.Sprintf("integration ownership of %q in yard %s was released while its installed configuration still selects it; a release repair would overwrite the released document; run yard -Y %s init instead",
+			path, runtime.Yard.YardName, runtime.Yard.YardName),
+		retry: shellquote.Command([]string{"yard", "-Y", runtime.Yard.YardName, "init"}),
+	}
+}
+
+// ownershipReleaseNotice previews a retirement that only releases ownership:
+// changed owned fields no longer prove Subyard's values, and a missing document
+// has nothing to remove. The document itself stays unchanged.
+func ownershipReleaseNotice(integration, path string, observation configmaterial.Observation) string {
+	return boundedNotice("retiring "+integration+" releases ownership of "+path+": ", observation, "")
+}
+
+// Activation warnings share the release diagnostic bound: the notice lists the
+// retained fields when the whole list fits, and otherwise only counts them.
+const ownershipNoticeLimit = 384
+
+func boundedNotice(prefix string, observation configmaterial.Observation, suffix string) string {
+	reason, fields := "owned fields changed after Subyard applied them", "no owned fields remain"
+	if observation.Release == configmaterial.ReleaseMissingDocument {
+		reason = "the document is missing"
+	}
+	switch {
+	case len(observation.Released) != 0:
+		fields = "fields left in place: " + strings.Join(observation.Released, ", ")
+	case observation.ReleasedCount != 0:
+		fields = fmt.Sprintf("%d fields left in place", observation.ReleasedCount)
+	case observation.Release == configmaterial.ReleaseMissingDocument:
+		fields = "nothing to remove"
+	}
+	if maximum := ownershipNoticeLimit / 2; len(prefix) > maximum {
+		prefix = truncateText(prefix, maximum-len("...: ")) + "...: "
+	}
+	notice := prefix + reason + "; " + fields + suffix
+	if len(notice) > ownershipNoticeLimit {
+		notice = prefix + reason + "; " + fmt.Sprintf("%d fields left in place", observation.ReleasedCount) + suffix
+	}
+	return notice
+}
+
+// truncateText cuts at a UTF-8 boundary within limit bytes.
+func truncateText(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	for limit > 0 && !utf8.RuneStart(text[limit]) {
+		limit--
+	}
+	return text[:limit]
 }
 
 // RetiredIntegrationNotices previews retired package state for operations such as
@@ -1242,6 +1333,10 @@ func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retiremen
 			warnings = append(warnings, observation.Notice)
 		}
 	}
+	// Preview structured ownership releases before consent. A refused or failed
+	// inspection is reported by the plan that applies it, not by this preview.
+	plan, _ := runtime.IntegrationPlan(ctx)
+	warnings = append(warnings, plan.ownershipReleaseNotices...)
 	return retirements, warnings, nil
 }
 

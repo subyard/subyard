@@ -627,7 +627,12 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 	if file.ownedFormat == "" {
 		return runtime.writeGuestFile(ctx, file.destination, payload)
 	}
-	request, err := configmaterial.Request(file.ownedFormat, configmaterial.ModeApply, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+	mode := configmaterial.ModeApply
+	if runtime.appliedIntegrationInspection {
+		// An installed-view repair never takes back released ownership.
+		mode = configmaterial.ModeApplyInstalled
+	}
+	request, err := configmaterial.Request(file.ownedFormat, mode, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
 	if err != nil {
 		return err
 	}

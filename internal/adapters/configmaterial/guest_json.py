@@ -1,3 +1,4 @@
+import copy
 import fcntl
 import hashlib
 import json
@@ -523,21 +524,101 @@ def document_payload(current, original):
     return semantic_payload(current) + b"\n"
 
 
-def retire(mode, baseline, baseline_path, receipt_path, current, original, destination, allowed_home, uid):
+def read_release_marker(path, evidence=None):
+    # A release records its reason, bound to its recorded projection, before any
+    # ownership write. It outlives the retired receipt until fresh ownership: the
+    # host consults it only while the inventory still lists this document, and an
+    # installed-view repair must not overlay the released document meanwhile.
+    # A record for another projection, such as one an older runtime left behind
+    # before an ordinary retirement, is stale and ignored.
+    if not os.path.lexists(path):
+        return ""
+    validate_regular(path, STATE_UID, 0o600)
+    with open(path, "rb") as source:
+        try:
+            value = parse_json(source.read())
+        except Exception:
+            raise MaterializationError("invalid release record")
+    if (not isinstance(value, dict) or set(value) != {"schema", "release", "retired_digest"} or
+            not isinstance(value["schema"], Decimal) or value["schema"] != 1 or
+            value["release"] not in ("changed", "missing-document") or
+            not isinstance(value["retired_digest"], str) or
+            not re.fullmatch(r"[0-9a-f]{64}", value["retired_digest"])):
+        raise MaterializationError("invalid release record")
+    if evidence is not None and evidence.get("retired_digest") != value["retired_digest"]:
+        return ""
+    return value["release"]
+
+
+def remove_release_marker(path):
+    # A corrupt record refuses here too, never disappears silently.
+    if os.path.lexists(path):
+        read_release_marker(path)
+        os.remove(path)
+
+
+def retained_paths(current, owned):
+    # Owned paths that a full retirement would remove from this document.
+    trial = copy.deepcopy(current)
+    for entry in sorted(owned, key=lambda item: item["path"].count("/"), reverse=True):
+        remove_owned(trial, entry)
+    return sorted(entry["path"] for entry in owned
+                  if lookup(current, pointer_parts(entry["path"]))[0] and
+                  not lookup(trial, pointer_parts(entry["path"]))[0])
+
+
+def printable_paths(paths):
+    # The host renders these names. Send the list only when every name is safe to
+    # print and the whole list is short; the count is always reported.
+    if (sum(len(path.encode()) + 2 for path in paths) > 384 or
+            any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for path in paths for c in path)):
+        return []
+    return paths
+
+
+def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid):
     if baseline is None or baseline["schema"] != 2:
         raise MaterializationError("retirement ownership evidence unavailable")
-    if original is None:
-        raise MaterializationError("retirement destination missing")
+    marker = read_release_marker(release_path, baseline)
     phase = baseline["phase"]
+    missing = original is None
+    if missing:
+        current = {}
     actual = projection_digest(current, baseline["owned"])
+    # A release keeps the document byte-for-byte: changed owned fields no longer
+    # prove which values are ours, and a missing document leaves nothing to remove.
+    release = ""
     if phase != "retired":
         expected = {baseline["projection_digest"]}
         if phase == "retiring":
             expected.add(baseline["retired_digest"])
-        if actual not in expected:
-            raise MaterializationError("retirement owned fields changed")
+        if missing and phase == "applied":
+            release = "missing-document"
+        elif actual not in expected:
+            if phase != "applied":
+                raise MaterializationError("retirement owned fields changed")
+            release = "changed"
+        elif missing and actual != baseline["retired_digest"]:
+            raise MaterializationError("retirement destination missing")
+    if phase != "applied":
+        # A committed release finishes and stays a release; it never edits the document.
+        release = marker
+    if release == "missing-document" and not missing:
+        release = "changed"
+    # A release, or its interrupted tail, leaves owned paths in place; an
+    # interrupted ordinary retirement has already removed them.
+    released = (retained_paths(current, baseline["owned"])
+                if release or phase != "retired" and actual != baseline["projection_digest"] else [])
     if mode == "retire" and phase != "retired":
-        if phase == "applied" or actual == baseline["projection_digest"]:
+        if phase == "applied" and release:
+            record = {"schema": 1, "release": release, "retired_digest": actual}
+            atomic_write(release_path, semantic_payload(record) + b"\n", STATE_UID, 0o600)
+            baseline["phase"] = "retiring"
+            baseline["retired_digest"] = actual
+            atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
+            atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
+        elif not release and (phase == "applied" or not missing and actual == baseline["projection_digest"]):
+            remove_release_marker(release_path)
             for entry in sorted(baseline["owned"], key=lambda item: item["path"].count("/"), reverse=True):
                 remove_owned(current, entry)
             # Commit intent before replacing the document. A retry accepts only
@@ -555,8 +636,14 @@ def retire(mode, baseline, baseline_path, receipt_path, current, original, desti
         atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
         phase = "retired"
     report = {"converged": phase == "retired",
-              "fingerprint": fingerprint(current, {}, baseline["projection_digest"], phase,
+              "fingerprint": fingerprint(current, {}, baseline["projection_digest"],
+                                         "release-" + release if release else phase,
                                          [] if phase == "retired" else baseline["owned"])}
+    if release:
+        report["release"] = release
+    if released:
+        report["released"] = printable_paths(released)
+        report["released_count"] = len(released)
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
 
 
@@ -564,8 +651,13 @@ def main():
     if len(sys.argv) != 8:
         fail("invalid request")
     mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest = sys.argv[1:]
-    if mode not in ("observe", "apply", "assess-adopt", "assess-retire", "retire"):
+    if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire"):
         fail("invalid request")
+    # An installed-view repair applies like apply, but never takes back ownership
+    # that a retirement released; only a deliberate enable does.
+    installed_apply = mode == "apply-installed"
+    if installed_apply:
+        mode = "apply"
     read_only = mode in ("observe", "assess-adopt", "assess-retire")
     try:
         uid = int(uid_text)
@@ -585,6 +677,7 @@ def main():
     baseline_path = os.path.join(STATE_ROOT, identity + ".json")
     receipt_path = os.path.join(STATE_ROOT, identity + ".ownership")
     lock_path = os.path.join(STATE_ROOT, identity + ".lock")
+    release_path = os.path.join(STATE_ROOT, identity + ".release")
     state_exists = validate_state_root()
 
     if mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
@@ -651,6 +744,17 @@ def main():
             with open(baseline_path, "rb") as source:
                 baseline = validate_baseline(source.read(), developer, destination)
         evidence = read_ownership(receipt_path, baseline, developer, destination)
+        # Decide a released document before reading it: whatever it now holds
+        # (invalid, missing or replaced), it is the operator's.
+        released = (evidence is not None and evidence.get("phase") == "retired" and
+                    read_release_marker(release_path, evidence))
+        if released and mode == "observe":
+            print(json.dumps({"converged": False, "release": released,
+                              "fingerprint": fingerprint({}, desired, evidence["projection_digest"], "released-" + released, [])},
+                             separators=(",", ":"), sort_keys=True))
+            return
+        if released and installed_apply:
+            raise MaterializationError("released ownership refused for the installed view")
         compatible = baseline is not None and baseline["schema"] == 1
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination, allow_invalid=mode in ("observe", "apply")) if parent_exists else ({}, None)
@@ -664,7 +768,7 @@ def main():
             current = {}
 
         if mode in ("assess-retire", "retire"):
-            retire(mode, evidence, baseline_path, receipt_path, current, original, destination, allowed_home, uid)
+            retire(mode, evidence, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid)
             return
 
         if evidence is not None:
@@ -714,6 +818,8 @@ def main():
 
         if baseline is not None and baseline.get("phase") == "retiring":
             raise MaterializationError("materialization retirement pending")
+        # Fresh ownership supersedes the reason of an earlier release.
+        remove_release_marker(release_path)
         if baseline is not None and baseline.get("phase") != "retired":
             wanted_keys = {(entry["path"], entry["kind"]) for entry in wanted_owned}
             wanted_objects = object_paths(desired)
