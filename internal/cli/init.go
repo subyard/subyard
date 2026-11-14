@@ -1072,7 +1072,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	// Every runtime of this yard converged; recorded yard-scoped failures are
 	// resolved and must not match a later state again.
 	if execution.loaded.Context.AccessKind == domain.AccessLocal {
-		if err := removeYardActivationPendingRecords(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName); err != nil {
+		if err := removeYardActivationPendingRecords(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName, cli.yardScopedRuntimeIDs()); err != nil {
 			return fmt.Errorf("retire resolved pending activation records: %w", err)
 		}
 	}

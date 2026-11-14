@@ -653,7 +653,7 @@ func (cli *CLI) applyTeardownYard(
 	var result domain.AdapterResult
 	var stderr string
 	if !execution.physicalChanged {
-		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}, retireTornDownActivationPending(loaded)
+		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}, cli.retireTornDownActivationPending(loaded)
 	}
 	result, stderr, err = orchestrator.RunAdapter(ctx, plan, request, nil)
 	if err == nil && result.Status != "ok" {
@@ -665,17 +665,17 @@ func (cli *CLI) applyTeardownYard(
 		err = fmt.Errorf("%w: teardown artifact changed before deletion", domain.ErrPlanStale)
 	}
 	if err == nil {
-		err = retireTornDownActivationPending(loaded)
+		err = cli.retireTornDownActivationPending(loaded)
 	}
 	return result, err
 }
 
 // A removed yard has no runtime left to wait for its init.
-func retireTornDownActivationPending(loaded config.Loaded) error {
+func (cli *CLI) retireTornDownActivationPending(loaded config.Loaded) error {
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return nil
 	}
-	if err := removeYardActivationPendingRecords(loaded.Context.Paths.ConfigHome, loaded.Context.YardName); err != nil {
+	if err := removeYardActivationPendingRecords(loaded.Context.Paths.ConfigHome, loaded.Context.YardName, cli.yardScopedRuntimeIDs()); err != nil {
 		return fmt.Errorf("retire pending activation records of the removed yard: %w", err)
 	}
 	return nil

@@ -566,9 +566,10 @@ ordinary configuration view; completed materialized readiness remains release-wi
 of that view, so selecting another yard cannot hide drift. Typed integration ownership
 refusals remain visible in initialization, status and migration readiness. When they are
 the only blockers of an already active, completed release, they describe pending configuration
-and do not block unrelated commands such as SSH-agent unlock. Readiness reports each owner's
-pending configuration as an `activation.<owner>.pending-configuration` blocker whose next step is
-plain `yard -Y NAME init`; command-line and RPC admission treat every such owner alike. Invalid history, unfinished
+and do not block unrelated commands such as SSH-agent unlock. Readiness reports pending
+configuration as an `activation.<owner>.pending-configuration` blocker. Recorded yard-scoped
+runtime failures use the same shape; only they open the additional command-line admission
+described in [yard-scoped runtime failures](#yard-scoped-runtime-failures). Invalid history, unfinished
 transactions and unclassified materialization failures still block mutation. A local typed
 selection reduction in this state validates the sealed original source and complete protected
 history, locks and rechecks that evidence, then writes only the desired selection; it grants
@@ -1219,35 +1220,34 @@ malformed record, a record from an undeclared owner, cancellation, a timeout, ou
 a mismatch that the core finds when it verifies the result after a successful exit stay blocking.
 So do plan-stale refusals, core runtimes, host and installation owners and any other failure.
 A handler reports `yard-local` only for its own guest-side steps while the guest still answers;
-host staging, file pushes and safety guards in the same apply stay blocking.
+host staging, file pushes, safety guards and a failed cleanup in the same apply stay blocking.
 
-Activation continues past typed failures to the remaining yards of the same owner and collects
-all of them in stable order. Before reporting a failure, the owner observes the state it left and
-records it under the configuration root as `activation-pending/v1/YARD/OWNER.json`, bound to the
-yard instance, the actual and desired fingerprints and the handler's content digest. The repair
-does not repeat a recorded failure, and the journal completes when every other owner converged,
-for the repair of the active release and for the activation of an ordinary update alike. While a
-journal is unfinished the owner keeps its ordinary observation, so an interrupted repair resumes
-with its authorized scope.
+The owner records the typed failure under the configuration root as
+`activation-pending/v1/YARD/OWNER.json`, bound to the yard instance, the actual and desired
+fingerprints the failure left and the handler's content digest, and continues with its other yards.
+Every observation matches records in any journal state: a stale yard with a matching record is
+converged with a pending finding, and any other stale yard, including a recorded one whose facts
+changed, is unconverged. The release journal therefore completes only through the engine's
+ordinary verification, for the repair of the active release and for the activation of an ordinary
+update alike. A blocking failure keeps the release recovering; its recorded yards stay findings.
 
-Completed readiness, including a fresh process, reports a matching record as pending configuration,
-one blocker per yard and owner with that yard's own init step:
-`yard migrate` and `yard update` exit non-zero, and `yard migrate --check`, `config status` and
-`yard status` show the same item. It names the yard, the profile and its diagnostic command
-`yard -Y NAME profile status ID`, states that the release is ready and the profile is not applied,
-and gives both exits: fix the cause and run `yard -Y NAME init`, which repeats the same apply from
-the partial state, or run `yard -Y NAME profile disable ID` and then init. Admission keeps that init
-and unrelated commands open. Any other drift keeps ordinary repair. A successful init of the yard,
-a converged repair of the owner, a new apply attempt for that yard and teardown of the yard
-remove the record; any change of the bound facts makes it stale, so it never hides a later failure.
-The `yard migrate` result names every pending finding within the diagnostic bound, and
-`yard migrate --check` lists each one. Admission keeps each named yard's init open whatever other
-yards or owners are pending, and keeps teardown open as over RPC; any unconverged owner keeps the
-ordinary gate. A successful init of one yard reports other yards' remaining pending items and
-succeeds. The journal completes only while a deferred owner still reports the exact observation its
-failure left; any change keeps the repair recovering. When a blocking failure accompanies typed
-ones, the release stays recovering and recorded yards are reported without the release-ready
-wording. A handler's failed cleanup also keeps its failure blocking.
+The engine alone turns findings into release state. Completed history of the goal whose every owner
+was observed and converged reports each finding as an `activation.<owner>.pending-configuration`
+blocker with that yard's init step; a release ready proof never accepts findings. While other
+release work remains, findings are warnings, so `yard migrate` still plans and repairs that work.
+`yard migrate` and `yard update` then exit non-zero; their result names every finding within the
+diagnostic bound and states that the release is ready, and `yard migrate --check`, `config status`
+and `yard status` show each one. A finding names the yard, the profile, the diagnostic command
+`yard -Y NAME profile status ID`, that the profile is not applied, and both exits: fix the cause and
+run `yard -Y NAME init`, which repeats the same apply from the partial state, or run
+`yard -Y NAME profile disable ID` and then init.
+
+When every blocker is such a finding of a declared owner and no owner is unconverged, the command
+line admits that yard's init even while other yards are pending, unrelated commands and teardown;
+a successful init of one yard reports the other yards' findings and succeeds. Materialized
+configuration pending keeps its own admission. A successful init of the yard, a converged or
+re-applied owner for that yard and teardown of the yard remove the record through its known owner
+path; other entries of the record directory are never touched.
 
 ### Interrupted release recovery
 

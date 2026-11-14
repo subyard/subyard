@@ -447,15 +447,6 @@ func (cli *CLI) prepareActivationRepair(
 	pendingInputs := false
 	for _, reconciler := range cli.nonConfigActivationReconcilers(request) {
 		observation, observeErr := reconciler.Observe(ctx, pair, observedLinks)
-		if runtime, ok := reconciler.(*profileRuntimeActivationReconciler); ok && pendingInit && runtimePendingConfigurationOnly(observeErr) {
-			// Recorded yard failures wait for their inits; each record binds its
-			// own yard's contract and is rechecked by that owner.
-			desired, err := runtime.desired(pair)
-			if err != nil {
-				return nil, nil
-			}
-			observation, observeErr = releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true}, nil
-		}
 		if observeErr != nil || !validConfigApplyActivationObservation(observation) {
 			return nil, nil
 		}
@@ -774,7 +765,7 @@ func (cli *CLI) checkConfigApplyRepairHistory(permit *configApplyRepairPermit) e
 	return nil
 }
 
-// A typed pending-configuration gate with a blocker that names plain init of
+// A typed pending-configuration gate whose every blocker names plain init of
 // this yard as its next step is repaired by that init. All other repair guards
 // still apply; the pending item counts as the selected yard's drift.
 func (cli *CLI) pendingInitRepairGate(ctx context.Context, yard string, outcome releasetransition.Outcome) bool {
@@ -783,11 +774,18 @@ func (cli *CLI) pendingInitRepairGate(ctx context.Context, yard string, outcome 
 		!cli.pendingIntegrationConfigurationGate(current, inspection) {
 		return false
 	}
-	// Every blocker is typed pending configuration (checked above); this yard's
-	// init is admitted when one of them names it. Pending items of other yards
-	// or owners wait for their own steps and never refuse this init.
 	retry := shellquote.Command([]string{"yard", "-Y", yard, "init"})
-	return slices.ContainsFunc(inspection.Blockers, func(blocker releasetransition.Blocker) bool { return blocker.Retry == retry })
+	// Recorded yard-scoped runtime failures of other yards wait for their own
+	// inits: one of these blockers naming this yard's init admits it.
+	if cli.declaredRuntimePendingGate(current, inspection) {
+		return slices.ContainsFunc(inspection.Blockers, func(blocker releasetransition.Blocker) bool { return blocker.Retry == retry })
+	}
+	for _, blocker := range inspection.Blockers {
+		if blocker.Retry != retry {
+			return false
+		}
+	}
+	return true
 }
 
 func configApplyRepairGateShape(outcome releasetransition.Outcome) bool {

@@ -1246,6 +1246,9 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			// A recorded yard-scoped runtime failure of this yard.
+			writeRuntimeProfileFixture(t, root)
+			writeCLIFile(t, filepath.Join(root, "config", "profiles", "sample", "profile.json"),
+				`{"schema_version":1,"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh","failure_scope":"yard"}}`, 0o600)
 			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			if err := os.MkdirAll(configHome, 0o700); err != nil {
 				t.Fatal(err)

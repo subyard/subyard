@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -135,34 +134,13 @@ func removeActivationPendingRecord(configHome, yard, owner string) error {
 	return config.RemovePersistentFileSnapshot(configHome, path, snapshot)
 }
 
-// removeYardActivationPendingRecords retires every record of one yard after
-// that yard converged all its runtimes or was torn down.
-func removeYardActivationPendingRecords(configHome, yard string) error {
-	if !filepath.IsAbs(configHome) || !domain.SafeName(yard) {
-		return errors.New("invalid pending activation record location")
-	}
-	entries, err := os.ReadDir(filepath.Join(filepath.Clean(configHome), "activation-pending", "v1", yard))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
+// removeYardActivationPendingRecords retires the records of the known yard-scoped
+// owners of one yard after that yard converged or was torn down. It never
+// enumerates the directory: other entries, including symbolic links, stay
+// untouched, and an unsafe entry at a record path refuses.
+func removeYardActivationPendingRecords(configHome, yard string, owners []string) error {
 	var failures []error
-	for _, entry := range entries {
-		// The persistent writer stages ".NAME.tmp-*" files beside a record; a
-		// crashed write leaves one behind, which is this tool's own debris.
-		if strings.HasPrefix(entry.Name(), ".") && strings.Contains(entry.Name(), ".json.tmp") && entry.Type().IsRegular() {
-			if err := os.Remove(filepath.Join(filepath.Clean(configHome), "activation-pending", "v1", yard, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-				failures = append(failures, err)
-			}
-			continue
-		}
-		owner, ok := strings.CutSuffix(entry.Name(), ".json")
-		if !ok || !entry.Type().IsRegular() {
-			failures = append(failures, fmt.Errorf("unexpected pending activation entry %q", entry.Name()))
-			continue
-		}
+	for _, owner := range owners {
 		failures = append(failures, removeActivationPendingRecord(configHome, yard, owner))
 	}
 	return domain.CollectRefusals(failures...)

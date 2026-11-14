@@ -306,9 +306,9 @@ func (cli *CLI) admitReleaseGate(
 	if outcome == nil {
 		return permits, 0, false
 	}
-	// Pending configuration of a completed release never blocks unrelated
-	// commands; they reach their own guards, as over RPC.
-	if ordinaryCommandDuringPendingConfiguration(admission.handler) && cli.pendingIntegrationConfigurationGate(outcome, gateInspection) {
+	// Recorded yard-scoped runtime failures of a completed release never block
+	// unrelated commands; they reach their own guards.
+	if ordinaryCommandDuringPendingConfiguration(admission.handler) && cli.declaredRuntimePendingGate(outcome, gateInspection) {
 		return permits, 0, false
 	}
 	switch admission.recovery {
@@ -389,8 +389,8 @@ func (cli *CLI) admitTeardownGate(
 	if outcome == nil {
 		return nil, 0, false
 	}
-	// As over RPC, pending configuration leaves teardown to its own guards.
-	if ordinaryCommandDuringPendingConfiguration("@teardown") && cli.pendingIntegrationConfigurationGate(outcome, gateInspection) {
+	// Recorded yard-scoped runtime failures leave teardown to its own guards.
+	if ordinaryCommandDuringPendingConfiguration("@teardown") && cli.declaredRuntimePendingGate(outcome, gateInspection) {
 		return nil, 0, false
 	}
 	permit, err := cli.prepareTeardownRepair(ctx, loaded, arguments, *outcome)

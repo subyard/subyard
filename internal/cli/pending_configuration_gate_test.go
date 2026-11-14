@@ -70,7 +70,7 @@ func TestCompletedPendingOwnershipSelectionReductionPreservesHistory(t *testing.
 }
 
 func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.T) {
-	for _, scenario := range []string{"pending", "runtime-owners", "history", "untyped", "qualified", "unconverged-owner", "resuming", "different-target", "different-inspection", "no-blockers"} {
+	for _, scenario := range []string{"pending", "runtime-owners", "history", "untyped", "qualified", "resuming", "different-target", "different-inspection", "no-blockers"} {
 		t.Run(scenario, func(t *testing.T) {
 			outcome := &releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired, Code: releasetransition.CodeDependencyUnavailable, Active: "0.26.0-fixture", Target: "0.26.0-fixture"}
 			inspection := &releasetransition.Inspection{Outcome: outcome, Blockers: []releasetransition.Blocker{{Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.materialized-config.pending-configuration"}}}
@@ -84,9 +84,6 @@ func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.
 				inspection.Blockers[0].Resource = "activation.materialized-config"
 			case "qualified":
 				inspection.Blockers[0].Resource = "activation.materialized-config.native-target.pending-configuration"
-			case "unconverged-owner":
-				// Installation-wide drift is a decision, not a blocker; it is release work.
-				inspection.Decisions = append(inspection.Decisions, releasetransition.RedactedDecision{Resource: "activation.key-tools-runtime", Scope: "activation", Decision: releasetransition.DecisionCanonicalize, Result: "converged"})
 			case "resuming":
 				inspection.Resume = &tx
 			case "different-target":

@@ -101,6 +101,8 @@ type yardFailureScenario struct {
 	fixture pendingInitFixture
 	runtime yardFailureRuntime
 	request releasetransition.ProcessRequest
+	// owners are further activation owners of every process, after the runtime.
+	owners []releasetransition.V2ActivationReconciler
 }
 
 // newYardFailureScenario selects the sample runtime in the named yards' installed
@@ -146,7 +148,7 @@ func (scenario yardFailureScenario) invoke(t *testing.T, mode releasetransition.
 	request.Mode, request.Execution = mode, execution
 	response, err := executeReleaseTransitionRequest(context.Background(), program.options.RepositoryRoot, request,
 		func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool { return grant != "" },
-		[]releasetransition.V2ActivationReconciler{program.profileActivationReconciler(request, "sample-runtime")},
+		append([]releasetransition.V2ActivationReconciler{program.profileActivationReconciler(request, "sample-runtime")}, scenario.owners...),
 		releaseTransitionOwnerFixture{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +185,7 @@ func requirePendingRuntimeOutcome(t *testing.T, outcome releasetransition.Outcom
 	}
 	for _, yard := range yards {
 		if !strings.Contains(outcome.Message, "yard "+yard+": profile sample runtime failed (diagnose: yard -Y "+yard+" profile status sample); "+
-			"release ready, profile not applied; fix it and run yard -Y "+yard+" init, or run yard -Y "+yard+" profile disable sample then init") {
+			"profile not applied; fix it and run yard -Y "+yard+" init, or run yard -Y "+yard+" profile disable sample then init; the release is ready") {
 			t.Fatalf("pending message omits yard %s: %s", yard, outcome.Message)
 		}
 	}
@@ -237,7 +239,7 @@ func TestDeclaredRuntimeYardFailureCompletesActiveReleaseRepair(t *testing.T) {
 	// The converged init retires the record (as yard init does after its
 	// stages). The same partial state later is ordinary drift, not the old
 	// pending item, and repair applies it again.
-	if err := removeYardActivationPendingRecords(scenario.request.ConfigHome, "default"); err != nil {
+	if err := removeYardActivationPendingRecords(scenario.request.ConfigHome, "default", []string{"sample-runtime"}); err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("d", 64)), 0o600)
@@ -285,7 +287,7 @@ func TestUndeclaredOrUntypedRuntimeFailureKeepsRecovery(t *testing.T) {
 			scenario := newYardFailureScenario(t, test.declared, test.typed, "default")
 			scenario.runtime.failing(t, "default", true)
 			outcome := scenario.converge(t)
-			if outcome.ReachedGoal || strings.Contains(outcome.Message, "release ready, profile not applied") || scenario.journal(t).Checkpoint != releasetransition.JournalReconciling {
+			if outcome.ReachedGoal || strings.Contains(outcome.Message, "profile not applied") || scenario.journal(t).Checkpoint != releasetransition.JournalReconciling {
 				t.Fatalf("blocking failure was deferred: %#v", outcome)
 			}
 			records, _ := filepath.Glob(filepath.Join(scenario.request.ConfigHome, "activation-pending", "v1", "*", "*.json"))
@@ -486,13 +488,16 @@ func TestPendingInitGateAdmitsEachNamedYardAcrossOwners(t *testing.T) {
 		admitted, other []string
 	}{
 		{name: "two runtime owners", extra: blocker("activation.other-runtime.pending-configuration", "named"), admitted: []string{"default", "named"}, other: []string{"third"}},
-		// A materialized-config item whose next step is not init still leaves
-		// the runtime item's init admitted.
+		// Materialized configuration pending keeps its own rule: every blocker
+		// must name the init, so it refuses a runtime item's init too.
 		{name: "materialized and runtime", extra: `,{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"yard named: move the unowned file aside","retry":"incus exec yard-named -- namei -l /home/dev/.codex"}`,
-			admitted: []string{"default"}, other: []string{"named"}},
+			other: []string{"default", "named"}},
+		// An undeclared owner's blocker keeps the materialized rule as well.
+		{name: "undeclared owner", extra: blocker("activation.unknown-runtime.pending-configuration", "named"), other: []string{"default", "named"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration", test.extra)
+			declareYardScopedRuntimes(t, &fixture)
 			for _, yard := range test.admitted {
 				if !fixture.cli.pendingInitRepairGate(context.Background(), yard, fixture.outcome) {
 					t.Fatalf("init of %s refused", yard)
@@ -508,9 +513,31 @@ func TestPendingInitGateAdmitsEachNamedYardAcrossOwners(t *testing.T) {
 	// Any blocker that is not pending configuration keeps every init gated.
 	fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration",
 		`,{"code":"dependency-unavailable","resource":"activation.other-runtime","message":"untyped","retry":"run yard update --check"}`)
+	declareYardScopedRuntimes(t, &fixture)
 	if fixture.cli.pendingInitRepairGate(context.Background(), "default", fixture.outcome) {
 		t.Fatal("a release blocker admitted init")
 	}
+}
+
+// declareYardScopedRuntimes declares the sample runtime and a second runtime
+// owner with the yard failure scope and reloads the fixture CLI.
+func declareYardScopedRuntimes(t *testing.T, fixture *configApplyRepairFixture) {
+	t.Helper()
+	root := fixture.cli.options.RepositoryRoot
+	for name, id := range map[string]string{"sample": "sample-runtime", "other": "other-runtime"} {
+		if err := os.MkdirAll(filepath.Join(root, "config/profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, "config/profiles", name, "profile.json"),
+			[]byte(`{"schema_version":1,"runtime":{"activation_id":"`+id+`","handler":"runtime.sh","failure_scope":"yard"}}`), 0o600)
+		testkit.WriteFile(t, filepath.Join(root, "config/profiles", name, "runtime.sh"),
+			[]byte("#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n"), 0o700)
+	}
+	program, err := New(fixture.cli.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.cli = program
 }
 
 // Teardown retires the removed yard's records and only that yard's.
@@ -525,8 +552,13 @@ func TestTeardownRetiresRemovedYardPendingRecords(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	scenario := newYardFailureScenario(t, true, true, "default")
 	loaded := config.Loaded{Context: domain.Context{YardName: "named", AccessKind: domain.AccessLocal, Paths: domain.RuntimePaths{ConfigHome: home}}}
-	if err := retireTornDownActivationPending(loaded); err != nil {
+	program, err := New(scenario.fixture.cli.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := program.retireTornDownActivationPending(loaded); err != nil {
 		t.Fatal(err)
 	}
 	for yard, kept := range map[string]bool{"named": false, "default": true} {
@@ -656,5 +688,82 @@ if [ -e '%s' ]; then cat '%s'; else cat '%s'; fi
 		if _, err := os.Stat(path); (err == nil) != kept {
 			t.Fatalf("yard %s record kept=%v: %v", yard, !kept, err)
 		}
+	}
+}
+
+// otherOwnerFixture is a second activation owner that drifts independently.
+type otherOwnerFixture struct {
+	current    *bool
+	reconciled *int
+}
+
+func (otherOwnerFixture) ID() string { return "other-owner" }
+func (owner otherOwnerFixture) Observe(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks) (releasetransition.V2ActivationObservation, error) {
+	desired := releasetransition.Fingerprint(strings.Repeat("c", 64))
+	if *owner.current {
+		return releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true}, nil
+	}
+	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(strings.Repeat("e", 64)), Desired: desired}, nil
+}
+func (owner otherOwnerFixture) Reconcile(context.Context, releasetransition.ReleaseLinks) error {
+	*owner.reconciled++
+	*owner.current = true
+	return nil
+}
+
+// A pending yard of one owner does not wedge another owner's drift: with that
+// drift the release needs repair, so migrate plans and repairs it, and the
+// pending item is reported again once only it remains.
+func TestPendingYardDoesNotBlockAnotherOwnersRepair(t *testing.T) {
+	current, reconciled := true, 0
+	scenario := newYardFailureScenario(t, true, true, "default")
+	scenario.owners = []releasetransition.V2ActivationReconciler{otherOwnerFixture{current: &current, reconciled: &reconciled}}
+	scenario.runtime.failing(t, "default", true)
+	requirePendingRuntimeOutcome(t, scenario.converge(t), "default")
+	// The other owner drifts later, for example after an admitted start.
+	current = false
+	inspection := scenario.invoke(t, releasetransition.ProcessInspect, nil)
+	if inspection.Inspection == nil || len(inspection.Inspection.Blockers) != 0 || !inspection.Inspection.Assessment.Changed {
+		payload, _ := json.Marshal(inspection)
+		t.Fatalf("migrate cannot plan the other owner's repair: %s", payload)
+	}
+	converged := scenario.invoke(t, releasetransition.ProcessConverge, &releasetransition.Execution{Plan: inspection.Inspection.Plan, Authorization: "fixture-confirmed-repair"})
+	if reconciled != 2 || !current || converged.Outcome == nil {
+		t.Fatalf("other owner was not repaired: %d %#v", reconciled, converged)
+	}
+	requirePendingRuntimeOutcome(t, *converged.Outcome, "default")
+	if applies := scenario.runtime.applies(t); len(applies) != 1 {
+		t.Fatalf("repair repeated the recorded failure: %v", applies)
+	}
+}
+
+// Materialized configuration pending keeps the gate of this release's base:
+// it does not open ordinary commands or teardown; a declared runtime's
+// recorded failure does.
+func TestOnlyDeclaredRuntimePendingOpensOrdinaryCommands(t *testing.T) {
+	for _, test := range []struct {
+		resource string
+		gated    bool
+	}{
+		{resource: "activation.materialized-config.pending-configuration", gated: true},
+		{resource: "activation.sample-runtime.pending-configuration", gated: false},
+	} {
+		t.Run(test.resource, func(t *testing.T) {
+			fixture := pendingInitGateFixture(t, false, test.resource, "")
+			declareYardScopedRuntimes(t, &fixture)
+			for _, arguments := range [][]string{{"-Y", "default", "stop"}, {"-Y", "default", "teardown"}} {
+				var stdout, stderr bytes.Buffer
+				options := fixture.cli.options
+				options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
+				program, err := New(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				program.Run(context.Background())
+				if refused := strings.Contains(stderr.String(), `"code":"dependency-unavailable"`); refused != test.gated {
+					t.Fatalf("yard %s gate refusal=%t want %t: %s%s", strings.Join(arguments, " "), refused, test.gated, stdout.String(), stderr.String())
+				}
+			}
+		})
 	}
 }

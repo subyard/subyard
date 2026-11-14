@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -24,8 +25,24 @@ func pendingIntegrationConfigurationShape(outcome *releasetransition.Outcome, in
 			return false
 		}
 	}
-	// An unconverged owner is release work, reported as a decision rather than
-	// a blocker; it is never pending configuration.
+	return true
+}
+
+// declaredRuntimePendingGate is the narrower trust of commands this release
+// adds under pending configuration: every blocker belongs to a profile runtime
+// that declares the yard failure scope, and no owner is unconverged.
+// Materialized configuration pending keeps its own admission.
+func (cli *CLI) declaredRuntimePendingGate(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
+	if !cli.pendingIntegrationConfigurationGate(outcome, inspection) {
+		return false
+	}
+	owners := cli.yardScopedRuntimeIDs()
+	for _, blocker := range inspection.Blockers {
+		owner := strings.TrimSuffix(strings.TrimPrefix(blocker.Resource, "activation."), ".pending-configuration")
+		if !slices.Contains(owners, owner) {
+			return false
+		}
+	}
 	for _, decision := range inspection.Decisions {
 		if decision.Scope == "activation" && decision.Decision == releasetransition.DecisionCanonicalize {
 			return false
@@ -35,10 +52,10 @@ func pendingIntegrationConfigurationShape(outcome *releasetransition.Outcome, in
 }
 
 // otherYardsPendingOnly reports a completed readiness whose remaining blockers
-// are only typed pending configuration of other yards: after this yard's init,
+// are only recorded runtime failures of other yards: after this yard's init,
 // those items wait for their own inits and do not fail this one.
 func (cli *CLI) otherYardsPendingOnly(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection, yard string) bool {
-	if !cli.pendingIntegrationConfigurationGate(outcome, inspection) {
+	if !cli.declaredRuntimePendingGate(outcome, inspection) {
 		return false
 	}
 	retry := shellquote.Command([]string{"yard", "-Y", yard, "init"})

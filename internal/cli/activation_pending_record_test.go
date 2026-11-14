@@ -66,9 +66,10 @@ func TestActivationPendingRecordBindsExactFacts(t *testing.T) {
 	}
 }
 
-// A crashed persistent write leaves the writer's own temporary file beside the
-// records; retirement removes it, and refuses only foreign entries.
-func TestYardRecordRetirementIgnoresOwnWriterDebris(t *testing.T) {
+// Retirement removes only known owners' records through the protected
+// writer: other entries stay untouched, and an unsafe entry at a record path,
+// such as a symbolic link, refuses and keeps its target.
+func TestYardRecordRetirementTouchesOnlyKnownRecords(t *testing.T) {
 	home := filepath.Join(testkit.TempDir(t), "config")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
@@ -79,15 +80,31 @@ func TestYardRecordRetirementIgnoresOwnWriterDebris(t *testing.T) {
 		t.Fatal(err)
 	}
 	directory := filepath.Join(home, "activation-pending", "v1", "named")
-	testkit.WriteFile(t, filepath.Join(directory, ".sample-runtime.json.tmp-123456"), []byte("partial"), 0o600)
-	if err := removeYardActivationPendingRecords(home, "named"); err != nil {
+	foreign := filepath.Join(directory, "foreign.txt")
+	debris := filepath.Join(directory, ".sample-runtime.json.tmp-123456")
+	testkit.WriteFile(t, foreign, []byte("x"), 0o600)
+	testkit.WriteFile(t, debris, []byte("partial"), 0o600)
+	if err := removeYardActivationPendingRecords(home, "named", []string{"sample-runtime", "other-runtime"}); err != nil {
 		t.Fatal(err)
 	}
-	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 0 {
-		t.Fatalf("records or debris kept: %v %v", entries, err)
+	path, _ := activationPendingRecordPath(home, "named", "sample-runtime")
+	for file, kept := range map[string]bool{path: false, foreign: true, debris: true} {
+		if _, err := os.Lstat(file); (err == nil) != kept {
+			t.Fatalf("%s kept=%v: %v", file, !kept, err)
+		}
 	}
-	testkit.WriteFile(t, filepath.Join(directory, "foreign.txt"), []byte("x"), 0o600)
-	if err := removeYardActivationPendingRecords(home, "named"); err == nil {
-		t.Fatal("a foreign entry was accepted")
+	target := filepath.Join(home, "elsewhere.json")
+	testkit.WriteFile(t, target, []byte("{}"), 0o600)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeYardActivationPendingRecords(home, "named", []string{"sample-runtime"}); err == nil {
+		t.Fatal("a symbolic link at a record path was accepted")
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("symbolic link was removed: %v", err)
+	}
+	if payload, err := os.ReadFile(target); err != nil || string(payload) != "{}" {
+		t.Fatalf("link target changed: %q %v", payload, err)
 	}
 }
