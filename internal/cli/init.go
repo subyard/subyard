@@ -19,6 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
 type initMode uint8
@@ -1098,20 +1099,25 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 }
 
 // Inspection follows every lifecycle effect, including profile provisioning.
-// Release-transition children leave completion to their protected owner.
-func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) error {
-	outcome, err := cli.inspectMutationGate(ctx, yard)
+// Release-transition children leave completion to their protected owner. Other
+// yards' pending configuration, which waits for their own inits, is returned for
+// the operation boundary to report.
+func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) ([]releasetransition.Blocker, error) {
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
 	if err != nil {
-		return fmt.Errorf("inspect release readiness after init: %w", err)
+		return nil, fmt.Errorf("inspect release readiness after init: %w", err)
 	}
 	if outcome == nil {
-		return nil
+		return nil, nil
+	}
+	if cli.otherYardsPendingOnly(outcome, inspection, yard) {
+		return slices.Clone(inspection.Blockers), nil
 	}
 	payload, err := json.Marshal(publicMutationGateOutcome(*outcome))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return fmt.Errorf("release readiness after init: %s", payload)
+	return nil, fmt.Errorf("release readiness after init: %s", payload)
 }
 
 func (execution *initExecution) checkBeforeInitWrites(ctx context.Context, cli *CLI) error {

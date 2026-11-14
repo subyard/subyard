@@ -17,9 +17,13 @@ func TestCompletedPendingOwnershipSelectionReductionPreservesHistory(t *testing.
 	if os.Getenv("SUBYARD_SOURCE_QUERY_TOOLING_ROOT") != "" {
 		t.Skip("typed process-protocol fixture; physical owner covered by Orca recovery lane")
 	}
-	for _, scenario := range []string{"valid", "corrupt-history"} {
+	for _, scenario := range []string{"valid", "corrupt-history", "beside-drift"} {
 		t.Run(scenario, func(t *testing.T) {
-			program, _, home := completedSourceAuthoringFixture(t, false, map[string]string{"config/fixture-pending-ownership": "fixture\n"})
+			asset := "config/fixture-pending-ownership"
+			if scenario == "beside-drift" {
+				asset = "config/fixture-pending-beside-drift"
+			}
+			program, _, home := completedSourceAuthoringFixture(t, false, map[string]string{asset: "fixture\n"})
 			path := filepath.Join(home, "yards/default/config.env")
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
@@ -33,6 +37,21 @@ func TestCompletedPendingOwnershipSelectionReductionPreservesHistory(t *testing.
 				outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "default")
 				if err != nil || !program.pendingIntegrationConfigurationGate(outcome, inspection) {
 					t.Fatalf("fixture is not typed pending ownership: outcome=%#v inspection=%#v err=%v", outcome, inspection, err)
+				}
+			}
+			if scenario == "beside-drift" {
+				// Another yard's pending finding no longer hides this drift, so the
+				// reduction takes the drift exit with its own repair permit.
+				outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "default")
+				if err != nil || outcome == nil || program.pendingIntegrationConfigurationGate(outcome, inspection) || len(outcome.Warnings) != 1 {
+					t.Fatalf("fixture is not drift beside a pending finding: %#v %v", outcome, err)
+				}
+				loaded, err := program.loadSelectionRepair("default")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for range 20 {
+					appendMismatchedHashSteps(t, program.options.Executor.(*testkit.Incus), loaded, "0")
 				}
 			}
 			history := activationRepairHistory(t, program.options.RepositoryRoot, home)
@@ -55,14 +74,14 @@ func TestCompletedPendingOwnershipSelectionReductionPreservesHistory(t *testing.
 					t.Fatalf("selection not restored %v", err)
 				}
 				outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "default")
-				if err != nil || !program.pendingIntegrationConfigurationGate(outcome, inspection) {
+				if err != nil || outcome == nil || program.pendingIntegrationConfigurationGate(outcome, inspection) != (scenario == "valid") {
 					t.Fatalf("readiness was hidden: %#v %v", outcome, err)
 				}
 			}
 			if !reflect.DeepEqual(history, activationRepairHistory(t, program.options.RepositoryRoot, home)) {
 				t.Fatal("source-only rollback changed release history")
 			}
-			if scenario == "valid" && strings.Contains(output.String(), "reduce-selection") {
+			if scenario != "corrupt-history" && strings.Contains(output.String(), "reduce-selection") {
 				t.Fatal("completed source authoring used interrupted-history fallback")
 			}
 		})
@@ -70,7 +89,7 @@ func TestCompletedPendingOwnershipSelectionReductionPreservesHistory(t *testing.
 }
 
 func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.T) {
-	for _, scenario := range []string{"pending", "history", "untyped", "resuming", "different-target", "different-inspection", "no-blockers"} {
+	for _, scenario := range []string{"pending", "history", "untyped", "resuming", "different-target", "different-inspection", "no-blockers", "other-owner-drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			outcome := &releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired, Code: releasetransition.CodeDependencyUnavailable, Active: "0.26.0-fixture", Target: "0.26.0-fixture"}
 			inspection := &releasetransition.Inspection{Outcome: outcome, Blockers: []releasetransition.Blocker{{Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.materialized-config.pending-configuration"}}}
@@ -89,6 +108,8 @@ func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.
 				inspection.Outcome = &copy
 			case "no-blockers":
 				inspection.Blockers = nil
+			case "other-owner-drift":
+				inspection.Decisions = []releasetransition.RedactedDecision{{Resource: "activation.sample-runtime", Scope: "activation", Decision: releasetransition.DecisionCanonicalize, Result: "converged"}}
 			}
 			if got := pendingIntegrationConfigurationShape(outcome, inspection); got != (scenario == "pending") {
 				t.Fatalf("pending admission=%t", got)

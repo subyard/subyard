@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode/utf8"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
@@ -158,6 +160,10 @@ func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) 
 		artifactDigest: request.ArtifactDigest,
 		registryDigest: request.RegistryDigest,
 		sourceIngress:  request.SourceIngress != nil,
+		deferral:       &cli.activation.pending,
+	}
+	cli.activation.pending.observe = func(ctx context.Context, releases releasetransition.ReleasePair) (releasetransition.V2ActivationObservation, error) {
+		return materialized.observe(ctx, releases, nil)
 	}
 	return slices.Insert(reconcilers, len(cli.profileRuntimeIDs()), releasetransition.V2ActivationReconciler(materialized))
 }
@@ -708,8 +714,11 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 				return activationApplicability{state: string(testyardmigration.BrokerRuntimeAbsent)}, nil
 			}
 			state, yard, err := testyardmigration.PrepareBrokerRuntimeTarget(ctx, values)
+			// Release repair leaves a deferred broker yard untouched; its state
+			// stays in Desired, like the materialized configuration of that yard.
+			deferred := err == nil && cli.activation != nil && cli.activation.repair && cli.activation.pending.decided(ctx, releasetransition.ReleasePair{})[yard]
 			return activationApplicability{
-				state: string(state), applies: state == testyardmigration.BrokerRuntimeActive,
+				state: string(state), applies: state == testyardmigration.BrokerRuntimeActive && !deferred,
 				target: yard,
 			}, err
 		},
@@ -945,6 +954,9 @@ type materializedConfigActivationReconciler struct {
 	projectedIntegrationPlans bool
 	projectedUnavailable      map[string]projectedIntegrationUnavailable
 	recoveryApply             *configApplyExecution
+	// deferral records the yards this owner defers for pending configuration;
+	// it is the activation's shared record when the owner belongs to one.
+	deferral *pendingYardDeferral
 }
 
 type releaseTransitionConfigApplier struct {
@@ -1166,6 +1178,10 @@ func (cli *CLI) releaseActivationOperation(requests ...releasetransition.Process
 func (reconciler *materializedConfigActivationReconciler) Observe(
 	ctx context.Context, releases releasetransition.ReleasePair, _ releasetransition.ReleaseLinks,
 ) (releasetransition.V2ActivationObservation, error) {
+	// Another owner needed this activation's deferral first: reuse that observation.
+	if kept, ok := reconciler.pendingDeferral().take(releases); ok {
+		return kept.observation, kept.err
+	}
 	return reconciler.observe(ctx, releases, nil)
 }
 
@@ -1176,6 +1192,7 @@ func (reconciler *materializedConfigActivationReconciler) ObserveProspective(
 	if view == nil {
 		return reconciler.Observe(ctx, releases, links)
 	}
+	reconciler.pendingDeferral().take(releases)
 	yards, err := view.ListYards()
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
@@ -1219,7 +1236,9 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	// Each yard is observed independently. A refusal skips only that yard's
 	// findings that depend on the failed read; every refusal is reported together.
 	var refusals []error
+	spans := make([]yardObservationSpan, 0, len(targets))
 	for _, target := range targets {
+		spans = append(spans, yardObservationSpan{name: target.Name, refusals: len(refusals), consequences: len(consequences)})
 		if err := migration.CheckLegacyGitConfig(ctx, target.Loaded.Context); err != nil {
 			refusals = materializedConfigActivationError{err, target.Name, "legacy gitconfig", "config status", "inspect", reconciler.configHome}.appendTo(refusals)
 		}
@@ -1238,6 +1257,10 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			refusals = materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome}.appendTo(refusals)
 			continue
 		}
+		// A deferred yard keeps its desired configuration and integration scope,
+		// like a stopped yard, so deferral never changes the activation's Desired.
+		spans[len(spans)-1].deferred = &config.MaterializationActivationTarget{Name: target.Name,
+			Assessment: config.MaterializationAssessment{State: "deferred", DesiredFingerprint: assessment.DesiredFingerprint}, IntegrationScope: integrationScope}
 		platform := operation.initPlatform(target.Loaded, nil)
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && files != nil {
 			runtime.SourceReader = files.ReadAsset
@@ -1305,13 +1328,248 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integrationChanged || integration.NeedsRetirementProof(),
 		})
 	}
-	if err := collectActivationRefusals(refusals); err != nil {
+	// Only release repair of the active release defers. Any other activation,
+	// including a prospective source publication, stops with the findings.
+	deferring := reconciler.cli.activation != nil && reconciler.cli.activation.repair && files == nil
+	pending, err := reconciler.deferPendingYards(refusals, spans, &activationTargets, &consequences, deferring)
+	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
 	assessed := config.AssessMaterializationActivation(activationTargets)
 	// The frozen protocol requires a sorted warning list.
 	slices.Sort(warnings)
-	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings)}, nil
+	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings), Pending: pending}, nil
+}
+
+// yardObservationSpan marks where one yard's refusals and consequences begin,
+// and holds that yard's target as deferral keeps it.
+type yardObservationSpan struct {
+	name                   string
+	refusals, consequences int
+	deferred               *config.MaterializationActivationTarget
+}
+
+// deferPendingYards decides deferral when every refusal is pending configuration.
+// Release repair defers each such yard as a whole, like a stopped yard: it gets
+// one finding, its target stays in Desired without drift, and its consequences
+// and saved integration plan leave the activation. Any other activation stops
+// with the refusals, as before deferral existed.
+func (reconciler *materializedConfigActivationReconciler) deferPendingYards(
+	refusals []error, spans []yardObservationSpan,
+	targets *[]config.MaterializationActivationTarget, consequences *[]string, deferring bool,
+) ([]releasetransition.V2PendingConfiguration, error) {
+	if len(refusals) == 0 {
+		if deferring {
+			reconciler.pendingDeferral().record(nil)
+		}
+		return nil, nil
+	}
+	var findings []releasetransition.V2PendingConfiguration
+	deferred := map[string]*config.MaterializationActivationTarget{}
+	kept := []string{}
+	assessed := true
+	for index, span := range spans {
+		refusalEnd, consequenceEnd := len(refusals), len(*consequences)
+		if index+1 < len(spans) {
+			refusalEnd, consequenceEnd = spans[index+1].refusals, spans[index+1].consequences
+		}
+		own := refusals[span.refusals:refusalEnd]
+		if len(own) == 0 {
+			kept = append(kept, (*consequences)[span.consequences:consequenceEnd]...)
+			continue
+		}
+		finding, pending := pendingYardFinding(span.name, own)
+		if !pending {
+			return nil, collectActivationRefusals(refusals)
+		}
+		findings = append(findings, finding)
+		deferred[span.name] = span.deferred
+		assessed = assessed && span.deferred != nil
+	}
+	if !deferring {
+		return nil, collectActivationRefusals(refusals)
+	}
+	if !assessed || len(findings) > releasetransition.MaxPlanItems {
+		// A yard refused before its assessment has no desired configuration to
+		// keep, and the protocol bounds the findings it can report.
+		return nil, pendingBesideDrift{collectActivationRefusals(refusals), "run yard migrate --check"}
+	}
+	*targets = slices.DeleteFunc(*targets, func(target config.MaterializationActivationTarget) bool {
+		_, found := deferred[target.Name]
+		return found
+	})
+	names := make(map[string]bool, len(deferred))
+	for name, target := range deferred {
+		*targets = append(*targets, *target)
+		names[name] = true
+		delete(reconciler.integrationPlans, name)
+	}
+	*consequences = kept
+	reconciler.pendingDeferral().record(names)
+	return findings, nil
+}
+
+// pendingYardFinding is the one finding of a deferred yard: its refusals in
+// observation order behind the yard's name. Its next step is the yard's own
+// init only when every refusal names it, otherwise the first other safe step
+// that is no yard's init, else the yard's integration status. A text beyond the
+// protocol bounds becomes the count of the yard's refusals.
+func pendingYardFinding(yard string, refusals []error) (releasetransition.V2PendingConfiguration, bool) {
+	items, pending := activationPendingFindings(collectActivationRefusals(refusals))
+	if !pending {
+		return releasetransition.V2PendingConfiguration{}, false
+	}
+	initStep := shellquote.Command([]string{"yard", "-Y", yard, "init"})
+	finding := releasetransition.V2PendingConfiguration{Retry: initStep}
+	other := ""
+	messages := make([]string, len(items))
+	for index, item := range items {
+		messages[index] = item.Message
+		if item.Retry == initStep {
+			continue
+		}
+		finding.Retry = "run yard -Y " + yard + " integration status"
+		_, named := pendingInitYards(&releasetransition.Inspection{Blockers: []releasetransition.Blocker{{Retry: item.Retry}}})
+		if other == "" && !named && (releasetransition.V2PendingConfiguration{Message: "next step", Retry: item.Retry}).Validate() == nil {
+			other = item.Retry
+		}
+	}
+	if finding.Retry != initStep && other != "" {
+		finding.Retry = other
+	}
+	finding.Message = strings.Join(messages, "; ")
+	if !strings.HasPrefix(finding.Message, "yard "+yard+":") {
+		finding.Message = "yard " + yard + ": " + finding.Message
+	}
+	if finding.Validate() != nil {
+		finding.Message = fmt.Sprintf("yard %s: %d pending configuration findings; full details: yard -Y %s integration status", yard, len(items), yard)
+	}
+	return finding, true
+}
+
+// pendingBesideDrift keeps pending findings visible when they cannot be
+// deferred beside other work. It is not pending configuration, so it admits no
+// ordinary command, and it names the admitted next step.
+type pendingBesideDrift struct {
+	refusals error
+	retry    string
+}
+
+func (err pendingBesideDrift) Error() string                    { return err.refusals.Error() }
+func (err pendingBesideDrift) Unwrap() error                    { return err.refusals }
+func (pendingBesideDrift) ActivationPendingConfiguration() bool { return false }
+func (err pendingBesideDrift) ActivationDiagnostic() (string, string) {
+	message := "release activation cannot be observed safely"
+	if diagnostic, ok := err.refusals.(interface{ ActivationDiagnostic() (string, string) }); ok {
+		message, _ = diagnostic.ActivationDiagnostic()
+	}
+	return message, err.retry
+}
+
+// pendingYardDeferral is the one record of yards deferred for pending
+// configuration in an activation. The materialized-config owner decides it on
+// each repair observation; every yard-scoped activation owner leaves those
+// yards untouched. A deciding observation another owner needs first is kept
+// for the materialized-config owner's next observation, so it runs once.
+type pendingYardDeferral struct {
+	decide   sync.Mutex
+	mutex    sync.Mutex
+	known    bool
+	yards    map[string]bool
+	releases releasetransition.ReleasePair
+	observe  func(context.Context, releasetransition.ReleasePair) (releasetransition.V2ActivationObservation, error)
+	kept     *keptActivationObservation
+}
+
+type keptActivationObservation struct {
+	releases    releasetransition.ReleasePair
+	observation releasetransition.V2ActivationObservation
+	err         error
+}
+
+func (reconciler *materializedConfigActivationReconciler) pendingDeferral() *pendingYardDeferral {
+	if reconciler.deferral == nil {
+		reconciler.deferral = &pendingYardDeferral{}
+	}
+	return reconciler.deferral
+}
+
+func (deferral *pendingYardDeferral) record(yards map[string]bool) {
+	deferral.mutex.Lock()
+	defer deferral.mutex.Unlock()
+	deferral.known, deferral.yards = true, maps.Clone(yards)
+}
+
+func (deferral *pendingYardDeferral) deferred(yard string) bool {
+	deferral.mutex.Lock()
+	defer deferral.mutex.Unlock()
+	return deferral.yards[yard]
+}
+
+// take returns the kept deciding observation for these releases once, and
+// discards any other.
+func (deferral *pendingYardDeferral) take(releases releasetransition.ReleasePair) (*keptActivationObservation, bool) {
+	deferral.mutex.Lock()
+	defer deferral.mutex.Unlock()
+	kept := deferral.kept
+	deferral.kept = nil
+	return kept, kept != nil && kept.releases == releases
+}
+
+// decided returns the deferred yards. When this activation has no decision yet,
+// it first runs the deciding observation once, for releases or else those of
+// the latest owner observation; a failed one defers nothing.
+func (deferral *pendingYardDeferral) decided(ctx context.Context, releases releasetransition.ReleasePair) map[string]bool {
+	deferral.decide.Lock()
+	defer deferral.decide.Unlock()
+	deferral.mutex.Lock()
+	if releases == (releasetransition.ReleasePair{}) {
+		releases = deferral.releases
+	} else {
+		deferral.releases = releases
+	}
+	known, observe := deferral.known, deferral.observe
+	deferral.mutex.Unlock()
+	if !known && observe != nil {
+		observation, err := observe(ctx, releases)
+		deferral.mutex.Lock()
+		deferral.known, deferral.kept = true, &keptActivationObservation{releases, observation, err}
+		deferral.mutex.Unlock()
+	}
+	deferral.mutex.Lock()
+	defer deferral.mutex.Unlock()
+	return maps.Clone(deferral.yards)
+}
+
+// activationPendingFindings reports whether every cause of a refusal is pending
+// configuration, and returns its findings.
+func activationPendingFindings(err error) ([]releasetransition.V2PendingConfiguration, bool) {
+	switch typed := err.(type) {
+	case nil:
+		return nil, false
+	case interface{ Unwrap() []error }:
+		causes := typed.Unwrap()
+		var findings []releasetransition.V2PendingConfiguration
+		for _, cause := range causes {
+			items, pending := activationPendingFindings(cause)
+			if !pending {
+				return nil, false
+			}
+			findings = append(findings, items...)
+		}
+		return findings, len(causes) != 0
+	case interface{ ActivationPendingConfiguration() bool }:
+		if !typed.ActivationPendingConfiguration() {
+			return nil, false
+		}
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		finding := releasetransition.V2PendingConfiguration{Message: "pending configuration awaits yard init"}
+		if errors.As(err, &diagnostic) {
+			finding.Message, finding.Retry = diagnostic.ActivationDiagnostic()
+		}
+		return []releasetransition.V2PendingConfiguration{finding}, true
+	}
+	return activationPendingFindings(errors.Unwrap(err))
 }
 
 // activationRefusals keeps every independent per-yard refusal of one activation
@@ -1499,6 +1757,7 @@ func (reconciler *materializedConfigActivationReconciler) UseSourceStableActivat
 	reconciler.allLocal, reconciler.scopeResolved = true, true
 	// Plans captured for selected scope cannot authorize additional targets.
 	reconciler.integrationPlans = nil
+	reconciler.pendingDeferral().take(releasetransition.ReleasePair{})
 	return func() {
 		reconciler.allLocal, reconciler.scopeResolved = allLocal, resolved
 		reconciler.integrationPlans = nil
@@ -1573,6 +1832,7 @@ func (reconciler *materializedConfigActivationReconciler) PrepareActivationRecov
 	// Recapture native ownership plans from actual state, including any known
 	// partial integration apply. Unknown ownership remains an adapter failure.
 	reconciler.integrationPlans = nil
+	reconciler.pendingDeferral().take(releases)
 	if _, err := reconciler.Observe(ctx, releases, links); err != nil {
 		return "", err
 	}
@@ -1612,6 +1872,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	if reconciler == nil || reconciler.cli == nil {
 		return errors.New("materialized config reconciler is unavailable")
 	}
+	reconciler.pendingDeferral().take(releasetransition.ReleasePair{})
 
 	operation := reconciler.reconcileCLI()
 	yard := reconciler.yard
@@ -1657,13 +1918,13 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 
 // configTargets selects the same durable configuration view for assessment,
 // native integration effects, materialized refresh and every freshness check.
+// Yards the latest observation deferred are left out, so no effect reaches them.
 func (reconciler *materializedConfigActivationReconciler) configTargets(ctx context.Context, operation *CLI, loaded config.Loaded, allLocal bool) ([]configTarget, error) {
 	_, targets, err := operation.releaseActivationTargets(ctx, loaded.Context.YardName, reconciler.configHome, allLocal, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	return targets, nil
+	return slices.DeleteFunc(targets, func(target configTarget) bool { return reconciler.pendingDeferral().deferred(target.Name) }), nil
 }
 
 func (cli *CLI) resolveReleaseTransitionContext(

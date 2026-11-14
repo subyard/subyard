@@ -129,7 +129,7 @@ esac
 			defer unlock()
 			platform.converged[ports.ReconcileStageTestVMs] = true
 			writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
-			if err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
+			if _, err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
 				t.Fatal(err)
 			}
 		})

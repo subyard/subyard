@@ -57,6 +57,8 @@ type releaseConfiguration struct {
 	complete bool
 	mutex    sync.Mutex
 	yards    map[string]releaseYardConfiguration
+	// pending is the activation's one deferral record for pending configuration.
+	pending pendingYardDeferral
 }
 
 type releaseYardConfiguration struct {
