@@ -1258,13 +1258,14 @@ integration resume fix and recovery replacement support in the same release.
 
 Published 0.28.0 stops an update at the first running VM yard whose pending disk-backed `/tmp`
 migration it restarts, typically on a direct update from a release before 0.27.0: its migration
-guard counts the project low-level grant that its own VM start policy writes as an outside change. The earlier release stays active, yards and data stay intact, and
-every later update reports that the journal-selected release cannot provide a valid transition
-inspection. Since 0.28.1 the registered-yard binding treats that exact grant on a VM yard project
-as product output; any other value stays bound. To leave the stopped update, re-run the
+guard counts the project low-level grant that its own VM start policy writes as an outside
+change. The earlier release stays active, yards and data stay intact, and every later update
+reports that the journal-selected release cannot provide a valid transition inspection. Since
+0.28.1 the registered-yard binding treats that exact grant on a VM yard project as product
+output; any other value stays bound. To leave the stopped update, re-run the
 [installer](getting-started.md) for 0.28.1 or later; it replaces the unfinished journal through
-its own launcher whatever the active release is. An active launcher from 0.26.0 or later
-also accepts `yard update --version 0.28.1`.
+its own launcher whatever the active release is. An active launcher from 0.26.0 or later also
+accepts `yard update --version 0.28.1`.
 
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone
