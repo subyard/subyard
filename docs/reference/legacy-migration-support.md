@@ -168,6 +168,24 @@ Post-activation takeover of an anchor-series journal relies on the candidate sti
 anchor's activated state and on intact migration authority; removing that code makes takeover a
 refusal again. A defective hop is repaired by an anchor-series fix release, not a bridge release.
 
+### Input for removing pre-anchor code
+
+The boundary itself deletes no product code. A later removal (proved unreachable by build before
+deletion) starts from these facts of the current candidate:
+
+- **Unfinished journals it no longer continues:** every unfinished transition while the installed
+  release is below v0.28.0, whoever started it: the candidate refuses before the engine, including
+  the historical owner fixes of v0.11.1, v0.17.3 and v0.21.0, so their replacement and recovery paths
+  are not reached from admission. It continues only its own exact transaction (same target,
+  direction and artifact digest); at or above the anchor the engine keeps ordinary resume,
+  newer-release replacement and the post-activation takeover of an anchor-series journal.
+- **Readers an install completed on the anchor still needs:** the V2 journal and runtime links, the
+  migration ledger and its history checkpoint and projection at the unchanged `minimumEpochs`, and
+  the recovery readers for anchor-series journals. Whether any completed v0.28.x install can still
+  hold pre-V2 history that needs the V1 import reader is not established here.
+- **Lowest rollback target:** v0.28.0. Rollback below it refuses before dispatch; compatible v0.28.x
+  rollback stays supported.
+
 ## Existing compatibility inventory
 
 Retired migration V1 used a global layout, schema 1 registry, applied state at
