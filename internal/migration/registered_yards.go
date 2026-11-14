@@ -486,9 +486,10 @@ func (m *RegisteredYardMigration) binding(plan registeredYardPlan) (any, error) 
 		project[key] = value
 	}
 	// A VM yard's project policy includes the low-level grant that its owner
-	// raw.qemu.conf needs, and every product start may write it. Removing the
-	// exact grant keeps the Desired of an earlier plan; any other value stays bound.
-	if virtualMachine && project["restricted.virtual-machines.lowlevel"] == "allow" {
+	// raw.qemu.conf needs, and every product start may write it over an absent
+	// value or an explicit "block" alike. Removing both keeps the Desired of an
+	// earlier plan; any other value stays bound.
+	if value := project["restricted.virtual-machines.lowlevel"]; virtualMachine && (value == "allow" || value == "block") {
 		delete(project, "restricted.virtual-machines.lowlevel")
 	}
 	// Verified asset handles are process-local labels, not persisted yard identity.
