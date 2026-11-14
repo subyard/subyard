@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -81,6 +82,20 @@ func pendingConfigurationResource(resource string) bool {
 	return found && domain.SafeID(owner) && !strings.Contains(owner, ".")
 }
 
+// pendingConfigurationOwnersTrusted accepts pending configuration only from the
+// materialized-config owner and from profile runtimes that declare the yard
+// failure scope.
+func (cli *CLI) pendingConfigurationOwnersTrusted(inspection *releasetransition.Inspection) bool {
+	owners := cli.yardScopedRuntimeIDs()
+	for _, blocker := range inspection.Blockers {
+		owner := strings.TrimSuffix(strings.TrimPrefix(blocker.Resource, "activation."), ".pending-configuration")
+		if owner != "materialized-config" && !slices.Contains(owners, owner) {
+			return false
+		}
+	}
+	return true
+}
+
 func ordinaryCommandDuringPendingConfiguration(handler string) bool {
 	switch handler {
 	case "@init", "@config", "@integration", "@profile", "@provision", "@update", "@migrate", "@release-transition":
@@ -93,7 +108,7 @@ func ordinaryCommandDuringPendingConfiguration(handler string) bool {
 // The transaction on an operator outcome can name completed history. Its mere
 // presence cannot decide admission: read the protected journal and match it.
 func (cli *CLI) pendingIntegrationConfigurationGate(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
-	if !pendingIntegrationConfigurationShape(outcome, inspection) {
+	if !pendingIntegrationConfigurationShape(outcome, inspection) || !cli.pendingConfigurationOwnersTrusted(inspection) {
 		return false
 	}
 	options, available, err := cli.mutationGateReleaseOptions()
