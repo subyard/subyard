@@ -302,7 +302,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_checkpoint=Non
                 allow_failed_checkpoint=False):
     watch = None
     if interrupt_checkpoint is not None:
-        journal, _, _ = interrupt_checkpoint
+        journal = interrupt_checkpoint[0]
         libc = ctypes.CDLL(None, use_errno=True)
         watch = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
         require(watch >= 0, "cannot observe the owned recovery journal")
@@ -331,7 +331,10 @@ def run_process(command, env, timeout, input_text=None, interrupt_checkpoint=Non
     failure = None
     try:
         if interrupt_checkpoint is not None:
-            journal, checkpoint, marker = interrupt_checkpoint
+            # An optional fourth item names the predecessor transaction, whose own
+            # journal may already sit at this checkpoint before a replacement.
+            journal, checkpoint, marker = interrupt_checkpoint[:3]
+            predecessor = interrupt_checkpoint[3] if len(interrupt_checkpoint) > 3 else None
             deadline = time.monotonic() + timeout
             observed = False
             while child.poll() is None and time.monotonic() < deadline:
@@ -347,7 +350,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_checkpoint=Non
                 if current is None:
                     os.killpg(child.pid, signal.SIGCONT)
                     continue
-                if current["checkpoint"] == checkpoint:
+                if current["checkpoint"] == checkpoint and current["transaction"] != predecessor:
                     marker.write_text(json.dumps({"transaction": current["transaction"],
                                                   "checkpoint": checkpoint}) + "\n")
                     marker.chmod(0o600)
@@ -357,7 +360,8 @@ def run_process(command, env, timeout, input_text=None, interrupt_checkpoint=Non
                 os.killpg(child.pid, signal.SIGCONT)
             if not observed and allow_failed_checkpoint and child.poll() is not None:
                 current = read_observed_journal() or {}
-                if child.returncode != 0 and current.get("checkpoint") == checkpoint:
+                if (child.returncode != 0 and current.get("checkpoint") == checkpoint
+                        and current.get("transaction") != predecessor):
                     marker.write_text(json.dumps({"transaction": current["transaction"],
                                                   "checkpoint": checkpoint,
                                                   "nativeFailureExit": child.returncode}) + "\n")

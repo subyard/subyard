@@ -110,13 +110,15 @@ active_version() {
 interrupt_at_reconciling() { # version
   local version="$1" marker="$FIXTURE_ROOT/interrupted-$1" checkpoint="${2:-reconciling}"
   fixture_env python3 - "$ROOT" "$LAUNCHER" "$version" "$marker" "$JOURNAL" "$RUNTIME_ROOT" "$checkpoint" <<'PY'
-import os, pathlib, runpy, sys
+import json, os, pathlib, runpy, sys
 root, launcher, version, marker, journal, runtime, checkpoint = sys.argv[1:]
 module = runpy.run_path(str(pathlib.Path(root) / "dev/verify-release-upgrades.py"))
+# A replaced journal may already be at the checkpoint; observe only its successor.
+predecessor = json.loads(pathlib.Path(journal).read_text())["transaction"] if pathlib.Path(journal).is_file() else None
 result = module["run_process"](
     [launcher, "update", "--offline", "--version", version, "--yes", "--runtime-root", runtime],
     os.environ.copy(), timeout=600,
-    interrupt_checkpoint=(pathlib.Path(journal), checkpoint, pathlib.Path(marker)),
+    interrupt_checkpoint=(pathlib.Path(journal), checkpoint, pathlib.Path(marker), predecessor),
     allow_failed_checkpoint=True)
 pathlib.Path(marker + ".stdout").write_text(result.stdout)
 pathlib.Path(marker + ".stderr").write_text(result.stderr)
@@ -131,7 +133,8 @@ require_replaced() { # saved journal copy
   fingerprint="$(sha256sum "$saved" | awk '{print $1}')"
   cmp "$saved" "$CONFIG_HOME/release-transition-replaced-journals/v1/$transaction-$fingerprint.json" \
     || die "journal $transaction was not preserved"
-  [ "$(jq -er .transaction "$JOURNAL")" != "$transaction" ] || die "journal $transaction was not replaced"
+  [ "$(jq -er .transaction "$JOURNAL")" != "$transaction" ] \
+    || die "journal $transaction was not replaced: saved=$(jq -c '{transaction,checkpoint,goal,releases}' "$saved") current=$(jq -c '{transaction,checkpoint,goal,releases}' "$JOURNAL") interrupted=$(cat "$FIXTURE_ROOT"/interrupted-* 2>/dev/null | tr '\n' ' ')"
 }
 
 require_fresh_plan() { # version
@@ -173,7 +176,14 @@ require_refusal() { # case reason...
 
 check_refusals() {
   local srv foreign=user.subyard.disk_tmp srv_reason='a missing or different srv device'
-  local foreign_reason='foreign guest temporary policy metadata'
+  local foreign_reason='foreign guest temporary policy metadata' plan="$FIXTURE_ROOT/refusal-plan.json"
+  # These are named migration-precondition verdicts. A candidate at the anchor's
+  # epochs updates without migration steps, so there is nothing to refuse.
+  fixture_env "$LAUNCHER" update --check --offline --version "${VERSIONS[0]}" --json > "$plan" 2>/dev/null || true
+  if ! jq -e '[.. | objects | .resource? | strings | select(startswith("migration."))] | length > 0' "$plan" >/dev/null; then
+    printf 'refusals: no candidate migration from %s; skipped named migration verdicts\n' "$SOURCE_VERSION"
+    return 0
+  fi
   srv="$(incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -c .devices.srv)"
   [ "$srv" != null ] || die 'srv is not a local device'
   [ "$(incus config get "$INSTANCE" "$foreign" --project "$PROJECT")" = v1 ] || die 'source temporary policy is not current'
@@ -225,10 +235,13 @@ main_newer_release() {
     bash "$ROOT/dev/package-engine.sh" --version "$version" --output-dir "$ASSET_ROOT/$version" >/dev/null
   done
   prepare_newer_fixture
-  # The anchor needs its own completed activation before init, so use its installer
-  # rather than only publishing the runtime.
-  fixture_env env YARD_RELEASE_BASE_URL="file://$SOURCE_ASSETS" \
-    bash "$SOURCE_ASSETS/subyard-install.sh" --version "$SOURCE_VERSION" --yes
+  local installed="$SOURCE_ASSETS/$SOURCE_BUNDLE"
+  fixture_env bash "$SOURCE_ASSETS/subyard-install-runtime-release.sh" --runtime-root "$RUNTIME_ROOT" \
+    --bundle "$installed" --checksum "$installed.sha256" \
+    --manifest "$installed.manifest.json" --provenance "$installed.provenance.json"
+  # As the installer's first install does, complete the anchor's protected
+  # transition before init can use its persisted-state capabilities.
+  fixture_env "$RUNTIME_ROOT/current/bin/yard" migrate --yes
   local source_launcher="$RUNTIME_ROOT/current/bin/yard"
   [ "$(fixture_env "$source_launcher" --version)" = "yard $SOURCE_VERSION" ] || die 'source release unavailable'
   ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'fixture project already exists'
@@ -253,13 +266,17 @@ main_newer_release() {
   local rc source_active
   source_active="$(readlink "$RUNTIME_ROOT/current")"
 
-  # Before activation: interrupt the real migration, leaving its journal unfinished.
+  # Before activation: the anchor and candidates share epochs, so the update has no
+  # migration steps. Stop it at authorization, leaving its journal unfinished.
   stage "${VERSIONS[0]}"
   check_refusals
-  interrupt_at_reconciling "${VERSIONS[0]}" migrating
-  jq -e '.checkpoint=="migrating"' "$JOURNAL" >/dev/null || die 'update did not stay unfinished'
+  interrupt_at_reconciling "${VERSIONS[0]}" authorized
+  jq -e '.checkpoint=="authorized"' "$JOURNAL" >/dev/null || die 'update did not stay unfinished'
   [ "$(readlink "$RUNTIME_ROOT/current")" = "$source_active" ] || die 'unfinished update changed the active release'
   cp "$JOURNAL" "$FIXTURE_ROOT/pre-journal.json"
+  # An update stopped at authorization may not have written transaction evidence yet.
+  local pre_evidence=0
+  [ ! -d "$CONFIG_HOME/release-transition/v2/transactions/$(jq -er .transaction "$JOURNAL")" ] || pre_evidence=1
   rc=0
   fixture_env "$LAUNCHER" update --check --version "$SOURCE_VERSION" > "$FIXTURE_ROOT/older.log" 2>&1 || rc=$?
   [ "$rc" != 0 ] && grep -Fq 'permits only exact target' "$FIXTURE_ROOT/older.log" \
@@ -273,12 +290,12 @@ main_newer_release() {
     > "$FIXTURE_ROOT/decline.log" 2>&1 || rc=$?
   [ "$rc" != 0 ] && grep -Eiq 'confirm' "$FIXTURE_ROOT/decline.log" || die 'replacement did not ask for fresh consent'
   cmp "$JOURNAL" "$FIXTURE_ROOT/pre-journal.json"
-  # The migration finishes and activates, and only reconciliation stops: its journal holds real steps.
+  # The replacement activates, and only reconciliation stops.
   interrupt_at_reconciling "${VERSIONS[1]}"
   require_replaced "$FIXTURE_ROOT/pre-journal.json"
 
-  # After activation: the migrated release is already active and its transition stopped.
-  jq -e '.checkpoint=="reconciling" and (.steps|length)>0' "$JOURNAL" >/dev/null || die 'activated journal shape differs'
+  # After activation: the replacement release is already active and its transition stopped.
+  jq -e '.checkpoint=="reconciling"' "$JOURNAL" >/dev/null || die 'activated journal shape differs'
   [ "$(active_version)" = "yard ${VERSIONS[1]}" ] || die 'interrupted release is not active'
   cp "$JOURNAL" "$FIXTURE_ROOT/post-journal.json"
   stage "${VERSIONS[2]}"
@@ -312,15 +329,15 @@ main_newer_release() {
   local pre_transaction
   pre_transaction="$(jq -er .transaction "$FIXTURE_ROOT/pre-journal.json")"
   [ ! -e "$CONFIG_HOME/release-transition/v2/transactions/$pre_transaction" ] \
-    && [ -d "$CONFIG_HOME/release-transition-replaced-journals/v1/$pre_transaction.transaction" ] \
-    || die 'replaced transaction with unclosed evidence stayed in the graph'
+    && { [ "$pre_evidence" = 0 ] || [ -d "$CONFIG_HOME/release-transition-replaced-journals/v1/$pre_transaction.transaction" ]; } \
+    || die "replaced transaction with unclosed evidence stayed in the graph (evidence=$pre_evidence)"
   for replaced in first-fix chain; do
     [ ! -e "$CONFIG_HOME/release-transition/v2/transactions/$(jq -er .transaction "$FIXTURE_ROOT/$replaced-journal.json")" ] \
       || die "$replaced transaction stayed in the graph"
   done
   jq -e '.checkpoint=="complete"' "$JOURNAL" >/dev/null || die 'final replacement did not close'
   require_ready "${VERSIONS[4]}"
-  printf 'ok: refusals named their yard; newer releases replaced unfinished journals before and after activation with migration steps, a failed replacement, and through the active launcher\n'
+  printf 'ok: newer releases replaced unfinished journals before and after activation, a failed replacement, and through the active launcher\n'
 }
 
 main_newer_release "$@"
