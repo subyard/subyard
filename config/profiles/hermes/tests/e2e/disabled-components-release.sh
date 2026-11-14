@@ -423,18 +423,19 @@ FAULT
 # release repair: the release completes and only that yard waits for its init.
 exercise_runtime_pending() {
   local rc=0 record="$CONFIG_HOME/activation-pending/v1/default/orca-runtime.json"
-  local hooks=/usr/local/libexec/subyard/projects-changed.d
+  # An Orca-only guest directory replaced by a file fails the Orca install step
+  # inside the guest; no other owner uses it.
+  local fault_dir=/usr/local/libexec/subyard/orca-codex
   operator_yard -Y default config set ORCA_ADVERTISE_HOST 127.0.0.1 --scope yard --local --yes
   operator_yard -Y default orca up --yes > "$STATE_ROOT/runtime-pending-up.txt" 2>&1 \
     || { cat "$STATE_ROOT/runtime-pending-up.txt"; die 'Orca did not install on the default yard'; }
   operator_yard migrate --yes
-  # A stale registration contract makes the repair apply the Orca runtime; the
-  # hook directory replaced by a file fails that apply inside the guest only.
+  # A stale registration contract makes the repair apply the Orca runtime.
   guest_yard default sh -euc '
     rm -f /usr/local/libexec/subyard/orca-registration.sha256
     mv "$1" "$1.runtime-pending"
     : > "$1"
-  ' _ "$hooks"
+  ' _ "$fault_dir"
   operator_yard migrate --check --json > "$STATE_ROOT/runtime-pending-stale.json"
   jq -e '.outcome.status == "migration-required" and (.blockers | length) == 0' "$STATE_ROOT/runtime-pending-stale.json" >/dev/null \
     || die 'stale Orca runtime did not require the release repair'
@@ -455,7 +456,7 @@ exercise_runtime_pending() {
   # Unrelated commands are admitted while the yard waits for its init.
   { operator_yard -Y default stop --yes && operator_yard -Y default start --yes; } > "$STATE_ROOT/runtime-pending-unrelated.txt" 2>&1 \
     || { cat "$STATE_ROOT/runtime-pending-unrelated.txt"; die 'pending configuration blocked an unrelated command'; }
-  guest_yard default sh -euc 'rm "$1"; mv "$1.runtime-pending" "$1"' _ "$hooks"
+  guest_yard default sh -euc 'rm "$1"; mv "$1.runtime-pending" "$1"' _ "$fault_dir"
   operator_yard -Y default init --yes > "$STATE_ROOT/runtime-pending-init.txt" 2>&1 \
     || { cat "$STATE_ROOT/runtime-pending-init.txt"; die 'yard init did not converge after the fault was removed'; }
   ! operator_env test -e "$record" || die 'the converged yard init left its pending record'
@@ -469,7 +470,7 @@ exercise_runtime_pending() {
     rm -f /usr/local/libexec/subyard/orca-registration.sha256
     mv "$1" "$1.runtime-pending"
     : > "$1"
-  ' _ "$hooks"
+  ' _ "$fault_dir"
   rc=0
   operator_yard migrate --yes > "$STATE_ROOT/runtime-pending-failure-2.log" 2>&1 || rc=$?
   [ "$rc" != 0 ] && grep -Fq 'or run yard -Y default profile disable orca then init' "$STATE_ROOT/runtime-pending-failure-2.log" \
@@ -486,7 +487,7 @@ exercise_runtime_pending() {
   operator_yard migrate --check --json > "$STATE_ROOT/runtime-pending-ready-2.json"
   jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/runtime-pending-ready-2.json" >/dev/null \
     || die 'the release is not ready after profile disable and init'
-  guest_yard default sh -euc 'rm "$1"; mv "$1.runtime-pending" "$1"' _ "$hooks"
+  guest_yard default sh -euc 'rm "$1"; mv "$1.runtime-pending" "$1"' _ "$fault_dir"
 }
 
 prepare_acceptance() {
