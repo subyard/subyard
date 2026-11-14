@@ -1067,8 +1067,8 @@ config/retired-integrations/aiobserver/tests/e2e/acceptance.sh --slot "$slot"
 
 The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `direct`, `refusal` or
 fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0 (with agents selected
-by `all`) and at the v0.28.1 hop (agent-free; `published-upgrade.sh hop none`); later distinct anchor
-patches and previous releases remain direct baselines.
+by `all`); the v0.28.1 hop has no release check of its own (the chains pass through it, Periodic E2E
+runs it agent-free), and a later previous release distinct from both remains a direct baseline.
 Refusal runs at v0.11.0, v0.17.3 and v0.27.0 check both update and `--check`, the exact hop
 command, unchanged settings, active runtime, native instance, power and guest data.
 

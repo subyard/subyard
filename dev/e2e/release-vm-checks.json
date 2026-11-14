@@ -11,8 +11,6 @@
      "command": ["bash", "dev/e2e/disabled-components-release.sh"]},
     {"id": "published-upgrade/anchor", "lease": {}, "timeout_seconds": 3600,
      "command": ["bash", "dev/e2e/published-upgrade.sh", "anchor", "all"]},
-    {"id": "published-upgrade/hop", "lease": {}, "timeout_seconds": 3600,
-     "command": ["bash", "dev/e2e/published-upgrade.sh", "hop", "none"]},
     {"id": "published-upgrade/0.11.0", "lease": {}, "timeout_seconds": 3600,
      "command": ["bash", "dev/e2e/published-upgrade.sh", "0.11.0", "refusal"]},
     {"id": "published-upgrade/0.17.3", "lease": {}, "timeout_seconds": 3600,

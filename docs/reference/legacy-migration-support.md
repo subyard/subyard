@@ -120,8 +120,10 @@ data; this synthetic boundary does not claim an authenticated historical grant. 
 also verifies that continuation alone never authorizes full removal. Current-owned
 projects retain their ordinary repeatable initialization contract.
 
-Published direct baselines are v0.28.0, the latest v0.28.x patch if different, and the previous
-published release if distinct. The immutable installer and archive digests live in
+Release acceptance runs the direct update from the anchor (v0.28.0, with agents) and from the
+previous published release if it is neither the anchor nor the hop. The hop has no separate release
+check: the first boundary release reaches the candidate from it in both chains, and Periodic E2E
+keeps an agent-free `published:` upgrade from it. The immutable installer and archive digests live in
 [`published-upgrade-baselines.tsv`](../../dev/e2e/published-upgrade-baselines.tsv); its fourth column
 labels `anchor` and `hop` (both also direct, exactly one each), `direct` and `refusal` expectations;
 `pin` rows supply immutable assets for fixture lookups only and never create matrix or periodic

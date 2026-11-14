@@ -276,7 +276,6 @@ CI_HOSTED_CHECKS = frozenset({
     "profile:orca/projects", "profile:orca/ssh-agent", "profile:orca/codex-permissions",
     "profile:orca/managed-agents", "profile:orca/identity-rename",
     "vm:published-upgrade/anchor",
-    "vm:published-upgrade/hop",
     "vm:published-upgrade/0.11.0",
     "vm:published-upgrade/0.17.3",
     "vm:published-upgrade/0.27.0",
