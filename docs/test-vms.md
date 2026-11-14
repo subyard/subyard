@@ -959,7 +959,8 @@ inventories, return nonzero and retain the marked fixture root for inspection.
 
 The integration selection fixtures use only marker-owned yards on allocated VM1. They exercise
 fresh/default selection, legacy selection adoption with established inventory, evidence-backed
-retirement, desired-retained failure and retry, and stopped-yard rejection without model API calls:
+retirement, release of changed owned fields through init (after a refused migrate and directly),
+desired-retained failure and retry, and stopped-yard rejection without model API calls:
 
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose integration-selection --vm 1 -- \

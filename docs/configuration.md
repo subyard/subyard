@@ -314,7 +314,19 @@ selection override that conflicts with persistent configuration is rejected.
 Disable stops only proven-owned services and removes only unchanged owned wiring.
 Credentials, session history, session storage targets, explicit operator links,
 unmanaged binaries and user CLI sessions are preserved. JSON/TOML retirement removes
-owned fields while retaining the document and unrelated fields. Materialization baselines
+owned fields while retaining the document and unrelated fields. If owned fields changed after
+Subyard applied them, for example an operator removed or edited one, they no longer prove which
+values Subyard wrote. Retirement then releases their ownership and leaves the document
+byte-for-byte unchanged instead of refusing. `yard integration status` warns which file and
+fields stay. The command that performs the release prints a result line naming the yard, file
+and fields that Subyard no longer manages. Remove those fields by hand if they are unwanted.
+A later enable applies the shipped fields again with fresh ownership. An interrupted retirement
+still accepts only the exact recorded before and after fields, and missing or unproven ownership
+evidence still blocks retirement. A disable after such a change while release activation is
+stale stores only the selection. `yard migrate --check` then names `yard -Y NAME init`, and
+`yard migrate` refuses, because its installed-view repair would first restore the changed fields.
+Run `yard -Y NAME init` to perform the release; a yard left in this state by an earlier release
+recovers the same way. Materialization baselines
 keep the v0.14.0 format for retained-runtime rollback; extra retirement evidence uses a
 protected companion record under the same lock. The root-owned
 inventory under `/var/lib/subyard/integrations` records artifact identity and digests;

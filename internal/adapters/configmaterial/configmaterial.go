@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -27,13 +29,19 @@ const (
 	// without writing.
 	ModeAssessAdopt = "assess-adopt"
 	// ModeAssessRetire reports whether ownership has already been released and
-	// rejects missing, stale, or drifted ownership receipts without changing state.
+	// rejects missing, stale, or unproven ownership receipts without changing state.
+	// Applied owned fields that changed are reported as released, not refused.
 	ModeAssessRetire = "assess-retire"
 	// ModeRetire removes only the unchanged, previously applied owned fields.
-	// Both retirement modes ignore payload and preserve the destination document.
+	// When applied owned fields changed, it releases their ownership and leaves
+	// the document unchanged. Both retirement modes ignore payload and preserve
+	// the destination document.
 	ModeRetire = "retire"
 
 	guestStateRoot = "/var/lib/subyard/config-materialization"
+
+	maxReleasedPointers     = 256
+	maxReleasedPointerBytes = 512
 )
 
 //go:embed guest_json.py
@@ -51,6 +59,9 @@ type JSONObservation struct {
 	Converged   bool   `json:"converged"`
 	Adoptable   bool   `json:"adoptable,omitempty"`
 	Fingerprint string `json:"fingerprint"`
+	// Released lists the owned field pointers that retirement leaves in place
+	// because they changed after apply; their ownership is released instead.
+	Released []string `json:"released,omitempty"`
 }
 
 type Observation = JSONObservation
@@ -351,9 +362,10 @@ func materializationRequest(format, mode, developer, destination string, uid int
 
 func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	type encodedObservation struct {
-		Converged   *bool  `json:"converged"`
-		Adoptable   bool   `json:"adoptable,omitempty"`
-		Fingerprint string `json:"fingerprint"`
+		Converged   *bool    `json:"converged"`
+		Adoptable   bool     `json:"adoptable,omitempty"`
+		Fingerprint string   `json:"fingerprint"`
+		Released    []string `json:"released,omitempty"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -369,5 +381,23 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	if _, err := hex.DecodeString(encoded.Fingerprint); err != nil {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
-	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint}, nil
+	if !validReleasedPointers(encoded.Released) {
+		return JSONObservation{}, errors.New("invalid JSON materialization observation")
+	}
+	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint, Released: encoded.Released}, nil
+}
+
+// Released pointers are rendered to the operator: accept only a bounded,
+// sorted, unique list of printable JSON pointers.
+func validReleasedPointers(pointers []string) bool {
+	if len(pointers) > maxReleasedPointers {
+		return false
+	}
+	for index, pointer := range pointers {
+		if len(pointer) < 2 || len(pointer) > maxReleasedPointerBytes || pointer[0] != '/' || !utf8.ValidString(pointer) ||
+			strings.ContainsFunc(pointer, unicode.IsControl) || index > 0 && pointers[index-1] >= pointer {
+			return false
+		}
+	}
+	return true
 }
