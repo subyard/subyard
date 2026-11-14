@@ -100,7 +100,7 @@ before="$(protected_state)"
 update_candidate --check --offline --version "$CANDIDATE_VERSION" > "$STATE_ROOT/stuck-check.log" 2>&1 || true
 grep -Fq 'the journal-selected release cannot provide a valid transition inspection' "$STATE_ROOT/stuck-check.log" || { cat "$STATE_ROOT/stuck-check.log" >&2; die 'old launcher did not keep the journal-selected owner'; }
 # The journal-selected engine names the pinned start policy grant as the stop reason.
-cat "$STATE_ROOT/stuck.log" "$STATE_ROOT/stuck-check.log" | grep -Fq 'registered yard migration desired state changed' || die 'published 0.28.0 stopped for another reason'
+grep -Fq 'registered yard migration desired state changed' "$STATE_ROOT/stuck.log" "$STATE_ROOT/stuck-check.log" || die 'published 0.28.0 stopped for another reason'
 [ "$(protected_state)" = "$before" ] || die 'old launcher check changed protected state'
 # An owned guest preflight refusal leaves the VM running. This tests isolation
 # without host shims, a fabricated exit code or an extra guest mount.
