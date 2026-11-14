@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 import selectors
+import shutil
 import signal
 import stat
 import statistics
@@ -526,10 +527,11 @@ def isolated_defaults(directory, env):
         source = ROOT / 'config' / name
         if source.is_file():
             private_file(shipped / name, source.read_text())
-    # Public immutable assets retain their real paths and profile contracts.
-    # App/owner state and records stay in plain private directories above.
+    # Public immutable assets keep their content and modes. They are copied, not linked: the
+    # product refuses shipped package directories that traverse symlinks. App/owner state and
+    # records stay in plain private directories above.
     for name in ('agents', 'profiles', 'yards'):
-        (shipped / name).symlink_to(ROOT / 'config' / name, target_is_directory=True)
+        shutil.copytree(ROOT / 'config' / name, shipped / name, symlinks=True)
     env['SUBYARD_CONFIG_DIR'] = str(shipped)
 
 
