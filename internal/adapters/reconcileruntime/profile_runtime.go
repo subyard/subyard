@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -348,7 +349,7 @@ func (runtime Runtime) applyProfileRuntime(
 		if runtime.Stderr != nil && len(stderr) != 0 {
 			_, _ = runtime.Stderr.Write(stderr)
 		}
-		return err
+		return runtime.profileRuntimeApplyFailure(definition, err, stderr)
 	}
 	applied, err := decodeProfileRuntimeObservation(stdout)
 	if err != nil {
@@ -366,6 +367,43 @@ func (runtime Runtime) applyProfileRuntime(
 		return errors.New("profile runtime refresh did not retain the expected contract")
 	}
 	return nil
+}
+
+// Runtime hooks share the lifecycle reason vocabulary and add yard-local: a
+// failure of an apply or verify that affects only its yard.
+var profileRuntimeDiagnosticProtocol = func() nativeDiagnosticProtocol {
+	reasons := maps.Clone(lifecycleReasons)
+	reasons["yard-local"] = "yard-local failure; yard init repeats the same apply"
+	return nativeDiagnosticProtocol{name: "subyard-profile-runtime-diagnostic-v1", reasons: reasons, effectOnly: map[string]bool{"yard-local": true}}
+}()
+
+// ProfileRuntimeYardFailure is a typed failure of a runtime that declares the
+// yard failure scope. The handler failed its own apply or verify and reported
+// exactly one yard-local record; yard init repeats the same apply. Cancellation,
+// timeouts, output overflow, verification by the core and undeclared owners
+// never produce it.
+type ProfileRuntimeYardFailure struct {
+	Yard, ActivationID, Phase string
+	cause                     error
+}
+
+func (failure *ProfileRuntimeYardFailure) Error() string {
+	return fmt.Sprintf("profile runtime %s %s failed in yard %s: %v", failure.ActivationID, failure.Phase, failure.Yard, failure.cause)
+}
+
+func (failure *ProfileRuntimeYardFailure) Unwrap() error { return failure.cause }
+
+func (runtime Runtime) profileRuntimeApplyFailure(definition profile.Definition, cause error, stderr []byte) error {
+	var exit *exec.ExitError
+	if definition.Runtime == nil || definition.Runtime.FailureScope != profile.FailureScopeYard || !errors.As(cause, &exit) ||
+		errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) || !domain.SafeName(runtime.Yard.YardName) {
+		return cause
+	}
+	phase, reason := profileRuntimeDiagnosticProtocol.failure(stderr, "apply")
+	if reason != "yard-local" {
+		return cause
+	}
+	return &ProfileRuntimeYardFailure{Yard: runtime.Yard.YardName, ActivationID: definition.Runtime.ActivationID, Phase: phase, cause: cause}
 }
 
 func (runtime Runtime) profileRuntimeDefinitions() ([]profile.Definition, error) {

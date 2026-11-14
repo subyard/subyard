@@ -881,6 +881,8 @@ if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract appl
   orca-refresh "$(printf '%064d' 0)" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
   fail 'runtime contract apply accepted a stale assessment'
 fi
+! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/runtime-stale.out" \
+  || fail 'a refused stale assessment was reported as a yard-local failure'
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
 touch "$TMP/fail-registration-marker"
@@ -889,6 +891,9 @@ if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract appl
   >"$TMP/runtime-interrupted.out" 2>&1; then
   fail 'runtime contract apply concealed an interruption before marker publication'
 fi
+[ "$(grep -c '^subyard-profile-runtime-diagnostic-v1 ' "$TMP/runtime-interrupted.out")" -eq 1 ] &&
+  grep -Fxq 'subyard-profile-runtime-diagnostic-v1 apply yard-local' "$TMP/runtime-interrupted.out" \
+  || fail 'a failed guest effect of the runtime apply was not reported as yard-local'
 rm -f "$TMP/fail-registration-marker"
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \

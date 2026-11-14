@@ -1,10 +1,16 @@
 package cli
 
-import "github.com/Subyard/Subyard/internal/releasetransition"
+import (
+	"strings"
 
-// A completed owner's pending integration configuration remains visible in
-// readiness. It cannot prevent unrelated commands from reaching their own guards.
-// No unfinished transaction, source/history blocker, or untyped failure qualifies.
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
+)
+
+// A completed owner's pending configuration, such as integration configuration
+// or a yard-scoped hook failure awaiting init, remains visible in readiness. It
+// cannot prevent unrelated commands from reaching their own guards. No
+// unfinished transaction, source/history blocker, or untyped failure qualifies.
 func pendingIntegrationConfigurationShape(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
 	if outcome == nil || inspection == nil || inspection.Outcome != outcome ||
 		outcome.ReachedGoal || outcome.Active == "" || outcome.Active != outcome.Target || inspection.Resume != nil ||
@@ -12,11 +18,22 @@ func pendingIntegrationConfigurationShape(outcome *releasetransition.Outcome, in
 		return false
 	}
 	for _, blocker := range inspection.Blockers {
-		if blocker.Code != releasetransition.CodeDependencyUnavailable || blocker.Resource != "activation.materialized-config.pending-configuration" {
+		if blocker.Code != releasetransition.CodeDependencyUnavailable || !pendingConfigurationResource(blocker.Resource) {
 			return false
 		}
 	}
 	return true
+}
+
+// pendingConfigurationResource accepts only the typed resource of one owner:
+// activation.<owner>.pending-configuration, with no other qualifier.
+func pendingConfigurationResource(resource string) bool {
+	owner, found := strings.CutPrefix(resource, "activation.")
+	if !found {
+		return false
+	}
+	owner, found = strings.CutSuffix(owner, ".pending-configuration")
+	return found && domain.SafeID(owner) && !strings.Contains(owner, ".")
 }
 
 func ordinaryCommandDuringPendingConfiguration(handler string) bool {

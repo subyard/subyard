@@ -306,6 +306,11 @@ func (cli *CLI) admitReleaseGate(
 	if outcome == nil {
 		return permits, 0, false
 	}
+	// Pending configuration of a completed release never blocks unrelated
+	// commands; they reach their own guards, as over RPC.
+	if ordinaryCommandDuringPendingConfiguration(admission.handler) && cli.pendingIntegrationConfigurationGate(outcome, gateInspection) {
+		return permits, 0, false
+	}
 	switch admission.recovery {
 	case recoveryConfigApply:
 		permit, err := cli.prepareConfigApplyRepair(ctx, yard, admission.configApplyAll, *outcome)

@@ -566,7 +566,9 @@ ordinary configuration view; completed materialized readiness remains release-wi
 of that view, so selecting another yard cannot hide drift. Typed integration ownership
 refusals remain visible in initialization, status and migration readiness. When they are
 the only blockers of an already active, completed release, they describe pending configuration
-and do not block unrelated commands such as SSH-agent unlock. Invalid history, unfinished
+and do not block unrelated commands such as SSH-agent unlock. Readiness reports each owner's
+pending configuration as an `activation.<owner>.pending-configuration` blocker whose next step is
+plain `yard -Y NAME init`; command-line and RPC admission treat every such owner alike. Invalid history, unfinished
 transactions and unclassified materialization failures still block mutation. A local typed
 selection reduction in this state validates the sealed original source and complete protected
 history, locks and rechecks that evidence, then writes only the desired selection; it grants
@@ -1205,6 +1207,35 @@ journals. If interrupted, follow its printed recovery command and review the ret
 confirming continuation. After verified cleanup, stop. Install the desired version separately;
 cleanup does not preserve data or automatically reinstall. See [full removal](configuration.md#full-uninstall)
 and the [support inventory](reference/legacy-migration-support.md).
+
+### Yard-scoped runtime failures
+
+A profile runtime may declare `"failure_scope": "yard"`. Its typed failure affects only one
+running yard: the release completes and that yard waits for its own init. A failure is typed only
+when the declared handler exits non-zero from `apply` and writes exactly one stderr record
+`subyard-profile-runtime-diagnostic-v1 apply|verify yard-local`. The record shares the closed
+parser and reasons of the lifecycle diagnostic protocol; an `inspect` record, a duplicate or
+malformed record, a record from an undeclared owner, cancellation, a timeout, output overflow and
+a mismatch that the core finds when it verifies the result after a successful exit stay blocking.
+So do plan-stale refusals, core runtimes, host and installation owners and any other failure.
+
+Activation continues past typed failures to the remaining yards of the same owner and collects
+all of them in stable order. Before reporting a failure, the owner observes the state it left and
+records it under the configuration root as `activation-pending/v1/YARD/OWNER.json`, bound to the
+yard instance, the actual and desired fingerprints and the handler's content digest. The repair
+does not repeat a recorded failure, and the journal completes when every other owner converged,
+for the repair of the active release and for the activation of an ordinary update alike. While a
+journal is unfinished the owner keeps its ordinary observation, so an interrupted repair resumes
+with its authorized scope.
+
+Completed readiness, including a fresh process, reports a matching record as pending configuration:
+`yard migrate` and `yard update` exit non-zero, and `yard migrate --check`, `config status` and
+`yard status` show the same item. It names the yard, the profile and its diagnostic command
+`yard -Y NAME profile status ID`, states that the release is ready and the profile is not applied,
+and gives both exits: fix the cause and run `yard -Y NAME init`, which repeats the same apply from
+the partial state, or run `yard -Y NAME profile disable ID` and then init. Admission keeps that init
+and unrelated commands open. Any other drift keeps ordinary repair. Any change of the bound facts,
+including a converged init, makes the record stale, so it never hides a later failure.
 
 ### Interrupted release recovery
 
@@ -2120,6 +2151,9 @@ in generic owner-port collision checks.
 
 A `runtime` declaration contains an `activation_id` and relative executable `handler`. The ID is
 unique across profile and core activation stages and remains durable across release transitions.
+Optional `failure_scope: "yard"` declares that a typed failure of the hook leaves only its yard
+pending init; see [yard-scoped runtime failures](#yard-scoped-runtime-failures). Custody runtimes
+and profiles with host owner or infrastructure services cannot declare it.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
 bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
 `ownership_absent`. States are `absent`, `deferred`, `pending`, `current`

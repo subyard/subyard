@@ -978,8 +978,9 @@ sealed original owner. That owner subsequently needs separate fresh consent for 
 staging newer tooling does not add capabilities to an old caller. Unsupported metadata or unresolved
 intent requires its exact original owner or the reported supported bridge, without editing journals.
 
-An optional activation hook can fail after migrations have completed. To reduce its persistent
-selection while that activation remains unfinished, preview an explicit local source change:
+An optional activation hook can fail while an update activates a new release. When that
+journal has no unfinished migration steps and its source release differs from its target, reduce
+the persistent selection with an explicit local source change; preview it first:
 
 ```sh
 yard -Y default config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local --check
@@ -997,6 +998,13 @@ profile disable use the same boundary when activation blocks ordinary mutation. 
 activation recovery needs a newly assessed plan and separate consent from its sealed owner.
 Exact operation planning and remote/RPC source reduction are unavailable; run the explicit
 owner-local preview above. Ordinary configuration apply retains its completed-history gate.
+
+An unfinished repair of the already active release applies the installed selection that `yard init`
+recorded, not desired configuration. `reduce-selection` refuses it before writing anything and
+names that installed selection: fix the failing component and run `yard migrate`. A profile runtime
+that declares a yard failure scope holds neither kind of activation: its typed failure completes the
+release and leaves that yard pending `yard -Y NAME init`, where `profile disable` and init apply the
+reduction. See [yard-scoped runtime failures](control-plane.md#yard-scoped-runtime-failures).
 
 After a completed transition, local selection `config set`, integration disable and profile
 disable can also reduce desired source while materialized configuration is stale. They use

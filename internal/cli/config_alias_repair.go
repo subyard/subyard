@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
@@ -183,6 +184,12 @@ func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request 
 	if optionsErr != nil || !available {
 		cli.errorf("%s", label+" requires verified installed release metadata")
 		return 1
+	}
+	if request.selection {
+		if refusal := cli.inPlaceRepairSelectionRefusal(ctx, yard, options.ConfigHome, request); refusal != "" {
+			cli.errorf("%s: %s", label, refusal)
+			return 1
+		}
 	}
 	shipped, toolingBinding, err := runtime.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
 	if err != nil {
@@ -429,4 +436,32 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		return 1
 	}
 	return 0
+}
+
+// inPlaceRepairSelectionRefusal refuses a selection reduction while an
+// unfinished repair of the active release holds the journal. That repair
+// applies the installed selection yard init recorded, so a desired source
+// change cannot release its failing owner. It names the real exits.
+func (cli *CLI) inPlaceRepairSelectionRefusal(ctx context.Context, yard, configHome string, request configAliasRepairRequest) string {
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return ""
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return ""
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Checkpoint == releasetransition.JournalComplete || journal.Releases.From != journal.Releases.Target {
+		return ""
+	}
+	name := request.choices[0].name
+	installed := "unavailable"
+	if loaded, err := cli.resolveInstalledReleaseContext(ctx, yard, configHome); err == nil {
+		installed = strconv.Quote(loaded.Environment[name])
+	}
+	return fmt.Sprintf("the unfinished repair of active release %s applies the installed %s=%s that yard init recorded, not this source; "+
+		"fix the failing component and run yard migrate. A component that declares a yard failure scope instead completes the repair "+
+		"and waits for yard -Y %s init; disable it there and run that init",
+		journal.Goal.Target, name, installed, yard)
 }

@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -15,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 // Refresh only installed profile files; the profile adapter owns their contract.
@@ -135,6 +139,11 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	}
 	actual := make([]observation, 0, len(targets))
 	converged := true
+	// Completed history reports a recorded yard-scoped failure as pending
+	// configuration; an unfinished journal keeps the owner's ordinary state so
+	// its authorized scope is unchanged.
+	completed := releaseJournalComplete(reconciler.request)
+	var pendingYards []error
 	pendingInputs := false
 	var diagnostics []releasetransition.RedactedDecision
 	disclosed, order := map[string][]string{}, []string{}
@@ -147,6 +156,17 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		if err != nil {
 			failures = append(failures, reconciler.failure(target.Name, "inspect", err))
 			continue
+		}
+		if completed && state.State == ports.RuntimeStateStale {
+			pending, err := reconciler.recordedPending(target, state)
+			if err != nil {
+				failures = append(failures, reconciler.failure(target.Name, "inspect", err))
+				continue
+			}
+			if pending != nil {
+				pendingYards = append(pendingYards, *pending)
+				continue
+			}
 		}
 		kind := string(state.State)
 		if kind == "current" || kind == "stale" {
@@ -173,6 +193,10 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	}
 	if err := domain.CollectRefusals(failures...); err != nil {
 		return releasetransition.V2ActivationObservation{}, err
+	}
+	// Other drift keeps the ordinary repair; its pending yards stay deferred.
+	if len(pendingYards) != 0 && converged {
+		return releasetransition.V2ActivationObservation{}, domain.CollectRefusals(pendingYards...)
 	}
 	actualDigest := desiredDigest
 	if !converged {
@@ -218,6 +242,10 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 	if reconciler.recovery != nil && len(targets) != len(reconciler.recovery) {
 		return domain.ErrPlanStale
 	}
+	// Typed yard-scoped failures do not stop the other yards; every one is
+	// recorded and reported. Any other failure stops as before.
+	var pendingYards []error
+	stop := func(err error) error { return domain.CollectRefusals(append(pendingYards, err)...) }
 	for _, target := range targets {
 		if _, ok := deferred[target.Name]; ok {
 			continue
@@ -231,45 +259,184 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		}
 		state, err := observe()
 		if err != nil {
-			return reconciler.failure(target.Name, "inspect", err)
+			return stop(reconciler.failure(target.Name, "inspect", err))
 		}
 		if reconciler.recovery != nil {
 			if _, exists := reconciler.recovery[target.Name]; !exists {
-				return domain.ErrPlanStale
+				return stop(domain.ErrPlanStale)
 			}
 		}
 		if approved, exists := reconciler.recovery[target.Name]; exists && !reflect.DeepEqual(state, approved) &&
 			!(state.State == ports.RuntimeStateCurrent && state.Desired == approved.Desired) &&
 			!(approved.State == ports.RuntimeStatePending && state.State == ports.RuntimeStateStale && state.Desired == approved.Desired) {
-			return reconciler.failure(target.Name, "apply", domain.ErrPlanStale)
+			return stop(reconciler.failure(target.Name, "apply", domain.ErrPlanStale))
 		}
 		if state.State == ports.RuntimeStatePending {
-			return reconciler.failure(target.Name, "apply", reconcileruntime.PendingProfileRuntimeError(target.Name, reconciler.id, state))
+			return stop(reconciler.failure(target.Name, "apply", reconcileruntime.PendingProfileRuntimeError(target.Name, reconciler.id, state)))
 		}
 		if state.State != "stale" {
 			// Absent and deferred yards have no running guest whose selection could be recorded.
 			if state.State == ports.RuntimeStateCurrent {
 				if err := reconciler.recordAppliedProfile(ctx, platform, target); err != nil {
-					return reconciler.failure(target.Name, "apply", err)
+					return stop(reconciler.failure(target.Name, "apply", err))
 				}
 			}
 			continue
 		}
+		// A recorded failure waits for yard init; repair does not repeat it.
+		pending, err := reconciler.recordedPending(target, state)
+		if err != nil {
+			return stop(reconciler.failure(target.Name, "apply", err))
+		}
+		if pending != nil {
+			pendingYards = append(pendingYards, *pending)
+			continue
+		}
 		if err := apply(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
-			return reconciler.failure(target.Name, "apply", err)
+			var yardFailure *reconcileruntime.ProfileRuntimeYardFailure
+			if !errors.As(err, &yardFailure) || yardFailure.Yard != target.Name {
+				return stop(reconciler.failure(target.Name, "apply", err))
+			}
+			pending, recordErr := reconciler.recordPending(target, observe, yardFailure)
+			if recordErr != nil {
+				return stop(reconciler.failure(target.Name, "apply", err))
+			}
+			pendingYards = append(pendingYards, *pending)
+			continue
 		}
 		state, err = observe()
 		if err != nil {
-			return reconciler.failure(target.Name, "verify", err)
+			return stop(reconciler.failure(target.Name, "verify", err))
 		}
 		if state.State != "current" {
-			return reconciler.failure(target.Name, "verify", fmt.Errorf("profile runtime did not converge"))
+			return stop(reconciler.failure(target.Name, "verify", fmt.Errorf("profile runtime did not converge")))
 		}
 		if err := reconciler.recordAppliedProfile(ctx, platform, target); err != nil {
-			return reconciler.failure(target.Name, "apply", err)
+			return stop(reconciler.failure(target.Name, "apply", err))
 		}
 	}
-	return nil
+	return domain.CollectRefusals(pendingYards...)
+}
+
+// runtimePendingConfiguration is a recorded yard-scoped runtime failure that
+// waits for that yard's init. It is pending configuration, never a release
+// blocker, and its only next step is plain init of that yard.
+type runtimePendingConfiguration struct{ record activationPendingRecord }
+
+func (pending runtimePendingConfiguration) Error() string                { return pending.record.Message }
+func (runtimePendingConfiguration) ActivationPendingConfiguration() bool { return true }
+func (pending runtimePendingConfiguration) ActivationDiagnostic() (string, string) {
+	return pending.record.Message, shellquote.Command([]string{"yard", "-Y", pending.record.Yard, "init"})
+}
+
+// runtimePendingConfigurationOnly reports whether every cause is a recorded
+// yard-scoped runtime failure.
+func runtimePendingConfigurationOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	var refusals *domain.Refusals
+	if errors.As(err, &refusals) {
+		for _, cause := range refusals.Unwrap() {
+			if !runtimePendingConfigurationOnly(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	_, ok := err.(runtimePendingConfiguration)
+	return ok
+}
+
+// pendingFacts are the exact facts a pending record binds for one yard.
+func (reconciler *profileRuntimeActivationReconciler) pendingFacts(target configTarget, state ports.RuntimeObservation) (activationPendingRecord, error) {
+	definition, ok := reconciler.declaredYardScope()
+	if !ok {
+		return activationPendingRecord{}, errors.New("profile runtime does not declare a yard failure scope")
+	}
+	path, err := definition.ExecutablePath(definition.Runtime.Handler)
+	if err != nil {
+		return activationPendingRecord{}, err
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return activationPendingRecord{}, err
+	}
+	digest := sha256.Sum256(payload)
+	yard := target.Name
+	return activationPendingRecord{
+		SchemaVersion: activationPendingSchema, Yard: yard, Project: target.Loaded.Context.IncusProject,
+		Instance: target.Loaded.Context.YardInstanceName, Owner: reconciler.id, Actual: state.Actual, Desired: state.Desired,
+		Inputs: hex.EncodeToString(digest[:]),
+		// Both exits fit the release diagnostic bound for two yards.
+		Message: fmt.Sprintf("yard %[1]s: profile %[2]s runtime failed (diagnose: yard -Y %[1]s profile status %[2]s); "+
+			"release ready, profile not applied; fix it and run yard -Y %[1]s init, or run yard -Y %[1]s profile disable %[2]s then init", yard, definition.Name),
+	}, nil
+}
+
+// recordedPending returns the pending finding when a record still matches the
+// observed facts of a declared owner. Undeclared owners never have one.
+func (reconciler *profileRuntimeActivationReconciler) recordedPending(target configTarget, state ports.RuntimeObservation) (*runtimePendingConfiguration, error) {
+	if _, ok := reconciler.declaredYardScope(); !ok || state.State != ports.RuntimeStateStale {
+		return nil, nil
+	}
+	facts, err := reconciler.pendingFacts(target, state)
+	if err != nil {
+		return nil, err
+	}
+	record, found, err := pendingActivation(reconciler.request.ConfigHome, facts)
+	if err != nil || !found {
+		return nil, err
+	}
+	return &runtimePendingConfiguration{record}, nil
+}
+
+// recordPending binds a typed failure to the state it left before reporting it.
+func (reconciler *profileRuntimeActivationReconciler) recordPending(target configTarget, observe func() (ports.RuntimeObservation, error), failure *reconcileruntime.ProfileRuntimeYardFailure) (*runtimePendingConfiguration, error) {
+	state, err := observe()
+	if err != nil {
+		return nil, err
+	}
+	if state.State != ports.RuntimeStateStale {
+		return nil, fmt.Errorf("profile runtime %s is %s after its yard-scoped failure", failure.ActivationID, state.State)
+	}
+	record, err := reconciler.pendingFacts(target, state)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeActivationPendingRecord(reconciler.request.ConfigHome, record); err != nil {
+		return nil, err
+	}
+	return &runtimePendingConfiguration{record}, nil
+}
+
+// declaredYardScope is the profile whose runtime this owner applies when it
+// declares the yard failure scope. Core runtimes never declare one.
+func (reconciler *profileRuntimeActivationReconciler) declaredYardScope() (profile.Definition, bool) {
+	if coreInstalledRuntimeID(reconciler.id) {
+		return profile.Definition{}, false
+	}
+	for _, definition := range reconciler.cli.catalog.Profiles() {
+		if definition.Runtime != nil && definition.Runtime.ActivationID == reconciler.id {
+			return definition, definition.Runtime.FailureScope == profile.FailureScopeYard
+		}
+	}
+	return profile.Definition{}, false
+}
+
+// releaseJournalComplete reports whether the protected journal of this
+// request's target is completed history.
+func releaseJournalComplete(request releasetransition.ProcessRequest) bool {
+	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+	if err != nil {
+		return false
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return false
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	return err == nil && journal.Checkpoint == releasetransition.JournalComplete && journal.Goal.Target == request.Target
 }
 
 // recordAppliedProfile keeps the applied selection of an owner-service profile

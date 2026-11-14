@@ -41,6 +41,8 @@ ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
 ORCA_GUEST_TMP_DIR=
+# Set while a runtime apply changes or verifies only this running yard's guest.
+ORCA_RUNTIME_EFFECT=
 
 valid_guest_tmp_dir() {
   [[ "$1" =~ ^/tmp/subyard-orca\.[A-Za-z0-9]{6,}$ ]]
@@ -63,7 +65,17 @@ cleanup() {
     rm -rf -- "$ORCA_TMP_DIR" || cleanup_failed=1
   fi
   [ "$status" -ne 0 ] || [ "$cleanup_failed" -eq 0 ] || return 1
+  report_runtime_yard_failure "$status"
   return "$status"
+}
+
+# A failed runtime effect inside a still running guest affects only this yard;
+# its init repeats the same apply. Interruption, host or Incus failures, refused
+# assessments and anything before the effect report nothing and stay blocking.
+report_runtime_yard_failure() {
+  [ "$1" -ne 0 ] && [ "$1" -ne 130 ] && [ "$1" -ne 143 ] && [ -n "$ORCA_RUNTIME_EFFECT" ] || return 0
+  [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" 2>/dev/null)" = RUNNING ] || return 0
+  printf 'subyard-profile-runtime-diagnostic-v1 %s yard-local\n' "$ORCA_RUNTIME_EFFECT" >&2
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -1528,6 +1540,7 @@ if [ "$sub" = _runtime-contract ]; then
         stale)
           # Helper refresh restarts nothing. A changed main unit restarts the service, as the
           # approving plan disclosed through this observation's consequence.
+          ORCA_RUNTIME_EFFECT=apply
           ensure_linger
           if [ "$(jq -r '.consequence // empty' <<<"$observation")" = "$ORCA_MAIN_UNIT_CONSEQUENCE" ]; then
             apply_main_unit
@@ -1535,8 +1548,10 @@ if [ "$sub" = _runtime-contract ]; then
             stage_registration_contract
           fi
           cleanup_guest || die "Orca guest staging directory could not be removed"
+          ORCA_RUNTIME_EFFECT=verify
           observe_runtime_contract | jq -e --arg desired "$4" \
             'select(.state == "current" and .actual == .desired and .desired == $desired)'
+          ORCA_RUNTIME_EFFECT=
           ;;
         *) die "invalid Orca runtime contract observation" ;;
       esac

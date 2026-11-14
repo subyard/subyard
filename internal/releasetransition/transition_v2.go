@@ -1085,9 +1085,10 @@ func (transition *V2Transition) Converge(
 		if observation.sourceActivationPrepared || !pendingSourceActivationWork(observation) {
 			expectedActivation = observation.activationScope
 		}
-		if outcome, reconcileErr := transition.reconcileActivation(
+		outcome, deferred, reconcileErr := transition.reconcileActivation(
 			ctx, *journal, expectedActivation,
-		); reconcileErr != nil || outcome.Code != "" {
+		)
+		if reconcileErr != nil || outcome.Code != "" {
 			return outcome, reconcileErr
 		}
 		if err := transition.inject("before-journal-complete"); err != nil {
@@ -1099,6 +1100,17 @@ func (transition *V2Transition) Converge(
 		}
 		if err := transition.inject("after-journal-complete"); err != nil {
 			return Outcome{}, err
+		}
+		if deferred {
+			// Completed history with pending configuration reports exactly what
+			// completed readiness reports: its typed blockers, not a resume.
+			observation, err := transition.observe(ctx, journal.Goal)
+			if err != nil {
+				return Outcome{}, err
+			}
+			if len(observation.blockers) != 0 {
+				return transition.inspectionOutcome(observation), nil
+			}
 		}
 	}
 	return transition.evaluateTerminal(ctx, *journal)
@@ -3584,6 +3596,19 @@ func (transition *V2Transition) reconcileActivation(
 	ctx context.Context,
 	journal JournalRecord,
 	expected []v2ActivationScope,
+) (Outcome, bool, error) {
+	// Owners whose typed pending configuration waits for yard init. They do not
+	// hold the journal; completed readiness keeps reporting them.
+	deferred := map[string]bool{}
+	outcome, err := transition.reconcileActivationOwners(ctx, journal, expected, deferred)
+	return outcome, len(deferred) != 0, err
+}
+
+func (transition *V2Transition) reconcileActivationOwners(
+	ctx context.Context,
+	journal JournalRecord,
+	expected []v2ActivationScope,
+	deferred map[string]bool,
 ) (Outcome, error) {
 	pending := map[int]bool{}
 	for pass := 0; pass < 2; pass++ {
@@ -3637,6 +3662,15 @@ func (transition *V2Transition) reconcileActivation(
 				continue
 			}
 			if err := reconciler.Reconcile(ctx, links); err != nil {
+				// A typed pending configuration failure does not hold the journal
+				// while its owner stays observable; anything else keeps recovery.
+				if pendingConfiguration(err) {
+					after, observeErr := reconciler.Observe(ctx, journal.Releases, links)
+					if observeErr == nil && validateActivationObservation(id, after) == nil || observeErr != nil && pendingConfiguration(observeErr) {
+						deferred[id] = true
+						continue
+					}
+				}
 				phase := "reconcile"
 				var phased interface{ ActivationPhase() string }
 				if errors.As(err, &phased) && phased.ActivationPhase() != "" {
@@ -3695,7 +3729,7 @@ func (transition *V2Transition) reconcileActivation(
 	if guardErr != nil || guardOutcome.Code != "" {
 		return guardOutcome, guardErr
 	}
-	id, fixed, warnings, verifyErr := transition.activationFixedPointDiagnostic(ctx, journal.Releases, links)
+	id, fixed, warnings, verifyErr := transition.activationFixedPointDiagnostic(ctx, journal.Releases, links, deferred)
 	links, guardOutcome, guardErr = transition.guardJournalLinks(ctx, journal)
 	if guardErr != nil {
 		guardOutcome = v2OperatorOutcome(ReleaseLinks{}, journal.Goal.Target,
@@ -4170,14 +4204,17 @@ func (transition *V2Transition) activationFixedPointStatus(
 	releases ReleasePair,
 	links ReleaseLinks,
 ) (string, bool, []string) {
-	id, fixed, warnings, _ := transition.activationFixedPointDiagnostic(ctx, releases, links)
+	id, fixed, warnings, _ := transition.activationFixedPointDiagnostic(ctx, releases, links, nil)
 	return id, fixed, warnings
 }
 
+// A deferred owner is outside the fixed point while it remains observable as
+// itself or as pending configuration; completed readiness reports it.
 func (transition *V2Transition) activationFixedPointDiagnostic(
 	ctx context.Context,
 	releases ReleasePair,
 	links ReleaseLinks,
+	deferred map[string]bool,
 ) (string, bool, []string, error) {
 	warnings := []string{}
 	for _, reconciler := range transition.options.Reconcilers {
@@ -4189,11 +4226,18 @@ func (transition *V2Transition) activationFixedPointDiagnostic(
 			return "", false, warnings, invalid("activation reconciler identity is invalid")
 		}
 		actual, err := reconciler.Observe(ctx, releases, links)
+		if err != nil && deferred[id] && pendingConfiguration(err) {
+			continue
+		}
 		if err != nil {
 			return id, false, warnings, err
 		}
 		if err := validateActivationObservation(id, actual); err != nil {
 			return id, false, warnings, err
+		}
+		if deferred[id] {
+			warnings = canonicalWarnings(append(warnings, actual.Warnings...))
+			continue
 		}
 		warnings = canonicalWarnings(append(warnings, actual.Warnings...))
 		if !actual.Converged {

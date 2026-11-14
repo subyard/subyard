@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -1003,6 +1004,14 @@ func (cli *CLI) configStatus(
 						fmt.Fprintf(cli.options.Stdout, "profile %s pending input repair; next: run yard -Y %s config apply\n", id, target.Name)
 					}
 					if observation.State != ports.RuntimeStateStale && observation.State != ports.RuntimeStatePending {
+						continue
+					}
+					owner := &profileRuntimeActivationReconciler{cli: cli, request: releasetransition.ProcessRequest{ConfigHome: configHome}, id: id}
+					if pending, err := owner.recordedPending(target, observation); err != nil {
+						findings = append(findings, materializedConfigActivationError{err, target.Name, "profile runtimes", "config status", "inspect", configHome})
+					} else if pending != nil {
+						drift = true
+						fmt.Fprintf(cli.options.Stdout, "profile runtime %s pending yard init: %s\n", id, pending.record.Message)
 						continue
 					}
 					if observation.Diagnostics == nil || len(*observation.Diagnostics) == 0 {
