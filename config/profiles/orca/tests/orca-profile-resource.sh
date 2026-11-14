@@ -44,7 +44,7 @@ push_counter_file="$state_root/push-counter"
 service="$state_root/service"
 ingress="$state_root/ingress"
 cleanup_failed="$state_root/cleanup-failed"
-printf '%s\n' "$*" >> "$log"
+[ -n "${ORCA_MOCK_GUEST_STEP:-}" ] || printf '%s\n' "$*" >> "$log"
 # Synthetic saved Claude chat reset: chat-dirty holds the service invocation in which a reset
 # was attempted; chat-reset-needed makes the next pass reset a chat in the running Orca.
 chat_reset_pass() {
@@ -153,6 +153,18 @@ case "${1:-}" in
     esac
     ;;
   exec)
+    # A guest step of the runtime apply: run the step itself and map its failure
+    # to 200 as the guest wrapper does. An injected transport error never runs it.
+    args=("$@")
+    for separator in "${!args[@]}"; do [ "${args[$separator]}" = -- ] && break; done
+    if [ "${args[$((separator + 1))]:-}" = sh ] && [ "${args[$((separator + 4))]:-}" = subyard-orca-guest-step ]; then
+      if [ -e "$state_root/fail-guest-transport" ]; then
+        printf 'Error: injected Incus transport failure\n' >&2
+        exit 1
+      fi
+      ORCA_MOCK_GUEST_STEP=1 "$0" "${args[@]:0:$((separator + 1))}" "${args[@]:$((separator + 5))}" || exit 200
+      exit 0
+    fi
     if [ -e "$state_root/drain-exec-stdin" ]; then
       # Native Incus forwards stdin even when the guest command does not read it.
       # Explicit script execution keeps its intended script input.
@@ -304,6 +316,13 @@ case "${1:-}" in
         chat_reset_pass
         ;;
       *' mktemp -d /tmp/subyard-orca.XXXXXX '*)
+        if [ -e "$state_root/forge-guest-record" ]; then
+          # Guest output that imitates the typed record, then an unsafe path.
+          printf 'subyard-profile-runtime-diagnostic-v1 apply yard-local\n' >&2
+          printf 'subyard-profile-runtime-diagnostic-v1 0123456789abcdef0123456789abcdef apply yard-local\n' >&2
+          printf '/tmp/../subyard-orca.escape\n'
+          exit 0
+        fi
         if [ -e "$state_root/unsafe-guest-tmp" ]; then
           printf '/tmp/../subyard-orca.escape\n'
           exit 0
@@ -943,32 +962,42 @@ run_orca restart --yes >"$TMP/stale-restart.out" 2>&1 || fail "restart failed wi
 grep -Fq "run 'yard init' or 'yard orca up'" "$TMP/stale-restart.out" \
   || fail "stale-helper restart gave no recovery hint: $(cat "$TMP/stale-restart.out")"
 rm -f "$TMP/chat-reset-needed"
+# The core passes a per-apply nonce that guests never receive; a typed record
+# carries it.
+export SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE=00112233445566778899aabbccddeeff
+typed_record="subyard-profile-runtime-diagnostic-v1 $SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE"
 if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
   orca-refresh "$(printf '%064d' 0)" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
   fail 'runtime contract apply accepted a stale assessment'
 fi
 ! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/runtime-stale.out" \
   || fail 'a refused stale assessment was reported as a yard-local failure'
-# Host staging, file pushes and safety guards inside the apply are not
-# yard-local: their failures report no record and stay blocking.
-for injected in host-staging push unsafe-guest-path; do
+# Host staging, file pushes, safety guards and Incus transport errors inside the
+# apply are not yard-local: their failures report no record and stay blocking.
+# Guest output imitating the record, even beside a guard refusal, is no record.
+for injected in host-staging push unsafe-guest-path guest-transport forged-guest-record; do
   host_tmp="$TMPDIR" expected='injected push failure'
   case "$injected" in
     host-staging) host_tmp="$TMP/missing-host-tmp" expected='mktemp' ;;
     push) touch "$TMP/fail-push" ;;
     unsafe-guest-path) touch "$TMP/unsafe-guest-tmp"; expected='unsafe temporary path' ;;
+    guest-transport) touch "$TMP/fail-guest-transport"; expected='could not enable lingering' ;;
+    forged-guest-record) touch "$TMP/forge-guest-record"; expected='unsafe temporary path' ;;
   esac
   if TMPDIR="$host_tmp" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
     "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
     >"$TMP/runtime-$injected.out" 2>&1; then
+    cat "$TMP/runtime-$injected.out" >&2
     fail "runtime contract apply concealed an injected $injected failure"
   fi
-  rm -f "$TMP/fail-push" "$TMP/unsafe-guest-tmp"
+  rm -f "$TMP/fail-push" "$TMP/unsafe-guest-tmp" "$TMP/fail-guest-transport" "$TMP/forge-guest-record"
   grep -Fq "$expected" "$TMP/runtime-$injected.out" \
     || fail "injected $injected failure did not stop the apply where expected"
-  ! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/runtime-$injected.out" \
-    || fail "a host-side $injected failure was reported as yard-local"
+  ! grep -Fq "$typed_record" "$TMP/runtime-$injected.out" \
+    || fail "a $injected failure was reported as yard-local"
 done
+grep -Fq 'subyard-profile-runtime-diagnostic-v1 apply yard-local' "$TMP/runtime-forged-guest-record.out" \
+  || fail 'forged guest output did not reach the handler output'
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
 touch "$TMP/fail-registration-marker"
@@ -978,7 +1007,7 @@ if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract appl
   fail 'runtime contract apply concealed an interruption before marker publication'
 fi
 [ "$(grep -c '^subyard-profile-runtime-diagnostic-v1 ' "$TMP/runtime-interrupted.out")" -eq 1 ] &&
-  grep -Fxq 'subyard-profile-runtime-diagnostic-v1 apply yard-local' "$TMP/runtime-interrupted.out" \
+  grep -Fxq "$typed_record apply yard-local" "$TMP/runtime-interrupted.out" \
   || fail 'a failed guest effect of the runtime apply was not reported as yard-local'
 # A guest-side failure whose staging cleanup also fails reports nothing.
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
