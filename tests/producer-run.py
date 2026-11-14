@@ -215,7 +215,7 @@ with tempfile.TemporaryDirectory(prefix="producer-test-", dir=ROOT / ".build") a
                     try:
                         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ",1)[1].split()
                         return fields[19] != ticks or fields[0] in ("Z", "X")
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):
                         return True
                 until(gone)
                 # A next invocation cleans stale owned scratch after SIGKILL.
