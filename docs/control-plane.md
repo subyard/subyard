@@ -593,13 +593,16 @@ readiness and repair own only the committed installed scope: they neither report
 records outside that scope as drift nor retire or drop them, so the release stays ready and the
 next successful init commits or retires them. Committed records that leave the installed scope
 are still retired, even when a failed apply left intent labels on them.
-Retirement follows the hook boundary: the inventory commit removes deselected owned files and
-links, and structured owned fields are released only after the hooks succeed. A failed init that
-deselects an installed integration therefore leaves its assets and committed records in place;
-installed-view readiness stays converged, repair has nothing to restore, and the next successful
-init retires them. A removed owned asset, foreign bytes or metadata remain drift or ownership
-conflicts. A failed init that changes the bytes of a file that stays selected is not covered;
-installed-view readiness reports that file as drift.
+Retirement of deselected owned file, link and structured assets follows the hook boundary: the
+inventory commit removes the files and links, and structured owned fields are released only after
+the hooks succeed. A failed init that deselects an installed integration therefore leaves those
+assets and their committed records in place; for them installed-view readiness stays converged,
+repair has nothing to restore, and the next successful init retires them. A removed owned asset,
+foreign bytes or metadata remain drift or ownership conflicts. Effects that still precede the
+hooks are not covered: lifecycle handlers that retire a deselected lifecycle integration, and the
+project-hook manifest `/etc/subyard/agent-project-hooks`, which inventory apply rewrites when the
+deselected integration declares a project hook. A failed init that changes the bytes of a file
+that stays selected is not covered either; installed-view readiness reports that file as drift.
 RPC execution prints the listing and commands without running in-process inits. With no pending
 integration settings, no init steps are added.
 When a running yard's repair would change installed integration state while its integration
