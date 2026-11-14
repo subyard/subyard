@@ -1020,7 +1020,17 @@ at the branch's latest commit. A retry runs each check on three runners at once 
 30 times; checks that never reached Intel fail that last run as not run. Only the `reschedule` job may
 start runs, and the `supersede` job cancels replaced ones; neither checks out code.
 
-A manual dispatch can name the check ids to run in `checks`. The separate Stale runs workflow cancels
+The Veranda GUI SHORT scenarios run here only, not in release acceptance, so they never gate a CLI or
+engine release: `veranda:x11`, `veranda:wayland` and the manual `veranda:x11-remote-ui` and
+`veranda:wayland-ime` lease one VM each through
+`dev/e2e/veranda-short.sh`, as the [Veranda SHORT recipe](../veranda/desktop/README.md#disposable-x11-and-wayland-short)
+does. A separate `veranda-bundle` job builds the GUI and a matching engine with the stable version
+`VERANDA_VERSION` and adds them to a copy of the candidate bundle; other checks keep the unchanged
+candidate bundle and still run if that build fails, while the Veranda checks then fail. These checks
+measure no resource budgets.
+
+A manual dispatch can name the check ids to run in `checks`. A check the planner marks `manual`, such
+as `veranda:wayland-ime`, runs only when named there. The separate Stale runs workflow cancels
 runs of any workflow left queued or in progress for over a day, since such a run holds its
 concurrency group.
 

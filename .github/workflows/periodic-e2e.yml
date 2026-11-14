@@ -43,6 +43,9 @@ concurrency:
 
 env:
   CANDIDATE_VERSION: 1.0.0-ci.periodic-e2e
+  # The GUI accepts only a stable version, which must match its engine's. Any version above the
+  # installed-source floor works; the Veranda checks install their own isolated runtime.
+  VERANDA_VERSION: 0.99.1
   # A retry runs each nested VM check on this many runners at once. Intel's share of hosted
   # runners varies from about one in four to one in twenty, so a single copy may need dozens of
   # retries; a second copy on Intel only repeats the check.
@@ -144,6 +147,7 @@ jobs:
     outputs:
       checks: ${{ steps.plan.outputs.checks }}
       nested: ${{ steps.plan.outputs.nested }}
+      veranda: ${{ steps.plan.outputs.veranda }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,6 +172,9 @@ jobs:
             plan="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
               | map_values(.include |= map(select(.id as $id | $ids | index($id))))' <<<"$plan")"
             [ "$(jq '[.[].include[]] | length' <<<"$plan")" -gt 0 ] || { echo "no such checks: $ONLY"; exit 1; }
+          else
+            # Manual checks run only when named.
+            plan="$(jq -c 'map_values(.include |= map(select(.manual | not)))' <<<"$plan")"
           fi
           if [ -n "$RETRY" ]; then
             plan="$(jq -c --argjson copies "$NESTED_COPIES" \
@@ -178,6 +185,8 @@ jobs:
             printf '%s=%s\n' "$kind" "$(jq -c --arg kind "$kind" '.[$kind] | select(.include != [])' <<<"$plan")" \
               >> "$GITHUB_OUTPUT"
           done
+          printf 'veranda=%s\n' "$(jq '[.[].include[] | select(.bundle == "veranda-bundle")] != []' <<<"$plan")" \
+            >> "$GITHUB_OUTPUT"
           {
             echo '### Checks'
             jq -r '.checks.include[].id' <<<"$plan"
@@ -188,6 +197,59 @@ jobs:
         with:
           name: candidate-bundle
           path: .build/candidate/candidate-bundle.tar.gz
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
+
+  # The candidate bundle plus the GUI and its matching engine, as the Veranda SHORT recipe in
+  # veranda/desktop/README.md stages them. Other checks keep the unchanged candidate bundle, and a
+  # failed build here fails only the Veranda checks.
+  veranda-bundle:
+    needs: candidate
+    if: needs.candidate.outputs.veranda == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate-bundle
+          path: ${{ runner.temp }}/candidate
+      # The same stable toolchain as the Veranda workflow.
+      - name: Install the Veranda build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev
+          rustup toolchain install stable --profile minimal --no-self-update
+      - name: Build the Veranda bundle
+        run: |
+          stage=.build/veranda-short
+          VERANDA_PRODUCT_VERSION="$VERANDA_VERSION" CARGO_TARGET_DIR=.build/veranda-desktop \
+            cargo +stable build --manifest-path veranda/desktop/Cargo.toml --locked
+          install -D -m 0755 .build/veranda-desktop/debug/veranda "$stage/.subyard-acceptance/veranda"
+          # The guest packages the engine again and requires the same bytes, so build with the
+          # toolchain go.mod selects there, whatever Go setup-go installed here.
+          toolchain="$(sed -n 's/^toolchain //p' go.mod)"
+          GOTOOLCHAIN="${toolchain:-auto}" YARD_BUILD_VERSION="$VERANDA_VERSION" \
+            bash dev/build-engine.sh --force --output "$stage/.subyard-acceptance/yard"
+          GOTOOLCHAIN="${toolchain:-auto}" go version "$stage/.subyard-acceptance/yard"
+          gzip -dc "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" > "$stage/bundle.tar"
+          if tar -tf "$stage/bundle.tar" | grep -Eqx '(\./)?\.subyard-acceptance/(veranda|yard)'; then
+            echo 'the candidate bundle already holds a Veranda input'; exit 1
+          fi
+          tar -C "$stage" -rf "$stage/bundle.tar" .subyard-acceptance/veranda .subyard-acceptance/yard
+          gzip -n < "$stage/bundle.tar" > .build/veranda-bundle.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: veranda-bundle
+          path: .build/veranda-bundle.tar.gz
           compression-level: 0
           retention-days: 2
           if-no-files-found: error
@@ -218,10 +280,11 @@ jobs:
           "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz"
           bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1
 
+  # Waits for the Veranda bundle job, but runs whatever its result: the Veranda checks then fail.
   check:
     name: ${{ matrix.id }}
-    needs: [candidate, pool]
-    if: ${{ needs.candidate.outputs.checks && needs.pool.result == 'success' }}
+    needs: [candidate, pool, veranda-bundle]
+    if: ${{ !cancelled() && needs.candidate.outputs.checks && needs.pool.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
@@ -231,6 +294,13 @@ jobs:
       max-parallel: 11
       matrix: ${{ fromJSON(needs.candidate.outputs.checks) }}
     steps:
+      - name: Require the Veranda bundle
+        if: matrix.bundle == 'veranda-bundle' && needs.veranda-bundle.result != 'success'
+        env:
+          RESULT: ${{ needs.veranda-bundle.result }}
+        run: |
+          printf '::error title=Veranda bundle not built::The veranda-bundle job ended with %s; see its log.\n' "$RESULT"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -241,16 +311,17 @@ jobs:
           cache-dependency-path: go.sum
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: candidate-bundle
+          name: ${{ matrix.bundle || 'candidate-bundle' }}
           path: ${{ runner.temp }}/candidate
       - name: Run the check
         env:
           CHECK_ID: ${{ matrix.id }}
           CHECK_COMMAND: ${{ toJSON(matrix.command) }}
+          BUNDLE: ${{ matrix.bundle || 'candidate-bundle' }}
         run: |
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
           bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \
-            "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" "${command[@]}"
+            "$RUNNER_TEMP/candidate/$BUNDLE.tar.gz" "${command[@]}"
       - name: Preserve failed check diagnostics
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

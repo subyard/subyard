@@ -25,6 +25,26 @@ wayland_spec.loader.exec_module(wayland_fixture)
 
 
 class WaylandProbeTest(unittest.TestCase):
+    def test_isolated_defaults_copy_shipped_directories_without_symlinks(self):
+        # The product refuses shipped package directories that traverse symlinks.
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            env = {}
+            probe.isolated_defaults(Path(temporary), env)
+            shipped = Path(env['SUBYARD_CONFIG_DIR'])
+            self.assertEqual(shipped, Path(temporary) / 'shipped-config')
+            for name in ('agents', 'profiles', 'yards'):
+                source = probe.ROOT / 'config' / name
+                copied = shipped / name
+                self.assertFalse(copied.is_symlink())
+                expected = sorted(path.relative_to(source) for path in source.rglob('*'))
+                self.assertEqual(sorted(path.relative_to(copied) for path in copied.rglob('*')), expected)
+                for relative in expected:
+                    original, path = source / relative, copied / relative
+                    self.assertFalse(path.is_symlink(), relative)
+                    self.assertEqual(path.stat().st_mode, original.stat().st_mode, relative)
+                    if original.is_file():
+                        self.assertEqual(path.read_bytes(), original.read_bytes(), relative)
+
     def test_displayfd_waits_for_fragmented_newline_without_requiring_eof(self):
         for fragments in ([b'123\n'], [b'123', b'\n'], [b'1', b'2', b'3', b'\n']):
             with self.subTest(fragments=fragments):
