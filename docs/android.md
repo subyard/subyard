@@ -20,8 +20,10 @@ compositor. Guest Vulkan is explicitly disabled in this mode to reduce startup w
 VMs. Verbose guest-to-host log forwarding is silenced; guest log buffers remain available through
 `adb logcat`. Select `software` for SwiftShader with Vulkan support; it can require more
 startup time and CPU capacity. Neither mode substitutes hardware rendering automatically.
-For hardware graphics, the profile must also grant the render node: the shipped
-`config/profiles/android/profile.conf` sets `YARD_DEVICES="kvm"`, so change it to
+For hardware graphics, the profile must also grant the render node. Only the profile's own
+`config/profiles/android/profile.conf` declares devices, and it sets `YARD_DEVICES="kvm"`; a yard
+or host `YARD_DEVICES` value is ignored and reported, never applied (see
+[scalar settings](configuration.md#scalar-settings)). Change it to
 `YARD_DEVICES="kvm gpu"` in that profile. Then select host mode for the yard and converge it
 with idle pool slots:
 

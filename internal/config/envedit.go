@@ -218,13 +218,21 @@ func ParsePersistentAssignments(
 			continue
 		}
 		direct, dynamic := persistentDirectAssignment(record)
-		if err := applyRecord(record, values, func(name, value string) {
+		observe := func(name, value string) {
 			isDirect := direct != "" && name == direct
 			assignments = append(assignments, PersistentAssignment{
 				Name: name, Value: value, Line: recordLine,
 				Direct: isDirect, Dynamic: dynamic || !isDirect,
 			})
-		}); err != nil {
+		}
+		// A profile-only assignment is discarded as the loader discards it: it
+		// never refuses parsing or affects later records, and only its own
+		// record remains visible, so config unset can still remove it.
+		if err := applyRecordRetired(record, values, observe, operatorDiscardPolicy(func(value discardedValue) {
+			if !value.Nested {
+				observe(value.Name, value.Value)
+			}
+		})); err != nil {
 			return nil, sourceContext(path, recordLine, recordSettingKey(record), "persistent settings", err)
 		}
 	}
@@ -559,9 +567,13 @@ func parseEnvEditRecords(path string, content []byte) ([]envEditRecord, error) {
 		record := envEditRecord{content: raw}
 		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
 			var assigned string
-			if err := applyRecord(trimmed, values, func(name, _ string) {
+			if err := applyRecordRetired(trimmed, values, func(name, _ string) {
 				assigned = name
-			}); err != nil {
+			}, operatorDiscardPolicy(func(value discardedValue) {
+				if !value.Nested {
+					assigned = value.Name
+				}
+			})); err != nil {
 				return nil, sourceContext(path, recordLine, recordSettingKey(trimmed), "persistent settings", err)
 			}
 			record.name = assigned

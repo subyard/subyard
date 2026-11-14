@@ -84,6 +84,8 @@ type initExecution struct {
 	runtimePlan                                 *reconcileruntime.ProfileRuntimePlan
 	hookPlan                                    *reconcileruntime.ProjectHookPlan
 	hookProjects                                []domain.ProjectRecord
+	// extrasDetach names the owned extras devices the extras stage detaches.
+	extrasDetach reconcileruntime.ExtrasDetach
 }
 
 type initExecutionLockKey struct{}
@@ -512,6 +514,9 @@ func (execution *initExecution) prepareStageObservations(ctx context.Context, st
 				step.Converged = runtime.PreparedProfileRuntimesConverged(execution.runtimePlan)
 			}
 			execution.plan.Steps = append(execution.plan.Steps, step)
+		}
+		if err := execution.assessExtrasDetach(ctx, runtime); err != nil {
+			return err
 		}
 		runtime.RuntimePlan = execution.runtimePlan
 		execution.platform = runtime

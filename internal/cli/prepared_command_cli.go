@@ -76,6 +76,9 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	} else if prepared.preview != nil {
 		prepared.preview()
 	}
+	if prepared.readiness != nil {
+		prepared.readiness()
+	}
 	if prepared.pendingInit != nil {
 		cli.printPendingInit(*prepared.pendingInit)
 	}

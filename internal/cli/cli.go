@@ -1430,6 +1430,8 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			owner := ""
 			if index != 0 {
 				owner = result.inventory.HostID
+			} else if local, err := cli.loadInventoryLoaded(yard.Name, loaded); err == nil {
+				printIgnoredAssignments(cli.options.Stdout, "  ", "", local)
 			}
 			cli.printReleaseReadiness(releases[index], owner)
 		}
@@ -1542,6 +1544,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		fmt.Fprintf(cli.options.Stdout, "  security FAIL  (inspect: %s security)\n", cli.yardHint(status.Context))
 	}
 	fmt.Fprintf(cli.options.Stdout, "  space    %s\n", status.Facts.Space)
+	printIgnoredAssignments(cli.options.Stdout, "  ", "", loaded)
 	cli.printReleaseReadiness(cli.releaseReadiness(ctx), "")
 	return 0
 }

@@ -33,17 +33,19 @@ func ReadAssignmentsOver(path string, base map[string]string) (map[string]string
 	return result, nil
 }
 
+// AssignedSettingNames lists the settings an operator file assigns. A
+// profile-only assignment is discarded as the loader discards it.
 func AssignedSettingNames(path string) ([]string, error) {
 	values := environment{}
 	seen := map[string]struct{}{}
 	var result []string
-	if err := applyEnvFileObserved(path, values, func(name, _ string, _ int) {
+	if err := applyEnvFileObservedRetired(path, values, func(name, _ string, _ int) {
 		if _, exists := seen[name]; exists {
 			return
 		}
 		seen[name] = struct{}{}
 		result = append(result, name)
-	}); err != nil {
+	}, IsProfileOnlySetting); err != nil {
 		return nil, err
 	}
 	sort.Strings(result)
@@ -74,14 +76,61 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 		defer file.Close()
 		input = file
 	}
-	return applyEnvReaderObservedRetired(input, path, values, observer, retired)
+	return applyEnvReaderObservedRetired(input, path, values, observer, retired, nil)
+}
+
+// discardPolicy names inputs that are evaluated in isolation and discarded:
+// retired settings always, plus those match selects. Neither such an
+// assignment nor any nested default it performs changes values or reaches the
+// observer, so later records never see it. report, when set, receives each
+// discarded assignment. A discarded profile-only expression never refuses:
+// an evaluation error, or a required check of the name, is ignored with it.
+type discardPolicy struct {
+	match  func(string) bool
+	report func(discardedValue)
+}
+
+// discardedValue is one discarded assignment. A nested one is a default
+// performed inside another record's expression: Expression is its exact
+// parameter text and Within names that record's setting, or ":" for a no-op
+// record.
+type discardedValue struct {
+	Name, Value        string
+	Expression, Within string
+	Nested             bool
+}
+
+// within reports nested defaults as performed inside record's expression.
+func (policy discardPolicy) within(record string) discardPolicy {
+	if report := policy.report; report != nil {
+		policy.report = func(value discardedValue) {
+			if value.Nested {
+				value.Within = record
+			}
+			report(value)
+		}
+	}
+	return policy
+}
+
+func (policy discardPolicy) discards(name string) bool {
+	return isRetiredSetting(name) || policy.match != nil && policy.match(name)
+}
+
+// operatorDiscardPolicy is the policy for operator-authored files: they may
+// still contain profile-only settings, which only environment profiles declare.
+func operatorDiscardPolicy(report func(discardedValue)) discardPolicy {
+	return discardPolicy{match: IsProfileOnlySetting, report: report}
 }
 
 func applyEnvReaderObserved(reader io.Reader, source string, values environment, observer assignmentObserver) error {
-	return applyEnvReaderObservedRetired(reader, source, values, observer, isRetiredSetting)
+	return applyEnvReaderObservedRetired(reader, source, values, observer, isRetiredSetting, nil)
 }
 
-func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool) error {
+// applyEnvReaderObservedRetired evaluates every record under the discard
+// policy of retired (see discardPolicy). discarded, when set, receives each
+// discarded assignment with its record line.
+func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool, discarded func(discardedValue, int)) error {
 	discardRetiredSettings(values)
 
 	scanner := bufio.NewScanner(reader)
@@ -112,7 +161,11 @@ func applyEnvReaderObservedRetired(reader io.Reader, source string, values envir
 				observer(name, value, recordLine)
 			}
 		}
-		if err := applyRecordRetired(record.String(), values, recordObserver, retired); err != nil {
+		policy := discardPolicy{match: retired}
+		if discarded != nil {
+			policy.report = func(value discardedValue) { discarded(value, recordLine) }
+		}
+		if err := applyRecordRetired(record.String(), values, recordObserver, policy); err != nil {
 			return sourceContext(source, recordLine, recordSettingKey(record.String()), "scalar settings", err)
 		}
 		record.Reset()
@@ -149,11 +202,7 @@ func scanQuote(line string, quote byte) byte {
 	return quote
 }
 
-func applyRecord(record string, values environment, observer func(name, value string)) error {
-	return applyRecordRetired(record, values, observer, isRetiredSetting)
-}
-
-func applyRecordRetired(record string, values environment, observer func(name, value string), retired func(string) bool) error {
+func applyRecordRetired(record string, values environment, observer func(name, value string), policy discardPolicy) error {
 	record = strings.TrimSpace(record)
 	if strings.HasPrefix(record, ":") {
 		expression := strings.TrimSpace(strings.TrimPrefix(record, ":"))
@@ -161,7 +210,7 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 		if !expand {
 			return nil
 		}
-		_, err := expandValue(value, values, observer)
+		_, err := expandValue(value, values, observer, policy.within(":"))
 		return err
 	}
 	if strings.HasPrefix(record, "export ") {
@@ -175,24 +224,34 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	if !ValidVariable(name) {
 		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
-	if isRetiredSetting(name) || retired(name) {
+	discard := policy.discards(name)
+	inner := policy.within(name)
+	if discard {
 		// Validate the old expression without allowing its assignments or nested
-		// defaults to affect current settings, provenance, or sync exports.
+		// defaults to affect current settings, provenance, or sync exports. The
+		// discarded record itself is the only disclosure for its line.
 		values = cloneEnvironment(values)
 		observer = nil
+		inner.report = nil
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
-	if !expand {
-		values[name] = value
-		if observer != nil {
-			observer(name, value)
+	if expand {
+		expanded, err := expandValue(value, values, observer, inner)
+		if err != nil && !(discard && IsProfileOnlySetting(name)) {
+			return err
+		}
+		// An ignored profile-only expression never refuses loading; its
+		// unevaluated text is what the disclosure reports.
+		if err == nil {
+			value = expanded
+		}
+	}
+	if discard {
+		if policy.report != nil {
+			policy.report(discardedValue{Name: name, Value: value})
 		}
 		return nil
-	}
-	value, err := expandValue(value, values, observer)
-	if err != nil {
-		return err
 	}
 	values[name] = value
 	if observer != nil {
@@ -218,6 +277,7 @@ func expandValue(
 	value string,
 	values environment,
 	observer func(name, value string),
+	policy discardPolicy,
 ) (string, error) {
 	if strings.Contains(value, "$(") || strings.ContainsRune(value, '`') {
 		return "", sourceError("", 0, "", "scalar settings", "command substitution is not allowed in config", nil)
@@ -244,7 +304,7 @@ func expandValue(
 			if err != nil {
 				return "", err
 			}
-			expanded, err := expandParameter(value[index+2:end], values, observer)
+			expanded, err := expandParameter(value[index+2:end], values, observer, policy)
 			if err != nil {
 				return "", err
 			}
@@ -289,12 +349,15 @@ func expandParameter(
 	expression string,
 	values environment,
 	observer func(name, value string),
+	policy discardPolicy,
 ) (string, error) {
 	name, operator, fallback := splitParameter(expression)
 	if !ValidVariable(name) {
 		return "", sourceError("", 0, "", "scalar settings", "invalid parameter name", nil)
 	}
-	if isRetiredSetting(name) {
+	discard := policy.discards(name)
+	if discard {
+		// A default of a discarded name stays inside this expansion.
 		values = cloneEnvironment(values)
 		observer = nil
 	}
@@ -306,7 +369,12 @@ func expandParameter(
 		if current != "" {
 			return current, nil
 		}
-		expanded, err := expandValue(fallback, values, observer)
+		if operator == ":?" && discard && IsProfileOnlySetting(name) {
+			// Operators never assign it, so a required check of it is ignored
+			// too, without evaluating its message.
+			return "", nil
+		}
+		expanded, err := expandValue(fallback, values, observer, policy)
 		if err != nil {
 			return "", err
 		}
@@ -320,6 +388,9 @@ func expandParameter(
 			values[name] = expanded
 			if observer != nil {
 				observer(name, expanded)
+			}
+			if discard && policy.report != nil {
+				policy.report(discardedValue{Name: name, Value: expanded, Expression: "${" + expression + "}", Nested: true})
 			}
 		}
 		return expanded, nil

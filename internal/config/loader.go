@@ -71,6 +71,7 @@ type Loaded struct {
 	ConfigurationLayers   []ConfigurationLayer
 	assetValidationInputs []string
 	ProspectiveFiles      *ProspectiveFiles
+	ignored               []IgnoredAssignment
 }
 
 // AssetValidationInputs returns the logical file sources opened while validating
@@ -121,6 +122,7 @@ func Load(options LoadOptions) (Loaded, error) {
 		EnvironmentProfiles:   tracker.environmentProfiles,
 		assetValidationInputs: tracker.assetValidationInputs,
 		ProspectiveFiles:      options.ProspectiveFiles,
+		ignored:               tracker.ignoredAssignments(ctx.YardName, ctx.Paths.ConfigHome),
 	}, nil
 }
 
@@ -140,6 +142,11 @@ func load(
 		resetInheritedContext(values)
 	}
 	commandEnvironment := cloneEnvironment(values)
+	// A command-environment profile-only value never takes part in evaluation;
+	// the command layer below only reports it.
+	for _, name := range profileOnlySettings {
+		delete(values, name)
+	}
 	if values["SUBYARD_CONFIG_DIR"] == "" {
 		values["SUBYARD_CONFIG_DIR"] = filepath.Join(root, "config")
 	}
@@ -332,7 +339,7 @@ func load(
 			yardPresent = true
 			templateSource = path
 			source := tracker.fileSource(path)
-			if err := tracker.catalog.applyEnvFileValidatedFrom(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, tracker.prospectiveReader()); err != nil {
+			if err := tracker.catalog.applyEnvFileValidatedFrom(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, nil, tracker.prospectiveReader()); err != nil {
 				return domain.Context{}, nil, err
 			}
 		}
@@ -420,6 +427,10 @@ func load(
 		"command", "command override", "environment", true, settingAny,
 	)
 	for name, value := range commandEnvironment {
+		if IsProfileOnlySetting(name) {
+			tracker.observeProfileOnly(commandLayer, discardedValue{Name: name, Value: value}, "", 0)
+			continue
+		}
 		if _, ok := tracker.catalog.LookupSetting(name); ok {
 			if err := tracker.catalog.ValidateSetting(ScopeCommand, name, value, false); err != nil {
 				return domain.Context{}, nil, sourceContext("", 0, recognizedSettingKey(tracker.catalog, name), "command override", err)
@@ -967,6 +978,8 @@ func applyEnvFileTrackedValidated(
 	return tracker.catalog.applyEnvFileValidatedFrom(path, source, values, scope, requireSyncable,
 		func(name, value string, line int) {
 			tracker.record(layer, name, value, path, line, "")
+		}, func(value discardedValue, line int) {
+			tracker.observeProfileOnly(layer, value, path, line)
 		}, tracker.prospectiveReader())
 }
 
@@ -977,32 +990,56 @@ func (settings Catalog) applyEnvFileValidated(
 	requireSyncable bool,
 	observer assignmentObserver,
 ) error {
-	return settings.applyEnvFileValidatedFrom(path, path, values, scope, requireSyncable, observer)
+	return settings.applyEnvFileValidatedFrom(path, path, values, scope, requireSyncable, observer, nil)
 }
 
-func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
+func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver, readers ...func(string) ([]byte, error)) error {
 	if len(readers) != 0 && readers[0] != nil {
 		payload, err := readers[0](source)
 		if err != nil {
 			return sourceAccessError(path, "scalar settings", err)
 		}
-		return settings.applyEnvReaderValidated(bytes.NewReader(payload), path, values, scope, requireSyncable, observer)
+		return settings.applyEnvReaderValidatedIgnoring(bytes.NewReader(payload), path, values, scope, requireSyncable, observer, ignored)
 	}
 	file, err := os.Open(source)
 	if err != nil {
 		return sourceAccessError(path, "scalar settings", err)
 	}
 	defer file.Close()
-	return settings.applyEnvReaderValidated(file, path, values, scope, requireSyncable, observer)
+	return settings.applyEnvReaderValidatedIgnoring(file, path, values, scope, requireSyncable, observer, ignored)
 }
 
 func (settings Catalog) applyEnvReaderValidated(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver) error {
+	return settings.applyEnvReaderValidatedIgnoring(reader, path, values, scope, requireSyncable, observer, nil)
+}
+
+// ignoredObserver receives a discarded profile-only assignment and its line.
+type ignoredObserver func(discardedValue, int)
+
+// applyEnvReaderValidatedIgnoring evaluates and validates one scalar layer.
+// Outside shipped scope, a profile-only assignment is discarded like a retired
+// setting while the file is read: evaluated in isolation, so neither it nor a
+// nested default of it changes any value a later record sees. It is reported
+// to ignored, never validated, applied or observed as a setting.
+func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
+	type discardedAssignment struct {
+		discardedValue
+		line int
+	}
+	var discarded []discardedAssignment
 	var content bytes.Buffer
+	operatorScope := scope != ScopeShipped
 	if err := applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, func(name, value string, line int) {
 		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
-	}, settings.retiredSetting); err != nil {
+	}, func(name string) bool {
+		return settings.retiredSetting(name) || operatorScope && IsProfileOnlySetting(name)
+	}, func(value discardedValue, line int) {
+		if operatorScope && IsProfileOnlySetting(value.Name) {
+			discarded = append(discarded, discardedAssignment{value, line})
+		}
+	}); err != nil {
 		return err
 	}
 	normalized := make([]observedAssignment, 0, len(assignments))
@@ -1056,6 +1093,11 @@ func (settings Catalog) applyEnvReaderValidated(reader io.Reader, path string, v
 	if observer != nil {
 		for _, assignment := range assignments {
 			observer(assignment.name, assignment.value, assignment.line)
+		}
+	}
+	if ignored != nil {
+		for _, assignment := range discarded {
+			ignored(assignment.discardedValue, assignment.line)
 		}
 	}
 	return nil

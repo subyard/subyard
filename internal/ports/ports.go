@@ -232,7 +232,8 @@ type ReconcileStageObservation struct {
 	NativeExit int
 	Reason     string
 	// Diagnostics are readiness state of a converged stage that the operation
-	// boundary renders, such as a setting that applies at the next start.
+	// boundary renders, such as a setting that applies at the next start or a
+	// profile declaration that this yard kind does not apply.
 	// They are neither refusals nor warnings.
 	Diagnostics []string
 }

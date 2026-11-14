@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -136,10 +139,20 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 			scope = "owner host networking for " + target + " bridge " + yard.IncusBridge
 			desired = fmt.Sprintf("host NetworkManager and route safety; bridge DHCP/DNS and forwarding rules if UFW is active; native policy lock access for operator UID %d", os.Getuid())
 		}
+		consequence := desired
+		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && detach.Unverified {
+			consequence = fmt.Sprintf("yard %s: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)", yard.YardName)
+			if len(detach.Devices) != 0 {
+				consequence = boundedStepList(consequence+", including each of these if attached: ", detach.Devices, " ", "devices")
+			}
+		} else if native.Stage.ID == ports.ReconcileStageExtras && len(detach.Devices) != 0 {
+			consequence = boundedStepList(fmt.Sprintf("yard %s: detaches devices no selected profile requests: ", yard.YardName), detach.Devices, " ", "devices")
+		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
-			"native VerifyStage "+string(native.Stage.ID)+" returns converged", desired, native.Converged, native.Conditional)
+			"native VerifyStage "+string(native.Stage.ID)+" returns converged", consequence, native.Converged, native.Conditional)
 		if native.Converged && native.Diagnostic != "" {
-			steps[len(steps)-1].Observed += "; " + native.Diagnostic
+			// Stage diagnostics are joined with "; "; bound them like any step text.
+			steps[len(steps)-1].Observed = boundedStepList(steps[len(steps)-1].Observed+"; ", strings.Split(native.Diagnostic, "; "), "; ", "diagnostics")
 		}
 		if execution.mode == initReconcile && native.Stage.ID == ports.ReconcileStageProvision {
 			for index, path := range execution.integrationAdoption.Adoption {
@@ -286,4 +299,45 @@ func (execution *provisionExecution) stateBinding() string {
 		Endpoint *endpoint
 		Seeds    any
 	}{execution.approvedProfiles, execution.approvedPowerCycle, saved, execution.startupSeeds})
+}
+
+// assessExtrasDetach records the owned extras devices that the pending extras
+// stage detaches, so the plan names each device loss before confirmation. A
+// conditional extras stage counts too. A profile declaration refusal refuses
+// planning. A yard without an instance detaches nothing; when the instance
+// cannot be read, the plan says that any attached yx-* device no selected
+// profile requests is detached and names those ignored operator assignments
+// request.
+func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime reconcileruntime.Runtime) error {
+	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
+	if execution.mode == initReset || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
+		return step.Stage.ID == ports.ReconcileStageExtras && !step.Converged
+	}) {
+		return nil
+	}
+	detach, err := runtime.ExtrasDetachPlanned(ctx, execution.loaded.IgnoredAssignments())
+	if err != nil {
+		return fmt.Errorf("check init stage %q: %w", ports.ReconcileStageExtras, err)
+	}
+	execution.extrasDetach = detach
+	return nil
+}
+
+// operationStepTextLimit is the byte bound of one operation step text.
+const operationStepTextLimit = 512
+
+// boundedStepList appends items joined by separator to prefix within the step
+// text bound, ending with "and N more" when they do not all fit, or naming
+// only their count when none fits.
+func boundedStepList(prefix string, items []string, separator, noun string) string {
+	for shown := len(items); shown > 0; shown-- {
+		text := prefix + strings.Join(items[:shown], separator)
+		if rest := len(items) - shown; rest != 0 {
+			text += fmt.Sprintf(" and %d more", rest)
+		}
+		if len(text) <= operationStepTextLimit {
+			return text
+		}
+	}
+	return fmt.Sprintf("%s%d %s", prefix, len(items), noun)
 }

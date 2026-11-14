@@ -94,13 +94,15 @@ func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition 
 }
 
 func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, arguments []string) (*releaseExecution, error) {
-	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{
+	runtimeConfig := cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{
 		OperatorHome: loaded.Context.Paths.OperatorHome,
 		DataHome:     loaded.Context.Paths.DataHome,
 		ConfigHome:   loaded.Context.Paths.ConfigHome,
 		RuntimeRoot:  loaded.Environment["YARD_RUNTIME_ROOT"],
 		OperationID:  cli.env["SUBYARD_OPERATION_ID"],
-	}))
+	})
+	runtimeConfig.ConfigurationState = func() []config.ConfigurationState { return cli.localConfigurationState(loaded) }
+	runtime := releaseruntime.New(runtimeConfig)
 	prepared, err := runtime.PrepareTransition(
 		ctx, arguments, loaded.Environment["SUBYARD_CONFIG_HOME"],
 		loaded.Context.YardName,

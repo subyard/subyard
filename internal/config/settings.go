@@ -93,6 +93,7 @@ type settingTracker struct {
 	layers                []settingLayer
 	assignments           map[string][]settingAssignment
 	order                 int
+	ignored               []IgnoredAssignment
 }
 
 func newSettingTracker() *settingTracker {

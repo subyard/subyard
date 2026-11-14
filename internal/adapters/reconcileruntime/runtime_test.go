@@ -19,6 +19,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -2150,10 +2151,29 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 		values["SUBYARD_EXTRAS_DEVICES"] != "gpu" || values["SUBYARD_EXTRAS_HOST_MEMORY"] != "1" {
 		t.Fatalf("unexpected extras context: %#v", values)
 	}
+	// Operator values never reach a profile's evaluation, so an inheriting
+	// profile declares nothing and an assigning one keeps its own value.
+	writeProfile("inherit", "YARD_DEVICES=\"${YARD_DEVICES:-}\"\nYARD_MOUNTS=\"${YARD_MOUNTS:-}\"\nYARD_CAPS=\"${YARD_CAPS:-}\"\n")
+	isolated := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=inherit b", "YARD_DEVICES=kvm fuse", "YARD_MOUNTS=other:/srv/other:ro:0700", "YARD_CAPS=nesting"}}
+	values, err = isolated.extrasContext()
+	if err != nil || values["SUBYARD_EXTRAS_DEVICES"] != "gpu" || values["SUBYARD_EXTRAS_MOUNTS"] != "" || values["SUBYARD_EXTRAS_CAPABILITIES"] != "fuse rootless-docker" {
+		t.Fatalf("operator values reached profile extras: %#v, %v", values, err)
+	}
 	runtime.Yard.YardKind = domain.YardVM
 	values, err = runtime.extrasContext()
 	if err != nil || values["SUBYARD_EXTRAS_DEVICES"] != "" || values["SUBYARD_EXTRAS_HOST_MEMORY"] != "0" {
 		t.Fatalf("VM inherited container-only device extras: %#v, %v", values, err)
+	}
+	// A VM yard reports a declared device as readiness state, not a silent skip.
+	requests, err := runtime.profileRequests()
+	if err != nil || len(requests.diagnostics) != 1 ||
+		requests.diagnostics[0] != `YARD_DEVICES entry "gpu" in `+filepath.Join(root, "config", "profiles", "b", "profile.conf")+` is not applicable to VM yards` {
+		t.Fatalf("VM device diagnostic = %#v, %v", requests.diagnostics, err)
+	}
+	observed := runtime
+	observed.Incus = &testkit.Incus{}
+	if observation, err := observed.ObserveStage(context.Background(), ports.ReconcileStageExtras); err != nil || !slices.Equal(observation.Diagnostics, requests.diagnostics) {
+		t.Fatalf("extras observation diagnostics = %#v, %v", observation.Diagnostics, err)
 	}
 	for name, contents := range map[string]string{
 		"mount":  "YARD_MOUNTS='cache:/srv/cache:rw:0755'\n",
@@ -2175,6 +2195,18 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	writeProfile("bad", "YARD_MOUNTS='cache:/srv/cache:rw:0755 cache:/srv/other:ro:0700'\n")
 	if _, err := runtime.extrasContext(); err == nil {
 		t.Fatal("ambiguous profile mount declarations were accepted")
+	}
+	// Every independent declaration refusal is reported, in stable order.
+	writeProfile("bad", "YARD_CAPS='bogus'\nYARD_DEVICES='tape'\n")
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=bad missing", "ALLOWS_HOST_ACCESS=false"}
+	_, err = runtime.extrasContext()
+	if err == nil {
+		t.Fatal("invalid declarations were accepted")
+	}
+	for _, want := range []string{"forbids YARD_CAPS", "forbids YARD_DEVICES", `invalid YARD_CAPS entry "bogus"`, `invalid YARD_DEVICES entry "tape"`, "missing"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("collected refusal lacks %q: %v", want, err)
+		}
 	}
 }
 
@@ -2399,5 +2431,74 @@ func TestPowerImportCollectsForeignOwnersAndContinuesOtherYards(t *testing.T) {
 	}
 	if len(native.ConfigUpdates) != 1 || native.ConfigUpdates[0].Project != "gamma" || native.Instances["alpha/alpha"].Config["user.subyard.name"] != "unregistered" {
 		t.Fatalf("other yards not imported: %#v", native.ConfigUpdates)
+	}
+}
+
+// The extras stage detaches every owned yx-* device no selected profile
+// requests, including one an ignored operator assignment supplied before. The
+// init plan names each such device.
+func TestExtrasDetachPlannedNamesUnrequestedOwnedDevices(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "config", "profiles", "a")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "profile.conf"), []byte("YARD_MOUNTS='cache:/srv/cache:rw:0755'\nYARD_DEVICES='kvm'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	devices := t.TempDir()
+	for _, node := range []string{"kvm", "fuse", "dri/renderD128"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(devices, node)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(devices, node), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Name: "yard", Project: "subyard", LocalDevices: map[string]map[string]string{
+		"eth0": {}, "yx-cache": {}, "yx-dev-kvm": {}, "yx-dev-fuse": {}, "yx-dev-dri-renderD128": {},
+	}}}}
+	runtime := Runtime{RepositoryRoot: root, Incus: incus, HostDeviceRoot: devices, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer},
+		Environment: []string{"ENVIRONMENT_PROFILES=a", "YARD_DEVICES=fuse gpu"}}
+	ignored := []config.IgnoredAssignment{{Name: "YARD_DEVICES", Value: "kvm fuse gpu"}, {Name: "YARD_MOUNTS", Value: "old:/srv/old:ro:0755"}}
+	detach, err := runtime.ExtrasDetachPlanned(context.Background(), ignored)
+	if err != nil || detach.Unverified || strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD128 yx-dev-fuse" {
+		t.Fatalf("detach = %#v, %v", detach, err)
+	}
+	// An unreadable instance still names the devices the ignored assignments
+	// requested beyond the profiles, as detached if attached.
+	incus.Err = errors.New("Incus is stopped")
+	detach, err = runtime.ExtrasDetachPlanned(context.Background(), ignored)
+	if err != nil || !detach.Unverified || strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD* yx-dev-fuse yx-old" {
+		t.Fatalf("unreadable detach = %#v, %v", detach, err)
+	}
+	// Without a host node the device can still be attached: names are derived
+	// from declarations alone.
+	if err := os.Remove(filepath.Join(devices, "kvm")); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES="}
+	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), ignored[:1]); err != nil || !detach.Unverified ||
+		strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD* yx-dev-fuse yx-dev-kvm" {
+		t.Fatalf("unreadable detach without host nodes = %#v, %v", detach, err)
+	}
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=a", "YARD_DEVICES=fuse gpu"}
+	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), nil); err != nil || !detach.Unverified || len(detach.Devices) != 0 {
+		t.Fatalf("unreadable detach without ignored assignments = %#v, %v", detach, err)
+	}
+	// A declaration refusal surfaces even when the instance is unreadable.
+	if err := os.WriteFile(filepath.Join(directory, "profile.conf"), []byte("YARD_DEVICES='tape'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ExtrasDetachPlanned(context.Background(), ignored); err == nil || !strings.Contains(err.Error(), `invalid YARD_DEVICES entry "tape"`) {
+		t.Fatalf("declaration refusal hidden: %v", err)
+	}
+	incus.Err = nil
+	runtime.Yard.YardInstanceName = "absent"
+	if err := os.WriteFile(filepath.Join(directory, "profile.conf"), []byte("YARD_DEVICES='kvm'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), ignored); err != nil || len(detach.Devices) != 0 {
+		t.Fatalf("absent yard detaches %#v, %v", detach, err)
 	}
 }

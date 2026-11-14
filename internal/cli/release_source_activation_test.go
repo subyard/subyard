@@ -562,3 +562,30 @@ func TestPreparedActivationOmitsDisabledIntegrationScope(t *testing.T) {
 		})
 	}
 }
+
+// Release activation applies yard settings without refusing ignored
+// profile-only operator assignments of any yard.
+func TestPreparedActivationIgnoresProfileOnlyOperatorAssignments(t *testing.T) {
+	fixture := newSourceScopeFixture(t)
+	fixture.program.options.InitPlatform = nil
+	fixture.program.options.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	fixture.program.options.Executor = nil
+	host := filepath.Join(fixture.configHome, "config.env")
+	settings, err := os.ReadFile(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, host, append(settings, []byte("YARD_CAPS=\nYARD_DEVICES=fuse\n")...), 0o600)
+	named := filepath.Join(fixture.configHome, "yards", "named", "config.env")
+	settings, err = os.ReadFile(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, named, append(settings, []byte("YARD_MOUNTS=cache:/srv/cache:rw:0755\n")...), 0o600)
+	reconciler := fixture.reconciler(false).materializedConfigActivationReconciler
+	reconciler.yard, reconciler.allLocal = "", true
+	releases := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
+	if _, err := reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, releasetransition.V2SourceActivationView{Settings: preparedActivationSnapshotFixture{home: fixture.configHome}}); err != nil {
+		t.Fatalf("activation refused ignored profile-only assignments: %v", err)
+	}
+}

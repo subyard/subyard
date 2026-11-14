@@ -248,7 +248,13 @@ func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileSt
 		return ports.ReconcileStageObservation{Converged: converged, Diagnostics: diagnostics}, err
 	}
 	converged, err := runtime.CheckStage(ctx, stage)
-	return ports.ReconcileStageObservation{Converged: converged}, err
+	observation := ports.ReconcileStageObservation{Converged: converged}
+	if err == nil && stage == ports.ReconcileStageExtras {
+		var requests profileRequests
+		requests, err = runtime.profileRequests()
+		observation.Diagnostics = requests.diagnostics
+	}
+	return observation, err
 }
 
 func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
@@ -1477,36 +1483,170 @@ func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsrunti
 	}, nil
 }
 
+// ExtrasDetach is the device loss of a pending extras stage. Unverified means
+// the instance could not be read: the stage then detaches any attached yx-*
+// device that no selected profile requests, and Devices are only the names
+// derived from ignored operator assignments, each detached if attached.
+type ExtrasDetach struct {
+	Devices    []string
+	Unverified bool
+}
+
+// ExtrasDetachPlanned names the Subyard-owned yx-* devices of the yard that the
+// extras stage detaches because no selected profile requests them, resolved as
+// 09-yard-extras.sh resolves them. This includes a device that only an operator
+// assignment supplied before the loader started ignoring it. A profile
+// declaration refusal is returned. A yard without an instance detaches nothing.
+// When the instance cannot be read, for example while Incus is stopped, the
+// result is unverified, with the device names that ignored operator
+// assignments request and no selected profile declares, regardless of host
+// device nodes.
+func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context, ignored []config.IgnoredAssignment) (ExtrasDetach, error) {
+	requests, err := runtime.profileRequests()
+	if err != nil {
+		return ExtrasDetach{}, err
+	}
+	instance, err := runtime.Incus.Instance(readOnlyProbeContext(ctx), runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
+	if errors.Is(err, ports.ErrInstanceNotFound) {
+		return ExtrasDetach{}, nil
+	}
+	if err != nil {
+		operator := map[string][]string{}
+		for _, assignment := range ignored {
+			for _, entry := range strings.Fields(assignment.Value) {
+				switch {
+				case assignment.Name == "YARD_MOUNTS":
+					operator["SUBYARD_EXTRAS_MOUNTS"] = append(operator["SUBYARD_EXTRAS_MOUNTS"], entry)
+				case assignment.Name == "YARD_CAPS" && slices.Contains([]string{"nesting", "rootless-docker", "fuse"}, entry):
+					operator["SUBYARD_EXTRAS_CAPABILITIES"] = append(operator["SUBYARD_EXTRAS_CAPABILITIES"], entry)
+				case assignment.Name == "YARD_DEVICES" && runtime.Yard.YardKind != domain.YardVM:
+					operator["SUBYARD_EXTRAS_DEVICES"] = append(operator["SUBYARD_EXTRAS_DEVICES"], entry)
+				}
+			}
+		}
+		extras := map[string]string{}
+		for name, entries := range operator {
+			extras[name] = strings.Join(entries, " ")
+		}
+		declared := runtime.extrasDeviceNames(requests.extras, false)
+		var devices []string
+		for name := range runtime.extrasDeviceNames(extras, false) {
+			if !declared[name] {
+				devices = append(devices, name)
+			}
+		}
+		slices.Sort(devices)
+		return ExtrasDetach{Devices: devices, Unverified: true}, nil
+	}
+	wanted := runtime.extrasDeviceNames(requests.extras, true)
+	var detached []string
+	for _, name := range slices.Sorted(maps.Keys(instance.LocalDevices)) {
+		if strings.HasPrefix(name, "yx-") && !wanted[name] {
+			detached = append(detached, name)
+		}
+	}
+	return ExtrasDetach{Devices: detached}, nil
+}
+
+// extrasDeviceNames names the yx-* devices that 09-yard-extras.sh wants for
+// the extras context, from its declarations and, with hostNodes, the existing
+// host device nodes. Without hostNodes every declared device is named, and
+// render nodes as the yx-dev-dri-renderD* pattern.
+func (runtime Runtime) extrasDeviceNames(extras map[string]string, hostNodes bool) map[string]bool {
+	root := runtime.HostDeviceRoot
+	if root == "" {
+		root = "/dev"
+	}
+	wanted := map[string]bool{}
+	want := func(pattern, prefix string) {
+		if !hostNodes {
+			wanted[prefix+filepath.Base(pattern)] = true
+			return
+		}
+		nodes, _ := filepath.Glob(filepath.Join(root, pattern))
+		for _, node := range nodes {
+			wanted[prefix+filepath.Base(node)] = true
+		}
+	}
+	for _, mount := range strings.Fields(extras["SUBYARD_EXTRAS_MOUNTS"]) {
+		if name, path, _ := strings.Cut(mount, ":"); domain.SafeName(name) && path != "" {
+			wanted["yx-"+name] = true
+		}
+	}
+	fuse := strings.TrimSpace(extras["SUBYARD_EXTRAS_CAPABILITIES"]) != ""
+	for _, device := range strings.Fields(extras["SUBYARD_EXTRAS_DEVICES"]) {
+		switch device {
+		case "kvm":
+			want("kvm", "yx-dev-")
+		case "fuse":
+			fuse = true
+		case "gpu":
+			want("dri/renderD*", "yx-dev-dri-")
+		}
+	}
+	if fuse {
+		want("fuse", "yx-dev-")
+	}
+	return wanted
+}
+
 func (runtime Runtime) extrasContext() (map[string]string, error) {
+	requests, err := runtime.profileRequests()
+	return requests.extras, err
+}
+
+type profileRequests struct {
+	extras map[string]string
+	// diagnostics are readiness state: declarations this yard kind does not
+	// apply. They are neither refusals nor warnings.
+	diagnostics []string
+}
+
+// profileRequests resolves the yard extras of the selected profiles in one
+// pass. Only a profile's own profile.conf declares YARD_MOUNTS, YARD_CAPS and
+// YARD_DEVICES: operator values never reach its evaluation. Every independent
+// declaration refusal is reported together. A VM yard reports each declared
+// container-only device as a "not applicable to VM yards" diagnostic.
+func (runtime Runtime) profileRequests() (profileRequests, error) {
 	mounts := map[string]bool{}
 	mountNames := map[string]string{}
 	capabilities := map[string]bool{}
 	devices := map[string]bool{}
 	hostMemory := "0"
+	var refusals []error
+	var diagnostics []string
 	base := runtimeEnvironment(runtime.Environment)
+	for _, name := range []string{"YARD_MOUNTS", "YARD_CAPS", "YARD_DEVICES"} {
+		delete(base, name)
+	}
+	forbidHost := base["ALLOWS_HOST_ACCESS"] == "false"
 	for _, name := range strings.Fields(base["ENVIRONMENT_PROFILES"]) {
 		if !domain.SafeName(name) {
-			return nil, fmt.Errorf("invalid ENVIRONMENT_PROFILES entry %q", name)
+			refusals = append(refusals, fmt.Errorf("invalid ENVIRONMENT_PROFILES entry %q", name))
+			continue
 		}
 		pkg, err := profile.ResolvePackage(runtime.RepositoryRoot, name)
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
 		if pkg.Config == nil && len(pkg.Resources) != 0 {
 			continue
 		}
 		if pkg.Config == nil {
-			return nil, fmt.Errorf("profile %q configuration is missing", name)
+			refusals = append(refusals, fmt.Errorf("profile %q configuration is missing", name))
+			continue
 		}
 		path := pkg.Config.Path
 		values, err := config.ProfileValues(pkg.Config, base)
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
-		if base["ALLOWS_HOST_ACCESS"] == "false" {
+		if forbidHost {
 			for _, name := range []string{"YARD_MOUNTS", "YARD_CAPS", "YARD_DEVICES"} {
 				if strings.TrimSpace(values[name]) != "" {
-					return nil, fmt.Errorf("selected yard role forbids %s in %s", name, path)
+					refusals = append(refusals, fmt.Errorf("selected yard role forbids %s in %s", name, path))
 				}
 			}
 		}
@@ -1516,10 +1656,12 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 				!filepath.IsAbs(parts[1]) ||
 				(parts[2] != "ro" && parts[2] != "rw") ||
 				!safeDirectoryMode(parts[3]) {
-				return nil, fmt.Errorf("invalid YARD_MOUNTS entry %q in %s", mount, path)
+				refusals = append(refusals, fmt.Errorf("invalid YARD_MOUNTS entry %q in %s", mount, path))
+				continue
 			}
 			if previous := mountNames[parts[0]]; previous != "" && previous != mount {
-				return nil, fmt.Errorf("conflicting YARD_MOUNTS declaration for %q", parts[0])
+				refusals = append(refusals, fmt.Errorf("conflicting YARD_MOUNTS declaration for %q", parts[0]))
+				continue
 			}
 			mountNames[parts[0]] = mount
 			mounts[mount] = true
@@ -1535,28 +1677,32 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 			case "nesting", "rootless-docker", "fuse":
 				capabilities[capability] = true
 			default:
-				return nil, fmt.Errorf("invalid YARD_CAPS entry %q in %s", capability, path)
+				refusals = append(refusals, fmt.Errorf("invalid YARD_CAPS entry %q in %s", capability, path))
 			}
 		}
 		for _, device := range strings.Fields(values["YARD_DEVICES"]) {
-			// The current extras adapter implements devices as container-only unix-char mounts.
-			if runtime.Yard.YardKind == domain.YardVM {
-				continue
-			}
 			switch device {
 			case "kvm", "fuse", "gpu":
-				devices[device] = true
+				// The extras adapter implements devices as container-only unix-char mounts.
+				if runtime.Yard.YardKind == domain.YardVM {
+					diagnostics = append(diagnostics, fmt.Sprintf("YARD_DEVICES entry %q in %s is not applicable to VM yards", device, path))
+				} else {
+					devices[device] = true
+				}
 			default:
-				return nil, fmt.Errorf("invalid YARD_DEVICES entry %q in %s", device, path)
+				refusals = append(refusals, fmt.Errorf("invalid YARD_DEVICES entry %q in %s", device, path))
 			}
 		}
 	}
-	return map[string]string{
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return profileRequests{}, err
+	}
+	return profileRequests{extras: map[string]string{
 		"SUBYARD_EXTRAS_MOUNTS":       sortedSet(mounts),
 		"SUBYARD_EXTRAS_CAPABILITIES": sortedSet(capabilities),
 		"SUBYARD_EXTRAS_DEVICES":      sortedSet(devices),
 		"SUBYARD_EXTRAS_HOST_MEMORY":  hostMemory,
-	}, nil
+	}, diagnostics: diagnostics}, nil
 }
 
 func safeDirectoryMode(value string) bool {

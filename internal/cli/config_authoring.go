@@ -30,6 +30,19 @@ type configAuthoringRequest struct {
 	sourceGuard   func() error
 }
 
+// configAuthoringDefinition validates the setting for its scope. Operator
+// scopes may only remove a profile-only setting, which the loader ignores,
+// never assign it.
+func configAuthoringDefinition(catalog config.Catalog, action string, scope config.SettingScope, name string, syncable bool) (config.SettingDefinition, error) {
+	if !config.IsProfileOnlySetting(name) || scope == config.ScopeShipped {
+		return catalog.ValidateSettingName(scope, name, syncable)
+	}
+	if action != "unset" {
+		return config.SettingDefinition{}, fmt.Errorf("%s is declared only by environment profiles; select the profile instead", name)
+	}
+	return catalog.ValidateSettingName(config.ScopeShipped, name, syncable)
+}
+
 func (cli *CLI) runConfigAuthoring(
 	ctx context.Context,
 	loaded config.Loaded,
@@ -57,9 +70,7 @@ func (cli *CLI) runConfigAuthoring(
 		return cli.runConfigGitAuthoring(ctx, loaded, requests, nil)
 	}
 	request := requests[0]
-	definition, err := loaded.Catalog.ValidateSettingName(
-		request.scope, request.name, action == "import" || action == "edit",
-	)
+	definition, err := configAuthoringDefinition(loaded.Catalog, action, request.scope, request.name, action == "import" || action == "edit")
 	if err != nil {
 		cli.errorf("config %s: %v", action, err)
 		return 2
@@ -200,7 +211,7 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 	var refusals []error
 	seen := make(map[string]string, len(requests))
 	for _, request := range requests {
-		definition, err := loaded.Catalog.ValidateSettingName(request.scope, request.name, false)
+		definition, err := configAuthoringDefinition(loaded.Catalog, request.action, request.scope, request.name, false)
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("%s: %w", request.name, err))
 			continue

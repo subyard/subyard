@@ -60,7 +60,7 @@ func validateProfileConstraints(configDir, yard string, values environment) erro
 	if values["ALLOWS_HOST_ACCESS"] == "false" {
 		for _, name := range []string{
 			"HOST_MOUNTS", "HOST_LINKS", "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD",
-			"HOST_OPENCODE_AGENTS_MD", "YARD_CAPABILITIES", "YARD_CAPS", "YARD_DEVICES", "YARD_MOUNTS",
+			"HOST_OPENCODE_AGENTS_MD", "YARD_CAPABILITIES",
 		} {
 			if strings.TrimSpace(values[name]) != "" {
 				return fmt.Errorf("selected yard role forbids non-empty %s", name)

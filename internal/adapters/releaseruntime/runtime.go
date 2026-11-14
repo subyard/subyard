@@ -43,6 +43,9 @@ type Config struct {
 	InstalledRuntimePresence  func(context.Context, string, config.Loaded, string) (ports.RuntimePresence, error)
 	ProfileRuntimeObservation func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error)
 	YardInstance              func(context.Context, config.Loaded) (ports.InstanceInfo, error)
+	// ConfigurationState supplies configuration state that update --check
+	// reports beside its inspection, such as ignored operator assignments.
+	ConfigurationState func() []config.ConfigurationState
 }
 
 type Prepared struct {
@@ -1577,7 +1580,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			Action: "update.check", Changed: false, Consequences: nil,
 			ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
 			run: func(context.Context) error {
-				return runtime.writeInspection(parsed, inspection)
+				return runtime.writeInspection(parsed, struct {
+					releasetransition.Inspection
+					Configuration []config.ConfigurationState `json:"configuration,omitempty"`
+				}{inspection, runtime.configurationState()})
 			},
 		}, nil
 	}
@@ -1763,13 +1769,21 @@ func (runtime *Runtime) writeInspection(parsed options, value any) error {
 	return encoder.Encode(value)
 }
 
+func (runtime *Runtime) configurationState() []config.ConfigurationState {
+	if runtime.config.ConfigurationState == nil {
+		return nil
+	}
+	return runtime.config.ConfigurationState()
+}
+
 func (runtime *Runtime) preparePublicInspectionOutcome(parsed options, outcome releasetransition.Outcome) Prepared {
 	return Prepared{
 		Action: "update.check",
 		run: func(context.Context) error {
 			return runtime.writeInspection(parsed, struct {
-				Outcome releasetransition.Outcome `json:"outcome"`
-			}{Outcome: outcome})
+				Outcome       releasetransition.Outcome   `json:"outcome"`
+				Configuration []config.ConfigurationState `json:"configuration,omitempty"`
+			}{Outcome: outcome, Configuration: runtime.configurationState()})
 		},
 	}
 }

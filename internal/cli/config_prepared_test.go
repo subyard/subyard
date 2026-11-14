@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -741,5 +742,55 @@ func TestConfigProspectiveContextDefaultsCannotMaskPersistentPaths(t *testing.T)
 	content, err := os.ReadFile(path)
 	if err != nil || string(content) != before {
 		t.Fatal("invalid scoped configuration was written")
+	}
+}
+
+// Ignored profile-only assignments refuse neither config apply of any target,
+// including the additional targets of --all-local, nor RPC authoring. RPC
+// config unset removes one through ordinary exact authoring.
+func TestConfigApplyAndRPCAuthoringIgnoreProfileOnlyAssignments(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	other := filepath.Join(configHome, "yards", "other", "config.env")
+	writeConfigCommandFile(t, other, "YARD_DEVICES=fuse\n")
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	program := configExactProgram(t, root, environment, nil, &recordingConfigApplier{})
+	targets, err := program.localConfigTargets(loaded, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) < 2 || !slices.ContainsFunc(targets, func(target configTarget) bool { return len(target.Loaded.IgnoredAssignments()) == 1 }) {
+		t.Fatalf("--all-local fixture lacks the target with an ignored assignment: %d", len(targets))
+	}
+	if _, err := program.prepareConfigApply(context.Background(), targets, nil); err != nil {
+		t.Fatalf("--all-local apply refused an ignored assignment: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	program, err = New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, host, "YARD_CAPS=nesting\n")
+	execute := func(id, call string) {
+		t.Helper()
+		handler := &rpcHandler{cli: program, loaded: loadConfigCommandContext(t, root, environment, "default")}
+		defer handler.closePlans()
+		value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: id, Params: json.RawMessage(call)}, nil)
+		if err != nil {
+			t.Fatalf("RPC plan %s refused: %v", id, err)
+		}
+		params, _ := json.Marshal(map[string]any{"confirmed": true, "digest": value.(exactOperationPlan).Digest})
+		if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: id, Params: params}, nil); err != nil {
+			t.Fatalf("RPC execute %s refused: %v", id, err)
+		}
+	}
+	execute("ignored-set", `{"command":"config","arguments":["set","SSH_PORT","2390","--scope","host"],"exact":true}`)
+	if after, err := os.ReadFile(host); err != nil || string(after) != "YARD_CAPS=nesting\nSSH_PORT='2390'\n" {
+		t.Fatalf("RPC config set of another key: %q %v", after, err)
+	}
+	execute("ignored-unset", `{"command":"config","arguments":["unset","YARD_CAPS","--scope","host"],"exact":true}`)
+	if after, err := os.ReadFile(host); err != nil || string(after) != "SSH_PORT='2390'\n" {
+		t.Fatalf("RPC config unset left %q: %v", after, err)
 	}
 }

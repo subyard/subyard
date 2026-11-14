@@ -190,7 +190,6 @@ while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -q .; do ssh_port=$((ss
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 ENVIRONMENT_PROFILES=android
 CODING_TOOL_INTEGRATIONS=
-YARD_DEVICES="kvm"
 FORWARD_SSH_AGENT=0
 SSH_PORT=$ssh_port
 EOF

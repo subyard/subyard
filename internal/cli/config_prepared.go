@@ -48,7 +48,7 @@ func configExactInvocation(loaded config.Loaded, arguments []string) bool {
 			return false
 		}
 		for _, request := range requests {
-			definition, err := loaded.Catalog.ValidateSettingName(request.scope, request.name, false)
+			definition, err := configAuthoringDefinition(loaded.Catalog, arguments[0], request.scope, request.name, false)
 			if err != nil || definition.Kind != config.SettingScalar || definition.Sensitive {
 				return false
 			}
@@ -111,7 +111,7 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 
 func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context, action string, request configAuthoringRequest, protected ...bool) error {
 	cli, loaded := prepared.CLI, prepared.Loaded
-	definition, err := loaded.Catalog.ValidateSettingName(request.scope, request.name, false)
+	definition, err := configAuthoringDefinition(loaded.Catalog, action, request.scope, request.name, false)
 	if err != nil || definition.Kind != config.SettingScalar || (definition.Sensitive && (len(protected) == 0 || !protected[0])) {
 		return fmt.Errorf("%w: only non-sensitive scalar settings support exact authoring", errConfigUsage)
 	}
