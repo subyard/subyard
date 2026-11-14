@@ -294,6 +294,8 @@ export MOCK_INCUS_ROUTE_COUNT="$tmp/route-count"
 ) || exit 1
 # A route that never appears fails closed at the deadline, naming the observation.
 (
+  # Unset SECONDS stops following wall time, so only the mocked sleep moves the clock.
+  unset SECONDS; SECONDS=0
   sleep() { SECONDS=$((SECONDS + 1)); }
   rm -f "$MOCK_INCUS_ROUTE_COUNT"
   if MOCK_INCUS_ROUTE_AFTER=1000 SUBYARD_VM_IPV4_TIMEOUT=5 incus_instance_primary_ipv4 test-project test-yard 2> "$tmp/ipv4.err"; then
@@ -325,6 +327,8 @@ incus_wait_instance_agent test-project test-yard || fail "instance agent did not
 
 # Simulate a healthy agent arriving after the container deadline, without waiting minutes.
 (
+  # Unset SECONDS stops following wall time, so only the mocked sleep moves the clock.
+  unset SECONDS; SECONDS=0
   sleep() { SECONDS=$((SECONDS + 130)); }
   unset SUBYARD_INCUS_AGENT_WAIT_TIMEOUT
   for kind in vm container; do
@@ -352,6 +356,8 @@ incus_wait_instance_agent test-project test-yard || fail "instance agent did not
     shift 2
     "$@"
   }
+  # Unset SECONDS stops following wall time, so only the mocked sleep moves the clock.
+  unset SECONDS; SECONDS=0
   sleep() { SECONDS=$((SECONDS + arrival)); }
   unset SUBYARD_INCUS_AGENT_WAIT_TIMEOUT
   for arrival in 301 599 600; do
