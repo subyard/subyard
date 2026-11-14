@@ -34,7 +34,13 @@ owner() {
   sg incus-admin -c "exec $command"
 }
 yard() { owner "$launcher" -Y "$name" "$@"; }
-attached() { incus config device list "$instance" --project "$project" | grep -Fxq "$device"; }
+# Presence is decided only from a device list that was read; a failed read stops the lane.
+attached() {
+  local devices
+  devices="$(incus config device list "$instance" --project "$project")" \
+    || die "cannot read the device list of $instance"
+  grep -Fxq "$device" <<<"$devices"
+}
 cleanup() {
   local original=$? cleanup_exit=0
   trap - EXIT
@@ -130,11 +136,9 @@ yard config show >"$STATE/config-show.log" 2>&1 || die 'config show failed'
 grep -Fxq "$disclosure" "$STATE/config-show.log" || die 'config show did not disclose the ignored assignment'
 yard config show YARD_DEVICES >"$STATE/config-show-setting.log" 2>&1 || die 'config show YARD_DEVICES failed'
 grep -Fxq "$disclosure" "$STATE/config-show-setting.log" || die 'config show YARD_DEVICES did not disclose it'
-# The release outcome of a same-version check is not this lane's contract; its report must
-# still carry the configuration state.
 owner env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
   "$launcher" update --check --json --version "$CANDIDATE_VERSION" >"$STATE/update-check.json" 2>"$STATE/update-check.log" \
-  || printf 'update --check exit=%s (outcome not asserted)\n' "$?"
+  || die 'update --check failed'
 # A host assignment is reported once across local yards; any yard's unset removes it.
 jq -e --arg path "$host_config" '[.configuration[]? | select(.state == "ignored" and .setting == "YARD_DEVICES"
   and .scope == "host" and .path == $path and .line == 1
