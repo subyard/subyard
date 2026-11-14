@@ -1109,7 +1109,11 @@ func (transition *V2Transition) Converge(
 				return Outcome{}, err
 			}
 			if len(observation.blockers) != 0 {
-				return transition.inspectionOutcome(observation), nil
+				// Inspection outcomes repeat their first blocker; this terminal
+				// result names every pending finding within the public bound.
+				outcome := transition.inspectionOutcome(observation)
+				outcome.Message = pendingConfigurationMessage(observation.blockers)
+				return outcome, nil
 			}
 		}
 	}
@@ -3454,7 +3458,7 @@ func (transition *V2Transition) observeActivation(
 			observation.activationFixed = false
 			observation.blockers = append(
 				observation.blockers,
-				activationObservationBlocker(ctx, id, err),
+				activationObservationBlockers(ctx, id, err)...,
 			)
 			continue
 		}
@@ -3866,6 +3870,36 @@ func pendingConfiguration(err error) bool {
 	return pendingConfiguration(errors.Unwrap(err))
 }
 
+// pendingConfigurationMessage names every finding when all blockers are pending
+// configuration, within the public diagnostic bound. Any other blocker set
+// reports its first blocker.
+func pendingConfigurationMessage(blockers []Blocker) string {
+	for _, blocker := range blockers {
+		if !strings.HasSuffix(blocker.Resource, ".pending-configuration") {
+			return blockers[0].Message
+		}
+	}
+	message := ""
+	for index, blocker := range blockers {
+		candidate := blocker.Message
+		if message != "" {
+			candidate = message + "; " + blocker.Message
+		}
+		suffix := ""
+		if remaining := len(blockers) - index - 1; remaining > 0 {
+			suffix = fmt.Sprintf("; and %d more pending; full details: yard migrate --check", remaining)
+		}
+		if len(candidate)+len(suffix) > maxDiagnosticText {
+			if message == "" {
+				return blocker.Message
+			}
+			return message + fmt.Sprintf("; and %d more pending; full details: yard migrate --check", len(blockers)-index)
+		}
+		message = candidate
+	}
+	return message
+}
+
 func nativeTargetRefusalsOnly(err error) bool {
 	switch typed := err.(type) {
 	case nil:
@@ -3882,6 +3916,21 @@ func nativeTargetRefusalsOnly(err error) bool {
 		return len(causes) != 0
 	}
 	return nativeTargetRefusalsOnly(errors.Unwrap(err))
+}
+
+// activationObservationBlockers keeps every pending configuration finding of an
+// owner as its own blocker, so each finding's next step stays within the public
+// diagnostic bound regardless of how many yards it concerns.
+func activationObservationBlockers(ctx context.Context, id string, err error) []Blocker {
+	if !pendingConfiguration(err) {
+		return []Blocker{activationObservationBlocker(ctx, id, err)}
+	}
+	causes := refusalCauses(err)
+	blockers := make([]Blocker, 0, len(causes))
+	for _, cause := range causes {
+		blockers = append(blockers, activationObservationBlocker(ctx, id, cause))
+	}
+	return blockers
 }
 
 func activationObservationBlocker(ctx context.Context, id string, err error) Blocker {

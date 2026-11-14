@@ -275,6 +275,11 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 			return stop(reconciler.failure(target.Name, "apply", reconcileruntime.PendingProfileRuntimeError(target.Name, reconciler.id, state)))
 		}
 		if state.State != "stale" {
+			if state.State == ports.RuntimeStateCurrent || state.State == ports.RuntimeStateAbsent {
+				if err := reconciler.retirePending(target); err != nil {
+					return stop(reconciler.failure(target.Name, "apply", err))
+				}
+			}
 			// Absent and deferred yards have no running guest whose selection could be recorded.
 			if state.State == ports.RuntimeStateCurrent {
 				if err := reconciler.recordAppliedProfile(ctx, platform, target); err != nil {
@@ -291,6 +296,11 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		if pending != nil {
 			pendingYards = append(pendingYards, *pending)
 			continue
+		}
+		// A record that no longer matches describes an earlier state; this apply
+		// replaces it with its own result.
+		if err := reconciler.retirePending(target); err != nil {
+			return stop(reconciler.failure(target.Name, "apply", err))
 		}
 		if err := apply(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
 			var yardFailure *reconcileruntime.ProfileRuntimeYardFailure
@@ -368,7 +378,8 @@ func (reconciler *profileRuntimeActivationReconciler) pendingFacts(target config
 		SchemaVersion: activationPendingSchema, Yard: yard, Project: target.Loaded.Context.IncusProject,
 		Instance: target.Loaded.Context.YardInstanceName, Owner: reconciler.id, Actual: state.Actual, Desired: state.Desired,
 		Inputs: hex.EncodeToString(digest[:]),
-		// Both exits fit the release diagnostic bound for two yards.
+		// Each yard's finding is its own readiness blocker, so this bounded
+		// message and its init step never depend on the number of yards.
 		Message: fmt.Sprintf("yard %[1]s: profile %[2]s runtime failed (diagnose: yard -Y %[1]s profile status %[2]s); "+
 			"release ready, profile not applied; fix it and run yard -Y %[1]s init, or run yard -Y %[1]s profile disable %[2]s then init", yard, definition.Name),
 	}, nil
@@ -408,6 +419,15 @@ func (reconciler *profileRuntimeActivationReconciler) recordPending(target confi
 		return nil, err
 	}
 	return &runtimePendingConfiguration{record}, nil
+}
+
+// retirePending removes this owner's record for a yard whose runtime converged
+// or is about to be applied again.
+func (reconciler *profileRuntimeActivationReconciler) retirePending(target configTarget) error {
+	if _, ok := reconciler.declaredYardScope(); !ok {
+		return nil
+	}
+	return removeActivationPendingRecord(reconciler.request.ConfigHome, target.Name, reconciler.id)
 }
 
 // declaredYardScope is the profile whose runtime this owner applies when it

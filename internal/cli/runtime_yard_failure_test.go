@@ -14,6 +14,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/shellquote"
@@ -175,12 +176,9 @@ func (scenario yardFailureScenario) journal(t *testing.T) releasetransition.Jour
 
 func requirePendingRuntimeOutcome(t *testing.T, outcome releasetransition.Outcome, yards ...string) {
 	t.Helper()
-	retries := make([]string, len(yards))
-	for index, yard := range yards {
-		retries[index] = shellquote.Command([]string{"yard", "-Y", yard, "init"})
-	}
+	// Each yard is its own blocker; the outcome names all and continues with the first.
 	if outcome.Status != releasetransition.StatusOperatorActionRequired || outcome.Code != releasetransition.CodeDependencyUnavailable ||
-		outcome.Retry != strings.Join(retries, ", then ") {
+		outcome.Retry != shellquote.Command([]string{"yard", "-Y", yards[0], "init"}) {
 		t.Fatalf("pending outcome: %#v", outcome)
 	}
 	for _, yard := range yards {
@@ -236,6 +234,45 @@ func TestDeclaredRuntimeYardFailureCompletesActiveReleaseRepair(t *testing.T) {
 	if applies := scenario.runtime.applies(t); !slices.Equal(applies, []string{"default", "default"}) {
 		t.Fatalf("hook applies: %v", applies)
 	}
+	// The converged init retires the record (as yard init does after its
+	// stages). The same partial state later is ordinary drift, not the old
+	// pending item, and repair applies it again.
+	if err := removeYardActivationPendingRecords(scenario.request.ConfigHome, "default"); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("d", 64)), 0o600)
+	drift := scenario.invoke(t, releasetransition.ProcessInspect, nil)
+	if drift.Inspection == nil || len(drift.Inspection.Blockers) != 0 || drift.Inspection.Outcome.Status == releasetransition.StatusReady {
+		payload, _ := json.Marshal(drift)
+		t.Fatalf("resurrected pending item: %s", payload)
+	}
+	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("repair of ordinary drift: %#v", outcome)
+	}
+	if applies := scenario.runtime.applies(t); !slices.Equal(applies, []string{"default", "default", "default"}) {
+		t.Fatalf("repair skipped the apply: %v", applies)
+	}
+}
+
+// A record that no longer matches is retired when the repair applies again,
+// and a converged owner retires its record.
+func TestRuntimeOwnerRetiresStalePendingRecords(t *testing.T) {
+	scenario := newYardFailureScenario(t, true, true, "default")
+	scenario.runtime.failing(t, "default", true)
+	requirePendingRuntimeOutcome(t, scenario.converge(t), "default")
+	path, err := activationPendingRecordPath(scenario.request.ConfigHome, "default", "sample-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The native state changes after the failure: the record no longer matches.
+	testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("e", 64)), 0o600)
+	scenario.runtime.failing(t, "default", false)
+	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("repair after changed state: %#v", outcome)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("stale record was kept: %v", err)
+	}
 }
 
 // Undeclared owners and untyped failures keep blocking recovery.
@@ -268,6 +305,17 @@ func TestRuntimeYardFailuresAreCollectedForEveryYard(t *testing.T) {
 	requirePendingRuntimeOutcome(t, scenario.converge(t), "default", "named")
 	if applies := scenario.runtime.applies(t); !slices.Equal(applies, []string{"default", "named"}) {
 		t.Fatalf("hook applies: %v", applies)
+	}
+	readiness := scenario.invoke(t, releasetransition.ProcessInspect, nil)
+	if readiness.Inspection == nil || len(readiness.Inspection.Blockers) != 2 {
+		payload, _ := json.Marshal(readiness)
+		t.Fatalf("readiness: %s", payload)
+	}
+	for index, yard := range []string{"default", "named"} {
+		blocker := readiness.Inspection.Blockers[index]
+		if blocker.Resource != "activation.sample-runtime.pending-configuration" || blocker.Retry != shellquote.Command([]string{"yard", "-Y", yard, "init"}) {
+			t.Fatalf("blocker %d: %#v", index, blocker)
+		}
 	}
 }
 
@@ -385,6 +433,7 @@ func TestPendingRuntimeConfigurationReadersAndAdmission(t *testing.T) {
 		{arguments: []string{"-Y", "default", "config", "status"}, output: true},
 		{arguments: []string{"-Y", "default", "status"}, output: true},
 		{arguments: []string{"-Y", "default", "stop"}},
+		{arguments: []string{"-Y", "default", "teardown"}},
 		{arguments: []string{"-Y", "default", "init", "--yes"}},
 		{arguments: []string{"-Y", "default", "init", "--reset", "--yes"}, gated: true},
 	} {
@@ -422,5 +471,68 @@ func TestReduceSelectionRefusesUnfinishedActiveReleaseRepair(t *testing.T) {
 	}
 	if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
 		t.Fatal("refused reduction wrote the source")
+	}
+}
+
+// Pending items of different owners and yards never refuse each other's init:
+// a yard's init is admitted when one pending blocker names it.
+func TestPendingInitGateAdmitsEachNamedYardAcrossOwners(t *testing.T) {
+	blocker := func(resource, yard string) string {
+		retry := strings.ReplaceAll(shellquote.Command([]string{"yard", "-Y", yard, "init"}), "'", `'\''`)
+		return fmt.Sprintf(`,{"code":"dependency-unavailable","resource":%q,"message":"yard %s pending","retry":"%s"}`, resource, yard, retry)
+	}
+	for _, test := range []struct {
+		name, extra     string
+		admitted, other []string
+	}{
+		{name: "two runtime owners", extra: blocker("activation.other-runtime.pending-configuration", "named"), admitted: []string{"default", "named"}, other: []string{"third"}},
+		// A materialized-config item whose next step is not init still leaves
+		// the runtime item's init admitted.
+		{name: "materialized and runtime", extra: `,{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"yard named: move the unowned file aside","retry":"incus exec yard-named -- namei -l /home/dev/.codex"}`,
+			admitted: []string{"default"}, other: []string{"named"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration", test.extra)
+			for _, yard := range test.admitted {
+				if !fixture.cli.pendingInitRepairGate(context.Background(), yard, fixture.outcome) {
+					t.Fatalf("init of %s refused", yard)
+				}
+			}
+			for _, yard := range test.other {
+				if fixture.cli.pendingInitRepairGate(context.Background(), yard, fixture.outcome) {
+					t.Fatalf("init of %s admitted without a pending item", yard)
+				}
+			}
+		})
+	}
+	// Any blocker that is not pending configuration keeps every init gated.
+	fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration",
+		`,{"code":"dependency-unavailable","resource":"activation.other-runtime","message":"untyped","retry":"run yard update --check"}`)
+	if fixture.cli.pendingInitRepairGate(context.Background(), "default", fixture.outcome) {
+		t.Fatal("a release blocker admitted init")
+	}
+}
+
+// Teardown retires the removed yard's records and only that yard's.
+func TestTeardownRetiresRemovedYardPendingRecords(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, yard := range []string{"named", "default"} {
+		if err := writeActivationPendingRecord(home, activationPendingRecord{Yard: yard, Project: "p", Instance: "i", Owner: "sample-runtime",
+			Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "x"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded := config.Loaded{Context: domain.Context{YardName: "named", AccessKind: domain.AccessLocal, Paths: domain.RuntimePaths{ConfigHome: home}}}
+	if err := retireTornDownActivationPending(loaded); err != nil {
+		t.Fatal(err)
+	}
+	for yard, kept := range map[string]bool{"named": false, "default": true} {
+		path, _ := activationPendingRecordPath(home, yard, "sample-runtime")
+		if _, err := os.Stat(path); (err == nil) != kept {
+			t.Fatalf("yard %s record kept=%v: %v", yard, !kept, err)
+		}
 	}
 }

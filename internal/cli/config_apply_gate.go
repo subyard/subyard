@@ -402,8 +402,17 @@ func (cli *CLI) prepareActivationRepair(
 						return nil, nil
 					}
 				}
-				if _, selected := requested[target.Name]; selected {
+				_, selected := requested[target.Name]
+				if selected {
 					selectedRuntimes[target.Name+"/"+id] = contract
+				} else if pendingInit && contract.State == ports.RuntimeStateStale {
+					// Another yard's recorded failure waits for that yard's init.
+					owner := &profileRuntimeActivationReconciler{cli: &operation, request: releasetransition.ProcessRequest{ConfigHome: options.ConfigHome}, id: id}
+					if pending, err := owner.recordedPending(target, contract); err != nil {
+						return nil, nil
+					} else if pending != nil {
+						continue
+					}
 				}
 				changed = changed || contract.State == ports.RuntimeStateStale
 			}
@@ -762,7 +771,7 @@ func (cli *CLI) checkConfigApplyRepairHistory(permit *configApplyRepairPermit) e
 	return nil
 }
 
-// A typed pending-configuration gate whose every blocker names plain init of
+// A typed pending-configuration gate with a blocker that names plain init of
 // this yard as its next step is repaired by that init. All other repair guards
 // still apply; the pending item counts as the selected yard's drift.
 func (cli *CLI) pendingInitRepairGate(ctx context.Context, yard string, outcome releasetransition.Outcome) bool {
@@ -771,14 +780,11 @@ func (cli *CLI) pendingInitRepairGate(ctx context.Context, yard string, outcome 
 		!cli.pendingIntegrationConfigurationGate(current, inspection) {
 		return false
 	}
+	// Every blocker is typed pending configuration (checked above); this yard's
+	// init is admitted when one of them names it. Pending items of other yards
+	// or owners wait for their own steps and never refuse this init.
 	retry := shellquote.Command([]string{"yard", "-Y", yard, "init"})
-	for _, blocker := range inspection.Blockers {
-		// One owner's findings for several yards name each init in order.
-		if !slices.Contains(strings.Split(blocker.Retry, ", then "), retry) {
-			return false
-		}
-	}
-	return true
+	return slices.ContainsFunc(inspection.Blockers, func(blocker releasetransition.Blocker) bool { return blocker.Retry == retry })
 }
 
 func configApplyRepairGateShape(outcome releasetransition.Outcome) bool {

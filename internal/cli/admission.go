@@ -389,6 +389,10 @@ func (cli *CLI) admitTeardownGate(
 	if outcome == nil {
 		return nil, 0, false
 	}
+	// As over RPC, pending configuration leaves teardown to its own guards.
+	if ordinaryCommandDuringPendingConfiguration("@teardown") && cli.pendingIntegrationConfigurationGate(outcome, gateInspection) {
+		return nil, 0, false
+	}
 	permit, err := cli.prepareTeardownRepair(ctx, loaded, arguments, *outcome)
 	if err != nil {
 		cli.errorf("teardown release admission: %v", err)

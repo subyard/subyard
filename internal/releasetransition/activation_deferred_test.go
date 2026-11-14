@@ -3,8 +3,12 @@ package releasetransition
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // deferringActivation models a yard-scoped owner with a durable pending record.
@@ -158,5 +162,54 @@ func TestResumedRepairDefersRecordedPendingConfiguration(t *testing.T) {
 	}
 	if journal := readDeferredJournal(t, transition); journal.Checkpoint != JournalComplete {
 		t.Fatalf("resumed journal: %s", journal.Checkpoint)
+	}
+}
+
+type yardPendingFinding string
+
+func (yard yardPendingFinding) Error() string                   { return "yard " + string(yard) + " pending" }
+func (yardPendingFinding) ActivationPendingConfiguration() bool { return true }
+func (yard yardPendingFinding) ActivationDiagnostic() (string, string) {
+	return "yard " + string(yard) + ": profile runtime failed; release ready, profile not applied", "yard -Y " + string(yard) + " init"
+}
+
+// Many yards with long names: every yard keeps its own blocker and init step,
+// and the outcome stays within the public bound while naming the rest.
+func TestManyPendingYardsKeepTheirOwnInitSteps(t *testing.T) {
+	transition, _, _ := v2TransitionFixture(t, nil)
+	var findings []error
+	for index := range 30 {
+		findings = append(findings, yardPendingFinding(fmt.Sprintf("a-rather-long-descriptive-yard-name-%02d", index)))
+	}
+	reconciled := []string{}
+	transition.options.Reconcilers = []V2ActivationReconciler{
+		&deferringActivation{id: "hook-runtime", store: transition.store, failure: domain.CollectRefusals(findings...), reconciled: &reconciled},
+	}
+	ctx := context.Background()
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(ctx, goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := transition.Converge(ctx, Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+	if err != nil || outcome.Status != StatusOperatorActionRequired || outcome.Retry != "yard -Y a-rather-long-descriptive-yard-name-00 init" ||
+		len(outcome.Message) > maxDiagnosticText || !strings.Contains(outcome.Message, "more pending; full details: yard migrate --check") {
+		t.Fatalf("converge: %#v %v", outcome, err)
+	}
+	readiness, err := transition.Inspect(ctx, goal)
+	if err != nil || len(readiness.Blockers) != len(findings) {
+		t.Fatalf("readiness: %#v %v", readiness, err)
+	}
+	for index, blocker := range readiness.Blockers {
+		yard := fmt.Sprintf("a-rather-long-descriptive-yard-name-%02d", index)
+		if blocker.Resource != "activation.hook-runtime.pending-configuration" || blocker.Retry != "yard -Y "+yard+" init" {
+			t.Fatalf("blocker %d: %#v", index, blocker)
+		}
+	}
+	if readiness.Outcome.Retry != readiness.Blockers[0].Retry || readiness.Outcome.Message != readiness.Blockers[0].Message {
+		t.Fatalf("readiness outcome: %#v", readiness.Outcome)
+	}
+	if err := ValidateProcessInspection(goal, readiness); err != nil {
+		t.Fatal(err)
 	}
 }

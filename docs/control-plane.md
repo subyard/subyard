@@ -1218,6 +1218,8 @@ parser and reasons of the lifecycle diagnostic protocol; an `inspect` record, a 
 malformed record, a record from an undeclared owner, cancellation, a timeout, output overflow and
 a mismatch that the core finds when it verifies the result after a successful exit stay blocking.
 So do plan-stale refusals, core runtimes, host and installation owners and any other failure.
+A handler reports `yard-local` only for its own guest-side steps while the guest still answers;
+host staging, file pushes and safety guards in the same apply stay blocking.
 
 Activation continues past typed failures to the remaining yards of the same owner and collects
 all of them in stable order. Before reporting a failure, the owner observes the state it left and
@@ -1228,14 +1230,19 @@ for the repair of the active release and for the activation of an ordinary updat
 journal is unfinished the owner keeps its ordinary observation, so an interrupted repair resumes
 with its authorized scope.
 
-Completed readiness, including a fresh process, reports a matching record as pending configuration:
+Completed readiness, including a fresh process, reports a matching record as pending configuration,
+one blocker per yard and owner with that yard's own init step:
 `yard migrate` and `yard update` exit non-zero, and `yard migrate --check`, `config status` and
 `yard status` show the same item. It names the yard, the profile and its diagnostic command
 `yard -Y NAME profile status ID`, states that the release is ready and the profile is not applied,
 and gives both exits: fix the cause and run `yard -Y NAME init`, which repeats the same apply from
 the partial state, or run `yard -Y NAME profile disable ID` and then init. Admission keeps that init
-and unrelated commands open. Any other drift keeps ordinary repair. Any change of the bound facts,
-including a converged init, makes the record stale, so it never hides a later failure.
+and unrelated commands open. Any other drift keeps ordinary repair. A successful init of the yard,
+a converged repair of the owner, a new apply attempt for that yard and teardown of the yard
+remove the record; any change of the bound facts makes it stale, so it never hides a later failure.
+The `yard migrate` result names every pending finding within the diagnostic bound, and
+`yard migrate --check` lists each one. Admission keeps each named yard's init open whatever other
+yards or owners are pending, and keeps teardown open as over RPC.
 
 ### Interrupted release recovery
 
