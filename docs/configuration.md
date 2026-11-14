@@ -331,10 +331,14 @@ document, even if the operator restored Subyard's values in between. An interrup
 receipt decides again from the document: restored values are then retired normally. An
 interrupted ordinary retirement still accepts only the exact recorded before and after fields;
 if its document is deleted meanwhile, it completes without a notice when nothing owned was left
-in it, and otherwise refuses. A reason recorded for other fields, such as one an older runtime
-left behind after a rollback, is ignored. While an installed configuration still selects a
-released document, for example after an init interrupted before it stored its applied settings,
-`yard migrate` refuses instead of overwriting it and names `yard -Y NAME init`. A symlink or invalid document at the destination, ownership evidence recorded for a
+in it, and otherwise refuses. A reason left behind by an older runtime after a rollback is
+ignored when its recorded fields differ from the current retirement. It still counts when both
+recorded no remaining owned field, for example a missing-document release followed there by an
+ordinary retirement of the same document; the only effect is a release notice for that
+retirement. While an installed configuration still selects a released document, for example
+after an init interrupted before it stored its applied settings, `yard migrate` refuses and names
+`yard -Y NAME init`; the installed view never writes a released document, whether it is changed,
+invalid, missing or replaced by a link. A symlink or invalid document at the destination, ownership evidence recorded for a
 different destination path, and missing or unproven ownership evidence still block retirement.
 A disable after such a change or removal while release activation is stale stores only the
 selection. `yard migrate --check` then names `yard -Y NAME init`, and `yard migrate` refuses,

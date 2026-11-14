@@ -233,3 +233,23 @@ func TestInstalledViewRefusesReleasedDocument(t *testing.T) {
 		t.Fatalf("installed-view apply reached the released document: %v writes=%d", err, executor.writes)
 	}
 }
+
+// The installed view requests the guest's refusing apply mode; the desired view,
+// a deliberate enable, requests ordinary apply.
+func TestInstalledViewAppliesWithRefusingMode(t *testing.T) {
+	executor := &retryableIntegrationExecutor{}
+	runtime := Runtime{Executor: executor, Yard: domain.Context{YardName: "example", IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}}
+	file := guestConfigFile{destination: "/home/dev/.sample/settings.json", ownedFormat: "json"}
+	for _, scenario := range []struct {
+		runtime Runtime
+		mode    string
+	}{{runtime, configmaterial.ModeApply}, {runtime.WithInstalledConfiguration(), configmaterial.ModeApplyInstalled}} {
+		executor.requests = nil
+		if err := scenario.runtime.applyGuestConfig(context.Background(), file, []byte(`{"managed":1}`)); err != nil {
+			t.Fatal(err)
+		}
+		if len(executor.requests) != 1 || executor.requests[0].Command[4] != scenario.mode {
+			t.Fatalf("apply mode: %v, want %s", executor.requests, scenario.mode)
+		}
+	}
+}

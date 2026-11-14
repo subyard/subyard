@@ -651,8 +651,13 @@ def main():
     if len(sys.argv) != 8:
         fail("invalid request")
     mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest = sys.argv[1:]
-    if mode not in ("observe", "apply", "assess-adopt", "assess-retire", "retire"):
+    if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire"):
         fail("invalid request")
+    # An installed-view repair applies like apply, but never takes back ownership
+    # that a retirement released; only a deliberate enable does.
+    installed_apply = mode == "apply-installed"
+    if installed_apply:
+        mode = "apply"
     read_only = mode in ("observe", "assess-adopt", "assess-retire")
     try:
         uid = int(uid_text)
@@ -739,6 +744,17 @@ def main():
             with open(baseline_path, "rb") as source:
                 baseline = validate_baseline(source.read(), developer, destination)
         evidence = read_ownership(receipt_path, baseline, developer, destination)
+        # Decide a released document before reading it: whatever it now holds
+        # (invalid, missing or replaced), it is the operator's.
+        released = (evidence is not None and evidence.get("phase") == "retired" and
+                    read_release_marker(release_path, evidence))
+        if released and mode == "observe":
+            print(json.dumps({"converged": False, "release": released,
+                              "fingerprint": fingerprint({}, desired, evidence["projection_digest"], "released-" + released, [])},
+                             separators=(",", ":"), sort_keys=True))
+            return
+        if released and installed_apply:
+            raise MaterializationError("released ownership refused for the installed view")
         compatible = baseline is not None and baseline["schema"] == 1
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination, allow_invalid=mode in ("observe", "apply")) if parent_exists else ({}, None)
@@ -797,11 +813,6 @@ def main():
                                                  baseline["owned"])}
             if mode == "assess-adopt":
                 report["adoptable"] = adoptable
-            elif evidence is not None and evidence.get("phase") == "retired":
-                # Ownership was released; only a deliberate enable may take it again.
-                release = read_release_marker(release_path, evidence)
-                if release:
-                    report["release"] = release
             print(json.dumps(report, separators=(",", ":"), sort_keys=True))
             return
 
