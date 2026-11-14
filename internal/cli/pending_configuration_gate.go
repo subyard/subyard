@@ -46,8 +46,10 @@ func pendingInitYards(inspection *releasetransition.Inspection) (map[string]bool
 	}
 	yards := map[string]bool{}
 	for _, blocker := range inspection.Blockers {
-		yard, found := strings.CutPrefix(blocker.Retry, "'yard' '-Y' '")
-		if yard, found = strings.CutSuffix(yard, "' 'init'"); !found || !domain.SafeName(yard) ||
+		// The exact quoted-command comparison below also rejects a missing prefix.
+		yard, _ := strings.CutPrefix(blocker.Retry, "'yard' '-Y' '")
+		yard, found := strings.CutSuffix(yard, "' 'init'")
+		if !found || !domain.SafeName(yard) ||
 			shellquote.Command([]string{"yard", "-Y", yard, "init"}) != blocker.Retry {
 			return nil, false
 		}
