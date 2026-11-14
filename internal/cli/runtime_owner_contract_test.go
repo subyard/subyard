@@ -32,6 +32,8 @@ var runtimeOwnerVolatileEnvironment = []string{"PWD=", "SHLVL=", "_=", "OLDPWD="
 // other entry must match exactly.
 var runtimeOwnerAllowedDifferences = map[string]string{
 	"SUBYARD_OPERATION_ID": "each command has its own operation",
+	// The typed failure record opens with a fresh nonce per apply.
+	"SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE": "each apply has its own record nonce",
 	// Activation applies the installed view of an active release repair; init
 	// applies desired configuration.
 	"ENVIRONMENT_PROFILES": "installed versus desired selection",
