@@ -188,10 +188,6 @@ func scanQuote(line string, quote byte) byte {
 	return quote
 }
 
-func applyRecord(record string, values environment, observer func(name, value string)) error {
-	return applyRecordRetired(record, values, observer, discardPolicy{})
-}
-
 func applyRecordRetired(record string, values environment, observer func(name, value string), policy discardPolicy) error {
 	record = strings.TrimSpace(record)
 	if strings.HasPrefix(record, ":") {
