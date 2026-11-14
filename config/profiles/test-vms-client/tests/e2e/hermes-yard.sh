@@ -207,16 +207,16 @@ printf '  [ ok ] deselection and init retired the client, skill and links\n'
 REFUSED_YARD="vpn-$token"
 refused="$REFUSED_YARD"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$refused"
-{
-  grep -v '^ENVIRONMENT_PROFILES=' "$ROOT/config/profiles/amnezia/yard.env"
-  printf 'ENVIRONMENT_PROFILES="amnezia test-vms-client"\n'
-} > "$SUBYARD_CONFIG_HOME/yards/$refused/config.env"
+cp "$ROOT/config/profiles/amnezia/yard.env" "$SUBYARD_CONFIG_HOME/yards/$refused/config.env"
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$refused/config.env"
+# The supported enabling command reports every independent refusal of the selection.
 set +e
-refusal="$(yard_named "$refused" config show ENVIRONMENT_PROFILES 2>&1)"
+refusal="$(yard_named "$refused" provision test-vms-client --yes 2>&1)"
 refusal_rc=$?
 set -e
-[ "$refusal_rc" != 0 ] && grep -Fq 'profile "test-vms-client" requires host access' <<<"$refusal" \
+[ "$refusal_rc" != 0 ] \
+  && grep -Fq 'profile "test-vms-client" requires host access' <<<"$refusal" \
+  && grep -Fq 'selected yard role permits only environment profile "amnezia"' <<<"$refusal" \
   || die "a role without host access accepted the profile: $refusal"
 rm -rf -- "${SUBYARD_CONFIG_HOME:?}/yards/$refused"
 REFUSED_YARD=''
