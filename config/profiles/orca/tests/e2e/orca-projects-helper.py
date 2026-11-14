@@ -243,7 +243,7 @@ def stock_probe(arguments):
     try:
         sys.path.insert(0, arguments.registration)
         from reconcile import _records
-        from settings import codex_defaults
+        from settings import launch_defaults
 
         with tempfile.TemporaryDirectory(prefix="subyard-orca-stock-probe.") as directory:
             root = Path(directory)
@@ -306,7 +306,9 @@ def stock_probe(arguments):
                 finally:
                     os.close(log)
                 started = time.monotonic()
-                deadline = started + 20
+                # A fresh profile's first `orca serve` unpacks its server runtime before writing
+                # metadata; under lane load that exceeds 20 s, so use the registration budget.
+                deadline = started + 85
                 last = "no runtime metadata"
                 while time.monotonic() < deadline and server.poll() is None:
                     if metadata.is_file():
@@ -326,7 +328,7 @@ def stock_probe(arguments):
                 phase = "startup"
                 start()
                 phase = "registration and terminal snapshots"
-                codex_defaults(rpc, apply=True)
+                launch_defaults(rpc, apply=True)
                 project = root / "project"
                 project.mkdir(mode=0o700)
                 group = rpc.call("projectGroup.create", {
