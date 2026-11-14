@@ -1298,13 +1298,13 @@ guard counts the project low-level grant that its own VM start policy writes as 
 change. The earlier release stays active, yards and data stay intact, and every later update
 reports that the journal-selected release cannot provide a valid transition inspection. Since
 0.28.1 the registered-yard binding treats that exact grant on a VM yard project as product
-output; any other value stays bound. To leave the stopped update, re-run the
-[installer](getting-started.md) for 0.28.1 or later; it replaces the unfinished journal through
+output; any other value stays bound. To leave the stopped update, run the
+[installer](getting-started.md) for 0.28.1 or a later 0.28.x release; it replaces the unfinished journal through
 its own launcher whatever the active release is. An active launcher from 0.26.0 or later also
 accepts `yard update --version 0.28.1`. Releases after v0.28.x cannot replace that journal: below
 the anchor they refuse and name the v0.28.1 installer as the repair, and a launcher before 0.26.0
 never reaches that refusal because it asks only the journal-selected engine. Such an install
-re-runs the 0.28.1 installer first, then updates normally.
+runs the 0.28.1 installer first, then updates normally.
 
 0.28.0 and 0.28.1 stop the same way at such a yard whose project carries an explicit
 `restricted.virtual-machines.lowlevel=block`, which the start policy replaces with the grant.

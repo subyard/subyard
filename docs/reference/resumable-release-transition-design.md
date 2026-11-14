@@ -517,7 +517,7 @@ route. An incompatible target blocks before mutation.
 The frozen v0.28.0 released-caller matrix established the matching-epoch bridge, synthetic
 future-epoch advance and epoch-2 rollback refusal. Later candidates start direct admission at
 v0.28.0; current Go contracts retain checkpoint/projection and unfinished-owner reader coverage.
-The first boundary release additionally checks the published old-source → v0.28.0 → candidate
+The first boundary release additionally checks the published old-source → v0.28.1 hop → candidate
 chains on disposable VMs. A source-version boundary does not retire accepted history readers.
 
 The main registry retains its live migration definitions and the current epoch floor. Future V2 prefix

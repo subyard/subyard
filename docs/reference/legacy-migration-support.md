@@ -34,7 +34,7 @@ Any other unfinished transition while the installed release is below v0.28.0 ref
 `next: yard update && yard update --version 0.28.1 && yard update`, or `yard update && yard update`
 when it already targets v0.28.0 or newer: the installed release first finishes its own journal. If
 it cannot, for example when `yard update` reports that the journal-selected release cannot provide
-a valid transition inspection (a v0.28.0 update stopped at a restarted VM yard), re-run the v0.28.1
+a valid transition inspection (a v0.28.0 update stopped at a restarted VM yard), run the v0.28.1
 installer or use a later v0.28.x release that owns that recovery; do not uninstall.
 The anchor does not change `minimumEpochs`, persistent formats or retained history readers.
 
@@ -142,10 +142,13 @@ candidate acceptance does not repeat it.
 
 Move the boundary when the supported matrix's cost or age justifies retiring a source path.
 
-1. Publish the new anchor first and keep its installer/archive assets available permanently.
+1. Publish the new anchor first. Keep the complete published asset sets (installer, archives,
+   checksums, manifests and provenance) of the anchor, the hop and every release a documented
+   recovery route names available permanently: an install whose only supported path crosses a
+   missing release is stranded.
 2. Change `UpdateAnchorVersion` and mark its verified TSV row `anchor` (exactly one).
    The anchor also supplies the direct baseline; retain a `direct` row for the previous release
-   when distinct, and choose representative below-anchor `refusal` rows.
+   when it is neither the anchor nor the hop, and choose representative below-anchor `refusal` rows.
    Set `UpdateHopVersion` to the published fix release of the anchor series that completes the
    hop from older sources, and mark its own verified row `hop` (exactly one, at or above the anchor).
    Refusals print the hop; admission and rollback use the anchor.
@@ -161,7 +164,7 @@ Move the boundary when the supported matrix's cost or age justifies retiring a s
 The TSV/constant contract (`tests/release-acceptance.sh`: one anchor and one hop row, each equal to
 its constant, hop at or above the anchor) and the shared fixture readers `published_anchor` and
 `published_hop` keep both selections synchronized.
-Post-activation takeover of an anchor journal relies on the candidate still reconciling the
+Post-activation takeover of an anchor-series journal relies on the candidate still reconciling the
 anchor's activated state and on intact migration authority; removing that code makes takeover a
 refusal again. A defective hop is repaired by an anchor-series fix release, not a bridge release.
 
@@ -191,7 +194,7 @@ The historical released producers and their retained contracts are:
 | v0.18.6 | Historical completed/interrupted source-repair producer; original-owner recovery stays in the anchor branch |
 | v0.18.1 | Historical process V1/Ledger V2 and checkpoint-reader bridge producer; current anchor refusal |
 | v0.19.0 | Historical independent completed domain history producer; current anchor refusal |
-| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession through v0.25.1, whose registry matches, then the v0.28.0 anchor hop; later candidates refuse the replacement and unknown artifacts fail closed |
+| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession through v0.25.1, whose registry matches, then the v0.28.1 hop; later candidates refuse the replacement and unknown artifacts fail closed |
 
 The [historical reader](../../internal/migration/v1_import.go) binds the exact retained runtime
 pair, registry, journal and observed postconditions. It does not admit arbitrary historical

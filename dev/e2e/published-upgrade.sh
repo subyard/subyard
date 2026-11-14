@@ -15,6 +15,7 @@ IFS=$'\t' read -r ANCHOR_VERSION _ _ _ < <(published_anchor)
 # Below-anchor sources step through the hop, a fix release of the anchor series.
 IFS=$'\t' read -r HOP_VERSION _ HOP_SHA256 _ < <(published_hop)
 [ "$VERSION" != anchor ] || VERSION="$ANCHOR_VERSION"
+# The `hop` alias has no release catalog check; it remains for targeted and periodic runs.
 [ "$VERSION" != hop ] || VERSION="$HOP_VERSION"
 PUBLISHED_MODE=direct
 case "${2:-}" in refusal|chain) PUBLISHED_MODE="$2" ;; esac

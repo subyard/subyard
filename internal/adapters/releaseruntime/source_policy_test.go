@@ -243,7 +243,7 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 								!strings.Contains(err.Error(), "next: "+next+"\n") && !strings.HasSuffix(err.Error(), "next: "+next) {
 								t.Fatalf("lost single continuation %q: %v", next, err)
 							}
-							if unfinished && (!strings.Contains(err.Error(), "re-run the v0.28.1 installer") || !strings.Contains(err.Error(), "Do not uninstall.") || strings.Contains(err.Error(), "uninstall --full")) {
+							if unfinished && (!strings.Contains(err.Error(), "run the v0.28.1 installer") || !strings.Contains(err.Error(), "Do not uninstall.") || strings.Contains(err.Error(), "uninstall --full")) {
 								t.Fatalf("lost repair guidance: %v", err)
 							}
 						}

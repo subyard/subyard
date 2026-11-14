@@ -55,7 +55,7 @@ func unfinishedBelowAnchorError(journal releasetransition.JournalRecord) error {
 		journal.Goal.Direction == releasetransition.DirectionActivateTarget && target.GTE(anchor) {
 		next = "yard update && yard update"
 	}
-	return fmt.Errorf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: %s\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), re-run the v%s installer or use a later v%d.%d.x fix release. Do not uninstall.", next, UpdateHopVersion, hop.Major, hop.Minor)
+	return fmt.Errorf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: %s\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v%s installer or use a later v%d.%d.x fix release. Do not uninstall.", next, UpdateHopVersion, hop.Major, hop.Minor)
 }
 
 // VerifyLegacyUninstallSource recognizes the sealed historical project-creator

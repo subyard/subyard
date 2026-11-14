@@ -285,13 +285,13 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			candidateVersion := "0.29.0-test"
 			rollback := state == "rollback"
 			oldVersion := "0.27.0"
-			old, anchor, candidate := releasetransition.ReleaseID(oldVersion+"-aaaaaaaaaaaa"), releasetransition.ReleaseID(hopVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
+			old, hop, candidate := releasetransition.ReleaseID(oldVersion+"-aaaaaaaaaaaa"), releasetransition.ReleaseID(hopVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
 			oldDigest := writeSealedRollbackTarget(t, runtimeRoot, string(old), oldVersion, registry)
-			anchorDigest := writeSealedRollbackTarget(t, runtimeRoot, string(anchor), hopVersion, registry)
+			hopDigest := writeSealedRollbackTarget(t, runtimeRoot, string(hop), hopVersion, registry)
 			candidateDigest := writeSealedRollbackTarget(t, runtimeRoot, string(candidate), candidateVersion, registry)
-			from, target, direction, artifact := old, anchor, releasetransition.DirectionActivateTarget, anchorDigest
+			from, target, direction, artifact := old, hop, releasetransition.DirectionActivateTarget, hopDigest
 			if rollback {
-				from, target, direction, artifact = anchor, old, releasetransition.DirectionActivatePrevious, oldDigest
+				from, target, direction, artifact = hop, old, releasetransition.DirectionActivatePrevious, oldDigest
 			}
 			if err := os.Symlink("releases/"+string(from), filepath.Join(runtimeRoot, "current")); err != nil {
 				t.Fatal(err)
@@ -388,7 +388,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 					if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --version "+hopVersion+" && yard update") || strings.Contains(refusal.Error(), "unfinished") {
 						t.Fatalf("completed owner repeated the same step: %v", refusal)
 					}
-					owner.Direction, owner.Target, owner.ArtifactDigest = releasetransition.DirectionActivateTarget, anchor, anchorDigest
+					owner.Direction, owner.Target, owner.ArtifactDigest = releasetransition.DirectionActivateTarget, hop, hopDigest
 					owner.Mode, owner.Execution, owner.Replacement = releasetransition.ProcessInspect, nil, nil
 					Version = hopVersion
 					plan = run(owner)
