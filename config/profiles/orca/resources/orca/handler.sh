@@ -15,6 +15,26 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib-service.sh
 . "$SCRIPT_DIR/lib-service.sh"
 
+# Within a bracketed step of a runtime apply, a guest command proves that it ran:
+# the guest maps its own failure to status 200, which an Incus transport error
+# never returns. The last command's class is kept for the failure report.
+yexec() {
+  if [ -z "${ORCA_RUNTIME_EFFECT:-}" ] || [ -z "${ORCA_GUEST_STEP_STATUS:-}" ]; then
+    # An explicit status: a bare return inside the EXIT trap would return the
+    # status that started the trap instead.
+    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"
+    return $?
+  fi
+  local status=0
+  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -c '"$@" || exit 200' subyard-orca-guest-step "$@" || status=$?
+  case "$status" in
+    0) printf 'ok\n' ;;
+    200) printf 'guest-failed\n' ;;
+    *) printf 'transport\n' ;;
+  esac >"$ORCA_GUEST_STEP_STATUS"
+  return "$status"
+}
+
 ORCA_PROFILE_DIR="$(cd "$RESOURCE_DIR/../.." && pwd)"
 # shellcheck source=config/profiles/orca/release.env
 . "$ORCA_PROFILE_DIR/release.env"
@@ -42,9 +62,10 @@ ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
 ORCA_GUEST_TMP_DIR=
 # The runtime apply phase (apply or verify), and the same value while a guest-side
-# step runs whose failure affects only this yard.
+# step runs whose failure affects only this yard; the class of its last guest command.
 ORCA_RUNTIME_PHASE=
 ORCA_RUNTIME_EFFECT=
+ORCA_GUEST_STEP_STATUS=
 
 valid_guest_tmp_dir() {
   [[ "$1" =~ ^/tmp/subyard-orca\.[A-Za-z0-9]{6,}$ ]]
@@ -58,7 +79,13 @@ cleanup_guest() {
 }
 
 cleanup() {
-  local status=$? cleanup_failed=0
+  local status=$? cleanup_failed=0 effect="$ORCA_RUNTIME_EFFECT" step=""
+  if [ -n "$ORCA_GUEST_STEP_STATUS" ]; then
+    step="$(cat -- "$ORCA_GUEST_STEP_STATUS" 2>/dev/null || true)"
+    rm -f -- "$ORCA_GUEST_STEP_STATUS" || cleanup_failed=1
+  fi
+  ORCA_RUNTIME_EFFECT=''
+  ORCA_GUEST_STEP_STATUS=''
   if [ "$ORCA_PAIR_PENDING" -eq 1 ]; then
     clear_mobile_request >/dev/null 2>&1 || cleanup_failed=1
   fi
@@ -68,19 +95,22 @@ cleanup() {
   fi
   [ "$status" -ne 0 ] || [ "$cleanup_failed" -eq 0 ] || return 1
   # Debris the handler could not remove makes the outcome not yard-local.
-  [ "$cleanup_failed" -ne 0 ] || report_runtime_yard_failure "$status"
+  [ "$cleanup_failed" -ne 0 ] || report_runtime_yard_failure "$status" "$effect" "$step"
   return "$status"
 }
 
-# A failed guest-side step of a runtime apply affects only this yard; its init
-# repeats the same apply. Interruption, host staging, file pushes, safety guards,
-# refused assessments and a guest that no longer answers report nothing and stay
-# blocking.
-report_runtime_yard_failure() {
-  [ "$1" -ne 0 ] && [ "$1" -ne 130 ] && [ "$1" -ne 143 ] && [ -n "$ORCA_RUNTIME_EFFECT" ] || return 0
+# A guest-side step of a runtime apply whose guest command itself ran and failed
+# affects only this yard; its init repeats the same apply. Interruption, Incus
+# transport errors, host staging, file pushes, safety guards, refused assessments
+# and a guest that no longer answers report nothing and stay blocking. The record
+# carries the core's per-apply nonce, which guests never receive, so relayed guest
+# output cannot forge it.
+report_runtime_yard_failure() { # <status> <effect> <last guest command class>
+  [ "$1" -ne 0 ] && [ "$1" -ne 130 ] && [ "$1" -ne 143 ] && [ -n "$2" ] && [ "$3" = guest-failed ] || return 0
+  [[ "${SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE:-}" =~ ^[0-9a-f]{32}$ ]] || return 0
   [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" 2>/dev/null)" = RUNNING ] || return 0
   yexec true >/dev/null 2>&1 || return 0
-  printf 'subyard-profile-runtime-diagnostic-v1 %s yard-local\n' "$ORCA_RUNTIME_EFFECT" >&2
+  printf 'subyard-profile-runtime-diagnostic-v1 %s %s yard-local\n' "$SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE" "$2" >&2
 }
 
 # Bracket guest-side commands of a runtime apply; outside an apply both are no-ops.
@@ -1566,6 +1596,7 @@ if [ "$sub" = _runtime-contract ]; then
           # Helper refresh restarts nothing. A changed main unit restarts the service, as the
           # approving plan disclosed through this observation's consequence.
           ORCA_RUNTIME_PHASE=apply
+          ORCA_GUEST_STEP_STATUS="$(mktemp)"
           ensure_linger
           if [ "$(jq -r '.consequence // empty' <<<"$observation")" = "$ORCA_MAIN_UNIT_CONSEQUENCE" ]; then
             apply_main_unit
@@ -1575,10 +1606,14 @@ if [ "$sub" = _runtime-contract ]; then
           cleanup_guest || die "Orca guest staging directory could not be removed"
           ORCA_RUNTIME_PHASE=verify
           observation="$(observe_runtime_contract)" || die "Orca runtime contract cannot be verified"
-          # The guest did not reach the desired contract that this apply installed.
+          # The guest's own state did not reach the desired contract that this apply
+          # installed; the observation that shows it was read from the guest.
           yard_local_begin
-          jq -e --arg desired "$4" \
-            'select(.state == "current" and .actual == .desired and .desired == $desired)' <<<"$observation"
+          if ! jq -e --arg desired "$4" \
+            'select(.state == "current" and .actual == .desired and .desired == $desired)' <<<"$observation"; then
+            printf 'guest-failed\n' >"$ORCA_GUEST_STEP_STATUS"
+            exit 1
+          fi
           yard_local_end
           ORCA_RUNTIME_PHASE=
           ;;
