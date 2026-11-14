@@ -1260,8 +1260,15 @@ The decision uses the remote URLs after Git's `insteadOf` and `pushInsteadOf` re
 leaves Git's SSH selection unchanged when `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`,
 `core.sshCommand`, `ssh.variant`, or the remote's `uploadpack` or `receivepack` is set; when `ssh -G`, given the remote command Git runs
 (`git-upload-pack`, and `git-receive-pack` for a push), reports your own `ControlMaster` or
-`ControlPath`, or a configuration that differs between those commands; or when no short private
-socket path is available. HTTPS and file remotes are unaffected.
+`ControlPath`, or, for endpoints that resolve to the same control socket (for example two `Host`
+aliases of one host, port and user), configurations that differ, such as a fetch-only deploy key and
+a push key; or when no short private socket path is available. HTTPS and file remotes are unaffected.
+
+`ssh -G` reports an explicit `ControlMaster no` or `ControlPath none` the same way as the default,
+so such a setting does not prevent sharing. While the command runs, including during its
+confirmation, other processes of the same user can open sessions through its master socket without
+the key. To opt out, run the command with `GIT_SSH_COMMAND=ssh`, or set `core.sshCommand` in the
+registered checkout, for example `git -C <checkout> config core.sshCommand ssh`.
 
 Native `sync pull` and `sync push` remove group/world write permissions from the registered
 checkout before importing it. Permission repair is included in their confirmed plan even when

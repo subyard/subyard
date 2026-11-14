@@ -211,6 +211,7 @@ func (session *configGitSSHSession) record() {
 		ctx, cancel := context.WithTimeout(context.Background(), configGitSSHTimeout)
 		command := exec.CommandContext(ctx, session.ssh, "-F", "none", "-o", "ControlPath="+socket, "-O", "check", "subyard-config-git")
 		command.Env = session.env
+		command.WaitDelay = configGitWaitDelay
 		output, _ := command.CombinedOutput()
 		cancel()
 		match := configGitSSHMasterPID.FindSubmatch(output)
@@ -496,6 +497,7 @@ func (cli *CLI) configGitSSHOverridden(ctx context.Context, directory string) bo
 		command.Env = environmentList(cli.env, map[string]string{
 			"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C",
 		})
+		command.WaitDelay = configGitWaitDelay
 		output, err := command.Output()
 		cancel()
 		var exit *exec.ExitError
@@ -513,34 +515,64 @@ func (cli *CLI) configGitSSHOverridden(ctx context.Context, directory string) bo
 // configGitSSHUnmultiplexed resolves the operator's OpenSSH configuration as
 // Git invokes each endpoint, including its remote command. A configured
 // master or control path is the operator's own multiplexing and keeps
-// precedence. A configuration that differs between commands on one
-// destination would make a shared master authenticate a later command with
-// the first command's settings, so it also keeps separate connections.
+// precedence. Endpoints are grouped by the control socket OpenSSH derives for
+// them (%C hashes the resolved host, port and user, so different aliases can
+// share one). The first endpoint of a group starts its master and every later
+// one would reuse that authentication, so sharing requires an identical
+// resolved configuration within each group. Only the "host" line, the
+// requested alias itself, may differ; it does not change the connection.
 //
 // keepAlive reports that every endpoint leaves ServerAliveInterval at 0.
 func (cli *CLI) configGitSSHUnmultiplexed(ctx context.Context, ssh string, endpoints []configGitSSHEndpoint) (shared, keepAlive bool) {
 	keepAlive = true
 	resolved := make(map[string][]byte, len(endpoints))
 	for _, endpoint := range endpoints {
-		probeCtx, cancel := context.WithTimeout(ctx, configGitSSHTimeout)
-		arguments := append(append([]string{"-G"}, endpoint.destination...), endpoint.command)
-		command := exec.CommandContext(probeCtx, ssh, arguments...)
-		command.Env = environmentList(cli.env, nil)
-		command.Stderr = io.Discard
-		output, err := command.Output()
-		cancel()
+		output, err := cli.configGitSSHResolve(ctx, ssh, nil, endpoint)
 		unmultiplexed, alive := configGitSSHOutputUnmultiplexed(output)
 		if err != nil || !unmultiplexed {
 			return false, false
 		}
 		keepAlive = keepAlive && !alive
-		key := strings.Join(endpoint.destination, "\x00")
-		if previous, seen := resolved[key]; seen && !bytes.Equal(previous, output) {
+		keyed, err := cli.configGitSSHResolve(ctx, ssh, []string{"-o", "ControlPath=" + configGitSSHProbePath}, endpoint)
+		socket := configGitSSHOutputValue(keyed, "controlpath")
+		if err != nil || socket == "" {
 			return false, false
 		}
-		resolved[key] = output
+		var effective []byte
+		for _, line := range bytes.SplitAfter(output, []byte("\n")) {
+			if !bytes.HasPrefix(line, []byte("host ")) {
+				effective = append(effective, line...)
+			}
+		}
+		if previous, seen := resolved[socket]; seen && !bytes.Equal(previous, effective) {
+			return false, false
+		}
+		resolved[socket] = effective
 	}
 	return true, keepAlive
+}
+
+// configGitSSHProbePath only names the socket OpenSSH would derive; it is never created.
+const configGitSSHProbePath = "/subyard-config-git-probe/%C"
+
+func (cli *CLI) configGitSSHResolve(ctx context.Context, ssh string, options []string, endpoint configGitSSHEndpoint) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, configGitSSHTimeout)
+	defer cancel()
+	arguments := append(append(append([]string{"-G"}, options...), endpoint.destination...), endpoint.command)
+	command := exec.CommandContext(ctx, ssh, arguments...)
+	command.Env = environmentList(cli.env, nil)
+	command.Stderr = io.Discard
+	command.WaitDelay = configGitWaitDelay
+	return command.Output()
+}
+
+func configGitSSHOutputValue(output []byte, name string) string {
+	for _, line := range strings.Split(string(output), "\n") {
+		if key, value, found := strings.Cut(strings.TrimSpace(line), " "); found && strings.EqualFold(key, name) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // configGitSSHOutputUnmultiplexed parses ssh -G output. alive reports an

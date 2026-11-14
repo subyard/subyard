@@ -44,8 +44,20 @@ while [ $# -gt 0 ]; do
 	*) host="$1"; shift; break ;;
 	esac
 done
+requested="$control"
 control=$(printf '%s' "$control" | sed 's/%C/connection/')
 if [ -n "$printConfig" ]; then
+	# SUBYARD_TEST_SSH_ALIASES lists ALIAS=HOSTNAME:IDENTITYFILE entries.
+	resolved="$host" identity=""
+	for entry in $SUBYARD_TEST_SSH_ALIASES; do
+		case "$entry" in "$host="*) value=${entry#*=}; resolved=${value%%:*}; identity=${value#*:} ;; esac
+	done
+	printf 'host %s\nhostname %s\n' "$host" "$resolved"
+	[ -n "$identity" ] && printf 'identityfile %s\n' "$identity"
+	if [ -n "$requested" ]; then
+		printf 'controlpath %s\n' "$(printf '%s' "$requested" | sed "s/%C/$resolved/")"
+		exit 0
+	fi
 	printf 'probe %s %s\n' "$host" "${1%% *}" >>"$log"
 	matched=""
 	case "$1" in "$SUBYARD_TEST_SSH_MATCH_COMMAND"*) matched=1 ;; esac
@@ -94,6 +106,11 @@ else
 		bash -c 'exec -a "$0" sleep 3600' "ssh: $control [mux]" </dev/null >/dev/null 2>&1 &
 		printf '%s %s\n' "$!" "$control" >>"$log.masters"
 	fi
+fi
+if [ -n "$SUBYARD_TEST_SSH_HOLD_STDERR" ]; then
+	# A descendant that keeps the inherited standard error open.
+	sleep 20 </dev/null >/dev/null &
+	printf '%s\n' "$!" >>"$log.holders"
 fi
 exec sh -c "$*"
 `
@@ -501,6 +518,60 @@ func TestConfigGitSSHWithoutRegisteredWatchdogClosesNormally(t *testing.T) {
 	}
 	if _, err := os.Lstat(session.directory); !os.IsNotExist(err) {
 		t.Fatalf("private control directory remains: %v", err)
+	}
+}
+
+func TestConfigGitSSHSharesOnlyIdenticalConfigurationPerSocket(t *testing.T) {
+	bin, _, log := writeConfigFakeSSH(t)
+	for _, test := range []struct {
+		aliases string
+		shared  bool
+	}{
+		// Both aliases resolve to one host and so to one control socket.
+		{"ro=config.invalid:/keys/ro rw=config.invalid:/keys/rw", false},
+		{"ro=config.invalid:/keys/same rw=config.invalid:/keys/same", true},
+		{"ro=one.invalid:/keys/ro rw=two.invalid:/keys/rw", true},
+	} {
+		program, err := New(Options{RepositoryRoot: repositoryRoot(t), Program: "yard", WorkingDir: "/",
+			Environment: []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"SUBYARD_TEST_SSH_LOG=" + log, "SUBYARD_TEST_SSH_ALIASES=" + test.aliases},
+			Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fetch, _ := configGitSSHEndpointFor("ro:config.git", "git-upload-pack")
+		push, _ := configGitSSHEndpointFor("rw:config.git", "git-receive-pack")
+		if shared, _ := program.configGitSSHUnmultiplexed(context.Background(), filepath.Join(bin, "ssh"),
+			[]configGitSSHEndpoint{fetch, push}); shared != test.shared {
+			t.Errorf("%s: shared=%t, want %t", test.aliases, shared, test.shared)
+		}
+	}
+}
+
+func TestConfigGitCommandsBoundDescendantOutput(t *testing.T) {
+	previous := configGitWaitDelay
+	configGitWaitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { configGitWaitDelay = previous })
+	f := newConfigSSHFixture(t, "SUBYARD_TEST_SSH_HOLD_STDERR=1")
+	t.Cleanup(func() {
+		content, _ := os.ReadFile(f.log + ".holders")
+		for _, field := range strings.Fields(string(content)) {
+			var pid int
+			if _, err := fmt.Sscan(field, &pid); err == nil {
+				cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+				if bytes.Equal(cmdline, []byte("sleep\x0020\x00")) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			}
+		}
+	})
+	start := time.Now()
+	f.run(0, "config", "sync", "pull", "--yes")
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("a descendant holding standard error delayed the command for %v", elapsed)
+	}
+	if holders, err := os.ReadFile(f.log + ".holders"); err != nil || len(holders) == 0 {
+		t.Fatalf("the fixture started no descendant: %v", err)
 	}
 }
 

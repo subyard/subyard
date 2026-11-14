@@ -686,7 +686,8 @@ func (cli *CLI) configGitOutputBytesWithEnvironment(
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	err := command.Run()
+	command.WaitDelay = configGitWaitDelay
+	err := runConfigGitCommand(command)
 	cli.configGitSSH.record()
 	if err != nil {
 		detail := boundedConfigGitText(strings.TrimSpace(stderr.String()))
@@ -696,6 +697,20 @@ func (cli *CLI) configGitOutputBytesWithEnvironment(
 		return nil, errors.New(detail)
 	}
 	return stdout.Bytes(), nil
+}
+
+// configGitWaitDelay bounds the wait for output after a Git command exits:
+// an SSH descendant, such as a persistent master or a ProxyCommand, can keep
+// the inherited output pipes open.
+var configGitWaitDelay = 5 * time.Second
+
+// runConfigGitCommand runs command and accepts output pipes that a descendant
+// still held after the WaitDelay; the command itself has already exited.
+func runConfigGitCommand(command *exec.Cmd) error {
+	if err := command.Run(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+		return err
+	}
+	return nil
 }
 
 func (cli *CLI) configGitEnvironment(overrides map[string]string) []string {
