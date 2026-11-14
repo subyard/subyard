@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Published 0.27.0 yard with an operator-scope YARD_DEVICES -> frozen candidate on one
+# Published 0.28.0 yard with an operator-scope YARD_DEVICES -> frozen candidate on one
 # broker-owned disposable VM: the candidate ignores and discloses the assignment, the init
 # plan names the owned device the extras stage detaches, and config unset removes the line.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OLD_VERSION=0.27.0
+OLD_VERSION=0.28.0
 OLD_INSTALLER_SHA256=cbf54fbfc846c2e936c53a0d7efa6366f83220e906dfb893f0671a057b29400d
-OLD_BUNDLE_SHA256=b339acd76299a7c301d79e502459d9f4ab6e8d6f486c83e76c53aff1f6bc5e61
+OLD_BUNDLE_SHA256=d4d3cc9919236ab2a2aac64391ae19bb8e0edbbe90f5241601c2399626c99f9e
 if [ "${1:-}" = --preflight ]; then
   bash -n "$0"
   TMPDIR=/tmp go test ./internal/config ./internal/configsync ./internal/adapters/reconcileruntime ./internal/cli -run 'ProfileOnly|IgnoredProfileOnly|TestExtrasDetachPlanned|TestInitPlanDisclosesExtrasDetach|TestInitExtrasDetachPreview|TestUpdateTypedConfirmation' -count=1
@@ -140,7 +140,7 @@ owner env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
   "$launcher" update --check --json --version "$CANDIDATE_VERSION" >"$STATE/update-check.json" 2>"$STATE/update-check.log" \
   || die 'update --check failed'
 # A host assignment is reported once across local yards; any yard's unset removes it.
-jq -e --arg path "$host_config" '[.configuration[]? | select(.state == "ignored" and .setting == "YARD_DEVICES"
+jq -e --arg path "$host_config" '[.configuration[]? | select(.setting == "YARD_DEVICES"
   and .scope == "host" and .path == $path and .line == 1
   and (.repair | test("^yard -Y [a-z0-9-]+ config unset YARD_DEVICES --scope host --local$")))] | length == 1' \
   "$STATE/update-check.json" >/dev/null || {

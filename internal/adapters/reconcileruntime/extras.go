@@ -11,29 +11,55 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 // extrasNativePolicy is the read-only counterpart of the extras leaf. It
 // evaluates declarations against observed native devices, never the reverse.
+// Source and convergence refusals are independent; every one is reported. A
+// device whose host node could not be read has no convergence finding.
 func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map[string]string, complete bool, sources *[]any) (map[string]map[string]string, map[string]string, error) {
-	devices := map[string]map[string]string{}
+	devices, unread, refusals := runtime.extrasDevices(state, extras, sources)
+	configuration := extrasCapabilityConfiguration(extras)
+	for key, value := range configuration {
+		if !complete && value == "" {
+			continue
+		}
+		if state.Instance.Config[key] != value || state.Instance.LocalConfig[key] != value {
+			refusals = append(refusals, fmt.Errorf("profile capability configuration %q is not converged", key))
+		}
+	}
+	for name, device := range devices {
+		if unread[name] {
+			continue
+		}
+		if !maps.Equal(state.Instance.LocalDevices[name], device) || !maps.Equal(state.Instance.Devices[name], device) {
+			refusals = append(refusals, fmt.Errorf("profile device %q is not converged", name))
+		}
+	}
+	for name := range state.Instance.Devices {
+		if complete && strings.HasPrefix(name, "yx-") && devices[name] == nil {
+			refusals = append(refusals, fmt.Errorf("unselected profile device %q remains", name))
+		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, nil, err
+	}
+	return devices, configuration, nil
+}
+
+// extrasDevices returns every yx-* device the extras leaf wants, named as
+// 09-yard-extras.sh names them: each declared mount and each declared
+// character device whose host node exists. A device whose source is not
+// verified is still named; every such refusal is returned. Unread names the
+// character devices whose host node could not be read.
+func (runtime Runtime) extrasDevices(state ports.ReconcileState, extras map[string]string, sources *[]any) (devices map[string]map[string]string, unread map[string]bool, refusals []error) {
+	devices, unread = map[string]map[string]string{}, map[string]bool{}
 	for _, declaration := range strings.Fields(extras["SUBYARD_EXTRAS_MOUNTS"]) {
 		parts := strings.Split(declaration, ":") // extrasContext validated the declaration.
 		path := filepath.Join(runtime.Yard.Paths.HostBase, parts[0])
-		tree, err := uninstall.CaptureRoot(path)
-		if sources != nil {
-			*sources = append(*sources, tree)
-		}
-		mode, _ := strconv.ParseUint(parts[3], 8, 32)
-		uid, uidErr := strconv.ParseUint(runtime.environmentDefault("DEV_UID", "1000"), 10, 32)
-		if err != nil || uidErr != nil || len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFDIR || uint64(tree.Entries[0].Mode&07777) != mode {
-			return nil, nil, fmt.Errorf("profile mount %q has unverified host directory permissions", parts[0])
-		}
-		if uint64(tree.Entries[0].UID) != uid || uint64(tree.Entries[0].GID) != uid {
-			return nil, nil, fmt.Errorf("profile mount %q has unverified owner identity", parts[0])
-		}
 		device := map[string]string{"type": "disk", "source": path, "path": parts[1]}
 		if parts[2] == "ro" {
 			device["readonly"] = "true"
@@ -42,12 +68,23 @@ func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map
 			device["shift"] = "true"
 		}
 		devices["yx-"+parts[0]] = device
+		tree, err := uninstall.CaptureRoot(path)
+		if sources != nil {
+			*sources = append(*sources, tree)
+		}
+		mode, _ := strconv.ParseUint(parts[3], 8, 32)
+		uid, uidErr := strconv.ParseUint(runtime.environmentDefault("DEV_UID", "1000"), 10, 32)
+		if err != nil || uidErr != nil || len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFDIR || uint64(tree.Entries[0].Mode&07777) != mode {
+			refusals = append(refusals, fmt.Errorf("profile mount %q has unverified host directory permissions", parts[0]))
+		} else if uint64(tree.Entries[0].UID) != uid || uint64(tree.Entries[0].GID) != uid {
+			refusals = append(refusals, fmt.Errorf("profile mount %q has unverified owner identity", parts[0]))
+		}
 	}
 	root := runtime.HostDeviceRoot
 	if root == "" {
 		root = "/dev"
 	}
-	addCharacter := func(name, source string) error {
+	addCharacter := func(name, source string) {
 		path := filepath.Join(root, strings.TrimPrefix(source, "/dev/"))
 		info, err := os.Stat(path)
 		if sources != nil && (err == nil || os.IsNotExist(err)) {
@@ -61,67 +98,39 @@ func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map
 			}{path, stat})
 		}
 		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeCharDevice == 0 {
-			return fmt.Errorf("profile device source %q is not a character device", source)
+			return
 		}
 		device := map[string]string{"type": "unix-char", "source": source, "path": source}
 		if state.Instance.LocalDevices[name]["mode"] != "" {
 			device["mode"] = "0666"
 		}
 		devices[name] = device
-		return nil
+		if err != nil {
+			unread[name] = true
+			refusals = append(refusals, err)
+		} else if info.Mode()&os.ModeCharDevice == 0 {
+			refusals = append(refusals, fmt.Errorf("profile device source %q is not a character device", source))
+		}
 	}
-	configuration := extrasCapabilityConfiguration(extras)
 	needFuse := len(strings.Fields(extras["SUBYARD_EXTRAS_CAPABILITIES"])) != 0
 	for _, device := range strings.Fields(extras["SUBYARD_EXTRAS_DEVICES"]) {
 		switch device {
 		case "kvm":
-			if err := addCharacter("yx-dev-kvm", "/dev/kvm"); err != nil {
-				return nil, nil, err
-			}
+			addCharacter("yx-dev-kvm", "/dev/kvm")
 		case "fuse":
 			needFuse = true
 		case "gpu":
 			nodes, err := filepath.Glob(filepath.Join(root, "dri/renderD*"))
-			if err != nil {
-				return nil, nil, err
-			}
+			refusals = append(refusals, err)
 			for _, node := range nodes {
-				if err := addCharacter("yx-dev-dri-"+filepath.Base(node), "/dev/dri/"+filepath.Base(node)); err != nil {
-					return nil, nil, err
-				}
+				addCharacter("yx-dev-dri-"+filepath.Base(node), "/dev/dri/"+filepath.Base(node))
 			}
 		}
 	}
 	if needFuse {
-		if err := addCharacter("yx-dev-fuse", "/dev/fuse"); err != nil {
-			return nil, nil, err
-		}
+		addCharacter("yx-dev-fuse", "/dev/fuse")
 	}
-	for key, value := range configuration {
-		if !complete && value == "" {
-			continue
-		}
-		if state.Instance.Config[key] != value || state.Instance.LocalConfig[key] != value {
-			return nil, nil, fmt.Errorf("profile capability configuration %q is not converged", key)
-		}
-	}
-	for name, device := range devices {
-		if !maps.Equal(state.Instance.LocalDevices[name], device) || !maps.Equal(state.Instance.Devices[name], device) {
-			return nil, nil, fmt.Errorf("profile device %q is not converged", name)
-		}
-	}
-	for name := range state.Instance.Devices {
-		if complete && strings.HasPrefix(name, "yx-") && devices[name] == nil {
-			return nil, nil, fmt.Errorf("unselected profile device %q remains", name)
-		}
-	}
-	return devices, configuration, nil
+	return devices, unread, refusals
 }
 
 // extrasCapabilityConfiguration declares selected capabilities' exact instance

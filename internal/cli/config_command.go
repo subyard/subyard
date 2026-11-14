@@ -708,7 +708,7 @@ func (cli *CLI) localConfigurationState(loaded config.Loaded) []config.Configura
 
 // ignoredAssignmentKey identifies one source assignment across yards.
 func ignoredAssignmentKey(assignment config.IgnoredAssignment) string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%s", assignment.Name, assignment.Scope, assignment.Path, assignment.Line, assignment.Expression)
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d", assignment.Name, assignment.Scope, assignment.Path, assignment.Line)
 }
 
 func findSettingTrace(

@@ -228,11 +228,7 @@ func ParsePersistentAssignments(
 		// A profile-only assignment is discarded as the loader discards it: it
 		// never refuses parsing or affects later records, and only its own
 		// record remains visible, so config unset can still remove it.
-		if err := applyRecordRetired(record, values, observe, operatorDiscardPolicy(func(value discardedValue) {
-			if !value.Nested {
-				observe(value.Name, value.Value)
-			}
-		})); err != nil {
+		if err := applyRecordRetired(record, values, observe, operatorDiscardPolicy(observe)); err != nil {
 			return nil, sourceContext(path, recordLine, recordSettingKey(record), "persistent settings", err)
 		}
 	}
@@ -569,10 +565,8 @@ func parseEnvEditRecords(path string, content []byte) ([]envEditRecord, error) {
 			var assigned string
 			if err := applyRecordRetired(trimmed, values, func(name, _ string) {
 				assigned = name
-			}, operatorDiscardPolicy(func(value discardedValue) {
-				if !value.Nested {
-					assigned = value.Name
-				}
+			}, operatorDiscardPolicy(func(name, _ string) {
+				assigned = name
 			})); err != nil {
 				return nil, sourceContext(path, recordLine, recordSettingKey(trimmed), "persistent settings", err)
 			}

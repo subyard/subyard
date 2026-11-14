@@ -142,9 +142,6 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		consequence := desired
 		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && detach.Unverified {
 			consequence = fmt.Sprintf("yard %s: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)", yard.YardName)
-			if len(detach.Devices) != 0 {
-				consequence = boundedStepList(consequence+", including each of these if attached: ", detach.Devices, " ", "devices")
-			}
 		} else if native.Stage.ID == ports.ReconcileStageExtras && len(detach.Devices) != 0 {
 			consequence = boundedStepList(fmt.Sprintf("yard %s: detaches devices no selected profile requests: ", yard.YardName), detach.Devices, " ", "devices")
 		}
@@ -306,8 +303,7 @@ func (execution *provisionExecution) stateBinding() string {
 // conditional extras stage counts too. A profile declaration refusal refuses
 // planning. A yard without an instance detaches nothing; when the instance
 // cannot be read, the plan says that any attached yx-* device no selected
-// profile requests is detached and names those ignored operator assignments
-// request.
+// profile requests is detached.
 func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime reconcileruntime.Runtime) error {
 	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
 	if execution.mode == initReset || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
@@ -315,7 +311,7 @@ func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime 
 	}) {
 		return nil
 	}
-	detach, err := runtime.ExtrasDetachPlanned(ctx, execution.loaded.IgnoredAssignments())
+	detach, err := runtime.ExtrasDetachPlanned(ctx)
 	if err != nil {
 		return fmt.Errorf("check init stage %q: %w", ports.ReconcileStageExtras, err)
 	}

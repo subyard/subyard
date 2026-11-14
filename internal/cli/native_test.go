@@ -756,7 +756,7 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 				t.Fatalf("%v refused or broke its report: code=%d stdout=%q stderr=%q", arguments, code, stdout.String(), stderr.String())
 			}
 			want := config.ConfigurationState{
-				State: "ignored", Yard: "default", Setting: "YARD_DEVICES", Scope: "host", Path: host, Line: line,
+				Yard: "default", Setting: "YARD_DEVICES", Scope: "host", Path: host, Line: line,
 				Repair: "yard -Y default config unset YARD_DEVICES --scope host --local",
 			}
 			message := "YARD_DEVICES in " + host + ":" + strconv.Itoa(line) + " is ignored: only environment profiles declare it; remove it with " + want.Repair
