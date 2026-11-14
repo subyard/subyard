@@ -1277,11 +1277,10 @@ run `yard -Y NAME init`, which repeats the same apply from the partial state, or
 
 These findings share the pending-configuration admission of materialized configuration: when every
 blocker is such a finding and no owner is unconverged, the direct CLI and RPC admit unrelated
-commands, teardown and each named yard's init even while other yards are pending. On a yard
-without a finding of its own, a new yard included, the command line also admits init, config,
-profile and integration commands, which reach their own guards; a successful init of one yard
-reports the other yards' findings and succeeds. While other release work remains, findings are
-one bounded warning. A successful init of the yard, a converged or
+commands, teardown and each named yard's init even while other yards are pending. Init, config,
+profile and integration commands on other yards stay gated. A successful init of one yard reports
+the other yards' findings and succeeds. While other release work remains, findings are one
+bounded warning. A successful init of the yard, a converged or
 re-applied owner for that yard and teardown of the yard remove the record through its known owner
 path; other entries of the record directory are never touched.
 
