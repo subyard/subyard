@@ -1511,7 +1511,7 @@ func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context) (ExtrasDetach, e
 		return ExtrasDetach{Unverified: true}, nil
 	}
 	// A source refusal belongs to the stage itself; its device is still named.
-	wanted, _ := runtime.extrasDevices(ports.ReconcileState{Instance: instance}, requests.extras, nil)
+	wanted, _, _ := runtime.extrasDevices(ports.ReconcileState{Instance: instance}, requests.extras, nil)
 	var detached []string
 	for _, name := range slices.Sorted(maps.Keys(instance.LocalDevices)) {
 		if strings.HasPrefix(name, "yx-") && wanted[name] == nil {

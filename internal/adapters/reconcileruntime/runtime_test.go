@@ -2433,6 +2433,41 @@ func TestPowerImportCollectsForeignOwnersAndContinuesOtherYards(t *testing.T) {
 	}
 }
 
+// Every independent source and convergence refusal is reported, in stable
+// order; a device whose host node cannot be read has no convergence finding.
+func TestExtrasNativePolicyReportsEveryRefusal(t *testing.T) {
+	devices := t.TempDir()
+	if err := os.WriteFile(filepath.Join(devices, "kvm"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := Runtime{HostDeviceRoot: devices}
+	state := ports.ReconcileState{Instance: ports.InstanceInfo{
+		LocalDevices: map[string]map[string]string{"yx-stale": {"type": "disk"}},
+		Devices:      map[string]map[string]string{"yx-stale": {"type": "disk"}},
+	}}
+	extras := map[string]string{"SUBYARD_EXTRAS_CAPABILITIES": "nesting", "SUBYARD_EXTRAS_DEVICES": "kvm"}
+	want := strings.Join([]string{
+		`profile capability configuration "security.idmap.size" is not converged`,
+		`profile capability configuration "security.syscalls.intercept.mknod" is not converged`,
+		`profile capability configuration "security.syscalls.intercept.setxattr" is not converged`,
+		`profile device "yx-dev-kvm" is not converged`,
+		`profile device source "/dev/kvm" is not a character device`,
+		`unselected profile device "yx-stale" remains`,
+	}, "; ")
+	for range 8 {
+		if _, _, err := runtime.extrasNativePolicy(state, extras, true, nil); err == nil || err.Error() != want {
+			t.Fatalf("refusals = %v", err)
+		}
+	}
+	// A device root that is a regular file fails the node read itself.
+	runtime.HostDeviceRoot = filepath.Join(devices, "kvm")
+	state.Instance = ports.InstanceInfo{}
+	unread := "stat " + filepath.Join(devices, "kvm", "kvm") + ": not a directory"
+	if _, _, err := runtime.extrasNativePolicy(state, map[string]string{"SUBYARD_EXTRAS_DEVICES": "kvm"}, true, nil); err == nil || err.Error() != unread {
+		t.Fatalf("unread node refusals = %v", err)
+	}
+}
+
 // The extras stage detaches every owned yx-* device no selected profile
 // requests, including one an ignored operator assignment supplied before. The
 // init plan names each such device.

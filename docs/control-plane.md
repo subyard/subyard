@@ -1724,8 +1724,8 @@ declaration refusal together. The catalog allows these settings only at shipped 
 discards each operator assignment, at any scope or in the command environment, in one place, as it
 discards retired settings, while the file is read: its expression, and a default of the name inside
 another record's expression, is evaluated in isolation, so no later record sees it or any default
-it performs, and its evaluation error does not refuse loading. Such a nested default is not
-reported, and a required check of the name refuses as for a retired setting. Persistent-settings
+it performs, and neither its evaluation error nor a required check of the name refuses loading.
+Such a nested default is not reported. Persistent-settings
 parsing for `config set`/`unset`, `init` and config sync discards it the same way. A non-empty one
 is returned as configuration state (`Loaded.IgnoredAssignments`) with its exact repair. It is never
 a refusal: `config show`, `status`, `update --check` and the init plan render it, `update --check`

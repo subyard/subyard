@@ -18,29 +18,34 @@ import (
 
 // extrasNativePolicy is the read-only counterpart of the extras leaf. It
 // evaluates declarations against observed native devices, never the reverse.
+// Source and convergence refusals are independent; every one is reported. A
+// device whose host node could not be read has no convergence finding.
 func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map[string]string, complete bool, sources *[]any) (map[string]map[string]string, map[string]string, error) {
-	devices, err := runtime.extrasDevices(state, extras, sources)
-	if err != nil {
-		return nil, nil, err
-	}
+	devices, unread, refusals := runtime.extrasDevices(state, extras, sources)
 	configuration := extrasCapabilityConfiguration(extras)
 	for key, value := range configuration {
 		if !complete && value == "" {
 			continue
 		}
 		if state.Instance.Config[key] != value || state.Instance.LocalConfig[key] != value {
-			return nil, nil, fmt.Errorf("profile capability configuration %q is not converged", key)
+			refusals = append(refusals, fmt.Errorf("profile capability configuration %q is not converged", key))
 		}
 	}
 	for name, device := range devices {
+		if unread[name] {
+			continue
+		}
 		if !maps.Equal(state.Instance.LocalDevices[name], device) || !maps.Equal(state.Instance.Devices[name], device) {
-			return nil, nil, fmt.Errorf("profile device %q is not converged", name)
+			refusals = append(refusals, fmt.Errorf("profile device %q is not converged", name))
 		}
 	}
 	for name := range state.Instance.Devices {
 		if complete && strings.HasPrefix(name, "yx-") && devices[name] == nil {
-			return nil, nil, fmt.Errorf("unselected profile device %q remains", name)
+			refusals = append(refusals, fmt.Errorf("unselected profile device %q remains", name))
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, nil, err
 	}
 	return devices, configuration, nil
 }
@@ -48,10 +53,10 @@ func (runtime Runtime) extrasNativePolicy(state ports.ReconcileState, extras map
 // extrasDevices returns every yx-* device the extras leaf wants, named as
 // 09-yard-extras.sh names them: each declared mount and each declared
 // character device whose host node exists. A device whose source is not
-// verified is still named; every such refusal is returned together.
-func (runtime Runtime) extrasDevices(state ports.ReconcileState, extras map[string]string, sources *[]any) (map[string]map[string]string, error) {
-	devices := map[string]map[string]string{}
-	var refusals []error
+// verified is still named; every such refusal is returned. Unread names the
+// character devices whose host node could not be read.
+func (runtime Runtime) extrasDevices(state ports.ReconcileState, extras map[string]string, sources *[]any) (devices map[string]map[string]string, unread map[string]bool, refusals []error) {
+	devices, unread = map[string]map[string]string{}, map[string]bool{}
 	for _, declaration := range strings.Fields(extras["SUBYARD_EXTRAS_MOUNTS"]) {
 		parts := strings.Split(declaration, ":") // extrasContext validated the declaration.
 		path := filepath.Join(runtime.Yard.Paths.HostBase, parts[0])
@@ -101,6 +106,7 @@ func (runtime Runtime) extrasDevices(state ports.ReconcileState, extras map[stri
 		}
 		devices[name] = device
 		if err != nil {
+			unread[name] = true
 			refusals = append(refusals, err)
 		} else if info.Mode()&os.ModeCharDevice == 0 {
 			refusals = append(refusals, fmt.Errorf("profile device source %q is not a character device", source))
@@ -124,7 +130,7 @@ func (runtime Runtime) extrasDevices(state ports.ReconcileState, extras map[stri
 	if needFuse {
 		addCharacter("yx-dev-fuse", "/dev/fuse")
 	}
-	return devices, domain.CollectRefusals(refusals...)
+	return devices, unread, refusals
 }
 
 // extrasCapabilityConfiguration declares selected capabilities' exact instance

@@ -26,9 +26,6 @@ type IgnoredAssignment struct {
 	Yard, Name, Scope, Path string
 	Line                    int
 	Git                     bool
-	// Value is the evaluated value the assignment would have supplied, or its
-	// unevaluated text when evaluation failed.
-	Value string
 	// authored reports that config unset at Scope writes exactly Path and
 	// removes the assignment.
 	authored bool
@@ -80,7 +77,7 @@ func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, va
 	}
 	definition := tracker.layers[layer]
 	tracker.ignored = append(tracker.ignored, IgnoredAssignment{
-		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "), Value: value,
+		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "),
 	})
 }
 

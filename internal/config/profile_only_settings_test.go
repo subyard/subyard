@@ -144,6 +144,23 @@ func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
 		t.Fatalf("nested observations = %q", got)
 	}
 
+	// A required check of an ignored name never refuses either, nor is its
+	// message evaluated.
+	fixture.write(t, host, "YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n: \"${YARD_DEVICES:?${MISSING:?required}}\"\n")
+	if loaded, err = fixture.load("default", nil); err != nil || len(loaded.IgnoredAssignments()) != 1 {
+		t.Fatalf("a required check of an ignored name refused the load: %v %q", err, renderedIgnored(loaded))
+	}
+	if _, err := ParsePersistentAssignments(host, []byte("YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n: \"${YARD_DEVICES:?${MISSING:?required}}\"\n")); err != nil {
+		t.Fatalf("persistent parse refused a required check of an ignored name: %v", err)
+	}
+
+	// The exception stops at ignored names: a required check of a retired
+	// setting still refuses.
+	fixture.write(t, host, ": \"${CODEX_VERSION:?}\"\n")
+	if _, err = fixture.load("default", nil); err == nil || !strings.Contains(err.Error(), "required parameter is unset") {
+		t.Fatalf("a required check of a retired name did not refuse the load: %v", err)
+	}
+
 	// Evaluating an ignored expression never refuses loading.
 	fixture.write(t, host, "YARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\n")
 	loaded, err = fixture.load("default", nil)

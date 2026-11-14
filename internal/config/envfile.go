@@ -83,7 +83,8 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 // retired or ignored selects. A discarded assignment is evaluated in
 // isolation: neither it nor any default it performs changes values or reaches
 // the observer, so later records never see it. An ignored one also never
-// refuses: its evaluation error is dropped and its unevaluated text kept.
+// refuses: its evaluation error is dropped and its unevaluated text kept, and
+// a required check of its name is ignored.
 // report, when set, receives each discarded record's assignment.
 type discardPolicy struct {
 	retired, ignored func(string) bool
@@ -342,6 +343,11 @@ func expandParameter(
 	case ":-", ":=", ":?":
 		if current != "" {
 			return current, nil
+		}
+		if operator == ":?" && policy.ignores(name) {
+			// Operators never assign an ignored name, so a required check of
+			// it is ignored too, without evaluating its message.
+			return "", nil
 		}
 		expanded, err := expandValue(fallback, values, observer, policy)
 		if err != nil {

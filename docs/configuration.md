@@ -125,7 +125,7 @@ as a warning, with its file and line and its removal:
 file, otherwise the line to remove from that file, such as a flat `yards/NAME.env` registration.
 A default of the setting inside another assignment, such as
 `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"`, has no effect and is not reported; a required check such
-as `${YARD_DEVICES:?}` fails as for a retired setting. The JSON report of `update --check` carries
+as `${YARD_DEVICES:?}` is ignored as well. The JSON report of `update --check` carries
 them in its `configuration` array. If such a value supplied a device, the `init` plan names each
 device that the extras stage now detaches; while the yard's instance cannot be read, it states that
 any attached `yx-*` device no selected profile requests is detached. A VM yard does not apply a
