@@ -119,6 +119,8 @@ die() {
 }
 info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s: %s\n' "$OLD_VERSION" "$*"; }
+# Name the failing step and show its captured logs instead of exiting silently.
+trap 'die "line $LINENO failed (exit $?)"' ERR
 
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 instance_uuid() { incus config get "$INSTANCE" volatile.uuid --project "$PROJECT"; }
@@ -192,7 +194,7 @@ stage_candidate() {
 }
 
 interrupt_anchor_hop() {
-  local checkpoint="$1" before links transaction fingerprint rc=0 evidence
+  local checkpoint="$1" before links transaction fingerprint rc=0 hop_rc=0 evidence
   case "$checkpoint" in authorized|reconciling) ;; *) die 'invalid published hop checkpoint' ;; esac
   stage_candidate
   # The zero-step hop still durably publishes reconciling. Keep a real native
@@ -200,8 +202,7 @@ interrupt_anchor_hop() {
   [ "$checkpoint" != reconciling ] || install_activation_reconcile_fault
   # Observe and stop the real published owner; never edit its journal or links.
   operator_env python3 - "$ROOT" "$OPERATOR_HOME/.local/bin/yard" "$ANCHOR_VERSION" "$V2_JOURNAL" \
-    "$OPERATOR_HOME/hop-interrupted" "$checkpoint" > "$STATE_ROOT/hop-interrupt.log" 2>&1 <<'PYTHON' \
-    || { tail -c 16384 "$STATE_ROOT/hop-interrupt.log" >&2; die "published anchor hop interruption at $checkpoint failed"; }
+    "$OPERATOR_HOME/hop-interrupted" "$checkpoint" > "$STATE_ROOT/hop-interrupt.log" 2>&1 <<'PYTHON' || hop_rc=$?
 import os, pathlib, runpy, sys
 root, launcher, version, journal, marker, checkpoint = sys.argv[1:]
 run = runpy.run_path(str(pathlib.Path(root) / "dev/verify-release-upgrades.py"))["run_process"]
@@ -212,6 +213,7 @@ print(result.stdout, result.stderr)
 if result.returncode == 0 or not pathlib.Path(marker).is_file():
     raise SystemExit("published anchor hop did not reach the observed interruption")
 PYTHON
+  [ "$hop_rc" = 0 ] || { tail -c 16384 "$STATE_ROOT/hop-interrupt.log" >&2; die "published anchor hop interruption at $checkpoint failed"; }
   if [ "$checkpoint" = reconciling ]; then
     if operator_env jq -e 'has("nativeFailureExit")' "$OPERATOR_HOME/hop-interrupted" >/dev/null; then
       operator_env test -f "$ACTIVATION_FAULT_PROBE" || die 'reconciling native failure was not the owned interruption'

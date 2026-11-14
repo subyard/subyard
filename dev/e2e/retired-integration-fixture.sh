@@ -84,7 +84,7 @@ fixture_cleanup() {
 trap fixture_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-trap 'printf "%s: line %s failed (exit %s)\n" "$FIXTURE_LABEL" "$LINENO" "$?" >&2' ERR
+trap 'printf "%s: %s failed (exit %s) in %s\n" "$FIXTURE_LABEL" "$BASH_COMMAND" "$?" "${FUNCNAME[*]:-main}" >&2' ERR
 
 # Install the published anchor and stage the frozen candidate's release assets.
 prepare_candidate_fixture() {
