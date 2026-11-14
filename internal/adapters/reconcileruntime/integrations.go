@@ -104,6 +104,11 @@ type IntegrationPlan struct {
 	facts               []integrationFact
 	persist             persistObservation
 	sources             string
+
+	// ownershipReleases lists structured documents whose retirement releases
+	// changed owned fields instead of removing them.
+	ownershipReleases []string
+
 	// Attribution only; the existing aggregate source binding remains the guard.
 	packageSources         map[string]string
 	instance               ports.InstanceInfo
@@ -121,6 +126,10 @@ func (plan IntegrationPlan) InstalledChanged() bool { return plan.Changed && !pl
 // NeedsRetirementProof requests the existing guarded apply even for a clean
 // guest. The proof is an apply receipt, outside integration equality and Desired.
 func (plan IntegrationPlan) NeedsRetirementProof() bool { return plan.retirementProofPending }
+
+// OwnershipReleases lists structured documents whose retirement releases changed
+// owned fields in place. Rewriting them first would discard the operator's change.
+func (plan IntegrationPlan) OwnershipReleases() []string { return slices.Clone(plan.ownershipReleases) }
 
 type integrationProfileRoute struct {
 	Owner, MarkerKey, DeviceName, Marker string
@@ -862,6 +871,10 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		fingerprints = append(fingerprints, observation.Fingerprint)
 		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
+		if len(observation.Released) != 0 {
+			plan.Warnings = append(plan.Warnings, ownershipReleaseNotice(entry.ID, entry.Path, observation.Released))
+			plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
+		}
 	}
 	if err := domain.CollectRefusals(causes...); err != nil {
 		return plan, observed, err
@@ -1187,7 +1200,20 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		}
 		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)
 	}
-	return configmaterial.ParseObservation(result.Stdout)
+	observation, err := configmaterial.ParseObservation(result.Stdout)
+	if err == nil && mode == configmaterial.ModeRetire && len(observation.Released) != 0 && runtime.Stdout != nil {
+		// Report the completed release once, from the call that performed it.
+		fmt.Fprintf(runtime.Stdout, "  [ ok ] yard %s: released ownership of changed fields in %s; left in place and no longer managed by Subyard: %s\n",
+			runtime.Yard.YardName, path, strings.Join(observation.Released, ", "))
+	}
+	return observation, err
+}
+
+// ownershipReleaseNotice previews a retirement that leaves changed owned fields
+// in place: they no longer prove Subyard's values, so only ownership is released.
+func ownershipReleaseNotice(integration, path string, released []string) string {
+	return fmt.Sprintf("owned fields in %s changed after Subyard applied them; retiring %s leaves them in place and releases their ownership: %s",
+		path, integration, strings.Join(released, ", "))
 }
 
 // RetiredIntegrationNotices previews retired package state for operations such as

@@ -1,3 +1,4 @@
+import copy
 import fcntl
 import hashlib
 import json
@@ -523,6 +524,19 @@ def document_payload(current, original):
     return semantic_payload(current) + b"\n"
 
 
+def retained_paths(current, owned):
+    # Owned paths that a full retirement would remove from this document.
+    trial = copy.deepcopy(current)
+    for entry in sorted(owned, key=lambda item: item["path"].count("/"), reverse=True):
+        remove_owned(trial, entry)
+    paths = sorted(entry["path"] for entry in owned
+                   if lookup(current, pointer_parts(entry["path"]))[0] and
+                   not lookup(trial, pointer_parts(entry["path"]))[0])
+    # The host renders these names: keep a bounded list without control characters.
+    return [path for path in paths if len(path.encode()) <= 512 and
+            not any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for c in path)][:256]
+
+
 def retire(mode, baseline, baseline_path, receipt_path, current, original, destination, allowed_home, uid):
     if baseline is None or baseline["schema"] != 2:
         raise MaterializationError("retirement ownership evidence unavailable")
@@ -530,14 +544,28 @@ def retire(mode, baseline, baseline_path, receipt_path, current, original, desti
         raise MaterializationError("retirement destination missing")
     phase = baseline["phase"]
     actual = projection_digest(current, baseline["owned"])
+    release = False
     if phase != "retired":
         expected = {baseline["projection_digest"]}
         if phase == "retiring":
             expected.add(baseline["retired_digest"])
         if actual not in expected:
-            raise MaterializationError("retirement owned fields changed")
+            if phase != "applied":
+                raise MaterializationError("retirement owned fields changed")
+            # Changed owned fields no longer prove which values are ours. Release
+            # ownership and leave the document byte-for-byte unchanged.
+            release = True
+    # A release, or its interrupted tail, leaves owned paths in place; an
+    # interrupted ordinary retirement has already removed them.
+    released = (retained_paths(current, baseline["owned"])
+                if phase != "retired" and actual != baseline["projection_digest"] else [])
     if mode == "retire" and phase != "retired":
-        if phase == "applied" or actual == baseline["projection_digest"]:
+        if release:
+            baseline["phase"] = "retiring"
+            baseline["retired_digest"] = actual
+            atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
+            atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
+        elif phase == "applied" or actual == baseline["projection_digest"]:
             for entry in sorted(baseline["owned"], key=lambda item: item["path"].count("/"), reverse=True):
                 remove_owned(current, entry)
             # Commit intent before replacing the document. A retry accepts only
@@ -555,8 +583,11 @@ def retire(mode, baseline, baseline_path, receipt_path, current, original, desti
         atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
         phase = "retired"
     report = {"converged": phase == "retired",
-              "fingerprint": fingerprint(current, {}, baseline["projection_digest"], phase,
+              "fingerprint": fingerprint(current, {}, baseline["projection_digest"],
+                                         "release" if release and phase != "retired" else phase,
                                          [] if phase == "retired" else baseline["owned"])}
+    if released:
+        report["released"] = released
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
 
 

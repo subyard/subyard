@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -432,12 +433,21 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 			case "unavailable":
 				return ports.InstanceExecResult{}, errors.New("synthetic transport failure")
 			}
-			payload, _ := json.Marshal(map[string]any{"fingerprint": strings.Repeat("b", 64), "changed": true})
+			observation := map[string]any{"fingerprint": strings.Repeat("b", 64), "changed": true}
+			if desired == "release" {
+				observation["retired"] = []map[string]any{{"id": "codex", "kind": "structured", "format": "toml", "path": "/home/dev/.codex/config.toml", "digest": strings.Repeat("c", 64)}}
+			}
+			payload, _ := json.Marshal(observation)
 			return ports.InstanceExecResult{Stdout: payload}, nil
 		case "settings", "selection":
 			return fixture.installedSettingsExecutor.Exec(ctx, project, instance, request)
 		}
 		return ports.InstanceExecResult{}, fmt.Errorf("unexpected inventory mutation: %s", command[4])
+	}
+	if len(command) >= 5 && command[0] == "python3" && strings.Contains(command[3], "def retire(") && command[4] == "assess-retire" {
+		// The desired view releases changed owned fields of the deselected integration.
+		payload, _ := json.Marshal(map[string]any{"converged": false, "fingerprint": strings.Repeat("d", 64), "released": []string{"/approval_policy"}})
+		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
 	if len(command) == 3 && command[0] == "sha256sum" && command[2] == fixture.destination {
 		if instance == fixture.unreadable {
@@ -456,7 +466,7 @@ func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, ins
 // state, or cannot be inspected, the repair refuses instead of first rewriting
 // the change. Another yard's independent read failure is reported together.
 func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
-	for _, desired := range []string{"conflict", "unavailable", "", "conflict+unreadable-named"} {
+	for _, desired := range []string{"conflict", "unavailable", "", "conflict+unreadable-named", "release"} {
 		t.Run("desired="+desired, func(t *testing.T) {
 			named := desired == "conflict+unreadable-named"
 			fixture := newPendingInitFixture(t, named, map[string]string{"default": "CODING_TOOL_INTEGRATIONS=\n"})
@@ -491,6 +501,18 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 			if desired == "" {
 				if err != nil || observation.Converged || !owner.integrationPlans["default"].Changed || executor.desiredReads == 0 {
 					t.Fatalf("retirable pending selection blocked the repair: %#v %v", observation, err)
+				}
+				return
+			}
+			if desired == "release" {
+				// Plain init releases the changed fields in place; the repair must not rewrite them first.
+				var release pendingInitOwnershipRelease
+				if !errors.As(err, &release) || release.yard != "default" || !slices.Equal(release.paths, []string{"/home/dev/.codex/config.toml"}) || !release.ActivationPendingConfiguration() {
+					t.Fatalf("repair would rewrite fields pending init releases: %#v %v", observation, err)
+				}
+				message, retry := release.ActivationDiagnostic()
+				if !strings.HasPrefix(message, "yard default: integration configuration awaiting yard init releases changed owned fields in place") || retry != shellquote.Command([]string{"yard", "-Y", "default", "init"}) || len(message) > 512 {
+					t.Fatalf("diagnostic=%q retry=%q", message, retry)
 				}
 				return
 			}
