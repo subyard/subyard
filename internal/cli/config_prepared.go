@@ -321,11 +321,9 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 			if err := prospective.checkLocked(true); err != nil {
 				return err
 			}
-			if request.sourceGuard != nil {
-				if err := request.sourceGuard(); err != nil {
-					return err
-				}
-			}
+			// The source guard runs native inspections that read this configuration
+			// root, so it ran above; its caller holds the release update lock until
+			// this write returns.
 			for _, capture := range captures {
 				if capture.prepared != nil {
 					if err := capture.prepared.Apply(ctx); err != nil {
