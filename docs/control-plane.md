@@ -1276,6 +1276,12 @@ output; any other value stays bound. To leave the stopped update, re-run the
 its own launcher whatever the active release is. An active launcher from 0.26.0 or later also
 accepts `yard update --version 0.28.1`.
 
+0.28.0 and 0.28.1 stop the same way at such a yard whose project carries an explicit
+`restricted.virtual-machines.lowlevel=block`, which the start policy replaces with the grant.
+Later releases treat that value as product output too. A replacement must be newer than the
+release the unfinished journal selected, so a stop under 0.28.1 is left only with a release newer
+than 0.28.1.
+
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone
 installer from a newer supported patch release; the active v0.11.1 command remains fail-closed.

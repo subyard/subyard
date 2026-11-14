@@ -622,10 +622,14 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 }
 
 func TestRegisteredDesiredIgnoresVMRestartOutputs(t *testing.T) {
-	for _, guest := range []bool{false, true} {
-		t.Run(fmt.Sprintf("guest-%t", guest), func(t *testing.T) {
+	// The plan is taken with the project grant absent or explicitly blocked.
+	for _, variant := range []struct {
+		guest   bool
+		planned string
+	}{{false, "absent"}, {false, "block"}, {true, "absent"}, {true, "block"}} {
+		t.Run(fmt.Sprintf("guest-%t/planned-%s", variant.guest, variant.planned), func(t *testing.T) {
 			owner, tmp, native, _ := pairedRegisteredOwners(t)
-			if guest {
+			if variant.guest {
 				owner = tmp
 			}
 			original := owner.LoadTargets
@@ -654,11 +658,15 @@ func TestRegisteredDesiredIgnoresVMRestartOutputs(t *testing.T) {
 			}
 			set("volatile.eth0.host_name", "tapBEFORE")
 			set("volatile.vm.rtc_adjustment", "-1")
+			if variant.planned == "block" {
+				native.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = "block"
+			}
 			before := desired()
 			set("volatile.eth0.host_name", "tapAFTER")
 			set("volatile.vm.rtc_adjustment", "-2")
 			set("volatile.vm.needs_reset", "true")
-			// The product start policy writes the owner device override and its project grant.
+			// The product start policy writes the owner device override and replaces an
+			// absent or blocked project grant with "allow".
 			set("raw.qemu.conf", domain.VMRawQEMUConfig(false))
 			native.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = "allow"
 			if desired() != before {
@@ -670,7 +678,7 @@ func TestRegisteredDesiredIgnoresVMRestartOutputs(t *testing.T) {
 
 func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 	for _, guest := range []bool{false, true} {
-		for _, change := range []string{"malformed-clock", "noncanonical-clock", "clock-suffix", "container-clock", "reset-false", "reset-empty", "reset-suffix", "container-reset", "uuid", "generation", "vsock", "limits", "device", "lowlevel-block", "container-lowlevel"} {
+		for _, change := range []string{"malformed-clock", "noncanonical-clock", "clock-suffix", "container-clock", "reset-false", "reset-empty", "reset-suffix", "container-reset", "uuid", "generation", "vsock", "limits", "device", "project-policy", "container-lowlevel-block", "container-lowlevel"} {
 			t.Run(fmt.Sprintf("guest-%t/%s", guest, change), func(t *testing.T) {
 				container := strings.HasPrefix(change, "container-")
 				owner, tmp, native, _ := pairedRegisteredOwners(t)
@@ -722,16 +730,19 @@ func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 					key = "volatile.uuid.generation"
 				case "vsock":
 					key = "volatile.vsock_id"
-				case "lowlevel-block", "container-lowlevel":
-					value = map[string]string{"lowlevel-block": "block", "container-lowlevel": "allow"}[change]
+				case "container-lowlevel-block", "container-lowlevel":
+					value = map[string]string{"container-lowlevel-block": "block", "container-lowlevel": "allow"}[change]
 					native.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = value
+				case "project-policy":
+					// Another policy key of a VM yard's project stays bound.
+					native.Reconcile.ProjectConfig["restricted.devices.disk"] = "allow"
 				case "limits":
 					key = "limits.cpu"
 				case "device":
 					instance.Devices = maps.Clone(instance.Devices)
 					instance.Devices["foreign"] = map[string]string{"type": "disk", "source": "/foreign", "path": "/foreign"}
 				}
-				if change != "device" && !strings.Contains(change, "lowlevel") {
+				if change != "device" && change != "project-policy" && !strings.Contains(change, "lowlevel") {
 					for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
 						values[key] = value
 					}
