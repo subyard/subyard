@@ -1792,7 +1792,7 @@ os.write(1, result.stdout)
         self.assertTrue(self.refused(port))
 
     def test_acquire_retains_tcp_relay_until_release(self):
-        address = self.serve_control()
+        self.serve_control()
         lease = self.root / 'tcp-lease.json'
         environment = dict(os.environ, ANDROID_PUBLIC_ROOT=str(self.root))
         result = subprocess.run([sys.executable, '-B', str(ROOT / 'config/profiles/android/client.py'), 'acquire',
