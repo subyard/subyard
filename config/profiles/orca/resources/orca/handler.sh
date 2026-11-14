@@ -1303,7 +1303,7 @@ emit_sync_assessment() {
   observed=unready;decision=apply
   if codex_defaults_ready;then observed=custom-arguments-retained-or-stock-default-disabled;decision=skip;fi
   orca_step_add codex-defaults settings/codex-defaults "$observed" custom-arguments-retained-or-stock-default-disabled "$decision" \
-    'native Codex custom arguments are retained or stock default disabled' 'converge the bounded Orca Codex launch default'
+    'native Codex and Claude custom arguments are retained or stock defaults disabled' 'converge the bounded Orca Codex and Claude launch defaults'
   observed="$(orca_registration_observation)";decision=apply
   [ "$observed" != unavailable ] || die 'Orca native root catalog is unavailable'
   if [ "$observed" = registered ];then

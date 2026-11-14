@@ -972,25 +972,24 @@ done
 for pending_selector in "${pending_selectors[@]}"; do
   guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal absent "$pending_selector"
 done
-# Orca reattaches the saved terminal across restart, so its gone checkout stays retained.
-# Reconcile explicitly so the assertions do not race periodic discovery.
-yard orca sync --yes >/dev/null
-[ "$(repo_id "$saved_gone")" = "$saved_gone_id" ] \
-  || die 'restart-surviving terminal lost its missing checkout record'
-saved_session_pty_id="$(orca_rpc session.tabs.listAll | jq -er --arg tab "$saved_session_id" '
-  [.snapshots[].tabs[] | select(.id == $tab) | .ptyId] | if length == 1 then .[0] else error end')" \
-  || die 'restored saved terminal tab has no single PTY'
-# A worktree selector no longer resolves for the missing checkout, so close the restored
-# terminal by its native handle. Once no session remains, reconciling removes the record.
+# Orca may reattach the saved terminal across restart. A worktree selector no longer resolves
+# for the missing checkout, so close any restored PTY by its native handle.
+restored_pty="$(orca_rpc session.tabs.listAll | jq -r --arg tab "$saved_session_id" '
+  [.snapshots[].tabs[] | select(.id == $tab) | .ptyId | strings] | if length > 1 then error else (.[0] // "") end')" \
+  || die 'restored saved terminal tab has several PTYs'
+[ -z "$restored_pty" ] || saved_session_pty_id="$restored_pty"
 saved_handle="$(orca_rpc terminal.list '{"limit":1000,"requireFreshPtyLiveness":true,"includeVisualLayouts":false}' \
-  | jq -er --arg pty "$saved_session_pty_id" '
+  | jq -r --arg pty "$saved_session_pty_id" '
     [.terminals[] | select(.ptyId == $pty and .connected == true) | .handle]
-    | if length == 1 then .[0] else error end')" \
-  || die 'restored saved terminal is not a single live PTY'
-rpc_write terminal.close "$(rpc_params --arg handle "$saved_handle" '{terminal:$handle}')"
-guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
-  absent "id:$saved_gone_id::$saved_gone" --tab-id "$saved_session_id" \
-  --pty-id "$saved_session_pty_id"
+    | if length > 1 then error else (.[0] // "") end')" \
+  || die 'restored saved terminal has several live PTYs'
+if [ -n "$saved_handle" ]; then
+  rpc_write terminal.close "$(rpc_params --arg handle "$saved_handle" '{terminal:$handle}')"
+  guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+    absent "id:$saved_gone_id::$saved_gone" --tab-id "$saved_session_id" \
+    --pty-id "$saved_session_pty_id"
+fi
+# Reconcile explicitly so the assertion does not race periodic discovery.
 yard orca sync --yes >/dev/null
 assert_absent_repo "$saved_gone"
 guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \

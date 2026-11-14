@@ -251,6 +251,16 @@ access** for an Orca chat, sending the argument from a paired Desktop or configu
 custom Claude arguments is an explicit opt-out: Orca then approves commit and push in that
 chat without asking.
 
+Orca saves each chat's permission mode when the chat is created, so chats saved under the
+stock default keep Full access. The first project sync after this update, run by `yard init`,
+`yard orca sync` or an `orca up` that repairs the launch defaults, resets those saved Claude
+chats, including ones whose tab is closed, to Orca's default mode and reports how many it reset.
+A chat that is open during that pass keeps Full access, with a warning, until a later
+`yard orca sync` resets it. After the reset, choosing Full access again is respected.
+The reset finds chats through Orca's open tabs and Session History: a chat that never ran a
+turn and whose tab is closed appears in neither, and coverage of chats in other workspaces and
+worktrees has not been verified.
+
 Without the Claude integration, an Orca-installed Claude copy is reported as
 **unmanaged** by `yard integration status claude` and detailed `yard -Y NAME status`: self-updating,
 without Subyard's commit approval, persistence or instructions. Enabling Orca never
