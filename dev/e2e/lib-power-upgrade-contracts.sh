@@ -2,11 +2,15 @@
 # Shared assertions and state helpers for the power-upgrade and release-smoke fixtures.
 # Definitions only: callers own initialization, lease validation and cleanup traps.
 
-published_anchor() {
-  awk -F '\t' '$4 == "anchor" { row=$0; count++ }
-    END { if (count != 1) { print "expected exactly one published anchor" > "/dev/stderr"; exit 1 }; print row }' \
+published_role() {
+  awk -F '\t' -v role="$1" '$4 == role { row=$0; count++ }
+    END { if (count != 1) { print "expected exactly one published " role > "/dev/stderr"; exit 1 }; print row }' \
     "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
 }
+# The oldest accepted direct-update source.
+published_anchor() { published_role anchor; }
+# The release a below-anchor install steps through on its way to a newer candidate.
+published_hop() { published_role hop; }
 
 operator_env() {
   local uid

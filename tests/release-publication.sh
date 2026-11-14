@@ -865,6 +865,14 @@ class Contracts(unittest.TestCase):
             git("add", "dev")
             git("commit", "-q", "-m", "pin side-branch release")
             self.assertEqual(REAL_BASELINE_REFUSALS("1.2.4", "HEAD"), [])
+            # The hop is a fix release of the anchor and also a direct baseline.
+            git("tag", "v1.2.4")
+            self.assertIn("v1.2.4 is missing", REAL_BASELINE_REFUSALS("1.2.5", "HEAD")[0])
+            with pins.open("a") as stream:
+                stream.write("1.2.4\t" + "e" * 64 + "\t" + "f" * 64 + "\thop\n")
+            git("add", "dev")
+            git("commit", "-q", "-m", "pin hop release")
+            self.assertEqual(REAL_BASELINE_REFUSALS("1.2.5", "HEAD"), [])
             # Hotfix branches retain the original three-column direct-pin format.
             pins.write_text("\n".join("\t".join(line.split("\t")[:3]) for line in pins.read_text().splitlines()) + "\n")
             git("add", "dev")

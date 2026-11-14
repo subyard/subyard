@@ -67,7 +67,7 @@ class SourceAnchorRefusalTest(unittest.TestCase):
                         (runtime/'current').symlink_to('releases/target')
                     return subprocess.CompletedProcess(command, 0 if failure == 'success' or (failure == 'check-json' and '--check' in command) else 1,
                         json.dumps({'outcome':{'reachedGoal':False,'status':'operator-action-required'}}) if failure == 'check-json' else '',
-                        'source-anchor-required: ' + ('' if failure == 'guidance' else 'next: yard update --version ' + module['published_anchor'](ROOT)[0] + ' && yard update'))
+                        'source-anchor-required: ' + ('' if failure == 'guidance' else 'next: yard update --version ' + module['published_hop'](ROOT)[0] + ' && yard update'))
                 with patch.dict(verify.__globals__, {'run_process':run}):
                     if failure in ('none', 'check-json'):
                         verify(fixture, root/'subyard-install.sh')

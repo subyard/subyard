@@ -66,10 +66,10 @@ def plan(root=ROOT):
         version, _, _, expectation = line.split("\t")
         if expectation == "pin":
             continue
-        catalog_version = "anchor" if expectation == "anchor" else version
+        catalog_version = expectation if expectation in ("anchor", "hop") else version
         if "vm:published-upgrade/" + catalog_version not in declared:
             include.append({"id": "published:" + version,
-                            "command": published_upgrade(version, "none" if expectation in ("direct", "anchor") else "refusal")})
+                            "command": published_upgrade(version, "none" if expectation in ("direct", "anchor", "hop") else "refusal")})
     include += [veranda_short(name, options) for name, options in VERANDA.items()]
     include += [veranda_short(name, options) | {"manual": True} for name, options in VERANDA_MANUAL.items()]
     missing = sorted(SPLIT - set(declared))

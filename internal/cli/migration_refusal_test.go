@@ -281,13 +281,13 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeReleaseTransitionTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), ledger, 0600)
-			anchorVersion := releaseruntime.UpdateAnchorVersion
+			hopVersion := releaseruntime.UpdateHopVersion
 			candidateVersion := "0.29.0-test"
 			rollback := state == "rollback"
 			oldVersion := "0.27.0"
-			old, anchor, candidate := releasetransition.ReleaseID(oldVersion+"-aaaaaaaaaaaa"), releasetransition.ReleaseID(anchorVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
+			old, anchor, candidate := releasetransition.ReleaseID(oldVersion+"-aaaaaaaaaaaa"), releasetransition.ReleaseID(hopVersion+"-bbbbbbbbbbbb"), releasetransition.ReleaseID(candidateVersion+"-cccccccccccc")
 			oldDigest := writeSealedRollbackTarget(t, runtimeRoot, string(old), oldVersion, registry)
-			anchorDigest := writeSealedRollbackTarget(t, runtimeRoot, string(anchor), anchorVersion, registry)
+			anchorDigest := writeSealedRollbackTarget(t, runtimeRoot, string(anchor), hopVersion, registry)
 			candidateDigest := writeSealedRollbackTarget(t, runtimeRoot, string(candidate), candidateVersion, registry)
 			from, target, direction, artifact := old, anchor, releasetransition.DirectionActivateTarget, anchorDigest
 			if rollback {
@@ -302,7 +302,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 				}
 			}
 			savedVersion := Version
-			Version = anchorVersion
+			Version = hopVersion
 			t.Cleanup(func() { Version = savedVersion })
 			owner := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: home, Target: target, Direction: direction, ArtifactDigest: artifact}
 			reconciler := &processDriftReconciler{failOnce: true}
@@ -364,7 +364,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			if preactivation || rollback {
 				next := "yard update && yard update"
 				if rollback {
-					next = "yard update && yard update --version " + anchorVersion + " && yard update"
+					next = "yard update && yard update --version " + hopVersion + " && yard update"
 				}
 				if refusal == nil || !strings.Contains(refusal.Error(), "next: "+next) || strings.Count(refusal.Error(), "next:") != 1 {
 					t.Fatalf("unsafe continuation %q: %v", next, refusal)
@@ -373,7 +373,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 				if err := releaseruntime.CheckSourcePolicy(context.Background(), owner); err != nil {
 					t.Fatal(err)
 				}
-				Version = anchorVersion
+				Version = hopVersion
 				owner.Mode, owner.Execution = releasetransition.ProcessInspect, nil
 				resume := run(owner)
 				owner.Mode = releasetransition.ProcessConverge
@@ -385,12 +385,12 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 				refusal = releaseruntime.CheckSourcePolicy(context.Background(), request)
 				if rollback {
 					// Step 2: the completed old release updates to the anchor.
-					if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --version "+anchorVersion+" && yard update") || strings.Contains(refusal.Error(), "unfinished") {
+					if refusal == nil || !strings.Contains(refusal.Error(), "next: yard update --version "+hopVersion+" && yard update") || strings.Contains(refusal.Error(), "unfinished") {
 						t.Fatalf("completed owner repeated the same step: %v", refusal)
 					}
 					owner.Direction, owner.Target, owner.ArtifactDigest = releasetransition.DirectionActivateTarget, anchor, anchorDigest
 					owner.Mode, owner.Execution, owner.Replacement = releasetransition.ProcessInspect, nil, nil
-					Version = anchorVersion
+					Version = hopVersion
 					plan = run(owner)
 					owner.Mode = releasetransition.ProcessConverge
 					owner.Execution = &releasetransition.Execution{Plan: plan.Inspection.Plan, Authorization: "confirmed"}
@@ -412,7 +412,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 				ordinary := request
 				ordinary.Target = journal.Goal.Target
 				inspection := run(ordinary).Inspection
-				if inspection == nil || inspection.Outcome == nil || inspection.Outcome.Retry == "" || strings.Contains(inspection.Outcome.Retry, "--version "+anchorVersion) {
+				if inspection == nil || inspection.Outcome == nil || inspection.Outcome.Retry == "" || strings.Contains(inspection.Outcome.Retry, "--version "+hopVersion) {
 					t.Fatalf("plain inspection lost engine recovery: %#v", inspection)
 				}
 				request.Replacement = &releasetransition.JournalReplacement{Transaction: journal.Transaction, Fingerprint: before.Fingerprint, Reason: releasetransition.JournalReplacementNewerRelease}

@@ -11,8 +11,11 @@ TOKEN=$((16#$RUN_ID))
 VERSION="${1:-}"
 # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
 . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
-IFS=$'\t' read -r ANCHOR_VERSION _ ANCHOR_SHA256 _ < <(published_anchor)
+IFS=$'\t' read -r ANCHOR_VERSION _ _ _ < <(published_anchor)
+# Below-anchor sources step through the hop, a fix release of the anchor series.
+IFS=$'\t' read -r HOP_VERSION _ HOP_SHA256 _ < <(published_hop)
 [ "$VERSION" != anchor ] || VERSION="$ANCHOR_VERSION"
+[ "$VERSION" != hop ] || VERSION="$HOP_VERSION"
 PUBLISHED_MODE=direct
 case "${2:-}" in refusal|chain) PUBLISHED_MODE="$2" ;; esac
 published_agent_selection() {
@@ -83,7 +86,7 @@ print(hashlib.sha256(raw).hexdigest())'
 PINS="$(awk -F '\t' -v version="$VERSION" '$1 == version' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")"
 [ -n "$PINS" ] || { printf 'published-upgrade: unpinned baseline %q\n' "$VERSION" >&2; exit 2; }
 # The first boundary release retains the uninterrupted chain and both cuts.
-# Ready .27 and the anchor share epochs: zero-step updates skip migrating.
+# Ready .27 and the hop share epochs: zero-step updates skip migrating.
 # Each child retains the existing marked lifecycle and cleanup in this lane.
 if [ "$PUBLISHED_MODE" = chain ] && [ "$VERSION" = 0.27.0 ] && [ -z "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" ]; then
   for checkpoint in uninterrupted authorized reconciling; do
@@ -100,7 +103,7 @@ set -- run "$TOKEN"
 
 IFS=$'\t' read -r OLD_VERSION OLD_INSTALLER_SHA256 OLD_BUNDLE_SHA256 EXPECTATION <<<"$PINS"
 if [ "$PUBLISHED_MODE" = direct ]; then
-  [[ "$EXPECTATION" = direct || "$EXPECTATION" = anchor ]] || die 'a refusal baseline cannot run a direct upgrade'
+  [[ "$EXPECTATION" = direct || "$EXPECTATION" = anchor || "$EXPECTATION" = hop ]] || die 'a refusal baseline cannot run a direct upgrade'
 else
   [[ "$EXPECTATION" = refusal || ( "$PUBLISHED_MODE" = chain && "$EXPECTATION" = pin ) ]] \
     || die 'refusal and chain modes require a refusal or chain pin baseline'
@@ -174,8 +177,8 @@ assert_source_refusal() {
         (.outcome.status | type == "string" and . != "ready" and . != "")' "$STATE_ROOT/refusal-$arguments.log" >/dev/null \
         || die "$arguments did not report refusal (exit=$status)"
     fi
-    grep -Fq "yard update --version $ANCHOR_VERSION" "$STATE_ROOT/refusal-$arguments.stderr" \
-      || die "$arguments lost the anchor command (exit=$status)"
+    grep -Fq "yard update --version $HOP_VERSION" "$STATE_ROOT/refusal-$arguments.stderr" \
+      || die "$arguments lost the hop command (exit=$status)"
     [ "$(protected_settings_digest)" = "$settings" ] \
       && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$before_links" ] \
       && [ "$(instance_uuid)" = "$UUID_BEFORE" ] \
@@ -193,7 +196,7 @@ stage_candidate() {
   case "$staged_path" in "$OPERATOR_HOME/.subyard/runtime/releases/$CANDIDATE_VERSION-"*) ;; *) die 'invalid staged candidate path' ;; esac
 }
 
-interrupt_anchor_hop() {
+interrupt_published_hop() {
   local checkpoint="$1" before links transaction fingerprint rc=0 hop_rc=0 evidence
   case "$checkpoint" in authorized|reconciling) ;; *) die 'invalid published hop checkpoint' ;; esac
   stage_candidate
@@ -203,7 +206,7 @@ interrupt_anchor_hop() {
   # Observe and stop the real published owner; never edit its journal or links.
   # The operator cannot read this checkout, so it runs a private copy of the observer.
   sudo -n install -o "$OPERATOR" -g "$OPERATOR" -m 0600 "$ROOT/dev/verify-release-upgrades.py" "$OPERATOR_HOME/hop-observer.py"
-  operator_env python3 - "$OPERATOR_HOME/hop-observer.py" "$OPERATOR_HOME/.local/bin/yard" "$ANCHOR_VERSION" "$V2_JOURNAL" \
+  operator_env python3 - "$OPERATOR_HOME/hop-observer.py" "$OPERATOR_HOME/.local/bin/yard" "$HOP_VERSION" "$V2_JOURNAL" \
     "$OPERATOR_HOME/hop-interrupted" "$checkpoint" > "$STATE_ROOT/hop-interrupt.log" 2>&1 <<'PYTHON' || hop_rc=$?
 import os, pathlib, runpy, sys
 observer, launcher, version, journal, marker, checkpoint = sys.argv[1:]
@@ -213,9 +216,9 @@ result = run([launcher, "update", "--version", version, "--yes"], os.environ.cop
              allow_failed_checkpoint=checkpoint == "reconciling")
 print(result.stdout, result.stderr)
 if result.returncode == 0 or not pathlib.Path(marker).is_file():
-    raise SystemExit("published anchor hop did not reach the observed interruption")
+    raise SystemExit("published hop did not reach the observed interruption")
 PYTHON
-  [ "$hop_rc" = 0 ] || { tail -c 16384 "$STATE_ROOT/hop-interrupt.log" >&2; die "published anchor hop interruption at $checkpoint failed"; }
+  [ "$hop_rc" = 0 ] || { tail -c 16384 "$STATE_ROOT/hop-interrupt.log" >&2; die "published hop interruption at $checkpoint failed"; }
   if [ "$checkpoint" = reconciling ]; then
     if operator_env jq -e 'has("nativeFailureExit")' "$OPERATOR_HOME/hop-interrupted" >/dev/null; then
       operator_env test -f "$ACTIVATION_FAULT_PROBE" || die 'reconciling native failure was not the owned interruption'
@@ -225,16 +228,16 @@ PYTHON
   operator_env jq -e --arg checkpoint "$checkpoint" --arg from "${OLD_RELEASE_TARGET#releases/}" \
     '.checkpoint == $checkpoint and .releases.from == $from and .goal.direction == "activate-target"' "$V2_JOURNAL" >/dev/null \
     || die 'interruption missed the authentic published hop'
-  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$ANCHOR_VERSION/subyard-$ANCHOR_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$ANCHOR_SHA256" ] \
-    || die 'interrupted hop used an archive different from the anchor pin'
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$HOP_VERSION/subyard-$HOP_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$HOP_SHA256" ] \
+    || die 'interrupted hop used an archive different from the hop pin'
   operator_env cat "$V2_JOURNAL" > "$STATE_ROOT/hop-before.json"
   evidence="$ROOT/.build/published-upgrade-$OLD_VERSION-$checkpoint"
   install -d -m 0700 "$evidence"
   cp "$STATE_ROOT/hop-before.json" "$STATE_ROOT/hop-interrupt.log" "$evidence/"
   if grep -Fq "yard update --version $CANDIDATE_VERSION" "$STATE_ROOT/hop-interrupt.log"; then
-    printf 'anchor_newer_hint=true\n' > "$evidence/hint.txt"
+    printf 'hop_newer_hint=true\n' > "$evidence/hint.txt"
   else
-    printf 'anchor_newer_hint=false (owner process stopped at checkpoint)\n' > "$evidence/hint.txt"
+    printf 'hop_newer_hint=false (owner process stopped at checkpoint)\n' > "$evidence/hint.txt"
   fi
   if [ "$checkpoint" = authorized ]; then
     before="$(protected_settings_digest)"
@@ -264,7 +267,7 @@ PYTHON
   # candidate, whose own inspection/consent decides whether takeover is safe.
   [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$(jq -er .goal.target "$STATE_ROOT/hop-before.json" | sed 's|^|releases/|')" ] \
     && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$OLD_RELEASE_TARGET" ] \
-    || die 'reconciling hop did not activate the exact anchor links'
+    || die 'reconciling hop did not activate the exact hop links'
   operator_env "$staged_path/bin/yard" update --check --offline --version "$CANDIDATE_VERSION" --json \
     > "$STATE_ROOT/hop-replacement.json" 2> "$STATE_ROOT/hop-replacement.stderr"
   jq -e '.resume == null and (.blockers | length) == 0 and
@@ -280,7 +283,7 @@ PYTHON
   CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   assert_ready
   cp "$STATE_ROOT/hop-replacement.json" "$STATE_ROOT/hop-replacement.stderr" "$STATE_ROOT/hop-replaced.log" "$evidence/"
-  ok 'activated anchor hop replaced with fresh consent and the original journal preserved'
+  ok 'activated hop replaced with fresh consent and the original journal preserved'
   exit 0
 }
 
@@ -341,23 +344,23 @@ if [ "$PUBLISHED_MODE" != direct ]; then
   [ "$PUBLISHED_MODE" != refusal ] || exit 0
   # Chain catalog entries exist only for the first boundary release.
   if [ "$OLD_VERSION" = 0.27.0 ] && [[ "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" = authorized || "${SUBYARD_PUBLISHED_HOP_CHECKPOINT:-}" = reconciling ]]; then
-    interrupt_anchor_hop "$SUBYARD_PUBLISHED_HOP_CHECKPOINT"
+    interrupt_published_hop "$SUBYARD_PUBLISHED_HOP_CHECKPOINT"
   else
-    operator_yard update --version "$ANCHOR_VERSION" --yes
+    operator_yard update --version "$HOP_VERSION" --yes
   fi
-  anchor_target="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
-  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$ANCHOR_VERSION/subyard-$ANCHOR_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$ANCHOR_SHA256" ] \
-    || die 'anchor archive checksum changed'
-  assert_ready "$ANCHOR_VERSION" "$anchor_target"
+  hop_target="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$HOP_VERSION/subyard-$HOP_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$HOP_SHA256" ] \
+    || die 'hop archive checksum changed'
+  assert_ready "$HOP_VERSION" "$hop_target"
   # The actual old runtime is still previous here. Staged candidate tooling
   # must refuse that rollback without first activating the candidate.
   stage_candidate
-  anchor_settings="$(protected_settings_digest)"
+  hop_settings="$(protected_settings_digest)"
   rollback_status=0
   operator_env "$staged_path/bin/yard" update --rollback --yes > "$STATE_ROOT/rollback-refusal.log" 2>&1 || rollback_status=$?
   [ "$rollback_status" != 0 ] && grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/rollback-refusal.log" \
-    && [ "$(protected_settings_digest)" = "$anchor_settings" ] \
-    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$anchor_target" ] \
+    && [ "$(protected_settings_digest)" = "$hop_settings" ] \
+    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "$hop_target" ] \
     || die 'below-anchor rollback was not refused without mutation'
 fi
 

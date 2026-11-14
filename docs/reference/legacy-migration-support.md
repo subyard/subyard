@@ -10,21 +10,31 @@ updated: 2026-11-10
 
 Direct update requires installed **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0
 refuse with `source-anchor-required` before changing active runtime links, journals, settings or data.
-Run the exact published anchor, then retry the latest release:
+Run the published hop release, then retry the latest release:
 
 ```sh
-yard update --version 0.28.0
+yard update --version 0.28.1
 yard update
 ```
+
+The **anchor** (v0.28.0, `UpdateAnchorVersion`) is the oldest accepted source and the rollback floor;
+installs that completed on v0.28.0 update directly. The **hop** (v0.28.1, `UpdateHopVersion`) is the
+release the refusal names. It is a fix release of the anchor series, because published v0.28.0 can
+stop an update from an older release at its first running VM yard with a pending disk-backed `/tmp`
+migration. Such a stopped install keeps an unfinished v0.28.0 journal that later releases cannot
+replace: re-run the [installer](../getting-started.md) for v0.28.1, then update normally. Launchers
+before v0.26.0 never reach the later release's refusal; see
+[Release migrations](../control-plane.md#release-migrations).
 
 The same boundary applies to the installer over an existing runtime and offline update. Immutable
 staging remains available for cleanup tooling. Rollback below v0.28.0 refuses; compatible v0.28.x
 rollback remains supported. Incomplete or contradictory state cannot be repaired by comparing
 versions: exact unfinished transactions retain their sealed owner, artifacts and evidence.
 Any other unfinished transition while the installed release is below v0.28.0 refuses once with
-`next: yard update && yard update --version 0.28.0 && yard update`, or `yard update && yard update`
+`next: yard update && yard update --version 0.28.1 && yard update`, or `yard update && yard update`
 when it already targets v0.28.0 or newer: the installed release first finishes its own journal. If
-it cannot, the repair path is a v0.28.x release that owns that recovery; do not uninstall.
+it cannot, re-run the v0.28.1 installer or use a later v0.28.x release that owns that recovery; do
+not uninstall.
 The anchor does not change `minimumEpochs`, persistent formats or retained history readers.
 
 Sources before **v0.11.0** retain full uninstall followed by the user's separate clean installation.
@@ -113,15 +123,17 @@ projects retain their ordinary repeatable initialization contract.
 Published direct baselines are v0.28.0, the latest v0.28.x patch if different, and the previous
 published release if distinct. The immutable installer and archive digests live in
 [`published-upgrade-baselines.tsv`](../../dev/e2e/published-upgrade-baselines.tsv); its fourth column
-labels `anchor` (also direct), `direct` and `refusal` expectations; `pin` rows supply immutable assets for fixture lookups
-only and never create matrix or periodic checks. Release preparation refuses if the previous published
-release is not a direct or anchor row or local release tags are unavailable. Candidate versions must sort
-above their direct baselines.
+labels `anchor` and `hop` (both also direct, exactly one each), `direct` and `refusal` expectations;
+`pin` rows supply immutable assets for fixture lookups only and never create matrix or periodic
+checks. Release preparation refuses if the previous published release is not a direct, anchor or hop
+row or local release tags are unavailable. Candidate versions must sort above their direct baselines.
 
-Refusal coverage includes v0.11.0, v0.17.3 and v0.27.0; pre-v0.11.0 removal retains its own pinned
-harness and full-uninstall lane. The first boundary release additionally runs
-v0.11.0 → v0.28.0 → candidate and v0.27.0 → v0.28.0 → candidate. The complete old-source matrix
-remains frozen in the v0.28.0 tag; later candidate acceptance does not repeat it.
+Refusal coverage includes v0.11.0, v0.17.3 and v0.27.0, each asserting the hop command; pre-v0.11.0
+removal retains its own pinned harness and full-uninstall lane. The first boundary release
+additionally runs v0.11.0 → v0.28.1 → candidate and v0.27.0 → v0.28.1 → candidate. Fixtures that step
+an older install through the boundary use the hop; fixtures whose subject starts at an accepted
+source use the anchor. The complete old-source matrix remains frozen in the v0.28.0 tag; later
+candidate acceptance does not repeat it.
 
 ## Moving the update boundary
 
@@ -131,16 +143,21 @@ Move the boundary when the supported matrix's cost or age justifies retiring a s
 2. Change `UpdateAnchorVersion` and mark its verified TSV row `anchor` (exactly one).
    The anchor also supplies the direct baseline; retain a `direct` row for the previous release
    when distinct, and choose representative below-anchor `refusal` rows.
-3. Add one-time chain catalog entries for the first boundary release, then remove them after
-   that release. Each release refuses with its own anchor: successive boundaries require
-   operator-directed hops through those anchors, one by one.
+   Set `UpdateHopVersion` to the published fix release of the anchor series that completes the
+   hop from older sources, and mark its own verified row `hop` (exactly one, above the anchor).
+   Refusals print the hop; admission and rollback use the anchor.
+3. Add one-time chain catalog entries through the hop for the first boundary release, then
+   remove them after that release. Each release refuses with its own hop: successive boundaries
+   require operator-directed hops, one by one.
 4. Review each fixture: is its subject reachable from an install at the new anchor? Rebase
    reachable subjects onto the anchor, retain older creation pins only for retained-state
    subjects, and remove frozen paths. Run the owning host-free and physical checks.
 5. Remove obsolete product code later as a separate measured change; changing the source
    boundary alone neither deletes history readers nor raises epoch floors.
 
-The TSV/constant contract and shared fixture readers keep the anchor selection synchronized.
+The TSV/constant contract (`tests/release-acceptance.sh`: one anchor and one hop row, each equal to
+its constant, hop at or above the anchor) and the shared fixture readers `published_anchor` and
+`published_hop` keep both selections synchronized.
 Post-activation takeover of an anchor journal relies on the candidate still reconciling the
 anchor's activated state and on intact migration authority; removing that code makes takeover a
 refusal again. A defective hop is repaired by an anchor-series fix release, not a bridge release.

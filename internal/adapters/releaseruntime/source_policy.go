@@ -19,7 +19,15 @@ import (
 )
 
 const MinimumSourceVersion = "0.11.0"
+
+// UpdateAnchorVersion is the oldest installed release a direct update accepts
+// and the rollback floor.
 const UpdateAnchorVersion = "0.28.0"
+
+// UpdateHopVersion is the release a below-anchor source updates to first. It is
+// at least the anchor: a fix release that completes the hop where the anchor
+// itself can stop.
+const UpdateHopVersion = "0.28.1"
 
 const LegacyReinstallGuidance = "Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately."
 
@@ -32,7 +40,7 @@ func sourceVersionError(version string) error {
 		return errors.New(LegacyReinstallGuidance)
 	}
 	if parsed.LT(semver.MustParse(UpdateAnchorVersion)) {
-		return fmt.Errorf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: yard update --version %s && yard update", version, UpdateAnchorVersion, UpdateAnchorVersion)
+		return fmt.Errorf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: yard update --version %s && yard update", version, UpdateAnchorVersion, UpdateHopVersion)
 	}
 	return nil
 }
@@ -41,13 +49,13 @@ func sourceVersionError(version string) error {
 // release that started it: plain yard update resumes its own journal on every
 // supported release. It never predicts which journals another release replaces.
 func unfinishedBelowAnchorError(journal releasetransition.JournalRecord) error {
-	anchor := semver.MustParse(UpdateAnchorVersion)
-	next := "yard update && yard update --version " + UpdateAnchorVersion + " && yard update"
+	anchor, hop := semver.MustParse(UpdateAnchorVersion), semver.MustParse(UpdateHopVersion)
+	next := "yard update && yard update --version " + UpdateHopVersion + " && yard update"
 	if target, err := releasetransition.ReleaseIDVersion(journal.Goal.Target); err == nil &&
 		journal.Goal.Direction == releasetransition.DirectionActivateTarget && target.GTE(anchor) {
 		next = "yard update && yard update"
 	}
-	return fmt.Errorf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: %s\nThis release cannot replace it. If the installed release cannot finish it, a v%d.%d.x fix release is the repair path. Do not uninstall.", next, anchor.Major, anchor.Minor)
+	return fmt.Errorf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: %s\nThis release cannot replace it. If the installed release cannot finish it, re-run the v%s installer or use a later v%d.%d.x fix release. Do not uninstall.", next, UpdateHopVersion, hop.Major, hop.Minor)
 }
 
 // VerifyLegacyUninstallSource recognizes the sealed historical project-creator

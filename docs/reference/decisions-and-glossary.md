@@ -419,12 +419,14 @@ supported V2 recovery and checkpoint-reader contracts remain independent; see th
 [support policy](legacy-migration-support.md).
 
 For releases above 0.28.x, direct update and new rollback targets require v0.28.0 or newer.
-Sources from v0.11.0 to below that anchor first run `yard update --version 0.28.0`, then
-`yard update` again. The published anchor and its assets remain available; there is no automatic
-chain, new bridge release, state format or epoch-floor increase. This explicitly retires fresh
+Sources from v0.11.0 to below that anchor first run `yard update --version 0.28.1`, then
+`yard update` again. The hop is a separate fix release of the anchor series because published
+0.28.0 can stop with a running VM yard; installs completed on 0.28.0 stay accepted. The published
+anchor, the hop and their assets remain available; there is no automatic chain, new bridge
+release, state format or epoch-floor increase. This explicitly retires fresh
 pre-anchor migration coverage from later candidates; its full matrix stays in the v0.28.0 tag.
 Accepted history readers and exact unfinished-owner recovery remain supported. The first boundary
-release retains two physical chains through the anchor and separate refusal cases. Follow
+release retains two physical chains through the hop and separate refusal cases. Follow
 [Moving the update boundary](legacy-migration-support.md#moving-the-update-boundary) for later moves.
 
 The domain upgrade floor is expressed in epochs, separately from the source-version boundary and

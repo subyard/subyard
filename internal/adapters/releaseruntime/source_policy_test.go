@@ -98,7 +98,7 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 						t.Fatalf("damaged supported source lost its non-destructive refusal: %v", err)
 					}
 				} else if semver.MustParse(scenario.version).GTE(semver.MustParse(MinimumSourceVersion)) {
-					if !strings.Contains(err.Error(), "source-anchor-required") || (!strings.Contains(scenario.name, "rollback") && !strings.Contains(err.Error(), "yard update --version "+UpdateAnchorVersion)) || strings.Contains(err.Error(), "uninstall") {
+					if !strings.Contains(err.Error(), "source-anchor-required") || (!strings.Contains(scenario.name, "rollback") && !strings.Contains(err.Error(), "yard update --version "+UpdateHopVersion)) || strings.Contains(err.Error(), "uninstall") {
 						t.Fatalf("missing anchor guidance: %v", err)
 					}
 				} else if !strings.Contains(err.Error(), "uninstall --full") {
@@ -118,13 +118,13 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 // separately validates checkpoint/link consistency, replacement bindings and consent.
 func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 	// Literal expectations: moving the anchor must revisit this table.
-	if UpdateAnchorVersion != "0.28.0" {
-		t.Fatalf("update the literal anchor expectations for v%s", UpdateAnchorVersion)
+	if UpdateAnchorVersion != "0.28.0" || UpdateHopVersion != "0.28.1" {
+		t.Fatalf("update the literal anchor and hop expectations for v%s and v%s", UpdateAnchorVersion, UpdateHopVersion)
 	}
 	const (
-		replace = "yard update --version 0.28.0 && yard update"
+		replace = "yard update --version 0.28.1 && yard update"
 		resume  = "yard update && yard update"
-		chain   = "yard update && yard update --version 0.28.0 && yard update"
+		chain   = "yard update && yard update --version 0.28.1 && yard update"
 		legacy  = "legacy"
 	)
 	modern := semver.MustParse(UpdateAnchorVersion)
@@ -137,8 +137,15 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 				name, from, target string
 				want               map[string]string
 			}{
-				{"hop", "0.27.0", "0.28.0", map[string]string{
+				{"anchor hop", "0.27.0", "0.28.0", map[string]string{
 					"from/complete": replace, "from/target": resume, "from/previous": chain,
+				}},
+				{"hop", "0.27.0", "0.28.1", map[string]string{
+					"from/complete": replace, "from/target": resume, "from/previous": chain,
+				}},
+				{"below-anchor journal", "0.21.3", "0.27.0", map[string]string{
+					"from/complete": replace, "from/target": chain, "from/previous": chain,
+					"target/complete": replace, "target/target": chain, "target/previous": chain,
 				}},
 				{"pre-floor", "0.10.0", "0.20.0", map[string]string{
 					"from/complete": legacy, "from/target": legacy, "from/previous": legacy,
@@ -236,7 +243,7 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 								!strings.Contains(err.Error(), "next: "+next+"\n") && !strings.HasSuffix(err.Error(), "next: "+next) {
 								t.Fatalf("lost single continuation %q: %v", next, err)
 							}
-							if unfinished && (!strings.Contains(err.Error(), "Do not uninstall.") || strings.Contains(err.Error(), "uninstall --full")) {
+							if unfinished && (!strings.Contains(err.Error(), "re-run the v0.28.1 installer") || !strings.Contains(err.Error(), "Do not uninstall.") || strings.Contains(err.Error(), "uninstall --full")) {
 								t.Fatalf("lost repair guidance: %v", err)
 							}
 						}
@@ -282,6 +289,20 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The printed hop must itself be an admitted source, so its own next update is direct.
+func TestUpdateHopVersionIsAdmittedAtOrAboveAnchor(t *testing.T) {
+	hop, err := semver.Parse(UpdateHopVersion)
+	if err != nil || hop.String() != UpdateHopVersion || len(hop.Pre) != 0 {
+		t.Fatalf("hop must be a plain release version: %q %v", UpdateHopVersion, err)
+	}
+	if hop.LT(semver.MustParse(UpdateAnchorVersion)) {
+		t.Fatalf("hop v%s is below the anchor v%s", UpdateHopVersion, UpdateAnchorVersion)
+	}
+	if err := sourceVersionError(UpdateHopVersion); err != nil {
+		t.Fatalf("hop is not an admitted source: %v", err)
 	}
 }
 
@@ -409,7 +430,7 @@ func TestSourceVersionRefusalsDistinguishInvalidFromUnsupported(t *testing.T) {
 					t.Fatal("invalid version became uninstall guidance", err)
 				}
 			case "0.11.0", "0.26.0", "0.26.0-p0.15", UpdateAnchorVersion + "-rc.1":
-				want := fmt.Sprintf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: yard update --version %s && yard update", version, UpdateAnchorVersion, UpdateAnchorVersion)
+				want := fmt.Sprintf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: yard update --version %s && yard update", version, UpdateAnchorVersion, UpdateHopVersion)
 				if err == nil || err.Error() != want {
 					t.Fatalf("anchor guidance = %v, want %s", err, want)
 				}

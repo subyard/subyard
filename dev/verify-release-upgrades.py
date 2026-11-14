@@ -57,13 +57,23 @@ RECENT_BASELINE = "0.27.0"
 RECENT_BASELINE_SHA256 = {"amd64": "b339acd76299a7c301d79e502459d9f4ab6e8d6f486c83e76c53aff1f6bc5e61"}
 
 
-def published_anchor(root):
-    """Return the unique update anchor's version and immutable asset pins."""
+def published_role(root, role):
+    """Return the unique row with this role: version and immutable asset pins."""
     rows = [fields for line in (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()
-            if len(fields := line.split("\t")) == 4 and fields[3] == "anchor"]
+            if len(fields := line.split("\t")) == 4 and fields[3] == role]
     if len(rows) != 1:
-        raise ValueError("expected exactly one published anchor")
+        raise ValueError(f"expected exactly one published {role}")
     return rows[0]
+
+
+def published_anchor(root):
+    """The oldest accepted direct-update source."""
+    return published_role(root, "anchor")
+
+
+def published_hop(root):
+    """The release that below-anchor refusals name as the first update."""
+    return published_role(root, "hop")
 
 
 def require(condition, message):
@@ -547,9 +557,9 @@ def verify_source_anchor_refusal(fixture, installer=None):
                                 and isinstance(outcome.get("status"), str)
                                 and outcome["status"] not in ("", "ready"))
         require(reported_refusal and "source-anchor-required" in refused.stderr
-                and f"next: yard update --version {published_anchor(Path(__file__).resolve().parent.parent)[0]} && yard update" in refused.stderr
+                and f"next: yard update --version {published_hop(Path(__file__).resolve().parent.parent)[0]} && yard update" in refused.stderr
                 and "uninstall --full" not in refused.stderr,
-                f"released {fixture.baseline_version} update {arguments} lost anchor guidance "
+                f"released {fixture.baseline_version} update {arguments} lost hop guidance "
                 f"(exit={refused.returncode}): "
                 + refused.stdout + refused.stderr)
         require(snapshot(fixture.config) == before and fixture.project_marker.read_bytes() == marker

@@ -975,11 +975,11 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
 | `newer-release` | VM1; published v0.28.0 direct pin, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
-| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | pinned v0.11.0 settings creation → shared anchor → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | targeted diagnostic; required in full |
+| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.28.0 upgrade, incompatible rollback refusal and authentic v0.28.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full |
-| `yard-maintenance` | VM1, frozen candidate and pinned published 0.21.3 and stopped 0.28.0; one container and two bounded VMs, one weighted | journal replacement through the installer, upfront restart disclosure and decline, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
+| `yard-maintenance` | VM1, frozen candidate and pinned published 0.21.3 → 0.28.1 hop; one container and two bounded VMs, one weighted | VM yards left pending by guest preflight refusals through the hop, upfront restart disclosure and decline of the candidate's current-release retry, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
 | `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
 | `release-smoke` | VM1, shared published anchor, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton retained-data/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke and full both cover fresh init/projects/RPC, offline projects and credentials |
@@ -1065,15 +1065,16 @@ config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot"
 config/retired-integrations/aiobserver/tests/e2e/acceptance.sh --slot "$slot"
 ```
 
-The published-baseline matrix reads immutable pins and an `anchor`, `direct`, `refusal` or
+The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `direct`, `refusal` or
 fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0 (with agents selected
-by `all`); later distinct anchor patches and previous releases remain direct baselines.
-Refusal runs at v0.11.0, v0.17.3 and v0.27.0 check both update and `--check`, the exact anchor
+by `all`) and at the v0.28.1 hop (agent-free; `published-upgrade.sh hop none`); later distinct anchor
+patches and previous releases remain direct baselines.
+Refusal runs at v0.11.0, v0.17.3 and v0.27.0 check both update and `--check`, the exact hop
 command, unchanged settings, active runtime, native instance, power and guest data.
 
 The second argument is an agent selection for direct rows, or `refusal`/`chain` for refusal rows.
 The first boundary release includes chains from v0.11.0 and v0.27.0: refusal, explicit published
-v0.28.0 update and Ready, then plain update to the frozen candidate and Ready. These two catalog
+v0.28.1 hop update and Ready, then plain update to the frozen candidate and Ready. These two catalog
 entries are temporary first-boundary-release acceptance. Each scenario gets a fresh lease.
 
 ```sh

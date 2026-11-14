@@ -25,7 +25,7 @@ from unittest.mock import patch
 root = Path(sys.argv[1])
 
 def published_baseline_refusals(source, catalog):
-    errors, pins, anchors = [], {}, []
+    errors, pins, unique = [], {}, {"anchor": [], "hop": []}
     path = source / "dev/e2e/published-upgrade-baselines.tsv"
     for index, line in enumerate(path.read_text().splitlines(), 1):
         fields = line.split("\t")
@@ -37,42 +37,49 @@ def published_baseline_refusals(source, catalog):
             errors.append(f"baseline {version}: duplicate version")
         if not all(re.fullmatch(r"[0-9a-f]{64}", pin) for pin in (installer, archive)):
             errors.append(f"baseline {version}: invalid immutable asset pins")
-        if role not in ("anchor", "direct", "refusal", "pin"):
+        if role not in ("anchor", "hop", "direct", "refusal", "pin"):
             errors.append(f"baseline {version}: unknown role {role}")
         pins[version] = role
-        if role == "anchor":
-            anchors.append(version)
-    if len(anchors) != 1:
-        errors.append("expected exactly one anchor row")
+        if role in unique:
+            unique[role].append(version)
+    anchors, hops = unique["anchor"], unique["hop"]
+    for role, versions in unique.items():
+        if len(versions) != 1:
+            errors.append(f"expected exactly one {role} row")
     policy = (source / "internal/adapters/releaseruntime/source_policy.go").read_text()
-    anchor = re.search(r'const UpdateAnchorVersion = "([0-9]+\.[0-9]+\.[0-9]+)"', policy)
-    if anchor is None:
-        errors.append("cannot parse UpdateAnchorVersion")
-    else:
-        anchor = anchor[1]
-        for version in anchors:
-            if version != anchor:
-                errors.append(f"anchor {version}: differs from UpdateAnchorVersion {anchor}")
-        key = lambda version: tuple(map(int, version.split(".")))
+    constants = {}
+    for role, name in (("anchor", "UpdateAnchorVersion"), ("hop", "UpdateHopVersion")):
+        match = re.search(r'const ' + name + r' = "([0-9]+\.[0-9]+\.[0-9]+)"', policy)
+        if match is None:
+            errors.append(f"cannot parse {name}")
+            continue
+        constants[role] = match[1]
+        for version in unique[role]:
+            if version != match[1]:
+                errors.append(f"{role} {version}: differs from {name} {match[1]}")
+    key = lambda version: tuple(map(int, version.split(".")))
+    if "anchor" in constants and "hop" in constants and key(constants["hop"]) < key(constants["anchor"]):
+        errors.append(f"hop {constants['hop']}: below anchor {constants['anchor']}")
+    if "anchor" in constants:
         for version, role in pins.items():
-            if role == "refusal" and not (0, 11, 0) <= key(version) < key(anchor):
+            if role == "refusal" and not (0, 11, 0) <= key(version) < key(constants["anchor"]):
                 errors.append(f"refusal {version}: outside the supported refusal window")
     for entry in catalog["checks"]:
         command = entry["command"]
         if command[1] != "dev/e2e/published-upgrade.sh":
             continue
         version, mode = command[2:4]
-        if version == "anchor":
-            if len(anchors) != 1:
-                errors.append(f"{entry['id']}: anchor baseline is unavailable")
-            role = "anchor"
+        if version in unique:
+            if len(unique[version]) != 1:
+                errors.append(f"{entry['id']}: {version} baseline is unavailable")
+            role = version
         else:
             role = pins.get(version)
-        allowed = ("refusal", "pin") if mode == "chain" else ("refusal",) if mode == "refusal" else ("anchor", "direct")
+        allowed = ("refusal", "pin") if mode == "chain" else ("refusal",) if mode == "refusal" else ("anchor", "hop", "direct")
         if role not in allowed:
             errors.append(f"{entry['id']}: {mode} source {version} has role {role}")
-        if mode == "chain" and not anchors:
-            errors.append(f"{entry['id']}: chain anchor is unavailable")
+        if mode == "chain" and not hops:
+            errors.append(f"{entry['id']}: chain hop is unavailable")
     return errors
 
 sys.argv = [sys.argv[0]]
@@ -3083,29 +3090,44 @@ while True: time.sleep(1)
         module = importlib.util.module_from_spec(verifier)
         sys.modules[verifier.name] = module
         verifier.loader.exec_module(module)
-        anchor = module.published_anchor(root)
-        shell = subprocess.check_output(["bash", "-c",
-            '. "$1/dev/e2e/lib-power-upgrade-contracts.sh"; ROOT="$1"; published_anchor', "_", str(root)], text=True)
-        self.assertEqual(shell.strip().split("\t"), anchor)
+        for role in ("anchor", "hop"):
+            pin = getattr(module, "published_" + role)(root)
+            shell = subprocess.check_output(["bash", "-c",
+                '. "$1/dev/e2e/lib-power-upgrade-contracts.sh"; ROOT="$1"; published_' + role, "_", str(root)], text=True)
+            self.assertEqual(shell.strip().split("\t"), pin)
+            self.assertEqual(pin[3], role)
 
     def test_published_baseline_contract_reports_independent_violations(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             source = Path(temporary)
             (source / "dev/e2e").mkdir(parents=True)
             (source / "internal/adapters/releaseruntime").mkdir(parents=True)
-            (source / "internal/adapters/releaseruntime/source_policy.go").write_text('const UpdateAnchorVersion = "2.0.0"')
+            (source / "internal/adapters/releaseruntime/source_policy.go").write_text(
+                'const UpdateAnchorVersion = "2.0.0"\nconst UpdateHopVersion = "1.5.0"\n')
             (source / "dev/e2e/published-upgrade-baselines.tsv").write_text(
                 "1.0.0\t"+"a"*64+"\t"+"b"*64+"\tanchor\n"+
+                "1.1.0\t"+"a"*64+"\t"+"b"*64+"\thop\n"+
+                "1.2.0\t"+"a"*64+"\t"+"b"*64+"\thop\n"+
                 "3.0.0\t"+"c"*64+"\t"+"d"*64+"\trefusal\n")
-            catalog = {"checks": [{"id": "bad-chain", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.0.0", "chain"]}]}
+            catalog = {"checks": [{"id": "bad-chain", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.0.0", "chain"]},
+                                  {"id": "hop-chain", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.1.0", "chain"]},
+                                  {"id": "hop-direct", "command": ["bash", "dev/e2e/published-upgrade.sh", "hop", "none"]}]}
             self.assertEqual(published_baseline_refusals(source, catalog), [
+                "expected exactly one hop row",
                 "anchor 1.0.0: differs from UpdateAnchorVersion 2.0.0",
+                "hop 1.1.0: differs from UpdateHopVersion 1.5.0",
+                "hop 1.2.0: differs from UpdateHopVersion 1.5.0",
+                "hop 1.5.0: below anchor 2.0.0",
                 "refusal 3.0.0: outside the supported refusal window",
-                "bad-chain: chain source 1.0.0 has role anchor"])
+                "bad-chain: chain source 1.0.0 has role anchor",
+                "hop-chain: chain source 1.1.0 has role hop",
+                "hop-direct: hop baseline is unavailable"])
             (source / "dev/e2e/published-upgrade-baselines.tsv").write_text("")
             self.assertEqual(published_baseline_refusals(source, catalog), [
-                "expected exactly one anchor row", "bad-chain: chain source 1.0.0 has role None",
-                "bad-chain: chain anchor is unavailable"])
+                "expected exactly one anchor row", "expected exactly one hop row", "hop 1.5.0: below anchor 2.0.0",
+                "bad-chain: chain source 1.0.0 has role None", "bad-chain: chain hop is unavailable",
+                "hop-chain: chain source 1.1.0 has role None", "hop-chain: chain hop is unavailable",
+                "hop-direct: hop baseline is unavailable"])
 
     def test_core_vm_check_wrapper_runs_the_declared_command_on_its_slot(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -3189,7 +3211,7 @@ while True: time.sleep(1)
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 24)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 25)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):

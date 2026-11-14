@@ -5864,7 +5864,7 @@ BASELINE_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" prep
 set -euo pipefail
 F=$1 OPERATOR_HOME=$1/operator SHARED_ROOT=$1/shared ROOT=$2
 . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
-IFS=$'\t' read -r ANCHOR_VERSION _ ANCHOR_SHA _ < <(published_anchor)
+IFS=$'\t' read -r HOP_VERSION _ HOP_SHA _ < <(published_hop)
 BASELINE_VERSION=0.11.0 BASE_IMAGE=fixture-cache FIXTURE_DEV_UID=1001
 PROJECT=subyard-e2e-yard INSTANCE=yard-e2e-yard DEFAULT_PROJECT=subyard DEFAULT_INSTANCE=yard
 install -d -m 0700 "$OPERATOR_HOME/.local/bin" "$SHARED_ROOT"
@@ -5890,7 +5890,7 @@ operator_env() {
     printf '{"schemaVersion":1,"files":[{}]}\n' > "$OPERATOR_HOME/.config/subyard/.sync/manifest.json"
     printf 'config sync\n' >> "$trace"
   elif [ "$1" = sha256sum ] && [[ "$2" = "$OPERATOR_HOME/.subyard/releases/"* ]]; then
-    printf '%s  %s\n' "$ANCHOR_SHA" "$2"
+    printf '%s  %s\n' "$HOP_SHA" "$2"
   else
     "$@"
   fi
@@ -5898,7 +5898,7 @@ operator_env() {
 operator_yard() {
   case "$*" in
     --version) printf 'yard %s\n' "$(cat "$F/active-version")"; return ;;
-    "update --version $ANCHOR_VERSION --yes") printf '%s\n' "$ANCHOR_VERSION" > "$F/active-version" ;;
+    "update --version $HOP_VERSION --yes") printf '%s\n' "$HOP_VERSION" > "$F/active-version" ;;
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
@@ -5918,7 +5918,7 @@ done
 grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
-grep -Fxq "yard update --version $ANCHOR_VERSION --yes" "$trace"
+grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
 jq -e '.schemaVersion == 1 and (.files | length) > 0' "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
 PUBLISHED_OWNER
 

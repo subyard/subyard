@@ -1101,7 +1101,7 @@ Receipt replay validates these identities and evidence; recorded transaction IDs
 from cleanup. Other earlier releases and arbitrary same-registry targets are unsupported, and
 unknown artifacts and graphs remain blocked. The candidate registry must equal the predecessor's,
 which holds through v0.25.1: a host interrupted on v0.21.0 is replaced by standalone v0.25.1 and
-then takes the v0.28.0 anchor hop, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
+then takes the v0.28.1 hop, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
 and initial-successor evidence under `release-transition/migration-owner/v1/transactions` before
 current-journal CAS. The original activation remains unfinished superseded evidence; ordinary V2
 resume belongs to the candidate successor. This exception does not widen either activation-only
@@ -1173,11 +1173,11 @@ contracts. Do not weaken validation or silently discard a new safety requirement
 response: the compatibility adapter must preserve its meaning.
 
 Before publication, `dev/verify-release-upgrades.py` runs unmodified checksum-pinned old callers
-through update and `--check` refusal, verifies the anchor instruction reaches stderr, and checks
+through update and `--check` refusal, verifies the hop instruction reaches stderr, and checks
 that protected configuration, active links and project data remain unchanged. The pre-anchor
 migration and original-owner recovery matrix is frozen in the v0.28.0 tag. Current Go reader tests
 retain accepted V2 history and recovery contracts; installed direct upgrade, rollback and the
-one-time anchor chains belong to the published-upgrade and P0 VM lanes.
+one-time hop chains belong to the published-upgrade and P0 VM lanes.
 
 Historical frozen materialization recipes retain preview composition from the bound runtime's
 `config/preview/instructions.md` asset, or the exact legacy fallback for older runtimes. Recovery
@@ -1189,7 +1189,8 @@ The Release workflow retains the compatibility check's output with its other fai
 
 Direct updates, the installer over an existing installation and offline update require installed
 **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0 refuse before any change and print
-`yard update --version 0.28.0 && yard update`; rollback targets below v0.28.0 refuse. The
+`yard update --version 0.28.1 && yard update`: the hop is the v0.28.1 fix release, because the
+anchor itself can stop with a running VM yard (see below). Rollback targets below v0.28.0 refuse. The
 [approved support boundary](reference/legacy-migration-support.md#approved-support-boundary)
 owns the complete rules, including unfinished transitions below the anchor.
 
@@ -1272,7 +1273,7 @@ journal copy remains. Full uninstall removes them. Add `--runtime-root` on a hos
 Below the [update boundary](reference/legacy-migration-support.md#approved-support-boundary),
 releases after v0.28.x refuse the installed source. There, `$VERSION` must be a v0.28.x release:
 v0.28.x is the last series that owns the recoveries of earlier releases described below. After
-recovery, continue with `yard update --version 0.28.0 && yard update`.
+recovery, continue with `yard update --version 0.28.1 && yard update`.
 
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
 migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate refuses a journal that
@@ -1288,8 +1289,8 @@ An interrupted integration apply may already have written every desired artifact
 pending digests remain unfinished work: retry observes lifecycles, runs hooks, commits inventory,
 verifies convergence and captures applied settings. It accepts only owned bytes matching the
 recorded pending or committed digests. To leave a recovery dead end on 0.27.0, explicitly select
-v0.28.0, which has the integration resume fix and recovery replacement support:
-`yard update --version 0.28.0`, then `yard update`.
+v0.28.1, which has the integration resume fix and recovery replacement support:
+`yard update --version 0.28.1`, then `yard update`.
 
 Published 0.28.0 stops an update at the first running VM yard whose pending disk-backed `/tmp`
 migration it restarts, typically on a direct update from a release before 0.27.0: its migration
@@ -1300,7 +1301,10 @@ reports that the journal-selected release cannot provide a valid transition insp
 output; any other value stays bound. To leave the stopped update, re-run the
 [installer](getting-started.md) for 0.28.1 or later; it replaces the unfinished journal through
 its own launcher whatever the active release is. An active launcher from 0.26.0 or later also
-accepts `yard update --version 0.28.1`.
+accepts `yard update --version 0.28.1`. Releases after v0.28.x cannot replace that journal: below
+the anchor they refuse and name the v0.28.1 installer as the repair, and a launcher before 0.26.0
+never reaches that refusal because it asks only the journal-selected engine. Such an install
+re-runs the 0.28.1 installer first, then updates normally.
 
 0.28.0 and 0.28.1 stop the same way at such a yard whose project carries an explicit
 `restricted.virtual-machines.lowlevel=block`, which the start policy replaces with the grant.

@@ -1634,7 +1634,7 @@ def published_upgrade_baseline_refusals(version, commit):
                                           stderr=subprocess.DEVNULL)
         pins = {fields[0] for line in payload.splitlines()
                 if len(fields := line.split("\t")) == 3
-                or (len(fields) == 4 and fields[3] in ("direct", "anchor"))}
+                or (len(fields) == 4 and fields[3] in ("direct", "anchor", "hop"))}
     except (subprocess.CalledProcessError, OSError):
         return [f"cannot read {path} at the candidate commit"]
     if baseline[1:] not in pins:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published anchor owner recreation, retained ordinary yard and installed-runtime recovery.
+# Published hop owner recreation, retained ordinary yard and installed-runtime recovery.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -331,7 +331,7 @@ prepare_operator() {
 }
 
 prepare_baseline_yards() {
-  local checkout anchor_version anchor_sha manifest_before
+  local checkout hop_version hop_sha manifest_before
   local BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256
   # Create the legacy Git-owned settings with its authentic schema-1 producer.
   IFS=$'\t' read -r BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256 _ < <(
@@ -391,14 +391,15 @@ BASELINE_CONFIG
   operator_env jq -e '.schemaVersion == 1 and (.files | length) > 0' \
     "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
   manifest_before="$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")"
-  IFS=$'\t' read -r anchor_version _ anchor_sha _ < <(published_anchor)
-  operator_yard update --version "$anchor_version" --yes
-  [ "$(operator_yard --version)" = "yard $anchor_version" ] || die 'anchor update did not activate'
-  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$anchor_version/subyard-$anchor_version-linux-amd64.tar.gz" | awk '{print $1}')" = "$anchor_sha" ] \
-    || die 'anchor archive differs from its immutable pin'
+  # A below-anchor install follows the printed route through the hop release.
+  IFS=$'\t' read -r hop_version _ hop_sha _ < <(published_hop)
+  operator_yard update --version "$hop_version" --yes
+  [ "$(operator_yard --version)" = "yard $hop_version" ] || die 'hop update did not activate'
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$hop_version/subyard-$hop_version-linux-amd64.tar.gz" | awk '{print $1}')" = "$hop_sha" ] \
+    || die 'hop archive differs from its immutable pin'
   [ "$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")" = "$manifest_before" ] \
-    || die 'anchor update changed the retained schema-1 manifest'
-  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'anchor update changed the ordinary yard'
+    || die 'hop update changed the retained schema-1 manifest'
+  [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'hop update changed the ordinary yard'
 }
 
 package_candidates() {
@@ -913,7 +914,7 @@ verify_shared_target_refusals() {
 }
 
 prepare() {
-  [ "$(uname -m)" = x86_64 ] || die 'the published anchor pin requires an amd64 P0 worker'
+  [ "$(uname -m)" = x86_64 ] || die 'the published hop pin requires an amd64 P0 worker'
   command -v git >/dev/null 2>&1 || die 'Git is required for the published configuration import'
   command -v unshare >/dev/null 2>&1 || die 'unshare is required'
   p0_capacity_reset_build_cache

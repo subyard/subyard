@@ -161,6 +161,6 @@ baselines = [(fields[0], fields[3]) for line in (root / "dev/e2e/published-upgra
              if line and (fields := line.split("\t"))[3] != "pin"]
 assert {name for name in entries if name.startswith("published:")} == {
     "published:" + version for version, role in baselines
-    if "vm:published-upgrade/" + ("anchor" if role == "anchor" else version) not in commands}
+    if "vm:published-upgrade/" + (role if role in ("anchor", "hop") else version) not in commands}
 PY
 printf 'ok: hosted VM workflow binds exact candidates and periodic upgrades retain catalog coverage\n'
