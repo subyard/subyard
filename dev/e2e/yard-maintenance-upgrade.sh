@@ -91,7 +91,9 @@ case "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" in rel
 operator_env jq -e --arg target "$stuck-" '.checkpoint != "complete" and (.goal.target | startswith($target))' "$V2_JOURNAL" >/dev/null || die 'stopped update left no unfinished journal'
 [ "$(marker default)" = v1 ] && [ -z "$(marker weighted)" ] && [ "$(lowlevel weighted)" = allow ] \
   && [ -z "$(marker z-last)" ] && [ -z "$(lowlevel z-last)" ] && [ "$(yard_boot z-last)" = "${BOOT[z-last]}" ] || die 'stopped update reached an unexpected native state'
-BOOT[default]="$(yard_boot default)" BOOT[weighted]="$(yard_boot weighted)"
+# The stopped update returned while the restarted VM was still booting.
+for _ in {1..60}; do yard_boot weighted >/dev/null 2>&1 && break; sleep 2; done
+BOOT[default]="$(yard_boot default)" && BOOT[weighted]="$(yard_boot weighted)" || die 'stopped update left a yard without a guest agent'
 # The active 0.21.3 launcher asks only the journal-selected engine, even for a newer release.
 before="$(protected_state)"
 update_candidate --check --offline --version "$CANDIDATE_VERSION" > "$STATE_ROOT/stuck-check.log" 2>&1 || true
@@ -99,7 +101,8 @@ grep -Fq 'the journal-selected release cannot provide a valid transition inspect
 [ "$(protected_state)" = "$before" ] || die 'old launcher check changed protected state'
 # An owned guest preflight refusal leaves the VM running. This tests isolation
 # without host shims, a fabricated exit code or an extra guest mount.
-yard_guest weighted sh -eu -c 'test ! -e /etc/systemd/system/tmp.mount; test ! -L /etc/systemd/system/tmp.mount; printf "fixture foreign policy\n" > /etc/systemd/system/tmp.mount'
+# The stopped update already masked tmp.mount before restarting this VM; that completed effect stays.
+yard_guest weighted sh -eu -c 'test "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null; rm /etc/systemd/system/tmp.mount; printf "fixture foreign policy\n" > /etc/systemd/system/tmp.mount'
 # The candidate's own launcher replaces the unfinished journal; rerunning the installer is the operator route.
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" bash "$RELEASE_ROOT/subyard-install.sh" --publish-only --version "$CANDIDATE_VERSION" > "$STATE_ROOT/stage.log"
 LAUNCHER="$(sed -n 's/^staged release=.* candidate=//p' "$STATE_ROOT/stage.log")/bin/yard"
