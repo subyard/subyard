@@ -68,12 +68,14 @@ select_retired() { # yard, host port
 assert_retired() { # yard, effective selection JSON
   local name="$1" key
   guest_yard "$name" sh -eu -c '
-    ! systemctl is-active --quiet subyard-ai-observer.service
+    # set -e ignores negations and && lists, so every check fails explicitly.
+    if systemctl is-active --quiet subyard-ai-observer.service; then exit 1; fi
     for path in /usr/local/bin/ai-observer /usr/local/bin/ai-observer-check /etc/subyard/ai-observer/managed \
       /etc/systemd/system/subyard-ai-observer.service /var/lib/subyard/ai-observer-retirement; do
-      [ ! -e "$path" ] && [ ! -L "$path" ]
+      if [ -e "$path" ] || [ -L "$path" ]; then exit 1; fi
     done
-    ! docker container ls -a --format "{{.Names}}" | grep -Fxq subyard-ai-observer
+    names=$(docker container ls -a --format "{{.Names}}")
+    if printf "%s\n" "$names" | grep -Fxq subyard-ai-observer; then exit 1; fi
   ' || die "yard $name kept an AI Observer control"
   guest_yard "$name" sh -c 'stat -c "%d:%i" "$1/ai-observer.duckdb"; sha256sum "$1/ai-observer.duckdb" "$1/.retirement-history"' \
     subyard "$DATA" | cmp -s - "$STATE_ROOT/data-$name.before" || die "retirement changed retained data in yard $name"
@@ -106,10 +108,8 @@ follow_stopped_action() {
   local action
   action="$(tr -d '\r' < "$STATE_ROOT/update.log" | sed -n \
     's/^.*retired integration aiobserver may still be installed in yard solo; run: //p' | head -n 1)"
+  # The anchor already provides disk-backed /tmp, so a stopped yard retires through init.
   case "$action" in
-    'yard -Y solo start; then run yard migrate')
-      run_checked solo-follow.log 'printed solo start' operator_yard -Y solo start --yes
-      run_checked solo-migrate.log 'printed migrate' operator_yard migrate --yes ;;
     'yard -Y solo init')
       run_checked solo-follow.log 'printed solo init' operator_yard -Y solo init --yes
       [ "$(yard_power solo)" = STOPPED ] || die 'retirement init did not restore stopped power'

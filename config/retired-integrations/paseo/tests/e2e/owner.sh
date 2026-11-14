@@ -92,12 +92,13 @@ PY
 assert_removed() {
   local name="$1"
   guest_yard "$name" sh -eu -c '
-    ! systemctl is-active --quiet paseo.service
+    # set -e ignores negations and && lists, so every check fails explicitly.
+    if systemctl is-active --quiet paseo.service; then exit 1; fi
     for path in /etc/systemd/system/paseo.service /run/systemd/system/paseo.service \
       /usr/lib/systemd/system/paseo.service /lib/systemd/system/paseo.service /var/lib/subyard/paseo-ownership /opt/subyard/paseo \
       /usr/local/bin/paseo /usr/local/bin/paseo-check /usr/local/bin/paseo-pair \
       /usr/local/bin/paseo-rotate-identity /usr/local/bin/paseo-sync-projects; do
-      [ ! -e "$path" ] && [ ! -L "$path" ]
+      if [ -e "$path" ] || [ -L "$path" ]; then exit 1; fi
     done
   ' || die "yard $name kept a removable Paseo file"
   if [ "$name" != solo ]; then

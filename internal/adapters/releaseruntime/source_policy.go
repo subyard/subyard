@@ -219,7 +219,9 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		if admissionErr != nil {
 			return admissionErr
 		}
-		return errors.New(LegacyReinstallGuidance)
+		// A supported version without a sealed registry is damaged, not a pre-V2
+		// source: never point it, or an interrupted update, at data deletion.
+		return errors.New("source release has no verified V2 registry provenance; restore its exact sealed runtime from a known-good backup; do not uninstall")
 	}
 	registryFile, err := openCandidateFile(int(verified.root.Fd()), "config/release-transition.json")
 	if err != nil {

@@ -31,6 +31,7 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 		{"inclusive anchor", UpdateAnchorVersion, "", true, false, true},
 		{"anchor hotfix", aboveAnchor.String(), "", true, false, true},
 		{"missing provenance", "0.11.0", "", false, false, false},
+		{"anchor without provenance", aboveAnchor.String(), "", false, false, false},
 		{"unparseable source", "development", "", true, false, false},
 		{"invalid fixture version", "0.26.0.next", "", true, false, false},
 		{"invalid without registry", "0.26.0.next", "", false, false, false},
@@ -91,6 +92,10 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 				if _, parseErr := semver.Parse(scenario.version); parseErr != nil {
 					if !strings.Contains(err.Error(), "source release version is invalid") || strings.Contains(err.Error(), "uninstall") {
 						t.Fatalf("invalid version became destructive pre-floor guidance: %v", err)
+					}
+				} else if !scenario.registry && semver.MustParse(scenario.version).GTE(semver.MustParse(UpdateAnchorVersion)) {
+					if !strings.Contains(err.Error(), "no verified V2 registry provenance") || strings.Contains(err.Error(), "uninstall --full") {
+						t.Fatalf("damaged supported source lost its non-destructive refusal: %v", err)
 					}
 				} else if semver.MustParse(scenario.version).GTE(semver.MustParse(MinimumSourceVersion)) {
 					if !strings.Contains(err.Error(), "source-anchor-required") || (!strings.Contains(scenario.name, "rollback") && !strings.Contains(err.Error(), "yard update --version "+UpdateAnchorVersion)) || strings.Contains(err.Error(), "uninstall") {
@@ -239,8 +244,8 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 							t.Fatal("admission changed the original journal")
 						}
 						if unfinished && next == legacy {
-							// Without sealed registry provenance the floor still wins over
-							// the provenance repair hint.
+							// Without sealed registry provenance a source below the V2 floor
+							// keeps only the full-uninstall route.
 							if err := os.Remove(filepath.Join(root, "config", "release-transition.json")); err != nil {
 								t.Fatal(err)
 							}

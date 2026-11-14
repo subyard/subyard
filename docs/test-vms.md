@@ -918,7 +918,9 @@ bridge: published releases before v0.21.2 cannot resume an empty journal staging
 inside a compare-and-swap, which is not a supported state. The current reader's handling of that
 file is covered by the `journal-zero` case in `internal/releasetransition/pending_recovery_test.go`.
 Pre-anchor migration and original-owner recovery acceptance is frozen in the v0.28.0 tag.
-Current Go contracts retain journal, checkpoint and projection reader coverage.
+Current Go contracts retain journal, checkpoint and projection reader coverage. This includes the
+refused guest disk-/tmp parent: the anchor completes that policy for the yards these lanes create,
+so its retry is covered by the registered disk-/tmp Go tests, not a VM lane.
 The newer-release fixture shares marker-owned runtime and cleanup helpers. It binds valid
 power coordination state before preparing its isolated history; busy or unsafe coordination
 state, or a changed bound generation, refuses without deleting barriers. Producer cleanup
@@ -971,7 +973,7 @@ stopped power. Repeated init of the proven, stopped yard must not boot it again.
 The AI Observer payload likewise seeds its managed controls, container, route, receipts and retained
 data after direct anchor activation in one running and one stopped yard. It verifies retirement,
 retained data and unchanged retired settings, follows the action printed for the stopped yard, and
-repeats init and migrate without further changes. Both payloads share
+repeats init and migrate with the retired state unchanged. Both payloads share
 `dev/e2e/retired-integration-fixture.sh`.
 
 ```sh

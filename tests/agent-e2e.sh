@@ -4983,7 +4983,7 @@ smoke_rollback_fixture_contract() {
     printf 'retained evidence\n' > "$V2_STATE_ROOT/evidence/retained/verified.json"
     chmod 0600 "$V2_STATE_ROOT/evidence/retained/verified.json"
     printf '# Release smoke retained operator setting\n' > "$OPERATOR_HOME/.config/subyard/config.env"
-    printf 'adopted-v1\n' > "$STATE_ROOT/installation"
+    printf '1\n' > "$STATE_ROOT/installation"
     case "$scenario" in
       missing-ownership) printf '\n' > "$STATE_ROOT/installation" ;;
       foreign-ownership) printf 'foreign\n' > "$STATE_ROOT/installation" ;;
@@ -5034,7 +5034,7 @@ smoke_rollback_fixture_contract() {
               enrollment-journal-change) printf 'changed\n' > "$V2_JOURNAL" ;;
               enrollment-evidence-change) printf 'changed\n' > "$V2_STATE_ROOT/evidence/retained/verified.json" ;;
               enrollment-mode-change) chmod 0644 "$V2_LEDGER" ;;
-              enrollment-project-change) printf '\n' > "$STATE_ROOT/installation" ;;
+              enrollment-project-change) printf 'adopted-v1\n' > "$STATE_ROOT/installation" ;;
             esac
             printf 'enrolled\n' >> "$STATE_ROOT/enrollments"
           else
@@ -5108,7 +5108,7 @@ smoke_rollback_fixture_contract() {
           install -d -m 0700 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations"
           printf 'unexpected\n' > "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
         elif [ "$scenario" = installation-change ]; then
-          printf 'foreign\n' > "$STATE_ROOT/installation"
+          printf 'adopted-v1\n' > "$STATE_ROOT/installation"
         fi
         printf '%s\n' "$*" >> "$STATE_ROOT/updates"
         printf '%s\n' "$current" > "$STATE_ROOT/previous"

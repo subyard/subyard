@@ -126,14 +126,12 @@ exercise_activation_only_repair() {
   fi
 
   sudo -n install -m 0600 "$V2_JOURNAL" "$ACTIVATION_JOURNAL_BASELINE"
-  set +e
+  unconfirmed_rc=0
   unconfirmed_output="$(
     operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
       "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" \
       </dev/null 2>&1
-  )"
-  unconfirmed_rc=$?
-  set -e
+  )" || unconfirmed_rc=$?
   [ "$unconfirmed_rc" = 1 ] \
     && [ "$(grep -Fc 'confirmation required: interactive terminal required' \
       <<<"$unconfirmed_output")" = 1 ] \
@@ -145,14 +143,12 @@ exercise_activation_only_repair() {
   assert_activation_ledger_unchanged
 
   install_activation_reconcile_fault
-  set +e
+  interrupted_rc=0
   interrupted_output="$(
     operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
       "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes \
       </dev/null 2>&1
-  )"
-  interrupted_rc=$?
-  set -e
+  )" || interrupted_rc=$?
   [ "$interrupted_rc" -ne 0 ] \
     || die 'injected activation reconciliation unexpectedly completed'
   if ! operator_env test -f "$ACTIVATION_FAULT_PROBE"; then

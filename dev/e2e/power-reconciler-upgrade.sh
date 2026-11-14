@@ -461,12 +461,10 @@ bridge_read_only_snapshot() {
 verify_bridge_plan_is_read_only() {
   local before after output rc
   before="$(bridge_read_only_snapshot)"
-  set +e
+  rc=0
   output="$(operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" \
-      </dev/null 2>&1 >/dev/null)"
-  rc=$?
-  set -e
+      </dev/null 2>&1 >/dev/null)" || rc=$?
   [ "$rc" = 1 ] && grep -Fq 'confirmation required: interactive terminal required' <<<"$output" \
     || die "unconfirmed standalone bridge did not stop at its candidate-owned plan: $output"
   after="$(bridge_read_only_snapshot)"
@@ -503,13 +501,13 @@ record_reboot_baseline() {
   mv -f -- "$route_temporary" "$DEFAULT_ROUTE_STATE"
 }
 
-# The anchor creates owned projects (1); a migrated legacy registration carries
-# adopted-v1. Either way no separate continuation grant remains.
+# These lanes start at the anchor, whose init creates owned projects (1). Any
+# rewrite, including to a migrated registration's adopted-v1, changes which
+# releases treat the project as owned. No separate continuation grant remains.
 assert_registered_ownership() {
   local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json" owner
   owner="$(incus project get "$PROJECT" user.subyard.installation)"
-  [ "$owner" = 1 ] || [ "$owner" = adopted-v1 ] \
-    || die "yard project lacks registered installation ownership: '$owner'"
+  [ "$owner" = 1 ] || die "yard project lost its anchor-created installation ownership: '$owner'"
   operator_env test ! -e "$grant" && operator_env test ! -L "$grant" \
     || die 'registered yard unexpectedly holds a legacy continuation grant'
 }
