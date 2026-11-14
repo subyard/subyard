@@ -873,7 +873,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		fingerprints = append(fingerprints, observation.Fingerprint)
 		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
-		if observation.Release != "" || observation.ReleasedCount != 0 {
+		if observation.Release != "" {
 			notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
 			plan.Warnings = append(plan.Warnings, notice)
 			plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
@@ -1205,7 +1205,7 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)
 	}
 	observation, err := configmaterial.ParseObservation(result.Stdout)
-	if err == nil && mode == configmaterial.ModeRetire && (observation.Release != "" || observation.ReleasedCount != 0) && runtime.Stdout != nil {
+	if err == nil && mode == configmaterial.ModeRetire && observation.Release != "" && runtime.Stdout != nil {
 		// Report the completed release once, from the call that performed it.
 		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+path+": ", observation, "; Subyard no longer manages it"))
 	}
@@ -1219,62 +1219,31 @@ func ownershipReleaseNotice(integration, path string, observation configmaterial
 	return boundedNotice("retiring "+integration+" releases ownership of "+path+": ", observation, "")
 }
 
-// Activation warnings share the release diagnostic bound, so the notice keeps
-// its reason, field count and suffix and shortens only the path or pointers.
+// Activation warnings share the release diagnostic bound: the notice lists the
+// retained fields when the whole list fits, and otherwise only counts them.
 const ownershipNoticeLimit = 384
 
 func boundedNotice(prefix string, observation configmaterial.Observation, suffix string) string {
-	reason := "owned fields changed after Subyard applied them"
+	reason, fields := "owned fields changed after Subyard applied them", "no owned fields remain"
 	if observation.Release == configmaterial.ReleaseMissingDocument {
 		reason = "the document is missing"
+	}
+	switch {
+	case len(observation.Released) != 0:
+		fields = "fields left in place: " + strings.Join(observation.Released, ", ")
+	case observation.ReleasedCount != 0:
+		fields = fmt.Sprintf("%d fields left in place", observation.ReleasedCount)
+	case observation.Release == configmaterial.ReleaseMissingDocument:
+		fields = "nothing to remove"
 	}
 	if maximum := ownershipNoticeLimit / 2; len(prefix) > maximum {
 		prefix = truncateText(prefix, maximum-len("...: ")) + "...: "
 	}
-	head := prefix + reason + "; "
-	return head + ownershipReleaseFields(observation, ownershipNoticeLimit-len(head)-len(suffix)) + suffix
-}
-
-// ownershipReleaseFields names the retained pointers within budget bytes. A
-// pointer that does not fit is shortened or counted, never cut off silently.
-func ownershipReleaseFields(observation configmaterial.Observation, budget int) string {
-	pointers, total := observation.Released, max(observation.ReleasedCount, len(observation.Released))
-	switch {
-	case total == 0 && observation.Release == configmaterial.ReleaseMissingDocument:
-		return "nothing to remove"
-	case total == 0:
-		return "no owned fields remain"
-	case len(pointers) == 0:
-		// Every retained pointer was too long or unsafe to print.
-		return fmt.Sprintf("%d fields left in place", total)
+	notice := prefix + reason + "; " + fields + suffix
+	if len(notice) > ownershipNoticeLimit {
+		notice = prefix + reason + "; " + fmt.Sprintf("%d fields left in place", observation.ReleasedCount) + suffix
 	}
-	fields := "fields left in place: "
-	for index, pointer := range pointers {
-		more := ""
-		if remaining := total - index - 1; remaining != 0 {
-			more = fmt.Sprintf(" and %d more", remaining)
-		}
-		separator := ""
-		if index != 0 {
-			separator = ", "
-		}
-		if len(fields)+len(separator)+len(pointer)+len(more) <= budget {
-			fields += separator + pointer
-			continue
-		}
-		if index != 0 {
-			return fields + fmt.Sprintf(" and %d more", total-index)
-		}
-		room := budget - len(fields) - len(more) - len("...")
-		if room < len("/x") {
-			return fmt.Sprintf("%d fields left in place", total)
-		}
-		return fields + truncateText(pointer, room) + "..." + more
-	}
-	if omitted := total - len(pointers); omitted != 0 {
-		fields += fmt.Sprintf(" and %d more", omitted)
-	}
-	return fields
+	return notice
 }
 
 // truncateText cuts at a UTF-8 boundary within limit bytes.

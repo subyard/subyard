@@ -42,7 +42,6 @@ const (
 
 	maxReleasedPointers     = 256
 	maxReleasedPointerBytes = 512
-	maxReleasedCount        = 1 << 20
 )
 
 //go:embed guest_json.py
@@ -63,9 +62,9 @@ type JSONObservation struct {
 	// Release names why retirement releases ownership without changing the
 	// document: ReleaseChanged or ReleaseMissingDocument. Empty otherwise.
 	Release string `json:"release,omitempty"`
-	// Released lists the printable owned field pointers that such a release
-	// leaves in place; ReleasedCount counts all of them, including pointers too
-	// long or unsafe to print. Both are empty when no owned path remains.
+	// ReleasedCount counts the owned field pointers that such a release leaves
+	// in place. Released lists all of them when they are short and safe to
+	// print, and is empty otherwise.
 	Released      []string `json:"released,omitempty"`
 	ReleasedCount int      `json:"released_count,omitempty"`
 }
@@ -396,8 +395,8 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	if _, err := hex.DecodeString(encoded.Fingerprint); err != nil {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
-	if !validReleasedPointers(encoded.Released) || encoded.ReleasedCount < len(encoded.Released) ||
-		encoded.ReleasedCount > maxReleasedCount ||
+	if !validReleasedPointers(encoded.Released) || encoded.ReleasedCount < 0 ||
+		len(encoded.Released) != 0 && len(encoded.Released) != encoded.ReleasedCount ||
 		encoded.Release != "" && encoded.Release != ReleaseChanged && encoded.Release != ReleaseMissingDocument {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}

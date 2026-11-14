@@ -117,42 +117,32 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 	}
 }
 
-// Activation warnings reject text above the release diagnostic bound; a long
-// field list is shortened, and its count and suffix always survive.
+// Activation warnings reject text above the release diagnostic bound: the
+// notice lists every retained field when they fit, and otherwise counts them.
 func TestOwnershipReleaseNoticeStaysWithinDiagnosticBound(t *testing.T) {
-	long := "/" + strings.Repeat("p", 500)
-	many := make([]string, 256)
-	for index := range many {
-		many[index] = fmt.Sprintf("/%03d/%s", index, strings.Repeat("q", 500))
+	long := make([]string, 40)
+	for index := range long {
+		long[index] = fmt.Sprintf("/field-%02d", index)
 	}
-	many[0] = "/000"
-	slices.Sort(many)
-	suffix := "; Subyard no longer manages it"
 	for _, scenario := range []struct {
-		name, path string
-		pointers   []string
-		count      string
+		observation configmaterial.Observation
+		fields      string
 	}{
-		{"many", "/home/dev/.sample/settings.json", many, " and 255 more"},
-		{"long-first", "/home/dev/.sample/settings.json", []string{long, "/z"}, " and 1 more"},
-		{"long-only", "/home/dev/.sample/settings.json", []string{long}, ""},
-		{"long-path", "/home/dev/" + strings.Repeat("d", 600), []string{long, "/z"}, " and 1 more"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 2}, "fields left in place: /a, /b"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: long, ReleasedCount: len(long)}, "40 fields left in place"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, ReleasedCount: 300}, "300 fields left in place"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged}, "no owned fields remain"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseMissingDocument}, "nothing to remove"},
 	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			observation := configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: scenario.pointers}
-			result := boundedNotice("  [ ok ] yard "+strings.Repeat("y", 63)+": released ownership of "+scenario.path+": ", observation, suffix)
-			for _, notice := range []string{ownershipReleaseNotice("sample", scenario.path, observation), result} {
-				if len(notice) > ownershipNoticeLimit || !utf8.ValidString(notice) || !strings.Contains(notice, "fields left in place: ") {
-					t.Fatalf("notice exceeds the bound or lost its fields: %d %q", len(notice), notice)
-				}
-				if scenario.count != "" && !strings.Contains(notice, scenario.count) {
-					t.Fatalf("omitted pointers are not counted: %q", notice)
-				}
+		for _, notice := range []string{
+			ownershipReleaseNotice("sample", "/home/dev/.sample/settings.json", scenario.observation),
+			boundedNotice("  [ ok ] yard "+strings.Repeat("y", 63)+": released ownership of /home/dev/.sample/settings.json: ", scenario.observation, "; Subyard no longer manages it"),
+			ownershipReleaseNotice("sample", "/home/dev/"+strings.Repeat("d", 600), scenario.observation),
+		} {
+			if len(notice) > ownershipNoticeLimit || !utf8.ValidString(notice) || !strings.Contains(notice, "; "+scenario.fields) {
+				t.Fatalf("notice=%q (%d bytes), want fields %q", notice, len(notice), scenario.fields)
 			}
-			if !strings.HasSuffix(result, suffix) {
-				t.Fatalf("result line lost its suffix: %q", result)
-			}
-		})
+		}
 	}
 }
 
@@ -169,23 +159,5 @@ func TestRetiredIntegrationNoticesPreviewOwnershipRelease(t *testing.T) {
 	}
 	if executor.retires != 0 || output.Len() != 0 {
 		t.Fatalf("preview performed or reported the release: retires=%d output=%q", executor.retires, output.String())
-	}
-}
-
-// Retained pointers the guest could not print are counted in the notice.
-func TestOwnershipReleaseNoticeCountsUnprintedFields(t *testing.T) {
-	for _, scenario := range []struct {
-		observation configmaterial.Observation
-		want        string
-	}{
-		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 300}, "fields left in place: /a, /b and 298 more"},
-		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, ReleasedCount: 1}, "1 fields left in place"},
-		{configmaterial.Observation{Release: configmaterial.ReleaseChanged}, "no owned fields remain"},
-		{configmaterial.Observation{Release: configmaterial.ReleaseMissingDocument}, "nothing to remove"},
-	} {
-		notice := ownershipReleaseNotice("sample", "/home/dev/.sample/settings.json", scenario.observation)
-		if !strings.HasSuffix(notice, "; "+scenario.want) {
-			t.Fatalf("notice=%q want suffix %q", notice, scenario.want)
-		}
 	}
 }
