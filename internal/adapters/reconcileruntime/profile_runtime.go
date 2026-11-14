@@ -3,6 +3,8 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -344,12 +346,17 @@ func (runtime Runtime) applyProfileRuntime(
 		action = "custody-apply"
 		arguments = append(arguments, custody...)
 	}
-	stdout, stderr, err := runtime.runProfileRuntimeHandler(ctx, definition, action, arguments...)
+	nonce, err := profileRuntimeDiagnosticNonce()
+	if err != nil {
+		return err
+	}
+	environment := append(slices.Clone(runtime.Environment), profileRuntimeNonceVariable+"="+nonce)
+	stdout, stderr, err := runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, environment, profileRuntimeApplyLimit, action, arguments...)
 	if err != nil {
 		if runtime.Stderr != nil && len(stderr) != 0 {
 			_, _ = runtime.Stderr.Write(stderr)
 		}
-		return runtime.profileRuntimeApplyFailure(definition, err, stderr)
+		return runtime.profileRuntimeApplyFailure(definition, err, stderr, nonce)
 	}
 	applied, err := decodeProfileRuntimeObservation(stdout)
 	if err != nil {
@@ -393,13 +400,27 @@ func (failure *ProfileRuntimeYardFailure) Error() string {
 
 func (failure *ProfileRuntimeYardFailure) Unwrap() error { return failure.cause }
 
-func (runtime Runtime) profileRuntimeApplyFailure(definition profile.Definition, cause error, stderr []byte) error {
+// profileRuntimeNonceVariable names the per-apply nonce that opens a typed
+// record. The handler must not pass it to guests or other relayed output.
+const profileRuntimeNonceVariable = "SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE"
+
+func profileRuntimeDiagnosticNonce() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func (runtime Runtime) profileRuntimeApplyFailure(definition profile.Definition, cause error, stderr []byte, nonce string) error {
 	var exit *exec.ExitError
 	if definition.Runtime == nil || definition.Runtime.FailureScope != profile.FailureScopeYard || !errors.As(cause, &exit) ||
 		errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) || !domain.SafeName(runtime.Yard.YardName) {
 		return cause
 	}
-	phase, reason := profileRuntimeDiagnosticProtocol.failure(stderr, "apply")
+	protocol := profileRuntimeDiagnosticProtocol
+	protocol.nonce = nonce
+	phase, reason := protocol.failure(stderr, "apply")
 	if reason != "yard-local" {
 		return cause
 	}

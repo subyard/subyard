@@ -1214,17 +1214,23 @@ and the [support inventory](reference/legacy-migration-support.md).
 A profile runtime may declare `"failure_scope": "yard"`. Its typed failure affects only one
 running yard: the release completes and that yard waits for its own init. A failure is typed only
 when the declared handler exits non-zero from `apply` and writes exactly one stderr record
-`subyard-profile-runtime-diagnostic-v1 apply|verify yard-local`. The record shares the closed
+`subyard-profile-runtime-diagnostic-v1 NONCE apply|verify yard-local`. `NONCE` is the value of
+`SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE`, which the core creates for each apply and the handler
+must not pass to guests, so relayed guest output cannot forge a record. The record shares the closed
 parser and reasons of the lifecycle diagnostic protocol; an `inspect` record, a duplicate or
 malformed record, a record from an undeclared owner, cancellation, a timeout, output overflow and
 a mismatch that the core finds when it verifies the result after a successful exit stay blocking.
 So do plan-stale refusals, core runtimes, host and installation owners and any other failure.
-A handler reports `yard-local` only for its own guest-side steps while the guest still answers;
-host staging, file pushes, safety guards and a failed cleanup in the same apply stay blocking.
+A handler reports `yard-local` only when a guest-side command itself ran and failed and the guest
+still answers; Incus transport errors, host staging, file pushes, safety guards and a failed cleanup
+in the same apply stay blocking. The Orca handler proves this by running each such command through a
+guest wrapper that maps the command's failure to status 200, which Incus never returns.
 
 The owner records the typed failure under the configuration root as
 `activation-pending/v1/YARD/OWNER.json`, bound to the yard instance, the actual and desired
-fingerprints the failure left and the handler's content digest, and continues with its other yards.
+fingerprints the failure left and the digest of the profile package (the declared handler and
+every resource it may execute, except `tests/`), and continues with its other yards. Shared core
+scripts are not part of that digest.
 Every observation matches records in any journal state: a stale yard with a matching record is
 converged with a pending finding, and any other stale yard, including a recorded one whose facts
 changed, is unconverged. The release journal therefore completes only through the engine's
@@ -1243,8 +1249,11 @@ run `yard -Y NAME init`, which repeats the same apply from the partial state, or
 `yard -Y NAME profile disable ID` and then init.
 
 When every blocker is such a finding of a declared owner and no owner is unconverged, the command
-line admits that yard's init even while other yards are pending, unrelated commands and teardown;
-a successful init of one yard reports the other yards' findings and succeeds. Materialized
+line admits that yard's init even while other yards are pending, unrelated commands and teardown.
+On a yard without a finding of its own, a new yard included, it also admits init, config,
+profile and integration commands, which reach their own guards; a successful init of one yard
+reports the other yards' findings and succeeds. While other release work remains, findings are
+one bounded warning. Materialized
 configuration pending keeps its own admission. A successful init of the yard, a converged or
 re-applied owner for that yard and teardown of the yard remove the record through its known owner
 path; other entries of the record directory are never touched.

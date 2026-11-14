@@ -68,7 +68,7 @@ func installYardFailureRuntime(t *testing.T, root string, declared, typed bool) 
 	}
 	record := ":"
 	if typed {
-		record = `printf '%s\n' 'subyard-profile-runtime-diagnostic-v1 apply yard-local' >&2`
+		record = `printf '%s\n' "subyard-profile-runtime-diagnostic-v1 $SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE apply yard-local" >&2`
 	}
 	testkit.WriteFile(t, filepath.Join(root, "config/profiles/sample/profile.json"), []byte(declaration), 0o600)
 	testkit.WriteFile(t, filepath.Join(root, "config/profiles/sample/runtime.sh"), []byte(fmt.Sprintf(`#!/bin/sh
@@ -487,7 +487,7 @@ func TestPendingInitGateAdmitsEachNamedYardAcrossOwners(t *testing.T) {
 		name, extra     string
 		admitted, other []string
 	}{
-		{name: "two runtime owners", extra: blocker("activation.other-runtime.pending-configuration", "named"), admitted: []string{"default", "named"}, other: []string{"third"}},
+		{name: "two runtime owners", extra: blocker("activation.other-runtime.pending-configuration", "named"), admitted: []string{"default", "named"}},
 		// Materialized configuration pending keeps its own rule: every blocker
 		// must name the init, so it refuses a runtime item's init too.
 		{name: "materialized and runtime", extra: `,{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"yard named: move the unowned file aside","retry":"incus exec yard-named -- namei -l /home/dev/.codex"}`,
@@ -510,8 +510,16 @@ func TestPendingInitGateAdmitsEachNamedYardAcrossOwners(t *testing.T) {
 			}
 		})
 	}
+	// A yard without a pending item of its own needs no repair permit: its init
+	// is admitted ordinarily while the other yards stay pending.
+	fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration", blocker("activation.other-runtime.pending-configuration", "named"))
+	declareYardScopedRuntimes(t, &fixture)
+	outcome, inspection, err := fixture.cli.inspectMutationGateInspection(context.Background(), "third")
+	if err != nil || fixture.cli.pendingInitRepairGate(context.Background(), "third", fixture.outcome) || !fixture.cli.otherYardsPendingOnly(outcome, inspection, "third") {
+		t.Fatalf("third yard admission: %v", err)
+	}
 	// Any blocker that is not pending configuration keeps every init gated.
-	fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration",
+	fixture = pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration",
 		`,{"code":"dependency-unavailable","resource":"activation.other-runtime","message":"untyped","retry":"run yard update --check"}`)
 	declareYardScopedRuntimes(t, &fixture)
 	if fixture.cli.pendingInitRepairGate(context.Background(), "default", fixture.outcome) {
@@ -576,8 +584,8 @@ func TestMixedTypedAndBlockingFailuresDoNotClaimReady(t *testing.T) {
 	scenario := newYardFailureScenario(t, true, true, "default", "named")
 	handler := filepath.Join(scenario.fixture.cli.options.RepositoryRoot, "config/profiles/sample/runtime.sh")
 	payload := string(mustReadConfigFixture(t, handler))
-	patched := strings.Replace(payload, "printf '%s\\n' 'subyard-profile-runtime-diagnostic-v1 apply yard-local' >&2",
-		"[ \"$yard\" = default ] && printf '%s\\n' 'subyard-profile-runtime-diagnostic-v1 apply yard-local' >&2", 1)
+	patched := strings.Replace(payload, "printf '%s\\n' \"subyard-profile-runtime-diagnostic-v1",
+		"[ \"$yard\" = default ] && printf '%s\\n' \"subyard-profile-runtime-diagnostic-v1", 1)
 	if patched == payload {
 		t.Fatal("fixture handler was not patched")
 	}
@@ -765,5 +773,67 @@ func TestOnlyDeclaredRuntimePendingOpensOrdinaryCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// While another yard is pending, configuration commands on a yard without a
+// pending item reach their own guards; a materialized item keeps them gated.
+func TestConfigurationCommandsOnUnpendingYardWhileAnotherIsPending(t *testing.T) {
+	for _, test := range []struct {
+		resource string
+		gated    bool
+	}{
+		{resource: "activation.sample-runtime.pending-configuration"},
+		{resource: "activation.materialized-config.pending-configuration", gated: true},
+	} {
+		t.Run(test.resource, func(t *testing.T) {
+			fixture := pendingInitGateFixtureFor(t, true, "named", test.resource, "")
+			registry := filepath.Join(fixture.cli.options.RepositoryRoot, "config", "commands.registry")
+			extra := ""
+			for _, line := range strings.Split(string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "commands.registry"))), "\n") {
+				if strings.HasPrefix(line, "config|") || strings.HasPrefix(line, "profile|") {
+					extra += line + "\n"
+				}
+			}
+			testkit.WriteFile(t, registry, append(mustReadConfigFixture(t, registry), extra...), 0o600)
+			declareYardScopedRuntimes(t, &fixture)
+			for _, arguments := range [][]string{
+				{"-Y", "default", "init", "--yes"},
+				{"-Y", "default", "config", "set", "LIMITS_MEMORY", "4GiB", "--scope", "yard", "--local", "--yes"},
+				{"-Y", "default", "profile", "enable", "sample", "--yes"},
+			} {
+				var stdout, stderr bytes.Buffer
+				options := fixture.cli.options
+				options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
+				program, err := New(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				code := program.Run(context.Background())
+				t.Logf("yard %s => %d %s%s", strings.Join(arguments, " "), code, stdout.String(), stderr.String())
+				if refused := strings.Contains(stderr.String(), `"code":"dependency-unavailable"`); refused != test.gated {
+					t.Fatalf("yard %s gate refusal=%t want %t: %s%s", strings.Join(arguments, " "), refused, test.gated, stdout.String(), stderr.String())
+				}
+			}
+		})
+	}
+}
+
+// A record binds the whole profile package, not only the declared wrapper: a
+// changed resource the handler executes makes the old record stale.
+func TestPendingRecordBindsTheProfilePackage(t *testing.T) {
+	scenario := newYardFailureScenario(t, true, true, "default")
+	resource := filepath.Join(scenario.fixture.cli.options.RepositoryRoot, "config/profiles/sample/resources/handler.sh")
+	if err := os.MkdirAll(filepath.Dir(resource), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, resource, []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	scenario.runtime.failing(t, "default", true)
+	requirePendingRuntimeOutcome(t, scenario.converge(t), "default")
+	testkit.WriteFile(t, resource, []byte("#!/bin/sh\nexit 1\n"), 0o700)
+	readiness := scenario.invoke(t, releasetransition.ProcessInspect, nil)
+	if readiness.Inspection == nil || len(readiness.Inspection.Blockers) != 0 || readiness.Inspection.Outcome.Status == releasetransition.StatusReady {
+		payload, _ := json.Marshal(readiness)
+		t.Fatalf("record survived a changed package resource: %s", payload)
 	}
 }

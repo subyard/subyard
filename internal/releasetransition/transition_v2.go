@@ -3544,9 +3544,17 @@ func promoteActivationPending(observation *v2Observation) {
 		}
 		return
 	}
-	for _, pending := range observation.activationPending {
-		observation.activationWarnings = append(observation.activationWarnings, pendingConfigurationText(pending.item, "; it waits for its yard init after the release is ready"))
+	// One bounded warning names the findings, within the outcome's warning count.
+	if len(canonicalWarnings(observation.activationWarnings)) >= 64 {
+		return
 	}
+	blockers := make([]Blocker, len(observation.activationPending))
+	for index, pending := range observation.activationPending {
+		blockers[index] = Blocker{Resource: "activation." + pending.id + ".pending-configuration", Message: pending.item.Message}
+	}
+	const suffix = "; waits for yard init after the release is ready"
+	observation.activationWarnings = append(observation.activationWarnings,
+		pendingConfigurationText(V2PendingConfiguration{Message: pendingConfigurationMessageWithin(blockers, maxDiagnosticText-len(suffix))}, suffix))
 }
 
 func pendingConfigurationText(item V2PendingConfiguration, suffix string) string {
@@ -3916,6 +3924,10 @@ func pendingConfiguration(err error) bool {
 // configuration, within the public diagnostic bound. Any other blocker set
 // reports its first blocker.
 func pendingConfigurationMessage(blockers []Blocker) string {
+	return pendingConfigurationMessageWithin(blockers, maxDiagnosticText)
+}
+
+func pendingConfigurationMessageWithin(blockers []Blocker, limit int) string {
 	for _, blocker := range blockers {
 		if !strings.HasSuffix(blocker.Resource, ".pending-configuration") {
 			return blockers[0].Message
@@ -3931,7 +3943,7 @@ func pendingConfigurationMessage(blockers []Blocker) string {
 		if remaining := len(blockers) - index - 1; remaining > 0 {
 			suffix = fmt.Sprintf("; and %d more pending; full details: yard migrate --check", remaining)
 		}
-		if len(candidate)+len(suffix) > maxDiagnosticText {
+		if len(candidate)+len(suffix) > limit {
 			if message == "" {
 				return blocker.Message
 			}

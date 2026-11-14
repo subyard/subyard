@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -334,25 +335,75 @@ func (reconciler *profileRuntimeActivationReconciler) pendingFacts(target config
 	if !ok {
 		return activationPendingRecord{}, errors.New("profile runtime does not declare a yard failure scope")
 	}
-	path, err := definition.ExecutablePath(definition.Runtime.Handler)
+	digest, err := profileRuntimePackageDigest(definition)
 	if err != nil {
 		return activationPendingRecord{}, err
 	}
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return activationPendingRecord{}, err
-	}
-	digest := sha256.Sum256(payload)
 	yard := target.Name
 	return activationPendingRecord{
 		SchemaVersion: activationPendingSchema, Yard: yard, Project: target.Loaded.Context.IncusProject,
 		Instance: target.Loaded.Context.YardInstanceName, Owner: reconciler.id, Actual: state.Actual, Desired: state.Desired,
-		Inputs: hex.EncodeToString(digest[:]),
+		Inputs: digest,
 		// Each yard's finding is its own readiness blocker, so this bounded
 		// message and its init step never depend on the number of yards.
 		Message: fmt.Sprintf("yard %[1]s: profile %[2]s runtime failed (diagnose: yard -Y %[1]s profile status %[2]s); "+
 			"profile not applied; fix it and run yard -Y %[1]s init, or run yard -Y %[1]s profile disable %[2]s then init", yard, definition.Name),
 	}, nil
+}
+
+// profileRuntimePackageDigest binds a record to the effective handler: the
+// declared wrapper and every resource of its profile package that it may
+// execute, so a release changing any of them invalidates older records.
+func profileRuntimePackageDigest(definition profile.Definition) (string, error) {
+	handler, err := definition.ExecutablePath(definition.Runtime.Handler)
+	if err != nil {
+		return "", err
+	}
+	root := strings.TrimSuffix(handler, string(filepath.Separator)+filepath.Clean(definition.Runtime.Handler))
+	hash := sha256.New()
+	entries := 0
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entries++; entries > 4096 {
+			return errors.New("profile package exceeds its digest bound")
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			if path != root && entry.Name() == "tests" {
+				return filepath.SkipDir
+			}
+			fmt.Fprintf(hash, "d %q\n", relative)
+		case entry.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(hash, "l %q %q\n", relative, target)
+		case entry.Type().IsRegular():
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			payload, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(hash, "f %q %o %x\n", relative, info.Mode().Perm(), sha256.Sum256(payload))
+		default:
+			return fmt.Errorf("profile package entry %q has an unsupported type", relative)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // recordedPending returns the pending finding when a record still matches the

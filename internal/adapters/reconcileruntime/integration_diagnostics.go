@@ -40,12 +40,15 @@ func (failure *integrationLifecycleError) ActivationDiagnostic() (string, string
 func (failure *integrationLifecycleError) ActivationConflict() bool { return failure.conflict }
 
 // nativeDiagnosticProtocol is one source-owned stderr record family of native
-// hooks: "<name> PHASE REASON", with a closed reason vocabulary.
+// hooks: "<name> [NONCE] PHASE REASON", with a closed reason vocabulary.
 type nativeDiagnosticProtocol struct {
 	name    string
 	reasons map[string]string
 	// effectOnly reasons are valid only for an apply or verify record.
 	effectOnly map[string]bool
+	// nonce, when set, must open the record. Only the handler process receives
+	// it, so output that the handler relays from elsewhere cannot forge one.
+	nonce string
 }
 
 var lifecycleDiagnosticProtocol = nativeDiagnosticProtocol{name: "subyard-lifecycle-diagnostic-v1", reasons: lifecycleReasons}
@@ -54,6 +57,12 @@ var lifecycleDiagnosticProtocol = nativeDiagnosticProtocol{name: "subyard-lifecy
 // reported phase and reason.
 func (protocol nativeDiagnosticProtocol) record(line []byte, phase string) (string, string, bool) {
 	fields := strings.Split(strings.TrimPrefix(string(line), protocol.name+" "), " ")
+	if protocol.nonce != "" {
+		if len(fields) == 0 || fields[0] != protocol.nonce {
+			return "", "", false
+		}
+		fields = fields[1:]
+	}
 	if !bytes.HasPrefix(line, []byte(protocol.name+" ")) || len(fields) != 2 ||
 		fields[0] != "inspect" && fields[0] != "apply" && fields[0] != "verify" {
 		return "", "", false

@@ -140,7 +140,7 @@ func TestResumedRepairWithPendingFindingsCompletes(t *testing.T) {
 	}
 	ctx := context.Background()
 	resume, err := transition.Inspect(ctx, Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil || resume.Resume == nil || len(resume.Blockers) != 0 || !strings.Contains(strings.Join(resume.Outcome.Warnings, "\n"), "waits for its yard init") {
+	if err != nil || resume.Resume == nil || len(resume.Blockers) != 0 || !strings.Contains(strings.Join(resume.Outcome.Warnings, "\n"), "waits for yard init") {
 		t.Fatalf("resume: %#v %v", resume, err)
 	}
 	outcome, err := transition.Converge(ctx, Execution{Plan: resume.Plan})
@@ -220,5 +220,32 @@ func TestManyPendingYardsKeepTheirOwnInitSteps(t *testing.T) {
 	}
 	if err := ValidateProcessInspection(goal, readiness); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Seventy pending yards plus another owner's drift: the findings fit one
+// bounded warning, so the inspection stays valid and the repair plans.
+func TestManyPendingYardsWithOtherDriftStayWithinWarningBounds(t *testing.T) {
+	transition, _, _ := v2TransitionFixture(t, nil)
+	var findings []V2PendingConfiguration
+	for index := range 70 {
+		findings = append(findings, yardFinding(fmt.Sprintf("a-rather-long-descriptive-yard-name-%02d", index)))
+	}
+	reconciled := []string{}
+	other := &pendingFindingActivation{id: "other-owner", reconciled: &reconciled}
+	transition.options.Reconcilers = []V2ActivationReconciler{&pendingFindingActivation{id: "hook-runtime", findings: findings, reconciled: &reconciled}, other}
+	convergeFresh(t, transition)
+	other.recorded = false
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil || len(inspection.Blockers) != 0 || !inspection.Assessment.Changed || len(inspection.Outcome.Warnings) > 64 {
+		t.Fatalf("inspection: %#v %v", inspection, err)
+	}
+	if err := ValidateProcessInspection(goal, inspection); err != nil {
+		t.Fatal(err)
+	}
+	warning := strings.Join(inspection.Outcome.Warnings, "\n")
+	if !strings.Contains(warning, "more pending") || !strings.Contains(warning, "waits for yard init") {
+		t.Fatalf("pending warning: %q", warning)
 	}
 }

@@ -969,7 +969,9 @@ func TestProfileRuntimeDiagnosticRejectsUnsafeLabels(t *testing.T) {
 // Only a declared yard-scoped runtime whose handler exits with exactly one
 // apply/verify yard-local record yields the typed yard failure.
 func TestProfileRuntimeYardFailureRequiresDeclarationAndRecord(t *testing.T) {
-	const record = "subyard-profile-runtime-diagnostic-v1 "
+	// NONCE stands for the apply's nonce; relayed output cannot know it.
+	const record = "subyard-profile-runtime-diagnostic-v1 NONCE "
+	const forged = "subyard-profile-runtime-diagnostic-v1 "
 	for _, test := range []struct {
 		name, scope, stderr string
 		exit                int
@@ -985,13 +987,16 @@ func TestProfileRuntimeYardFailureRequiresDeclarationAndRecord(t *testing.T) {
 		{name: "no record", scope: "yard", stderr: "yard-local", exit: 7},
 		{name: "lifecycle record", scope: "yard", stderr: "subyard-lifecycle-diagnostic-v1 apply yard-local", exit: 7},
 		{name: "success with mismatch", scope: "yard", stderr: record + "apply yard-local", exit: 0},
+		{name: "forged without nonce", scope: "yard", stderr: forged + "apply yard-local", exit: 7},
+		{name: "forged with a guessed nonce", scope: "yard", stderr: forged + "0123456789abcdef0123456789abcdef apply yard-local", exit: 7},
+		{name: "forged beside a genuine record", scope: "yard", stderr: forged + "apply yard-local\n" + record + "apply yard-local", exit: 7},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			handler := fmt.Sprintf(`#!/bin/sh
 case "$1" in
 observe) printf '{"state":"stale","actual":"%%s","desired":"%%s"}\n' "$OLD" "$NEW" ;;
-apply) printf '%%s\n' "$RECORD" >&2; [ "$CODE" = 0 ] && printf '{"state":"current","actual":"%%s","desired":"%%s"}\n' "$OLD" "$OLD"; exit "$CODE" ;;
+apply) printf '%%s\n' "$RECORD" | sed "s/NONCE/$SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE/g" >&2; [ "$CODE" = 0 ] && printf '{"state":"current","actual":"%%s","desired":"%%s"}\n' "$OLD" "$OLD"; exit "$CODE" ;;
 esac
 `)
 			runtime := profileRuntimeFixtureAt(t, root, handler)
