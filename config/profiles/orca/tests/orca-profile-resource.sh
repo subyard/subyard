@@ -589,12 +589,12 @@ if [ "${1:-}" = --source-observer-fixture ]; then
     target="$ORCA_TEST_GUEST/$artifact"
     mkdir -p "${target%/*}"
     printf 'orphaned Codex integration\n' >"$target"
-    "$observer" _runtime-contract observe >"$TMP/codex-orphan.json"
+    ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/codex-orphan.json"
     jq -e '.state == "stale"' "$TMP/codex-orphan.json" >/dev/null \
       || fail "runtime contract ignored orphaned $artifact"
     rm -f "$target"
     ln -s "$TMP/missing-contract-target" "$target"
-    if "$observer" _runtime-contract observe >"$TMP/contract-symlink.json" 2>"$TMP/contract-symlink.err"; then
+    if ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/contract-symlink.json" 2>"$TMP/contract-symlink.err"; then
       fail "runtime contract accepted an orphaned symbolic link at $artifact"
     fi
     rm -f "$target"
@@ -603,7 +603,7 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   touch "$TMP/drain-exec-stdin"
   mkdir -p "$ORCA_TEST_GUEST/usr/bin"
   ln -s "$ORCA_TEST_GUEST/tmp/unrelated" "$ORCA_TEST_GUEST/usr/bin/orca-ide"
-  "$observer" _runtime-contract observe >"$2/current.json"
+  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/current.json"
   jq -e '.state == "current"' "$2/current.json" >/dev/null \
     || fail 'runtime contract refused the package-owned launcher symlink'
   rm -f "$ORCA_TEST_GUEST/usr/bin/orca-ide"
@@ -620,7 +620,7 @@ if [ "${1:-}" = --source-observer-fixture ]; then
         content) printf '# legacy Codex integration\n' >"$target" ;;
         mode) chmod 0600 "$target" ;;
       esac
-      "$observer" _runtime-contract observe >"$TMP/codex-artifact-stale.json"
+      ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/codex-artifact-stale.json"
       jq -e '.state == "stale" and .actual != .desired' "$TMP/codex-artifact-stale.json" >/dev/null \
         || fail "runtime contract accepted $drift drift in $artifact with intact helpers"
       cp -p "$TMP/codex-artifact" "$target"
@@ -628,18 +628,18 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   done
   rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex"
   printf '# legacy Codex login integration\n' >"$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh"
-  "$observer" _runtime-contract observe >"$TMP/codex-launch-stale.json"
+  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/codex-launch-stale.json"
   jq -e '.state == "stale" and .actual != .desired' "$TMP/codex-launch-stale.json" >/dev/null \
     || fail 'runtime contract accepted missing Codex chat launcher and legacy login integration'
   printf '# old helper\n' >>"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/reconcile.py"
   pushes="$(cat "$ORCA_TEST_PUSH_COUNTER")"
   stages="$(count_log 'mktemp -d /tmp/subyard-orca.')"
-  "$observer" _runtime-contract observe >"$2/stale.json"
+  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/stale.json"
   [ "$pushes" = "$(cat "$ORCA_TEST_PUSH_COUNTER")" ] || fail 'source observation pushed guest files'
   [ "$stages" = "$(count_log 'mktemp -d /tmp/subyard-orca.')" ] || fail 'source observation staged guest files'
   "$observer" _runtime-contract apply source-observer-repair \
     "$(jq -r .actual "$2/stale.json")" "$(jq -r .desired "$2/stale.json")" >"$TMP/applied.json"
-  "$observer" _runtime-contract observe >"$2/repaired.json"
+  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/repaired.json"
   cmp -s "$TMP/expected-codex-profile" "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
     || fail 'runtime contract repair left the legacy Codex login integration'
   cmp -s "$TMP/expected-codex-bin" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex" \
@@ -731,7 +731,7 @@ done
   || fail 'pair restarted a stopped Orca service'
 [ "$(count_log '.pairing.url')" -eq 0 ] \
   || fail 'pair read a pairing capability while Orca was stopped'
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "absent" and .actual == "" and .desired == ""' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation did not distinguish an absent Orca installation'
 run_orca up --yes >"$TMP/up.out"
@@ -851,11 +851,16 @@ done
 grep -Fq -- "sync --host-name 'owner-host'" \
   "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" \
   || fail 'installed project hook did not receive the owner HostID'
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and (.actual | test("^[0-9a-f]{64}$")) and .actual == .desired' \
   <<<"$observation" >/dev/null || fail 'installed runtime contract was not observed as current'
+# A yard that does not select Orca has no runtime to converge, installed or not.
+for profiles in '' 'hermes'; do
+  [ "$(ENVIRONMENT_PROFILES="$profiles" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe </dev/null)" \
+    = '{"state":"absent","actual":"","desired":""}' ] || fail 'unselected Orca runtime was not observed as absent'
+done
 touch "$TMP/project-counts-fail"
-if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
+if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
   >"$TMP/unavailable-binding.out" 2>&1; then
   fail 'running native observation errors were downgraded to conditional scope'
 fi
@@ -871,11 +876,11 @@ grep -Fq 'Orca cleanup pending: /srv/workspaces/removed/src: session tabs are re
   || fail 'expected cleanup drift generated a warning'
 rm -f "$TMP/project-cleanup-pending"
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation accepted a missing completion marker'
 printf 'legacy-contract\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation accepted an old completion marker'
 push_count="$(cat "$ORCA_TEST_PUSH_COUNTER")"
@@ -883,7 +888,7 @@ printf '# drift\n' >>"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registrati
 chmod 0644 "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.lock"
 printf 'legacy-contract\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation missed helper drift'
 [ "$(cat "$ORCA_TEST_PUSH_COUNTER")" -eq "$push_count" ] \
@@ -948,7 +953,7 @@ fi
   grep -Fxq "$typed_record apply yard-local" "$TMP/runtime-interrupted.out" \
   || fail 'a failed guest effect of the runtime apply was not reported as yard-local'
 # A guest-side failure whose staging cleanup also fails reports nothing.
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 touch "$TMP/fail-cleanup-once"
 if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
@@ -965,13 +970,13 @@ for leftover in "$ORCA_TEST_GUEST"/tmp/subyard-orca.[0-9]*; do
   [ ! -e "$leftover" ] || rm -rf -- "$leftover"
 done
 rm -f "$TMP/fail-registration-marker"
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'interrupted runtime contract apply appeared current without its marker'
 assert_runtime_diagnostics() {
   local normal detailed
-  normal="$(SUBYARD_PROFILE_DIAGNOSTICS=0 "$ROOT/config/profiles/orca/runtime.sh" observe)"
-  detailed="$(SUBYARD_PROFILE_DIAGNOSTICS=1 "$ROOT/config/profiles/orca/runtime.sh" observe)"
+  normal="$(ENVIRONMENT_PROFILES=orca SUBYARD_PROFILE_DIAGNOSTICS=0 "$ROOT/config/profiles/orca/runtime.sh" observe)"
+  detailed="$(ENVIRONMENT_PROFILES=orca SUBYARD_PROFILE_DIAGNOSTICS=1 "$ROOT/config/profiles/orca/runtime.sh" observe)"
   jq -en --argjson normal "$normal" --argjson detailed "$detailed" --argjson expected "$1" '
     ($normal | has("diagnostics") | not) and
     ($detailed | del(.diagnostics)) == $normal and
@@ -1006,7 +1011,7 @@ ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 run_orca s
 grep -Fq "service runs an outdated unit: its updated environment is not applied; run 'yard migrate' or 'yard orca up'" \
   "$TMP/status-unit-drift.out" || fail 'status did not report an unapplied service unit'
 observation="$(ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
-  "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+  ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired and
   .consequence == "Orca service restarts to apply its updated unit; Orca clients reconnect; agents or terminals running inside the service end"' \
   <<<"$observation" >/dev/null || fail "runtime contract did not disclose main-unit drift: $observation"
@@ -1022,14 +1027,14 @@ cmp -s "$TMP/current-unit" "$installed_unit" \
 [ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
   || fail 'runtime contract apply did not restart Orca once for its updated unit'
 touch "$TMP/need-daemon-reload"
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and (.consequence | length > 0)' <<<"$observation" >/dev/null \
   || fail 'runtime contract missed a unit change systemd has not loaded'
 rm -f "$TMP/need-daemon-reload"
 # Restore the configured endpoint; up republishes its contract marker for the restored unit.
 sed -i 's#--pairing-address legacy.example-tailnet.ts.net:17679#--pairing-address owner.example-tailnet.ts.net:17678#' "$installed_unit"
 run_orca up --yes >/dev/null
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and .actual == .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract did not match the unit installed by up'
 assert_runtime_diagnostics '[]'

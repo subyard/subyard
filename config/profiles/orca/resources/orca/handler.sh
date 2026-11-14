@@ -1570,6 +1570,12 @@ if [ "$sub" = _runtime-contract ]; then
         jq -e '.schema == 1 and (.missingMetadata | type == "array")' <<<"$ORCA_METADATA_PROJECTION" >/dev/null \
           || die 'invalid native metadata projection'
       fi
+      # A yard that does not select Orca has no Orca runtime to converge: the
+      # runtime stage skips it. Deselection leaves an installed Orca in place.
+      if ! orca_profile_selected; then
+        printf '%s\n' '{"state":"absent","actual":"","desired":""}'
+        exit 0
+      fi
       observation="$(observe_runtime_contract)" || exit 1
       hook_binding=""
       if [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] &&
