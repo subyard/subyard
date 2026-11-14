@@ -22,7 +22,6 @@ E2E_ROUTE_CAPTURED=0
 # process: keeper bound to the calling process; handle: detached keeper bound to a handle.
 LEASE_KEEPER_MODE=process
 CLIENT_PROJECT=""
-HANDLE_IDLE_SECONDS=1200
 
 E2E_YARD="${SUBYARD_E2E_YARD:-test-yard}"
 E2E_LEGACY_ROUTE=0
@@ -249,59 +248,49 @@ ssh_config_value() {
   printf '"%s"' "$value"
 }
 
+render_facade_host() {
+  local host="$1" user="$2" identity="$3"
+  printf 'Host %s\n' "$host"
+  printf '    HostName %s\n' "$BASTION_HOSTNAME"
+  printf '    Port %s\n' "$BASTION_PORT"
+  printf '    User %s\n' "$user"
+  printf '    IdentityFile '; ssh_config_value "$identity"; printf '\n'
+  printf '    IdentitiesOnly yes\n'
+  printf '    BatchMode yes\n'
+  printf '    ForwardAgent no\n'
+  printf '    RequestTTY no\n'
+  printf '    StrictHostKeyChecking yes\n'
+  printf '    UserKnownHostsFile '; ssh_config_value "$BASTION_KNOWN_HOSTS"; printf '\n'
+  [ -z "$BASTION_HOST_KEY_ALIAS" ] || [ "$BASTION_HOST_KEY_ALIAS" = none ] \
+    || printf '    HostKeyAlias %s\n' "$BASTION_HOST_KEY_ALIAS"
+}
+
 render_client_config() {
   local selector alias
-  {
-    printf 'Host subyard-e2e-bastion\n'
-    printf '    HostName %s\n' "$BASTION_HOSTNAME"
-    printf '    Port %s\n' "$BASTION_PORT"
-    printf '    User %s\n' "$BASTION_USER"
-    printf '    IdentityFile '; ssh_config_value "$IDENTITY"; printf '\n'
+  render_facade_host subyard-e2e-bastion "$BASTION_USER" "$IDENTITY"
+  if [ -n "$DATA_USER" ]; then
+    printf '\n'
+    render_facade_host subyard-e2e-data "$DATA_USER" "$GUEST_IDENTITY"
+  fi
+  for ((selector=1; selector<=${#VM_IP[@]}; selector++)); do
+    alias="e2e-vm-$selector"
+    printf '\nHost %s\n' "$alias"
+    printf '    HostName %s\n' "${VM_IP[$selector]}"
+    printf '    Port 22\n'
+    printf '    User %s\n' "$GUEST_USER"
+    printf '    IdentityFile '; ssh_config_value "${GUEST_IDENTITY:-$IDENTITY}"; printf '\n'
     printf '    IdentitiesOnly yes\n'
     printf '    BatchMode yes\n'
     printf '    ForwardAgent no\n'
-    printf '    RequestTTY no\n'
+    printf '    ProxyJump subyard-e2e-data\n'
+    printf '    ConnectTimeout 10\n'
+    printf '    ConnectionAttempts 1\n'
+    printf '    ServerAliveInterval 15\n'
+    printf '    ServerAliveCountMax 3\n'
+    printf '    HostKeyAlias %s\n' "$alias"
     printf '    StrictHostKeyChecking yes\n'
-    printf '    UserKnownHostsFile '; ssh_config_value "$BASTION_KNOWN_HOSTS"; printf '\n'
-    [ -z "$BASTION_HOST_KEY_ALIAS" ] || [ "$BASTION_HOST_KEY_ALIAS" = none ] \
-      || printf '    HostKeyAlias %s\n' "$BASTION_HOST_KEY_ALIAS"
-    if [ -n "$DATA_USER" ]; then
-      printf '\nHost subyard-e2e-data\n'
-      printf '    HostName %s\n' "$BASTION_HOSTNAME"
-      printf '    Port %s\n' "$BASTION_PORT"
-      printf '    User %s\n' "$DATA_USER"
-      printf '    IdentityFile '; ssh_config_value "$GUEST_IDENTITY"; printf '\n'
-      printf '    IdentitiesOnly yes\n'
-      printf '    BatchMode yes\n'
-      printf '    ForwardAgent no\n'
-      printf '    RequestTTY no\n'
-      printf '    StrictHostKeyChecking yes\n'
-      printf '    UserKnownHostsFile '; ssh_config_value "$BASTION_KNOWN_HOSTS"; printf '\n'
-      [ -z "$BASTION_HOST_KEY_ALIAS" ] || [ "$BASTION_HOST_KEY_ALIAS" = none ] \
-        || printf '    HostKeyAlias %s\n' "$BASTION_HOST_KEY_ALIAS"
-    fi
-    if [ "${#VM_IP[@]}" -gt 0 ]; then
-      for ((selector=1; selector<=${#VM_IP[@]}; selector++)); do
-        alias="e2e-vm-$selector"
-        printf '\nHost %s\n' "$alias"
-        printf '    HostName %s\n' "${VM_IP[$selector]}"
-        printf '    Port 22\n'
-        printf '    User %s\n' "$GUEST_USER"
-        printf '    IdentityFile '; ssh_config_value "${GUEST_IDENTITY:-$IDENTITY}"; printf '\n'
-        printf '    IdentitiesOnly yes\n'
-        printf '    BatchMode yes\n'
-        printf '    ForwardAgent no\n'
-        printf '    ProxyJump subyard-e2e-data\n'
-        printf '    ConnectTimeout 10\n'
-        printf '    ConnectionAttempts 1\n'
-        printf '    ServerAliveInterval 15\n'
-        printf '    ServerAliveCountMax 3\n'
-        printf '    HostKeyAlias %s\n' "$alias"
-        printf '    StrictHostKeyChecking yes\n'
-        printf '    UserKnownHostsFile '; ssh_config_value "$GUEST_KNOWN_HOSTS"; printf '\n'
-      done
-    fi
-  }
+    printf '    UserKnownHostsFile '; ssh_config_value "$GUEST_KNOWN_HOSTS"; printf '\n'
+  done
 }
 
 ensure_client_id() {
@@ -829,9 +818,8 @@ acquire_lease() {
   resolve_vm_count
   local client fingerprint type blob response code reason state started last_report request
   local status_response workspace_context elapsed sleep_seconds capacity_wait attempt=0 last_state='' last_reason=''
-  local owner_display='' owner_yard='' owner_project='' owner_run='' owner_purpose=''
-  local owner_acquired='' owner_expires='' owner_acquired_epoch='' owner_expires_epoch=''
-  local owner_summary='' last_owner_summary='' transport_rc guard_rc
+  local owner_acquired_epoch owner_expires_epoch owner_summary='' last_owner_summary=''
+  local transport_rc guard_rc
   [ -n "$LEASE_REQUESTED_SLOT" ] \
     || die "an exact --slot is required before acquiring an E2E lease"
   command -v jq >/dev/null 2>&1 || die "jq is required"
@@ -986,20 +974,13 @@ acquire_lease() {
       || die_acquire_unknown invalid-busy-refusal
     owner_summary=''
     if [ "$state" = held ]; then
-      owner_display="$(jq -r '.owner.display_label' <<<"$response")"
-      owner_yard="$(jq -r '.owner.yard' <<<"$response")"
-      owner_project="$(jq -r '.owner.project' <<<"$response")"
-      owner_run="$(jq -r '.owner.run' <<<"$response")"
-      owner_purpose="$(jq -r '.owner.purpose' <<<"$response")"
-      owner_acquired="$(jq -r '.owner.acquired_at' <<<"$response")"
-      owner_expires="$(jq -r '.owner.expires_at' <<<"$response")"
-      owner_acquired_epoch="$(date -u -d "$owner_acquired" +%s 2>/dev/null)" \
+      owner_acquired_epoch="$(date -u -d "$(jq -r '.owner.acquired_at' <<<"$response")" +%s 2>/dev/null)" \
         || die_acquire_unknown invalid-busy-owner-acquired
-      owner_expires_epoch="$(date -u -d "$owner_expires" +%s 2>/dev/null)" \
+      owner_expires_epoch="$(date -u -d "$(jq -r '.owner.expires_at' <<<"$response")" +%s 2>/dev/null)" \
         || die_acquire_unknown invalid-busy-owner-expires
       [ "$owner_acquired_epoch" -le "$owner_expires_epoch" ] \
         || die_acquire_unknown invalid-busy-owner-window
-      owner_summary="owner=$owner_yard/$owner_project run=$owner_run purpose=$owner_purpose acquired=$owner_acquired expires=$owner_expires label=$owner_display"
+      owner_summary="$(jq -r '.owner | "owner=\(.yard)/\(.project) run=\(.run) purpose=\(.purpose) acquired=\(.acquired_at) expires=\(.expires_at) label=\(.display_label)"' <<<"$response")"
     fi
     last_state="$state"
     last_reason="$reason"
@@ -1008,12 +989,8 @@ acquire_lease() {
       die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason${owner_summary:+; $owner_summary}"
     fi
     elapsed=$((SECONDS - started))
-    if [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
-      printf '%s: timed out waiting for %s: state=%s reason=%s\n' "$E2E_PROGRAM" \
-        "$LEASE_REQUESTED_SLOT" "$state" "$reason" >&2
-      [ -z "$owner_summary" ] || printf '%s: %s\n' "$E2E_PROGRAM" "$owner_summary" >&2
-      return 4
-    fi
+    # The loop head reports an elapsed deadline with this refusal.
+    [ "$elapsed" -lt "$WAIT_SECONDS" ] || continue
     if [ "$((SECONDS - last_report))" -ge 30 ]; then
       report_exact_slot_wait "$started" "$state" "$reason" "$owner_summary"
       last_report=$SECONDS
@@ -1028,27 +1005,57 @@ lease_command() {
   printf '%s %s %s %s %s\n' "$1" "$LEASE_SLOT" "$LEASE_ID" "$LEASE_EPOCH" "$LEASE_CAPABILITY"
 }
 
-release_lease() {
-  local released_slot="$LEASE_SLOT" released_run="$LEASE_RUN" response code started=$SECONDS rc=0
-  [ -n "$LEASE_ID" ] || return 0
+# One bounded release with its E2E_RELEASE evidence. Sets RELEASE_CODE to ok, to the
+# broker's refusal code, or to empty when the transport failed.
+RELEASE_CODE=''
+lease_release_request() {
+  local response started=$SECONDS rc=0
+  RELEASE_CODE=''
   printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
-  if response="$(facade_request "$(lease_command release)" 180)"; then :; else
+  if response="$(facade_request "$(lease_command release)" 180)"; then
+    RELEASE_CODE="$(jq -r 'if .status == "ok" then "ok" else (.code // "") end' <<<"$response" 2>/dev/null)" || RELEASE_CODE=''
+    [ -n "$RELEASE_CODE" ] || RELEASE_CODE=invalid_response
+    [ "$RELEASE_CODE" = ok ] || rc=1
+  else
     rc=$?
-    printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' "$((SECONDS - started))" "$rc" >&2 || true
-    printf '%s: release failed for slot=%s run=%s\n' "$E2E_PROGRAM" \
-      "$released_slot" "$released_run" >&2
-    return 1
   fi
-  if [ "$(jq -r '.status // empty' <<<"$response")" != ok ]; then
-    printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=1\n' "$((SECONDS - started))" >&2 || true
-    code="$(jq -r '.code // "invalid_response"' <<<"$response")"
-    printf '%s: release rejected for slot=%s run=%s (%s)\n' "$E2E_PROGRAM" \
-      "$released_slot" "$released_run" "$code" >&2
-    return 1
-  fi
+  printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' \
+    "$((SECONDS - started))" "$rc" >&2 || true
+}
+
+release_lease() {
+  local released_slot="$LEASE_SLOT" released_run="$LEASE_RUN"
+  [ -n "$LEASE_ID" ] || return 0
+  lease_release_request
+  case "$RELEASE_CODE" in
+    ok) ;;
+    '')
+      printf '%s: release failed for slot=%s run=%s\n' "$E2E_PROGRAM" "$released_slot" "$released_run" >&2
+      return 1 ;;
+    *)
+      printf '%s: release rejected for slot=%s run=%s (%s)\n' "$E2E_PROGRAM" \
+        "$released_slot" "$released_run" "$RELEASE_CODE" >&2
+      return 1 ;;
+  esac
   LEASE_ID=""
-  printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=0\n' "$((SECONDS - started))" >&2 || true
   printf 'E2E lease released: slot=%s run=%s\n' "$released_slot" "$released_run" >&2
+}
+
+# Exit-path cleanup of whatever an acquire reached: a reservation whose grant never
+# arrived stays unconfirmed, a held lease is released and the acquire session ends.
+abandon_acquired_lease() {
+  local failed=0
+  if [ -n "$LEASE_ACQUIRE_PID" ] && [ -z "$LEASE_ID" ]; then
+    printf '%s: acquire cleanup remains unconfirmed: slot=%s run=%s\n' "$E2E_PROGRAM" "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
+    failed=1
+  fi
+  release_lease || failed=1
+  if [ -n "$LEASE_ACQUIRE_PID" ]; then
+    kill "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
+    wait "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
+    LEASE_ACQUIRE_PID=''
+  fi
+  return "$failed"
 }
 
 lease_process_identity() {
@@ -1277,6 +1284,35 @@ set_requested_slot() {
   printf -v LEASE_REQUESTED_SLOT 'slot-%03d' "$((10#$value))"
 }
 
+# Route selectors of every command line. The caller shifts two words.
+route_option() {
+  case "$1" in
+    --owner) [ "$#" -ge 2 ] && [ -z "$E2E_OWNER" ] || die '--owner requires one owner ID'; E2E_OWNER="$2" ;;
+    --pool) [ "$#" -ge 2 ] && [ -z "$E2E_POOL" ] || die '--pool requires one pool ID'; E2E_POOL="$2" ;;
+    --yard) [ "$#" -ge 2 ] || die '--yard needs a yard name'; E2E_YARD="$2"; E2E_LEGACY_ROUTE=1 ;;
+  esac
+}
+
+# Allocation options of every lease-taking command line. The caller shifts two words.
+allocation_option() {
+  case "$1" in
+    --slot)
+      [ "$#" -ge 2 ] || die '--slot needs a number from 1 to 999'
+      [ -z "$LEASE_REQUESTED_SLOT" ] || die '--slot may be specified only once'
+      set_requested_slot "$2" --slot ;;
+    --type) [ "$#" -ge 2 ] || die '--type needs subyard-pair or android-test'; ENVIRONMENT_TYPE="$2" ;;
+    --disk)
+      [ "$#" -ge 2 ] || die '--disk needs 50GiB'
+      [ -z "$DISK_REQUESTED" ] || die '--disk may be specified only once'
+      [ "$2" = 50GiB ] || die '--disk must be 50GiB'
+      DISK_REQUESTED="$2" ;;
+    --vm-count)
+      [ "$#" -ge 2 ] || die '--vm-count needs 1 or 2'
+      [ -z "$VM_COUNT_REQUESTED" ] || die '--vm-count may be specified only once'
+      case "$2" in 1|2) VM_COUNT_REQUESTED="$2" ;; *) die '--vm-count must be 1 or 2' ;; esac ;;
+  esac
+}
+
 # Resolve the trusted owner publication unless an explicit rollout route was selected.
 resolve_service_selection() {
   local mode="$1" service_route _runtime_uuid route_generation
@@ -1325,45 +1361,46 @@ parse_client_duration() {
 
 # --- Session lease handles ------------------------------------------------------
 # A handle keeps one lease across separate client invocations. Its private directory
-# holds the captured route, lease credentials and ephemeral guest key. A detached
-# keeper renews only while that exact handle exists and was used recently.
+# holds the captured route, the ephemeral guest key and:
+#   lease.json    lease credentials; removing or replacing it ends the handle
+#   activity      its mtime is the last exec; active.lock is held shared while one runs
+#   keeper.ready  PID and start time of the detached keeper; keeper.log has its events
+#   lost          the keeper gave the lease up; only release remains
+# The keeper renews only while it is alive and that exact lease.json exists.
 
+HANDLE_BASE="$STATE_BASE/handles"
 HANDLE_DIRECTORY=""
-
-handle_base() { printf '%s\n' "$STATE_BASE/handles"; }
-
-handle_directory() {
-  local handle="$1"
-  [[ "$handle" =~ ^[0-9a-f]{8}$ ]] || die "invalid lease handle '$handle'"
-  printf '%s/%s\n' "$(handle_base)" "$handle"
-}
-
-# Keeper timing: renewal cadence, transport retry pause, and how long transport
-# failures may be retried after the last successful renewal (below the broker's
-# 20-minute expiry). Tests shorten them only in test mode.
-handle_timing() {
-  local name="$1" value="$2" override
-  case "$name" in
-    renew) override="${SUBYARD_E2E_TEST_RENEW_SECONDS:-}" ;;
-    retry) override="${SUBYARD_E2E_TEST_RENEW_RETRY_SECONDS:-}" ;;
-    stale) override="${SUBYARD_E2E_TEST_RENEW_STALE_SECONDS:-}" ;;
-  esac
-  if [ "${SUBYARD_E2E_TEST_MODE:-}" = 1 ] && [[ "$override" =~ ^[1-9][0-9]{0,4}$ ]]; then
-    value="$override"
-  fi
-  printf '%s\n' "$value"
-}
-
+HANDLE_IDLE_SECONDS=1200
 # A failed idle release is retried this many times before the keeper gives up the
 # lease to broker expiry.
 HANDLE_IDLE_RELEASE_ATTEMPTS=3
 
-handle_mark_lost() {
-  printf '%s\t%s\n' "$(date +%s)" "$2" >> "$1/keeper.log"
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$1/lost"
+handle_directory() {
+  [[ "$1" =~ ^[0-9a-f]{8}$ ]] || die "invalid lease handle '$1'"
+  printf '%s/%s\n' "$HANDLE_BASE" "$1"
 }
 
 handle_lease_identity() { stat -c '%d:%i' "$1/lease.json" 2>/dev/null; }
+
+# Exit 0 while process $1 is the one that started at $2.
+process_started_at() {
+  local identity
+  identity="$(lease_process_identity "$1")" && [ "${identity%%:*}" = "$2" ]
+}
+
+handle_keeper_running() {
+  local pid start
+  read -r pid start < "$1/keeper.ready" 2>/dev/null && process_started_at "$pid" "$start"
+}
+
+# Exit 0 while an exec holds the handle's shared activity lock.
+handle_in_use() {
+  local fd rc=1
+  exec {fd}>>"$1/active.lock" || return 1
+  flock -x -n "$fd" || rc=0
+  exec {fd}>&-
+  return "$rc"
+}
 
 write_handle_state() {
   local dir="$HANDLE_DIRECTORY" temp
@@ -1372,10 +1409,7 @@ write_handle_state() {
   chmod 0600 "$dir/bastion_known_hosts"
   BASTION_KNOWN_HOSTS="$dir/bastion_known_hosts"
   write_client_config
-  : > "$dir/activity"
-  : > "$dir/active.lock"
-  : > "$dir/release.lock"
-  : > "$dir/keeper.lock"
+  touch -- "$dir/activity" "$dir/active.lock" "$dir/release.lock" "$dir/keeper.lock"
   temp="$(mktemp "$dir/.lease.XXXXXX")"
   jq -n \
     --arg handle "$LEASE_RUN" --arg slot "$LEASE_SLOT" --arg generation "$LEASE_GENERATION" \
@@ -1401,7 +1435,7 @@ write_handle_state() {
 }
 
 load_handle() {
-  local dir="$1" fields
+  local dir="$1" fields end=''
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -f "$dir/lease.json" ] && [ ! -L "$dir/lease.json" ] || return 1
   # The unit separator keeps empty fields, such as an unpublished owner, in place.
   fields="$(jq -r 'select(.schema_version == 1 and (.vm_count == 1 or .vm_count == 2) and
@@ -1411,7 +1445,6 @@ load_handle() {
      .route.owner, .route.pool, .route.yard, .route.service_generation, .route.state_root,
      .route.identity, .route.hostname, .route.port, .route.host_key_alias, .route.user,
      .route.data_user, "end"] | map(tostring) | join("\u001f")' "$dir/lease.json" 2>/dev/null)" || return 1
-  local end=''
   IFS=$'\x1f' read -r LEASE_RUN LEASE_SLOT LEASE_GENERATION LEASE_ID LEASE_EPOCH LEASE_CAPABILITY \
     LEASE_YARD LEASE_PROJECT LEASE_PURPOSE ENVIRONMENT_TYPE VM_COUNT HANDLE_IDLE_SECONDS \
     E2E_OWNER E2E_POOL E2E_YARD E2E_SERVICE_GENERATION STATE_ROOT IDENTITY BASTION_HOSTNAME \
@@ -1429,182 +1462,154 @@ load_handle() {
   CLIENT_CONFIG="$dir/ssh_config"
 }
 
-open_handle() {
-  local handle="$1" dir
-  dir="$(handle_directory "$handle")"
-  load_handle "$dir" || die "no active lease handle '$handle'; list handles with: leases"
-}
-
-# Exit 0 while the recorded keeper process, identified by PID and start time, lives.
-handle_keeper_running() {
-  local pid start identity
-  read -r pid start < "$1/keeper.ready" 2>/dev/null || return 1
-  identity="$(lease_process_identity "$pid")" || return 1
-  [ "${identity%%:*}" = "$start" ]
-}
-
 remove_handle_directory() {
   local dir="$1"
-  case "$dir" in "$(handle_base)"/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) return 1 ;; esac
-  [ ! -L "$dir" ] || return 1
+  [ "$dir" = "$HANDLE_BASE/${dir##*/}" ] && [[ "${dir##*/}" =~ ^[0-9a-f]{8}$ ]] && [ ! -L "$dir" ] || return 1
   # Retire the credentials first: a keeper treats a missing lease file as the end of its lease.
   rm -f -- "$dir/lease.json"
   find "$dir" -depth -delete 2>/dev/null
 }
 
 # Release the loaded handle's lease once. Returns 0 when the broker released it or it
-# had already ended; the handle is then removed.
+# had already ended; the handle is then removed. A failed release keeps the handle.
 release_handle() {
-  local dir="$HANDLE_DIRECTORY" reason="$1" fd response code started=$SECONDS release_rc=0
+  local dir="$HANDLE_DIRECTORY" reason="$1" fd rc=0
   exec {fd}>>"$dir/release.lock" || return 1
   flock -x "$fd"
-  if [ ! -f "$dir/lease.json" ]; then
-    exec {fd}>&-
-    return 0
+  if [ -f "$dir/lease.json" ]; then
+    lease_release_request
+    case "$RELEASE_CODE" in
+      ok) printf 'E2E lease released: handle=%s slot=%s reason=%s\n' "$LEASE_RUN" "$LEASE_SLOT" "$reason" >&2 ;;
+      lease_lost) printf 'E2E lease had already ended: handle=%s slot=%s\n' "$LEASE_RUN" "$LEASE_SLOT" >&2 ;;
+      '')
+        printf '%s: release failed for handle=%s slot=%s; the handle is kept, retry release\n' \
+          "$E2E_PROGRAM" "$LEASE_RUN" "$LEASE_SLOT" >&2
+        rc=1 ;;
+      *)
+        printf '%s: release rejected for handle=%s slot=%s (%s)\n' \
+          "$E2E_PROGRAM" "$LEASE_RUN" "$LEASE_SLOT" "$RELEASE_CODE" >&2
+        rc=1 ;;
+    esac
+    [ "$rc" != 0 ] || remove_handle_directory "$dir" || true
   fi
-  # The same bounded release evidence as release_lease; only a confirmed release reports 0.
-  printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
-  if response="$(facade_request "$(lease_command release)" 180)"; then
-    code="$(jq -r 'if .status == "ok" then "ok" else (.code // "invalid_response") end' <<<"$response" 2>/dev/null || printf invalid_response)"
-    [ "$code" = ok ] || release_rc=1
-  else
-    release_rc=$?
-    code=''
-  fi
-  printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' \
-    "$((SECONDS - started))" "$release_rc" >&2 || true
-  if [ -z "$code" ]; then
-    exec {fd}>&-
-    printf '%s: release failed for handle=%s slot=%s; the handle is kept, retry release\n' \
-      "$E2E_PROGRAM" "$LEASE_RUN" "$LEASE_SLOT" >&2
-    return 1
-  fi
-  case "$code" in
-    ok) printf 'E2E lease released: handle=%s slot=%s reason=%s\n' "$LEASE_RUN" "$LEASE_SLOT" "$reason" >&2 ;;
-    lease_lost) printf 'E2E lease had already ended: handle=%s slot=%s\n' "$LEASE_RUN" "$LEASE_SLOT" >&2 ;;
-    *)
-      exec {fd}>&-
-      printf '%s: release rejected for handle=%s slot=%s (%s)\n' "$E2E_PROGRAM" "$LEASE_RUN" "$LEASE_SLOT" "$code" >&2
-      return 1
-      ;;
-  esac
-  remove_handle_directory "$dir" || true
   exec {fd}>&-
+  return "$rc"
 }
 
-# Ownership of one renewal: this exact handle and its live keeper.
-handle_renew_owned() {
-  local dir="$1" identity="$2" keeper="$3" start="$4" current
-  [ "$(handle_lease_identity "$dir")" = "$identity" ] || return 1
-  current="$(lease_process_identity "$keeper")" || return 1
-  [ "${current%%:*}" = "$start" ]
+# --- Handle keeper ----------------------------------------------------------------
+# The handle_keeper_* steps read the locals of handle_keeper_main.
+
+handle_mark_lost() {
+  printf '%s\t%s\n' "$(date +%s)" "$1" >> "$dir/keeper.log"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/lost"
 }
 
-# One renewal transport, run as its own process group. It checks ownership right before
-# sending and, while in flight, kills its whole group when the handle or the keeper is
-# gone or its bound expires, so an orphaned transport cannot complete a renewal.
+# Ownership of the lease: this exact handle and this live keeper. An orphaned keeper
+# or renewal, whose handle was released or replaced or whose keeper died, has neither.
+handle_keeper_owns() {
+  [ "$(handle_lease_identity "$dir")" = "$lease_identity" ] && process_started_at "$keeper_pid" "$keeper_start"
+}
+
+# One renewal, run as its own process group. It sends only while the keeper owns the
+# lease and kills its whole group once that ends or after a minute, so no transport
+# outlives the ownership it started with and completes a renewal.
 handle_renew_transport() {
-  local dir="$1" identity="$2" keeper="$3" start="$4" transport waited=0
-  handle_renew_owned "$dir" "$identity" "$keeper" "$start" || exit 75
+  local transport deadline=$((SECONDS + 60))
+  handle_keeper_owns || exit 75
   facade_request "$(lease_command renew)" &
   transport=$!
   while kill -0 "$transport" 2>/dev/null; do
-    if ! handle_renew_owned "$dir" "$identity" "$keeper" "$start" || [ "$waited" -ge 300 ]; then
-      kill -KILL 0
-    fi
+    handle_keeper_owns && [ "$SECONDS" -lt "$deadline" ] || kill -KILL 0
     sleep 0.2
-    waited=$((waited + 1))
   done
   wait "$transport"
 }
 
-# The detached keeper: renews while this exact handle exists, stops when it is
-# released or replaced, and releases the lease after the idle limit.
+handle_keeper_renew() {
+  local rc=0 status
+  (set +m; handle_renew_transport) > "$dir/.renew-response" 2>/dev/null &
+  wait "$!" 2>/dev/null || rc=$?
+  handle_keeper_owns || exit 0
+  status="$(jq -r 'if type == "object" then (.status // "") else "" end' "$dir/.renew-response" 2>/dev/null)"
+  if [ "$rc" = 0 ] && [ "$status" = ok ]; then
+    printf '%s\tok\n' "$(date +%s)" >> "$dir/keeper.log"
+    last_ok=$SECONDS
+    next_renew=$((SECONDS + renew_seconds))
+  elif [ "$status" = error ]; then
+    # An explicit broker rejection: the lease is no longer current.
+    handle_mark_lost renew-rejected
+    exit 1
+  elif [ $((SECONDS - last_ok + retry_seconds)) -lt "$stale_seconds" ]; then
+    # A transport failure or timeout: retry while the lease is safely unexpired.
+    printf '%s\trenew-retry\n' "$(date +%s)" >> "$dir/keeper.log"
+    next_renew=$((SECONDS + retry_seconds))
+  else
+    handle_mark_lost renew-unconfirmed
+    exit 1
+  fi
+}
+
+# Release the lease once no exec has used the handle for its idle limit.
+handle_keeper_idle() {
+  local fd now last
+  [ "$SECONDS" -ge "$next_idle_release" ] || return 0
+  exec {fd}>>"$dir/active.lock" || exit 1
+  # A running exec holds this lock shared and counts as activity.
+  if flock -x -n "$fd"; then
+    now="$(date +%s)"
+    last="$(stat -c %Y "$dir/activity" 2>/dev/null || printf 0)"
+    if [ $((now - last)) -ge "$HANDLE_IDLE_SECONDS" ]; then
+      printf '%s\tidle-release\n' "$now" >> "$dir/keeper.log"
+      release_handle idle && exit 0
+      idle_failures=$((idle_failures + 1))
+      if [ "$idle_failures" -ge "$HANDLE_IDLE_RELEASE_ATTEMPTS" ]; then
+        # Stop renewing; the broker's expiry then reclaims the slot.
+        handle_mark_lost idle-release-abandoned
+        exit 1
+      fi
+      # Renewal continues; retry the release after a pause.
+      next_idle_release=$((SECONDS + retry_seconds))
+    fi
+  fi
+  exec {fd}>&-
+}
+
+# The detached keeper of one handle: renews while it owns the lease and releases it
+# after the idle limit. Cadence: renewal period, pause before retrying a failed
+# transport or idle release, and how long after the last confirmed renewal transport
+# failures are retried (below the broker's 20-minute expiry).
 handle_keeper_main() {
-  local dir="$1" self identity identity_start renew_seconds retry_seconds stale_seconds next now last afd
-  local response rc status last_ok idle_attempt=0 idle_failures=0
-  HANDLE_RENEW_JOB=''
+  local dir="${1:-}" lease_identity keeper_pid="$BASHPID" keeper_start
+  local renew_seconds=300 retry_seconds=60 stale_seconds=900
+  local next_renew last_ok=$SECONDS next_idle_release=0 idle_failures=0
   [ "$#" -eq 1 ] || exit 2
   set +e
-  # Renewal transports get their own process groups so ownership loss can end them whole.
+  # Job control gives each renewal its own process group.
   set -m
-  trap '[ -z "$HANDLE_RENEW_JOB" ] || kill -KILL -- "-$HANDLE_RENEW_JOB" >/dev/null 2>&1' EXIT
   trap 'exit 0' INT TERM
   exec 9>>"$dir/keeper.lock" || exit 1
   flock -n 9 || exit 0
   load_handle "$dir" || exit 0
-  identity="$(handle_lease_identity "$dir")" || exit 0
-  renew_seconds="$(handle_timing renew 300)"
-  retry_seconds="$(handle_timing retry 60)"
-  stale_seconds="$(handle_timing stale 900)"
-  next=$((SECONDS + renew_seconds))
-  last_ok=$SECONDS
-  self="$BASHPID"
-  identity_start="$(lease_process_identity "$self")" || exit 1
-  printf '%s %s\n' "$self" "${identity_start%%:*}" > "$dir/keeper.ready"
-  while true; do
-    # An orphaned keeper never renews: its handle was released or replaced.
-    [ "$(handle_lease_identity "$dir")" = "$identity" ] || exit 0
-    [ ! -e "$dir/lost" ] || exit 1
-    exec {afd}>>"$dir/active.lock" || exit 1
-    # A running exec holds a shared lock and counts as activity.
-    if [ "$SECONDS" -ge "$idle_attempt" ] && flock -x -n "$afd"; then
-      now="$(date +%s)"
-      last="$(stat -c %Y "$dir/activity" 2>/dev/null || printf 0)"
-      if [ $((now - last)) -ge "$HANDLE_IDLE_SECONDS" ]; then
-        printf '%s\tidle-release\n' "$now" >> "$dir/keeper.log"
-        release_handle idle && exit 0
-        idle_failures=$((idle_failures + 1))
-        if [ "$idle_failures" -ge "$HANDLE_IDLE_RELEASE_ATTEMPTS" ]; then
-          # Stop renewing; the broker's expiry then reclaims the slot.
-          handle_mark_lost "$dir" idle-release-abandoned
-          exit 1
-        fi
-        # Renewal continues; retry a failed idle release after a pause.
-        idle_attempt=$((SECONDS + retry_seconds))
-      fi
-      flock -u "$afd"
-    fi
-    exec {afd}>&-
-    if [ "$SECONDS" -ge "$next" ]; then
-      rc=0
-      (set +m; handle_renew_transport "$dir" "$identity" "$self" "${identity_start%%:*}") \
-        > "$dir/.renew-response" 2>/dev/null &
-      HANDLE_RENEW_JOB=$!
-      while kill -0 "$HANDLE_RENEW_JOB" 2>/dev/null; do
-        # A released or replaced handle ends the in-flight transport; the EXIT trap kills it.
-        [ "$(handle_lease_identity "$dir")" = "$identity" ] || exit 0
-        sleep 0.2
-      done
-      wait "$HANDLE_RENEW_JOB" 2>/dev/null || rc=$?
-      HANDLE_RENEW_JOB=''
-      [ "$(handle_lease_identity "$dir")" = "$identity" ] || exit 0
-      response="$(cat "$dir/.renew-response" 2>/dev/null)"
-      status="$(jq -r 'if type == "object" then (.status // "") else "" end' <<<"$response" 2>/dev/null)"
-      if [ "$rc" = 0 ] && [ "$status" = ok ]; then
-        printf '%s\tok\n' "$(date +%s)" >> "$dir/keeper.log"
-        last_ok=$SECONDS
-        next=$((SECONDS + renew_seconds))
-      elif [ "$status" = error ]; then
-        # An explicit broker rejection: the lease is no longer current.
-        handle_mark_lost "$dir" renew-rejected
-        exit 1
-      elif [ $((SECONDS - last_ok + retry_seconds)) -lt "$stale_seconds" ]; then
-        # A transport failure or timeout: retry while the lease is safely unexpired.
-        printf '%s\trenew-retry\n' "$(date +%s)" >> "$dir/keeper.log"
-        next=$((SECONDS + retry_seconds))
-      else
-        handle_mark_lost "$dir" renew-unconfirmed
-        exit 1
-      fi
-    fi
+  lease_identity="$(handle_lease_identity "$dir")" || exit 0
+  keeper_start="$(lease_process_identity "$keeper_pid")" || exit 1
+  keeper_start="${keeper_start%%:*}"
+  if [ "${SUBYARD_E2E_TEST_MODE:-}" = 1 ]; then
+    renew_seconds="${SUBYARD_E2E_TEST_RENEW_SECONDS:-$renew_seconds}"
+    retry_seconds="${SUBYARD_E2E_TEST_RENEW_RETRY_SECONDS:-$retry_seconds}"
+    stale_seconds="${SUBYARD_E2E_TEST_RENEW_STALE_SECONDS:-$stale_seconds}"
+  fi
+  next_renew=$((SECONDS + renew_seconds))
+  printf '%s %s\n' "$keeper_pid" "$keeper_start" > "$dir/keeper.ready"
+  while handle_keeper_owns; do
+    handle_keeper_idle
+    [ "$SECONDS" -lt "$next_renew" ] || handle_keeper_renew
     sleep 1
   done
+  exit 0
 }
 
 start_handle_keeper() {
   local dir="$HANDLE_DIRECTORY" waited=0
-  [ -n "$dir" ] || die 'lease handle directory is not initialized'
   write_handle_state
   setsid -f bash "$CLIENT_SELF" _keeper "$dir" </dev/null >>"$dir/keeper.log" 2>&1 \
     || die 'cannot start the lease keeper'
@@ -1616,51 +1621,37 @@ start_handle_keeper() {
   LEASE_KEEPER_PID=detached
 }
 
+# --- Client commands ------------------------------------------------------------------
+
+# An acquire that ends before its handle is usable leaves neither a lease nor a handle.
 handle_acquire_cleanup() {
   local rc="${1:-$?}" failed=0
   trap - EXIT INT TERM
   set +e
-  if [ "${HANDLE_READY:-0}" != 1 ]; then
-    # Retire the handle first so a started keeper cannot renew while release runs.
-    [ -z "$HANDLE_DIRECTORY" ] || rm -f -- "$HANDLE_DIRECTORY/lease.json"
-    if [ -n "$LEASE_ACQUIRE_PID" ] && [ -z "$LEASE_ID" ]; then
-      printf '%s: acquire cleanup remains unconfirmed: slot=%s run=%s\n' "$E2E_PROGRAM" "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
-      failed=1
-    fi
-    release_lease || failed=1
-    if [ -n "$LEASE_ACQUIRE_PID" ]; then
-      kill "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
-      wait "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
-    fi
-    [ -z "$HANDLE_DIRECTORY" ] || remove_handle_directory "$HANDLE_DIRECTORY" || failed=1
-    [ "$failed" = 0 ] || [ "$rc" != 0 ] || rc=3
-  fi
+  # Retire the handle first so a started keeper cannot renew while release runs.
+  rm -f -- "$HANDLE_DIRECTORY/lease.json"
+  abandon_acquired_lease || failed=1
+  remove_handle_directory "$HANDLE_DIRECTORY" || failed=1
+  [ "$failed" = 0 ] || [ "$rc" != 0 ] || rc=3
   exit "$rc"
 }
 
 client_acquire() {
-  local slot='' purpose='' tool dir
+  local purpose='' tool
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --owner) [ "$#" -ge 2 ] && [ -z "$E2E_OWNER" ] || die '--owner requires one owner ID'; E2E_OWNER="$2"; shift 2 ;;
-      --pool) [ "$#" -ge 2 ] && [ -z "$E2E_POOL" ] || die '--pool requires one pool ID'; E2E_POOL="$2"; shift 2 ;;
-      --yard) [ "$#" -ge 2 ] || die '--yard needs a yard name'; E2E_YARD="$2"; E2E_LEGACY_ROUTE=1; shift 2 ;;
-      --slot) [ "$#" -ge 2 ] && [ -z "$slot" ] || die '--slot needs one number'; slot="$2"; set_requested_slot "$slot" --slot; shift 2 ;;
+      --owner | --pool | --yard) route_option "$@"; shift 2 ;;
+      --slot | --type | --vm-count | --disk) allocation_option "$@"; shift 2 ;;
       --wait) [ "$#" -ge 2 ] || die '--wait needs a duration'; WAIT_SECONDS="$(parse_client_duration "$2" --wait)"; shift 2 ;;
       --purpose) [ "$#" -ge 2 ] || die '--purpose needs a label'; purpose="$2"; shift 2 ;;
       --project) [ "$#" -ge 2 ] || die '--project needs a label'; CLIENT_PROJECT="$2"; shift 2 ;;
-      --type) [ "$#" -ge 2 ] || die '--type needs subyard-pair or android-test'; ENVIRONMENT_TYPE="$2"; shift 2 ;;
-      --vm-count)
-        [ "$#" -ge 2 ] && [ -z "$VM_COUNT_REQUESTED" ] || die '--vm-count needs 1 or 2'
-        case "$2" in 1|2) VM_COUNT_REQUESTED="$2" ;; *) die '--vm-count must be 1 or 2' ;; esac
-        shift 2 ;;
-      --disk) [ "$#" -ge 2 ] && [ "$2" = 50GiB ] && [ -z "$DISK_REQUESTED" ] || die '--disk must be 50GiB'; DISK_REQUESTED="$2"; shift 2 ;;
       --idle)
         [ "$#" -ge 2 ] || die '--idle needs a duration'
         HANDLE_IDLE_SECONDS="$(parse_client_duration "$2" --idle)"
-        if [ "${SUBYARD_E2E_TEST_MODE:-}" != 1 ]; then
-          [ "$HANDLE_IDLE_SECONDS" -ge 60 ] && [ "$HANDLE_IDLE_SECONDS" -le 7200 ] || die '--idle must be between 1m and 2h'
-        fi
+        # Tests shorten the limit only in test mode.
+        [ "${SUBYARD_E2E_TEST_MODE:-}" = 1 ] \
+          || { [ "$HANDLE_IDLE_SECONDS" -ge 60 ] && [ "$HANDLE_IDLE_SECONDS" -le 7200 ]; } \
+          || die '--idle must be between 1m and 2h'
         [ "$HANDLE_IDLE_SECONDS" -ge 1 ] || die '--idle must be positive'
         shift 2 ;;
       *) die "unknown acquire option '$1'" ;;
@@ -1679,37 +1670,27 @@ client_acquire() {
   LEASE_RUN="$(new_run_id)"
   LEASE_KEEPER_MODE=handle
   ensure_state_root
-  install -d -m 0700 "$(handle_base)"
-  dir="$(handle_directory "$LEASE_RUN")"
-  mkdir -m 0700 -- "$dir" || die 'cannot create the lease handle'
-  HANDLE_DIRECTORY="$dir"
-  LOCAL_TEMP="$dir"
-  HANDLE_READY=0
+  install -d -m 0700 "$HANDLE_BASE"
+  HANDLE_DIRECTORY="$(handle_directory "$LEASE_RUN")"
+  mkdir -m 0700 -- "$HANDLE_DIRECTORY" || die 'cannot create the lease handle'
+  LOCAL_TEMP="$HANDLE_DIRECTORY"
   trap handle_acquire_cleanup EXIT
   trap 'handle_acquire_cleanup 130' INT
   trap 'handle_acquire_cleanup 143' TERM
-  acquire_lease || exit "$?"
+  # Not a condition: a refusal or any failed step must end the command through the trap.
+  acquire_lease
   start_lease_keeper
-  HANDLE_READY=1
   trap - EXIT INT TERM
   printf 'E2E handle: %s slot=%s vms=%s idle_release=%ss\n' \
     "$LEASE_RUN" "$LEASE_SLOT" "$VM_COUNT" "$HANDLE_IDLE_SECONDS" >&2
   printf '%s\n' "$LEASE_RUN"
 }
 
-# Refuse use of a handle whose lease cannot be current.
-require_usable_handle() {
-  local dir="$HANDLE_DIRECTORY"
-  [ ! -e "$dir/lost" ] \
-    || die "lease $LEASE_RUN was lost (expired or fenced); run release $LEASE_RUN, then acquire again"
-  handle_keeper_running "$dir" \
-    || die "lease keeper for $LEASE_RUN is not running; the broker expires the lease within 20 minutes of its last renewal; run release $LEASE_RUN"
-}
-
+# exec (interactive=0) and ssh (interactive=1): root in the handle's VM.
 client_exec() {
-  local handle="${1:-}" vm=1 stdin=0 fd rc=0 interactive="$2"
-  shift 2 || die 'exec needs a handle'
+  local interactive="$1" handle="${2:-}" dir vm=1 stdin=0 fd rc=0
   [ -n "$handle" ] || die 'a lease handle is required'
+  shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --vm) [ "$#" -ge 2 ] || die '--vm needs 1 or 2'; vm="$2"; shift 2 ;;
@@ -1718,18 +1699,24 @@ client_exec() {
       *) die "unknown option '$1' (put the guest command after --)" ;;
     esac
   done
-  open_handle "$handle"
+  dir="$(handle_directory "$handle")"
+  load_handle "$dir" || die "no active lease handle '$handle'; list handles with: leases"
   case "$vm" in 1|2) [ "$vm" -le "$VM_COUNT" ] || die "this lease has only $VM_COUNT VM" ;; *) die '--vm must be 1 or 2' ;; esac
   if [ "$interactive" = 0 ]; then
     [ "$#" -gt 0 ] || die 'exec needs a guest command after --'
   else
     [ "$#" -eq 0 ] || die 'ssh opens an interactive root session and takes no command; use exec'
   fi
-  exec {fd}>>"$HANDLE_DIRECTORY/active.lock" || die 'cannot open the lease handle'
+  # Held shared for the whole command: the keeper's idle release waits for it.
+  exec {fd}>>"$dir/active.lock" || die 'cannot open the lease handle'
   flock -s -w 30 "$fd" || die "lease $handle is being released"
-  [ -f "$HANDLE_DIRECTORY/lease.json" ] || die "lease $handle was released"
-  require_usable_handle
-  touch -- "$HANDLE_DIRECTORY/activity"
+  [ -f "$dir/lease.json" ] || die "lease $handle was released"
+  # Refuse a handle whose lease cannot be current.
+  [ ! -e "$dir/lost" ] \
+    || die "lease $handle was lost (expired or fenced); run release $handle, then acquire again"
+  handle_keeper_running "$dir" \
+    || die "lease keeper for $handle is not running; the broker expires the lease within 20 minutes of its last renewal; run release $handle"
+  touch -- "$dir/activity"
   if [ "$interactive" = 1 ]; then
     ssh -F "$CLIENT_CONFIG" -tt "e2e-vm-$vm" || rc=$?
   elif [ "$stdin" = 1 ]; then
@@ -1737,14 +1724,13 @@ client_exec() {
   else
     ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$(quote_ssh_command "$@")" </dev/null || rc=$?
   fi
-  touch -- "$HANDLE_DIRECTORY/activity" 2>/dev/null || true
-  exec {fd}>&-
+  touch -- "$dir/activity" 2>/dev/null || true
   return "$rc"
 }
 
 client_release() {
-  [ "$#" -eq 1 ] || die 'release needs exactly one handle'
   local dir
+  [ "$#" -eq 1 ] || die 'release needs exactly one handle'
   dir="$(handle_directory "$1")"
   if ! load_handle "$dir"; then
     printf 'E2E lease handle %s is not active; nothing to release\n' "$1" >&2
@@ -1753,34 +1739,18 @@ client_release() {
   release_handle explicit || exit 1
 }
 
-# Exit 0 while an exec holds the handle's shared activity lock.
-handle_in_use() {
-  local fd rc=1
-  exec {fd}>>"$1/active.lock" || return 1
-  flock -x -n "$fd" || rc=0
-  exec {fd}>&-
-  return "$rc"
-}
-
 client_leases() {
-  local dir now state idle last left keeper countdown
+  local dir now state left countdown
   [ "$#" -eq 0 ] || die 'leases takes no arguments'
   printf '%-10s %-9s %-13s %-4s %-24s %-9s %s\n' HANDLE SLOT TYPE VMS PURPOSE STATE IDLE_RELEASE
-  [ -d "$(handle_base)" ] || return 0
   now="$(date +%s)"
-  for dir in "$(handle_base)"/*; do
-    [ -d "$dir" ] || continue
+  for dir in "$HANDLE_BASE"/*; do
     load_handle "$dir" || continue
-    state=active
-    keeper=1
-    handle_keeper_running "$dir" || keeper=0
-    if [ -e "$dir/lost" ]; then state=lost; elif [ "$keeper" = 0 ]; then state=no-keeper; fi
+    if [ -e "$dir/lost" ]; then state=lost; elif handle_keeper_running "$dir"; then state=active; else state=no-keeper; fi
     if handle_in_use "$dir"; then
       countdown=in-use
     else
-      last="$(stat -c %Y "$dir/activity" 2>/dev/null || printf 0)"
-      idle=$((now - last))
-      left=$((HANDLE_IDLE_SECONDS - idle))
+      left=$((HANDLE_IDLE_SECONDS - now + $(stat -c %Y "$dir/activity" 2>/dev/null || printf 0)))
       [ "$left" -ge 0 ] || left=0
       countdown="in $(format_duration "$left")"
     fi
@@ -1816,15 +1786,15 @@ EOF
 }
 
 client_main() {
-  local command="${1:-}" json=0 count=50 incident=''
+  local command="${1:-}" json=0 count=50 incident='' response
   [ "$#" -gt 0 ] || { client_usage >&2; exit 2; }
   shift
   case "$command" in
     -h|--help|help) client_usage; return 0 ;;
     _keeper) handle_keeper_main "$@"; return ;;
     acquire) client_acquire "$@"; return ;;
-    exec) client_exec "${1:-}" 0 "${@:2}"; return ;;
-    ssh) client_exec "${1:-}" 1 "${@:2}"; return ;;
+    exec) client_exec 0 "$@"; return ;;
+    ssh) client_exec 1 "$@"; return ;;
     release) client_release "$@"; return ;;
     leases) client_leases "$@"; return ;;
     status|logs|incident|prepare) ;;
@@ -1832,9 +1802,7 @@ client_main() {
   esac
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --owner) [ "$#" -ge 2 ] && [ -z "$E2E_OWNER" ] || die '--owner requires one owner ID'; E2E_OWNER="$2"; shift 2 ;;
-      --pool) [ "$#" -ge 2 ] && [ -z "$E2E_POOL" ] || die '--pool requires one pool ID'; E2E_POOL="$2"; shift 2 ;;
-      --yard) [ "$#" -ge 2 ] || die '--yard needs a yard name'; E2E_YARD="$2"; E2E_LEGACY_ROUTE=1; shift 2 ;;
+      --owner | --pool | --yard) route_option "$@"; shift 2 ;;
       --json) [ "$command" = status ] || [ "$command" = logs ] || die '--json is valid only with status or logs'; json=1; shift ;;
       --slot) [ "$command" = logs ] && [ "$#" -ge 2 ] || die '--slot is valid only with logs'; set_requested_slot "$2" --slot; shift 2 ;;
       -n)
@@ -1853,7 +1821,6 @@ client_main() {
   case "$command" in
     prepare) prepare_identity ;;
     status)
-      local response
       response="$(facade_request status)" || die 'test environment unavailable'
       if [ "$json" = 1 ]; then printf '%s\n' "$response"; else render_pool_status "$response"; fi
       ;;
