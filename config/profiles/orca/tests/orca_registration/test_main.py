@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest import mock
 
-from support import Catalog, COMPONENT, init_git, project
+from support import Catalog, COMPONENT, git, init_git, project
 
 
 class MainTests(unittest.TestCase):
@@ -142,8 +142,10 @@ class MainTests(unittest.TestCase):
             nested.rename(Path(self.tmp.name) / "original-repository")
             init_git(nested)
         else:
-            with (nested / ".git" / "config").open("a") as config:
-                config.write("\n# changed fixture metadata\n")
+            # Git now resolves another work tree for the same repository.
+            elsewhere = Path(self.tmp.name) / "elsewhere"
+            elsewhere.mkdir()
+            git(nested, "config", "core.worktree", str(elsewhere))
         self.rpc.calls.clear()
         with mock.patch.dict(os.environ, {"SUBYARD_ORCA_REGISTRATION_SCOPE": binding}):
             code, report = self.run_cli("sync")

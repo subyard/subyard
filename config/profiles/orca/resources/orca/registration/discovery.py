@@ -18,6 +18,9 @@ class Root:
     path: str
     name: str
     kind: str
+    # Git-resolved absolute Git and common directories; empty unless kind is git.
+    git_dir: str = ""
+    common_dir: str = ""
 
 
 @dataclass
@@ -62,46 +65,81 @@ def _same_directory(path, fd):
 
 
 def _git_kind(path, fd, marker, deadline):
+    return _git_probe(path, fd, marker, deadline)[0]
+
+
+def _git_probe(path, fd, marker, deadline):
+    """Return the root kind and, for git, where Git itself resolves the repository.
+
+    Git applies core.worktree, core.bare, includes, gitfiles and symlinks, so the
+    resolved directories capture every redirection without reading config here.
+    """
+    unknown = ("unknown", "", "")
     if not _same_directory(path, fd):
-        return "unknown"
+        return unknown
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update({"LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"})
     try:
         remaining = min(3.0, deadline - time.monotonic())
         if remaining <= 0:
             raise ScanLimit("time")
-        probe = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+        probe = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--show-toplevel",
+                                "--absolute-git-dir", "--git-common-dir"],
                                cwd="/proc/self/fd/" + str(fd), pass_fds=(fd,),
                                env=environment, capture_output=True, timeout=remaining)
         if not _same_directory(path, fd):
-            return "unknown"
+            return unknown
         if probe.returncode == 0:
-            toplevel = os.fsdecode(probe.stdout[:-1] if probe.stdout.endswith(b"\n") else probe.stdout)
-            return "git" if toplevel == path else "folder"
+            prefix = os.fsencode(path) + b"\n"
+            if not probe.stdout.startswith(prefix):
+                return ("folder", "", "")
+            dirs = _split_git_dirs(probe.stdout[len(prefix):])
+            return ("git",) + dirs if dirs else unknown
         if not marker and probe.stderr.startswith(b"fatal: not a git repository"):
-            return "folder"
+            return ("folder", "", "")
     except (OSError, subprocess.TimeoutExpired):
         pass
-    return "unknown"
+    return unknown
 
 
-def verify_root(root, deadline):
-    """Recheck the filesystem fact immediately before applying its metadata."""
+def _split_git_dirs(output):
+    """Split "<git dir>\\n<common dir>\\n"; paths may themselves contain newlines."""
+    if not output.endswith(b"\n"):
+        return None
+    body = output[:-1]
+    splits = [(body[:index], body[index + 1:]) for index, byte in enumerate(body)
+              if byte == 0x0A and body[:index].startswith(b"/") and body[index + 1:].startswith(b"/")]
+    same = [split for split in splits if split[0] == split[1]]
+    if not same:
+        same = [split for split in splits if all(os.path.isdir(path) for path in split)]
+    return tuple(os.fsdecode(path) for path in same[0]) if len(same) == 1 else None
+
+
+def observe_root(path, deadline):
+    """Probe one known path without traversal; returns (kind, git_dir, common_dir)."""
     try:
-        if os.path.realpath(root.path) != root.path:
-            return False
-        fd = _open_dir(root.path)
+        if os.path.realpath(path) != path:
+            return ("unknown", "", "")
+        fd = _open_dir(path)
         try:
             try:
                 os.stat(".git", dir_fd=fd, follow_symlinks=False)
                 marker = True
             except FileNotFoundError:
                 marker = False
-            return _git_kind(root.path, fd, marker, deadline) == root.kind
+            return _git_probe(path, fd, marker, deadline)
         finally:
             os.close(fd)
     except (OSError, ScanLimit):
+        return ("unknown", "", "")
+
+
+def verify_root(root, deadline):
+    """Recheck the filesystem fact immediately before applying its metadata."""
+    kind, git_dir, common_dir = observe_root(root.path, deadline)
+    if kind != root.kind:
         return False
+    return not root.git_dir or (git_dir, common_dir) == (root.git_dir, root.common_dir)
 
 
 def verify_missing(scan, path):
@@ -182,10 +220,10 @@ def discover(workspaces, deadline=None, max_entries=1000000, recursive=True):
                         stack.pop()
                         continue
                     if path == project.root or marker:
-                        kind = _git_kind(path, fd, marker, deadline)
+                        kind, git_dir, common_dir = _git_probe(path, fd, marker, deadline)
                         name = project.name if path == project.root else os.path.relpath(path, project.root)
                         if path == project.root or kind in ("git", "unknown"):
-                            project.roots.append(Root(path, name, kind))
+                            project.roots.append(Root(path, name, kind, git_dir, common_dir))
                         if kind == "unknown":
                             scan.errors.append("Git root could not be verified: " + path)
                     try:
@@ -295,15 +333,13 @@ def include_known(scan, paths, deadline):
                 continue
             if verify_missing(scan, path):
                 continue
-            root = Root(path, os.path.relpath(path, project.root), "git")
-            if verify_root(root, deadline):
+            kind, git_dir, common_dir = observe_root(path, deadline)
+            root = Root(path, os.path.relpath(path, project.root), kind, git_dir, common_dir)
+            if kind == "git":
                 project.roots.append(root)
-            else:
+            elif kind == "folder":
                 # Losing .git is not deletion evidence; keep native data intact.
-                folder = Root(path, root.name, "folder")
-                if verify_root(folder, deadline):
-                    scan.warnings.append("Known checkout lost Git metadata; record is retained: " + path)
-                else:
-                    root.kind = "unknown"
-                    project.roots.append(root)
-                    scan.errors.append("Known Git root could not be verified: " + path)
+                scan.warnings.append("Known checkout lost Git metadata; record is retained: " + path)
+            else:
+                project.roots.append(root)
+                scan.errors.append("Known Git root could not be verified: " + path)
