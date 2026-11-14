@@ -1325,6 +1325,61 @@ func TestCompletedReleaseRepairRunsOrdinaryInitBeforeProjectHooks(t *testing.T) 
 	}
 }
 
+// A skill provider deselected back to the recorded selection leaves only the core guest
+// runtime stale. The provision stage owns that refresh, so ordinary init ends ready;
+// a stage that reports converged leaves the drift and the refusal in place.
+func TestInitRetiresDeselectedProviderGuestRuntime(t *testing.T) {
+	for _, scenario := range []string{"provision pending", "provision converged"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newConfigApplyRepairFixture(t, false)
+			writeCLIFile(t, filepath.Join(fixture.cli.env["SUBYARD_CONFIG_HOME"], "host-id"),
+				"owner-a\n", 0o600)
+			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			platform.converged[ports.ReconcileStageProvision] = scenario == "provision converged"
+			platform.converged[ports.ReconcileStageFinalize] = true
+			platform.installed = &ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("c", 64), Desired: strings.Repeat("d", 64)}
+			platform.provisioned = func() {
+				platform.installed.State, platform.installed.Actual = ports.RuntimeStateCurrent, platform.installed.Desired
+				writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
+			}
+			fixture.cli.options.InitPlatform = platform
+			fixture.cli.options.Arguments = []string{"init", "--yes"}
+			var output bytes.Buffer
+			fixture.cli.options.Stdout, fixture.cli.options.Stderr = &output, &output
+			fake := fixture.cli.options.Executor.(*testkit.Incus)
+			fake.ExecSteps = nil
+			loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, err := fixture.cli.localConfigTargets(loaded, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 12 {
+				for _, target := range targets {
+					appendHashSteps(t, fake, target.Loaded)
+				}
+			}
+			code := fixture.cli.Run(context.Background())
+			if scenario == "provision converged" {
+				if code == 0 || len(platform.applied) != 0 ||
+					!strings.Contains(output.String(), "did not restore release readiness") {
+					t.Fatalf("unrepaired guest runtime was accepted: code=%d applied=%v output=%s", code, platform.applied, output.String())
+				}
+				return
+			}
+			if code != 0 || !slices.Equal(platform.applied, []ports.ReconcileStageID{ports.ReconcileStageProvision}) ||
+				platform.projectHooks != 1 || !strings.Contains(output.String(), "Subyard initialized") {
+				t.Fatalf("ordinary init did not retire the stale guest runtime: code=%d applied=%v hooks=%d output=%s", code, platform.applied, platform.projectHooks, output.String())
+			}
+		})
+	}
+}
+
 func TestProfileRuntimeRepairValidationRejectsUnsafeInitShapes(t *testing.T) {
 	permit := &configApplyRepairPermit{requestedTargets: map[string]string{"default": "desired"}}
 	for _, test := range []struct {

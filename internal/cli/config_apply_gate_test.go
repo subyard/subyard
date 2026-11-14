@@ -29,6 +29,16 @@ type sampleRepairPlatformFixture struct {
 	observation *ports.RuntimeObservation
 	installed   *ports.RuntimeObservation
 	installedID string
+	// provisioned runs when the ordinary provision stage is applied.
+	provisioned func()
+}
+
+func (fixture *sampleRepairPlatformFixture) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
+	err := fixture.initPlatformFixture.ApplyStage(ctx, stage)
+	if err == nil && stage == ports.ReconcileStageProvision && fixture.provisioned != nil {
+		fixture.provisioned()
+	}
+	return err
 }
 
 type pendingRepairConfigApplier struct{ apply func() }

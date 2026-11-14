@@ -4,6 +4,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -112,5 +113,46 @@ func TestVMCPUWeightContract(t *testing.T) {
 	}
 	if err := validateProfileConstraints(testkit.TempDir(t), "synthetic", environment{"YARD_KIND": "container", "VM_CPU_WEIGHT": "1000"}); err == nil {
 		t.Fatal("container accepted VM-only scheduling")
+	}
+}
+
+func TestHostAccessProfileConstraintReportsEveryRefusal(t *testing.T) {
+	root := testkit.TempDir(t)
+	for name, body := range map[string]string{
+		"route-client": "REQUIRES_HOST_ACCESS=1\n",
+		"other-client": "REQUIRES_HOST_ACCESS=1\n",
+		"plain":        "REQUIRES_HOST_ACCESS=0\n",
+		"broken":       "REQUIRES_HOST_ACCESS=yes\nPROVISION_SCOPE=unknown\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, "profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, "profiles", name, "profile.conf"), []byte(body), 0o644)
+	}
+	if err := validateProfileConstraints(root, "named", environment{"ENVIRONMENT_PROFILES": "route-client plain"}); err != nil {
+		t.Fatalf("host-access yard refused a route profile: %v", err)
+	}
+	if err := validateProfileConstraints(root, "named", environment{"ENVIRONMENT_PROFILES": "plain", "ALLOWS_HOST_ACCESS": "false"}); err != nil {
+		t.Fatalf("restricted yard refused a profile without the requirement: %v", err)
+	}
+	err := validateProfileConstraints(root, "named", environment{
+		"ENVIRONMENT_PROFILES": "route-client other-client", "ALLOWS_HOST_ACCESS": "false", "HOST_LINKS": "x",
+	})
+	if err == nil {
+		t.Fatal("restricted yard accepted profiles that require host access")
+	}
+	for _, want := range []string{
+		`profile "route-client" requires host access`,
+		`profile "other-client" requires host access`,
+		"selected yard role forbids non-empty HOST_LINKS",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err, want)
+		}
+	}
+	err = validateProfileConstraints(root, "named", environment{"ENVIRONMENT_PROFILES": "broken"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported PROVISION_SCOPE") ||
+		!strings.Contains(err.Error(), "unsupported REQUIRES_HOST_ACCESS") {
+		t.Fatalf("invalid declarations were not all reported: %v", err)
 	}
 }

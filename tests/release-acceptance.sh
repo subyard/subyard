@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,7 @@ spec.loader.exec_module(m)
 
 def fixture_checkout(directory, optional_vms=False):
     checkout = directory / "checkout"
-    for name in ("dev/agent-e2e.sh", "dev/e2e/p0-acceptance.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
+    for name in ("dev/agent-e2e.sh", "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "dev/e2e/p0-acceptance.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = checkout / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, target)
@@ -1738,7 +1739,7 @@ exit "$COLLECTOR_EXIT"
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             checkout = directory / "checkout"
-            for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
+            for name in ("dev/agent-e2e.sh", "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
                 target = checkout / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(root / name, target)
@@ -2214,6 +2215,48 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             log = output / "refusal.log"
             log.write_text("agent-e2e: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\nE2E lease: slot=slot-1\nproduct failure\n")
             self.assertIsNone(m.capacity_reason(log))
+            # The installed standalone client prints the same typed refusal under its own name.
+            script.write_text("#!/bin/bash\nprintf 'subyard-test-vms: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\\n'\nexit 4\n")
+            result = m.execute("profile:sample/three", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_disk"))
+            log.write_text("other-tool: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\n")
+            self.assertIsNone(m.capacity_reason(log))
+            # A later acquire of a multi-lease lane blocks on capacity only after a clean release.
+            lease = "E2E lease: yard=hermes project=hermes run=0123abcd purpose=p slot=slot-001 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
+            start = "E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+            refusal = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
+            for released, expected in (("0", "memory"), ("1", None)):
+                log.write_text(lease + start + f"E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code={released}\n" + refusal)
+                self.assertEqual(m.capacity_reason(log), expected, released)
+            log.write_text(lease + refusal)
+            self.assertIsNone(m.capacity_reason(log))
+            # Two overlapping leases with one released still hold a lease at the refusal.
+            log.write_text(lease + lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal)
+            self.assertIsNone(m.capacity_reason(log))
+            log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
+            self.assertIsNone(m.capacity_reason(log))
+            script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
+            result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
+
+    def test_client_handle_release_evidence_keeps_the_slot_after_a_lane_failure(self):
+        # The standalone client's acquire line and handle-release markers, then a lane failure.
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            script = output / "client-lane.sh"
+            script.write_text("#!/bin/bash\n"
+                "printf 'E2E lease: yard=hermes project=hermes run=0123abcd purpose=test-vms-client slot=slot-001 type=subyard-pair vms=1 base=%s\\n' " + "a" * 64 + " >&2\n"
+                "printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\\n' >&2\n"
+                "printf 'E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\\n' >&2\n"
+                "printf 'E2E lease released: handle=0123abcd slot=slot-001 reason=explicit\\n' >&2\n"
+                "exit 1\n")
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"]), ("failed", 1))
+            self.assertEqual(result["cleanup"]["lease-release"], {"exit_code": 0, "duration_seconds": 2})
+            self.assertTrue(m.slot_continues_after(result))
+            script.write_text(script.read_text().replace("duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0", "duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=1"))
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertFalse(m.slot_continues_after(result))
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:

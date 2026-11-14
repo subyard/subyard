@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/test-vms-client/provision.sh", "kind": "profile", "owner": "internal/profile/packages.go", "reference": "\"provision.sh\""},
+    {"path": "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "kind": "library", "owner": "dev/agent-e2e.sh", "reference": "skills/subyard-test-vms/client.sh"}
+  ]
+}

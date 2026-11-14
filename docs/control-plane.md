@@ -1714,7 +1714,10 @@ profile provisioning and selected-resource probing; discovering a descriptor nev
 Shipped yard roles may declare `REQUIRED_YARD_KIND=vm`, `ALLOWS_CODING_TOOLS=false`,
 `ALLOWS_HOST_ACCESS=false` and `ALLOWS_PROJECTS=false`. Host-access exclusion rejects mounts,
 links, host instruction files, arbitrary device/capability declarations, SSH agent forwarding and
-nested E2E access. These constraints are validated after configuration precedence is resolved.
+nested E2E access. A profile whose runtime needs an owner-host route, such as the test-VM broker
+route mount, declares `REQUIRES_HOST_ACCESS=1` in `profile.conf`; selecting it in such a role is
+refused. These constraints are validated after configuration precedence is resolved and report
+every independent refusal together.
 Before startup and during convergence, effective Incus devices are checked too: inherited host
 mappings and local root-disk overrides cannot bypass the role or its root disk bound.
 
