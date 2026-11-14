@@ -409,8 +409,17 @@ func (cli *CLI) prepareActivationRepair(
 						return nil, nil
 					}
 				}
-				if _, selected := requested[target.Name]; selected {
+				_, selected := requested[target.Name]
+				if selected {
 					selectedRuntimes[target.Name+"/"+id] = contract
+				} else if pendingInit && contract.State == ports.RuntimeStateStale {
+					// Another yard's recorded failure waits for that yard's init.
+					owner := &profileRuntimeActivationReconciler{cli: &operation, request: releasetransition.ProcessRequest{ConfigHome: options.ConfigHome}, id: id}
+					if pending, err := owner.recordedPending(target, contract); err != nil {
+						return nil, nil
+					} else if pending != nil {
+						continue
+					}
 				}
 				changed = changed || contract.State == ports.RuntimeStateStale
 			}

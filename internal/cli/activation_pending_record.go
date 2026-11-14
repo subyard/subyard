@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -132,4 +133,29 @@ func removeActivationPendingRecord(configHome, yard, owner string) error {
 		return err
 	}
 	return config.RemovePersistentFileSnapshot(configHome, path, snapshot)
+}
+
+// removeYardActivationPendingRecords retires every record of one yard after
+// that yard converged all its runtimes or was torn down.
+func removeYardActivationPendingRecords(configHome, yard string) error {
+	if !filepath.IsAbs(configHome) || !domain.SafeName(yard) {
+		return errors.New("invalid pending activation record location")
+	}
+	entries, err := os.ReadDir(filepath.Join(filepath.Clean(configHome), "activation-pending", "v1", yard))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, entry := range entries {
+		owner, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !entry.Type().IsRegular() {
+			failures = append(failures, fmt.Errorf("unexpected pending activation entry %q", entry.Name()))
+			continue
+		}
+		failures = append(failures, removeActivationPendingRecord(configHome, yard, owner))
+	}
+	return domain.CollectRefusals(failures...)
 }
