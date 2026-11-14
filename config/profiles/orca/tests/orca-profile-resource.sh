@@ -255,6 +255,10 @@ case "${1:-}" in
         ;;
       *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py '*) rm -f "$state_root/codex-defaults-drift" ;;
       *' mktemp -d /tmp/subyard-orca.XXXXXX '*)
+        if [ -e "$state_root/unsafe-guest-tmp" ]; then
+          printf '/tmp/../subyard-orca.escape\n'
+          exit 0
+        fi
         counter="$(cat "$stage_counter_file" 2>/dev/null || printf 0)"
         counter=$((counter + 1))
         printf '%s\n' "$counter" >"$stage_counter_file"
@@ -883,6 +887,26 @@ if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract appl
 fi
 ! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/runtime-stale.out" \
   || fail 'a refused stale assessment was reported as a yard-local failure'
+# Host staging, file pushes and safety guards inside the apply are not
+# yard-local: their failures report no record and stay blocking.
+for injected in host-staging push unsafe-guest-path; do
+  host_tmp="$TMPDIR" expected='injected push failure'
+  case "$injected" in
+    host-staging) host_tmp="$TMP/missing-host-tmp" expected='mktemp' ;;
+    push) touch "$TMP/fail-push" ;;
+    unsafe-guest-path) touch "$TMP/unsafe-guest-tmp"; expected='unsafe temporary path' ;;
+  esac
+  if TMPDIR="$host_tmp" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+    "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
+    >"$TMP/runtime-$injected.out" 2>&1; then
+    fail "runtime contract apply concealed an injected $injected failure"
+  fi
+  rm -f "$TMP/fail-push" "$TMP/unsafe-guest-tmp"
+  grep -Fq "$expected" "$TMP/runtime-$injected.out" \
+    || fail "injected $injected failure did not stop the apply where expected"
+  ! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/runtime-$injected.out" \
+    || fail "a host-side $injected failure was reported as yard-local"
+done
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
 touch "$TMP/fail-registration-marker"
