@@ -90,7 +90,8 @@ archive="$(find "$STATE/releases" -name "subyard-$OLD_VERSION-linux-amd64.tar.gz
 launcher="$STATE/bin/yard"
 [ "$(owner "$launcher" --version)" = "yard $OLD_VERSION" ] || die 'published runtime is not active'
 
-# The operator assignment the published release applies and the candidate ignores.
+# The operator assignment the published release applies through a selected profile that
+# does not assign YARD_DEVICES itself, and that the candidate ignores.
 printf 'YARD_DEVICES=fuse\n' > "$host_config"
 chmod 0600 "$host_config"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
@@ -101,7 +102,7 @@ YARD_KIND=container
 YARD_IMAGE=images:debian/13/cloud
 YARD_IMAGE_FALLBACK=images:debian/13/cloud
 CODING_TOOL_INTEGRATIONS=
-ENVIRONMENT_PROFILES=
+ENVIRONMENT_PROFILES=git-fetch
 DEV_USER=dev
 DEV_UID=1001
 HOST_BASE=$STATE/host
