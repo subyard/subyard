@@ -16,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 // An in-place repair retains installed configuration until it is ready. The
@@ -478,10 +479,36 @@ func (cli *CLI) pendingInitIntegrationRefusal(ctx context.Context, installed con
 	if runtime, ok = platform.(reconcileruntime.Runtime); !ok {
 		return refusal(errors.New("prepared integration runtime is unavailable"))
 	}
-	if _, err = runtime.IntegrationPlan(ctx); err != nil {
-		return refusal(err)
+	// Report a release together with any independent inspection refusal.
+	plan, err := runtime.IntegrationPlan(ctx)
+	var causes []error
+	if err != nil {
+		causes = append(causes, refusal(err))
 	}
-	return nil
+	if releases := plan.OwnershipReleases(); len(releases) != 0 {
+		causes = append(causes, pendingInitOwnershipRelease{yard: installed.Name, paths: releases})
+	}
+	return collectActivationRefusals(causes)
+}
+
+// pendingInitOwnershipRelease refuses an installed-view repair that would rewrite
+// owned state whose ownership the pending yard init releases in place. Plain init
+// of that yard performs the release without the repair, so it is the next step.
+type pendingInitOwnershipRelease struct {
+	yard  string
+	paths []string
+}
+
+func (err pendingInitOwnershipRelease) Error() string {
+	return fmt.Sprintf("yard %s: pending yard init releases ownership of %s", err.yard, strings.Join(err.paths, ", "))
+}
+
+// The pending init owns this state, so ordinary init remains admitted.
+func (pendingInitOwnershipRelease) ActivationPendingConfiguration() bool { return true }
+
+func (err pendingInitOwnershipRelease) ActivationDiagnostic() (string, string) {
+	return "yard " + err.yard + ": integration configuration awaiting yard init releases ownership of changed or missing owned configuration in place; the release repair would overwrite it first; run yard -Y " + err.yard + " init instead",
+		shellquote.Command([]string{"yard", "-Y", err.yard, "init"})
 }
 
 // pendingInitConflictError refuses an installed-view repair whose integration
