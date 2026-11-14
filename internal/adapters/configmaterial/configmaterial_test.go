@@ -1520,7 +1520,7 @@ func TestCompletedReleaseKeepsItsSignalUntilFreshOwnership(t *testing.T) {
 
 // After a release, the installed view never writes the document, whatever it
 // now holds: observation reports the release before reading it, and an
-// installed-view apply refuses. A deliberate apply still takes ownership.
+// installed-view apply refuses.
 func TestInstalledViewNeverWritesReleasedDocument(t *testing.T) {
 	for _, kind := range []string{"invalid", "missing", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
