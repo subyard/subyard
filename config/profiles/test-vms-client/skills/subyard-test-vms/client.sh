@@ -1005,17 +1005,22 @@ lease_command() {
   printf '%s %s %s %s %s\n' "$1" "$LEASE_SLOT" "$LEASE_ID" "$LEASE_EPOCH" "$LEASE_CAPABILITY"
 }
 
-# One bounded release with its E2E_RELEASE evidence. Sets RELEASE_CODE to ok, to the
-# broker's refusal code, or to empty when the transport failed.
-RELEASE_CODE=''
+# One bounded release with its E2E_RELEASE evidence. Sets RELEASE_STATE to released,
+# refused (RELEASE_CODE then holds the broker's refusal code) or failed (no reply).
+# Only the reply's status decides success; a refusal code is display text.
+RELEASE_STATE='' RELEASE_CODE=''
 lease_release_request() {
   local response started=$SECONDS rc=0
-  RELEASE_CODE=''
+  RELEASE_STATE=failed RELEASE_CODE=''
   printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
   if response="$(facade_request "$(lease_command release)" 180)"; then
-    RELEASE_CODE="$(jq -r 'if .status == "ok" then "ok" else (.code // "") end' <<<"$response" 2>/dev/null)" || RELEASE_CODE=''
-    [ -n "$RELEASE_CODE" ] || RELEASE_CODE=invalid_response
-    [ "$RELEASE_CODE" = ok ] || rc=1
+    if jq -e 'type == "object" and .status == "ok"' <<<"$response" >/dev/null 2>&1; then
+      RELEASE_STATE=released
+    else
+      RELEASE_STATE=refused rc=1
+      RELEASE_CODE="$(jq -r '.code | strings' <<<"$response" 2>/dev/null)" || RELEASE_CODE=''
+      [ -n "$RELEASE_CODE" ] || RELEASE_CODE=invalid_response
+    fi
   else
     rc=$?
   fi
@@ -1027,9 +1032,9 @@ release_lease() {
   local released_slot="$LEASE_SLOT" released_run="$LEASE_RUN"
   [ -n "$LEASE_ID" ] || return 0
   lease_release_request
-  case "$RELEASE_CODE" in
-    ok) ;;
-    '')
+  case "$RELEASE_STATE" in
+    released) ;;
+    failed)
       printf '%s: release failed for slot=%s run=%s\n' "$E2E_PROGRAM" "$released_slot" "$released_run" >&2
       return 1 ;;
     *)
@@ -1478,10 +1483,10 @@ release_handle() {
   flock -x "$fd"
   if [ -f "$dir/lease.json" ]; then
     lease_release_request
-    case "$RELEASE_CODE" in
-      ok) printf 'E2E lease released: handle=%s slot=%s reason=%s\n' "$LEASE_RUN" "$LEASE_SLOT" "$reason" >&2 ;;
-      lease_lost) printf 'E2E lease had already ended: handle=%s slot=%s\n' "$LEASE_RUN" "$LEASE_SLOT" >&2 ;;
-      '')
+    case "$RELEASE_STATE:$RELEASE_CODE" in
+      released:*) printf 'E2E lease released: handle=%s slot=%s reason=%s\n' "$LEASE_RUN" "$LEASE_SLOT" "$reason" >&2 ;;
+      refused:lease_lost) printf 'E2E lease had already ended: handle=%s slot=%s\n' "$LEASE_RUN" "$LEASE_SLOT" >&2 ;;
+      failed:*)
         printf '%s: release failed for handle=%s slot=%s; the handle is kept, retry release\n' \
           "$E2E_PROGRAM" "$LEASE_RUN" "$LEASE_SLOT" >&2
         rc=1 ;;
