@@ -38,14 +38,11 @@ func (client *Client) ReconcilePublications(ctx context.Context, project, name s
 		}
 	}
 	instance.Config, instance.Devices = config, devices
-	if err := beforeNative(ctx, server, "instance-publication", project, name); err != nil {
-		return nil, err
-	}
 	operation, err := server.UpdateInstance(name, instance.Writable(), etag)
 	if err != nil {
 		return nil, normalizeError("update optional publication", err)
 	}
-	if err = waitNative(ctx, server, operation, "instance-publication", project, name); err != nil {
+	if err = operation.Wait(); err != nil {
 		return nil, normalizeOperationError("wait for optional publication update", operation.Get(), err)
 	}
 	return waiting, nil

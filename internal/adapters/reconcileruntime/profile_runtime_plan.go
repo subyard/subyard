@@ -32,24 +32,6 @@ type ProfileRuntimePlan struct {
 	unavailable bool
 }
 
-// SelectedRuntimeInputs captures native handler/environment/source identity for
-// one compiled activation. It does not select yards or decide release work.
-func (runtime Runtime) SelectedRuntimeInputs(id string) (string, error) {
-	if id == "core-guest-runtime" || id == "key-tools-runtime" {
-		return runtime.profileRuntimeInputs(nil)
-	}
-	definitions, err := runtime.profileRuntimeDefinitions()
-	if err != nil {
-		return "", err
-	}
-	for _, definition := range definitions {
-		if definition.Runtime.ActivationID == id {
-			return runtime.profileRuntimeInputs([]profile.Definition{definition})
-		}
-	}
-	return "", errors.New("selected runtime owner is unavailable")
-}
-
 func (runtime Runtime) PrepareProfileRuntimes(ctx context.Context, unavailable, reconstruct bool, dependent ...bool) (*ProfileRuntimePlan, error) {
 	definitions, err := runtime.profileRuntimeDefinitions()
 	if err != nil {
@@ -99,9 +81,6 @@ func (runtime Runtime) PrepareProfileRuntimes(ctx context.Context, unavailable, 
 }
 
 func (runtime Runtime) profileRuntimeInputs(definitions []profile.Definition) (string, error) {
-	if runtime.ownerSources != nil {
-		return runtime.ownerSources.inputs(runtime, definitions)
-	}
 	environment := runtime.bindingEnvironment(runtime.Environment)
 	// Authorization bookkeeping changes after consent; it is not a desired
 	// runtime, handler or guest input. The sudo adapter validates it separately.

@@ -1,8 +1,6 @@
 package reconcileruntime
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -10,9 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
@@ -39,82 +35,6 @@ func (runtime Runtime) preparedProfileDefinition(owner string) (profile.Definiti
 		}
 	}
 	return profile.Definition{}, errors.New("prepared profile owner unavailable")
-}
-
-func (runtime Runtime) preparedProfileExecution(ctx context.Context, p *PreparedInstalledRuntime) (Runtime, error) {
-	execution, err := runtime.preparedSourceExecution(ctx, p)
-	if err != nil {
-		return Runtime{}, err
-	}
-	definitions, err := runtime.profileDefinitions()
-	if err != nil {
-		return Runtime{}, err
-	}
-	mapper := runtime
-	mapper.LogicalRepositoryRoot = p.directory
-	for index := range definitions {
-		definitions[index].Root = mapper.bindingPath(definitions[index].Root)
-	}
-	execution.Profiles = definitions
-	execution.Environment = preparedInstalledEnvironment(execution.Environment, "SUBYARD_REPOSITORY_ROOT", p.directory)
-	execution.Environment = preparedInstalledEnvironment(execution.Environment, "SUBYARD_CONFIG_DIR", filepath.Join(p.directory, "config"))
-	hooks := runtime.environmentValue("SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS")
-	execution.Environment = preparedInstalledEnvironment(execution.Environment, "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS", mapper.bindingPath(hooks))
-	return execution, nil
-}
-
-func (runtime Runtime) ApplyPreparedProfileRuntimeSources(ctx context.Context, p *PreparedInstalledRuntime, operation, actual, desired string, custody ...string) error {
-	if p == nil || p.profile == "" {
-		return domain.ErrPlanStale
-	}
-	if err := runtime.validateInstalledRecipe(p); err != nil {
-		return err
-	}
-	before, err := runtime.ObserveProfileRuntime(ctx, p.owner)
-	if err != nil {
-		return err
-	}
-	if before.State == ports.RuntimeStateCurrent && before.Actual == desired && before.Desired == desired {
-		return nil
-	}
-	if before.State != ports.RuntimeStateStale || before.Actual != actual || before.Desired != desired {
-		return domain.ErrPlanStale
-	}
-	execution, err := runtime.preparedProfileExecution(ctx, p)
-	if err != nil {
-		return err
-	}
-	defer p.Close()
-	if len(custody) == 0 {
-		err = execution.ApplyProfileRuntime(ctx, p.owner, operation, actual, desired)
-	} else if len(custody) == 2 {
-		err = execution.ApplyProfileRuntimeCustody(ctx, p.owner, operation, actual, desired, custody[0], custody[1])
-	} else {
-		err = domain.ErrPlanStale
-	}
-	if err != nil && p.stageBinding != "" {
-		p.retain.Store(true)
-	}
-	return err
-}
-
-func (runtime Runtime) FencePreparedProfileRuntimeSources(ctx context.Context, p *PreparedInstalledRuntime, expected, generation, successor string) error {
-	if p == nil || p.profile == "" {
-		return domain.ErrPlanStale
-	}
-	if err := runtime.validateInstalledRecipe(p); err != nil {
-		return err
-	}
-	execution, err := runtime.preparedProfileExecution(ctx, p)
-	if err != nil {
-		return err
-	}
-	defer p.Close()
-	err = execution.FenceProfileRuntime(ctx, p.owner, expected, generation, successor)
-	if err != nil && p.stageBinding != "" {
-		p.retain.Store(true)
-	}
-	return err
 }
 
 // profileSourcePaths selects only the registered package and its existing
@@ -225,80 +145,4 @@ func (runtime Runtime) profileSourcePaths(owner string) (profile.Definition, []s
 		return definition, nil, nil, errors.New("prepared profile file bound")
 	}
 	return definition, paths, native, nil
-}
-
-func (runtime Runtime) PrepareProfileRuntimeSources(ctx context.Context, owner string) (*PreparedInstalledRuntime, error) {
-	definition, paths, native, err := runtime.profileSourcePaths(owner)
-	if err != nil {
-		return nil, err
-	}
-	source, err := runtime.SelectedRuntimeInputs(owner)
-	if err != nil {
-		return nil, err
-	}
-	p := &PreparedInstalledRuntime{owner: owner, source: source, runtime: runtime.configRuntimeBinding(), resources: runtime.installedResourceBinding(), profile: definition.Name, handler: definition.Runtime.Handler, native: native, leaves: []string{definition.Runtime.Handler}, files: map[string][]byte{}}
-	total := 0
-	for _, relative := range paths {
-		asset := config.MaterializedAsset{Source: filepath.Join(runtime.RepositoryRoot, relative)}
-		var payload []byte
-		if runtime.SourceReader != nil {
-			payload, err = runtime.SourceReader(asset)
-		} else {
-			payload, err = asset.ReadSource()
-		}
-		if err != nil {
-			return nil, err
-		}
-		total += len(payload)
-		if total > 32<<20 {
-			return nil, errors.New("prepared profile source bound")
-		}
-		p.files[relative] = payload
-	}
-	if err := runtime.validateInstalledRecipe(p); err != nil {
-		return nil, err
-	}
-	p.binding = installedRuntimeDigest(json.RawMessage(p.Recipe()))
-	return p, nil
-}
-
-func (runtime Runtime) validateProfileRuntimeSources(p *PreparedInstalledRuntime) error {
-	definition, paths, native, err := runtime.profileSourcePaths(p.owner)
-	if err != nil {
-		return err
-	}
-	if definition.Name != p.profile || definition.Runtime.Handler != p.handler || !slices.Equal(native, p.native) || !slices.Equal(p.leaves, []string{p.handler}) || len(paths) != len(p.files) {
-		return domain.ErrPlanStale
-	}
-	for _, path := range paths {
-		if _, ok := p.files[path]; !ok {
-			return domain.ErrPlanStale
-		}
-	}
-	return nil
-}
-
-func (runtime Runtime) bindProfileRuntimeSources(r installedRecipe, raw []byte) (*PreparedInstalledRuntime, error) {
-	if r.Profile == "" || r.Handler == "" || r.Launcher != "" || r.HookBefore != "" || len(r.Files) > 2048 {
-		return nil, errors.New("invalid prepared profile recipe")
-	}
-	p := &PreparedInstalledRuntime{owner: r.Owner, source: r.Source, runtime: r.Runtime, resources: r.Resources, profile: r.Profile, handler: r.Handler, native: r.Native, leaves: r.Leaves, files: map[string][]byte{}}
-	total := 0
-	previous := ""
-	for _, file := range r.Files {
-		if file.Path <= previous || len(file.Path) > 512 {
-			return nil, errors.New("invalid prepared profile file order")
-		}
-		previous = file.Path
-		total += len(file.Content)
-		if total > 32<<20 {
-			return nil, errors.New("prepared profile source bound")
-		}
-		p.files[file.Path] = file.Content
-	}
-	if err := runtime.validateInstalledRecipe(p); err != nil {
-		return nil, err
-	}
-	p.binding = installedRuntimeDigest(json.RawMessage(raw))
-	return p, nil
 }

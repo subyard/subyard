@@ -98,23 +98,52 @@ func preparedPreviewFixture(t *testing.T, selected bool, body []byte) (Runtime, 
 	return runtime, executor, path
 }
 
-func TestCurrentPreparedPreviewRetirementMigratesBeforeStaticRefresh(t *testing.T) {
+func TestCurrentPreparedPreviewRefusesUnknownMarkersBeforeAnyMutation(t *testing.T) {
+	unknown := []byte("Guest text.\n<!-- subyard-preview -->\nUser-owned unknown body.\n<!-- /subyard-preview -->\n")
+	runtime, executor, path := preparedPreviewFixture(t, true, unknown)
+	host := filepath.Join(runtime.RepositoryRoot, "new-host-source")
+	testkit.WriteFile(t, host, []byte("Current host instructions.\n"), 0o600)
+	runtime.Environment = replaceTestEnvironment(runtime.Environment, "HOST_CLAUDE_MD", host)
+	// Even a valid ownership digest cannot authorize replacing an unknown block.
+	before, _ := os.ReadFile(executor.state + "/inventory.json")
+	if _, err := runtime.IntegrationPlan(context.Background()); err == nil {
+		t.Fatal("unknown block admitted to current materialized plan")
+	}
+	after, _ := os.ReadFile(executor.state + "/inventory.json")
+	actual, _ := os.ReadFile(path)
+	if executor.mutations != 0 || !bytes.Equal(before, after) || !bytes.Equal(actual, unknown) {
+		t.Fatal("refused current migration changed files")
+	}
+}
+
+func replaceTestEnvironment(environment []string, name, value string) []string {
+	prefix := name + "="
+	for index, entry := range environment {
+		if strings.HasPrefix(entry, prefix) {
+			environment[index] = prefix + value
+			return environment
+		}
+	}
+	return append(environment, prefix+value)
+}
+
+func TestCurrentPreviewRetirementMigratesBeforeStaticRefresh(t *testing.T) {
 	original := []byte("Retained host text.\n\n" + previewInstructions)
 	want := []byte("Retained host text.\n\n\n")
 	for _, selected := range []bool{false, true} {
 		t.Run(fmt.Sprint("selected=", selected), func(t *testing.T) {
 			runtime, executor, path := preparedPreviewFixture(t, selected, original)
-			prepared := prepareMaterializedIntegrationFixture(t, runtime)
-			defer prepared.Close()
-			if selected && len(prepared.configs.files) != 1 {
-				t.Fatal("missing-source case did not select the instruction adapter")
+			if selected {
+				configs, err := runtime.PrepareConfigs(context.Background())
+				if err != nil || len(configs.files) != 1 {
+					t.Fatal("missing-source case did not select the instruction adapter", err)
+				}
 			}
-			rebound, err := runtime.BindInstalledRuntimeContext(context.Background(), prepared.Recipe())
+			plan, err := runtime.IntegrationPlan(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer rebound.Close()
-			if err := runtime.ApplyPreparedMaterializedIntegrations(context.Background(), rebound); err != nil {
+			if err := runtime.ApplyIntegrations(context.Background(), plan); err != nil {
 				t.Fatal(err)
 			}
 			actual, err := os.ReadFile(path)
@@ -134,72 +163,9 @@ func TestCurrentPreparedPreviewRetirementMigratesBeforeStaticRefresh(t *testing.
 	}
 }
 
-func TestHistoricalPreparedEmptyInstructionSelectionKeepsRetirementSemantics(t *testing.T) {
-	runtime, _, path := preparedPreviewFixture(t, false, []byte("Historical text.\n\n"+previewInstructions))
-	runtime.legacyPreviewInstructions = true
-	prepared := prepareMaterializedIntegrationFixture(t, runtime)
-	defer prepared.Close()
-	raw := prepared.Recipe()
-	metadata, _, err := readMaterializedMetadata(prepared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(metadata, []byte("PreviewSkillCutover")) {
-		t.Fatal("historical canonical bytes gained current intent")
-	}
-	current := runtime
-	current.legacyPreviewInstructions = false
-	rebound, err := current.BindInstalledRuntimeContext(context.Background(), raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rebound.Close()
-	if !bytes.Equal(rebound.Recipe(), raw) {
-		t.Fatal("historical empty-selector recipe bytes changed")
-	}
-	if err := current.ApplyPreparedMaterializedIntegrations(context.Background(), rebound); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("historical empty-selector retirement changed: %v", err)
-	}
-}
-
-func TestCurrentPreparedPreviewRefusesUnknownMarkersBeforeAnyMutation(t *testing.T) {
-	unknown := []byte("Guest text.\n<!-- subyard-preview -->\nUser-owned unknown body.\n<!-- /subyard-preview -->\n")
-	runtime, executor, path := preparedPreviewFixture(t, true, unknown)
-	host := filepath.Join(runtime.RepositoryRoot, "new-host-source")
-	testkit.WriteFile(t, host, []byte("Current host instructions.\n"), 0o600)
-	runtime.Environment = preparedInstalledEnvironment(runtime.Environment, "HOST_CLAUDE_MD", host)
-	// Even a valid ownership digest cannot authorize replacing an unknown block.
-	before, _ := os.ReadFile(executor.state + "/inventory.json")
-	if _, err := runtime.IntegrationPlan(context.Background()); err == nil {
-		t.Fatal("unknown block admitted to current materialized plan")
-	}
-	after, _ := os.ReadFile(executor.state + "/inventory.json")
-	actual, _ := os.ReadFile(path)
-	if executor.mutations != 0 || !bytes.Equal(before, after) || !bytes.Equal(actual, unknown) {
-		t.Fatal("refused current migration changed files")
-	}
-}
-
-func TestCurrentPreparedConfigOnlyMigratesWithMissingHostSource(t *testing.T) {
+func TestCurrentConfigRefreshMigratesWithMissingHostSource(t *testing.T) {
 	runtime, _, path := preparedPreviewFixture(t, true, []byte("Retained config-only text.\n"+previewInstructions))
-	configs, err := runtime.PrepareConfigs(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	prepared, err := runtime.PrepareMaterializedConfigs(context.Background(), configs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer prepared.Close()
-	rebound, err := runtime.BindInstalledRuntimeContext(context.Background(), prepared.Recipe())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rebound.Close()
-	if err := runtime.ApplyPreparedMaterializedConfigs(context.Background(), rebound); err != nil {
+	if err := runtime.RefreshConfigs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(path)
@@ -208,15 +174,17 @@ func TestCurrentPreparedConfigOnlyMigratesWithMissingHostSource(t *testing.T) {
 	}
 }
 
-func TestCurrentPreparedSelectedHostSourceMigratesBeforeConfigWrite(t *testing.T) {
+func TestCurrentSelectedHostSourceMigratesBeforeConfigWrite(t *testing.T) {
 	runtime, _, path := preparedPreviewFixture(t, true, []byte("Prior host text.\n"+previewInstructions))
 	source := filepath.Join(runtime.RepositoryRoot, "current-host-source")
 	want := []byte("Current source-owned instructions.\n")
 	testkit.WriteFile(t, source, want, 0o600)
-	runtime.Environment = preparedInstalledEnvironment(runtime.Environment, "HOST_CLAUDE_MD", source)
-	prepared := prepareMaterializedIntegrationFixture(t, runtime)
-	defer prepared.Close()
-	if err := runtime.ApplyPreparedMaterializedIntegrations(context.Background(), prepared); err != nil {
+	runtime.Environment = replaceTestEnvironment(runtime.Environment, "HOST_CLAUDE_MD", source)
+	plan, err := runtime.IntegrationPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.ApplyIntegrations(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(path)

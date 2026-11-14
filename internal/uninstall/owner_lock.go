@@ -40,60 +40,6 @@ func BorrowOwnerLock(dataHome string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), file.Name()), nil
 }
 
-// RegisterBorrowedOwnerLock exposes an already checked, held native owner OFD to
-// existing delegated installer/guard children. The caller retains ownership of
-// held; release closes only this duplicate, never unlocks any borrower's OFD.
-// It performs no path reopen or lock acquisition.
-func RegisterBorrowedOwnerLock(dataHome string, held *os.File) (func(), error) {
-	if held == nil {
-		return nil, errors.New("native owner barrier is missing")
-	}
-	path := OwnerLockPath(dataHome)
-	current, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	info, err := held.Stat()
-	if err != nil {
-		return nil, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 ||
-		stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || !os.SameFile(current, info) {
-		return nil, config.OwnerMetadataError(path, "native owner barrier", "differs from its protected installation; "+ownerLockFacts(info)+"; required type=regular, mode=0600, links=1, matching inode", fmt.Sprintf("required uid=%d; current %s", os.Getuid(), config.FileMetadata(current)), nil)
-	}
-	fd, err := syscall.Dup(int(held.Fd()))
-	if err != nil {
-		return nil, err
-	}
-	syscall.CloseOnExec(fd)
-	file := os.NewFile(uintptr(fd), path)
-	ownerFiles.Lock()
-	previous := ownerFiles.files[path]
-	ownerFiles.files[path] = file
-	ownerFiles.Unlock()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			ownerFiles.Lock()
-			if ownerFiles.files[path] == file {
-				if previous != nil {
-					if _, err := previous.Stat(); err != nil {
-						previous = nil
-					}
-				}
-				if previous == nil {
-					delete(ownerFiles.files, path)
-				} else {
-					ownerFiles.files[path] = previous
-				}
-			}
-			ownerFiles.Unlock()
-			file.Close()
-		})
-	}, nil
-}
-
 // Native guard children retain the already-held barriers if their caller is
 // interrupted. They never acquire a new scope or unlock their parent's OFDs.
 func borrowOwnerBarriers() ([]*os.File, error) {

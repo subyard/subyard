@@ -55,11 +55,11 @@ func TestRetainedRepositoryDescriptorNumbersDoNotChangePreparedBindings(t *testi
 	if a.RepositoryRoot == b.RepositoryRoot {
 		t.Fatal("fixture did not vary actual descriptor")
 	}
-	left, err := a.SelectedRuntimeInputs("core-guest-runtime")
+	left, err := a.profileRuntimeInputs(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	right, err := b.SelectedRuntimeInputs("core-guest-runtime")
+	right, err := b.profileRuntimeInputs(nil)
 	if err != nil || left != right {
 		t.Fatal("descriptor number entered source binding", err)
 	}
@@ -68,11 +68,11 @@ func TestRetainedRepositoryDescriptorNumbersDoNotChangePreparedBindings(t *testi
 		t.Fatal(err)
 	}
 	y, err := b.PrepareConfigs(context.Background())
-	if err != nil || x.Binding() != y.Binding() {
+	if err != nil || x.binding != y.binding {
 		t.Fatal("descriptor number entered prepared config recipe", err)
 	}
 	testkit.WriteFile(t, filepath.Join(root, "config", "AGENTS.md"), []byte("different actual source\n"), 0o600)
-	right, err = b.SelectedRuntimeInputs("core-guest-runtime")
+	right, err = b.profileRuntimeInputs(nil)
 	if err != nil || left == right {
 		t.Fatal("logical label hid changed approved bytes", err)
 	}

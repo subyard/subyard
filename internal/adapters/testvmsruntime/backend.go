@@ -1,11 +1,9 @@
 package testvmsruntime
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,307 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
-
-// PreparedApply retains the exact broker inputs and source handles captured
-// before consent. Its binding is descriptive; only this private handle executes.
-type PreparedApply struct {
-	state                                  backendState
-	inputs, native, binding                string
-	provision, download, recipes, manifest []byte
-	engine                                 *os.File
-	close                                  sync.Once
-}
-
-func (p *PreparedApply) Binding() string {
-	if p == nil {
-		return ""
-	}
-	return p.binding
-}
-
-// PinnedEngineSource retains the approved bytes for the owning host sink as
-// well as the guest backend. It never selects another dispatcher by path.
-func (p *PreparedApply) PinnedEngineSource() (string, string, error) {
-	if p == nil {
-		return "", "", domain.ErrPlanStale
-	}
-	if err := p.checkEngine(); err != nil {
-		return "", "", err
-	}
-	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), p.engine.Fd()), p.state.engineHash, nil
-}
-func (p *PreparedApply) Close() error {
-	var err error
-	if p != nil {
-		p.close.Do(func() { err = p.engine.Close() })
-	}
-	return err
-}
-
-func (backend *Backend) inputBinding() string {
-	environment := maps.Clone(backend.Environment)
-	for key, value := range environment {
-		environment[key] = backend.bindingPath(value)
-	}
-	delete(environment, "SUBYARD_OPERATION_ID")
-	delete(environment, "SUBYARD_SUDO_PREAUTHORIZED")
-	raw, _ := json.Marshal(struct {
-		Repository, DataHome, Dispatcher, Project, Instance, Yard string
-		Power                                                     domain.DesiredPower
-		Memory                                                    bool
-		Environment                                               map[string]string
-	}{backend.bindingPath(backend.RepositoryRoot), backend.DataHome, backend.bindingPath(backend.Dispatcher), backend.Project, backend.Instance, backend.YardName, backend.DesiredPower, backend.HostMemory, environment})
-	return fmt.Sprintf("%x", sha256.Sum256(raw))
-}
-
-func (backend *Backend) bindingPath(value string) string {
-	if backend.LogicalRepositoryRoot != "" && backend.RepositoryRoot != "" && backend.LogicalRepositoryRoot != backend.RepositoryRoot {
-		if strings.HasPrefix(backend.RepositoryRoot, "/proc/self/fd/") {
-			alias := strings.Replace(backend.RepositoryRoot, "/proc/self/", fmt.Sprintf("/proc/%d/", os.Getpid()), 1)
-			value = replaceBackendRoot(value, alias, backend.LogicalRepositoryRoot)
-		}
-		return replaceBackendRoot(value, backend.RepositoryRoot, backend.LogicalRepositoryRoot)
-	}
-	return value
-}
-
-func replaceBackendRoot(value, physical, logical string) string {
-	var result strings.Builder
-	for {
-		i := strings.Index(value, physical)
-		if i < 0 {
-			result.WriteString(value)
-			return result.String()
-		}
-		end := i + len(physical)
-		result.WriteString(value[:i])
-		if (i == 0 || strings.ContainsRune("=:\"'\n\r\t [,(", rune(value[i-1]))) && (end == len(value) || strings.ContainsRune("/\"'\n\r\t ", rune(value[end]))) {
-			result.WriteString(logical)
-		} else {
-			result.WriteString(physical)
-		}
-		value = value[end:]
-	}
-}
-
-func (backend *Backend) nativeBinding(ctx context.Context) (string, error) {
-	facts := map[string]string{}
-	for _, key := range []string{"volatile.uuid", "user.subyard.test_vms_revision", "user.subyard.test_vms_spool_schema"} {
-		value, err := backend.incus(ctx, "config", "get", backend.Instance, key, "--project", backend.Project)
-		if err != nil {
-			return "", err
-		}
-		facts[key] = strings.TrimSpace(value)
-	}
-	if facts["volatile.uuid"] == "" {
-		return "", errors.New("broker instance UUID unavailable")
-	}
-	outer, err := backend.outerState(ctx)
-	if err != nil {
-		return "", err
-	}
-	facts["power"] = outer
-	raw, err := json.Marshal(facts)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
-}
-
-func (backend *Backend) PrepareApply(ctx context.Context) (*PreparedApply, error) {
-	return backend.prepareApply(ctx, true)
-}
-
-// PrepareApplySources captures only original source/state/engine inputs. The
-// native placeholder is inert and must be resolved before any dispatch.
-func (backend *Backend) PrepareApplySources(ctx context.Context) (*PreparedApply, error) {
-	return backend.prepareApply(ctx, false)
-}
-func (backend *Backend) prepareApply(ctx context.Context, physical bool) (*PreparedApply, error) {
-	state, err := backend.state()
-	if err != nil {
-		return nil, err
-	}
-	if backend.Runner == nil {
-		backend.Runner = ProcessRunner{}
-	}
-	native := strings.Repeat("0", 64)
-	if physical {
-		native, err = backend.nativeBinding(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-	engine, err := os.Open(backend.Dispatcher)
-	if err != nil {
-		return nil, err
-	}
-	p := &PreparedApply{state: state, inputs: backend.inputBinding(), native: native, engine: engine}
-	ok := false
-	defer func() {
-		if !ok {
-			p.Close()
-		}
-	}()
-	if p.provision, err = os.ReadFile(state.provision); err != nil {
-		return nil, err
-	}
-	if p.download, err = os.ReadFile(state.downloadHelper); err != nil {
-		return nil, err
-	}
-	if p.recipes, p.manifest, err = RecipeBundle(backend.RepositoryRoot); err != nil {
-		return nil, err
-	}
-	if err := p.checkEngine(); err != nil {
-		return nil, err
-	}
-	sealed, err := SealPreparedEngine(p.engine, p.state.engineHash)
-	if err != nil {
-		return nil, err
-	}
-	p.engine.Close()
-	p.engine = sealed
-	p.binding = p.calculateBinding()
-	ok = true
-	return p, nil
-}
-
-func (p *PreparedApply) calculateBinding() string {
-	raw, _ := json.Marshal(struct {
-		Inputs, Native, Marker        string
-		Provision, Download, Manifest string
-	}{p.inputs, p.native, p.state.marker, fmt.Sprintf("%x", sha256.Sum256(p.provision)), fmt.Sprintf("%x", sha256.Sum256(p.download)), fmt.Sprintf("%x", sha256.Sum256(p.manifest))})
-	return fmt.Sprintf("%x", sha256.Sum256(raw))
-}
-
-// ResolvePreparedApply measures only the physical native guard. Every source
-// byte, state field and pinned engine remains the original captured authority.
-func (backend *Backend) ResolvePreparedApply(ctx context.Context, original *PreparedApply) (*PreparedApply, error) {
-	if original == nil || original.inputs != backend.inputBinding() {
-		return nil, domain.ErrPlanStale
-	}
-	if backend.Runner == nil {
-		backend.Runner = ProcessRunner{}
-	}
-	state, err := backend.state()
-	if err != nil {
-		return nil, err
-	}
-	if state != original.state {
-		return nil, domain.ErrPlanStale
-	}
-	if err := original.checkEngine(); err != nil {
-		return nil, err
-	}
-	native, err := backend.nativeBinding(ctx)
-	if err != nil {
-		return nil, err
-	}
-	record, files, err := original.Record(backend)
-	if err != nil {
-		return nil, err
-	}
-	copy := &PreparedApply{state: original.state, inputs: original.inputs, native: native, provision: original.provision, download: original.download, recipes: original.recipes, manifest: original.manifest}
-	record.Native = native
-	record.Binding = copy.calculateBinding()
-	return backend.RestorePreparedApply(ctx, record, files)
-}
-
-func (p *PreparedApply) checkEngine() error {
-	info, err := p.engine.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return errors.New("prepared broker engine unavailable")
-	}
-	hash := sha256.New()
-	if _, err := p.engine.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	size, err := io.Copy(hash, io.LimitReader(p.engine, (128<<20)+1))
-	if err != nil {
-		return err
-	}
-	if size > 128<<20 || hex.EncodeToString(hash.Sum(nil)) != p.state.engineHash {
-		return domain.ErrPlanStale
-	}
-	return nil
-}
-
-func (backend *Backend) ApplyPrepared(ctx context.Context, prepared *PreparedApply) error {
-	if prepared == nil || prepared.inputs != backend.inputBinding() {
-		return domain.ErrPlanStale
-	}
-	state, err := backend.state()
-	if err != nil {
-		return err
-	}
-	if state != prepared.state {
-		return domain.ErrPlanStale
-	}
-	if err := prepared.checkEngine(); err != nil {
-		return err
-	}
-	if backend.Runner == nil {
-		backend.Runner = ProcessRunner{}
-	}
-	native, err := backend.nativeBinding(ctx)
-	if err != nil {
-		return err
-	}
-	if native != prepared.native {
-		return domain.ErrPlanStale
-	}
-	candidate := *backend
-	candidate.Dispatcher = fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), prepared.engine.Fd())
-	if ports.NativeOperationObserverFrom(ctx) != nil {
-		candidate.Runner = brokerNativeRunner{CommandRunner: candidate.Runner, source: prepared.binding}
-	}
-	return candidate.apply(ctx, prepared.state, prepared)
-}
-
-type brokerNativeRunner struct {
-	CommandRunner
-	source string
-}
-
-func (runner brokerNativeRunner) Run(ctx context.Context, name string, arguments, environment []string, input io.Reader) ([]byte, []byte, error) {
-	observer := ports.NativeOperationObserverFrom(ctx)
-	if observer == nil {
-		return runner.CommandRunner.Run(ctx, name, arguments, environment, input)
-	}
-	var payload []byte
-	var err error
-	if input != nil {
-		payload, err = io.ReadAll(io.LimitReader(input, (32<<20)+1))
-		if err != nil || len(payload) > 32<<20 {
-			return nil, nil, errors.New("broker command input bound")
-		}
-		input = bytes.NewReader(payload)
-	}
-	raw, err := json.Marshal(struct {
-		Source, Name           string
-		Arguments, Environment []string
-		Payload                string
-	}{runner.source, name, arguments, environment, fmt.Sprintf("%x", sha256.Sum256(payload))})
-	if err != nil {
-		return nil, nil, err
-	}
-	ordinal, err := observer.CommandStarted("broker-command", fmt.Sprintf("%x", sha256.Sum256(raw)))
-	if err != nil {
-		return nil, nil, err
-	}
-	stdout, stderr, err := runner.CommandRunner.Run(ctx, name, arguments, environment, input)
-	if err != nil {
-		observer.Uncertain()
-		return stdout, stderr, err
-	}
-	return stdout, stderr, observer.CommandTerminal(ordinal)
-}
 
 type Backend struct {
 	LogicalRepositoryRoot string
@@ -493,10 +195,10 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	return backend.apply(ctx, state, nil)
+	return backend.apply(ctx, state)
 }
 
-func (backend *Backend) apply(ctx context.Context, state backendState, prepared *PreparedApply) (err error) {
+func (backend *Backend) apply(ctx context.Context, state backendState) (err error) {
 	if backend.Runner == nil {
 		backend.Runner = ProcessRunner{}
 	}
@@ -559,28 +261,20 @@ func (backend *Backend) apply(ctx context.Context, state backendState, prepared 
 		"--", "mv", "-f", "--", installCandidate, DefaultInstalledPath); err != nil {
 		return err
 	}
-	var payload io.Reader
-	if prepared != nil {
-		if err := backend.installRecipeBundle(ctx, prepared.recipes, prepared.manifest); err != nil {
-			return err
-		}
-		payload = io.MultiReader(bytes.NewReader(prepared.download), bytes.NewReader(prepared.provision))
-	} else {
-		if err := backend.installRecipes(ctx); err != nil {
-			return err
-		}
-		downloadHelper, err := os.Open(state.downloadHelper)
-		if err != nil {
-			return err
-		}
-		defer downloadHelper.Close()
-		provision, err := os.Open(state.provision)
-		if err != nil {
-			return err
-		}
-		defer provision.Close()
-		payload = io.MultiReader(downloadHelper, provision)
+	if err := backend.installRecipes(ctx); err != nil {
+		return err
 	}
+	downloadHelper, err := os.Open(state.downloadHelper)
+	if err != nil {
+		return err
+	}
+	defer downloadHelper.Close()
+	provision, err := os.Open(state.provision)
+	if err != nil {
+		return err
+	}
+	defer provision.Close()
+	payload := io.MultiReader(downloadHelper, provision)
 	budgetValues := map[string]string{
 		"E2E_DISK_BUDGET":    state.diskBudget,
 		"E2E_CACHE_BUDGET":   state.cacheBudget,

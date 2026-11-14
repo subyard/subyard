@@ -144,16 +144,13 @@ func (client *Client) SetInstancePower(
 			return err
 		}
 	}
-	if err := beforeNative(ctx, server, "instance-power", project, name); err != nil {
-		return err
-	}
 	operation, err := server.UseProject(project).UpdateInstanceState(name, api.InstanceStatePut{
 		Action: action, Timeout: -1, Force: force,
 	}, "")
 	if err != nil {
 		return normalizeError(action+" instance", err)
 	}
-	if err := waitNative(ctx, server, operation, "instance-power", project, name); err != nil {
+	if err := operation.Wait(); err != nil {
 		return normalizeOperationError("wait for "+action+" instance", operation.Get(), err)
 	}
 	if action == "start" {
@@ -275,9 +272,6 @@ func (client *Client) exec(
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	dataDone := make(chan bool)
-	if err := beforeNative(ctx, server, "instance-exec", project, name); err != nil {
-		return ports.InstanceExecResult{}, err
-	}
 	operation, err := server.UseProject(project).ExecInstance(name, api.InstanceExecPost{
 		Command: request.Command, Environment: cloneMap(request.Environment),
 		WaitForWS: true, Interactive: false, User: request.User, Group: request.Group,
@@ -289,20 +283,16 @@ func (client *Client) exec(
 		return ports.InstanceExecResult{}, normalizeError("start instance command", err)
 	}
 	wait := make(chan error, 1)
-	go func() { wait <- waitNative(ctx, server, operation, "instance-exec", project, name) }()
+	go func() { wait <- operation.Wait() }()
 	select {
 	case <-ctx.Done():
 		_ = operation.Cancel()
 		<-wait
-		if err := drainExecData(ctx, dataDone); err != nil {
-			return ports.InstanceExecResult{}, err
-		}
+		<-dataDone
 		return ports.InstanceExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()},
 			fmt.Errorf("wait for instance command: %w", context.Cause(ctx))
 	case err := <-wait:
-		if drainErr := drainExecData(ctx, dataDone); drainErr != nil {
-			return ports.InstanceExecResult{}, errors.Join(err, drainErr)
-		}
+		<-dataDone
 		exitCode, validExit := nativeGuestExitCode(operation.Get().Metadata["return"])
 		result := ports.InstanceExecResult{
 			Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode,
@@ -317,21 +307,6 @@ func (client *Client) exec(
 			return result, &ports.GuestExitError{Code: exitCode}
 		}
 		return result, nil
-	}
-}
-
-func drainExecData(ctx context.Context, done <-chan bool) error {
-	observer := ports.NativeOperationObserverFrom(ctx)
-	if observer == nil {
-		<-done
-		return nil
-	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		observer.Uncertain()
-		return errors.New("native exec streams did not drain")
 	}
 }
 
@@ -430,14 +405,11 @@ func (client *Client) SetInstanceConfig(
 	if !changed {
 		return nil
 	}
-	if err := beforeNative(ctx, projectServer, "instance-config", project, instanceName); err != nil {
-		return err
-	}
 	operation, err := projectServer.UpdateInstance(instanceName, instance.Writable(), etag)
 	if err != nil {
 		return normalizeError("update instance config", err)
 	}
-	if err := waitNative(ctx, projectServer, operation, "instance-config", project, instanceName); err != nil {
+	if err := operation.Wait(); err != nil {
 		return normalizeOperationError("wait for instance config update", operation.Get(), err)
 	}
 	return nil
@@ -450,22 +422,11 @@ func updateInstanceDevices(
 	instance *api.Instance,
 	etag string,
 ) error {
-	info, infoErr := server.GetConnectionInfo()
-	if infoErr != nil && ports.NativeOperationObserverFrom(ctx) != nil {
-		return infoErr
-	}
-	project := ""
-	if info != nil {
-		project = info.Project
-	}
-	if err := beforeNative(ctx, server, "instance-devices", project, name); err != nil {
-		return err
-	}
 	operation, err := server.UpdateInstance(name, instance.Writable(), etag)
 	if err != nil {
 		return normalizeError("update instance devices", err)
 	}
-	if err := waitNative(ctx, server, operation, "instance-devices", project, name); err != nil {
+	if err := operation.Wait(); err != nil {
 		return normalizeOperationError("wait for instance device update", operation.Get(), err)
 	}
 	return nil

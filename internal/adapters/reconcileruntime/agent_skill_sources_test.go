@@ -3,7 +3,6 @@ package reconcileruntime
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -139,51 +138,6 @@ func TestAgentSkillSourcesRefuseUnsafeInputs(t *testing.T) {
 			}
 			if err := exec.Command("python3", "-B", filepath.Join(root, "config/skills/package.py"), "files", root).Run(); err == nil {
 				t.Fatal("unsafe Python source admitted")
-			}
-		})
-	}
-}
-
-func TestPreparedAgentSkillAssetsRefuseDriftBeforeEffects(t *testing.T) {
-	for _, name := range []string{"config/skills/package.py", "config/skills/refresh.sh"} {
-		t.Run(name, func(t *testing.T) {
-			runtime := preparedInstalledFixture(t)
-			runtime.Environment = append(runtime.Environment, "ALLOWS_CODING_TOOLS=false")
-			writeAgentSkillFixture(t, runtime.RepositoryRoot)
-			for _, asset := range []string{"scripts/refresh-installed-guest-runtime.sh", "scripts/prepare-preview-route.sh", "config/preview/subyard-preview", "config/agents/ccusage/provision.sh"} {
-				payload, err := os.ReadFile(filepath.Join("../../..", asset))
-				if err != nil {
-					t.Fatal(err)
-				}
-				path := filepath.Join(runtime.RepositoryRoot, asset)
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, path, payload, 0o755)
-			}
-			prepared, err := runtime.PrepareInstalledRuntime(context.Background(), "core-guest-runtime")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer prepared.Close()
-			if len(prepared.files[name]) == 0 {
-				t.Fatal("missing prepared skill asset")
-			}
-			if err := prepared.materialize(); err != nil {
-				t.Fatal(err)
-			}
-			for _, relative := range []string{"config/skills", name} {
-				info, err := os.Stat(filepath.Join(prepared.directory, relative))
-				if err != nil || info.Mode().Perm() != 0o500 {
-					t.Fatalf("frozen mode %s: %v %v", relative, info, err)
-				}
-			}
-			testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, name), []byte("foreign\n"), 0o600)
-			if _, err := runtime.BindInstalledRuntime(prepared.Recipe()); !errors.Is(err, domain.ErrPlanStale) {
-				t.Fatalf("changed source admitted: %v", err)
-			}
-			if err := runtime.ApplyPreparedInstalledRuntime(context.Background(), prepared, "prepared", testRuntimeOldDigest, testRuntimeNewDigest); !errors.Is(err, domain.ErrPlanStale) {
-				t.Fatalf("changed source reached effects: %v", err)
 			}
 		})
 	}
