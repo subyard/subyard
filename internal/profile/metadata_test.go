@@ -160,3 +160,31 @@ func TestRetirementNoticeRequiresRetiredPackageAndBoundedText(t *testing.T) {
 		}
 	}
 }
+
+func TestFailureScopeIsYardOnlyOnYardLocalOwners(t *testing.T) {
+	runtime := func(scope, extra string) []byte {
+		return []byte(`{"schema_version":1,` + extra + `"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh"` + scope + `}}`)
+	}
+	for _, valid := range [][]byte{runtime(``, ``), runtime(`,"failure_scope":"yard"`, ``)} {
+		if _, err := Decode("synthetic", valid); err != nil {
+			t.Fatalf("%s: %v", valid, err)
+		}
+	}
+	metadata, err := Decode("synthetic", runtime(`,"failure_scope":"yard"`, ``))
+	if err != nil || metadata.definition().Runtime.FailureScope != FailureScopeYard {
+		t.Fatalf("declared scope was lost: %v", err)
+	}
+	for _, invalid := range [][]byte{
+		runtime(`,"failure_scope":"installation"`, ``),
+		runtime(`,"failure_scope":"Yard"`, ``),
+		runtime(`,"custody":true,"failure_scope":"yard"`, ``),
+		runtime(`,"failure_scope":"yard"`, `"owner_service":"owner.sh",`),
+	} {
+		if _, err := Decode("synthetic", invalid); err == nil {
+			t.Fatalf("always-blocking runtime declared a yard failure scope: %s", invalid)
+		}
+	}
+	if _, err := DecodeIntegration("synthetic", []byte(`{"schema_version":1,"lifecycle":{"handler":"hook.py","failure_scope":"yard"}}`)); err == nil {
+		t.Fatal("integration lifecycle accepted an undeclared failure scope")
+	}
+}

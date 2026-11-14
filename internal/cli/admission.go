@@ -306,6 +306,11 @@ func (cli *CLI) admitReleaseGate(
 	if outcome == nil {
 		return permits, 0, false
 	}
+	// Recorded yard-scoped runtime failures of a completed release never block
+	// unrelated commands; they reach their own guards.
+	if ordinaryCommandDuringPendingConfiguration(admission.handler) && cli.declaredRuntimePendingGate(outcome, gateInspection) {
+		return permits, 0, false
+	}
 	switch admission.recovery {
 	case recoveryConfigApply:
 		permit, err := cli.prepareConfigApplyRepair(ctx, yard, admission.configApplyAll, *outcome)
@@ -382,6 +387,10 @@ func (cli *CLI) admitTeardownGate(
 		return nil, 1, true
 	}
 	if outcome == nil {
+		return nil, 0, false
+	}
+	// Recorded yard-scoped runtime failures leave teardown to its own guards.
+	if ordinaryCommandDuringPendingConfiguration("@teardown") && cli.declaredRuntimePendingGate(outcome, gateInspection) {
 		return nil, 0, false
 	}
 	permit, err := cli.prepareTeardownRepair(ctx, loaded, arguments, *outcome)

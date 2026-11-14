@@ -27,6 +27,12 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 	t.Helper()
 	_, home, configHome, environment := configCommandFixture(t)
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "1.2.2-source"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/1.2.2-source", filepath.Join(runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
 	root := filepath.Join(runtimeRoot, "releases", "1.2.3-owner")
 	capabilities := releasetransition.ActivationRecoveryLifecycleCapabilities()
 	reply, err := releasetransition.MarshalRecoveryProcessResponse(releasetransition.RecoveryProcessResponse{SchemaVersion: 2, Capabilities: &capabilities})
@@ -72,8 +78,10 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 	fixtureDigest := releasetransition.Fingerprint(strings.Repeat("a", 64))
 	journal := releasetransition.JournalRecord{
 		SchemaVersion: 2, Transaction: "tx-0123456789abcdef",
-		Goal:              releasetransition.Goal{Target: "1.2.3-owner", Direction: releasetransition.DirectionActivateTarget},
-		Releases:          releasetransition.ReleasePair{From: "1.2.3-owner", Target: "1.2.3-owner"},
+		Goal: releasetransition.Goal{Target: "1.2.3-owner", Direction: releasetransition.DirectionActivateTarget},
+		// The unfinished activation of an ordinary update; an in-place repair
+		// applies the installed selection and refuses source reduction.
+		Releases:          releasetransition.ReleasePair{From: "1.2.2-source", Target: "1.2.3-owner"},
 		AuthorizationPlan: releasetransition.PlanToken("plan-v1-" + string(fixtureDigest)),
 		ResumePlan:        releasetransition.PlanToken("resume-v1-" + strings.Repeat("b", 64)),
 		ArtifactDigest:    releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest))),
@@ -471,6 +479,9 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 	if _, pending := extraAssets["config/fixture-pending-ownership"]; pending {
 		enginePath := filepath.Join(root, "bin/yard-engine")
 		engine := string(mustReadConfigFixture(t, enginePath))
+		// The native inspection reads the configuration root, as config loading does.
+		engine = strings.Replace(engine, `request="$(cat)"`, `request="$(cat)"
+  flock -n -s "$(printf '%s' "$request" | jq -r .configHome)" true || { echo 'native inspection found the configuration root locked' >&2; exit 75; }`, 1)
 		engine = strings.Replace(engine, `"status":"migration-required"`, `"status":"operator-action-required"`, 1)
 		engine = strings.Replace(engine, `"code":"transition-required"`, `"code":"dependency-unavailable"`, 1)
 		engine = strings.Replace(engine, `"message":"activation drift","retry":"run yard update"`, `"message":"fixture unowned selected artifact","retry":"move fixture file aside","transaction":"tx-0123456789abcdef"`, 1)

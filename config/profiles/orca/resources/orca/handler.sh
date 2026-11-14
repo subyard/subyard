@@ -15,6 +15,26 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib-service.sh
 . "$SCRIPT_DIR/lib-service.sh"
 
+# Within a bracketed step of a runtime apply, a guest command proves that it ran:
+# the guest maps its own failure to status 200, which an Incus transport error
+# never returns. The last command's class is kept for the failure report.
+yexec() {
+  if [ -z "${ORCA_RUNTIME_EFFECT:-}" ] || [ -z "${ORCA_GUEST_STEP_STATUS:-}" ]; then
+    # An explicit status: a bare return inside the EXIT trap would return the
+    # status that started the trap instead.
+    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"
+    return $?
+  fi
+  local status=0
+  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -c '"$@" || exit 200' subyard-orca-guest-step "$@" || status=$?
+  case "$status" in
+    0) printf 'ok\n' ;;
+    200) printf 'guest-failed\n' ;;
+    *) printf 'transport\n' ;;
+  esac >"$ORCA_GUEST_STEP_STATUS"
+  return "$status"
+}
+
 ORCA_PROFILE_DIR="$(cd "$RESOURCE_DIR/../.." && pwd)"
 # shellcheck source=config/profiles/orca/release.env
 . "$ORCA_PROFILE_DIR/release.env"
@@ -41,6 +61,11 @@ ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
 ORCA_GUEST_TMP_DIR=
+# The runtime apply phase (apply or verify), and the same value while a guest-side
+# step runs whose failure affects only this yard; the class of its last guest command.
+ORCA_RUNTIME_PHASE=
+ORCA_RUNTIME_EFFECT=
+ORCA_GUEST_STEP_STATUS=
 
 valid_guest_tmp_dir() {
   [[ "$1" =~ ^/tmp/subyard-orca\.[A-Za-z0-9]{6,}$ ]]
@@ -54,7 +79,13 @@ cleanup_guest() {
 }
 
 cleanup() {
-  local status=$? cleanup_failed=0
+  local status=$? cleanup_failed=0 effect="$ORCA_RUNTIME_EFFECT" step=""
+  if [ -n "$ORCA_GUEST_STEP_STATUS" ]; then
+    step="$(cat -- "$ORCA_GUEST_STEP_STATUS" 2>/dev/null || true)"
+    rm -f -- "$ORCA_GUEST_STEP_STATUS" || cleanup_failed=1
+  fi
+  ORCA_RUNTIME_EFFECT=''
+  ORCA_GUEST_STEP_STATUS=''
   if [ "$ORCA_PAIR_PENDING" -eq 1 ]; then
     clear_mobile_request >/dev/null 2>&1 || cleanup_failed=1
   fi
@@ -63,8 +94,28 @@ cleanup() {
     rm -rf -- "$ORCA_TMP_DIR" || cleanup_failed=1
   fi
   [ "$status" -ne 0 ] || [ "$cleanup_failed" -eq 0 ] || return 1
+  # Debris the handler could not remove makes the outcome not yard-local.
+  [ "$cleanup_failed" -ne 0 ] || report_runtime_yard_failure "$status" "$effect" "$step"
   return "$status"
 }
+
+# A guest-side step of a runtime apply whose guest command itself ran and failed
+# affects only this yard; its init repeats the same apply. Interruption, Incus
+# transport errors, host staging, file pushes, safety guards, refused assessments
+# and a guest that no longer answers report nothing and stay blocking. The record
+# carries the core's per-apply nonce, which guests never receive, so relayed guest
+# output cannot forge it.
+report_runtime_yard_failure() { # <status> <effect> <last guest command class>
+  [ "$1" -ne 0 ] && [ "$1" -ne 130 ] && [ "$1" -ne 143 ] && [ -n "$2" ] && [ "$3" = guest-failed ] || return 0
+  [[ "${SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE:-}" =~ ^[0-9a-f]{32}$ ]] || return 0
+  [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" 2>/dev/null)" = RUNNING ] || return 0
+  yexec true >/dev/null 2>&1 || return 0
+  printf 'subyard-profile-runtime-diagnostic-v1 %s %s yard-local\n' "$SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE" "$2" >&2
+}
+
+# Bracket guest-side commands of a runtime apply; outside an apply both are no-ops.
+yard_local_begin() { ORCA_RUNTIME_EFFECT="$ORCA_RUNTIME_PHASE"; }
+yard_local_end() { ORCA_RUNTIME_EFFECT=; }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -323,7 +374,9 @@ stage_registration_contract() {
   chmod 0755 "$sync"
   desired="$(registration_desired_digest)" || die "Orca registration helper contract unavailable"
   version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
+  yard_local_begin
   [ -n "$ORCA_GUEST_TMP_DIR" ] || ORCA_GUEST_TMP_DIR="$(yexec mktemp -d /tmp/subyard-orca.XXXXXX)"
+  yard_local_end
   valid_guest_tmp_dir "$ORCA_GUEST_TMP_DIR" \
     || die "Orca guest staging returned an unsafe temporary path"
   incus file push "$sync" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/orca-sync" \
@@ -336,6 +389,7 @@ stage_registration_contract() {
     "$ORCA_TMP_DIR/orca-codex-profile" "$ORCA_TMP_DIR/orca-codex-bin"; do
     incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" "${PROJ[@]}" --mode 0644 >/dev/null
   done
+  yard_local_begin
   yexec bash -se -- "$ORCA_GUEST_TMP_DIR" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
     "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$version" \
     "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" \
@@ -371,6 +425,7 @@ mv "$temporary" "$marker"
 YARD
   yexec systemctl daemon-reload
   yexec systemctl enable --now "$ORCA_DISCOVERY_TIMER" >/dev/null
+  yard_local_end
 }
 
 render_runtime_service() { # <guest-uid>
@@ -417,12 +472,16 @@ stage_runtime_contract() {
   local sync="$ORCA_TMP_DIR/orca-sync"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
   local source contract_version guest_uid
+  yard_local_begin
   guest_uid="$(yexec id -u "${DEV_USER:-dev}")" || die 'Orca development user UID unavailable'
+  yard_local_end
   [[ "$guest_uid" =~ ^[0-9]+$ ]] || die 'Orca development user UID is invalid'
   local -a helpers=()
   mapfile -t helpers < <(registration_files)
   contract_version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
+  yard_local_begin
   ORCA_GUEST_TMP_DIR="$(yexec mktemp -d /tmp/subyard-orca.XXXXXX)"
+  yard_local_end
   valid_guest_tmp_dir "$ORCA_GUEST_TMP_DIR" \
     || die "Orca guest staging returned an unsafe temporary path"
   local guest_ingress="$ORCA_GUEST_TMP_DIR/orca-ingress"
@@ -485,6 +544,7 @@ CAPTURE
   incus file push "$unit" "$YARD_INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
   stage_registration_contract
+  yard_local_begin
   if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
     ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
     ! yexec cmp -s "$guest_unit" "/etc/systemd/system/$ORCA_UNIT" ||
@@ -517,6 +577,7 @@ chown "$dev_user:$dev_user" "$ready"
 chmod 0600 "$ready"
 YARD
   yexec systemctl daemon-reload
+  yard_local_end
   cleanup_guest || die "Orca guest staging directory could not be removed"
 }
 
@@ -647,11 +708,13 @@ linger_ready() {
 }
 
 ensure_linger() {
+  yard_local_begin
   if ! linger_ready; then
     yexec loginctl enable-linger "${DEV_USER:-dev}" \
       || die "Orca could not enable lingering for ${DEV_USER:-dev}"
   fi
   linger_ready || die "Orca lingering is disabled for ${DEV_USER:-dev} after reconciliation"
+  yard_local_end
 }
 
 # Set ORCA_MAIN_UNIT_STATE to current, drift or unrenderable for the installed main unit.
@@ -710,14 +773,18 @@ observe_runtime_contract() {
 }
 
 apply_main_unit() {
+  yard_local_begin
   inspect_main_unit || die "Orca service unit unavailable"
+  yard_local_end
   [ "$ORCA_MAIN_UNIT_STATE" = drift ] || return 0
   ORCA_ADVERTISE_HOST="$ORCA_INSTALLED_ADVERTISE_HOST" ORCA_HOST_PORT="$ORCA_INSTALLED_HOST_PORT"
   stage_runtime_contract
+  yard_local_begin
   if yexec systemctl is-active --quiet "$ORCA_UNIT"; then
     yexec systemctl restart "$ORCA_UNIT"
     wait_service_endpoint_ready || die "Orca did not become ready after applying its updated unit"
   fi
+  yard_local_end
 }
 
 runtime_contract_ready() {
@@ -1503,6 +1570,12 @@ if [ "$sub" = _runtime-contract ]; then
         jq -e '.schema == 1 and (.missingMetadata | type == "array")' <<<"$ORCA_METADATA_PROJECTION" >/dev/null \
           || die 'invalid native metadata projection'
       fi
+      # A yard that does not select Orca has no Orca runtime to converge: the
+      # runtime stage skips it. Deselection leaves an installed Orca in place.
+      if ! orca_profile_selected; then
+        printf '%s\n' '{"state":"absent","actual":"","desired":""}'
+        exit 0
+      fi
       observation="$(observe_runtime_contract)" || exit 1
       hook_binding=""
       if [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] &&
@@ -1528,6 +1601,8 @@ if [ "$sub" = _runtime-contract ]; then
         stale)
           # Helper refresh restarts nothing. A changed main unit restarts the service, as the
           # approving plan disclosed through this observation's consequence.
+          ORCA_RUNTIME_PHASE=apply
+          ORCA_GUEST_STEP_STATUS="$(mktemp)"
           ensure_linger
           if [ "$(jq -r '.consequence // empty' <<<"$observation")" = "$ORCA_MAIN_UNIT_CONSEQUENCE" ]; then
             apply_main_unit
@@ -1535,8 +1610,18 @@ if [ "$sub" = _runtime-contract ]; then
             stage_registration_contract
           fi
           cleanup_guest || die "Orca guest staging directory could not be removed"
-          observe_runtime_contract | jq -e --arg desired "$4" \
-            'select(.state == "current" and .actual == .desired and .desired == $desired)'
+          ORCA_RUNTIME_PHASE=verify
+          observation="$(observe_runtime_contract)" || die "Orca runtime contract cannot be verified"
+          # The guest's own state did not reach the desired contract that this apply
+          # installed; the observation that shows it was read from the guest.
+          yard_local_begin
+          if ! jq -e --arg desired "$4" \
+            'select(.state == "current" and .actual == .desired and .desired == $desired)' <<<"$observation"; then
+            printf 'guest-failed\n' >"$ORCA_GUEST_STEP_STATUS"
+            exit 1
+          fi
+          yard_local_end
+          ORCA_RUNTIME_PHASE=
           ;;
         *) die "invalid Orca runtime contract observation" ;;
       esac

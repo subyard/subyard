@@ -51,7 +51,10 @@ fixture_cleanup() {
         inventory-boundaries.jsonl selected-hook-proof.json hermes-dashboard-native.jsonl dashboard-disabled.txt \
         deselect-assets.before deselect-assets.failed deselect-assets.repaired deselect-assets.after deselect-plan.json \
         deselect-failure.log deselect-recovery-plan.json deselect-repair.log deselect-init.txt deselect-status.json \
-        deselect-repeat.txt 2>/dev/null || failed=1
+        deselect-repeat.txt runtime-pending-up.txt runtime-pending-stale.json runtime-pending-failure.log \
+        runtime-pending-check.json runtime-pending-record.json runtime-pending-unrelated.txt runtime-pending-init.txt \
+        runtime-pending-ready.json runtime-pending-failure-2.log runtime-pending-disable.txt runtime-pending-init-2.txt \
+        runtime-pending-ready-2.json 2>/dev/null || failed=1
     fi
     # shellcheck source=config/profiles/hermes/tests/e2e/disabled-release-resource.sh
     . "$ROOT/config/profiles/hermes/tests/e2e/disabled-release-resource.sh"
@@ -416,6 +419,77 @@ FAULT
   assert_disabled hermes
 }
 
+# A declared yard-scoped runtime (Orca) fails guest-side during the active
+# release repair: the release completes and only that yard waits for its init.
+exercise_runtime_pending() {
+  local rc=0 record="$CONFIG_HOME/activation-pending/v1/default/orca-runtime.json"
+  # An Orca-only guest directory replaced by a file fails the Orca install step
+  # inside the guest; no other owner uses it.
+  local fault_dir=/usr/local/libexec/subyard/orca-codex
+  operator_yard -Y default config set ORCA_ADVERTISE_HOST 127.0.0.1 --scope yard --local --yes
+  operator_yard -Y default orca up --yes > "$STATE_ROOT/runtime-pending-up.txt" 2>&1 \
+    || { cat "$STATE_ROOT/runtime-pending-up.txt"; die 'Orca did not install on the default yard'; }
+  operator_yard migrate --yes
+  # A stale registration contract makes the repair apply the Orca runtime.
+  guest_yard default sh -euc '
+    rm -f /usr/local/libexec/subyard/orca-registration.sha256
+    mv "$1" "$1.runtime-pending"
+    : > "$1"
+  ' _ "$fault_dir"
+  operator_yard migrate --check --json > "$STATE_ROOT/runtime-pending-stale.json"
+  jq -e '.outcome.status == "migration-required" and (.blockers | length) == 0' "$STATE_ROOT/runtime-pending-stale.json" >/dev/null \
+    || die 'stale Orca runtime did not require the release repair'
+  operator_yard migrate --yes > "$STATE_ROOT/runtime-pending-failure.log" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && grep -Fq 'yard default: profile orca runtime failed (diagnose: yard -Y default profile list)' "$STATE_ROOT/runtime-pending-failure.log" \
+    && grep -Fq 'fix it and run yard -Y default init' "$STATE_ROOT/runtime-pending-failure.log" \
+    && grep -Fq 'the release is ready' "$STATE_ROOT/runtime-pending-failure.log" \
+    || { cat "$STATE_ROOT/runtime-pending-failure.log"; die "failed Orca runtime did not report its pending yard init (exit $rc)"; }
+  sudo -n jq -e '.checkpoint == "complete" and .releases.from == .releases.target' "$V2_JOURNAL" >/dev/null \
+    || die 'the active release repair did not complete its journal'
+  operator_yard migrate --check --json > "$STATE_ROOT/runtime-pending-check.json" || true
+  jq -e '.outcome.status == "operator-action-required" and (.blockers | length) == 1 and
+    .blockers[0].resource == "activation.orca-runtime.pending-configuration" and
+    (.blockers[0].retry | gsub("\u0027"; "")) == "yard -Y default init"' "$STATE_ROOT/runtime-pending-check.json" >/dev/null \
+    || { cat "$STATE_ROOT/runtime-pending-check.json"; die 'readiness did not report the pending Orca yard init'; }
+  operator_env jq -e '.owner == "orca-runtime" and .yard == "default" and .actual != .desired' "$record" \
+    > "$STATE_ROOT/runtime-pending-record.json" || die 'the yard-scoped failure was not recorded'
+  # Unrelated commands are admitted while the yard waits for its init.
+  { operator_yard -Y default stop --yes && operator_yard -Y default start --yes; } > "$STATE_ROOT/runtime-pending-unrelated.txt" 2>&1 \
+    || { cat "$STATE_ROOT/runtime-pending-unrelated.txt"; die 'pending configuration blocked an unrelated command'; }
+  guest_yard default sh -euc 'rm "$1"; mv "$1.runtime-pending" "$1"' _ "$fault_dir"
+  operator_yard -Y default init --yes > "$STATE_ROOT/runtime-pending-init.txt" 2>&1 \
+    || { cat "$STATE_ROOT/runtime-pending-init.txt"; die 'yard init did not converge after the fault was removed'; }
+  ! operator_env test -e "$record" || die 'the converged yard init left its pending record'
+  operator_yard migrate --check --json > "$STATE_ROOT/runtime-pending-ready.json"
+  jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/runtime-pending-ready.json" >/dev/null \
+    || die 'the release is not ready after the pending yard init'
+  guest_yard default test -s /usr/local/libexec/subyard/orca-registration.sha256 || die 'yard init did not reapply the Orca runtime'
+  operator_yard -Y default orca down --yes
+  # Second exit: disable the profile and run init; the deselected runtime is skipped.
+  guest_yard default sh -euc '
+    rm -f /usr/local/libexec/subyard/orca-registration.sha256
+    mv "$1" "$1.runtime-pending"
+    : > "$1"
+  ' _ "$fault_dir"
+  rc=0
+  operator_yard migrate --yes > "$STATE_ROOT/runtime-pending-failure-2.log" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && grep -Fq 'or run yard -Y default profile disable orca then init' "$STATE_ROOT/runtime-pending-failure-2.log" \
+    || { cat "$STATE_ROOT/runtime-pending-failure-2.log"; die "second Orca runtime failure did not report its pending yard init (exit $rc)"; }
+  operator_env test -f "$record" || die 'the second yard-scoped failure was not recorded'
+  operator_yard -Y default profile disable orca --yes > "$STATE_ROOT/runtime-pending-disable.txt" 2>&1 \
+    || { cat "$STATE_ROOT/runtime-pending-disable.txt"; die 'profile disable was refused while the yard waits for init'; }
+  operator_yard -Y default init --yes > "$STATE_ROOT/runtime-pending-init-2.txt" 2>&1 \
+    || { cat "$STATE_ROOT/runtime-pending-init-2.txt"; die 'yard init after profile disable did not converge'; }
+  ! operator_env test -e "$record" || die 'yard init after profile disable left the pending record'
+  # Deselection skips the runtime without reapplying or uninstalling it.
+  guest_yard default test ! -e /usr/local/libexec/subyard/orca-registration.sha256 \
+    || die 'yard init applied the runtime of a deselected profile'
+  operator_yard migrate --check --json > "$STATE_ROOT/runtime-pending-ready-2.json"
+  jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/runtime-pending-ready-2.json" >/dev/null \
+    || die 'the release is not ready after profile disable and init'
+  guest_yard default sh -euc 'rm "$1"; mv "$1.runtime-pending" "$1"' _ "$fault_dir"
+}
+
 prepare_acceptance() {
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
@@ -478,6 +552,7 @@ prepare_acceptance() {
   hermes_disabled_resource_prepare
   exercise_recovery
   exercise_failed_deselect
+  exercise_runtime_pending
   operator_yard migrate --yes
   hermes_disabled_resource_assert preboot
   assert_candidate

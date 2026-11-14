@@ -26,11 +26,18 @@ type Setting struct {
 }
 
 type RuntimeHook struct {
-	ActivationID         string   `json:"activation_id"`
-	Handler              string   `json:"handler"`
-	Custody              bool     `json:"custody,omitempty"`
+	ActivationID string `json:"activation_id"`
+	Handler      string `json:"handler"`
+	Custody      bool   `json:"custody,omitempty"`
+	// FailureScope "yard" declares that a typed failure of this hook affects only
+	// its yard and may wait for that yard's init. Absent means blocking.
+	FailureScope         string   `json:"failure_scope,omitempty"`
 	ProjectsChangedHooks []string `json:"projects_changed_hooks,omitempty"`
 }
+
+// FailureScopeYard is the only declarable failure scope: a typed hook failure
+// that leaves its yard pending configuration until `yard -Y NAME init`.
+const FailureScopeYard = "yard"
 
 type GuestEnvironmentHook struct {
 	Handler string `json:"handler"`

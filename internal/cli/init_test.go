@@ -1245,6 +1245,19 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 	for _, scenario := range []string{"repair", "failure", "declined"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
+			// A recorded yard-scoped runtime failure of this yard.
+			writeRuntimeProfileFixture(t, root)
+			writeCLIFile(t, filepath.Join(root, "config", "profiles", "sample", "profile.json"),
+				`{"schema_version":1,"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh","failure_scope":"yard"}}`, 0o600)
+			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+			if err := os.MkdirAll(configHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeActivationPendingRecord(configHome, activationPendingRecord{Yard: "default", Project: "p", Instance: "i", Owner: "sample-runtime",
+				Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "x"}); err != nil {
+				t.Fatal(err)
+			}
+			record, _ := activationPendingRecordPath(configHome, "default", "sample-runtime")
 			platform := newInitPlatformFixture()
 			for stage := range platform.converged {
 				platform.converged[stage] = true
@@ -1266,6 +1279,10 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				t.Fatal(err)
 			}
 			code := program.Run(context.Background())
+			// Only a converged init resolves the recorded failure.
+			if _, err := os.Stat(record); (err == nil) != (scenario != "repair") {
+				t.Fatalf("pending record kept=%v after %s: %v", err == nil, scenario, err)
+			}
 			if scenario != "repair" {
 				if code == 0 || platform.projectHooks != 0 || len(platform.applied) != 0 || strings.Contains(output.String(), "Subyard initialized") {
 					t.Fatalf("failed/declined repair ran hooks or reported success: code=%d hooks=%d applied=%v output=%s", code, platform.projectHooks, platform.applied, output.String())

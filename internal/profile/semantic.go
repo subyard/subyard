@@ -382,6 +382,12 @@ func (definition *Definition) validateExtensions() error {
 		if err := validateExecutableName(definition.Runtime.Handler); err != nil {
 			return fmt.Errorf("runtime handler: %w", err)
 		}
+		// Host custody and host services are installation state; their failures
+		// always block the release.
+		if scope := definition.Runtime.FailureScope; scope != "" && (scope != FailureScopeYard ||
+			definition.Runtime.Custody || definition.OwnerService != "" || definition.InfrastructureService != nil) {
+			return errors.New("runtime failure scope must be yard on a yard-local runtime")
+		}
 		seen := map[string]bool{}
 		for _, path := range definition.Runtime.ProjectsChangedHooks {
 			if !strings.HasPrefix(path, "/usr/local/libexec/subyard/projects-changed.d/") || filepath.Clean(path) != path || filepath.Dir(path) != "/usr/local/libexec/subyard/projects-changed.d" || strings.ContainsAny(path, "\r\n\x00") || seen[path] {

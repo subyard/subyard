@@ -156,7 +156,9 @@ func TestPendingPersistAdoptionAdmitsPlainInitWithoutConfigDrift(t *testing.T) {
 }
 
 func TestPendingInitRepairRefusesEverythingElse(t *testing.T) {
-	for _, scenario := range []string{"different-yard", "untyped-blocker", "history-blocker", "profile-argument", "other-next-step"} {
+	// Another pending item with a different next step no longer refuses this
+	// yard's init; TestPendingInitGateAdmitsEachNamedYardAcrossOwners owns that.
+	for _, scenario := range []string{"different-yard", "untyped-blocker", "history-blocker", "profile-argument"} {
 		t.Run(scenario, func(t *testing.T) {
 			resource, extra := "activation.materialized-config.pending-configuration", ""
 			switch scenario {
@@ -164,8 +166,6 @@ func TestPendingInitRepairRefusesEverythingElse(t *testing.T) {
 				resource = "activation.materialized-config"
 			case "history-blocker":
 				extra = `,{"code":"dependency-unavailable","resource":"transition.source-metadata","message":"history","retry":"run yard update --check"}`
-			case "other-next-step":
-				extra = `,{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"fixture unowned selected artifact","retry":"move fixture file aside"}`
 			}
 			fixture := pendingInitGateFixture(t, scenario == "different-yard", resource, extra)
 			convergedRepairPlatform(fixture)

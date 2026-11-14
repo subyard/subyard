@@ -1069,6 +1069,13 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := reconciler.Apply(ctx, approved); err != nil {
 		return err
 	}
+	// Every runtime of this yard converged; recorded yard-scoped failures are
+	// resolved and must not match a later state again.
+	if execution.loaded.Context.AccessKind == domain.AccessLocal {
+		if err := removeYardActivationPendingRecords(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName, cli.yardScopedRuntimeIDs()); err != nil {
+			return fmt.Errorf("retire resolved pending activation records: %w", err)
+		}
+	}
 	if err := execution.retryProjectHooks(ctx); err != nil {
 		return err
 	}
@@ -1095,11 +1102,16 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 // Inspection follows every lifecycle effect, including profile provisioning.
 // Release-transition children leave completion to their protected owner.
 func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) error {
-	outcome, err := cli.inspectMutationGate(ctx, yard)
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
 	if err != nil {
 		return fmt.Errorf("inspect release readiness after init: %w", err)
 	}
 	if outcome == nil {
+		return nil
+	}
+	// This yard converged; other yards' pending items wait for their own inits.
+	if cli.otherYardsPendingOnly(outcome, inspection, yard) {
+		cli.reportOtherYardsPending(inspection)
 		return nil
 	}
 	payload, err := json.Marshal(publicMutationGateOutcome(*outcome))

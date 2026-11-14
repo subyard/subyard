@@ -132,6 +132,21 @@ type V2ActivationObservation struct {
 	Consequences  []string           `json:"consequences,omitempty"`
 	Planned       []string           `json:"planned,omitempty"`
 	Warnings      []string           `json:"warnings,omitempty"`
+	// Pending are yard-scoped findings of a converged owner that wait for their
+	// yards' inits. The engine reports them as pending configuration blockers of
+	// completed history, and as warnings while other release work remains.
+	Pending []V2PendingConfiguration `json:"pending,omitempty"`
+}
+
+// V2PendingConfiguration is one finding with its yard's next step.
+type V2PendingConfiguration struct {
+	Message string `json:"message"`
+	Retry   string `json:"retry"`
+}
+
+type v2PendingActivation struct {
+	id   string
+	item V2PendingConfiguration
 }
 
 type V2Transition struct {
@@ -178,6 +193,7 @@ type v2Observation struct {
 	activationScope                  []v2ActivationScope
 	activationConsequences           []string
 	activationWarnings               []string
+	activationPending                []v2PendingActivation
 	activationObservationFailure     error
 	observationScope                 Fingerprint
 	activationFixed                  bool
@@ -1085,9 +1101,10 @@ func (transition *V2Transition) Converge(
 		if observation.sourceActivationPrepared || !pendingSourceActivationWork(observation) {
 			expectedActivation = observation.activationScope
 		}
-		if outcome, reconcileErr := transition.reconcileActivation(
+		outcome, pending, reconcileErr := transition.reconcileActivation(
 			ctx, *journal, expectedActivation,
-		); reconcileErr != nil || outcome.Code != "" {
+		)
+		if reconcileErr != nil || outcome.Code != "" {
 			return outcome, reconcileErr
 		}
 		if err := transition.inject("before-journal-complete"); err != nil {
@@ -1099,6 +1116,19 @@ func (transition *V2Transition) Converge(
 		}
 		if err := transition.inject("after-journal-complete"); err != nil {
 			return Outcome{}, err
+		}
+		if pending {
+			// Completed history with pending findings reports what completed
+			// readiness reports: its pending configuration, never a ready proof.
+			observation, err := transition.observe(ctx, journal.Goal)
+			if err != nil {
+				return Outcome{}, err
+			}
+			if len(observation.blockers) != 0 {
+				outcome := transition.inspectionOutcome(observation)
+				outcome.Message = pendingConfigurationMessage(observation.blockers)
+				return outcome, nil
+			}
 		}
 	}
 	return transition.evaluateTerminal(ctx, *journal)
@@ -3467,13 +3497,17 @@ func (transition *V2Transition) observeActivation(
 				Decision: DecisionCanonicalize, Result: "converged",
 			})
 		}
+		for _, item := range actual.Pending {
+			observation.activationPending = append(observation.activationPending, v2PendingActivation{id, item})
+		}
 		payload, err := json.Marshal(struct {
-			ID            string      `json:"id"`
-			Actual        Fingerprint `json:"actual"`
-			Desired       Fingerprint `json:"desired"`
-			Binding       Fingerprint `json:"binding,omitempty"`
-			PendingInputs bool        `json:"pendingInputs,omitempty"`
-		}{ID: id, Actual: actual.Actual, Desired: actual.Desired, Binding: actual.Binding, PendingInputs: actual.PendingInputs})
+			ID            string                   `json:"id"`
+			Actual        Fingerprint              `json:"actual"`
+			Desired       Fingerprint              `json:"desired"`
+			Binding       Fingerprint              `json:"binding,omitempty"`
+			PendingInputs bool                     `json:"pendingInputs,omitempty"`
+			Pending       []V2PendingConfiguration `json:"pending,omitempty"`
+		}{ID: id, Actual: actual.Actual, Desired: actual.Desired, Binding: actual.Binding, PendingInputs: actual.PendingInputs, Pending: actual.Pending})
 		if err != nil {
 			return err
 		}
@@ -3486,8 +3520,48 @@ func (transition *V2Transition) observeActivation(
 		})
 		observation.activationFixed = observation.activationFixed && actual.Converged
 	}
+	promoteActivationPending(observation)
 	observation.activationWarnings = canonicalWarnings(observation.activationWarnings)
 	return nil
+}
+
+// promoteActivationPending is the only place pending findings become release
+// state. Completed history of this goal whose every owner was observed and
+// converged reports them as pending configuration blockers; otherwise other
+// release work remains, and they are warnings that never block that work.
+func promoteActivationPending(observation *v2Observation) {
+	if len(observation.activationPending) == 0 {
+		return
+	}
+	completed := observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
+		observation.journal.Goal == observation.goal
+	if completed && observation.activationFixed && observation.activationObservationFailure == nil && len(observation.blockers) == 0 {
+		for _, pending := range observation.activationPending {
+			observation.blockers = append(observation.blockers, Blocker{
+				Code: CodeDependencyUnavailable, Resource: "activation." + pending.id + ".pending-configuration",
+				Message: pendingConfigurationText(pending.item, "; the release is ready"), Retry: pending.item.Retry,
+			})
+		}
+		return
+	}
+	// One bounded warning names the findings, within the outcome's warning count.
+	if len(canonicalWarnings(observation.activationWarnings)) >= 64 {
+		return
+	}
+	blockers := make([]Blocker, len(observation.activationPending))
+	for index, pending := range observation.activationPending {
+		blockers[index] = Blocker{Resource: "activation." + pending.id + ".pending-configuration", Message: pending.item.Message}
+	}
+	const suffix = "; waits for yard init after the release is ready"
+	observation.activationWarnings = append(observation.activationWarnings,
+		pendingConfigurationText(V2PendingConfiguration{Message: pendingConfigurationMessageWithin(blockers, maxDiagnosticText-len(suffix))}, suffix))
+}
+
+func pendingConfigurationText(item V2PendingConfiguration, suffix string) string {
+	if len(item.Message)+len(suffix) > maxDiagnosticText {
+		return item.Message
+	}
+	return item.Message + suffix
 }
 
 func (transition *V2Transition) bindObservationScope(
@@ -3580,10 +3654,23 @@ func (transition *V2Transition) currentObservationScope(
 	return baseScope, false, nil
 }
 
+// reconcileActivation also reports whether any converged owner has pending
+// findings; those owners do not hold the journal.
 func (transition *V2Transition) reconcileActivation(
 	ctx context.Context,
 	journal JournalRecord,
 	expected []v2ActivationScope,
+) (Outcome, bool, error) {
+	findings := false
+	outcome, err := transition.reconcileActivationOwners(ctx, journal, expected, &findings)
+	return outcome, findings && err == nil && outcome.Code == "", err
+}
+
+func (transition *V2Transition) reconcileActivationOwners(
+	ctx context.Context,
+	journal JournalRecord,
+	expected []v2ActivationScope,
+	findings *bool,
 ) (Outcome, error) {
 	pending := map[int]bool{}
 	for pass := 0; pass < 2; pass++ {
@@ -3686,6 +3773,7 @@ func (transition *V2Transition) reconcileActivation(
 					fmt.Sprintf("activation reconciler %q did not reach its fixed point during verification", id),
 				), nil
 			}
+			*findings = *findings || len(actual.Pending) != 0
 			if err := transition.inject(fmt.Sprintf("after-reconciler-%d", index)); err != nil {
 				return Outcome{}, err
 			}
@@ -3695,7 +3783,7 @@ func (transition *V2Transition) reconcileActivation(
 	if guardErr != nil || guardOutcome.Code != "" {
 		return guardOutcome, guardErr
 	}
-	id, fixed, warnings, verifyErr := transition.activationFixedPointDiagnostic(ctx, journal.Releases, links)
+	id, fixed, warnings, verifyErr := transition.activationFixedPointDiagnostic(ctx, journal.Releases, links, true)
 	links, guardOutcome, guardErr = transition.guardJournalLinks(ctx, journal)
 	if guardErr != nil {
 		guardOutcome = v2OperatorOutcome(ReleaseLinks{}, journal.Goal.Target,
@@ -3830,6 +3918,40 @@ func pendingConfiguration(err error) bool {
 		return typed.ActivationPendingConfiguration()
 	}
 	return pendingConfiguration(errors.Unwrap(err))
+}
+
+// pendingConfigurationMessage names every finding when all blockers are pending
+// configuration, within the public diagnostic bound. Any other blocker set
+// reports its first blocker.
+func pendingConfigurationMessage(blockers []Blocker) string {
+	return pendingConfigurationMessageWithin(blockers, maxDiagnosticText)
+}
+
+func pendingConfigurationMessageWithin(blockers []Blocker, limit int) string {
+	for _, blocker := range blockers {
+		if !strings.HasSuffix(blocker.Resource, ".pending-configuration") {
+			return blockers[0].Message
+		}
+	}
+	message := ""
+	for index, blocker := range blockers {
+		candidate := blocker.Message
+		if message != "" {
+			candidate = message + "; " + blocker.Message
+		}
+		suffix := ""
+		if remaining := len(blockers) - index - 1; remaining > 0 {
+			suffix = fmt.Sprintf("; and %d more pending; full details: yard migrate --check", remaining)
+		}
+		if len(candidate)+len(suffix) > limit {
+			if message == "" {
+				return blocker.Message
+			}
+			return message + fmt.Sprintf("; and %d more pending; full details: yard migrate --check", len(blockers)-index)
+		}
+		message = candidate
+	}
+	return message
 }
 
 func nativeTargetRefusalsOnly(err error) bool {
@@ -4018,6 +4140,17 @@ func validateActivationObservation(id string, observation V2ActivationObservatio
 	if len(observation.Warnings) > 64 {
 		return invalid("activation reconciler %q reported too many warnings", id)
 	}
+	if len(observation.Pending) > MaxPlanItems {
+		return invalid("activation reconciler %q reported too many pending findings", id)
+	}
+	for _, item := range observation.Pending {
+		if err := validateText(item.Message, "pending configuration", maxDiagnosticText, true); err != nil {
+			return err
+		}
+		if err := validateSafeAction(item.Retry); err != nil {
+			return err
+		}
+	}
 	for _, warning := range observation.Warnings {
 		if err := validateText(warning, "activation warning", maxDiagnosticText, true); err != nil {
 			return err
@@ -4170,14 +4303,17 @@ func (transition *V2Transition) activationFixedPointStatus(
 	releases ReleasePair,
 	links ReleaseLinks,
 ) (string, bool, []string) {
-	id, fixed, warnings, _ := transition.activationFixedPointDiagnostic(ctx, releases, links)
+	id, fixed, warnings, _ := transition.activationFixedPointDiagnostic(ctx, releases, links, false)
 	return id, fixed, warnings
 }
 
+// allowPending accepts converged owners with pending findings: they do not hold
+// the journal. A ready proof never accepts them.
 func (transition *V2Transition) activationFixedPointDiagnostic(
 	ctx context.Context,
 	releases ReleasePair,
 	links ReleaseLinks,
+	allowPending bool,
 ) (string, bool, []string, error) {
 	warnings := []string{}
 	for _, reconciler := range transition.options.Reconcilers {
@@ -4196,7 +4332,7 @@ func (transition *V2Transition) activationFixedPointDiagnostic(
 			return id, false, warnings, err
 		}
 		warnings = canonicalWarnings(append(warnings, actual.Warnings...))
-		if !actual.Converged {
+		if !actual.Converged || !allowPending && len(actual.Pending) != 0 {
 			return id, false, warnings, nil
 		}
 	}

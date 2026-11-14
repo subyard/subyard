@@ -402,8 +402,17 @@ func (cli *CLI) prepareActivationRepair(
 						return nil, nil
 					}
 				}
-				if _, selected := requested[target.Name]; selected {
+				_, selected := requested[target.Name]
+				if selected {
 					selectedRuntimes[target.Name+"/"+id] = contract
+				} else if pendingInit && contract.State == ports.RuntimeStateStale {
+					// Another yard's recorded failure waits for that yard's init.
+					owner := &profileRuntimeActivationReconciler{cli: &operation, request: releasetransition.ProcessRequest{ConfigHome: options.ConfigHome}, id: id}
+					if pending, err := owner.recordedPending(target, contract); err != nil {
+						return nil, nil
+					} else if pending != nil {
+						continue
+					}
 				}
 				changed = changed || contract.State == ports.RuntimeStateStale
 			}
@@ -670,9 +679,12 @@ func (cli *CLI) finishConfigApplyRepair(
 	if err := cli.checkConfigApplyRepairHistory(permit); err != nil {
 		return err
 	}
-	outcome, err := cli.inspectMutationGate(ctx, permit.yard)
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, permit.yard)
 	if err != nil {
 		return err
+	}
+	if outcome != nil && permit.profileInit && cli.otherYardsPendingOnly(outcome, inspection, permit.yard) {
+		return nil
 	}
 	if outcome != nil {
 		if permit.pendingInputs && !permit.profileInit && !permit.integrationRetry && outcome.Status == releasetransition.StatusMigrationRequired &&
@@ -763,6 +775,11 @@ func (cli *CLI) pendingInitRepairGate(ctx context.Context, yard string, outcome 
 		return false
 	}
 	retry := shellquote.Command([]string{"yard", "-Y", yard, "init"})
+	// Recorded yard-scoped runtime failures of other yards wait for their own
+	// inits: one of these blockers naming this yard's init admits it.
+	if cli.declaredRuntimePendingGate(current, inspection) {
+		return slices.ContainsFunc(inspection.Blockers, func(blocker releasetransition.Blocker) bool { return blocker.Retry == retry })
+	}
 	for _, blocker := range inspection.Blockers {
 		if blocker.Retry != retry {
 			return false

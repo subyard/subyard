@@ -566,7 +566,10 @@ ordinary configuration view; completed materialized readiness remains release-wi
 of that view, so selecting another yard cannot hide drift. Typed integration ownership
 refusals remain visible in initialization, status and migration readiness. When they are
 the only blockers of an already active, completed release, they describe pending configuration
-and do not block unrelated commands such as SSH-agent unlock. Invalid history, unfinished
+and do not block unrelated commands such as SSH-agent unlock. Readiness reports pending
+configuration as an `activation.<owner>.pending-configuration` blocker. Recorded yard-scoped
+runtime failures use the same shape; only they open the additional command-line admission
+described in [yard-scoped runtime failures](#yard-scoped-runtime-failures). Invalid history, unfinished
 transactions and unclassified materialization failures still block mutation. A local typed
 selection reduction in this state validates the sealed original source and complete protected
 history, locks and rechecks that evidence, then writes only the desired selection; it grants
@@ -1205,6 +1208,56 @@ journals. If interrupted, follow its printed recovery command and review the ret
 confirming continuation. After verified cleanup, stop. Install the desired version separately;
 cleanup does not preserve data or automatically reinstall. See [full removal](configuration.md#full-uninstall)
 and the [support inventory](reference/legacy-migration-support.md).
+
+### Yard-scoped runtime failures
+
+A profile runtime may declare `"failure_scope": "yard"`. Its typed failure affects only one
+running yard: the release completes and that yard waits for its own init. A failure is typed only
+when the declared handler exits non-zero from `apply` and writes exactly one stderr record
+`subyard-profile-runtime-diagnostic-v1 NONCE apply|verify yard-local`. `NONCE` is the value of
+`SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE`, which the core creates for each apply and the handler
+must not pass to guests, so relayed guest output cannot forge a record. The record shares the closed
+parser and reasons of the lifecycle diagnostic protocol; an `inspect` record, a duplicate or
+malformed record, a record from an undeclared owner, cancellation, a timeout, output overflow and
+a mismatch that the core finds when it verifies the result after a successful exit stay blocking.
+So do plan-stale refusals, core runtimes, host and installation owners and any other failure.
+A handler reports `yard-local` only when a guest-side command itself ran and failed and the guest
+still answers; Incus transport errors, host staging, file pushes, safety guards and a failed cleanup
+in the same apply stay blocking. The Orca handler proves this by running each such command through a
+guest wrapper that maps the command's failure to status 200, which Incus never returns.
+Orca observes its runtime as `absent` in a yard that does not select it, so deselection plus init
+clears its pending item; deselection skips the runtime but leaves Orca installed.
+
+The owner records the typed failure under the configuration root as
+`activation-pending/v1/YARD/OWNER.json`, bound to the yard instance, the actual and desired
+fingerprints the failure left and the digest of the profile package (the declared handler and
+every resource it may execute, except `tests/`), and continues with its other yards. Shared core
+scripts are not part of that digest.
+Every observation matches records in any journal state: a stale yard with a matching record is
+converged with a pending finding, and any other stale yard, including a recorded one whose facts
+changed, is unconverged. The release journal therefore completes only through the engine's
+ordinary verification, for the repair of the active release and for the activation of an ordinary
+update alike. A blocking failure keeps the release recovering; its recorded yards stay findings.
+
+The engine alone turns findings into release state. Completed history of the goal whose every owner
+was observed and converged reports each finding as an `activation.<owner>.pending-configuration`
+blocker with that yard's init step; a release ready proof never accepts findings. While other
+release work remains, findings are warnings, so `yard migrate` still plans and repairs that work.
+`yard migrate` and `yard update` then exit non-zero; their result names every finding within the
+diagnostic bound and states that the release is ready, and `yard migrate --check`, `config status`
+and `yard status` show each one. A finding names the yard, the profile, the diagnostic command
+`yard -Y NAME profile list`, that the profile is not applied, and both exits: fix the cause and
+run `yard -Y NAME init`, which repeats the same apply from the partial state, or run
+`yard -Y NAME profile disable ID` and then init.
+
+When every blocker is such a finding of a declared owner and no owner is unconverged, the command
+line admits that yard's init even while other yards are pending, unrelated commands and teardown.
+Init, config, profile and integration commands on other yards stay gated. A successful init of
+one yard reports the other yards' findings and succeeds. While other release work remains, findings are
+one bounded warning. Materialized
+configuration pending keeps its own admission. A successful init of the yard, a converged or
+re-applied owner for that yard and teardown of the yard remove the record through its known owner
+path; other entries of the record directory are never touched.
 
 ### Interrupted release recovery
 
@@ -2120,6 +2173,9 @@ in generic owner-port collision checks.
 
 A `runtime` declaration contains an `activation_id` and relative executable `handler`. The ID is
 unique across profile and core activation stages and remains durable across release transitions.
+Optional `failure_scope: "yard"` declares that a typed failure of the hook leaves only its yard
+pending init; see [yard-scoped runtime failures](#yard-scoped-runtime-failures). Custody runtimes
+and profiles with host owner or infrastructure services cannot declare it.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
 bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
 `ownership_absent`. States are `absent`, `deferred`, `pending`, `current`
