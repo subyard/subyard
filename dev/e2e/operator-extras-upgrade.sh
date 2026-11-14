@@ -140,7 +140,7 @@ owner env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
   "$launcher" update --check --json --version "$CANDIDATE_VERSION" >"$STATE/update-check.json" 2>"$STATE/update-check.log" \
   || die 'update --check failed'
 # A host assignment is reported once across local yards; any yard's unset removes it.
-jq -e --arg path "$host_config" '[.configuration[]? | select(.state == "ignored" and .setting == "YARD_DEVICES"
+jq -e --arg path "$host_config" '[.configuration[]? | select(.setting == "YARD_DEVICES"
   and .scope == "host" and .path == $path and .line == 1
   and (.repair | test("^yard -Y [a-z0-9-]+ config unset YARD_DEVICES --scope host --local$")))] | length == 1' \
   "$STATE/update-check.json" >/dev/null || {

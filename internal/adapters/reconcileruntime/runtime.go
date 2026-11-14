@@ -1485,8 +1485,7 @@ func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsrunti
 
 // ExtrasDetach is the device loss of a pending extras stage. Unverified means
 // the instance could not be read: the stage then detaches any attached yx-*
-// device that no selected profile requests, and Devices are only the names
-// derived from ignored operator assignments, each detached if attached.
+// device that no selected profile requests, and Devices is empty.
 type ExtrasDetach struct {
 	Devices    []string
 	Unverified bool
@@ -1498,10 +1497,8 @@ type ExtrasDetach struct {
 // assignment supplied before the loader started ignoring it. A profile
 // declaration refusal is returned. A yard without an instance detaches nothing.
 // When the instance cannot be read, for example while Incus is stopped, the
-// result is unverified, with the device names that ignored operator
-// assignments request and no selected profile declares, regardless of host
-// device nodes.
-func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context, ignored []config.IgnoredAssignment) (ExtrasDetach, error) {
+// result is unverified.
+func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context) (ExtrasDetach, error) {
 	requests, err := runtime.profileRequests()
 	if err != nil {
 		return ExtrasDetach{}, err
@@ -1511,83 +1508,17 @@ func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context, ignored []config
 		return ExtrasDetach{}, nil
 	}
 	if err != nil {
-		operator := map[string][]string{}
-		for _, assignment := range ignored {
-			for _, entry := range strings.Fields(assignment.Value) {
-				switch {
-				case assignment.Name == "YARD_MOUNTS":
-					operator["SUBYARD_EXTRAS_MOUNTS"] = append(operator["SUBYARD_EXTRAS_MOUNTS"], entry)
-				case assignment.Name == "YARD_CAPS" && slices.Contains([]string{"nesting", "rootless-docker", "fuse"}, entry):
-					operator["SUBYARD_EXTRAS_CAPABILITIES"] = append(operator["SUBYARD_EXTRAS_CAPABILITIES"], entry)
-				case assignment.Name == "YARD_DEVICES" && runtime.Yard.YardKind != domain.YardVM:
-					operator["SUBYARD_EXTRAS_DEVICES"] = append(operator["SUBYARD_EXTRAS_DEVICES"], entry)
-				}
-			}
-		}
-		extras := map[string]string{}
-		for name, entries := range operator {
-			extras[name] = strings.Join(entries, " ")
-		}
-		declared := runtime.extrasDeviceNames(requests.extras, false)
-		var devices []string
-		for name := range runtime.extrasDeviceNames(extras, false) {
-			if !declared[name] {
-				devices = append(devices, name)
-			}
-		}
-		slices.Sort(devices)
-		return ExtrasDetach{Devices: devices, Unverified: true}, nil
+		return ExtrasDetach{Unverified: true}, nil
 	}
-	wanted := runtime.extrasDeviceNames(requests.extras, true)
+	// A source refusal belongs to the stage itself; its device is still named.
+	wanted, _ := runtime.extrasDevices(ports.ReconcileState{Instance: instance}, requests.extras, nil)
 	var detached []string
 	for _, name := range slices.Sorted(maps.Keys(instance.LocalDevices)) {
-		if strings.HasPrefix(name, "yx-") && !wanted[name] {
+		if strings.HasPrefix(name, "yx-") && wanted[name] == nil {
 			detached = append(detached, name)
 		}
 	}
 	return ExtrasDetach{Devices: detached}, nil
-}
-
-// extrasDeviceNames names the yx-* devices that 09-yard-extras.sh wants for
-// the extras context, from its declarations and, with hostNodes, the existing
-// host device nodes. Without hostNodes every declared device is named, and
-// render nodes as the yx-dev-dri-renderD* pattern.
-func (runtime Runtime) extrasDeviceNames(extras map[string]string, hostNodes bool) map[string]bool {
-	root := runtime.HostDeviceRoot
-	if root == "" {
-		root = "/dev"
-	}
-	wanted := map[string]bool{}
-	want := func(pattern, prefix string) {
-		if !hostNodes {
-			wanted[prefix+filepath.Base(pattern)] = true
-			return
-		}
-		nodes, _ := filepath.Glob(filepath.Join(root, pattern))
-		for _, node := range nodes {
-			wanted[prefix+filepath.Base(node)] = true
-		}
-	}
-	for _, mount := range strings.Fields(extras["SUBYARD_EXTRAS_MOUNTS"]) {
-		if name, path, _ := strings.Cut(mount, ":"); domain.SafeName(name) && path != "" {
-			wanted["yx-"+name] = true
-		}
-	}
-	fuse := strings.TrimSpace(extras["SUBYARD_EXTRAS_CAPABILITIES"]) != ""
-	for _, device := range strings.Fields(extras["SUBYARD_EXTRAS_DEVICES"]) {
-		switch device {
-		case "kvm":
-			want("kvm", "yx-dev-")
-		case "fuse":
-			fuse = true
-		case "gpu":
-			want("dri/renderD*", "yx-dev-dri-")
-		}
-	}
-	if fuse {
-		want("fuse", "yx-dev-")
-	}
-	return wanted
 }
 
 func (runtime Runtime) extrasContext() (map[string]string, error) {
