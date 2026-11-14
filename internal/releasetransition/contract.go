@@ -4,6 +4,7 @@ package releasetransition
 
 import (
 	"context"
+	"slices"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -128,18 +129,22 @@ func validDirection(value Direction) bool {
 	return value == DirectionActivateTarget || value == DirectionActivatePrevious
 }
 
+var outcomeCodes = []OutcomeCode{
+	CodeReady, CodeTransitionRequired, CodeRecoveryPending, CodeRegistryInvalid,
+	CodeUnsupportedEpoch, CodeUnsupportedKind, CodeConfirmationRequired,
+	CodeOperationDeclined, CodePlanStale, CodeMigrationStale, CodeResourceConflict,
+	CodePreconditionBlocked, CodeDependencyUnavailable, CodeVerificationFailed,
+	CodeActivationAmbiguous, CodeRecoveryAmbiguous, CodeJournalInvalid,
+	CodeRollbackIncompatible, CodeRollbackExpired,
+}
+
+// OutcomeCodes returns every valid outcome code in declaration order.
+func OutcomeCodes() []OutcomeCode {
+	return slices.Clone(outcomeCodes)
+}
+
 func validOutcomeCode(value OutcomeCode) bool {
-	switch value {
-	case CodeReady, CodeTransitionRequired, CodeRecoveryPending, CodeRegistryInvalid,
-		CodeUnsupportedEpoch, CodeUnsupportedKind, CodeConfirmationRequired,
-		CodeOperationDeclined, CodePlanStale, CodeMigrationStale, CodeResourceConflict,
-		CodePreconditionBlocked, CodeDependencyUnavailable, CodeVerificationFailed,
-		CodeActivationAmbiguous, CodeRecoveryAmbiguous, CodeJournalInvalid,
-		CodeRollbackIncompatible, CodeRollbackExpired:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(outcomeCodes, value)
 }
 
 func validDecision(value Decision) bool {

@@ -340,7 +340,14 @@ impl Client {
             return Err(unavailable());
         }
         let mut store = self.store.lock().map_err(|_| unavailable())?;
+        let mutations = store.mutations();
         let change = change(&mut store);
+        // A call that reached no saved-trust side effect, whether it succeeded
+        // (an unchanged registration) or refused, leaves sessions, plans and the
+        // trust epoch as they are.
+        if store.mutations() == mutations {
+            return change.map(|(result, _)| result);
+        }
         self.trust_epoch.fetch_add(1, Ordering::AcqRel);
         // A rename can commit before a durability or verification check fails.
         // An ambiguous failed commit therefore invalidates remote trust too.
@@ -434,6 +441,7 @@ impl Client {
                 }
                 let disconnected = event.event == "transport.disconnected";
                 if disconnected || event.stale {
+                    // A stale or lost view requires re-reviewing held plans.
                     event_epoch.fetch_add(1, Ordering::AcqRel);
                 }
                 // RPC request lifecycle events also accompany read queries. They must
@@ -551,16 +559,20 @@ impl Client {
         sessions: &mut HashMap<SessionKey, Arc<Session>>,
         session: &Arc<Session>,
     ) -> Result<(), NativeError> {
-        let result = match &session._pin {
-            Some(pin) => self
-                .store
-                .lock()
-                .map_err(|_| unavailable())?
-                .validate_registered_session(pin),
-            None if session.key.connection.is_none() => Ok(()),
-            None => Err(unavailable()),
+        let (result, retire) = match &session._pin {
+            Some(pin) => {
+                let result = self
+                    .store
+                    .lock()
+                    .map_err(|_| unavailable())?
+                    .validate_registered_session(pin);
+                let retire = result.as_ref().is_err_and(retires_session);
+                (result, retire)
+            }
+            None if session.key.connection.is_none() => (Ok(()), false),
+            None => (Err(unavailable()), true),
         };
-        if result.is_err() {
+        if retire {
             session.epoch.fetch_add(1, Ordering::AcqRel);
             session.rpc.close();
             sessions.retain(|_, cached| !Arc::ptr_eq(cached, session));
@@ -1015,13 +1027,31 @@ impl Client {
                 "Review and confirm the exact owner plan before execution.",
             ));
         }
-        let held = self
+        // Validate before consuming the review, so a retryable store failure
+        // keeps the plan; the plan is consumed only by the execute attempt.
+        let session = self
             .plans
             .lock()
             .map_err(|_| unavailable())?
-            .remove(id)
+            .get(id)
+            .map(|held| held.session.clone())
             .ok_or_else(expired)?;
-        self.validate_session(&held.session)?;
+        if let Err(error) = self.validate_session(&session) {
+            if session.rpc.is_closed() {
+                if let Ok(mut plans) = self.plans.lock() {
+                    self.expire_plans(&mut plans);
+                }
+            }
+            return Err(error);
+        }
+        let held = {
+            let mut plans = self.plans.lock().map_err(|_| unavailable())?;
+            match plans.get(id) {
+                Some(held) if Arc::ptr_eq(&held.session, &session) => plans.remove(id),
+                _ => None,
+            }
+        }
+        .ok_or_else(expired)?;
         if held.plan.digest != digest
             || Instant::now() >= held.expires
             || held.session.rpc.is_closed()
@@ -1139,7 +1169,9 @@ impl Client {
             Ok(pin) => pin,
             Err(error) => {
                 drop(store);
-                self.invalidate_session(&session);
+                if retires_session(&error) {
+                    self.invalidate_session(&session);
+                }
                 return Err(error);
             }
         };
@@ -1187,7 +1219,9 @@ impl Client {
             Ok(pin) => pin,
             Err(error) => {
                 drop(store);
-                self.invalidate_session(&session);
+                if retires_session(&error) {
+                    self.invalidate_session(&session);
+                }
                 return Err(error);
             }
         };
@@ -1482,6 +1516,11 @@ fn list_text(value: &str) -> bool {
 }
 fn required(value: &str, limit: usize) -> bool {
     !value.trim().is_empty() && text(value, limit)
+}
+/// Only a changed registration invalidates a session's bound trust. Other
+/// store failures, such as a busy lock, leave the session open for retry.
+fn retires_session(error: &NativeError) -> bool {
+    error.code == "connection_changed"
 }
 fn unavailable() -> NativeError {
     NativeError::new(

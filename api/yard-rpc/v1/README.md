@@ -17,6 +17,8 @@ event envelopes. Request IDs and operation IDs are printable ASCII, 1–128 byte
 Protocol `version` is `1`. An absent operation ID defaults to the request ID.
 Responses may arrive out of request order: correlate by ID. A typed error has
 `code` and `message`; clients must not derive state by parsing that message.
+[`gate-error-codes.json`](gate-error-codes.json) lists every code a mutation
+returns when the release or configuration gate refuses it.
 
 Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 [`negotiate.schema.json`](negotiate.schema.json): `version`, `protocolMin`,
@@ -31,7 +33,16 @@ Requests may include an RFC 3339 `deadline`. Cancellation sends a `type:"cancel"
 frame with the active operation ID; it carries no deadline. Explicit cancellation
 and deadline expiry produce distinct typed errors. Disconnect cancels active work
 and releases unused plans and retained operation-owned drafts. The server has a
-bounded writer queue; an unresponsive client is disconnected.
+bounded writer queue. Responses are never dropped; they wait for queue room. When
+events outrun the client, the server drops the events that do not fit except
+the newest one, which it still delivers; the client observes a sequence gap
+instead of a disconnect, and the session and its operations stay alive. At most
+128 requests are active or awaiting delivery of their response at once; further
+requests fail with `operation_capacity`, while cancel frames are still accepted.
+If the client accepts no output bytes for the write stall timeout (30 seconds),
+the server cancels the session's operations and delivers no further frames. Over
+a blocking stdio pipe one more request may still be read and run with a
+cancelled context, and the process ends only when the peer closes the stream.
 
 ## Ordered events and snapshots
 
@@ -42,6 +53,8 @@ adapter revision, when present inside `data`, cannot replace the outer revision.
 revision with the complete core snapshot. Replies themselves need not carry
 sequence/revision. Detect gaps or reordering, mark affected observations stale,
 and obtain a fresh snapshot. A new session starts its own ordered stream.
+During a sustained event storm a resync snapshot can itself be followed by a
+gap, so observations may stay stale until the storm ends.
 
 ## Current methods
 

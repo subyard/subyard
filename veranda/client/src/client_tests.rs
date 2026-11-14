@@ -1091,6 +1091,228 @@ fn external_trust_change_rejects_held_execution() {
 }
 
 #[test]
+fn trust_refusals_before_any_store_side_effect_keep_sessions_plans_and_epoch() {
+    let fixture = ManagerFixture::with_registration("manager", true);
+    let connection = fixture.session.key.connection.clone().unwrap();
+    let plan = fixture
+        .client
+        .plan(
+            Some(connection.clone()),
+            None,
+            "config".into(),
+            vec!["set".into(), "SSH_PORT".into(), "2223".into()],
+        )
+        .unwrap();
+    let epoch = fixture.client.trust_epoch.load(Ordering::Acquire);
+    let untouched = || assert_trust_untouched(&fixture, &plan, epoch);
+    let removal = fixture.client.assess_removal(&connection).unwrap();
+    let held = crate::connections::try_store_lock_for_test(&fixture.owner.store_root()).unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .remove(&removal.assessment_id, true)
+            .err()
+            .unwrap()
+            .code,
+        "connection_store_busy"
+    );
+    drop(held);
+    untouched();
+    let removal = fixture.client.assess_removal(&connection).unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .remove(&removal.assessment_id, false)
+            .err()
+            .unwrap()
+            .code,
+        "consent_declined"
+    );
+    untouched();
+    assert!(fixture
+        .client
+        .execute(&plan.plan_id, &plan.digest, true)
+        .is_ok());
+}
+
+fn assert_trust_untouched(fixture: &ManagerFixture, plan: &OperationPlan, epoch: u64) {
+    assert!(!fixture.session.rpc.is_closed());
+    assert_eq!(fixture.client.sessions.lock().unwrap().len(), 1);
+    assert!(fixture
+        .client
+        .plans
+        .lock()
+        .unwrap()
+        .contains_key(&plan.plan_id));
+    assert_eq!(fixture.client.trust_epoch.load(Ordering::Acquire), epoch);
+    assert_eq!(fixture.client.connections().unwrap().len(), 1);
+}
+
+#[test]
+fn removal_refused_by_a_read_only_check_keeps_sessions_plans_and_epoch() {
+    let fixture = ManagerFixture::with_registration("manager", true);
+    let connection = fixture.session.key.connection.clone().unwrap();
+    let plan = fixture
+        .client
+        .plan(
+            Some(connection.clone()),
+            None,
+            "config".into(),
+            vec!["set".into(), "SSH_PORT".into(), "2223".into()],
+        )
+        .unwrap();
+    let epoch = fixture.client.trust_epoch.load(Ordering::Acquire);
+    // A pin path that is not a private file is refused before anything is removed.
+    let pin = fixture
+        .owner
+        .store_root()
+        .join(format!("veranda-stored-{connection}.known_hosts"));
+    let _ = std::fs::remove_file(&pin);
+    std::fs::create_dir(&pin).unwrap();
+    let removal = fixture.client.assess_removal(&connection).unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .remove(&removal.assessment_id, true)
+            .err()
+            .unwrap()
+            .code,
+        "unsafe_connection_store"
+    );
+    assert_trust_untouched(&fixture, &plan, epoch);
+    std::fs::remove_dir(&pin).unwrap();
+}
+
+#[test]
+fn reregistering_an_unchanged_endpoint_keeps_sessions_plans_and_epoch() {
+    let fixture = ManagerFixture::with_registration("manager", true);
+    let connection = fixture.session.key.connection.clone().unwrap();
+    let plan = fixture
+        .client
+        .plan(
+            Some(connection.clone()),
+            None,
+            "config".into(),
+            vec!["set".into(), "SSH_PORT".into(), "2223".into()],
+        )
+        .unwrap();
+    let epoch = fixture.client.trust_epoch.load(Ordering::Acquire);
+    let pin = synthetic_trust(&mut fixture.client.store.lock().unwrap(), None);
+    let record = fixture
+        .client
+        .commit_trust(|store| {
+            let record = store.finalize_registration(pin, "example-owner")?;
+            Ok((record.clone(), record.id))
+        })
+        .unwrap();
+    assert_eq!(record.id, connection);
+    assert_trust_untouched(&fixture, &plan, epoch);
+    assert!(fixture
+        .client
+        .execute(&plan.plan_id, &plan.digest, true)
+        .is_ok());
+}
+
+#[test]
+fn only_a_changed_registration_retires_a_session() {
+    for (code, retire) in [
+        ("connection_changed", true),
+        ("connection_store_busy", false),
+        ("invalid_connection_store", false),
+        ("native_unavailable", false),
+    ] {
+        assert_eq!(
+            retires_session(&NativeError::new(code, "message")),
+            retire,
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn busy_connection_store_keeps_session_and_reviewed_plan_for_retry() {
+    let fixture = ManagerFixture::with_registration("manager", true);
+    let plan = fixture
+        .client
+        .plan(
+            fixture.session.key.connection.clone(),
+            None,
+            "config".into(),
+            vec!["set".into(), "SSH_PORT".into(), "2223".into()],
+        )
+        .unwrap();
+    let held = crate::connections::try_store_lock_for_test(&fixture.owner.store_root()).unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .snapshot(&fixture.session)
+            .err()
+            .unwrap()
+            .code,
+        "connection_store_busy"
+    );
+    assert_eq!(
+        fixture
+            .client
+            .execute(&plan.plan_id, &plan.digest, true)
+            .err()
+            .unwrap()
+            .code,
+        "connection_store_busy"
+    );
+    let connection = fixture.session.key.connection.clone();
+    assert_eq!(
+        fixture
+            .client
+            .launch(connection.clone(), None, None, "shell".into())
+            .err()
+            .unwrap()
+            .code,
+        "connection_store_busy"
+    );
+    assert_eq!(
+        fixture
+            .client
+            .shell_command(connection, None, None)
+            .err()
+            .unwrap()
+            .code,
+        "connection_store_busy"
+    );
+    assert_eq!(fixture.client.launch_count.load(Ordering::Acquire), 0);
+    assert!(!fixture.session.rpc.is_closed());
+    assert_eq!(fixture.client.sessions.lock().unwrap().len(), 1);
+    assert_eq!(fixture.stats()["executes"], 0);
+    drop(held);
+    let started = fixture
+        .client
+        .execute(&plan.plan_id, &plan.digest, true)
+        .unwrap();
+    assert_eq!(started.operation_id, plan.operation_id);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let event = fixture
+            .events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+        if event.operation_id.as_deref() == Some(&plan.operation_id) {
+            assert_eq!(event.state, "completed");
+            break;
+        }
+    }
+    assert_eq!(
+        fixture
+            .client
+            .execute(&plan.plan_id, &plan.digest, true)
+            .err()
+            .unwrap()
+            .code,
+        "plan_stale"
+    );
+    assert_eq!(fixture.stats()["executes"], 1);
+}
+
+#[test]
 fn unrelated_external_registration_and_selection_preserve_cached_trust() {
     let fixture = ManagerFixture::with_registration("manager", true);
     external_trust_change(&fixture, "unrelated");

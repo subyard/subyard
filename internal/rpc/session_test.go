@@ -230,29 +230,150 @@ func TestDisconnectCancelsOperation(t *testing.T) {
 	}
 }
 
-func TestBackpressureDisconnectsSlowClient(t *testing.T) {
-	handler := HandlerFunc(func(_ context.Context, _ Call, emit Emit) (any, error) {
-		for index := 0; index < 100; index++ {
-			if _, err := emit("progress", map[string]any{"index": index}); err != nil {
+func TestBackpressureDisconnectsClientThatStopsReading(t *testing.T) {
+	var emitted atomic.Int64
+	handler := HandlerFunc(func(ctx context.Context, _ Call, emit Emit) (any, error) {
+		for ctx.Err() == nil {
+			if _, err := emit("progress", map[string]any{"index": emitted.Load()}); err != nil {
 				return nil, err
 			}
+			emitted.Add(1)
 		}
-		return nil, nil
+		return nil, ctx.Err()
 	})
 	client, server := net.Pipe()
+	defer client.Close()
 	done := make(chan error, 1)
-	go func() { done <- (Session{Handler: handler, Buffer: 1}).Serve(context.Background(), server, server) }()
+	go func() {
+		done <- (Session{Handler: handler, Buffer: 1, WriteStallTimeout: 50 * time.Millisecond}).Serve(
+			context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "flood", Method: "events"})
 	select {
-	case <-done:
-	case <-time.After(time.Second):
-		_ = client.Close()
-		t.Fatal("slow RPC client blocked session shutdown")
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "write stall timeout") {
+			t.Fatalf("unread client was not disconnected for a write stall: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client that stopped reading was not disconnected")
+	}
+	if emitted.Load() == 0 {
+		t.Fatal("event producer was blocked by the unread client")
+	}
+}
+
+func TestOutboxBoundsQueuedFramesAndCoalescesEvents(t *testing.T) {
+	queue := newOutbox(4)
+	for sequence := uint64(1); sequence <= 10000; sequence++ {
+		if !queue.pushEvent(Response{Type: "event", Sequence: sequence}) {
+			t.Fatal("event push failed on a live queue")
+		}
+	}
+	pushed := make(chan bool, 1)
+	go func() {
+		pushed <- queue.pushResponse(Response{Type: "response", ID: "done"})
+		queue.close()
+	}()
+	var frames []Response
+	for {
+		frame, ok := queue.pop()
+		if !ok {
+			break
+		}
+		frames = append(frames, frame)
+	}
+	if !<-pushed {
+		t.Fatal("response push failed on a live queue")
+	}
+	want := []uint64{1, 2, 3, 4, 10000}
+	if len(frames) != len(want)+1 {
+		t.Fatalf("queued frames are not bounded: %d", len(frames))
+	}
+	for index, sequence := range want {
+		if frames[index].Type != "event" || frames[index].Sequence != sequence {
+			t.Fatalf("frame %d = %#v, want event %d", index, frames[index], sequence)
+		}
+	}
+	if last := frames[len(frames)-1]; last.Type != "response" || last.ID != "done" {
+		t.Fatalf("response was not delivered after the coalesced event: %#v", last)
+	}
+}
+
+func TestEventBurstKeepsSessionAndOperationsAlive(t *testing.T) {
+	const burst = 5000
+	emitted := make(chan struct{})
+	release := make(chan struct{})
+	handler := HandlerFunc(func(ctx context.Context, call Call, emit Emit) (any, error) {
+		switch call.Method {
+		case "hold":
+			select {
+			case <-release:
+				return map[string]any{"held": true}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		case "burst":
+			for index := 0; index < burst; index++ {
+				if _, err := emit("incus.lifecycle", map[string]any{"index": index}); err != nil {
+					return nil, err
+				}
+			}
+			close(emitted)
+			return map[string]any{"emitted": burst}, nil
+		default:
+			return map[string]any{"method": call.Method}, nil
+		}
+	})
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	codec := NewCodec(client, client)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
+	_ = readResponse(t, codec)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold", Method: "hold"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "burst", Method: "burst"})
+	// The burst outruns the writer, exercising overflow deterministically.
+	select {
+	case <-emitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("event burst blocked its producer")
+	}
+	var previous uint64
+	gap := false
+	for {
+		frame := readResponse(t, codec)
+		if frame.Type == "event" {
+			if frame.Sequence <= previous {
+				t.Fatalf("event sequence is not increasing: %d after %d", frame.Sequence, previous)
+			}
+			gap = gap || frame.Sequence != previous+1
+			previous = frame.Sequence
+			continue
+		}
+		if frame.ID != "burst" || frame.Error != nil {
+			t.Fatalf("burst response = %#v", frame)
+		}
+		break
+	}
+	if !gap || previous != burst {
+		t.Fatalf("overflow is not observable: gap=%v last=%d", gap, previous)
+	}
+	close(release)
+	if response := readResponse(t, codec); response.ID != "hold" || response.Error != nil {
+		t.Fatalf("in-flight operation did not complete: %#v", response)
+	}
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "after", Method: "system.ping"})
+	if response := readResponse(t, codec); response.ID != "after" || response.Error != nil {
+		t.Fatalf("session did not survive the burst: %#v", response)
 	}
 	_ = client.Close()
+	if err := <-done; err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatal(err)
+	}
 }
 
 func TestContextCancellationInterruptsBlockedRead(t *testing.T) {
@@ -469,4 +590,183 @@ func (reader *oneByteReader) Read(target []byte) (int, error) {
 	target[0] = reader.value[0]
 	reader.value = reader.value[1:]
 	return 1, nil
+}
+
+func TestEventBurstWithConcurrentReaderKeepsSessionAlive(t *testing.T) {
+	const burst = 5000
+	handler := HandlerFunc(func(_ context.Context, call Call, emit Emit) (any, error) {
+		if call.Method != "burst" {
+			return map[string]any{"method": call.Method}, nil
+		}
+		for index := 0; index < burst; index++ {
+			if _, err := emit("incus.lifecycle", map[string]any{"index": index}); err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{"emitted": burst}, nil
+	})
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	codec := NewCodec(client, client)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
+	_ = readResponse(t, codec)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "burst", Method: "burst"})
+	var previous uint64
+	for {
+		frame := readResponse(t, codec)
+		if frame.Type == "event" {
+			if frame.Sequence <= previous {
+				t.Fatalf("event sequence is not increasing: %d after %d", frame.Sequence, previous)
+			}
+			previous = frame.Sequence
+			continue
+		}
+		if frame.ID != "burst" || frame.Error != nil {
+			t.Fatalf("burst response = %#v", frame)
+		}
+		break
+	}
+	if previous != burst {
+		t.Fatalf("newest burst event was not delivered before the response: %d", previous)
+	}
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "after", Method: "system.ping"})
+	if response := readResponse(t, codec); response.ID != "after" || response.Error != nil {
+		t.Fatalf("session did not survive the burst: %#v", response)
+	}
+	_ = client.Close()
+	if err := <-done; err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatal(err)
+	}
+}
+
+func TestOperationCapacityRefusesExcessRequestsAndKeepsCancellation(t *testing.T) {
+	release := make(chan struct{})
+	handler := HandlerFunc(func(ctx context.Context, call Call, _ Emit) (any, error) {
+		if call.Method == "hold" {
+			select {
+			case <-release:
+				return map[string]any{"held": true}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return map[string]any{"method": call.Method}, nil
+	})
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- (Session{Handler: handler, MaxOperations: 2}).Serve(context.Background(), server, server)
+	}()
+	codec := NewCodec(client, client)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
+	_ = readResponse(t, codec)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold-1", Method: "hold"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold-2", Method: "hold"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "excess", Method: "system.ping"})
+	if response := readResponse(t, codec); response.ID != "excess" || response.Error == nil ||
+		response.Error.Code != "operation_capacity" {
+		t.Fatalf("excess request was not refused: %#v", response)
+	}
+	writeRequest(t, codec, Request{Version: 1, Type: "cancel", ID: "c", OperationID: "hold-1"})
+	responses := map[string]Response{}
+	for len(responses) < 2 {
+		response := readResponse(t, codec)
+		responses[response.ID] = response
+	}
+	if responses["c"].Error != nil || responses["hold-1"].Error == nil ||
+		responses["hold-1"].Error.Code != "cancelled" {
+		t.Fatalf("cancellation at capacity = %#v", responses)
+	}
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "after", Method: "system.ping"})
+	if response := readResponse(t, codec); response.ID != "after" || response.Error != nil {
+		t.Fatalf("freed slot was not reused: %#v", response)
+	}
+	close(release)
+	if response := readResponse(t, codec); response.ID != "hold-2" || response.Error != nil {
+		t.Fatalf("held operation = %#v", response)
+	}
+	_ = client.Close()
+	<-done
+}
+
+func TestUnreadClientCannotGrowAdmittedRequests(t *testing.T) {
+	var handled atomic.Int64
+	handler := HandlerFunc(func(context.Context, Call, Emit) (any, error) {
+		handled.Add(1)
+		return map[string]any{"ok": true}, nil
+	})
+	client, server := net.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- (Session{Handler: handler, Buffer: 1, MaxOperations: 4, WriteStallTimeout: time.Minute}).Serve(
+			context.Background(), server, server)
+	}()
+	codec := NewCodec(client, client)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
+	_ = readResponse(t, codec)
+	var sent atomic.Int64
+	go func() {
+		for index := 0; index < 1000; index++ {
+			if err := codec.Write(Request{Version: 1, Type: "request", ID: fmt.Sprintf("r-%d", index),
+				Method: "system.ping"}); err != nil {
+				return
+			}
+			sent.Add(1)
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	// One frame in the writer, Buffer+1 queued, MaxOperations held, and the
+	// read loop's blocked refusal bound what an unread client can make the
+	// session hold, independently of how many requests it sends.
+	if handled.Load() > 8 || sent.Load() > 10 {
+		t.Fatalf("unread client grew session work: handled=%d sent=%d", handled.Load(), sent.Load())
+	}
+	_ = client.Close()
+	if err := <-done; err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatal(err)
+	}
+}
+
+type slowReader struct {
+	reader io.Reader
+	delay  time.Duration
+}
+
+func (reader slowReader) Read(target []byte) (int, error) {
+	time.Sleep(reader.delay)
+	return reader.reader.Read(target[:min(len(target), 4096)])
+}
+
+func TestSlowSteadyReaderReceivesLargeFrameWithoutStall(t *testing.T) {
+	large := strings.Repeat("x", 256*1024)
+	handler := HandlerFunc(func(context.Context, Call, Emit) (any, error) {
+		return map[string]any{"large": large}, nil
+	})
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- (Session{Handler: handler, WriteStallTimeout: 100 * time.Millisecond}).Serve(
+			context.Background(), server, server)
+	}()
+	codec := NewCodec(slowReader{reader: client, delay: 10 * time.Millisecond}, client)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
+	_ = readResponse(t, codec)
+	started := time.Now()
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "large", Method: "large"})
+	response := readResponse(t, codec)
+	result, _ := response.Result.(map[string]any)
+	if response.Error != nil || result["large"] != large {
+		t.Fatalf("large frame was not delivered intact: %v", response.Error)
+	}
+	if elapsed := time.Since(started); elapsed < 300*time.Millisecond {
+		t.Fatalf("reader was not slower than the stall timeout: %v", elapsed)
+	}
+	_ = client.Close()
+	if err := <-done; err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("slow steady reader was treated as stalled: %v", err)
+	}
 }

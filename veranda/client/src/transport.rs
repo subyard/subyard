@@ -744,6 +744,31 @@ fn disconnected() -> NativeError {
     )
 }
 
+/// Codes the owner returns when its release or configuration gate refuses a
+/// mutation; `api/yard-rpc/v1/gate-error-codes.json` is the shared list.
+const GATE_ERROR_CODES: &[&str] = &[
+    "mutation_gate_failed",
+    "transition_required",
+    "transition-required",
+    "recovery-pending",
+    "registry-invalid",
+    "unsupported-epoch",
+    "unsupported-kind",
+    "confirmation-required",
+    "operation-declined",
+    "plan-stale",
+    "migration-stale",
+    "resource-conflict",
+    "precondition-blocked",
+    "dependency-unavailable",
+    "verification-failed",
+    "activation-ambiguous",
+    "recovery-ambiguous",
+    "journal-invalid",
+    "rollback-incompatible",
+    "rollback-expired",
+];
+
 fn public_fault(code: &str) -> NativeError {
     let (code, message) = match code {
         "plan_stale" | "plan_binding_invalid" => (
@@ -802,7 +827,7 @@ fn public_fault(code: &str) -> NativeError {
             "owner_context_changed",
             "The owner context changed. Reconnect and refresh before continuing.",
         ),
-        "mutation_gate_failed" | "migration_required" => (
+        code if GATE_ERROR_CODES.contains(&code) => (
             "owner_repair_required",
             "The owner requires release or configuration repair before this operation.",
         ),
@@ -824,6 +849,28 @@ mod tests {
         assert_eq!(error.code, "owner_request_failed");
         assert!(!error.message.contains("token-secret"));
         assert_eq!(public_fault("plan_stale").code, "plan_stale");
+    }
+
+    #[test]
+    fn every_shared_gate_error_code_maps_to_owner_repair() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../api/yard-rpc/v1/gate-error-codes.json"
+        ))
+        .unwrap();
+        let codes: Vec<&str> = fixture["codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|code| code.as_str().unwrap())
+            .collect();
+        assert_eq!(codes, GATE_ERROR_CODES);
+        for code in codes {
+            assert_eq!(public_fault(code).code, "owner_repair_required", "{code}");
+        }
+        assert_eq!(
+            public_fault("migration_required").code,
+            "owner_request_failed"
+        );
     }
 
     #[test]

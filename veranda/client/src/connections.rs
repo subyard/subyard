@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const STORE_LIMIT: usize = 1024 * 1024;
@@ -152,6 +153,10 @@ enum Action {
 pub struct ConnectionStore {
     root: PathBuf,
     pending: HashMap<String, Pending>,
+    /// Advances immediately before every step that can change saved trust on
+    /// disk, so a caller can tell a call that changed nothing from a committed
+    /// or ambiguous one.
+    mutations: AtomicU64,
 }
 
 /// A consumed, native-only consent capability. Dropping it cleans the temporary
@@ -247,6 +252,13 @@ impl Drop for ConsentedConnection {
 }
 
 impl ConnectionStore {
+    /// Trust mutation marker; unchanged across a call means it changed no saved trust.
+    pub fn mutations(&self) -> u64 {
+        self.mutations.load(Ordering::Acquire)
+    }
+    fn mutating(&self) {
+        self.mutations.fetch_add(1, Ordering::AcqRel);
+    }
     /// Presentation-owned nonsecret drafts and interrupted-result metadata.
     /// Reuse the native protected store and lock, without changing trust revision.
     pub fn desktop_document(&self) -> Result<Vec<u8>, NativeError> {
@@ -287,6 +299,7 @@ impl ConnectionStore {
         Self {
             root,
             pending: HashMap::new(),
+            mutations: AtomicU64::new(0),
         }
     }
 
@@ -967,6 +980,7 @@ impl ConnectionStore {
                 match fs::symlink_metadata(&path) {
                     Ok(_) => {
                         check_private_file(&path)?;
+                        self.mutating();
                         fs::remove_file(path).map_err(|_| store_io())?;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -981,6 +995,7 @@ impl ConnectionStore {
         match fs::symlink_metadata(&path) {
             Ok(_) => {
                 check_private_file(&path)?;
+                self.mutating();
                 fs::remove_file(path).map_err(|_| store_io())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1064,6 +1079,8 @@ impl ConnectionStore {
             if fs::symlink_metadata(&target).is_ok() {
                 check_private_file(&target)?;
             }
+            // The rename can commit even when it or a later check reports failure.
+            self.mutating();
             fs::rename(&temporary, &target).map_err(|_| store_io())?;
             #[cfg(unix)]
             File::open(&self.root)
