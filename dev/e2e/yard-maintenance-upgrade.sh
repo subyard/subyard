@@ -78,7 +78,8 @@ for name in "${NAMES[@]}"; do
   UUID[$name]="$(yard_uuid "$name")" BOOT[$name]="$(yard_boot "$name")"
 done
 lowlevel() { incus project get "$(project_for "$1")" restricted.virtual-machines.lowlevel; }
-[ -z "$(lowlevel weighted)" ] && [ -z "$(lowlevel z-last)" ] || die 'VM yards already carry the VM start policy grant'
+grants() { local name value; for name in weighted z-last; do value="$(lowlevel "$name")" || return; printf '%s=%s ' "$name" "$value"; done; }
+[ "$(grants)" = 'weighted= z-last= ' ] || die 'VM yards already carry the VM start policy grant'
 # Published 0.28.0 pins the project grant that its own VM start policy writes, so its
 # direct update stops at the first restarted VM yard and keeps the old release active.
 read -r stuck _ archive_sha < <(awk -F '\t' '$1=="0.28.0"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
@@ -89,8 +90,8 @@ operator_yard update --version "$stuck" --yes > "$STATE_ROOT/stuck.log" 2>&1 || 
 [ "$rc" != 0 ] && grep -Fq 'code=recovery-ambiguous' "$STATE_ROOT/stuck.log" || { cat "$STATE_ROOT/stuck.log" >&2; die 'published 0.28.0 update did not stop'; }
 case "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" in releases/"$creation"-*) ;; *) die 'stopped update changed the active release' ;; esac
 operator_env jq -e --arg target "$stuck-" '.checkpoint != "complete" and (.goal.target | startswith($target))' "$V2_JOURNAL" >/dev/null || die 'stopped update left no unfinished journal'
-[ "$(marker default)" = v1 ] && [ -z "$(marker weighted)" ] && [ "$(lowlevel weighted)" = allow ] \
-  && [ -z "$(marker z-last)" ] && [ -z "$(lowlevel z-last)" ] && [ "$(yard_boot z-last)" = "${BOOT[z-last]}" ] || die 'stopped update reached an unexpected native state'
+[ "$(marker default)" = v1 ] && [ -z "$(marker weighted)" ] && [ "$(grants)" = 'weighted=allow z-last= ' ] \
+  && [ -z "$(marker z-last)" ] && [ "$(yard_boot z-last)" = "${BOOT[z-last]}" ] || die 'stopped update reached an unexpected native state'
 # The stopped update returned while the restarted VM was still booting.
 for _ in {1..60}; do yard_boot weighted >/dev/null 2>&1 && break; sleep 2; done
 BOOT[default]="$(yard_boot default)" && BOOT[weighted]="$(yard_boot weighted)" || die 'stopped update left a yard without a guest agent'
@@ -98,6 +99,8 @@ BOOT[default]="$(yard_boot default)" && BOOT[weighted]="$(yard_boot weighted)" |
 before="$(protected_state)"
 update_candidate --check --offline --version "$CANDIDATE_VERSION" > "$STATE_ROOT/stuck-check.log" 2>&1 || true
 grep -Fq 'the journal-selected release cannot provide a valid transition inspection' "$STATE_ROOT/stuck-check.log" || { cat "$STATE_ROOT/stuck-check.log" >&2; die 'old launcher did not keep the journal-selected owner'; }
+# The journal-selected engine names the pinned start policy grant as the stop reason.
+cat "$STATE_ROOT/stuck.log" "$STATE_ROOT/stuck-check.log" | grep -Fq 'registered yard migration desired state changed' || die 'published 0.28.0 stopped for another reason'
 [ "$(protected_state)" = "$before" ] || die 'old launcher check changed protected state'
 # An owned guest preflight refusal leaves the VM running. This tests isolation
 # without host shims, a fabricated exit code or an extra guest mount.
