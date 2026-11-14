@@ -906,6 +906,34 @@ func TestConfigSetSeveralPairsRequiresGitAndReportsEveryRefusal(t *testing.T) {
 	}
 }
 
+// Profile-only settings are refused in every pair of a multi-setting Git set,
+// all reported together in the stable refusal order, and refused for a local set. An unset still
+// removes a persisted one from the versioned source.
+func TestConfigSetSeveralPairsRefusesProfileOnlySettings(t *testing.T) {
+	f := newConfigSSHFixture(t)
+	f.run(2, "config", "set", "YARD_DEVICES", "kvm", "--scope", "host", "--local", "--yes")
+	if !strings.Contains(f.stderr.String(), "YARD_DEVICES is declared only by environment profiles") {
+		t.Fatalf("local profile-only set: %s", f.stderr.String())
+	}
+	f.run(2, "config", "set", "YARD_DEVICES", "kvm", "GIT_USER_NAME", "One", "YARD_CAPS", "fuse", "--scope", "shared", "--git", "--yes")
+	output := f.stderr.String()
+	devices := strings.Index(output, "YARD_DEVICES is declared only by environment profiles")
+	caps := strings.Index(output, "YARD_CAPS is declared only by environment profiles")
+	if caps < 0 || devices < caps || strings.Contains(output, "GIT_USER_NAME:") {
+		t.Fatalf("multi-setting profile-only refusals: %s", output)
+	}
+	if events := f.events(); len(events) != 0 {
+		t.Fatalf("refused pairs contacted the remote: %#v", events)
+	}
+
+	f.publishRemoteChange("GIT_USER_NAME='Remote Operator'\nYARD_DEVICES=kvm\n")
+	f.run(0, "config", "sync", "pull", "--yes")
+	f.run(0, "config", "unset", "YARD_DEVICES", "--scope", "shared", "--git", "--yes")
+	if versioned := configSourceGitOutput(t, f.remote, "show", "HEAD:shared/config.env"); versioned != "GIT_USER_NAME='Remote Operator'\n" {
+		t.Fatalf("git unset of a profile-only setting left %q", versioned)
+	}
+}
+
 // withSyntheticYardTemplate replaces the shipped configuration directory with
 // an exact-mode copy whose only yard template is a synthetic one that forbids
 // coding tools.
