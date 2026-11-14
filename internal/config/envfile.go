@@ -355,13 +355,14 @@ func expandParameter(
 		if current != "" {
 			return current, nil
 		}
+		if operator == ":?" && discard && IsProfileOnlySetting(name) {
+			// Operators never assign it, so a required check of it is ignored
+			// too, without evaluating its message.
+			return "", nil
+		}
 		expanded, err := expandValue(fallback, values, observer, policy)
 		if err != nil {
 			return "", err
-		}
-		if operator == ":?" && discard && IsProfileOnlySetting(name) {
-			// Operators never assign it, so a required check of it is ignored too.
-			return "", nil
 		}
 		if operator == ":?" {
 			if expanded == "" {
@@ -376,10 +377,11 @@ func expandParameter(
 			}
 			if discard && policy.report != nil {
 				// Replacing the parameter with its fallback keeps the record's
-				// value; a fallback that itself assigns is frozen to its value.
+				// value; a fallback that itself assigns is frozen to its value,
+				// escaped so that evaluating the record again yields it exactly.
 				replacement := fallback
 				if strings.Contains(fallback, ":=") {
-					replacement = expanded
+					replacement = escapeExpansion(expanded)
 				}
 				policy.report(discardedValue{Name: name, Value: expanded, Expression: "${" + expression + "}", Replacement: replacement, Nested: true})
 			}
@@ -435,4 +437,10 @@ func EvaluateAssignments(reader io.Reader, source string, base map[string]string
 		return nil, err
 	}
 	return values, nil
+}
+
+// escapeExpansion quotes value for an expanding (unquoted or double-quoted)
+// context, so that evaluating it yields value itself.
+func escapeExpansion(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `$`, `\$`, "`", "\\`", `"`, `\"`).Replace(value)
 }

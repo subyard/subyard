@@ -1483,9 +1483,10 @@ func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsrunti
 	}, nil
 }
 
-// ExtrasDetach is the device loss of a pending extras stage. Unverified
-// devices are derived from configuration alone because the instance could not
-// be read; each is detached only if it is attached.
+// ExtrasDetach is the device loss of a pending extras stage. Unverified means
+// the instance could not be read: the stage then detaches any attached yx-*
+// device that no selected profile requests, and Devices are only the names
+// derived from ignored operator assignments, each detached if attached.
 type ExtrasDetach struct {
 	Devices    []string
 	Unverified bool
@@ -1497,14 +1498,14 @@ type ExtrasDetach struct {
 // assignment supplied before the loader started ignoring it. A profile
 // declaration refusal is returned. A yard without an instance detaches nothing.
 // When the instance cannot be read, for example while Incus is stopped, the
-// devices that ignored operator assignments request and no selected profile
-// requests are returned as unverified.
+// result is unverified, with the device names that ignored operator
+// assignments request and no selected profile declares, regardless of host
+// device nodes.
 func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context, ignored []config.IgnoredAssignment) (ExtrasDetach, error) {
 	requests, err := runtime.profileRequests()
 	if err != nil {
 		return ExtrasDetach{}, err
 	}
-	wanted := runtime.extrasDeviceNames(requests.extras)
 	instance, err := runtime.Incus.Instance(readOnlyProbeContext(ctx), runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		return ExtrasDetach{}, nil
@@ -1527,15 +1528,17 @@ func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context, ignored []config
 		for name, entries := range operator {
 			extras[name] = strings.Join(entries, " ")
 		}
+		declared := runtime.extrasDeviceNames(requests.extras, false)
 		var devices []string
-		for name := range runtime.extrasDeviceNames(extras) {
-			if !wanted[name] {
+		for name := range runtime.extrasDeviceNames(extras, false) {
+			if !declared[name] {
 				devices = append(devices, name)
 			}
 		}
 		slices.Sort(devices)
 		return ExtrasDetach{Devices: devices, Unverified: true}, nil
 	}
+	wanted := runtime.extrasDeviceNames(requests.extras, true)
 	var detached []string
 	for _, name := range slices.Sorted(maps.Keys(instance.LocalDevices)) {
 		if strings.HasPrefix(name, "yx-") && !wanted[name] {
@@ -1546,14 +1549,20 @@ func (runtime Runtime) ExtrasDetachPlanned(ctx context.Context, ignored []config
 }
 
 // extrasDeviceNames names the yx-* devices that 09-yard-extras.sh wants for
-// the extras context, from its declarations and the host device nodes.
-func (runtime Runtime) extrasDeviceNames(extras map[string]string) map[string]bool {
+// the extras context, from its declarations and, with hostNodes, the existing
+// host device nodes. Without hostNodes every declared device is named, and
+// render nodes as the yx-dev-dri-renderD* pattern.
+func (runtime Runtime) extrasDeviceNames(extras map[string]string, hostNodes bool) map[string]bool {
 	root := runtime.HostDeviceRoot
 	if root == "" {
 		root = "/dev"
 	}
 	wanted := map[string]bool{}
 	want := func(pattern, prefix string) {
+		if !hostNodes {
+			wanted[prefix+filepath.Base(pattern)] = true
+			return
+		}
 		nodes, _ := filepath.Glob(filepath.Join(root, pattern))
 		for _, node := range nodes {
 			wanted[prefix+filepath.Base(node)] = true

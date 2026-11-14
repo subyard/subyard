@@ -2469,9 +2469,20 @@ func TestExtrasDetachPlannedNamesUnrequestedOwnedDevices(t *testing.T) {
 	// requested beyond the profiles, as detached if attached.
 	incus.Err = errors.New("Incus is stopped")
 	detach, err = runtime.ExtrasDetachPlanned(context.Background(), ignored)
-	if err != nil || !detach.Unverified || strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD128 yx-dev-fuse yx-old" {
+	if err != nil || !detach.Unverified || strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD* yx-dev-fuse yx-old" {
 		t.Fatalf("unreadable detach = %#v, %v", detach, err)
 	}
+	// Without a host node the device can still be attached: names are derived
+	// from declarations alone.
+	if err := os.Remove(filepath.Join(devices, "kvm")); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES="}
+	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), ignored[:1]); err != nil || !detach.Unverified ||
+		strings.Join(detach.Devices, " ") != "yx-dev-dri-renderD* yx-dev-fuse yx-dev-kvm" {
+		t.Fatalf("unreadable detach without host nodes = %#v, %v", detach, err)
+	}
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=a", "YARD_DEVICES=fuse gpu"}
 	if detach, err := runtime.ExtrasDetachPlanned(context.Background(), nil); err != nil || !detach.Unverified || len(detach.Devices) != 0 {
 		t.Fatalf("unreadable detach without ignored assignments = %#v, %v", detach, err)
 	}

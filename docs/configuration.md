@@ -127,9 +127,10 @@ A default of the setting inside another assignment, such as
 `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"`, names the replacement that keeps the other value. The
 JSON report of `update --check` carries them in its `configuration` array. If such a value
 supplied a device, the `init` plan names each device that the extras stage now detaches; while
-the yard's instance cannot be read, it names the devices those values requested, each detached if
-attached. A VM yard does not apply a profile's container-only `YARD_DEVICES`; the `init` plan
-reports each entry as not applicable to VM yards on the converged extras stage.
+the yard's instance cannot be read, it states that any attached `yx-*` device no selected profile
+requests is detached and names the devices those values requested. A VM yard does not apply a
+profile's container-only `YARD_DEVICES`; the `init` plan reports each entry as not applicable to
+VM yards on the converged extras stage.
 
 `init` validates the effective `INCUS_PROJECT` before confirmation or host changes, including
 with `--reset` and `--configs`. Incus project names cannot contain underscores, must start and

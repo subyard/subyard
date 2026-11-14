@@ -159,12 +159,29 @@ func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
 		t.Fatalf("nested observations = %q", got)
 	}
 
-	// A required check of a discarded name never refuses either.
-	fixture.write(t, host, "YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n")
+	// A frozen replacement keeps the other setting's literal value when the
+	// record is evaluated again.
+	content := "GIT_USER_NAME=\"${YARD_DEVICES:=${UNSET_VALUE:=literal-\\$SSH_PORT}}\"\n"
+	fixture.write(t, host, content)
+	if loaded, err = fixture.load("default", nil); err != nil || loaded.Environment["GIT_USER_NAME"] != "literal-$SSH_PORT" {
+		t.Fatalf("nested literal fixture = %q, %v", loaded.Environment["GIT_USER_NAME"], err)
+	}
+	ignored := loaded.IgnoredAssignments()
+	if len(ignored) != 1 || !ignored[0].Nested {
+		t.Fatalf("nested literal observations = %q", renderedIgnored(loaded))
+	}
+	fixture.write(t, host, strings.Replace(content, ignored[0].Expression, ignored[0].Replacement, 1))
+	if loaded, err = fixture.load("default", nil); err != nil || loaded.Environment["GIT_USER_NAME"] != "literal-$SSH_PORT" || len(loaded.IgnoredAssignments()) != 0 {
+		t.Fatalf("applied replacement changed the value: %q, %v, %q", loaded.Environment["GIT_USER_NAME"], err, renderedIgnored(loaded))
+	}
+
+	// A required check of a discarded name never refuses either, nor is its
+	// message evaluated.
+	fixture.write(t, host, "YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n: \"${YARD_DEVICES:?${MISSING:?required}}\"\n")
 	if loaded, err = fixture.load("default", nil); err != nil || len(loaded.IgnoredAssignments()) != 1 {
 		t.Fatalf("a required check of an ignored name refused the load: %v %q", err, renderedIgnored(loaded))
 	}
-	if _, err := ParsePersistentAssignments(host, []byte("YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n")); err != nil {
+	if _, err := ParsePersistentAssignments(host, []byte("YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n: \"${YARD_DEVICES:?${MISSING:?required}}\"\n")); err != nil {
 		t.Fatalf("persistent parse refused a required check of an ignored name: %v", err)
 	}
 

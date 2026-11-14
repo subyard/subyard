@@ -1735,11 +1735,12 @@ refusals of the others on stderr, and `config unset` remains available at operat
 sync accepts and materializes a persisted one unchanged. The init plan names each owned `yx-*`
 extras device that the pending extras stage detaches, resolved as `09-yard-extras.sh` resolves it.
 A declaration refusal refuses planning. A yard without an instance detaches nothing. When the
-instance cannot be read, for example while Incus is stopped, the plan names each device the ignored
-operator assignments requested and no selected profile requests, as detached if attached. The
-extras stage observation carries each declared device of a VM yard as a "not applicable to VM
-yards" diagnostic that `init` renders on the converged stage; it is readiness state, not a refusal
-or a warning.
+instance cannot be read, for example while Incus is stopped, the plan states that any attached
+`yx-*` device no selected profile requests is detached, and names each device the ignored operator
+assignments requested and no selected profile declares, regardless of host device nodes. The extras
+stage observation carries each declared device of a VM yard as a "not applicable to VM yards"
+diagnostic that `init` renders on the converged stage; it is readiness state, not a refusal or a
+warning.
 
 Every VM yard is headless. The owner sets a fixed local `raw.qemu.conf` whose empty
 `[device "qemu_gpu"]` section removes the Incus default emulated GPU (virtio-vga); with

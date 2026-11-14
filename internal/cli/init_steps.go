@@ -140,12 +140,13 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 			desired = fmt.Sprintf("host NetworkManager and route safety; bridge DHCP/DNS and forwarding rules if UFW is active; native policy lock access for operator UID %d", os.Getuid())
 		}
 		consequence := desired
-		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && len(detach.Devices) != 0 {
-			consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests: %s", yard.YardName, strings.Join(detach.Devices, " "))
-			if detach.Unverified {
-				consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests, each if attached (the instance is not readable now): %s",
-					yard.YardName, strings.Join(detach.Devices, " "))
+		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && detach.Unverified {
+			consequence = fmt.Sprintf("yard %s: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)", yard.YardName)
+			if len(detach.Devices) != 0 {
+				consequence += ", including each of these if attached: " + strings.Join(detach.Devices, " ")
 			}
+		} else if native.Stage.ID == ports.ReconcileStageExtras && len(detach.Devices) != 0 {
+			consequence = fmt.Sprintf("yard %s: detaches devices no selected profile requests: %s", yard.YardName, strings.Join(detach.Devices, " "))
 		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
 			"native VerifyStage "+string(native.Stage.ID)+" returns converged", consequence, native.Converged, native.Conditional)
@@ -303,8 +304,9 @@ func (execution *provisionExecution) stateBinding() string {
 // stage detaches, so the plan names each device loss before confirmation. A
 // conditional extras stage counts too. A profile declaration refusal refuses
 // planning. A yard without an instance detaches nothing; when the instance
-// cannot be read, the plan names the devices ignored operator assignments
-// request as detached if attached.
+// cannot be read, the plan says that any attached yx-* device no selected
+// profile requests is detached and names those ignored operator assignments
+// request.
 func (execution *initExecution) assessExtrasDetach(ctx context.Context, runtime reconcileruntime.Runtime) error {
 	execution.extrasDetach = reconcileruntime.ExtrasDetach{}
 	if execution.mode == initReset || !slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
