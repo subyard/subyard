@@ -311,11 +311,6 @@ func (cli *CLI) admitReleaseGate(
 	if ordinaryCommandDuringPendingConfiguration(admission.handler) && cli.declaredRuntimePendingGate(outcome, gateInspection) {
 		return permits, 0, false
 	}
-	// Configuration commands on a yard without a pending item of its own, a new
-	// yard included, reach their own guards; the pending yards keep their items.
-	if slices.Contains([]string{"@init", "@config", "@integration", "@profile"}, admission.handler) && cli.otherYardsPendingOnly(outcome, gateInspection, yard) {
-		return permits, 0, false
-	}
 	switch admission.recovery {
 	case recoveryConfigApply:
 		permit, err := cli.prepareConfigApplyRepair(ctx, yard, admission.configApplyAll, *outcome)

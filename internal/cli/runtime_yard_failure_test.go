@@ -487,7 +487,7 @@ func TestPendingInitGateAdmitsEachNamedYardAcrossOwners(t *testing.T) {
 		name, extra     string
 		admitted, other []string
 	}{
-		{name: "two runtime owners", extra: blocker("activation.other-runtime.pending-configuration", "named"), admitted: []string{"default", "named"}},
+		{name: "two runtime owners", extra: blocker("activation.other-runtime.pending-configuration", "named"), admitted: []string{"default", "named"}, other: []string{"third"}},
 		// Materialized configuration pending keeps its own rule: every blocker
 		// must name the init, so it refuses a runtime item's init too.
 		{name: "materialized and runtime", extra: `,{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"yard named: move the unowned file aside","retry":"incus exec yard-named -- namei -l /home/dev/.codex"}`,
@@ -510,16 +510,8 @@ func TestPendingInitGateAdmitsEachNamedYardAcrossOwners(t *testing.T) {
 			}
 		})
 	}
-	// A yard without a pending item of its own needs no repair permit: its init
-	// is admitted ordinarily while the other yards stay pending.
-	fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration", blocker("activation.other-runtime.pending-configuration", "named"))
-	declareYardScopedRuntimes(t, &fixture)
-	outcome, inspection, err := fixture.cli.inspectMutationGateInspection(context.Background(), "third")
-	if err != nil || fixture.cli.pendingInitRepairGate(context.Background(), "third", fixture.outcome) || !fixture.cli.otherYardsPendingOnly(outcome, inspection, "third") {
-		t.Fatalf("third yard admission: %v", err)
-	}
 	// Any blocker that is not pending configuration keeps every init gated.
-	fixture = pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration",
+	fixture := pendingInitGateFixtureFor(t, true, "default", "activation.sample-runtime.pending-configuration",
 		`,{"code":"dependency-unavailable","resource":"activation.other-runtime","message":"untyped","retry":"run yard update --check"}`)
 	declareYardScopedRuntimes(t, &fixture)
 	if fixture.cli.pendingInitRepairGate(context.Background(), "default", fixture.outcome) {
@@ -777,13 +769,14 @@ func TestOnlyDeclaredRuntimePendingOpensOrdinaryCommands(t *testing.T) {
 }
 
 // While another yard is pending, configuration commands on a yard without a
-// pending item reach their own guards; a materialized item keeps them gated.
+// pending item of its own stay gated, for declared runtime and materialized
+// items alike; opening them needs its own admission model.
 func TestConfigurationCommandsOnUnpendingYardWhileAnotherIsPending(t *testing.T) {
 	for _, test := range []struct {
 		resource string
 		gated    bool
 	}{
-		{resource: "activation.sample-runtime.pending-configuration"},
+		{resource: "activation.sample-runtime.pending-configuration", gated: true},
 		{resource: "activation.materialized-config.pending-configuration", gated: true},
 	} {
 		t.Run(test.resource, func(t *testing.T) {
@@ -800,6 +793,7 @@ func TestConfigurationCommandsOnUnpendingYardWhileAnotherIsPending(t *testing.T)
 			for _, arguments := range [][]string{
 				{"-Y", "default", "init", "--yes"},
 				{"-Y", "default", "config", "set", "LIMITS_MEMORY", "4GiB", "--scope", "yard", "--local", "--yes"},
+				{"-Y", "default", "config", "set", "LIMITS_MEMORY", "4GiB", "--scope", "host", "--local", "--yes"},
 				{"-Y", "default", "profile", "enable", "sample", "--yes"},
 			} {
 				var stdout, stderr bytes.Buffer

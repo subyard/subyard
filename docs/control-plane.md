@@ -1250,9 +1250,8 @@ run `yard -Y NAME init`, which repeats the same apply from the partial state, or
 
 When every blocker is such a finding of a declared owner and no owner is unconverged, the command
 line admits that yard's init even while other yards are pending, unrelated commands and teardown.
-On a yard without a finding of its own, a new yard included, it also admits init, config,
-profile and integration commands, which reach their own guards; a successful init of one yard
-reports the other yards' findings and succeeds. While other release work remains, findings are
+Init, config, profile and integration commands on other yards stay gated. A successful init of
+one yard reports the other yards' findings and succeeds. While other release work remains, findings are
 one bounded warning. Materialized
 configuration pending keeps its own admission. A successful init of the yard, a converged or
 re-applied owner for that yard and teardown of the yard remove the record through its known owner
