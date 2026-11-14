@@ -961,11 +961,11 @@ physical project and instance names, and teardown are isolated from the retained
 
 The retained-lease disabled-components controller installs the published v0.28.0 baseline, updates
 to the frozen candidate and reboots once. Its default payload belongs to the Hermes profile.
-After direct anchor activation, the Paseo payload explicitly seeds package-shaped leftovers and a foreign service. It verifies removal, retention
-of only non-empty worktrees, and the printed `start` then `migrate` sequence for a stopped
-Paseo-only yard. Both policies must converge and publish their
-proofs. After start has completed disk-backed `/tmp`, the stopped-yard init path must disclose
-removal before consent, leave an unconfirmed yard untouched, retire after confirmation and restore
+After direct anchor activation, the Paseo payload explicitly seeds package-shaped leftovers and a foreign service,
+stops the Paseo-only yard natively inside its owned project and then selects the retired package. Migrate
+retires the running yards and prints `init` for the stopped one. It verifies removal and retention of only
+non-empty worktrees. Both policies must converge and publish their proofs. The stopped-yard init path must
+disclose removal before consent, leave an unconfirmed yard untouched, retire after confirmation and restore
 stopped power. Repeated init of the proven, stopped yard must not boot it again.
 
 The AI Observer payload likewise seeds its managed controls, container, route, receipts and retained

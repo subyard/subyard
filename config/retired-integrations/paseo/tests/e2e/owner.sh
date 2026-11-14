@@ -78,8 +78,6 @@ seed_guests() {
   ' subyard "$FOREIGN_UNIT" "$FOREIGN_DATA"
 }
 
-# Select the retired package only after solo is stopped: a changed selection
-# makes activation repair pending, which gates ordinary stop until migrate.
 select_retired() {
   operator_env python3 - "$CONFIG_HOME/yards" <<'PY'
 import pathlib, re, sys
@@ -136,13 +134,18 @@ assert_converged() {
 }
 
 prepare_acceptance() {
+  local uuid
   prepare_candidate_fixture
   seed_settings
   create_yards
   update_candidate --yes > "$STATE_ROOT/anchor-update.log" 2>&1 || die 'anchor update failed before synthetic retirement setup'
   [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active before retirement setup'
   seed_guests
-  operator_yard -Y solo stop --yes
+  uuid="$(incus config get yard-solo volatile.uuid --project subyard-solo)"
+  [ -n "$uuid" ] || die 'solo instance UUID is missing'
+  # Ordinary stop is gated while retained artifacts await migrate. Simulate an
+  # external shutdown only inside our owned namespace to test stopped retirement.
+  run_checked solo-stop.log 'stop owned solo' stop_owned_solo "$uuid"
   select_retired
   # The changed selection is activation repair; migrate is its printed entry.
   operator_yard migrate --check --json > "$STATE_ROOT/update-check.json" || true
@@ -150,14 +153,14 @@ prepare_acceptance() {
   operator_yard migrate --check > "$STATE_ROOT/update-check.txt" 2>&1 || true
   grep -Fq 'retire integration paseo' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
     || die 'migration preview omitted the retirement'
-  grep -Fq 'run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
+  grep -Fq 'run: yard -Y solo init' "$STATE_ROOT/update-check.txt" "$STATE_ROOT/update-check.json" \
     || die 'migration preview omitted the stopped yard action'
   run_checked update.log 'candidate retirement' operator_yard migrate --yes
   grep -Fq 'retire integration paseo' "$STATE_ROOT/update.log" || die 'unattended migration omitted the retirement warning'
-  grep -Fq 'retired integration paseo may still be installed in yard solo; run: yard -Y solo start; then run yard migrate' "$STATE_ROOT/update.log" \
+  grep -Fq 'retired integration paseo may still be installed in yard solo; run: yard -Y solo init' "$STATE_ROOT/update.log" \
     || die 'unattended migration omitted the stopped yard warning'
   [ "$(yard_power solo)" = STOPPED ] || die 'migration started the stopped yard'
-  assert_stopped_yard_finishes
+  assert_stopped_yard_retires "$uuid"
   assert_converged
   run_checked repeat-init.log 'repeat default init' operator_yard -Y default init --yes
   run_checked repeat-migrate.log 'repeat migration' operator_yard migrate --yes
@@ -172,47 +175,12 @@ prepare_acceptance() {
   printf 'ok: Paseo removal passed; reboot pending\n'
 }
 
-# A fixture-only native stop reaches the externally stopped state without passing
-# the release gate. Bind both physical stop and stopped intent to our project/UUID.
-stop_owned_solo() { # captured UUID
-  (
-    local PROJECT=subyard-solo INSTANCE=yard-solo
-    assert_state_root
-    [ -f "$STATE_ROOT/.solo-armed" ] && [ ! -L "$STATE_ROOT/.solo-armed" ] \
-      && [ "$(cat "$STATE_ROOT/.solo-armed")" = "$MARKER" ] || die 'refusing unarmed solo stop'
-    assert_project_owned
-    [ "$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT")" = true ] \
-      || die 'refusing foreign solo instance'
-    [ -n "$1" ] && [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$1" ] \
-      || die 'solo instance identity changed before native stop'
-    incus stop "$INSTANCE" --project "$PROJECT" || exit $?
-    [ "$(yard_power solo)" = STOPPED ] || die 'native stop did not stop solo'
-    [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$1" ] \
-      || die 'solo instance identity changed after native stop'
-    # Init restores desired power, not just observed power. Preserve stopped intent too.
-    incus config set "$INSTANCE" user.subyard.desired_power stopped --project "$PROJECT"
-  )
-}
-
-assert_stopped_yard_finishes() {
-  local booted uuid
-  uuid="$(incus config get yard-solo volatile.uuid --project subyard-solo)"
-  [ -n "$uuid" ] || die 'solo instance UUID is missing'
+# The anchor already provides disk-backed /tmp, so a stopped yard retires through init.
+assert_stopped_yard_retires() { # captured UUID
+  local booted uuid="$1"
   run_checked stopped-status.json 'stopped solo integration status' operator_yard -Y solo integration status --json
-  check_json "$STATE_ROOT/stopped-status.json" 'stopped status omitted the combined action' \
-    '.observed == "stopped" and (.detail | contains("run: yard -Y solo start; then run yard migrate"))'
-  # Ordinary start has confirmation=never; EOF must not be mistaken for a decline.
-  run_checked solo-start.log 'noninteractive solo start' operator_yard -Y solo start </dev/null
-  [ "$(yard_power solo)" = RUNNING ] || die 'start did not leave solo running'
-  [ -z "$(retired_proof solo)" ] || die 'start unexpectedly published retirement proof'
-  grep -Fq 'retired integration paseo may still be installed in yard solo; run: yard migrate' "$STATE_ROOT/solo-start.log" \
-    || { report_failure 'start did not name the remaining migrate step' "$STATE_ROOT/solo-start.log"; return 1; }
-  [ "$(incus config get yard-solo user.subyard.disk_tmp --project subyard-solo)" = v1 ] \
-    || die 'start lost the disk-/tmp marker'
-  guest_yard solo sh -s -- check < "$ROOT/scripts/guest-disk-tmp.sh" || die 'start left active /tmp memory-backed'
-  # Ordinary stop is gated until migrate repairs this now-running guest. Simulate an
-  # external shutdown only inside our owned namespace to test stopped retirement.
-  run_checked solo-stop.log 'prepare unproven stopped disk-backed solo' stop_owned_solo "$uuid"
+  check_json "$STATE_ROOT/stopped-status.json" 'stopped status omitted the init action' \
+    '.observed == "stopped" and (.detail | contains("run: yard -Y solo init"))'
   run_checked stopped-before-init.json 'stopped readiness before retirement init' operator_yard migrate --check --json
   check_json "$STATE_ROOT/stopped-before-init.json" 'stopped deferral did not leave init admissible' \
     '.outcome.status == "ready" and .outcome.code == "ready" and (.blockers // []) == []'

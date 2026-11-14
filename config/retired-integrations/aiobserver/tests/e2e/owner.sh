@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 FIXTURE_LABEL=observer-retirement
 YARDS=(default solo)
 DATA=/srv/agents/ai-observer/data
-LOGS=(anchor-update.log update-check.json update-check.txt update.log solo-follow.log solo-migrate.log
+LOGS=(anchor-update.log solo-stop.log update-check.json update-check.txt update.log solo-follow.log solo-migrate.log
   status-default.json status-solo.json ready.json repeat-init.log repeat-migrate.log enable-refused.log postboot.json)
 
 # shellcheck source=dev/e2e/retired-integration-fixture.sh
@@ -58,8 +58,7 @@ seed_observer() { # yard, host port
     subyard "$DATA" > "$STATE_ROOT/data-$name.before"
 }
 
-# Old selections and the retired port setting must keep loading unchanged. Write
-# them after solo stops: a changed selection gates ordinary stop until migrate.
+# Old selections and the retired port setting must keep loading unchanged.
 select_retired() { # yard, host port
   local name="$1" port="$2"
   operator_env bash -c 'sed -i "s/^CODING_TOOL_INTEGRATIONS=.*/CODING_TOOL_INTEGRATIONS=$2/" "$1"; printf "AI_OBSERVER_HOST_PORT=%s\n" "$3" >> "$1"' \
@@ -127,7 +126,9 @@ prepare_acceptance() {
   [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active before retirement setup'
   seed_observer default 22222
   seed_observer solo 22233
-  operator_yard -Y solo stop --yes
+  # Ordinary stop is gated while retained controls await migrate. Simulate an
+  # external shutdown only inside our owned namespace to test stopped retirement.
+  run_checked solo-stop.log 'stop owned solo' stop_owned_solo "$(incus config get yard-solo volatile.uuid --project subyard-solo)"
   select_retired default 22222
   select_retired solo 22233
   operator_env bash -c 'sha256sum "$1"/yards/*/config.env' _ "$CONFIG_HOME" > "$STATE_ROOT/settings.before"

@@ -66,7 +66,7 @@ class FixtureCreationTest(unittest.TestCase):
     def test_stopped_path_requires_disclosure_and_power_restoration(self):
         source = payload_source()
         functions = ''.join(name+'() {'+source.split(name+'() {', 1)[1].split('\n}\n', 1)[0]+'\n}\n'
-                            for name in ('report_failure', 'check_json', 'run_checked', 'stop_owned_solo', 'assert_stopped_yard_finishes')
+                            for name in ('report_failure', 'check_json', 'run_checked', 'stop_owned_solo', 'assert_stopped_yard_retires')
                             if name+'() {' in source)
         for scenario, error in (('healthy', None), ('restore-fails', 'did not restore stopped power'),
                                 ('no-disclosure', 'destructive retirement disclosure'),
@@ -78,8 +78,8 @@ class FixtureCreationTest(unittest.TestCase):
 set -euo pipefail
 STATE_ROOT=$1 ROOT=$2 scenario=$3 MARKER=fixture
 printf '%s\n' "$MARKER" > "$STATE_ROOT/.solo-armed"
-printf 'stopped\n' > "$STATE_ROOT/intent"
-printf 'STOPPED\n' > "$STATE_ROOT/power"
+printf 'running\n' > "$STATE_ROOT/intent"
+printf 'RUNNING\n' > "$STATE_ROOT/power"
 : > "$STATE_ROOT/proof"
 printf '0\n' > "$STATE_ROOT/boot"
 die() { printf '%s\n' "$1" >&2; exit 1; }
@@ -94,13 +94,14 @@ incus() {
   case "$*" in
     'config get yard-solo user.subyard.disk_tmp --project subyard-solo') printf 'v1\n' ;;
     'config get yard-solo volatile.uuid --project subyard-solo')
-      if [ "$scenario" = uuid-changed ] && [ -e "$STATE_ROOT/started" ]; then printf 'replaced\n'
+      if [ "$scenario" = uuid-changed ] && [ -e "$STATE_ROOT/native-stopped" ]; then printf 'replaced\n'
       else printf 'solo-uuid\n'; fi ;;
     'config get yard-solo user.subyard.managed --project subyard-solo') printf 'true\n' ;;
     'project get subyard-solo user.p0-power-systemd')
       if [ "$scenario" = foreign-project ]; then printf 'foreign\n'; else printf '%s\n' "$MARKER"; fi ;;
     'stop yard-solo --project subyard-solo')
       [ "$scenario" != stop-fails ] || return 23
+      touch "$STATE_ROOT/native-stopped"
       printf 'STOPPED\n' > "$STATE_ROOT/power" ;;
     'config set yard-solo user.subyard.desired_power stopped --project subyard-solo') printf 'stopped\n' > "$STATE_ROOT/intent" ;;
     *) die "unexpected native operation: $*" ;;
@@ -113,7 +114,7 @@ operator_yard() {
   case "$*" in
     '-Y solo integration status --json')
       if [ -z "$proof" ]; then
-        printf '%s\n' '{"observed":"stopped","detail":"run: yard -Y solo start; then run yard migrate"}'
+        printf '%s\n' '{"observed":"stopped","detail":"run: yard -Y solo init"}'
       else printf '%s\n' '{"observed":"stopped","detail":""}'; fi ;;
     '-Y solo start'|'-Y solo start --yes')
       touch "$STATE_ROOT/started"
@@ -149,14 +150,14 @@ operator_yard() {
   esac
 }
 '''
-                script += functions+'assert_stopped_yard_finishes\n'
+                script += functions+"run_checked solo-stop.log 'stop owned solo' stop_owned_solo solo-uuid\nassert_stopped_yard_retires solo-uuid\n"
                 result = subprocess.run(['bash', '-c', script, 'fixture', temporary,
                                          str(PACKAGE.parents[2]), scenario], stdin=subprocess.DEVNULL,
                                         capture_output=True, text=True, timeout=10)
                 if error:
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn(error, result.stderr)
-                    if scenario in ('foreign-project', 'uuid-changed', 'stop-fails'):
+                    if scenario in ('foreign-project', 'stop-fails'):
                         self.assertEqual((Path(temporary)/'power').read_text().strip(), 'RUNNING')
                         self.assertEqual((Path(temporary)/'intent').read_text().strip(), 'running')
                 else:

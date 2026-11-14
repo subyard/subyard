@@ -116,6 +116,28 @@ create_yards() {
   done
 }
 
+# A fixture-only native stop reaches the externally stopped state without passing
+# the release gate. Bind both physical stop and stopped intent to our project/UUID.
+stop_owned_solo() { # captured UUID
+  (
+    local PROJECT=subyard-solo INSTANCE=yard-solo
+    assert_state_root
+    [ -f "$STATE_ROOT/.solo-armed" ] && [ ! -L "$STATE_ROOT/.solo-armed" ] \
+      && [ "$(cat "$STATE_ROOT/.solo-armed")" = "$MARKER" ] || die 'refusing unarmed solo stop'
+    assert_project_owned
+    [ "$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT")" = true ] \
+      || die 'refusing foreign solo instance'
+    [ -n "$1" ] && [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$1" ] \
+      || die 'solo instance identity changed before native stop'
+    incus stop "$INSTANCE" --project "$PROJECT" || exit $?
+    [ "$(yard_power solo)" = STOPPED ] || die 'native stop did not stop solo'
+    [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$1" ] \
+      || die 'solo instance identity changed after native stop'
+    # Init restores desired power, not just observed power. Preserve stopped intent too.
+    incus config set "$INSTANCE" user.subyard.desired_power stopped --project "$PROJECT"
+  )
+}
+
 # Wait until every fixture yard returns running after the controller's reboot.
 await_rebooted_yards() {
   local name
