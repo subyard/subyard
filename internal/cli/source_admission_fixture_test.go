@@ -147,7 +147,7 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 		}
 	}
 	tooling := sourceAdmissionToolingFixture(t, runtimeRoot)
-	versionBytes, err := exec.Command(filepath.Join(tooling, "bin/yard-engine"), "--version").Output()
+	versionBytes, err := exec.Command(filepath.Join(tooling, "bin/yard-engine"), "version").Output()
 	if err != nil {
 		t.Fatal(err)
 	}

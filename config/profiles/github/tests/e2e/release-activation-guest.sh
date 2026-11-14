@@ -648,7 +648,7 @@ printf 'release_activation_dev_uid=%s cached_image_availability=verified\n' "$FI
 FINAL_ENGINE="$(release_candidate_prepare "$ROOT")" || die 'frozen transported candidate is required'
 read -r CANDIDATE SYNTHETIC BASELINE_INSTALLER_SHA < <(candidate_identity "$ROOT/.subyard-acceptance/candidate.json" "$BASELINE") \
   || die 'frozen candidate identity is invalid'
-[ "$("$FINAL_ENGINE" --version)" = "yard-engine $CANDIDATE" ] || die 'frozen candidate engine version differs from metadata'
+[ "$("$FINAL_ENGINE" version)" = "yard-engine $CANDIDATE" ] || die 'frozen candidate engine version differs from metadata'
 printf 'release_activation_candidate=%s authentic_predecessor=%s synthetic_successor=%s\n' "$CANDIDATE" "$BASELINE" "$SYNTHETIC"
 FINAL_SOURCE="${FINAL_ENGINE%/bin/yard-engine}"
 FINAL_RELEASE="$ROOT/.subyard-acceptance/release"
@@ -719,7 +719,7 @@ exec {engine}< "$2/bin/yard-engine"
 runuser -u "$3" -- env -i PATH=/usr/bin:/bin HOME="$7" \
   SUBYARD_REPOSITORY_ROOT="/proc/self/fd/$repository" SUBYARD_CONFIG_HOME="$4" \
   bash -c '[ "$(id -u)" = "$1" ] && [ "$(id -g)" = "$2" ] || exit 89; shift 2; exec -a yard "$@"' \
-  fd-reader "$5" "$6" "/proc/self/fd/$engine" --version
+  fd-reader "$5" "$6" "/proc/self/fd/$engine" version
 '''
 try:
     results = []
@@ -957,7 +957,7 @@ verify_runtime "$source_b"
 ready
 yard update --rollback --yes > "$STATE/rollback-a.log" 2>&1
 claim_units
-[ "$(yard --version)" = "yard $CANDIDATE" ] || die 'supported rollback did not restore candidate A'
+[ "$(yard version)" = "yard $CANDIDATE" ] || die 'supported rollback did not restore candidate A'
 verify_runtime "$FINAL_SOURCE"
 ready
 cmp -s "$STATE/ledger-retained" "$ledger" || die 'supported runtime rollback replayed migrations'

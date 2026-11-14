@@ -341,7 +341,7 @@ PY_PARTIAL
     neighbor_state="$(incus list yard-neighbor --project "subyard-full-$token-neighbor" -f csv -c ns)" || fail 'cannot inspect neighbor before selected teardown'
     [ "$neighbor_state" = yard-neighbor,RUNNING ] || fail 'neighbor is not running before selected teardown'
     yard teardown --yes
-    yard --version >/dev/null
+    yard version >/dev/null
     assert_project "subyard-full-$token-neighbor"
     neighbor_state="$(incus list yard-neighbor --project "subyard-full-$token-neighbor" -f csv -c ns)" || fail 'cannot inspect neighbor after selected teardown'
     [ "$neighbor_state" = yard-neighbor,RUNNING ] || fail 'neighbor is missing or changed state after selected teardown'

@@ -7,7 +7,7 @@ set -Eeuo pipefail
   || die 'Claude recovery requires the marked disposable adoption fixture'
 
 stage 'checking ordinary commands and typed rollback after a refused Claude init'
-yard --version
+yard version
 printf 'claude-recovery: fresh installed candidate; codex -> codex claude; foreign instructions force pre-apply refusal\n'
 jq -c '{checkpoint, releases, migration_steps:(.steps | length)}' \
   "$SUBYARD_CONFIG_HOME/release-transition/v2/journal.json"

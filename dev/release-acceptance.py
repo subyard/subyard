@@ -263,6 +263,8 @@ CI_COUNTED_POLICIES = frozenset({
     "e952002eada45e0d6f245fbc61f5403c7325ae5d",
     # Immutable action pins; exact candidate refs, checks and asset export retained.
     "4089769ddfcdfa54fdfeb1d11498acf6af1fd42f",
+    # The engine self-check uses the `yard version` subcommand.
+    "e392fe64fbd8d45fe359526bde1a1688c56646da",
 })
 
 

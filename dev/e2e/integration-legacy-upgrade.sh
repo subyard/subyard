@@ -376,7 +376,7 @@ guest sh -eu -c 'test -d /srv/agents/ai-observer/data; printf "%s\n" "$2" > "$1"
 info 'upgrading through the published updater and adopting the exact legacy state'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-[ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] \
+[ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] \
   || die 'candidate release was not activated'
 CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
 case "$CANDIDATE_RELEASE_TARGET" in

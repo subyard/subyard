@@ -54,8 +54,8 @@ chmod +x "$TMP/fake-go-bin/go"
   || { printf 'build-engine: output parent permissions changed\n' >&2; exit 1; }
 
 install -m 0755 "$ROOT/.build/yard" "$TMP/release-engine"
-expected_version="$("$ROOT/.build/yard" --version)"
-[ "$(PATH="$no_go_path" YARD_ENGINE_PATH="$TMP/release-engine" "$ROOT/bin/yard" --version)" = "$expected_version" ] \
+expected_version="$("$ROOT/.build/yard" version)"
+[ "$(PATH="$no_go_path" YARD_ENGINE_PATH="$TMP/release-engine" "$ROOT/bin/yard" version)" = "$expected_version" ] \
   || { printf 'build-engine: explicit release engine did not run without Go\n' >&2; exit 1; }
 
 printf 'ok: engine freshness is source-aware and the release launcher runs without Go\n'

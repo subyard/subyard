@@ -152,7 +152,7 @@ printf 'evidence: dev execution UID and traversable fixture CWD preflight passed
   "$data/release/subyard-install.sh" --yes >/dev/null
 runtime="$(readlink -f "$root/bin/yard")"
 [ "$runtime" = "$data/runtime/releases/$version-${digest:0:12}/bin/yard" ]
-[ "$("$root/bin/yard" --version)" = "yard $version" ]
+[ "$("$root/bin/yard" version)" = "yard $version" ]
 (cd "${runtime%/bin/yard}" && sha256sum -c runtime-files.sha256 >/dev/null)
 /usr/sbin/runuser -u dev -- env HOME="$root/home" SUBYARD_OPERATOR_HOME="$root/home" \
   SUBYARD_HOME="$data" SUBYARD_CONFIG_HOME="$root/config-home" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
@@ -372,7 +372,7 @@ yard_env() { # fixture-root command...
     runtime="$(readlink -f "$fixture/bin/yard")"
     [ "$runtime" = "$fixture/data/runtime/releases/$VERSION-${runtime_digest:0:12}/bin/yard" ] \
       || fail 'controller launcher is outside the verified installed runtime'
-    [ "$("$fixture/bin/yard" --version)" = "yard $VERSION" ] || fail 'controller installed version mismatch'
+    [ "$("$fixture/bin/yard" version)" = "yard $VERSION" ] || fail 'controller installed version mismatch'
     (cd "${runtime%/bin/yard}" && sha256sum -c runtime-files.sha256 >/dev/null) \
       || fail 'controller installed runtime checksum mismatch'
   fi

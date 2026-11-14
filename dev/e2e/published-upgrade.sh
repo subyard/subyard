@@ -100,7 +100,7 @@ instance_uuid() { incus config get "$INSTANCE" volatile.uuid --project "$PROJECT
 
 assert_ready() {
   local epochs guest_marker registry="$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json"
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
+  [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
   epochs="$(operator_env jq -c .currentEpochs "$registry")"
   # shellcheck disable=SC2016 # jq binds $epochs itself.
   # The checkpoint is the authority; ledger.json stays a pinned legacy projection.

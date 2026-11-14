@@ -53,7 +53,7 @@ jobs:
       - name: Build and run native engine
         run: |
           make build VERSION=0.22.0-test
-          .build/yard --version
+          .build/yard version
       - name: Native engine tests
         run: go test -count=1 -timeout=20m ./cmd/... ./internal/...
 

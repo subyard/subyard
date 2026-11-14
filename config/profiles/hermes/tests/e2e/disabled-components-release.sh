@@ -252,7 +252,7 @@ assert_candidate() {
   [ "$target" = "releases/$CANDIDATE_VERSION-${digest:0:12}" ] || die 'installed runtime differs from frozen package'
   operator_env bash -c 'cd "$1"; sha256sum -c runtime-files.sha256 >/dev/null' _ \
     "$OPERATOR_HOME/.subyard/runtime/$target"
-  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'installed CLI version differs'
+  [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] || die 'installed CLI version differs'
   for name in default hermes; do
     expected=2222
     [ "$name" = default ] || expected=2233

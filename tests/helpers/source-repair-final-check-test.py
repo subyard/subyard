@@ -33,7 +33,7 @@ OLD_RELEASE_TARGET=releases/0.18.6-bbbbbbbbbbbb RELEASE_ROOT=/fixture
 V2_JOURNAL=$1/journal.json
 operator_yard() {
   case "$*" in
-    --version) printf 'yard %s\n' "${MOCK_VERSION:-$CANDIDATE_VERSION}" ;;
+    --version|version) printf 'yard %s\n' "${MOCK_VERSION:-$CANDIDATE_VERSION}" ;;
     'migrate --check --json')
       if [ -e "$STATE_ROOT/applied" ]; then cat "$STATE_ROOT/ready.json"; else cat "$STATE_ROOT/report.json"; fi ;;
     *) return 99 ;;

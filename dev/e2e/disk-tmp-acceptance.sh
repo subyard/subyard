@@ -123,7 +123,7 @@ export STORAGE_PATH
 STORAGE_PATH="$(incus storage get default source)"
 install -d -m 0700 "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME" "$SUBYARD_HOME"
 launcher="$(install_candidate)"
-printf 'evidence: installed_candidate=%s\n' "$("$launcher" --version)"
+printf 'evidence: installed_candidate=%s\n' "$("$launcher" version)"
 sha256sum "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh"
 
 guest() { incus exec "$instance" --project "$project" -- "$@"; }

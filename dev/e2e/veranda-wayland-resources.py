@@ -204,7 +204,7 @@ time.sleep(60)
 
 def prepare_release(state, engine, env, prepared_assets=None):
     """Commit fresh capabilities through the same-candidate installed release owner."""
-    version = subprocess.check_output([str(engine), '--version'], env=env, text=True, timeout=5).strip()
+    version = subprocess.check_output([str(engine), 'version'], env=env, text=True, timeout=5).strip()
     if not re.fullmatch(r'yard [A-Za-z0-9][A-Za-z0-9._+-]*', version):
         raise RuntimeError('platform engine version is invalid')
     release = state / 'prepare-release'
@@ -285,7 +285,7 @@ def prepared_platform(state, engine, observer=None, prepared_assets=None):
     with contextlib.ExitStack() as assets_context:
         if prepared_assets is not None:
             assets = prepared.validate(prepared_assets, engine, subprocess.check_output(
-                [str(engine), '--version'], env=env, text=True, timeout=5).strip().removeprefix('yard '), ROOT)
+                [str(engine), 'version'], env=env, text=True, timeout=5).strip().removeprefix('yard '), ROOT)
             image_log = assets_context.enter_context(private_log(state / 'platform-prepared-image.log'))
             def incus_command(argv, timeout):
                 result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True,
@@ -361,7 +361,7 @@ def main():
             or not re.fullmatch(r'Version: [A-Za-z0-9][A-Za-z0-9.+~:-]*', metadata[1])):
         parser.error('requires an explicit amd64 subyard-veranda package')
     args.product_version = metadata[1].removeprefix('Version: ')
-    if probe.command_output([str(args.engine), '--version']) != 'yard ' + args.product_version:
+    if probe.command_output([str(args.engine), 'version']) != 'yard ' + args.product_version:
         parser.error('package and supplied engine versions must match exactly')
     args.deb, args.engine = args.deb.resolve(), args.engine.resolve()
     started = time.monotonic()

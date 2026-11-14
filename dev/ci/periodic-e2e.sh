@@ -147,7 +147,7 @@ install_runtime() {
   local release="$WORKSPACE/.subyard-acceptance/release" version
   version="$(jq -er .version "$WORKSPACE/.subyard-acceptance/candidate.json")"
   env YARD_RELEASE_BASE_URL="file://$release" bash "$release/subyard-install.sh" --version "$version" --yes
-  "$HOME/.local/bin/yard" --version
+  "$HOME/.local/bin/yard" version
 }
 
 # One slot per job. The reserve leaves a 9 GiB pair admissible on a 16 GiB runner.

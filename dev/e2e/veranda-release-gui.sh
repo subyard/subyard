@@ -56,7 +56,7 @@ done
 installed_version=0.1.0
 [ "$growth" = 0 ] || installed_version=0.1.1
 if [ "$wayland" = 1 ]; then
-  [ "$(timeout 5s "$ENGINE" --version)" = "$(basename -- "$ENGINE") 0.1.1" ] || die 'frozen engine release version mismatch'
+  [ "$(timeout 5s "$ENGINE" version)" = "$(basename -- "$ENGINE") 0.1.1" ] || die 'frozen engine release version mismatch'
 fi
 [ "$(dpkg-deb -f "$BASE" Package Version)" = "Package: subyard-veranda"$'\n'"Version: $installed_version" ] || die 'preparation package identity mismatch'
 [ "$(dpkg-deb -f "$NEXT" Package Version)" = $'Package: subyard-veranda\nVersion: 0.1.1' ] || die 'next package identity mismatch'

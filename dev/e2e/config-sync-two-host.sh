@@ -52,13 +52,13 @@ install_candidate_release() {
     YARD_RELEASE_BASE_URL="file://$release" \
     YARD_RELEASE_VERSION="$VERSION" \
     "$release/subyard-install.sh" --yes >/dev/null
-  [ "$("$yard" --version)" = "yard $VERSION" ] \
+  [ "$("$yard" version)" = "yard $VERSION" ] \
     || fail "$name did not activate the installed candidate release"
   case "$(readlink -f "$yard")" in
     "$root/data/runtime/releases/$VERSION-"*/bin/yard) ;;
     *) fail "$name yard command does not resolve to the installed immutable release" ;;
   esac
-  printf 'installed: %s -> %s\n' "$("$yard" --version)" "$(readlink -f "$yard")"
+  printf 'installed: %s -> %s\n' "$("$yard" version)" "$(readlink -f "$yard")"
 }
 
 wait_remote() {

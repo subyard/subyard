@@ -124,7 +124,7 @@ export STORAGE_PATH
 STORAGE_PATH="$(incus storage get default source)"
 install -d -m 0700 "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME" "$SUBYARD_HOME"
 launcher="$(install_candidate)"
-printf 'evidence: installed_candidate=%s\n' "$("$launcher" --version)"
+printf 'evidence: installed_candidate=%s\n' "$("$launcher" version)"
 
 guest() { incus exec "$instance" --project "$project" -- "$@"; }
 native_names() {

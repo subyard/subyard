@@ -126,7 +126,7 @@ pass "published $OLD_VERSION attached $device from host-scope YARD_DEVICES"
 owner env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
   "$launcher" update --version "$CANDIDATE_VERSION" --yes >"$STATE/update.log" 2>&1 \
   || die 'candidate update failed'
-[ "$(owner "$launcher" --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
+[ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
 attached || die 'the update itself detached the device before any init'
 pass "updated to $CANDIDATE_VERSION without refusing the ignored assignment"
 
