@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2220,6 +2221,20 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_disk"))
             log.write_text("other-tool: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\n")
             self.assertIsNone(m.capacity_reason(log))
+            # A later acquire of a multi-lease lane blocks on capacity only after a clean release.
+            lease = "E2E lease: yard=hermes project=hermes run=0123abcd purpose=p slot=slot-001 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
+            start = "E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+            refusal = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
+            for released, expected in (("0", "memory"), ("1", None)):
+                log.write_text(lease + start + f"E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code={released}\n" + refusal)
+                self.assertEqual(m.capacity_reason(log), expected, released)
+            log.write_text(lease + refusal)
+            self.assertIsNone(m.capacity_reason(log))
+            log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
+            self.assertIsNone(m.capacity_reason(log))
+            script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
+            result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
 
     def test_client_handle_release_evidence_keeps_the_slot_after_a_lane_failure(self):
         # The standalone client's acquire line and handle-release markers, then a lane failure.

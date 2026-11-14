@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Live shared-client lease from an installed copy outside any Subyard checkout:
-# acquire, root exec in two separate processes of one lease, release, then the
-# transport boundary through the runner built on the same client.
+# Delivery into a real Hermes-preset yard on one leased VM, then a live shared-client
+# lease from an installed copy outside any Subyard checkout: acquire, root exec in two
+# separate processes of one lease, release, then the transport boundary through the
+# runner built on the same client. The three leases are sequential.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 PROFILE="$ROOT/config/profiles/test-vms-client"
@@ -21,6 +22,9 @@ if [ -n "${SUBYARD_E2E_ROLLOUT_YARD:-}" ]; then
   [[ "$SUBYARD_E2E_ROLLOUT_YARD" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || usage
   route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
 fi
+
+bash "$ROOT/dev/agent-e2e.sh" "${route[@]}" --slot "$slot" --vm-count 1 --purpose test-vms-client-yard --vm 1 -- \
+  timeout --signal=TERM --kill-after=120 3600 bash config/profiles/test-vms-client/tests/e2e/hermes-yard.sh
 
 work="$(mktemp -d /tmp/subyard-test-vms-client.XXXXXX)"
 handle=''
@@ -54,4 +58,4 @@ handle=''
 if bash "$client" exec "$released" -- true 2>/dev/null; then fail 'exec succeeded after release'; fi
 
 bash "$ROOT/dev/agent-e2e.sh" "${route[@]}" --slot "$slot" --vm-count 1 --purpose test-vms-client-boundary --verify-boundary
-printf 'ok: installed client leased, ran root commands across calls, released; boundary verified\n'
+printf 'ok: Hermes yard delivery and retirement; installed client leased, ran root commands across calls, released; boundary verified\n'
