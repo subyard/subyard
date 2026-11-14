@@ -67,7 +67,8 @@ cleanup() {
     rm -rf -- "$ORCA_TMP_DIR" || cleanup_failed=1
   fi
   [ "$status" -ne 0 ] || [ "$cleanup_failed" -eq 0 ] || return 1
-  report_runtime_yard_failure "$status"
+  # Debris the handler could not remove makes the outcome not yard-local.
+  [ "$cleanup_failed" -ne 0 ] || report_runtime_yard_failure "$status"
   return "$status"
 }
 

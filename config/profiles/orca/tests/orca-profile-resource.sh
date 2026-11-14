@@ -918,8 +918,25 @@ fi
 [ "$(grep -c '^subyard-profile-runtime-diagnostic-v1 ' "$TMP/runtime-interrupted.out")" -eq 1 ] &&
   grep -Fxq 'subyard-profile-runtime-diagnostic-v1 apply yard-local' "$TMP/runtime-interrupted.out" \
   || fail 'a failed guest effect of the runtime apply was not reported as yard-local'
+# A guest-side failure whose staging cleanup also fails reports nothing.
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
+touch "$TMP/fail-cleanup-once"
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
+  >"$TMP/runtime-cleanup-failed.out" 2>&1; then
+  fail 'runtime contract apply concealed a failure with failed cleanup'
+fi
+[ -e "$ORCA_TEST_CLEANUP_FAILED" ] || fail 'injected cleanup failure did not happen'
+! grep -Fq 'changed since assessment' "$TMP/runtime-cleanup-failed.out" \
+  || fail 'cleanup failure case was refused before its guest effect'
+! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/runtime-cleanup-failed.out" \
+  || fail 'a failure with failed staging cleanup was reported as yard-local'
+rm -f "$TMP/fail-cleanup-once" "$ORCA_TEST_CLEANUP_FAILED"
+for leftover in "$ORCA_TEST_GUEST"/tmp/subyard-orca.[0-9]*; do
+  [ ! -e "$leftover" ] || rm -rf -- "$leftover"
+done
 rm -f "$TMP/fail-registration-marker"
-observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'interrupted runtime contract apply appeared current without its marker'
 assert_runtime_diagnostics() {
