@@ -715,6 +715,20 @@ packages the transported worktree the same way. It changes
 network policy only inside the disposable VM and does not enable isolation on the operator's host.
 The skill's risk criteria determine whether the focused network lane needs broader lifecycle coverage.
 
+The operator-extras upgrade lane installs published 0.27.0 with a host-scope `YARD_DEVICES=fuse`,
+checks the attached `yx-dev-fuse`, then updates to the frozen candidate. The candidate must disclose
+the ignored assignment in `config show` and `update --check --json`, name the device in the
+unconfirmed `init` plan without changing it, remove it with the printed `config unset` and detach it
+on `init`:
+
+```sh
+bash dev/e2e/operator-extras-upgrade.sh --preflight
+SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
+SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
+  dev/agent-e2e.sh --slot "$slot" --purpose operator-extras --vm-count 1 --vm 1 -- \
+  bash dev/e2e/operator-extras-upgrade.sh
+```
+
 `dev/e2e/p0-acceptance.sh --slot N` runs the release smoke; `--lane full` runs the exhaustive
 compatibility and recovery matrix. Release collection requests these long VM runs explicitly;
 its default performs host-free/local checks without allocating. The skill defines when each applies. GitHub workflows do not
