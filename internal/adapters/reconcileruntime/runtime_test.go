@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1141,6 +1142,18 @@ type provisionFactsExecutor struct {
 	provisionLifecycleExecutor
 	exit          int
 	factsRequests []ports.InstanceExecRequest
+	skills        string
+	skillRequests []ports.InstanceExecRequest
+}
+
+// skillProbeRequest recognizes the read-only static skill probe by its request.
+func skillProbeRequest(request ports.InstanceExecRequest) bool {
+	var probe struct {
+		Files    map[string][]byte `json:"files"`
+		Profiles *string           `json:"profiles"`
+	}
+	return len(request.Command) == 4 && request.Command[0] == "python3" && request.Command[2] == "-c" &&
+		json.Unmarshal(request.Stdin, &probe) == nil && probe.Profiles != nil && probe.Files["config/skills/probe.py"] != nil
 }
 
 func (fixture *provisionFactsExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
@@ -1151,7 +1164,45 @@ func (fixture *provisionFactsExecutor) Exec(ctx context.Context, project, instan
 		}
 		return ports.InstanceExecResult{}, nil
 	}
+	if skillProbeRequest(request) && fixture.skills != "" {
+		fixture.skillRequests = append(fixture.skillRequests, request)
+		return ports.InstanceExecResult{Stdout: []byte(fixture.skills)}, nil
+	}
 	return fixture.provisionLifecycleExecutor.Exec(ctx, project, instance, request)
+}
+
+// A provider registered by profile provisioning and deselected before the next init
+// returns the selection to the recorded facts; only its leftover skill shows the work.
+func TestProvisionRequiresConvergedSkillsWhenFactsMatch(t *testing.T) {
+	previewLoopbackFixture(t)
+	runtime, definition, _, desired := lifecycleFixture(t)
+	testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, desired, desired)), 0o600)
+	runtime.RepositoryRoot = "../../.."
+	runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=", "CCUSAGE_VERSION=1.2.3", "ENVIRONMENT_PROFILES=synthetic-kept", "YARD_VERSION=0.25.6-test")
+	runtime.Yard = domain.Context{YardName: "synthetic", IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: 1000}
+	runtime.Incus = &testkit.Incus{ServerInfo: ports.ServerInfo{Environment: "incus"}, Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{"user.subyard.ccusage_version": "1.2.3"}}}}
+	executor := &provisionFactsExecutor{provisionLifecycleExecutor: provisionLifecycleExecutor{&retryableIntegrationExecutor{}}, skills: "skills-stale\n"}
+	runtime.Executor = executor
+	if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); err != nil || ready {
+		t.Fatalf("stale static skills skipped ordinary provisioning: ready=%v err=%v", ready, err)
+	}
+	var probe struct {
+		Profiles string `json:"profiles"`
+	}
+	if len(executor.skillRequests) != 1 || json.Unmarshal(executor.skillRequests[0].Stdin, &probe) != nil || probe.Profiles != "synthetic-kept" {
+		t.Fatalf("init did not probe skills for its exact selection: %d requests, profiles %q", len(executor.skillRequests), probe.Profiles)
+	}
+	executor.skills = "skills-current\n"
+	if ready, err := runtime.VerifyStage(context.Background(), ports.ReconcileStageProvision); err != nil || !ready {
+		t.Fatalf("refreshed skills did not verify: ready=%v err=%v", ready, err)
+	}
+	if len(executor.factsRequests) != 1 {
+		t.Fatalf("matching facts were not the remaining check: %d", len(executor.factsRequests))
+	}
+	executor.skills = "unexpected\n"
+	if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); ready || err == nil {
+		t.Fatalf("an invalid skill probe report was accepted: ready=%v err=%v", ready, err)
+	}
 }
 
 func TestProvisionRequiresExactFactsAfterProfileSelectionChanges(t *testing.T) {
@@ -1185,6 +1236,9 @@ func TestProvisionRequiresExactFactsAfterProfileSelectionChanges(t *testing.T) {
 
 func (fixture provisionLifecycleExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	command := request.Command
+	if skillProbeRequest(request) {
+		return ports.InstanceExecResult{Stdout: []byte("skills-current\n")}, nil
+	}
 	if slices.Equal(command, provisionPasswdProbe("dev")) {
 		return ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}, nil
 	}
@@ -1243,6 +1297,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		return []testkit.IncusExecStep{
 			{}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}}, usage,
 			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
+			{Result: ports.InstanceExecResult{Stdout: []byte("skills-current\n")}},
 			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {}, {},
 		}
 	}
@@ -1273,10 +1328,13 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	bindArtifactTestPackages(t, &runtime, filepath.Dir(instructions))
 	assertStage(t, runtime, "provision", true, "matching running provision state")
-	if len(incus.ExecCalls) != 11 {
-		t.Fatalf("running provision observations = %d, want eleven including exact guest facts", len(incus.ExecCalls))
+	if len(incus.ExecCalls) != 12 {
+		t.Fatalf("running provision observations = %d, want twelve including static skills and exact guest facts", len(incus.ExecCalls))
 	}
-	if call := incus.ExecCalls[9].Request; len(call.Command) != 5 || call.Command[0] != "python3" || call.Command[4] != "check" || string(call.Stdin) != string(runtime.guestRuntimeFacts()) {
+	if !skillProbeRequest(incus.ExecCalls[5].Request) {
+		t.Fatalf("provision did not probe static skills after its configs: %#v", incus.ExecCalls[5].Request.Command[:3])
+	}
+	if call := incus.ExecCalls[10].Request; len(call.Command) != 5 || call.Command[0] != "python3" || call.Command[4] != "check" || string(call.Stdin) != string(runtime.guestRuntimeFacts()) {
 		t.Fatalf("provision did not check its exact guest facts: %#v", call)
 	}
 	if command := incus.ExecCalls[4].Request.Command; len(command) != 3 ||
@@ -1349,14 +1407,14 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		{"guest facts unavailable", testkit.IncusExecStep{Err: factsTransport}, factsTransport},
 	} {
 		incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
-		incus.ExecSteps[9] = scenario.step
+		incus.ExecSteps[10] = scenario.step
 		ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision)
 		if ready || !errors.Is(err, scenario.want) {
 			t.Fatalf("%s: ready=%v err=%v", scenario.name, ready, err)
 		}
 	}
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
-	incus.ExecSteps[7] = testkit.IncusExecStep{
+	incus.ExecSteps[8] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1},
 		Err:    errors.New("dispatcher drift"),
 	}

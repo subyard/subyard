@@ -45,11 +45,14 @@ file modes, missing content and link drift. New sources join the prepared runtim
 closed inventory; historical frozen recipes retain their original inventory and bytes.
 
 Installed runtime readiness includes static skill drift, including missing links and
-artifacts from a deselected provider. Completed release history does not grant new
-repair authority to ordinary initialization. Run `yard migrate --check`, then
-`yard migrate --yes` on the owner host without a yard selector to assess and authorize
-that repair. Static repair and skill retirement do not restart capability services;
-capability removal follows its owning lifecycle separately.
+artifacts from a deselected provider. The provision stage owns the static refresh, so
+ordinary `yard init` of the selected running yard repairs that drift and retires a
+deselected provider's skills, also when the selection returned to the recorded one.
+Drift in another yard, host tools and an unfinished release transition stay outside
+that init: run `yard migrate --check`, then `yard migrate --yes` on the owner host
+without a yard selector to assess and authorize them. Static repair and skill
+retirement do not restart capability services; capability removal follows its owning
+lifecycle separately.
 
 All providers link the same content into `~/.agents/skills` (Codex), `~/.claude/skills`,
 and `~/.config/opencode/skills`. Links are installed ahead of client installation and
