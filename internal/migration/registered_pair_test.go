@@ -658,6 +658,9 @@ func TestRegisteredDesiredIgnoresVMRestartOutputs(t *testing.T) {
 			set("volatile.eth0.host_name", "tapAFTER")
 			set("volatile.vm.rtc_adjustment", "-2")
 			set("volatile.vm.needs_reset", "true")
+			// The product start policy writes the owner device override and its project grant.
+			set("raw.qemu.conf", domain.VMRawQEMUConfig(false))
+			native.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = "allow"
 			if desired() != before {
 				t.Fatal("VM restart outputs changed the pinned Desired")
 			}
@@ -667,7 +670,7 @@ func TestRegisteredDesiredIgnoresVMRestartOutputs(t *testing.T) {
 
 func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 	for _, guest := range []bool{false, true} {
-		for _, change := range []string{"malformed-clock", "noncanonical-clock", "clock-suffix", "container-clock", "reset-false", "reset-empty", "reset-suffix", "container-reset", "uuid", "generation", "vsock", "limits", "device"} {
+		for _, change := range []string{"malformed-clock", "noncanonical-clock", "clock-suffix", "container-clock", "reset-false", "reset-empty", "reset-suffix", "container-reset", "uuid", "generation", "vsock", "limits", "device", "lowlevel-block", "container-lowlevel"} {
 			t.Run(fmt.Sprintf("guest-%t/%s", guest, change), func(t *testing.T) {
 				container := strings.HasPrefix(change, "container-")
 				owner, tmp, native, _ := pairedRegisteredOwners(t)
@@ -719,13 +722,16 @@ func TestRegisteredMigrationBindsNonClockVMDrift(t *testing.T) {
 					key = "volatile.uuid.generation"
 				case "vsock":
 					key = "volatile.vsock_id"
+				case "lowlevel-block", "container-lowlevel":
+					value = map[string]string{"lowlevel-block": "block", "container-lowlevel": "allow"}[change]
+					native.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = value
 				case "limits":
 					key = "limits.cpu"
 				case "device":
 					instance.Devices = maps.Clone(instance.Devices)
 					instance.Devices["foreign"] = map[string]string{"type": "disk", "source": "/foreign", "path": "/foreign"}
 				}
-				if change != "device" {
+				if change != "device" && !strings.Contains(change, "lowlevel") {
 					for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
 						values[key] = value
 					}
