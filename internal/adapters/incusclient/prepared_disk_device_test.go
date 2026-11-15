@@ -151,8 +151,7 @@ func TestPreparedReadOnlyDiskRecognizesOnlyOriginalBeforeOrExactDesiredOnReplay(
 }
 
 func TestPreparedReadOnlyDiskKeepsSameGETETagAcrossReplacement(t *testing.T) {
-	observer := &ownerCreateObserverFixture{}
-	client, fixture := ownerCreateClientFixture(t, observer, "instance-success")
+	client, fixture := ownerCreateClientFixture(t, "instance-success")
 	fixture.instance = &api.Instance{Name: "yard", Project: "original-project", InstancePut: api.InstancePut{Config: map[string]string{"volatile.uuid": "original-uuid"}}}
 	original, err := client.PrepareReadOnlyDisk(context.Background(), "original-project", "yard", "owned-routes", "/owned/routes", "/guest/routes")
 	if err != nil {

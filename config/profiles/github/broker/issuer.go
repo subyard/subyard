@@ -387,12 +387,6 @@ func loadKey(path string) (*rsa.PrivateKey, error) {
 	return parsePrivateKey(data)
 }
 
-// ValidatePrivateKey checks an imported PEM without exposing its contents.
-func ValidatePrivateKey(data []byte) error {
-	_, err := parsePrivateKey(data)
-	return err
-}
-
 func parsePrivateKey(data []byte) (*rsa.PrivateKey, error) {
 	if len(data) > maxKeyBytes {
 		return nil, errors.New("github private key is too large")

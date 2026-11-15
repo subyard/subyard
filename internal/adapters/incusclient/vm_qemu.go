@@ -78,14 +78,11 @@ func (client *Client) prepareVMStart(ctx context.Context, server incus.InstanceS
 	request := actual.Writable()
 	request.Config = maps.Clone(actual.Config)
 	request.Config["raw.qemu.conf"] = target
-	if err := beforeNative(ctx, native, "instance-config", project, name); err != nil {
-		return err
-	}
 	operation, err := native.UpdateInstance(name, request, etag)
 	if err != nil {
 		return normalizeError("write VM QEMU device policy before start", err)
 	}
-	return waitNative(ctx, native, operation, "instance-config", project, name)
+	return operation.Wait()
 }
 
 // ownedVMProject proves that a dedicated project carries this installation's

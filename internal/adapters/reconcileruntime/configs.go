@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
@@ -60,21 +59,6 @@ type configSourceBytes struct {
 	exists  bool
 }
 
-func (p *PreparedConfigs) Binding() string {
-	if p == nil {
-		return ""
-	}
-	return p.binding
-}
-
-// InstanceUUID returns the physical instance identity captured with the payloads.
-func (p *PreparedConfigs) InstanceUUID() string {
-	if p == nil {
-		return ""
-	}
-	return p.instance
-}
-
 func configBindingEnvironment(environment []string) []string {
 	result := make([]string, 0, len(environment))
 	for _, entry := range environment {
@@ -108,7 +92,7 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 			}
 		}
 	}
-	return runtime.applyPreparedConfigs(ctx, prepared, false)
+	return runtime.applyPreparedConfigs(ctx, prepared)
 }
 func (runtime Runtime) PrepareConfigs(ctx context.Context) (*PreparedConfigs, error) {
 	if runtime.Executor == nil {
@@ -239,62 +223,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	return &PreparedConfigs{previewSkillCutover: !runtime.legacyPreviewInstructions, files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
 }
 
-// ApplyPreparedConfigs rechecks the captured sources and uses only the cached
-// approved payloads. It never discovers a new file or integration at execution.
-func (runtime Runtime) ApplyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
-	return runtime.applyPreparedConfigs(ctx, prepared, true)
-}
-
-// CheckPreparedConfigs checks the retained exact source/resource set without
-// discovering another selection or making a guest call.
-func (runtime Runtime) CheckPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
-	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
-		return domain.ErrPlanStale
-	}
-	packageSources, err := runtime.artifactPackageSources()
-	if err != nil {
-		return errors.Join(domain.ErrPlanStale, err)
-	}
-	if len(packageSources) != len(prepared.packageSources) {
-		return domain.ErrPlanStale
-	}
-	for _, source := range packageSources {
-		identity, err := materializedSourceIdentity(source.Source)
-		if err != nil || identity != prepared.packageIdentities[source.Source] {
-			return domain.ErrPlanStale
-		}
-		expected, present := prepared.sources[configSourceKey{source.Source, false}]
-		actual, err := source.ReadSource()
-		if err != nil || !present || !expected.exists || !slices.Equal(actual, expected.payload) {
-			return domain.ErrPlanStale
-		}
-	}
-	for _, file := range prepared.files {
-		// Prepared readers may project an approved future import. Mutation checks
-		// its now-published native source rather than rereading the old projection.
-		file.readAsset = nil
-		expected, exists := prepared.payloads[file.destination]
-		actual, err := file.readSource()
-		if !exists && os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if !exists || !slices.Equal(actual, expected) {
-			return domain.ErrPlanStale
-		}
-	}
-	state, err := runtime.reconcileState(ctx)
-	if err != nil {
-		return err
-	}
-	if !state.InstanceFound || !strings.EqualFold(state.Instance.Status, "running") || state.Instance.Config["volatile.uuid"] != prepared.instance {
-		return domain.ErrPlanStale
-	}
-	return nil
-}
-func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs, recheck bool) error {
+func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
 	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
 		return domain.ErrPlanStale
 	}
@@ -309,21 +238,10 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 		return err
 	}
 	runtime.legacyPreviewInstructions = !prepared.previewSkillCutover
-	if recheck {
-		if err := runtime.CheckPreparedConfigs(ctx, prepared); err != nil {
-			return err
-		}
-	}
 	files, payloads, entries := prepared.files, prepared.payloads, prepared.entries
 	evidence, err := runtime.prepareConfigDiagnostics(ctx, prepared)
 	if err != nil {
 		return err
-	}
-	if recheck {
-		files = slices.Clone(files)
-		for i := range files {
-			files[i].readAsset = nil
-		}
 	}
 	output := runtime.Stdout
 	if output == nil {

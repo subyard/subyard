@@ -2246,18 +2246,11 @@ The Orca profile retains its existing `orca-runtime` identity and wire fingerpri
 digests. It proves no owned artifacts remain for retained-owner admission; successful
 cleanup still converges to the approved desired digest. It does not relax apply verification.
 
-An optional `runtime.custody: true` declares resource generation fencing for the private native
-owner protocol. Its handler additionally accepts `custody-observe`,
-`custody-apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256 EXPECTED_GENERATION GENERATION`, and
-`custody-fence EXPECTED_GENERATION GENERATION SUCCESSOR`. Custody observations contain only
-`{"generation":"0"}` for an absent generation or a lowercase SHA-256 generation. Inspection
-does not claim a generation. A consented apply durably claims the exact predecessor or checks its
-own generation under the component's actual mutation lock, retaining that lock through verification.
-A recovery fence admits only the original predecessor, original generation or its own idempotent
-successor; it fsyncs and verifies that successor under the same lock before acknowledging it.
-Busy locks and unrelated generation drift refuse. Every relevant native invocation must carry
-this recipe. This capability does not infer closure of other transports, change ordinary Go
-mutation admission, or make a fence proof of desired runtime convergence.
+A manifest may still declare `runtime.custody: true`, and a declaring handler may still accept
+`custody-observe`, `custody-apply` and `custody-fence`. These actions belonged to the removed
+native release-owner protocol; the engine no longer invokes them. It still invokes the ordinary
+`observe` and `apply` actions and, for developer identity owners, `identity-observe` and
+`identity-apply`.
 
 GitHub declares `github-runtime`, reusing its owner-service lifecycle for release delivery,
 restart and verification. Its authenticated status includes the loaded broker's executable
@@ -2272,21 +2265,9 @@ systemd policy, preserves a disabled timer, and leaves absent installations
 absent even when selected. Deselected installed files remain release consumers;
 refresh keeps their timer disabled. Observations bind public file metadata and
 manager readiness without inspecting repositories, URLs or credentials.
-Its native custody handler retains the existing guest installation lock across generation CAS,
-source/baseline validation, unit stop, asset publication, reload, enable/start and verification.
-The durable generation is a protected profile-owned sibling of the installed runtime directory,
-so claiming it does not itself change the approved runtime baseline. Recovery also fences a delayed
-first claim from an absent generation; subsequent work uses a fresh owner-bound generation.
-Ordinary apply, pause, resume and release refresh invalidate older native claims under that
-same lock before their first effect. An already current no-op does not change the generation.
-The deterministic native generation includes its observed predecessor, so a later fresh plan
-cannot restore an older generation after recovery has fenced it.
-
-Native effects preserve the existing supported 75-minute component allowance, with a separate
-30-second drain and durable publication reserve. Component-specific shorter deadlines still apply.
-The owner permits a 76-minute mutation exchange and 75-minute 40-second armed shutdown allowance;
-read-only queries retain their shorter bound. Expiration, cancellation and local process death
-never constitute a native terminal witness.
+Ordinary apply, pause, resume and release refresh invalidate an older custody generation under
+the existing guest installation lock before their first effect; an already current no-op does not
+change it.
 
 Core also registers `core-guest-runtime` and `key-tools-runtime` for already installed helpers.
 Inspection of an exactly matching completed release validates installed consumers

@@ -8,9 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -22,13 +20,6 @@ const materializedBlobPrefix = "prepared/materialized-bytes/"
 
 func materializedBlobPath(content []byte) string {
 	return materializedBlobPrefix + fmt.Sprintf("%x", sha256.Sum256(content))
-}
-
-func (p *PreparedInstalledRuntime) MaterializedSourceBinding() string {
-	if p == nil || (p.owner != "materialized-files" && p.owner != "materialized-integrations") {
-		return ""
-	}
-	return p.source
 }
 
 // These descriptors are an encoding of the owning component's selection, not
@@ -77,55 +68,6 @@ func (runtime Runtime) materializedProjectedSource(path string) (bool, error) {
 	return matched && snapshot.Exists && snapshot.Identity == (config.PersistentFileIdentity{}), err
 }
 
-func (runtime Runtime) readPublishedMaterializedSource(path string) ([]byte, error) {
-	files := runtime.PreparedSources
-	if files == nil {
-		return nil, domain.ErrPlanStale
-	}
-	relative, err := filepath.Rel(files.Root, path)
-	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, "../") {
-		return nil, domain.ErrPlanStale
-	}
-	var snapshot config.PersistentFileSnapshot
-	if files.PinnedRoot != nil {
-		actual, err := os.Lstat(files.Root)
-		if err != nil {
-			return nil, domain.ErrPlanStale
-		}
-		held, err := files.PinnedRoot.Stat()
-		if err != nil || !os.SameFile(actual, held) || actual.Mode()&os.ModeSymlink != 0 {
-			return nil, domain.ErrPlanStale
-		}
-		snapshot, err = config.ReadPersistentSnapshotAt(files.PinnedRoot, filepath.ToSlash(relative))
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		snapshot, err = config.ReadPersistentFileSnapshot(files.Root, path)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !snapshot.Exists {
-		return nil, domain.ErrPlanStale
-	}
-	return snapshot.Content, nil
-}
-
-func (runtime Runtime) checkProjectedMaterializedGuard(path []byte, original, current string, projected bool, payload []byte) error {
-	if original == current {
-		return nil
-	}
-	if !projected {
-		return domain.ErrPlanStale
-	}
-	actual, err := runtime.readPublishedMaterializedSource(string(path))
-	if err != nil || !bytes.Equal(actual, payload) {
-		return domain.ErrPlanStale
-	}
-	return nil
-}
-
 type materializedRecipe struct {
 	Version      int
 	Configs      materializedConfigs
@@ -143,14 +85,6 @@ func describeMaterializedArtifacts(entries []integrationArtifact) []materialized
 	var result []materializedArtifact
 	for _, e := range entries {
 		result = append(result, materializedArtifact{e.ID, e.Kind, e.Digest, e.SourceDigest, e.Format, e.Content, []byte(e.Path), []byte(e.Target), e.FileTarget, e.Mode})
-	}
-	return result
-}
-
-func restoreMaterializedArtifacts(entries []materializedArtifact) []integrationArtifact {
-	var result []integrationArtifact
-	for _, e := range entries {
-		result = append(result, integrationArtifact{ID: e.ID, Kind: e.Kind, Digest: e.Digest, SourceDigest: e.SourceDigest, Format: e.Format, Content: e.Content, Path: string(e.Path), Target: string(e.Target), FileTarget: e.FileTarget, Mode: e.Mode})
 	}
 	return result
 }
@@ -259,7 +193,7 @@ func (runtime Runtime) PrepareMaterializedConfigs(ctx context.Context, prepared 
 	if err != nil {
 		return nil, err
 	}
-	p := &PreparedInstalledRuntime{owner: "materialized-files", runtime: runtime.configRuntimeBinding(), resources: runtime.installedResourceBinding(), files: map[string][]byte{}, configs: prepared}
+	p := &PreparedInstalledRuntime{owner: "materialized-files", runtime: runtime.configRuntimeBinding(), resources: runtime.installedResourceBinding(), files: map[string][]byte{}}
 	for index, file := range description.Files {
 		if file.Payload != "" {
 			p.files[file.Payload] = prepared.payloads[prepared.files[index].destination]
@@ -277,7 +211,6 @@ func (runtime Runtime) PrepareMaterializedConfigs(ctx context.Context, prepared 
 	if err := checkMaterializedRecipeSize(p); err != nil {
 		return nil, err
 	}
-	p.binding = installedRuntimeDigest(json.RawMessage(p.Recipe()))
 	return p, nil
 }
 
@@ -327,167 +260,4 @@ func readMaterializedMetadata(p *PreparedInstalledRuntime) ([]byte, map[string]b
 		allowed[path] = true
 	}
 	return raw, allowed, nil
-}
-
-func (runtime Runtime) restoreMaterializedConfigs(ctx context.Context, p *PreparedInstalledRuntime) (*PreparedConfigs, error) {
-	var original materializedRecipe
-	raw, allowed, err := readMaterializedMetadata(p)
-	if err != nil {
-		return nil, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&original); err != nil {
-		return nil, err
-	}
-	canonical, _ := json.Marshal(original)
-	if original.Version != 1 || !bytes.Equal(raw, canonical) {
-		return nil, errors.New("invalid materialized metadata")
-	}
-	var refusals []error
-	checkPayload := func(label, reference string) {
-		payload, exists := p.files[reference]
-		if !exists || reference != materializedBlobPath(payload) {
-			refusals = append(refusals, fmt.Errorf("%s: recorded materialized payload missing or changed: %w", label, domain.ErrPlanStale))
-		}
-	}
-	for _, file := range original.Configs.Files {
-		if file.Payload != "" {
-			checkPayload(string(file.Destination), file.Payload)
-		}
-	}
-	for _, source := range original.Configs.Sources {
-		if source.Exists {
-			checkPayload(string(source.Path), source.Payload)
-		}
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return nil, err
-	}
-	if p.owner == "materialized-files" && original.Integrations != nil {
-		return nil, errors.New("unexpected integration metadata")
-	}
-	if err := p.overlayAfterOwnerConfigs(&original); err != nil {
-		return nil, err
-	}
-	if p.afterOwnerConfigs != nil || p.afterOwnerConfigSource {
-		if (p.owner != "materialized-files" && p.owner != "materialized-integrations") || p.afterOwner == nil {
-			return nil, domain.ErrPlanStale
-		}
-	}
-	// Absence is the exact historical selector, including recipes with no
-	// selected instruction descriptors. Current recipes bind cutover explicitly.
-	runtime.legacyPreviewInstructions = !original.Configs.PreviewSkillCutover
-	// The selector is only a scope/guard oracle. Its newly read payloads are
-	// discarded; the returned handle below is populated from original bytes.
-	var fresh *PreparedConfigs
-	if p.afterOwnerConfigSource {
-		if original.Configs.Instance != afterOwnerConfigInstance {
-			return nil, domain.ErrPlanStale
-		}
-		fresh, err = runtime.prepareConfigPayloads(afterOwnerConfigInstance)
-	} else if p.afterOwnerConfigs != nil {
-		fresh, err = runtime.afterOwnerPhysicalConfigs(ctx)
-	} else {
-		fresh, err = runtime.PrepareConfigs(ctx)
-	}
-	if err != nil {
-		return nil, errors.Join(domain.ErrPlanStale, err)
-	}
-	description, err := runtime.materializedConfigDescription(fresh)
-	if err != nil {
-		return nil, err
-	}
-	if len(description.Sources) != len(original.Configs.Sources) {
-		return nil, domain.ErrPlanStale
-	}
-	for index, guard := range original.Configs.Sources {
-		current := &description.Sources[index]
-		if !bytes.Equal(current.Path, guard.Path) || current.Projected != guard.Projected {
-			return nil, domain.ErrPlanStale
-		}
-		if err := runtime.checkProjectedMaterializedGuard(guard.Path, guard.Identity, current.Identity, guard.Projected, p.files[guard.Payload]); err != nil {
-			return nil, err
-		}
-		current.Identity = guard.Identity
-	}
-	if installedRuntimeDigest(description) != installedRuntimeDigest(original.Configs) || p.owner == "materialized-files" && p.afterOwnerConfigs == nil && p.source != original.Configs.sourceBinding() {
-		return nil, domain.ErrPlanStale
-	}
-	for index, file := range original.Configs.Files {
-		if file.Payload == "" {
-			continue
-		}
-		payload, exists := p.files[file.Payload]
-		if !exists || !bytes.Equal(payload, fresh.payloads[fresh.files[index].destination]) {
-			return nil, domain.ErrPlanStale
-		}
-		allowed[file.Payload] = true
-		fresh.payloads[fresh.files[index].destination] = payload
-	}
-	for _, source := range original.Configs.Sources {
-		if source.Exists {
-			payload, exists := p.files[source.Payload]
-			if !exists || source.Payload != materializedBlobPath(payload) {
-				return nil, domain.ErrPlanStale
-			}
-			allowed[source.Payload] = true
-			for key := range fresh.sources {
-				if key.follow == source.Follow && bytes.Equal([]byte(runtime.bindingPath(key.path)), source.Path) {
-					fresh.sources[key] = configSourceBytes{payload: payload, exists: true}
-				}
-			}
-		}
-	}
-	if p.owner == "materialized-files" && len(allowed) != len(p.files) {
-		return nil, errors.New("unrecognized materialized recipe leaf")
-	}
-	fresh.entries = restoreMaterializedArtifacts(original.Configs.Entries)
-	return fresh, nil
-}
-
-func (runtime Runtime) bindMaterializedRecipe(ctx context.Context, r installedRecipe, raw []byte) (*PreparedInstalledRuntime, error) {
-	if r.Profile != "" || r.Handler != "" || r.Launcher != "" || r.HookBefore != "" || len(r.Native) != 0 || len(r.Leaves) != 0 || (r.Owner != "materialized-files" && r.Owner != "materialized-integrations") {
-		return nil, errors.New("invalid materialized recipe scope")
-	}
-	p := &PreparedInstalledRuntime{owner: r.Owner, source: r.Source, runtime: r.Runtime, resources: r.Resources, files: map[string][]byte{}, afterOwnerConfigs: runtime.afterOwnerConfigs, afterOwnerConfigSource: runtime.afterOwnerConfigSource, afterOwner: r.AfterOwner, afterOwnerIntegrations: runtime.afterOwnerIntegrations}
-	previous := ""
-	for _, file := range r.Files {
-		if file.Path <= previous || len(file.Path) > 512 || filepath.Clean(file.Path) != file.Path || filepath.IsAbs(file.Path) {
-			return nil, errors.New("invalid materialized recipe path")
-		}
-		previous = file.Path
-		p.files[file.Path] = file.Content
-	}
-	if err := checkMaterializedRecipeSize(p); err != nil {
-		return nil, err
-	}
-	if p.runtime != runtime.configRuntimeBinding() || p.resources != runtime.installedResourceBinding() {
-		return nil, domain.ErrPlanStale
-	}
-	var err error
-	p.configs, err = runtime.restoreMaterializedConfigs(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	if p.owner == "materialized-integrations" {
-		if err := runtime.restoreMaterializedIntegrations(ctx, p); err != nil {
-			return nil, err
-		}
-	}
-	p.binding = installedRuntimeDigest(json.RawMessage(raw))
-	return p, nil
-}
-
-func (runtime Runtime) ApplyPreparedMaterializedConfigs(ctx context.Context, p *PreparedInstalledRuntime) error {
-	if p == nil || p.owner != "materialized-files" || p.closed.Load() || p.runtime != runtime.configRuntimeBinding() || p.resources != runtime.installedResourceBinding() {
-		return domain.ErrPlanStale
-	}
-	prepared, err := runtime.restoreMaterializedConfigs(ctx, p)
-	if err != nil {
-		return err
-	}
-	// No source reads occur beyond this guard: all guest writes consume the
-	// reconstructed original payloads and original source-owned destinations.
-	return runtime.applyPreparedConfigs(ctx, prepared, false)
 }

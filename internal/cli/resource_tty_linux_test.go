@@ -5,8 +5,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
@@ -901,8 +899,7 @@ func TestSealedDispatcherRemainsExecutableInProfileServiceChild(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer release()
-		observer := &maintenanceCommandObserver{}
-		ctx := ports.WithNativeOwnerHome(ports.WithNativeInvocationKey(ports.WithNativeOperationObserver(context.Background(), observer), "sealed-profile-callback"), loaded.Context.Paths.DataHome)
+		ctx := context.Background()
 		for _, mode := range []string{"sealed", "disk", "foreign", "other-memfd"} {
 			runtime := cli.initPlatform(loaded, nil).(reconcileruntime.Runtime)
 			if mode != "sealed" {
@@ -927,24 +924,6 @@ func TestSealedDispatcherRemainsExecutableInProfileServiceChild(t *testing.T) {
 			err := runtime.ApplyStage(ctx, ports.ReconcileStageProfileServices)
 			if strings.Join(runtime.Environment, "\x00") != before {
 				t.Fatal("execution mutated bound runtime environment")
-			}
-			bound := []string{}
-			for _, entry := range runtime.Environment {
-				if !strings.HasPrefix(entry, "SUBYARD_OPERATION_ID=") && !strings.HasPrefix(entry, "SUBYARD_SUDO_PREAUTHORIZED=") {
-					bound = append(bound, entry)
-				}
-			}
-			bound = append(bound, "SUBYARD_NATIVE_OWNER_FD3=1")
-			body, readErr := os.ReadFile(filepath.Join(root, "scripts/profile-services.sh"))
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			raw, _ := json.Marshal(struct {
-				Payload                []byte
-				Environment, Arguments []string
-			}{body, bound, []string{"--yes"}})
-			if observer.source != fmt.Sprintf("%x", sha256.Sum256(raw)) {
-				t.Fatal("native command binding lost original symbolic engine roles")
 			}
 			if mode == "foreign" || mode == "other-memfd" {
 				if err == nil || !strings.Contains(output.String(), "profile services: native engine is missing") {

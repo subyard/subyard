@@ -94,5 +94,5 @@ func (client *Client) AdoptRegisteredInstance(ctx context.Context, before ports.
 	if err != nil {
 		return err
 	}
-	return waitNative(ctx, native, operation, "instance-config", before.Project, before.Name)
+	return operation.Wait()
 }

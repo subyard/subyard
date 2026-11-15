@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -20,7 +19,7 @@ func TestOrdinarySharedProjectRequiresCanonicalInitialConfig(t *testing.T) {
 			if change == "conflict" {
 				mode = "ordinary-conflict"
 			}
-			client, fixture := ownerCreateClientFixture(t, &ownerCreateObserverFixture{}, mode)
+			client, fixture := ownerCreateClientFixture(t, mode)
 			p := ports.PreparedImageProject{Project: "subyard-test-yard", Absent: true, SharedImages: true}
 			p.InitialConfig, _ = renderOwnerProjectConfig(t, domain.Context{YardName: "test-yard", IncusProject: p.Project, YardInstanceName: "yard-test-yard"}, []string{"SUBYARD_HOME=/fixture/data", "SUBYARD_CONFIG_HOME=/fixture/config", "YARD_NAME=test-yard", "YARD_INSTANCE_NAME=yard-test-yard", "HOST_BASE=/fixture/host", "SRV_POOL=default", "SRV_VOLUME=yard-test-yard", "STORAGE_PATH=/fixture/storage"})
 			switch change {
@@ -70,103 +69,24 @@ func TestOrdinarySharedProjectRequiresCanonicalInitialConfig(t *testing.T) {
 	}
 }
 
-type cancelOwnerObserver struct {
-	*custodyObserver
-	cancel context.CancelFunc
-}
-
-func (o *cancelOwnerObserver) Accepted(value ports.NativeOperation) error {
-	err := o.custodyObserver.Accepted(value)
-	o.cancel()
-	return err
-}
-
-func TestPreparedOwnerTemporaryStopChecksOriginalUUIDBeforeSubmit(t *testing.T) {
-	for _, drift := range []string{"none", "uuid", "desired", "missing", "already-stopped", "known-failure", "cancel"} {
-		t.Run(drift, func(t *testing.T) {
-			fake, err := testkit.NewIncusServer(testkit.TempDir(t))
-			if err != nil {
-				t.Fatal(err)
+func TestOrdinaryProjectInitialPOSTUsesActualRenderer(t *testing.T) {
+	for _, reporting := range []string{"0", "1"} {
+		t.Run(reporting, func(t *testing.T) {
+			client, fixture := ownerCreateClientFixture(t, "ordinary")
+			p := ports.PreparedImageProject{Project: "subyard-test-yard", Absent: true, SharedImages: true}
+			initialConfig, contextValue := renderOwnerProjectConfig(t, domain.Context{YardName: "test-yard", IncusProject: p.Project, YardInstanceName: "yard-test-yard"}, []string{"SUBYARD_HOME=/original/data", "SUBYARD_CONFIG_HOME=/original/config", "YARD_NAME=test-yard", "YARD_INSTANCE_NAME=yard-test-yard", "HOST_BASE=/original/host-\xff", "SRV_POOL=original-pool", "SRV_VOLUME=original-srv", "STORAGE_PATH=/original/storage", "YARD_KIND=vm", "VM_FREE_PAGE_REPORTING=" + reporting, "NESTED_E2E_VMS=1"})
+			p.InitialConfig = initialConfig
+			if err := client.ApplyPreparedImageProject(context.Background(), p); err != nil {
+				t.Fatal("actual initial project config refused", err)
 			}
-			t.Cleanup(func() { fake.Close() })
-			instance := map[string]any{"name": "yard-e2e-yard", "type": "container", "status": "Stopped", "config": map[string]string{"volatile.uuid": "original-uuid", "user.subyard.desired_power": "running"}}
-			fake.SetInstance("subyard-e2e-yard", "yard-e2e-yard", instance)
-			client := New(fake.SocketPath, "projects")
-			prepared, err := client.PrepareTemporaryStop(context.Background(), "subyard-e2e-yard", "yard-e2e-yard")
-			if err != nil {
-				t.Fatal(err)
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			config := fixture.project.Config
+			if fixture.posts != 1 || config["user.subyard.installation"] != "1" || config["user.subyard.data_home"] != "/original/data" || config["user.subyard.context"] != contextValue || config["restricted.containers.interception"] != "allow" || config["restricted.virtual-machines.lowlevel"] != "allow" || config["features.images"] != "false" {
+				t.Fatal("initial actual POST omitted ownership or policy")
 			}
-			instance["status"] = "Running"
-			switch drift {
-			case "uuid":
-				instance["config"] = map[string]string{"volatile.uuid": "foreign-uuid", "user.subyard.desired_power": "running"}
-			case "desired":
-				instance["config"] = map[string]string{"volatile.uuid": "original-uuid", "user.subyard.desired_power": "stopped"}
-			case "already-stopped":
-				instance["status"] = "Stopped"
-			case "known-failure":
-				fake.QueuePowerErrors("fixed fixture failure")
-			}
-			fake.SetInstance("subyard-e2e-yard", "yard-e2e-yard", instance)
-			if drift == "missing" {
-				fake.ReplaceInstances(nil)
-			}
-			observer := &custodyObserver{}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			var nativeObserver ports.NativeOperationObserver = observer
-			if drift == "cancel" {
-				nativeObserver = &cancelOwnerObserver{observer, cancel}
-			}
-			ctx = ports.WithNativeOperationObserver(ctx, nativeObserver)
-			err = client.ApplyPreparedTemporaryStop(ctx, prepared)
-			if drift == "cancel" {
-				if err == nil || len(observer.accepted) != 1 {
-					t.Fatal("cancellation invented successful completion", err)
-				}
-				for _, final := range observer.terminal {
-					if final.ID != observer.accepted[0].ID || !nativeFinalStatus(api.StatusCode(final.Status)) {
-						t.Fatal("cancellation invented final identity")
-					}
-				}
-				if len(observer.terminal) == 0 && !observer.uncertain {
-					t.Fatal("unproved cancellation lost UNKNOWN")
-				}
-				return
-			}
-			if drift == "uuid" || drift == "desired" || drift == "missing" {
-				if err == nil || len(fake.PowerCalls()) != 0 || len(observer.accepted) != 0 {
-					t.Fatal("changed original resource submitted", err)
-				}
-				if drift != "missing" && !errors.Is(err, domain.ErrPlanStale) {
-					t.Fatal(err)
-				}
-				return
-			}
-			if drift == "already-stopped" {
-				if err != nil || len(fake.PowerCalls()) != 0 {
-					t.Fatal("original stop no-op submitted", err)
-				}
-				return
-			}
-			if drift == "known-failure" {
-				var failure *ports.NativeOperationFailure
-				if !errors.As(err, &failure) || observer.uncertain {
-					t.Fatal("known native failure lost", err)
-				}
-			} else if err != nil {
-				t.Fatal(err)
-			}
-			if len(fake.PowerCalls()) != 1 || len(observer.accepted) != 1 || len(observer.terminal) != 1 {
-				t.Fatal("missing exact accepted/final operation", err)
-			}
-			op := observer.accepted[0]
-			if op.ID == "" || op.Server == "" || op.Project != prepared.Project || op.Resource != prepared.Instance {
-				t.Fatal("operation scope not bound")
-			}
-			current, err := client.NativeOperationState(context.Background(), op)
-			if err != nil || current != observer.terminal[0] {
-				t.Fatal("exact durable operation query changed", err)
+			if _, exists := config[ownerCreateTokenKey]; exists {
+				t.Fatal("ordinary project acquired native token")
 			}
 		})
 	}

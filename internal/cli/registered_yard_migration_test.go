@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
-	"github.com/Subyard/Subyard/internal/uninstall"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -146,21 +145,7 @@ func TestPlainInitMigrationProbePropagatesMissingNativeSocket(t *testing.T) {
 	}
 }
 
-type maintenanceCommandObserver struct {
-	ports.NativeOperationObserver
-	starts int
-	source string
-}
-
-func (o *maintenanceCommandObserver) CommandStarted(_ string, source string) (uint64, error) {
-	o.source = source
-	o.starts++
-	return 1, nil
-}
-func (*maintenanceCommandObserver) CommandTerminal(uint64) error { return nil }
-func (*maintenanceCommandObserver) Uncertain()                   {}
-
-func TestRegisteredMaintenanceUsesPreparedCLIContextAndOriginalOwner(t *testing.T) {
+func TestRegisteredMaintenanceUsesPreparedCLIContext(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	var output bytes.Buffer
 	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &output, Stderr: &output})
@@ -186,30 +171,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/engine-context.sh"
 subyard_require_engine_context
 [ "$1" = stop ] && [ "$#" = 1 ]
-[ "$SUBYARD_NATIVE_OWNER_FD3" = 1 ]
 : > "$SUBYARD_HOME/physical-called"
 `), 0700)
-	observer := &maintenanceCommandObserver{}
-	ctx := ports.WithNativeOwnerHome(ports.WithNativeInvocationKey(ports.WithNativeOperationObserver(context.Background(), observer), "prepared-maintenance"), loaded.Context.Paths.DataHome)
 	marker := filepath.Join(loaded.Context.Paths.DataHome, "physical-called")
 	if err := os.MkdirAll(loaded.Context.Paths.DataHome, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.RunMigrationPhysicalLifecycle(ctx, "stop"); err == nil || observer.starts != 0 {
-		t.Fatal("missing original owner admitted", err)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatal("missing owner had effects", err)
-	}
-	_, closeOwner, err := uninstall.OwnerLock(context.Background(), loaded.Context.Paths.DataHome, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeOwner()
-	if err := runtime.RunMigrationPhysicalLifecycle(ctx, "stop"); err != nil {
+	if err := runtime.RunMigrationPhysicalLifecycle(context.Background(), "stop"); err != nil {
 		t.Fatal("prepared CLI context rejected", err, output.String())
 	}
-	if _, err := os.Stat(marker); err != nil || observer.starts != 1 {
-		t.Fatal("physical boundary did not run", err, observer.starts)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("physical boundary did not run", err)
 	}
 }

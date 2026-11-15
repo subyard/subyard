@@ -23,7 +23,6 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
-	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 const (
@@ -318,7 +317,6 @@ func (runtime Runtime) applyProfileRuntime(
 	ctx context.Context,
 	definition profile.Definition,
 	operationID, actual, desired string,
-	custody ...string,
 ) error {
 	if !domain.SafeID(operationID) {
 		return errors.New("profile runtime refresh requires a valid operation ID")
@@ -334,16 +332,7 @@ func (runtime Runtime) applyProfileRuntime(
 	if observation.State != ports.RuntimeStateStale || observation.Actual != actual || observation.Desired != desired {
 		return fmt.Errorf("%w: profile runtime assessment changed before apply", domain.ErrPlanStale)
 	}
-	action := "apply"
-	arguments := []string{operationID, actual, desired}
-	if len(custody) != 0 {
-		if !definition.Runtime.Custody || len(custody) != 2 {
-			return domain.ErrPlanStale
-		}
-		action = "custody-apply"
-		arguments = append(arguments, custody...)
-	}
-	stdout, stderr, err := runtime.runProfileRuntimeHandler(ctx, definition, action, arguments...)
+	stdout, stderr, err := runtime.runProfileRuntimeHandler(ctx, definition, "apply", operationID, actual, desired)
 	if err != nil {
 		if runtime.Stderr != nil && len(stderr) != 0 {
 			_, _ = runtime.Stderr.Write(stderr)
@@ -404,7 +393,7 @@ func (runtime Runtime) runProfileRuntimeHandler(
 	arguments ...string,
 ) ([]byte, []byte, error) {
 	timeout := profileRuntimeObserveLimit
-	if action == "apply" || action == "custody-apply" || action == "custody-fence" {
+	if action == "apply" {
 		timeout = profileRuntimeApplyLimit
 	}
 	return runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, runtime.Environment, timeout, action, arguments...)
@@ -431,22 +420,6 @@ func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile
 		command.Env = append(command.Environ(), "SUBYARD_REPOSITORY_ROOT="+parentRoot)
 	}
 	command.Stdin = nil
-	if ports.NativeOperationObserverFrom(ctx) != nil && action != "observe" && action != "custody-observe" {
-		home := runtime.Yard.Paths.DataHome
-		if home == "" {
-			home = runtime.environmentValue("SUBYARD_HOME")
-		}
-		owner, err := uninstall.BorrowOwnerLock(home)
-		if err != nil {
-			return nil, nil, err
-		}
-		if owner == nil {
-			return nil, nil, errors.New("native profile transport requires its original owner barrier")
-		}
-		defer owner.Close()
-		command.ExtraFiles = append(command.ExtraFiles, owner)
-		command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_FD3=1")
-	}
 	if action == "observe" && len(runtime.projectMetadataProjection) != 0 {
 		command.Stdin = bytes.NewReader(runtime.projectMetadataProjection)
 	}
@@ -462,26 +435,15 @@ func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile
 	stderr := &profileRuntimeBoundedBuffer{limit: profileRuntimeOutputLimit}
 	command.Stdout = stdout
 	command.Stderr = stderr
-	observationContext := ctx
-	if action == "observe" || action == "custody-observe" {
-		observationContext = ports.WithoutNativeOperationObserver(ctx)
-	}
-	finish, err := runtime.beginNativeCommand(observationContext, "shipped-handler", cleanPath, command.Env, append([]string{action}, arguments...))
-	if err != nil {
-		return nil, nil, err
-	}
 	err = command.Run()
 	if stdout.exceeded || stderr.exceeded {
-		return nil, stderr.Bytes(), finish(errors.New("profile runtime handler output exceeded limit"))
+		return nil, stderr.Bytes(), errors.New("profile runtime handler output exceeded limit")
 	}
 	if callContext.Err() != nil {
-		return nil, stderr.Bytes(), finish(fmt.Errorf("profile runtime handler cancelled: %w", callContext.Err()))
+		return nil, stderr.Bytes(), fmt.Errorf("profile runtime handler cancelled: %w", callContext.Err())
 	}
 	if err != nil {
-		return nil, stderr.Bytes(), finish(fmt.Errorf("profile runtime handler %s failed: %w", action, err))
-	}
-	if err := finish(nil); err != nil {
-		return nil, nil, err
+		return nil, stderr.Bytes(), fmt.Errorf("profile runtime handler %s failed: %w", action, err)
 	}
 	return bytes.Clone(stdout.Bytes()), bytes.Clone(stderr.Bytes()), nil
 }

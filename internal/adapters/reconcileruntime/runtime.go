@@ -63,17 +63,6 @@ type Runtime struct {
 	appliedIntegrationInspection bool
 	profileDiagnostics           bool
 	persistProjection            map[string]string
-	ownerInitPlanning            bool
-	ownerSources                 *preparedOwnerSourceExecution
-	afterOwnerConfigs            *afterOwnerConfigPhysical
-	afterOwnerConfigSource       bool
-	afterOwnerBroker             *afterOwnerBrokerPhysical
-	afterOwnerRoutes             *afterOwnerRoutePhysical
-	afterOwnerIntegrationSource  bool
-	afterOwnerIntegrations       *afterOwnerIntegrationPhysical
-	ownerProject                 *ownerProjectExecution
-	ownerInstance                *ownerInstanceExecution
-	ownerVolume                  *ownerVolumeExecution
 	LegacyContinuation           *domain.LegacyContinuation
 	RepositoryRoot               string
 	// LogicalRepositoryRoot labels durable recipes while RepositoryRoot may be
@@ -258,9 +247,6 @@ func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileSt
 }
 
 func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
-	if runtime.ownerInitPlanning {
-		return domain.ErrPlanStale
-	}
 	if err := runtime.checkLegacyContinuation(ctx); err != nil {
 		return err
 	}
@@ -268,9 +254,6 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageProject:
 		if runtime.LegacyContinuation != nil {
 			return runtime.checkLegacyContinuation(ctx)
-		}
-		if ports.NativeOperationObserverFrom(ctx) != nil {
-			return runtime.applyOwnerProjectPortions(ctx)
 		}
 		return runtime.runScript(ctx, runtime.Stderr, "02-create-project.sh", "--yes")
 	case ports.ReconcileStageInstance:
@@ -359,9 +342,6 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 // integration or project-hook reconciliation. Callers may restore project data
 // before continuing with the ordinary provision stage.
 func (runtime Runtime) ProvisionBase(ctx context.Context) error {
-	if runtime.ownerInitPlanning {
-		return domain.ErrPlanStale
-	}
 	if err := runtime.checkLegacyContinuation(ctx); err != nil {
 		return err
 	}
@@ -410,7 +390,6 @@ func (runtime Runtime) VerifyStageWithDiagnostic(ctx context.Context, stage port
 }
 
 func (runtime Runtime) scriptConverged(ctx context.Context, name string, arguments ...string) (bool, error) {
-	ctx = ports.WithoutNativeOperationObserver(ctx)
 	return probeConverged(runtime.runScript(ctx, nil, name, arguments...))
 }
 
@@ -1093,9 +1072,6 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
-	if runtime.ownerInitPlanning {
-		return domain.ErrPlanStale
-	}
 	if runtime.LegacyContinuation != nil {
 		return errors.New("legacy continuation cannot authorize reset or teardown")
 	}
@@ -1247,11 +1223,7 @@ func (runtime Runtime) importPowerState(ctx context.Context) error {
 }
 
 func (runtime Runtime) powerService() application.PowerService {
-	config := runtime.ConfigWriter
-	if runtime.ownerInstance != nil && runtime.ownerInstance.created != nil {
-		config = ownerCreatedPowerWriter{runtime}
-	}
-	return application.PowerService{Instances: runtime.Incus, Config: config}
+	return application.PowerService{Instances: runtime.Incus, Config: runtime.ConfigWriter}
 }
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
@@ -1284,22 +1256,6 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	desired := application.InitialPower(runtime.Yard)
 	vmWeight := runtime.environmentValue("VM_CPU_WEIGHT")
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
-	if runtime.ownerInstance != nil {
-		if err == nil {
-			if runtime.ownerInstance.created == nil {
-				return domain.ErrPlanStale
-			}
-			original := runtime.ownerInstance.original
-			if runtime.ownerInstance.resolved != nil {
-				original = *runtime.ownerInstance.resolved
-			}
-			if runtime.checkCreatedOwnerInstance(ctx, original, *runtime.ownerInstance.created) != nil {
-				return domain.ErrPlanStale
-			}
-		} else if !errors.Is(err, ports.ErrInstanceNotFound) {
-			return err
-		}
-	}
 	if err == nil {
 		if vmWeight == "" {
 			vmWeight = instance.Config["user.subyard.vm_cpu_weight"]
@@ -1324,9 +1280,6 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	}
 	if err := runtime.withNetworkStart(ctx, func() error {
 		environment := map[string]string{"SUBYARD_POWER_DESIRED": string(desired), "SUBYARD_PREPARED_INCUS_APPARMOR": appArmor, "VM_CPU_WEIGHT": vmWeight}
-		if ports.NativeOperationObserverFrom(ctx) != nil {
-			return runtime.applyOwnerInstancePortions(ctx, environment)
-		}
 		return runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--yes")
 	}); err != nil {
 		return err
@@ -2567,32 +2520,7 @@ func (runtime Runtime) runPathEnvironment(
 	command.Stdin = runtime.Stdin
 	command.Stdout = output
 	command.Stderr = output
-	if ports.NativeOperationObserverFrom(ctx) != nil {
-		home := runtime.Yard.Paths.DataHome
-		if home == "" {
-			home = runtime.environmentValue("SUBYARD_HOME")
-		}
-		owner, err := uninstall.BorrowOwnerLock(home)
-		if err != nil {
-			return err
-		}
-		if owner == nil {
-			return errors.New("native host installer requires its original owner barrier")
-		}
-		defer owner.Close()
-		if filepath.Base(path) == "install-power-reconciler.sh" || filepath.Base(path) == "install-test-vms-host-sink.sh" {
-			// Only these stdin-free fixed privileged installers use fd0. Their
-			// root entry validates it after sudo before effects.
-			command.Stdin = owner
-			command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_STDIN=1")
-		} else {
-			// Unprivileged component transports retain the original OFD as an
-			// inherited descriptor while the parent helper may disappear.
-			command.ExtraFiles = append(command.ExtraFiles, owner)
-			command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_FD3=1")
-		}
-	}
-	if ports.NativeOperationObserverFrom(ctx) != nil || ctx.Value(readOnlyProbeKey{}) != nil {
+	if ctx.Value(readOnlyProbeKey{}) != nil {
 		// The child's own group is a background group of the operator's terminal.
 		// Reading it or changing its modes, as `incus exec` does, stops the child.
 		if input, ok := command.Stdin.(*os.File); ok && term.IsTerminal(int(input.Fd())) {
@@ -2607,13 +2535,9 @@ func (runtime Runtime) runPathEnvironment(
 		}
 		command.WaitDelay = 2 * time.Second
 	}
-	finish, err := runtime.beginNativeCommand(ctx, "component-script", path, command.Env, arguments)
-	if err != nil {
-		return err
-	}
-	// Resolve only the current engine's transport label after authorization.
-	// Keep symbolic roles in native records; the parent remains alive while its
-	// child uses the same executing image through this process-qualified path.
+	// Resolve only the current engine's transport label. The parent remains
+	// alive while its child uses the same executing image through this
+	// process-qualified path.
 	if self, err := os.Executable(); err == nil && strings.HasPrefix(self, "/memfd:") {
 		command.Env = append([]string(nil), command.Env...)
 		for index, entry := range command.Env {
@@ -2624,9 +2548,9 @@ func (runtime Runtime) runPathEnvironment(
 		}
 	}
 	if err := command.Run(); err != nil {
-		return finish(fmt.Errorf("reconcile adapter %s: %w", strings.Join(arguments, " "), err))
+		return fmt.Errorf("reconcile adapter %s: %w", strings.Join(arguments, " "), err)
 	}
-	return finish(nil)
+	return nil
 }
 
 func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {

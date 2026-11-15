@@ -686,7 +686,7 @@ ssh_transport_identity_prepare "$SUBYARD_HOME" >/dev/null
 
 func TestBaseProvisionDefersNestedIntegrationProjectHooksUntilRestore(t *testing.T) {
 	previewLoopbackFixture(t)
-	for _, scenario := range []string{"base-only", "full-stage-before-restore", "base-failure", "network-failure", "planning", "legacy-identity"} {
+	for _, scenario := range []string{"base-only", "full-stage-before-restore", "base-failure", "network-failure", "legacy-identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			for path, content := range map[string]string{
@@ -715,7 +715,7 @@ func TestBaseProvisionDefersNestedIntegrationProjectHooksUntilRestore(t *testing
 				failBase = "1"
 			}
 			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, NetworkPolicy: policy,
-				Profiles: []profile.Definition{}, ownerInitPlanning: scenario == "planning",
+				Profiles:    []profile.Definition{},
 				Yard:        domain.Context{YardName: "example", IncusProject: "test", YardInstanceName: "yard", YardKind: domain.YardVM, DevUser: "dev", DevUID: os.Getuid()},
 				Environment: []string{"BASE_READY=" + filepath.Join(root, "base-ready"), "SSH_READY=" + filepath.Join(root, "ssh-ready"), "FAIL_BASE=" + failBase}}
 			if scenario == "legacy-identity" {

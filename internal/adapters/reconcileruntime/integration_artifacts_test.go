@@ -3,7 +3,6 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,9 +59,6 @@ func TestDeclaredArtifactsCaptureProspectiveSourcesAndRejectStalePackages(t *tes
 	if err := overlapping.RefreshConfigs(context.Background()); err == nil {
 		t.Fatal("managed link overlap authorized refresh")
 	}
-	if _, err := overlapping.PrepareIntegrations(context.Background(), IntegrationPlan{}); err == nil {
-		t.Fatal("managed link overlap authorized integration planning")
-	}
 	if len(incus.ExecCalls) != 0 {
 		t.Fatal("managed link overlap reached guest")
 	}
@@ -77,60 +73,5 @@ func TestDeclaredArtifactsCaptureProspectiveSourcesAndRejectStalePackages(t *tes
 	// The ordinary reader cannot see instructions yet; planning must use capture.
 	if _, err := os.Stat(instructions); !os.IsNotExist(err) {
 		t.Fatal("prospective source unexpectedly exists")
-	}
-	testkit.WriteFile(t, instructions, imported, 0600)
-	if err := runtime.CheckPreparedConfigs(context.Background(), prepared); err != nil {
-		t.Fatal(err)
-	}
-	recipe, err := runtime.PrepareMaterializedConfigs(context.Background(), prepared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runtime.restoreMaterializedConfigs(context.Background(), recipe); err != nil {
-		t.Fatal("captured declaration recipe did not restore", err)
-	}
-	for _, changed := range []string{"manifest", "default", "removed", "replacement"} {
-		t.Run(changed, func(t *testing.T) {
-			prepared, err := runtime.PrepareConfigs(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			recipe, err := runtime.PrepareMaterializedConfigs(context.Background(), prepared)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch changed {
-			case "manifest":
-				testkit.WriteFile(t, declaration, append(bytes.Clone(manifest), '\n'), 0644)
-			case "default":
-				testkit.WriteFile(t, source, []byte("changed"), 0644)
-			case "replacement":
-				testkit.WriteFile(t, declaration+".replacement", manifest, 0644)
-				if err := os.Rename(declaration+".replacement", declaration); err != nil {
-					t.Fatal(err)
-				}
-			case "removed":
-				if err := os.Remove(declaration); err != nil {
-					t.Fatal(err)
-				}
-			}
-			before := len(incus.ExecCalls)
-			if err := runtime.ApplyPreparedConfigs(context.Background(), prepared); err == nil {
-				t.Fatal("changed package allowed prepared config mutation")
-			}
-			if len(incus.ExecCalls) != before {
-				t.Fatal("stale package reached guest")
-			}
-			if _, err := runtime.restoreMaterializedConfigs(context.Background(), recipe); err == nil {
-				t.Fatal("stale recipe restored")
-			}
-			testkit.WriteFile(t, declaration, manifest, 0644)
-			testkit.WriteFile(t, source, raw, 0644)
-		})
-	}
-	runtime.SourceReader = nil
-	testkit.WriteFile(t, instructions, []byte("changed after approval"), 0600)
-	if err := runtime.CheckPreparedConfigs(context.Background(), prepared); !errors.Is(err, domain.ErrPlanStale) {
-		t.Fatal("operator source drift accepted", err)
 	}
 }

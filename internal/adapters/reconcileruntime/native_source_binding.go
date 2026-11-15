@@ -1,7 +1,6 @@
 package reconcileruntime
 
 import (
-	"github.com/Subyard/Subyard/internal/domain"
 	"os"
 	"strconv"
 	"strings"
@@ -45,16 +44,6 @@ func (runtime Runtime) bindingEnvironment(environment []string) []string {
 	values := configBindingEnvironment(environment)
 	for index := range values {
 		values[index] = runtime.bindingPath(values[index])
-	}
-	return values
-}
-
-func (runtime Runtime) bindingYards() []domain.Context {
-	values := append([]domain.Context(nil), runtime.PowerYards...)
-	for index := range values {
-		paths := &values[index].Paths
-		paths.RepositoryRoot = runtime.bindingPath(paths.RepositoryRoot)
-		paths.ConfigDir = runtime.bindingPath(paths.ConfigDir)
 	}
 	return values
 }
