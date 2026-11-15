@@ -25,7 +25,7 @@ import (
 )
 
 // Source repair executes the complete normal Go runtime supplied by the owning gate.
-func sourceAdmissionToolingFixture(t *testing.T, runtimeRoot string) string {
+func sourceAdmissionToolingStage(t *testing.T) string {
 	t.Helper()
 	stage := os.Getenv("SUBYARD_SOURCE_QUERY_TOOLING_ROOT")
 	if stage == "" {
@@ -40,6 +40,61 @@ func sourceAdmissionToolingFixture(t *testing.T, runtimeRoot string) string {
 			t.Fatal("normal source tooling is incomplete", err)
 		}
 	}
+	return stage
+}
+
+// Refuse an unsupported build before any fixture directory or copy exists.
+func sourceAuthoringToolingVersion(t *testing.T) string {
+	t.Helper()
+	stage := sourceAdmissionToolingStage(t)
+	versionBytes, err := exec.Command(filepath.Join(stage, "bin/yard-engine"), "version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionFields := strings.Fields(string(versionBytes))
+	if len(versionFields) != 2 {
+		t.Fatal("normal helper has invalid version")
+	}
+	version, err := semver.Parse(versionFields[1])
+	if err != nil || version.LT(semver.MustParse(releaseruntime.UpdateAnchorVersion)) {
+		t.Fatalf("source-authoring fixture needs normal tooling >= %s, got %q; run make build VERSION=0.29.0-test or supply a supported SUBYARD_SOURCE_QUERY_TOOLING_ROOT", releaseruntime.UpdateAnchorVersion, versionFields[1])
+	}
+	return versionFields[1]
+}
+
+// Declared native profile executables are never run by Go source tooling;
+// omitting them halves every copy without changing the engine or its assets.
+func sourceAdmissionNativeExecutables(t *testing.T, stage string) map[string]bool {
+	t.Helper()
+	excluded := map[string]bool{}
+	manifests, err := filepath.Glob(filepath.Join(stage, "config/profiles/*/profile.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, manifest := range manifests {
+		var declaration struct {
+			Native []struct {
+				Path string `json:"path"`
+			} `json:"native"`
+		}
+		if err := json.Unmarshal(mustReadConfigFixture(t, manifest), &declaration); err != nil {
+			t.Fatal(err)
+		}
+		for _, native := range declaration.Native {
+			relative, err := filepath.Rel(stage, filepath.Join(filepath.Dir(manifest), native.Path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			excluded[filepath.ToSlash(relative)] = true
+		}
+	}
+	return excluded
+}
+
+func sourceAdmissionToolingFixture(t *testing.T, runtimeRoot string) string {
+	t.Helper()
+	stage := sourceAdmissionToolingStage(t)
+	excluded := sourceAdmissionNativeExecutables(t, stage)
 	root := filepath.Join(runtimeRoot, "releases", filepath.Base(stage))
 	if err := filepath.WalkDir(stage, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -60,9 +115,22 @@ func sourceAdmissionToolingFixture(t *testing.T, runtimeRoot string) string {
 		if !info.Mode().IsRegular() {
 			t.Fatalf("normal tooling contains a nonregular asset: %s", relative)
 		}
+		if excluded[filepath.ToSlash(relative)] {
+			return nil
+		}
 		payload, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		if relative == "runtime-files.sha256" {
+			var kept []string
+			for _, line := range strings.SplitAfter(string(payload), "\n") {
+				if _, listed, found := strings.Cut(line, "  ./"); found && excluded[strings.TrimSuffix(listed, "\n")] {
+					continue
+				}
+				kept = append(kept, line)
+			}
+			payload = []byte(strings.Join(kept, ""))
 		}
 		testkit.WriteFile(t, target, payload, info.Mode().Perm())
 		return nil
@@ -113,13 +181,28 @@ func completedRuntimeSourceFixture(t *testing.T, migrateSSH bool, extraAssets ma
 	return program, ready, home
 }
 
+// keepFailedFixturesEnv=1 keeps a failed test's detached fixture for diagnosis.
+const keepFailedFixturesEnv = "SUBYARD_TEST_KEEP_FAILED_FIXTURES"
+
 func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string, directions ...releasetransition.Direction) (*CLI, string, string, *testkit.IncusServer) {
 	t.Helper()
+	toolingVersion := sourceAuthoringToolingVersion(t)
 	original, environment, _ := nativeFixture(t)
+	// The constructor lives outside t.TempDir only so that an explicit
+	// diagnostic request can keep it; by default it is always removed.
 	detached, err := os.MkdirTemp("/tmp", "subyard-current-source-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if t.Failed() && os.Getenv(keepFailedFixturesEnv) == "1" {
+			t.Logf("retained failed source constructor (%s=1): %s", keepFailedFixturesEnv, detached)
+			return
+		}
+		if err := os.RemoveAll(detached); err != nil {
+			t.Error("remove source constructor:", err)
+		}
+	})
 	if err := os.Remove(detached); err != nil {
 		t.Fatal(err)
 	}
@@ -131,13 +214,6 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 	}
 	oldRoot := original
 	original = detached
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Log("retained actual source constructor:", original)
-		} else {
-			_ = os.RemoveAll(original)
-		}
-	})
 	home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	data := environmentValue(environment, "SUBYARD_HOME")
 	runtimeRoot := filepath.Join(original, "runtime-source-authoring")
@@ -147,19 +223,7 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 		}
 	}
 	tooling := sourceAdmissionToolingFixture(t, runtimeRoot)
-	versionBytes, err := exec.Command(filepath.Join(tooling, "bin/yard-engine"), "version").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	versionFields := strings.Fields(string(versionBytes))
-	if len(versionFields) != 2 {
-		t.Fatal("normal helper has invalid version")
-	}
-	version, err := semver.Parse(versionFields[1])
-	if err != nil || version.LT(semver.MustParse(releaseruntime.UpdateAnchorVersion)) {
-		t.Fatalf("source-authoring fixture needs normal tooling >= %s, got %q; build VERSION=0.29.0-test or supply a supported SUBYARD_SOURCE_QUERY_TOOLING_ROOT", releaseruntime.UpdateAnchorVersion, versionFields[1])
-	}
-	targetID := versionFields[1] + "-aaaaaaaaaaaa"
+	targetID := toolingVersion + "-aaaaaaaaaaaa"
 	root := filepath.Join(runtimeRoot, "releases", targetID)
 	if err := os.Rename(tooling, root); err != nil {
 		t.Fatal(err)
@@ -189,7 +253,7 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 	}
 	manifest := sourceFixtureManifest(t, root)
 	// The source has the same normal image/assets, under its own retained root.
-	sourceID := versionFields[1] + "-source"
+	sourceID := toolingVersion + "-source"
 	source := filepath.Join(runtimeRoot, "releases", sourceID)
 	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
