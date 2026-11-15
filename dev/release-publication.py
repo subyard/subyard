@@ -1096,7 +1096,7 @@ def stable_tag_refusals(github, version, commit):
 
 
 def retained_workflow_ref(state, explicit):
-    if explicit is not None and explicit != state["workflow_ref"]:
+    if state.get("dispatch_started") and explicit is not None and explicit != state["workflow_ref"]:
         return ["this request already uses workflow ref " + state["workflow_ref"] +
                 "; repeat the command without --workflow-ref or with --workflow-ref " + state["workflow_ref"]]
     return []
@@ -1755,8 +1755,10 @@ def main():
                 refusals = [] if same_repository(state["repository"], args.repository) else ["request repository mismatch"]
                 refuse(refusals + retained_workflow_ref(state, args.workflow_ref) + baseline_refusals)
                 if not state.get("dispatch_started"):
-                    _, refusals = select_workflow_ref(github, args.version, args.commit, state["workflow_ref"])
+                    workflow_ref, refusals = select_workflow_ref(github, args.version, args.commit,
+                                                                 args.workflow_ref or state["workflow_ref"])
                     refuse(refusals)
+                    state["workflow_ref"] = workflow_ref
             else:
                 workflow_ref, refusals = select_workflow_ref(github, args.version, args.commit, args.workflow_ref)
                 refuse(refusals + stable_tag_refusals(github, args.version, args.commit) + baseline_refusals)
@@ -1849,8 +1851,10 @@ def main():
                     if state["attestation_sha256"] != identity_hash(document) else [])
                    + retained_workflow_ref(state, args.workflow_ref))
             if not state.get("dispatch_started"):
-                _, refusals = select_workflow_ref(github, identity["version"], identity["commit"], state["workflow_ref"])
+                workflow_ref, refusals = select_workflow_ref(github, identity["version"], identity["commit"],
+                                                             args.workflow_ref or state["workflow_ref"])
                 refuse(refusals)
+                state["workflow_ref"] = workflow_ref
         else:
             workflow_ref, refusals = select_workflow_ref(github, identity["version"], identity["commit"], args.workflow_ref)
             refuse(refusals)

@@ -1224,10 +1224,25 @@ class Contracts(unittest.TestCase):
                 return result
             with patch.object(github, "api", side_effect=lost_upload), self.assertRaisesRegex(ValueError, "lost blob upload"):
                 m.main()
-            request = json.loads((candidate / "publication.json").read_text())["request"]
+            pending = json.loads((candidate / "publication.json").read_text())
+            request = pending["request"]
+            self.assertNotIn("dispatch_started", pending)
+            github.branch_heads["master"] = "d" * 40
+            with self.assertRaisesRegex(ValueError, "master: head .* is not candidate") as refused:
+                m.main()
+            branch = m.release_branch(identity["version"], identity["commit"])
+            self.assertIn("--workflow-ref " + branch, str(refused.exception))
+            self.assertEqual(json.loads((candidate / "publication.json").read_text()), pending)
+            github.files[branch] = dict(github.files[identity["commit"]])
+            github.branch_heads[branch] = identity["commit"]
+            argv.extend(["--workflow-ref", branch])
             self.assertEqual(m.main(), 0)
+            self.assertEqual(json.loads((candidate / "publication.json").read_text())["workflow_ref"], branch)
+            github.branch_heads[branch] = "d" * 40
             github.blobs.clear()  # Dangling remote objects have no retention guarantee.
             self.assertEqual(m.main(), 0)
+            with patch.object(sys, "argv", argv[:-1] + ["master"]), self.assertRaisesRegex(ValueError, "already uses workflow ref"):
+                m.main()
         retained = json.loads((candidate / "publication.json").read_text())
         self.assertEqual(retained["attestation_sha256"], m.identity_hash(document))
         self.assertEqual(retained["request"], dispatched[0]["request"])
@@ -2119,21 +2134,28 @@ class WorkflowRef(unittest.TestCase):
         del self.github.files["0.26.y"]
         self.assertIn("0.26.y: branch not found", self.refused())
 
-    def test_undispatched_retained_preparation_rechecks_its_branch_without_retargeting(self):
+    def test_undispatched_retained_preparation_can_retarget_a_validated_candidate_branch(self):
         self.request.parent.mkdir(parents=True)
         state = {"request": "retained", "version": "1.2.3", "commit": self.commit,
                  "repository": self.github.repository, "workflow_ref": "master"}
         m.write_json(self.request, state)
         retained = self.request.read_bytes()
         self.github.branch_heads["master"] = "d" * 40
-        self.hotfix_branch()
         with self.assertRaisesRegex(ValueError, "master: head .* is not candidate"):
             self.prepare()
         self.assertEqual(self.dispatched, [])
         self.assertEqual(self.request.read_bytes(), retained)
-        self.github.branch_heads["master"] = self.commit
-        self.assertEqual(self.prepare(), 0)
-        self.assertEqual(self.dispatched, ["master"])
+        self.hotfix_branch(self.branch)
+        self.github.branch_heads[self.branch] = "c" * 40
+        with self.assertRaisesRegex(ValueError, "head .* is not candidate"):
+            self.prepare("--workflow-ref", self.branch)
+        self.assertEqual(self.request.read_bytes(), retained)
+        self.github.branch_heads[self.branch] = self.commit
+        self.assertEqual(self.prepare("--workflow-ref", self.branch), 0)
+        self.assertEqual(self.dispatched, [self.branch])
+        recorded = json.loads(self.request.read_text())
+        self.assertEqual(recorded["workflow_ref"], self.branch)
+        self.assertEqual(recorded["request"], state["request"])
 
     def test_missing_published_baseline_blocks_preparation_and_reports_other_refusals(self):
         self.move_master()

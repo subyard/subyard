@@ -184,10 +184,13 @@ git push origin release/X.Y.Z-SHORT12
 dev/release.sh prepare --version X.Y.Z --commit FULL_SHA
 ```
 
-A retained request keeps its recorded ref. Before its first dispatch, that ref is rechecked and must
-still point at the candidate. Once dispatch has started, repeating the same command discovers or
-reruns the original workflow attempt at its original SHA even after branches move. An explicit
-`--workflow-ref` that differs from the recorded ref is refused with that ref's name and dispatches nothing.
+Before its first dispatch, a retained request rechecks its recorded ref. If that branch moved, push
+the suggested release branch and repeat with `--workflow-ref BRANCH`. The new candidate-headed ref
+is validated and recorded under the same request identity; no request file needs to be deleted.
+This also recovers publication requests retained after attestation encoding fails before dispatch.
+Once dispatch intent has been recorded, the request stays pinned: repeating the same command
+discovers or reruns the original workflow attempt at its original SHA even after branches move.
+A different explicit `--workflow-ref` is then refused with the recorded ref's name and dispatches nothing.
 
 Under `subyard-github run`, the broker's token belongs to the App installation of the repository it
 selected, which may come from the working directory's `origin`. Before any GitHub call, local

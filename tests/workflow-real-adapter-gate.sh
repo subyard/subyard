@@ -155,22 +155,45 @@ def workflow_steps(job):
         arguments = re.search(r"(?ms)^        with:\n(.*?)(?=^        \S|\Z)", step)
         yield action[1] if action else "", arguments[1] if arguments else "", step
 
-def literal(arguments, key, value):
-    setting = re.search(r"(?m)^          " + re.escape(key) + r":[ \t]*([^#\n]+)", arguments)
+def literal(arguments, key, value, indent=10):
+    setting = re.search(r"(?m)^" + " " * indent + re.escape(key) + r":[ \t]*([^#\n]+)", arguments)
     return setting and setting[1].strip() in (value, f"'{value}'", f'"{value}"')
+
+def blocking(block, indent):
+    return not re.search(r"(?m)^" + " " * indent + r"if:", block) and (
+        not re.search(r"(?m)^" + " " * indent + r"continue-on-error:", block)
+        or literal(block, "continue-on-error", "false", indent))
 
 EXACT_GUARD = '        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"\n'
 
 def dispatch_contract(name, text):
     for job, body in workflow_jobs(text):
         steps = list(workflow_steps(body))
-        for index, (action, arguments, _) in enumerate(steps):
-            context = f"{name}/{job}: {action}"
+        for index, (action, arguments, step) in enumerate(steps):
+            context = f"{name}/{job}: {action or 'run'}"
+            run = re.search(r"(?ms)^        run:(.*?)(?=^        \S|\Z)", step)
+            # All revision changes use reviewed checkout actions. Banning shell Git
+            # mutations also covers refs hidden behind env variables or step outputs.
+            assert not run or not re.search(r"\bgit\b[^\n;&|]*\b(?:fetch|checkout|switch|reset|pull|clone|worktree)\b",
+                run[1].replace("\\\n", " ")), context + " must not change revisions through shell Git"
             if action == "actions/checkout":
-                assert not re.search(r"(?m)^          ref:.*\binputs\s*[.\[]", arguments), context + " must not check out a dispatch input"
+                # The publisher selects a candidate-headed branch; its validated fetch
+                # returns the immutable preparation's commit. Only this output is safe.
+                publication = name == "release-publish.yml" and job == "publish" and literal(
+                    arguments, "ref", "${{ steps.candidate.outputs.commit }}")
+                assert not re.search(r"(?m)^          ref:", arguments) or literal(
+                    arguments, "ref", "${{ github.sha }}") or publication, context + " must not check out an input- or output-derived ref"
+                if publication:
+                    producer = steps[index - 1][2] if index else ""
+                    assert blocking(body, 4) and blocking(producer, 8), context + " requires a blocking validated fetch"
+                    assert all(line in producer for line in (
+                        '        id: candidate\n',
+                        '          identity = module.fetch(module.GitHub(), os.environ["CANDIDATE"], prepared)\n',
+                        '              stream.write("commit=" + identity["commit"] + "\\n")\n',
+                    )), context + " requires the verified preparation commit output"
                 if name in ("release.yml", "release-vm.yml"):
-                    assert not re.search(r"(?m)^          ref:", arguments) or literal(arguments, "ref", "${{ github.sha }}"), context + " must check out the workflow SHA"
                     guard = steps[index + 1][2] if index + 1 < len(steps) else ""
+                    assert blocking(body, 4) and blocking(guard, 8), context + " requires an unconditional blocking job and guard"
                     assert all(line in guard for line in (
                         '          COMMIT: ${{ inputs.commit }}\n',
                         '          WORKFLOW_SHA: ${{ github.sha }}\n', EXACT_GUARD)), context + " must immediately require exact workflow and candidate commit"
@@ -192,6 +215,17 @@ for unsafe in (
                     '          WORKFLOW_SHA: ${{ inputs.commit }}\n' + EXACT_GUARD, 1),
     release.replace('      - name: Require exact workflow and candidate commit\n',
                     '      - uses: actions/setup-go@abc\n      - name: Require exact workflow and candidate commit\n', 1),
+    *(release.replace('      - name: Require exact workflow and candidate commit\n',
+                      '      - name: Require exact workflow and candidate commit\n        ' + flag + '\n', 1)
+      for flag in ('continue-on-error: true', 'if: false')),
+    *(release.replace('  native-engine-arm64:\n', '  native-engine-arm64:\n    ' + flag + '\n', 1)
+      for flag in ('continue-on-error: true', 'if: false')),
+    *(release.replace(EXACT_GUARD, EXACT_GUARD + '      - run: ' + command + '\n', 1)
+      for command in ('git fetch origin "${{ inputs.commit }}"',
+                      'git checkout "${{ steps.ref.outputs.commit }}"',
+                      'git -C "$RUNNER_TEMP/source" checkout "${{ inputs.commit }}"')),
+    release.replace(EXACT_GUARD, EXACT_GUARD + '      - env:\n          REF: ${{ inputs.commit }}\n        run: git fetch origin "$REF"\n', 1),
+    release.replace(EXACT_GUARD, EXACT_GUARD + '      - uses: actions/checkout@abc\n        with:\n          ref: ${{ steps.ref.outputs.commit }}\n', 1),
 ):
     try:
         dispatch_contract("release.yml", unsafe)
@@ -201,6 +235,19 @@ for unsafe in (
         raise AssertionError("dispatch contract accepted an unsafe release checkout")
 dispatch_contract("release.yml", release.replace('          persist-credentials: false\n',
                   '          ref: ${{ github.sha }}\n          persist-credentials: false\n'))
+dispatch_contract("release.yml", release.replace(EXACT_GUARD, '        continue-on-error: false\n' + EXACT_GUARD))
+publication = (root / ".github/workflows/release-publish.yml").read_text()
+for name, unsafe in (
+    ("other.yml", publication),
+    ("release-publish.yml", publication.replace('steps.candidate.outputs.commit', 'steps.other.outputs.commit')),
+    ("release-publish.yml", publication.replace('identity = module.fetch', 'identity = unchecked_fetch')),
+):
+    try:
+        dispatch_contract(name, unsafe)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("dispatch contract accepted an unverified publication checkout")
 
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, root / path)
