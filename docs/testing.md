@@ -988,26 +988,41 @@ See [release publication](reference/release-publication.md) for identity and pol
 contracts are `tests/release-acceptance.sh`, `tests/release-publication.sh` and
 `tests/workflow-real-adapter-gate.sh`; they do not establish native hosted VM acceptance.
 
-Every Release VM job uploads `hosted-diagnostics-JOB_INDEX-ATTEMPT` from its `always()` steps,
-including after failure, check timeout or cancellation. Find it under **Artifacts** on the workflow
-run page. It contains sanitized snapshots of `acceptance/<check>-*.log`, `receipt.json`,
-`events.jsonl`, attempt and invocation records, runner probe logs and broker events, plus an
-environment summary, bounded `p0-*.failure.log` snapshots from the runner E2E evidence directory,
-and `cleanup.log` (the captured cleanup/release lines; absent cleanup stays
-unconfirmed). Failed jobs also print a sanitized check-log tail, limited to 80 lines / 16 KiB;
+Every Release VM job attempts to upload `hosted-diagnostics-JOB_INDEX-ATTEMPT` from its
+`always()` steps, including after failure, check timeout or cancellation. Find artifacts on the
+workflow run page. Contents differ by workflow:
+
+| Artifact | Contents, when produced by the check |
+| --- | --- |
+| Release VM `hosted-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `acceptance/<check>-*.log`, other collector logs, `acceptance/receipt.json`, `acceptance/events.jsonl`, `acceptance/attempts/*.json` and `acceptance/runs/*.json`; `runner/` probe logs/results and broker events; `p0/` failure snapshots; `cleanup.log` and `summary.json` |
+| Periodic `pool-diagnostics-ATTEMPT`, `diagnostics-JOB_INDEX-ATTEMPT`, `nested-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `runner/check.log`, probe logs, `runner/results.tsv` and service/yard broker events; available `p0/` failure snapshots; `cleanup.log` and `summary.json`. These jobs have no collector output under `$RUNNER_TEMP/acceptance`, so no `acceptance/`, receipt, original attempt or invocation records |
+| Release VM `ci-hosted-JOB_INDEX` | Strict validated native PASS evidence: `ci-execution.json`, receipt, events, logs, original attempts/manifests and invocation records. This is separate from diagnostic snapshots |
+
+`p0/` preserves the route-relative paths of `p0-*.failure.log` (keeper, redacted broker status,
+capacity, reachability and OOM snapshots). `cleanup.log` contains captured cleanup/release lines;
+absent cleanup stays unconfirmed. `summary.json` records execution IDs, check/job outcome,
+environment facts, truncation and omitted-file counts. Early setup failure can leave only a subset
+of files. Intel-skipped nested jobs do not upload a snapshot.
+
+Diagnostic capture reads complete inputs within a 128 MiB raw-input budget; files exceeding the
+remaining input budget are omitted rather than read as raw tails. It collects secret values from
+secret-named environment variables and labelled fields in allowlisted inputs, masks exact values
+of at least eight characters, normalizes controls, and applies labelled/shape rules before any tail
+cut. Capture refuses if its masking table exceeds 4096 values or 1 MiB rather than dropping masks.
+SHA/digest-like hex runs become stable `[hexLENGTH:HASH_TAG]` identifiers, preserving comparisons.
+Unknown unlabelled low-entropy values cannot reliably be classified as secrets.
+Snapshots retain the last 2 MiB of sanitized content per file, at most 128 inputs and 16 MiB of
+file content, plus bounded summary/cleanup metadata. They contain no source tree or release assets
+and expire after seven days. Failed jobs also print a sanitized tail, limited to 80 lines / 16 KiB;
 if setup failed before a check log exists, this shows the failed probe instead. Diagnostic steps
 are best effort: their failure cannot change a passing job into a failure or prevent counting
 otherwise valid hosted evidence.
-Snapshots retain the last 2 MiB per file, at most 128 files and 16 MiB of file content, plus bounded
-summary/cleanup metadata; the summary marks truncation, omitted files and the job outcome.
-They contain no source tree or release assets and expire after seven days. Check steps have a
-340-minute limit within the 350-minute job budget (110/120 for the Periodic E2E pool), reserving
-time for diagnostic collection/upload. Runner loss or a forced
-termination that prevents final steps can still prevent upload.
 
-Diagnostic snapshots never count as evidence. The separate `ci-hosted-JOB_INDEX` artifact is
-uploaded only after strict validation of the complete selected PASS and cleanup; its retention
-remains 90 days.
+Check steps have a 340-minute limit within the 350-minute job budget (110/120 for the Periodic E2E
+pool), reserving time for diagnostic collection/upload. Runner loss or a forced termination that
+prevents final steps can still prevent upload. Diagnostic snapshots never count as evidence. The
+separate `ci-hosted-JOB_INDEX` artifact is uploaded only after strict validation of the complete
+selected PASS and cleanup; its retention remains 90 days.
 
 #### Periodic E2E on hosted runners
 
@@ -1028,8 +1043,8 @@ except `boundary` and `cleanup`. The `pool` job first installs the candidate's `
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
 becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it.
-The `pool`, `check` and Intel `nested` jobs use the same bounded diagnostic snapshots and failed-log
-tails described above, uploaded on every outcome as `pool-diagnostics-ATTEMPT`,
+The `pool`, `check` and Intel `nested` jobs use the bounded runner/P0 snapshots and failed-log
+tails listed above, uploaded on every outcome as `pool-diagnostics-ATTEMPT`,
 `diagnostics-JOB_INDEX-ATTEMPT` and `nested-diagnostics-JOB_INDEX-ATTEMPT`. Their `runner/check.log`
 contains check output, including native cleanup output, and their broker event records survive
 interruption when final steps can run. Logs are staged under the runner temporary directory rather

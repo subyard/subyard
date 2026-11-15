@@ -181,7 +181,8 @@ for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):
         exporter = next(step for step in steps if step.startswith("name: Preserve native evidence"))
         assert "continue-on-error" not in exporter
 a = module("acceptance", "dev/release-acceptance.py")
-assert a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes()) in a.CI_HOSTED_POLICIES
+assert a.CI_HOSTED_POLICIES == {"911e6588dded3367817a8c21c5a849dd5b945b2e",
+                                a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes())}
 p = module("periodic", "dev/ci/plan-periodic-checks.py")
 plan = p.plan(root)
 entries = {entry["id"]: entry["command"] for group in plan.values() for entry in group["include"]}

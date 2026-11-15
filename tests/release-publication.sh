@@ -2613,7 +2613,7 @@ class HostedChecks(unittest.TestCase):
         (logs / "check.log").write_text("padding\n" * 1000 +
             '::error::untrusted command\npassword="fixture secret with spaces"\n'
             '"token": "fixture-token"\nAuthorization: Bearer fixture-auth\n'
-            "ARBITRARY_VALUE=fixture-env\nhttps://user:fixture-url@example.com/path\n"
+            "ARBITRARY_SECRET=fixture-env\nhttps://user:fixture-url@example.com/path\n"
             "-----BEGIN PRIVATE KEY-----\nfixture-key\n-----END PRIVATE KEY-----\n"
             "E2E_PHASE phase=cleanup/release state=end exit_code=1\nfixture failure reason\n")
         (logs / "00-linked.log").symlink_to(logs / "check.log")
@@ -2674,6 +2674,98 @@ class HostedChecks(unittest.TestCase):
         for token in tokens:
             with self.subTest(token_shape=token[:8]):
                 self.assertEqual(helper.sanitize("key=" + token), "key=[redacted]")
+
+    def test_redaction_leak_and_keep_tables(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        base62 = "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL3oR6uX9bD2e"[:43]
+        base64url = "aB3_dE6-gH9_jK2-mN5_pQ8-sT1_vW4-yZ7_cF0-iL3"
+        leaks = [
+            ("authorization token", "Authorization: token fixture-auth-value", "fixture-auth-value"),
+            ("digest", 'Proxy-Authorization: Digest username="fixture-digest", response="fixture-response"', "fixture-response"),
+            ("authorization digest", 'Authorization: Digest response="fixture-digest-response"', "fixture-digest-response"),
+            ("unknown auth scheme", "Authorization: Custom fixture-custom-value", "fixture-custom-value"),
+            ("cookie", "Cookie: session=fixture-cookie; other=fixture-other", "fixture-other"),
+            ("set cookie", "Set-Cookie: session=fixture-cookie; HttpOnly", "fixture-cookie"),
+            ("postgres URL", "postgres://alice:fixture-db-password@db.example/schema", "fixture-db-password"),
+            ("ssh URL", "ssh://bob:fixture-ssh-password@host.example/repo", "fixture-ssh-password"),
+            ("CLI space", "command --password fixture-cli-password --verbose", "fixture-cli-password"),
+            ("CLI equals", "command --api-key=fixture-cli-key --verbose", "fixture-cli-key"),
+            ("CLI token", "command --token=fixture-cli-token --verbose", "fixture-cli-token"),
+            ("CLI secret", "command --secret fixture-cli-secret --verbose", "fixture-cli-secret"),
+            ("CLI quoted", 'command --passphrase "fixture-\\"quote-suffix" --verbose', "quote-suffix"),
+            ("pass", "pass=fixture-pass-value", "fixture-pass-value"),
+            ("passwd", "passwd: fixture-passwd-value", "fixture-passwd-value"),
+            ("passphrase", "passphrase: fixture-phrase-value", "fixture-phrase-value"),
+            ("auth", "auth: fixture-auth-value", "fixture-auth-value"),
+            ("private key label", "private_key: fixture-private-value", "fixture-private-value"),
+            ("credential whitespace", "credentials fixture-credential-value", "fixture-credential-value"),
+            ("suffix token", "SERVICE_TOKEN=fixture-service-value", "fixture-service-value"),
+            ("suffix key", '"signing_KEY": "fixture-signing-value"', "fixture-signing-value"),
+            ("quoted mixed-case label", '"pAsSwOrD" "fixture-quoted-value"', "fixture-quoted-value"),
+            ("bare bearer", "sending Bearer fixture-bearer-value", "fixture-bearer-value"),
+            ("base62", "received " + base62, base62),
+            ("base64url", "received " + base64url, base64url),
+            ("multiline quote", 'password="first-line\nsecond-line"\ncontext retained', "second-line"),
+            ("multiline single quote", "secret 'first-line\nsecond-line'", "second-line"),
+        ]
+        for name, text, leaked in leaks:
+            with self.subTest(case=name):
+                self.assertNotIn(leaked, helper.sanitize(text))
+        keep = ["log=/home/runner/work/_temp/acceptance/profile-orca-managed-agents-76bf920a.log",
+                "internal/adapters/reconcileruntime/integration_ownership_release_test.go:123: failed",
+                "key=/srv/workspaces/Subyard/src/file.txt", "ssh_key_path=/home/runner/.ssh/id_ed25519",
+                "key=log/path/with/some-very-long-component-name-with_underscore",
+                "log=verylongfilenamethatcontainsmorethan32characters.go:123"]
+        for text in keep:
+            with self.subTest(keep=text):
+                self.assertEqual(helper.sanitize(text), text)
+        self.assertIn("postgres://alice:[redacted]@", helper.sanitize("postgres://alice:fixture-db-password@db.example/schema"))
+        self.assertIn("ssh://bob:[redacted]@", helper.sanitize("ssh://bob:fixture-ssh-password@host.example/repo"))
+        first, second = "0123456789abcdef" * 4, "fedcba9876543210" * 4
+        tag = helper.sanitize(first)
+        self.assertRegex(tag, r"^\[hex64:[0-9a-f]{8}\]$")
+        self.assertEqual(tag, helper.sanitize(first))
+        self.assertNotEqual(tag, helper.sanitize(second))
+        self.assertEqual(helper.sanitize("expected=" + first + " got=" + second),
+                         "expected=" + tag + " got=" + helper.sanitize(second))
+        self.assertEqual(helper.sanitize("foo_" + first), "foo_" + tag)
+        self.assertEqual(helper.sanitize("name-7-" + first), "name-7-" + tag)
+        self.assertRegex(helper.sanitize(first[:40]), r"^\[hex40:[0-9a-f]{8}\]$")
+
+    def test_whole_input_masking_precedes_tails_and_reuses_env_and_broker_values(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        logs = self.directory / "whole-input-logs"
+        logs.mkdir()
+        body = "qwertyuiopASDFGHJKLzxcvbnmQWERTYUIasdfghjklZXCVBNM0123456789+/abcd"
+        (logs / "check.log").write_text("-----BEGIN PRIVATE KEY-----\n" + (body + "\n") * 30 +
+            "-----END PRIVATE KEY-----\npassword=\"first-line\nsecond-line\n" +
+            "fixture-low-entropy-fragment\n" * 50 + '"\n' +
+            "unlabelled fixture-environment-value and fixture-broker-value\nfixture failure after key\n")
+        (logs / "service-events.json").write_text(json.dumps({"token": "fixture-broker-value"}))
+        (logs / "orphan.log").write_text((body + "\n") * 3 + "-----END PRIVATE KEY-----\n")
+        with patch.dict(os.environ, {"FIXTURE_SESSION": "fixture-environment-value",
+                                    "BROKER_CONTEXT": '{"access_token":"fixture-context-value"}'}), \
+             patch.object(helper, "DIAGNOSTIC_FILE_BYTES", 256), redirect_stdout(io.StringIO()) as printed:
+            self.assertNotIn("fixture-context-value", helper.sanitize("unlabelled fixture-context-value"))
+            helper.diagnostic_snapshot(self.directory / "absent", self.directory / "whole-input", "fixture", "failure", logs)
+        for path in (self.directory / "whole-input").rglob("*.log"):
+            captured = path.read_text()
+            for leaked in (body, "first-line", "second-line", "fixture-low-entropy-fragment",
+                           "fixture-environment-value", "fixture-broker-value"):
+                self.assertNotIn(leaked, captured)
+                self.assertNotIn(leaked, printed.getvalue())
+        self.assertIn("fixture failure after key", printed.getvalue())
+        self.assertIn("[redacted PEM", (self.directory / "whole-input/runner/orphan.log").read_text())
+        # Inputs too large to sanitize in full are omitted, never tailed raw.
+        with patch.object(helper, "DIAGNOSTIC_INPUT_BYTES", 16):
+            helper.diagnostic_snapshot(self.directory / "absent", self.directory / "too-large", "fixture", "success", logs)
+        summary = json.loads((self.directory / "too-large/summary.json").read_text())
+        self.assertGreater(summary["omitted"], 0)
+        self.assertEqual(summary["files"], [])
 
     def test_p0_failure_logs_and_early_probe_tail_are_retained_without_other_evidence(self):
         spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
