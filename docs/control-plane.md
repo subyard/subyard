@@ -397,8 +397,24 @@ cause unclassified instead of printing its text. A raw OS or parse cause attache
 independent. Boundary-owned fixed texts and sentinels enter as `PublicConfigDiagnostic` or
 `config.KnownCause`; operation sentinels such as a stale plan keep their own text. The CLI renders
 only configuration validation and usage causes this way; other preparation failures keep their
-fixed diagnostics. An integration is named only when the shipped catalog contains it. Independent load stages merge their causes into one
-stable collection.
+fixed diagnostics. An integration is named only when the shipped catalog contains it.
+Independent load stages merge their causes into one stable collection.
+
+Configuration diagnostics guarantee that no setting value, secret or absolute path is printed,
+that every typed code renders its fixed text and next step, and that all refusals within a stage
+are reported in stable order. A refusal can hide a later stage only along these edges, each
+named in the loader code:
+
+- D1: the bootstrap chain, including command alias conflicts, stops at its first failed step.
+- D2: yard identity (name, registration, template) resolves before sources are selected.
+- D3: source files apply in precedence order; the first refused file stops at its first refused line.
+- D4: native target discovery covers source and command-override refusals only.
+- D5: unresolved integration roots select nothing for later checks.
+- D6: failed role or profile constraints skip profile resolution.
+- D7: within a check, the SSH port range follows its parse, path checks follow an absolute path,
+  the disk minimum follows its size parse and CPU validation follows its resolution.
+- D8: any refusal up to the context skips saved endpoints, derived ports and all collisions.
+- D9: a derived-port source failure skips collisions and the web preview check.
 
 `HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
 `yard host rename` transactionally moves a registered Git owner subtree, commits the exact move

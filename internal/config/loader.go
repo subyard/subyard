@@ -151,6 +151,8 @@ func load(
 			delete(values, name)
 		}
 	}
+	// Edge D1: the bootstrap chain (command alias conflicts, operator and config
+	// home, root lock, pending transaction) stops the load at its first failed step.
 	if err := normalizeLegacyEnvironment(values); err != nil {
 		return domain.Context{}, nil, err
 	}
@@ -253,6 +255,8 @@ func load(
 		}
 		tracker.record(defaultLayer, definition.Name, values[definition.Name], integrationDefaultSources[definition.Owner], 0, "profile default")
 	}
+	// Edge D3: source files apply in precedence order; the first refused file,
+	// at its first refused line, stops the load.
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		path := filepath.Join(configDir, name)
 		if err := applyOptionalTracked(path, values, tracker, defaultLayer); err != nil {
@@ -269,6 +273,8 @@ func load(
 	if yardName == "" {
 		yardName = "default"
 	}
+	// Edge D2: yard identity (name, registration, template) must resolve before
+	// its sources can be selected.
 	if !domain.SafeName(yardName) {
 		return domain.Context{}, nil, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigYardNameInvalid), yardName)
 	}
@@ -450,6 +456,10 @@ func load(
 		if _, ok := tracker.catalog.LookupSetting(name); ok {
 			if err := tracker.catalog.ValidateSetting(ScopeCommand, name, value, false); err != nil {
 				commandRefusals = append(commandRefusals, sourceContext("", 0, recognizedSettingKey(tracker.catalog, name), "command override", err))
+				if len(tracker.assignments[name]) == 0 {
+					// The refused value came only from the command; later checks must not see it.
+					delete(values, name)
+				}
 				continue
 			}
 		}
@@ -476,6 +486,8 @@ func load(
 		"derived", "derived", "resolver normalization", true, settingScalar, "E2E_VM_CPU",
 	)
 	if options.NativeTargetOnly {
+		// Edge D4: native target discovery reports source and command-override
+		// refusals only; later checks are not part of address discovery.
 		// Address discovery does not require guest-account, port or provisioner
 		// readiness. Scalar source parsing and registration checks above still apply.
 		for _, entry := range []struct{ key, value string }{{"ACCESS_KIND", "local"}, {"INCUS_PROJECT", "subyard"}, {"YARD_INSTANCE_NAME", "yard"}, {"SSH_HOST", "yard"}} {
@@ -486,13 +498,13 @@ func load(
 		}
 		return domain.Context{YardName: yardName, AccessKind: domain.AccessKind(values["ACCESS_KIND"]), IncusProject: values["INCUS_PROJECT"], YardInstanceName: values["YARD_INSTANCE_NAME"], SSHHost: values["SSH_HOST"], Paths: domain.RuntimePaths{RepositoryRoot: root, ConfigDir: configDir, ConfigHome: configHome, OperatorHome: values["SUBYARD_OPERATOR_HOME"], DataHome: values["SUBYARD_HOME"], HostBase: values["HOST_BASE"]}}, values, nil
 	}
-	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
-		return domain.Context{}, nil, err
-	}
+	// One collection point: command overrides, asset sources, integration
+	// selection, role, profile and context refusals are reported together.
+	roleRefusals := append(commandRefusals, refusalCauses(normalizeAgentAssetPaths(values, tracker))...)
 	integrationRefusal, err := resolveLoadedIntegrations(values, tracker)
-	roleRefusals := append(commandRefusals, integrationRefusal)
+	roleRefusals = append(roleRefusals, integrationRefusal)
 	if err != nil {
-		// An unresolved selection selects nothing for the independent checks below.
+		// Edge D5: unresolved integration roots select nothing for the checks below.
 		roleRefusals = append(roleRefusals, refusalCauses(err)...)
 		values["CODING_TOOL_INTEGRATIONS"] = ""
 	}
@@ -507,7 +519,8 @@ func load(
 		}
 	}
 	// Role, profile and context checks read independent settings, so each stage
-	// runs and every refusal is reported. Profile resolution needs valid constraints.
+	// runs and every refusal is reported. Edge D6: failed constraints skip
+	// profile resolution.
 	var refusals []error
 	if err := validateProfileConstraints(configDir, yardName, values, roleRefusals...); err != nil {
 		refusals = append(refusals, refusalCauses(err)...)
@@ -515,13 +528,16 @@ func load(
 		refusals = append(refusals, err)
 	}
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
+	// Edge D8: any refusal up to the context skips saved endpoints, derived
+	// ports and all collision checks, which need a valid context.
 	if err := domain.CollectRefusals(append(refusals, refusalCauses(err)...)...); err != nil {
 		return domain.Context{}, nil, err
 	}
 	if err := applySavedResourceEndpoints(root, options, ctx, values, tracker); err != nil {
 		return ctx, values, err
 	}
-	// Derived ports need their source ports; collisions are collected once per pair.
+	// Edge D9: a derived-port source failure skips collisions and the web
+	// preview check. Collisions are otherwise collected once per pair.
 	collisions := newPortCollisions()
 	if err := normalizeDerivedPorts(values, tracker, collisions); err != nil {
 		return ctx, values, err
@@ -846,14 +862,13 @@ func regularFileExists(path string) (bool, error) {
 	return true, nil
 }
 
+// normalizeAgentAssetPaths checks every AGENT_* file source in sorted order and
+// returns all refusals; a refused source keeps its authored value.
 func normalizeAgentAssetPaths(
 	values environment,
 	tracker *settingTracker,
 ) error {
-	for name, value := range values {
-		if !sourceValuedAgentSetting(name) || value == "" {
-			continue
-		}
+	normalize := func(name, value string) error {
 		if !filepath.IsAbs(value) {
 			return tracker.sourceError(name, "must name an absolute regular file", nil)
 		}
@@ -862,35 +877,37 @@ func normalizeAgentAssetPaths(
 			if err != nil || !snapshot.Exists {
 				return tracker.sourceError(name, "file setting source is not openable", err)
 			}
-			tracker.assetValidationInputs = append(tracker.assetValidationInputs, path)
-			values[name] = path
-			if path != value {
-				tracker.normalize(name, path, "normalized absolute path")
+		} else {
+			source := tracker.fileSource(path)
+			info, err := os.Lstat(source)
+			if err != nil {
+				return tracker.sourceError(name, "file setting source is not openable", err)
 			}
-			continue
-		}
-		source := tracker.fileSource(path)
-		info, err := os.Lstat(source)
-		if err != nil {
-			return tracker.sourceError(name, "file setting source is not openable", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return tracker.sourceError(name, "must name a regular non-symlink file", nil)
-		}
-		file, err := os.Open(source)
-		if err != nil {
-			return tracker.sourceError(name, "file setting source is not openable", err)
-		}
-		if err := file.Close(); err != nil {
-			return tracker.sourceError(name, "cannot close file setting source", err)
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return tracker.sourceError(name, "must name a regular non-symlink file", nil)
+			}
+			file, err := os.Open(source)
+			if err != nil {
+				return tracker.sourceError(name, "file setting source is not openable", err)
+			}
+			if err := file.Close(); err != nil {
+				return tracker.sourceError(name, "cannot close file setting source", err)
+			}
 		}
 		tracker.assetValidationInputs = append(tracker.assetValidationInputs, path)
 		values[name] = path
 		if path != value {
 			tracker.normalize(name, path, "normalized absolute path")
 		}
+		return nil
 	}
-	return nil
+	var refusals []error
+	for _, name := range slices.Sorted(maps.Keys(values)) {
+		if value := values[name]; sourceValuedAgentSetting(name) && value != "" {
+			refusals = append(refusals, normalize(name, value))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }
 
 func sourceValuedAgentSetting(name string) bool {
@@ -1411,7 +1428,7 @@ func contextFrom(
 		stateDir = filepath.Join(configHome, "projects")
 	}
 	sshPort, err := optionalInt(values["SSH_PORT"])
-	sshPortRefused := err != nil
+	sshPortRefused := err != nil // Edge D7: the SSH port range is checked only after it parses.
 	if err != nil {
 		refusals = append(refusals, domain.WithRefusalCause(domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), err))
 	}
@@ -1433,6 +1450,7 @@ func contextFrom(
 			)
 		}
 	}
+	// Edge D7: the CPU count is validated only after it resolves.
 	refusals = append(refusals, refusalCauses(validateE2EConfig(values, err == nil))...)
 	ctx := domain.Context{
 		YardName:         yardName,
@@ -1549,6 +1567,7 @@ func validateE2EConfig(values environment, checkCPU bool) error {
 			sizeMiB(name)
 		}
 	}
+	// Edge D7: the disk minimum applies only after the size parses.
 	if disk, ok := sizeMiB("E2E_VM_DISK"); ok && disk < 10*1024 {
 		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigE2EVMDiskMinimum))
 	}

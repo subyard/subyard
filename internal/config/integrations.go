@@ -57,14 +57,25 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 			delete(tracker.assignments, name)
 		}
 	}
+	// The role prohibition reads only authored assignments, so it is checked
+	// before and independently of resolving the requested selection.
+	assignments := tracker.assignments["CODING_TOOL_INTEGRATIONS"]
+	if values["ALLOWS_CODING_TOOLS"] == "false" || values["ALLOWS_CODING_TOOLS"] == "0" {
+		// An inherited default can be suppressed; a concrete forbidden request cannot.
+		for _, assignment := range assignments {
+			layer := tracker.layers[assignment.Layer]
+			if refusal == nil && (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
+				refusal = fmt.Errorf("%w in %s", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools), assignment.Path)
+			}
+		}
+	}
 	selection, err := tracker.catalog.ResolveIntegrationSelection(values, requested)
 	if err != nil {
-		return nil, err
+		return refusal, err
 	}
 	_, selection.Present = values["CODING_TOOL_INTEGRATIONS"]
 	slices.Sort(retired)
 	selection.Retired = retired
-	assignments := tracker.assignments["CODING_TOOL_INTEGRATIONS"]
 	if len(assignments) != 0 {
 		assignment := assignments[len(assignments)-1]
 		layer := tracker.layers[assignment.Layer]
@@ -74,13 +85,6 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 		}
 	}
 	if !selection.AllowsCodingTools {
-		// An inherited default can be suppressed; a concrete forbidden request cannot.
-		for _, assignment := range assignments {
-			layer := tracker.layers[assignment.Layer]
-			if refusal == nil && (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
-				refusal = fmt.Errorf("%w in %s", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools), assignment.Path)
-			}
-		}
 		selection.Suppressed = len(selection.Requested) != 0
 		selection.Effective = []string{}
 		selection.DependencyReasons = map[string][]string{}

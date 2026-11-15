@@ -378,3 +378,41 @@ func TestDiagnoseRendersRetiredTemplateRelativeToConfigHome(t *testing.T) {
 		t.Fatalf("retired diagnostic without home = %q", message)
 	}
 }
+
+func TestLoadCollectsAssetPathAndCodingToolRoleRefusals(t *testing.T) {
+	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
+	if err := os.MkdirAll(filepath.Join(root, "config", "yards", "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config", "yards", "profiles", "nocode.env"), []byte("ALLOWS_CODING_TOOLS=false\n"), 0o600)
+	home := testkit.TempDir(t)
+	yard := filepath.Join(home, ".config", "subyard", "yards", "work")
+	if err := os.MkdirAll(yard, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(yard, "config.env"), []byte("YARD_TEMPLATE=nocode\nCODING_TOOL_INTEGRATIONS=missing-sentinel\nVM_CPU_WEIGHT=1000\n"), 0o600)
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "work", DisablePrivate: true, Environment: map[string]string{
+		"AGENT_alpha_RULES": filepath.Join(home, "missing-alpha"), "AGENT_beta_CONFIG": filepath.Join(home, "missing-beta"),
+	}})
+	diagnostic := Diagnose(filepath.Join(home, ".config", "subyard"), err)
+	message := diagnostic.Message("generic")
+	for _, want := range []string{"AGENT_alpha_RULES", "AGENT_beta_CONFIG", "require YARD_KIND=vm", "yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "unknown integration"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("load refusals lack %q: %s", want, message)
+		}
+	}
+	if strings.Contains(message, "sentinel") || strings.Contains(message, home) || diagnostic.Unclassified || len(diagnostic.Next) == 0 {
+		t.Fatalf("load refusals = %q (%#v)", message, diagnostic)
+	}
+}
+
+func TestDiagnoseGivesSourceErrorsANextStep(t *testing.T) {
+	for _, source := range []error{
+		sourceError("", 0, "SSH_PORT", "scalar settings", "invalid port value", nil),
+		sourceError("/home/config.env", 3, "SSH_PORT", "scalar settings", "invalid port value", nil),
+	} {
+		if diagnostic := Diagnose("/home", source); len(diagnostic.Next) != 1 {
+			t.Fatalf("source diagnostic lacks a next step: %#v", diagnostic)
+		}
+	}
+}

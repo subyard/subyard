@@ -147,7 +147,7 @@ func NormalizeContext(ctx Context) (Context, error) {
 	for _, field := range fields {
 		if !filepath.IsAbs(*field.value) {
 			refusals = append(refusals, NewConfigRefusal(ConfigPathNotAbsolute, ConfigName{field.name}))
-			unusable[field.name] = true
+			unusable[field.name] = true // Edge D7: later path checks need an absolute path.
 			continue
 		}
 		*field.value = filepath.Clean(*field.value)

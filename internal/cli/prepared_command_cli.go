@@ -57,7 +57,9 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 		}
 	}
 	cli.errorf("%s: %v", prefix, err)
-	cli.reportConfigNext(err)
+	if definition.Handler == "@config" {
+		cli.reportConfigNext(err)
+	}
 	return code
 }
 

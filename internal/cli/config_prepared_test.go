@@ -883,6 +883,21 @@ func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
 			t.Errorf("%v rendered as an invalid input: %s", test.err, stderr.String())
 		}
 	}
+	// Next steps belong to config commands only; other operations keep their own guidance.
+	other, _ := program.manifest.Lookup("init")
+	stderr.Reset()
+	program.reportPreparationError(other, domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize))
+	if strings.Contains(stderr.String(), "Next:") {
+		t.Fatalf("a non-config command printed a config next step: %s", stderr.String())
+	}
+	stderr.Reset()
+	invalid, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "SSH_PORT", "nope", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := invalid.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "SSH_PORT") || !strings.Contains(stderr.String(), "Next: use a supported value for the named setting") || strings.Contains(stderr.String(), "nope") {
+		t.Fatalf("invalid scalar lacks a next step: code=%d %s", code, stderr.String())
+	}
 	stderr.Reset()
 	retired, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
 	if err != nil {

@@ -107,16 +107,18 @@ func (cli *CLI) reportConfigRefusal(prefix, home string, err error) {
 	}
 }
 
-// reportConfigNext prints the fixed next steps of a prospective config refusal.
+// reportConfigNext prints every fixed next step config.Diagnose finds. Callers
+// pass only errors from a config command boundary.
 func (cli *CLI) reportConfigNext(err error) {
+	home, cause := "", err
 	var prospective configProspectiveError
-	var refusal *domain.ConfigRefusal
 	if errors.As(err, &prospective) {
-		for _, next := range config.Diagnose(prospective.home, prospective.cause).Next {
-			cli.errorf("Next: %s", next)
-		}
-	} else if errors.As(err, &refusal) {
-		cli.errorf("Next: %s", refusal.Next())
+		home, cause = prospective.home, prospective.cause
+	} else {
+		home, _ = config.ResolveConfigHome(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), cli.env)
+	}
+	for _, next := range config.Diagnose(home, cause).Next {
+		cli.errorf("Next: %s", next)
 	}
 }
 

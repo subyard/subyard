@@ -367,6 +367,11 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 		case *SourceError:
 			message, _ := SourceDiagnostic(configHome, typed)
 			diagnostic.Refusals = append(diagnostic.Refusals, message)
+			if typed.Path != "" {
+				diagnostic.addNext("correct the named configuration source, then run config validate")
+			} else {
+				diagnostic.addNext("use a supported value for the named setting")
+			}
 			return
 		case *domain.ConfigRefusal:
 			diagnostic.Refusals = append(diagnostic.Refusals, typed.Error())
