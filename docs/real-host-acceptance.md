@@ -46,7 +46,12 @@ inside each selected running instance.
 Shared-only onboarding, terminal confirmation, declined-operation immutability and local
 HostID persistence are covered by `tests/cli-contract.sh` and the configuration-source Go
 tests. Installed authenticated SSH/Git transport and bidirectional convergence are covered
-by `dev/e2e/config-sync-acceptance.sh`.
+by `dev/e2e/config-sync-acceptance.sh --slot N`, including refusal on dirty, diverged and
+conflicted checkouts without changing live settings or remote refs. Periodic E2E runs it by
+default as `periodic:config-sync`, also selectable through `checks`; it is outside release
+acceptance. Changes to `internal/configsync`, configuration-source SSH/Git transport, or
+`config sync` / `config set --git` commands require this lane under the
+[coverage ownership map](testing.md#coverage-ownership).
 
 ## Platform and release checks
 

@@ -728,6 +728,15 @@ live settings or remote refs:
 bash dev/e2e/config-sync-acceptance.sh --slot "$slot"
 ```
 
+[Periodic E2E](testing.md#periodic-e2e-on-hosted-runners) runs this check by default as
+`periodic:config-sync`; a manual dispatch can select it with `checks=periodic:config-sync`.
+It is not part of release acceptance. The [coverage ownership map](testing.md#coverage-ownership)
+requires it for configuration-sync and configuration-source SSH/Git transport changes.
+The hosted controller has a provisional 90-minute timeout plus 10-minute TERM cleanup grace,
+pending measurement. It uses the standard pair: 9 GiB including VM overhead, with a 2 GiB hosted
+memory reserve. The hosted wrapper uses 12 GiB VM disks when free space is below 65 GiB;
+normal broker memory and disk admission still apply.
+
 The boot check uses one standard VM. It packages the current worktree and installs it through the
 supported installer, reboots the VM, observes the installed power service waiting for a missing
 required proxy address while an owned optional publication keeps its yard and local workload

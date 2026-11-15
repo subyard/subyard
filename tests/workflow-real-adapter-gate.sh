@@ -138,8 +138,11 @@ grep -Fq 'bash dev/ci/periodic-e2e.sh acceptance' "$HOSTED_WORKFLOW" \
   || fail 'hosted VM workflow must reuse pool setup and verify terminal collector selection'
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import importlib.util
+import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 root = Path(sys.argv[1])
 def module(name, path):
@@ -214,6 +217,33 @@ p = module("periodic", "dev/ci/plan-periodic-checks.py")
 plan = p.plan(root)
 entries = {entry["id"]: entry["command"] for group in plan.values() for entry in group["include"]}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
+config_sync = {"id": "periodic:config-sync",
+               "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
+                           "bash", "dev/e2e/config-sync-acceptance.sh", "--slot", "1"]}
+assert plan["checks"]["include"].count(config_sync) == 1
+# Collector commands wrap core VM checks, so also inspect their underlying catalog commands.
+release_entries = [{"id": name, "command": command or []} for name, command in commands.items()]
+release_entries += json.loads((root / a.CORE_VM_CATALOG).read_text())["checks"]
+assert not any(entry["id"].split(":")[-1] == "config-sync" or
+               any(Path(arg).name == "config-sync-acceptance.sh" for arg in entry["command"])
+               for entry in release_entries), "config sync leaked into release acceptance"
+# Adding periodic-only checks must preserve every existing matrix entry, including Veranda.
+p.PERIODIC_ONLY = []
+assert {kind: {"include": [entry for entry in group["include"] if entry != config_sync]}
+        for kind, group in plan.items()} == p.plan(root)
+# Execute the workflow's actual default/dispatch filtering, without running any VM commands.
+workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
+selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"\n', 1)[1]
+selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
+for only in ("", config_sync["id"]):
+    selected = json.loads(subprocess.check_output(
+        ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
+        env=dict(os.environ, ONLY=only, plan=json.dumps(plan))))
+    expected = ({"checks": {"include": [config_sync]}, "nested": {"include": []}} if only else
+                {kind: {"include": [entry for entry in group["include"] if not entry.get("manual")]}
+                 for kind, group in plan.items()})
+    assert selected == expected
+print("ok: periodic config sync runs by default and by dispatch, outside release acceptance")
 assert entries["vm:integration-selection/default"] == commands["vm:integration-selection/default"] + ["--slot", "1"]
 for name, command in commands.items():
     if name.startswith("vm:published-upgrade/"):
