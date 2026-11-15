@@ -1059,7 +1059,7 @@ recorded, not desired configuration. `reduce-selection` refuses it before writin
 names that installed selection: fix the failing component and run `yard migrate`. A profile runtime
 that declares a yard failure scope holds neither kind of activation: its typed failure completes the
 release and leaves that yard pending `yard -Y NAME init`: fix the failing component and run that
-init. See [yard-scoped runtime failures](control-plane.md#yard-scoped-runtime-failures).
+init, or use the exit its profile names, such as `yard -Y NAME orca remove` followed by init. See [yard-scoped runtime failures](control-plane.md#yard-scoped-runtime-failures).
 
 After a completed transition, local selection `config set`, integration disable and profile
 disable can also reduce desired source while materialized configuration is stale. They use

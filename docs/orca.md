@@ -80,6 +80,19 @@ stopped; after starting one, run `yard init` to repair its installed handler bef
 project hooks execute. This repair also runs when provisioning is already current.
 `orca sync` refuses a stale registration contract and points to `yard init`.
 
+`yard -Y NAME orca remove` takes Orca out of one yard, also when an update left it half applied or
+its service is broken: it removes the owned route, stops and then disables the Orca service and
+discovery units, and removes the fixed Orca hook, registration helpers, markers, lock, Codex
+launch wiring and unit files. The ingress guard and unit files go only after the main unit is
+inactive. It runs no installed Orca helper itself (stopping the service runs only the unit's own
+stop commands) and touches no other path; an unreceipted
+`orca-server` device and an unowned nft table are left untouched with a warning, and Orca daemon
+scopes are stopped on a best-effort basis. Orca state under `/srv/agents/orca`, the `orca-ide`
+package and lingering are kept. It exits zero only when the route, the three units and every
+fixed path are gone; otherwise it lists every unmet item, and rerunning it is the retry. When an
+update leaves a yard pending its init because of an Orca failure, the failure names this exit:
+run `orca remove` and then `yard -Y NAME init`. `orca up` installs Orca again.
+
 When rolling back to Subyard 0.14.0 or 0.13.13, the older updater leaves the newer,
 backward-compatible registration handler installed. This legacy rollback does not
 undo a defect in that handler. An explicit `orca up` on the older release reinstalls

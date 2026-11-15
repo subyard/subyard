@@ -1276,6 +1276,10 @@ and `yard status` show each one. A finding names the yard, the profile, the diag
 exact `yard -Y NAME init`. When those exact commands exceed the 480-byte record message, the
 finding names the yard once with the same steps, and a yard name too long even for that is left
 to the next step, so the failure is still recorded.
+The handler may print its own further exit on its stderr beside the typed record; the core
+message stays generic. Orca names `yard -Y NAME orca remove` and then `yard -Y NAME init`: the
+resource verb is a profile resource mutation, so the pending-configuration admission below admits
+it, and once Orca is removed the runtime observes `absent` and the yard is ready again.
 
 These findings share the pending-configuration admission of materialized configuration: when every
 blocker is such a finding and no owner is unconverged, the direct CLI and RPC admit unrelated
