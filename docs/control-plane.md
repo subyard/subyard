@@ -1309,8 +1309,11 @@ runs the 0.28.1 installer first, then updates normally.
 0.28.0 and 0.28.1 stop the same way at such a yard whose project carries an explicit
 `restricted.virtual-machines.lowlevel=block`, which the start policy replaces with the grant.
 Later releases treat that value as product output too. A replacement must be newer than the
-release the unfinished journal selected, so a stop under 0.28.1 is left only with a release newer
-than 0.28.1.
+release the unfinished journal selected, and releases after v0.28.x refuse such a journal while
+the active release is below the anchor. A stop under 0.28.1 on an install below 0.28.0 is
+therefore a known limitation: it is left only with a later 0.28.x fix release (a defective hop
+is repaired in the anchor series). The earlier release stays active and yards and data stay
+intact. Subyard never writes `block` itself, so only a manually set value reaches this stop.
 
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone
