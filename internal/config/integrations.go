@@ -100,7 +100,7 @@ func ResolveIntegrationSelection(values map[string]string, requested []string) (
 	selected := make(map[string]bool, len(requested))
 	for _, agent := range requested {
 		if selected[agent] {
-			return result, fmt.Errorf("duplicate agent %q", agent)
+			return result, namedRefusal(domain.ConfigDuplicateIntegration, domain.ConfigIntegrationName, agent)
 		}
 		selected[agent] = true
 	}
@@ -114,7 +114,7 @@ func ResolveIntegrationSelection(values map[string]string, requested []string) (
 	}
 	for _, agent := range requested {
 		if !domain.SafeName(agent) || !knownAgent(agent) {
-			return result, fmt.Errorf("unknown integration %q", agent)
+			return result, namedRefusal(domain.ConfigUnknownIntegration, domain.ConfigIntegrationName, agent)
 		}
 	}
 	visiting := make(map[string]bool)
@@ -192,14 +192,14 @@ func ValidateYardTemplateIntegrations(loaded Loaded, template string) error {
 		return nil
 	}
 	if !domain.SafeName(template) {
-		return fmt.Errorf("invalid YARD_TEMPLATE %q", template)
+		return fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template)
 	}
 	path := filepath.Join(loaded.Context.Paths.ConfigDir, "yards", "profiles", template+".env")
 	values := cloneEnvironment(loaded.Environment)
 	delete(values, "ALLOWS_CODING_TOOLS")
 	if err := loaded.Catalog.applyEnvFileValidated(path, values, ScopeShipped, false, nil); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("unknown YARD_TEMPLATE %q", template)
+			return fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template)
 		}
 		return err
 	}

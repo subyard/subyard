@@ -38,3 +38,23 @@ func TestConfigRefusalRendersOnlyValidatedNames(t *testing.T) {
 		t.Fatalf("unvalidated fallback = %v", fallback)
 	}
 }
+
+func TestContextValidationReportsEveryTypedRefusal(t *testing.T) {
+	ctx := Context{YardName: "default", AccessKind: AccessLocal, YardKind: "SENTINEL", ShiftMode: "SENTINEL", DevUID: -1, NestedE2EVMs: true,
+		Paths: RuntimePaths{RepositoryRoot: "/r", ConfigDir: "relative", OperatorHome: "/home/dev", ConfigHome: "/c", DataHome: "/home/dev", StoragePath: "/s", HostBase: "/srv", StateDir: "/t"}}
+	if _, err := NormalizeContext(ctx); err == nil || err.Error() != "config dir must be an absolute path" {
+		t.Fatalf("path refusal = %v", err)
+	}
+	ctx.Paths.ConfigDir = "/d"
+	_, err := NormalizeContext(ctx)
+	var refusals *Refusals
+	if !errors.As(err, &refusals) || len(refusals.Unwrap()) != 8 {
+		t.Fatalf("context refusals = %v", err)
+	}
+	for _, cause := range refusals.Unwrap() {
+		var typed *ConfigRefusal
+		if !errors.As(cause, &typed) || strings.Contains(typed.Error(), "SENTINEL") || strings.Contains(typed.Error(), "/srv") {
+			t.Fatalf("untyped or value-bearing context refusal: %v", cause)
+		}
+	}
+}

@@ -98,6 +98,16 @@ func (err configProspectiveError) Error() string {
 }
 func (err configProspectiveError) Unwrap() error { return err.cause }
 
+// reportConfigNext prints the fixed next steps of a prospective config refusal.
+func (cli *CLI) reportConfigNext(err error) {
+	var prospective configProspectiveError
+	if errors.As(err, &prospective) {
+		for _, next := range config.Diagnose(prospective.home, prospective.cause).Next {
+			cli.errorf("Next: %s", next)
+		}
+	}
+}
+
 func (plan *configProspective) inspect(draft, locked bool) (binding, semantics string, result error) {
 	defer func() {
 		if result != nil {
@@ -141,11 +151,11 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 				return err
 			}
 			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
-				return errors.New("configuration dependency directory has unsafe type or permissions")
+				return domain.NewConfigRefusal(domain.ConfigDependencyDirectoryUnsafe)
 			}
 			stat, ok := info.Sys().(*syscall.Stat_t)
 			if !ok || stat.Uid != uint32(os.Getuid()) {
-				return errors.New("configuration dependency directory is not operator-owned")
+				return domain.NewConfigRefusal(domain.ConfigDependencyDirectoryNotOwned)
 			}
 			directories[directory] = config.PersistentFileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode, UID: stat.Uid, GID: stat.Gid}
 		}

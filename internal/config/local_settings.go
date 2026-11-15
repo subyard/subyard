@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // ErrLegacyGitSettingsMigration preserves the old shared storage until sync
@@ -20,7 +22,7 @@ func CheckLocalSettingsWritable(configHome string) error {
 		return err
 	}
 	if pending {
-		return errors.New("an interrupted configuration transaction requires recovery with yard config sync")
+		return domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
 	}
 	path := filepath.Join(configHome, ".sync", "manifest.json")
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {

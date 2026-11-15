@@ -129,13 +129,6 @@ func NormalizeContext(ctx Context) (Context, error) {
 	if ctx.DevUser == "" {
 		ctx.DevUser = "dev"
 	}
-	clean := func(name, value string) (string, error) {
-		if !filepath.IsAbs(value) {
-			return "", fmt.Errorf("%s must be an absolute path", name)
-		}
-		return filepath.Clean(value), nil
-	}
-
 	fields := []struct {
 		name  string
 		value *string
@@ -149,12 +142,16 @@ func NormalizeContext(ctx Context) (Context, error) {
 		{"host base", &ctx.Paths.HostBase},
 		{"state dir", &ctx.Paths.StateDir},
 	}
+	var refusals []error
 	for _, field := range fields {
-		value, err := clean(field.name, *field.value)
-		if err != nil {
-			return Context{}, err
+		if !filepath.IsAbs(*field.value) {
+			refusals = append(refusals, NewConfigRefusal(ConfigPathNotAbsolute, ConfigName{field.name}))
+			continue
 		}
-		*field.value = value
+		*field.value = filepath.Clean(*field.value)
+	}
+	if err := CollectRefusals(refusals...); err != nil {
+		return Context{}, err
 	}
 	if err := ctx.Validate(); err != nil {
 		return Context{}, err
@@ -162,50 +159,51 @@ func NormalizeContext(ctx Context) (Context, error) {
 	return ctx, nil
 }
 
+// Validate reports every independent context refusal in stable order.
 func (ctx Context) Validate() error {
+	var refusals []error
+	refuse := func(code ConfigRefusalCode, names ...ConfigName) {
+		refusals = append(refusals, NewConfigRefusal(code, names...))
+	}
 	if ctx.YardName == "" {
-		return errors.New("yard name is required")
+		refuse(ConfigYardNameRequired)
 	}
 	if ctx.AccessKind != AccessLocal && ctx.AccessKind != AccessRemote {
-		return fmt.Errorf("access kind must be %q or %q", AccessLocal, AccessRemote)
+		refuse(ConfigAccessKindInvalid)
 	}
 	if ctx.YardKind != YardContainer && ctx.YardKind != YardVM {
-		return fmt.Errorf("yard kind must be %q or %q", YardContainer, YardVM)
+		refuse(ConfigYardKindInvalid)
 	}
 	if ctx.NestedE2EVMs && ctx.YardKind != YardContainer {
-		return errors.New("nested E2E VMs currently require a container yard")
+		refuse(ConfigNestedE2EVMsRequireContainer)
 	}
 	if ctx.YardInstanceName == "" || ctx.IncusProject == "" || ctx.SSHHost == "" || ctx.DevUser == "" {
-		return errors.New("instance name, Incus project, SSH host and dev user are required")
+		refuse(ConfigContextIdentityRequired)
 	}
 	if ctx.ShiftMode != "shift" && ctx.ShiftMode != "acl" {
-		return errors.New("shift mode must be shift or acl")
+		refuse(ConfigShiftModeInvalid)
 	}
 	if ctx.DevUID < 0 {
-		return errors.New("dev UID must be non-negative")
+		refuse(ConfigDevUIDNegative)
 	}
-	if ctx.Paths.HostBase != filepath.Clean(ctx.Paths.HostBase) {
-		return errors.New("host base must be normalized")
-	}
-	if ctx.Paths.DataHome != filepath.Clean(ctx.Paths.DataHome) {
-		return errors.New("data home must be normalized")
-	}
-	if broadHostPath(ctx.Paths.HostBase, ctx.Paths.OperatorHome) {
-		return fmt.Errorf("host base is too broad: %s", ctx.Paths.HostBase)
-	}
-	if broadHostPath(ctx.Paths.DataHome, ctx.Paths.OperatorHome) {
-		return fmt.Errorf("data home is too broad: %s", ctx.Paths.DataHome)
+	for _, path := range []struct{ name, value string }{{"host base", ctx.Paths.HostBase}, {"data home", ctx.Paths.DataHome}} {
+		if path.value != filepath.Clean(path.value) {
+			refuse(ConfigPathNotNormalized, ConfigName{path.name})
+		} else if broadHostPath(path.value, ctx.Paths.OperatorHome) {
+			// The established text names the path; boundaries render only the typed part.
+			refusals = append(refusals, fmt.Errorf("%w: %s", NewConfigRefusal(ConfigPathTooBroad, ConfigName{path.name}), path.value))
+		}
 	}
 	if ctx.AccessKind == AccessLocal && (ctx.SSHPort < 1 || ctx.SSHPort > 65535) {
-		return errors.New("SSH port must be an integer from 1 to 65535")
+		refuse(ConfigSSHPortRange)
 	}
 	if ctx.AccessKind == AccessRemote && !SafeSSHTarget(ctx.OwnerEndpoint) {
-		return errors.New("remote yard context requires an owner endpoint")
+		refuse(ConfigOwnerEndpointRequired)
 	}
 	if ctx.AccessKind == AccessRemote && !SafeName(ctx.OwnerYardName) {
-		return errors.New("remote yard context requires a canonical owner yard name")
+		refuse(ConfigOwnerYardNameRequired)
 	}
-	return nil
+	return CollectRefusals(refusals...)
 }
 
 func broadHostPath(path, operatorHome string) bool {

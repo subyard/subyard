@@ -259,7 +259,7 @@ func load(
 		yardName = "default"
 	}
 	if !domain.SafeName(yardName) {
-		return domain.Context{}, nil, fmt.Errorf("invalid yard name %q", yardName)
+		return domain.Context{}, nil, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigYardNameInvalid), yardName)
 	}
 	resetFallback, err := options.ProspectiveFiles.fallbackReset(configHome, yardName)
 	if err != nil {
@@ -513,8 +513,9 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 	}
 	port, err := strconv.Atoi(values[name])
 	if err != nil || port < 1024 || port > 65535 || strconv.Itoa(port) != values[name] {
-		return fmt.Errorf("%s must be a canonical port in range 1024..65535", name)
+		return domain.SettingRefusal(domain.ConfigSettingCanonicalPort, name)
 	}
+	var collisions []error
 	profiles := strings.Fields(values["ENVIRONMENT_PROFILES"])
 	for _, definition := range tracker.catalog.SettingCatalog() {
 		if !definition.HostListener || definition.Name == name {
@@ -527,11 +528,10 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 			continue
 		}
 		if listenerPort, err := strconv.Atoi(values[definition.Name]); err == nil && listenerPort == port {
-			return fmt.Errorf("%s collides with %s; choose another port", name, definition.Name)
+			collisions = append(collisions, domain.SettingRefusal(domain.ConfigPortCollision, name, definition.Name))
 		}
 	}
-
-	return nil
+	return domain.CollectRefusals(collisions...)
 }
 
 func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
@@ -546,7 +546,7 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 		}
 		source, err := strconv.Atoi(values[definition.DefaultFrom.Setting])
 		if err != nil {
-			return fmt.Errorf("derived port %s has invalid source", name)
+			return domain.SettingRefusal(domain.ConfigDerivedPortSource, name)
 		}
 		width := definition.Maximum - definition.Minimum + 1
 		value := (source + definition.DefaultFrom.Offset - definition.Minimum) % width
@@ -564,6 +564,8 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 	}
 	// Integration listeners preserve reservations against configured peer listeners,
 	// including packages whose service is stopped or not yet initialized.
+	var collisions []error
+	reported := map[[2]string]bool{}
 	for _, definition := range tracker.catalog.SettingCatalog() {
 		owner, integration := strings.CutPrefix(definition.Owner, "integration:")
 		if !integration || !definition.HostListener || !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), owner) {
@@ -576,15 +578,22 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 			if other, ok := strings.CutPrefix(peer.Owner, "integration:"); ok && !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), other) {
 				continue
 			}
-			if values[peer.Name] == values[definition.Name] {
-				return fmt.Errorf("%s collides with %s; choose another port", definition.Name, peer.Name)
+			pair := [2]string{min(definition.Name, peer.Name), max(definition.Name, peer.Name)}
+			if values[peer.Name] == values[definition.Name] && !reported[pair] {
+				reported[pair] = true
+				collisions = append(collisions, domain.SettingRefusal(domain.ConfigPortCollision, definition.Name, peer.Name))
 			}
 		}
+	}
+	if len(collisions) != 0 {
+		// The general check below would report the same pairs again.
+		return domain.CollectRefusals(collisions...)
 	}
 	return validateHostListenerCollisions(values, tracker.catalog)
 }
 
 func validateHostListenerCollisions(values map[string]string, settings Catalog) error {
+	var collisions []error
 	ports := map[string]string{}
 	for _, definition := range settings.SettingCatalog() {
 		if !definition.HostListener {
@@ -601,11 +610,12 @@ func validateHostListenerCollisions(values map[string]string, settings Catalog) 
 			continue
 		}
 		if previous := ports[value]; previous != "" {
-			return fmt.Errorf("%s collides with %s; choose another port", definition.Name, previous)
+			collisions = append(collisions, domain.SettingRefusal(domain.ConfigPortCollision, definition.Name, previous))
+			continue
 		}
 		ports[value] = definition.Name
 	}
-	return nil
+	return domain.CollectRefusals(collisions...)
 }
 
 func normalizeAgentPersistLinks(
@@ -656,7 +666,7 @@ func ResolveConfigHome(operatorHome string, source map[string]string) (string, e
 		values["SUBYARD_OPERATOR_HOME"] = operatorHome
 	}
 	if values["SUBYARD_OPERATOR_HOME"] == "" {
-		return "", errors.New("operator home is required")
+		return "", domain.NewConfigRefusal(domain.ConfigOperatorHomeRequired)
 	}
 	return bootstrapConfigHome(values)
 }
@@ -908,7 +918,7 @@ func applyYardConfigTracked(
 func applyYardTemplateTracked(configDir, yardName, template, yardFile string, values environment, tracker *settingTracker) error {
 	if template != "" {
 		if !domain.SafeName(template) {
-			return fmt.Errorf("invalid YARD_TEMPLATE %q in %s", template, yardFile)
+			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
 		}
 		if template == "e2e-vms" {
 			return retiredE2EVMTemplateError(yardName, yardFile)
@@ -917,12 +927,12 @@ func applyYardTemplateTracked(configDir, yardName, template, yardFile string, va
 		info, err := os.Stat(templateFile)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("unknown YARD_TEMPLATE %q in %s", template, yardFile)
+				return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
 			}
 			return err
 		}
 		if info.IsDir() {
-			return fmt.Errorf("unknown YARD_TEMPLATE %q in %s", template, yardFile)
+			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
 		}
 		settings := Catalog{}
 		if tracker != nil {
@@ -1164,10 +1174,8 @@ func normalizeLegacyEnvironment(values environment) error {
 		}
 		legacyValue = normalizeLegacySelection(legacy, legacyValue)
 		if canonicalValue, hasCanonical := values[canonical]; hasCanonical && canonicalValue != legacyValue {
-			return fmt.Errorf(
-				"conflicting command environment settings %s=%q and %s=%q",
-				canonical, canonicalValue, legacy, legacyValue,
-			)
+			// Command values may be secrets, so even the error text names only settings.
+			return domain.SettingRefusal(domain.ConfigConflictingCommandSettings, canonical, legacy)
 		}
 		values[canonical] = legacyValue
 		delete(values, legacy)
@@ -1346,8 +1354,10 @@ func contextFrom(
 	dataHome := values["SUBYARD_HOME"]
 	hostBase := values["HOST_BASE"]
 	restrictedBase := values["RESTRICTED_DISK_PATHS"]
+	// Each check reads only its own settings, so every refusal is reported.
+	var refusals []error
 	if hostBase != restrictedBase {
-		return domain.Context{}, errors.New("HOST_BASE must equal RESTRICTED_DISK_PATHS")
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigHostBaseMismatch))
 	}
 	stateDir := values["SUBYARD_STATE_DIR"]
 	if stateDir == "" {
@@ -1355,37 +1365,28 @@ func contextFrom(
 	}
 	sshPort, err := optionalInt(values["SSH_PORT"])
 	if err != nil {
-		return domain.Context{}, fmt.Errorf("SSH_PORT: %w", err)
+		refusals = append(refusals, fmt.Errorf("%w: %w", domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), err))
 	}
 	devUID, err := strconv.Atoi(values["DEV_UID"])
 	if err != nil {
-		return domain.Context{}, fmt.Errorf("DEV_UID must be numeric")
+		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingNumeric, "DEV_UID"))
 	}
-	forwardAgent, err := zeroOne(values["FORWARD_SSH_AGENT"], "FORWARD_SSH_AGENT")
-	if err != nil {
-		return domain.Context{}, err
-	}
-	devSudo, err := zeroOne(values["DEV_SUDO"], "DEV_SUDO")
-	if err != nil {
-		return domain.Context{}, err
-	}
-	nestedE2EVMs, err := zeroOne(values["NESTED_E2E_VMS"], "NESTED_E2E_VMS")
-	if err != nil {
-		return domain.Context{}, err
-	}
+	forwardAgent, devSudo, nestedE2EVMs := zeroOne(values, "FORWARD_SSH_AGENT", &refusals), zeroOne(values, "DEV_SUDO", &refusals), zeroOne(values, "NESTED_E2E_VMS", &refusals)
 	rawE2EVMCPU := values["E2E_VM_CPU"]
 	e2eVMCPU, err := resolveE2EVMCPU(rawE2EVMCPU, runtime.NumCPU())
 	if err != nil {
-		return domain.Context{}, err
+		refusals = append(refusals, err)
+	} else {
+		values["E2E_VM_CPU"] = e2eVMCPU
+		if e2eVMCPU != rawE2EVMCPU {
+			tracker.record(
+				normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
+				"resolved from "+rawE2EVMCPU,
+			)
+		}
 	}
-	values["E2E_VM_CPU"] = e2eVMCPU
-	if e2eVMCPU != rawE2EVMCPU {
-		tracker.record(
-			normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
-			"resolved from "+rawE2EVMCPU,
-		)
-	}
-	if err := validateE2EConfig(values); err != nil {
+	refusals = append(refusals, validateE2EConfig(values, err == nil))
+	if err := domain.CollectRefusals(refusals...); err != nil {
 		return domain.Context{}, err
 	}
 	ctx := domain.Context{
@@ -1426,16 +1427,16 @@ func contextFrom(
 func resolveE2EVMCPU(value string, hostCPUs int) (string, error) {
 	if value != "" && value != "auto" {
 		if strings.Trim(value, "0123456789") != "" {
-			return "", errors.New("E2E_VM_CPU must be auto or a positive integer")
+			return "", domain.NewConfigRefusal(domain.ConfigE2EVMCPU)
 		}
 		count, err := strconv.Atoi(value)
 		if err != nil || count < 1 {
-			return "", errors.New("E2E_VM_CPU must be auto or a positive integer")
+			return "", domain.NewConfigRefusal(domain.ConfigE2EVMCPU)
 		}
 		return strconv.Itoa(count), nil
 	}
 	if hostCPUs < 1 {
-		return "", errors.New("cannot resolve E2E_VM_CPU: host CPU count is unavailable")
+		return "", domain.NewConfigRefusal(domain.ConfigHostCPUUnavailable)
 	}
 	count := hostCPUs * 2 / 3
 	if count < 1 {
@@ -1454,73 +1455,62 @@ func optionalInt(value string) (int, error) {
 	return strconv.Atoi(value)
 }
 
-func zeroOne(value, name string) (bool, error) {
-	switch value {
+func zeroOne(values environment, name string, refusals *[]error) bool {
+	switch values[name] {
 	case "0":
-		return false, nil
+		return false
 	case "1":
-		return true, nil
+		return true
 	default:
-		return false, fmt.Errorf("%s must be 0 or 1", name)
+		*refusals = append(*refusals, domain.SettingRefusal(domain.ConfigSettingZeroOne, name))
+		return false
 	}
 }
 
-func validateE2EConfig(values environment) error {
-	positive := func(name string) (int, error) {
-		value, err := strconv.Atoi(values[name])
-		if err != nil || value < 1 {
-			return 0, fmt.Errorf("%s must be a positive integer", name)
-		}
-		return value, nil
+// validateE2EConfig reports every independent E2E setting refusal; checkCPU is
+// false when E2E_VM_CPU already failed to resolve.
+func validateE2EConfig(values environment, checkCPU bool) error {
+	var refusals []error
+	if value, err := strconv.Atoi(values["E2E_VM_CPU"]); checkCPU && (err != nil || value < 1) {
+		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingPositiveInteger, "E2E_VM_CPU"))
 	}
-	if _, err := positive("E2E_VM_CPU"); err != nil {
-		return err
-	}
-	sizeMiB := func(name string) (int, error) {
+	sizeMiB := func(name string) (int, bool) {
 		value := values[name]
 		factor, raw := 1, strings.TrimSuffix(value, "MiB")
 		if strings.HasSuffix(value, "GiB") {
 			factor, raw = 1024, strings.TrimSuffix(value, "GiB")
-		} else if raw == value {
-			return 0, fmt.Errorf("%s must use a positive MiB or GiB value", name)
 		}
 		amount, err := strconv.Atoi(raw)
-		if err != nil || amount < 1 {
-			return 0, fmt.Errorf("%s must use a positive MiB or GiB value", name)
+		if raw == value || err != nil || amount < 1 {
+			refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingPositiveSize, name))
+			return 0, false
 		}
-		return amount * factor, nil
+		return amount * factor, true
 	}
-	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
-		if name == "E2E_DISK_BUDGET" && values[name] == "0GiB" {
-			continue
-		}
-		if _, err := sizeMiB(name); err != nil {
-			return err
+	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD", "E2E_VM_MEMORY"} {
+		if name != "E2E_DISK_BUDGET" || values[name] != "0GiB" {
+			sizeMiB(name)
 		}
 	}
-	if _, err := sizeMiB("E2E_VM_MEMORY"); err != nil {
-		return err
+	if disk, ok := sizeMiB("E2E_VM_DISK"); ok && disk < 10*1024 {
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigE2EVMDiskMinimum))
 	}
-	if disk, err := sizeMiB("E2E_VM_DISK"); err != nil {
-		return err
-	} else if disk < 10*1024 {
-		return errors.New("E2E_VM_DISK must be at least 10GiB")
-	}
-	for name, bounds := range map[string][2]int{
-		"E2E_VM_SLOT_COUNT": {1, 1<<20 - 1}, "E2E_VM_BOOT_TIMEOUT": {30, 1800},
-	} {
-		value, err := strconv.Atoi(values[name])
-		if err != nil || value < bounds[0] || value > bounds[1] {
-			return fmt.Errorf("%s must be an integer from %d to %d", name, bounds[0], bounds[1])
+	for _, bound := range []struct {
+		name     string
+		min, max int
+		code     domain.ConfigRefusalCode
+	}{{"E2E_VM_SLOT_COUNT", 1, 1<<20 - 1, domain.ConfigE2EVMSlotCountRange}, {"E2E_VM_BOOT_TIMEOUT", 30, 1800, domain.ConfigE2EVMBootTimeoutRange}} {
+		if value, err := strconv.Atoi(values[bound.name]); err != nil || value < bound.min || value > bound.max {
+			refusals = append(refusals, domain.NewConfigRefusal(bound.code))
 		}
 	}
 	image := values["E2E_VM_IMAGE"]
 	if image == "" || strings.HasPrefix(image, "-") || strings.ContainsFunc(image, func(char rune) bool {
 		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/@+-", char)
 	}) {
-		return errors.New("E2E_VM_IMAGE contains unsafe characters")
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigE2EVMImageUnsafe))
 	}
-	return nil
+	return domain.CollectRefusals(refusals...)
 }
 
 func applyEnvFileValidated(path string, values environment, scope SettingScope, syncable bool, observer assignmentObserver) error {

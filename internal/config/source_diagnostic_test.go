@@ -251,6 +251,16 @@ func TestDiagnoseRendersEveryClassifiedRefusalWithoutValues(t *testing.T) {
 		!strings.Contains(message, "configuration: SSH_PORT (scalar settings): invalid port value") || len(mixed.Refusals) != len(want)+1 {
 		t.Fatalf("mixed diagnostic = %q", message)
 	}
+	if stale := Diagnose("", fmt.Errorf("%w: %w", err, domain.ErrPlanStale)); stale.Unclassified || len(stale.Refusals) != len(want) {
+		t.Fatalf("known sentinel made the diagnostic incomplete: %#v", stale)
+	}
+	values := Diagnose("", domain.CollectRefusals(
+		fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), "SENTINEL", "/SENTINEL"),
+		fmt.Errorf("%w %q", ErrUnknownYard, "SENTINEL"),
+	))
+	if message := values.Message("generic"); message != "unknown YARD_TEMPLATE; unknown yard" || values.Unclassified {
+		t.Fatalf("value-suffixed refusals = %q", message)
+	}
 	if opaque := Diagnose("", errors.New("raw SENTINEL")); !opaque.Unclassified || opaque.Message("generic") != "generic" {
 		t.Fatalf("unclassified diagnostic = %#v", opaque)
 	}

@@ -218,6 +218,7 @@ func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request 
 	}
 	if err != nil {
 		cli.errorf(label+": %v", configProspectiveError{configHome, err})
+		cli.reportConfigNext(configProspectiveError{configHome, err})
 		return 1
 	}
 	file, err := os.CreateTemp("/tmp", "subyard-alias-repair-*")
@@ -240,6 +241,7 @@ func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request 
 	}
 	if err != nil {
 		cli.errorf(label+": %v", configProspectiveError{configHome, err})
+		cli.reportConfigNext(configProspectiveError{configHome, err})
 		return 1
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal {

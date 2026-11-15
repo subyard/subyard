@@ -1013,7 +1013,8 @@ readiness. `config status` reports materialized assets only; use release assessm
 
 A refused configuration load, `config set` or `config validate` reports every independent
 classified refusal in stable order: source diagnostics, yard-role and profile constraints,
-shipped package and configuration-root states, each with its fixed next step. These texts name
+setting, port and context checks, shipped package and configuration-root states, each with its
+fixed next step. These texts name
 profiles and settings but never their values; any other cause is summarized by a generic
 "invalid or unavailable" tail.
 

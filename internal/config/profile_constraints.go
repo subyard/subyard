@@ -27,7 +27,7 @@ type profileConstraintDeclaration struct {
 func profileDeclaration(configDir, name string) (profileConstraintDeclaration, error) {
 	declaration := profileConstraintDeclaration{scope: "shared"}
 	if !domain.SafeName(name) {
-		return declaration, fmt.Errorf("invalid environment profile %q", name)
+		return declaration, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigProfileNameInvalid), name)
 	}
 	pkg, err := profile.ResolvePackageInConfig(configDir, name)
 	if errors.Is(err, os.ErrNotExist) {

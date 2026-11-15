@@ -835,7 +835,7 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 		{2, []string{"-Y", "broken", "config", "show"}, []string{"yard broken, config inspection: ", permits, route, kind, "selected yard role forbids non-empty HOST_CLAUDE_MD", "yard: Next: deselect"}},
 		{1, []string{"-Y", "broken", "config", "validate"}, []string{"yard broken: prospective configuration: ", permits, route, kind, "\nRetry: deselect"}},
 		{1, []string{"-Y", "broken", "config", "validate", "--json"}, []string{`"diagnostic":"prospective configuration: profile \"route\" requires host access`, kind, `"retry":"deselect`}},
-		{1, []string{"-Y", "valid", "config", "set", "ENVIRONMENT_PROFILES", "service route", "--scope", "yard", "--yes"}, []string{"prospective configuration: ", permits, route}},
+		{1, []string{"-Y", "valid", "config", "set", "ENVIRONMENT_PROFILES", "service route", "--scope", "yard", "--yes"}, []string{"prospective configuration: ", permits, route, "yard: Next: deselect"}},
 	} {
 		code, output := run(test.arguments...)
 		if code != test.code || strings.Contains(output, "SENTINEL") || strings.Contains(output, "invalid or unavailable") {

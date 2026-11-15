@@ -387,7 +387,9 @@ Source-only domain modules do not load configuration themselves.
 
 Configuration refusals that may be shown are `config.SourceError`, the retired-template diagnostic
 and `domain.ConfigRefusal`: a closed code with a fixed template and next step, built only from
-validated profile, setting or yard-kind names. Producers collect independent role and profile
+validated profile, setting, integration or yard-kind names. A producer that must keep an
+unvalidated value in its error text appends it after the wrapped refusal; the renderer prints only
+the refusal. Producers collect independent role and profile
 refusals with `domain.CollectRefusals`. `config.Diagnose` is the single CLI renderer for load,
 `config set` and `config validate` failures; it walks the collected causes and marks any other
 cause unclassified instead of printing its text.

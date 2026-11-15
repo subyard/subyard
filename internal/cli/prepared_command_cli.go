@@ -41,6 +41,7 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 		code = 2
 	}
 	cli.errorf("%s: %v", prefix, err)
+	cli.reportConfigNext(err)
 	return code
 }
 

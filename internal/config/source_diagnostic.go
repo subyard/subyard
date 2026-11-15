@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -335,6 +336,17 @@ func Diagnose(configHome string, err error) ConfigDiagnostic {
 
 func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 	for current := err; current != nil; current = errors.Unwrap(current) {
+		if current == ErrUnknownYard {
+			current = domain.NewConfigRefusal(domain.ConfigUnknownYard)
+		}
+		if current == ErrLegacyGitSettingsMigration {
+			diagnostic.Refusals = append(diagnostic.Refusals, current.Error())
+			return
+		}
+		if current == domain.ErrPlanStale || current == context.Canceled || current == context.DeadlineExceeded {
+			// A known operation sentinel beside config causes is not an unclassified config cause.
+			return
+		}
 		switch typed := current.(type) {
 		case *SourceError:
 			message, _ := SourceDiagnostic(configHome, typed)
@@ -362,7 +374,7 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 // Message joins the refusals; an unclassified cause adds the generic tail.
 func (diagnostic ConfigDiagnostic) Message(generic string) string {
 	messages := slices.Clone(diagnostic.Refusals)
-	if diagnostic.Unclassified {
+	if diagnostic.Unclassified || len(messages) == 0 {
 		messages = append(messages, generic)
 	}
 	return strings.Join(messages, "; ")
