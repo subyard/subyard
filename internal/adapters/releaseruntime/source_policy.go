@@ -172,6 +172,9 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		if err != nil {
 			return err
 		}
+		if err := journal.CheckIngressSupport(); err != nil {
+			return err
+		}
 		if journal.Checkpoint != releasetransition.JournalComplete &&
 			journal.Goal.Target == request.Target && journal.Goal.Direction == request.Direction &&
 			journal.ArtifactDigest == request.ArtifactDigest {

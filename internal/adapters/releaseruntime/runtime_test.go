@@ -3474,6 +3474,44 @@ esac
 	if _, err := os.Lstat(capture); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy owner executed: %v", err)
 	}
+	for _, entry := range []struct {
+		name    string
+		inspect func() error
+	}{
+		{"source_admission", func() error {
+			_, err := runtime.InspectSourceAdmission(context.Background(), fixture.runtimeRoot, fixture.configHome)
+			return err
+		}},
+		{"source_policy", func() error {
+			return CheckSourcePolicy(context.Background(), releasetransition.ProcessRequest{
+				Mode: releasetransition.ProcessInspect, RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome,
+				Target: "1.3.0-next", Direction: releasetransition.DirectionActivateTarget,
+			})
+		}},
+		{"source_policy_exact", func() error {
+			return CheckSourcePolicy(context.Background(), releasetransition.ProcessRequest{
+				Mode: releasetransition.ProcessInspect, RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome,
+				Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest,
+			})
+		}},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			err := entry.inspect()
+			if _, markerErr := os.Lstat(capture); !errors.Is(markerErr, os.ErrNotExist) {
+				t.Errorf("retained owner executed before refusal: %v", markerErr)
+				// Keep the other entrypoint's negative proof independent on a failed run.
+				if markerErr == nil {
+					if err := os.Remove(capture); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if !errors.Is(err, releasetransition.ErrCompatibilityIngressUnavailable) || err.Error() != "compatibility ingress operation is unavailable" {
+				t.Errorf("retired import refusal = %v", err)
+			}
+		})
+	}
+
 	after, err := os.Lstat(fixture.journalPath)
 	if err != nil {
 		t.Fatal(err)

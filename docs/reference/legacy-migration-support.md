@@ -266,11 +266,19 @@ can therefore refuse with:
 
 `candidate does not bind supported completed history to a new ordinary plan; stage a compatible candidate supporting protected metadata admission`
 
-For this completed-history case, move aside only these two paths from the configuration home
+If the V2 import is complete but an original V1 journal is unfinished, v0.28.x can refuse
+earlier, before that binding comparison. Its source-history reader reports
+`legacy transaction is not closed canonical history`
+(`v0.28.1:internal/migration/source_history.go:93`); source admission renders this as
+`release source admission: protected metadata is unsupported or unresolved (legacy history); finish pending publications or recovery intent with the exact sealed original owner before source repair`.
+The same manual step below applies to those retained V1 files.
+
+Do not move these files during a running update. Once no update is running, move aside only
+these two paths from the configuration home
 to a private backup outside it, then retry the same update:
 
 - `migrations/state.json`;
-- the entire `migrations/transactions/` directory, containing the committed V1 journals and
+- the entire `migrations/transactions/` directory, containing the retained V1 journals and
   their retained recovery files.
 
 Both paths must be absent; leaving an empty `migrations/transactions/` directory still changes

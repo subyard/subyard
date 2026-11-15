@@ -372,11 +372,13 @@ requires those files and current tooling refuses it without writes; completed V2
 provenance and recovery evidence remain readable. The source-version boundary is
 separate from domain epochs and V2 checkpoint-reader compatibility.
 When an installed v0.28.x updater's completed-metadata fallback refuses a completed V2 import
-with committed V1 remnants, move aside only `migrations/state.json` and the whole
+with committed V1 remnants, wait until no update is running, then move aside only
+`migrations/state.json` and the whole
 `migrations/transactions/` directory to a private backup outside the configuration home.
 Nothing else needs cleanup or reinstallation; keep `migrations/update.lock`, V2 metadata and
 all other data in place. The [retained committed V1 workaround](legacy-migration-support.md#retained-committed-v1-files-with-v028x-updaters)
-explains the binding limitation.
+explains the binding limitation and the earlier v0.28.x source-history refusal for an
+unfinished original V1 journal under a completed V2 import; the same manual step applies.
 
 Three independent policies determine support:
 
