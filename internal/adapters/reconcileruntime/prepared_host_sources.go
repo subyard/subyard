@@ -14,10 +14,6 @@ import (
 func (runtime Runtime) hostInstallerSourcePaths(owner string) (string, []string, error) {
 	var handler string
 	switch owner {
-	case "host-power":
-		handler = "install-power-reconciler.sh"
-	case "test-vms-host-sink":
-		handler = "install-test-vms-host-sink.sh"
 	case "materialized-integrations":
 		handler = "reconcile-integrations.sh"
 	default:
