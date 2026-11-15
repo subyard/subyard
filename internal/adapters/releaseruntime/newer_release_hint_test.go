@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -16,14 +14,19 @@ func latestReleaseClient(t *testing.T, tag string, calls *int) *http.Client {
 	t.Helper()
 	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		*calls++
-		if request.URL.String() != "https://api.github.com/repos/Subyard/Subyard/releases/latest" {
-			t.Fatalf("unexpected lookup %s", request.URL)
-		}
 		if tag == "" {
 			return nil, errors.New("network unreachable")
 		}
+		if request.URL.String() == "https://github.com/Subyard/Subyard/releases/latest" {
+			return &http.Response{StatusCode: http.StatusFound, Header: http.Header{
+				"Location": {"https://github.com/Subyard/Subyard/releases/tag/" + tag},
+			}, Body: http.NoBody}, nil
+		}
+		if request.URL.String() != "https://github.com/Subyard/Subyard/releases/tag/"+tag {
+			t.Fatalf("unexpected lookup %s", request.URL)
+		}
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK",
-			Body: io.NopCloser(strings.NewReader(`{"tag_name":"` + tag + `"}`))}, nil
+			Body: http.NoBody, Request: request}, nil
 	})}
 }
 
@@ -77,7 +80,11 @@ func TestNewerReleaseProbeNamesOnlyANewerPublishedRelease(t *testing.T) {
 				t.Fatal("an ordinary resume has no newer-release probe")
 			}
 			got := Prepared{newerRelease: probe}.NewerRelease(context.Background())
-			if got.Version != test.version || got.Command != test.command || calls != 1 {
+			wantCalls := 2
+			if test.tag == "" {
+				wantCalls = 1
+			}
+			if got.Version != test.version || got.Command != test.command || calls != wantCalls {
 				t.Fatalf("NewerRelease() = %#v after %d lookups", got, calls)
 			}
 		})
@@ -114,8 +121,21 @@ func TestNewerReleaseProbeLeavesExplicitSelectionsAlone(t *testing.T) {
 	if got := (Prepared{newerRelease: probe}).NewerRelease(context.Background()); got != (NewerRelease{}) {
 		t.Fatalf("a completed journal named %#v", got)
 	}
-	if calls != 1 {
+	if calls != 2 {
 		t.Fatalf("explicit selections or cancellation looked up the channel: %d lookups", calls)
+	}
+}
+
+func TestNewerReleaseProbeIgnoresRateLimitWithoutRetry(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	calls := 0
+	runtime := New(Config{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: http.NoBody}, nil
+	})}})
+	probe := runtime.newerReleaseProbe(options{repository: "Subyard/Subyard"}, fixture.configHome)
+	if got := (Prepared{newerRelease: probe}).NewerRelease(context.Background()); got != (NewerRelease{}) || calls != 1 {
+		t.Fatalf("rate-limited probe = %#v after %d requests", got, calls)
 	}
 }
 

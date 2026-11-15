@@ -96,15 +96,53 @@ if [ "$OFFLINE" = 0 ]; then
   esac
 fi
 
+latest_release_tag() (
+  local headers response response_headers result status reset retry_after reason metadata_url tag prefix
+  headers="$(mktemp /tmp/subyard-latest.XXXXXX)" || return 1
+  trap 'rm -f -- "$headers"' EXIT
+  # Like Codex provisioning, use the public redirect instead of the shared REST
+  # quota. Do not let curl retry a rate-limit refusal.
+  if response="$(curl --fail --silent --show-error --location --head \
+    --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 0 \
+    --connect-timeout 20 --max-time 60 --dump-header "$headers" \
+    --write-out $'%{http_code}\n%{url_effective}' --output /dev/null \
+    "https://github.com/$REPOSITORY/releases/latest")"; then
+    metadata_url="${response#*$'\n'}"
+  else
+    result=$?
+    status=''
+    # Transport failures may still report an earlier successful redirect code.
+    [ "$result" != 22 ] || status="${response%%$'\n'*}"
+    # A redirect chain can carry unrelated quota headers; classify the final response.
+    response_headers="$(awk '/^HTTP\// {block=""} {block=block $0 ORS} END {printf "%s", block}' "$headers")"
+    reason="could not resolve the stable release${status:+ (HTTP $status)}"
+    if [ "$status" = 429 ] || { [ "$status" = 403 ] && \
+      grep -Eiq $'^x-ratelimit-remaining: *0\r?$|^retry-after:' <<< "$response_headers"; }; then
+      reset="$(awk 'tolower($1) == "x-ratelimit-reset:" {gsub(/\r/, "", $2); print $2}' <<< "$response_headers")"
+      retry_after="$(awk 'tolower($1) == "retry-after:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); print}' <<< "$response_headers")"
+      if [[ "$retry_after" =~ ^[0-9]+$ ]]; then retry_after="$retry_after seconds"; fi
+      reason="GitHub rate limit refused latest release request (HTTP $status)"
+      if [ -n "$reset" ]; then reason+=" (reset at Unix time $reset)"
+      else reason+=" (reset time unavailable)"; fi
+      reason+="${retry_after:+ (retry after $retry_after)}"
+    fi
+    printf 'bootstrap-runtime: %s\n' "$reason" >&2
+    return 1
+  fi
+  prefix="https://github.com/$REPOSITORY/releases/tag/"
+  tag="${metadata_url#"$prefix"}"
+  if [[ "$metadata_url" != "$prefix"* ]] || \
+    ! [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    printf 'bootstrap-runtime: latest release redirect does not name a valid stable release tag\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$tag"
+)
+
 tag=""
 if [ -z "$VERSION" ]; then
   [ "$OFFLINE" = 0 ] || { printf 'bootstrap-runtime: offline mode requires --version\n' >&2; exit 2; }
-  release_json="$(curl -fsSL --proto '=https' --tlsv1.2 \
-    -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "https://api.github.com/repos/$REPOSITORY/releases/latest")" \
-    || { printf 'bootstrap-runtime: could not resolve the stable release\n' >&2; exit 1; }
-  tag="$(jq -er '.tag_name | select(type == "string" and length > 0)' <<<"$release_json")" \
-    || { printf 'bootstrap-runtime: latest release has no valid tag\n' >&2; exit 1; }
+  tag="$(latest_release_tag)" || exit 1
   VERSION="${tag#v}"
 else
   tag="${YARD_RELEASE_TAG:-v$VERSION}"

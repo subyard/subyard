@@ -17,6 +17,7 @@ import (
 	goruntime "runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -2253,26 +2254,78 @@ func (runtime *Runtime) fetch(ctx context.Context, options options, name, destin
 }
 
 func (runtime *Runtime) latestTag(ctx context.Context, repository string) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+repository+"/releases/latest", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://github.com/"+repository+"/releases/latest", nil)
 	if err != nil {
 		return "", err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	response, err := runtime.config.HTTPClient.Do(request)
+	// Keep the caller's transport, timeout and redirect policy without mutating
+	// its client. Reject insecure hops before sending another request.
+	client := *runtime.config.HTTPClient
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many latest release redirects")
+		}
+		if runtime.config.HTTPClient.CheckRedirect != nil {
+			if err := runtime.config.HTTPClient.CheckRedirect(request, via); err != nil {
+				return err
+			}
+		}
+		if request.URL.Scheme != "https" {
+			return errors.New("latest release redirects must use https")
+		}
+		return nil
+	}
+	response, err := client.Do(request)
 	if err != nil {
-		return "", errors.New("could not resolve the stable release")
+		return "", fmt.Errorf("could not resolve the stable release: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusTooManyRequests ||
+		(response.StatusCode == http.StatusForbidden &&
+			(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")) {
+		return "", &releaseRateLimitError{
+			StatusCode: response.StatusCode,
+			Reset:      response.Header.Get("X-RateLimit-Reset"),
+			RetryAfter: response.Header.Get("Retry-After"),
+		}
+	}
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GitHub latest release request returned %s", response.Status)
 	}
-	var payload struct {
-		Tag string `json:"tag_name"`
+	if response.Request == nil || response.Request.URL == nil {
+		return "", errors.New("latest release response has no redirect URL")
 	}
-	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload) != nil || payload.Tag == "" {
-		return "", errors.New("latest release has no valid tag")
+	prefix := "https://github.com/" + repository + "/releases/tag/"
+	tag := strings.TrimPrefix(response.Request.URL.String(), prefix)
+	version, err := semver.Parse(strings.TrimPrefix(tag, "v"))
+	if err != nil || len(version.Pre) != 0 || len(version.Build) != 0 ||
+		response.Request.URL.String() != prefix+"v"+version.String() {
+		return "", errors.New("latest release redirect does not name a valid stable release tag")
 	}
-	return payload.Tag, nil
+	return tag, nil
+}
+
+type releaseRateLimitError struct {
+	StatusCode int
+	Reset      string
+	RetryAfter string
+}
+
+func (failure *releaseRateLimitError) Error() string {
+	message := fmt.Sprintf("GitHub rate limit refused latest release request (HTTP %d)", failure.StatusCode)
+	if failure.Reset != "" {
+		message += " (reset at Unix time " + failure.Reset + ")"
+	} else {
+		message += " (reset time unavailable)"
+	}
+	if failure.RetryAfter != "" {
+		retryAfter := failure.RetryAfter
+		if _, err := strconv.ParseUint(retryAfter, 10, 64); err == nil {
+			retryAfter += " seconds"
+		}
+		message += " (retry after " + retryAfter + ")"
+	}
+	return message
 }
 
 func (runtime *Runtime) installWithOutput(
