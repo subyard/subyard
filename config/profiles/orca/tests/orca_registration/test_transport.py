@@ -190,3 +190,20 @@ class TransportTests(unittest.TestCase):
             return self.frame(request)
         self.server(answer)
         self.client(self.metadata).call("projectGroup.create", {"name": "Fixture"}, before_send=captured.append)
+
+    def test_budget_spent_by_pre_send_checks_is_known_and_never_sent(self):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(self.endpoint)
+        listener.listen()
+        self.addCleanup(listener.close)
+        client = self.client(self.metadata, timeout=5, deadline=time.monotonic() + 0.2)
+        with self.assertRaises(self.error) as raised:
+            client.call("repo.rm", {"repo": "id:fixture"}, before_send=lambda _: time.sleep(0.3))
+        self.assertEqual("Orca registration time budget exhausted", str(raised.exception))
+        self.assertTrue(raised.exception.timed_out)
+        self.assertFalse(raised.exception.unknown)
+        listener.settimeout(0.5)
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(0.5)
+            self.assertEqual(b"", connection.recv(1))

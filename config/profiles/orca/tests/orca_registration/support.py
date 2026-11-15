@@ -72,6 +72,9 @@ class Catalog:
                     snapshot["tabs"] = [tab for tab in snapshot["tabs"]
                                         if (tab.get("parentTabId") or tab["id"]) != params["tabId"]]
             result = {"closed": True}
+        elif method == "terminal.close":
+            self.terminals = [t for t in self.terminals if t.get("handle") != params["terminal"]]
+            result = {}
         elif method == "projectGroup.list":
             result = {"groups": self.groups}
         elif method == "projectGroup.delete":

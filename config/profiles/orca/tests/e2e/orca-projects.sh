@@ -528,6 +528,12 @@ for mode in ordinary hook sync periodic legacy; do
       create "$removal_selector")"
     removal_tab="$(jq -er '.tab_id' <<<"$removal_session")"
     removal_pty="$(jq -er '.pty_id' <<<"$removal_session")"
+    # A live terminal of another project must survive the removed project's cleanup.
+    neighbour_selector="id:$(repo_id "$clone_root")::$clone_root"
+    neighbour_session="$(guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+      create "$neighbour_selector")"
+    neighbour_tab="$(jq -er '.tab_id' <<<"$neighbour_session")"
+    neighbour_pty="$(jq -er '.pty_id' <<<"$neighbour_session")"
   fi
   if [ "$mode" != ordinary ]; then
     # Native group deletion detaches its records, preserving their exact IDs.
@@ -555,32 +561,10 @@ YARD
   catalog | jq -e --arg id "$removal_child_id" '.repos | all(.id != $id)' >/dev/null \
     || die 'partial removed-project cleanup retained the unprotected child'
   if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
-    [ "$(repo_id "$removal_root")" = "$removal_id" ] \
-      || die 'removed-project cleanup lost a live-session registration'
-    orca_rpc session.tabs.listAll | jq -e --arg id "$removal_tab" \
-      '.snapshots | any(.tabs | any(.id == $id))' >/dev/null \
-      || die 'incomplete project hook removed a protected session'
-    guest_dev jq -e --arg path "$removal_root" --arg id "$removal_id" \
-      '.projects | any(.confirmed_repos[$path] == $id)' \
-      /srv/agents/orca/subyard-registration.json >/dev/null \
-      || die 'incomplete project hook discarded durable repository ownership'
-    yard orca status >"$STATE/remove-status-$mode.out" 2>"$STATE/remove-status-$mode.err"
-    grep -Fq "$removal_root" "$STATE/remove-status-$mode.out" "$STATE/remove-status-$mode.err" \
-      || die 'status omitted the retained registration of a removed project'
-    if yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err"; then
-      die 'sync reported complete cleanup while the removed project retained a session'
-    fi
-    grep -Fq "$removal_root" "$STATE/remove-retry-$mode.out" "$STATE/remove-retry-$mode.err" \
-      || die 'sync omitted the pending removed-project cleanup reason'
-    stop_result="$(orca_rpc terminal.stopExact "$(rpc_params \
-      --arg selector "$removal_selector" --arg pty "$removal_pty" \
-      '{worktree:$selector,expectedPtyIds:[$pty],keepHistory:true}')")"
-    jq -e '.stopped == 1 and .postStopVerified == true' <<<"$stop_result" >/dev/null \
-      || die 'removed-project terminal stop was not verified'
-    guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
-      pending "$removal_selector" --tab-id "$removal_tab" --pty-id "$removal_pty"
+    # The removal hook closes the removed project's exact live session and removes its record.
     if [ "$mode" = sync ]; then
-      yard orca sync --yes >/dev/null
+      yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err" \
+        || die 'sync failed after cleaning the removed project sessions'
     else
       resume_discovery
       for _ in $(seq 1 60); do
@@ -591,6 +575,14 @@ YARD
     fi
     guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
       absent "$removal_selector" --tab-id "$removal_tab" --pty-id "$removal_pty"
+    orca_rpc terminal.list '{"limit":1000,"requireFreshPtyLiveness":true,"includeVisualLayouts":false}' \
+      | jq -e --arg pty "$neighbour_pty" '.terminals | any(.ptyId == $pty and .connected == true)' >/dev/null \
+      || die 'removed-project cleanup ended a live terminal of another project'
+    orca_rpc session.tabs.listAll | jq -e --arg id "$neighbour_tab" \
+      '.snapshots | any(.tabs | any(.id == $id))' >/dev/null \
+      || die 'removed-project cleanup closed a tab of another project'
+    rpc_write session.tabs.close "$(rpc_params --arg worktree "$neighbour_selector" --arg tab "$neighbour_tab" \
+      '{worktree:$worktree,tabId:$tab,reason:"user"}')"
   fi
   assert_absent_repo "$removal_root"
   groups | jq -e --arg id "$removal_group" '.groups | all(.id != $id)' >/dev/null \
@@ -613,7 +605,7 @@ if [ "${SUBYARD_E2E_ORCA_CLEANUP_ONLY:-}" = 1 ]; then
   for mode in ordinary hook sync periodic legacy; do
     assert_absent_repo "/srv/workspaces/cleanup-removal-$mode/src"
   done
-  printf 'ok: removed-project hook retry, group loss, legacy cleanup and session retention persist after restart\n'
+  printf 'ok: removed-project hook retry, group loss, legacy cleanup and removed-project session cleanup persist after restart\n'
   exit 0
 fi
 

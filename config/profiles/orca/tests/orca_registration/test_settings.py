@@ -679,6 +679,22 @@ class ChatPermissionMigrationTests(unittest.TestCase):
         self.restart(rpc, "runtime-2")
         self.assertEqual("complete", self.reset(rpc)[0])
 
+    def test_shared_hook_deadline_bounds_launch_defaults_and_reset_pass(self):
+        rpc = ChatRPC(full("a"), tabs=[tab("a")])
+        deadlines = []
+
+        def connect(path, timeout=5.0, deadline=None):
+            deadlines.append(deadline)
+            rpc.deadline = deadline
+            return rpc
+        shared = time.monotonic() + 7
+        with mock.patch.object(settings, "RuntimeRPC", side_effect=connect), \
+                mock.patch.object(settings.sys, "argv", ["settings.py", "--deadline", str(shared),
+                                                         "--state", str(self.state)]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            settings.main()
+        self.assertEqual([shared, shared], deadlines)
+
     def test_lock_wait_is_bounded_by_the_pass_budget(self):
         rpc = ChatRPC(full("a"), tabs=[tab("a")])
         started = time.monotonic()

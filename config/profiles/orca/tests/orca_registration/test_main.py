@@ -22,10 +22,10 @@ class MainTests(unittest.TestCase):
         self.state = Path(self.tmp.name) / "state"
         self.rpc = Catalog()
 
-    def run_cli(self, command):
+    def run_cli(self, command, *extra):
         result = subprocess.run([sys.executable, "-B", str(COMPONENT / "main.py"), command,
                                  "--host-name", "owner-host",
-                                 "--workspaces", str(self.workspaces), "--state", str(self.state)],
+                                 "--workspaces", str(self.workspaces), "--state", str(self.state), *extra],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual("", result.stderr)
         self.assertEqual(1, len(result.stdout.splitlines()))
@@ -91,9 +91,27 @@ class MainTests(unittest.TestCase):
         code, report = self.run_cli("status")
         self.assertNotEqual(0, code)
         self.assertFalse(report["ready"])
+        self.assertFalse(report["settled"])
         self.assertEqual(1, report["total"])
         self.assertTrue(report["errors"])
         self.assertFalse(self.state.exists())
+
+    def test_settlement_is_reported_and_exit_code_stays_strict_readiness(self):
+        self.start_server()
+        code, report = self.run_cli("sync")
+        self.assertEqual((0, True, True), (code, report["ready"], report["settled"]))
+        # A protected record of a removed project settles the pass; readiness stays strict.
+        self.rpc.repos[0]["projectGroupId"] = "foreign-group"
+        shutil.rmtree(self.root.parent)
+        for command in ("sync", "status"):
+            code, report = self.run_cli(command)
+            self.assertEqual((1, False, True), (code, report["ready"], report["settled"]), report)
+            self.assertEqual("protected", report["cleanup"][0]["retention"])
+
+    def test_exhausted_shared_deadline_never_settles(self):
+        code, report = self.run_cli("sync", "--deadline", "0")
+        self.assertEqual((1, False, False), (code, report["ready"], report["settled"]))
+        self.assertTrue(report["errors"])
 
     def assert_source_observer_binding_survives_helper_repair(self, change, shadow=None):
         nested = self.root / ".build" / "nested"

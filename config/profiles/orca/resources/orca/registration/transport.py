@@ -72,6 +72,10 @@ class RuntimeRPC:
                 connection.connect(endpoint)
                 if before_send is not None:
                     before_send(runtime_id)
+                    # Pre-send identity checks consume the same budget; never send late.
+                    if deadline - time.monotonic() <= 0:
+                        raise RpcError("Orca registration time budget exhausted" if budget_limited
+                                       else f"Orca runtime request timed out: {method}", timed_out=True)
                 # sendall may write part or all of the frame before raising.
                 sent = True
                 connection.sendall(json.dumps(request).encode("utf-8") + b"\n")

@@ -563,7 +563,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual([], report["warnings"])
         self.assertEqual([{"projectId": "sample-id", "path": str(self.root), "groupId": group_id,
                            "repoId": None, "removedProject": True,
-                           "reason": "project group removal is pending", "nextAction": "Retry Orca sync"}],
+                           "reason": "project group removal is pending", "nextAction": "Retry Orca sync",
+                       "retention": "pending"}],
                          report["cleanup"])
         self.assertEqual(before, self.sidecar())
         self.assertTrue(all(method in ("repo.list", "projectGroup.list", "folderWorkspace.list")
@@ -701,7 +702,7 @@ class ReconcileTests(unittest.TestCase):
         init_git(self.root / "nested")
         self.assertTrue(self.run_sync()["ready"])
         original, held = copy.deepcopy(self.rpc.repos)
-        self.rpc.snapshots = [{"worktree": held["id"] + "::/saved", "tabs": [{"id": "saved"}]}]
+        self.hold_with_ambiguous_terminal(held)
         shutil.rmtree(self.root.parent)
         self.assertFalse(self.run_sync()["ready"])
         self.assertEqual(original["id"], self.sidecar()["projects"]["sample-id"]
@@ -709,6 +710,7 @@ class ReconcileTests(unittest.TestCase):
         replacement = dict(original, id="delayed-replacement", projectGroupId=None)
         self.rpc.repos.append(replacement)
         self.rpc.snapshots.clear()
+        self.rpc.terminals.clear()
         for apply in (True, False, True):
             report = self.run_sync(apply=apply)
             self.assertFalse(report["ready"])
@@ -788,38 +790,35 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(groups, self.rpc.groups)
         self.assertFalse(any(method == "projectGroup.delete" for method, _ in self.rpc.calls))
 
+    def hold_with_ambiguous_terminal(self, repo):
+        # A saved PTY attributed to another record makes the close undetermined.
+        self.rpc.snapshots = [{"worktree": repo["id"] + "::/saved",
+                               "tabs": [{"id": "saved", "ptyId": "shared"}]}]
+        self.rpc.terminals = [{"ptyId": "shared", "worktreeId": "other::/other", "handle": "other",
+                               "executionHostId": "local", "connected": True}]
+
     def test_empty_group_does_not_erase_retained_removed_project_identity(self):
         self.assertTrue(self.run_sync()["ready"])
         repo = self.rpc.repos[0]
         repo["projectGroupId"] = None
-        self.rpc.snapshots = [{"worktree": repo["id"] + "::/saved", "tabs": [{"id": "saved"}]}]
+        self.hold_with_ambiguous_terminal(repo)
         shutil.rmtree(self.root.parent)
         report = self.run_sync()
         self.assertFalse(report["ready"])
+        self.assertFalse(report["settled"])
         self.assertEqual([], self.rpc.groups)
         self.assertEqual(repo["id"], self.sidecar()["projects"]["sample-id"]
                          ["confirmed_repos"][repo["path"]])
-        self.assertEqual("session tabs are retained", report["cleanup"][0]["reason"])
+        self.assertEqual("session identity is ambiguous; repository is retained", report["cleanup"][0]["reason"])
+        self.assertEqual("undetermined", report["cleanup"][0]["retention"])
+        self.assertEqual(1, len(self.rpc.snapshots[0]["tabs"]))
+        self.assertFalse(any(method in ("session.tabs.close", "terminal.close") for method, _ in self.rpc.calls))
         before = self.sidecar()
         self.assertFalse(self.run_sync(apply=False)["ready"])
         self.assertEqual(before, self.sidecar())
-        self.rpc.snapshots.clear()
-        self.assertTrue(self.run_sync()["ready"])
-        self.assertEqual({}, self.sidecar()["projects"])
-
-    def test_removed_project_without_saved_tabs_keeps_live_orphan_terminal(self):
-        self.assertTrue(self.run_sync()["ready"])
-        repo = self.rpc.repos[0]
-        repo["projectGroupId"] = None
-        shutil.rmtree(self.root.parent)
-        self.rpc.terminals = [{"ptyId": "live", "worktreeId": repo["id"] + "::" + repo["path"],
-                               "executionHostId": "local", "connected": True}]
-        report = self.run_sync()
-        self.assertFalse(report["ready"])
-        self.assertIn(repo, self.rpc.repos)
-        self.assertEqual("live terminals are retained", report["cleanup"][0]["reason"])
         self.rpc.terminals.clear()
         self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual({}, self.sidecar()["projects"])
 
     def test_removed_confirmed_identity_excludes_replacement_foreign_and_remote(self):
         for changes, reason in (({"id": "replacement"}, "repository identity changed"),
@@ -1809,3 +1808,248 @@ class ReconcileTests(unittest.TestCase):
             return original(method, params, **kwargs)
         self.rpc.call = invalid
         self.assertFalse(self.run_sync()["ready"])
+
+
+class RemovedProjectSessionTests(unittest.TestCase):
+    """A project whose whole workspace directory is absent was removed from Subyard."""
+
+    def setUp(self):
+        from discovery import discover
+        from reconcile import reconcile
+        from transport import RpcError
+        self.discover = discover
+        self.reconcile = reconcile
+        self.error = RpcError
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.tmp.cleanup)
+        self.workspaces = Path(self.tmp.name) / "workspaces"
+        self.state = Path(self.tmp.name) / "state"
+        self.root = project(self.workspaces)
+        init_git(self.root / "linked")
+        self.other_root = project(self.workspaces, "other-id", "Other")
+        self.rpc = Catalog()
+        self.assertTrue(self.run_sync()["ready"])
+        self.repo = self.repo_at(self.root)
+        self.linked = self.repo_at(self.root / "linked")
+        self.other = self.repo_at(self.other_root)
+        # A foreign record whose ID extends this repository ID must never match it.
+        self.neighbour = dict(self.other, id=self.repo["id"] + "0", path=str(self.other_root) + "-neighbour",
+                              projectGroupId=None)
+        self.rpc.repos.append(self.neighbour)
+
+    def run_sync(self, apply=True, scan=None):
+        return self.reconcile(scan or self.discover(self.workspaces), self.rpc, self.state,
+                              apply=apply, host_name="owner-host")
+
+    def repo_at(self, path):
+        return next(repo for repo in self.rpc.repos if repo["path"] == str(path))
+
+    def terminal(self, repo, pty, handle, worktree=None):
+        return {"ptyId": pty, "worktreeId": worktree or repo["id"] + "::" + repo["path"], "handle": handle,
+                "executionHostId": "local", "connected": True}
+
+    def sessions(self):
+        self.rpc.snapshots = [
+            {"worktree": self.repo["id"] + "::" + self.repo["path"],
+             "tabs": [{"id": "agent", "type": "terminal", "ptyId": "agent-pty", "sessionId": "s"},
+                      {"id": "split", "parentTabId": "agent", "ptyId": "split-pty"}]},
+            # A saved linked worktree of the same record is closed too.
+            {"worktree": self.repo["id"] + "::/srv/linked-elsewhere", "tabs": [{"id": "linked-tab"}]},
+            {"worktree": self.other["id"] + "::" + self.other["path"], "tabs": [{"id": "other-tab"}]},
+            {"worktree": self.neighbour["id"] + "::" + self.neighbour["path"], "tabs": [{"id": "neighbour-tab"}]},
+        ]
+        self.rpc.terminals = [
+            self.terminal(self.repo, "orphan-pty", "orphan"),
+            self.terminal(self.other, "other-pty", "other"),
+            self.terminal(self.neighbour, "neighbour-pty", "neighbour"),
+        ]
+
+    def closes(self):
+        return [(method, params) for method, params in self.rpc.calls
+                if method in ("session.tabs.close", "terminal.close")]
+
+    def assert_untouched(self):
+        tabs = {tab["id"] for item in self.rpc.snapshots for tab in item["tabs"]}
+        self.assertTrue({"other-tab", "neighbour-tab"} <= tabs)
+        self.assertEqual({"other", "neighbour"} & {t["handle"] for t in self.rpc.terminals}, {"other", "neighbour"})
+        self.assertIn(self.other, self.rpc.repos)
+        self.assertIn(self.neighbour, self.rpc.repos)
+
+    def test_whole_directory_absent_closes_exact_sessions_and_deletes_record(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        status = self.run_sync(apply=False)
+        self.assertFalse(status["settled"])
+        self.assertTrue(all(item["retention"] == "pending" for item in status["cleanup"]), status["cleanup"])
+        self.assertEqual([], self.closes())
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertTrue(report["settled"])
+        self.assertEqual([("session.tabs.close", {"worktree": "id:" + self.repo["id"] + "::/srv/linked-elsewhere",
+                                                 "tabId": "linked-tab", "reason": "user"}),
+                          ("session.tabs.close", {"worktree": "id:" + self.repo["id"] + "::" + self.repo["path"],
+                                                 "tabId": "agent", "reason": "user"}),
+                          ("terminal.close", {"terminal": "orphan"})], self.closes())
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertNotIn(self.linked["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertNotIn("sample-id", self.sidecar()["projects"])
+        self.assert_untouched()
+
+    def sidecar(self):
+        return json.loads((self.state / "subyard-registration.json").read_text())
+
+    def assert_protected_without_close(self, report):
+        self.assertEqual([], self.closes())
+        self.assertIn(self.repo, self.rpc.repos)
+        self.assertTrue(report["cleanup"])
+        self.assertTrue(all(item["retention"] == "protected" for item in report["cleanup"]), report["cleanup"])
+        self.assertTrue(report["settled"], report)
+        self.assert_untouched()
+
+    def test_only_missing_checkout_of_active_project_keeps_sessions(self):
+        self.sessions()
+        shutil.rmtree(self.root)
+        self.assert_protected_without_close(self.run_sync())
+
+    def test_remaining_project_directory_keeps_sessions(self):
+        # A bind mountpoint or other project files at the address are not a removal.
+        self.sessions()
+        shutil.rmtree(self.root)
+        (self.root.parent / ".subyard-meta.json").unlink()
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertTrue(all(item["removedProject"] for item in report["cleanup"]))
+        self.assert_protected_without_close(report)
+
+    def test_changed_workspace_boundary_or_scan_error_closes_nothing(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        changed = self.discover(self.workspaces)
+        changed.identity = (0, 0)
+        failed = self.discover(self.workspaces)
+        failed.errors.append("Directory scan failed: fixture")
+        for scan in (changed, failed):
+            report = self.run_sync(scan=scan)
+            self.assertFalse(report["settled"])
+            self.assertTrue(all(item["retention"] == "undetermined" for item in report["cleanup"]), report["cleanup"])
+            self.assertEqual([], self.closes())
+            self.assertIn(self.repo, self.rpc.repos)
+            self.assert_untouched()
+
+    def test_recreated_project_directory_before_close_refuses_send(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+
+        def recreate(method, params):
+            if method == "terminal.list" and not self.root.parent.exists():
+                self.root.parent.mkdir()
+        self.rpc.after = recreate
+        report = self.run_sync()
+        self.assertFalse(report["settled"])
+        self.assertIn("candidate changed", " ".join(report["errors"]))
+        self.assertEqual([], self.closes())
+        self.assertIn(self.repo, self.rpc.repos)
+
+    def test_unknown_close_reply_uses_readback(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def lost_reply(method, params=None, **kwargs):
+            result = original(method, params, **kwargs)
+            if method in ("session.tabs.close", "terminal.close"):
+                raise self.error("lost reply", unknown=True)
+            return result
+        self.rpc.call = lost_reply
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+
+    def test_unresolved_terminal_close_keeps_record(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def ignored(method, params=None, **kwargs):
+            if method == "terminal.close":
+                raise self.error("lost reply", unknown=True)
+            return original(method, params, **kwargs)
+        self.rpc.call = ignored
+        report = self.run_sync()
+        self.assertFalse(report["settled"])
+        self.assertIn("terminal removal is unconfirmed", " ".join(report["errors"]))
+        self.assertIn(self.repo, self.rpc.repos)
+        self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
+
+    def test_pty_attributed_to_another_record_closes_nothing(self):
+        self.sessions()
+        self.rpc.terminals.append(self.terminal(self.other, "agent-pty", "foreign"))
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertFalse(report["settled"])
+        self.assertEqual("undetermined", next(item for item in report["cleanup"]
+                                              if item["repoId"] == self.repo["id"])["retention"])
+        self.assertFalse(any(params["worktree"].startswith("id:" + self.repo["id"] + "::")
+                             for method, params in self.closes() if method == "session.tabs.close"))
+        self.assertIn("foreign", {t["handle"] for t in self.rpc.terminals})
+        self.assertIn(self.repo, self.rpc.repos)
+
+    def test_unvisited_record_after_cold_session_read_is_never_protected(self):
+        # Outcomes are keyed by repository ID: a sibling whose path prefixes another's never inherits it.
+        shutil.rmtree(self.root.parent)
+        self.rpc.repos.sort(key=lambda repo: repo["path"] != self.linked["path"])
+        original = self.rpc.call
+        reads = 0
+
+        def cold(method, params=None, **kwargs):
+            nonlocal reads
+            if method == "session.tabs.listAll":
+                reads += 1
+                if reads == 1:
+                    raise self.error("cold read timed out", timed_out=True)
+                return {"snapshots": [{"worktree": self.linked["id"] + "::/saved", "tabs": [{"id": "t"}]}]}
+            return original(method, params, **kwargs)
+        self.rpc.call = cold
+        report = self.run_sync()
+        self.assertFalse(report["settled"])
+        reasons = {item["path"]: (item["reason"], item["retention"]) for item in report["cleanup"]}
+        self.assertEqual(("cleanup safety checks are incomplete; repository is retained", "undetermined"),
+                         reasons[self.repo["path"]])
+        self.assertEqual([], self.closes())
+        self.assertIn(self.repo, self.rpc.repos)
+
+    def test_exhausted_budget_never_settles(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        report = self.reconcile(self.discover(self.workspaces), self.rpc, self.state,
+                                deadline=0, host_name="owner-host")
+        self.assertFalse(report["settled"])
+        self.assertFalse(report["ready"])
+        self.assertIn(self.repo, self.rpc.repos)
+
+    def test_retention_classes(self):
+        from reconcile import RemovalEvidence, retention
+        scan = self.discover(self.workspaces)
+        evidence = RemovalEvidence(scan, [])
+        root = str(self.root)
+        for reason, removed, expected in (
+                ("repository identity changed", True, "protected"),
+                ("repository belongs to another execution host", True, "protected"),
+                ("repository belongs to another project group", True, "protected"),
+                ("legacy repository identity is unconfirmed", True, "protected"),
+                ("repository path changed", True, "protected"),
+                ("session tabs are retained", False, "protected"),
+                ("live terminals are retained", False, "protected"),
+                ("session tabs are retained", True, "protected"),
+                ("project root is missing; repository is retained", False, "protected"),
+                ("repository removal is pending", True, "pending"),
+                ("project group removal is pending", True, "pending"),
+                ("workspace absence is unverified", True, "undetermined"),
+                ("session inventory is unavailable; cleanup is retained", True, "undetermined"),
+                ("cleanup safety checks are incomplete; repository is retained", True, "undetermined"),
+                ("repository creation identity is pending", True, "undetermined"),
+                ("an unknown future reason", True, "undetermined")):
+            self.assertEqual(expected, retention("sample-id", root, removed, reason, evidence), reason)
+        shutil.rmtree(self.root.parent)
+        self.assertEqual("pending", retention("sample-id", root, True, "session tabs are retained", evidence))
+        self.assertEqual("undetermined", retention("sample-id", root, True, "session tabs are retained",
+                                                   RemovalEvidence(scan, ["scan error"])))

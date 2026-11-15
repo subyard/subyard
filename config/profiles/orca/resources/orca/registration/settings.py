@@ -336,20 +336,24 @@ def main():
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--reset-chats", action="store_true", help="run only the saved Claude chat reset")
     parser.add_argument("--state", default="/srv/agents/orca")
+    # A project hook passes the absolute time.monotonic() deadline it shares with registration.
+    parser.add_argument("--deadline", type=float, default=None)
     args = parser.parse_args()
     runtime = Path(args.state) / "config/orca/orca-runtime.json"
     if args.check:
         return check(RuntimeRPC(runtime), args.state)
     if not args.reset_chats:
         try:
-            launch_defaults(RuntimeRPC(runtime), apply=True)
+            launch_defaults(RuntimeRPC(runtime, deadline=args.deadline), apply=True)
         except Exception:
             print("Orca agent launch settings unavailable; run yard orca up", file=sys.stderr)
             return 1
     try:
         # Session History scans saved transcripts, which can take longer than a settings call.
-        result = reset_chat_permissions(
-            RuntimeRPC(runtime, timeout=30, deadline=time.monotonic() + PASS_BUDGET), args.state)
+        deadline = time.monotonic() + PASS_BUDGET
+        if args.deadline is not None:
+            deadline = min(deadline, args.deadline)
+        result = reset_chat_permissions(RuntimeRPC(runtime, timeout=30, deadline=deadline), args.state)
     except (RpcError, OSError, ValueError, KeyError, TypeError, AttributeError):
         # Every later apply retries the pass and warns again; reset chats are never reset twice.
         print(INCOMPLETE_WARNING, file=sys.stderr)

@@ -13,6 +13,9 @@ from reconcile import reconcile
 from transport import RuntimeRPC
 
 
+REGISTRATION_BUDGET = 85
+
+
 class DeadlineExceeded(Exception):
     pass
 
@@ -23,17 +26,21 @@ def main():
     parser.add_argument("--workspaces", default="/srv/workspaces")
     parser.add_argument("--state", default="/srv/agents/orca")
     parser.add_argument("--host-name", default="")
+    # A caller sharing one budget passes its absolute time.monotonic() deadline.
+    parser.add_argument("--deadline", type=float, default=None)
     args = parser.parse_args()
-    report = {"ready": False, "registered": 0, "total": 0,
+    report = {"ready": False, "settled": False, "registered": 0, "total": 0,
               "errors": [], "warnings": [], "projects": []}
-    deadline = time.monotonic() + 85
+    deadline = time.monotonic() + REGISTRATION_BUDGET
+    if args.deadline is not None:
+        deadline = min(deadline, args.deadline)
 
     def expired(*_):
         raise DeadlineExceeded()
 
     signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, 85)
     try:
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic()))
         scan = discover(args.workspaces, deadline=min(deadline, time.monotonic() + 20), recursive=False)
         report["total"] = sum(len(project.roots) for project in scan.projects)
         with Inventory(args.state, apply=args.command == "discover") as inventory:
@@ -54,6 +61,8 @@ def main():
         report["errors"].append("Orca registration failed unexpectedly; result is incomplete")
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+    if report["errors"]:
+        report["ready"] = report["settled"] = False
     print(json.dumps(report, separators=(",", ":")))
     return 0 if report["ready"] else 1
 

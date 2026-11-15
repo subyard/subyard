@@ -144,30 +144,36 @@ def verify_root(root, deadline):
 
 def verify_missing(scan, path):
     """Require ENOENT below the same workspace boundary; never follow symlinks."""
+    return absence(scan, path) is True
+
+
+def absence(scan, path):
+    """True for ENOENT below the scan's workspace boundary (same device and inode), False
+    when the whole path opens as directories, None when neither is verifiable."""
     if not path.startswith(scan.workspaces + "/") or os.path.normpath(path) != path:
-        return False
+        return None
     fd = None
     try:
         fd = _open_dir(scan.workspaces)
         current = os.fstat(fd)
         if ((current.st_dev, current.st_ino) != scan.identity
                 or not _same_directory(scan.workspaces, fd)):
-            return False
+            return None
         ancestor = scan.workspaces
         for name in os.path.relpath(path, scan.workspaces).split("/"):
             try:
                 child = _open_dir(name, fd)
             except FileNotFoundError:
-                return _same_directory(ancestor, fd)
+                return True if _same_directory(ancestor, fd) else None
             os.close(fd)
             fd = child
             ancestor = os.path.join(ancestor, name)
+        return False if _same_directory(path, fd) else None
     except OSError:
-        pass
+        return None
     finally:
         if fd is not None:
             os.close(fd)
-    return False
 
 
 def discover(workspaces, deadline=None, max_entries=1000000, recursive=True):

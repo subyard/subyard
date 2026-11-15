@@ -467,8 +467,24 @@ proven missing, its exact saved root and remembered checkout paths also establis
 ownership, including ungrouped records. Missing paths without that prior association
 are retained. Explicit membership in an unrelated group and remote records are left
 alone. Project hooks, explicit sync and periodic discovery use this same mechanism.
-Records with live terminals, other saved tabs or unverified tab state are retained with a warning.
-Exposed agent sessions, launch drafts, chat leaves and saved terminal buffers are also retained.
+Within an existing project, records with live terminals, other saved tabs or unverified tab
+state are retained with a warning. Exposed agent sessions, launch drafts, chat leaves and saved
+terminal buffers are also retained.
+
+A project removed from Subyard loses its Orca sessions. When the project's whole workspace
+directory `/srv/workspaces/<project-id>` is absent, sync closes every saved tab and live
+terminal of that project's owned records and removes the records; processes in those
+terminals end. Deleting a project directory inside the yard by hand counts as removal too.
+Absence is checked below the same workspace boundary as the completed scan; any remaining
+directory at that address, such as a bind mountpoint, keeps the sessions. A missing `src` alone,
+a scan error or a changed workspace boundary closes nothing. Tabs are selected by the exact
+repository ID, including linked worktrees of that record, and closed by worktree and tab ID;
+orphan terminals are closed by native handle while their local host and worktree still match.
+A saved PTY attributed to another record stops the cleanup of that record before any close.
+Other repositories, their terminals and processes are never touched. Ownership, identity,
+removal authority and runtime are checked again immediately before each close; an
+unconfirmed close is read back, and the record is removed only after its tabs and terminals
+are confirmed absent.
 An absent checkout's terminal layouts can be removed when all belong to that exact checkout,
 explicitly lack a terminal handle, and a fresh, complete local terminal inventory has no matching
 worktree or saved PTY. This also checks orphan terminals. Saved tabs are read again before removal;
@@ -486,9 +502,20 @@ or unconfirmed creation intents. A failed project hook leaves enough state for t
 or discovery portion to retry; the original project action is not rolled back.
 
 `status` and `sync` include pending cleanup for removed projects, with the path, retention
-reason and next action. Ordinary missing-record drift is reported as cleanup state. A removed
-project that still has a protected registration leaves cleanup incomplete; sync returns
-nonzero until that registration can be safely removed or is removed through Orca itself.
+reason and next action. Ordinary missing-record drift is reported as cleanup state. Each
+record has a retention class. A record Subyard does not provably own is `protected`: another
+execution host or project group, a replaced identity or path, or an unconfirmed legacy
+identity. Cleanup still to perform is `pending`. A record without safe evidence, for example
+after an incomplete pass or an unverified workspace boundary, is `undetermined`; an unknown
+reason is never protected. Project hooks, periodic discovery, `orca up` and `orca pair`
+succeed when the pass completed and only protected records of removed projects remain.
+Explicit `orca sync` stays strict: it fails until every removed project's record is gone.
+`status` shows protected and pending records as information and warns about undetermined ones.
+
+A nonzero project hook exit means its pass failed or its state is undetermined. One hook
+invocation shares a single budget below the dispatcher's limit across the lock wait,
+registration, session cleanup and launch settings. A pass interrupted by the budget keeps its
+confirmed progress but never settles, and the next hook, sync or discovery portion continues.
 
 Cleanup is skipped on registration or workspace-boundary errors. An unfinished background
 pass never proves absence: cleanup requires an independent filesystem check below the same
@@ -504,8 +531,8 @@ and session data.
 After upgrading and refreshing the installed helper with `yard init`, inspect `yard orca
 status` and run `yard orca sync`. Legacy registrations associated with a removed project's
 saved paths are cleaned automatically under the same filesystem and session checks. Retry
-sync after correcting an unavailable mount, catalog or runtime; restarting does not authorize
-discarding saved sessions.
+sync after correcting an unavailable mount, catalog or runtime. Restarting does not authorize
+discarding saved sessions; only the absence of the removed project's whole workspace directory does.
 
 For a retained record without a prior Subyard path association, inspect its exact path,
 native ID, host, group membership and sessions in the connected Orca client. Keep live
