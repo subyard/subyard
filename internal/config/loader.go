@@ -456,9 +456,8 @@ func load(
 		values[name] = value
 		tracker.record(commandLayer, name, value, "environment", 0, "")
 	}
-	if err := domain.CollectRefusals(commandRefusals...); err != nil {
-		return domain.Context{}, nil, err
-	}
+	// A refused override is not applied; later independent checks still run on
+	// the remaining layers and every refusal is reported together below.
 	values["SUBYARD_CONFIG_DIR"] = configDir
 	// Config-directory env files are compatibility defaults, not authority for
 	// immutable package inputs. Report the same canonical value hooks receive.
@@ -482,17 +481,22 @@ func load(
 		for _, entry := range []struct{ key, value string }{{"ACCESS_KIND", "local"}, {"INCUS_PROJECT", "subyard"}, {"YARD_INSTANCE_NAME", "yard"}, {"SSH_HOST", "yard"}} {
 			setDefault(values, entry.key, entry.value, tracker, defaultLayer)
 		}
+		if err := domain.CollectRefusals(commandRefusals...); err != nil {
+			return domain.Context{}, nil, err
+		}
 		return domain.Context{YardName: yardName, AccessKind: domain.AccessKind(values["ACCESS_KIND"]), IncusProject: values["INCUS_PROJECT"], YardInstanceName: values["YARD_INSTANCE_NAME"], SSHHost: values["SSH_HOST"], Paths: domain.RuntimePaths{RepositoryRoot: root, ConfigDir: configDir, ConfigHome: configHome, OperatorHome: values["SUBYARD_OPERATOR_HOME"], DataHome: values["SUBYARD_HOME"], HostBase: values["HOST_BASE"]}}, values, nil
 	}
 	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
 		return domain.Context{}, nil, err
 	}
 	integrationRefusal, err := resolveLoadedIntegrations(values, tracker)
+	roleRefusals := append(commandRefusals, integrationRefusal)
 	if err != nil {
-		return domain.Context{}, nil, err
+		// An unresolved selection selects nothing for the independent checks below.
+		roleRefusals = append(roleRefusals, refusalCauses(err)...)
+		values["CODING_TOOL_INTEGRATIONS"] = ""
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
-	roleRefusals := []error{integrationRefusal}
 	if values["ALLOWS_HOST_ACCESS"] == "false" {
 		for _, owner := range tracker.catalog.Integrations() {
 			for _, artifact := range owner.Artifacts {
@@ -530,6 +534,9 @@ func load(
 func refusalCauses(err error) []error {
 	if refusals, ok := err.(*domain.Refusals); ok {
 		return refusals.Unwrap()
+	}
+	if err == nil {
+		return nil
 	}
 	return []error{err}
 }
@@ -640,7 +647,7 @@ func validateHostListenerCollisions(values map[string]string, settings Catalog) 
 }
 
 func addHostListenerCollisions(values map[string]string, settings Catalog, collisions *portCollisions) {
-	ports := map[string]string{}
+	ports := map[string][]string{}
 	for _, definition := range settings.SettingCatalog() {
 		if !definition.HostListener {
 			continue
@@ -655,11 +662,11 @@ func addHostListenerCollisions(values map[string]string, settings Catalog, colli
 		if value == "" {
 			continue
 		}
-		if previous := ports[value]; previous != "" {
+		// Every listener already on this port collides with this one.
+		for _, previous := range ports[value] {
 			collisions.add(definition.Name, previous)
-			continue
 		}
-		ports[value] = definition.Name
+		ports[value] = append(ports[value], definition.Name)
 	}
 }
 
@@ -1212,7 +1219,9 @@ func canonicalSettingName(name string) string {
 
 func normalizeLegacyEnvironment(values environment) error {
 	discardRetiredSettings(values)
-	for legacy, canonical := range legacySettingNames {
+	var conflicts []error
+	for _, legacy := range slices.Sorted(maps.Keys(legacySettingNames)) {
+		canonical := legacySettingNames[legacy]
 		legacyValue, hasLegacy := values[legacy]
 		if !hasLegacy {
 			continue
@@ -1220,12 +1229,13 @@ func normalizeLegacyEnvironment(values environment) error {
 		legacyValue = normalizeLegacySelection(legacy, legacyValue)
 		if canonicalValue, hasCanonical := values[canonical]; hasCanonical && canonicalValue != legacyValue {
 			// Command values may be secrets, so even the error text names only settings.
-			return domain.SettingRefusal(domain.ConfigConflictingCommandSettings, canonical, legacy)
+			conflicts = append(conflicts, domain.SettingRefusal(domain.ConfigConflictingCommandSettings, canonical, legacy))
+			continue
 		}
 		values[canonical] = legacyValue
 		delete(values, legacy)
 	}
-	return nil
+	return domain.CollectRefusals(conflicts...)
 }
 
 func applyOptionalTracked(
@@ -1401,8 +1411,9 @@ func contextFrom(
 		stateDir = filepath.Join(configHome, "projects")
 	}
 	sshPort, err := optionalInt(values["SSH_PORT"])
+	sshPortRefused := err != nil
 	if err != nil {
-		refusals = append(refusals, fmt.Errorf("%w: %w", domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), err))
+		refusals = append(refusals, domain.WithRefusalCause(domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), err))
 	}
 	devUID, err := strconv.Atoi(values["DEV_UID"])
 	if err != nil {
@@ -1422,10 +1433,7 @@ func contextFrom(
 			)
 		}
 	}
-	refusals = append(refusals, validateE2EConfig(values, err == nil))
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return domain.Context{}, err
-	}
+	refusals = append(refusals, refusalCauses(validateE2EConfig(values, err == nil))...)
 	ctx := domain.Context{
 		YardName:         yardName,
 		AccessKind:       domain.AccessKind(values["ACCESS_KIND"]),
@@ -1458,7 +1466,19 @@ func contextFrom(
 	if ctx.AccessKind == domain.AccessRemote && ctx.OwnerYardName == "" {
 		ctx.OwnerYardName = "default"
 	}
-	return domain.NormalizeContext(ctx)
+	normalized, err := domain.NormalizeContext(ctx)
+	if len(refusals) == 0 {
+		return normalized, err
+	}
+	// Context validation is independent of the setting checks above, except that
+	// an unparsed SSH_PORT already explains the port range refusal.
+	for _, cause := range refusalCauses(err) {
+		var typed *domain.ConfigRefusal
+		if !(sshPortRefused && errors.As(cause, &typed) && typed.Code() == domain.ConfigSSHPortRange) {
+			refusals = append(refusals, cause)
+		}
+	}
+	return domain.Context{}, domain.CollectRefusals(refusals...)
 }
 
 func resolveE2EVMCPU(value string, hostCPUs int) (string, error) {

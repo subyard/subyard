@@ -57,7 +57,7 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 			delete(tracker.assignments, name)
 		}
 	}
-	selection, err := ResolveIntegrationSelection(values, requested)
+	selection, err := tracker.catalog.ResolveIntegrationSelection(values, requested)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +94,16 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 // dependency closure. DependencyReasons records direct dependents for disable
 // guards and status explanations; it is not another desired-state store.
 func ResolveIntegrationSelection(values map[string]string, requested []string) (IntegrationSelection, error) {
+	return resolveIntegrationSelection(values, requested, func(string) bool { return false })
+}
+
+// ResolveIntegrationSelection also names a refused integration when it is one
+// this catalog ships; metadata settings alone never make a name printable.
+func (settings Catalog) ResolveIntegrationSelection(values map[string]string, requested []string) (IntegrationSelection, error) {
+	return resolveIntegrationSelection(values, requested, settings.ShippedIntegration)
+}
+
+func resolveIntegrationSelection(values map[string]string, requested []string, shipped func(string) bool) (IntegrationSelection, error) {
 	result := IntegrationSelection{
 		Requested: append([]string{}, requested...), Effective: []string{}, Present: true,
 		DependencyReasons: map[string][]string{}, AllowsCodingTools: values["ALLOWS_CODING_TOOLS"] != "false" && values["ALLOWS_CODING_TOOLS"] != "0",
@@ -112,7 +122,7 @@ func ResolveIntegrationSelection(values map[string]string, requested []string) (
 	// Only a shipped integration is named in the rendered diagnostic; the
 	// supplied text of any other request stays in the Go error only.
 	refusal := func(known, unknown domain.ConfigRefusalCode, agent string) error {
-		if name, ok := domain.ConfigIntegrationName(agent); ok && knownAgent(agent) {
+		if name, ok := domain.ConfigIntegrationName(agent); ok && knownAgent(agent) && shipped(agent) {
 			return domain.NewConfigRefusal(known, name)
 		}
 		return fmt.Errorf("%w %q", domain.NewConfigRefusal(unknown), agent)

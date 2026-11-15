@@ -190,7 +190,7 @@ func configScalarStateRefusals(state config.Loaded, request configAuthoringReque
 	var refusals []error
 	if request.action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
 		requested := strings.Fields(request.value)
-		if _, err := config.ResolveIntegrationSelection(state.Environment, requested); err != nil {
+		if _, err := state.Catalog.ResolveIntegrationSelection(state.Environment, requested); err != nil {
 			refusals = append(refusals, err)
 		}
 		if request.scope == config.ScopeYard && !state.Integrations.AllowsCodingTools && len(requested) != 0 {

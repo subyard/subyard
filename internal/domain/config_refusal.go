@@ -69,6 +69,9 @@ const (
 	ConfigUnknownIntegration
 	ConfigDuplicateIntegration
 	ConfigDuplicateUnknownIntegration
+	ConfigResourceShutdownUnverified
+	ConfigResourceIngressEnabled
+	ConfigIntegrationRetired
 	ConfigConflictingCommandSettings
 )
 
@@ -136,6 +139,9 @@ var configRefusalTexts = map[ConfigRefusalCode]struct{ template, next string }{
 	ConfigUnknownIntegration:          {"unknown integration", "select coding tool integrations by their shipped names"},
 	ConfigDuplicateIntegration:        {"duplicate agent %q", "list each coding tool integration once"},
 	ConfigDuplicateUnknownIntegration: {"duplicate agent", "list each coding tool integration once"},
+	ConfigResourceShutdownUnverified:  {"verify resource shutdown before changing %s: run %s %s in the running yard first", "start the yard, run that resource shutdown, then retry the change"},
+	ConfigResourceIngressEnabled:      {"run %s %s before changing %s; its public ingress or runtime is still enabled", "run that resource shutdown, then retry the change"},
+	ConfigIntegrationRetired:          {"integration %s is retired and can no longer be selected", "remove the retired integration from CODING_TOOL_INTEGRATIONS"},
 	ConfigConflictingCommandSettings:  {"conflicting command environment settings %s and %s", "pass only the canonical setting in the command environment"},
 }
 
@@ -157,6 +163,9 @@ func ConfigSettingName(value string) (ConfigName, bool) {
 func ConfigIntegrationName(value string) (ConfigName, bool) {
 	return configName(value, SafeName(value))
 }
+
+// ConfigCommandName accepts only a safe shipped command or subcommand word.
+func ConfigCommandName(value string) (ConfigName, bool) { return configName(value, SafeName(value)) }
 
 // ConfigYardKindName accepts only a supported yard kind.
 func ConfigYardKindName(value string) (ConfigName, bool) {
@@ -226,3 +235,22 @@ func SettingRefusal(code ConfigRefusalCode, settings ...string) error {
 	}
 	return NewConfigRefusal(code, names...)
 }
+
+// ConfigRefusalCause keeps a raw cause, such as an OS or parse error, for Go
+// callers beside the typed refusal that already explains it to the operator.
+type ConfigRefusalCause struct {
+	Refusal *ConfigRefusal
+	cause   error
+}
+
+// WithRefusalCause attaches cause as detail of refusal. An unclassified refusal
+// stays an ordinary wrap, so a boundary still reports it as unclassified.
+func WithRefusalCause(refusal, cause error) error {
+	if typed, ok := refusal.(*ConfigRefusal); ok {
+		return &ConfigRefusalCause{typed, cause}
+	}
+	return fmt.Errorf("%w: %w", refusal, cause)
+}
+
+func (err *ConfigRefusalCause) Error() string   { return err.Refusal.Error() + ": " + err.cause.Error() }
+func (err *ConfigRefusalCause) Unwrap() []error { return []error{err.Refusal, err.cause} }

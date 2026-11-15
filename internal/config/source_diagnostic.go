@@ -357,8 +357,10 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			diagnostic.Refusals = append(diagnostic.Refusals, current.Error())
 			return
 		}
-		if current == domain.ErrPlanStale || current == context.Canceled || current == context.DeadlineExceeded {
-			// A known operation sentinel beside config causes is not an unclassified config cause.
+		if text, next, ok := operationSentinel(current); ok {
+			// Operation sentinels keep their own fixed text, never the generic tail.
+			diagnostic.Refusals = append(diagnostic.Refusals, text)
+			diagnostic.addNext(next)
 			return
 		}
 		switch typed := current.(type) {
@@ -387,21 +389,31 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 				diagnostic.add(configHome, cause)
 			}
 			return
+		case *domain.ConfigRefusalCause:
+			// The raw detail is explained by its typed refusal.
+			diagnostic.add(configHome, typed.Refusal)
+			return
 		case interface{ Unwrap() []error }:
-			// A raw cause wrapped beside a classified refusal is explained by it.
-			nested := ConfigDiagnostic{known: diagnostic.known}
+			// Joined or multi-wrapped causes are independent; each is classified.
 			for _, cause := range typed.Unwrap() {
-				nested.add(configHome, cause)
+				diagnostic.add(configHome, cause)
 			}
-			diagnostic.Refusals = append(diagnostic.Refusals, nested.Refusals...)
-			for _, next := range nested.Next {
-				diagnostic.addNext(next)
-			}
-			diagnostic.Unclassified = diagnostic.Unclassified || (nested.Unclassified && len(nested.Refusals) == 0)
 			return
 		}
 	}
 	diagnostic.Unclassified = true
+}
+
+func operationSentinel(err error) (text, next string, ok bool) {
+	switch err {
+	case domain.ErrPlanStale:
+		return err.Error(), "run the command again to review a fresh plan", true
+	case context.Canceled:
+		return "operation was cancelled", "", true
+	case context.DeadlineExceeded:
+		return "operation timed out", "run the command again", true
+	}
+	return "", "", false
 }
 
 func (diagnostic *ConfigDiagnostic) addNext(next string) {

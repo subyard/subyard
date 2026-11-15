@@ -106,7 +106,7 @@ func packageDirectory(root string) (string, error) {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if err != nil {
-			return "", fmt.Errorf("%w: %w", domain.NewConfigRefusal(domain.ConfigShippedPackageUnavailable), err)
+			return "", domain.WithRefusalCause(domain.NewConfigRefusal(domain.ConfigShippedPackageUnavailable), err)
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return "", domain.NewConfigRefusal(domain.ConfigShippedPackageSymlink)

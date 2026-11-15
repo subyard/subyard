@@ -32,7 +32,8 @@ func (configUsageError) Is(target error) bool { return target == errConfigUsage 
 func configUsage(cause error) error           { return configUsageError{cause} }
 func configUsageText(text string) error       { return configUsageError{configPublicRefusal(text)} }
 
-// configAuthoringFailure routes a scalar authoring refusal through config.Diagnose.
+// configAuthoringFailure routes a configuration validation refusal through
+// config.Diagnose. Other preparation failures keep their own fixed diagnostics.
 type configAuthoringFailure struct {
 	home  string
 	cause error
@@ -120,23 +121,6 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 }
 
 func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action string, arguments []string, protected ...bool) error {
-	err := prepared.prepareConfigScalarArguments(ctx, action, arguments, protected...)
-	if push, ok := err.(configPushPreparation); ok {
-		// Git transport preparation reports its own fixed diagnostics.
-		return push.err
-	}
-	if err != nil {
-		return configAuthoringFailure{prepared.Loaded.Context.Paths.ConfigHome, err}
-	}
-	return nil
-}
-
-// configPushPreparation carries the Git push preparation result unchanged.
-type configPushPreparation struct{ err error }
-
-func (push configPushPreparation) Error() string { return "config push preparation" }
-
-func (prepared *preparedCommand) prepareConfigScalarArguments(ctx context.Context, action string, arguments []string, protected ...bool) error {
 	requests, err := parseConfigAuthoringRequests(action, arguments, false)
 	if err != nil {
 		return configUsage(err)
@@ -145,7 +129,7 @@ func (prepared *preparedCommand) prepareConfigScalarArguments(ctx context.Contex
 		if err := prepared.CLI.configGitScalarsRefusal(prepared.Loaded, requests); err != nil {
 			return configUsage(err)
 		}
-		return configPushPreparation{prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage(requests), authoring: requests})}
+		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage(requests), authoring: requests})
 	}
 	return prepared.prepareConfigScalarRequest(ctx, action, requests[0], protected...)
 }
@@ -165,10 +149,10 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		if !definition.Syncable {
 			return configUsageText(request.name + " cannot be saved in Git")
 		}
-		return configPushPreparation{prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage([]configAuthoringRequest{request}), authoring: []configAuthoringRequest{request}})}
+		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage([]configAuthoringRequest{request}), authoring: []configAuthoringRequest{request}})
 	}
 	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
-		return err
+		return configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
 	}
 	if action == "set" {
 		if err := loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, false); err != nil {
@@ -180,7 +164,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		if err := loaded.Catalog.CheckSelectableIntegrations(requested); err != nil {
 			return configUsage(err)
 		}
-		if _, err := config.ResolveIntegrationSelection(loaded.Environment, requested); err != nil {
+		if _, err := loaded.Catalog.ResolveIntegrationSelection(loaded.Environment, requested); err != nil {
 			return configUsage(err)
 		}
 		if request.scope == config.ScopeYard && !loaded.Integrations.AllowsCodingTools && len(requested) != 0 {

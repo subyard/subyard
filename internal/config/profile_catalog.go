@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
@@ -202,6 +203,11 @@ func (settings Catalog) Integrations() []profile.IntegrationDefinition {
 }
 
 // RetiredIntegration reports a shipped package kept only for migration.
+// ShippedIntegration reports whether id names an integration package in this catalog.
+func (settings Catalog) ShippedIntegration(id string) bool {
+	return slices.ContainsFunc(settings.integrations, func(definition profile.IntegrationDefinition) bool { return definition.Name == id })
+}
+
 func (settings Catalog) RetiredIntegration(id string) bool {
 	return slices.ContainsFunc(settings.integrations, func(definition profile.IntegrationDefinition) bool {
 		return definition.Retired && definition.Name == id
@@ -210,16 +216,14 @@ func (settings Catalog) RetiredIntegration(id string) bool {
 
 // CheckSelectableIntegrations refuses every retired ID in an explicit new selection.
 func (settings Catalog) CheckSelectableIntegrations(requested []string) error {
-	var retired []string
+	// Retired IDs are shipped package names, so each refusal may name its ID.
+	var refusals []error
 	for _, id := range requested {
-		if settings.RetiredIntegration(id) && !slices.Contains(retired, id) {
-			retired = append(retired, id)
+		if settings.RetiredIntegration(id) {
+			refusals = append(refusals, namedRefusal(domain.ConfigIntegrationRetired, domain.ConfigIntegrationName, id))
 		}
 	}
-	if len(retired) != 0 {
-		return fmt.Errorf("integration %s is retired and can no longer be selected", strings.Join(retired, ", "))
-	}
-	return nil
+	return domain.CollectRefusals(refusals...)
 }
 
 // RetiredProfile recognizes only declared removed profiles, never arbitrary names.

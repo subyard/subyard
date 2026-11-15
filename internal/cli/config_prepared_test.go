@@ -853,3 +853,43 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.manifest.Lookup("config")
+	for _, test := range []struct {
+		err  error
+		want []string
+	}{
+		{resourceRefusal(domain.ConfigResourceIngressEnabled, "sample", "stop", "ENVIRONMENT_PROFILES"), []string{
+			"prepare config: run sample stop before changing ENVIRONMENT_PROFILES; its public ingress or runtime is still enabled", "Next: run that resource shutdown"}},
+		{domain.ErrPlanStale, []string{"prepare config: operation plan is stale"}},
+		{context.Canceled, []string{"prepare config: context canceled"}},
+		{configUsage(domain.SettingRefusal(domain.ConfigSettingNumeric, "DEV_UID")), []string{"prepare config: DEV_UID must be numeric", "Next: set the named setting"}},
+	} {
+		stderr.Reset()
+		program.reportPreparationError(definition, test.err)
+		for _, want := range test.want {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("%v: output lacks %q: %s", test.err, want, stderr.String())
+			}
+		}
+		if strings.Contains(stderr.String(), "invalid or unavailable") {
+			t.Errorf("%v rendered as an invalid input: %s", test.err, stderr.String())
+		}
+	}
+	stderr.Reset()
+	retired, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := retired.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "integration aiobserver is retired and can no longer be selected") ||
+		!strings.Contains(stderr.String(), "Next: remove the retired integration") {
+		t.Fatalf("retired integration refusal: code=%d %s", code, stderr.String())
+	}
+}

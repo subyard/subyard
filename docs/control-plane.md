@@ -392,9 +392,12 @@ unvalidated value in its error text appends it after the wrapped refusal; the re
 the refusal. Producers collect independent role and profile
 refusals with `domain.CollectRefusals`. `config.Diagnose` is the single CLI renderer for load,
 `config set` and `config validate` failures; it walks the collected causes and marks any other
-cause unclassified instead of printing its text. A raw cause wrapped beside a typed refusal is
-explained by it; boundary-owned fixed texts and sentinels enter as `PublicConfigDiagnostic` or
-`config.KnownCause`. Independent load stages merge their causes into one
+cause unclassified instead of printing its text. A raw OS or parse cause attached with
+`domain.WithRefusalCause` is explained by its refusal; joined or multi-wrapped causes stay
+independent. Boundary-owned fixed texts and sentinels enter as `PublicConfigDiagnostic` or
+`config.KnownCause`; operation sentinels such as a stale plan keep their own text. The CLI renders
+only configuration validation and usage causes this way; other preparation failures keep their
+fixed diagnostics. An integration is named only when the shipped catalog contains it. Independent load stages merge their causes into one
 stable collection.
 
 `HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
