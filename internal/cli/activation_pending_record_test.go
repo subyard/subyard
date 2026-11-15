@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,5 +107,38 @@ func TestYardRecordRetirementTouchesOnlyKnownRecords(t *testing.T) {
 	}
 	if payload, err := os.ReadFile(target); err != nil || string(payload) != "{}" {
 		t.Fatalf("link target changed: %q %v", payload, err)
+	}
+}
+
+// An unreadable or misplaced record fails closed and names the record, relative
+// to the configuration root, so the operator knows what to inspect or remove.
+func TestInvalidActivationPendingRecordNamesItsPath(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := activationPendingRecord{Yard: "named", Project: "subyard-named", Instance: "yard-named", Owner: "sample-runtime",
+		Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "inputs-1", Message: "yard named: sample-runtime failed"}
+	if err := writeActivationPendingRecord(home, record); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := activationPendingRecordPath(home, "named", "sample-runtime")
+	for name, payload := range map[string]string{"undecodable": "{not json\n", "another owner": `{"schemaVersion":1}`} {
+		t.Run(name, func(t *testing.T) {
+			if name == "another owner" {
+				other := record
+				other.Owner = "other-runtime"
+				payloadBytes, err := json.Marshal(other)
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload = string(payloadBytes) + "\n"
+			}
+			testkit.WriteFile(t, path, []byte(payload), 0o600)
+			_, _, err := pendingActivation(home, record)
+			if err == nil || !strings.Contains(err.Error(), "activation-pending/v1/named/sample-runtime.json") {
+				t.Fatalf("invalid record did not fail closed with its path: %v", err)
+			}
+		})
 	}
 }

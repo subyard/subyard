@@ -90,7 +90,15 @@ func readActivationPendingRecord(configHome, yard, owner string) (activationPend
 	}
 	record, err := decodeActivationPendingRecord(snapshot.Content)
 	if err == nil && (record.Yard != yard || record.Owner != owner) {
-		err = errors.New("pending activation record is stored under another owner")
+		err = errors.New("it is stored under another owner")
+	}
+	if err != nil {
+		// Fail closed, naming the record to inspect or remove.
+		relative, relErr := filepath.Rel(filepath.Clean(configHome), path)
+		if relErr != nil {
+			relative = path
+		}
+		err = fmt.Errorf("pending activation record %s is invalid: %w", filepath.ToSlash(relative), err)
 	}
 	return record, snapshot, err
 }
