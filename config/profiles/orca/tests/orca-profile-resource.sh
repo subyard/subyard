@@ -143,6 +143,7 @@ case "${1:-}" in
         esac
         ;;
       'device show')
+        [ ! -e "$state_root/fail-device-show" ] || exit 1
         if [ -f "$route" ]; then
           printf 'orca-server:\n  type: proxy\n  bind: host\n  listen: %s\n  connect: %s\n' \
             "$(sed -n '1p' "$route")" "$(sed -n '2p' "$route")"
@@ -215,6 +216,7 @@ case "${1:-}" in
                 basename "$(readlink "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$2")"
               else printf '%s\n' "$2"; fi ;;
             *' --property=ActiveState --value')
+              ! grep -qx "$2" "$root/fail-remove-active-query" 2>/dev/null || return 1
               case "$2" in
                 subyard-orca.service) if [ -f "$ORCA_TEST_SERVICE_FILE" ]; then printf 'active\n'; else printf 'inactive\n'; fi ;;
                 subyard-orca-discovery.timer) if [ -f "$root/discovery-active" ]; then printf 'active\n'; else printf 'inactive\n'; fi ;;
@@ -1832,8 +1834,10 @@ for installation in full half-applied symlinked; do
   esac
   hook_runs="$(( $(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca') + $(count_log 'orca-ingress down') + $(count_log 'orca-registration/discover ') ))"
   run_orca remove --yes >"$TMP/remove-$installation.out" 2>&1 || { cat "$TMP/remove-$installation.out" >&2; fail "orca remove of a $installation Orca failed"; }
+  # The only guest helper that may run is the unit's own ExecStopPost while the
+  # unit stops; remove itself never invokes an installed helper.
   [ "$(( $(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca') + $(count_log 'orca-ingress down') + $(count_log 'orca-registration/discover ') ))" -eq "$hook_runs" ] \
-    || fail "orca remove of a $installation Orca ran an installed helper"
+    || fail "orca remove of a $installation Orca invoked an installed helper directly (only the unit's own ExecStopPost may run one)"
   assert_orca_removed "orca remove of a $installation Orca"
   [ -f "$ORCA_TEST_GUEST/tmp/unrelated" ] || fail 'orca remove followed a symbolic link'
 done
@@ -1921,6 +1925,39 @@ for calls in '2 3' 4; do
   run_orca remove --yes >/dev/null || fail "orca remove did not converge after a failed device list ($calls)"
   assert_orca_removed "orca remove after a failed device list ($calls)"
 done
+# A failed device read is never a foreign device: the remove is non-zero and
+# keeps the route and its receipt.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+touch "$TMP/fail-device-show"
+if run_orca remove --yes >"$TMP/remove-show.out" 2>&1; then fail 'orca remove concealed a failed device read'; fi
+[ -e "$ORCA_TEST_ROUTE" ] && [ -n "$(cat "$TMP/config-user.subyard.resource.orca-server" 2>/dev/null)" ] \
+  || fail 'orca remove dropped the route or its receipt after a failed device read'
+rm -f "$TMP/fail-device-show"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed device read'
+assert_orca_removed 'orca remove after a failed device read'
+# A yard Incus cannot reach while stopping Orca scopes is a non-zero result.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+touch "$TMP/fail-guest-transport"
+if run_orca remove --yes >"$TMP/remove-scope-transport.out" 2>&1; then fail 'orca remove concealed an unreachable yard while stopping scopes'; fi
+grep -Fq 'could not reach the yard to stop the Orca daemon scopes' "$TMP/remove-scope-transport.out" \
+  || { cat "$TMP/remove-scope-transport.out" >&2; fail 'an unreachable yard was not reported'; }
+rm -f "$TMP/fail-guest-transport"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after an unreachable yard'
+assert_orca_removed 'orca remove after an unreachable yard'
+# One failed systemd query does not hide the other unmet items.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+printf 'subyard-orca-discovery.timer\n' >"$TMP/fail-remove-active-query"
+if SUBYARD_RESOURCE_MODE=verify "$ROOT/config/profiles/orca/resources/orca/handler.sh" remove >"$TMP/remove-query.json" 2>"$TMP/remove-query.err"; then
+  jq -e '[.steps[] | select(.decision != "skip") | .target] as $unmet |
+    ($unmet | any(endswith("/subyard-orca-discovery.timer"))) and ($unmet | any(endswith("/orca-server"))) and
+    ($unmet | any(endswith("projects-changed.d/orca")))' "$TMP/remove-query.json" >/dev/null \
+    || { cat "$TMP/remove-query.json" >&2; fail 'a failed systemd query hid the route or path items'; }
+else
+  cat "$TMP/remove-query.err" >&2; fail 'a failed systemd query aborted the remove assessment'
+fi
+rm -f "$TMP/fail-remove-active-query"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed systemd query'
+assert_orca_removed 'orca remove after a failed systemd query'
 # A unit whose disable failed keeps its unit file, so a rerun can disable it.
 ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
 touch "$TMP/fail-remove-disable"

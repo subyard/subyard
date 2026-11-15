@@ -1635,25 +1635,36 @@ ORCA_REMOVE_PATHS=("$ORCA_SYNC" "$ORCA_REGISTRATION" "$ORCA_REGISTRATION_DIGEST"
 # link followed). Fails when the guest cannot answer.
 remove_inspection() {
   yexec bash -se -- orca-remove-inspect "${#ORCA_REMOVE_UNITS[@]}" "${ORCA_REMOVE_UNITS[@]}" "${ORCA_REMOVE_UNIT_FILES[@]}" "${ORCA_REMOVE_PATHS[@]}" <<'YARD'
-set -euo pipefail
+set -uo pipefail
+# Each query is independent: a failed one reports "unknown" and the rest go on.
 shift
 count="$1"; shift
 unit_files=("${@:$((count + 1)):$count}")
 index=0
 for unit in "${@:1:$count}"; do
-  if [ -L "${unit_files[$index]}" ] || [ "$(systemctl show "$unit" --property=Id --value)" != "$unit" ]; then
+  if [ -L "${unit_files[$index]}" ]; then
     printf '%s alias -\n' "$unit"
+  elif ! id="$(systemctl show "$unit" --property=Id --value)"; then
+    printf '%s unknown unknown\n' "$unit"
+  elif [ "$id" != "$unit" ]; then
+    printf '%s alias -\n' "$unit"
+  elif ! active="$(systemctl show "$unit" --property=ActiveState --value)" ||
+    ! enabled="$(systemctl show "$unit" --property=UnitFileState --value)"; then
+    printf '%s unknown unknown\n' "$unit"
   else
-    active="$(systemctl show "$unit" --property=ActiveState --value)"
-    enabled="$(systemctl show "$unit" --property=UnitFileState --value)"
     printf '%s %s %s\n' "$unit" "${active:--}" "${enabled:--}"
   fi
   index=$((index + 1))
 done
 table=absent
-if command -v nft >/dev/null 2>&1 && grep -Fxq 'table inet subyard_orca' <<<"$(nft list tables)"; then
-  chain="$(nft list chain inet subyard_orca input)"
-  if grep -F 'comment "subyard-orca-managed"' >/dev/null <<<"$chain"; then table=owned; else table=foreign; fi
+if command -v nft >/dev/null 2>&1; then
+  if ! tables="$(nft list tables)"; then
+    table=unknown
+  elif grep -Fxq 'table inet subyard_orca' <<<"$tables"; then
+    if ! chain="$(nft list chain inet subyard_orca input)"; then table=unknown
+    elif grep -F 'comment "subyard-orca-managed"' >/dev/null <<<"$chain"; then table=owned
+    else table=foreign; fi
+  fi
 fi
 printf 'nft %s\n' "$table"
 shift "$count"
@@ -1678,11 +1689,28 @@ remove_route_state() {
   ORCA_REMOVE_DEVICE=0
   if grep -Fxq "$ORCA_DEVICE" <<<"$devices"; then
     ORCA_REMOVE_DEVICE=1
-    if ! [[ "$marker" =~ ^v1:[0-9a-f]{64}$ ]] || ! route_receipt_matches; then ORCA_REMOVE_ROUTE=foreign; return 0; fi
+    # Foreign only when a successful read proves no matching receipt.
+    if ! [[ "$marker" =~ ^v1:[0-9a-f]{64}$ ]]; then ORCA_REMOVE_ROUTE=foreign; return 0; fi
+    remove_receipt_matches "$marker" || case "$?" in 1) ORCA_REMOVE_ROUTE=foreign; return 0 ;; *) return 1 ;; esac
   elif [ -z "$marker" ] && [ -z "$saved" ]; then
     ORCA_REMOVE_ROUTE=absent; return 0
   fi
   ORCA_REMOVE_ROUTE="owned:$(printf '%s\n%s\n%s\n' "$ORCA_REMOVE_DEVICE" "$marker" "$saved" | sha256sum | awk '{print $1}')"
+}
+
+# Whether the receipt matches the live orca-server device: 0 yes, 1 a successful
+# read proves it does not, 2 Incus could not be read.
+remove_receipt_matches() { # <marker>
+  local show keys key value fields=""
+  show="$(incus config device show "$YARD_INSTANCE_NAME" "${PROJ[@]}")" || return 2
+  keys="$(awk -v device="$ORCA_DEVICE" '$0 == device ":" {inside=1;next} inside && /^[^[:space:]]/ {exit}
+    inside && /^  [A-Za-z0-9_.-]+:/ {key=$0;sub(/^  /,"",key);sub(/:.*/,"",key);print key}' <<<"$show" | LC_ALL=C sort)"
+  [ "$keys" = $'bind\nconnect\nlisten\ntype' ] || return 1
+  for key in bind connect listen type; do
+    value="$(incus config device get "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "$key" "${PROJ[@]}")" || return 2
+    fields+="$key=$value"$'\n'
+  done
+  [ "$1" = "v1:$(printf 'v1\n%s' "$fields" | sha256sum | awk '{print $1}')" ] || return 1
 }
 
 remove_unit_state() { # <inspection> <unit>
@@ -1693,22 +1721,23 @@ remove_unit_enabled() { case "${1#* }" in enabled|enabled-runtime|linked|linked-
 
 emit_remove_assessment() {
   local inspection route unit state observed path
-  inspection="$(remove_inspection)" || die "Orca removal cannot inspect the yard"
-  remove_route_state || die "Orca removal cannot read the owner route"
-  route="$ORCA_REMOVE_ROUTE"
+  # Every independent part is inspected; a failed read is an unmet "unknown" item.
+  inspection="$(remove_inspection)" || { warn 'Orca removal cannot inspect the yard' >&2; inspection=""; }
+  if remove_route_state; then route="$ORCA_REMOVE_ROUTE"; else warn 'Orca removal cannot read the owner route' >&2; route=unknown; fi
   ORCA_STEPS='[]'
   observed="$route"
   [ "$route" != foreign ] || observed=absent
   orca_step_add route "$ORCA_DEVICE" "$observed" absent "$(if [ "$observed" = absent ]; then printf skip; else printf apply; fi)" \
     'no receipted Orca proxy device, saved publication or ownership receipt remains' 'remove the receipted Orca proxy device and its metadata'
   observed="$(awk '$1 == "nft" {print $2}' <<<"$inspection")"
-  case "$observed" in owned|foreign|absent) ;; *) die "Orca removal inspection omitted the ingress table" ;; esac
+  case "$observed" in owned|foreign|absent) ;; *) observed=unknown ;; esac
   # An unowned table is not Orca's to remove.
   [ "$observed" != foreign ] || observed=absent
   orca_step_add ingress inet/subyard_orca "$observed" absent "$(if [ "$observed" = absent ]; then printf skip; else printf apply; fi)" \
     'no profile-owned Orca nft ingress table remains' 'remove the Orca nft ingress table after the service stops'
   for unit in "${ORCA_REMOVE_UNITS[@]}"; do
     state="$(remove_unit_state "$inspection" "$unit")"
+    [ -n "$state" ] || state="unknown unknown"
     # An aliased unit path is removed as a file; the unit it names is not Orca's.
     [ "$state" != "alias -" ] || state="inactive -"
     observed=inactive-disabled
@@ -1720,7 +1749,7 @@ emit_remove_assessment() {
   for path in "${ORCA_REMOVE_UNIT_FILES[@]}" "${ORCA_REMOVE_PATHS[@]}"; do
     observed="$(awk -v key="path-$index" '$1 == key {print $2}' <<<"$inspection")"
     index=$((index + 1))
-    [ "$observed" = present ] || [ "$observed" = absent ] || die "Orca removal inspection omitted $path"
+    [ "$observed" = present ] || [ "$observed" = absent ] || observed=unknown
     orca_step_add "file-$(basename "$path" | tr '.' '-')" "${path#/}" "$observed" absent "$(if [ "$observed" = absent ]; then printf skip; else printf apply; fi)" \
       "the fixed Orca path $path is absent" "remove the fixed Orca path $path"
   done
@@ -1728,8 +1757,8 @@ emit_remove_assessment() {
 }
 
 cmd_remove() {
-  local devices
-  remove_route_state || die "Orca removal cannot read the owner route"
+  local devices class
+  remove_route_state || { warn 'Orca removal cannot read the owner route; it stays until a rerun can'; ORCA_REMOVE_ROUTE=unknown; }
   case "$ORCA_REMOVE_ROUTE" in
     foreign) warn "Orca removal left the unreceipted device '$ORCA_DEVICE' untouched; remove it from the yard instance if it is not needed" ;;
     owned:*)
@@ -1764,12 +1793,18 @@ active_state() { systemctl show "$1" --property=ActiveState --value; }
 enabled_state() { systemctl show "$1" --property=UnitFileState --value; }
 inactive() { case "$1" in inactive|failed) return 0 ;; esac; return 1; }
 enabled() { case "$1" in enabled|enabled-runtime|linked|linked-runtime|alias) return 0 ;; esac; return 1; }
-declare -A alias=()
+declare -A alias=() unknown=()
 for index in "${!units[@]}"; do
   unit="${units[$index]}"
   # A fixed unit path that is a symbolic link, or a name systemd resolves to
   # another unit, is an alias: only the link goes, the unit it names is untouched.
-  if [ -L "${unit_files[$index]}" ] || [ "$(systemctl show "$unit" --property=Id --value)" != "$unit" ]; then
+  if [ -L "${unit_files[$index]}" ]; then
+    id=link
+  elif ! id="$(systemctl show "$unit" --property=Id --value)"; then
+    # An unknown unit is neither stopped nor removed; the rerun retries it.
+    warn "could not inspect $unit"; unknown[$unit]=1; continue
+  fi
+  if [ "$id" != "$unit" ]; then
     alias[$unit]=1
     rm -f -- "${unit_files[$index]}" || warn "could not remove ${unit_files[$index]}"
     continue
@@ -1779,6 +1814,7 @@ for index in "${!units[@]}"; do
 done
 main_state="$(active_state "$main")" || main_state=unknown
 [ -z "${alias[$main]:-}" ] || main_state=inactive
+[ -z "${unknown[$main]:-}" ] || main_state=unknown
 if inactive "$main_state"; then
   # The ingress guard closes the Orca port while the service runs.
   if command -v nft >/dev/null 2>&1; then
@@ -1800,7 +1836,7 @@ if inactive "$main_state"; then
     path="${unit_files[$index]}"
     if [ "$index" -lt "${#units[@]}" ]; then
       unit="${units[$index]}"
-      [ -z "${alias[$unit]:-}" ] || continue
+      [ -z "${alias[$unit]:-}" ] && [ -z "${unknown[$unit]:-}" ] || continue
       inactive "$(active_state "$unit")" && ! enabled "$(enabled_state "$unit")" || continue
     fi
     rm -f -- "$path" || warn "could not remove $path"
@@ -1811,9 +1847,17 @@ fi
 for path in "${paths[@]}"; do rm -rf -- "$path" || warn "could not remove $path"; done
 systemctl daemon-reload || warn 'could not reload systemd units'
 YARD
-  if ! daemon_scopes stop >/dev/null; then
-    warn "Orca removal could not stop every Orca daemon or terminal scope"
+  # Scopes are best effort inside the guest; a yard Incus cannot reach is not.
+  class="$(mktemp)" || die "Orca removal cannot create a temporary file"
+  if ! ORCA_RUNTIME_EFFECT=remove ORCA_GUEST_STEP_STATUS="$class" daemon_scopes stop >/dev/null; then
+    if [ "$(cat -- "$class")" = guest-failed ]; then
+      warn "Orca removal could not stop every Orca daemon or terminal scope"
+    else
+      rm -f -- "$class"
+      die "Orca removal could not reach the yard to stop the Orca daemon scopes; rerun it"
+    fi
   fi
+  rm -f -- "$class"
   # Exit 0 only when every fixed step holds; otherwise list every unmet item.
   local fresh unmet
   fresh="$(emit_remove_assessment)"
