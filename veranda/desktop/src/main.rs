@@ -380,7 +380,8 @@ impl View {
         }
         // The review was decided executable above; main-thread callbacks cannot
         // interleave with this synchronous bounded queue operation, so an
-        // admitted execute always consumes that review.
+        // admitted execute always leaves Review. Keep a copy until submission
+        // succeeds so a retryable nonstart can restore the same review.
         let plan = plan.clone();
         if self.worker.borrow().owner(OwnerCommand::Execute {
             request: operation.request,
@@ -388,7 +389,7 @@ impl View {
             state: state.clone(),
         }) {
             let consumed = operation.take_review().is_some();
-            debug_assert!(consumed, "admitted execute must consume its review");
+            debug_assert!(consumed, "admitted execute must leave Review");
             *self.state.borrow_mut() = state;
         } else {
             self.status.set_text(OWNER_BUSY_EXECUTE);
@@ -1372,7 +1373,9 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                     result,
                 } => {
                     if let Err(error) = result {
-                        view.state_writable.set(false);
+                        if !veranda_lib::client::retryable_not_submitted(&error) {
+                            view.state_writable.set(false);
+                        }
                         view.status
                             .set_text(&format!("{}: {}", error.code, error.message));
                         view.render_operation();
@@ -1424,20 +1427,14 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                     {
                         match result {
                             Ok(id) => {
-                                operation.operation_id = Some(id);
-                                operation.phase = OperationPhase::Running;
-                                operation.text = "The owner is executing the reviewed plan…".into();
+                                operation.execution_started(id);
                             }
                             Err(proof) => {
                                 if let Some(id) = &operation.operation_id {
                                     view.state.borrow_mut().not_submitted(id, &proof);
                                     view.save_state();
                                 }
-                                operation.phase = OperationPhase::Finished;
-                                operation.text = format!(
-                                    "Not submitted · {}: {}",
-                                    proof.0.code, proof.0.message
-                                );
+                                operation.execution_not_submitted(&proof.0);
                             }
                         }
                     }

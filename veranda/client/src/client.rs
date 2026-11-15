@@ -2189,6 +2189,17 @@ pub struct OperationPlan {
 pub struct ExecutionNotSubmitted {
     error: NativeError,
 }
+
+/// Transient store failures that leave an unsubmitted execution's review intact.
+/// Use only with a proven not-submitted result (or before calling Execute).
+/// Retrying still revalidates registration, digest, expiry and session state.
+pub fn retryable_not_submitted(error: &NativeError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "connection_store_busy" | "connection_store_io"
+    )
+}
+
 impl ExecutionNotSubmitted {
     pub fn error(&self) -> &NativeError {
         &self.error
