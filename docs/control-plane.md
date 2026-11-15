@@ -243,7 +243,9 @@ and the distinction between expiring signatures and already authenticated SSH se
 `yard rpc --stdio` is the only machine protocol. Each frame is a four-byte big-endian length
 followed by at most 1 MiB of JSON. A session must call `rpc.negotiate` first; responses and ordered
 events carry protocol version, request/operation ID and typed errors. A `cancel` frame targets an
-active operation ID, and a bounded writer queue closes a client that cannot keep up.
+active operation ID. The bounded writer queue never drops responses; events that outrun the
+client are coalesced into an observable sequence gap, and a client that reads nothing for the
+write stall timeout has its operations cancelled.
 Negotiation also returns the engine build version, supported protocol range and capabilities so a
 rolling controller/owner-host mismatch is explicit. Calls may carry an RFC 3339 deadline; expiry and
 explicit cancellation produce different typed errors.

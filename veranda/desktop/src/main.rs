@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use subyard_veranda::model::{Model, ReadAction};
-use subyard_veranda::operation::{Operation, Phase as OperationPhase};
+use subyard_veranda::operation::{Operation, Phase as OperationPhase, OWNER_BUSY_EXECUTE};
 use subyard_veranda::remote::{Flow, Phase};
 use subyard_veranda::state::{AppState, OperationNote, Scope};
 use subyard_veranda::trace_sink::{
@@ -306,6 +306,7 @@ impl View {
                 .set_visible(operation.phase == OperationPhase::Review);
             self.pages.execute.set_sensitive(
                 self.state_writable.get()
+                    && operation.executable_review().is_some()
                     && operation.scope.connection == self.scope().connection
                     && self.model.borrow().host().fresh,
             );
@@ -353,7 +354,7 @@ impl View {
         }) else {
             return;
         };
-        let Some(plan) = operation.plan.as_ref() else {
+        let Some(plan) = operation.executable_review() else {
             return;
         };
         let owner_id = self
@@ -377,18 +378,20 @@ impl View {
                 .set_text(&format!("{}: {}", error.code, error.message));
             return;
         }
-        // Queue admission precedes consuming the review; main-thread callbacks
-        // cannot interleave with this synchronous bounded queue operation.
+        // The review was decided executable above; main-thread callbacks cannot
+        // interleave with this synchronous bounded queue operation, so an
+        // admitted execute always consumes that review.
         let plan = plan.clone();
         if self.worker.borrow().owner(OwnerCommand::Execute {
             request: operation.request,
             plan,
             state: state.clone(),
         }) {
-            operation.take_review();
+            let consumed = operation.take_review().is_some();
+            debug_assert!(consumed, "admitted execute must consume its review");
             *self.state.borrow_mut() = state;
         } else {
-            self.status.set_text("Another owner request is queued. Review remains available; try again after it finishes.");
+            self.status.set_text(OWNER_BUSY_EXECUTE);
         }
         drop(operations);
         self.render_operation();
@@ -398,19 +401,14 @@ impl View {
         let Some(operation) = operations.as_mut() else {
             return;
         };
-        if operation.phase == OperationPhase::Planning {
-            operation.discard_requested = true;
-            operation.text = "Waiting for the owner plan before discarding it…".into();
-        } else if operation.phase == OperationPhase::Review {
-            let Some(plan) = operation.plan.as_ref() else {
-                return;
-            };
+        if let Some(plan_id) = operation.request_discard().map(|plan| plan.plan_id.clone()) {
             if self.worker.borrow().owner(OwnerCommand::Discard {
                 request: operation.request,
-                plan_id: plan.plan_id.clone(),
+                plan_id,
             }) {
-                operation.plan = None;
-                operation.phase = OperationPhase::Discarding;
+                operation.discard_admitted();
+            } else {
+                self.status.set_text(operation.discard_refused());
             }
         }
         drop(operations);
@@ -418,19 +416,17 @@ impl View {
     }
     fn cancel_operation(&self) {
         let mut operations = self.operation.borrow_mut();
-        let Some(operation) = operations
-            .as_mut()
-            .filter(|op| op.phase == OperationPhase::Running)
-        else {
+        let Some(operation) = operations.as_mut() else {
             return;
         };
-        if let Some(id) = &operation.operation_id {
+        if let Some(operation_id) = operation.cancel_target().map(str::to_owned) {
             if self.worker.borrow().owner(OwnerCommand::Cancel {
                 request: operation.request,
-                operation_id: id.clone(),
+                operation_id,
             }) {
-                operation.phase = OperationPhase::Cancelling;
-                operation.text = "Requesting owner cancellation…".into();
+                operation.cancel_admitted();
+            } else {
+                self.status.set_text(operation.cancel_refused());
             }
         }
         drop(operations);
@@ -1397,9 +1393,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                             }
                         }
                     }
-                    let discard = operations.as_ref().is_some_and(|op| {
-                        op.discard_requested && op.phase == OperationPhase::Review
-                    });
+                    let discard = operations.as_ref().is_some_and(Operation::pending_discard);
                     drop(operations);
                     if discard {
                         view.discard_operation();

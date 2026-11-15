@@ -357,6 +357,12 @@ func (cli *CLI) inspectMutationGateInspection(
 	return legacy, nil, nil
 }
 
+// RPC error codes for release gate refusals that do not carry an outcome code.
+const (
+	rpcMutationGateFailedCode = "mutation_gate_failed"
+	rpcTransitionRequiredCode = "transition_required"
+)
+
 func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) *rpc.Error {
 	payload, err := json.Marshal(publicInspectedMutationGateOutcome(outcome, inspection))
 	if err != nil {
@@ -4297,7 +4303,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				ctx, operationLoaded.Context.YardName, definition.Handler, params.Arguments,
 			)
 			if gateErr != nil {
-				return nil, operationRPCError("mutation_gate_failed", gateErr)
+				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
 			if outcome != nil && !operationCLI.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
 				if definition.Handler == "@init" {
@@ -4306,7 +4312,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 						ctx, operationLoaded.Context.YardName, params.Arguments, *outcome)
 					operationCLI.permits.profileInit = permit
 					if gateErr != nil {
-						return nil, operationRPCError("mutation_gate_failed", gateErr)
+						return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 					}
 				}
 				if outcome != nil {
@@ -4430,7 +4436,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				ctx, planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments,
 			)
 			if gateErr != nil {
-				return nil, operationRPCError("mutation_gate_failed", gateErr)
+				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
 			if outcome != nil && !planned.CLI.ordinaryCommandAdmitted(planned.Definition.Handler, outcome, gateInspection) {
 				if planned.Definition.Handler != "@init" || planned.CLI.permits.profileInit == nil ||
@@ -4455,7 +4461,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if errors.As(err, &pending) {
 				// One RPC execution authorizes one plan, even when the original
 				// invocation included --yes. The controller must prepare again.
-				return nil, operationRPCError("transition_required", err)
+				return nil, operationRPCError(rpcTransitionRequiredCode, err)
 			}
 			var commitErr *commandCommitError
 			if errors.As(err, &commitErr) {
