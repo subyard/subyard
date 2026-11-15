@@ -29,6 +29,7 @@ SESSION_RETENTION = frozenset(("session tabs are retained", "live terminals are 
 PENDING_WORK = frozenset(("repository removal is pending", "project group removal is pending"))
 ACTIVE_ROOT_MISSING = "project root is missing; repository is retained"
 CLEANUP_INCOMPLETE = "cleanup safety checks are incomplete; repository is retained"
+READBACK_POLLS, READBACK_INTERVAL = 4, 0.25
 
 
 class AdmissionLimit(RpcError):
@@ -88,8 +89,8 @@ class CleanupRefusal(RpcError):
 AMBIGUOUS_SESSION = "session identity is ambiguous; repository is retained"
 
 
-class AmbiguousSession(RpcError):
-    """A saved PTY is attributed to another record; nothing of this record is closed."""
+class AmbiguousSession(CleanupRefusal):
+    """A PTY is attributed to this record and to another; the next close is not sent."""
 
 
 class CleanupPass:
@@ -504,8 +505,14 @@ def _report_cleanup(report, scan, state, rpc, groups, repos, cleanup_pass, evide
         if reason in SESSION_RETENTION and removal_authorized(
                 {"projectId": project_id, "root": entry["root"], "removedProject": project_id not in active,
                  "sessions": True}, evidence) is True:
-            # Sessions of a removed project are cleanup work, not a retention reason.
-            reason = "repository removal is pending"
+            # Sessions of a removed project are cleanup work unless apply would refuse them.
+            try:
+                if snapshots is None:
+                    snapshots = _session_snapshots(rpc)
+                ambiguous = _ambiguous(snapshots, _terminal_census(rpc), repo)
+                reason = AMBIGUOUS_SESSION if ambiguous else "repository removal is pending"
+            except RpcError:
+                reason = "session inventory is unavailable; cleanup is retained"
         if reason == "legacy repository identity is unconfirmed":
             action = "Inspect sessions and remove the exact repository in Orca"
         elif retention(project_id, entry["root"], project_id not in active, reason, evidence) == PROTECTED:
@@ -646,37 +653,57 @@ def _owned_tab_parents(snapshots, repo):
     return parents
 
 
-def _close_removed_sessions(rpc, repo, unchanged, same_runtime):
+def _ambiguous(snapshots, terminals, repo):
+    """A PTY shared between this record and another one makes either side's ownership unproven."""
+    prefix = repo["id"] + "::"
+    own = lambda terminal: terminal["executionHostId"] == "local" and terminal["worktreeId"].startswith(prefix)
+    saved = _saved_pty_ids(snapshots, repo)
+    elsewhere = {tab["ptyId"] for item in snapshots if not item["worktree"].startswith(prefix)
+                 for tab in item["tabs"] if isinstance(tab, dict) and isinstance(tab.get("ptyId"), str)}
+    return any(terminal["ptyId"] in saved if not own(terminal) else terminal["ptyId"] in elsewhere
+               for terminal in terminals) or bool(saved & elsewhere)
+
+
+def _confirmed(observe, deadline):
+    """Read back until observe() holds, bounded by a few short polls inside the budget."""
+    for attempt in range(READBACK_POLLS):
+        if observe():
+            return True
+        if attempt + 1 == READBACK_POLLS or time.monotonic() + READBACK_INTERVAL >= deadline:
+            return False
+        time.sleep(READBACK_INTERVAL)
+    return False
+
+
+def _close_removed_sessions(rpc, repo, unchanged, same_runtime, deadline):
     """Close every saved tab and live terminal of one removed project's exact record.
 
     Tabs are selected by repository ID plus "::" (linked worktrees included), never by
     path, and closed by exact worktree and parent tab ID. Orphan terminals are closed by
     native handle when their local host and worktree still match; a PTY match alone never
-    closes a terminal attributed elsewhere. Every send is preceded by refreshed identity
-    and removal authority, and confirmed by readback; anything unresolved stays retained.
+    closes a terminal attributed elsewhere, and a PTY shared with another record stops the
+    cleanup before the first close and before each later one. Every pre-send check ends
+    with ownership and removal authority after its last read, so no request follows a
+    stale check; every close is confirmed by bounded readback, and anything unresolved
+    stays retained.
     """
     prefix = repo["id"] + "::"
     initial = _session_snapshots(rpc)
-    pty_ids = _saved_pty_ids(initial, repo)
-
-    def foreign(terminal):
-        foreign = terminal["executionHostId"] != "local" or not terminal["worktreeId"].startswith(prefix)
-        if foreign and terminal["ptyId"] in pty_ids:
-            raise AmbiguousSession(AMBIGUOUS_SESSION)
-        return foreign
-
-    # Refuse before any close when a saved PTY is attributed to another record.
-    for terminal in _terminal_census(rpc):
-        foreign(terminal)
+    if _ambiguous(initial, _terminal_census(rpc), repo):
+        raise AmbiguousSession(AMBIGUOUS_SESSION)
     for worktree, parent in sorted(_owned_tab_parents(initial, repo)):
         if (worktree, parent) not in _owned_tab_parents(_session_snapshots(rpc), repo):
             continue
 
         def before_close(runtime_id):
             same_runtime(runtime_id)
-            unchanged()
-            if (worktree, parent) not in _owned_tab_parents(_session_snapshots(rpc), repo):
+            current = _session_snapshots(rpc)
+            if (worktree, parent) not in _owned_tab_parents(current, repo):
                 raise CleanupRefusal("Orca cleanup tab state changed; retry sync")
+            if _ambiguous(initial + current, _terminal_census(rpc), repo):
+                raise AmbiguousSession(AMBIGUOUS_SESSION)
+            # Last: catalog identity, then filesystem authority; nothing is read after it.
+            unchanged()
             same_runtime(rpc.runtime_id)
 
         try:
@@ -687,26 +714,30 @@ def _close_removed_sessions(rpc, repo, unchanged, same_runtime):
         except RpcError:
             # A rejected or lost reply is resolved by readback only.
             pass
-        if (worktree, parent) in _owned_tab_parents(_session_snapshots(rpc), repo):
+        if not _confirmed(lambda: (worktree, parent) not in _owned_tab_parents(_session_snapshots(rpc), repo),
+                          deadline):
             raise RpcError("Orca session tab removal is unconfirmed; retry sync: " + repo["path"])
     for terminal in _terminal_census(rpc):
-        if foreign(terminal):
+        if terminal["executionHostId"] != "local" or not terminal["worktreeId"].startswith(prefix):
             continue
         handle = terminal.get("handle")
         if not isinstance(handle, str) or not handle:
             raise RpcError("Orca cleanup terminal handle is unavailable; retry sync: " + repo["path"])
         identity = (terminal["ptyId"], terminal["worktreeId"], terminal["executionHostId"])
-        current = lambda: [item for item in _terminal_census(rpc) if item.get("handle") == handle]
-        if not current():
+        matching = lambda terminals: [item for item in terminals if item.get("handle") == handle]
+        if not matching(_terminal_census(rpc)):
             continue
 
         def before_terminal_close(runtime_id):
             same_runtime(runtime_id)
-            unchanged()
-            matches = current()
+            census = _terminal_census(rpc)
+            matches = matching(census)
             if (len(matches) != 1 or (matches[0]["ptyId"], matches[0]["worktreeId"],
                                       matches[0]["executionHostId"]) != identity):
                 raise CleanupRefusal("Orca cleanup terminal changed; retry sync")
+            if _ambiguous(initial + _session_snapshots(rpc), census, repo):
+                raise AmbiguousSession(AMBIGUOUS_SESSION)
+            unchanged()
             same_runtime(rpc.runtime_id)
 
         try:
@@ -715,7 +746,7 @@ def _close_removed_sessions(rpc, repo, unchanged, same_runtime):
             raise
         except RpcError:
             pass
-        if current():
+        if not _confirmed(lambda: not matching(_terminal_census(rpc)), deadline):
             raise RpcError("Orca terminal removal is unconfirmed; retry sync: " + repo["path"])
     latest = _session_snapshots(rpc)
     if _owned_tab_parents(latest, repo) or _has_terminal_reference(rpc, repo, initial + latest):
@@ -917,7 +948,7 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
 
         if retained:
             try:
-                _close_removed_sessions(rpc, repo, unchanged, same_runtime)
+                _close_removed_sessions(rpc, repo, unchanged, same_runtime, state.deadline)
             except AmbiguousSession:
                 cleanup_pass.outcomes[repo["id"]] = AMBIGUOUS_SESSION
                 continue

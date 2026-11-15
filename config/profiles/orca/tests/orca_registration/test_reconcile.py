@@ -2053,3 +2053,103 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.assertEqual("pending", retention("sample-id", root, True, "session tabs are retained", evidence))
         self.assertEqual("undetermined", retention("sample-id", root, True, "session tabs are retained",
                                                    RemovalEvidence(scan, ["scan error"])))
+
+    def during_send(self, method, effect):
+        """Run effect(nested_method) after each read made inside method's pre-send check."""
+        original = self.rpc.call
+
+        def call(name, params=None, before_send=None):
+            if before_send is None or name != method:
+                return original(name, params, before_send=before_send)
+
+            def checked(runtime_id):
+                previous = self.rpc.after
+                self.rpc.after = lambda nested, _: effect(nested)
+                try:
+                    before_send(runtime_id)
+                finally:
+                    self.rpc.after = previous
+            return original(name, params, before_send=checked)
+        self.rpc.call = call
+
+    def test_address_reappearing_during_any_pre_send_read_refuses_send(self):
+        for method, read in (("session.tabs.close", "session.tabs.listAll"), ("terminal.close", "terminal.list")):
+            with self.subTest(method=method):
+                self.setUp()
+                self.sessions()
+                if method == "terminal.close":
+                    self.rpc.snapshots = [item for item in self.rpc.snapshots
+                                          if not item["worktree"].startswith(self.repo["id"] + "::")]
+                shutil.rmtree(self.root.parent)
+                self.during_send(method, lambda nested, read=read: nested == read
+                                 and self.root.parent.mkdir(exist_ok=True))
+                report = self.run_sync()
+                self.assertFalse(report["settled"])
+                self.assertFalse(any(name == method for name, _ in self.closes()), self.closes())
+                self.assertIn(self.repo, self.rpc.repos)
+
+    def test_pty_attributed_elsewhere_before_a_close_refuses_it(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        foreign = self.terminal(self.other, "split-pty", "foreign")
+
+        def appear(nested):
+            if nested == "session.tabs.listAll" and foreign not in self.rpc.terminals:
+                self.rpc.terminals.append(foreign)
+        self.during_send("session.tabs.close", appear)
+        report = self.run_sync()
+        self.assertFalse(report["settled"])
+        self.assertEqual([], self.closes())
+        self.assertEqual("session identity is ambiguous; repository is retained",
+                         next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])["reason"])
+        self.assertIn("foreign", {t["handle"] for t in self.rpc.terminals})
+
+    def test_own_terminal_whose_pty_is_saved_by_another_record_closes_nothing(self):
+        self.sessions()
+        self.rpc.snapshots[2]["tabs"][0]["ptyId"] = "orphan-pty"
+        shutil.rmtree(self.root.parent)
+        for apply in (False, True):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual(("session identity is ambiguous; repository is retained", "undetermined"),
+                             (item["reason"], item["retention"]))
+            self.assertFalse(report["settled"])
+        self.assertEqual([], self.closes())
+        self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
+
+    def test_status_warns_for_remote_terminal_sharing_a_saved_pty(self):
+        self.sessions()
+        remote = dict(self.terminal(self.repo, "agent-pty", "remote"), executionHostId="ssh-1")
+        self.rpc.terminals.append(remote)
+        shutil.rmtree(self.root.parent)
+        for apply in (False, True):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual("undetermined", item["retention"])
+        self.assertEqual([], self.closes())
+
+    def test_close_readback_polls_briefly_before_declaring_unconfirmed(self):
+        import reconcile
+        self.sessions()
+        self.rpc.snapshots = [self.rpc.snapshots[2]]
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+        pending = []
+        reads = 0
+
+        def delayed(method, params=None, **kwargs):
+            nonlocal reads
+            if method == "terminal.close":
+                original("repo.list", before_send=kwargs.get("before_send"))
+                pending.append(params["terminal"])
+                return {}
+            if method == "terminal.list" and pending:
+                reads += 1
+                if reads == 2:
+                    self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] not in pending]
+            return original(method, params, **kwargs)
+        self.rpc.call = delayed
+        with mock.patch.object(reconcile, "READBACK_INTERVAL", 0.01):
+            report = self.run_sync()
+        self.assertTrue(report["settled"], report)
+        self.assertGreaterEqual(reads, 2)
