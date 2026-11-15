@@ -280,7 +280,7 @@ exercise_recovery() {
   local rc=0 transaction current previous
   # Selection is init-owned on a ready release: the repair keeps the installed view and
   # the selected provisioner runs in the post-repair yard init, never as activation work.
-  operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS 'codex claude' --scope yard --local --yes
+  operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS claude --scope yard --local --yes
   guest_yard hermes sh -euc 'test ! -e /usr/local/bin/curl; test ! -e /var/tmp/subyard-disabled-components-hook'
   cat > "$STATE_ROOT/native-curl.sh" <<'FAULT'
 #!/bin/sh
@@ -331,7 +331,7 @@ FAULT
   operator_yard -Y hermes init --yes > "$STATE_ROOT/recovery-init.txt" 2>&1 \
     || { cat "$STATE_ROOT/recovery-init.txt"; die 'yard init did not complete after the fault was removed'; }
   operator_yard -Y hermes integration status --json > "$STATE_ROOT/recovery-status.json"
-  jq -e '(.selection.effective | sort) == ["claude","codex"]' "$STATE_ROOT/recovery-status.json" >/dev/null \
+  jq -e '.selection.effective == ["claude"]' "$STATE_ROOT/recovery-status.json" >/dev/null \
     || die 'recovered yard init did not apply the selected integrations'
   sudo -n jq -e --arg transaction "$transaction" '.checkpoint == "complete" and .transaction == $transaction' \
     "$V2_JOURNAL" >/dev/null || die 'ordinary yard init changed the release journal'
@@ -367,6 +367,7 @@ exercise_failed_deselect() {
     || { cat "$STATE_ROOT/deselect-assets.before"; die 'installed claude settings are missing before deselection'; }
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS codex --scope yard --local --yes
   # The remaining selected provisioner fails after inventory apply, before the hooks.
+  # Codex is first selected here: a fresh install cannot keep a working release.
   cat > "$STATE_ROOT/deselect-curl.sh" <<'FAULT'
 #!/bin/sh
 # subyard-disabled-components-curl-v1
