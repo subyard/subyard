@@ -483,8 +483,15 @@ verifies its platform SHA-256 against the versioned manifest, and atomically ins
 is preserved; an existing command owned by another installer is left unchanged and reported as a conflict.
 The package check verifies both the native CLI and the managed permission policy without downloading updates
 or accessing user authorization. When the Codex provisioning hook runs, it resolves the current
-stable official release, verifies the `codex-package-<target>.tar.gz` asset against that release's SHA-256
-metadata, and installs the whole package under root-owned `/opt/subyard/codex/releases/<version>`.
+stable official release through GitHub's release redirect, verifies the `codex-package-<target>.tar.gz`
+asset against that tag's official `codex-package_SHA256SUMS`, and installs the whole package under
+root-owned `/opt/subyard/codex/releases/<version>` without using GitHub's anonymous REST quota.
+If release discovery or checksum download is unavailable, provisioning retains a working managed
+release after checking its ownership, permissions, native CLI version, app-server and managed policy.
+It reports that the latest release could not be verified; the next provision attempts discovery again.
+Fresh or unhealthy installations still fail after bounded retries for transient metadata failures
+(at most four 60-second attempts with two-second pauses per request). Rate-limit refusals are not
+retried; diagnostics identify rate limits and their reset time or retry delay when supplied.
 `/usr/local/bin/codex` points to `/opt/subyard/codex/codex`, a link to that release's `bin/codex`, which keeps
 the path a retained release's hook replaces on rollback. A newer working installation is preserved.
 Provisioning keeps the published release, the one it replaced and any release a running process uses, and
