@@ -168,7 +168,7 @@ func (runtime *Runtime) inspectionFailure(parsed options, err error) (Prepared, 
 
 func allowsCompletedMetadataAdmission(protected *protectedTransitionInspection, err error) bool {
 	var selected unsupportedReleaseOwnerError
-	if errors.As(err, &selected) {
+	if errors.As(err, &selected) || errors.Is(err, releasetransition.ErrCompatibilityIngressUnavailable) {
 		return false
 	}
 	return err != nil || protected != nil &&
@@ -287,6 +287,11 @@ func (runtime *Runtime) inspectProtectedTransition(
 			"the protected release transition journal is invalid",
 			"restore protected release metadata from backup, then run yard update --check",
 		)
+	}
+	if err := journal.CheckIngressSupport(); err != nil {
+		return nil, newPublicReleaseInspectionError(err, runtimeRoot, journal.Goal.Target, &journal.Transaction,
+			releasetransition.CodePreconditionBlocked, err.Error(),
+			"restore protected release metadata from backup, then run yard update --check")
 	}
 	if err := store.ValidateCurrentRecovery(journal); err != nil {
 		return nil, newPublicReleaseInspectionError(err, runtimeRoot, journal.Goal.Target, &journal.Transaction,

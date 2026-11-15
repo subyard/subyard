@@ -88,7 +88,7 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 				}
 				program.promptInputTerminal = func() bool { return invocation.terminal }
 				code := program.Run(context.Background())
-				if code == 0 || observed != invocation.fullRemoval || len(prompt.Requests) != 0 {
+				if (invocation.fullRemoval || strings.HasPrefix(state, "V2")) && (code == 0 || observed != invocation.fullRemoval || len(prompt.Requests) != 0) {
 					t.Fatalf("cleanup admission: code=%d observed=%t prompts=%d stderr=%s", code, observed, len(prompt.Requests), stderr.String())
 				}
 				if invocation.fullRemoval {
@@ -98,7 +98,7 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 					if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
 						t.Fatalf("full uninstall inspected the migration owner: %v", err)
 					}
-				} else {
+				} else if strings.HasPrefix(state, "V2") {
 					var outcome mutationGateOutcome
 					if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil ||
 						(outcome.Status != "recovering" && outcome.Status != "operator-action-required") {

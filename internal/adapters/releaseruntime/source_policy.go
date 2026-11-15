@@ -268,8 +268,6 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		}
 		absent := !ledger.Exists && !checkpoint.Exists
 		paths := []string{
-			filepath.Join(request.ConfigHome, "migrations", "state.json"),
-			filepath.Join(request.ConfigHome, "migrations", "transactions"),
 			filepath.Join(filepath.Dir(request.RuntimeRoot), "recovery", "pre-go-source"),
 		}
 		if dataHome := os.Getenv("SUBYARD_HOME"); dataHome != "" {

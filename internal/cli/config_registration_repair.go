@@ -8,7 +8,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -116,21 +115,6 @@ func (cli *CLI) inspectRegistrationRepairGate(
 	}
 	if outcome != nil && !(snapshot.Exists && outcome.Code == releasetransition.CodePreconditionBlocked) {
 		return snapshot, fmt.Errorf("release transition %s: %s", outcome.Code, outcome.Message)
-	}
-	// A completed V2 blocker can mask the legacy gate in the ordinary dispatcher.
-	// Both journal families must permit this independent configuration repair.
-	options, available, err := cli.mutationGateReleaseOptions()
-	if err != nil {
-		return snapshot, err
-	}
-	if available {
-		legacy, err := migration.InspectMutationGate(ctx, options)
-		if err != nil {
-			return snapshot, err
-		}
-		if legacy != nil {
-			return snapshot, fmt.Errorf("legacy release transition %s: %s", legacy.Code, legacy.Message)
-		}
 	}
 	return snapshot, nil
 }

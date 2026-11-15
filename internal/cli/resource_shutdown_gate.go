@@ -11,7 +11,6 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 )
@@ -44,10 +43,6 @@ func (cli *CLI) prepareResourceShutdownRepair(ctx context.Context, yard string, 
 	}
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
-		return nil, err
-	}
-	legacy, err := migration.InspectMutationGate(ctx, options)
-	if err != nil || legacy != nil {
 		return nil, err
 	}
 	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)

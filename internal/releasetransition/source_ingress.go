@@ -2,6 +2,7 @@ package releasetransition
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sort"
 
@@ -20,6 +21,9 @@ const (
 	V2SourceImport      V2IngressOperationKind = "import"
 	V2SourceEntrypoints V2IngressOperationKind = "entrypoints"
 )
+
+// ErrCompatibilityIngressUnavailable refuses retired ingress without inspecting its source files.
+var ErrCompatibilityIngressUnavailable = errors.New("compatibility ingress operation is unavailable")
 
 // V2SettingsSnapshotView is the read-only settings state used during planning.
 // Source ingress may overlay prospective imported files without writing them.
@@ -261,6 +265,19 @@ func ingressStep(
 		Binding: binding, Kind: operation.Kind,
 		Expected: operation.Expected, Desired: operation.Desired, Static: operation.Static,
 	}, nil
+}
+
+// CheckIngressSupport rejects retired imports before invoking a retained owner
+// or opening the journal for execution. Completed provenance remains readable.
+func (journal JournalRecord) CheckIngressSupport() error {
+	if journal.Checkpoint != JournalComplete {
+		for _, step := range ingressStepBindings(journal.Steps) {
+			if step.Kind == V2LegacyV1Import {
+				return ErrCompatibilityIngressUnavailable
+			}
+		}
+	}
+	return nil
 }
 
 func ingressStepBindings(steps []JournalStep) []V2IngressStepBinding {

@@ -193,11 +193,11 @@ func TestNativeTargetGateAdmitsAddressRepair(t *testing.T) {
 		if err != nil || outcome == nil || !nativeTargetAddressRepair("@config", options.Arguments[3:], inspection) {
 			t.Fatalf("expected native-target-only V2 gate: outcome=%+v err=%v", outcome, err)
 		}
-		if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), "legacy release transition journal-invalid:") {
-			t.Fatalf("pending legacy transition admitted address repair: exit=%d %s", code, &output)
+		if code := program.Run(context.Background()); code != 0 {
+			t.Fatalf("legacy files blocked address repair: exit=%d %s", code, &output)
 		}
-		if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
-			t.Fatal("refused address repair changed configuration")
+		if bytes.Equal(before, mustReadConfigFixture(t, path)) {
+			t.Fatal("address repair did not change configuration")
 		}
 	})
 }

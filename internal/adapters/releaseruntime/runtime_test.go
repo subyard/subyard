@@ -3390,3 +3390,77 @@ func TestNewerReleaseAfterInspectionErrorKeepsExperimentalRefusal(t *testing.T) 
 		t.Fatalf("experimental owner selected %#v", selected)
 	}
 }
+
+func TestMutationGateRefusesUnfinishedV1ImportBeforeRetainedOwner(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	capture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "legacy-owner-called")
+	writeProtectedRuntimeFixtureEngine(t, fixture, fmt.Sprintf(`#!/bin/sh
+printf called > %q
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, capture, fixture.recoveringResponse()))
+	payload, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := releasetransition.Fingerprint(strings.Repeat("b", 64))
+	journal.Steps = []releasetransition.JournalStep{{
+		ID: "legacy-v1.import", Migration: string(releasetransition.V2LegacyV1Import), Resource: "legacy-v1.journal",
+		Decision: releasetransition.DecisionCanonicalize, Expected: facts, Desired: facts,
+		Checkpoint: releasetransition.StepIntent,
+	}}
+	// Intent binds the step's immutable identity, excluding its mutable checkpoint.
+	steps := json.RawMessage(fmt.Sprintf(`[{"id":"legacy-v1.import","migration":"legacy-v1-import","resource":"legacy-v1.journal","decision":"canonicalize","expected":%q,"desired":%q}]`, facts, facts))
+	intent, err := json.Marshal(struct {
+		AuthorizationPlan releasetransition.PlanToken   `json:"authorizationPlan"`
+		ResumePlan        releasetransition.PlanToken   `json:"resumePlan"`
+		ObservationScope  releasetransition.Fingerprint `json:"observationScope"`
+		Steps             json.RawMessage               `json:"steps"`
+	}{journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(intent)
+	journal.IntentDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", digest))
+	payload, err = releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, fixture.journalPath, payload, 0600)
+	before, err := os.Lstat(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := New(Config{Installer: fixture.installer, Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	defer runtime.Close()
+	outcome, err := runtime.InspectMutationGate(context.Background(), fixture.runtimeRoot, fixture.configHome, "default")
+	if err != nil || outcome == nil || outcome.Code != releasetransition.CodePreconditionBlocked ||
+		outcome.Message != "compatibility ingress operation is unavailable" {
+		t.Fatalf("unfinished import gate: %#v, %v", outcome, err)
+	}
+	if _, err := runtime.PrepareTransition(context.Background(), []string{"--runtime-root", fixture.runtimeRoot, "--version", "1.3.0"}, fixture.configHome, "default"); err == nil {
+		t.Fatal("unfinished legacy import admitted a newer release")
+	} else if refusal, ok := TransitionOutcome(err); !ok || refusal.Message != "compatibility ingress operation is unavailable" {
+		t.Fatalf("newer release lost retired import refusal: %v", err)
+	}
+	if _, err := os.Lstat(fixture.publicationCapture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retired import published another release: %v", err)
+	}
+	if _, err := os.Lstat(capture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy owner executed: %v", err)
+	}
+	after, err := os.Lstat(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustReadFile(t, fixture.journalPath); !bytes.Equal(got, payload) || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
+		t.Fatal("unfinished import inspection changed its journal")
+	}
+}

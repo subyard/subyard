@@ -1192,6 +1192,15 @@ owns the complete rules, including unfinished transitions below the anchor.
 
 Sources before **v0.11.0** retain the full-uninstall route; no V1 upgrade bridge exists. Accepted
 V2 history and evidence remain readable independently of fresh update admission.
+Supported installations are assumed to have no V1 journals. Ordinary commands, including
+configuration repair and source-history assessment, ignore `migrations/state.json` and
+`migrations/transactions/` without reading or deleting them. There is no V1 mutation gate;
+stray V1 files are repaired manually if needed. Current tooling refuses an unfinished V2
+`legacy-v1-import` journal with `compatibility ingress operation is unavailable` before writes,
+including retained-owner inspection, resume or replacement. Completed V2 legacy provenance,
+evidence, recovery bindings,
+history checkpoints and projections retain their existing validation and readers. The static
+`config/migrations.json` header remains for old released callers' actionable refusal.
 For a source before v0.11.0, stage verified current cleanup tooling in its existing runtime store:
 
 ```bash
