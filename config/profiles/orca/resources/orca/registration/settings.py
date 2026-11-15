@@ -205,6 +205,22 @@ class _Observed:
             self._seen(self.rpc.runtime_id)
 
 
+class Refused(RpcError):
+    """Orca answered every attempt with a refusal: nothing was applied."""
+
+
+class PassResult(tuple):
+    """(state name, reset count, whether an unreadable state was rewritten).
+
+    finished is False when the pass could not decide every chat, whatever the restart state.
+    """
+
+    def __new__(cls, name, reset, recovered, finished):
+        result = super().__new__(cls, (name, reset, recovered))
+        result.finished = finished
+        return result
+
+
 def _set_default_mode(rpc, session, before_send):
     fields = {"key": "permissionMode", "value": "own"}
     payload = json.dumps({"method": "agentSession.setOption", "sessionId": session, "fields": fields},
@@ -220,16 +236,14 @@ def _set_default_mode(rpc, session, before_send):
             break
         moved = ((result.get("refusal") or {}).get("details") or {}).get("reason") == "leaseMoved"
         if attempt or not moved:
-            raise RpcError("Orca refused a chat permission reset")
+            # A refusal is an answer from the runtime that took the request: it applied nothing.
+            raise Refused("Orca refused a chat permission reset")
     if rpc.call("agentSession.options", {"sessionId": session})["current"]["permissionMode"] != "own":
         raise RpcError("Orca did not reset a chat permission mode")
 
 
 def reset_chat_permissions(rpc, state):
-    """Reset each saved Full access Claude chat once under the exclusive lock.
-
-    Return (state name, reset count, whether an unreadable state was rewritten).
-    """
+    """Reset each saved Full access Claude chat once under the exclusive lock; return a PassResult."""
     deadline = getattr(rpc, "deadline", None)
     wait = LOCK_WAIT if deadline is None else max(0.0, min(LOCK_WAIT, deadline - time.monotonic()))
     with _exclusive(state, wait):
@@ -244,7 +258,7 @@ def _reset_pass(rpc, state):
         data, recovered = None, True
     if not recovered and data["complete"]:
         # Completed: a later explicit Full access choice is the user's opt-out.
-        return "complete", 0, False
+        return PassResult("complete", 0, False, True)
     observed = _Observed(rpc)
     sessions, clean = claude_chats(observed)
     if not observed.runtimes:
@@ -277,6 +291,7 @@ def _reset_pass(rpc, state):
             refused = True
             continue
         attempted = True
+        previous = data["dirty"]
         try:
             _set_default_mode(observed, session, mark_dirty)
             # Record each reset durably so that no chat is ever reset twice.
@@ -284,13 +299,24 @@ def _reset_pass(rpc, state):
             _save_chat_state(state, updated)
             data = updated
             count += 1
+        except Refused:
+            refused = True
+            if data["dirty"] != previous:
+                # Nothing was applied, so this attempt needs no restart. If restoring fails,
+                # the restart stays pending, which is safe.
+                try:
+                    restored = {**data, "dirty": previous}
+                    _save_chat_state(state, restored)
+                    data = restored
+                except OSError:
+                    pass
         except (RpcError, OSError, KeyError, TypeError, AttributeError):
             refused = True
-    if (clean and not attempted and not refused and observed.runtimes == [runtime]
-            and data["dirty"] != runtime):
+    finished = clean and not refused and observed.runtimes == [runtime]
+    if finished and not attempted and data["dirty"] != runtime:
         data = {**data, "complete": True}
         _save_chat_state(state, data)
-    return reset_state(data, observed.runtimes[-1]), count, recovered
+    return PassResult(reset_state(data, observed.runtimes[-1]), count, recovered, finished)
 
 
 RESTART_WARNING = ("Warning: saved Claude chats may still run Git without approval until Orca restarts; "
@@ -338,20 +364,22 @@ def main():
             return 1
     try:
         # Session History scans saved transcripts, which can take longer than a settings call.
-        name, reset, recovered = reset_chat_permissions(
+        result = reset_chat_permissions(
             RuntimeRPC(runtime, timeout=30, deadline=time.monotonic() + PASS_BUDGET), args.state)
     except (RpcError, OSError, ValueError, KeyError, TypeError, AttributeError):
         # Every later apply retries the pass and warns again; reset chats are never reset twice.
         print(INCOMPLETE_WARNING, file=sys.stderr)
         return 0
+    name, reset, recovered = result
     if recovered:
         print(RECOVERED_WARNING, file=sys.stderr)
     if reset:
         print(f"Orca reset {reset} saved Claude chat(s) from Full access to the default permission mode; "
               "choose Full access in a chat again to opt out")
+    # Both can hold at once: a restart for applied resets, and chats this pass could not decide.
     if name == "restart-pending":
         print(RESTART_WARNING, file=sys.stderr)
-    elif name != "complete":
+    if name != "complete" and (not result.finished or name != "restart-pending"):
         print(INCOMPLETE_WARNING, file=sys.stderr)
     return 0
 

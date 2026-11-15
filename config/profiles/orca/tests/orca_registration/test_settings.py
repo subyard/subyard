@@ -427,16 +427,45 @@ class ChatPermissionMigrationTests(unittest.TestCase):
         rpc = ChatRPC(full("a", "b", "c"), tabs=[tab("a"), tab("b"), tab("c")], refuse={"b"})
         self.assertEqual(("restart-pending", 2, False), self.reset(rpc))
         self.assertEqual(["a", "c"], self.saved()["reset"])
-        # The refused chat is retried in the new runtime; the attempt needs another restart.
+        # The refused chat is retried in the new runtime; a definitive refusal applied nothing, so
+        # it needs no restart, but it still forbids completion.
         self.restart(rpc, "runtime-2")
-        self.assertEqual(("restart-pending", 0, False), self.reset(rpc), "a refusal forbids completion")
-        self.assertEqual("runtime-2", self.saved()["dirty"])
+        self.assertEqual(("incomplete", 0, False), self.reset(rpc), "a refusal forbids completion")
+        self.assertEqual("runtime-1", self.saved()["dirty"])
         rpc.heal()
         self.assertEqual(("restart-pending", 1, False), self.reset(rpc))
         self.assertEqual(["a", "c", "b"], self.saved()["reset"])
         self.restart(rpc, "runtime-3")
         self.assertEqual(("complete", 0, False), self.reset(rpc))
         self.assertEqual(["a", "b", "b", "b", "c"], sorted(rpc.resets()))
+
+    def test_a_persistently_refused_chat_never_requests_a_restart(self):
+        rpc = ChatRPC(full("chat"), tabs=[tab("chat")], refuse={"chat"})
+        rpc.state = self.state
+        for runtime in ("runtime-1", "runtime-2"):
+            self.restart(rpc, runtime)
+            self.assertEqual(("incomplete", 0, False), self.reset(rpc))
+            self.assertIsNone(self.saved()["dirty"])
+        # The intent was recorded before each write was sent.
+        self.assertEqual([("runtime-1", "runtime-1"), ("runtime-2", "runtime-2")], rpc.dirty_at_write)
+        # Leases that keep moving are refusals too.
+        rpc.refuse, rpc.moved = set(), {"chat": 2}
+        self.assertEqual(("incomplete", 0, False), self.reset(rpc))
+        self.assertIsNone(self.saved()["dirty"])
+        rpc.heal()
+        self.assertEqual(("restart-pending", 1, False), self.reset(rpc))
+
+    def test_a_refusal_keeps_the_restart_if_its_dirty_record_cannot_be_restored(self):
+        rpc = ChatRPC(full("chat"), tabs=[tab("chat")], refuse={"chat"})
+        real = settings._save_chat_state
+
+        def save(state, data):
+            if data["dirty"] is None and self.path.exists():
+                raise OSError("disk full")
+            real(state, data)
+        with mock.patch.object(settings, "_save_chat_state", save):
+            self.assertEqual(("restart-pending", 0, False), self.reset(rpc))
+        self.assertEqual("runtime-1", self.saved()["dirty"])
 
     def test_unreadable_chat_mode_forbids_completion(self):
         rpc = ChatRPC(full("a"), tabs=[tab("a"), tab("gone")])
@@ -608,14 +637,26 @@ class ChatPermissionMigrationTests(unittest.TestCase):
         incomplete = ("Warning: Orca could not finish resetting saved Claude chats from Full access; "
                       "they may still run Git without approval. Run yard orca sync, or switch each chat's "
                       "mode to Ask.\n")
-        self.assertEqual((0, "", "Warning: saved Claude chats may still run Git without approval until Orca "
-                          "restarts; run yard orca restart\n"), self.run_main(rpc))
+        restart = ("Warning: saved Claude chats may still run Git without approval until Orca "
+                   "restarts; run yard orca restart\n")
+        # A definitive refusal applied nothing: no restart, only the per-chat advice.
+        self.assertEqual((0, "", incomplete), self.run_main(rpc))
+        self.assertEqual({"version": 1, "reset": [], "dirty": None, "complete": False}, self.saved())
+        self.assertEqual((0, "launch=ready reset=incomplete\n", ""), self.run_main(rpc, "--check"))
+        # A reset applied in the same pass as a refusal reports both findings.
+        rpc.chats["other"] = {"mode": "full-access"}
+        rpc.tabs.append(tab("other"))
+        self.assertEqual((0, "Orca reset 1 saved Claude chat(s) from Full access to the default permission "
+                          "mode; choose Full access in a chat again to opt out\n", restart + incomplete),
+                         self.run_main(rpc))
+        self.assertEqual("runtime-1", self.saved()["dirty"])
+        self.assertEqual((3, "launch=ready reset=restart-pending\n", ""), self.run_main(rpc, "--check"))
         rpc.runtime_id = "runtime-2"
         rpc.refuse, rpc.history = set(), {"hasMore": True}
+        # The incomplete scan is reported next to the restart the applied reset needs.
         self.assertEqual((0, "Orca reset 1 saved Claude chat(s) from Full access to the default permission "
-                          "mode; choose Full access in a chat again to opt out\n",
-                          "Warning: saved Claude chats may still run Git without approval until Orca "
-                          "restarts; run yard orca restart\n"), self.run_main(rpc, "--reset-chats"))
+                          "mode; choose Full access in a chat again to opt out\n", restart + incomplete),
+                         self.run_main(rpc, "--reset-chats"))
         rpc.runtime_id = "runtime-3"
         self.assertEqual((0, "", incomplete), self.run_main(rpc, "--reset-chats"))
         self.assertEqual((0, "launch=ready reset=incomplete\n", ""), self.run_main(rpc, "--check"))

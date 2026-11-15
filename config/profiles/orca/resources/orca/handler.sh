@@ -960,7 +960,7 @@ cmd_up() {
       # Agent processes are children of the service and end with it. Restart once: the pass
       # in the new runtime completes the reset or warns, and never triggers another restart.
       yexec systemctl restart "$ORCA_UNIT"
-      wait_service_endpoint_ready || die "Orca did not become ready after restarting for saved Claude chats"
+      wait_service_ready || die "Orca did not become ready after restarting for saved Claude chats"
       ok "Orca restarted so no Claude chat keeps Full access from before the reset"
       run_claude_chat_reset
     else
