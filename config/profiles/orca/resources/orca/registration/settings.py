@@ -29,6 +29,8 @@ CHAT_STATE = "subyard-claude-chat-permissions.json"
 CHAT_LOCK = ".subyard-claude-chat-permissions.lock"
 CHAT_STATE_LIMIT = 1024 * 1024
 LOCK_WAIT = 120
+# A stalled Orca must not hold the chat lock, and with it hooks, init and up, for long.
+PASS_BUDGET = 120
 RESTART_PENDING = 3
 
 
@@ -125,6 +127,7 @@ def _save_chat_state(state, data):
     directory = Path(state)
     descriptor, temporary = tempfile.mkstemp(prefix=".subyard-claude-chat-", dir=directory)
     try:
+        os.fchmod(descriptor, 0o600)  # Exact mode whatever the umask.
         with os.fdopen(descriptor, "w") as output:
             json.dump(data, output, sort_keys=True, separators=(",", ":"))
             output.write("\n")
@@ -181,13 +184,25 @@ class _Observed:
         self.rpc = rpc
         self.runtimes = []
 
+    def _seen(self, runtime):
+        if runtime is not None and runtime not in self.runtimes:
+            self.runtimes.append(runtime)
+
     def call(self, method, params=None, before_send=None):
+        if before_send is None:
+            try:
+                return self.rpc.call(method, params)
+            finally:
+                self._seen(self.rpc.runtime_id)
+
+        def answered_by(runtime):
+            # A sent write may have applied in the runtime that answered it.
+            self._seen(runtime)
+            before_send(runtime)
         try:
-            return self.rpc.call(method, params, before_send=before_send)
+            return self.rpc.call(method, params, before_send=before_send, on_runtime_mismatch=answered_by)
         finally:
-            runtime = self.rpc.runtime_id
-            if runtime is not None and runtime not in self.runtimes:
-                self.runtimes.append(runtime)
+            self._seen(self.rpc.runtime_id)
 
 
 def _set_default_mode(rpc, session, before_send):
@@ -215,7 +230,9 @@ def reset_chat_permissions(rpc, state):
 
     Return (state name, reset count, whether an unreadable state was rewritten).
     """
-    with _exclusive(state):
+    deadline = getattr(rpc, "deadline", None)
+    wait = LOCK_WAIT if deadline is None else max(0.0, min(LOCK_WAIT, deadline - time.monotonic()))
+    with _exclusive(state, wait):
         return _reset_pass(rpc, state)
 
 
@@ -286,19 +303,21 @@ RECOVERED_WARNING = ("Warning: the saved Claude chat reset state was unreadable 
 
 def check(rpc, state):
     """Report launch defaults and the reset separately; exit 3 only while a restart is pending."""
+    launch = "unavailable"
     try:
-        ready = launch_defaults(rpc)
+        launch = "ready" if launch_defaults(rpc) else "unready"
     except Exception:
         # Neither settings nor upstream errors may enter logs: they can contain secrets.
         print("Orca agent launch settings unavailable; run yard orca up", file=sys.stderr)
-        print("launch=unavailable reset=unknown")
-        return 1
+    # The runtime is known once its metadata was read, even when the settings call failed.
     try:
-        name = reset_state(load_chat_state(state), rpc.runtime_id)
+        data = load_chat_state(state)
     except (OSError, ValueError):
         name = "unreadable"  # The next apply pass rewrites it; readiness must not wedge.
-    print(f"launch={'ready' if ready else 'unready'} reset={name}")
-    return RESTART_PENDING if name == "restart-pending" else 0 if ready else 1
+    else:
+        name = "unknown" if rpc.runtime_id is None and not data["complete"] else reset_state(data, rpc.runtime_id)
+    print(f"launch={launch} reset={name}")
+    return RESTART_PENDING if name == "restart-pending" else 0 if launch == "ready" else 1
 
 
 def main():
@@ -319,7 +338,8 @@ def main():
             return 1
     try:
         # Session History scans saved transcripts, which can take longer than a settings call.
-        name, reset, recovered = reset_chat_permissions(RuntimeRPC(runtime, timeout=30), args.state)
+        name, reset, recovered = reset_chat_permissions(
+            RuntimeRPC(runtime, timeout=30, deadline=time.monotonic() + PASS_BUDGET), args.state)
     except (RpcError, OSError, ValueError, KeyError, TypeError, AttributeError):
         # Every later apply retries the pass and warns again; reset chats are never reset twice.
         print(INCOMPLETE_WARNING, file=sys.stderr)

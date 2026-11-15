@@ -8,6 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -115,15 +116,18 @@ class ChatRPC:
     """
 
     def __init__(self, chats, tabs=(), vault=(), refuse=(), ignore=(), moved=(), history=None,
-                 lost=(), crash=(), unreadable=(), tabs_fail=False, history_fail=False):
+                 lost=(), crash=(), unreadable=(), tabs_fail=False, history_fail=False, answered=None):
         self.chats = copy.deepcopy(chats)
         self.tabs, self.vault = list(tabs), list(vault)
         self.refuse, self.ignore = set(refuse), set(ignore)
         self.lost, self.crash, self.unreadable = set(lost), set(crash), set(unreadable)
         self.tabs_fail, self.history_fail = tabs_fail, history_fail
         self.moved = {session: count for session, count in moved}
+        self.answered = dict(answered or {})  # A write applied and answered by another runtime.
         self.history = history or {}
         self.calls = []
+        self.deadline = None
+        self.stall = 0
         self.runtime_id = "runtime-1"
         self.settings = {"agentDefaultArgs": {"codex": "", "claude": ""}}
         self.before = None  # Runs before each call, e.g. to restart Orca or interleave a pass.
@@ -131,9 +135,14 @@ class ChatRPC:
         self.dirty_at_write = []
         self.read_back = set()
 
-    def call(self, method, params=None, before_send=None):
+    def call(self, method, params=None, before_send=None, on_runtime_mismatch=None):
         if self.before:
             self.before(self, method, params)
+        if self.deadline is not None:
+            # The transport refuses to connect once the overall budget is spent.
+            time.sleep(self.stall)
+            if time.monotonic() >= self.deadline:
+                raise RpcError("Orca registration time budget exhausted", timed_out=True)
         if before_send is not None:
             try:
                 before_send(self.runtime_id)
@@ -179,6 +188,13 @@ class ChatRPC:
                 raise Crash()
             if session in self.lost:
                 raise RpcError("Orca runtime request timed out", unknown=True, timed_out=True)
+            if session in self.answered:
+                assert on_runtime_mismatch is not None
+                try:
+                    on_runtime_mismatch(self.answered[session])
+                except OSError:
+                    raise RpcError("Orca runtime connection failed", unknown=True) from None
+                raise RpcError("Orca runtime response runtime mismatch", unknown=True)
             return {"ok": True, "value": params["value"]}
         raise AssertionError(method)
 
@@ -192,6 +208,7 @@ class ChatRPC:
     def heal(self):
         self.refuse, self.ignore, self.lost, self.crash, self.unreadable = set(), set(), set(), set(), set()
         self.moved, self.history, self.tabs_fail, self.history_fail = {}, {}, False, False
+        self.answered = {}
 
 
 def tab(session, agent="claude", kind="agent-session"):
@@ -529,7 +546,11 @@ class ChatPermissionMigrationTests(unittest.TestCase):
 
     def run_main(self, rpc, *arguments, lock_wait=None):
         stdout, stderr = io.StringIO(), io.StringIO()
-        patches = [mock.patch.object(settings, "RuntimeRPC", return_value=rpc),
+
+        def connect(path, timeout=5.0, deadline=None):
+            rpc.deadline = deadline
+            return rpc
+        patches = [mock.patch.object(settings, "RuntimeRPC", side_effect=connect),
                    mock.patch.object(settings.sys, "argv", ["settings.py", *arguments, "--state", str(self.state)])]
         if lock_wait is not None:
             patches.append(mock.patch.object(settings, "LOCK_WAIT", lock_wait))
@@ -562,9 +583,17 @@ class ChatPermissionMigrationTests(unittest.TestCase):
         self.assertEqual((3, "launch=unready reset=restart-pending\n", ""), self.run_main(rpc, "--check"))
         rpc.runtime_id = "runtime-2"
         self.assertEqual((1, "launch=unready reset=incomplete\n", ""), self.run_main(rpc, "--check"))
+        unavailable = "Orca agent launch settings unavailable; run yard orca up\n"
         rpc.call = lambda *args, **kwargs: (_ for _ in ()).throw(RpcError("Orca runtime connection failed"))
-        self.assertEqual((1, "launch=unavailable reset=unknown\n",
-                          "Orca agent launch settings unavailable; run yard orca up\n"), self.run_main(rpc, "--check"))
+        self.assertEqual((1, "launch=unavailable reset=incomplete\n", unavailable), self.run_main(rpc, "--check"))
+        # The settings call fails, but the runtime from its metadata still shows the pending restart.
+        rpc.runtime_id = "runtime-1"
+        self.assertEqual((3, "launch=unavailable reset=restart-pending\n", unavailable),
+                         self.run_main(rpc, "--check"))
+        rpc.runtime_id = None
+        self.assertEqual((1, "launch=unavailable reset=unknown\n", unavailable), self.run_main(rpc, "--check"))
+        self.path.write_text("not json")
+        self.assertEqual((1, "launch=unavailable reset=unreadable\n", unavailable), self.run_main(rpc, "--check"))
 
     def test_reset_only_pass_leaves_launch_defaults_alone(self):
         rpc = ChatRPC(full("chat"), tabs=[tab("chat")])
@@ -600,3 +629,51 @@ class ChatPermissionMigrationTests(unittest.TestCase):
         self.assertEqual(["settings.get"], [method for method, _ in rpc.calls])
         self.assertFalse(self.path.exists())
         self.assertFalse((self.state / CHAT_LOCK).exists())
+
+    def test_write_answered_by_another_runtime_records_that_runtime_as_dirty(self):
+        rpc = ChatRPC(full("chat"), tabs=[tab("chat")], answered={"chat": "runtime-2"})
+        self.assertEqual(("restart-pending", 0, False), self.reset(rpc))
+        self.assertEqual({"version": 1, "reset": [], "dirty": "runtime-2", "complete": False}, self.saved())
+        self.assert_never_completes_in(rpc, "runtime-2")
+        self.restart(rpc, "runtime-3")
+        self.assertEqual(("complete", 0, False), self.reset(rpc))
+
+    def test_exact_modes_under_a_hostile_umask(self):
+        rpc = ChatRPC(full("chat"), tabs=[tab("chat")])
+        previous = os.umask(0o777)
+        try:
+            self.assertEqual("restart-pending", self.reset(rpc)[0])
+            self.restart(rpc, "runtime-2")
+            self.assertEqual("complete", self.reset(rpc)[0])
+        finally:
+            os.umask(previous)
+        self.assertEqual(0o600, stat.S_IMODE(self.path.stat().st_mode))
+        self.assertEqual(0o600, stat.S_IMODE((self.state / CHAT_LOCK).stat().st_mode))
+        self.assertTrue(self.saved()["complete"])
+
+    def test_pass_has_a_bounded_total_time_and_never_completes_on_expiry(self):
+        rpc = ChatRPC(full("a", "b", "c"), tabs=[tab("a"), tab("b"), tab("c")])
+        rpc.stall = 0.05
+        started = time.monotonic()
+        with mock.patch.object(settings, "PASS_BUDGET", 0.3):
+            code, _, stderr = self.run_main(rpc, "--reset-chats")
+        self.assertEqual(0, code)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertNotEqual([], rpc.calls)
+        self.assertFalse(self.path.exists() and self.saved()["complete"])
+        self.assertLess(len(rpc.resets()), 3, "the budget must expire mid-pass")
+        self.assertTrue("could not finish resetting" in stderr or "until Orca restarts" in stderr)
+        rpc.deadline = None
+        self.assertEqual("restart-pending", self.reset(rpc)[0])
+        self.restart(rpc, "runtime-2")
+        self.assertEqual("complete", self.reset(rpc)[0])
+
+    def test_lock_wait_is_bounded_by_the_pass_budget(self):
+        rpc = ChatRPC(full("a"), tabs=[tab("a")])
+        started = time.monotonic()
+        with settings._exclusive(self.state), mock.patch.object(settings, "PASS_BUDGET", 0.2):
+            code, _, stderr = self.run_main(rpc, "--reset-chats")
+        self.assertEqual(0, code)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn("could not finish resetting", stderr)
+        self.assertEqual([], rpc.calls)

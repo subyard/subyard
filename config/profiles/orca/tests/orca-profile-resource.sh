@@ -64,7 +64,8 @@ chat_reset_state() {
   runtime="$(cat "$state_root/invocation" 2>/dev/null || printf 1)"
   if [ -e "$state_root/chat-dirty" ] && [ "$(cat "$state_root/chat-dirty")" = "$runtime" ]; then
     printf restart-pending
-  elif [ -e "$state_root/chat-dirty" ] || [ -e "$state_root/chat-reset-incomplete" ]; then
+  elif [ -e "$state_root/chat-dirty" ] || [ -e "$state_root/chat-reset-incomplete" ] ||
+    [ -e "$state_root/chat-reset-needed" ]; then
     printf incomplete
   else
     printf complete
@@ -1121,12 +1122,26 @@ chat_status_has 'saved Claude chats may still run Git without approval until Orc
   'status hid a pending saved Claude chat restart'
 ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/chat-plan.json"
-jq -e '.changed == true and any(.steps[]; .id == "codex-defaults" and .decision == "apply"
-  and .observed == "saved-claude-chats-await-orca-restart")' "$TMP/chat-plan.json" >/dev/null \
+jq -e '.changed == true and any(.steps[]; .id == "chat-permissions" and .decision == "apply"
+  and .observed == "saved-claude-chats-await-orca-restart" and (.consequence | test("restarting Orca once")))
+  and any(.steps[]; .id == "codex-defaults" and .decision == "skip")' "$TMP/chat-plan.json" >/dev/null \
   || fail "up plan hid the pending saved Claude chat restart: $(cat "$TMP/chat-plan.json")"
 SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" sync >"$TMP/chat-sync-plan.json"
-jq -e 'any(.steps[]; .id == "codex-defaults" and .observed == "saved-claude-chats-await-orca-restart")' \
-  "$TMP/chat-sync-plan.json" >/dev/null || fail 'sync plan hid the pending saved Claude chat restart'
+jq -e 'any(.steps[]; .id == "chat-permissions" and .decision == "apply"
+  and .observed == "saved-claude-chats-await-orca-restart" and (.consequence | test("left to orca restart")))
+  and any(.steps[]; .id == "codex-defaults" and .decision == "skip" and (.consequence | test("saved Claude chats")))' \
+  "$TMP/chat-sync-plan.json" >/dev/null || fail "sync plan hid the pending saved Claude chat restart: $(cat "$TMP/chat-sync-plan.json")"
+SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart >"$TMP/chat-restart-plan.json"
+jq -e 'any(.steps[]; .id == "chat-permissions" and .decision == "apply"
+  and .observed == "saved-claude-chats-await-orca-restart")' "$TMP/chat-restart-plan.json" >/dev/null \
+  || fail "restart plan did not declare the saved Claude chat reset: $(cat "$TMP/chat-restart-plan.json")"
+# Sync cannot restart Orca: it retries the reset, warns and still verifies.
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+run_orca sync --yes >"$TMP/chat-sync.out" 2>&1 || fail "sync failed while a chat restart is pending: $(cat "$TMP/chat-sync.out")"
+grep -Fq "until Orca restarts; run 'yard orca restart' or 'yard orca up'" "$TMP/chat-sync.out" \
+  || fail "sync hid the pending saved Claude chat restart: $(cat "$TMP/chat-sync.out")"
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq "$restart_count" ] || fail 'sync restarted Orca'
+[ -e "$TMP/chat-dirty" ] || fail 'sync completed a reset that needs an Orca restart'
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 run_orca up --yes >"$TMP/chat-up.out" || fail 'up did not finish the saved Claude chat reset'
 [ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
@@ -1154,6 +1169,22 @@ chat_status_has 'until Orca restarts' 'status hid a saved Claude chat reset pend
 rm -f "$TMP/chat-reset-needed" "$TMP/chat-reset-recurs"
 run_orca restart --yes >/dev/null
 [ ! -e "$TMP/chat-dirty" ] || fail 'restart did not complete the saved Claude chat reset'
+
+# A chat still needing a reset is reset before the restart, so one restart finishes it.
+touch "$TMP/chat-reset-needed"
+SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart >"$TMP/chat-restart-plan.json"
+jq -e 'any(.steps[]; .id == "chat-permissions" and .decision == "apply"
+  and .observed == "saved-claude-chat-reset-incomplete")' "$TMP/chat-restart-plan.json" >/dev/null \
+  || fail "restart plan hid an incomplete saved Claude chat reset: $(cat "$TMP/chat-restart-plan.json")"
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+run_orca restart --yes >/dev/null || fail 'restart did not finish a pending saved Claude chat reset'
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
+  || fail 'restart needed more than one Orca restart for saved Claude chats'
+[ ! -e "$TMP/chat-reset-needed" ] && [ ! -e "$TMP/chat-dirty" ] \
+  || fail 'one restart did not finish the saved Claude chat reset'
+SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart >"$TMP/chat-restart-plan.json"
+jq -e 'any(.steps[]; .id == "chat-permissions" and .decision == "skip")' "$TMP/chat-restart-plan.json" >/dev/null \
+  || fail 'a completed saved Claude chat reset still planned work'
 
 # An incomplete reset warns without making launch defaults look unready.
 touch "$TMP/chat-reset-incomplete"
