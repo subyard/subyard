@@ -2,30 +2,17 @@ package releasetransition
 
 import "testing"
 
-// SeedProcessCrashHistoryForTest supplies completed v0.28-shaped authority,
-// without calling any retired effect writer or seeding an in-flight journal.
-func SeedProcessCrashHistoryForTest(t *testing.T, home string, checkpointed bool) {
+// SeedProcessCrashHistoryForTest seeds a complete tag-produced installation,
+// including its journal/evidence, plus an unreferenced closed recovery to collect.
+func SeedProcessCrashHistoryForTest(t *testing.T, home, version string, checkpointed bool) {
 	t.Helper()
-	seedFrozenReaderTree(t, home, "v0.28.1-first-transition-verified.json", false)
-	if !checkpointed {
-		return
-	}
-	store, err := NewPOSIXV2Store(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	unlock, err := store.Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-	state, err := store.ReadMigrationLedger(historyV028, historyV028Digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ConvertMigrationLedger(state, historyV028, historyV028Digest, historyV028, historyV028Digest); err != nil {
-		t.Fatal(err)
-	}
+	seedCompletedInstallationFixture(t, home, version, checkpointed)
+	seedUnreferencedClosedHistory(t, home)
+}
+
+func AssertProcessCrashCleanupForTest(t *testing.T, home string, requirePredecessor bool) {
+	t.Helper()
+	assertCompletedHistoryCleanup(t, home, requirePredecessor)
 }
 
 // SetProcessCrashFaultForTest attaches only existing fault seams. This file is

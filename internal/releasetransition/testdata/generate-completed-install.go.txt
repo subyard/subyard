@@ -1,0 +1,93 @@
+package releasetransition
+
+import (
+	"context"
+	"encoding/json"
+	"github.com/Subyard/Subyard/internal/testkit"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestExportCompletedInstallation(t *testing.T) {
+	version := os.Getenv("FIXTURE_VERSION")
+	for _, checkpoint := range []bool{false, true} {
+		name := "plain"
+		if checkpoint {
+			name = "checkpointed"
+		}
+		t.Run(name, func(t *testing.T) {
+			release := ReleaseID(version + "-aaaaaaaaaaaa")
+			payload, err := os.ReadFile("../../config/release-transition.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := V2Options{ConfigHome: testkit.TempDir(t), RegistryPayload: payload, ArtifactDigest: digestA,
+				Releases: ReleasePair{From: release, Target: release}, ObserveLinks: func(context.Context) (ReleaseLinks, error) { return ReleaseLinks{Active: release}, nil },
+				OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}, RegisteredYards: []V2ActivationReconciler{}, GuestDiskTmp: []V2ActivationReconciler{},
+				MigrationCheckpoint: checkpoint, SourceMigrationCheckpoint: true, NewTransactionID: func() TransactionID { return "tx-completed-install" }, VerifyAuthorization: func(p PlanToken, a Authorization) bool { return a == v2TestAuthorization(p) },
+			}
+			engine, err := NewV2Transition(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goal := Goal{Target: release, Direction: DirectionActivateTarget}
+			plan, err := engine.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := engine.Converge(context.Background(), Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
+			if err != nil || out.Status != StatusReady || len(out.Warnings) != 0 {
+				t.Fatalf("tag install: %#v %v", out, err)
+			}
+			snapshot, err := engine.store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := ParseJournal(snapshot.Payload)
+			if err != nil || journal.Checkpoint != JournalComplete || len(journal.Steps) != 6 {
+				t.Fatalf("journal: %#v %v", journal, err)
+			}
+			for _, step := range journal.Steps {
+				if step.Checkpoint != StepVerified {
+					t.Fatal("unfinished migration")
+				}
+			}
+			state, err := engine.store.ReadMigrationLedger(engine.registry, engine.registryDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Checkpointed != checkpoint {
+				t.Fatal("wrong checkpoint shape")
+			}
+			files := map[string]string{}
+			err = filepath.Walk(options.ConfigHome, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if info.IsDir() {
+					return nil
+				}
+				body, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				rel, err := filepath.Rel(options.ConfigHome, path)
+				if err != nil {
+					return err
+				}
+				files[filepath.ToSlash(rel)] = string(body)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			bytes, err := json.MarshalIndent(files, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(os.Getenv("FIXTURE_OUTPUT"), "v"+version+"-completed-install-"+name+".json")
+			testkit.WriteFile(t, destination, append(bytes, '\n'), 0600)
+		})
+	}
+}

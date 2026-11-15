@@ -270,13 +270,13 @@ func TestBootstrapLedgerHistorySurvivesNextTransition(t *testing.T) {
 	release := ReleaseID("0.29.0-bbbbbbbbbbbb")
 	links := &ReleaseLinks{Active: release}
 	options := currentHistoryOptions(t, home, links, release)
-	for _, target := range []ReleaseID{release, "0.30.0-cccccccccccc"} {
+	for _, target := range []ReleaseID{release, "0.30.0-cccccccccccc", "0.31.0-dddddddddddd"} {
 		options.Releases = ReleasePair{From: links.Active, Previous: cloneReleaseID(links.Previous), Target: target}
 		options.NewTransactionID = func() TransactionID {
 			if target == release {
 				return "tx-bootstrap-history"
 			}
-			return "tx-next-history"
+			return TransactionID("tx-next-" + string(target))
 		}
 		engine, err := NewV2Transition(options)
 		if err != nil {
@@ -288,11 +288,14 @@ func TestBootstrapLedgerHistorySurvivesNextTransition(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := engine.Converge(context.Background(), Execution{Plan: plan.Plan, Authorization: v2TestAuthorization(plan.Plan)})
-		if err != nil || out.Status != StatusReady {
+		if err != nil || out.Status != StatusReady || len(out.Warnings) != 0 {
 			t.Fatalf("transition: %#v %v", out, err)
 		}
 		if _, err := engine.store.InspectSourceMetadata(engine.registry, engine.registryDigest); err != nil {
 			t.Fatal(err)
+		}
+		if _, err := engine.store.closedTransactionEvidence("tx-bootstrap-history", engine.registry); err != nil {
+			t.Fatal("pinned initial ledger publication was not retained", err)
 		}
 	}
 }

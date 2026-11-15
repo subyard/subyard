@@ -56,14 +56,8 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 		if err != nil || !bytes.Equal(canonical, snapshot.Payload) {
 			return proof, errors.New("source repair requires a canonical protected journal")
 		}
-		originalCatalog, supportedCatalog := SupportedBuiltinCatalog(journal.CatalogDigest)
-		if journal.RegistryDigest != digest || !supportedCatalog || !BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) || journal.SourceIngress != nil {
+		if journal.RegistryDigest != digest || !BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) || journal.SourceIngress != nil {
 			return proof, errors.New("source repair requires the exact supported original registry and catalog without source ingress")
-		}
-		for _, migration := range registry.Migrations {
-			if !originalCatalog.Supports(migration.Kind, migration.Domain) {
-				return proof, errors.New("source repair registry exceeds the original compiled catalog")
-			}
 		}
 		if journal.Checkpoint != JournalComplete && (journal.Checkpoint != JournalReconciling || journal.Goal.Direction != DirectionActivateTarget || len(journal.Steps) != 0 || IsRecoveryTransaction(journal.Transaction)) {
 			if strings.HasPrefix(string(journal.Transaction), RecoveryTransactionPrefixV2) &&

@@ -1614,7 +1614,7 @@ func (transition *V2Transition) rollbackCompatibilityBlocker(fresh bool) *Blocke
 	}
 	// The validated applied prefix plus PendingPath covers the whole registry.
 	// Prove compatibility with that resulting ledger before planning any work.
-	for _, migration := range transition.registry.Migrations {
+	for _, migration := range transition.registry.historyData().Migrations {
 		descriptor, exists := transition.catalog.descriptor(migration.Kind)
 		if !exists || descriptor.RollbackCompatibility != RollbackCompatibilityBackwardCompatibleNoOp {
 			return rollbackIncompatibleBlocker()

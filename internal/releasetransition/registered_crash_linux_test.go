@@ -186,7 +186,7 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 	trace := &crashTrace{store: store, cuts: map[string]bool{}, counts: map[string]int{}}
 	native := &registeredCrashNative{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{}, Reconcile: ports.ReconcileState{ProjectFound: true, InstanceFound: true, ProjectConfig: map[string]string{"user.subyard.installation": "1", "user.subyard.operator_uid": strconv.Itoa(os.Getuid()), "user.subyard.config_home": home, "user.subyard.data_home": home + "/data"}}}, path: statePath, trace: trace, vm: family == crashFamilyRegisteredVM}
 	if initialize {
-		for _, path := range []string{filepath.Dir(settings), filepath.Join(home, ".sync/settings"), filepath.Join(runtimeRoot, "releases/release-a"), filepath.Join(root, "scripts")} {
+		for _, path := range []string{filepath.Dir(settings), filepath.Join(home, ".sync/settings"), filepath.Join(runtimeRoot, "releases/0.28.1-aaaaaaaaaaaa"), filepath.Join(runtimeRoot, "releases/0.30.0-bbbbbbbbbbbb"), filepath.Join(root, "scripts")} {
 			if err := os.MkdirAll(path, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -198,7 +198,7 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 		for _, script := range []string{"06-network.sh", "lifecycle-guard.sh"} {
 			testkit.WriteFile(t, filepath.Join(root, "scripts", script), []byte("#!/bin/sh\nexit 0\n"), 0o700)
 		}
-		if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
+		if err := os.Symlink("releases/0.28.1-aaaaaaaaaaaa", filepath.Join(runtimeRoot, "current")); err != nil {
 			t.Fatal(err)
 		}
 		values := map[string]string{"volatile.uuid": "uuid-original", "user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.name": "default", "user.subyard.bridge": "fixture-br", "user.subyard.desired_power": "running"}
@@ -213,7 +213,7 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 		if native.vm {
 			instance.Type = domain.YardVM
 		}
-		rt.SeedProcessCrashHistoryForTest(t, home, false)
+		rt.SeedProcessCrashHistoryForTest(t, home, "0.28.1", false)
 		if err := native.write(registeredCrashState{Instance: instance}); err != nil {
 			t.Fatal(err)
 		}
@@ -284,9 +284,10 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 		t.Fatal(err)
 	}
 	options := rt.V2Options{CandidateConfigDir: candidate, ConfigHome: home, RegistryPayload: payload, ArtifactDigest: crashPin("artifact"),
-		Releases: rt.ReleasePair{From: "release-a", Target: "release-a"}, Direction: rt.DirectionActivateTarget,
+		Releases: rt.ReleasePair{From: "0.28.1-aaaaaaaaaaaa", Target: "0.30.0-bbbbbbbbbbbb"}, Direction: rt.DirectionActivateTarget,
 		MigrationCheckpoint: true, SourceMigrationCheckpoint: true,
 		ObserveLinks:        func(context.Context) (rt.ReleaseLinks, error) { return links.Observe() },
+		ActivateLinks:       func(_ context.Context, pair rt.ReleasePair) (rt.ReleaseLinks, error) { return links.Activate(pair) },
 		Reconcilers:         []rt.V2ActivationReconciler{&namedRegisteredCrashActor{owner, "registered"}, &namedRegisteredCrashActor{tmp, "guest-tmp"}},
 		VerifyAuthorization: func(plan rt.PlanToken, grant rt.Authorization) bool { return string(grant) == "grant:"+string(plan) },
 	}
@@ -295,7 +296,7 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 		// no longer exist; exercise the still-live activation write itself.
 		options.Reconcilers = []rt.V2ActivationReconciler{&revisionActivation{native: native, trace: trace}}
 	}
-	return &crashFixture{family: family, target: "release-a", home: home, root: root, registry: payload, options: options, links: links, trace: trace, signature: registeredCrashSignature}
+	return &crashFixture{family: family, target: "0.30.0-bbbbbbbbbbbb", home: home, root: root, registry: payload, options: options, links: links, trace: trace, signature: registeredCrashSignature}
 
 }
 
@@ -319,7 +320,7 @@ func mustMkdirAll(t *testing.T, path string, create bool) string {
 
 func registeredCrashSignature(t *testing.T, root string) map[string]string {
 	t.Helper()
-	result := map[string]string{}
+	result := crashDomainSignature(t, root)
 	for _, relative := range []string{"config/yards/default/config.env", "config/.sync/settings/config.env", "native.json"} {
 		body, err := os.ReadFile(filepath.Join(root, relative))
 		if err != nil {

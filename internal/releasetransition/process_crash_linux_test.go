@@ -37,6 +37,15 @@ func (trace *crashTrace) event(origin, point string) error {
 	if err != nil || !snapshot.Exists {
 		return err
 	}
+	journal, err := rt.ParseJournal(snapshot.Payload)
+	if err != nil {
+		return err
+	}
+	// A completed predecessor does not authorize the new update. Discover cuts
+	// only after this writer publishes its own transaction and grant.
+	if journal.Transaction == "tx-completed-install" {
+		return nil
+	}
 	key := origin + "/" + point
 	trace.counts[key]++
 	return trace.hit(fmt.Sprintf("%s/%03d", key, trace.counts[key]))
@@ -128,7 +137,6 @@ type crashFixture struct {
 
 const crashFamilyFresh = "fresh"
 const crashFamilyUpdate = "update"
-const crashFamilyCheckpointed = "update-checkpointed"
 
 func crashFamily(family string) func(*testing.T) *crashFixture {
 	return func(t *testing.T) *crashFixture { return classicCrashFixtureAt(t, testkit.TempDir(t), true, family) }
@@ -137,7 +145,8 @@ func crashFamily(family string) func(*testing.T) *crashFixture {
 func classicCrashFixtureAt(t *testing.T, root string, initialize bool, family string) *crashFixture {
 	t.Helper()
 	home, runtime := filepath.Join(root, "config"), filepath.Join(root, "runtime")
-	source, target := rt.ReleaseID("0.28.1-aaaaaaaaaaaa"), rt.ReleaseID("0.29.0-bbbbbbbbbbbb")
+	version := strings.TrimSuffix(strings.TrimPrefix(family, crashFamilyUpdate+"-"), "-checkpointed")
+	source, target := rt.ReleaseID(version+"-aaaaaaaaaaaa"), rt.ReleaseID("0.30.0-bbbbbbbbbbbb")
 	if family == crashFamilyFresh {
 		source = target
 	}
@@ -152,7 +161,7 @@ func classicCrashFixtureAt(t *testing.T, root string, initialize bool, family st
 		}
 		testkit.WriteFile(t, filepath.Join(root, "canary"), []byte("unrelated operator data\n"), 0o600)
 		if family != crashFamilyFresh {
-			rt.SeedProcessCrashHistoryForTest(t, home, family == crashFamilyCheckpointed)
+			rt.SeedProcessCrashHistoryForTest(t, home, version, strings.HasSuffix(family, "-checkpointed"))
 		}
 	}
 	store, err := rt.NewPOSIXV2Store(home)
@@ -197,6 +206,12 @@ func crashConverge(t *testing.T, f *crashFixture, resume bool) rt.Outcome {
 	outcome, err := transition.Converge(context.Background(), execution)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if outcome.Status == rt.StatusReady {
+		if len(outcome.Warnings) != 0 {
+			t.Fatalf("Ready has cleanup warnings: %+v", outcome)
+		}
+		rt.AssertProcessCrashCleanupForTest(t, f.home, f.family != crashFamilyFresh)
 	}
 	return outcome
 }
@@ -313,7 +328,11 @@ func crashDomainSignature(t *testing.T, root string) map[string]string {
 }
 
 func TestProcessCrashUpdatesResumeFresh(t *testing.T) {
-	for _, family := range []string{crashFamilyUpdate, crashFamilyCheckpointed, crashFamilyFresh} {
+	families := []string{crashFamilyFresh}
+	for _, version := range []string{"0.28.1", "0.29.0"} {
+		families = append(families, crashFamilyUpdate+"-"+version, crashFamilyUpdate+"-"+version+"-checkpointed")
+	}
+	for _, family := range families {
 		t.Run(family, func(t *testing.T) { runCrashMatrix(t, crashFamily(family), nil) })
 	}
 }
@@ -322,7 +341,7 @@ func runCrashMatrix(t *testing.T, build func(*testing.T) *crashFixture, verifyCo
 	t.Helper()
 	control := build(t)
 	outcome := crashConverge(t, control, false)
-	if outcome.Status != rt.StatusReady {
+	if outcome.Status != rt.StatusReady || len(outcome.Warnings) != 0 {
 		t.Fatalf("control: %+v", outcome)
 	}
 	snapshot, err := control.trace.store.ReadCurrentJournal()
@@ -343,13 +362,13 @@ func runCrashMatrix(t *testing.T, build func(*testing.T) *crashFixture, verifyCo
 	// These assertions prove the fixture reaches its intended boundaries. They
 	// do not select cuts: every discovered hook invocation below is still killed.
 	required := []string{"transition/after-journal-authorized/", "transition/after-target-active/", "transition/after-reconciling/", "transition/before-journal-complete/", "transition/after-journal-complete/", "transition/before-recovery-gc/", "store/after-publish-before-dir-fsync/"}
-	if control.family == crashFamilyUpdate || control.family == crashFamilyCheckpointed {
+	if strings.HasPrefix(control.family, crashFamilyUpdate+"-") {
 		required = append(required, "transition/after-activation-intent/", "links/after-staged-link/", "links/after-link-exchange/")
 	}
 	if control.family == crashFamilyFresh {
 		required = append(required, "transition/before-baseline-ledger/", "transition/after-baseline-ledger/", "transition/after-step-evidence/", "transition/after-step-verified/")
 	}
-	if control.family == crashFamilyUpdate || control.family == crashFamilyFresh {
+	if strings.HasPrefix(control.family, crashFamilyUpdate+"-") && !strings.HasSuffix(control.family, "-checkpointed") || control.family == crashFamilyFresh {
 		required = append(required, "transition/before-checkpoint-publication/", "transition/after-checkpoint-publication/")
 	}
 	for _, prefix := range required {

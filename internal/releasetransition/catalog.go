@@ -173,6 +173,7 @@ func (catalog CapabilityCatalog) Descriptors() []CapabilityDescriptor {
 // SupportsSourceMetadata admits read-only history from exact supported catalogs
 // with unchanged compiled semantics. The registry stays within its owner's catalog.
 func (catalog CapabilityCatalog) SupportsSourceMetadata(source Fingerprint, registry RegistryV2) bool {
+	registry = registry.historyData()
 	if source == catalog.Digest() {
 		return registry.Validate(catalog) == nil
 	}
