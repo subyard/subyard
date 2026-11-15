@@ -27,15 +27,30 @@ var releaseLookupCases = []struct {
 	rateLimit      bool
 	priorHeaders   string
 	transportFail  bool
+	repository     string
+	via            []string
+	wantRequests   int
 }{
 	{name: "stable", location: stableReleaseURL, status: 200, wantTag: "v1.2.3"},
+	{name: "configured repository casing", repository: "subyard/subyard", location: stableReleaseURL, status: 200, wantTag: "v1.2.3"},
+	{name: "redirect repository casing", location: "https://github.com/subyard/subyard/releases/tag/v1.2.3", status: 200, wantTag: "v1.2.3"},
+	{name: "renamed repository", via: []string{"https://github.com/Renamed/Project/releases/latest"}, location: "https://github.com/Renamed/Project/releases/tag/v1.2.3", status: 200, wantTag: "v1.2.3"},
 	{name: "no redirect", status: 200, wantError: "valid stable release tag"},
 	{name: "missing v", location: "https://github.com/Subyard/Subyard/releases/tag/1.2.3", status: 200, wantError: "valid stable release tag"},
 	{name: "prerelease", location: stableReleaseURL + "-rc.1", status: 200, wantError: "valid stable release tag"},
 	{name: "build metadata", location: stableReleaseURL + "+build", status: 200, wantError: "valid stable release tag"},
 	{name: "leading zero", location: "https://github.com/Subyard/Subyard/releases/tag/v01.2.3", status: 200, wantError: "valid stable release tag"},
-	{name: "wrong host", location: "https://example.invalid/Subyard/Subyard/releases/tag/v1.2.3", status: 200, wantError: "valid stable release tag"},
+	{name: "wrong host", location: "https://example.invalid/Subyard/Subyard/releases/tag/v1.2.3", status: 200, wantError: "stay on github.com", wantRequests: 1},
+	{name: "off-host chain back to GitHub", via: []string{"https://example.invalid/bounce"}, location: stableReleaseURL, status: 200, wantError: "stay on github.com", wantRequests: 1},
+	{name: "off-host intermediate", via: []string{"https://github.com/bounce", "https://example.invalid/bounce"}, location: stableReleaseURL, status: 200, wantError: "stay on github.com", wantRequests: 2},
+	{name: "host suffix", location: "https://github.com.example.invalid/tag", status: 200, wantError: "stay on github.com", wantRequests: 1},
+	{name: "host port", location: "https://github.com:443/tag", status: 200, wantError: "stay on github.com", wantRequests: 1},
+	{name: "host casing remains strict", location: "https://GitHub.com/tag", status: 200, wantError: "stay on github.com", wantRequests: 1},
+	{name: "userinfo", location: "https://operator@github.com/tag", status: 200, wantError: "stay on github.com", wantRequests: 1},
+	{name: "insecure redirect", location: "http://github.com/Subyard/Subyard/releases/tag/v1.2.3", status: 200, wantError: "redirects must use https", wantRequests: 1},
 	{name: "wrong repository", location: "https://github.com/Other/Project/releases/tag/v1.2.3", status: 200, wantError: "valid stable release tag"},
+	{name: "release path casing remains strict", location: "https://github.com/Subyard/Subyard/Releases/tag/v1.2.3", status: 200, wantError: "valid stable release tag"},
+	{name: "tag casing remains strict", location: "https://github.com/Subyard/Subyard/releases/tag/V1.2.3", status: 200, wantError: "valid stable release tag"},
 	{name: "extra path", location: stableReleaseURL + "/other", status: 200, wantError: "valid stable release tag"},
 	{name: "encoded tag", location: "https://github.com/Subyard/Subyard/releases/tag/%761.2.3", status: 200, wantError: "valid stable release tag"},
 	{name: "query", location: stableReleaseURL + "?other=1", status: 200, wantError: "valid stable release tag"},
@@ -53,36 +68,44 @@ var releaseLookupCases = []struct {
 func TestLatestTagRedirectAndHTTPFailures(t *testing.T) {
 	for _, test := range releaseLookupCases {
 		t.Run(test.name, func(t *testing.T) {
+			repository := test.repository
+			if repository == "" {
+				repository = "Subyard/Subyard"
+			}
+			redirects := append([]string{}, test.via...)
+			if test.location != "" {
+				redirects = append(redirects, test.location)
+			}
 			calls := 0
 			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				calls++
 				if test.transportFail {
 					return nil, errors.New("connection failed")
 				}
-				if request.Method != http.MethodHead {
-					t.Fatalf("lookup method = %s", request.Method)
+				if request.Method != http.MethodHead || request.URL.Host != "github.com" || request.URL.User != nil {
+					t.Fatalf("unsafe lookup: %s %s", request.Method, request.URL)
 				}
 				if calls == 1 {
-					if request.URL.String() != latestReleaseURL {
+					if request.URL.String() != "https://github.com/"+repository+"/releases/latest" {
 						t.Fatalf("lookup URL = %s", request.URL)
 					}
-					if test.location != "" {
-						return &http.Response{StatusCode: 302, Header: http.Header{"Location": {test.location}}, Body: http.NoBody}, nil
-					}
-				} else if calls != 2 || request.URL.String() != test.location {
+				} else if calls > len(redirects)+1 || request.URL.String() != redirects[calls-2] {
 					t.Fatalf("unexpected request %d: %s", calls, request.URL)
+				}
+				if calls <= len(redirects) {
+					return &http.Response{StatusCode: 302, Header: http.Header{"Location": {redirects[calls-1]}}, Body: http.NoBody}, nil
 				}
 				return &http.Response{StatusCode: test.status, Status: fmt.Sprintf("%d %s", test.status, http.StatusText(test.status)), Header: test.headers, Body: http.NoBody, Request: request}, nil
 			})}
-			tag, err := New(Config{HTTPClient: client}).latestTag(context.Background(), "Subyard/Subyard")
+			tag, err := New(Config{HTTPClient: client}).latestTag(context.Background(), repository)
 			var limited *releaseRateLimitError
 			if tag != test.wantTag || errors.As(err, &limited) != test.rateLimit ||
 				(test.wantError == "" && err != nil) || (test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError))) {
 				t.Fatalf("latestTag() = %q, %v (rate limit=%v)", tag, err, limited)
 			}
-			wantCalls := 1
-			if test.location != "" {
-				wantCalls++
+			wantCalls := len(redirects) + 1
+			if test.wantRequests != 0 {
+				wantCalls = test.wantRequests
 			}
 			if calls != wantCalls {
 				t.Fatalf("made %d requests, want %d", calls, wantCalls)
@@ -154,21 +177,32 @@ func TestBootstrapLatestReleaseDiscovery(t *testing.T) {
 			root := testkit.TempDir(t)
 			curl := filepath.Join(root, "curl")
 			testkit.WriteFile(t, curl, []byte(fakeLatestReleaseCurl), 0o700)
+			repository := test.repository
+			if repository == "" {
+				repository = "Subyard/Subyard"
+			}
+			redirects := append([]string{}, test.via...)
+			if test.location != "" {
+				redirects = append(redirects, test.location)
+			}
+			for index, location := range redirects {
+				testkit.WriteFile(t, filepath.Join(root, fmt.Sprintf("headers-%d", index+1)),
+					[]byte("HTTP/2 302\r\nLocation: "+location+"\r\n\r\n"), 0o600)
+				testkit.WriteFile(t, filepath.Join(root, fmt.Sprintf("status-%d", index+1)), []byte("302"), 0o600)
+			}
 			headers := test.priorHeaders + fmt.Sprintf("HTTP/2 %d\r\n", test.status)
 			for key, values := range test.headers {
 				for _, value := range values {
 					headers += key + ": " + value + "\r\n"
 				}
 			}
-			location := test.location
-			if location == "" {
-				location = latestReleaseURL
-			}
+			testkit.WriteFile(t, filepath.Join(root, fmt.Sprintf("headers-%d", len(redirects)+1)), []byte(headers), 0o600)
+			testkit.WriteFile(t, filepath.Join(root, fmt.Sprintf("status-%d", len(redirects)+1)), []byte(fmt.Sprint(test.status)), 0o600)
 			command := exec.Command("bash", script, "--yes")
 			command.Env = []string{
 				"PATH=" + root + ":" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=/tmp",
-				"FAKE_LOG=" + filepath.Join(root, "requests"), "FAKE_HEADERS=" + headers,
-				"FAKE_STATUS=" + fmt.Sprint(test.status), "FAKE_LOCATION=" + location,
+				"FAKE_LOG=" + filepath.Join(root, "requests"), "FAKE_RESPONSES=" + root,
+				"YARD_RELEASE_REPOSITORY=" + repository,
 			}
 			if test.transportFail {
 				command.Env = append(command.Env, "FAKE_TRANSPORT_FAILURE=1")
@@ -189,15 +223,24 @@ func TestBootstrapLatestReleaseDiscovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			lines := strings.Split(strings.TrimSpace(string(requests)), "\n")
-			if lines[0] != latestReleaseURL || (test.wantTag == "" && len(lines) != 1) {
+			wantLookups := len(redirects) + 1
+			if test.wantRequests != 0 {
+				wantLookups = test.wantRequests
+			}
+			if len(lines) < wantLookups || lines[0] != "https://github.com/"+repository+"/releases/latest" || (test.wantTag == "" && len(lines) != wantLookups) {
 				t.Fatalf("unexpected requests: %s", requests)
 			}
+			for _, url := range lines[:wantLookups] {
+				if !strings.HasPrefix(url, "https://github.com/") {
+					t.Fatalf("contacted unsafe redirect: %s", url)
+				}
+			}
 			if test.wantTag != "" {
-				if len(lines) != 7 {
+				if len(lines) != wantLookups+6 {
 					t.Fatalf("expected tag lookup and six pinned assets: %s", requests)
 				}
-				for _, url := range lines[1:] {
-					if !strings.HasPrefix(url, "https://github.com/Subyard/Subyard/releases/download/"+test.wantTag+"/") {
+				for _, url := range lines[wantLookups:] {
+					if !strings.HasPrefix(url, "https://github.com/"+repository+"/releases/download/"+test.wantTag+"/") {
 						t.Fatalf("unpinned asset: %s", url)
 					}
 				}
@@ -208,27 +251,31 @@ func TestBootstrapLatestReleaseDiscovery(t *testing.T) {
 
 const fakeLatestReleaseCurl = `#!/usr/bin/env bash
 set -euo pipefail
-headers='' output='' url='' head=0 proto='' redir='' retry=''
+headers='' output='' url='' head=0 proto='' retry='' follow=0 disabled=0 max_redirs=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --head) head=1; shift ;;
+    --disable) disabled=1; shift ;;
+    --location|-L|-fsSL) follow=1; shift ;;
     --dump-header) headers="$2"; shift 2 ;;
     --output|-o) output="$2"; shift 2 ;;
     --proto) proto="$2"; shift 2 ;;
-    --proto-redir) redir="$2"; shift 2 ;;
     --retry) retry="$2"; shift 2 ;;
+    --max-redirs) max_redirs="$2"; shift 2 ;;
     --write-out|--connect-timeout|--max-time) shift 2 ;;
-    https://*) url="$1"; shift ;;
+    *://*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
 printf '%s\n' "$url" >> "$FAKE_LOG"
-if [[ "$url" == */releases/latest ]]; then
-  [ "$head/$proto/$redir/$retry" = '1/=https/=https/0' ]
-  printf '%s' "$FAKE_HEADERS" > "$headers"
-  printf '%s\n%s' "$FAKE_STATUS" "$FAKE_LOCATION"
+if [ "$head" = 1 ]; then
+  [ "$proto/$retry/$follow/$disabled/$max_redirs" = '=https/0/0/1/0' ]
+  index="$(wc -l < "$FAKE_LOG")"
+  cat "$FAKE_RESPONSES/headers-$index" > "$headers"
+  status="$(cat "$FAKE_RESPONSES/status-$index")"
+  printf '%s' "$status"
   [ "${FAKE_TRANSPORT_FAILURE:-0}" != 1 ] || exit 7
-  [ "$FAKE_STATUS" -lt 400 ] || exit 22
+  [ "$status" -lt 400 ] || exit 22
 else
   # A real download never runs in this fixture.
   printf 'invalid fixture bytes\n' > "$output"

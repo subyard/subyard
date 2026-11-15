@@ -97,24 +97,49 @@ if [ "$OFFLINE" = 0 ]; then
 fi
 
 latest_release_tag() (
-  local headers response response_headers result status reset retry_after reason metadata_url tag prefix
+  local headers response response_headers result status reset retry_after reason metadata_url tag path repository
+  local redirects location expected_repository="$REPOSITORY"
   headers="$(mktemp /tmp/subyard-latest.XXXXXX)" || return 1
   trap 'rm -f -- "$headers"' EXIT
   # Like Codex provisioning, use the public redirect instead of the shared REST
-  # quota. Do not let curl retry a rate-limit refusal.
-  if response="$(curl --fail --silent --show-error --location --head \
-    --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 0 \
-    --connect-timeout 20 --max-time 60 --dump-header "$headers" \
-    --write-out $'%{http_code}\n%{url_effective}' --output /dev/null \
-    "https://github.com/$REPOSITORY/releases/latest")"; then
-    metadata_url="${response#*$'\n'}"
-  else
-    result=$?
-    status=''
-    # Transport failures may still report an earlier successful redirect code.
-    [ "$result" != 22 ] || status="${response%%$'\n'*}"
+  # quota. Follow redirects ourselves so every hop is checked before contact.
+  metadata_url="https://github.com/$REPOSITORY/releases/latest"
+  for ((redirects=0; redirects<10; redirects++)); do
+    if response="$(curl --disable --fail --silent --show-error --head \
+      --proto '=https' --tlsv1.2 --retry 0 --max-redirs 0 \
+      --connect-timeout 20 --max-time 60 --dump-header "$headers" \
+      --write-out '%{http_code}' --output /dev/null "$metadata_url")"; then
+      status="$response"
+    else
+      result=$?
+      status=''
+      # Only curl's HTTP refusal exit identifies a failing HTTP response.
+      [ "$result" != 22 ] || status="$response"
+    fi
     # A redirect chain can carry unrelated quota headers; classify the final response.
     response_headers="$(awk '/^HTTP\// {block=""} {block=block $0 ORS} END {printf "%s", block}' "$headers")"
+    case "$status" in
+      200) break ;;
+      301|302|303|307|308)
+        location="$(awk 'tolower($1) == "location:" {
+          sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); value=$0; count++
+        } END {if (count != 1) exit 1; print value}' <<< "$response_headers")" \
+          || { printf 'bootstrap-runtime: latest release redirect needs one Location header\n' >&2; return 1; }
+        case "$location" in
+          /*) [[ "$location" == //* ]] || location="https://github.com$location" ;;
+        esac
+        if [[ "$location" != https://github.com/* || "$location" == *[$'\r\n\t ']* ]]; then
+          printf 'bootstrap-runtime: latest release redirects must use https and stay on github.com\n' >&2
+          return 1
+        fi
+        # GitHub canonicalizes renamed/transferred repositories via this endpoint.
+        path="${location#https://github.com/}"
+        if [[ "$path" =~ ^([^/?#]+)/([^/?#]+)/releases/latest$ ]]; then
+          expected_repository="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+        fi
+        metadata_url="$location"
+        continue ;;
+    esac
     reason="could not resolve the stable release${status:+ (HTTP $status)}"
     if [ "$status" = 429 ] || { [ "$status" = 403 ] && \
       grep -Eiq $'^x-ratelimit-remaining: *0\r?$|^retry-after:' <<< "$response_headers"; }; then
@@ -128,10 +153,15 @@ latest_release_tag() (
     fi
     printf 'bootstrap-runtime: %s\n' "$reason" >&2
     return 1
+  done
+  if [ "$redirects" = 10 ]; then
+    printf 'bootstrap-runtime: too many latest release redirects\n' >&2
+    return 1
   fi
-  prefix="https://github.com/$REPOSITORY/releases/tag/"
-  tag="${metadata_url#"$prefix"}"
-  if [[ "$metadata_url" != "$prefix"* ]] || \
+  path="${metadata_url#https://github.com/}"
+  repository="${path%/releases/tag/*}"
+  tag="${path#"$repository/releases/tag/"}"
+  if [[ "${repository,,}" != "${expected_repository,,}" || "$path" != "$repository/releases/tag/$tag" ]] || \
     ! [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
     printf 'bootstrap-runtime: latest release redirect does not name a valid stable release tag\n' >&2
     return 1

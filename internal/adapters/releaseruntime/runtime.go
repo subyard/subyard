@@ -2273,6 +2273,17 @@ func (runtime *Runtime) latestTag(ctx context.Context, repository string) (strin
 		if request.URL.Scheme != "https" {
 			return errors.New("latest release redirects must use https")
 		}
+		if request.URL.Host != "github.com" || request.URL.User != nil {
+			return errors.New("latest release redirects must stay on github.com")
+		}
+		// GitHub canonicalizes renamed/transferred repositories through their
+		// latest endpoint. Keep tag validation bound to that canonical repository.
+		parts := strings.Split(request.URL.EscapedPath(), "/")
+		if len(parts) == 5 && parts[1] != "" && parts[2] != "" &&
+			parts[3] == "releases" && parts[4] == "latest" &&
+			request.URL.RawQuery == "" && !request.URL.ForceQuery && request.URL.Fragment == "" {
+			repository = parts[1] + "/" + parts[2]
+		}
 		return nil
 	}
 	response, err := client.Do(request)
@@ -2295,11 +2306,18 @@ func (runtime *Runtime) latestTag(ctx context.Context, repository string) (strin
 	if response.Request == nil || response.Request.URL == nil {
 		return "", errors.New("latest release response has no redirect URL")
 	}
-	prefix := "https://github.com/" + repository + "/releases/tag/"
-	tag := strings.TrimPrefix(response.Request.URL.String(), prefix)
+	resolved := response.Request.URL
+	parts := strings.Split(resolved.EscapedPath(), "/")
+	if resolved.Scheme != "https" || resolved.Host != "github.com" || resolved.User != nil ||
+		resolved.RawQuery != "" || resolved.ForceQuery || resolved.Fragment != "" ||
+		len(parts) != 6 || !strings.EqualFold(parts[1]+"/"+parts[2], repository) ||
+		parts[3] != "releases" || parts[4] != "tag" {
+		return "", errors.New("latest release redirect does not name a valid stable release tag")
+	}
+	tag := parts[5]
 	version, err := semver.Parse(strings.TrimPrefix(tag, "v"))
 	if err != nil || len(version.Pre) != 0 || len(version.Build) != 0 ||
-		response.Request.URL.String() != prefix+"v"+version.String() {
+		tag != "v"+version.String() {
 		return "", errors.New("latest release redirect does not name a valid stable release tag")
 	}
 	return tag, nil
