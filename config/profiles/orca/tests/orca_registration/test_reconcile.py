@@ -2382,6 +2382,21 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.assertNotIn(self.linked["id"], {repo["id"] for repo in self.rpc.repos})
         self.assertTrue(report["settled"], report)
 
+    def test_identified_and_unidentified_tabs_of_one_worktree_protect_without_failing(self):
+        from reconcile import _ownership
+        snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],
+                      "tabs": [{"id": "t1"}, {"title": "no identity"}]}]
+        closable, tabs, _ = _ownership(self.repo, self.rpc.repos, snapshots, [])
+        self.assertFalse(closable)
+        self.assertEqual(2, len(tabs))
+        self.rpc.snapshots = snapshots
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], report["errors"])
+        self.assertEqual([], self.closes())
+        self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"]))
+
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
         import fcntl

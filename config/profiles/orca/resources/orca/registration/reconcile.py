@@ -672,7 +672,7 @@ def _ownership(repo, catalog, snapshots, terminals):
         if who == repo["id"]:
             rows.append(terminal)
     closable = all(owners[key] == {repo["id"]} for key in mentioned)
-    return closable, sorted(set(tabs)), rows
+    return closable, sorted(set(tabs), key=lambda tab: (tab[0], tab[1] or "")), rows
 
 
 def _cleanup_plan(repo, read_set, refused_stops=frozenset()):
