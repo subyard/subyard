@@ -79,6 +79,9 @@ Registration-only changes do not restart the service; a changed service unit doe
 stopped; after starting one, run `yard init` to repair its installed handler before
 project hooks execute. This repair also runs when provisioning is already current.
 `orca sync` refuses a stale registration contract and points to `yard init`.
+In a yard that no longer selects the profile, Orca stays installed but its project hook and
+periodic discovery register nothing; `orca sync` refuses and points to `yard profile enable orca`
+and then `yard init`.
 
 When rolling back to Subyard 0.14.0 or 0.13.13, the older updater leaves the newer,
 backward-compatible registration handler installed. This legacy rollback does not

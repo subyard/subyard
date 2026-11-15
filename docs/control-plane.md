@@ -1254,9 +1254,14 @@ in the same apply stay blocking. The Orca handler proves this by running each su
 guest wrapper that maps the command's failure to status 200, which Incus never returns.
 Orca observes its runtime as `absent` in a yard that does not select it, so deselection plus init
 clears its pending item; deselection skips the runtime but leaves Orca installed. Its installed
-project hook exits 0, before its contract marker check, when the yard's guest runtime facts select
-profiles without Orca; a selected Orca with a stale marker, or unreadable facts, still refuse with
-the init hint.
+project hook exits 0, before its contract marker check, when the yard's guest runtime facts are
+valid, from a completed refresh, owned like the guest root, not writable by others, bound to the
+guest machine, and select profiles without Orca. A selected Orca with a stale marker, and missing,
+incomplete, foreign, linked or writable facts, still refuse with the init hint. A runtime apply
+replaces the hook atomically before any other helper file, so a later guest failure never leaves
+an older release's hook that would refuse after deselection. In such a yard the installed Orca
+registers no projects, periodic discovery registers nothing, and `orca sync` refuses with that
+reason and the `profile enable orca` and init exit.
 
 The owner records the typed failure under the configuration root as
 `activation-pending/v1/YARD/OWNER.json`, bound to the yard instance, the actual and desired
@@ -1275,10 +1280,11 @@ blocker with that yard's init step; a release ready proof never accepts findings
 release work remains, findings are warnings, so `yard migrate` still plans and repairs that work.
 `yard migrate` and `yard update` then exit non-zero; their result names every finding within the
 diagnostic bound and states that the release is ready, and `yard migrate --check`, `config status`
-and `yard status` show each one. A finding names the yard, the profile, the diagnostic command
-`yard -Y NAME profile list`, that the profile is not applied, and both exits: fix the cause and
-run `yard -Y NAME init`, which repeats the same apply from the partial state, or run
-`yard -Y NAME profile disable ID` and then init.
+and `yard status` show each one. A finding names the yard once, the profile, that the profile is
+not applied, the diagnostic `profile list` and both exits for that yard: fix the cause and run
+init, which repeats the same apply from the partial state, or run `profile disable ID` and then
+init. Its next step is the exact `yard -Y NAME init`. A yard name too long for the 480-byte record
+message is left to that next step, so the failure is still recorded.
 
 These findings share the pending-configuration admission of materialized configuration: when every
 blocker is such a finding and no owner is unconverged, the direct CLI and RPC admit unrelated

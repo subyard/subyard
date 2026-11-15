@@ -165,6 +165,14 @@ case "${1:-}" in
       ORCA_MOCK_GUEST_STEP=1 "$0" "${args[@]:0:$((separator + 1))}" "${args[@]:$((separator + 5))}" || exit 200
       exit 0
     fi
+    case " $* " in
+      *' subyard-orca-selection / ')
+        for index in "${!args[@]}"; do
+          [ "${args[$index]}" = -c ] && program="${args[$((index + 1))]}"
+        done
+        exec python3 -I -B -c "$program" subyard-orca-selection "$guest"
+        ;;
+    esac
     if [ -e "$state_root/drain-exec-stdin" ]; then
       # Native Incus forwards stdin even when the guest command does not read it.
       # Explicit script execution keeps its intended script input.
@@ -1046,6 +1054,31 @@ assert_runtime_diagnostics() {
     || fail 'opt-in runtime diagnostics changed the observation or exposed unexpected values'
 }
 assert_runtime_diagnostics '[{"parameter":"orca.registration","installed":"unknown","desired":"current"}]'
+# Staging replaces an older release's hook first: a guest failure after that
+# (an Orca-only directory replaced by a file) leaves the hook that skips a yard
+# not selecting Orca, never the older hook that would refuse without its marker.
+staged_hook="$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
+codex_dir="$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex"
+sed -i '/^# A yard that does not select Orca/,/unselected ] || exit 0$/d' "$staged_hook"
+! grep -Fq subyard-orca-selection "$staged_hook" || fail 'fixture did not plant an older project hook'
+mv "$codex_dir" "$codex_dir.saved"
+: >"$codex_dir"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
+  >"$TMP/runtime-hook-first.out" 2>&1; then
+  fail 'runtime contract apply concealed a guest failure after the hook replacement'
+fi
+grep -Fxq "$typed_record apply yard-local" "$TMP/runtime-hook-first.out" \
+  || { cat "$TMP/runtime-hook-first.out" >&2; fail 'the injected staging failure did not happen inside the guest step'; }
+grep -Fq subyard-orca-selection "$staged_hook" \
+  || fail 'a staging failure after the hook replacement left the older project hook'
+[ "$(stat -c %a "$staged_hook")" = 755 ] || fail 'the replaced project hook is not executable'
+! ls "$ORCA_TEST_GUEST/usr/local/libexec/subyard"/.orca-sync.* >/dev/null 2>&1 \
+  || fail 'hook replacement left its temporary file'
+rm -f "$codex_dir"
+mv "$codex_dir.saved" "$codex_dir"
+observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 rm -f "$TMP/linger"
 "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
@@ -1696,41 +1729,83 @@ fi
 grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \
   || fail 'unsafe hostname failure was not actionable'
 
-# The rendered project hook exits 0 in a yard whose guest facts do not select
-# Orca, before its marker check; a selected but stopped Orca with a missing
-# marker, or unreadable facts, still refuse with the init hint.
+# Sync in a yard whose guest facts do not select Orca names the real reason.
+chmod 0755 "$ORCA_TEST_GUEST"
+mkdir -p "$ORCA_TEST_GUEST/etc/subyard"
+chmod 0755 "$ORCA_TEST_GUEST/etc" "$ORCA_TEST_GUEST/etc/subyard"
+printf '0123456789abcdef0123456789abcdef\n' >"$ORCA_TEST_GUEST/etc/machine-id"
+jq -n '{version:"0.29.0-test",yard:{name:"default",project:"subyard",instance:"yard"},selected_profiles:[]} as $applied |
+  {schema:1,machine_id:"0123456789abcdef0123456789abcdef",status:"current",target:$applied,last_success:$applied,
+   capabilities:"unknown",readiness:"unknown"}' >"$ORCA_TEST_GUEST/etc/subyard/guest-runtime.json"
+chmod 0644 "$ORCA_TEST_GUEST/etc/machine-id" "$ORCA_TEST_GUEST/etc/subyard/guest-runtime.json"
+if run_orca sync >"$TMP/unselected-sync.out" 2>&1; then
+  fail 'sync succeeded in a yard that does not select Orca'
+fi
+grep -Fq 'Orca is not selected in this yard, so it registers no projects' "$TMP/unselected-sync.out" \
+  || { cat "$TMP/unselected-sync.out" >&2; fail 'sync in a yard that does not select Orca did not name the reason'; }
+rm -f "$ORCA_TEST_GUEST/etc/subyard/guest-runtime.json"
+
+# The rendered project hook exits 0 in a yard whose valid guest facts do not
+# select Orca, before its marker check. A selected but stopped Orca with a
+# missing marker, and missing, incomplete, foreign, linked or writable facts,
+# still refuse with the init hint.
 hook_root="$TMP/selection-hook"
-mkdir -p "$hook_root/bin"
+guest_root="$hook_root/guest"
+mkdir -p "$hook_root/bin" "$guest_root/etc/subyard"
+chmod 0755 "$guest_root" "$guest_root/etc" "$guest_root/etc/subyard"
 printf '#!/bin/sh\nexit 3\n' >"$hook_root/bin/systemctl"
 chmod 0755 "$hook_root/bin/systemctl"
+printf '0123456789abcdef0123456789abcdef\n' >"$guest_root/etc/machine-id"
+chmod 0644 "$guest_root/etc/machine-id"
 : >"$hook_root/lock"
 (
   RESOURCE_DIR="$ROOT/config/profiles/orca/resources/orca"
   ORCA_CONTRACT_VERSION="$(sed -n 's/^ORCA_CONTRACT_VERSION=//p' "$RESOURCE_DIR/handler.sh")"
   ORCA_UNIT=subyard-orca.service ORCA_REGISTRATION="$hook_root/registration"
   ORCA_REGISTRATION_LOCK="$hook_root/lock" ORCA_REGISTRATION_DIGEST="$hook_root/marker"
-  ORCA_GUEST_FACTS="$hook_root/guest-runtime.json"
+  ORCA_GUEST_ROOT="$guest_root"
   # shellcheck source=config/profiles/orca/resources/orca/registration-contract.sh
   . "$RESOURCE_DIR/registration-contract.sh"
   render_registration_hook >"$hook_root/sync"
 )
 chmod 0755 "$hook_root/sync"
-selection_facts() {
-  jq -n --argjson profiles "$1" '{schema:1,machine_id:"0",status:"current",target:{selected_profiles:$profiles},last_success:null,capabilities:"unknown",readiness:"unknown"}' \
-    >"$hook_root/guest-runtime.json"
+selection_facts() { # <target profiles> [status] [machine id] [last success profiles]
+  local facts="$guest_root/etc/subyard/guest-runtime.json"
+  rm -f "$facts"
+  jq -n --argjson target "$1" --arg status "${2:-current}" --arg machine "${3:-0123456789abcdef0123456789abcdef}" \
+    --argjson applied "${4:-$1}" '
+    {version:"0.29.0-test",yard:{name:"default",project:"subyard",instance:"yard"}} as $yard |
+    {schema:1,machine_id:$machine,status:$status,target:($yard + {selected_profiles:$target}),
+     last_success:($yard + {selected_profiles:$applied}),capabilities:"unknown",readiness:"unknown"}' >"$facts"
+  chmod 0644 "$facts"
 }
 selection_facts '["hermes"]'
 PATH="$hook_root/bin:$PATH" "$hook_root/sync" >"$hook_root/deselected.out" 2>&1 \
   || { cat "$hook_root/deselected.out"; fail 'project hook refused a yard that does not select Orca'; }
 [ ! -s "$hook_root/deselected.out" ] || fail 'deselected project hook reported output'
-for facts in '["orca"]' missing; do
-  if [ "$facts" = missing ]; then rm -f "$hook_root/guest-runtime.json"; else selection_facts "$facts"; fi
+for facts in selected missing incomplete foreign symlink writable writable-directory; do
+  chmod 0755 "$guest_root/etc/subyard"
+  case "$facts" in
+    selected) selection_facts '["orca"]' ;;
+    missing) rm -f "$guest_root/etc/subyard/guest-runtime.json" ;;
+    incomplete) selection_facts '["hermes"]' incomplete 0123456789abcdef0123456789abcdef '["orca"]' ;;
+    foreign) selection_facts '["hermes"]' current fedcba9876543210fedcba9876543210 ;;
+    symlink)
+      selection_facts '["hermes"]'
+      mv "$guest_root/etc/subyard/guest-runtime.json" "$guest_root/etc/subyard/facts.json"
+      ln -s facts.json "$guest_root/etc/subyard/guest-runtime.json"
+      ;;
+    writable) selection_facts '["hermes"]'; chmod 0664 "$guest_root/etc/subyard/guest-runtime.json" ;;
+    writable-directory) selection_facts '["hermes"]'; chmod 0777 "$guest_root/etc/subyard" ;;
+  esac
   if PATH="$hook_root/bin:$PATH" "$hook_root/sync" >"$hook_root/selected.out" 2>&1; then
-    fail "project hook accepted a missing marker with facts $facts"
+    fail "project hook accepted a missing marker with $facts facts"
   fi
   grep -Fq "Orca project helper is stale or incomplete; run 'yard init' first" "$hook_root/selected.out" \
-    || { cat "$hook_root/selected.out"; fail "project hook did not refuse a missing marker with facts $facts"; }
+    || { cat "$hook_root/selected.out"; fail "project hook did not refuse a missing marker with $facts facts"; }
+  rm -f "$guest_root/etc/subyard/facts.json"
 done
+chmod 0755 "$guest_root/etc/subyard"
 
 # Run the profile component's filesystem, wire and reconciliation contract tests in the core gate.
 python3 -B -m unittest discover -s "$ROOT/config/profiles/orca/tests/orca_registration"

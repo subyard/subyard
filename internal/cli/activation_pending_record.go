@@ -34,12 +34,14 @@ type activationPendingRecord struct {
 const (
 	activationPendingSchema = 1
 	activationPendingBytes  = 4096
+	// activationPendingMessageBytes bounds the public diagnostic of a record.
+	activationPendingMessageBytes = 480
 )
 
 func (record activationPendingRecord) validate() error {
 	if record.SchemaVersion != activationPendingSchema || !domain.SafeName(record.Yard) || !domain.SafeID(record.Owner) ||
 		record.Project == "" || record.Instance == "" || record.Inputs == "" || record.Actual == "" || record.Desired == "" ||
-		record.Actual == record.Desired || len(record.Message) > 480 || strings.ContainsFunc(record.Message, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		record.Actual == record.Desired || len(record.Message) > activationPendingMessageBytes || strings.ContainsFunc(record.Message, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return errors.New("invalid pending activation record")
 	}
 	return nil

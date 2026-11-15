@@ -355,9 +355,19 @@ func (reconciler *profileRuntimeActivationReconciler) pendingFacts(target config
 		Inputs: digest,
 		// Each yard's finding is its own readiness blocker, so this bounded
 		// message and its init step never depend on the number of yards.
-		Message: fmt.Sprintf("yard %[1]s: profile %[2]s runtime failed (diagnose: yard -Y %[1]s profile list); "+
-			"profile not applied; fix it and run yard -Y %[1]s init, or run yard -Y %[1]s profile disable %[2]s then init", yard, definition.Name),
+		Message: runtimePendingMessage(yard, definition.Name),
 	}, nil
+}
+
+// runtimePendingMessage names the yard once; the finding's next step carries
+// the exact init command. A yard name too long for the record bound is left to
+// that next step, so a legal yard's typed failure is still recorded.
+func runtimePendingMessage(yard, profileName string) string {
+	steps := fmt.Sprintf("run profile list to diagnose, then fix it and run init, or run profile disable %s and then init", profileName)
+	if message := fmt.Sprintf("yard %s: profile %s runtime failed and is not applied; in that yard, %s", yard, profileName, steps); len(message) <= activationPendingMessageBytes {
+		return message
+	}
+	return fmt.Sprintf("profile %s runtime failed and is not applied in the yard of the next step; there, %s", profileName, steps)
 }
 
 // profileRuntimePackageDigest binds a record to the effective handler: the

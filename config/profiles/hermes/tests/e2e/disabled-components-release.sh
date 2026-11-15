@@ -447,8 +447,8 @@ exercise_runtime_pending() {
   jq -e '.outcome.status == "migration-required" and (.blockers | length) == 0' "$STATE_ROOT/runtime-pending-stale.json" >/dev/null \
     || die 'stale Orca runtime did not require the release repair'
   operator_yard migrate --yes > "$STATE_ROOT/runtime-pending-failure.log" 2>&1 || rc=$?
-  [ "$rc" != 0 ] && grep -Fq 'yard default: profile orca runtime failed (diagnose: yard -Y default profile list)' "$STATE_ROOT/runtime-pending-failure.log" \
-    && grep -Fq 'fix it and run yard -Y default init' "$STATE_ROOT/runtime-pending-failure.log" \
+  [ "$rc" != 0 ] && grep -Fq 'yard default: profile orca runtime failed and is not applied; in that yard, run profile list to diagnose' "$STATE_ROOT/runtime-pending-failure.log" \
+    && grep -Fq 'then fix it and run init' "$STATE_ROOT/runtime-pending-failure.log" \
     && grep -Fq 'the release is ready' "$STATE_ROOT/runtime-pending-failure.log" \
     || { cat "$STATE_ROOT/runtime-pending-failure.log"; die "failed Orca runtime did not report its pending yard init (exit $rc)"; }
   sudo -n jq -e '.checkpoint == "complete" and .releases.from == .releases.target' "$V2_JOURNAL" >/dev/null \
@@ -473,16 +473,22 @@ exercise_runtime_pending() {
   guest_yard default test -s /usr/local/libexec/subyard/orca-registration.sha256 || die 'yard init did not reapply the Orca runtime'
   operator_yard -Y default orca down --yes
   # Second exit: disable the profile and run init; the deselected runtime is skipped.
+  # An older release's hook has no selection skip; the failing apply must still
+  # replace it before the fault, or that hook refuses init after deselection.
   guest_yard default sh -euc '
     rm -f /usr/local/libexec/subyard/orca-registration.sha256
+    sed -i "/^# A yard that does not select Orca/,/unselected \] || exit 0\$/d" "$2"
+    if grep -Fq subyard-orca-selection "$2"; then exit 1; fi
     mv "$1" "$1.runtime-pending"
     : > "$1"
-  ' _ "$fault_dir"
+  ' _ "$fault_dir" /usr/local/libexec/subyard/projects-changed.d/orca
   rc=0
   operator_yard migrate --yes > "$STATE_ROOT/runtime-pending-failure-2.log" 2>&1 || rc=$?
-  [ "$rc" != 0 ] && grep -Fq 'or run yard -Y default profile disable orca then init' "$STATE_ROOT/runtime-pending-failure-2.log" \
+  [ "$rc" != 0 ] && grep -Fq 'or run profile disable orca and then init' "$STATE_ROOT/runtime-pending-failure-2.log" \
     || { cat "$STATE_ROOT/runtime-pending-failure-2.log"; die "second Orca runtime failure did not report its pending yard init (exit $rc)"; }
   operator_env test -f "$record" || die 'the second yard-scoped failure was not recorded'
+  guest_yard default grep -Fq subyard-orca-selection /usr/local/libexec/subyard/projects-changed.d/orca \
+    || die 'the failing Orca apply left the older project hook'
   operator_yard -Y default profile disable orca --yes > "$STATE_ROOT/runtime-pending-disable.txt" 2>&1 \
     || { cat "$STATE_ROOT/runtime-pending-disable.txt"; die 'profile disable was refused while the yard waits for init'; }
   operator_yard -Y default init --yes > "$STATE_ROOT/runtime-pending-init-2.txt" 2>&1 \

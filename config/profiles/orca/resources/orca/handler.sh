@@ -56,7 +56,7 @@ ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
 # The rendered project hook reads the guest selection facts.
 # shellcheck disable=SC2034
-ORCA_GUEST_FACTS=/etc/subyard/guest-runtime.json
+ORCA_GUEST_ROOT=/
 ORCA_DISCOVERY_UNIT=subyard-orca-discovery.service
 ORCA_DISCOVERY_TIMER=subyard-orca-discovery.timer
 ORCA_CONTRACT_VERSION=7
@@ -407,7 +407,14 @@ chmod 0644 "$lock"
 chown 0:0 "$lock"
 exec 9>"$lock"
 flock -x 9
-install -d -m 0755 "$directory" "$(dirname "$hook")" "$(dirname "$discovery_service")" \
+# Replace the hook first and atomically: after any later failure the installed
+# hook skips a yard that does not select Orca and refuses a selected one
+# without the marker, instead of an older release's hook refusing forever.
+install -d -m 0755 "$(dirname "$hook")"
+next_hook="$(dirname "$lock")/.orca-sync.$$"
+install -m 0755 "$stage/orca-sync" "$next_hook"
+mv -fT -- "$next_hook" "$hook"
+install -d -m 0755 "$directory" "$(dirname "$discovery_service")" \
   "$(dirname "$codex_profile")" "$(dirname "$codex_bin")"
 rm -f -- "$marker"
 for installed in "$directory"/*.py; do
@@ -415,7 +422,6 @@ for installed in "$directory"/*.py; do
   [ -f "$stage/${installed##*/}" ] || rm -f -- "$installed"
 done
 for source in "$stage"/*.py; do install -m 0644 "$source" "$directory/${source##*/}"; done
-install -m 0755 "$stage/orca-sync" "$hook"
 install -m 0755 "$stage/discover" "$directory/discover"
 install -m 0644 "$stage/${discovery_service##*/}" "$discovery_service"
 install -m 0644 "$stage/${discovery_timer##*/}" "$discovery_timer"
@@ -1091,7 +1097,19 @@ cmd_pair() {
   ' "$ORCA_READY" || die "Orca did not publish a $scope pairing link"
 }
 
+# The guest facts of a yard that does not select Orca; its project hook and
+# discovery then register nothing although Orca stays installed.
+orca_unselected_in_guest() {
+  [ "$(yexec /usr/bin/python3 -I -B -c "$(render_selection_check)" subyard-orca-selection "$ORCA_GUEST_ROOT" 2>/dev/null)" = unselected ]
+}
+
+require_orca_selected_in_guest() {
+  ! orca_unselected_in_guest \
+    || die "Orca is not selected in this yard, so it registers no projects; run '$(yard_cmd_hint) profile enable orca' and then '$(yard_cmd_hint) init'"
+}
+
 cmd_sync() {
+  require_orca_selected_in_guest
   yexec systemctl is-active --quiet "$ORCA_UNIT" \
     || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
   registration_contract_ready \
@@ -1485,6 +1503,7 @@ emit_restart_assessment() {
 emit_sync_assessment() {
   local observed decision
   svc_require_yard_running
+  require_orca_selected_in_guest
   yexec systemctl is-active --quiet "$ORCA_UNIT" || die 'Orca is not running'
   registration_contract_ready || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
   ORCA_STEPS='[]'
