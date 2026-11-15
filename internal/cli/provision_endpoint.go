@@ -109,7 +109,7 @@ func (cli *CLI) prepareProvisionEndpointWithBootstrap(loaded config.Loaded, prof
 		if err := loaded.Catalog.ValidateSetting(config.ScopeYard, name, value, false); err != nil {
 			return nil, nil, err
 		}
-		plan.content, err = config.EditPersistentAssignmentContent(plan.path, plan.content, name, &value)
+		plan.content, err = cli.catalog.EditPersistentAssignmentContent(plan.path, plan.content, name, &value)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -219,7 +219,7 @@ func (plan *provisionEndpoint) acceptProfileBootstrap(cli *CLI, bootstrap *profi
 	expected := plan.before.Content
 	var err error
 	if bootstrap.selectionPath != "" {
-		expected, err = config.EditPersistentAssignmentContent(plan.path, expected, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
+		expected, err = cli.catalog.EditPersistentAssignmentContent(plan.path, expected, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
 		if err != nil {
 			return err
 		}
@@ -253,7 +253,7 @@ func (plan *provisionEndpoint) acceptProfileBootstrap(cli *CLI, bootstrap *profi
 	plan.initial, plan.before, plan.content = fresh, current, current.Content
 	for _, name := range slices.Sorted(maps.Keys(plan.values)) {
 		value := plan.values[name]
-		plan.content, err = config.EditPersistentAssignmentContent(plan.path, plan.content, name, &value)
+		plan.content, err = cli.catalog.EditPersistentAssignmentContent(plan.path, plan.content, name, &value)
 		if err != nil {
 			return err
 		}

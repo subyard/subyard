@@ -283,18 +283,13 @@ func TestIntegrationRetryRepairScopeAndFreshness(t *testing.T) {
 			}
 			writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=codex\nSSH_PORT=2222\n", 0600)
 			if scenario == "retired id" {
-				root := filepath.Join(program.options.RepositoryRoot, "config/retired-integrations/widget")
-				if err := os.MkdirAll(root, 0700); err != nil {
-					t.Fatal(err)
-				}
-				writeCLIFile(t, filepath.Join(root, "integration.json"), `{"schema_version":1,"retired":true,"lifecycle":{"handler":"retire.sh","instance_config_keys":[],"instance_devices":[]}}`, 0600)
-				writeCLIFile(t, filepath.Join(root, "retire.sh"), "#!/bin/sh\nexit 0\n", 0700)
+				writeCLIFile(t, filepath.Join(program.options.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"integration","id":"old-tool"}]}`, 0644)
 				var err error
-				program, err = New(program.options)
+				program.catalog, err = config.LoadCatalog(program.options.RepositoryRoot)
 				if err != nil {
 					t.Fatal(err)
 				}
-				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=widget\nSSH_PORT=2222\n", 0600)
+				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=old-tool\nSSH_PORT=2222\n", 0600)
 			}
 			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
 			for stage := range platform.converged {
@@ -339,7 +334,7 @@ func TestIntegrationRetryRepairScopeAndFreshness(t *testing.T) {
 			if scenario == "expansion" {
 				arguments[1] = "claude"
 			} else if scenario == "retired id" {
-				arguments[1] = "widget"
+				arguments[1] = "old-tool"
 			} else if scenario == "unknown id" {
 				arguments[1] = "unknown"
 			} else if scenario == "disable" {

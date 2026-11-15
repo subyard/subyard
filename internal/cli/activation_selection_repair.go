@@ -86,7 +86,7 @@ func (cli *CLI) runActivationSelectionRepair(ctx context.Context, yard, handler 
 			if loadErr == nil {
 				selected, loadErr = cli.currentProfileSelection(loaded, definitions)
 			}
-			if loadErr == nil && !slices.ContainsFunc(definitions, func(d profile.Definition) bool { return d.Name == id }) {
+			if loadErr == nil && !loaded.Catalog.RetiredProfile(id) && !slices.ContainsFunc(definitions, func(d profile.Definition) bool { return d.Name == id }) {
 				loadErr = errors.New("unknown environment profile")
 			}
 			if loadErr != nil {
@@ -278,7 +278,7 @@ func (cli *CLI) selectionRepairContent(yard, path string, content []byte, reques
 		return nil, err
 	}
 	choice := request.choices[0]
-	assignments, err := config.ParsePersistentAssignments(path, content)
+	assignments, err := cli.catalog.ParsePersistentAssignments(path, content)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +319,7 @@ func (cli *CLI) selectionRepairContent(yard, path string, content []byte, reques
 			}
 		}
 	}
-	return config.EditPersistentAssignmentContent(path, content, choice.name, &choice.value)
+	return cli.catalog.EditPersistentAssignmentContent(path, content, choice.name, &choice.value)
 }
 
 func (cli *CLI) checkSelectionReduction(before, after config.Loaded, name string) error {

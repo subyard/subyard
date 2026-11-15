@@ -176,22 +176,20 @@ type preparedCommand struct {
 	refresh          commandAssessment
 	initExecution    *initExecution
 	identityHookPlan *reconcileruntime.ProjectHookPlan
-	// A stopped-yard inspection disclosed pending retirements before its start.
-	retirementsDisclosed bool
-	initFacts            string
-	steps                func() []domain.OperationStep
-	stepsComplete        bool
-	execute              func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
-	closeResource        func() error
-	preview              func()
-	readiness            func() // configuration state rendered with the plan
-	displayOnly          func()
-	printResult          func(domain.AdapterResult)
-	remoteArguments      func([]string) ([]string, error)
-	executeNoOp          bool
-	lifecycle            *preparedLifecycle
-	ownerAdmission       ownerWriteAdmission
-	remotePhased         bool
+	initFacts        string
+	steps            func() []domain.OperationStep
+	stepsComplete    bool
+	execute          func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
+	closeResource    func() error
+	preview          func()
+	readiness        func() // configuration state rendered with the plan
+	displayOnly      func()
+	printResult      func(domain.AdapterResult)
+	remoteArguments  func([]string) ([]string, error)
+	executeNoOp      bool
+	lifecycle        *preparedLifecycle
+	ownerAdmission   ownerWriteAdmission
+	remotePhased     bool
 	// profileFollowup offers pending profile provisioning after success.
 	profileFollowup *releaseExecution
 	pendingInit     *pendingInitPlan
@@ -955,7 +953,6 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 		if err = prepared.CLI.finishDiskTmpStart(ctx, prepared.Loaded, execution, result, err, diagnostics); err != nil {
 			return result, err
 		}
-		prepared.CLI.warnRetiredIntegrationsAfterStart(prepared.Loaded, execution, result, err, diagnostics)
 		if err := startup.apply(ctx, prepared.CLI, prepared.Plan.OperationID); err != nil {
 			return result, fmt.Errorf("yard started but resource activation is pending: %w", err)
 		}

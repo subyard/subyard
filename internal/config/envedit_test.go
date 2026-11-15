@@ -451,7 +451,7 @@ func TestPersistentAuthoringPreservesExistingReadPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WritePersistentAssignmentIfUnchanged(root, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
+	if err := (Catalog{}).WritePersistentAssignmentIfUnchanged(root, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -489,7 +489,7 @@ func TestWritePersistentAssignmentCanonicalizesLegacyAliases(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := WritePersistentAssignmentIfUnchanged(configHome, path, setting.canonical, value, before); err != nil {
+					if err := (Catalog{}).WritePersistentAssignmentIfUnchanged(configHome, path, setting.canonical, value, before); err != nil {
 						t.Fatal(err)
 					}
 					content, err := os.ReadFile(path)
@@ -551,7 +551,7 @@ func TestWritePersistentAssignmentAliasRejectsStaleAndInvalidTargets(t *testing.
 				}
 			}
 			value := "neighbor fixture"
-			err = WritePersistentAssignmentIfUnchanged(configHome, path, "ENVIRONMENT_PROFILES", &value, before)
+			err = (Catalog{}).WritePersistentAssignmentIfUnchanged(configHome, path, "ENVIRONMENT_PROFILES", &value, before)
 			if err == nil || strings.HasPrefix(condition, "stale") && !errors.Is(err, ErrPersistentTargetStale) {
 				t.Fatalf("%s accepted: %v", condition, err)
 			}

@@ -1291,7 +1291,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		// An installed-view repair must not rewrite owned integration state that the
 		// pending yard init could not retire: that would discard the operator's change.
 		if reconciler.cli.activation != nil && reconciler.cli.activation.repair &&
-			(integration.Changed || integration.NeedsRetirementProof()) {
+			integration.Changed {
 			if err := operation.pendingInitIntegrationRefusal(ctx, target, reconciler.configHome, files); err != nil {
 				refusals = append(refusals, err)
 			}
@@ -1300,9 +1300,6 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			if integration.AdoptionFingerprint != "" {
 				for _, path := range managedPaths {
 					consequences = append(consequences, fmt.Sprintf("yard %s: manage integration path (create if absent, adopt only exact matching legacy state): %s", target.Name, path))
-				}
-				for _, retirement := range integration.Retirements {
-					consequences = append(consequences, "yard "+target.Name+": "+retirement)
 				}
 			} else {
 				for _, step := range integration.Steps {
@@ -1314,16 +1311,9 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		for _, warning := range integration.Warnings {
 			warnings = append(warnings, "yard "+target.Name+": "+warning)
 		}
-		// An update leaves a stopped yard untouched. This reuses the assessment read,
-		// so the reminder adds no failure that could block the update.
-		if assessment.StoppedInstance != nil {
-			if reminder := reconcileruntime.RetiredIntegrationReminder(target.Loaded, *assessment.StoppedInstance); reminder != "" {
-				warnings = append(warnings, reminder)
-			}
-		}
 		activationTargets = append(activationTargets, config.MaterializationActivationTarget{
 			Name: target.Name, Assessment: config.MaterializationAssessment{State: assessment.State, Changed: assessment.Changed, DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint},
-			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integrationChanged || integration.NeedsRetirementProof(),
+			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integrationChanged,
 		})
 	}
 	// Only release repair of the active release defers. Any other activation,

@@ -73,7 +73,7 @@ func TestCheckIntegrationPlanComparesRepeatedFactKeysByOccurrence(t *testing.T) 
 	approved := IntegrationPlan{Fingerprint: "approved", Scope: "scope", Changed: true, facts: []integrationFact{
 		{Key: "structured:/home/dev/.tool/settings.json", Desired: "inventory", Observed: "inventory-observed"},
 		{Key: "structured:/home/dev/.tool/settings.json", Desired: "source", Observed: "source-observed", AtDesired: true},
-		{Key: "lifecycle:sample", Desired: "absent", Observed: "installed"},
+		{Key: "package:sample", Desired: "absent", Observed: "installed"},
 	}}
 	fresh := approved
 	fresh.Fingerprint = "fresh"

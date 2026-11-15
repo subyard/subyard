@@ -258,7 +258,7 @@ func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAu
 	}
 	for _, request := range requests {
 		value := request.value
-		if content, err = config.EditPersistentAssignmentContent(path, content, request.name, &value); err != nil {
+		if content, err = cli.catalog.EditPersistentAssignmentContent(path, content, request.name, &value); err != nil {
 			return config.Loaded{}, err
 		}
 	}

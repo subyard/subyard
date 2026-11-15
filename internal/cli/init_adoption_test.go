@@ -20,7 +20,6 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
-	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/state"
@@ -1353,25 +1352,31 @@ func TestYardAdoptionRebuildKeepsNormalInitAuthority(t *testing.T) {
 	}
 }
 
-// A retired integration's own handler removes its keys after activation, so its
-// predecessor's receipts must not block the registration that comes first.
-func TestYardAdoptionLeavesRetiredIntegrationKeysToRetirement(t *testing.T) {
+// Only declared historical adoption keys are accepted; removed profile keys remain foreign.
+func TestYardAdoptionPreservesOnlyDeclaredRetiredKeys(t *testing.T) {
 	_, execution, fake := adoptionFixture(t)
 	runtime := execution.platform.(reconcileruntime.Runtime)
 	runtime.Incus = fake
-	runtime.Integrations = append(slices.Clone(runtime.Integrations), profile.IntegrationDefinition{
-		Name: "retired-sample", Retired: true,
-		Lifecycle: &profile.IntegrationLifecycle{InstanceConfigKeys: []string{"user.subyard.retired_marker"}},
-	})
+	writeCLIFile(t, filepath.Join(runtime.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"integration","id":"old-tool","adoption_keys":["user.subyard.old_provision","user.subyard.old_proxy","user.subyard.deferred_publication.old-tool"]},{"kind":"profile","id":"removed-profile"}]}`, 0644)
 	instance := &fake.Reconcile.Instance
-	instance.LocalConfig["user.subyard.retired_marker"], instance.Config["user.subyard.retired_marker"] = "v1", "v1"
+	for _, key := range []string{"user.subyard.old_provision", "user.subyard.old_proxy", "user.subyard.deferred_publication.old-tool", "user.subyard.retired_integration.old-tool"} {
+		instance.LocalConfig[key], instance.Config[key] = "v1", "v1"
+	}
+	before := operationStateDigest(*instance)
 	if _, _, _, _, err := runtime.InspectYardAdoption(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	instance.LocalConfig["user.subyard.unrelated"], instance.Config["user.subyard.unrelated"] = "v1", "v1"
-	_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
-	if want := `refuses unsupported instance configuration key "user.subyard.unrelated"`; err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("got %v, want %s", err, want)
+	if operationStateDigest(*instance) != before || fake.writes != 0 {
+		t.Fatal("adoption changed retained state")
+	}
+	for _, key := range []string{"user.subyard.removed_dashboard", "user.subyard.deferred_publication.removed-dashboard", "user.subyard.unrelated"} {
+		instance.LocalConfig[key], instance.Config[key] = "v1", "v1"
+		_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
+		if err == nil || !strings.Contains(err.Error(), `refuses unsupported instance configuration key "`+key+`"`) {
+			t.Fatalf("foreign key accepted: %s %v", key, err)
+		}
+		delete(instance.LocalConfig, key)
+		delete(instance.Config, key)
 	}
 }
 

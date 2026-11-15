@@ -140,10 +140,10 @@ func (plan *DeveloperIdentityPlan) Binding() string {
 	return installedRuntimeDigest(value)
 }
 
-// RetiredIntegrationNotices observes pending integration retirements as the
+// IntegrationOwnershipNotices observes pending ownership releases as the
 // installed account, because the desired login does not exist before the rename.
-func (plan *DeveloperIdentityPlan) RetiredIntegrationNotices(ctx context.Context) (retirements, warnings []string, err error) {
-	return plan.old.RetiredIntegrationNotices(ctx)
+func (plan *DeveloperIdentityPlan) IntegrationOwnershipNotices(ctx context.Context) ([]string, error) {
+	return plan.old.IntegrationOwnershipNotices(ctx)
 }
 
 func (plan *DeveloperIdentityPlan) Description() string {

@@ -1,12 +1,11 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 func TestRemovedCleanupMetadataDoesNotDeclareAnIntegration(t *testing.T) {
@@ -18,16 +17,15 @@ func TestRemovedCleanupMetadataDoesNotDeclareAnIntegration(t *testing.T) {
 }
 
 func TestRetiredIntegrationSelectionIsRefused(t *testing.T) {
-	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
+	var metadata []profile.IntegrationMetadata
 	for _, id := range []string{"retired-one", "retired-two"} {
-		retired := filepath.Join(root, "config/retired-integrations", id)
-		if err := os.MkdirAll(retired, 0o700); err != nil {
+		item, err := profile.DecodeIntegration(id, []byte(`{"schema_version":1,"retired":true,"retired_settings":["AGENT_`+id+`_COMMAND"]}`))
+		if err != nil {
 			t.Fatal(err)
 		}
-		testkit.WriteFile(t, filepath.Join(retired, "integration.json"), []byte(`{"schema_version":1,"retired":true,"retired_settings":["AGENT_`+id+`_COMMAND"],"lifecycle":{"handler":"retire.sh"}}`), 0o600)
-		testkit.WriteFile(t, filepath.Join(retired, "retire.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+		metadata = append(metadata, item)
 	}
-	catalog, err := LoadCatalog(root)
+	catalog, err := BuildCatalog(nil, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}

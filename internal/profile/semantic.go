@@ -187,7 +187,7 @@ func (definition *IntegrationDefinition) validateSemantic() error {
 		return err
 	}
 	if definition.Retired {
-		if definition.Lifecycle == nil || definition.Provision != "" || definition.Persist != "" || len(definition.Depends) != 0 || definition.Command != "" || definition.Check != "" || definition.Health != "" || len(definition.Native) != 0 || len(definition.Inputs) != 0 || len(definition.Settings) != 0 || definition.Dashboard != nil {
+		if definition.Provision != "" || definition.Persist != "" || len(definition.Depends) != 0 || definition.Command != "" || definition.Check != "" || definition.Health != "" || len(definition.Native) != 0 || len(definition.Inputs) != 0 || len(definition.Settings) != 0 || definition.Dashboard != nil {
 			return errors.New("retired integration permits only cleanup lifecycle metadata")
 		}
 		for _, name := range definition.RetiredSettings {

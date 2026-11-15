@@ -135,6 +135,11 @@ func load(
 		return domain.Context{}, nil, fmt.Errorf("resolve repository root: %w", err)
 	}
 	values := environmentFrom(options.Environment)
+	for name := range values {
+		if tracker.catalog.retiredSetting(name) {
+			delete(values, name)
+		}
+	}
 	if err := normalizeLegacyEnvironment(values); err != nil {
 		return domain.Context{}, nil, err
 	}

@@ -1046,23 +1046,9 @@ physical project and instance names, and teardown are isolated from the retained
 
 The retained-lease disabled-components controller installs the published v0.28.0 baseline, updates
 to the frozen candidate and reboots once. Its default payload belongs to the Hermes profile.
-After direct anchor activation, the Paseo payload explicitly seeds package-shaped leftovers and a foreign service,
-stops the Paseo-only yard natively inside its owned project and then selects the retired package. Migrate
-retires the running yards and prints `init` for the stopped one. It verifies removal and retention of only
-non-empty worktrees. Both policies must converge and publish their proofs. The stopped-yard init path must
-disclose removal before consent, leave an unconfirmed yard untouched, retire after confirmation and restore
-stopped power. Repeated init of the proven, stopped yard must not boot it again.
-
-The AI Observer payload likewise seeds its managed controls, container, route, receipts and retained
-data after direct anchor activation in one running and one stopped yard. It verifies retirement,
-retained data and unchanged retired settings, follows the action printed for the stopped yard, and
-repeats init and migrate with the retired state unchanged. Both payloads share
-`dev/e2e/retired-integration-fixture.sh`.
 
 ```sh
 dev/e2e/disabled-components-release.sh --slot "$slot"
-config/retired-integrations/paseo/tests/e2e/acceptance.sh --slot "$slot"
-config/retired-integrations/aiobserver/tests/e2e/acceptance.sh --slot "$slot"
 ```
 
 The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `direct`, `refusal` or

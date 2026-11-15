@@ -340,7 +340,7 @@ case "$1" in
  list) case " $* " in *" --all-projects "*) printf '[]\n' ;; *) printf 'RUNNING\n' ;; esac ;;
  query) case "$2" in *recursion=1*) printf '[]\n' ;; /1.0/instances/yard*) printf '%%s\n' '{"config":{"volatile.uuid":"source-authoring-default","user.subyard.managed":"true"},"devices":{}}' ;; *) exit 64 ;; esac ;;
  config) case "$2:$3" in get:*|device:list) ;; *) exit 64 ;; esac ;;
- exec) case " $* " in *" -- getent passwd "*|*" --check-removed "*|*subyard/github-client*) cat >/dev/null ;; *ai-observer-retirement*|*" docker container ls "*) cat >/dev/null ;; *" systemctl is-active "*) cat >/dev/null; exit 3 ;; *" test "*) cat >/dev/null; exit 1 ;; *" observe "*|*" bash -se -- "*) cat >/dev/null; printf '%%s\n' '{"state":"absent","actual":"","desired":""}' ;; *) exit 64 ;; esac ;;
+ exec) case " $* " in *" -- getent passwd "*|*" --check-removed "*|*subyard/github-client*) cat >/dev/null ;; *" docker container ls "*) cat >/dev/null ;; *" systemctl is-active "*) cat >/dev/null; exit 3 ;; *" test "*) cat >/dev/null; exit 1 ;; *" observe "*|*" bash -se -- "*) cat >/dev/null; printf '%%s\n' '{"state":"absent","actual":"","desired":""}' ;; *) exit 64 ;; esac ;;
  *) exit 64 ;;
 esac
 `, filepath.Join(original, "physical-profile-unavailable"))), 0700)

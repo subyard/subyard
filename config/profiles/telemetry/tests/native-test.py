@@ -202,36 +202,42 @@ class NativeTest(unittest.TestCase):
             self.assertIs(type(preserved), int)
             self.assertEqual(preserved, 0)
 
-    def test_legacy_handoff_restores_before_claim_and_refuses_foreign_edits(self):
+    def test_existing_exporter_leaves_are_restored_without_old_owner_cleanup(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            legacy = root/'legacy/native.json'
+            prior = {'otel': {
+                'exporter': {'otlp-http': {'endpoint': 'http://127.0.0.1:4318/v1/logs', 'protocol': 'binary'}},
+                'metrics_exporter': {'otlp-http': {'endpoint': 'http://127.0.0.1:4318/v1/metrics', 'protocol': 'binary'}},
+                'trace_exporter': {'otlp-http': {'endpoint': 'http://127.0.0.1:4318/v1/traces', 'protocol': 'binary'}},
+                'log_user_prompt': False}}
+            path = root/'.codex/config.toml'
+            path.parent.mkdir(mode=0o700)
+            path.write_text(tomli_w.dumps(prior))
+            path.chmod(0o600)
+            claude = {'env': {
+                'CLAUDE_CODE_ENABLE_TELEMETRY': '1',
+                'OTEL_METRICS_EXPORTER': 'otlp', 'OTEL_LOGS_EXPORTER': 'otlp',
+                'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT': 'http://127.0.0.1:4318/v1/logs',
+                'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT': 'http://127.0.0.1:4318/v1/metrics',
+                'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL': 'http/protobuf',
+                'OTEL_EXPORTER_OTLP_METRICS_PROTOCOL': 'http/protobuf',
+                'OTEL_EXPORTER_OTLP_LOGS_HEADERS': '', 'OTEL_EXPORTER_OTLP_METRICS_HEADERS': '',
+                'OTEL_LOG_USER_PROMPTS': '0'}}
+            claude_path = root/'.claude/settings.json'
+            claude_path.parent.mkdir(mode=0o700)
+            claude_path.write_text(json.dumps(claude))
+            claude_path.chmod(0o600)
+            legacy = root/'old-owner/native.json'
             legacy.parent.mkdir(mode=0o700)
-            (legacy.parent/'marker').write_bytes(b'subyard-openlit-v1\n')
-            native.reconcile(root, legacy, ['codex'], 'http://old-local:4318', 'old', tomli_w, os.getuid(), os.getgid())
-            original_stat = Path.stat
-            def metadata(path, *args, **kwargs):
-                info = original_stat(path, *args, **kwargs)
-                if path in (legacy.parent, legacy.parent/'marker'):
-                    values = list(info)
-                    values[4] = 0
-                    return os.stat_result(values)
-                return info
-            with patch.object(Path, 'stat', metadata):
-                native.relinquish_openlit(root, legacy, tomli_w, os.getuid(), os.getgid())
-                self.assertEqual(json.loads(legacy.read_text())['agents'], {})
-                self.assertNotIn('old-local', (root/'.codex/config.toml').read_text())
-                native.reconcile(root, legacy, ['claude'], 'http://old-local:4318', 'old', tomli_w, os.getuid(), os.getgid())
-                path = root/'.claude/settings.json'
-                value = json.loads(path.read_text())
-                value['env']['OTEL_LOGS_EXPORTER'] = 'foreign'
-                path.write_text(json.dumps(value))
-                before = path.read_bytes()
-                state = legacy.read_bytes()
-                with self.assertRaisesRegex(ValueError, 'legacy native exporter changed'):
-                    native.relinquish_openlit(root, legacy, tomli_w, os.getuid(), os.getgid())
-                self.assertEqual(path.read_bytes(), before)
-                self.assertEqual(legacy.read_bytes(), state)
+            legacy.write_bytes(b'old receipt is outside current ownership')
+            before = legacy.read_bytes()
+            state = root/'native.json'
+            native.reconcile(root, state, ['claude', 'codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+            self.assertTrue(native.reconcile(root, state, ['claude', 'codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid(), check=True))
+            native.reconcile(root, state, [], '', '', tomli_w, os.getuid(), os.getgid())
+            self.assertEqual(tomllib.loads(path.read_text()), prior)
+            self.assertEqual(json.loads(claude_path.read_text()), claude)
+            self.assertEqual(legacy.read_bytes(), before)
 
     def test_claim_restore_privacy_and_analytics_intent(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:

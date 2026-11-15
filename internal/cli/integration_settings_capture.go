@@ -36,7 +36,7 @@ func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded c
 	}
 	environment := maps.Clone(cli.baseEnv)
 	for name := range environment {
-		if _, known := loaded.Catalog.LookupSetting(name); known || config.IsLegacySetting(name) {
+		if _, known := loaded.Catalog.LookupSetting(name); known || loaded.Catalog.IsLegacySetting(name) {
 			delete(environment, name)
 		}
 	}

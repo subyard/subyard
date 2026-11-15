@@ -6,6 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
@@ -13,11 +19,6 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
-	"os"
-	"path/filepath"
-	"slices"
-	"strings"
-	"testing"
 )
 
 type stoppedActivationNative struct {
@@ -66,7 +67,7 @@ func (native *stoppedActivationNative) AdoptRegisteredInstance(ctx context.Conte
 }
 
 func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *testing.T) {
-	for _, mode := range []string{"tmp-stopped", "native-stopped", "combined-stopped", "retired-stopped", "retired-proven"} {
+	for _, mode := range []string{"tmp-stopped", "native-stopped", "combined-stopped"} {
 		t.Run(mode, func(t *testing.T) {
 			initial := "stopped"
 			nativePending := mode == "native-stopped" || mode == "combined-stopped"
@@ -104,18 +105,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			options.NetworkPolicy = &yardnetwork.Service{Host: &networkCLIHost{policy: policy, ready: true, instances: map[string]ports.InstanceInfo{"default": instance}}, Lock: testNetworkPolicyLock{}}
 			options.Environment = append(options.Environment, "STATE="+root)
 			options.Environment = append(options.Environment, "SAMPLE_HOST=127.0.0.1", "SAMPLE_PORT=32000")
-			retired := strings.HasPrefix(mode, "retired-")
-			if retired {
-				packageRoot := filepath.Join(root, "config/retired-integrations/widget")
-				if err := os.MkdirAll(packageRoot, 0700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, filepath.Join(packageRoot, "integration.json"), []byte(`{"schema_version":1,"retired":true,"lifecycle":{"handler":"retire.py","instance_config_keys":[],"instance_devices":[]}}`), 0600)
-				testkit.WriteFile(t, filepath.Join(packageRoot, "retire.py"), []byte("#!/bin/sh\n"), 0700)
-			}
-			if mode == "retired-proven" {
-				instance.Config["user.subyard.retired_integration.widget"], instance.LocalConfig["user.subyard.retired_integration.widget"] = "true", "true"
-			}
 			program, err := New(options)
 			if err != nil {
 				t.Fatal(err)
@@ -135,9 +124,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 				selection = "sample"
 			}
 			integrations := ""
-			if retired {
-				integrations = "widget"
-			}
 			for key, value := range map[string]string{"YARD_TEMPLATE": "migration-tools", "CODING_TOOL_INTEGRATIONS": integrations, "ENVIRONMENT_PROFILES": selection} {
 				body, err = config.EditPersistentAssignmentContent(settingsPath, body, key, &value)
 				if err != nil {
@@ -172,17 +158,7 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			if nativePending {
 				sourceView.RegisteredYards[register.ID()] = registration.Desired
 			}
-			projected, err := reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, sourceView)
-			if retired {
-				if err != nil {
-					t.Fatal("prepare", err)
-				}
-				reminder := "retired integration widget may still be installed in yard default; run: yard -Y default start; then run yard migrate"
-				if slices.Contains(projected.Consequences, reminder) != (mode == "retired-stopped") {
-					t.Fatalf("update check consequences=%q", projected.Consequences)
-				}
-				return
-			}
+			_, err = reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, sourceView)
 			if err != nil {
 				t.Fatal("prepare", err)
 			}

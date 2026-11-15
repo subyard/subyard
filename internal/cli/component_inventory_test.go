@@ -18,10 +18,11 @@ import (
 )
 
 func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testing.T) {
-	for _, selection := range []string{"absent", "empty", "explicit"} {
+	for _, selection := range []string{"absent", "empty", "explicit", "removed"} {
 		t.Run(selection, func(t *testing.T) {
 			handler, runner, incus := ownerQueryFixture(t)
 			root := handler.cli.options.RepositoryRoot
+			writeCLIFile(t, filepath.Join(root, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile"}]}`, 0644)
 			manifest := filepath.Join(root, "config/commands.registry")
 			data := mustReadConfigFixture(t, manifest)
 			writeCLIFile(t, manifest, string(data)+"profile||@profile||deny|mutate|dynamic|public|lifecycle|profile|profile <command> [id]|profiles|--json --yes --help|list enable disable setup status\n", 0o600)
@@ -30,6 +31,9 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 				value := ""
 				if selection == "explicit" {
 					value = "selected resource-only"
+				}
+				if selection == "removed" {
+					value = "removed-profile"
 				}
 				writeConfigCommandFile(t, filepath.Join(home, "config.env"), "ENVIRONMENT_PROFILES='"+value+"'\n")
 				writeConfigCommandFile(t, filepath.Join(home, config.GitSettingsRelativePath, "config.env"), "ENVIRONMENT_PROFILES=legacy\n")
@@ -68,6 +72,9 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 				}
 				if len(list.Profiles) != 4 || list.Selection.Present != (selection != "absent") {
 					t.Fatalf("full catalog/absence lost: %#v", list)
+				}
+				if selection == "removed" && (!slices.Equal(list.Selection.Requested, []string{"removed-profile"}) || len(list.Selection.Effective) != 0) {
+					t.Fatalf("removed selection failed list: %+v", list.Selection)
 				}
 				for _, entry := range list.Profiles {
 					if entry.Name == "dedicated" && (entry.Eligible || entry.Effective || entry.Reason != "role-restricted") {
@@ -230,7 +237,8 @@ func TestIntegrationInventoryUsesEffectiveDependencyAndRoleSnapshot(t *testing.T
 	loaded.Integrations.AllowsCodingTools = false
 	loaded.Integrations.Effective = nil
 	for _, entry := range loaded.IntegrationInventory() {
-		if entry.Effective || entry.Eligible || entry.Reason != "role-restricted" {
+		wantReason := "role-restricted"
+		if entry.Effective || entry.Eligible || entry.Reason != wantReason {
 			t.Fatalf("role suppression lost: %#v", entry)
 		}
 	}

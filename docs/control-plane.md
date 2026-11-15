@@ -835,12 +835,6 @@ Registered-migration summaries drop names before reason classes when the frozen 
 Mutation refusals retain the verified inspection’s public decisions and blockers;
 a later readiness observation does not replace the refused resource or reason.
 
-The historical AI Observer [typed observation pilot](reference/typed-semantic-observations.md)
-used one package-owned Go producer for native projection and semantic hashes.
-Mount records form an unordered multiset; other arrays preserve order. Native
-helper executable bytes bind the package. Its optional closed failure transport
-retains the integration, yard and inspect/apply/verify phase without changing
-public observation, process, journal or grant schemas.
 Recoverable reconcile failures retain validated public diagnostics after reobservation;
 ambiguous state and protected transition guards retain their own recovery instructions.
 The original public failure also remains visible when recovery observation adds a blocker
@@ -1555,7 +1549,7 @@ fallback. Pending identity recovery skips these service probes.
 
 Positive startup evidence includes a pending unit/timer start job or a container health
 check starting. During this invocation's anchored startup window, GitHub and Telemetry
-also treat auto-restart as `starting`; GitHub/OpenLIT connections and receivers may still
+also treat auto-restart as `starting`; GitHub connections and receivers may still
 be coming up. Unit activation timestamps never shorten an anchored invocation's window.
 Failed services and inactive units without a pending job remain stable drift; `migrate`
 owns their repair. Without an invocation anchor, probes retain their standalone semantics.
@@ -2371,8 +2365,8 @@ and launches no further checks; cancellation terminates the check's process grou
 two additional seconds for cleanup/drain. Direct remote yard-status processes have a 38-second
 execution timeout plus their existing two-second cleanup/drain allowance. SSH trust setup retains
 its existing timeout policy. These bounds preserve the full owning readiness check.
-Retired integration declarations live under `config/retired-integrations/`; they permit only
-bounded cleanup lifecycle and discarded-input metadata, with no provisioning or native binaries.
+Removed integrations retain only inert selection and discarded-input compatibility metadata,
+without guest cleanup, proof publication or automatic starts.
 An observation that reads guest services waits, within its observe limit, for a running guest
 that started recently and is still booting; a guest that is stopped, has been up longer, or does
 not answer within that bound reports `native-unavailable`.

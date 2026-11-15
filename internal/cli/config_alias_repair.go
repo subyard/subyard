@@ -36,7 +36,7 @@ func configEarlyInvocation(arguments []string) (string, []string) {
 func (cli *CLI) configSourceEnvironment() map[string]string {
 	values := map[string]string{}
 	for name, value := range cli.baseEnv {
-		if _, setting := cli.catalog.LookupSetting(name); setting || config.IsLegacySetting(name) {
+		if _, setting := cli.catalog.LookupSetting(name); setting || cli.catalog.IsLegacySetting(name) {
 			continue
 		}
 		values[name] = value
@@ -104,7 +104,7 @@ func parseConfigAliasRepair(arguments []string) (configAliasRepairRequest, error
 }
 
 func (cli *CLI) aliasRepairContent(path string, content []byte, request configAliasRepairRequest) ([]byte, error) {
-	assignments, err := config.ParsePersistentAssignments(path, content)
+	assignments, err := cli.catalog.ParsePersistentAssignments(path, content)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ func (cli *CLI) aliasRepairContent(path string, content []byte, request configAl
 			}
 			continue
 		}
-		draft, err = config.EditPersistentAssignmentContent(path, draft, choice.name, &choice.value)
+		draft, err = cli.catalog.EditPersistentAssignmentContent(path, draft, choice.name, &choice.value)
 		if err != nil {
 			return nil, err
 		}

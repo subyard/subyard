@@ -160,3 +160,17 @@ func TestRetirementNoticeRequiresRetiredPackageAndBoundedText(t *testing.T) {
 		}
 	}
 }
+
+func TestRetiredMetadataNeedsNoCleanupLifecycle(t *testing.T) {
+	metadata, err := DecodeIntegration("removed", []byte(`{"schema_version":1,"retired":true,"retired_settings":["REMOVED_PORT","AGENT_removed_COMMAND"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := metadata.Data()
+	if err != nil || !data.Retired || data.Lifecycle != nil || len(data.RetiredSettings) != 2 {
+		t.Fatalf("retired inputs lost: %+v %v", data, err)
+	}
+	if err := ValidateMetadata(nil, []IntegrationMetadata{metadata}); err != nil {
+		t.Fatal(err)
+	}
+}

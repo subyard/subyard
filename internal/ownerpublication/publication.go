@@ -51,6 +51,9 @@ func Plan(instance ports.InstanceInfo, contracts []Contract, addresses []netip.A
 	for _, contract := range contracts {
 		key := Prefix + contract.Device
 		known[key] = true
+		if contract.Codec == "inert" {
+			continue
+		}
 		device := instance.Devices[contract.Device]
 		local := devices[contract.Device]
 		ownership := config[contract.Key]

@@ -439,16 +439,21 @@ func TestAppliedDiagnosticCaptureRejectsSourceChangeBeforePublication(t *testing
 	}
 }
 
-func TestIntegrationSettingsPublicationRetryAndLateFailure(t *testing.T) {
-	for _, scenario := range []string{"publication-retry", "late-retirement-failure"} {
+func TestIntegrationSettingsPublicationRetry(t *testing.T) {
+	for _, scenario := range []string{"publication-retry"} {
 		t.Run(scenario, func(t *testing.T) {
-			runtime, _ := retiredApplyFixture(t, `{"state":"absent","actual":"","desired":""}`)
+			root := testkit.TempDir(t)
+			for _, path := range []string{"config/projects-changed.sh", "scripts/reconcile-integrations.sh"} {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(root, path), []byte("#!/bin/sh\nexit 0\n"), 0755)
+			}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, Yard: domain.Context{YardName: "example", IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}}
 			executor := &appliedSettingsExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{pending: true}, settings: map[string]string{"AGENT_sample_COMMAND": "old-command"}, failCapture: scenario == "publication-retry"}
 			runtime.Executor = executor
 			runtime.Environment = append(runtime.Environment, "AGENT_sample_COMMAND=new-command")
-			if scenario == "late-retirement-failure" {
-				runtime.ConfigWriter = failingBaselineConfigWriter{}
-			}
 			plan, err := runtime.IntegrationPlan(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -458,9 +463,6 @@ func TestIntegrationSettingsPublicationRetryAndLateFailure(t *testing.T) {
 			}
 			if executor.captures != 0 || executor.settings["AGENT_sample_COMMAND"] != "old-command" {
 				t.Fatal("failed apply promoted desired settings")
-			}
-			if scenario == "late-retirement-failure" {
-				return
 			}
 			plan, err = runtime.IntegrationPlan(context.Background())
 			if err != nil || plan.Changed {
@@ -472,13 +474,6 @@ func TestIntegrationSettingsPublicationRetryAndLateFailure(t *testing.T) {
 		})
 	}
 }
-
-type failingBaselineConfigWriter struct{}
-
-func (failingBaselineConfigWriter) SetInstanceConfig(context.Context, string, string, map[string]string) error {
-	return errors.New("fixture retired marker publication failed")
-}
-
 func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T) {
 	for _, scenario := range []string{"ready", "source-drift", "runtime-drift"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -673,61 +668,7 @@ func TestRawHistoricalConfigDigestIsBoundToInitialAdoption(t *testing.T) {
 	}
 }
 
-// A foreign service next to a retired package is a warning on the legacy adoption path:
-// it neither blocks the plan nor reaches the fingerprint the operator consented to.
-func TestLegacyAdoptionKeepsForeignRetiredServiceOutOfItsBinding(t *testing.T) {
-	const notice = "sample.service is not proven Subyard-managed and stays"
-	observe := func(t *testing.T, state string) IntegrationPlan {
-		t.Helper()
-		root := t.TempDir()
-		for path, content := range map[string]string{
-			"config/projects-changed.sh": "#!/bin/sh\nexit 0\n",
-			"codex-AGENTS.md":            "selected instructions\n",
-			"codex-config.json":          "{\"selected\":true}\n",
-		} {
-			full := filepath.Join(root, path)
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, full, []byte(content), 0o644)
-		}
-		executor := &preparedAdoptionExecutor{fingerprint: strings.Repeat("a", 64), configFingerprint: strings.Repeat("c", 64), initial: true}
-		incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{
-			Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
-		}}}
-		fixture, retired, _, _ := lifecycleFixture(t)
-		retired.Retired = true
-		testkit.WriteFile(t, filepath.Join(retired.Root, "state"), []byte(state), 0o600)
-		runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, Yard: domain.Context{
-			IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid(),
-		}, Environment: []string{
-			"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex-AGENTS.md"),
-			"AGENT_codex_CONFIG=" + filepath.Join(root, "codex-config.json"), "AGENT_codex_CONFIG_DEST=.codex/config.json",
-		}}
-		runtime.Environment = append(runtime.Environment, fixture.Environment[:len(fixture.Environment)-1]...)
-		bindInstructionTestPackage(t, &runtime, root, "codex")
-		runtime.Integrations = append(runtime.Integrations, retired)
-		prepared, adoption, err := runtime.PrepareLegacyIntegrationAdoption(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		plan, err := prepared.IntegrationPlan(context.Background())
-		if err != nil || plan.AdoptionFingerprint != adoption.AdoptionFingerprint {
-			t.Fatalf("adoption did not stay bound: plan=%+v adoption=%+v err=%v", plan, adoption, err)
-		}
-		return plan
-	}
-	clean := observe(t, `{"state":"absent","actual":"","desired":""}`)
-	foreign := observe(t, `{"state":"absent","actual":"","desired":"","notice":"`+notice+`"}`)
-	if len(clean.Warnings) != 0 || !slices.Equal(foreign.Warnings, []string{notice}) || !slices.Contains(foreign.Adoption, "/home/dev/.codex/config.json") {
-		t.Fatalf("clean=%+v foreign=%+v", clean, foreign)
-	}
-	if foreign.AdoptionFingerprint == "" || foreign.AdoptionFingerprint != clean.AdoptionFingerprint || foreign.Changed != clean.Changed ||
-		!slices.Equal(foreign.Adoption, clean.Adoption) || len(foreign.Retirements) != 0 {
-		t.Fatalf("foreign service changed the adoption: clean=%+v foreign=%+v", clean, foreign)
-	}
-}
-
+// Legacy adoption binds the initial snapshot while apply verifies the approved changes.
 func TestPrepareLegacyIntegrationAdoptionBindsInitialSnapshotOnly(t *testing.T) {
 	root := t.TempDir()
 	for path, content := range map[string]string{

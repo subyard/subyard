@@ -118,7 +118,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	}
 	environment := make(map[string]string)
 	for name, value := range plan.cli.baseEnv {
-		if _, setting := plan.loaded.Catalog.LookupSetting(name); setting || config.IsLegacySetting(name) {
+		if _, setting := plan.loaded.Catalog.LookupSetting(name); setting || plan.loaded.Catalog.IsLegacySetting(name) {
 			continue
 		}
 		environment[name] = value

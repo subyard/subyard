@@ -23,16 +23,26 @@ func CoreContracts() []Contract {
 
 func Load(root string) ([]Contract, error) {
 	contracts := CoreContracts()
+	retired, err := profile.LoadRetired(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, component := range retired {
+		route := component.Route
+		if route == nil {
+			continue
+		}
+		contract := dashboardContract(&profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{MarkerKey: route.MarkerKey, DeviceName: route.DeviceName}})
+		if !route.Defer {
+			contract.Codec = "inert"
+		}
+		contracts = append(contracts, contract)
+	}
 	integrations, err := profile.LoadIntegrations(root)
 	if err != nil {
 		return nil, err
 	}
 	for _, definition := range integrations {
-		for _, route := range definition.RetiredRoutes {
-			contract := dashboardContract(&profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{DeviceName: route.DeviceName, MarkerKey: route.MarkerKey}})
-			contract.CleanupOnly = true
-			contracts = append(contracts, contract)
-		}
 		dashboard := definition.Dashboard
 		if dashboard == nil || dashboard.ContainerRoute == nil {
 			continue
@@ -142,6 +152,11 @@ func Decode(value string) ([]Contract, error) {
 				return nil, fmt.Errorf("invalid preview publication contract")
 			}
 			contract.Owns = CoreContracts()[0].Owns
+		case "inert":
+			// Recognized historical receipts have no current publication authority.
+			if envelope.Version != 2 {
+				return nil, fmt.Errorf("invalid historical publication contract schema")
+			}
 		case "dashboard":
 			if contract.GuestPort < 1 || contract.GuestPort > 65535 {
 				return nil, fmt.Errorf("invalid dashboard publication port")

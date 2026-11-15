@@ -264,7 +264,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
-                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', root/'legacy/native.json')
+                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
                 for command in runtime.starts.values():
                     self.assertEqual(command.split()[:2],['/usr/bin/setpriv','--no-new-privs'])
                     actual=subprocess.check_output(command.split()[:2]+[sys.executable,'-c',
@@ -345,7 +345,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 (bare/'subyard-telemetry').unlink()
                 installed_binary = root/'library/subyard-telemetry'
                 kept = installed_binary.read_bytes()
-                runs = {name: guest.Runtime(path, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', root/'legacy/native.json')
+                runs = {name: guest.Runtime(path, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
                         for name, path in (('source', bare), ('packaged', source))}
                 for unselected in runs.values():
                     self.assertNotIn(installed_binary, unselected.assets)
@@ -396,7 +396,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 with (source/'subyard-telemetry').open('wb') as output:
                     output.truncate(guest.BINARY_LIMIT+1)
                 with self.assertRaisesRegex(ValueError, 'unsafe native file'):
-                    guest.Runtime(source, 'dev', True, [], root/'control', root/'data', root/'library', root/'units', root/'bin', root/'legacy/native.json')
+                    guest.Runtime(source, 'dev', True, [], root/'control', root/'data', root/'library', root/'units', root/'bin')
 
     def test_unselected_guest_needs_only_the_collector_path(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -409,7 +409,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             def runtime(selected, origin=source):
                 return guest.Runtime(origin, 'dev', selected, [], root/'control', root/'data', root/'library',
-                                     root/'units', root/'bin', root/'legacy/native.json')
+                                     root/'units', root/'bin')
             with patch.object(guest.pwd, 'getpwnam', return_value=account):
                 with self.assertRaisesRegex(ValueError, 'missing profile asset'):
                     runtime(True)

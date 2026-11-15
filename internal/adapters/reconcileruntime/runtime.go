@@ -81,8 +81,6 @@ type Runtime struct {
 	// the caller. Nil falls back to loading the shipped declarations from disk.
 	Profiles     []profile.Definition
 	Integrations []profile.IntegrationDefinition
-	// RetiredSelection lists retired IDs this yard's settings still select.
-	RetiredSelection []string
 	// RuntimePlan retains the individual native contracts approved before init.
 	RuntimePlan               *ProfileRuntimePlan
 	HookPlan                  *ProjectHookPlan
@@ -670,10 +668,6 @@ func (runtime Runtime) instanceConverged(ctx context.Context, diagnostics *[]str
 		// provision/SSH and the other live reconciliation stages run.
 		if !instanceIntentionallyStopped(state.Instance) {
 			return false, nil
-		}
-		// Only a boot can prove a selected retired package gone from this guest.
-		if pending, err := runtime.pendingRetiredIntegrations(state.Instance); err != nil || len(pending) != 0 {
-			return false, err
 		}
 	default:
 		return false, nil
@@ -2046,35 +2040,12 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if !strings.EqualFold(instance.Status, "running") {
 		return false, nil
 	}
-	// The stage's integration reconcile publishes the proof before finalization can stop the yard.
-	if pending, err := runtime.pendingRetiredIntegrations(instance); err != nil || len(pending) != 0 {
-		return false, err
-	}
 	if runtime.Executor == nil {
 		return false, errors.New("Incus executor is required")
 	}
 	// Integration ownership probes require the generic Docker substrate first.
 	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-c", "timeout --kill-after=1 10 docker container ls -a --format '{{.Names}}' >/dev/null 2>&1"}); err != nil || !ok {
 		return false, err
-	}
-	_, resolvedIntegrations := runtimeEnvironment(runtime.Environment)["INTEGRATION_HOST_LINKS"]
-	if !resolvedIntegrations && runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" {
-		// Resolved contexts observe every lifecycle in the final IntegrationPlan.
-		definitions, err := runtime.integrationDefinitions()
-		if err != nil {
-			return false, err
-		}
-		for _, definition := range definitions {
-			if definition.Lifecycle != nil {
-				observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
-				if err != nil {
-					return false, err
-				}
-				if observation.State == ports.RuntimeStateStale {
-					return false, nil
-				}
-			}
-		}
 	}
 	commands, err := runtime.provisionAgentCommands()
 	if err != nil {

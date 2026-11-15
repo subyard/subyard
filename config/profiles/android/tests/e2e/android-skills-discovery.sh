@@ -16,7 +16,7 @@ for client in codex opencode; do
   guest timeout --kill-after=5 300 bash -s < "$runtime/config/agents/$client/provision.sh"
 done
 
-# Reuse the checksum-pinned native Claude fixture version from OpenLIT acceptance.
+# Reuse the checksum-pinned native Claude fixture version for native agent acceptance.
 # This installs only in this disposable yard and uses no account or provider key.
 guest timeout --kill-after=5 240 bash -se <<'CLAUDE'
 set -euo pipefail

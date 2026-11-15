@@ -399,15 +399,9 @@ retired and ignored in `yard integration status`, and its old settings are disca
 rewriting the file. `yard integration enable <id>` and `yard config set` refuse it, while
 `yard integration disable <id>` removes it from the yard's selection. A dependency that only the
 retired integration requested stops being effective, keeps its binaries and authorization, and
-can be selected again, for example with `yard integration enable codex`. While a selected retired
-integration has no recorded retirement, `yard init` can temporarily start a stopped yard
-whose disk-backed `/tmp` policy is complete, remove it and restore stopped power. If both
-retirement and disk-backed `/tmp` are pending, run `yard -Y NAME start`, then `yard migrate`;
-the same sequence finishes both and records verified retirement, including an already-clean guest.
-An update does not boot a stopped yard. Paseo removal
-also removes foreign units and all state except a non-empty real `/srv/agents/paseo/worktrees/`
-directory, which stays with one warning. To use Paseo, install an older release. See the
-[retired package contract](reference/shipped-integration-contract.md#retired-package-compatibility).
+can be selected again, for example with `yard integration enable codex`. Removed integrations have no guest cleanup hooks. Existing
+files and services remain untouched, and retirement never starts a stopped yard. See the
+[retired input contract](reference/shipped-integration-contract.md#retired-package-compatibility).
 A previously accepted `AGENT_<name>_CLEANUP` value is ignored in the same way.
 
 When an update is blocked before activation, its diagnostic names the downloaded candidate's
@@ -1400,13 +1394,10 @@ still masks the Git value; remove it with `yard -Y default config unset ENVIRONM
 is not required for scalar profile selection. Remote writes and provisioning run on the selected
 owner host.
 
-Retired shipped integrations are normalized only by their compatibility declaration. Old
-`aiobserver` selection entries and `AI_OBSERVER_HOST_PORT` assignments are ignored without
-rewriting their source files; other choices and explicit empty selections retain their authority.
-The OpenLIT profile is disabled. Historical `ENVIRONMENT_PROFILES` entries remain authored
-but are omitted from the effective selection; enable requests are refused by profile policy.
-Normal reconciliation removes its managed telemetry and dashboard publication while preserving
-existing data. See [OpenLIT](openlit.md) and [Observer retirement](openlit.md#predecessor-retirement).
+Removed shipped integrations retain input compatibility only. Historical selections and
+settings load without rewriting their source files; other choices and explicit empty selections
+retain their authority. A removed disabled profile remains omitted from the effective selection.
+No cleanup of its guest services, routes, telemetry leaves or retained data is performed.
 
 ## Full uninstall
 

@@ -180,7 +180,7 @@ func (cli *CLI) prepareProfileBootstrap(ctx context.Context, loaded config.Loade
 		if write == nil {
 			return nil, fmt.Errorf("profile bootstrap requires a prepared integration settings write")
 		}
-		write.Content, err = config.EditPersistentAssignmentContent(write.Path, write.Content, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
+		write.Content, err = bootstrap.loaded.Catalog.EditPersistentAssignmentContent(write.Path, write.Content, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
 		if err != nil {
 			return nil, err
 		}
@@ -391,11 +391,11 @@ func (bootstrap *profileBootstrap) apply(ctx context.Context, cli *CLI) error {
 			// Full init publishes both requested selections in one protected write.
 			return nil
 		}
-		content, err := config.EditPersistentAssignmentContent(bootstrap.selectionPath, bootstrap.selection.Content, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
+		content, err := bootstrap.loaded.Catalog.EditPersistentAssignmentContent(bootstrap.selectionPath, bootstrap.selection.Content, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
 		if err != nil {
 			return err
 		}
-		if err := config.WritePersistentAssignmentIfUnchanged(bootstrap.loaded.Context.Paths.ConfigHome,
+		if err := bootstrap.loaded.Catalog.WritePersistentAssignmentIfUnchanged(bootstrap.loaded.Context.Paths.ConfigHome,
 			bootstrap.selectionPath, "ENVIRONMENT_PROFILES", &bootstrap.profiles, bootstrap.selection); err != nil {
 			return err
 		}

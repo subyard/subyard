@@ -33,6 +33,9 @@ func captureInitIntegrationBaseline(loaded config.Loaded) (*initIntegrationBasel
 	baseline := &initIntegrationBaseline{Selection: loaded.Integrations, Settings: map[string]config.SettingTrace{}, Sources: map[string]initIntegrationSource{}}
 	baseline.Packages = map[string]string{}
 	for _, definition := range loaded.Catalog.Integrations() {
+		if definition.Retired {
+			continue
+		}
 		binding, err := definition.SourceBinding()
 		if err != nil {
 			return nil, err

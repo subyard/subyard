@@ -72,11 +72,6 @@ func LoadIntegrations(root string) ([]IntegrationDefinition, error) {
 	if err != nil {
 		return nil, err
 	}
-	retired, err := loadDeclarations(root, "retired-integrations", "integration.json")
-	if err != nil {
-		return nil, err
-	}
-	packages = append(packages, retired...)
 	result := make([]IntegrationDefinition, 0, len(packages))
 	metadataInputs := make([]IntegrationMetadata, 0, len(packages))
 	names := map[string]bool{}
@@ -87,7 +82,7 @@ func LoadIntegrations(root string) ([]IntegrationDefinition, error) {
 		}
 		definition := metadata.definition()
 		definition.Root = filepath.Dir(shipped.path)
-		if names[definition.Name] || (filepath.Base(filepath.Dir(definition.Root)) == "retired-integrations") != definition.Retired {
+		if names[definition.Name] || definition.Retired {
 			return nil, errors.New("integration name collision or invalid retirement package")
 		}
 		names[definition.Name] = true

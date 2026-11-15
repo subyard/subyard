@@ -342,6 +342,12 @@ func selectPreviewOwnerAddress(host string, active map[string]struct{}) (string,
 }
 
 func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinition {
+	retired, _ := profile.LoadRetired(runtime.RepositoryRoot)
+	for _, component := range retired {
+		if route := component.Route; route != nil && route.Guard && route.DeviceName == name {
+			return &profile.IntegrationDefinition{Name: component.ID, Retired: true, Dashboard: &profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{MarkerKey: route.MarkerKey, DeviceName: route.DeviceName}}}
+		}
+	}
 	definitions := runtime.Integrations
 	if definitions == nil {
 		definitions, _ = profile.LoadIntegrations(runtime.RepositoryRoot)
@@ -353,12 +359,6 @@ func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinit
 		}
 	}
 	for _, definition := range definitions {
-		for _, route := range definition.RetiredRoutes {
-			if route.DeviceName == name {
-				definition.Dashboard = &profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{MarkerKey: route.MarkerKey, DeviceName: route.DeviceName}}
-				return &definition
-			}
-		}
 		if definition.Dashboard != nil && definition.Dashboard.ContainerRoute != nil && definition.Dashboard.ContainerRoute.DeviceName == name {
 			return &definition
 		}

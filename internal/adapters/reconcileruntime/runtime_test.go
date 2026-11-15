@@ -1064,11 +1064,9 @@ func TestProvisionProbeRequiresDockerBeforeIntegrationOwnership(t *testing.T) {
 	previewLoopbackFixture(t)
 	transport := errors.New("native transport unavailable")
 	for _, test := range []struct {
-		name       string
-		step       testkit.IncusExecStep
-		report     string
-		wantErr    error
-		wantCalled bool
+		name    string
+		step    testkit.IncusExecStep
+		wantErr error
 	}{
 		{name: "command missing", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 127}, Err: errors.New("native exit")}},
 		{name: "API not ready", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("native exit")}},
@@ -1076,17 +1074,9 @@ func TestProvisionProbeRequiresDockerBeforeIntegrationOwnership(t *testing.T) {
 		{name: "transport unavailable", step: testkit.IncusExecStep{Err: transport}, wantErr: transport},
 		{name: "caller cancelled", step: testkit.IncusExecStep{Err: context.Canceled}, wantErr: context.Canceled},
 		{name: "caller deadline", step: testkit.IncusExecStep{Err: context.DeadlineExceeded}, wantErr: context.DeadlineExceeded},
-		{name: "ready substrate", wantCalled: true},
-		{name: "ready substrate preserves schema rejection", report: "invalid", wantCalled: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtime, definition, _, _ := lifecycleFixture(t)
-			called := filepath.Join(definition.Root, "called")
-			testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf observed > \"$CALLED\"\ncat \"$STATE\"\n"), 0o755)
-			if test.report != "" {
-				testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(test.report), 0o600)
-			}
-			runtime.Environment = append(runtime.Environment, "CCUSAGE_VERSION=1.2.3", "CALLED="+called)
+			runtime := Runtime{Environment: []string{"CCUSAGE_VERSION=1.2.3"}}
 			incus := &testkit.Incus{
 				ServerInfo: ports.ServerInfo{Environment: "incus"},
 				Reconcile:  ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
@@ -1094,12 +1084,8 @@ func TestProvisionProbeRequiresDockerBeforeIntegrationOwnership(t *testing.T) {
 			}
 			runtime.Incus, runtime.Executor = incus, incus
 			converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision)
-			if converged || (test.report == "" && !errors.Is(err, test.wantErr)) || (test.report != "" && err == nil) {
+			if converged || !errors.Is(err, test.wantErr) {
 				t.Fatalf("provision check: converged=%v err=%v", converged, err)
-			}
-			_, readErr := os.Stat(called)
-			if (readErr == nil) != test.wantCalled {
-				t.Fatalf("integration ownership handler called=%v, want=%v", readErr == nil, test.wantCalled)
 			}
 			if len(incus.ExecCalls) != 1 {
 				t.Fatalf("Docker substrate checks = %d, want one", len(incus.ExecCalls))
@@ -1175,8 +1161,7 @@ func (fixture *provisionFactsExecutor) Exec(ctx context.Context, project, instan
 // returns the selection to the recorded facts; only its leftover skill shows the work.
 func TestProvisionRequiresConvergedSkillsWhenFactsMatch(t *testing.T) {
 	previewLoopbackFixture(t)
-	runtime, definition, _, desired := lifecycleFixture(t)
-	testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, desired, desired)), 0o600)
+	runtime, _, _, _ := integrationSourceFixture(t)
 	runtime.RepositoryRoot = "../../.."
 	runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=", "CCUSAGE_VERSION=1.2.3", "ENVIRONMENT_PROFILES=synthetic-kept", "YARD_VERSION=0.25.6-test")
 	runtime.Yard = domain.Context{YardName: "synthetic", IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: 1000}
@@ -1207,8 +1192,7 @@ func TestProvisionRequiresConvergedSkillsWhenFactsMatch(t *testing.T) {
 
 func TestProvisionRequiresExactFactsAfterProfileSelectionChanges(t *testing.T) {
 	previewLoopbackFixture(t)
-	runtime, definition, _, desired := lifecycleFixture(t)
-	testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, desired, desired)), 0o600)
+	runtime, _, _, _ := integrationSourceFixture(t)
 	runtime.RepositoryRoot = "../../.."
 	runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=", "CCUSAGE_VERSION=1.2.3", "ENVIRONMENT_PROFILES=", "YARD_VERSION=0.29.0-test")
 	runtime.Yard = domain.Context{YardName: "synthetic", IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: 1000}
@@ -1252,39 +1236,6 @@ func (fixture provisionLifecycleExecutor) Exec(ctx context.Context, project, ins
 		}
 	}
 	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
-}
-
-func TestProvisionProbeObservesLifecycleOnceOnLegacyAndResolvedPaths(t *testing.T) {
-	previewLoopbackFixture(t)
-	for _, selection := range []string{"legacy", "resolved", "disabled"} {
-		t.Run(selection, func(t *testing.T) {
-			runtime, definition, _, desired := lifecycleFixture(t)
-			calls := filepath.Join(definition.Root, "calls")
-			testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf 'observe\\n' >> \"$CALLS\"\ncat \"$STATE\"\n"), 0o755)
-			testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, desired, desired)), 0o600)
-			runtime.RepositoryRoot = "../../.."
-			runtime.Environment = append(runtime.Environment, "CALLS="+calls, "CCUSAGE_VERSION=1.2.3")
-			if selection == "resolved" {
-				runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=")
-			} else if selection == "disabled" {
-				runtime.Environment = append(runtime.Environment, "ALLOWS_CODING_TOOLS=false")
-			}
-			runtime.Yard = domain.Context{IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: 1000}
-			incus := &testkit.Incus{ServerInfo: ports.ServerInfo{Environment: "incus"},
-				Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{"user.subyard.ccusage_version": "1.2.3"}}}}
-			runtime.Incus, runtime.Executor = incus, provisionLifecycleExecutor{&retryableIntegrationExecutor{}}
-			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); err != nil || !ready {
-				t.Fatalf("provision readiness: %t %v", ready, err)
-			}
-			if data, err := os.ReadFile(calls); err != nil || string(data) != "observe\n" {
-				t.Fatalf("lifecycle observation count: %q %v", data, err)
-			}
-			testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte("invalid"), 0o600)
-			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); ready || err == nil {
-				t.Fatalf("invalid lifecycle report was accepted: %t %v", ready, err)
-			}
-		})
-	}
 }
 
 func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {

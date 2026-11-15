@@ -110,7 +110,7 @@ func (prepared *preparedCommand) prepareStoppedIdentityInspection(ctx context.Co
 	}
 	execution := &initExecution{loaded: prepared.Loaded, mode: initReconcile, powerYards: peers}
 	if prepared.Loaded.Integrations.AllowsCodingTools {
-		execution.integrationRetirements, execution.integrationWarnings, err = runtime.RetiredIntegrationNotices(ctx)
+		execution.integrationWarnings, err = runtime.IntegrationOwnershipNotices(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -255,7 +255,6 @@ func (prepared *preparedCommand) prepareStoppedIdentityInspection(ctx context.Co
 		}
 		fresh := *prepared
 		fresh.interactiveSetup = false
-		fresh.retirementsDisclosed = true
 		handled, err := fresh.prepareDeveloperIdentityInit(ctx, nil)
 		if err != nil {
 			return domain.AdapterResult{}, err

@@ -152,7 +152,7 @@ runtime_extras=(
 while IFS= read -r -d '' relative; do
   [ -e "$REPO/$relative" ] || continue
   case "$relative" in
-    config/release-owner.json|config/release-owner.schema.json|config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs|config/retired-integrations/*/tests/*) continue ;;
+    config/release-owner.json|config/release-owner.schema.json|config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs) continue ;;
   esac
   case "$relative" in
     scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;
@@ -175,6 +175,7 @@ install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-rele
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
 for required in config/installation-capabilities.json \
+  config/retired-components.json \
   internal/adapters/configmaterial/tomli_w.py \
   internal/adapters/configmaterial/TOMLI_W_LICENSE \
   scripts/e2e-lab/base.sh \

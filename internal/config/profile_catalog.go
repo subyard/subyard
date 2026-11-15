@@ -14,6 +14,7 @@ type Catalog struct {
 	profiles     map[string]SettingDefinition
 	declarations []profile.Definition
 	integrations []profile.IntegrationDefinition
+	retired      []profile.RetiredComponent
 }
 
 func LoadCatalog(root string) (Catalog, error) {
@@ -43,7 +44,22 @@ func LoadCatalog(root string) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
-	result.declarations, result.integrations = definitions, integrations
+	retired, err := profile.LoadRetired(root)
+	if err != nil {
+		return Catalog{}, err
+	}
+	for _, component := range retired {
+		if component.Kind == "profile" && slices.ContainsFunc(definitions, func(item profile.Definition) bool { return item.Name == component.ID }) {
+			return Catalog{}, fmt.Errorf("retired profile collides with active package %s", component.ID)
+		}
+		if component.Kind == "integration" {
+			if slices.ContainsFunc(integrations, func(item profile.IntegrationDefinition) bool { return item.Name == component.ID }) {
+				return Catalog{}, fmt.Errorf("retired integration collides with active package %s", component.ID)
+			}
+			integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: 1, Name: component.ID, Retired: true, RetiredSettings: slices.Clone(component.Settings)})
+		}
+	}
+	result.declarations, result.integrations, result.retired = definitions, integrations, retired
 	return result, nil
 }
 
@@ -206,11 +222,28 @@ func (settings Catalog) CheckSelectableIntegrations(requested []string) error {
 	return nil
 }
 
+// RetiredProfile recognizes only declared removed profiles, never arbitrary names.
+func (settings Catalog) RetiredProfile(name string) bool {
+	return slices.ContainsFunc(settings.retired, func(component profile.RetiredComponent) bool {
+		return component.Kind == "profile" && component.ID == name
+	})
+}
+
 func (settings Catalog) retiredSetting(name string) bool {
+	for _, component := range settings.retired {
+		if slices.Contains(component.Settings, name) {
+			return true
+		}
+	}
 	for _, definition := range settings.integrations {
 		if definition.Retired && slices.Contains(definition.RetiredSettings, name) {
 			return true
 		}
 	}
 	return false
+}
+
+// IsLegacySetting includes removed declarations when filtering inherited contexts.
+func (settings Catalog) IsLegacySetting(name string) bool {
+	return IsLegacySetting(name) || settings.retiredSetting(name)
 }

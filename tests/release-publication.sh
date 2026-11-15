@@ -155,7 +155,7 @@ class FakeGitHub:
         self.successful_run = True
         self.complete_jobs = True
         self.workflow_revision = "b" * 40
-        self.workflow_blob = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
+        self.workflow_blob = "e952002eada45e0d6f245fbc61f5403c7325ae5d"
         self.host_free_verify = True
         self.immutable = True
         # Release workflow files by ref: the candidate commit and an unchanged default branch.
@@ -226,9 +226,6 @@ class FakeGitHub:
     def pages(self, path, key=None):
         if path.startswith("actions/runs/") and path.endswith("/jobs"):
             names = ["validate", "native-engine-arm64", "prepare"]
-            if self.workflow_blob in ("bb9852249013520480a165571dac6c604c487e86", "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"):
-                # Historical preparation inventory of a since retired integration.
-                names += ["paseo-headless-amd64", "paseo-headless-arm64"]
             if self.host_free_verify:
                 names.append("host-free-verify")
             if not self.complete_jobs:
@@ -337,8 +334,9 @@ class Contracts(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as printed:
             self.assertEqual(m.publish_remote(self.github, self.prepared, document, root)["html_url"], "https://fixture/release")
         self.assertIn("PUBLICATION ci_counted=compatibility,local-adapters,shellcheck,verify execution=ci-preparation\n", printed.getvalue())
-        self.github.workflow_blob = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
-        with self.assertRaisesRegex(ValueError, "does not run the counted checks: compatibility,local-adapters,shellcheck,verify"):
+        self.github.workflow_blob = "e952002eada45e0d6f245fbc61f5403c7325ae5d"
+        with patch.object(m, "CI_COUNTED_POLICIES", frozenset()), \
+             self.assertRaisesRegex(ValueError, "does not run the counted checks: compatibility,local-adapters,shellcheck,verify"):
             m.publish_remote(self.github, self.prepared, document, root)
         for mutate in (lambda d: d["checks"]["verify"].update(ci_job="prepare"),
                        lambda d: d["checks"]["p0-release-smoke"].update(execution="ci-preparation", ci_job="prepare"),
@@ -388,13 +386,19 @@ class Contracts(unittest.TestCase):
             self.assertEqual(m.a.source_declares(output / "source", "dev/release-publication.py", "release_level"), mutate is not None)
 
     def test_preparation_workflow_revision_policies(self):
-        legacy = "bb9852249013520480a165571dac6c604c487e86"
-        current = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
+        current = "e952002eada45e0d6f245fbc61f5403c7325ae5d"
         latest = m.git_blob_sha((ROOT / ".github/workflows/release.yml").read_bytes())
-        for blob, host_free in ((legacy, False), (current, True), (latest, True)):
+        for blob, host_free in ((current, True), (latest, True)):
             self.github.workflow_blob = blob
             self.github.host_free_verify = host_free
             self.assertEqual(m.verify_run(self.github, "r123-a1")["head_sha"], self.github.workflow_revision)
+        for removed in ("bb9852249013520480a165571dac6c604c487e86",
+                        "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4",
+                        "dcc7d9d2cd7f1f20c41bb7993ffd279af644380f"):
+            self.github.workflow_blob = removed
+            with self.assertRaisesRegex(ValueError, "unknown preparation workflow policy"):
+                m.verify_run(self.github, "r123-a1")
+        self.github.workflow_blob = current
         self.github.host_free_verify = False
         with self.assertRaisesRegex(ValueError, "job inventory"):
             m.verify_run(self.github, "r123-a1")
@@ -1882,8 +1886,6 @@ class Contracts(unittest.TestCase):
         verify = prep.split("  host-free-verify:\n", 1)[1].split("\n  prepare:", 1)[0]
         self.assertIn("needs: validate", verify)
         self.assertNotIn("ui-browser-test.py", verify)
-        for workflow in (prep, (ROOT / ".github/workflows/ci.yml").read_text()):
-            self.assertNotIn("profile-go.sh openlit", workflow)
         self.assertIn("Preserve failed host-free diagnostics", verify)
         self.assertIn("needs: [host-free-verify, native-engine-arm64]", prep)
         self.assertIn("group: subyard-release-publication-stable", publish)

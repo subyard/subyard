@@ -1,14 +1,17 @@
 package ownerpublication
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -57,22 +60,9 @@ func TestProfileDashboardContractSurvivesInstalledSnapshot(t *testing.T) {
 	}
 }
 
+// Historical installed envelopes retain their reader even after package removal.
 func TestRetiredRouteLoadsOnlyCancellationAuthority(t *testing.T) {
-	root := testkit.TempDir(t)
-	dir := filepath.Join(root, "config", "retired-integrations", "synthetic")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(dir, "retire.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
-	definition := profile.IntegrationDefinition{SchemaVersion: 1, Retired: true,
-		Lifecycle:     &profile.IntegrationLifecycle{Handler: "retire.sh", InstanceConfigKeys: []string{"user.subyard.retired"}, InstanceDevices: []string{"retired-dashboard"}},
-		RetiredRoutes: []profile.RetiredRoute{{MarkerKey: "user.subyard.retired", DeviceName: "retired-dashboard", GuestPort: 3000}}}
-	data, _ := json.Marshal(definition)
-	testkit.WriteFile(t, filepath.Join(dir, "integration.json"), data, 0o600)
-	loaded, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded := []Contract{{Device: "retired-dashboard", Key: "user.subyard.retired", Codec: "dashboard", GuestPort: 3000, CleanupOnly: true}}
 	encoded, err := Encode(loaded)
 	if err != nil {
 		t.Fatal(err)
@@ -153,5 +143,72 @@ func TestResourceOwnershipMatchesLoadedAndInstalledContracts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRetiredRouteDefersAndRestoresWithItsInstalledContract(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/retired-components.json"), []byte(`{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile","route":{"marker_key":"user.subyard.old_dashboard","device_name":"old-dashboard","guest_port":3000,"defer":true}},{"kind":"integration","id":"old-tool","route":{"marker_key":"user.subyard.old_proxy","device_name":"old-inert","guest_port":8080}}]}`), 0644)
+	contracts, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := Encode(contracts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, contracts := range [][]Contract{contracts, installed} {
+		device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:100.101.102.103:22222", "connect": "tcp:127.0.0.1:3000"}
+		instance := ports.InstanceInfo{LocalConfig: map[string]string{"user.subyard.old_dashboard": "v2:100.101.102.103:22222", Prefix + "old-inert": "historical inert receipt"}, LocalDevices: map[string]map[string]string{"old-dashboard": device}, Devices: map[string]map[string]string{"old-dashboard": device}}
+		config, devices, waiting, err := Plan(instance, contracts, nil)
+		if err != nil || len(devices) != 0 || len(waiting) != 1 || waiting[0] != device["listen"] || config[Prefix+"old-dashboard"] == "" || config[Prefix+"old-inert"] != "historical inert receipt" {
+			t.Fatalf("missing owner address blocked safe deferral: %v %v %v %v", config, devices, waiting, err)
+		}
+		instance.LocalConfig = config
+		instance.LocalDevices = devices
+		instance.Devices = devices
+		config, devices, waiting, err = Plan(instance, contracts, []netip.Addr{netip.MustParseAddr("100.101.102.103")})
+		if err != nil || config[Prefix+"old-dashboard"] != "" || !maps.Equal(devices["old-dashboard"], device) || len(waiting) != 0 {
+			t.Fatalf("retained route did not restore: %v %v %v %v", config, devices, waiting, err)
+		}
+		foreign := maps.Clone(device)
+		foreign["connect"] = "tcp:127.0.0.1:4000"
+		instance.LocalConfig = map[string]string{"user.subyard.old_dashboard": "v2:100.101.102.103:22222"}
+		instance.Devices = map[string]map[string]string{"old-dashboard": foreign}
+		instance.LocalDevices = instance.Devices
+		_, devices, waiting, err = Plan(instance, contracts, nil)
+		if err != nil || !maps.Equal(devices["old-dashboard"], foreign) || len(waiting) != 0 {
+			t.Fatal("foreign route was deferred")
+		}
+	}
+}
+
+func TestInertPublicationContractDoesNotExtendHistoricalV1Schema(t *testing.T) {
+	value, err := Encode([]Contract{{Device: "old-dashboard", Key: "user.subyard.old", Codec: "inert"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	envelope["version"] = 1
+	payload, err = json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(base64.StdEncoding.EncodeToString(payload)); err == nil {
+		t.Fatal("new receipt-only contract was accepted as a historical v1 contract")
 	}
 }

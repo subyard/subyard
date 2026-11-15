@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -101,18 +102,17 @@ func TestIntegrationImmutableInputsIgnoreConfigDirectoryDefaults(t *testing.T) {
 
 func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
-	retired := filepath.Join(root, "config/retired-integrations/retired-widget")
-	if err := os.MkdirAll(retired, 0o700); err != nil {
+	catalog, err := LoadCatalog(root)
+	if err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, filepath.Join(retired, "integration.json"), []byte(`{"schema_version":1,"retired":true,"retired_settings":["OBSOLETE_PORT"],"lifecycle":{"handler":"retire.sh"}}`), 0o600)
-	testkit.WriteFile(t, filepath.Join(retired, "retire.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	catalog.integrations = append(catalog.integrations, profile.IntegrationDefinition{SchemaVersion: 1, Name: "retired-widget", Retired: true, RetiredSettings: []string{"OBSOLETE_PORT"}})
 	for _, selection := range []string{"sample retired-widget", "retired-widget", ""} {
 		home, configHome := testkit.TempDir(t), testkit.TempDir(t)
 		original := "CODING_TOOL_INTEGRATIONS=\"" + selection + "\"\nOBSOLETE_PORT=${UNUSED_PORT:=12345}\n"
 		path := filepath.Join(configHome, "config.env")
 		testkit.WriteFile(t, path, []byte(original), 0o600)
-		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+		loaded, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: home, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -129,7 +129,7 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 			if !allowed {
 				snapshot.Integrations.Effective = nil
 			}
-			inventory := snapshot.IntegrationInventory()
+			inventory := slices.DeleteFunc(snapshot.IntegrationInventory(), func(entry ComponentSelection) bool { return entry.ID != "retired-widget" && entry.ID != "sample" })
 			if len(inventory) != 2 || inventory[0].ID != "retired-widget" || inventory[1].ID != "sample" {
 				t.Fatalf("catalog entries lost: %#v", inventory)
 			}
@@ -161,7 +161,7 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 			t.Fatal("retired setting is writable")
 		}
 	}
-	if _, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "unknown"}}); err == nil {
+	if _, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "unknown"}}); err == nil {
 		t.Fatal("arbitrary unknown integration accepted")
 	}
 }

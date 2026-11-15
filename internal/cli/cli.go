@@ -2722,7 +2722,7 @@ func (cli *CLI) freshMigrationEnvironment(
 ) map[string]string {
 	environment := make(map[string]string, len(inherited)+1)
 	for name, value := range inherited {
-		if _, setting := cli.catalog.LookupSetting(name); setting || config.IsLegacySetting(name) {
+		if _, setting := cli.catalog.LookupSetting(name); setting || cli.catalog.IsLegacySetting(name) {
 			continue
 		}
 		switch name {

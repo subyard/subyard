@@ -222,20 +222,30 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		}
 		return nil
 	}
+	if request.verb == "enable" && loaded.Catalog.RetiredProfile(request.id) {
+		return fmt.Errorf("profile %q was removed and cannot be enabled", request.id)
+	}
 	definitions, err := profile.Load(cli.options.RepositoryRoot)
 	if err != nil {
 		return err
 	}
 	index := slices.IndexFunc(definitions, func(d profile.Definition) bool { return d.Name == request.id })
-	if index < 0 || definitions[index].OwnerService == "" {
+	removed := index < 0 && loaded.Catalog.RetiredProfile(request.id)
+	if (!removed && (index < 0 || definitions[index].OwnerService == "")) || (removed && request.verb != "status" && request.verb != "disable") {
 		return fmt.Errorf("profile %q does not declare a scoped owner service", request.id)
 	}
-	definition := definitions[index]
+	definition := profile.Definition{Name: request.id, Disabled: true}
+	if !removed {
+		definition = definitions[index]
+	}
 	connection, connectionErr := cli.profileConnection(loaded, definition)
+	if removed {
+		connectionErr = errors.New("profile has been removed")
+	}
 	if request.verb == "status" {
 		status := profileStatus{Yard: loaded.Context.YardName, ID: request.id, Enabled: definition.Selected(loaded.Context.YardName, loaded.Environment), Configured: connectionErr == nil, Runtime: "unavailable"}
 		diagnostic := ""
-		if cli.requireRunningProfileYard(ctx, loaded) == nil {
+		if !removed && cli.requireRunningProfileYard(ctx, loaded) == nil {
 			runtime := cli.profileRuntime(loaded)
 			var converged bool
 			var err error
@@ -279,7 +289,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		}
 	}
 	yardBinding := ""
-	if request.verb != "setup" {
+	if request.verb != "setup" && !removed {
 		instance, err := cli.observeProfileYard(ctx, loaded)
 		if err != nil {
 			return err
@@ -341,7 +351,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 	}
 	value := strings.Join(requested, " ")
 	if selectionChanged {
-		if _, err := config.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value); err != nil {
+		if _, err := cli.catalog.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value); err != nil {
 			return err
 		}
 	}
@@ -369,7 +379,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 	}
 	var runtime ProfileServiceRuntime
 	converged := true
-	if request.verb != "setup" {
+	if request.verb != "setup" && !removed {
 		runtime = cli.profileRuntime(candidate)
 		converged, err = runtime.ProfileServiceConverged(ctx, request.id)
 		if err != nil {
@@ -426,7 +436,9 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		}
 		if request.verb != "setup" {
 			add("profile.selection", path, "profiles ["+value+"]", "read effective yard profile selection", selectionChanged)
-			add("profile.runtime", loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName+":"+request.id, "profile "+request.verb+" converged", "selected profile owner hook --check", !converged)
+			if !removed {
+				add("profile.runtime", loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName+":"+request.id, "profile "+request.verb+" converged", "selected profile owner hook --check", !converged)
+			}
 		} else if setups == nil {
 			add("profile.setup", loaded.Context.Paths.ConfigHome, "protected connection for "+request.id, "validate protected consumer connection", false)
 		}
@@ -451,7 +463,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 				return fmt.Errorf("%w: profile artifact changed", domain.ErrPlanStale)
 			}
 		}
-		if request.verb != "setup" {
+		if request.verb != "setup" && !removed {
 			instance, err := cli.observeProfileYard(ctx, loaded)
 			if err != nil {
 				return err
@@ -510,7 +522,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			}
 		}
 		if selectionChanged {
-			if err := config.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
+			if err := cli.catalog.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
 				return result, err
 			}
 		}

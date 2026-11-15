@@ -893,14 +893,19 @@ func TestDefaultPreviewSecurityRejectsInactiveOwnedAddress(t *testing.T) {
 	}
 }
 
-func TestRetiredDashboardSecurityAllowsOnlyExactCleanupRoute(t *testing.T) {
-	runtime := Runtime{Integrations: []profile.IntegrationDefinition{{Name: "obsolete", Retired: true, RetiredRoutes: []profile.RetiredRoute{{MarkerKey: "user.subyard.obsolete", DeviceName: "obsolete-ui", GuestPort: 8080}}}}}
-	definition := runtime.integrationProxy("obsolete-ui")
+func TestRemovedDashboardRetainsExactRouteGuard(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/retired-components.json"), []byte(`{"schema_version":1,"components":[{"kind":"integration","id":"old-tool","route":{"marker_key":"user.subyard.old_proxy","device_name":"old-dashboard","guest_port":8080,"guard":true}}]}`), 0644)
+	runtime := Runtime{RepositoryRoot: root}
+	definition := runtime.integrationProxy("old-dashboard")
 	if definition == nil {
 		t.Fatal("retired cleanup ownership missing")
 	}
 	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:100.101.102.103:22222", "connect": "tcp:127.0.0.1:8080"}
-	metadata := map[string]string{"user.subyard.obsolete": "v2:pending:100.101.102.103:22222"}
+	metadata := map[string]string{"user.subyard.old_proxy": "v2:pending:100.101.102.103:22222"}
 	if err := runtime.checkIntegrationProxy(context.Background(), *definition, device, metadata); err != nil {
 		t.Fatal(err)
 	}

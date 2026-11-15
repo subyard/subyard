@@ -39,7 +39,7 @@ func (cli *CLI) exportSelectedConfig(loaded config.Loaded, candidate, hostID str
 		if !snapshot.Exists && value == nil {
 			return nil, nil
 		}
-		content, err = config.EditPersistentAssignmentContent(path, snapshot.Content, request.name, value)
+		content, err = cli.catalog.EditPersistentAssignmentContent(path, snapshot.Content, request.name, value)
 		if err != nil {
 			return nil, err
 		}
