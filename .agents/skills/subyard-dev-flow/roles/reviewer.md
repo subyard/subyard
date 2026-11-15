@@ -22,6 +22,9 @@ when it requires writes. If concurrent edits change the candidate, stop and repo
 affected scope; recheck only invalidated claims after writing stops. Do not stash,
 reset or commit other work, bypass approvals or perform operator-only actions.
 In the first round also state whether a simpler approach would meet the requirements.
+Separately list the risks you see in the solution for long-term maintenance and future bugs,
+such as complexity, duplicated rules or fragile coupling. They are not findings and do not start
+another round; the coordinator decides what to do with them.
 Return findings, no findings in reviewed scope, or incomplete. Each finding needs
 priority (P1 breaks a requirement, data or security; P2 another contract or check gap; P3 minor),
 file/line, a violated requirement/behavior and reproduction or concrete
