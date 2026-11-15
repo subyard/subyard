@@ -15,7 +15,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
-	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v7/shared/api"
 )
 
 // ownerCreateServerFixture serves the ordinary project create boundary used by

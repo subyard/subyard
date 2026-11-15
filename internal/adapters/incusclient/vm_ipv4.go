@@ -9,7 +9,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
-	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v7/shared/api"
 )
 
 // PinVMIPv4 validates the dedicated VM's default-profile reservation. On

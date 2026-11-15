@@ -79,7 +79,7 @@ case "$name:$*" in
   'id:-u dev') printf '1000\n' ;;
   'id:-gn dev') printf 'dev\n' ;;
   'getent:passwd dev') printf 'dev:x:1000:1000::%s:/bin/bash\n' "$HOME" ;;
-  'incus:--version') printf '6.0.6\n' ;;
+  'incus:--version') printf '6.0.7\n' ;;
   'incus:network list --project default --format csv -c n,t') : ;;
   'systemctl:is-active NetworkManager') printf 'inactive\n' ;;
   *) printf 'unexpected physical operation: %s %s\n' "$name" "$*" >&2; exit 99 ;;
@@ -104,7 +104,7 @@ printf 'caller-complete\n'
 			if err != nil {
 				t.Fatalf("real bundled recipe/installer failed: %v\n%s", err, output)
 			}
-			if !bytes.Contains(output, []byte("Incus is 6.0.6.")) || !bytes.Contains(output, []byte("caller-complete")) {
+			if !bytes.Contains(output, []byte("Incus is 6.0.7.")) || !bytes.Contains(output, []byte("caller-complete")) {
 				t.Fatalf("child or caller did not complete: %s", output)
 			}
 			effects, err := os.ReadFile(filepath.Join(root, "effects"))

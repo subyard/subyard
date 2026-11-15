@@ -928,7 +928,7 @@ run_incus_installer() {
     # shellcheck source=config/host.env
     . "$ROOT/config/host.env"
     set +a
-    bash "$ROOT/scripts/01-install-incus.sh" "$@"
+    MIN_INCUS_VER=6.0.7 bash "$ROOT/scripts/01-install-incus.sh" "$@"
   )
 }
 
@@ -986,11 +986,11 @@ ensure_incus() {
 		reexec_with_incus_group "$resume_mode"
 	fi
 	if incus info >/dev/null 2>&1; then
-    if ! dpkg --compare-versions "$(incus --version)" ge 6.0.6; then
+    if ! dpkg --compare-versions "$(incus --version)" ge 6.0.7; then
       printf '  [ .. ] VM%s: upgrading Incus to the supported LTS\n' "$SUBYARD_E2E_VM"
       run_incus_installer "$state_root" "$storage_path" --yes --zabbly --upgrade-only
-      dpkg --compare-versions "$(incus --version)" ge 6.0.6 \
-        || die 'Incus upgrade did not reach 6.0.6'
+      dpkg --compare-versions "$(incus --version)" ge 6.0.7 \
+        || die 'Incus upgrade did not reach 6.0.7'
     fi
     if incus storage show default --project default >/dev/null 2>&1 \
       && incus network show incusbr0 --project default >/dev/null 2>&1; then

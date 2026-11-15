@@ -15,7 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
-	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v7/shared/api"
 )
 
 func TestLocalInstallationAbsentPreservesUnavailableState(t *testing.T) {

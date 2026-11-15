@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,6 +43,45 @@ func TestDoctorDiagnosticUsesActualChecksAndDoesNotExposeRawErrors(t *testing.T)
 			delete(want, "WANT_DIAGNOSTIC")
 			if err := runtime.Run(context.Background(), []string{"doctor"}, want); err == nil || output.Len() != 0 {
 				t.Fatalf("ordinary doctor changed: error=%v, report=%q", err, output.String())
+			}
+		})
+	}
+}
+
+func TestDoctorIncusVersionRequiresRecommendedTestBackend(t *testing.T) {
+	for _, test := range []struct {
+		version   string
+		converged bool
+	}{
+		{"6.0.6", false},
+		{"6.0.7", true},
+		{"6.0.7-202610170000-debian13", true},
+	} {
+		t.Run(test.version, func(t *testing.T) {
+			runtime := &Runtime{Config: Config{Incus: "fixture-incus"}}
+			runtime.Runner = &fakeRunner{handler: func(name string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				switch name {
+				case "fixture-incus":
+					if strings.Join(args, " ") != "--version" {
+						t.Fatalf("unexpected Incus probe: %v", args)
+					}
+					return []byte(test.version + "\n"), nil, nil
+				case "dpkg":
+					// Exercise the actual version comparison without reaching a daemon.
+					output, err := exec.Command("dpkg", args...).CombinedOutput()
+					return output, nil, err
+				default:
+					t.Fatalf("unexpected command: %s %v", name, args)
+					return nil, nil, nil
+				}
+			}}
+			var output bytes.Buffer
+			if err := writeDoctorReport(&output, runtime.doctorIncusVersion(context.Background())); err != nil {
+				t.Fatal(err)
+			}
+			converged, reason := parseDoctorReport(output.String())
+			if converged != test.converged || (!converged && reason != "inner Incus is too old") {
+				t.Fatalf("doctor report = %s", output.String())
 			}
 		})
 	}

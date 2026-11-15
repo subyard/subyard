@@ -101,7 +101,14 @@ new size limit or automatic eviction policy.
 
 Debian 13 currently ships an older bootstrap Go than the Incus client requires. That is acceptable
 for source development because Go follows the module's `toolchain` directive. Confirm the selected
-compiler with `go version` after the first build.
+compiler with `go version` after the first build. The `github.com/lxc/incus/v7` v7.6.0
+client requires Go 1.26.9 or newer; it does not change the daemon release line.
+The daemon minimum is 6.0.6: it remains supported, is never refused for its version and
+is not upgraded automatically. The recommended and tested version is 6.0.7, used by
+disposable test fixtures. Distributions below the minimum install from Zabbly LTS-6.0,
+which serves the latest 6.0.x. Incus v6 audit exemptions were removed with the client
+migration; see the
+[dependency audit policy](testing.md#static-checks-and-dependency-audits).
 
 Profiles whose services start after the guest agent should declare the optional
 [`startup_readiness` hook](control-plane.md#profile-extensions) in `profile.json`.

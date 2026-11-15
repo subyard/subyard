@@ -532,7 +532,7 @@ prepare_test_vm_config() {
 
 version_ok() {
   command -v incus >/dev/null 2>&1 \
-    && dpkg --compare-versions "$(incus --version 2>/dev/null)" ge 6.0.6
+    && dpkg --compare-versions "$(incus --version 2>/dev/null)" ge 6.0.7
 }
 
 reconcile_inner_packages() {
@@ -547,7 +547,7 @@ reconcile_inner_packages() {
       incus qemu-system-x86 qemu-utils ovmf openssh-client nftables genisoimage
   command -v mkisofs >/dev/null 2>&1 \
     || { printf 'mkisofs is required for VM cloud-init metadata disks\n' >&2; exit 1; }
-  version_ok || { printf 'Incus 6.0.6 or newer is required inside the yard\n' >&2; exit 1; }
+  version_ok || { printf 'Incus 6.0.7 or newer is required inside the yard\n' >&2; exit 1; }
 }
 
 reconcile_test_vm_access() {
