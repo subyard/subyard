@@ -22,7 +22,7 @@ class ReleaseObservationTest(unittest.TestCase):
             package = Path(temp)/'orca'
             resource = package/'resources/orca'
             resource.mkdir(parents=True)
-            for name in ('handler.sh', 'registration-contract.sh', 'registration-observer.bash', 'fixed-paths'):
+            for name in ('handler.sh', 'registration-contract.sh', 'registration-observer.bash', 'fixed-paths', 'fixed-paths.bash'):
                 shutil.copyfile(PROFILE/'resources/orca'/name, resource/name)
             self.assertEqual(len(provider['read_only_stdin_commands'](package)), 1)
             for name in ('registration-contract.sh', 'registration-observer.bash'):
@@ -92,6 +92,31 @@ print('{"state":"absent","actual":"","desired":""}')
                     self.assertTrue(marker.exists())
                     self.assertFalse(effect.exists())
 
+
+    def test_fixed_path_parsers_agree(self):
+        provider = runpy.run_path(str(PROFILE/'tests/release-observation.py'))
+        parse = provider['parse_fixed_paths']
+        shipped = (PROFILE/'resources/orca/fixed-paths').read_text()
+        cases = {'shipped': shipped,
+                 'indented comment and blanks': '\n  # indented comment\n\t\nunit /etc/a.service\n   path   /usr/b  \n#c\n',
+                 'no final newline': 'path /usr/last'}
+        invalid = {'unknown kind': 'other /usr/x\n', 'relative': 'path usr/x\n', 'extra field': 'path /usr/x y\n',
+                   'parent step': 'path /usr/../x\n'}
+        with tempfile.TemporaryDirectory(prefix='orca-fixed-paths-', dir='/tmp') as temp:
+            for name, text in {**cases, **invalid}.items():
+                with self.subTest(name=name):
+                    listing = Path(temp)/'fixed-paths'
+                    listing.write_text(text)
+                    shell = subprocess.run(['bash', '-c', '. "$1"; orca_fixed_paths_parse "$2"', 'parity',
+                                            str(PROFILE/'resources/orca/fixed-paths.bash'), str(listing)],
+                                           capture_output=True, text=True, timeout=10)
+                    if name in invalid:
+                        self.assertNotEqual(shell.returncode, 0)
+                        with self.assertRaises(ValueError):
+                            parse(text)
+                        continue
+                    self.assertEqual(shell.returncode, 0, shell.stderr)
+                    self.assertEqual([tuple(line.split(' ', 1)) for line in shell.stdout.splitlines()], parse(text))
 
     def test_historical_identity_and_transport_fail_closed(self):
         harness = runpy.run_path(str(ROOT / 'dev/verify-release-upgrades.py'))

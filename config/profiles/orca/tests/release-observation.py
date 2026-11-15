@@ -7,10 +7,26 @@ import re
 FIXTURES = Path(__file__).parent / 'fixtures/release-observation'
 
 
+FIXED_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
+
+
+def parse_fixed_paths(text):
+    """Parse the fixed-path list by the rule of resources/orca/fixed-paths.bash."""
+    entries = []
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0].startswith('#'):
+            continue
+        if (len(fields) != 2 or fields[0] not in ('unit', 'unit-helper', 'path')
+                or not FIXED_PATH.fullmatch(fields[1]) or '..' in fields[1]):
+            raise ValueError('invalid Orca fixed path list entry')
+        entries.append((fields[0], fields[1]))
+    return entries
+
+
 def fixed_paths(resource):
     """The profile's one fixed-path list, as the observer receives it."""
-    paths = [line.split()[1] for line in (resource / 'fixed-paths').read_text().splitlines()
-             if line.strip() and not line.startswith('#')]
+    paths = [path for _, path in parse_fixed_paths((resource / 'fixed-paths').read_text())]
     return [str(len(paths)), *paths]
 
 
@@ -29,8 +45,9 @@ def read_only_stdin_commands(package):
         if (resource / 'handler.sh').read_bytes() != current_handler.read_bytes():
             return []
         fixed = resource / 'fixed-paths'
+        parser = resource / 'fixed-paths.bash'
         if any(path.is_symlink() or not path.is_file() or path.read_bytes() != (current_resource/path.name).read_bytes()
-               for path in (contract, observer, fixed)):
+               for path in (contract, observer, fixed, parser)):
             return []
     if not contract.is_file() or not observer.is_file():
         if contract.exists() or contract.is_symlink() or observer.exists() or observer.is_symlink():

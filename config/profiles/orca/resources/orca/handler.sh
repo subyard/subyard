@@ -70,20 +70,19 @@ ORCA_GUEST_STEP_STATUS=
 # The one fixed-path list of this profile (resources/orca/fixed-paths): every
 # Orca-installed guest path, read by the observer's link check, the apply's
 # link refusal and `orca remove`, so the three can never diverge.
+# shellcheck source=config/profiles/orca/resources/orca/fixed-paths.bash
+. "$RESOURCE_DIR/fixed-paths.bash"
 ORCA_FIXED_PATHS=() ORCA_FIXED_UNIT_FILES=() ORCA_FIXED_UNIT_HELPERS=() ORCA_FIXED_OTHER_PATHS=()
+orca_fixed_entries="$(orca_fixed_paths_parse "$RESOURCE_DIR/fixed-paths")" || exit 1
 while read -r orca_kind orca_path; do
-  case "$orca_kind" in ''|'#'*) continue ;; esac
-  [[ "$orca_path" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$orca_path" != *..* ]] || {
-    printf 'invalid Orca fixed path list entry\n' >&2; exit 1; }
   case "$orca_kind" in
     unit) ORCA_FIXED_UNIT_FILES+=("$orca_path") ;;
     unit-helper) ORCA_FIXED_UNIT_HELPERS+=("$orca_path") ;;
     path) ORCA_FIXED_OTHER_PATHS+=("$orca_path") ;;
-    *) printf 'invalid Orca fixed path list entry\n' >&2; exit 1 ;;
   esac
   ORCA_FIXED_PATHS+=("$orca_path")
-done <"$RESOURCE_DIR/fixed-paths"
-unset orca_kind orca_path
+done <<<"$orca_fixed_entries"
+unset orca_kind orca_path orca_fixed_entries
 
 valid_guest_tmp_dir() {
   [[ "$1" =~ ^/tmp/subyard-orca\.[A-Za-z0-9]{6,}$ ]]
@@ -870,11 +869,17 @@ observe_runtime_contract() {
 # installation, never current with a conditional binding: its apply then ends
 # in the typed yard-local failure instead of blocking the release.
 observe_bound_runtime_contract() {
-  local observation hook_binding="" report
+  local observation hook_binding="" report class step
   observation="$(observe_runtime_contract)" || return 1
   if [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] &&
     yexec systemctl is-active --quiet "$ORCA_UNIT"; then
-    report="$(project_registration_report source)" || report=""
+    # The read runs bracketed so a guest that ran and failed is distinguishable
+    # from Incus not reaching the yard, which is never a yard-local state.
+    class="$(mktemp)" || die 'Orca native catalog read cannot create a temporary file'
+    report="$(ORCA_RUNTIME_EFFECT=native-catalog ORCA_GUEST_STEP_STATUS="$class" project_registration_report source)" || report=""
+    step="$(cat -- "$class" 2>/dev/null || true)"
+    rm -f -- "$class"
+    [ "$step" != transport ] || die 'Orca native hook catalog cannot be read: Incus did not reach the yard'
     hook_binding="$(jq -r '.catalogDigest // empty' <<<"$report" 2>/dev/null)" || hook_binding=""
     if ! [[ "$hook_binding" =~ ^[0-9a-f]{64}$ ]]; then
       [[ "$(jq -r .desired <<<"$observation")" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native hook catalog fingerprint unavailable'
@@ -1776,7 +1781,7 @@ emit_remove_assessment() {
 
 cmd_remove() {
   local devices class failed=0
-  remove_route_state || { warn 'Orca removal cannot read the owner route; it stays until a rerun can'; ORCA_REMOVE_ROUTE=unknown; }
+  remove_route_state || { warn 'Orca removal cannot read the owner route; it stays until a rerun can'; ORCA_REMOVE_ROUTE=unknown; failed=1; }
   case "$ORCA_REMOVE_ROUTE" in
     foreign) warn "Orca removal left the unreceipted device '$ORCA_DEVICE' untouched; remove it from the yard instance if it is not needed" ;;
     owned:*)
@@ -1856,8 +1861,10 @@ if inactive "$main_state"; then
       fi
     fi
   fi
-  # Unit files go only while the main unit is inactive, and each only once its
-  # own unit is inactive and no longer enabled, so a rerun can still disable it.
+  # Orca unit files go only while the main unit is inactive, and each only once
+  # its own unit is inactive and no longer enabled, so a rerun can still disable
+  # it. An alias link (a name systemd resolves to another unit) is not an Orca
+  # unit and was removed above, before this gate.
   for index in "${!unit_files[@]}"; do
     path="${unit_files[$index]}"
     if [ "$index" -lt "${#units[@]}" ]; then

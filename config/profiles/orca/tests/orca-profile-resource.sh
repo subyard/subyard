@@ -173,6 +173,16 @@ case "${1:-}" in
         printf 'Error: injected Incus transport failure\n' >&2
         exit 1
       fi
+      # Chosen native catalog reads fail in the transport with Incus's own status.
+      if [ -e "$state_root/transport-owner-host-calls" ] && [[ " $* " == *' /usr/bin/python3 -I -B - owner-host '* ]]; then
+        calls="$(( $(cat "$state_root/owner-host-count" 2>/dev/null || printf 0) + 1 ))"
+        printf '%s\n' "$calls" >"$state_root/owner-host-count"
+        if grep -qx "$calls" "$state_root/transport-owner-host-calls"; then
+          cat >/dev/null
+          printf 'Error: injected Incus transport failure\n' >&2
+          exit 255
+        fi
+      fi
       ORCA_MOCK_GUEST_STEP=1 "$0" "${args[@]:0:$((separator + 1))}" "${args[@]:$((separator + 5))}" || exit 200
       exit 0
     fi
@@ -1085,7 +1095,8 @@ for injected in host-staging push unsafe-guest-path guest-transport forged-guest
     host-staging) host_tmp="$TMP/missing-host-tmp" expected='mktemp' ;;
     push) touch "$TMP/fail-push" ;;
     unsafe-guest-path) touch "$TMP/unsafe-guest-tmp"; expected='unsafe temporary path' ;;
-    guest-transport) touch "$TMP/fail-guest-transport"; expected='could not enable lingering' ;;
+    # The first bracketed guest read is the native catalog read of the running Orca.
+    guest-transport) touch "$TMP/fail-guest-transport"; expected='Incus did not reach the yard' ;;
     forged-guest-record) touch "$TMP/forge-guest-record"; expected='unsafe temporary path' ;;
   esac
   if TMPDIR="$host_tmp" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
@@ -1899,6 +1910,32 @@ for fault in native-catalog unsafe-link linked-codex-dir linked-discover; do
   [ "$fault" != linked-codex-dir ] || [ "$(cat "$TMP/link-dir/codex")" = kept ] || fail 'orca remove followed a linked orca-codex directory'
   rm -f "$TMP/project-counts-fail"
 done
+# A native catalog read that Incus cannot complete is a blocking failure in
+# observe and in the apply's verify, with no yard-local record; only a guest
+# that ran and failed (above) makes the runtime stale.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+printf '1\n' >"$TMP/transport-owner-host-calls"
+rm -f "$TMP/owner-host-count"
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe >"$TMP/catalog-transport.out" 2>&1 </dev/null; then
+  fail 'observe concealed a native catalog transport failure'
+fi
+! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/catalog-transport.out" || fail 'observe classified a catalog transport failure'
+rm -f "$TMP/transport-owner-host-calls" "$TMP/owner-host-count"
+rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe </dev/null)"
+jq -e '.state == "stale"' <<<"$observation" >/dev/null || fail 'a missing marker was not stale before the verify transport case'
+# The apply's own first read succeeds; the verify read fails in the transport.
+printf '2\n' >"$TMP/transport-owner-host-calls"
+rm -f "$TMP/owner-host-count"
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-catalog \
+  "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" >"$TMP/catalog-verify-transport.out" 2>&1 </dev/null; then
+  fail 'the apply concealed a verify catalog transport failure'
+fi
+[ "$(cat "$TMP/owner-host-count")" -ge 2 ] || fail 'the verify catalog read did not run'
+! grep -Fq 'subyard-profile-runtime-diagnostic-v1' "$TMP/catalog-verify-transport.out" \
+  || { cat "$TMP/catalog-verify-transport.out" >&2; fail 'a verify catalog transport failure was reported as yard-local'; }
+rm -f "$TMP/transport-owner-host-calls" "$TMP/owner-host-count"
+run_orca remove --yes >/dev/null || fail 'orca remove after the catalog transport cases failed'
 unset SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE
 # A second remove is a no-op.
 assessment="$(SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" remove)"
@@ -1993,6 +2030,17 @@ grep -Fq 'cannot confirm the owner route removal' "$TMP/remove-continue.out" &&
 rm -f "$TMP/fail-device-list-calls" "$TMP/device-list-count" "$TMP/fail-guest-transport"
 run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed confirmation read'
 assert_orca_removed 'orca remove after a failed confirmation read'
+# A failed first route read is a non-zero remove even when everything else is
+# removed and a later read succeeds; the rerun is the retry.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+rm -f "$ORCA_TEST_ROUTE" "$TMP/config-user.subyard.resource.orca-server" "$TMP/config-user.subyard.deferred_publication.orca-server"
+printf '3\n' >"$TMP/fail-device-list-calls"
+rm -f "$TMP/device-list-count"
+if run_orca remove --yes >"$TMP/remove-first-read.out" 2>&1; then fail 'orca remove concealed a failed first route read'; fi
+grep -Fq 'cannot read the owner route' "$TMP/remove-first-read.out" || { cat "$TMP/remove-first-read.out" >&2; fail 'a failed first route read was not reported'; }
+rm -f "$TMP/fail-device-list-calls" "$TMP/device-list-count"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed first route read'
+assert_orca_removed 'orca remove after a failed first route read'
 # A failed device read is never a foreign device: the remove is non-zero and
 # keeps the route and its receipt.
 ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
