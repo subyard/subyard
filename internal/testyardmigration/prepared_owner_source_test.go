@@ -9,7 +9,7 @@ import (
 )
 
 func TestOwnerRegistrationRestoreFactFollowsDurableRename(t *testing.T) {
-	for _, cut := range []string{"complete", "before-rename", "fsync", "post-fsync", "result-write", "late-mode"} {
+	for _, cut := range []string{"complete", "before-rename", "fsync", "post-fsync"} {
 		t.Run(cut, func(t *testing.T) {
 			options, before := flatOwnerFaultFixture(t)
 			shape, _, _ := preparedLegacyState(before.State)
@@ -19,70 +19,56 @@ func TestOwnerRegistrationRestoreFactFollowsDurableRename(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer original.close()
-			record, err := retainedOwnerMember(original.fd, before)
+			info, err := os.Lstat(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-
+			payload := read(t, path)
 			if err := copyBoundRegistration(options, original, current, before); err != nil {
 				t.Fatal(err)
 			}
 			if err := archivePreparedRegistration(options, original, before); err != nil {
 				t.Fatal(err)
 			}
-			called := false
-			var result PreparedOwnerMember
-			options.RecordRegistrationRestore = func(member PreparedOwnerMember) error {
-				called = true
-				expected := record
-				expected.ChangedSeconds, expected.ChangedNanos = member.ChangedSeconds, member.ChangedNanos
-				if member != expected {
-					return errors.New("restored registration changed its original member")
-				}
-				if cut == "result-write" {
-					return errors.New("result publication refused")
-				}
-				result = member
-				return nil
+			archive, err := preparedRegistrationArchive(options, before)
+			if err != nil {
+				t.Fatal(err)
 			}
+			cutErr := errors.New("restore cut")
 			options.fault = func(point string) error {
-				if cut == "before-rename" && point == "after-compensation-registration-validation-before-restore" || cut == "post-fsync" && point == "after-compensation-registration-recreation" {
-					return errors.New("original cut")
-				}
-				if cut == "late-mode" && point == "after-compensation-registration-recreation" {
-					return os.Chmod(path, 0644)
+				if cut == "before-rename" && point == "after-compensation-registration-validation-before-restore" ||
+					cut == "post-fsync" && point == "after-compensation-registration-recreation" {
+					return cutErr
 				}
 				return nil
 			}
 			if cut == "fsync" {
 				options.syncOwnerDirectory = func(role string, fd int) error {
 					if role == "registration-restore-destination" {
-						return errors.New("sync cut")
+						return cutErr
 					}
 					return unix.Fsync(fd)
 				}
 			}
 			err = restorePreparedRegistration(options, before)
-			if cut != "complete" {
-				if err == nil {
-					t.Fatal("incomplete result accepted")
+			if cut == "complete" {
+				if err != nil {
+					t.Fatalf("durable original restore refused: %v", err)
 				}
-				if called != (cut == "result-write" || cut == "late-mode") {
-					t.Fatal("result published before completed owning rename")
-				}
-				return
+			} else if !errors.Is(err, cutErr) {
+				t.Fatalf("restore cut was not returned: %v", err)
 			}
-			if err != nil || !called {
-				t.Fatal("durable original restore refused", err)
+			retained, absent := path, archive.archive
+			if cut == "before-rename" {
+				retained, absent = archive.archive, path
 			}
-			var stat unix.Stat_t
-			if err := unix.Fstat(original.fd, &stat); err != nil {
-				t.Fatal(err)
+			restored, err := os.Lstat(retained)
+			if err != nil || !os.SameFile(info, restored) || read(t, retained) != payload {
+				t.Fatalf("original registration was not retained at %s: %v", retained, err)
 			}
-			if result.ChangedSeconds != stat.Ctim.Sec || result.ChangedNanos != stat.Ctim.Nsec {
-				t.Fatal("restored registration result differs from its retained descriptor")
+			if _, err := os.Lstat(absent); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unexpected registration at %s: %v", absent, err)
 			}
-
 		})
 	}
 }

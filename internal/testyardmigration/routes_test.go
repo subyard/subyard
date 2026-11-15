@@ -26,7 +26,7 @@ func TestRouteConsumersObserveGitTemplateWithLocalSlotCount(t *testing.T) {
 		"YARD_TEMPLATE=test-vms\nE2E_VM_SLOT_COUNT=3\n")
 	local := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
 	testkit.WriteFile(t, local, []byte("E2E_VM_SLOT_COUNT='4'\n"), 0o600)
-	before, err := prepareRouteConsumers(context.Background(), options, false)
+	before, err := PrepareRouteConsumersActivation(context.Background(), options)
 	if err != nil {
 		t.Fatalf("layered route observation: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRouteConsumerActivationUsesGitTemplateWithLocalSlotOverride(t *testing.
 func TestRouteConsumersPrepareRejectsForeignDevice(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	write(t, state.defaultDevice, "wrong\n")
-	before, err := prepareRouteConsumers(context.Background(), options, false)
+	before, err := PrepareRouteConsumersActivation(context.Background(), options)
 	if err == nil || before != "" || !strings.Contains(err.Error(), "foreign or drifted") {
 		t.Fatalf("foreign route device preparation = %q, %v", before, err)
 	}
@@ -80,7 +80,7 @@ func TestRouteConsumersPrepareRejectsForeignDevice(t *testing.T) {
 func TestRouteConsumersSkipGuestProbeForStoppedYard(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	write(t, state.defaultStatus, "STOPPED\n")
-	before, err := prepareRouteConsumers(context.Background(), options, false)
+	before, err := PrepareRouteConsumersActivation(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestRouteConsumersSkipGuestProbeForStoppedYard(t *testing.T) {
 func TestRouteConsumersSkipOwnerGuestProbeForStoppedCanonicalYard(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	write(t, state.ownerStatus, "STOPPED\n")
-	before, err := prepareRouteConsumers(context.Background(), options, false)
+	before, err := PrepareRouteConsumersActivation(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,13 +420,9 @@ func TestRouteConsumersHistoricalMigrationPreservesConsumerContract(t *testing.T
 	writeIsolatedRouteTemplate(t, options)
 	write(t, filepath.Join(options.ConfigHome, "yards", "demo", "config.env"), "SSH_PORT=2233\nYARD_TEMPLATE=isolated\n")
 	ctx := context.Background()
-	before, err := prepareRouteConsumers(ctx, options, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(before, `"yard":"demo"`) {
-		t.Fatal("historical snapshot changed its frozen whole-host consumer set")
-	}
+	// Exact snapshot from prepareRouteConsumers(ctx, options, false) at 380e810c.
+	// Retained history keeps consumers whose policy now forbids host access.
+	before := `{"schemaVersion":1,"active":true,"consumers":[{"project":"subyard-demo","instance":"yard-demo","yard":"demo","mounted":false},{"project":"subyard","instance":"yard","yard":"default","mounted":false}]}`
 	write(t, state.defaultDevice, "correct\n")
 	write(t, state.extraDevice, "correct\n")
 	if err := VerifyRouteConsumers(ctx, options, before); err != nil {

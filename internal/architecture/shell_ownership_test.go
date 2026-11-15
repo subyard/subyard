@@ -151,7 +151,6 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	expected := map[string][]string{
 		"install-power-reconciler.sh": {
-			"internal/adapters/reconcileruntime/prepared_host_sources.go",
 			"internal/adapters/reconcileruntime/runtime.go",
 		},
 		"lifecycle-guard.sh": {

@@ -26,24 +26,23 @@ const (
 
 type Options struct {
 	// ProspectiveFiles is used only by read-only activation planning.
-	ProspectiveFiles          *config.ProspectiveFiles
-	Executable                string
-	RepositoryRoot            string
-	Incus                     string
-	ConfigHome                string
-	DataHome                  string
-	Environment               []string
-	Stdout                    io.Writer
-	Stderr                    io.Writer
-	RunYard                   func(context.Context, string, io.Writer, ...string) error
-	EnsureImageProject        func(context.Context, string, bool) error
-	RecordRegistrationRestore func(PreparedOwnerMember) error
-	fault                     func(string) error
-	syncRegistrationFile      func(*os.File) error
-	openRegistrationStaging   func(int, string) (int, error)
-	syncOwnerDirectory        func(string, int) error
-	RecoveryToken             string
-	TerminalCleanup           bool
+	ProspectiveFiles        *config.ProspectiveFiles
+	Executable              string
+	RepositoryRoot          string
+	Incus                   string
+	ConfigHome              string
+	DataHome                string
+	Environment             []string
+	Stdout                  io.Writer
+	Stderr                  io.Writer
+	RunYard                 func(context.Context, string, io.Writer, ...string) error
+	EnsureImageProject      func(context.Context, string, bool) error
+	fault                   func(string) error
+	syncRegistrationFile    func(*os.File) error
+	openRegistrationStaging func(int, string) (int, error)
+	syncOwnerDirectory      func(string, int) error
+	RecoveryToken           string
+	TerminalCleanup         bool
 }
 
 type State string

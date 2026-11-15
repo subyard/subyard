@@ -45,6 +45,34 @@ func TestHeadlessReportingReaderProbe(t *testing.T) {
 	}
 }
 
+func TestVMStartPolicyRejectsGlobalOptionsBeforeAdmission(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"--yes", "_vm-start-policy", "p", "i"},
+		{"-Y", "default", "_vm-start-policy", "p", "i"},
+		{"--yes", "-Y", "remote/yard", "_vm-start-policy", "p", "i"},
+	} {
+		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
+			home := testkit.TempDir(t)
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: repositoryRoot(t), Arguments: arguments,
+				Environment: []string{"HOME=" + home}, Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 2 || stdout.Len() != 0 ||
+				stderr.String() != "yard: _vm-start-policy must be invoked directly without global options\n" {
+				t.Fatalf("internal invocation: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			entries, err := os.ReadDir(home)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("internal invocation reached admission or audit: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
 func TestStreamPromptAcceptsDefaultYesOnlyOnInteractiveEnter(t *testing.T) {
 	var output bytes.Buffer
 	accepted, err := (streamPrompt{

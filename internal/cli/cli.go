@@ -484,6 +484,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return code
 	}
 	name := remaining[0]
+	if name == "_vm-start-policy" {
+		cli.errorf("_vm-start-policy must be invoked directly without global options")
+		return 2
+	}
 	if name == "_installation" {
 		return cli.runInstallation(ctx, remaining[1:])
 	}

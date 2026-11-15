@@ -116,11 +116,11 @@ func prepareCanonicalRouteActivationBackend(ctx context.Context, options Options
 // PrepareRouteConsumersActivation snapshots current route consumers according
 // to their effective host-access policy, independently of the frozen migration.
 func PrepareRouteConsumersActivation(ctx context.Context, options Options) (string, error) {
-	before, err := prepareRouteConsumers(ctx, options, true)
+	before, err := prepareRouteConsumers(ctx, options)
 	return before, routeDiagnostic(err, "consumer preparation failed", "", "", "", false)
 }
 
-func prepareRouteConsumers(ctx context.Context, options Options, activation bool) (string, error) {
+func prepareRouteConsumers(ctx context.Context, options Options) (string, error) {
 	if err := validateOptions(&options); err != nil {
 		return "", err
 	}
@@ -138,7 +138,7 @@ func prepareRouteConsumers(ctx context.Context, options Options, activation bool
 	if _, err := inspectCurrentRoute(options); err != nil {
 		return "", err
 	}
-	yards, err := inspectRouteConsumerYards(ctx, options, activation)
+	yards, err := inspectRouteConsumerYards(ctx, options, true)
 	if err != nil {
 		return "", err
 	}
