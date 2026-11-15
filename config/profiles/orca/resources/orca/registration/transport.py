@@ -75,7 +75,12 @@ class RuntimeRPC:
                 connection.settimeout(remaining)
                 connection.connect(endpoint)
                 if before_send is not None:
-                    before_send(runtime_id)
+                    try:
+                        before_send(runtime_id)
+                    except RpcError as error:
+                        # A nested call's answer is not this request's: nothing was sent.
+                        error.rejected = error.unknown = False
+                        raise
                     # Pre-send identity checks consume the same budget; never send late.
                     if deadline - time.monotonic() <= 0:
                         raise RpcError("Orca registration time budget exhausted" if budget_limited

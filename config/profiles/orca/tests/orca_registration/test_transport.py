@@ -219,3 +219,16 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(self.error) as raised:
             self.client(self.metadata).call("session.tabs.close", {"worktree": "id:a::/w", "tabId": "t"})
         self.assertFalse(raised.exception.rejected or raised.exception.unknown)
+
+    def test_rejection_raised_by_a_pre_send_check_is_not_this_requests_answer(self):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(self.endpoint)
+        listener.listen()
+        self.addCleanup(listener.close)
+
+        def nested_rejection(_):
+            raise self.error("Orca runtime rejected terminal.list", rejected=True)
+        with self.assertRaises(self.error) as raised:
+            self.client(self.metadata).call("session.tabs.close", {"worktree": "id:a::/w", "tabId": "t"},
+                                            before_send=nested_rejection)
+        self.assertFalse(raised.exception.rejected or raised.exception.unknown)

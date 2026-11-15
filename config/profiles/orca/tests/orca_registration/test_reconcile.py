@@ -2318,8 +2318,8 @@ class RemovedProjectSessionTests(unittest.TestCase):
                     self.assertIn("by hand", item["nextAction"])
                     self.assertTrue(report["settled"], report)
 
-    def fail_pre_send_read(self, write_method, read_method="terminal.list"):
-        """Fail one read inside write_method's pre-send check, like a cold or incomplete read."""
+    def fail_pre_send_read(self, write_method, read_method="terminal.list", rejected=False):
+        """Fail one read inside write_method's pre-send check: a cold, incomplete or rejected read."""
         original = self.rpc.call
         state = {"armed": False, "done": False}
 
@@ -2328,19 +2328,21 @@ class RemovedProjectSessionTests(unittest.TestCase):
                 state["armed"] = True
             if method == read_method and state["armed"] and not state["done"]:
                 state["armed"], state["done"] = False, True
+                if rejected:
+                    raise self.error("Orca runtime rejected " + read_method, rejected=True)
                 raise self.error("Orca runtime request timed out: " + read_method, timed_out=True)
             return original(method, params, before_send=before_send)
         self.rpc.call = call
 
     def test_pre_send_failure_is_neither_a_refusal_nor_a_fallback(self):
-        for method in ("session.tabs.close", "terminal.stopExact"):
-            with self.subTest(method=method):
+        for method, rejected in itertools.product(("session.tabs.close", "terminal.stopExact"), (False, True)):
+            with self.subTest(method=method, rejected_read=rejected):
                 self.setUp()
                 self.sessions()
                 if method == "session.tabs.close":
                     self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
                 shutil.rmtree(self.root.parent)
-                self.fail_pre_send_read(method)
+                self.fail_pre_send_read(method, rejected=rejected)
                 report = self.run_sync()
                 item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
                 # Nothing was sent, so this pass is undetermined: no protection, no attention,

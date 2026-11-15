@@ -729,6 +729,10 @@ class _Stale(Exception):
     """The target left the recomputed plan before sending; nothing was sent."""
 
 
+class _PreSendFailure(RpcError):
+    """A read or check inside a pre-send callback failed; nothing was sent."""
+
+
 class CleanupRefused(RpcError):
     """Orca definitively refused a close and readback still shows the target."""
 
@@ -777,11 +781,20 @@ def _send_and_confirm(rpc, repo, fence, action, deadline, refused_stops, allow_l
             raise _Stale()
         fence.authorize(read_set)
 
+    def guarded(runtime_id):
+        try:
+            before_send(runtime_id)
+        except (CleanupRefusal, _Stale):
+            raise
+        except RpcError as error:
+            # Even a rejected nested read is only a pre-send failure of this request.
+            raise _PreSendFailure(str(error)) from None
+
     try:
-        result = rpc.call(method, params, before_send=before_send)
+        result = rpc.call(method, params, before_send=guarded)
         refused = method == "session.tabs.close" and result.get("refused") is True
         unknown = False
-    except (CleanupRefusal, _Stale):
+    except (CleanupRefusal, _Stale, _PreSendFailure):
         raise
     except RpcError as error:
         if not (error.rejected or error.unknown):
