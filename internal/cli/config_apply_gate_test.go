@@ -379,7 +379,7 @@ func TestIntegrationRetryRepairScopeAndFreshness(t *testing.T) {
 				runtime.plan.Changed = false
 				writeCLIFile(t, fixture.readyMarker, "ready\n", 0600)
 			}
-			err = program.finishConfigApplyRepair(context.Background(), permit)
+			_, err = program.finishConfigApplyRepair(context.Background(), permit)
 			if (err != nil) != (scenario == "remaining drift") || runtime.applied != 0 || !bytes.Equal(before, mustReadConfigFixture(t, fixture.journalPath)) {
 				t.Fatal("retry readiness or read-only history boundary failed", err)
 			}
@@ -482,7 +482,7 @@ func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
 				}
 				writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
 			}
-			err = fixture.cli.finishConfigApplyRepair(context.Background(), permit)
+			_, err = fixture.cli.finishConfigApplyRepair(context.Background(), permit)
 			if (err != nil) != (scenario == "remaining drift") {
 				t.Fatalf("post-init readiness: %v", err)
 			}
@@ -686,7 +686,7 @@ func TestProfileRuntimeInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *
 			defer unlock()
 			platform.converged[ports.ReconcileStageProfileRuntimes] = true
 			writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
-			if err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
+			if _, err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -763,7 +763,7 @@ func TestConfigApplyRepairUsesCompletedProtectedGateAndStableLock(t *testing.T) 
 	if err := os.WriteFile(fixture.readyMarker, []byte("ready\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
+	if _, err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(fixture.journalPath)
@@ -793,7 +793,7 @@ func TestIntegrationRetryAdmissionKeepsCompletedHistoryAndLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
-	err = fixture.cli.finishConfigApplyRepair(context.Background(), permits.integrationRetry)
+	_, err = fixture.cli.finishConfigApplyRepair(context.Background(), permits.integrationRetry)
 	unlock()
 	if err != nil {
 		t.Fatal(err)

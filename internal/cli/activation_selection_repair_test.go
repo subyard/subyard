@@ -481,6 +481,14 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 		testkit.WriteFile(t, enginePath, []byte(engine), 0700)
 
 	}
+	if _, pending := extraAssets["config/fixture-pending-beside-drift"]; pending {
+		// Activation drift of the completed release with another yard's pending
+		// finding, as the engine reports it while that drift remains.
+		enginePath := filepath.Join(root, "bin/yard-engine")
+		engine := strings.Replace(string(mustReadConfigFixture(t, enginePath)), `"message":"activation drift","retry":"run yard update"`,
+			`"message":"activation drift","retry":"run yard update","warnings":["yard named: fixture finding; waits for yard init after the release is ready"]`, 1)
+		testkit.WriteFile(t, enginePath, []byte(engine), 0700)
+	}
 	manifest := ""
 	for _, tree := range []string{"bin", "config", "scripts"} {
 		err := filepath.WalkDir(filepath.Join(root, tree), func(path string, entry fs.DirEntry, err error) error {

@@ -513,15 +513,25 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 				}
 				return
 			}
+			released := "yard default: integration configuration awaiting yard init releases ownership of changed or missing owned configuration in place"
+			if desired == "release" || desired == "release-completed" {
+				// Plain init releases the changed fields in place, so the repair defers the
+				// yard as a whole: its finding names that init, and its plan is dropped.
+				_, planned := owner.integrationPlans["default"]
+				if err != nil || len(observation.Pending) != 1 || !strings.HasPrefix(observation.Pending[0].Message, released) ||
+					observation.Pending[0].Retry != shellquote.Command([]string{"yard", "-Y", "default", "init"}) || planned || !owner.pendingDeferral().deferred("default") {
+					t.Fatalf("repair would rewrite fields pending init releases: %#v %v", observation, err)
+				}
+				return
+			}
 			if strings.HasPrefix(desired, "release") {
-				// Plain init releases the changed fields in place; the repair must not rewrite them first.
+				// An independent conflict keeps the release as one refusal with it.
 				var release pendingInitOwnershipRelease
 				if !errors.As(err, &release) || release.yard != "default" || !slices.Equal(release.paths, []string{"/home/dev/.codex/config.toml"}) || !release.ActivationPendingConfiguration() {
 					t.Fatalf("repair would rewrite fields pending init releases: %#v %v", observation, err)
 				}
 				message, retry := release.ActivationDiagnostic()
-				want := "yard default: integration configuration awaiting yard init releases ownership of changed or missing owned configuration in place"
-				if !strings.HasPrefix(message, want) || retry != shellquote.Command([]string{"yard", "-Y", "default", "init"}) || len(message) > 512 {
+				if !strings.HasPrefix(message, released) || retry != shellquote.Command([]string{"yard", "-Y", "default", "init"}) || len(message) > 512 {
 					t.Fatalf("diagnostic=%q retry=%q", message, retry)
 				}
 				var diagnostic interface{ ActivationDiagnostic() (string, string) }
@@ -529,15 +539,11 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 					t.Fatal("refusal has no public diagnostic")
 				}
 				combined, _ := diagnostic.ActivationDiagnostic()
+				// Both independent findings are reported, the conflict first.
 				var conflict pendingInitConflictError
-				if desired == "release+conflict" {
-					// Both independent findings are reported, the conflict first.
-					if !errors.As(err, &conflict) || !conflict.conflict ||
-						!strings.HasPrefix(combined, "yard default: integration configuration awaiting yard init has an ownership conflict") || !strings.Contains(combined, "; "+want) {
-						t.Fatalf("release hid an independent conflict: %v %q", err, combined)
-					}
-				} else if errors.As(err, &conflict) {
-					t.Fatalf("release reported a conflict: %v", err)
+				if !errors.As(err, &conflict) || !conflict.conflict ||
+					!strings.HasPrefix(combined, "yard default: integration configuration awaiting yard init has an ownership conflict") || !strings.Contains(combined, "; "+released) {
+					t.Fatalf("release hid an independent conflict: %v %q", err, combined)
 				}
 				return
 			}

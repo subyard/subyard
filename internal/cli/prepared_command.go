@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -834,10 +835,13 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 			result, err = cli.executeInitProfileProvision(ctx, execution, orchestrator, prepared.Plan, diagnostics)
 		}
 		if err == nil && cli.permits.profileInit != nil {
-			err = cli.finishConfigApplyRepair(ctx, cli.permits.profileInit)
+			// Readiness verification below reports what remains pending.
+			_, err = cli.finishConfigApplyRepair(ctx, cli.permits.profileInit)
 		}
 		if err == nil && !cli.releaseTransitionChild {
-			err = cli.verifyInitReleaseReadiness(ctx, execution.loaded.Context.YardName)
+			var pending []releasetransition.Blocker
+			pending, err = cli.verifyInitReleaseReadiness(ctx, execution.loaded.Context.YardName)
+			reportStillPending(diagnostics, pending)
 		}
 		if err == nil && !cli.releaseTransitionChild {
 			err = cli.publishAppliedIdentityHint(ctx, execution.loaded)

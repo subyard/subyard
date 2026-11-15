@@ -24,6 +24,8 @@ type profileRuntimeActivationReconciler struct {
 	request  releasetransition.ProcessRequest
 	id       string
 	recovery map[string]ports.RuntimeObservation
+	// releases are those of the latest observation, for the deferral decision.
+	releases releasetransition.ReleasePair
 }
 
 func (reconciler *profileRuntimeActivationReconciler) observeTarget(ctx context.Context, operation *CLI, target configTarget) (ports.RuntimeObservation, error) {
@@ -72,6 +74,12 @@ func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Contex
 		targets = nil
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
+	// Release repair defers yards with pending configuration for every yard-scoped
+	// owner. Host key tools are one installation that every yard only addresses.
+	if activation := operation.activation; reconciler.id != "key-tools-runtime" && activation != nil && activation.repair {
+		deferred := activation.pending.decided(ctx, reconciler.releases)
+		targets = slices.DeleteFunc(targets, func(target configTarget) bool { return deferred[target.Name] })
+	}
 	return operation, targets, nil
 }
 
@@ -101,6 +109,7 @@ func profileActivationPlatform(operation *CLI, target configTarget) ports.InitPl
 func (reconciler *profileRuntimeActivationReconciler) Observe(
 	ctx context.Context, releases releasetransition.ReleasePair, _ releasetransition.ReleaseLinks,
 ) (releasetransition.V2ActivationObservation, error) {
+	reconciler.releases = releases
 	desiredDigest, err := reconciler.desired(releases)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
@@ -331,6 +340,7 @@ func coreInstalledRuntimeID(id string) bool {
 // Runtime hooks own guarded, repeatable convergence from partial delivery. Bind
 // a fresh native plan to each yard's current CAS contract before new consent.
 func (reconciler *profileRuntimeActivationReconciler) PrepareActivationRecovery(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks) (releasetransition.Fingerprint, error) {
+	reconciler.releases = releases
 	complete, err := reconciler.sourceMigrationsComplete()
 	if err != nil {
 		return "", err

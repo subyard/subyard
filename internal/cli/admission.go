@@ -303,7 +303,7 @@ func (cli *CLI) admitReleaseGate(
 		cli.errorf("inspect release transition: %v", gateErr)
 		return permits, 1, true
 	}
-	if outcome == nil {
+	if outcome == nil || cli.ordinaryCommandAdmitted(admission.handler, outcome, gateInspection) {
 		return permits, 0, false
 	}
 	switch admission.recovery {
@@ -381,7 +381,7 @@ func (cli *CLI) admitTeardownGate(
 		cli.errorf("inspect release transition: %v", gateErr)
 		return nil, 1, true
 	}
-	if outcome == nil {
+	if outcome == nil || cli.ordinaryCommandAdmitted("@teardown", outcome, gateInspection) {
 		return nil, 0, false
 	}
 	permit, err := cli.prepareTeardownRepair(ctx, loaded, arguments, *outcome)

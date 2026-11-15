@@ -559,9 +559,10 @@ init or disable of the deselected integration, disclosed in the plan, only while
 developer's link to exactly the configured target; release activation leaves it. Release activation finishes a
 committed transfer but never starts or restarts one; finishing there is best-effort, and
 another pending item can defer it to the next `yard init`, which completes it. A new
-adoption stays pending configuration until `yard init`. That plain `yard init` of the yard is admitted as the
-release repair even without configuration drift, when every pending item names it as the
-next step. Each typed transfer conflict is pending configuration with a next step and none blocks
+adoption stays pending configuration until `yard init`; release repair (`yard migrate`) defers
+that yard and repairs the others, while an update stops before activation. That plain `yard init` of the yard is admitted as the release repair even
+without configuration drift, when every pending item names the init of a yard as its next step
+and one names this yard. Each typed transfer conflict is pending configuration with a next step and none blocks
 unrelated commands. Transport failures and program crashes stop the operation as inspection failures.
 `yard init` binds the transfer it disclosed: if the source, target, operation or the
 listed existing entries change before provisioning executes it, nothing is transferred

@@ -1,6 +1,12 @@
 package cli
 
-import "github.com/Subyard/Subyard/internal/releasetransition"
+import (
+	"strings"
+
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
+)
 
 // A completed owner's pending integration configuration remains visible in
 // readiness. It cannot prevent unrelated commands from reaching their own guards.
@@ -16,7 +22,51 @@ func pendingIntegrationConfigurationShape(outcome *releasetransition.Outcome, in
 			return false
 		}
 	}
+	// Any owner's remaining activation drift is release work, not pending configuration.
+	for _, decision := range inspection.Decisions {
+		if decision.Scope == "activation" && decision.Decision == releasetransition.DecisionCanonicalize {
+			return false
+		}
+	}
 	return true
+}
+
+// ordinaryCommandAdmitted is the one pending-configuration admission of the
+// direct CLI and RPC: an ordinary command passes a gate blocked only by a
+// completed owner's pending configuration and reaches its own guards.
+func (cli *CLI) ordinaryCommandAdmitted(handler string, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
+	return ordinaryCommandDuringPendingConfiguration(handler) && cli.pendingIntegrationConfigurationGate(outcome, inspection)
+}
+
+// pendingInitYards returns each yard whose plain init a blocker names as its
+// next step. It fails when any blocker names another step.
+func pendingInitYards(inspection *releasetransition.Inspection) (map[string]bool, bool) {
+	if inspection == nil || len(inspection.Blockers) == 0 {
+		return nil, false
+	}
+	yards := map[string]bool{}
+	for _, blocker := range inspection.Blockers {
+		// The exact quoted-command comparison below also rejects a missing prefix.
+		yard, _ := strings.CutPrefix(blocker.Retry, "'yard' '-Y' '")
+		yard, found := strings.CutSuffix(yard, "' 'init'")
+		if !found || !domain.SafeName(yard) ||
+			shellquote.Command([]string{"yard", "-Y", yard, "init"}) != blocker.Retry {
+			return nil, false
+		}
+		yards[yard] = true
+	}
+	return yards, true
+}
+
+// otherYardsPendingOnly reports a gate blocked only by other yards' pending
+// configuration whose next steps are those yards' inits. They wait for their own
+// inits and do not fail this yard's.
+func (cli *CLI) otherYardsPendingOnly(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection, yard string) bool {
+	if !cli.pendingIntegrationConfigurationGate(outcome, inspection) {
+		return false
+	}
+	yards, ok := pendingInitYards(inspection)
+	return ok && !yards[yard]
 }
 
 func ordinaryCommandDuringPendingConfiguration(handler string) bool {

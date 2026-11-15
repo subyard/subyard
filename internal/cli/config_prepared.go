@@ -533,7 +533,9 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		}
 	}
 	if cli.permits.configApply != nil {
-		return copyCLI.finishConfigApplyRepair(ctx, cli.permits.configApply)
+		pending, err := copyCLI.finishConfigApplyRepair(ctx, cli.permits.configApply)
+		reportStillPending(output, pending)
+		return err
 	}
 	return nil
 }

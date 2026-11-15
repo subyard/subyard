@@ -3305,6 +3305,67 @@ func TestRegisteredMigrationIgnoresParentResolvedSettings(t *testing.T) {
 }
 
 func TestBrokerActivationPlatformIgnoresInheritedDefaultContext(t *testing.T) {
+	program, configHome := activeBrokerProgram(t)
+	repositoryRoot := program.options.RepositoryRoot
+	reconciler, ok := program.brokerActivationReconciler(
+		releasetransition.ProcessRequest{Yard: "default", ConfigHome: configHome},
+	).(*activationStageReconciler)
+	if !ok {
+		t.Fatal("broker activation reconciler has an unexpected implementation")
+	}
+	applicability, err := reconciler.inspectApplicability(context.Background())
+	if err != nil || !applicability.applies || applicability.state != "active" ||
+		applicability.target != testyardmigration.CurrentYard {
+		t.Fatalf("broker applicability retained default context: %#v, err=%v", applicability, err)
+	}
+	platform, err := reconciler.platform(context.Background(), activationApplicability{
+		target: testyardmigration.CurrentYard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, ok := platform.(reconcileruntime.Runtime)
+	if !ok {
+		t.Fatalf("broker platform type = %T", platform)
+	}
+	if runtime.Yard.YardName != testyardmigration.CurrentYard ||
+		runtime.Yard.IncusProject != "subyard-test-yard" ||
+		runtime.Yard.YardInstanceName != "yard-test-yard" {
+		t.Fatalf("broker platform retained default context: %#v", runtime.Yard)
+	}
+	want := filepath.Join(repositoryRoot, "bin", "yard-engine")
+	if !slices.Contains(runtime.Environment, "SUBYARD_DISPATCHER_PATH="+want) {
+		t.Fatalf("broker platform does not use pinned engine %q: %q", want, runtime.Environment)
+	}
+}
+
+// Release repair defers the registered broker yard like any yard with pending
+// configuration: the broker stage keeps its Desired, reports nothing to do,
+// and enters no guest.
+func TestBrokerActivationLeavesDeferredBrokerYard(t *testing.T) {
+	program, configHome := activeBrokerProgram(t)
+	program.activation = &releaseConfiguration{repair: true, yards: map[string]releaseYardConfiguration{}}
+	program.activation.pending.record(map[string]bool{testyardmigration.CurrentYard: true})
+	// The fake Incus refuses every guest command the broker stage would run.
+	reconciler := program.brokerActivationReconciler(releasetransition.ProcessRequest{Yard: "default", ConfigHome: configHome}).(*activationStageReconciler)
+	// Desired binds the observed broker state, which deferral keeps.
+	applicability, err := reconciler.inspectApplicability(context.Background())
+	if err != nil || applicability.applies || applicability.state != "active" || applicability.target != testyardmigration.CurrentYard {
+		t.Fatalf("deferred broker applicability: %#v, err=%v", applicability, err)
+	}
+	releases := releasetransition.ReleasePair{From: "release-a", Target: "release-a"}
+	if deferred, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{}); err != nil || !deferred.Converged {
+		t.Fatalf("deferred broker yard observation=%#v err=%v", deferred, err)
+	}
+	if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatalf("deferred broker yard reconciliation: %v", err)
+	}
+}
+
+// activeBrokerProgram runs a CLI whose registered test-yard broker is active,
+// over a fake Incus that answers only the broker observation.
+func activeBrokerProgram(t *testing.T) (*CLI, string) {
+	t.Helper()
 	repositoryRoot := repositoryRoot(t)
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config", "subyard")
@@ -3359,36 +3420,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	reconciler, ok := program.brokerActivationReconciler(
-		releasetransition.ProcessRequest{Yard: "default", ConfigHome: configHome},
-	).(*activationStageReconciler)
-	if !ok {
-		t.Fatal("broker activation reconciler has an unexpected implementation")
-	}
-	applicability, err := reconciler.inspectApplicability(context.Background())
-	if err != nil || !applicability.applies || applicability.state != "active" ||
-		applicability.target != testyardmigration.CurrentYard {
-		t.Fatalf("broker applicability retained default context: %#v, err=%v", applicability, err)
-	}
-	platform, err := reconciler.platform(context.Background(), activationApplicability{
-		target: testyardmigration.CurrentYard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, ok := platform.(reconcileruntime.Runtime)
-	if !ok {
-		t.Fatalf("broker platform type = %T", platform)
-	}
-	if runtime.Yard.YardName != testyardmigration.CurrentYard ||
-		runtime.Yard.IncusProject != "subyard-test-yard" ||
-		runtime.Yard.YardInstanceName != "yard-test-yard" {
-		t.Fatalf("broker platform retained default context: %#v", runtime.Yard)
-	}
-	want := filepath.Join(repositoryRoot, "bin", "yard-engine")
-	if !slices.Contains(runtime.Environment, "SUBYARD_DISPATCHER_PATH="+want) {
-		t.Fatalf("broker platform does not use pinned engine %q: %q", want, runtime.Environment)
-	}
+	return program, configHome
 }
 
 type activationVerificationFixture struct{ applied int }

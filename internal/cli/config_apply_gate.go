@@ -23,7 +23,6 @@ import (
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
-	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 // configApplyRepairPermit admits bounded ordinary operations behind a verified,
@@ -188,8 +187,12 @@ func (cli *CLI) prepareActivationRepair(
 		return nil, nil
 	}
 	pendingInit := false
+	var otherPending map[string]bool
 	if !configApplyRepairGateShape(outcome) {
-		if pendingInit = profileInit && cli.pendingInitRepairGate(ctx, yard, outcome); !pendingInit {
+		if profileInit {
+			otherPending, pendingInit = cli.pendingInitRepairGate(ctx, yard, outcome)
+		}
+		if !pendingInit {
 			return nil, nil
 		}
 	}
@@ -316,6 +319,10 @@ func (cli *CLI) prepareActivationRepair(
 		facts.ConfigTargets = append(facts.ConfigTargets, targetFact)
 		if _, selected := requested[target.Name]; selected {
 			requestedDesired[target.Name] = assessment.DesiredFingerprint
+		} else if otherPending[target.Name] {
+			// Release activation defers this yard until its own init, like a
+			// stopped yard: its state is neither this init's drift nor its work.
+			continue
 		}
 		changed := assessment.Changed
 		if (profileInit || integrationRetry) && target.Loaded.Integrations.AllowsCodingTools &&
@@ -663,26 +670,43 @@ func configApplyDriftSubset(current, admitted []string) bool {
 	return true
 }
 
+// finishConfigApplyRepair verifies the readiness a repair permit restored. The
+// returned pending configuration remains for yards' own inits; the operation
+// boundary reports it. An init must have resolved its own yard's items.
 func (cli *CLI) finishConfigApplyRepair(
 	ctx context.Context,
 	permit *configApplyRepairPermit,
-) error {
+) ([]releasetransition.Blocker, error) {
 	if err := cli.checkConfigApplyRepairHistory(permit); err != nil {
-		return err
+		return nil, err
 	}
-	outcome, err := cli.inspectMutationGate(ctx, permit.yard)
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, permit.yard)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	own := ""
+	if permit.profileInit {
+		own = permit.yard
+	}
+	if outcome != nil && cli.otherYardsPendingOnly(outcome, inspection, own) {
+		return slices.Clone(inspection.Blockers), nil
 	}
 	if outcome != nil {
 		if permit.pendingInputs && !permit.profileInit && !permit.integrationRetry && outcome.Status == releasetransition.StatusMigrationRequired &&
 			outcome.Code == releasetransition.CodeTransitionRequired && outcome.Active == permit.gate.Active && outcome.Target == permit.gate.Target {
 			fmt.Fprintln(cli.options.Stdout, "Materialized configuration repaired; next: run yard migrate")
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("materialized configuration did not restore release readiness: %s (%s); next: %s", outcome.Code, outcome.Message, releaseruntime.CurrentReleaseRetry(*outcome))
+		return nil, fmt.Errorf("materialized configuration did not restore release readiness: %s (%s); next: %s", outcome.Code, outcome.Message, releaseruntime.CurrentReleaseRetry(*outcome))
 	}
-	return nil
+	return nil, nil
+}
+
+// reportStillPending renders pending configuration that waits for yards' inits.
+func reportStillPending(output io.Writer, pending []releasetransition.Blocker) {
+	for _, blocker := range pending {
+		fmt.Fprintf(output, "Still pending: %s; next: %s\n", blocker.Message, blocker.Retry)
+	}
 }
 
 func (cli *CLI) finishTeardownRepair(ctx context.Context, permit *configApplyRepairPermit) error {
@@ -753,22 +777,22 @@ func (cli *CLI) checkConfigApplyRepairHistory(permit *configApplyRepairPermit) e
 	return nil
 }
 
-// A typed pending-configuration gate whose every blocker names plain init of
-// this yard as its next step is repaired by that init. All other repair guards
-// still apply; the pending item counts as the selected yard's drift.
-func (cli *CLI) pendingInitRepairGate(ctx context.Context, yard string, outcome releasetransition.Outcome) bool {
+// A typed pending-configuration gate whose every blocker names plain init of a
+// yard as its next step is repaired, one yard at a time, by the init of a yard
+// it names. All other repair guards still apply; the pending item counts as the
+// selected yard's drift. It returns the other yards that wait for their inits.
+func (cli *CLI) pendingInitRepairGate(ctx context.Context, yard string, outcome releasetransition.Outcome) (map[string]bool, bool) {
 	current, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
 	if err != nil || current == nil || !sameConfigApplyGate(*current, outcome) ||
 		!cli.pendingIntegrationConfigurationGate(current, inspection) {
-		return false
+		return nil, false
 	}
-	retry := shellquote.Command([]string{"yard", "-Y", yard, "init"})
-	for _, blocker := range inspection.Blockers {
-		if blocker.Retry != retry {
-			return false
-		}
+	yards, ok := pendingInitYards(inspection)
+	if !ok || !yards[yard] {
+		return nil, false
 	}
-	return true
+	delete(yards, yard)
+	return yards, true
 }
 
 func configApplyRepairGateShape(outcome releasetransition.Outcome) bool {

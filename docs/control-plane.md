@@ -564,13 +564,43 @@ selections and the installed architecture's usage pin.
 Binding owners preserves ordinary applicability inputs. Non-repair observations keep their
 ordinary configuration view; completed materialized readiness remains release-wide independently
 of that view, so selecting another yard cannot hide drift. Typed integration ownership
-refusals remain visible in initialization, status and migration readiness. When they are
-the only blockers of an already active, completed release, they describe pending configuration
-and do not block unrelated commands such as SSH-agent unlock. Invalid history, unfinished
+refusals remain visible in initialization, status and migration readiness. When every refusal
+of a yard is typed pending configuration with a public next step, release repair of the active
+release defers that yard as a whole, like a stopped yard: it becomes one finding of a successful
+observation, its refusals joined behind `yard NAME:` (beyond the protocol bound, their count),
+with the yard's own init as the next step only when every refusal names it and otherwise another
+step, never another yard's init; its desired configuration stays in the activation's Desired
+without drift, and its consequences and saved integration plan
+leave the activation. The materialized-config owner records the deferral once per activation,
+reusing its own observation when another owner needs the decision first; the profile and
+core-guest runtime owners and the test-VM broker stage read the same record, so none of them
+runs a guest write in a deferred yard, including on resume, and gaining or resolving a finding
+before a resume leaves the journal's observation scope unchanged. Host-level owners (host key
+tools, host power) are repaired as usual; the test-yard route-consumer owner does not read the
+deferral. The other yards are still assessed
+and repaired. Any other refusal keeps every refusal, pending ones included, as one observation
+failure; a yard refused before its assessment, or more than 256 pending yards, cannot be
+deferred, and the refusal names `yard migrate --check`. An ordinary update, or a prospective
+source publication, does not defer: it stops before activation with the pending refusals and
+their next steps. A gate whose inspection still reports any owner's activation drift is never pending
+configuration. The engine reports deferred findings as one bounded warning while other release work remains; when
+the active, completed release has no other work, each finding is its own
+`activation.materialized-config.pending-configuration` blocker of an `operator-action-required`
+outcome. Only then does pending configuration not block unrelated commands such as SSH-agent
+unlock: the direct CLI and RPC share one admission, and `init`, `config`, `integration`,
+`profile`, `provision`, `update`, `migrate` and release transitions keep their own gates. Plain
+`yard -Y NAME init` of a yard such a blocker names is admitted when every blocker names a yard's
+init as its next step; the other named yards are deferred for that init, and it returns them as
+still pending instead of failing; the CLI prints them, and RPC writes them to the operation's
+diagnostics. A config apply or integration retry repair permit likewise finishes with the
+remaining pending items when each of them names a yard's init as its next step, and otherwise
+fails as before; it also finishes when its own yard turned pending meanwhile, a known
+limitation. Invalid history, unfinished
 transactions and unclassified materialization failures still block mutation. A local typed
 selection reduction in this state validates the sealed original source and complete protected
 history, locks and rechecks that evidence, then writes only the desired selection; it grants
-no activation or historical recovery authority.
+no activation or historical recovery authority. Drift beside a pending finding is ordinary drift
+for selection reduction and its repair permit.
 
 Declared persist directories are adopted by a separate guest program
 (`internal/adapters/reconcileruntime/integration_persist.py`), not by the artifact
@@ -635,13 +665,14 @@ restoring the installed state first would let the following init retire the oper
 A failed inspection also refuses, with its own diagnostic rather than a conflict. Fix what
 `yard -Y NAME integration status` reports, then run `yard migrate`. When that init would instead
 release ownership of a deselected integration's changed or missing owned configuration in place,
-the repair refuses with a pending-configuration blocker whose next step is `yard -Y NAME init`;
-an independent conflict in the same view is reported with it. The guest keeps a release's reason
-until fresh ownership, so the blocker also holds after the guest released ownership and before
+the repair defers that yard with a pending-configuration finding whose next step is
+`yard -Y NAME init` and repairs the other yards; an independent conflict in the same view
+refuses the repair together with it. The guest keeps a release's reason
+until fresh ownership, so the finding also holds after the guest released ownership and before
 the integration inventory commit forgets the record; without it, the repair would overlay the
 released document. After that commit, while the installed configuration still selects the
-document, the installed-view inspection itself refuses it with the same pending-configuration
-blocker. A deliberate enable from the desired selection is not refused and takes fresh ownership. That init is admitted and
+document, the installed-view inspection itself reports the same pending-configuration
+finding. A deliberate enable from the desired selection is not refused and takes fresh ownership. That init is admitted and
 performs the release without first restoring the installed state. Desired integration sources
 that cannot be read are not inspected, as in the pending-init listing, and the repair proceeds.
 Each yard is observed independently: refusals of all yards are reported together in target

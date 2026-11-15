@@ -245,7 +245,7 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 			fmt.Fprintln(cli.options.Stdout, "Warning: "+warning)
 		}
 	}
-	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
+	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 		result := domain.AdapterResult{Schema: 1, OperationID: prepared.Plan.OperationID, Status: "ok"}
 		if permit := cli.permits.integrationRetry; permit != nil {
 			unlock, err := cli.lockConfigApplyRepair(ctx, permit)
@@ -290,9 +290,11 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 			return result, fmt.Errorf("%w: configuration changed during integration reconciliation; inspect status and retry", domain.ErrPlanStale)
 		}
 		if permit := cli.permits.integrationRetry; permit != nil {
-			if err := cli.finishConfigApplyRepair(ctx, permit); err != nil {
+			pending, err := cli.finishConfigApplyRepair(ctx, permit)
+			if err != nil {
 				return result, err
 			}
+			reportStillPending(diagnostics, pending)
 		}
 		return result, nil
 	}
