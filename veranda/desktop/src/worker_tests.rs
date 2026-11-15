@@ -73,6 +73,10 @@ while True:
         with os.fdopen(fd, 'w') as output:
             output.write('1')
         os._exit(0)
+    if method == 'operation.discard':
+        fd = os.open(os.path.join(root, 'discard-observed'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, 'w') as output:
+            output.write(request['operationId'] + '\n')
     if method == 'operation.plan':
         result = fixture('operation-exact')
         result['plan']['operationId'] = request['operationId']
@@ -441,7 +445,9 @@ fn reopen_actor() {
             }
         };
         let id = plan.operation_id.clone();
-        plan.digest = "b".repeat(64);
+        if index != 0 {
+            plan.digest = "b".repeat(64);
+        }
         state
             .intent(OperationNote {
                 scope: scope.clone(),
@@ -451,6 +457,11 @@ fn reopen_actor() {
                 outcome: "unknown".into(),
             })
             .unwrap();
+        if index == 0 {
+            // Persistence rejects this before the client consumes the plan.
+            // The worker must still explicitly discard that retained review.
+            state.operations.last_mut().unwrap().command.clear();
+        }
         assert!(worker.owner(OwnerCommand::Execute {
             request: index,
             plan,
@@ -462,6 +473,12 @@ fn reopen_actor() {
                 state.not_submitted(&id, &proof);
                 break;
             }
+        }
+        if index == 0 {
+            assert!(fs::read_to_string(root.join("discard-observed"))
+                .unwrap()
+                .lines()
+                .any(|discarded| discarded == id));
         }
         worker.save_state(1, state.clone());
         loop {
@@ -509,6 +526,42 @@ fn reopen_actor() {
     state
         .intent(OperationNote {
             scope,
+            owner_id: "example-owner".into(),
+            operation_id: operation_id.clone(),
+            command: "config".into(),
+            outcome: "unknown".into(),
+        })
+        .unwrap();
+    // The intent save encounters the same store lock contention as session
+    // validation. It must preserve both the plan and the document baseline.
+    use std::os::fd::AsRawFd;
+    let lock = fs::File::open(root.join("private/connections.lock")).unwrap();
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    assert!(worker.owner(OwnerCommand::Execute {
+        request: 2,
+        plan: plan.clone(),
+        state: state.clone()
+    }));
+    loop {
+        if let Update::Executed { result, .. } = updates.recv_blocking().unwrap() {
+            let proof = result.expect_err("busy store cannot submit");
+            assert_eq!(proof.0.code, "connection_store_busy");
+            assert!(retryable_not_submitted(&proof.0));
+            state.not_submitted(&operation_id, &proof);
+            break;
+        }
+    }
+    assert!(!root.join("execute-observed").exists());
+    drop(lock);
+    state
+        .intent(OperationNote {
+            scope: Scope {
+                connection: None,
+                yard: None,
+            },
             owner_id: "example-owner".into(),
             operation_id: operation_id.clone(),
             command: "config".into(),

@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use veranda_lib::client::{
-    Assessment, Client, ConnectionAttempt, HostDetails, OperationPlan, VerandaEvent, YardDetails,
+    retryable_not_submitted, Assessment, Client, ConnectionAttempt, HostDetails, OperationPlan,
+    VerandaEvent, YardDetails,
 };
 use veranda_lib::connections::{ConnectionSummary, NavigationSelection};
 use veranda_lib::local_fleet::{LocalFleetSnapshot, NativeError};
@@ -178,7 +179,11 @@ fn save_state(
             Ok(())
         }
         Err(error) => {
-            *baseline = Err(error.clone());
+            // Keep the comparison baseline for a retry. A concurrent document
+            // change will still fail the native store's compare-and-save check.
+            if !retryable_not_submitted(&error) {
+                *baseline = Err(error.clone());
+            }
             Err(error)
         }
     }
@@ -699,7 +704,10 @@ impl Worker {
                                     .map(|started| started.operation_id().to_owned())
                                     .map_err(|error| NotSubmitted(error.into_error()))
                             });
-                            if result.is_err() {
+                            if result
+                                .as_ref()
+                                .is_err_and(|proof| !retryable_not_submitted(&proof.0))
+                            {
                                 let _ = native.discard(&plan.plan_id);
                             }
                             Update::Executed { request, result }

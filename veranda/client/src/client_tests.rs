@@ -1232,7 +1232,7 @@ fn only_a_changed_registration_retires_a_session() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn busy_connection_store_keeps_session_and_reviewed_plan_for_retry() {
+fn transient_connection_store_errors_keep_session_and_reviewed_plan_for_retry() {
     let fixture = ManagerFixture::with_registration("manager", true);
     let plan = fixture
         .client
@@ -1253,15 +1253,13 @@ fn busy_connection_store_keeps_session_and_reviewed_plan_for_retry() {
             .code,
         "connection_store_busy"
     );
-    assert_eq!(
-        fixture
-            .client
-            .execute(&plan.plan_id, &plan.digest, true)
-            .err()
-            .unwrap()
-            .code,
-        "connection_store_busy"
-    );
+    let error = fixture
+        .client
+        .execute_with_submission(&plan.plan_id, &plan.digest, true)
+        .err()
+        .unwrap();
+    assert_eq!(error.error().code, "connection_store_busy");
+    assert!(retryable_not_submitted(error.error()));
     let connection = fixture.session.key.connection.clone();
     assert_eq!(
         fixture
@@ -1286,6 +1284,29 @@ fn busy_connection_store_keeps_session_and_reviewed_plan_for_retry() {
     assert_eq!(fixture.client.sessions.lock().unwrap().len(), 1);
     assert_eq!(fixture.stats()["executes"], 0);
     drop(held);
+    // An unavailable store directory produces a read I/O error before the
+    // client can consume the review. Restoring it needs no new plan or session.
+    let root = fixture.owner.store_root();
+    let moved = root.with_extension("unavailable");
+    std::fs::rename(&root, &moved).unwrap();
+    let error = fixture
+        .client
+        .execute_with_submission(&plan.plan_id, &plan.digest, true)
+        .err()
+        .unwrap();
+    std::fs::rename(&moved, &root).unwrap();
+    assert_eq!(error.error().code, "connection_store_io");
+    assert!(retryable_not_submitted(error.error()));
+    {
+        let plans = fixture.client.plans.lock().unwrap();
+        let retained = plans.get(&plan.plan_id).unwrap();
+        assert!(Arc::ptr_eq(&retained.session, &fixture.session));
+        assert_eq!(retained.plan.digest, plan.digest);
+        assert_eq!(
+            retained.epoch,
+            fixture.session.epoch.load(Ordering::Acquire)
+        );
+    }
     let started = fixture
         .client
         .execute(&plan.plan_id, &plan.digest, true)
@@ -1312,6 +1333,23 @@ fn busy_connection_store_keeps_session_and_reviewed_plan_for_retry() {
         "plan_stale"
     );
     assert_eq!(fixture.stats()["executes"], 1);
+}
+
+#[test]
+fn only_transient_store_errors_allow_retrying_an_unsubmitted_execution() {
+    for code in [
+        "confirmation_required",
+        "connection_changed",
+        "invalid_connection_store",
+        "unsafe_connection_store",
+        "native_unavailable",
+        "plan_stale",
+        "request_capacity",
+        "disconnected",
+        "desktop_state_changed",
+    ] {
+        assert!(!retryable_not_submitted(&NativeError::new(code, "message")));
+    }
 }
 
 #[test]
