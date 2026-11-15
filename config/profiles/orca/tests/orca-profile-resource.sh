@@ -113,6 +113,12 @@ case "${1:-}" in
     ;;
   config)
     if [ "${2:-}" = get ]; then
+      # Chosen reads of one key fail with Incus's own transport status.
+      if [ -e "$state_root/fail-config-get-${4:-}" ]; then
+        calls="$(( $(cat "$state_root/config-get-count-${4:-}" 2>/dev/null || printf 0) + 1 ))"
+        printf '%s\n' "$calls" >"$state_root/config-get-count-${4:-}"
+        ! grep -qx "$calls" "$state_root/fail-config-get-${4:-}" || exit 255
+      fi
       [ ! -f "$state_root/config-${4:-}" ] || cat "$state_root/config-${4:-}"
       exit 0
     elif [ "${2:-}" = set ]; then
@@ -2041,6 +2047,20 @@ grep -Fq 'cannot read the owner route' "$TMP/remove-first-read.out" || { cat "$T
 rm -f "$TMP/fail-device-list-calls" "$TMP/device-list-count"
 run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed first route read'
 assert_orca_removed 'orca remove after a failed first route read'
+# With no device or receipt but a saved deferred publication, a failed read of
+# the ownership marker during the cleanup clears nothing and is non-zero.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+rm -f "$ORCA_TEST_ROUTE" "$TMP/config-user.subyard.resource.orca-server"
+printf '{"saved":"fixture"}' >"$TMP/config-user.subyard.deferred_publication.orca-server"
+# Marker reads: the plan (1), the native guard (2), remove's route read (3), its cleanup (4).
+printf '4\n' >"$TMP/fail-config-get-user.subyard.resource.orca-server"
+rm -f "$TMP/config-get-count-user.subyard.resource.orca-server"
+if run_orca remove --yes >"$TMP/remove-cleanup-read.out" 2>&1; then fail 'orca remove concealed a failed cleanup read'; fi
+[ -s "$TMP/config-user.subyard.deferred_publication.orca-server" ] || fail 'orca remove cleared the saved publication after a failed read'
+rm -f "$TMP/fail-config-get-user.subyard.resource.orca-server" "$TMP/config-get-count-user.subyard.resource.orca-server"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed cleanup read'
+[ ! -e "$TMP/config-user.subyard.deferred_publication.orca-server" ] || fail 'orca remove left the saved publication on rerun'
+assert_orca_removed 'orca remove after a failed cleanup read'
 # A failed device read is never a foreign device: the remove is non-zero and
 # keeps the route and its receipt.
 ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null

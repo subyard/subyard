@@ -13,7 +13,10 @@ FIXED_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
 def parse_fixed_paths(text):
     """Parse the fixed-path list by the rule of resources/orca/fixed-paths.bash."""
     entries = []
-    for line in text.splitlines():
+    # The list is LF-only: a carriage return anywhere is invalid, never normalized.
+    if '\r' in text:
+        raise ValueError('invalid Orca fixed path list entry')
+    for line in text.split('\n'):
         fields = line.split()
         if not fields or fields[0].startswith('#'):
             continue
@@ -26,7 +29,7 @@ def parse_fixed_paths(text):
 
 def fixed_paths(resource):
     """The profile's one fixed-path list, as the observer receives it."""
-    paths = [path for _, path in parse_fixed_paths((resource / 'fixed-paths').read_text())]
+    paths = [path for _, path in parse_fixed_paths((resource / 'fixed-paths').read_bytes().decode())]
     return [str(len(paths)), *paths]
 
 

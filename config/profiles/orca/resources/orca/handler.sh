@@ -1788,7 +1788,8 @@ cmd_remove() {
       # The receipt proves ownership of the device, so it is cleared only once
       # the device is confirmed gone.
       if [ "$ORCA_REMOVE_DEVICE" = 1 ]; then
-        incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null || warn "Orca removal could not remove the owner route"
+        incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null || {
+          warn "Orca removal could not remove the owner route"; failed=1; }
         if devices="$(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}")"; then
           grep -Fxq "$ORCA_DEVICE" <<<"$devices" || ORCA_REMOVE_DEVICE=0
         else
@@ -1797,16 +1798,27 @@ cmd_remove() {
         fi
       fi
       if [ "$ORCA_REMOVE_DEVICE" = 0 ]; then
+        # Both values are read before anything is cleared; a failed read clears
+        # nothing, so no write ever rests on an unread value.
+        local key value metadata=() read_failed=0
         for key in user.subyard.resource.orca-server user.subyard.deferred_publication.orca-server; do
-          if [ -n "$(incus config get "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}")" ]; then
-            incus config unset "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}" >/dev/null || warn "Orca removal could not clear $key"
+          if value="$(incus config get "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}")"; then
+            [ -z "$value" ] || metadata+=("$key")
+          else
+            warn "Orca removal cannot read $key"; read_failed=1; failed=1
           fi
         done
+        if [ "$read_failed" -eq 0 ]; then
+          for key in "${metadata[@]}"; do
+            incus config unset "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}" >/dev/null || {
+              warn "Orca removal could not clear $key"; failed=1; }
+          done
+        fi
       fi
       ;;
   esac
   yexec bash -se -- orca-remove-apply "${#ORCA_REMOVE_UNITS[@]}" "${ORCA_REMOVE_UNITS[@]}" "${#ORCA_REMOVE_UNIT_FILES[@]}" "${ORCA_REMOVE_UNIT_FILES[@]}" \
-    "${ORCA_REMOVE_PATHS[@]}" <<'YARD' || warn "Orca removal did not finish inside the yard"
+    "${ORCA_REMOVE_PATHS[@]}" <<'YARD' || { warn "Orca removal did not finish inside the yard"; failed=1; }
 set -uo pipefail
 shift
 count="$1"; shift
