@@ -1666,6 +1666,16 @@ func (transition *V2Transition) newerReleaseReplacementBlockers(observation v2Ob
 	if transition.options.SourceIngress != nil || journal.SourceIngress != nil {
 		refuse(CodeRecoveryAmbiguous, "a newer release cannot replace an unfinished source migration")
 	}
+	if !observation.migrationLedgerSnapshot.AuthoritySnapshot.Exists {
+		for _, step := range journal.Steps {
+			if step.ID == baselineLedgerStep {
+				// A successor is an update, not the initial self-bootstrap that
+				// authorized this absent-ledger CAS. Let its installed owner finish.
+				refuse(CodeRecoveryAmbiguous, "complete the initial ledger publication with the installed release before replacing its journal")
+				break
+			}
+		}
+	}
 	if transition.options.Direction != DirectionActivateTarget || journal.Goal.Direction != DirectionActivateTarget {
 		refuse(CodeRecoveryAmbiguous, "a newer release can replace only an unfinished forward update")
 	}
@@ -1734,15 +1744,12 @@ func (transition *V2Transition) canReplacePreActivationJournal(
 		return false
 	}
 	for _, step := range journal.Steps {
-		if step.Checkpoint == StepApplied || step.Checkpoint == StepVerified {
+		// The initial ledger publication must keep its original absent-snapshot
+		// authority, even before CAS. Replacing this journal would lose the only
+		// bootstrap proof and misclassify a fresh install as manual repair.
+		// Other ingress journals retain their existing stale-plan replacement.
+		if step.ID == baselineLedgerStep {
 			return false
-		}
-		if step.Checkpoint == StepEvidence {
-			for _, actual := range observation.observations {
-				if actual.Resource == step.Resource && actual.Fingerprint == step.Desired {
-					return false
-				}
-			}
 		}
 	}
 	for _, blocker := range observation.blockers {

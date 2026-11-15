@@ -494,6 +494,9 @@ reconstructs that exact authorized intent and accepts only absent or exact desir
 never reclassifies a prior transaction or predecessor as fresh. Publication of the schema-1
 checkpoint still requires Ready and keeps this ledger as its pinned projection. No persistent
 field or version changes; the additional step kind fits the frozen V2 journal/evidence grammar.
+An unpublished baseline keeps its original journal when a plan becomes stale. A newer-release
+replacement must wait for the installed owner to publish that first ledger; recovery uses the
+original bootstrap transaction and grant.
 A fresh install has no v0.28.x previous runtime to select for rollback. Completed v0.28.x updates
 keep their original history and eligible retained rollback targets.
 
