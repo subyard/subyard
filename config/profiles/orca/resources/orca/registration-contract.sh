@@ -20,65 +20,6 @@ registration_host_name() {
   printf '%s\n' "$name"
 }
 
-# Print "unselected" only for valid guest runtime facts of a completed refresh
-# whose selection omits orca. The facts and their directories must be owned
-# like the guest root and not writable by others; anything else prints nothing.
-# Arguments: a fixed argv marker, then the guest root. Contains no single quote.
-render_selection_check() {
-  cat <<'SELECTION'
-import json, os, re, stat, sys
-root = os.path.abspath(sys.argv[2])
-facts = os.path.join(root, "etc/subyard/guest-runtime.json")
-names = re.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
-def unique(pairs):
-    value = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError("duplicate field")
-        value[key] = item
-    return value
-def snapshot(value):
-    if not isinstance(value, dict) or set(value) != {"version", "yard", "selected_profiles"}:
-        raise ValueError("snapshot")
-    yard, profiles = value["yard"], value["selected_profiles"]
-    if (not isinstance(value["version"], str) or not re.fullmatch("[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}", value["version"]) or
-            not isinstance(yard, dict) or set(yard) != {"name", "project", "instance"} or
-            any(not isinstance(item, str) or not names.fullmatch(item) for item in yard.values()) or
-            not isinstance(profiles, list) or
-            any(not isinstance(item, str) or not re.fullmatch("[a-z0-9][a-z0-9_-]*", item) for item in profiles) or
-            len(set(profiles)) != len(profiles)):
-        raise ValueError("snapshot")
-    return value
-top = os.lstat(root)
-owner = (top.st_uid, top.st_gid)
-directory = os.path.dirname(facts)
-while True:
-    info = os.lstat(directory)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner[0] or info.st_mode & 0o022:
-        sys.exit(1)
-    if directory == root:
-        break
-    directory = os.path.dirname(directory)
-descriptor = os.open(facts, os.O_RDONLY | os.O_NOFOLLOW)
-info = os.fstat(descriptor)
-if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o644 or (info.st_uid, info.st_gid) != owner or
-        info.st_nlink != 1 or info.st_size > 16384):
-    sys.exit(1)
-with os.fdopen(descriptor, "rb") as stream:
-    value = json.loads(stream.read(16385), object_pairs_hook=unique)
-with open(os.path.join(root, "etc/machine-id")) as stream:
-    machine = stream.read().strip()
-if (not isinstance(value, dict) or set(value) != {"schema", "machine_id", "status", "target", "last_success", "capabilities", "readiness"} or
-        type(value["schema"]) is not int or value["schema"] != 1 or not re.fullmatch("[0-9a-f]{32}", machine) or
-        value["machine_id"] != machine or value["status"] != "current" or
-        value["capabilities"] != "unknown" or value["readiness"] != "unknown" or
-        snapshot(value["target"]) != snapshot(value["last_success"])):
-    sys.exit(1)
-if "orca" not in value["target"]["selected_profiles"]:
-    print("unselected")
-SELECTION
-}
-
 render_registration_hook() {
   local version host_name mode="${1:-sync}" settings_command=':'
   version="$(registration_contract_version)" || return 1
@@ -89,10 +30,6 @@ render_registration_hook() {
   cat <<SYNC_HEAD
 #!/usr/bin/env bash
 set -euo pipefail
-# A yard that does not select Orca keeps an installed Orca but has nothing to
-# register. Only valid guest facts that omit orca skip the hook.
-selection="\$(/usr/bin/python3 -I -B -c '$(render_selection_check)' subyard-orca-selection $ORCA_GUEST_ROOT 2>/dev/null)" || selection=
-[ "\$selection" != unselected ] || exit 0
 exec 9<$ORCA_REGISTRATION_LOCK
 flock -s 9
 [ "\$(cat $ORCA_REGISTRATION_DIGEST 2>/dev/null)" = "$version" ] || {

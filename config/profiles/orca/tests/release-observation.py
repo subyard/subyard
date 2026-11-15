@@ -7,11 +7,44 @@ import re
 FIXTURES = Path(__file__).parent / 'fixtures/release-observation'
 
 
+REMOVAL_DIGEST = ['bash', '-c', "printf 'subyard-orca-runtime-removed-v1\\n' | sha256sum | cut -d ' ' -f 1"]
+
+
+def removed_observation():
+    desired = hashlib.sha256(b'subyard-orca-runtime-removed-v1\n').hexdigest()
+    return f'{{"state":"current","actual":"{desired}","desired":"{desired}","ownership_absent":true}}\n'
+
+
+def current_removal(package):
+    """The fixed-path removal observer of an unselected current Orca package."""
+    resource = package / 'resources/orca'
+    current = Path(__file__).parents[1] / 'resources/orca'
+    removal = resource / 'removal.bash'
+    if (removal.is_symlink() or not removal.is_file() or (resource / 'handler.sh').is_symlink() or
+            not (resource / 'handler.sh').is_file() or
+            removal.read_bytes() != (current / 'removal.bash').read_bytes() or
+            (resource / 'handler.sh').read_bytes() != (current / 'handler.sh').read_bytes()):
+        return None
+    return removal
+
+
 def read_only_commands(package):
-    return []
+    # An unselected yard without an owner route reads only empty route metadata.
+    if current_removal(package) is None:
+        return []
+    return [(['config', 'get', 'yard', 'user.subyard.resource.orca-server', '--project', 'subyard'], ''),
+            (['config', 'get', 'yard', 'user.subyard.deferred_publication.orca-server', '--project', 'subyard'], ''),
+            (['config', 'device', 'list', 'yard', '--project', 'subyard'], '')]
 
 
 def read_only_stdin_commands(package):
+    removal = current_removal(package)
+    return ([] if removal is None else [(['exec', 'yard', '--project', 'subyard', '--', 'bash', '-se', '--', 'observe', '/', None],
+                                         removal.read_bytes(), removed_observation(), 0, REMOVAL_DIGEST)]
+            ) + registration_stdin_commands(package)
+
+
+def registration_stdin_commands(package):
     resource = package / 'resources/orca'
     contract = resource / 'registration-contract.sh'
     observer = resource / 'registration-observer.bash'
@@ -52,7 +85,6 @@ ORCA_CONTRACT_VERSION=5
 ORCA_UNIT=subyard-orca.service
 ORCA_REGISTRATION=/usr/local/libexec/subyard/orca-registration
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
-ORCA_GUEST_ROOT=/
 ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_DISCOVERY_UNIT=subyard-orca-discovery.service
 ORCA_DISCOVERY_TIMER=subyard-orca-discovery.timer

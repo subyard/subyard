@@ -79,9 +79,11 @@ Registration-only changes do not restart the service; a changed service unit doe
 stopped; after starting one, run `yard init` to repair its installed handler before
 project hooks execute. This repair also runs when provisioning is already current.
 `orca sync` refuses a stale registration contract and points to `yard init`.
-In a yard that no longer selects the profile, Orca stays installed but its project hook and
-periodic discovery register nothing; `orca sync` refuses and points to `yard profile enable orca`
-and then `yard init`.
+Disabling the profile and running `yard init` stops Orca and removes its wiring from that yard: the
+service and discovery units, the owner route, the ingress guard, the project hook, registration
+helpers, markers and Codex launch wiring, even when a previous apply was interrupted or the service
+is broken. Orca state under `/srv/agents/orca` and the `orca-ide` package are kept, so enabling the
+profile again, running init and then `yard orca up` restores the same Orca.
 
 When rolling back to Subyard 0.14.0 or 0.13.13, the older updater leaves the newer,
 backward-compatible registration handler installed. This legacy rollback does not

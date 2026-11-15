@@ -54,9 +54,6 @@ ORCA_CODEX_BIN=/usr/local/libexec/subyard/orca-codex/codex
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
 ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
-# The rendered project hook reads the guest selection facts.
-# shellcheck disable=SC2034
-ORCA_GUEST_ROOT=/
 ORCA_DISCOVERY_UNIT=subyard-orca-discovery.service
 ORCA_DISCOVERY_TIMER=subyard-orca-discovery.timer
 ORCA_CONTRACT_VERSION=7
@@ -407,18 +404,7 @@ chmod 0644 "$lock"
 chown 0:0 "$lock"
 exec 9>"$lock"
 flock -x 9
-# Replace the project hook and the discovery helper first, each atomically:
-# after any later failure both skip a yard that does not select Orca and refuse
-# a selected one without the marker, instead of an older release's helper
-# refusing forever or still registering projects.
-install -d -m 0755 "$(dirname "$hook")" "$directory"
-next_hook="$(dirname "$lock")/.orca-sync.$$"
-install -m 0755 "$stage/orca-sync" "$next_hook"
-mv -fT -- "$next_hook" "$hook"
-next_discover="$directory/.discover.$$"
-install -m 0755 "$stage/discover" "$next_discover"
-mv -fT -- "$next_discover" "$directory/discover"
-install -d -m 0755 "$(dirname "$discovery_service")" \
+install -d -m 0755 "$directory" "$(dirname "$hook")" "$(dirname "$discovery_service")" \
   "$(dirname "$codex_profile")" "$(dirname "$codex_bin")"
 rm -f -- "$marker"
 for installed in "$directory"/*.py; do
@@ -426,6 +412,8 @@ for installed in "$directory"/*.py; do
   [ -f "$stage/${installed##*/}" ] || rm -f -- "$installed"
 done
 for source in "$stage"/*.py; do install -m 0644 "$source" "$directory/${source##*/}"; done
+install -m 0755 "$stage/orca-sync" "$hook"
+install -m 0755 "$stage/discover" "$directory/discover"
 install -m 0644 "$stage/${discovery_service##*/}" "$discovery_service"
 install -m 0644 "$stage/${discovery_timer##*/}" "$discovery_timer"
 install -m 0644 "$stage/orca-codex-profile" "$codex_profile"
@@ -897,6 +885,56 @@ service_enabled() {
   yexec systemctl is-enabled --quiet "$ORCA_UNIT" >/dev/null 2>&1
 }
 
+# A yard that does not select Orca converges to no Orca wiring: the runtime
+# removes what this profile installed, by fixed paths, from any partial state,
+# and is then current at the removal digest with proven ownership absence.
+ORCA_REMOVAL_DESIRED="$(printf 'subyard-orca-runtime-removed-v1\n' | sha256sum | cut -d ' ' -f 1)"
+ORCA_REMOVAL_CONSEQUENCE="Orca stops and its wiring is removed from this yard; its state under /srv/agents/orca and the orca-ide package are kept"
+
+observe_removal() {
+  local observation route
+  observation="$(yexec bash -se -- observe / "$ORCA_REMOVAL_DESIRED" < "$RESOURCE_DIR/removal.bash")" || return 1
+  route="$(orca_route_state)" || return 1
+  if [ "$route" = absent ]; then
+    if [ "$(jq -r .state <<<"$observation")" = current ]; then
+      printf '%s\n' "$observation"
+      return 0
+    fi
+  else
+    observation="$(jq -c --arg actual "$(printf '%s\n%s\n' "$(jq -r .actual <<<"$observation")" "$route" | sha256sum | cut -d ' ' -f 1)" \
+      --arg desired "$ORCA_REMOVAL_DESIRED" '.state = "stale" | .actual = $actual | .desired = $desired | del(.ownership_absent)' <<<"$observation")"
+  fi
+  jq -c --arg consequence "$ORCA_REMOVAL_CONSEQUENCE" '. + {consequence:$consequence}' <<<"$observation"
+}
+
+# Remove every independent part and report all refusals. A failed host route
+# removal stays blocking; failures of guest commands that ran affect this yard.
+apply_removal() {
+  local route host_refused=0 guest_refused=0
+  if route="$(orca_route_state)"; then
+    if [ "$route" != absent ] && ! remove_route; then
+      warn "Orca removal: could not remove the owner route"
+      host_refused=1
+    fi
+  else
+    warn "Orca removal: the owner route metadata is invalid"
+    host_refused=1
+  fi
+  yard_local_begin
+  yexec bash -se -- apply / < "$RESOURCE_DIR/removal.bash" || guest_refused=1
+  if [ "$(daemon_scopes)" != "" ] && ! daemon_scopes stop >/dev/null; then
+    warn "Orca removal: Orca daemon scopes could not be stopped"
+    guest_refused=1
+  fi
+  yard_local_end
+  if [ "$host_refused" -eq 1 ]; then die "Orca removal is incomplete; retry yard init"; fi
+  if [ "$guest_refused" -eq 1 ]; then
+    yard_local_begin
+    printf 'guest-failed\n' >"$ORCA_GUEST_STEP_STATUS"
+    exit 1
+  fi
+}
+
 # Run captured sources in memory when installed helpers still need repair.
 render_registration_observer() {
   local name
@@ -1100,19 +1138,7 @@ cmd_pair() {
   ' "$ORCA_READY" || die "Orca did not publish a $scope pairing link"
 }
 
-# The guest facts of a yard that does not select Orca; its project hook and
-# discovery then register nothing although Orca stays installed.
-orca_unselected_in_guest() {
-  [ "$(yexec /usr/bin/python3 -I -B -c "$(render_selection_check)" subyard-orca-selection "$ORCA_GUEST_ROOT" 2>/dev/null)" = unselected ]
-}
-
-require_orca_selected_in_guest() {
-  ! orca_unselected_in_guest \
-    || die "Orca is not selected in this yard, so it registers no projects; run '$(yard_cmd_hint) profile enable orca' and then '$(yard_cmd_hint) init'"
-}
-
 cmd_sync() {
-  require_orca_selected_in_guest
   yexec systemctl is-active --quiet "$ORCA_UNIT" \
     || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
   registration_contract_ready \
@@ -1506,7 +1532,6 @@ emit_restart_assessment() {
 emit_sync_assessment() {
   local observed decision
   svc_require_yard_running
-  require_orca_selected_in_guest
   yexec systemctl is-active --quiet "$ORCA_UNIT" || die 'Orca is not running'
   registration_contract_ready || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
   ORCA_STEPS='[]'
@@ -1715,11 +1740,9 @@ if [ "$sub" = _runtime-contract ]; then
         jq -e '.schema == 1 and (.missingMetadata | type == "array")' <<<"$ORCA_METADATA_PROJECTION" >/dev/null \
           || die 'invalid native metadata projection'
       fi
-      # A yard that does not select Orca has no Orca runtime to converge: the
-      # runtime stage skips it. Deselection leaves an installed Orca in place.
       if ! orca_profile_selected; then
-        printf '%s\n' '{"state":"absent","actual":"","desired":""}'
-        exit 0
+        observe_removal || die "Orca removal state unavailable"
+        exit
       fi
       observation="$(observe_runtime_contract)" || exit 1
       hook_binding=""
@@ -1736,6 +1759,25 @@ if [ "$sub" = _runtime-contract ]; then
       [[ "${2:-}" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "${3:-}" =~ ^[a-f0-9]{64}$ ]] &&
         [[ "${4:-}" =~ ^[a-f0-9]{64}$ ]] || die "invalid Orca runtime activation arguments"
       SUBYARD_OPERATION_ID="$2"
+      if ! orca_profile_selected; then
+        observation="$(observe_removal)" || die "Orca removal state unavailable"
+        [ "$(jq -r .actual <<<"$observation")" = "$3" ] && [ "$(jq -r .desired <<<"$observation")" = "$4" ] \
+          || die "Orca runtime contract changed since assessment; retry yard init"
+        [ "$(jq -r .state <<<"$observation")" = stale ] || die "invalid Orca removal observation"
+        ORCA_RUNTIME_PHASE=apply
+        ORCA_GUEST_STEP_STATUS="$(mktemp)"
+        apply_removal
+        ORCA_RUNTIME_PHASE=verify
+        yard_local_begin
+        observation="$(observe_removal)" || die "Orca removal cannot be verified"
+        if ! jq -e --arg desired "$4" '.state == "current" and .ownership_absent == true and .desired == $desired' <<<"$observation" >/dev/null; then
+          printf 'guest-failed\n' >"$ORCA_GUEST_STEP_STATUS"
+          exit 1
+        fi
+        yard_local_end
+        printf '%s\n' "$observation"
+        exit
+      fi
       observation="$(observe_runtime_contract)" || exit 1
       [ "$(jq -r .actual <<<"$observation")" = "$3" ] &&
         [ "$(jq -r .desired <<<"$observation")" = "$4" ] \

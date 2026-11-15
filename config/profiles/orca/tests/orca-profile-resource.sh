@@ -152,7 +152,7 @@ case "${1:-}" in
         done
         printf '%s\n%s\n' "$listen" "$connect" > "$route"
         ;;
-      'device remove') rm -f "$route" ;;
+      'device remove') [ ! -e "$state_root/fail-route-remove" ] || exit 1; rm -f "$route" ;;
     esac
     ;;
   exec)
@@ -168,20 +168,47 @@ case "${1:-}" in
       ORCA_MOCK_GUEST_STEP=1 "$0" "${args[@]:0:$((separator + 1))}" "${args[@]:$((separator + 5))}" || exit 200
       exit 0
     fi
-    case " $* " in
-      *' subyard-orca-selection / ')
-        for index in "${!args[@]}"; do
-          [ "${args[$index]}" = -c ] && program="${args[$((index + 1))]}"
-        done
-        exec python3 -I -B -c "$program" subyard-orca-selection "$guest"
-        ;;
-    esac
     if [ -e "$state_root/drain-exec-stdin" ]; then
       # Native Incus forwards stdin even when the guest command does not read it.
       # Explicit script execution keeps its intended script input.
       case " $* " in *' bash -s'*|*' /usr/bin/python3 -I -B - '*) ;; *) cat >/dev/null ;; esac
     fi
     case " $* " in
+      *' bash -se -- observe / '*|*' bash -se -- apply / ')
+        # The fixed-path removal of an unselected Orca, under the guest root.
+        arguments=("$@")
+        for index in "${!arguments[@]}"; do
+          [ "${arguments[$index]}" = -- ] && command=("${arguments[@]:$((index + 1))}")
+        done
+        command[1]="$guest"
+        export ORCA_TEST_STATE_ROOT="$state_root" ORCA_TEST_SERVICE_FILE="$service"
+        systemctl() {
+          printf 'removal systemctl %s\n' "$*" >>"$ORCA_TEST_STATE_ROOT/commands.log"
+          local action="$1"
+          shift
+          case "$action" in
+            daemon-reload) return 0 ;;
+            disable)
+              [ ! -e "$ORCA_TEST_STATE_ROOT/fail-removal-disable" ] || return 1
+              case "${*: -1}" in
+                subyard-orca.service) rm -f "$ORCA_TEST_SERVICE_FILE" ;;
+                subyard-orca-discovery.timer) rm -f "$ORCA_TEST_STATE_ROOT/discovery-active" "$ORCA_TEST_STATE_ROOT/discovery-enabled" ;;
+              esac
+              ;;
+            is-active|is-enabled)
+              case "$action ${*: -1}" in
+                *' subyard-orca.service') [ -f "$ORCA_TEST_SERVICE_FILE" ] ;;
+                'is-active subyard-orca-discovery.timer') [ -f "$ORCA_TEST_STATE_ROOT/discovery-active" ] ;;
+                'is-enabled subyard-orca-discovery.timer') [ -f "$ORCA_TEST_STATE_ROOT/discovery-enabled" ] ;;
+                *) return 1 ;;
+              esac
+              ;;
+            *) return 1 ;;
+          esac
+        }
+        export -f systemctl
+        /bin/bash -se -- "${command[@]}"
+        ;;
       *' bash -se -- dev list '*|*' bash -se -- dev stop '*)
         . "$state_root/daemon-manager-fixture.bash"
         daemon_manager_fixture "$state_root" "${*: -1}"
@@ -638,9 +665,9 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   observer="$ROOT/config/profiles/orca/resources/orca/handler.sh"
   cp "$ORCA_TEST_LOG" "$TMP/before-invalid-runtime"
   empty_digest="$(printf '%064d' 0)"
-  if "$observer" _runtime-contract apply bad/operation "$empty_digest" "$empty_digest" \
+  if ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract apply bad/operation "$empty_digest" "$empty_digest" \
     >"$TMP/invalid-runtime-id.out" 2>&1; then fail 'runtime contract accepted an invalid operation ID'; fi
-  if "$observer" _runtime-contract apply valid-operation bad-digest "$empty_digest" \
+  if ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract apply valid-operation bad-digest "$empty_digest" \
     >"$TMP/invalid-runtime-digest.out" 2>&1; then fail 'runtime contract accepted an invalid digest'; fi
   cmp "$ORCA_TEST_LOG" "$TMP/before-invalid-runtime" \
     || fail 'invalid runtime activation arguments reached the transport'
@@ -697,7 +724,7 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/stale.json"
   [ "$pushes" = "$(cat "$ORCA_TEST_PUSH_COUNTER")" ] || fail 'source observation pushed guest files'
   [ "$stages" = "$(count_log 'mktemp -d /tmp/subyard-orca.')" ] || fail 'source observation staged guest files'
-  "$observer" _runtime-contract apply source-observer-repair \
+  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract apply source-observer-repair \
     "$(jq -r .actual "$2/stale.json")" "$(jq -r .desired "$2/stale.json")" >"$TMP/applied.json"
   ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/repaired.json"
   cmp -s "$TMP/expected-codex-profile" "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
@@ -914,11 +941,6 @@ grep -Fq -- "sync --host-name 'owner-host'" \
 observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and (.actual | test("^[0-9a-f]{64}$")) and .actual == .desired' \
   <<<"$observation" >/dev/null || fail 'installed runtime contract was not observed as current'
-# A yard that does not select Orca has no runtime to converge, installed or not.
-for profiles in '' 'hermes'; do
-  [ "$(ENVIRONMENT_PROFILES="$profiles" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe </dev/null)" \
-    = '{"state":"absent","actual":"","desired":""}' ] || fail 'unselected Orca runtime was not observed as absent'
-done
 touch "$TMP/project-counts-fail"
 if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
   >"$TMP/unavailable-binding.out" 2>&1; then
@@ -982,7 +1004,7 @@ rm -f "$TMP/chat-reset-needed"
 # carries it.
 export SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE=00112233445566778899aabbccddeeff
 typed_record="subyard-profile-runtime-diagnostic-v1 $SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE"
-if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
+if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
   orca-refresh "$(printf '%064d' 0)" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
   fail 'runtime contract apply accepted a stale assessment'
 fi
@@ -1000,7 +1022,7 @@ for injected in host-staging push unsafe-guest-path guest-transport forged-guest
     guest-transport) touch "$TMP/fail-guest-transport"; expected='could not enable lingering' ;;
     forged-guest-record) touch "$TMP/forge-guest-record"; expected='unsafe temporary path' ;;
   esac
-  if TMPDIR="$host_tmp" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  if TMPDIR="$host_tmp" ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
     "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
     >"$TMP/runtime-$injected.out" 2>&1; then
     cat "$TMP/runtime-$injected.out" >&2
@@ -1017,7 +1039,7 @@ grep -Fq 'subyard-profile-runtime-diagnostic-v1 apply yard-local' "$TMP/runtime-
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
 touch "$TMP/fail-registration-marker"
-if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-interrupted.out" 2>&1; then
   fail 'runtime contract apply concealed an interruption before marker publication'
@@ -1028,7 +1050,7 @@ fi
 # A guest-side failure whose staging cleanup also fails reports nothing.
 observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 touch "$TMP/fail-cleanup-once"
-if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-cleanup-failed.out" 2>&1; then
   fail 'runtime contract apply concealed a failure with failed cleanup'
@@ -1057,38 +1079,8 @@ assert_runtime_diagnostics() {
     || fail 'opt-in runtime diagnostics changed the observation or exposed unexpected values'
 }
 assert_runtime_diagnostics '[{"parameter":"orca.registration","installed":"unknown","desired":"current"}]'
-# Staging replaces an older release's hook first: a guest failure after that
-# (an Orca-only directory replaced by a file) leaves the hook that skips a yard
-# not selecting Orca, never the older hook that would refuse without its marker.
-staged_hook="$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
-staged_discover="$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/discover"
-codex_dir="$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex"
-for helper in "$staged_hook" "$staged_discover"; do
-  sed -i '/^# A yard that does not select Orca/,/unselected ] || exit 0$/d' "$helper"
-  ! grep -Fq subyard-orca-selection "$helper" || fail "fixture did not plant an older $helper"
-done
-mv "$codex_dir" "$codex_dir.saved"
-: >"$codex_dir"
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
-if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
-  "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
-  >"$TMP/runtime-hook-first.out" 2>&1 </dev/null; then
-  fail 'runtime contract apply concealed a guest failure after the hook replacement'
-fi
-grep -Fxq "$typed_record apply yard-local" "$TMP/runtime-hook-first.out" \
-  || { cat "$TMP/runtime-hook-first.out" >&2; fail 'the injected staging failure did not happen inside the guest step'; }
-for helper in "$staged_hook" "$staged_discover"; do
-  grep -Fq subyard-orca-selection "$helper" \
-    || fail "a staging failure after the helper replacement left the older $helper"
-  [ "$(stat -c %a "$helper")" = 755 ] || fail "the replaced $helper is not executable"
-done
-! ls "$ORCA_TEST_GUEST/usr/local/libexec/subyard"/.orca-sync.* "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration"/.discover.* \
-  >/dev/null 2>&1 || fail 'helper replacement left a temporary file'
-rm -f "$codex_dir"
-mv "$codex_dir.saved" "$codex_dir"
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 rm -f "$TMP/linger"
-"$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-applied.json"
 jq -e '.state == "current" and .actual == .desired' "$TMP/runtime-applied.json" >/dev/null \
@@ -1121,7 +1113,7 @@ jq -e '.state == "stale" and .actual != .desired and
 assert_runtime_diagnostics '[{"parameter":"orca.main-unit","installed":"changed","desired":"current"}]'
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
-  "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-unit.json"
 jq -e '.state == "current" and .actual == .desired and (has("consequence") | not)' "$TMP/runtime-unit.json" >/dev/null \
   || fail 'runtime contract apply did not converge the main unit'
@@ -1737,83 +1729,97 @@ fi
 grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \
   || fail 'unsafe hostname failure was not actionable'
 
-# Sync in a yard whose guest facts do not select Orca names the real reason.
-chmod 0755 "$ORCA_TEST_GUEST"
-mkdir -p "$ORCA_TEST_GUEST/etc/subyard"
-chmod 0755 "$ORCA_TEST_GUEST/etc" "$ORCA_TEST_GUEST/etc/subyard"
-printf '0123456789abcdef0123456789abcdef\n' >"$ORCA_TEST_GUEST/etc/machine-id"
-jq -n '{version:"0.29.0-test",yard:{name:"default",project:"subyard",instance:"yard"},selected_profiles:[]} as $applied |
-  {schema:1,machine_id:"0123456789abcdef0123456789abcdef",status:"current",target:$applied,last_success:$applied,
-   capabilities:"unknown",readiness:"unknown"}' >"$ORCA_TEST_GUEST/etc/subyard/guest-runtime.json"
-chmod 0644 "$ORCA_TEST_GUEST/etc/machine-id" "$ORCA_TEST_GUEST/etc/subyard/guest-runtime.json"
-if run_orca sync >"$TMP/unselected-sync.out" 2>&1; then
-  fail 'sync succeeded in a yard that does not select Orca'
-fi
-grep -Fq 'Orca is not selected in this yard, so it registers no projects' "$TMP/unselected-sync.out" \
-  || { cat "$TMP/unselected-sync.out" >&2; fail 'sync in a yard that does not select Orca did not name the reason'; }
-rm -f "$ORCA_TEST_GUEST/etc/subyard/guest-runtime.json"
-
-# The rendered project hook exits 0 in a yard whose valid guest facts do not
-# select Orca, before its marker check. A selected but stopped Orca with a
-# missing marker, and missing, incomplete, foreign, linked or writable facts,
-# still refuse with the init hint.
-hook_root="$TMP/selection-hook"
-guest_root="$hook_root/guest"
-mkdir -p "$hook_root/bin" "$guest_root/etc/subyard"
-chmod 0755 "$guest_root" "$guest_root/etc" "$guest_root/etc/subyard"
-printf '#!/bin/sh\nexit 3\n' >"$hook_root/bin/systemctl"
-chmod 0755 "$hook_root/bin/systemctl"
-printf '0123456789abcdef0123456789abcdef\n' >"$guest_root/etc/machine-id"
-chmod 0644 "$guest_root/etc/machine-id"
-: >"$hook_root/lock"
-(
-  RESOURCE_DIR="$ROOT/config/profiles/orca/resources/orca"
-  ORCA_CONTRACT_VERSION="$(sed -n 's/^ORCA_CONTRACT_VERSION=//p' "$RESOURCE_DIR/handler.sh")"
-  ORCA_UNIT=subyard-orca.service ORCA_REGISTRATION="$hook_root/registration"
-  ORCA_REGISTRATION_LOCK="$hook_root/lock" ORCA_REGISTRATION_DIGEST="$hook_root/marker"
-  ORCA_GUEST_ROOT="$guest_root"
-  # shellcheck source=config/profiles/orca/resources/orca/registration-contract.sh
-  . "$RESOURCE_DIR/registration-contract.sh"
-  render_registration_hook >"$hook_root/sync"
+# A yard that does not select Orca converges to no Orca wiring. The runtime
+# removes it by fixed paths from a full or half-applied installation, keeps
+# Orca state and the package, and is then current with proven ownership absence.
+orca_wiring=(
+  /usr/local/libexec/subyard/projects-changed.d/orca /usr/local/libexec/subyard/orca-registration
+  /usr/local/libexec/subyard/orca-registration.sha256 /usr/local/libexec/subyard/orca-contract.sha256
+  /usr/local/libexec/subyard/orca-registration.lock /usr/local/libexec/subyard/orca-ingress
+  /usr/local/libexec/subyard/orca-capture-ready /etc/profile.d/subyard-orca-codex.sh
+  /usr/local/libexec/subyard/orca-codex /etc/systemd/system/subyard-orca.service
+  /etc/systemd/system/subyard-orca-discovery.service /etc/systemd/system/subyard-orca-discovery.timer
 )
-chmod 0755 "$hook_root/sync"
-selection_facts() { # <target profiles> [status] [machine id] [last success profiles]
-  local facts="$guest_root/etc/subyard/guest-runtime.json"
-  rm -f "$facts"
-  jq -n --argjson target "$1" --arg status "${2:-current}" --arg machine "${3:-0123456789abcdef0123456789abcdef}" \
-    --argjson applied "${4:-$1}" '
-    {version:"0.29.0-test",yard:{name:"default",project:"subyard",instance:"yard"}} as $yard |
-    {schema:1,machine_id:$machine,status:$status,target:($yard + {selected_profiles:$target}),
-     last_success:($yard + {selected_profiles:$applied}),capabilities:"unknown",readiness:"unknown"}' >"$facts"
-  chmod 0644 "$facts"
+unselected_observe() {
+  ENVIRONMENT_PROFILES="hermes" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe
 }
-selection_facts '["hermes"]'
-PATH="$hook_root/bin:$PATH" "$hook_root/sync" >"$hook_root/deselected.out" 2>&1 \
-  || { cat "$hook_root/deselected.out"; fail 'project hook refused a yard that does not select Orca'; }
-[ ! -s "$hook_root/deselected.out" ] || fail 'deselected project hook reported output'
-for facts in selected missing incomplete foreign symlink writable writable-directory; do
-  chmod 0755 "$guest_root/etc/subyard"
-  case "$facts" in
-    selected) selection_facts '["orca"]' ;;
-    missing) rm -f "$guest_root/etc/subyard/guest-runtime.json" ;;
-    incomplete) selection_facts '["hermes"]' incomplete 0123456789abcdef0123456789abcdef '["orca"]' ;;
-    foreign) selection_facts '["hermes"]' current fedcba9876543210fedcba9876543210 ;;
-    symlink)
-      selection_facts '["hermes"]'
-      mv "$guest_root/etc/subyard/guest-runtime.json" "$guest_root/etc/subyard/facts.json"
-      ln -s facts.json "$guest_root/etc/subyard/guest-runtime.json"
-      ;;
-    writable) selection_facts '["hermes"]'; chmod 0664 "$guest_root/etc/subyard/guest-runtime.json" ;;
-    writable-directory) selection_facts '["hermes"]'; chmod 0777 "$guest_root/etc/subyard" ;;
-  esac
-  if PATH="$hook_root/bin:$PATH" "$hook_root/sync" >"$hook_root/selected.out" 2>&1; then
-    fail "project hook accepted a missing marker with $facts facts"
+unselected_apply() { # <observation>
+  ENVIRONMENT_PROFILES="hermes" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-removal \
+    "$(jq -r .actual <<<"$1")" "$(jq -r .desired <<<"$1")"
+}
+assert_removed_observation() { # <observation> <context>
+  jq -e '.state == "current" and .ownership_absent == true and .actual == .desired and (.desired | test("^[0-9a-f]{64}$"))' \
+    <<<"$1" >/dev/null || fail "$2 was not observed as removed: $1"
+}
+assert_orca_removed() {
+  local path
+  for path in "${orca_wiring[@]}"; do
+    [ ! -e "$ORCA_TEST_GUEST$path" ] && [ ! -L "$ORCA_TEST_GUEST$path" ] || fail "$1 left $path"
+  done
+  assert_down "$1"
+  [ ! -e "$TMP/discovery-active" ] && [ ! -e "$TMP/discovery-enabled" ] || fail "$1 left discovery scheduled"
+  [ -f "$ORCA_TEST_GUEST/srv/agents/orca/state/persisted-grant" ] || fail "$1 removed Orca state"
+  ! grep -Eq 'apt-get (remove|purge)|dpkg (-r|-P|--remove|--purge)' "$ORCA_TEST_LOG" || fail "$1 removed the Orca package"
+}
+mkdir -p "$ORCA_TEST_GUEST/srv/agents/orca/state"
+touch "$ORCA_TEST_GUEST/srv/agents/orca/state/persisted-grant"
+for installation in full half-applied; do
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+  [ -e "$ORCA_TEST_ROUTE" ] && [ -e "$ORCA_TEST_SERVICE" ] || fail 'fixture Orca is not running before removal'
+  if [ "$installation" = half-applied ]; then
+    # An interrupted older release: no marker, an older hook and discovery helper.
+    rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
+    printf '#!/bin/sh\nexit 1\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
+    printf '#!/bin/sh\nexit 1\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/discover"
+    rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/main.py"
   fi
-  grep -Fq "Orca project helper is stale or incomplete; run 'yard init' first" "$hook_root/selected.out" \
-    || { cat "$hook_root/selected.out"; fail "project hook did not refuse a missing marker with $facts facts"; }
-  rm -f "$guest_root/etc/subyard/facts.json"
+  observation="$(unselected_observe)" || fail "unselected $installation Orca could not be observed"
+  jq -e '.state == "stale" and (.actual | test("^[0-9a-f]{64}$")) and (.desired | test("^[0-9a-f]{64}$")) and .actual != .desired and
+    .consequence == "Orca stops and its wiring is removed from this yard; its state under /srv/agents/orca and the orca-ide package are kept"' \
+    <<<"$observation" >/dev/null || fail "unselected $installation Orca was not observed as removal: $observation"
+  hook_runs="$(count_log 'projects-changed.d/orca')"
+  unselected_apply "$observation" >"$TMP/removal-$installation.json" || fail "removal of $installation Orca failed"
+  assert_removed_observation "$(cat "$TMP/removal-$installation.json")" "removal of $installation Orca"
+  [ "$(count_log 'projects-changed.d/orca')" -eq "$hook_runs" ] || fail "removal of $installation Orca ran an installed helper"
+  assert_orca_removed "removal of $installation Orca"
+  assert_removed_observation "$(unselected_observe)" "removed $installation Orca"
 done
-chmod 0755 "$guest_root/etc/subyard"
+# Nothing installed: converged, and observation writes nothing.
+push_count="$(cat "$ORCA_TEST_PUSH_COUNTER")"
+assert_removed_observation "$(unselected_observe)" 'uninstalled unselected Orca'
+[ "$(cat "$ORCA_TEST_PUSH_COUNTER")" -eq "$push_count" ] || fail 'unselected observation wrote guest files'
+# Each independent removal refusal is reported together; other parts are still
+# removed, and a failed guest command of a reachable yard is yard-local.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+printf foreign >"$TMP/nft-mode"
+touch "$TMP/fail-removal-disable"
+observation="$(unselected_observe)"
+if unselected_apply "$observation" >"$TMP/removal-refused.out" 2>&1; then
+  fail 'removal concealed its refusals'
+fi
+grep -Fq 'Orca removal: could not stop and disable subyard-orca.service' "$TMP/removal-refused.out" &&
+  grep -Fq 'Orca removal: refusing to remove the unowned nft table inet subyard_orca' "$TMP/removal-refused.out" \
+  || { cat "$TMP/removal-refused.out" >&2; fail 'removal did not report every independent refusal'; }
+grep -Fxq "$typed_record apply yard-local" "$TMP/removal-refused.out" \
+  || fail 'a failed guest removal command was not reported as yard-local'
+[ ! -e "$ORCA_TEST_ROUTE" ] && [ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] \
+  || fail 'a removal refusal stopped the other removal steps'
+rm -f "$TMP/nft-mode" "$TMP/fail-removal-disable" "$TMP/ingress"
+observation="$(unselected_observe)"
+unselected_apply "$observation" >/dev/null || fail 'removal did not finish after its refusals were resolved'
+assert_orca_removed 'repeated removal'
+# A host route failure stays blocking: it reports no yard-local record.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+touch "$TMP/fail-route-remove"
+observation="$(unselected_observe)"
+if unselected_apply "$observation" >"$TMP/removal-route.out" 2>&1; then
+  fail 'removal concealed a host route failure'
+fi
+! grep -Fq "$typed_record" "$TMP/removal-route.out" || fail 'a host route removal failure was reported as yard-local'
+rm -f "$TMP/fail-route-remove"
+observation="$(unselected_observe)"
+unselected_apply "$observation" >/dev/null || fail 'removal did not finish after the route failure'
+assert_orca_removed 'removal after a route failure'
 
 # Run the profile component's filesystem, wire and reconciliation contract tests in the core gate.
 python3 -B -m unittest discover -s "$ROOT/config/profiles/orca/tests/orca_registration"

@@ -80,6 +80,20 @@ case " ${ENVIRONMENT_PROFILES:-} " in
 *) printf '%%s\n' '{"state":"absent","actual":"","desired":""}'; exit 0 ;;
 esac
 state='%[2]s'-$yard
+# A removal marker stands for an owner whose desired state is removal, as a
+# deselected profile's runtime: it removes its native state and is then current
+# at its removal digest with proven ownership absence.
+if [ -e '%[2]s'-removing-$yard ]; then
+  removed='{"state":"current","actual":"%[8]s","desired":"%[8]s","ownership_absent":true}'
+  if [ ! -f "$state" ]; then printf '%%s\n' "$removed"; exit 0; fi
+  actual=$(cat "$state")
+  case "$1" in
+  observe) printf '{"state":"stale","actual":"%%s","desired":"%%s"}\n' "$actual" %[8]s ;;
+  apply) [ "$3" = "$actual" ] && [ "$4" = %[8]s ] || exit 17; rm -f "$state"; printf '%%s\n' "$removed" ;;
+  *) exit 18 ;;
+  esac
+  exit 0
+fi
 [ -f "$state" ] || printf '%%s' %[3]s > "$state"
 actual=$(cat "$state")
 case "$1" in
@@ -93,7 +107,7 @@ apply)
   printf '{"state":"current","actual":"%%s","desired":"%%s"}\n' "$4" "$4" ;;
 *) exit 18 ;;
 esac
-`, runtime.calls, filepath.Join(root, "state"), strings.Repeat("a", 64), strings.Repeat("b", 64), filepath.Join(root, "fail"), strings.Repeat("d", 64), record)), 0o700)
+`, runtime.calls, filepath.Join(root, "state"), strings.Repeat("a", 64), strings.Repeat("b", 64), filepath.Join(root, "fail"), strings.Repeat("d", 64), record, strings.Repeat("f", 64))), 0o700)
 	return runtime
 }
 
@@ -274,6 +288,38 @@ func TestRuntimeOwnerRetiresStalePendingRecords(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("stale record was kept: %v", err)
+	}
+}
+
+// An owner whose desired state becomes removal (a deselected profile) removes
+// its partial state on the next repair; the yard's pending record is retired
+// and the release is ready, whatever partial state the failure left.
+func TestRuntimeRemovalResolvesThePendingYard(t *testing.T) {
+	scenario := newYardFailureScenario(t, true, true, "default")
+	scenario.runtime.failing(t, "default", true)
+	requirePendingRuntimeOutcome(t, scenario.converge(t), "default")
+	path, err := activationPendingRecordPath(scenario.request.ConfigHome, "default", "sample-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(scenario.runtime.root, "state-removing-default"), nil, 0o600)
+	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("repair after removal: %#v", outcome)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("removal kept the pending record: %v", err)
+	}
+	if _, err := os.Stat(scenario.runtime.state("default")); !os.IsNotExist(err) {
+		t.Fatalf("removal kept the partial native state: %v", err)
+	}
+	ready := scenario.invoke(t, releasetransition.ProcessInspect, nil)
+	if ready.Inspection == nil || ready.Inspection.Outcome.Status != releasetransition.StatusReady || len(ready.Inspection.Blockers) != 0 {
+		payload, _ := json.Marshal(ready)
+		t.Fatalf("readiness after removal: %s", payload)
+	}
+	// Removal is idempotent: the absent owner needs nothing more.
+	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady || len(scenario.runtime.applies(t)) != 2 {
+		t.Fatalf("repeated repair after removal: %#v applies=%v", outcome, scenario.runtime.applies(t))
 	}
 }
 
