@@ -12,11 +12,13 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail if the reference is stale")
+    parser.add_argument("--binary", type=Path, help="engine to document (default: .build/yard)")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    binary = root / ".build/yard"
+    binary = (args.binary or Path(".build/yard"))
+    binary = binary if binary.is_absolute() else root / binary
     if not binary.is_file():
-        parser.error("build the current CLI with make build first")
+        parser.error("build the current CLI with make cli-docs-engine first")
 
     sections = [
         "# CLI reference\n\n"

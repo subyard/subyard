@@ -3,7 +3,7 @@ PYTHON ?= python3
 VERSION ?= 0.1.0-dev
 TEST_VERSION ?= 0.29.0-test
 
-.PHONY: build package test lint verify verify-veranda clean cli-docs cli-docs-check
+.PHONY: build package test lint verify verify-veranda clean cli-docs cli-docs-engine cli-docs-check
 
 build:
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/build-engine.sh
@@ -17,11 +17,17 @@ test:
 	umask 0022 && TMPDIR=/tmp $(GO) test -count=1 -timeout=20m ./cmd/... ./internal/...
 	bash dev/test-profiles.sh --after-permissions
 
-cli-docs: build
-	python3 dev/generate-cli-docs.py
+# Help generation uses its own engine so it never republishes the runtime under test.
+CLI_DOCS_ENGINE := .build/cli-docs/yard
 
-cli-docs-check: build
-	python3 dev/generate-cli-docs.py --check
+cli-docs-engine:
+	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/build-engine.sh --output "$(CLI_DOCS_ENGINE)"
+
+cli-docs: cli-docs-engine
+	python3 dev/generate-cli-docs.py --binary "$(CLI_DOCS_ENGINE)"
+
+cli-docs-check: cli-docs-engine
+	python3 dev/generate-cli-docs.py --check --binary "$(CLI_DOCS_ENGINE)"
 
 lint:
 	bash dev/lint.sh
