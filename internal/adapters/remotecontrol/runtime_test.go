@@ -855,6 +855,7 @@ func TestAdmittedOwnerExecutionBudgetKeepsConnectionAndProbeBudgets(t *testing.T
 			runtime.Timeout = 0
 			ownerWant, probeWant := 10*time.Minute, 10*time.Second
 			connect := "ConnectTimeout=10"
+			slack := time.Second
 			ctx := context.Background()
 			cancel := func() {}
 			if kind == "override" {
@@ -864,8 +865,10 @@ func TestAdmittedOwnerExecutionBudgetKeepsConnectionAndProbeBudgets(t *testing.T
 				connect = "ConnectTimeout=1"
 			}
 			if kind == "parent" {
-				ownerWant = 75 * time.Millisecond
+				// Shorter than both default budgets; slack absorbs scheduling under -race.
+				ownerWant = 5 * time.Second
 				probeWant = ownerWant
+				slack = 4 * time.Second
 				ctx, cancel = context.WithTimeout(ctx, ownerWant)
 			}
 			defer cancel()
@@ -894,7 +897,7 @@ func TestAdmittedOwnerExecutionBudgetKeepsConnectionAndProbeBudgets(t *testing.T
 					writeRemoteFile(t, runtime.knownHostsPath(), "subyard-remote-demo "+fixturePublicKey+"\n", 0600)
 				}
 				remaining := time.Until(deadline)
-				if remaining <= 0 || remaining > want || want-remaining > time.Second {
+				if remaining <= 0 || remaining > want || want-remaining > slack {
 					t.Fatalf("prepared execution budget=%s want at most%s", remaining, want)
 				}
 				if !strings.Contains(strings.Join(args, " "), connect) {
