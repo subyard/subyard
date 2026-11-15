@@ -77,6 +77,8 @@ func installYardFailureRuntime(t *testing.T, root string, declared, typed bool) 
 set -eu
 yard=${SUBYARD_CONFIG_YARD_DIR##*/}
 printf '%%s %%s\n' "$yard" "$*" >> '%[1]s'
+# The yard name a handler can name in its own exit hint.
+printf '%%s\n' "${YARD_NAME:-}" > '%[1]s'-yard-name-$yard
 case " ${ENVIRONMENT_PROFILES:-} " in
 *" sample "*) ;;
 *) printf '%%s\n' '{"state":"absent","actual":"","desired":""}'; exit 0 ;;
@@ -314,6 +316,13 @@ func TestRuntimeYardFailuresAreCollectedForEveryYard(t *testing.T) {
 	if readiness.Inspection == nil || len(readiness.Inspection.Blockers) != 2 {
 		payload, _ := json.Marshal(readiness)
 		t.Fatalf("readiness: %s", payload)
+	}
+	// The release activation passes each yard's name to the handler, as its
+	// ordinary configuration does: unset for the default yard.
+	for yard, want := range map[string]string{"default": "", "named": "named"} {
+		if payload, err := os.ReadFile(scenario.runtime.calls + "-yard-name-" + yard); err != nil || strings.TrimSpace(string(payload)) != want {
+			t.Fatalf("handler of yard %s saw YARD_NAME %q: %v", yard, payload, err)
+		}
 	}
 	for index, yard := range []string{"default", "named"} {
 		blocker := readiness.Inspection.Blockers[index]
