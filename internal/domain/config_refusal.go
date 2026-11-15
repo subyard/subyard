@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -223,7 +222,7 @@ func UnclassifiedConfigRefusal(code ConfigRefusalCode, values ...string) error {
 	for index, value := range values {
 		arguments[index] = value
 	}
-	return errors.New(fmt.Sprintf(configRefusalTexts[code].template, arguments...))
+	return fmt.Errorf(configRefusalTexts[code].template, arguments...)
 }
 
 // SettingRefusal types a refusal over setting names. An invalid name keeps the
