@@ -588,10 +588,11 @@ def init_failure_diagnostics(arguments):
     try:
         result = subprocess.run(
             ["python3", "-B", "/usr/local/libexec/subyard/orca-registration/settings.py", "--check"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=False, text=True,
         )
+        # Exit 3 only means a saved Claude chat reset awaits a restart; launch readiness is printed.
         diagnostics.update(launch_defaults_check_available=True,
-                           launch_defaults_ready=result.returncode == 0)
+                           launch_defaults_ready=result.stdout.startswith("launch=ready "))
     except (OSError, subprocess.TimeoutExpired):
         pass
     try:

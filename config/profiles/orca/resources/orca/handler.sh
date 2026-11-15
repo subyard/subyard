@@ -668,9 +668,20 @@ claude_chat_restart_pending() {
   [ "${state#* }" = reset=restart-pending ]
 }
 
-# Run one saved Claude chat reset pass without touching launch defaults.
+# Run one saved Claude chat reset pass without touching launch defaults. A helper installed
+# before this reset existed has no such pass; init or up stages the current helper.
 run_claude_chat_reset() {
+  if ! registration_contract_ready; then
+    warn "saved Claude chats were not reset: the Orca project helper is stale; run '$(yard_cmd_hint) init' or '$(yard_cmd_hint) orca up'"
+    return 0
+  fi
   yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B "$ORCA_REGISTRATION/settings.py" --reset-chats
+}
+
+chat_reset_complete() {
+  local state
+  state="$(orca_settings_state)"
+  [ "${state#* }" = reset=complete ]
 }
 
 CHAT_RESET_UP_DESIRED='no-saved-claude-chat-awaits-orca-restart'
@@ -699,7 +710,8 @@ chat_reset_step_add() {
     'native saved Claude chat reset state reports the desired fact' "$consequence"
 }
 
-# Whether the approved plan, or a direct call without one, asks for a chat reset pass.
+# Whether the approved plan, or a direct call without one, asks for a chat reset pass. Every
+# chat-permissions step of up and restart includes the one Orca restart in its consequence.
 chat_reset_requested() {
   if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
     [ "$(jq -r '[.[]|select(.id == "chat-permissions")|.decision][0] // "skip"' <<<"$SUBYARD_RESOURCE_STEPS")" != skip ]
@@ -908,7 +920,8 @@ service_contract_endpoint_ready() {
 up_converged() {
   release_ready && dependencies_ready && runtime_contract_ready && service_enabled &&
     service_ready && ingress_active && owned_route_matches && owner_endpoint_ready &&\
-    automatic_project_hook_ready && discovery_scheduled && codex_defaults_ready && projects_synced
+    automatic_project_hook_ready && discovery_scheduled && launch_defaults_ready && chat_reset_complete &&
+    projects_synced
 }
 
 discovery_scheduled() {
@@ -947,14 +960,20 @@ cmd_up() {
     die "Orca owner endpoint failed readiness; route and service were rolled back"
   fi
   run_project_sync
-  ! chat_reset_requested || run_claude_chat_reset
+  local chat_restart=false
+  if chat_reset_requested; then chat_restart=true; run_claude_chat_reset; fi
   if claude_chat_restart_pending; then
-    # Agent processes are children of the service and end with it. Restart once: the pass
-    # in the new runtime completes the reset or warns, and never triggers another restart.
-    yexec systemctl restart "$ORCA_UNIT"
-    wait_service_endpoint_ready || die "Orca did not become ready after restarting for saved Claude chats"
-    ok "Orca restarted so no Claude chat keeps Full access from before the reset"
-    run_claude_chat_reset
+    if [ "$chat_restart" = true ] || [ -z "${SUBYARD_RESOURCE_STEPS:-}" ]; then
+      # Agent processes are children of the service and end with it. Restart once: the pass
+      # in the new runtime completes the reset or warns, and never triggers another restart.
+      yexec systemctl restart "$ORCA_UNIT"
+      wait_service_endpoint_ready || die "Orca did not become ready after restarting for saved Claude chats"
+      ok "Orca restarted so no Claude chat keeps Full access from before the reset"
+      run_claude_chat_reset
+    else
+      # The approved plan has no chat restart: leave it pending; verify reports the new work.
+      warn "saved Claude chats await an Orca restart; run '$(yard_cmd_hint) orca restart'"
+    fi
   fi
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   launch_defaults_ready || die "Orca agent launch defaults did not converge"
@@ -1035,7 +1054,11 @@ cmd_restart() {
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   wait_service_endpoint_ready || die "Orca did not become ready after restart"
   ok "Orca service restarted"
-  [ "$reset_chats" = false ] || run_claude_chat_reset
+  if ! registration_contract_ready; then
+    warn "saved Claude chats were not checked: the Orca project helper is stale; run '$(yard_cmd_hint) init' or '$(yard_cmd_hint) orca up'"
+  elif [ "$reset_chats" = true ]; then
+    run_claude_chat_reset
+  fi
 }
 
 # Print service or absent, and fail when the service cannot be read. A daemon or local
@@ -1388,9 +1411,10 @@ emit_restart_assessment() {
   observed=inactive;decision=apply
   if yexec systemctl is-active --quiet "$ORCA_DISCOVERY_TIMER";then observed=active;decision=skip;fi
   orca_step_add discovery "$ORCA_DISCOVERY_TIMER" "$observed" active "$decision" 'native discovery timer is active' 'start the selected Orca discovery timer'
-  local chat_available=false
-  ! registration_contract_ready || chat_available=true
-  chat_reset_step_add "$CHAT_RESET_UP_DESIRED" "$CHAT_RESET_CONSEQUENCE" "$chat_available"
+  # A stale helper cannot reset chats; restart stays available and the next init or up resets them.
+  if registration_contract_ready; then
+    chat_reset_step_add "$CHAT_RESET_UP_DESIRED" "$CHAT_RESET_CONSEQUENCE" true
+  fi
   orca_steps_emit restart "$ORCA_STEPS"
 }
 

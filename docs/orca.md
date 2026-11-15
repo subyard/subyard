@@ -260,11 +260,15 @@ Orca restart. The `orca up` and `yard orca restart` plans show this as a saved C
 reset step: they reset chats that still need it, restart Orca once, which ends running agents
 and terminals in the service, and finish the reset in the new Orca. `yard orca sync` retries
 the reset but never restarts Orca; while a restart is needed it succeeds with a warning naming
-`yard orca restart` and `orca up`. Until then, the repair and `yard orca status` warn that
-saved Claude chats may still run Git without approval. The repair runs after project
-registration is ready: on `yard init`, project events, `yard orca sync` and an `orca up` whose
-registration or launch-default step applies; until registration is ready it does not run. Each
-chat is reset at most once, so choosing Full access again in a chat is respected.
+`yard orca restart` and `orca up`. An `orca up` whose plan did not include the reset step never
+restarts Orca for it; it warns and leaves the restart to `yard orca restart`. Until `yard init`
+or `orca up` installs the current Orca project helper after a Subyard update, `yard orca
+restart` restarts Orca without resetting chats and says so. Until then, the repair and `yard
+orca status` warn that saved Claude chats may still run Git without approval. The repair runs
+after project registration is ready: on `yard init`, project events, `yard orca sync` and an
+`orca up` whose registration or launch-default step applies; until registration is ready it
+does not run. Each chat is reset at most once, so choosing Full access again in a chat is
+respected.
 
 The reset finds chats through Orca's open tabs and Session History. A chat that a listing does
 show is reset even when the other listing fails or Session History is incomplete, including one

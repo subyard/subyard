@@ -858,9 +858,9 @@ chown dev:dev "$root/.subyard-meta.json"
 runuser -u dev -- git -C "$root/src" init -q
 YARD
 second_pair="$(run_orca pair | tail -n1)"
-"${incus[@]}" exec "$instance" -- runuser -u dev -- \
-  python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check \
-  || die 'Codex defaults did not survive an Orca restart'
+settings_state="$("${incus[@]}" exec "$instance" -- runuser -u dev -- \
+  python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check || true)"
+[[ "$settings_state" == 'launch=ready '* ]] || die 'Codex defaults did not survive an Orca restart'
 [ "$first_pair" != "$second_pair" ] || die 'pair restart reused the old offer'
 "${incus[@]}" exec "$instance" -- jq -e '
   .pairing.available == true and .pairing.scope == "runtime"

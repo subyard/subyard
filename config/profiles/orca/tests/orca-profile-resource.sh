@@ -50,6 +50,11 @@ printf '%s\n' "$*" >> "$log"
 chat_reset_pass() {
   local runtime
   runtime="$(cat "$state_root/invocation" 2>/dev/null || printf 1)"
+  if [ -e "$state_root/chat-state-unreadable" ]; then
+    # Recovery: the rewritten state treats the running Orca as dirty.
+    rm -f "$state_root/chat-state-unreadable"
+    printf '%s\n' "$runtime" >"$state_root/chat-dirty"
+  fi
   if [ -e "$state_root/chat-reset-needed" ]; then
     printf '%s\n' "$runtime" >"$state_root/chat-dirty"
     [ -e "$state_root/chat-reset-recurs" ] || rm -f "$state_root/chat-reset-needed"
@@ -62,7 +67,9 @@ chat_reset_pass() {
 chat_reset_state() {
   local runtime
   runtime="$(cat "$state_root/invocation" 2>/dev/null || printf 1)"
-  if [ -e "$state_root/chat-dirty" ] && [ "$(cat "$state_root/chat-dirty")" = "$runtime" ]; then
+  if [ -e "$state_root/chat-state-unreadable" ]; then
+    printf unreadable
+  elif [ -e "$state_root/chat-dirty" ] && [ "$(cat "$state_root/chat-dirty")" = "$runtime" ]; then
     printf restart-pending
   elif [ -e "$state_root/chat-dirty" ] || [ -e "$state_root/chat-reset-incomplete" ] ||
     [ -e "$state_root/chat-reset-needed" ]; then
@@ -290,6 +297,8 @@ case "${1:-}" in
         ;;
       *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py '*)
         rm -f "$state_root/codex-defaults-drift"
+        # A chat needing a reset appears after the plan, between the native guard and this pass.
+        [ ! -e "$state_root/chat-reset-during-apply" ] || mv "$state_root/chat-reset-during-apply" "$state_root/chat-reset-needed"
         chat_reset_pass
         ;;
       *' mktemp -d /tmp/subyard-orca.XXXXXX '*)
@@ -915,6 +924,19 @@ if ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
 fi
 grep -Fq 'yard init' "$TMP/stale-sync-apply.out" \
   || fail 'stale sync apply did not provide an init recovery hint'
+# A stale helper has no chat reset pass: restart still works and points to init or up.
+touch "$TMP/chat-reset-needed"
+SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart >"$TMP/stale-restart-plan.json"
+jq -e 'all(.steps[]; .id != "chat-permissions")' "$TMP/stale-restart-plan.json" >/dev/null \
+  || fail "restart planned a chat reset with a stale helper: $(cat "$TMP/stale-restart-plan.json")"
+reset_passes="$(count_log 'settings.py --reset-chats')"
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+run_orca restart --yes >"$TMP/stale-restart.out" 2>&1 || fail "restart failed with a stale helper: $(cat "$TMP/stale-restart.out")"
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] || fail 'stale-helper restart did not restart'
+[ "$(count_log 'settings.py --reset-chats')" -eq "$reset_passes" ] || fail 'restart ran a stale helper chat reset'
+grep -Fq "run 'yard init' or 'yard orca up'" "$TMP/stale-restart.out" \
+  || fail "stale-helper restart gave no recovery hint: $(cat "$TMP/stale-restart.out")"
+rm -f "$TMP/chat-reset-needed"
 if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
   orca-refresh "$(printf '%064d' 0)" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
   fail 'runtime contract apply accepted a stale assessment'
@@ -1185,6 +1207,51 @@ run_orca restart --yes >/dev/null || fail 'restart did not finish a pending save
 SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart >"$TMP/chat-restart-plan.json"
 jq -e 'any(.steps[]; .id == "chat-permissions" and .decision == "skip")' "$TMP/chat-restart-plan.json" >/dev/null \
   || fail 'a completed saved Claude chat reset still planned work'
+
+# Up runs an approved chat step even when everything else is converged, and recovers corrupt state.
+for chat_state in chat-reset-needed chat-state-unreadable; do
+  touch "$TMP/$chat_state"
+  ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/chat-plan.json"
+  jq -e '[.steps[]|select(.decision != "skip")|.id] == ["chat-permissions"]' "$TMP/chat-plan.json" >/dev/null \
+    || fail "up plan for $chat_state did not isolate the chat step: $(cat "$TMP/chat-plan.json")"
+  restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+  run_orca up --yes >"$TMP/chat-up.out" || fail "up did not finish the saved Claude chat reset for $chat_state"
+  if grep -Fq 'already converged' "$TMP/chat-up.out"; then fail "up skipped the approved chat step for $chat_state"; fi
+  [ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
+    || fail "up did not restart Orca exactly once for $chat_state"
+  [ ! -e "$TMP/$chat_state" ] && [ ! -e "$TMP/chat-dirty" ] || fail "up did not complete the reset for $chat_state"
+done
+
+# A chat restart outside the approved plan is never performed.
+chat_up_apply() {
+  ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=apply \
+    SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=orca-handler-test \
+    SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$TMP/chat-plan.json")" SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$TMP/chat-plan.json")" \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/chat-up.out" 2>&1
+}
+touch "$TMP/codex-defaults-drift"
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/chat-plan.json"
+jq -e 'any(.steps[]; .id == "chat-permissions" and .decision == "skip")
+  and any(.steps[]; .id == "codex-defaults" and .decision == "apply")' "$TMP/chat-plan.json" >/dev/null \
+  || fail "unexpected launch-default plan: $(cat "$TMP/chat-plan.json")"
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+# A change before the native guard makes the plan stale.
+cp "$TMP/invocation" "$TMP/chat-dirty"
+if chat_up_apply; then fail 'up applied a plan whose chat reset state changed'; fi
+grep -Fq 'plan_stale' "$TMP/chat-up.out" || fail "stale chat state was not refused as stale: $(cat "$TMP/chat-up.out")"
+rm -f "$TMP/chat-dirty"
+# A reset during the approved launch-default repair is left pending with a warning.
+touch "$TMP/chat-reset-during-apply"
+chat_up_apply || fail "up failed on an unapproved chat restart: $(cat "$TMP/chat-up.out")"
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq "$restart_count" ] \
+  || fail 'up restarted Orca outside its approved plan'
+grep -Fq "saved Claude chats await an Orca restart; run 'yard orca restart'" "$TMP/chat-up.out" \
+  || fail "up hid an unapproved pending chat restart: $(cat "$TMP/chat-up.out")"
+[ -e "$TMP/chat-dirty" ] && [ ! -e "$TMP/codex-defaults-drift" ] || fail 'up dropped a pending chat restart'
+run_orca restart --yes >/dev/null
+[ ! -e "$TMP/chat-dirty" ] || fail 'restart did not complete the pending chat reset'
 
 # An incomplete reset warns without making launch defaults look unready.
 touch "$TMP/chat-reset-incomplete"
