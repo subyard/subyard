@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Published pre-policy yards: a stopped published update, its replacement with one upfront
-# confirmation, approved session interruption and marker-only retry.
+# Published pre-policy yards through the hop release: pending yards, one upfront
+# confirmation, approved session interruption and marker-only retry on the candidate.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOKEN="${1:?fixture token required}"
@@ -48,7 +48,7 @@ install -d "$RELEASE_ROOT"
 cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
 chmod -R a+rX "$RELEASE_ROOT"
 operator_env bash -c 'printf "%s\n" "AGENTS=none" "CODING_TOOL_INTEGRATIONS=" "ENVIRONMENT_PROFILES=" "YARD_IMAGE=subyard-e2e-debian-13-cloud-container" "YARD_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container" "DEV_UID=2000" > "$HOME/.config/subyard/config.env"; chmod 0600 "$HOME/.config/subyard/config.env"'
-read -r creation installer_sha archive_sha < <(awk -F '\t' '$1=="0.21.3"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
+read -r creation installer_sha archive_sha _ < <(awk -F '\t' '$1=="0.21.3" && $4=="pin"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
 [ "$creation" = 0.21.3 ] || die 'creation baseline missing'
 curl -fsSL --proto '=https' --tlsv1.2 "https://github.com/Subyard/Subyard/releases/download/v$creation/subyard-install.sh" -o "$INSTALLER"
 [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$installer_sha" ] || die 'creation installer changed'
@@ -63,7 +63,7 @@ for name in "${NAMES[@]}"; do
     operator_env install -d -m 0700 "$OPERATOR_HOME/.config/subyard/yards/$name"
     port=2243
     [ "$name" != weighted ] || port=2242
-    # Both VM yards predate the VM start policy; the stopped published update leaves z-last untouched.
+    # Both VM yards predate the VM start policy.
     settings="SSH_PORT=$port"$'\nYARD_KIND=vm\nYARD_IMAGE=subyard-e2e-debian-13-cloud-vm\nYARD_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-vm\nHOST_MOUNTS=\nHOST_LINKS=\nLIMITS_CPU=1\nLIMITS_MEMORY=1GiB\nROOT_DISK_SIZE=10GiB\nSRV_VOLUME_TYPE=block\nSRV_VOLUME_SIZE=2GiB\n'
     operator_env bash -c 'printf "%s" "$2" > "$1"; chmod 0600 "$1"' _ "$OPERATOR_HOME/.config/subyard/yards/$name/config.env" "$settings"
   fi
@@ -78,51 +78,47 @@ for name in "${NAMES[@]}"; do
   UUID[$name]="$(yard_uuid "$name")" BOOT[$name]="$(yard_boot "$name")"
 done
 lowlevel() { incus project get "$(project_for "$1")" restricted.virtual-machines.lowlevel; }
-grants() { local name value; for name in weighted z-last; do value="$(lowlevel "$name")" || return; printf '%s=%s ' "$name" "$value"; done; }
-[ "$(grants)" = 'weighted= z-last= ' ] || die 'VM yards already carry the VM start policy grant'
-# Published 0.28.0 pins the project grant that its own VM start policy writes, so its
-# direct update stops at the first restarted VM yard and keeps the old release active.
-read -r stuck _ archive_sha < <(awk -F '\t' '$1=="0.28.0"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
-[ "$stuck" = 0.28.0 ] || die 'stuck baseline missing'
-rc=0
-operator_yard update --version "$stuck" --yes > "$STATE_ROOT/stuck.log" 2>&1 || rc=$?
-[ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$stuck/subyard-$stuck-linux-amd64.tar.gz" | awk '{print $1}')" = "$archive_sha" ] || die 'stuck baseline changed'
-[ "$rc" != 0 ] && grep -Fq 'code=recovery-ambiguous' "$STATE_ROOT/stuck.log" || { cat "$STATE_ROOT/stuck.log" >&2; die 'published 0.28.0 update did not stop'; }
-case "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" in releases/"$creation"-*) ;; *) die 'stopped update changed the active release' ;; esac
-operator_env jq -e --arg target "$stuck-" '.checkpoint != "complete" and (.goal.target | startswith($target))' "$V2_JOURNAL" >/dev/null || die 'stopped update left no unfinished journal'
-[ "$(marker default)" = v1 ] && [ -z "$(marker weighted)" ] && [ "$(grants)" = 'weighted=allow z-last= ' ] \
-  && [ -z "$(marker z-last)" ] && [ "$(yard_boot z-last)" = "${BOOT[z-last]}" ] || die 'stopped update reached an unexpected native state'
-# The stopped update returned while the restarted VM was still booting.
-for _ in {1..60}; do yard_boot weighted >/dev/null 2>&1 && break; sleep 2; done
-BOOT[default]="$(yard_boot default)" && BOOT[weighted]="$(yard_boot weighted)" || die 'stopped update left a yard without a guest agent'
-# The active 0.21.3 launcher asks only the journal-selected engine, even for a newer release.
-before="$(protected_state)"
-update_candidate --check --offline --version "$CANDIDATE_VERSION" > "$STATE_ROOT/stuck-check.log" 2>&1 || true
-grep -Fq 'the journal-selected release cannot provide a valid transition inspection' "$STATE_ROOT/stuck-check.log" || { cat "$STATE_ROOT/stuck-check.log" >&2; die 'old launcher did not keep the journal-selected owner'; }
-# The journal-selected engine names the pinned start policy grant as the stop reason.
-grep -Fq 'registered yard migration desired state changed' "$STATE_ROOT/stuck.log" "$STATE_ROOT/stuck-check.log" || die 'published 0.28.0 stopped for another reason'
-[ "$(protected_state)" = "$before" ] || die 'old launcher check changed protected state'
-# An owned guest preflight refusal leaves the VM running. This tests isolation
-# without host shims, a fabricated exit code or an extra guest mount.
-# The stopped update already masked tmp.mount before restarting this VM; that completed effect stays.
-yard_guest weighted sh -eu -c 'test "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null; rm /etc/systemd/system/tmp.mount; printf "fixture foreign policy\n" > /etc/systemd/system/tmp.mount'
-# The candidate's own launcher replaces the unfinished journal; rerunning the installer is the operator route.
-operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" bash "$RELEASE_ROOT/subyard-install.sh" --publish-only --version "$CANDIDATE_VERSION" > "$STATE_ROOT/stage.log"
-LAUNCHER="$(sed -n 's/^staged release=.* candidate=//p' "$STATE_ROOT/stage.log")/bin/yard"
-operator_env test -x "$LAUNCHER" || die 'candidate launcher was not staged'
-before="$(protected_state)"
-operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$LAUNCHER" update --check --offline --version "$CANDIDATE_VERSION" --json > "$STATE_ROOT/plan.json"
-[ "$(protected_state)" = "$before" ] || die 'read-only plan changed protected state'
-jq -e '.resume==null and (.blockers|length)==0 and any(.assessment.consequences[]; startswith("replace the unfinished release transition"))' "$STATE_ROOT/plan.json" >/dev/null || die 'check omitted the journal replacement'
+[ -z "$(lowlevel weighted)" ] && [ -z "$(lowlevel z-last)" ] || die 'VM yards already carry the VM start policy grant'
+# An owned guest preflight refusal leaves the VM running with its disk-/tmp migration pending.
+# This tests isolation without host shims, a fabricated exit code or an extra guest mount,
+# and keeps both VM yards pending through the hop for this candidate's own restart.
 for name in weighted z-last; do
-  jq -e --arg name "yard $name:" 'any(.decisions[]?; (.result | contains($name) and contains("sessions") and contains("persistent data")))' "$STATE_ROOT/plan.json" >/dev/null || die 'check omitted restart disclosure'
+  yard_guest "$name" sh -eu -c 'test ! -e /etc/systemd/system/tmp.mount; test ! -L /etc/systemd/system/tmp.mount; printf "fixture foreign policy\n" > /etc/systemd/system/tmp.mount'
 done
-! jq -e 'any(.decisions[]?; .result | contains("yard default:"))' "$STATE_ROOT/plan.json" >/dev/null || die 'check restarts a finished yard'
+# Below the anchor, follow the printed route: the hop release first, then plain update.
+# A stopped published 0.28.0 update and its installer exit belong to the hop's own acceptance.
+read -r hop _ archive_sha _ < <(published_hop)
+operator_yard update --version "$hop" --yes > "$STATE_ROOT/hop.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/hop.log" >&2; exit "$rc"; }
+[ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$hop/subyard-$hop-linux-amd64.tar.gz" | awk '{print $1}')" = "$archive_sha" ] || die 'hop baseline changed'
+[ "$(operator_yard --version)" = "yard $hop" ] && operator_env jq -e '.checkpoint=="complete"' "$V2_JOURNAL" >/dev/null || die 'hop did not complete'
+for name in weighted z-last; do
+  grep -Fq "yard $name: disk-/tmp migration pending" "$STATE_ROOT/hop.log" && [ -z "$(marker "$name")" ] \
+    && [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] || { cat "$STATE_ROOT/hop.log" >&2; die 'hop did not keep the refused VM yard running and pending'; }
+done
+[ "$(marker default)" = v1 ] || die 'hop did not finish the container yard'
+BOOT[default]="$(yard_boot default)"
+# Only z-last becomes eligible for the candidate's restart; weighted keeps its foreign policy.
+yard_guest z-last rm -- /etc/systemd/system/tmp.mount
+# The update from the hop runs no migration step, so pending yards wait for the current-release retry.
+update_candidate --yes > "$STATE_ROOT/candidate.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/candidate.log" >&2; exit "$rc"; }
+[ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
+for name in "${NAMES[@]}"; do [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] && [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] || die 'update from the hop restarted a yard'; done
+[ -z "$(marker weighted)" ] && [ -z "$(marker z-last)" ] || die 'update from the hop changed a pending marker'
 before="$(protected_state)"
-printf -v decline_command '%q ' "$LAUNCHER" update --offline --version "$CANDIDATE_VERSION"
+update_candidate --check --offline --version "$CANDIDATE_VERSION" --json > "$STATE_ROOT/plan.json"
+[ "$(protected_state)" = "$before" ] || die 'read-only plan changed protected state'
+for name in weighted z-last; do
+  jq -e --arg name "yard $name:" '.outcome.status=="ready" and any(.outcome.warnings[]; contains($name) and contains("sessions") and contains("persistent data") and contains("yard update --yes"))' "$STATE_ROOT/plan.json" >/dev/null || die 'check omitted restart disclosure'
+done
+! jq -e 'any(.outcome.warnings[]; contains("yard default:"))' "$STATE_ROOT/plan.json" >/dev/null || die 'check restarts a finished yard'
+before="$(protected_state)"
+printf -v decline_command '%q ' "$OPERATOR_HOME/.local/bin/yard" update --offline --version "$CANDIDATE_VERSION"
 rc=0
 printf 'n\n' | operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" script -q -e -c "$decline_command" /dev/null > "$STATE_ROOT/decline.log" 2>&1 || rc=$?
 [ "$rc" != 0 ] && grep -Fq 'operation declined' "$STATE_ROOT/decline.log" || die 'ordinary confirmation was not declined'
+# The single confirmation discloses each restart before it is answered.
+for name in weighted z-last; do grep -Fq "yard $name: restarts now; active agent sessions" "$STATE_ROOT/decline.log" || die 'confirmation omitted restart disclosure'; done
+! grep -Fq 'yard default:' "$STATE_ROOT/decline.log" || die 'confirmation restarts a finished yard'
 [ "$(protected_state)" = "$before" ] || die 'decline changed protected state'
 for name in "${NAMES[@]}"; do [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] && [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] || die 'decline changed native state'; done
 [ -z "$(marker weighted)" ] && [ -z "$(marker z-last)" ] || die 'decline changed native state'
@@ -137,7 +133,7 @@ for _ in {1..40}; do [ "$(ssh_probe)" = active ] && break; sleep 0.5; done
 probe="$(ssh_probe)"
 sudo -n kill -0 "$session_pid" && [ "$probe" = active ] \
   || die "live SSH session did not connect: probe=$probe ssh=$(tr '\n' ' ' < "$STATE_ROOT/live-ssh.log")"
-operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" bash "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/update.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/update.log" >&2; exit "$rc"; }
+update_candidate --offline --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/update.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/update.log" >&2; exit "$rc"; }
 cat "$STATE_ROOT/update.log"
 grep -Fq "interrupting the SSH and VS Code Remote-SSH sessions still connected to 'yard-z-last'" "$STATE_ROOT/update.log" || die 'approved restart did not report the interrupted session'
 for _ in {1..60}; do sudo -n kill -0 "$session_pid" 2>/dev/null || break; sleep 0.5; done
@@ -150,9 +146,9 @@ update_candidate --check --offline --version "$CANDIDATE_VERSION" --json > "$STA
 jq -e '.outcome.status=="ready" and any(.outcome.warnings[]; contains("yard weighted:"))' "$STATE_ROOT/ready.json" >/dev/null || die 'ready warning missing'
 [ -z "$(marker weighted)" ] && [ "$(yard_uuid weighted)" = "${UUID[weighted]}" ] || die 'failure lost identity or pending marker'
 [ "$(yard_boot weighted)" = "${BOOT[weighted]}" ] && [ "$(incus list yard-weighted --project subyard-weighted --format csv -c s)" = RUNNING ] || die 'preflight refusal stopped the yard'
-# z-last first received the VM start policy inside this transition.
+# z-last carries the VM start policy after its restart.
 [ "$(marker z-last)" = v1 ] && [ "$(yard_boot z-last)" != "${BOOT[z-last]}" ] && [ "$(lowlevel z-last)" = allow ] || die 'remaining yard did not finish'
-[ "$(marker default)" = v1 ] && [ "$(yard_boot default)" = "${BOOT[default]}" ] || die 'replacement restarted a finished yard'
+[ "$(marker default)" = v1 ] && [ "$(yard_boot default)" = "${BOOT[default]}" ] || die 'retry restarted a finished yard'
 BOOT[z-last]="$(yard_boot z-last)"
 operator_yard -Y weighted config set VM_CPU_WEIGHT 250 --scope yard --local --yes
 incus config set yard-weighted user.subyard.vm_cpu_weight=250 --project subyard-weighted

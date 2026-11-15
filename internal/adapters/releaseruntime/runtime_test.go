@@ -340,7 +340,16 @@ func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 	}
 }
 
-func TestRollbackToRetainedPreV011ReleaseRefusesBeforeDispatch(t *testing.T) {
+func TestRollbackToRetainedPreAnchorReleaseRefusesBeforeDispatch(t *testing.T) {
+	for _, targetVersion := range []string{"0.8.0", "0.11.0", "0.26.0", UpdateAnchorVersion + "-rc.1"} {
+		t.Run(targetVersion, func(t *testing.T) {
+			testRollbackBelowAnchor(t, targetVersion)
+		})
+	}
+}
+
+func testRollbackBelowAnchor(t *testing.T, targetVersion string) {
+	t.Helper()
 	root := t.TempDir()
 	runtimeRoot := filepath.Join(root, "runtime")
 	configHome := filepath.Join(root, "config")
@@ -370,11 +379,11 @@ esac
 	}
 	legacyPayload := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
-  --version) printf 'yard-engine 0.8.0\n' ;;
+  --version) printf 'yard-engine %s\n' ;;
   _release-transition) : > %q; exit 93 ;;
   *) exit 64 ;;
 esac
-`, legacyUnexpected)
+`, targetVersion, legacyUnexpected)
 	legacyEngine := filepath.Join(legacyRoot, "bin", "yard-engine")
 	if err := os.WriteFile(legacyEngine, []byte(legacyPayload), 0o700); err != nil {
 		t.Fatal(err)
@@ -401,13 +410,16 @@ esac
 		context.Background(), []string{"--rollback", "--runtime-root", runtimeRoot},
 		configHome, "default",
 	)
-	if err == nil || !strings.Contains(err.Error(), "before v0.11.0") || prepared.Changed {
+	if err == nil || !strings.Contains(err.Error(), "code=rollback-incompatible") || !strings.Contains(err.Error(), "below the supported v"+UpdateAnchorVersion+" boundary") || prepared.Changed {
 		t.Fatalf("unsupported rollback = %#v err=%v", prepared, err)
 	}
 	for _, path := range []string{legacyUnexpected, capture} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("unsupported rollback dispatched a transition: %v", err)
 		}
+	}
+	if current, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil || current != "releases/"+string(owner.release) {
+		t.Fatalf("rollback refusal changed the active runtime: %s, %v", current, err)
 	}
 }
 

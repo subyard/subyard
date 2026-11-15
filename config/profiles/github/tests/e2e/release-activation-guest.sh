@@ -2,6 +2,9 @@
 # Authentic published predecessor plus two installed consumer classes on one VM.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
+# shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
+IFS=$'\t' read -r ANCHOR_VERSION _ ANCHOR_SHA256 _ < <(published_anchor)
 cd "$ROOT"
 # shellcheck source=config/profiles/github/tests/e2e/release-activation-fixture.sh
 . "$ROOT/config/profiles/github/tests/e2e/release-activation-fixture.sh"
@@ -53,11 +56,12 @@ trace_deferred_migration() {
 }
 # Shared with the controller so both select the same authentic baseline and synthetic B.
 candidate_identity() {
-  python3 - "$1" "$2" <<'PY'
-import json,re,sys
+  python3 - "$1" "$2" "$ROOT" <<'PY'
+import json,pathlib,re,runpy,sys
 candidate=json.load(open(sys.argv[1]))
 baseline=sys.argv[2]
-if baseline not in ('0.19.0','0.20.0'):
+pin=runpy.run_path(str(pathlib.Path(sys.argv[3])/'dev/verify-release-upgrades.py'))['published_anchor'](pathlib.Path(sys.argv[3]))
+if baseline != pin[0]:
     raise SystemExit('unsupported authentic activation predecessor')
 version=candidate['version']
 match=re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?',version)
@@ -70,8 +74,7 @@ if candidate['runtime_file'] not in (f'subyard-{version}-linux-amd64.tar.gz',f's
     raise SystemExit('activation candidate archive differs from its version')
 if not re.fullmatch('[0-9a-f]{64}',candidate['runtime_sha256']):
     raise SystemExit('invalid activation candidate checksum')
-print(version,f'{major}.{minor}.{patch+1}-activation-fixture',
-      'eeacda9ded1cc4c095ecc1e0569cf6fd96a737b3af6ab30ce7804833e3d8f1d1',sep='\t')
+print(version,f'{major}.{minor}.{patch+1}-activation-fixture',pin[1],sep='\t')
 PY
 }
 if [ "${1:-}" = --candidate-identity ]; then
@@ -79,7 +82,7 @@ if [ "${1:-}" = --candidate-identity ]; then
   candidate_identity "$2" "$3"
   exit
 fi
-BASELINE=0.19.0
+BASELINE="$ANCHOR_VERSION"
 MODE="${1:-normal}"
 if [ "$MODE" != --local-probe ]; then
   MODE=normal
@@ -553,7 +556,7 @@ SH
             if [ "$probe_case" = foreign-project ]; then printf 'foreign\n'; else printf '%s\n' "$STATE"; fi ;;
           'list --project')
             [ "$probe_case" != unavailable ] || return 99
-            probe_name=uid-probe; [ "$probe_case" != foreign-instance ] || probe_name=foreign
+            probe_name="uid-probe"; [ "$probe_case" != foreign-instance ] || probe_name=foreign
             jq -n --arg name "$probe_name" --arg marker "$STATE" '[{name:$name,config:{"user.activation-fixture":$marker}}]' ;;
           'delete uid-probe'|'project delete') printf '%s\n' "$*" >> "$mutations" ;;
           *) return 99 ;;
@@ -745,33 +748,35 @@ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connec
   "https://github.com/Subyard/Subyard/releases/download/v$BASELINE/subyard-install.sh" > "$STATE/baseline-install.sh"
 [ "$(hash "$STATE/baseline-install.sh")" = "$BASELINE_INSTALLER_SHA" ] || die 'published installer pin differs'
 bash "$STATE/baseline-install.sh" --version "$BASELINE" --yes > "$STATE/baseline-install.log" 2>&1
+archive_pin="$ANCHOR_SHA256"
+[ "$(hash "$STATE/releases/$BASELINE/subyard-$BASELINE-linux-amd64.tar.gz")" = "$archive_pin" ] || die 'published archive pin differs'
 YARD_BIN="$STATE/bin/yard"
 [ "$(yard --version)" = "yard $BASELINE" ] || die 'published predecessor not active'
 for target in default "$NAMED"; do
   project="$PROJECT"; [ "$target" = default ] || project="$NAMED_PROJECT"
   ! incus project show "$project" >/dev/null 2>&1 || die 'fixture project already exists'
   CREATED_YARDS+=("$target")
-  # Claim exact random fixture project before product init; native product retains it.
-  incus project create "$project" -c features.images=false -c "user.activation-fixture=$STATE"
-  yard -Y "$target" init --yes > "$STATE/init-$target.log" 2>&1
+  # Ordinary init creates proven project ownership; then bind fixture cleanup.
+  init_rc=0
+  yard -Y "$target" init --yes > "$STATE/init-$target.log" 2>&1 || init_rc=$?
+  if [ "$init_rc" != 0 ]; then
+    [ "$(incus project get "$project" user.subyard.installation)" = 1 ] \
+      && [ "$(incus project get "$project" user.subyard.operator_uid)" = "$(id -u)" ] \
+      && [ "$(incus project get "$project" user.subyard.data_home)" = "$SUBYARD_HOME" ] \
+      && [ "$(incus project get "$project" user.subyard.config_home)" = "$SUBYARD_CONFIG_HOME" ] \
+      && [ -z "$(incus list --project "$project" --format csv -c n)" ] \
+      || die 'source init failed outside its owned empty image namespace'
+    incus project set "$project" features.images=false
+  fi
+  incus project set "$project" "user.activation-fixture=$STATE"
+  [ "$init_rc" = 0 ] || yard -Y "$target" init --yes > "$STATE/init-$target-retry.log" 2>&1
   instance="$INSTANCE"; [ "$target" = default ] || instance="$NAMED_INSTANCE"
   claim_units
   yard -Y "$target" start --yes > "$STATE/start-$target.log" 2>&1
   [ "$(incus exec "$instance" --project "$project" -- id -u dev)" = "$FIXTURE_DEV_UID" ] || die 'published baseline created an unexpected dev UID'
 done
-# The genuine predecessor created and recorded these composed instructions.
-# Bind the unmarked bytes before current activation retires their missing source.
-preview_instruction_hash="$(guest python3 - <<'PY'
-import hashlib
-from pathlib import Path
-data = Path('/home/dev/.claude/CLAUDE.md').read_bytes()
-start, end = b'<!-- subyard-preview -->', b'<!-- /subyard-preview -->'
-assert data.count(start) == data.count(end) == 1
-begin, finish = data.index(start), data.index(end) + len(end)
-assert begin < finish and b'Keep these unmarked operator instructions.' in data[:begin]
-print(hashlib.sha256(data[:begin] + data[finish:]).hexdigest())
-PY
-)"
+# The anchor already owns modern preview skills and unmarked operator instructions.
+preview_instruction_hash="$(guest sha256sum /home/dev/.claude/CLAUDE.md | cut -d' ' -f1)"
 guest_dev /usr/local/bin/subyard-github status | jq -e '.configured==false' >/dev/null
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- test ! -e /usr/local/libexec/subyard/github-client
 stage synthetic-credentials-and-intent
@@ -803,38 +808,12 @@ guest sh -eu -c 'test ! -L /usr/local/bin/subyard-preview; test "$(stat -c "%a:%
 drifted_preview="$(guest sha256sum /usr/local/bin/subyard-preview | cut -d' ' -f1)"
 [ "$baseline_preview" != "$drifted_preview" ] && [ "$drifted_preview" != "$(hash "$FINAL_SOURCE/config/preview/subyard-preview")" ] || die 'preview fixture did not produce meaningful installed drift'
 printf 'release_activation_preview_drift baseline=%s installed=%s candidate=%s\n' "$baseline_preview" "$drifted_preview" "$(hash "$FINAL_SOURCE/config/preview/subyard-preview")"
-# All predecessor operations have finished; only the candidate sees this absence.
-rm -- "$STATE/preview-host-instructions"
 stage publish-exact-candidate
 fresh env YARD_RELEASE_BASE_URL="file://$FINAL_RELEASE" bash "$FINAL_RELEASE/subyard-install.sh" \
   --version "$CANDIDATE" --publish-only --yes > "$STATE/publish.log" 2>&1
 
-stage interrupt-after-native-delivery
-install -d -m 0700 "$STATE/wrappers"
-python3 - "$STATE" "$UNIT" <<'PY'
-from pathlib import Path
-import shlex,sys
-state,unit=sys.argv[1:]
-script='#!/bin/sh\nset -eu\nstate='+shlex.quote(state)+'\nunit='+shlex.quote(unit)+'\n'+r'''
-if [ "${1:-}" = --user ] && [ "${2:-}" = restart ] && [ "${3:-}" = "$unit" ] &&
-   [ ! -e "$state/allow-restart" ] &&
-   /usr/bin/jq -e '.checkpoint=="reconciling"' "$state/config/release-transition/v2/journal.json" >/dev/null 2>&1; then
-  printf '%s\n' "$$" > "$state/delivery-paused"
-  while [ ! -e "$state/allow-restart" ]; do sleep 0.1; done
-fi
-exec /usr/bin/systemctl "$@"
-'''
-path=Path(state)/'wrappers/systemctl'; path.write_text(script); path.chmod(0o700)
-PY
-old_pid="$(systemctl_user show "$UNIT" -p MainPID --value)"
-old_hash="$(hash "/proc/$old_pid/exe")"
 wanted="$(hash "$FINAL_SOURCE/config/profiles/github/bin/broker")"
-[ "$old_hash" != "$wanted" ] || die 'predecessor fixture does not have old loaded broker code'
-  interrupt_driver "$STATE" "$YARD_BIN" "$FINAL_RELEASE" "$CANDIDATE" "$UNIT" "$old_pid" "$old_hash" "$wanted"
-  touch "$STATE/allow-restart"
-  claim_units
-  stage historical-go-native-recovery-with-fresh-consent
-  PATH="$STATE/wrappers:$PATH" update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/recovery.log" 2>&1
+update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/update-a.log" 2>&1
 claim_units
 verify_runtime "$FINAL_SOURCE"
 ready
@@ -909,13 +888,6 @@ claim_units
 verify_git_wiring
 cp "$SUBYARD_CONFIG_HOME/yards/default/config.env" "$STATE/selection-live"
 
-stage authentic-predecessor-rollback-refusal
-links="$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")"
-if yard update --rollback --yes > "$STATE/predecessor-rollback.log" 2>&1; then die "incompatible $BASELINE predecessor rollback succeeded"; fi
-grep -Eq 'rollback-incompatible|cannot verify selected installed consumers|compatible installed-consumer' "$STATE/predecessor-rollback.log" || die 'rollback failed for an unexpected reason'
-[ "$links" = "$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")" ] || die 'refused rollback changed runtime links'
-cmp -s "$STATE/ledger-retained" "$ledger" || die 'refused rollback changed migration ledger'
-
 stage explicit-stopped-yard-start-and-migrate
 yard -Y "$NAMED" start --yes > "$STATE/start-deferred.log" 2>&1
 trace_deferred_migration
@@ -945,11 +917,38 @@ stage publish-exact-synthetic-candidate
 links="$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")"
 fresh env YARD_RELEASE_BASE_URL="file://$SYNTHETIC_RELEASE" bash "$SYNTHETIC_RELEASE/subyard-install.sh" \
   --version "$SYNTHETIC" --publish-only --yes > "$STATE/publish-b.log" 2>&1
+source_b="$(sed -n 's/^staged release=.* candidate=//p' "$STATE/publish-b.log")"
+[ -d "$source_b" ] || die 'synthetic B was not staged'
 [ "$links" = "$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")" ] || die 'synthetic publication changed runtime links'
 cmp -s "$STATE/ledger-retained" "$ledger" || die 'synthetic publication changed migration ledger'
 
 stage synthetic-same-source-supported-rollback
-update "$SYNTHETIC" "$SYNTHETIC_RELEASE" --yes > "$STATE/update-b.log" 2>&1
+stage interrupt-after-native-delivery
+install -d -m 0700 "$STATE/wrappers"
+python3 - "$STATE" "$UNIT" <<'PY'
+from pathlib import Path
+import shlex,sys
+state,unit=sys.argv[1:]
+script='#!/bin/sh\nset -eu\nstate='+shlex.quote(state)+'\nunit='+shlex.quote(unit)+'\n'+r'''
+if [ "${1:-}" = --user ] && [ "${2:-}" = restart ] && [ "${3:-}" = "$unit" ] &&
+   [ ! -e "$state/allow-restart" ] &&
+   /usr/bin/jq -e '.checkpoint=="reconciling"' "$state/config/release-transition/v2/journal.json" >/dev/null 2>&1; then
+  printf '%s\n' "$$" > "$state/delivery-paused"
+  while [ ! -e "$state/allow-restart" ]; do sleep 0.1; done
+fi
+exec /usr/bin/systemctl "$@"
+'''
+path=Path(state)/'wrappers/systemctl'; path.write_text(script); path.chmod(0o700)
+PY
+old_pid="$(systemctl_user show "$UNIT" -p MainPID --value)"
+old_hash="$(hash "/proc/$old_pid/exe")"
+wanted="$(hash "$source_b/config/profiles/github/bin/broker")"
+[ "$old_hash" != "$wanted" ] || die 'predecessor fixture does not have old loaded broker code'
+  interrupt_driver "$STATE" "$YARD_BIN" "$SYNTHETIC_RELEASE" "$SYNTHETIC" "$UNIT" "$old_pid" "$old_hash" "$wanted"
+  touch "$STATE/allow-restart"
+  claim_units
+  stage synthetic-native-recovery-with-fresh-consent
+  PATH="$STATE/wrappers:$PATH" update "$SYNTHETIC" "$SYNTHETIC_RELEASE" --yes > "$STATE/recovery.log" 2>&1
 claim_units
 source_b="$(readlink -f "$STATE/runtime/current")"
 verify_runtime "$source_b"
@@ -971,4 +970,4 @@ update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/absent-timer.log" 2>&1
   && [ ! -e "$UNIT_DIR/subyard-keys-sync.timer" ] && [ ! -L "$UNIT_DIR/subyard-keys-sync.timer" ] \
   || die 'release activation recreated absent timer units'
 ready
-printf 'ok: authentic %s upgrade/recovery/refusal and synthetic B-to-A rollback; broker loaded identities, core helpers, deferred yard, credentials and disabled timer verified\n' "$BASELINE"
+printf 'ok: authentic %s upgrade and synthetic recovery and synthetic B-to-A rollback; broker loaded identities, core helpers, deferred yard, credentials and disabled timer verified\n' "$BASELINE"

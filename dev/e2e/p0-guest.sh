@@ -35,8 +35,8 @@ OWNER_TEST_VMS_SINK_SERVICE="/etc/systemd/system/$OWNER_TEST_VMS_SINK_SERVICE_NA
 OWNER_TEST_VMS_SINK_TIMER_NAME="subyard-p0-$TOKEN-test-vms-host-sink.timer"
 OWNER_TEST_VMS_SINK_TIMER="/etc/systemd/system/$OWNER_TEST_VMS_SINK_TIMER_NAME"
 OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$ROOT/config/systemd/subyard-test-vms-host-sink.timer.in"
-P0_CURRENT_BASE_VERSION=0.11.1-p0.current-base
-P0_OWNER_VERSION=0.11.1-p0.owner
+P0_CURRENT_BASE_VERSION=0.29.0-p0.current-base
+P0_OWNER_VERSION=0.29.0-p0.owner
 PEER_SSH_DIR="$PEER_ROOT/ssh"
 PEER_YARD_ENTRY="$HOME/.local/bin/yard"
 PEER_YARD_BACKUP="$PEER_ROOT/user-yard-entry.backup"
@@ -694,8 +694,6 @@ owner() (
 	# Retain the shared base-image cache for later release smoke and peer fixtures.
 	OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
-	P0_V0111_BASE_IMAGE="$OWNER_BASE_IMAGE" \
-	  bash dev/e2e/release-transition-v0111-recovery.sh "$TOKEN"
   prepare_owner_image_cache_project subyard-test-yard
   owner_release_contract
   write_owner_registration test-yard test-vms 2224 1

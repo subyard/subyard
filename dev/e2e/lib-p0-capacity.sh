@@ -482,11 +482,9 @@ p0_capacity_query_default_pool() {
   [[ "$query_timeout" =~ ^[1-9][0-9]*$ ]] \
     || p0_capacity_die 'Incus query timeout is invalid' || return
   for query_attempt in 1 2; do
-    set +e
+    pool_rc=0
     query_state="$(timeout --foreground "$query_timeout" \
-      incus storage show default --project default 2>/dev/null)"
-    pool_rc=$?
-    set -e
+      incus storage show default --project default 2>/dev/null)" || pool_rc=$?
     case "$pool_rc" in
       0)
         printf -v "$output_name" '%s' "$query_state"

@@ -5,12 +5,16 @@ import hashlib
 import copy
 import pathlib
 import re
+import runpy
 import shlex
 import subprocess
 import tempfile
 import os
 import sys
 from unittest import mock
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+ANCHOR_VERSION = runpy.run_path(str(REPO/'dev/verify-release-upgrades.py'))['published_anchor'](REPO)[0]
 
 fixture = pathlib.Path(__file__).with_name('staging-reliability.sh').read_text()
 source = fixture.split("<<'PYTHON'", 1)[1].split('\n', 1)[1].split('\nPYTHON', 1)[0]
@@ -1193,17 +1197,23 @@ with tempfile.TemporaryDirectory(prefix='subyard-predecessor-broker-', dir='/tmp
     launcher = root / 'runtime/current/bin/yard'
     launcher.parent.mkdir(parents=True)
     launcher.write_text('''#!/bin/bash
-if [ "$*" = --version ]; then printf 'yard 0.19.0\n'; exit; fi
+if [ "$*" = --version ]; then printf 'yard @ANCHOR@\n'; exit; fi
+if [ "$*" = 'service register test-vms --yard test-yard --yes' ]; then
+  printf 'register\n' >> "$PREDECESSOR_CALLS"
+  [ "$PREDECESSOR_FAILURE" != registration ] || exit 1
+  install -m 0600 /dev/null "$PREDECESSOR_CALLS.registered"
+  exit
+fi
 if [ "$*" = '-Y test-yard _info' ]; then
   printf 'info\n' >> "$PREDECESSOR_CALLS"
   project=fixture; [ "$PREDECESSOR_FAILURE" != context ] || project=foreign
-  printf '{"yardName":"test-yard","accessKind":"local","incusProject":"%s","yardInstanceName":"owner","version":"0.19.0","state":"RUNNING"}\n' "$project"
+  printf '{"yardName":"test-yard","accessKind":"local","incusProject":"%s","yardInstanceName":"owner","version":"@ANCHOR@","state":"RUNNING"}\n' "$project"
   exit
 fi
 [ "$*" = '-Y test-yard init --yes' ] || exit 99
 printf 'init\n' >> "$PREDECESSOR_CALLS"
 [ "$PREDECESSOR_FAILURE" != init ]
-''')
+'''.replace('@ANCHOR@', ANCHOR_VERSION))
     launcher.chmod(0o700)
     engine = launcher.with_name('yard-engine')
     engine.write_bytes(launcher.read_bytes())
@@ -1212,23 +1222,48 @@ printf 'init\n' >> "$PREDECESSOR_CALLS"
     leaf = root / '.subyard-acceptance/runtime/config/profiles/github/git_wiring.py'
     leaf.parent.mkdir(parents=True)
     leaf.write_bytes(pathlib.Path('config/profiles/github/git_wiring.py').read_bytes())
-    for failure in ['', 'init', 'version', 'context', 'project-shape', 'native-owner', 'bridge', 'initialized', 'power', 'identity', 'marker', 'worker', 'native-state', 'git-operation', 'retained-worker', 'retained-state']:
+    setup_failures = ['init', 'version', 'context', 'project-shape', 'native-owner', 'bridge', 'initialized', 'power', 'identity', 'marker']
+    native_failures = ['native-state', 'native-query', 'native-bases-missing', 'native-cached', 'native-registry-error', 'native-builder', 'native-instances']
+    public_failures = ['public-query', 'public-bases-missing', 'public-cached', 'public-status-error']
+    for failure in ['', *setup_failures, 'worker', 'registration', 'registration-mutates', *native_failures, 'git-operation', 'retained-worker', 'retained-state', *public_failures]:
         log = root / ('calls-' + (failure or 'success'))
+        native_resources = {'bases': []}
+        public_status = {'status': 'ok', 'resources': {'bases': []}}
+        if failure == 'native-bases-missing': native_resources.pop('bases')
+        if failure == 'native-cached': native_resources['bases'] = [{'fingerprint': 'a'*64}]
+        if failure == 'native-registry-error': native_resources['errors'] = ['image_registry_unavailable']
+        if failure == 'native-builder': native_resources['builder'] = {'type': 'subyard-pair'}
+        if failure == 'public-bases-missing': public_status['resources'].pop('bases')
+        if failure == 'public-cached': public_status['resources']['bases'] = [{'fingerprint': 'a'*64}]
+        if failure == 'public-status-error': public_status = {'status': 'error', 'code': 'service_unavailable'}
         script = f"""set -euo pipefail
-ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME="$ROOT/config"; baseline=0.19.0; PROJECT=fixture; INSTANCE=owner; MARKER=owned
+ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME="$ROOT/config"; STATE_PARENT="$ROOT"; baseline={ANCHOR_VERSION}; PROJECT=fixture; INSTANCE=owner; MARKER=owned
 export PREDECESSOR_CALLS={str(log)!r} PREDECESSOR_FAILURE={failure!r}
 p0_retry_init_after_plan_stale() {{ "$@"; }}
 prepare_minimal_owner() {{ exit 99; }}
-runtime_yard() {{ if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else "0.19.0"}'; else printf '%s\n' '{{"resources":{{"bases":[]}}}}'; fi; }}
+runtime_yard() {{
+  if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else ANCHOR_VERSION}'; return; fi
+  [ "$*" = '-Y test-yard test-vms status --json' ] || return 99
+  printf 'public-status\n' >> '{log}'
+  if [ ! -f "$PREDECESSOR_CALLS.registered" ] || [ "$PREDECESSOR_FAILURE" = public-query ]; then
+    printf '%s\n' '{{"status":"error","code":"service_absent"}}'; return 1
+  fi
+  printf '%s\n' '{json.dumps(public_status)}'
+}}
 verify_broker_installation() {{ printf 'verified\n' >> '{log}'; return {1 if failure == 'worker' else 0}; }}
 outer_exec() {{
   case "$*" in
     'python3 - /home/dev off check') printf 'git-operation\n' >> '{log}'; cat >/dev/null; return {1 if failure == 'git-operation' else 0} ;;
-    *'_test-vms-worker status') printf 'native-state\n' >> '{log}'; printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}}}}' ;;
-    'incus list --all-projects --format csv -c n') return 0 ;;
-    'sha256sum /usr/local/libexec/subyard/.service-retained-v019-worker') printf '%s  retained\\n' '{'b'*64 if failure == 'retained-worker' else engine_sha}' ;;
+    *'_test-vms-worker status')
+      printf 'native-state\n' >> '{log}'
+      [ "$PREDECESSOR_FAILURE" != native-query ] || return 1
+      printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}},"resources":{json.dumps(native_resources)}}}' ;;
+    'incus list --all-projects --format csv -c n') [ "$PREDECESSOR_FAILURE" != native-instances ] || printf 'unexpected-builder\n' ;;
+    'sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker') printf '%s  retained\\n' '{'b'*64 if failure == 'retained-worker' else engine_sha}' ;;
     *'install -m 0700'*|*'install -m 0600'*) return 0 ;;
-    *sha256sum*) printf '%s  leases.json\n' '{'invalid' if failure == 'retained-state' else 'a'*64}' ;;
+    *sha256sum*)
+      if [ "$PREDECESSOR_FAILURE" = registration-mutates ] && [ -f "$PREDECESSOR_CALLS.registered" ]; then printf '%s  leases.json\n' '{'c'*64}'
+      else printf '%s  leases.json\n' '{'invalid' if failure == 'retained-state' else 'a'*64}'; fi ;;
     *) return 99 ;;
   esac
 }}
@@ -1247,24 +1282,34 @@ incus() {{
     *) return 99 ;;
   esac
 }}
-die() {{ exit 2; }}
+die() {{ printf '%s\\n' "$*" >&2; exit 2; }}
 """ + predecessor
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
         assert (result.returncode == 0) == (not failure), result
         calls = log.read_text().splitlines()
         expected=['init']
         if failure not in ['init','version']: expected += ['info']
-        if failure not in ['init','version','context','project-shape','native-owner','bridge','initialized','power','identity','marker']:
+        if failure not in setup_failures:
             expected += ['marker','verified']
             if failure != 'worker':
-                expected += ['native-state']
-                if failure != 'native-state': expected += ['git-operation']
+                expected += ['register']
+                if failure not in ['registration', 'registration-mutates']:
+                    expected += ['native-state']
+                    if failure not in native_failures:
+                        expected += ['git-operation']
+                        if failure not in ['git-operation', 'retained-worker', 'retained-state']:
+                            expected += ['public-status']
         assert calls == expected, (failure,calls)
-        assert ('STAGING_BASELINE_BROKER=' in result.stdout) == (failure in ['', 'git-operation', 'retained-worker', 'retained-state']), result
-print('authentic predecessor full-init argv and ownership/power/broker boundaries refuse incomplete setup')
+        marker_expected = failure in ['', 'git-operation', 'retained-worker', 'retained-state', *public_failures]
+        assert ('STAGING_BASELINE_BROKER=' in result.stdout) == marker_expected, result
+        if failure in ['public-query', 'public-status-error']:
+            assert 'cached base' not in result.stderr, result
+        if failure == 'public-query':
+            assert 'service_absent' in result.stderr and 'public broker status query failed' in result.stderr, result
+print('authentic predecessor init, explicit service registration and typed cold inventory refuse incomplete setup')
 
-# The retained historical writer must actually refuse the fenced state without
-# changing it; only that observed refusal permits admission to resume.
+# The retained anchor writer either honors the fence or refuses it as unsupported;
+# it never changes fenced state, and only then may admission resume.
 retained_writer = fixture.split('  outer_exec env SUBYARD_TEST_VMS_CONFIG=', 1)[1].split("  printf 'STAGING_RETAINED_WRITER=", 1)[0]
 retained_writer = 'outer_exec env SUBYARD_TEST_VMS_CONFIG=' + retained_writer
 for fault in ['', 'accepted', 'mutated', 'wrong-error', 'resume']:
@@ -1284,11 +1329,11 @@ outer_exec() {{
 die() {{ exit 2; }}
 ''' + retained_writer
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
-        assert (result.returncode == 0) == (fault == ''), (fault, result)
-        assert ('RESUMED' in result.stdout) == (fault in ['', 'resume']), (fault, result)
+        assert (result.returncode == 0) == (fault in ['', 'accepted']), (fault, result)
+        assert ('RESUMED' in result.stdout) == (fault in ['', 'accepted', 'resume']), (fault, result)
         receipt = json.loads(result.stdout.split('STAGING_RETAINED_ATTEMPT=', 1)[1].splitlines()[0])
         assert receipt['native_exit'] == (0 if fault == 'accepted' else 1), (fault, receipt)
-print('retained historical writer requires native refusal and unchanged leases before successful resume')
+print('retained anchor writer honors or refuses the fence and keeps leases unchanged before resume')
 
 # Execute the candidate's real Git configuration function as the process user.
 # Physical preflight uses the same leaf's CLI, which drops to native guest dev.
@@ -1319,7 +1364,7 @@ consumed = fixture.split("<<'PYCONSUMED'",1)[1].split('\n',1)[1].split('\nPYCONS
 for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-digest', 'baseline-digest', 'bootstrap-digest', 'bootstrap-mode', 'bootstrap-missing', 'bootstrap-link', 'bootstrap-hardlink', 'bootstrap-mount']:
     with tempfile.TemporaryDirectory(prefix='subyard-worktree.',dir='/tmp') as directory:
         parent=pathlib.Path(directory); root=parent/'src'; owner=parent/'owner'
-        runtime=root/'.subyard-acceptance/runtime'; release=root/'.subyard-acceptance/release'; baseline=owner/'baseline-0.19.0'
+        runtime=root/'.subyard-acceptance/runtime'; release=root/'.subyard-acceptance/release'; baseline=owner/('baseline-'+ANCHOR_VERSION)
         for target in [runtime,release,baseline,root/'dev',root/'.build',owner/'installed/current',owner/'installed/previous']:
             target.mkdir(parents=True,exist_ok=True)
         for target in [runtime/'engine',release/'runtime.tar.gz',baseline/'archive',owner/'installed/current/engine',owner/'installed/previous/engine',parent/'worktree.tar.gz']:
@@ -1327,7 +1372,9 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
         digest=hashlib.sha256(b'verified fixture bytes').hexdigest()
         bootstrap=root/'.build/yard'; bootstrap.write_bytes(b'verified fixture bytes'); bootstrap.chmod(0o755)
         (root/'.subyard-acceptance/candidate.json').write_text(json.dumps({'runtime_file':'runtime.tar.gz','runtime_sha256':digest}))
-        (root/'dev/verify-release-upgrades.py').write_text("import hashlib\nDIRECT_BASELINE='0.19.0'\nDIRECT_BASELINE_SHA256={'amd64':"+repr(digest)+"}\ndef baseline_assets(owner,path,version,hashes,arch):\n    assert hashlib.sha256((path/'archive').read_bytes()).hexdigest()==hashes[arch]\n")
+        (root/'dev/e2e').mkdir()
+        (root/'dev/e2e/published-upgrade-baselines.tsv').write_text(f'{ANCHOR_VERSION}\t{"a"*64}\t{digest}\tanchor\n')
+        (root/'dev/verify-release-upgrades.py').write_text("import hashlib,runpy\npublished_anchor=runpy.run_path("+repr(str(REPO/'dev/verify-release-upgrades.py'))+")["+repr('published_anchor')+"]\ndef baseline_assets(owner,path,version,hashes,arch):\n    assert version=="+repr(ANCHOR_VERSION)+"\n    assert hashlib.sha256((path/'archive').read_bytes()).hexdigest()==hashes[arch]\n")
         if fault=='symlink': (runtime/'foreign').symlink_to(owner/'installed/current')
         if fault=='hardlink': os.link(owner/'installed/current/engine',runtime/'foreign')
         if fault=='candidate-digest': (release/'runtime.tar.gz').write_bytes(b'changed')
@@ -1343,7 +1390,7 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
             prefix="from unittest import mock\n_original_read=pathlib.Path.read_text\ndef read(path,*a,**kw):\n    if str(path)=='/proc/self/mountinfo': return '1 0 0:1 / '+"+repr(str(mounted))+"+' rw - ext4 none rw\\n'\n    return _original_read(path,*a,**kw)\nmock.patch.object(pathlib.Path,'read_text',read).start()\n"
         if fault=='foreign-owner': prefix='from unittest import mock\nmock.patch.object(os,\'geteuid\',return_value=os.geteuid()+1).start()\n'
         program=consumed.replace('root,owner=map(pathlib.Path,sys.argv[1:3])',prefix+'root,owner=map(pathlib.Path,sys.argv[1:3])')
-        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner),digest,'yard 0.11.1-p0.owner'],capture_output=True,text=True,timeout=5)
+        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner),digest,'yard 0.29.0-p0.owner'],capture_output=True,text=True,timeout=5)
         assert (result.returncode==0)==(fault==''),(fault,result)
         for target in [runtime,release,baseline,parent/'worktree.tar.gz']:
             assert target.exists()==bool(fault),(fault,target,result)
@@ -1353,7 +1400,7 @@ for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-di
         if not fault:
             receipt=json.loads(result.stdout.split('STAGING_CONSUMED_INPUTS=',1)[1])
             assert receipt['total_allocated_bytes']==sum(receipt['allocated_bytes'].values())>0,receipt
-            assert receipt['bootstrap_engine']=={'path':'.build/yard','sha256':digest,'version':'yard 0.11.1-p0.owner'},receipt
+            assert receipt['bootstrap_engine']=={'path':'.build/yard','sha256':digest,'version':'yard 0.29.0-p0.owner'},receipt
 
 reclaim = re.search(r'^reclaim_supported_upgrade_inputs\(\) \{\n.*?^\}',fixture,re.MULTILINE|re.DOTALL)[0]
 fingerprint='a'*64
@@ -1363,7 +1410,7 @@ ROOT=/tmp/subyard-worktree.fixture/src; OWNER_ROOT=/tmp/owner
 SUPPORTED_UPGRADE=1; SUPPORTED_UPGRADE_BOUND={0 if fault=='unbound' else 1}
 OWNER_BASE_IMAGE_CREATED=1; OWNER_BASE_IMAGE_FINGERPRINT={fingerprint}
 OWNER_BASELINE_IMAGES={'a'*64 if fault=='baseline-image' else ''}
-BOOTSTRAP_ENGINE_SHA256={'a'*64}; BOOTSTRAP_ENGINE_VERSION='yard 0.11.1-p0.owner'
+BOOTSTRAP_ENGINE_SHA256={'a'*64}; BOOTSTRAP_ENGINE_VERSION='yard 0.29.0-p0.owner'
 p0_capacity_assert_root_marker() {{ return {1 if fault=='marker' else 0}; }}
 verify_broker_installation() {{ return {1 if fault=='identity' else 0}; }}
 incus() {{ printf '%s\\n' '[{{"aliases":[{{"name":"subyard-e2e-debian-13-cloud-container"}}],"fingerprint":"{'b'*64 if fault=='alias' else fingerprint}"}}]'; }}
