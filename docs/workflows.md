@@ -229,8 +229,3 @@ real application/provider checks require their declared external inputs.
 Use [`yard keys`](keys.md) for selected static staging and QA credentials. The ledger stays on the
 owner host and materializes only an authorized consumer file; it does not synchronize coding-agent
 OAuth or session stores.
-
-[OpenLIT](openlit.md) is disabled. Existing selections are suppressed; normal reconciliation
-disables its managed services, restores managed native exporter settings, and removes its
-dashboard publication. Database and account volumes are retained. Coding-agent session stores
-and credentials remain separate and are preserved.

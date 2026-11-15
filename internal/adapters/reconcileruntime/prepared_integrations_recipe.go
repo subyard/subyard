@@ -130,6 +130,9 @@ func (runtime Runtime) materializedIntegrationPaths() ([]string, error) {
 		})
 	}
 	for _, definition := range definitions {
+		if definition.Retired {
+			continue
+		}
 		if err := addTree(definition.Root); err != nil {
 			return nil, err
 		}

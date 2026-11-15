@@ -2181,7 +2181,7 @@ printf '%s\n' '{"journal":{"checkpoint":"complete"},"outcome":{"status":"ready",
             journal=dict(checkpoint='complete', transaction='synthetic-private'),
             outcome=dict(status='operator-action-required', code='dependency-unavailable',
                          message='synthetic-private', active='/private/source'),
-            blockers=[dict(resource='activation.openlit-runtime', message='synthetic-private'),
+            blockers=[dict(resource='activation.orca-runtime', message='synthetic-private'),
                       dict(resource='activation.materialized-config'),
                       dict(resource='/private/synthetic-private')])).encode())
         self.assertEqual(result, 'amnezia_release_probe=after-agent-loss-failure exit=1 '

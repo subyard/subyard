@@ -94,10 +94,8 @@ type IntegrationPlan struct {
 	Fingerprint string   `json:"fingerprint"`
 	Changed     bool     `json:"changed"`
 	Steps       []string `json:"steps"`
-	// Retirements repeats the lifecycle steps that remove a retired package.
-	// Warnings are persistent notices about state left in place. Both are public
-	// previews of bound observations, so they stay outside the plan binding.
-	Retirements         []string `json:"-"`
+	// Warnings preview bound observations about retained state and stay outside
+	// the plan binding.
 	Warnings            []string `json:"-"`
 	Adoption            []string `json:"adoption,omitempty"`
 	AdoptionFingerprint string   `json:"adoption_fingerprint,omitempty"`
@@ -112,22 +110,17 @@ type IntegrationPlan struct {
 	ownershipReleaseNotices []string
 
 	// Attribution only; the existing aggregate source binding remains the guard.
-	packageSources         map[string]string
-	instance               ports.InstanceInfo
-	instanceScope          string
-	fingerprints           []string
-	profileRoutes          []integrationProfileRoute
-	retirementProofPending bool
-	pendingOnly            bool
+	packageSources map[string]string
+	instance       ports.InstanceInfo
+	instanceScope  string
+	fingerprints   []string
+	profileRoutes  []integrationProfileRoute
+	pendingOnly    bool
 }
 
 // InstalledChanged excludes a redundant apply tail from installed readiness.
 // Changed still requires that tail for authorized apply and recovery.
 func (plan IntegrationPlan) InstalledChanged() bool { return plan.Changed && !plan.pendingOnly }
-
-// NeedsRetirementProof requests the existing guarded apply even for a clean
-// guest. The proof is an apply receipt, outside integration equality and Desired.
-func (plan IntegrationPlan) NeedsRetirementProof() bool { return plan.retirementProofPending }
 
 // OwnershipReleases lists structured documents whose retirement releases changed
 // owned fields in place. Rewriting them first would discard the operator's change.
@@ -769,25 +762,6 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	devices = append(devices, "eth0")
 	guardInstance.Config = cloneIntegrationConfig(guardInstance.Config, devices, virtualMachine)
 	guardInstance.LocalConfig = cloneIntegrationConfig(guardInstance.LocalConfig, devices, virtualMachine)
-	definitions, err := runtime.integrationDefinitions()
-	if err != nil {
-		return plan, observed, err
-	}
-	plan.retirementProofPending = runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" &&
-		len(pendingRetiredIntegrations(runtime.RetiredSelection, definitions, instance)) != 0
-	for _, definition := range definitions {
-		if definition.Lifecycle == nil {
-			continue
-		}
-		for _, key := range definition.Lifecycle.InstanceConfigKeys {
-			delete(guardInstance.Config, key)
-			delete(guardInstance.LocalConfig, key)
-		}
-		for _, name := range definition.Lifecycle.InstanceDevices {
-			delete(guardInstance.Devices, name)
-			delete(guardInstance.LocalDevices, name)
-		}
-	}
 	plan.instance, plan.instanceScope = guardInstance, scope
 	plan.profileRoutes = runtime.integrationProfileRoutes(ctx, guardInstance)
 	plan.Scope = integrationInstanceScope(scope, guardInstance)
@@ -797,27 +771,6 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		fingerprints = append(fingerprints, string(routeBindings))
 	}
 	causes := []error{}
-	for _, definition := range definitions {
-		if definition.Lifecycle == nil {
-			continue
-		}
-		observation, err := runtime.observeIntegrationLifecycleWithSourceReader(ctx, definition, phase, reader)
-		if err != nil {
-			causes = append(causes, err)
-			continue
-		}
-		fact := runtime.integrationLifecycleFact(definition, observation)
-		plan.facts = append(plan.facts, fact)
-		plan.Changed = plan.Changed || !fact.AtDesired
-		if observation.Notice != "" {
-			if fact.AtDesired {
-				plan.Warnings = append(plan.Warnings, observation.Notice)
-			} else {
-				plan.Retirements = append(plan.Retirements, observation.Notice)
-			}
-		}
-		fingerprints = append(fingerprints, observation.Actual, observation.Desired, fact.Desired)
-	}
 	files, err := runtime.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
 		return plan, observed, err
@@ -937,12 +890,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		}
 		for _, entry := range observed.Retired {
 			if entry.Kind == "package" {
-				// A retired package states its own removal through its lifecycle notice.
-				if !slices.ContainsFunc(definitions, func(definition profile.IntegrationDefinition) bool {
-					return definition.Retired && definition.Name == entry.ID
-				}) {
-					plan.Steps = append(plan.Steps, "disable managed startup for "+entry.ID+"; preserve binaries and user data")
-				}
+				plan.Steps = append(plan.Steps, "disable managed startup for "+entry.ID+"; preserve binaries and user data")
 			} else {
 				plan.Steps = append(plan.Steps, "retire owned "+entry.Kind+" for "+entry.ID+": "+entry.Path)
 			}
@@ -953,7 +901,6 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
 			plan.Steps = append(plan.Steps, "remove ownership-proven ccusage utility for the special yard role")
 		}
-		plan.Steps = append(plan.Steps, plan.Retirements...)
 	}
 	return plan, observed, nil
 }
@@ -1056,18 +1003,6 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 // Keep all causes visible, while withholding the unusable operation plan.
 func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, reader func(config.MaterializedAsset) ([]byte, error), observed integrationObservation, inventoryError error) error {
 	causes := []error{inventoryError}
-	definitions, loadErr := runtime.integrationDefinitions()
-	if loadErr != nil {
-		causes = append(causes, loadErr)
-	} else {
-		for _, definition := range definitions {
-			if definition.Lifecycle == nil {
-				continue
-			}
-			_, err := runtime.observeIntegrationLifecycleWithSourceReader(ctx, definition, "inspect", reader)
-			causes = append(causes, err)
-		}
-	}
 	files, err := runtime.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
 		return domain.CollectRefusals(append(causes, err)...)
@@ -1281,63 +1216,27 @@ func truncateText(text string, limit int) string {
 	return text[:limit]
 }
 
-// RetiredIntegrationNotices previews retired package state for operations such as
-// init that do not render the complete integration plan.
-func (runtime Runtime) RetiredIntegrationNotices(ctx context.Context) (retirements, warnings []string, err error) {
+// IntegrationOwnershipNotices previews structured ownership releases for operations
+// such as init that do not render the complete integration plan.
+func (runtime Runtime) IntegrationOwnershipNotices(ctx context.Context) ([]string, error) {
 	if ready, err := runtime.incusReady(ctx); err != nil || !ready {
-		return nil, nil, err
+		return nil, err
 	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil || !state.InstanceFound {
-		return nil, nil, err
-	}
-	if strings.EqualFold(state.Instance.Status, "stopped") {
-		// The guest cannot report its state, so consent rests on the package's own text.
-		pending, err := runtime.pendingRetiredIntegrations(state.Instance)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, definition := range pending {
-			retirements = append(retirements, "temporarily start this stopped yard to retire integration "+definition.Name+", then restore its desired power")
-			if definition.Lifecycle.RetirementNotice != "" {
-				retirements = append(retirements, definition.Lifecycle.RetirementNotice)
-			}
-		}
-		return retirements, nil, nil
+		return nil, err
 	}
 	if !strings.EqualFold(state.Instance.Status, "running") || runtime.Executor == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	ready, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()})
 	if err != nil || !ready {
-		return nil, nil, nil
-	}
-	definitions, err := runtime.integrationDefinitions()
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, definition := range definitions {
-		if !definition.Retired || definition.Lifecycle == nil {
-			continue
-		}
-		observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
-		if err != nil {
-			continue
-		}
-		if observation.Notice == "" {
-			continue
-		}
-		if observation.State == ports.RuntimeStateStale {
-			retirements = append(retirements, observation.Notice)
-		} else {
-			warnings = append(warnings, observation.Notice)
-		}
+		return nil, nil
 	}
 	// Preview structured ownership releases before consent. A refused or failed
 	// inspection is reported by the plan that applies it, not by this preview.
 	plan, _ := runtime.IntegrationPlan(ctx)
-	warnings = append(warnings, plan.ownershipReleaseNotices...)
-	return retirements, warnings, nil
+	return plan.ownershipReleaseNotices, nil
 }
 
 // AppliedIntegrationPlan inspects committed consumers for passive release admission.
@@ -1533,9 +1432,6 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 		return err
 	}
 	if !fresh.Changed {
-		if err := runtime.recordRetiredIntegrations(ctx); err != nil {
-			return err
-		}
 		return runtime.storeAppliedIntegrationSettings(ctx)
 	}
 	execution := runtime
@@ -1565,21 +1461,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if err := runtime.RefreshConfigs(ctx); err != nil {
 		return err
 	}
-	definitions, err := runtime.integrationDefinitions()
-	if err != nil {
-		return err
-	}
-	names := []string{}
-	for _, definition := range definitions {
-		if definition.Lifecycle != nil {
-			names = append(names, definition.Name)
-		}
-	}
-	skipped := strings.Join(names, " ")
-	if err := execution.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_INTEGRATION_LIFECYCLES": skipped}, "reconcile-integrations.sh"); err != nil {
-		return err
-	}
-	if err := execution.applyIntegrationLifecycles(ctx, fresh); err != nil {
+	if err := execution.runScript(ctx, runtime.Stderr, "reconcile-integrations.sh"); err != nil {
 		return err
 	}
 	// Keep the inventory pending until hooks succeed so the same requested
@@ -1609,9 +1491,6 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if verified.Changed {
 		return runtime.integrationDiagnostic(errors.New("integration reconcile verification failed; desired selection retained for retry"),
 			profile.IntegrationDefinition{}, "verify", "convergence-failed")
-	}
-	if err := runtime.recordRetiredIntegrations(ctx); err != nil {
-		return err
 	}
 	if err := runtime.storeAppliedIntegrationSettings(ctx); err != nil {
 		return err

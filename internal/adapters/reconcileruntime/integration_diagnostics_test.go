@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -100,28 +98,8 @@ func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testin
 	}
 }
 
-func TestLifecycleFailureRecordIsClosedAndPhaseAware(t *testing.T) {
-	for _, test := range []struct{ output, phase, wantPhase, wantReason string }{
-		{"private native output\n" + lifecycleDiagnosticPrefix + "inspect foreign-ownership\n", "inspect", "inspect", "foreign-ownership"},
-		{lifecycleDiagnosticPrefix + "inspect invalid-schema\n", "verify", "verify", "invalid-schema"},
-		{lifecycleDiagnosticPrefix + "verify native-unavailable\n", "apply", "verify", "native-unavailable"},
-		{lifecycleDiagnosticPrefix + "apply observation-changed\n", "apply", "apply", "observation-changed"},
-		{"historical arbitrary stderr", "inspect", "inspect", "operation-failed"},
-		{lifecycleDiagnosticPrefix + "inspect invalid-schema\n" + lifecycleDiagnosticPrefix + "inspect foreign-ownership\n", "inspect", "inspect", "operation-failed"},
-		{lifecycleDiagnosticPrefix + "inspect invalid-schema\n" + lifecycleDiagnosticPrefix + "inspect invalid-schema\n", "inspect", "inspect", "operation-failed"},
-		{lifecycleDiagnosticPrefix + "inspect arbitrary-private-value\n", "inspect", "inspect", "operation-failed"},
-		{lifecycleDiagnosticPrefix + "apply foreign-ownership\n", "inspect", "inspect", "operation-failed"},
-		{lifecycleDiagnosticPrefix + "inspect invalid-schema extra\n", "inspect", "inspect", "operation-failed"},
-	} {
-		phase, reason := lifecycleFailure([]byte(test.output), test.phase)
-		if phase != test.wantPhase || reason != test.wantReason {
-			t.Fatalf("failure decoding = %s/%s, want %s/%s", phase, reason, test.wantPhase, test.wantReason)
-		}
-	}
-}
-
 func TestLifecycleDiagnosticsDoNotRenderNativeOutput(t *testing.T) {
-	runtime, definition, _, _ := lifecycleFixture(t)
+	runtime, definition, _, _ := integrationSourceFixture(t)
 	runtime.Yard.YardName = "sample-yard"
 	var rendered bytes.Buffer
 	runtime.Stderr = &rendered
@@ -136,45 +114,9 @@ func TestLifecycleDiagnosticsDoNotRenderNativeOutput(t *testing.T) {
 			t.Fatalf("unsafe/incomplete diagnostic: %s / %s", message, retry)
 		}
 	}
-	testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf '%s\\n' 'PRIVATE=value' '"+lifecycleDiagnosticPrefix+"inspect foreign-ownership' >&2\nexit 1\n"), 0755)
-	_, err := runtime.observeIntegrationLifecycle(context.Background(), definition)
-	if err == nil || strings.Contains(err.Error(), "PRIVATE") || rendered.Len() != 0 {
-		t.Fatalf("private handler output rendered: %v", err)
-	}
-	var conflict interface{ ActivationConflict() bool }
-	if !errors.As(err, &conflict) || !conflict.ActivationConflict() {
-		t.Fatal("ownership conflict classification lost")
-	}
 	stale := runtime.integrationDiagnostic(errors.New("native detail"), definition, "apply", "observation-changed")
 	if !errors.Is(stale, domain.ErrPlanStale) {
 		t.Fatal("stale guard classification lost")
-	}
-}
-
-func TestLifecycleNativeBytesInvalidatePlanBeforeEffects(t *testing.T) {
-	runtime, definition, actual, desired := lifecycleFixture(t)
-	definition.Native = []profile.Native{{Package: "cmd/producer", Path: "bin/producer"}}
-	native := filepath.Join(definition.Root, "bin", "producer")
-	if err := os.MkdirAll(filepath.Dir(native), 0755); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, native, []byte("native-v1"), 0755)
-	runtime.Integrations = []profile.IntegrationDefinition{definition}
-	sources, _, err := runtime.integrationSourceBindingsPhase("inspect")
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := IntegrationPlan{sources: sources, facts: []integrationFact{{Key: "lifecycle:sample", Observed: actual, Desired: desired}}}
-	testkit.WriteFile(t, native, []byte("native-v2"), 0755)
-	if err := runtime.applyIntegrationLifecycles(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) {
-		t.Fatalf("native change = %v", err)
-	}
-	state, err := os.ReadFile(filepath.Join(definition.Root, "state"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(state, []byte("stale")) {
-		t.Fatal("native drift allowed effects")
 	}
 }
 
@@ -192,7 +134,7 @@ func assertIntegrationDiagnostic(t *testing.T, err error, phase, reason string) 
 
 func TestIntegrationScopeMissingNativeProducesEarlyDiagnostic(t *testing.T) {
 	for _, mode := range []os.FileMode{0, 0644} {
-		runtime, definition, _, _ := lifecycleFixture(t)
+		runtime, definition, _, _ := integrationSourceFixture(t)
 		runtime.Yard.YardName = "sample-yard"
 		definition.Native = []profile.Native{{Package: "cmd/producer", Path: "bin/producer"}}
 		runtime.Integrations = []profile.IntegrationDefinition{definition}
@@ -211,11 +153,11 @@ func TestIntegrationScopeMissingNativeProducesEarlyDiagnostic(t *testing.T) {
 }
 
 func TestApplyIntegrationsRejectsIdentifiedDriftBeforeEffects(t *testing.T) {
-	for _, change := range []string{"protected-observation", "helper-bytes", "helper-unavailable"} {
+	for _, change := range []string{"helper-bytes", "helper-unavailable"} {
 		t.Run(change, func(t *testing.T) {
-			runtime, definition, _, desired := lifecycleFixture(t)
+			runtime, definition, _, _ := integrationSourceFixture(t)
 			for _, directory := range []string{"bin", "config"} {
-				if err := os.Mkdir(filepath.Join(definition.Root, directory), 0755); err != nil {
+				if err := os.MkdirAll(filepath.Join(definition.Root, directory), 0755); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -237,8 +179,6 @@ func TestApplyIntegrationsRejectsIdentifiedDriftBeforeEffects(t *testing.T) {
 				testkit.WriteFile(t, native, []byte("native-v2"), 0755)
 			} else if change == "helper-unavailable" {
 				testkit.WriteFile(t, native, []byte("native-v1"), 0644)
-			} else {
-				testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(`{"state":"stale","actual":"`+strings.Repeat("c", 64)+`","desired":"`+desired+`"}`), 0600)
 			}
 			before, err := os.ReadFile(filepath.Join(definition.Root, "state"))
 			if err != nil {
@@ -263,15 +203,12 @@ func TestApplyIntegrationsRejectsIdentifiedDriftBeforeEffects(t *testing.T) {
 					t.Fatal("stale apply crossed inventory/reconcile effect boundary")
 				}
 			}
-			if change == "helper-bytes" {
-				assertIntegrationDiagnostic(t, runtime.applyIntegrationLifecycles(context.Background(), plan), "apply", "observation-changed")
-			}
 		})
 	}
 }
 
 func TestIntegrationDiagnosticPreservesExistingSafeCause(t *testing.T) {
-	runtime, definition, _, _ := lifecycleFixture(t)
+	runtime, definition, _, _ := integrationSourceFixture(t)
 	cause := integrationOwnershipError{message: "known ownership conflict", retry: "yard integration status --json"}
 	if err := runtime.integrationDiagnostic(cause, definition, "inspect", "native-unavailable"); err != cause {
 		t.Fatal("existing safe ownership diagnostic replaced")
@@ -292,51 +229,15 @@ func TestIntegrationDiagnosticPreservesExistingSafeCause(t *testing.T) {
 	}
 }
 
-func TestReadinessFailureDetailIsClosedAndConsistent(t *testing.T) {
-	const lifecycle = lifecycleDiagnosticPrefix + "inspect native-unavailable\n"
-	const detail = "subyard-readiness-diagnostic-v1 inspect enumeration transport-timeout 125 20000\n"
-	want := " (probe enumeration; transport-timeout; elapsed 125 ms; budget 20000 ms)"
-	if got := readinessFailure([]byte("PRIVATE native stderr\n"+lifecycle+detail), "inspect"); got != want {
-		t.Fatalf("safe detail = %q", got)
+func integrationSourceFixture(t *testing.T) (Runtime, profile.IntegrationDefinition, string, string) {
+	t.Helper()
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0700); err != nil {
+		t.Fatal(err)
 	}
-	for _, output := range []string{
-		detail, lifecycle, lifecycle + detail + detail, lifecycle + lifecycle + detail,
-		strings.Replace(lifecycle+detail, "inspect enumeration", "apply enumeration", 1),
-		strings.Replace(lifecycle+detail, "enumeration", "PRIVATE", 1),
-		strings.Replace(lifecycle+detail, "transport-timeout", "PRIVATE", 1),
-		strings.Replace(lifecycle+detail, "125", "-1", 1),
-		strings.Replace(lifecycle+detail, "125", "0125", 1),
-		strings.Replace(lifecycle+detail, "125", "1320001", 1),
-		strings.Replace(lifecycle+detail, "125", "999999999999999999999", 1),
-		strings.Replace(lifecycle+detail, "20000", "PRIVATE", 1),
-		strings.Replace(lifecycle+detail, "20000", "20000 extra", 1),
-		strings.Replace(lifecycle+detail, "inspect native-unavailable", "apply native-unavailable", 1),
-		strings.Replace(lifecycle+detail, "inspect native-unavailable", "inspect PRIVATE", 1),
-	} {
-		if got := readinessFailure([]byte(output), "inspect"); got != "" {
-			t.Fatalf("malformed detail rendered: %q", got)
-		}
-	}
-}
-
-func TestIntegrationReadinessDetailReachesOperationDiagnostic(t *testing.T) {
-	runtime, definition, _, _ := lifecycleFixture(t)
-	runtime.Yard.YardName = "sample-yard"
-	testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf '%s\\n' 'PRIVATE argv env stdout stderr' '"+lifecycleDiagnosticPrefix+"inspect native-unavailable' 'subyard-readiness-diagnostic-v1 inspect recovery-enumeration native-timeout 10000 20000' >&2\nexit 1\n"), 0755)
-	for _, phase := range []string{"inspect", "apply", "verify"} {
-		_, err := runtime.observeIntegrationLifecyclePhase(context.Background(), definition, phase)
-		assertIntegrationDiagnostic(t, err, phase, "native-unavailable")
-		if !strings.Contains(err.Error(), "probe recovery-enumeration; native-timeout; elapsed 10000 ms; budget 20000 ms") || strings.Contains(err.Error(), "PRIVATE") {
-			t.Fatalf("failure detail = %v", err)
-		}
-	}
-}
-
-func TestIntegrationHandlerAggregateDeadlineIsDistinct(t *testing.T) {
-	runtime, definition, _, _ := lifecycleFixture(t)
-	cause := fmt.Errorf("PRIVATE native cause: %w", context.DeadlineExceeded)
-	failure := runtime.integrationExecutionDiagnostic(cause, definition, "inspect", "inspect", "native-unavailable", nil, 120*time.Second, 120*time.Second, nil)
-	if !errors.Is(failure, context.DeadlineExceeded) || !strings.Contains(failure.Error(), "probe handler; handler-deadline; elapsed 120000 ms; budget 120000 ms") || strings.Contains(failure.Error(), "PRIVATE") {
-		t.Fatalf("aggregate deadline = %v", failure)
-	}
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	testkit.WriteFile(t, filepath.Join(root, "integration.json"), []byte(`{"schema_version":1}`), 0644)
+	testkit.WriteFile(t, filepath.Join(root, "state"), []byte("unchanged"), 0600)
+	definition := profile.IntegrationDefinition{Name: "sample", Root: root}
+	return Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{definition}}, definition, "", ""
 }

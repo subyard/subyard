@@ -18,7 +18,7 @@ import (
 )
 
 func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testing.T) {
-	for _, selection := range []string{"absent", "empty", "explicit"} {
+	for _, selection := range []string{"absent", "empty", "explicit", "removed"} {
 		t.Run(selection, func(t *testing.T) {
 			handler, runner, incus := ownerQueryFixture(t)
 			root := handler.cli.options.RepositoryRoot
@@ -30,6 +30,9 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 				value := ""
 				if selection == "explicit" {
 					value = "selected resource-only"
+				}
+				if selection == "removed" {
+					value = "openlit"
 				}
 				writeConfigCommandFile(t, filepath.Join(home, "config.env"), "ENVIRONMENT_PROFILES='"+value+"'\n")
 				writeConfigCommandFile(t, filepath.Join(home, config.GitSettingsRelativePath, "config.env"), "ENVIRONMENT_PROFILES=legacy\n")
@@ -68,6 +71,9 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 				}
 				if len(list.Profiles) != 4 || list.Selection.Present != (selection != "absent") {
 					t.Fatalf("full catalog/absence lost: %#v", list)
+				}
+				if selection == "removed" && (!slices.Equal(list.Selection.Requested, []string{"openlit"}) || len(list.Selection.Effective) != 0) {
+					t.Fatalf("removed selection failed list: %+v", list.Selection)
 				}
 				for _, entry := range list.Profiles {
 					if entry.Name == "dedicated" && (entry.Eligible || entry.Effective || entry.Reason != "role-restricted") {
@@ -176,7 +182,7 @@ func TestIntegrationStatusCLIUsesDependencyRoleAndCommandSourceSnapshot(t *testi
 				if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
 					t.Fatal(err)
 				}
-				if len(status.Inventory) != 3 || !status.Selection.Present || !slices.Equal(status.Selection.Requested, []string{"sample"}) || status.Observed != "ready" || status.ObservedScope != "yard" || len(status.Health) != 0 {
+				if len(status.Inventory) != 5 || !status.Selection.Present || !slices.Equal(status.Selection.Requested, []string{"sample"}) || status.Observed != "ready" || status.ObservedScope != "yard" || len(status.Health) != 0 {
 					t.Fatalf("JSON lost catalog or desired/runtime separation: %#v", status)
 				}
 				if status.Selection.Provenance.Scope != scope || status.Selection.Provenance.Path != sourcePath || scenario == "role" && (!status.Selection.Suppressed || len(status.Selection.Effective) != 0) || scenario != "role" && !slices.Equal(status.Selection.Effective, []string{"base", "sample"}) {
@@ -195,6 +201,9 @@ func TestIntegrationStatusCLIUsesDependencyRoleAndCommandSourceSnapshot(t *testi
 					}
 					if scenario == "role" {
 						effective, eligible, reason = false, false, "role-restricted"
+					}
+					if entry.ID == "aiobserver" || entry.ID == "paseo" {
+						requested, effective, eligible, reason = false, false, false, "retired"
 					}
 					if entry.Requested != requested || entry.Effective != effective || entry.Eligible != eligible || entry.Reason != reason || entry.SourceGroup != group || !reflect.DeepEqual(entry.Source, status.Selection.Provenance) || len(entry.Overridden) == 0 || entry.Observed != "not-inspected" {
 						t.Fatalf("JSON component selection/provenance differs: %#v", entry)
@@ -219,7 +228,7 @@ func TestIntegrationInventoryUsesEffectiveDependencyAndRoleSnapshot(t *testing.T
 		t.Fatal(err)
 	}
 	entries := loaded.IntegrationInventory()
-	if len(entries) != 3 {
+	if len(entries) != 5 {
 		t.Fatalf("inventory size=%d", len(entries))
 	}
 	for _, entry := range entries {
@@ -230,7 +239,11 @@ func TestIntegrationInventoryUsesEffectiveDependencyAndRoleSnapshot(t *testing.T
 	loaded.Integrations.AllowsCodingTools = false
 	loaded.Integrations.Effective = nil
 	for _, entry := range loaded.IntegrationInventory() {
-		if entry.Effective || entry.Eligible || entry.Reason != "role-restricted" {
+		wantReason := "role-restricted"
+		if entry.ID == "aiobserver" || entry.ID == "paseo" {
+			wantReason = "retired"
+		}
+		if entry.Effective || entry.Eligible || entry.Reason != wantReason {
 			t.Fatalf("role suppression lost: %#v", entry)
 		}
 	}

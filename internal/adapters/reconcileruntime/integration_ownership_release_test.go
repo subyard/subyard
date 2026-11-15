@@ -165,15 +165,15 @@ func TestOwnershipReleaseNoticeStaysWithinDiagnosticBound(t *testing.T) {
 }
 
 // The init plan previews a pending ownership release before consent.
-func TestRetiredIntegrationNoticesPreviewOwnershipRelease(t *testing.T) {
+func TestIntegrationOwnershipNoticesPreviewOwnershipRelease(t *testing.T) {
 	path := "/home/dev/.sample/settings.json"
 	executor := &ownershipReleaseExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}, path: path, pointers: []string{"/kept"}}
 	var output bytes.Buffer
 	runtime := ownershipReleaseRuntime(t, executor, &output)
-	retirements, warnings, err := runtime.RetiredIntegrationNotices(context.Background())
+	warnings, err := runtime.IntegrationOwnershipNotices(context.Background())
 	notice := "retiring sample releases ownership of " + path + ": owned fields changed after Subyard applied them; fields left in place: /kept"
-	if err != nil || len(retirements) != 0 || !slices.Equal(warnings, []string{notice}) {
-		t.Fatalf("init preview: retirements=%q warnings=%q err=%v", retirements, warnings, err)
+	if err != nil || !slices.Equal(warnings, []string{notice}) {
+		t.Fatalf("init preview: warnings=%q err=%v", warnings, err)
 	}
 	if executor.retires != 0 || output.Len() != 0 {
 		t.Fatalf("preview performed or reported the release: retires=%d output=%q", executor.retires, output.String())

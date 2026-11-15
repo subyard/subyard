@@ -462,7 +462,7 @@ verify_compatible_capabilities() {
     && jq -e 'keys == ["activationOwners", "activationReconciliationOwned", "schemaVersion"] and
       .activationReconciliationOwned == false and .schemaVersion == 2 and
       (.activationOwners | sort) == ["core-guest-runtime", "git-fetch-runtime", "github-runtime",
-        "host-power", "installation-runtime-v1", "key-tools-runtime", "openlit-runtime", "orca-runtime",
+        "host-power", "installation-runtime-v1", "key-tools-runtime", "orca-runtime",
         "telemetry-runtime", "test-vm-broker", "test-yard-route-consumers"]' \
       "$response" >/dev/null \
     || die 'published compatible runtime lacks exact activation capabilities'

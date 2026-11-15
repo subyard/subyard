@@ -226,3 +226,28 @@ func TestPublicationContractSnapshotRejectsUnknownReaderState(t *testing.T) {
 		t.Fatal("duplicate ownership accepted")
 	}
 }
+
+func TestRemovedPublicationReceiptsAndRoutesRemainInert(t *testing.T) {
+	for _, name := range []string{"ai-observer", "openlit-dashboard"} {
+		for _, present := range []bool{false, true} {
+			t.Run(name+map[bool]string{true: "-attached", false: "-deferred"}[present], func(t *testing.T) {
+				device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:192.0.2.12:22222", "connect": "tcp:127.0.0.1:3000"}
+				payload, _ := json.Marshal(Receipt{Version: 1, Ownership: "v2:192.0.2.12:22222", Device: device})
+				instance := ports.InstanceInfo{LocalConfig: map[string]string{Prefix + name: string(payload)}, LocalDevices: map[string]map[string]string{}, Devices: map[string]map[string]string{}}
+				if present {
+					instance.LocalDevices[name], instance.Devices[name] = device, device
+				}
+				for _, addresses := range [][]netip.Addr{nil, {netip.MustParseAddr("192.0.2.12")}} {
+					config, devices, waiting, err := Plan(instance, CoreContracts(), addresses)
+					if err != nil || !maps.Equal(config, instance.LocalConfig) || !reflect.DeepEqual(devices, instance.LocalDevices) || len(waiting) != 0 {
+						t.Fatalf("removed route changed: %v %+v %+v %v", err, config, devices, waiting)
+					}
+				}
+				instance.LocalConfig[Prefix+"unrelated"] = string(payload)
+				if _, _, _, err := Plan(instance, CoreContracts(), nil); err == nil || !strings.Contains(err.Error(), "unknown deferred publication") {
+					t.Fatalf("unknown route accepted: %v", err)
+				}
+			})
+		}
+	}
+}

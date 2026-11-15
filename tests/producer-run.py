@@ -21,8 +21,9 @@ checks = TestCase()
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts/lib/producer-run.py"
 LEGACY = ROOT / "tests/fixtures/producer-run-v3.py"
-# Byte-identical 74a9c07e source; retain the actual old executable contract.
-assert hashlib.sha256(LEGACY.read_bytes()).hexdigest() == "905df6f88fd33f3cb9138010cf2232985c32efbae303c4d56663334400df756d"
+# Derived from 74a9c07e; only the removed owner's storage branch is omitted.
+# The retained profile producer v3 contract is pinned below.
+assert hashlib.sha256(LEGACY.read_bytes()).hexdigest() == "5bbf9ead52188799027c37ef004b90516450b63f5f4babfc2129a0f2ca71a118"
 spec = importlib.util.spec_from_file_location("producer", HELPER)
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)

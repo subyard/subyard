@@ -20,7 +20,6 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
-	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/state"
@@ -1353,20 +1352,21 @@ func TestYardAdoptionRebuildKeepsNormalInitAuthority(t *testing.T) {
 	}
 }
 
-// A retired integration's own handler removes its keys after activation, so its
-// predecessor's receipts must not block the registration that comes first.
-func TestYardAdoptionLeavesRetiredIntegrationKeysToRetirement(t *testing.T) {
+// Removed integrations can leave inert keys in supported installations.
+func TestYardAdoptionPreservesRemovedIntegrationKeys(t *testing.T) {
 	_, execution, fake := adoptionFixture(t)
 	runtime := execution.platform.(reconcileruntime.Runtime)
 	runtime.Incus = fake
-	runtime.Integrations = append(slices.Clone(runtime.Integrations), profile.IntegrationDefinition{
-		Name: "retired-sample", Retired: true,
-		Lifecycle: &profile.IntegrationLifecycle{InstanceConfigKeys: []string{"user.subyard.retired_marker"}},
-	})
 	instance := &fake.Reconcile.Instance
-	instance.LocalConfig["user.subyard.retired_marker"], instance.Config["user.subyard.retired_marker"] = "v1", "v1"
+	for _, key := range []string{"user.subyard.ai_observer_provision", "user.subyard.ai_observer_proxy", "user.subyard.deferred_publication.ai-observer", "user.subyard.openlit_dashboard", "user.subyard.deferred_publication.openlit-dashboard", "user.subyard.retired_integration.aiobserver", "user.subyard.retired_integration.paseo"} {
+		instance.LocalConfig[key], instance.Config[key] = "v1", "v1"
+	}
+	before := operationStateDigest(*instance)
 	if _, _, _, _, err := runtime.InspectYardAdoption(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if operationStateDigest(*instance) != before || fake.writes != 0 {
+		t.Fatal("adoption changed retained state")
 	}
 	instance.LocalConfig["user.subyard.unrelated"], instance.Config["user.subyard.unrelated"] = "v1", "v1"
 	_, _, _, _, err := runtime.InspectYardAdoption(context.Background())

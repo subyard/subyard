@@ -19,7 +19,6 @@ choices that widen it.
 
 ## Optional integrations
 
-- [OpenLIT](openlit.md) — disabled telemetry profile; retained cleanup and data behavior.
 - [Android emulator leases](android.md) — request isolated phone/tablet runtimes and clean image caches.
 
 - [Orca remote server](orca.md) — run a pinned Orca server in a yard and connect over Tailscale or

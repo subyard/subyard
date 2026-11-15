@@ -57,22 +57,9 @@ func TestProfileDashboardContractSurvivesInstalledSnapshot(t *testing.T) {
 	}
 }
 
+// Historical installed envelopes retain their reader even after package removal.
 func TestRetiredRouteLoadsOnlyCancellationAuthority(t *testing.T) {
-	root := testkit.TempDir(t)
-	dir := filepath.Join(root, "config", "retired-integrations", "synthetic")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(dir, "retire.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
-	definition := profile.IntegrationDefinition{SchemaVersion: 1, Retired: true,
-		Lifecycle:     &profile.IntegrationLifecycle{Handler: "retire.sh", InstanceConfigKeys: []string{"user.subyard.retired"}, InstanceDevices: []string{"retired-dashboard"}},
-		RetiredRoutes: []profile.RetiredRoute{{MarkerKey: "user.subyard.retired", DeviceName: "retired-dashboard", GuestPort: 3000}}}
-	data, _ := json.Marshal(definition)
-	testkit.WriteFile(t, filepath.Join(dir, "integration.json"), data, 0o600)
-	loaded, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded := []Contract{{Device: "retired-dashboard", Key: "user.subyard.retired", Codec: "dashboard", GuestPort: 3000, CleanupOnly: true}}
 	encoded, err := Encode(loaded)
 	if err != nil {
 		t.Fatal(err)

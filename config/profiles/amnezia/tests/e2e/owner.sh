@@ -262,7 +262,7 @@ try:
     blockers = report.get('blockers', [])
     if not isinstance(blockers, list) or len(blockers) > 64:
         raise ValueError()
-    runtime = sum(item.get('resource') in ('activation.openlit-runtime', 'activation.orca-runtime') for item in blockers)
+    runtime = sum(item.get('resource') == 'activation.orca-runtime' for item in blockers)
     materialized = sum(item.get('resource') == 'activation.materialized-config' for item in blockers)
     other = len(blockers) - runtime - materialized
 except (OSError, ValueError, TypeError, KeyError, AttributeError):

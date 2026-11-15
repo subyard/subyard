@@ -28,11 +28,6 @@ func Load(root string) ([]Contract, error) {
 		return nil, err
 	}
 	for _, definition := range integrations {
-		for _, route := range definition.RetiredRoutes {
-			contract := dashboardContract(&profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{DeviceName: route.DeviceName, MarkerKey: route.MarkerKey}})
-			contract.CleanupOnly = true
-			contracts = append(contracts, contract)
-		}
 		dashboard := definition.Dashboard
 		if dashboard == nil || dashboard.ContainerRoute == nil {
 			continue

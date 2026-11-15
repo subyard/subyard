@@ -33,10 +33,10 @@ def systemctl(*args):
 class Runtime:
     def __init__(self, source, user, selected, agents, control=Path('/var/lib/subyard/telemetry-control'),
                  data=Path('/var/lib/subyard/telemetry'), library=Path('/usr/local/lib/subyard-telemetry'),
-                 units=Path('/etc/systemd/system'), commands=Path('/usr/local/bin'), legacy=Path('/var/lib/subyard/openlit/native.json'), account=None):
+                 units=Path('/etc/systemd/system'), commands=Path('/usr/local/bin'), account=None):
         self.source, self.user, self.selected, self.agents = source, user, selected, agents
         self.managed_agents = set()
-        self.control, self.data, self.library, self.units, self.commands, self.legacy = control, data, library, units, commands, legacy
+        self.control, self.data, self.library, self.units, self.commands = control, data, library, units, commands
         account = account or pwd.getpwnam(user)
         self.uid, self.gid, self.home = account.pw_uid, account.pw_gid, Path(account.pw_dir)
         if self.uid == 0 or not user.replace('_', '').replace('-', '').isalnum():
@@ -73,7 +73,7 @@ class Runtime:
         return BINARY_LIMIT if path == self.library/'subyard-telemetry' else native.CONFIG_LIMIT
 
     def identity_runtime(self,record):
-        wanted = Runtime(self.source,record['user'],self.selected,self.agents,self.control,self.data,self.library,self.units,self.commands,self.legacy,
+        wanted = Runtime(self.source,record['user'],self.selected,self.agents,self.control,self.data,self.library,self.units,self.commands,
                        account=SimpleNamespace(pw_uid=record['uid'],pw_gid=record['gid'],pw_dir=record['home']))
         wanted.managed_agents = set(getattr(self, 'managed_agents', ()))
         return wanted
@@ -359,8 +359,6 @@ class Runtime:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
-        if self.selected:
-            native.relinquish_openlit(self.home, self.legacy, tomli_w, self.uid, self.gid)
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)

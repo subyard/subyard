@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -268,19 +267,6 @@ func (cli *CLI) executeLifecycle(
 		}
 	}
 	return result, err
-}
-
-// A start never retires a package, and it reads no guest state to say so.
-func (cli *CLI) warnRetiredIntegrationsAfterStart(loaded config.Loaded, execution *lifecycleExecution, result domain.AdapterResult, err error, diagnostics io.Writer) {
-	if err != nil || result.Status != "ok" || execution.action != "start" || execution.observed == nil {
-		return
-	}
-	// The successful start has already happened; name the remaining guarded repair.
-	instance := *execution.observed
-	instance.Status = "Running"
-	if reminder := reconcileruntime.RetiredIntegrationReminder(loaded, instance); reminder != "" {
-		fmt.Fprintln(diagnostics, "Warning: "+reminder)
-	}
 }
 
 func (cli *CLI) prepareLifecycleVMCPUPrivileges(ctx context.Context, diagnostics io.Writer, yard domain.Context, execution *lifecycleExecution) error {

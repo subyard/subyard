@@ -47,7 +47,7 @@ codes = {"ready", "transition-required", "recovery-pending", "registry-invalid",
     "dependency-unavailable", "verification-failed", "activation-ambiguous",
     "recovery-ambiguous", "journal-invalid", "rollback-incompatible", "rollback-expired"}
 owners = {"activation."+name for name in ("core-guest-runtime", "key-tools-runtime",
-    "materialized-config", "github-runtime", "git-fetch-runtime", "openlit-runtime", "orca-runtime")}
+    "materialized-config", "github-runtime", "git-fetch-runtime", "orca-runtime")}
 try:
     payload = sys.stdin.buffer.read(65537)
     if len(payload) > 65536:

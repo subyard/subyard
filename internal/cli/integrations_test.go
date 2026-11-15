@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,7 +13,6 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
-	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -383,7 +381,7 @@ func TestIntegrationStatusSeparatesHealthFromConvergence(t *testing.T) {
 	if err != nil || len(status.Health) != 0 || len(incus.ExecCalls) != calls {
 		t.Fatalf("status probed an unselected integration: %#v, %v", status, err)
 	}
-	if status.ObservedScope != "yard" || len(status.Inventory) != 2 {
+	if status.ObservedScope != "yard" || len(status.Inventory) != 4 {
 		t.Fatalf("status lost the full catalog or yard observation scope: %#v", status)
 	}
 	for _, entry := range status.Inventory {
@@ -467,12 +465,6 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 	fixture := func(t *testing.T, selection string) (*CLI, string) {
 		t.Helper()
 		cli, _, _, path, _ := integrationFixture(t, selection)
-		packageRoot := filepath.Join(cli.options.RepositoryRoot, "config", "retired-integrations", "widget")
-		if err := os.MkdirAll(packageRoot, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, filepath.Join(packageRoot, "integration.json"), `{"schema_version":1,"retired":true,"retired_settings":["AGENT_widget_COMMAND"],"lifecycle":{"handler":"retire.py","instance_config_keys":[],"instance_devices":[]}}`, 0o600)
-		writeCLIFile(t, filepath.Join(packageRoot, "retire.py"), "#!/bin/sh\n", 0o700)
 		reloaded, err := New(cli.options)
 		if err != nil {
 			t.Fatal(err)
@@ -485,7 +477,7 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := prepareIntegrationTest(t, cli, "enable", "widget"); err == nil || !strings.Contains(err.Error(), "integration widget is retired") {
+		if _, err := prepareIntegrationTest(t, cli, "enable", "paseo"); err == nil || !strings.Contains(err.Error(), "integration paseo is retired") {
 			t.Fatalf("enable error=%v", err)
 		}
 		after, err := os.ReadFile(path)
@@ -494,8 +486,8 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 		}
 	})
 	t.Run("disable clears an authored selection", func(t *testing.T) {
-		cli, path := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
-		prepared, err := prepareIntegrationTest(t, cli, "disable", "widget")
+		cli, path := fixture(t, "CODING_TOOL_INTEGRATIONS='codex paseo'\n")
+		prepared, err := prepareIntegrationTest(t, cli, "disable", "paseo")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -509,75 +501,35 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 		}
 	})
 	t.Run("status reports retired selection", func(t *testing.T) {
-		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
+		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex paseo'\n")
 		loaded, err := cli.loadContext("default")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := strings.Join(loaded.Integrations.Retired, " "); got != "widget" {
+		if got := strings.Join(loaded.Integrations.Retired, " "); got != "paseo" {
 			t.Fatalf("retired selection=%q", got)
 		}
 		if got := strings.Join(loaded.Integrations.Effective, " "); got != "codex" {
 			t.Fatalf("effective selection=%q", got)
 		}
-		if _, err := prepareIntegrationTest(t, cli, "status", "widget"); err != nil {
+		if _, err := prepareIntegrationTest(t, cli, "status", "paseo"); err != nil {
 			t.Fatalf("retired status refused: %v", err)
 		}
 	})
-	t.Run("init plan names the retirement beside its operation steps", func(t *testing.T) {
-		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
+	t.Run("init plan retains ownership warnings", func(t *testing.T) {
+		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex paseo'\n")
 		loaded, err := cli.loadContext("default")
 		if err != nil {
 			t.Fatal(err)
 		}
 		var output bytes.Buffer
 		cli.options.Stdout = &output
-		execution := &initExecution{loaded: loaded, integrationRetirements: []string{"temporary start"}, integrationWarnings: []string{"kept state"}}
-		cli.printInitRetirements(execution)
-		for _, want := range []string{"[do  ] yard default: temporary start", "Warning: yard default: kept state"} {
+		execution := &initExecution{loaded: loaded, integrationWarnings: []string{"kept state"}}
+		cli.printInitIntegrationWarnings(execution)
+		for _, want := range []string{"Warning: yard default: kept state"} {
 			if !strings.Contains(output.String(), want) {
 				t.Fatalf("init plan output=%q", output.String())
 			}
 		}
-	})
-	t.Run("host warnings stop at the proof", func(t *testing.T) {
-		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex widget'\n")
-		loaded, err := cli.loadContext("default")
-		if err != nil {
-			t.Fatal(err)
-		}
-		incus := cli.options.Incus.(*testkit.Incus)
-		instance := incus.Instances["subyard/yard"]
-		instance.Status = "Stopped"
-		incus.Instances["subyard/yard"] = instance
-		want := "retired integration widget may still be installed in yard default; run: yard -Y default start; then run yard migrate"
-		check := func(wanted string) {
-			t.Helper()
-			status, err := cli.queryIntegrationStatus(context.Background(), loaded, "")
-			if err != nil || status.Observed != "stopped" || status.Detail != wanted {
-				t.Fatalf("status=%+v err=%v", status, err)
-			}
-			var started bytes.Buffer
-			execution := &lifecycleExecution{action: "start", observed: &instance}
-			cli.warnRetiredIntegrationsAfterStart(loaded, execution, domain.AdapterResult{Status: "ok"}, nil, &started)
-			line := ""
-			if wanted != "" {
-				line = "Warning: retired integration widget may still be installed in yard default; run: yard migrate\n"
-			}
-			if started.String() != line {
-				t.Fatalf("start=%q, want %q", started.String(), line)
-			}
-		}
-		check(want)
-		var failed bytes.Buffer
-		cli.warnRetiredIntegrationsAfterStart(loaded, &lifecycleExecution{action: "start", observed: &instance}, domain.AdapterResult{Status: "ok"}, errors.New("start failed"), &failed)
-		cli.warnRetiredIntegrationsAfterStart(loaded, &lifecycleExecution{action: "stop", observed: &instance}, domain.AdapterResult{Status: "ok"}, nil, &failed)
-		if failed.Len() != 0 {
-			t.Fatalf("warned outside a successful start: %q", failed.String())
-		}
-		instance.Config = maps.Clone(instance.Config)
-		instance.Config["user.subyard.retired_integration.widget"] = "true"
-		incus.Instances["subyard/yard"] = instance
-		check("")
 	})
 }

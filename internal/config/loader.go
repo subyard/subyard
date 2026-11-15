@@ -1115,7 +1115,7 @@ var legacySettingNames = map[string]string{
 // parsed but discarded, never exposed as writable settings or effective values.
 func isRetiredSetting(name string) bool {
 	switch name {
-	case "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
+	case "OPENLIT_HOST_PORT", "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
 		return true
 	default:
 		// The explicit integration cleanup hook no longer exists.

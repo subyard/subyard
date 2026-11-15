@@ -203,25 +203,3 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
         os.chown(path.parent, uid, gid)
     publish(state, (json.dumps(next_state)+'\n').encode(), snapshot(state))
     return True
-
-
-def relinquish_openlit(home, legacy, writer, uid, gid):
-    if not legacy.exists():
-        return
-    marker = legacy.parent/'marker'
-    if snapshot(marker) != b'subyard-openlit-v1\n' or marker.stat().st_uid != 0 or legacy.parent.stat().st_uid != 0 or stat.S_IMODE(legacy.parent.stat().st_mode) != 0o700:
-        raise ValueError('legacy ownership unavailable')
-    baseline = json.loads(snapshot(legacy))
-    for agent, owned in baseline.get('agents', {}).items():
-        if agent not in ('claude', 'codex'):
-            raise ValueError('unknown legacy native ownership')
-        path = home/('.claude/settings.json' if agent == 'claude' else '.codex/config.toml')
-        content = snapshot(path)
-        value = (json.loads(content) if agent == 'claude' else tomllib.loads(content.decode())) if content else {}
-        group = value.get('env' if agent == 'claude' else 'otel', {})
-        for key, entry in owned.items():
-            prior = {'present': entry['present'], 'value': entry['value']}
-            current = {'present': key in group, 'value': group.get(key)}
-            if not semantic_equal(current, prior) and not (key in group and any(semantic_equal(group[key], item) for item in [entry['managed'], *entry.get('previous', [])])):
-                raise ValueError('legacy native exporter changed')
-    reconcile(home, legacy, [], '', '', writer, uid, gid)

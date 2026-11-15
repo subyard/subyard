@@ -310,7 +310,7 @@ func TestPackagesRejectUnsafeNativeReferences(t *testing.T) {
 }
 
 func TestDeclarationSourcesRejectOversizeBeforeBinding(t *testing.T) {
-	for _, kind := range []string{"profiles", "agents", "retired-integrations"} {
+	for _, kind := range []string{"profiles", "agents"} {
 		t.Run(kind, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			name := "integration.json"

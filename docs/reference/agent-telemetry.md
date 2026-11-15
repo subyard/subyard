@@ -1,7 +1,7 @@
 # Local agent and resource collection
 
 The optional `telemetry` profile owns a local, independently runnable collector.
-OpenLIT remains disabled. Collection does not require an analytics UI, ClickHouse,
+Collection does not require an analytics UI, ClickHouse,
 Redis, a provider account, or a SQL server. The control plane owns only generic
 resource observation contracts; agent interpretation and SQLite writes belong to
 this profile.
@@ -134,9 +134,9 @@ memory-byte-seconds are not actual CPU or resident memory.
 The profile owns its data directory, private endpoints, bounded service and native
 exporter leaves. Collector processes stay outside measured agent scopes. Optional
 collection failure cannot fail an agent command or resource lifecycle operation.
-Native exporter ownership is acquired only after the disabled OpenLIT owner
-relinquishes its managed leaves. Foreign edits are preserved/refused. Existing
-agents are not killed to reload settings; OpenLIT/ClickHouse history is retained.
+Native exporter ownership records existing leaf values before changing them and restores
+them on disable. Foreign edits are preserved/refused. Existing agents are not killed to
+reload settings. Data from removed integrations remains untouched.
 Enabling and deployment are operator actions after development acceptance.
 
 Nested devcontainers use an explicit private mounted socket/limited loopback

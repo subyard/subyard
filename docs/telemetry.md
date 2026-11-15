@@ -2,7 +2,7 @@
 
 The optional `telemetry` profile collects native OTLP logs, metrics and traces,
 managed process measurements and broker resource records into local SQLite.
-It does not require OpenLIT, ClickHouse, Redis, a provider account or a database
+It does not require ClickHouse, Redis, a provider account or a database
 server. The [data contracts](reference/agent-telemetry.md) explain identities,
 durability and attribution. This is a collection and export layer; it does not
 estimate provider compute, score agents or calculate billing.
@@ -30,12 +30,11 @@ checks the running processes as well as unit files. Foreign unit overrides are
 refused; interrupted startup changes can be retried without terminating agent
 workloads.
 
-OpenLIT remains disabled. The telemetry owner first relinquishes the old owner's
-unchanged managed native leaves, then acquires its own settings. It preserves
-foreign edits and refuses ambiguous ownership. OpenLIT/ClickHouse data, volumes
-and history are retained. Already-running agents continue with their existing
-configuration; restart them normally when collection should begin. No running
-agent is killed to reload exporter settings.
+The telemetry owner records existing native exporter leaves before acquiring its own
+settings and restores them on disable. Existing ownership conflicts remain errors.
+Data, services and routes from removed integrations remain untouched. Already-running
+agents continue with their existing configuration; restart them normally when collection
+should begin. No running agent is killed to reload exporter settings.
 
 Disable collection through the same profile family:
 

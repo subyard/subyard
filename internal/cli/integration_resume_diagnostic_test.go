@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -145,7 +144,7 @@ func (e resumeConflictExecutor) Exec(_ context.Context, _, _ string, request por
 }
 
 func TestIntegrationActivationConflictRetriesRemainInspection(t *testing.T) {
-	for _, kind := range []string{"foreign-ownership", "ambiguous-ownership", "ccusage", "persist"} {
+	for _, kind := range []string{"ccusage", "persist"} {
 		t.Run(kind, func(t *testing.T) {
 			root, _, _, _ := configCommandFixture(t)
 			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Executor: resumeConflictExecutor{kind},
@@ -157,13 +156,6 @@ func TestIntegrationActivationConflictRetriesRemainInspection(t *testing.T) {
 			}
 			if kind == "persist" {
 				runtime.Environment = []string{"AGENT_sample_PERSIST=.memory:/mnt/host/agent-sessions/sample/memory"}
-			}
-			if strings.HasSuffix(kind, "ownership") {
-				handlerRoot := testkit.TempDir(t)
-				testkit.WriteFile(t, filepath.Join(handlerRoot, "integration.json"), []byte(`{"schema_version":1}`), 0644)
-				testkit.WriteFile(t, filepath.Join(handlerRoot, "hook.sh"), []byte("#!/bin/sh\nprintf 'subyard-lifecycle-diagnostic-v1 inspect "+kind+"\\n' >&2\nexit 1\n"), 0755)
-				runtime.Integrations[0].Root = handlerRoot
-				runtime.Integrations[0].Lifecycle = &profile.IntegrationLifecycle{Handler: "hook.sh"}
 			}
 			_, cause := runtime.IntegrationPlan(context.Background())
 			var diagnostic interface{ ActivationDiagnostic() (string, string) }

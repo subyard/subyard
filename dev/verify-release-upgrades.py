@@ -180,7 +180,7 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
         if (package_root / 'config/skills/package.py').is_file():
             for command, members in skills_transport_contract(package_root):
                 skills.setdefault(command, []).append(members)
-    fixtures = [fixture for owner in ("agents", "profiles", "retired-integrations")
+    fixtures = [fixture for owner in ("agents", "profiles")
                 for fixture in source.glob(f"config/{owner}/*/tests/release-observation.py")]
     for fixture in sorted(fixtures):
         provider = runpy.run_path(str(fixture))

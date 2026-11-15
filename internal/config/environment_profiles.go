@@ -40,6 +40,10 @@ func resolveEnvironmentProfiles(configDir, yard string, values map[string]string
 // EnvironmentProfileEligibility applies package policy and yard-role restrictions
 // independently of authored selection, including descriptorless packages.
 func EnvironmentProfileEligibility(configDir, yard string, values map[string]string, catalog Catalog, name string) (bool, string, error) {
+	// This disabled profile can remain in authored selections after package removal.
+	if name == "openlit" {
+		return false, "policy-disabled", nil
+	}
 	scope, err := ProfileProvisionScope(configDir, name)
 	if err != nil {
 		return false, "", err

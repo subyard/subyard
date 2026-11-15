@@ -219,7 +219,7 @@ def worker(kind, lock, data, original_ns, bindings, command):
 
 def launch(source, kind, root, command):
     root = str(Path(root).resolve()) if root else ""
-    storage = Path(root) / f".build/paseo-operation-{os.getuid()}" if kind == "paseo" else Path("/var/lib/subyard/profile-operation")
+    storage = Path("/var/lib/subyard/profile-operation")
     parent = os.getppid()
     pdeath(parent)
     parent_fd = directory(str(storage.parent), create=True)

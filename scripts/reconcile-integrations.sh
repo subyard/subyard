@@ -49,7 +49,6 @@ fi
 # Hooks live under config/agents/<name> and run as root in the yard.
 echo "Coding integrations:"
 for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
-  case " ${SUBYARD_INTEGRATION_LIFECYCLES:-} " in *" $_agent "*) continue ;; esac
   _provision_var="AGENT_${_agent}_PROVISION"
   _provision="${!_provision_var:-}"
   [ -n "$_provision" ] || continue

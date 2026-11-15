@@ -31,7 +31,6 @@ where agents run your product, reproduce bugs, and verify changes.
 - **Persistent history and statistics.** Keep agent sessions, projects, and caches.
   [Local telemetry](docs/telemetry.md) optionally collects native OTLP and attributed
   process/resource observations into SQLite for JSON/SQL inspection and export.
-  [OpenLIT](docs/openlit.md) is disabled; its cleanup code and existing data are retained.
   [Git fetch](docs/git-fetch.md) optionally fetches managed repositories sequentially every five minutes inside the yard.
 
 ## Getting started

@@ -25,6 +25,9 @@ import (
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
+// Historical retirement proofs remain inert native metadata.
+const retiredIntegrationMarkerPrefix = "user.subyard.retired_integration."
+
 // InspectLegacyContinuation observes a bounded dedicated legacy yard without
 // changing project policy or manufacturing installation ownership markers.
 func (runtime Runtime) InspectLegacyContinuation(ctx context.Context) (ports.ReconcileState, []ports.TeardownResource, error) {
@@ -309,17 +312,6 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	}
 	publication, publicationErr := runtime.legacyPublicationPolicy(instance)
 	refusals = append(refusals, publicationErr)
-	retiredKeys := map[string]bool{}
-	if adopt {
-		// The retired integration's own handler removes these after activation.
-		for _, definition := range runtime.Integrations {
-			if definition.Retired && definition.Lifecycle != nil {
-				for _, key := range definition.Lifecycle.InstanceConfigKeys {
-					retiredKeys[key] = true
-				}
-			}
-		}
-	}
 	configurations := []map[string]string{instance.Config, instance.LocalConfig}
 	if extrasErr != nil || publicationErr != nil {
 		configurations = nil // Without these inputs every allowed key would look foreign.
@@ -346,7 +338,7 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 			if key == "user.subyard.host_memory" && (adopt || hostMemory) {
 				continue
 			}
-			if retiredKeys[key] {
+			if adopt && (key == "user.subyard.ai_observer_provision" || key == "user.subyard.ai_observer_proxy" || key == "user.subyard.deferred_publication.ai-observer" || key == "user.subyard.openlit_dashboard" || key == "user.subyard.deferred_publication.openlit-dashboard") {
 				continue
 			}
 			switch key {
@@ -605,7 +597,7 @@ func legacyStableConfig(values map[string]string) map[string]string {
 	for _, key := range []string{"user.subyard.initialized", "user.subyard.desired_power", "user.subyard.ccusage_version", "user.subyard.preview_sha256", "user.subyard.preview_endpoint_sha256", "volatile.last_state.power", "volatile.last_state.ready", "volatile.eth0.host_name", "volatile.eth0.last_state.ip_addresses", previewroute.Key, ownerpublication.Prefix + previewroute.DeviceName} {
 		delete(result, key)
 	}
-	// Integration apply publishes retirement proof after consent.
+	// Historical retirement proofs remain outside the continuation binding.
 	maps.DeleteFunc(result, func(key, _ string) bool { return strings.HasPrefix(key, retiredIntegrationMarkerPrefix) })
 	// Base provisioning can publish this canonical policy after consent.
 	if result["user.subyard.disk_tmp"] == "v1" {

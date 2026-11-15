@@ -342,6 +342,11 @@ func selectPreviewOwnerAddress(host string, active map[string]struct{}) (string,
 }
 
 func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinition {
+	// Supported installations may retain this removed integration's exact route.
+	// Keep its existing read-only ownership guard; no cleanup is authorized here.
+	if name == "ai-observer" {
+		return &profile.IntegrationDefinition{Name: "aiobserver", Retired: true, Dashboard: &profile.IntegrationDashboard{GuestPort: 8080, ContainerRoute: &profile.IntegrationRoute{MarkerKey: "user.subyard.ai_observer_proxy", DeviceName: name}}}
+	}
 	definitions := runtime.Integrations
 	if definitions == nil {
 		definitions, _ = profile.LoadIntegrations(runtime.RepositoryRoot)
@@ -353,12 +358,6 @@ func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinit
 		}
 	}
 	for _, definition := range definitions {
-		for _, route := range definition.RetiredRoutes {
-			if route.DeviceName == name {
-				definition.Dashboard = &profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{MarkerKey: route.MarkerKey, DeviceName: route.DeviceName}}
-				return &definition
-			}
-		}
 		if definition.Dashboard != nil && definition.Dashboard.ContainerRoute != nil && definition.Dashboard.ContainerRoute.DeviceName == name {
 			return &definition
 		}

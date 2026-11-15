@@ -13,16 +13,6 @@ plane](../control-plane.md), and owning profile guides describe operational beha
 work is identified explicitly; accepted direction does not imply completed implementation or
 acceptance. Superseded alternatives and execution reports belong in Git history.
 
-## Typed observation pilot
-
-The retired AI Observer pilot used one package-owned Go native producer and the
-generic immutable snapshot canonicalizer. Mounts has explicit multiset semantics;
-other native arrays retain their existing order. Historical helper bytes bound the
-package, while exact sealed owners retain historical fingerprints and recovery
-authority. Source-owned phase/reason diagnostics cross the existing activation
-interface without raw native output. The [bounded contract](typed-semantic-observations.md)
-defines encoding, additive native fields, validation and focused acceptance.
-
 <a id="subyard-model"></a>
 
 ## Product model and trust boundary
@@ -605,17 +595,6 @@ Disconnect does not cancel turns or autoapprove questions; first backend MVP pro
 in-flight survival across server/yard/host restart. Managed restarts must respect live work and
 upstream shutdown behavior.
 
-Paseo is removed. The [retired package](shipped-integration-contract.md#retired-package-compatibility)
-removes its service, including a foreign unit, helper commands, runtime, receipt and state during
-an ordinary update. Only a non-empty real `/srv/agents/paseo/worktrees/` directory survives, with
-one warning naming it; chats, schedules, loops and uploads are removed. Path safety and actual
-operation failures remain enforced. To use Paseo, install an older release.
-
-Updates leave stopped yards untouched. Run `yard -Y NAME start`, then `yard migrate` to complete
-pending disk-backed `/tmp`, remove Paseo and repair runtimes. If disk-backed `/tmp` is already
-complete, `yard -Y NAME init` also supports retirement through a temporary start, restores stopped
-power and records proof so repeated init skips the boot. Start alone does not remove Paseo.
-
 <a id="github-app-token-broker"></a>
 
 ## GitHub App token broker
@@ -802,13 +781,6 @@ Amnezia explicit init installs prerequisites but leaves fresh VPN stopped until 
 yard start. After VPN down, provision/init/start/reboot preserve disabled intent until VPN up.
 Selecting profile alone never publishes VPN; external exposure follows confirmation policy. See
 [Amnezia](../amnezia.md).
-
-OpenLIT is disabled through shipped profile policy. Existing requested selections remain authored
-but never become effective, and explicit enable is refused. The retained owner/runtime hooks
-reconcile desired absence: stop managed services, restore managed native exporter settings, and
-remove owned dashboard publication while preserving account/database state, credentials and
-unrelated settings. Its executable owning tests and acceptance lanes are removed. Retired
-AI Observer compatibility continues to preserve history independently. See [OpenLIT](../openlit.md).
 
 Local collection is a separate optional `telemetry` profile, independently runnable
 without Subyard. It uses the official OTLP HTTP/protobuf receiver and local SQLite;

@@ -47,7 +47,9 @@ func Plan(instance ports.InstanceInfo, contracts []Contract, addresses []netip.A
 	if devices == nil {
 		devices = map[string]map[string]string{}
 	}
-	known := map[string]bool{}
+	// Removed packages leave their historical receipts inert. No current contract
+	// may restore or delete their routes; unrelated unknown receipts still refuse.
+	known := map[string]bool{Prefix + "ai-observer": true, Prefix + "openlit-dashboard": true}
 	for _, contract := range contracts {
 		key := Prefix + contract.Device
 		known[key] = true

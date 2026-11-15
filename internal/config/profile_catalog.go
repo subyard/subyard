@@ -43,7 +43,7 @@ func LoadCatalog(root string) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
-	result.declarations, result.integrations = definitions, integrations
+	result.declarations, result.integrations = definitions, withRetiredIntegrationInputs(integrations)
 	return result, nil
 }
 
@@ -68,6 +68,7 @@ func BuildCatalog(profiles []profile.Metadata, agents []profile.IntegrationMetad
 		}
 		integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native, Artifacts: data.Artifacts})
 	}
+	integrations = withRetiredIntegrationInputs(integrations)
 	result := Catalog{profiles: make(map[string]SettingDefinition), declarations: definitions, integrations: integrations}
 	type settingsOwner struct {
 		Name     string

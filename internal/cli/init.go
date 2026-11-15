@@ -52,39 +52,39 @@ type initBootstrap struct {
 
 type initExecution struct {
 	// approvedPersist binds provisioning to the persist plan confirmed by init.
-	approvedPersist                             *string
-	legacyContinuation                          *initLegacyContinuation
-	resourceCommand                             string
-	resourceArguments                           []string
-	provisionProfile                            string
-	requestedProfile                            string
-	profileProvision                            *provisionExecution
-	profileSetup                                *initProfileSet
-	operationID                                 string
-	integrationSelection                        *initIntegrationSelection
-	integrationBaseline                         *initIntegrationBaseline
-	integrationAdoption                         reconcileruntime.IntegrationPlan
-	integrationRetirements, integrationWarnings []string
-	loaded                                      config.Loaded
-	mode                                        initMode
-	bootstrap                                   *initBootstrap
-	plan                                        application.ReconcilePlan
-	approvedPlan                                application.ReconcilePlan
-	approvedFinalize                            application.ReconcilePlan
-	inputBaseline                               *ownerInputBaseline
-	teardownResources                           []ports.TeardownResource
-	resetBaseline                               *resetTeardownBaseline
-	platform                                    ports.InitPlatform
-	powerYards                                  []domain.Context
-	hostID                                      string
-	hostIDPending                               bool
-	configsChanged                              bool
-	hooksApplicable                             bool
-	orphanIngress                               *orphanIngressPlan
-	orphanIngressDeferred                       bool
-	runtimePlan                                 *reconcileruntime.ProfileRuntimePlan
-	hookPlan                                    *reconcileruntime.ProjectHookPlan
-	hookProjects                                []domain.ProjectRecord
+	approvedPersist       *string
+	legacyContinuation    *initLegacyContinuation
+	resourceCommand       string
+	resourceArguments     []string
+	provisionProfile      string
+	requestedProfile      string
+	profileProvision      *provisionExecution
+	profileSetup          *initProfileSet
+	operationID           string
+	integrationSelection  *initIntegrationSelection
+	integrationBaseline   *initIntegrationBaseline
+	integrationAdoption   reconcileruntime.IntegrationPlan
+	integrationWarnings   []string
+	loaded                config.Loaded
+	mode                  initMode
+	bootstrap             *initBootstrap
+	plan                  application.ReconcilePlan
+	approvedPlan          application.ReconcilePlan
+	approvedFinalize      application.ReconcilePlan
+	inputBaseline         *ownerInputBaseline
+	teardownResources     []ports.TeardownResource
+	resetBaseline         *resetTeardownBaseline
+	platform              ports.InitPlatform
+	powerYards            []domain.Context
+	hostID                string
+	hostIDPending         bool
+	configsChanged        bool
+	hooksApplicable       bool
+	orphanIngress         *orphanIngressPlan
+	orphanIngressDeferred bool
+	runtimePlan           *reconcileruntime.ProfileRuntimePlan
+	hookPlan              *reconcileruntime.ProjectHookPlan
+	hookProjects          []domain.ProjectRecord
 	// extrasDetach names the owned extras devices the extras stage detaches.
 	extrasDetach reconcileruntime.ExtrasDetach
 }
@@ -409,7 +409,6 @@ func (cli *CLI) initPlatformWithDispatcher(
 	return cli.activation.runtime(reconcileruntime.Runtime{
 		Profiles:          loaded.Catalog.Profiles(),
 		Integrations:      loaded.Catalog.Integrations(),
-		RetiredSelection:  loaded.Integrations.Retired,
 		RepositoryRoot:    cli.options.RepositoryRoot,
 		Environment:       environmentList(cli.env, environment),
 		LaunchEnvironment: environmentList(cli.baseEnv, nil),
@@ -608,7 +607,7 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 			return nil, err
 		}
 		if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok && loaded.Integrations.AllowsCodingTools {
-			execution.integrationRetirements, execution.integrationWarnings, err = runtime.RetiredIntegrationNotices(ctx)
+			execution.integrationWarnings, err = runtime.IntegrationOwnershipNotices(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -689,9 +688,6 @@ func (execution *initExecution) consequences() []string {
 		hostIDConsequences = append(hostIDConsequences, "grant normal reconciliation of the assessed existing legacy instance; no project creation, reset or full removal ownership")
 	}
 	hostIDConsequences = append(hostIDConsequences, integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption)...)
-	for _, retirement := range execution.integrationRetirements {
-		hostIDConsequences = append(hostIDConsequences, "yard "+execution.loaded.Context.YardName+": "+retirement)
-	}
 	hostIDConsequences = append(hostIDConsequences, execution.profileSetup.consequences()...)
 	if execution.integrationSelection != nil {
 		hostIDConsequences = append(hostIDConsequences, "record the selected yard's requested integration set")
@@ -914,10 +910,7 @@ func (execution *initExecution) refreshAssessment(ctx context.Context, cli *CLI)
 	return nil
 }
 
-func (cli *CLI) printInitRetirements(execution *initExecution) {
-	for _, retirement := range execution.integrationRetirements {
-		fmt.Fprintf(cli.options.Stdout, "  [do  ] yard %s: %s\n", execution.loaded.Context.YardName, retirement)
-	}
+func (cli *CLI) printInitIntegrationWarnings(execution *initExecution) {
 	for _, warning := range execution.integrationWarnings {
 		fmt.Fprintf(cli.options.Stdout, "  Warning: yard %s: %s\n", execution.loaded.Context.YardName, warning)
 	}
@@ -932,7 +925,7 @@ func (cli *CLI) printInitPlan(execution *initExecution) {
 	for _, consequence := range integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption) {
 		fmt.Fprintf(cli.options.Stdout, "  [do  ] %s\n", consequence)
 	}
-	cli.printInitRetirements(execution)
+	cli.printInitIntegrationWarnings(execution)
 	for _, consequence := range execution.orphanIngress.consequences() {
 		fmt.Fprintf(cli.options.Stdout, "  [do  ] %s\n", consequence)
 	}

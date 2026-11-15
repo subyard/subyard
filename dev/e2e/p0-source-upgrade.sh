@@ -472,7 +472,7 @@ bootstrap_failure_diagnostics() {
        "rollback-incompatible", "rollback-expired"] as $codes |
       {"activation.materialized-config":"materialized-config", "activation.host-power":"host-power",
        "activation.test-vm-broker":"test-vm-broker", "activation.test-yard-route-consumers":"route-consumers",
-       "activation.orca-runtime":"orca-runtime", "activation.openlit-runtime":"openlit-runtime",
+       "activation.orca-runtime":"orca-runtime",
        "source-install.config":"source-config", "source-install.entrypoints":"source-entrypoints",
        "test-yard-owner":"owner-registration", "migration-history.checkpoint":"migration-history",
        "transition.source-metadata":"source-metadata"} as $resources |

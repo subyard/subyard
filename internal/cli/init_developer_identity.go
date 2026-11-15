@@ -133,7 +133,7 @@ func (prepared *preparedCommand) prepareDeveloperIdentityInit(ctx context.Contex
 		execution.plan.Steps = append(execution.plan.Steps, application.ReconcileStep{Stage: stage, Conditional: true})
 	}
 	if prepared.Loaded.Integrations.AllowsCodingTools {
-		execution.integrationRetirements, execution.integrationWarnings, err = identity.RetiredIntegrationNotices(ctx)
+		execution.integrationWarnings, err = identity.IntegrationOwnershipNotices(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -246,15 +246,6 @@ func (prepared *preparedCommand) prepareDeveloperIdentityInit(ctx context.Contex
 		}
 		if err := execution.hookPlan.CheckContinuationScope(fresh.initExecution.hookPlan); err != nil {
 			return domain.AdapterResult{}, err
-		}
-		// A retirement can delete integration data. One the approval did not
-		// disclose needs a new plan; a stopped yard's plan disclosed its own.
-		if !prepared.retirementsDisclosed {
-			for _, retirement := range fresh.initExecution.integrationRetirements {
-				if !slices.Contains(execution.integrationRetirements, retirement) {
-					return domain.AdapterResult{}, fmt.Errorf("%w: integration retirement was not approved; run yard init again", domain.ErrPlanStale)
-				}
-			}
 		}
 		return fresh.execute(ctx, orchestrator, diagnostics)
 	}

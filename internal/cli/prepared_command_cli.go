@@ -71,7 +71,7 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		cli.printOperationSteps(prepared.Plan)
 		// Steps replace the init preview, and --yes shows no consequences.
 		if prepared.initExecution != nil {
-			cli.printInitRetirements(prepared.initExecution)
+			cli.printInitIntegrationWarnings(prepared.initExecution)
 		}
 	} else if prepared.preview != nil {
 		prepared.preview()

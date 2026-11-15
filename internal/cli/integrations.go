@@ -373,7 +373,6 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 	}
 	if !strings.EqualFold(instance.Status, "running") {
 		status.Observed = "stopped"
-		status.Detail = reconcileruntime.RetiredIntegrationReminder(loaded, instance)
 		return status, nil
 	}
 	runtime := cli.integrationRuntime(loaded)
