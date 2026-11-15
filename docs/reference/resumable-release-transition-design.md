@@ -371,6 +371,12 @@ Stray V1 files require manual repair if needed. An unfinished V2 `legacy-v1-impo
 requires those files and current tooling refuses it without writes; completed V2 legacy
 provenance and recovery evidence remain readable. The source-version boundary is
 separate from domain epochs and V2 checkpoint-reader compatibility.
+When an installed v0.28.x updater's completed-metadata fallback refuses a completed V2 import
+with committed V1 remnants, move aside only `migrations/state.json` and the whole
+`migrations/transactions/` directory to a private backup outside the configuration home.
+Nothing else needs cleanup or reinstallation; keep `migrations/update.lock`, V2 metadata and
+all other data in place. The [retained committed V1 workaround](legacy-migration-support.md#retained-committed-v1-files-with-v028x-updaters)
+explains the binding limitation.
 
 Three independent policies determine support:
 

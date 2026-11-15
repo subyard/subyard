@@ -39,6 +39,17 @@ func TestV2CompatibilityIngressRejectsUnavailableLeaf(t *testing.T) {
 	}
 }
 
+func TestV2CompatibilityIngressSkipsLegacyLeafWithoutJournaledLegacyStep(t *testing.T) {
+	binding := &releasetransition.V2IngressBinding{Steps: []releasetransition.V2IngressStepBinding{
+		{Kind: releasetransition.V2SourceImport},
+		{Kind: releasetransition.V2SourceEntrypoints},
+	}}
+	inspection, err := (&V2CompatibilityIngress{}).Inspect(context.Background(), binding)
+	if err != nil || !reflect.DeepEqual(inspection, releasetransition.V2IngressInspection{}) {
+		t.Fatalf("source-only binding inspection = %#v, %v; want empty", inspection, err)
+	}
+}
+
 // A verified import step still belongs to an unfinished journal until activation
 // completes. Retired imports cannot resume, while completed provenance stays readable.
 func TestV2CompatibilityIngressRefusesUnfinishedImportWithoutWrites(t *testing.T) {

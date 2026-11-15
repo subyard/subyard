@@ -257,6 +257,28 @@ by the user's separate clean install. Unknown, ambiguous or foreign state blocks
 manual editing of V2 journals is unsupported. Stray V1 files are outside automatic recovery and
 may be repaired by hand. Ordinary ready operation emits no deprecation warning.
 
+### Retained committed V1 files with v0.28.x updaters
+
+An installation created before v0.11.0 may have completed V2 import and still retain committed
+V1 files. The installed v0.28.x updater includes those files in its completed-metadata fallback
+binding; the current candidate always binds their absence without reading them. That fallback
+can therefore refuse with:
+
+`candidate does not bind supported completed history to a new ordinary plan; stage a compatible candidate supporting protected metadata admission`
+
+For this completed-history case, move aside only these two paths from the configuration home
+to a private backup outside it, then retry the same update:
+
+- `migrations/state.json`;
+- the entire `migrations/transactions/` directory, containing the committed V1 journals and
+  their retained recovery files.
+
+Both paths must be absent; leaving an empty `migrations/transactions/` directory still changes
+the old updater's binding. Keep `migrations/update.lock`, all `release-transition/` metadata
+and all other installation data in place. No other cleanup, migration, uninstall or reinstall
+is needed. This manual workaround does not restore a V1 reader and does not apply to an
+unfinished V2 `legacy-v1-import` journal.
+
 ## Supported V2 checkpoint compatibility
 
 V2 checkpoint-reader bridges remain a separate contract from the retired V1 upgrade path.

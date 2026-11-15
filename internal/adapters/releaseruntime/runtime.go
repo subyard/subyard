@@ -567,6 +567,20 @@ func (runtime *Runtime) PrepareTransition(
 	if !filepath.IsAbs(configHome) {
 		return Prepared{}, errors.New("release transition config home must be absolute")
 	}
+	// Retired ingress must refuse before even a version probe executes its owner.
+	// Other metadata failures retain their ordinary inspection diagnostics below.
+	if store, readErr := releasetransition.NewPOSIXV2Store(configHome); readErr == nil {
+		if snapshot, readErr := store.ReadCurrentJournal(); readErr == nil && snapshot.Exists {
+			if journal, parseErr := releasetransition.ParseJournal(snapshot.Payload); parseErr == nil {
+				if ingressErr := journal.CheckIngressSupport(); ingressErr != nil {
+					return runtime.inspectionFailure(parsed, newPublicReleaseInspectionError(
+						ingressErr, parsed.root, journal.Goal.Target, &journal.Transaction,
+						releasetransition.CodePreconditionBlocked, ingressErr.Error(),
+						"restore protected release metadata from backup, then run yard update --check"))
+				}
+			}
+		}
+	}
 	if !parsed.check && runtime.config.Progress != nil {
 		version := "unknown"
 		if current, err := inspectRuntimeLink(parsed.root, "current"); err == nil && current.present {

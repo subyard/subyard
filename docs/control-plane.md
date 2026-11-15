@@ -1201,6 +1201,12 @@ including retained-owner inspection, resume or replacement. Completed V2 legacy 
 evidence, recovery bindings,
 history checkpoints and projections retain their existing validation and readers. The static
 `config/migrations.json` header remains for old released callers' actionable refusal.
+An installed v0.28.x updater's completed-metadata fallback can refuse an installation that
+completed V2 import but retained committed V1 files. Move aside only `migrations/state.json`
+and the entire `migrations/transactions/` directory to a private backup outside the configuration
+home, then retry; no other cleanup or reinstall is needed. Keep `migrations/update.lock`,
+`release-transition/` and all other data in place. See the
+[retained committed V1 workaround](reference/legacy-migration-support.md#retained-committed-v1-files-with-v028x-updaters).
 For a source before v0.11.0, stage verified current cleanup tooling in its existing runtime store:
 
 ```bash
