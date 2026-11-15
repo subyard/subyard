@@ -13,10 +13,12 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -868,5 +870,35 @@ func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 	}
 	if message := runtimePendingMessage(strings.Repeat("7", 80), "orca"); !strings.Contains(message, "fix it and run yard -Y "+strings.Repeat("7", 80)+" init") {
 		t.Fatalf("an 80-byte yard name lost the exact commands: %q", message)
+	}
+}
+
+// A profile resource verb (such as a profile's own removal) reaches the shared
+// pending admission: under a gate blocked only by a declared runtime's pending
+// item it is admitted to its own guards, and an undeclared owner's pending
+// item keeps it gated.
+func TestProfileResourceVerbPassesPendingOnlyGate(t *testing.T) {
+	for _, test := range []struct {
+		resource string
+		admitted bool
+	}{
+		{resource: "activation.sample-runtime.pending-configuration", admitted: true},
+		{resource: "activation.unknown-runtime.pending-configuration", admitted: false},
+	} {
+		t.Run(test.resource, func(t *testing.T) {
+			fixture := pendingInitGateFixture(t, false, test.resource, "")
+			declareYardScopedRuntimes(t, &fixture)
+			definition := resource.Definition{Command: "fixture-resource"}
+			admission := fixture.cli.admission(command.Definition{}, false, definition, true, []string{"remove"}, true)
+			if admission.handler != "" || admission.readOnly || admission.gate != gateRequired {
+				t.Fatalf("synthetic resource verb is not a gated profile resource mutation: %#v", admission)
+			}
+			var stderr bytes.Buffer
+			fixture.cli.options.Stderr = &stderr
+			_, code, done := fixture.cli.admitReleaseGate(context.Background(), "default", admission, definition, []string{"remove"}, true)
+			if admitted := !done && code == 0; admitted != test.admitted {
+				t.Fatalf("resource verb admitted=%t want %t: code=%d done=%t %s", admitted, test.admitted, code, done, stderr.String())
+			}
+		})
 	}
 }
