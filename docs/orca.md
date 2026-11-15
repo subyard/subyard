@@ -86,15 +86,16 @@ discovery units, and removes the fixed Orca hook, registration helpers, markers,
 wiring and unit files. The ingress guard and every unit file go only after the main unit is
 inactive, and a unit's file only once that unit is no longer enabled; a unit path that is a symbolic
 link, or that systemd resolves to another unit, is removed as a link without stopping or disabling
-the unit it names. It runs no installed Orca helper itself (stopping the service runs only the
-unit's own stop commands) and touches no other path; an unreceipted `orca-server` device and an
-unowned nft table are left untouched with a warning, and Orca daemon scopes are stopped on a
-best-effort basis. Orca state under `/srv/agents/orca`, the `orca-ide` package and lingering are
-kept. It exits zero only when the route, Orca's own ingress table, the three units and every fixed
-path are gone, and a failed Incus read is never taken as absence; otherwise it lists every unmet
-item, and rerunning it is the retry. When an update leaves a yard pending its init because of an
-Orca failure, the failure names this exit: run `orca remove` and then `yard -Y NAME init`. `orca up`
-installs Orca again.
+the unit it names. It never invokes an installed Orca helper itself; the only guest helper that runs
+is the main unit's own `ExecStopPost` (`orca-ingress down`) while systemd stops it, and it touches
+no other path; an unreceipted `orca-server` device and an unowned nft table are left untouched with
+a warning, and Orca daemon scopes are stopped on a best-effort basis inside the guest, while a yard
+that Incus cannot reach is a non-zero result. Orca state under `/srv/agents/orca`, the `orca-ide`
+package and lingering are kept. It exits zero only when the route, Orca's own ingress table, the
+three units and every fixed path are gone, and a failed Incus read is never taken as absence;
+otherwise it lists every unmet item, and rerunning it is the retry. When an update leaves a yard
+pending its init because of an Orca failure, the failure names this exit: run `orca remove` and then
+`yard -Y NAME init`. `orca up` installs Orca again.
 
 When rolling back to Subyard 0.14.0 or 0.13.13, the older updater leaves the newer,
 backward-compatible registration handler installed. This legacy rollback does not
