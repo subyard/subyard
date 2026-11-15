@@ -1352,13 +1352,14 @@ func TestYardAdoptionRebuildKeepsNormalInitAuthority(t *testing.T) {
 	}
 }
 
-// Removed integrations can leave inert keys in supported installations.
-func TestYardAdoptionPreservesRemovedIntegrationKeys(t *testing.T) {
+// Only declared historical adoption keys are accepted; removed profile keys remain foreign.
+func TestYardAdoptionPreservesOnlyDeclaredRetiredKeys(t *testing.T) {
 	_, execution, fake := adoptionFixture(t)
 	runtime := execution.platform.(reconcileruntime.Runtime)
 	runtime.Incus = fake
+	writeCLIFile(t, filepath.Join(runtime.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"integration","id":"old-tool","adoption_keys":["user.subyard.old_provision","user.subyard.old_proxy","user.subyard.deferred_publication.old-tool"]},{"kind":"profile","id":"removed-profile"}]}`, 0644)
 	instance := &fake.Reconcile.Instance
-	for _, key := range []string{"user.subyard.ai_observer_provision", "user.subyard.ai_observer_proxy", "user.subyard.deferred_publication.ai-observer", "user.subyard.openlit_dashboard", "user.subyard.deferred_publication.openlit-dashboard", "user.subyard.retired_integration.aiobserver", "user.subyard.retired_integration.paseo"} {
+	for _, key := range []string{"user.subyard.old_provision", "user.subyard.old_proxy", "user.subyard.deferred_publication.old-tool", "user.subyard.retired_integration.old-tool"} {
 		instance.LocalConfig[key], instance.Config[key] = "v1", "v1"
 	}
 	before := operationStateDigest(*instance)
@@ -1368,10 +1369,14 @@ func TestYardAdoptionPreservesRemovedIntegrationKeys(t *testing.T) {
 	if operationStateDigest(*instance) != before || fake.writes != 0 {
 		t.Fatal("adoption changed retained state")
 	}
-	instance.LocalConfig["user.subyard.unrelated"], instance.Config["user.subyard.unrelated"] = "v1", "v1"
-	_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
-	if want := `refuses unsupported instance configuration key "user.subyard.unrelated"`; err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("got %v, want %s", err, want)
+	for _, key := range []string{"user.subyard.removed_dashboard", "user.subyard.deferred_publication.removed-dashboard", "user.subyard.unrelated"} {
+		instance.LocalConfig[key], instance.Config[key] = "v1", "v1"
+		_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
+		if err == nil || !strings.Contains(err.Error(), `refuses unsupported instance configuration key "`+key+`"`) {
+			t.Fatalf("foreign key accepted: %s %v", key, err)
+		}
+		delete(instance.LocalConfig, key)
+		delete(instance.Config, key)
 	}
 }
 

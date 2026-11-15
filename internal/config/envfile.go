@@ -101,8 +101,15 @@ func (policy discardPolicy) ignores(name string) bool {
 
 // operatorDiscardPolicy is the policy for operator-authored files: they may
 // still contain profile-only settings, which only environment profiles declare.
-func operatorDiscardPolicy(report func(name, value string)) discardPolicy {
-	return discardPolicy{ignored: IsProfileOnlySetting, report: report}
+func operatorDiscardPolicy(report func(name, value string), catalogs ...Catalog) discardPolicy {
+	return discardPolicy{ignored: IsProfileOnlySetting, report: report, retired: func(name string) bool {
+		for _, settings := range catalogs {
+			if settings.retiredSetting(name) {
+				return true
+			}
+		}
+		return false
+	}}
 }
 
 func applyEnvReaderObserved(reader io.Reader, source string, values environment, observer assignmentObserver) error {

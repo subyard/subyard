@@ -135,6 +135,11 @@ func load(
 		return domain.Context{}, nil, fmt.Errorf("resolve repository root: %w", err)
 	}
 	values := environmentFrom(options.Environment)
+	for name := range values {
+		if tracker.catalog.retiredSetting(name) {
+			delete(values, name)
+		}
+	}
 	if err := normalizeLegacyEnvironment(values); err != nil {
 		return domain.Context{}, nil, err
 	}
@@ -1115,7 +1120,7 @@ var legacySettingNames = map[string]string{
 // parsed but discarded, never exposed as writable settings or effective values.
 func isRetiredSetting(name string) bool {
 	switch name {
-	case "OPENLIT_HOST_PORT", "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
+	case "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
 		return true
 	default:
 		// The explicit integration cleanup hook no longer exists.

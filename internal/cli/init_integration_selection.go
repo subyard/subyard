@@ -36,7 +36,7 @@ func (cli *CLI) prepareInitIntegrationSelection(ctx context.Context, loaded conf
 	if bootstrap != nil {
 		content = bootstrap.content
 	}
-	assignments, err := config.ParsePersistentAssignments(path, content)
+	assignments, err := cli.catalog.ParsePersistentAssignments(path, content)
 	if err != nil {
 		return config.Loaded{}, nil, err
 	}
@@ -70,7 +70,7 @@ func (cli *CLI) prepareInitIntegrationSelection(ctx context.Context, loaded conf
 		desired = []string{}
 	}
 	value := strings.Join(desired, " ")
-	candidate, err := config.EditPersistentAssignmentContent(path, content, "CODING_TOOL_INTEGRATIONS", &value)
+	candidate, err := cli.catalog.EditPersistentAssignmentContent(path, content, "CODING_TOOL_INTEGRATIONS", &value)
 	if err != nil {
 		return config.Loaded{}, nil, err
 	}

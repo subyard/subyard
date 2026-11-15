@@ -203,7 +203,7 @@ func (cli *CLI) prepareConfigSyncPush(
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("validate configuration before source change: %w", err)
 	}
-	paths, err := sanitizeLegacySSHSource(repository.checkout, syncState.HostID)
+	paths, err := sanitizeLegacySSHSource(repository.checkout, syncState.HostID, cli.catalog)
 	if err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("prepare legacy SSH source cleanup: %w", err)

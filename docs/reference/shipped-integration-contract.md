@@ -57,13 +57,20 @@ compatibility entrypoints preserve the existing release coverage aggregation.
 ## Retired package compatibility
 
 Supported installations may retain removed integration IDs, settings, disabled profile
-selections and native keys. The configuration catalog retains inert retired input metadata;
+selections and native keys. The data declaration `config/retired-components.json` owns removed IDs, discarded settings,
+historical adoption keys and route policies. Core reads these generic contracts; it does not
+embed concrete package identities. The configuration catalog retains inert retired input metadata;
 `retired_settings` are discarded without evaluating assignments against live values or
 rewriting authored files. New selections still refuse retired IDs. Historical disabled
 profile selections remain authored but never become effective.
 
 Removed packages have no executable cleanup lifecycle, guest probes, retirement proof
 publication, temporary boot requirement or reminder. Guests not initialized since retirement
-may retain old files, services, routes and data. Ordinary ownership checks, confirmations,
-host network guards and the release migration epoch floor are unchanged. Existing retirement
-proof keys remain accepted as inert historical metadata.
+may retain old files, services and data. Only historical keys already accepted by the baseline
+remain eligible for yard adoption; removed profile dashboard keys remain foreign. Receipt-owned
+host listeners retain the baseline address deferral and restoration required for safe yard start.
+Other recognized historical receipts are inert and grant no publication authority. Confirmations,
+foreign-device guards and the release migration epoch floor are unchanged. Existing retirement
+proof keys remain accepted as inert historical metadata. Removed profile status reports unavailable
+runtime without probing or claiming cleanup; disable can remove its authored selection, including
+through release selection repair, without invoking a removed owner.

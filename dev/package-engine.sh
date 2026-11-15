@@ -175,6 +175,7 @@ install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-rele
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
 for required in config/installation-capabilities.json \
+  config/retired-components.json \
   internal/adapters/configmaterial/tomli_w.py \
   internal/adapters/configmaterial/TOMLI_W_LICENSE \
   scripts/e2e-lab/base.sh \

@@ -12,7 +12,11 @@ import (
 
 // Call only after validating the isolated source candidate. External source
 // publication remains owned by the prepared Git operation and its fresh consent.
-func sanitizeLegacySSHSource(candidate, hostID string) ([]string, error) {
+func sanitizeLegacySSHSource(candidate, hostID string, catalogs ...config.Catalog) ([]string, error) {
+	settings := config.Catalog{}
+	if len(catalogs) > 0 {
+		settings = catalogs[0]
+	}
 	if !domain.SafeName(hostID) {
 		return nil, errors.New("legacy SSH source cleanup requires a safe owner identity")
 	}
@@ -40,7 +44,7 @@ func sanitizeLegacySSHSource(candidate, hostID string) ([]string, error) {
 		if err := config.LegacyGitSSHPort(path, before.Content); err != nil {
 			return nil, err
 		}
-		content, err := config.EditPersistentAssignmentContent(path, before.Content, "SSH_PORT", nil)
+		content, err := settings.EditPersistentAssignmentContent(path, before.Content, "SSH_PORT", nil)
 		if err != nil {
 			return nil, err
 		}

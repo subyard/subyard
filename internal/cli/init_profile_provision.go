@@ -189,7 +189,7 @@ func (cli *CLI) executeInitProfileProvision(ctx context.Context, execution *init
 		if execution.integrationSelection != nil && execution.bootstrap == nil {
 			endpoint.content = current.Content
 			for name, value := range endpoint.values {
-				endpoint.content, err = config.EditPersistentAssignmentContent(endpoint.path, endpoint.content, name, &value)
+				endpoint.content, err = cli.catalog.EditPersistentAssignmentContent(endpoint.path, endpoint.content, name, &value)
 				if err != nil {
 					return domain.AdapterResult{}, err
 				}

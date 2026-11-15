@@ -668,8 +668,7 @@ func TestRawHistoricalConfigDigestIsBoundToInitialAdoption(t *testing.T) {
 	}
 }
 
-// A foreign service next to a retired package is a warning on the legacy adoption path:
-// it neither blocks the plan nor reaches the fingerprint the operator consented to.
+// Legacy adoption binds the initial snapshot while apply verifies the approved changes.
 func TestPrepareLegacyIntegrationAdoptionBindsInitialSnapshotOnly(t *testing.T) {
 	root := t.TempDir()
 	for path, content := range map[string]string{

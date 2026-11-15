@@ -19,3 +19,5 @@ yard-remote.sh
 yard-shell.sh
 
 full-uninstall.sh
+published-runtime-capabilities.sh
+retired-components.sh

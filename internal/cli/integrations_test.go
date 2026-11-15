@@ -381,7 +381,7 @@ func TestIntegrationStatusSeparatesHealthFromConvergence(t *testing.T) {
 	if err != nil || len(status.Health) != 0 || len(incus.ExecCalls) != calls {
 		t.Fatalf("status probed an unselected integration: %#v, %v", status, err)
 	}
-	if status.ObservedScope != "yard" || len(status.Inventory) != 4 {
+	if status.ObservedScope != "yard" || len(status.Inventory) != 2 {
 		t.Fatalf("status lost the full catalog or yard observation scope: %#v", status)
 	}
 	for _, entry := range status.Inventory {
@@ -465,6 +465,7 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 	fixture := func(t *testing.T, selection string) (*CLI, string) {
 		t.Helper()
 		cli, _, _, path, _ := integrationFixture(t, selection)
+		writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"integration","id":"old-tool"}]}`, 0644)
 		reloaded, err := New(cli.options)
 		if err != nil {
 			t.Fatal(err)
@@ -477,7 +478,7 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := prepareIntegrationTest(t, cli, "enable", "paseo"); err == nil || !strings.Contains(err.Error(), "integration paseo is retired") {
+		if _, err := prepareIntegrationTest(t, cli, "enable", "old-tool"); err == nil || !strings.Contains(err.Error(), "integration old-tool is retired") {
 			t.Fatalf("enable error=%v", err)
 		}
 		after, err := os.ReadFile(path)
@@ -486,8 +487,8 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 		}
 	})
 	t.Run("disable clears an authored selection", func(t *testing.T) {
-		cli, path := fixture(t, "CODING_TOOL_INTEGRATIONS='codex paseo'\n")
-		prepared, err := prepareIntegrationTest(t, cli, "disable", "paseo")
+		cli, path := fixture(t, "CODING_TOOL_INTEGRATIONS='codex old-tool'\n")
+		prepared, err := prepareIntegrationTest(t, cli, "disable", "old-tool")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -501,23 +502,23 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 		}
 	})
 	t.Run("status reports retired selection", func(t *testing.T) {
-		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex paseo'\n")
+		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex old-tool'\n")
 		loaded, err := cli.loadContext("default")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := strings.Join(loaded.Integrations.Retired, " "); got != "paseo" {
+		if got := strings.Join(loaded.Integrations.Retired, " "); got != "old-tool" {
 			t.Fatalf("retired selection=%q", got)
 		}
 		if got := strings.Join(loaded.Integrations.Effective, " "); got != "codex" {
 			t.Fatalf("effective selection=%q", got)
 		}
-		if _, err := prepareIntegrationTest(t, cli, "status", "paseo"); err != nil {
+		if _, err := prepareIntegrationTest(t, cli, "status", "old-tool"); err != nil {
 			t.Fatalf("retired status refused: %v", err)
 		}
 	})
 	t.Run("init plan retains ownership warnings", func(t *testing.T) {
-		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex paseo'\n")
+		cli, _ := fixture(t, "CODING_TOOL_INTEGRATIONS='codex old-tool'\n")
 		loaded, err := cli.loadContext("default")
 		if err != nil {
 			t.Fatal(err)

@@ -283,7 +283,13 @@ func TestIntegrationRetryRepairScopeAndFreshness(t *testing.T) {
 			}
 			writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=codex\nSSH_PORT=2222\n", 0600)
 			if scenario == "retired id" {
-				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=paseo\nSSH_PORT=2222\n", 0600)
+				writeCLIFile(t, filepath.Join(program.options.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"integration","id":"old-tool"}]}`, 0644)
+				var err error
+				program.catalog, err = config.LoadCatalog(program.options.RepositoryRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=old-tool\nSSH_PORT=2222\n", 0600)
 			}
 			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
 			for stage := range platform.converged {
@@ -328,7 +334,7 @@ func TestIntegrationRetryRepairScopeAndFreshness(t *testing.T) {
 			if scenario == "expansion" {
 				arguments[1] = "claude"
 			} else if scenario == "retired id" {
-				arguments[1] = "paseo"
+				arguments[1] = "old-tool"
 			} else if scenario == "unknown id" {
 				arguments[1] = "unknown"
 			} else if scenario == "disable" {

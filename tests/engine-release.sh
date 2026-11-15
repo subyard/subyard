@@ -189,6 +189,7 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/systemd/subyard-test-vms-host-sink.timer.in' "$bundle_list" \
   && grep -Fxq './config/commands.registry' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
+  && grep -Fxq './config/retired-components.json' "$bundle_list" \
   && grep -Fxq './config/release-transition.json' "$bundle_list" \
   && grep -Fxq './config/preview/subyard-preview' "$bundle_list" \
   && grep -Fxq './config/preview/instructions.md' "$bundle_list" \

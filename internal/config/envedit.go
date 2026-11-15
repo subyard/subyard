@@ -189,6 +189,11 @@ func ParsePersistentAssignments(
 	path string,
 	content []byte,
 ) ([]PersistentAssignment, error) {
+	return (Catalog{}).ParsePersistentAssignments(path, content)
+}
+
+// ParsePersistentAssignments applies the owning catalog's discarded-input policy.
+func (settings Catalog) ParsePersistentAssignments(path string, content []byte) ([]PersistentAssignment, error) {
 	if len(content) > 8<<20 {
 		return nil, errors.New("persistent setting content exceeds its size bound")
 	}
@@ -228,7 +233,7 @@ func ParsePersistentAssignments(
 		// A profile-only assignment is discarded as the loader discards it: it
 		// never refuses parsing or affects later records, and only its own
 		// record remains visible, so config unset can still remove it.
-		if err := applyRecordRetired(record, values, observe, operatorDiscardPolicy(observe)); err != nil {
+		if err := applyRecordRetired(record, values, observe, operatorDiscardPolicy(observe, settings)); err != nil {
 			return nil, sourceContext(path, recordLine, recordSettingKey(record), "persistent settings", err)
 		}
 	}
@@ -264,13 +269,13 @@ func WritePersistentAssignment(
 	name string,
 	value *string,
 ) error {
-	return writePersistentAssignment(configHome, path, name, value, nil, nil)
+	return writePersistentAssignment(configHome, path, name, value, nil, nil, Catalog{})
 }
 
 // WritePersistentAssignmentIfUnchanged updates an assignment only when the
 // complete target still matches the bytes and existence observed at preview.
 // Optional guards run under the configuration root lock before publication.
-func WritePersistentAssignmentIfUnchanged(
+func (settings Catalog) WritePersistentAssignmentIfUnchanged(
 	configHome string,
 	path string,
 	name string,
@@ -278,7 +283,7 @@ func WritePersistentAssignmentIfUnchanged(
 	expected PersistentFileSnapshot,
 	guards ...func() error,
 ) error {
-	return writePersistentAssignment(configHome, path, name, value, &expected, guards)
+	return writePersistentAssignment(configHome, path, name, value, &expected, guards, settings)
 }
 
 func writePersistentAssignment(
@@ -288,6 +293,7 @@ func writePersistentAssignment(
 	value *string,
 	expected *PersistentFileSnapshot,
 	guards []func() error,
+	settings Catalog,
 ) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
@@ -313,7 +319,7 @@ func writePersistentAssignment(
 		}
 	}
 	content := current.Content
-	updated, err := EditPersistentAssignmentContent(path, content, name, value)
+	updated, err := settings.EditPersistentAssignmentContent(path, content, name, value)
 	if err != nil {
 		return err
 	}
@@ -354,7 +360,12 @@ func EditPersistentAssignmentContent(
 	name string,
 	value *string,
 ) ([]byte, error) {
-	return editAssignmentContent(path, content, name, value)
+	return (Catalog{}).EditPersistentAssignmentContent(path, content, name, value)
+}
+
+// EditPersistentAssignmentContent uses the catalog without reading or writing native state.
+func (settings Catalog) EditPersistentAssignmentContent(path string, content []byte, name string, value *string) ([]byte, error) {
+	return editAssignmentContent(path, content, name, value, settings)
 }
 
 // WritePersistentFile atomically stores a validated persistent file setting.
@@ -481,8 +492,9 @@ func editAssignmentContent(
 	content []byte,
 	name string,
 	value *string,
+	settings Catalog,
 ) ([]byte, error) {
-	records, err := parseEnvEditRecords(path, content)
+	records, err := parseEnvEditRecords(path, content, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +528,7 @@ func editAssignmentContent(
 	// Removing a direct assignment can activate a conditional default in a
 	// preserved record. Reject that ambiguity rather than deleting unrelated
 	// settings or saving a file that will conflict on its next load.
-	assignments, err := ParsePersistentAssignments(path, result.Bytes())
+	assignments, err := settings.ParsePersistentAssignments(path, result.Bytes())
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +548,7 @@ func editAssignmentContent(
 	return result.Bytes(), nil
 }
 
-func parseEnvEditRecords(path string, content []byte) ([]envEditRecord, error) {
+func parseEnvEditRecords(path string, content []byte, settings Catalog) ([]envEditRecord, error) {
 	lines := bytes.SplitAfter(content, []byte{'\n'})
 	values := environment{}
 	var records []envEditRecord
@@ -567,7 +579,7 @@ func parseEnvEditRecords(path string, content []byte) ([]envEditRecord, error) {
 				assigned = name
 			}, operatorDiscardPolicy(func(name, _ string) {
 				assigned = name
-			})); err != nil {
+			}, settings)); err != nil {
 				return nil, sourceContext(path, recordLine, recordSettingKey(trimmed), "persistent settings", err)
 			}
 			record.name = assigned

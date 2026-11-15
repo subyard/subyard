@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
@@ -312,8 +313,18 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	}
 	publication, publicationErr := runtime.legacyPublicationPolicy(instance)
 	refusals = append(refusals, publicationErr)
+	var retiredKeys []string
+	var retiredErr error
+	if adopt {
+		var retired []profile.RetiredComponent
+		retired, retiredErr = profile.LoadRetired(runtime.RepositoryRoot)
+		refusals = append(refusals, retiredErr)
+		for _, component := range retired {
+			retiredKeys = append(retiredKeys, component.AdoptionKeys...)
+		}
+	}
 	configurations := []map[string]string{instance.Config, instance.LocalConfig}
-	if extrasErr != nil || publicationErr != nil {
+	if extrasErr != nil || publicationErr != nil || retiredErr != nil {
 		configurations = nil // Without these inputs every allowed key would look foreign.
 	}
 	for _, values := range configurations {
@@ -338,7 +349,7 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 			if key == "user.subyard.host_memory" && (adopt || hostMemory) {
 				continue
 			}
-			if adopt && (key == "user.subyard.ai_observer_provision" || key == "user.subyard.ai_observer_proxy" || key == "user.subyard.deferred_publication.ai-observer" || key == "user.subyard.openlit_dashboard" || key == "user.subyard.deferred_publication.openlit-dashboard") {
+			if adopt && slices.Contains(retiredKeys, key) {
 				continue
 			}
 			switch key {

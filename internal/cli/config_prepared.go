@@ -163,7 +163,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	if action == "set" {
 		value = &request.value
 	}
-	candidate, err := config.EditPersistentAssignmentContent(path, baseline.Content, request.name, value)
+	candidate, err := cli.catalog.EditPersistentAssignmentContent(path, baseline.Content, request.name, value)
 	if err != nil {
 		return err
 	}
@@ -317,7 +317,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 				return domain.AdapterResult{}, err
 			}
 		}
-		if err := config.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, func() error {
+		if err := cli.catalog.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, func() error {
 			if err := prospective.checkLocked(true); err != nil {
 				return err
 			}
