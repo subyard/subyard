@@ -841,9 +841,12 @@ def _cleanup_records(scan, state, groups, repos):
 def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_ids=None):
     # Missing project roots may be temporarily unmounted. A known checkout
     # losing Git metadata is retained without blocking independent missing paths.
-    if report["errors"] or any(not project.roots for project in scan.projects):
+    if report["errors"]:
         return
     active = {project.project_id for project in scan.projects}
+    # A registered project whose root is missing may be temporarily unmounted. Only its own
+    # records are inhibited; other projects, including removed ones, are still cleaned.
+    rootless = {project.project_id for project in scan.projects if not project.roots}
     # Removed projects cannot pass through registration again. Recover only
     # submitted identities, without creating or renaming native resources.
     if any(project_id not in active and (entry.get("pending_group") or entry.get("pending_repos"))
@@ -878,7 +881,7 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
                 state.save()
     candidates = _cleanup_records(scan, state, groups, repos)
     for project_id, entry, repo, reason in candidates:
-        if reason or not verify_missing(scan, repo["path"]):
+        if reason or project_id in rootless or not verify_missing(scan, repo["path"]):
             continue
         if approved_ids is not None and repo["id"] not in approved_ids[0]:
             raise RpcError("plan_stale: unapproved Orca cleanup repository")
@@ -1143,9 +1146,9 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
     report["warnings"] = list(dict.fromkeys(report["warnings"]))
     report["ready"] = (not report["errors"] and report["registered"] == report["total"]
                        and report["cleanupReady"])
-    # Like ready, but a removed project's remaining record may be protected. Pending work
-    # and undetermined records never settle, including after partial progress.
+    # Like ready, but a removed project's remaining record may be protected. Pending work of
+    # removed projects and any undetermined record never settle, including after partial progress.
     report["settled"] = (not report["errors"] and report["registered"] == report["total"]
-                         and all(item["retention"] == PROTECTED for item in report["cleanup"]
-                                 if item["removedProject"]))
+                         and all(item["retention"] == PROTECTED if item["removedProject"]
+                                 else item["retention"] != UNDETERMINED for item in report["cleanup"]))
     return report

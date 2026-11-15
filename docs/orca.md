@@ -508,7 +508,8 @@ execution host or project group, a replaced identity or path, or an unconfirmed 
 identity. Cleanup still to perform is `pending`. A record without safe evidence, for example
 after an incomplete pass or an unverified workspace boundary, is `undetermined`; an unknown
 reason is never protected. Project hooks, periodic discovery, `orca up` and `orca pair`
-succeed when the pass completed and only protected records of removed projects remain.
+succeed when the pass completed, no record is undetermined and only protected records of
+removed projects remain.
 Explicit `orca sync` stays strict: it fails until every removed project's record is gone.
 `status` shows protected and pending records as information and warns about undetermined ones.
 
@@ -519,8 +520,8 @@ confirmed progress but never settles, and the next hook, sync or discovery porti
 
 Cleanup is skipped on registration or workspace-boundary errors. An unfinished background
 pass never proves absence: cleanup requires an independent filesystem check below the same
-workspace identity. A registered project whose root is missing also inhibits cleanup: its mount may
-be temporarily unavailable. Missing paths are checked again before removal. Existing directories
+workspace identity. A registered project whose root is missing keeps its own records: its mount may
+be temporarily unavailable. Other projects, including removed ones, are still cleaned. Missing paths are checked again before removal. Existing directories
 that lose Git metadata retain their old records with a warning. Sync does not restore files or Git history.
 Manually deleted Orca entries and groups for existing directories are registered again.
 If the root gains or loses Git, its kind changes on the existing entry, preserving its ID

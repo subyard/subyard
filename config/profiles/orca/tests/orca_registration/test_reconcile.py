@@ -2128,6 +2128,18 @@ class RemovedProjectSessionTests(unittest.TestCase):
             self.assertEqual("undetermined", item["retention"])
         self.assertEqual([], self.closes())
 
+    def test_unrelated_rootless_project_does_not_block_removed_cleanup(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        shutil.rmtree(self.other_root)
+        report = self.run_sync()
+        self.assertTrue(report["settled"], report)
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+        other = next(item for item in report["cleanup"] if item["repoId"] == self.other["id"])
+        self.assertEqual(("project root is missing; repository is retained", "protected", False),
+                         (other["reason"], other["retention"], other["removedProject"]))
+        self.assert_untouched()
+
     def test_close_readback_polls_briefly_before_declaring_unconfirmed(self):
         import reconcile
         self.sessions()
@@ -2153,3 +2165,27 @@ class RemovedProjectSessionTests(unittest.TestCase):
             report = self.run_sync()
         self.assertTrue(report["settled"], report)
         self.assertGreaterEqual(reads, 2)
+
+    def test_incomplete_pass_of_an_active_project_never_settles(self):
+        init_git(self.root / "second")
+        self.assertTrue(self.run_sync()["ready"])
+        second = self.repo_at(self.root / "second")
+        shutil.rmtree(self.root / "linked")
+        shutil.rmtree(self.root / "second")
+        self.rpc.repos.sort(key=lambda repo: repo["path"] != self.linked["path"])
+        original = self.rpc.call
+        reads = 0
+
+        def cold(method, params=None, **kwargs):
+            nonlocal reads
+            if method == "session.tabs.listAll":
+                reads += 1
+                if reads == 1:
+                    raise self.error("cold read timed out", timed_out=True)
+                return {"snapshots": [{"worktree": self.linked["id"] + "::/saved", "tabs": [{"id": "t"}]}]}
+            return original(method, params, **kwargs)
+        self.rpc.call = cold
+        report = self.run_sync()
+        item = next(item for item in report["cleanup"] if item["repoId"] == second["id"])
+        self.assertEqual(("undetermined", False), (item["retention"], item["removedProject"]))
+        self.assertFalse(report["settled"])
