@@ -14,9 +14,6 @@ import (
 )
 
 func TestCompletedPendingOwnershipSelectionReductionPreservesHistory(t *testing.T) {
-	if os.Getenv("SUBYARD_SOURCE_QUERY_TOOLING_ROOT") != "" {
-		t.Skip("typed process-protocol fixture; physical owner covered by Orca recovery lane")
-	}
 	for _, scenario := range []string{"valid", "corrupt-history", "beside-drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			asset := "config/fixture-pending-ownership"
