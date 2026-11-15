@@ -8,7 +8,9 @@ create no `vMAJOR.MINOR.PATCH` ref, so a corrected commit can use the same versi
 Run from the managed development checkout with Python 3, authenticated GitHub CLI and the
 [acceptance prerequisites](../testing.md#one-release-candidate). The dispatch workflows must exist
 on the default branch; the source commit must contain the release tooling. A
-[compatible workflow ref](#workflow-ref-selection) must run the candidate's own release workflows.
+[compatible workflow ref](#workflow-ref-selection) must have the candidate as its head and run its
+own release workflows. For a candidate behind the default branch, push a release branch at that
+commit before preparation.
 Choose worktree checks using the
 [validation policy](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 
@@ -157,18 +159,23 @@ candidate directory when moving evidence between operator machines.
 
 ### Workflow ref selection
 
-The dispatched workflow ref, not the pinned source commit, supplies the workflow definitions and the
-publication fetch tooling. `prepare` and `publish` therefore choose the ref when they create a new
-request: the default branch first, then branches whose head is the candidate, in name order. A ref
-is compatible only when its `.github/workflows/release.yml`, `.github/workflows/release-publish.yml`
+The dispatched workflow ref supplies the workflow definitions, preparation source and publication
+fetch tooling. `prepare` and `publish` accept only branches whose head is the exact candidate commit.
+The default branch is preferred when its head equals the candidate; otherwise candidate-headed
+branches are tried in name order. Identical workflow files on a different commit do not qualify:
+candidate code must run in its own branch's cache scope. Preparation checks out the workflow SHA
+and verifies that both `github.sha` and checkout HEAD equal `inputs.commit` before executing source
+code; Go caching remains disabled. A ref is compatible only when its
+`.github/workflows/release.yml`, `.github/workflows/release-publish.yml`
 and `dev/release-assets.sh` blobs equal the candidate's and the candidate's `release.yml` blob is a
 registered preparation policy. An explicit `--workflow-ref BRANCH` must name a branch and gets the same check.
 `prepare` also refuses a new request when tag `vX.Y.Z` already exists, naming the owning candidate
 when the tag belongs to this commit. Refusals list every examined ref and happen before dispatch.
 
-When no compatible ref exists, typically a hotfix whose default branch has since changed its
-release workflows, the refusal names the exact release branch and the commands that create it at
-the candidate and publish it. The tool never creates or pushes a branch itself. Then repeat the
+When no candidate-headed ref exists, including a release of a non-head commit whose workflow files
+still match the default branch, push a release branch first. The refusal names the exact release
+branch and the commands that create it at the candidate and publish it. The tool never creates or
+pushes a branch itself. Then repeat the
 same `prepare` or `publish` command (with `--workflow-ref` of the new branch if a ref was given):
 
 ```sh
@@ -177,9 +184,13 @@ git push origin release/X.Y.Z-SHORT12
 dev/release.sh prepare --version X.Y.Z --commit FULL_SHA
 ```
 
-A retained request keeps its recorded ref even after branches move. Continue it by repeating the
-same command; an explicit `--workflow-ref` that differs from the recorded ref is refused with
-that ref's name and dispatches nothing.
+Before its first dispatch, a retained request rechecks its recorded ref. If that branch moved, push
+the suggested release branch and repeat with `--workflow-ref BRANCH`. The new candidate-headed ref
+is validated and recorded under the same request identity; no request file needs to be deleted.
+This also recovers publication requests retained after attestation encoding fails before dispatch.
+Once dispatch intent has been recorded, the request stays pinned: repeating the same command
+discovers or reruns the original workflow attempt at its original SHA even after branches move.
+A different explicit `--workflow-ref` is then refused with the recorded ref's name and dispatches nothing.
 
 Under `subyard-github run`, the broker's token belongs to the App installation of the repository it
 selected, which may come from the working directory's `origin`. Before any GitHub call, local
@@ -410,8 +421,9 @@ Agents preparing a release apply the
   checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
   then transfer equivalent complete original PASS evidence through the reviewed workflow.
   Rerun only affected or missing gates.
-- A release directly from the default branch needs no extra branch. A hotfix, whose default branch
-  has changes beyond the candidate, gets a release branch that the agent creates and pushes from
+- A release at the default branch head needs no extra branch. Every non-head candidate, including a
+  hotfix whose workflow files still match the default branch, needs a candidate-headed branch pushed
+  before preparation. A hotfix gets a release branch that the agent creates and pushes from
   the hotfix base; release-task PRs target it. At the candidate commit the agent creates and
   pushes the branch named by the refusal (`git branch release/X.Y.Z-SHORT12 FULL_SHA`, then
   `git push origin release/X.Y.Z-SHORT12`), then repeats `prepare` without `--workflow-ref`. Any
