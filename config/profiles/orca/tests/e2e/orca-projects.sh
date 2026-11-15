@@ -523,7 +523,7 @@ for mode in ordinary hook sync periodic legacy; do
   removal_group="$(group_id "$removal_root")" \
     || die "removed-project fixture group missing: $mode"
   removal_selector="id:$removal_id::$removal_root"
-  if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
+  if [ "$mode" = hook ] || [ "$mode" = sync ] || [ "$mode" = periodic ]; then
     removal_session="$(guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
       create "$removal_selector")"
     removal_tab="$(jq -er '.tab_id' <<<"$removal_session")"
@@ -555,25 +555,18 @@ entries[0].pop('confirmed_repos')
 path.write_text(json.dumps(state))
 YARD
   fi
+  orca_hook=/usr/local/libexec/subyard/projects-changed.d/orca
+  if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
+    # Recovery modes: the removal hook does not run, so sync or discovery alone must clean up.
+    guest_root chmod a-x "$orca_hook"
+  fi
   yard remove "$removal_name" --yes >"$STATE/remove-$mode.out" 2>"$STATE/remove-$mode.err" \
     || die "project removal failed: $mode"
+  if grep -Fq 'optional agent project hook failed' "$STATE/remove-$mode.out" "$STATE/remove-$mode.err"; then
+    die "removal hook failed: $mode"
+  fi
   guest_dev test ! -e "$removal_root" || die 'project removal left its workspace behind'
-  catalog | jq -e --arg id "$removal_child_id" '.repos | all(.id != $id)' >/dev/null \
-    || die 'partial removed-project cleanup retained the unprotected child'
-  if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
-    # After the removal hook and this mode's own pass, the removed project's exact live
-    # session is closed and its record is gone, while another project's terminal survives.
-    if [ "$mode" = sync ]; then
-      yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err" \
-        || die 'sync failed after cleaning the removed project sessions'
-    else
-      resume_discovery
-      for _ in $(seq 1 60); do
-        catalog | jq -e --arg id "$removal_id" '.repos | all(.id != $id)' >/dev/null && break
-        sleep 2
-      done
-      pause_discovery
-    fi
+  assert_removed_sessions() {
     guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
       absent "$removal_selector" --tab-id "$removal_tab" --pty-id "$removal_pty"
     orca_rpc terminal.list '{"limit":1000,"requireFreshPtyLiveness":true,"includeVisualLayouts":false}' \
@@ -582,6 +575,33 @@ YARD
     orca_rpc session.tabs.listAll | jq -e --arg id "$neighbour_tab" \
       '.snapshots | any(.tabs | any(.id == $id))' >/dev/null \
       || die 'removed-project cleanup closed a tab of another project'
+  }
+  if [ "$mode" = hook ]; then
+    # The removal hook alone closes the exact live session and removes the record, before any
+    # further sync or discovery pass.
+    assert_absent_repo "$removal_root"
+    assert_removed_sessions
+  elif [ "$mode" = sync ] || [ "$mode" = periodic ]; then
+    guest_root chmod 0755 "$orca_hook"
+    [ "$(repo_id "$removal_root")" = "$removal_id" ] \
+      || die 'recovery precondition lost: the disabled removal hook still cleaned up'
+    if [ "$mode" = sync ]; then
+      yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err" \
+        || die 'sync did not recover the removed project cleanup'
+    else
+      resume_discovery
+      for _ in $(seq 1 60); do
+        catalog | jq -e --arg id "$removal_id" '.repos | all(.id != $id)' >/dev/null && break
+        sleep 2
+      done
+      pause_discovery
+    fi
+    assert_absent_repo "$removal_root"
+    assert_removed_sessions
+  fi
+  catalog | jq -e --arg id "$removal_child_id" '.repos | all(.id != $id)' >/dev/null \
+    || die 'partial removed-project cleanup retained the unprotected child'
+  if [ "$mode" = hook ] || [ "$mode" = sync ] || [ "$mode" = periodic ]; then
     rpc_write session.tabs.close "$(rpc_params --arg worktree "$neighbour_selector" --arg tab "$neighbour_tab" \
       '{worktree:$worktree,tabId:$tab,reason:"user"}')"
   fi
