@@ -179,8 +179,11 @@ fn save_state(
             Ok(())
         }
         Err(error) => {
-            // Keep the comparison baseline for a retry. A concurrent document
-            // change will still fail the native store's compare-and-save check.
+            // Keep the comparison baseline for a retry. If the store did change
+            // (a concurrent edit, or an io error reported after the replace
+            // landed), the retry fails the compare-and-save check with a
+            // non-retryable error and the plan is discarded, so a retry offer
+            // can be wrong but never submits twice.
             if !retryable_not_submitted(&error) {
                 *baseline = Err(error.clone());
             }
