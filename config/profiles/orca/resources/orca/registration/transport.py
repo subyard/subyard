@@ -78,8 +78,10 @@ class RuntimeRPC:
                     try:
                         before_send(runtime_id)
                     except RpcError as error:
-                        # A nested call's answer is not this request's: nothing was sent.
-                        error.rejected = error.unknown = False
+                        # A nested call's answer is not this request's: nothing was sent, so it
+                        # was not rejected. A deliberate unknown (an earlier send may still apply)
+                        # is the caller's statement and is kept.
+                        error.rejected = False
                         raise
                     # Pre-send identity checks consume the same budget; never send late.
                     if deadline - time.monotonic() <= 0:
