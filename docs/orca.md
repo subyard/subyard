@@ -255,18 +255,30 @@ Orca saves each chat's permission mode when the chat is created, so chats saved 
 stock default keep Full access. After this update, Subyard's launch-default repair resets each
 of those saved Claude chats once, including running chats and ones whose tab is closed, to
 Orca's default mode and reports how many it reset. A chat process that started with Full
-access keeps it until Orca restarts, so the reset completes only after the next Orca restart:
-`orca up` restarts Orca once for this, which ends running agents and terminals in the service,
-and `yard orca restart` completes it too. Until then, the repair and `yard orca status` warn that
-saved Claude chats may still run Git without approval. The repair runs after project
-registration is ready: on `yard init`, project events, `yard orca sync` and an `orca up` whose
-registration or launch-default step applies; until registration is ready it does not run. Each chat is reset at most once, so choosing Full access again in a chat is respected.
+access keeps it until Orca restarts, so any reset attempt, including one whose result is lost,
+requires one Orca restart: `orca up` restarts Orca once for this, which ends running agents and
+terminals in the service, and then finishes the reset in the new Orca; `yard orca restart` does
+the same. Until then, the repair and `yard orca status` warn that saved Claude chats may still
+run Git without approval. The repair runs after project registration is ready: on `yard init`,
+project events, `yard orca sync` and an `orca up` whose registration or launch-default step
+applies; until registration is ready it does not run. Each chat is reset at most once, so
+choosing Full access again in a chat is respected.
 
-The reset finds chats through Orca's open tabs and Session History. An incomplete Session
-History scan, including one with an unrelated broken history entry, keeps the reset incomplete,
-and each repair warns until the scan succeeds. A chat that never ran a turn and whose tab is
-closed appears in neither, and coverage of chats in other workspaces and worktrees has not been
-verified.
+The reset finds chats through Orca's open tabs and Session History. A chat that a listing does
+show is reset even when the other listing fails or Session History is incomplete, including one
+with an unrelated broken history entry. The reset completes only after a pass that saw a
+complete listing, found nothing left to reset, met no refused chat and ran in a later Orca than
+the last reset attempt. Until then, each repair and `yard orca status` warn that the reset is
+incomplete; `yard orca sync` retries it. A chat that never ran a turn and whose tab is closed
+appears in neither listing, and coverage of chats in other workspaces and worktrees has not
+been verified.
+
+The reset state is kept in `/srv/agents/orca/subyard-claude-chat-permissions.json` (mode 0600):
+the chats already reset, the Orca runtime of the last reset attempt, and whether the reset is
+complete. Passes run one at a time. If the file is unreadable or invalid, the next repair warns,
+rewrites it and treats the running Orca as possibly holding a reset chat: the next `orca up` or
+`yard orca restart` completes the recovery with one restart and no manual step. Chats that were
+already reset before the file was lost may then be reset once more.
 
 Without the Claude integration, an Orca-installed Claude copy is reported as
 **unmanaged** by `yard integration status claude` and detailed `yard -Y NAME status`: self-updating,

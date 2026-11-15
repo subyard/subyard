@@ -637,17 +637,40 @@ run_project_sync() {
   yexec runuser -u "${DEV_USER:-dev}" -- env "SUBYARD_ORCA_REGISTRATION_SCOPE=$expected" "$ORCA_SYNC"
 }
 
+# Print "launch=<ready|unready|unavailable> reset=<state>"; the reset state is separate from
+# launch-default readiness, and only restart-pending makes the check exit 3.
+orca_settings_state() {
+  local output
+  output="$(yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
+    "$ORCA_REGISTRATION/settings.py" --check 2>/dev/null)" || true
+  [[ "$output" =~ ^launch=(ready|unready|unavailable)\ reset=(complete|incomplete|restart-pending|unreadable|unknown)$ ]] \
+    || output='launch=unavailable reset=unknown'
+  printf '%s\n' "$output"
+}
+
+# Launch defaults are repaired and no saved Claude chat awaits an Orca restart.
 codex_defaults_ready() {
-  yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
-    "$ORCA_REGISTRATION/settings.py" --check >/dev/null 2>&1
+  local state
+  state="$(orca_settings_state)"
+  [ "${state%% *}" = launch=ready ] && [ "${state#* }" != reset=restart-pending ]
+}
+
+launch_defaults_ready() {
+  local state
+  state="$(orca_settings_state)"
+  [ "${state%% *}" = launch=ready ]
 }
 
 # Saved Claude chats were reset in the running Orca, so a process may still hold Full access.
 claude_chat_restart_pending() {
-  local status=0
-  yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
-    "$ORCA_REGISTRATION/settings.py" --check >/dev/null 2>&1 || status=$?
-  [ "$status" -eq 3 ]
+  local state
+  state="$(orca_settings_state)"
+  [ "${state#* }" = reset=restart-pending ]
+}
+
+# Finish the saved Claude chat reset in a new Orca runtime without touching launch defaults.
+run_claude_chat_reset() {
+  yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B "$ORCA_REGISTRATION/settings.py" --reset-chats
 }
 
 linger_ready() {
@@ -890,13 +913,15 @@ cmd_up() {
   fi
   run_project_sync
   if claude_chat_restart_pending; then
-    # Agent processes are children of the service and end with it.
+    # Agent processes are children of the service and end with it. Restart once: the pass
+    # in the new runtime completes the reset or warns, and never triggers another restart.
     yexec systemctl restart "$ORCA_UNIT"
     wait_service_endpoint_ready || die "Orca did not become ready after restarting for saved Claude chats"
     ok "Orca restarted so no Claude chat keeps Full access from before the reset"
+    run_claude_chat_reset
   fi
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
-  codex_defaults_ready || die "Orca agent launch defaults did not converge"
+  launch_defaults_ready || die "Orca agent launch defaults did not converge"
   automatic_project_hook_ready && projects_synced || die "Orca project registration did not converge"
   ok "Orca ready through $ORCA_TRANSPORT at $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT"
 }
@@ -967,6 +992,9 @@ cmd_restart() {
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   wait_service_endpoint_ready || die "Orca did not become ready after restart"
   ok "Orca service restarted"
+  case "$(orca_settings_state)" in
+    *' reset=incomplete'|*' reset=unreadable'|*' reset=restart-pending') run_claude_chat_reset ;;
+  esac
 }
 
 # Print service or absent, and fail when the service cannot be read. A daemon or local
@@ -1042,7 +1070,7 @@ report_agent_survival() {
 }
 
 cmd_status() {
-  local report registered total diagnostic service_is_ready=0
+  local report registered total diagnostic settings_state service_is_ready=0
   select_release
   printf 'Orca %s in yard %s\n' "$ORCA_VERSION" "${YARD_NAME:-default}"
   if orca_profile_selected; then
@@ -1074,13 +1102,19 @@ cmd_status() {
     warn "automatic project dispatcher missing or stale; run '$(yard_cmd_hint) init'"
   fi
   if [ "$service_is_ready" -eq 1 ]; then
-    if codex_defaults_ready; then
+    settings_state="$(orca_settings_state)"
+    if [ "${settings_state%% *}" = launch=ready ]; then
       ok "Codex and Claude stock YOLO launch defaults disabled; yard config supplies defaults"
-    elif claude_chat_restart_pending; then
-      warn "saved Claude chats may still run Git without approval until Orca restarts; run '$(yard_cmd_hint) orca restart'"
     else
       warn "Orca agent launch defaults need repair; run '$(yard_cmd_hint) orca up'"
     fi
+    case "${settings_state#* }" in
+      reset=complete) ;;
+      reset=restart-pending)
+        warn "saved Claude chats may still run Git without approval until Orca restarts; run '$(yard_cmd_hint) orca restart'" ;;
+      reset=unknown) ;;
+      *) warn "saved Claude chat reset from Full access is incomplete; they may still run Git without approval; run '$(yard_cmd_hint) orca sync'" ;;
+    esac
     if report="$(project_registration_report)"; then
       registered="$(jq -r '.registered' <<<"$report")"
       total="$(jq -r '.total' <<<"$report")"
