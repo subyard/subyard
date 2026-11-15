@@ -625,3 +625,40 @@ func TestRemovedProfileStatusDisableAndStaleConsent(t *testing.T) {
 		})
 	}
 }
+
+func TestRemovedProfileEnableRefusesBeforeEffects(t *testing.T) {
+	for _, id := range []string{"removed-profile", "unknown-profile"} {
+		t.Run(id, func(t *testing.T) {
+			cli, incus, _, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='removed-profile neighbor'\n")
+			writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile"}]}`, 0644)
+			var err error
+			cli.catalog, err = config.LoadCatalog(cli.options.RepositoryRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cli.options.ProfileRuntime = func(config.Loaded) ProfileServiceRuntime {
+				t.Fatal("refused enable called the profile runtime")
+				return nil
+			}
+			before := mustReadConfigFixture(t, path)
+			want := `profile "removed-profile" was removed and cannot be enabled`
+			if id == "unknown-profile" {
+				want = `profile "unknown-profile" does not declare a scoped owner service`
+			}
+			prepared, err := prepareScopedProfile(t, cli, "enable", id)
+			if prepared != nil {
+				prepared.Close()
+			}
+			if err == nil || err.Error() != want {
+				t.Fatalf("enable error=%v, want %q", err, want)
+			}
+			cli.options.Arguments = []string{"profile", "enable", id, "--yes"}
+			if code := cli.Run(context.Background()); code != 1 || !strings.Contains(output.String(), want) {
+				t.Fatalf("enable code=%d output=%s", code, output)
+			}
+			if !bytes.Equal(before, mustReadConfigFixture(t, path)) || len(incus.ExecCalls) != 0 {
+				t.Fatal("refused enable changed selection or executed a guest command")
+			}
+		})
+	}
+}

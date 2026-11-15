@@ -1,14 +1,18 @@
 package compatibility_test
 
 import (
+	"bytes"
+	"context"
 	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/cli"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -124,5 +128,35 @@ func TestShippedRetiredSettingsAndAliasesRemainReadable(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestShippedRemovedProfileEnableReportsRemoval(t *testing.T) {
+	root, home := testkit.TempDir(t), testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	declaration, err := os.ReadFile("../../config/retired-components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/retired-components.json"), declaration, 0644)
+	testkit.WriteFile(t, filepath.Join(root, "config/commands.registry"), []byte("profile||@profile||deny|mutate|dynamic|public|lifecycle|profile|profile <command> <id>|profiles|--json --yes --help|enable disable setup status\n"), 0600)
+	testkit.WriteFile(t, filepath.Join(root, "config/subyard.env"), []byte("SHIFT_MODE=shift\nDEV_UID=1000\nDEV_USER=dev\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=$SUBYARD_HOME/host\nRESTRICTED_DISK_PATHS=$SUBYARD_HOME/host\nSSH_PORT=2222\n"), 0600)
+	path := filepath.Join(home, "config.env")
+	before := []byte("ENVIRONMENT_PROFILES=openlit\n")
+	testkit.WriteFile(t, path, before, 0600)
+	var output bytes.Buffer
+	incus := &testkit.Incus{}
+	program, err := cli.New(cli.Options{RepositoryRoot: root, Environment: []string{"HOME=" + testkit.TempDir(t), "SUBYARD_CONFIG_HOME=" + home, "SUBYARD_HOME=" + testkit.TempDir(t), "SUBYARD_NO_AUDIT=1"}, Arguments: []string{"profile", "enable", "openlit", "--yes"}, Incus: incus, Executor: incus, Stdout: &output, Stderr: &output, ProfileRuntime: func(config.Loaded) cli.ProfileServiceRuntime { t.Fatal("removed owner was invoked"); return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), `profile "openlit" was removed and cannot be enabled`) {
+		t.Fatalf("enable code=%d output=%s", code, &output)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) || len(incus.ExecCalls) != 0 {
+		t.Fatal("refused enable changed settings or executed a guest command")
 	}
 }

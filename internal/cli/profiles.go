@@ -222,6 +222,9 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		}
 		return nil
 	}
+	if request.verb == "enable" && loaded.Catalog.RetiredProfile(request.id) {
+		return fmt.Errorf("profile %q was removed and cannot be enabled", request.id)
+	}
 	definitions, err := profile.Load(cli.options.RepositoryRoot)
 	if err != nil {
 		return err
