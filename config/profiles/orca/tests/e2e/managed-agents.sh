@@ -472,10 +472,27 @@ if ! grep -Fq 'Orca reset 2 saved Claude chat(s) from Full access to the default
   grep -E 'Orca reset|Warning' "$STATE/saved-chat-sync.out" >&2 || :
   die 'Orca sync did not reset both saved Claude chats and warn until a restart'
 fi
+runtime_before="$(guest_root jq -er .runtimeId "$runtime_metadata")"
+guest_root jq -e --arg runtime "$runtime_before" \
+  '.complete == false and (.reset | length) == 2 and .dirty == $runtime' "$chat_state" >/dev/null \
+  || die 'saved-chat reset did not record its resets and the running Orca as dirty'
+# Reproduce a reset that Orca applied but whose record was lost (response timeout, failed state
+# write or crash): only the dirty runtime written before each write remains.
+as_dev python3 -B -c '
+import json, os, sys, tempfile
+path, runtime = sys.argv[1:3]
+descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(path))
+os.fchmod(descriptor, 0o600)
+with os.fdopen(descriptor, "w") as output:
+    json.dump({"version": 1, "reset": [], "dirty": runtime, "complete": False}, output)
+    output.flush()
+    os.fsync(output.fileno())
+os.replace(temporary, path)
+' "$chat_state" "$runtime_before" || die 'could not drop the saved-chat reset record'
+printf 'managed-agents-status: saved-chat resets applied in Orca but not recorded\n'
 yard orca status >"$STATE/saved-chat-status.out" 2>&1 || :
 grep -Fq "$restart_warning" "$STATE/saved-chat-status.out" \
-  || die 'Orca status did not warn about the pending restart'
-runtime_before="$(guest_root jq -er .runtimeId "$runtime_metadata")"
+  || die 'Orca status did not warn about the pending restart of an unrecorded reset'
 yard orca up --yes >"$STATE/saved-chat-up.out" 2>&1 || die 'Orca up failed to restart for saved Claude chats'
 grep -Fq 'Orca restarted so no Claude chat keeps Full access from before the reset' "$STATE/saved-chat-up.out" \
   || die 'Orca up did not restart Orca for the reset saved Claude chats'
@@ -487,8 +504,9 @@ flagged="$(flagged_claude_processes)" || die 'cannot inspect the Orca unit proce
 yard orca status >"$STATE/saved-chat-status.out" 2>&1 || :
 ! grep -Fq "$restart_warning" "$STATE/saved-chat-status.out" || die 'Orca status still warns after the restart'
 yard orca sync --yes >/dev/null || die 'Orca sync failed after the saved-chat restart'
-guest_root jq -e '.complete == true and (.reset | length) == 2' "$chat_state" >/dev/null \
-  || die 'saved-chat reset did not record completion'
+# The unrecorded chats are already in the default mode, so completion needs no second reset.
+guest_root jq -e '.complete == true and .reset == []' "$chat_state" >/dev/null \
+  || die 'saved-chat reset did not record completion after the unrecorded reset'
 [ "$(guest_root stat -c '%a %U' "$chat_state")" = '600 dev' ] || die 'saved-chat reset state is not private'
 guest_root sh -c 'printf "%s\n" "git commit --allow-empty -m saved-chat" > /tmp/subyard-managed-command; chmod 0644 /tmp/subyard-managed-command'
 as_dev python3 -B "$helper" saved-chat verify "$workspace" \

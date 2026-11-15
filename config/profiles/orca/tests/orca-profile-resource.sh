@@ -285,6 +285,8 @@ case "${1:-}" in
         rm -f "$guest${*: -1}"
         ;;
       *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check '*)
+        # A helper from before the chat reset prints nothing.
+        [ ! -e "$state_root/chat-check-silent" ] || exit 0
         launch=ready
         [ ! -e "$state_root/codex-defaults-drift" ] || launch=unready
         reset="$(chat_reset_state)"
@@ -1252,6 +1254,13 @@ grep -Fq "saved Claude chats await an Orca restart; run 'yard orca restart'" "$T
 [ -e "$TMP/chat-dirty" ] && [ ! -e "$TMP/codex-defaults-drift" ] || fail 'up dropped a pending chat restart'
 run_orca restart --yes >/dev/null
 [ ! -e "$TMP/chat-dirty" ] || fail 'restart did not complete the pending chat reset'
+
+# A helper that cannot report the reset state leaves the Git-approval risk visible.
+touch "$TMP/chat-check-silent"
+chat_status
+chat_status_has "saved Claude chat reset state is unknown; they may still run Git without approval; run 'yard init' or 'yard orca up'" \
+  'status hid an unknown saved Claude chat reset state'
+rm -f "$TMP/chat-check-silent"
 
 # An incomplete reset warns without making launch defaults look unready.
 touch "$TMP/chat-reset-incomplete"

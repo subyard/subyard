@@ -648,13 +648,6 @@ orca_settings_state() {
   printf '%s\n' "$output"
 }
 
-# Launch defaults are repaired and no saved Claude chat awaits an Orca restart.
-codex_defaults_ready() {
-  local state
-  state="$(orca_settings_state)"
-  [ "${state%% *}" = launch=ready ] && [ "${state#* }" != reset=restart-pending ]
-}
-
 launch_defaults_ready() {
   local state
   state="$(orca_settings_state)"
@@ -1176,7 +1169,8 @@ cmd_status() {
       reset=complete) ;;
       reset=restart-pending)
         warn "saved Claude chats may still run Git without approval until Orca restarts; run '$(yard_cmd_hint) orca restart'" ;;
-      reset=unknown) ;;
+      reset=unknown)
+        warn "saved Claude chat reset state is unknown; they may still run Git without approval; run '$(yard_cmd_hint) init' or '$(yard_cmd_hint) orca up'" ;;
       *) warn "saved Claude chat reset from Full access is incomplete; they may still run Git without approval; run '$(yard_cmd_hint) orca sync'" ;;
     esac
     if report="$(project_registration_report)"; then
