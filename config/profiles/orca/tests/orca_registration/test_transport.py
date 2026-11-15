@@ -88,6 +88,15 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(self.error):
             self.client(self.metadata).call("repo.list")
 
+    def test_runtime_mismatch_reports_the_answering_runtime_before_failing(self):
+        answered = []
+        self.server(lambda request, _: self.frame(request, _meta={"runtimeId": "different"}))
+        with self.assertRaises(self.error) as caught:
+            self.client(self.metadata).call("agentSession.setOption", {}, before_send=lambda _: None,
+                                            on_runtime_mismatch=answered.append)
+        self.assertEqual(["different"], answered)
+        self.assertTrue(caught.exception.unknown)
+
     def test_timeout_and_disconnect_after_write_are_unknown(self):
         self.server(lambda request, _: time.sleep(0.15))
         with self.assertRaises(self.error) as caught:

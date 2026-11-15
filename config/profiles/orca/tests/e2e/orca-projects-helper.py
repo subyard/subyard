@@ -243,7 +243,7 @@ def stock_probe(arguments):
     try:
         sys.path.insert(0, arguments.registration)
         from reconcile import _records
-        from settings import codex_defaults
+        from settings import launch_defaults
 
         with tempfile.TemporaryDirectory(prefix="subyard-orca-stock-probe.") as directory:
             root = Path(directory)
@@ -306,7 +306,9 @@ def stock_probe(arguments):
                 finally:
                     os.close(log)
                 started = time.monotonic()
-                deadline = started + 20
+                # A fresh profile's first `orca serve` unpacks its server runtime before writing
+                # metadata; under lane load that exceeds 20 s, so use the registration budget.
+                deadline = started + 85
                 last = "no runtime metadata"
                 while time.monotonic() < deadline and server.poll() is None:
                     if metadata.is_file():
@@ -326,7 +328,7 @@ def stock_probe(arguments):
                 phase = "startup"
                 start()
                 phase = "registration and terminal snapshots"
-                codex_defaults(rpc, apply=True)
+                launch_defaults(rpc, apply=True)
                 project = root / "project"
                 project.mkdir(mode=0o700)
                 group = rpc.call("projectGroup.create", {
@@ -586,10 +588,11 @@ def init_failure_diagnostics(arguments):
     try:
         result = subprocess.run(
             ["python3", "-B", "/usr/local/libexec/subyard/orca-registration/settings.py", "--check"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=False, text=True,
         )
+        # Exit 3 only means a saved Claude chat reset awaits a restart; launch readiness is printed.
         diagnostics.update(launch_defaults_check_available=True,
-                           launch_defaults_ready=result.returncode == 0)
+                           launch_defaults_ready=result.stdout.startswith("launch=ready "))
     except (OSError, subprocess.TimeoutExpired):
         pass
     try:

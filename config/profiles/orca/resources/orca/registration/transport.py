@@ -27,7 +27,13 @@ class RuntimeRPC:
         self.deadline = deadline
         self.runtime_id = None
 
-    def call(self, method, params=None, before_send=None):
+    def call(self, method, params=None, before_send=None, on_runtime_mismatch=None):
+        """Send one request.
+
+        before_send(runtime_id) runs on the connected socket before the request is sent.
+        on_runtime_mismatch(runtime_id) runs when the answer of a sent request names another
+        runtime, before the call fails, so a caller can record where a write may have applied.
+        """
         started = time.monotonic()
         write = method not in ("repo.list", "terminal.list", "projectGroup.list", "folderWorkspace.list",
                                "settings.get", "session.tabs.listAll")
@@ -95,6 +101,9 @@ class RuntimeRPC:
                             raise RpcError("Orca runtime response id mismatch", unknown=write)
                         meta = frame.get("_meta")
                         if not isinstance(meta, dict) or meta.get("runtimeId") != runtime_id:
+                            answered = meta.get("runtimeId") if isinstance(meta, dict) else None
+                            if on_runtime_mismatch is not None and isinstance(answered, str) and answered:
+                                on_runtime_mismatch(answered)
                             raise RpcError("Orca runtime response runtime mismatch", unknown=write)
                         if frame.get("ok") is False and isinstance(frame.get("error"), dict):
                             # Do not echo upstream messages or codes: either can contain secrets.

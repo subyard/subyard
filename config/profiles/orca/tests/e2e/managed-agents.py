@@ -783,6 +783,88 @@ def chat(arguments):
     return 0
 
 
+SAVED_CHATS = Path('/tmp/subyard-saved-chats.json')
+
+
+def saved_chat(arguments):
+    """Save Claude chats under Orca's stock Claude flag, then check them after the reset."""
+    sys.path.insert(0, '/usr/local/libexec/subyard/orca-registration')
+    from transport import RuntimeRPC
+    rpc = RuntimeRPC('/srv/agents/orca/config/orca/orca-runtime.json', timeout=30)
+    workspace = Path(arguments.workspace).resolve()
+
+    def page(session):
+        return accepted(rpc.call('agentSession.history', {'sessionId': session, 'direction': 'tail'}),
+                        'history')['page']
+
+    def send(session, text):
+        body = {'kind': 'message', 'role': 'user', 'blocks': [{'type': 'text', 'text': text}]}
+        accepted(rpc.call('agentSession.send', {
+            'envelope': envelope('agentSession.send', session, {'body': body}, page(session)['fence']),
+            'body': body}), 'send')
+
+    def mode(session):
+        return rpc.call('agentSession.options', {'sessionId': session})['current']['permissionMode']
+
+    def head():
+        return subprocess.run(['git', '-C', str(workspace), 'rev-parse', 'HEAD'], capture_output=True,
+                              text=True, timeout=10, check=True).stdout.strip()
+
+    if arguments.phase == 'create':
+        arguments_before = rpc.call('settings.get')['settings']['agentDefaultArgs']
+        rpc.call('settings.update', {'agentDefaultArgs': {
+            **arguments_before, 'claude': '--dangerously-skip-permissions'}})
+        repo = next(item for item in rpc.call('repo.list')['repos'] if item['path'] == str(workspace))
+        chats = {}
+        for name in ('open', 'closed'):
+            session = str(uuid.uuid4())
+            fields = {'worktree': 'id:' + repo['id'] + '::' + str(workspace), 'agent': 'claude'}
+            accepted(rpc.call('agentSession.create', {
+                **fields, 'envelope': envelope('agentSession.create', session, fields)}), 'create')
+            send(session, 'Say hello.')
+            deadline = time.monotonic() + 45
+            while (page(session).get('latestTurn') or {}).get('turn', {}).get('state') != 'completed':
+                assert time.monotonic() < deadline, 'saved chat turn did not finish'
+                time.sleep(0.2)
+            # Orca saves the mode at creation; the stock flag makes it Full access.
+            assert mode(session) == 'full-access', 'stock Claude flag did not save a Full access chat'
+            chats[name] = session
+        # A closed tab keeps the saved chat; only Session History lists it.
+        rpc.call('agentSession.close', {'sessionId': chats['closed']})
+        SAVED_CHATS.write_text(json.dumps(chats))
+        issues = rpc.call('aiVault.listSessions', {'unlimited': True, 'force': True})['issues']
+        # Record only the issue shape: whether each names its agent, and of which kind it is.
+        print('orca-session-history-issues: ' + json.dumps({
+            'count': len(issues), 'with_agent': sum(isinstance(item, dict) and bool(item.get('agent'))
+                                                    for item in issues),
+            'kinds': sorted({str(item.get('kind')) for item in issues if isinstance(item, dict)})}), flush=True)
+        return 0
+    chats = json.loads(SAVED_CHATS.read_text())
+    assert {name: mode(session) for name, session in chats.items()} == {'open': 'own', 'closed': 'own'}, \
+        'saved Full access Claude chats were not reset to the default mode'
+    session, before = chats['open'], head()
+    send(session, PROMPT)
+    deadline = time.monotonic() + 60
+    while True:
+        assert head() == before, 'FINDING: reopened saved Claude chat ran Git without approval'
+        latest = page(session)
+        prompts = [item for item in latest['items'] if item['body'].get('kind') == 'approval'
+                   and item['body']['resolution']['state'] == 'pending']
+        if prompts:
+            break
+        assert time.monotonic() < deadline, 'reopened saved Claude chat did not request Git approval'
+        time.sleep(0.2)
+    fields = {'itemId': prompts[0]['itemId'], 'expectedRevision': prompts[0]['revision'], 'optionId': 'deny'}
+    accepted(rpc.call('agentSession.respondToApproval', {
+        **fields, 'envelope': envelope('agentSession.respondTo:approval', session, fields, latest['fence'])}),
+        'respond')
+    time.sleep(3)
+    assert head() == before, 'denied saved-chat Git approval changed HEAD'
+    rpc.call('agentSession.close', {'sessionId': session})
+    print('ok: reopened saved Claude chat asked for Git approval after the one-time reset', flush=True)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest='operation', required=True)
@@ -793,6 +875,10 @@ def main():
     launch_command.add_argument('--expect-link', action='store_true')
     launch_command.add_argument('--pid-file')
     launch_command.set_defaults(handler=launch)
+    saved_chat_command = commands.add_parser('saved-chat')
+    saved_chat_command.add_argument('phase', choices=('create', 'verify'))
+    saved_chat_command.add_argument('workspace')
+    saved_chat_command.set_defaults(handler=saved_chat)
     serve_command = commands.add_parser('serve')
     serve_command.add_argument('--port-file', required=True)
     serve_command.add_argument('--command-file', required=True)

@@ -173,7 +173,7 @@ func TestNativePrepareStartupRetainsBindingWithDrainingIncusAcrossSourceRelocati
 		}
 		if state == "cold" {
 			approved = plan
-			if len(approved.Steps) != 12 {
+			if len(approved.Steps) != 13 {
 				t.Fatalf("cold plan omitted native target scope: %d steps", len(approved.Steps))
 			}
 			for _, step := range plan.Steps {

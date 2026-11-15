@@ -1386,8 +1386,13 @@ The lane then deletes Orca's hooks, restarts the service
 and requires the reinstalled hooks and a terminal launch to keep the managed Claude settings before any fixture
 snapshot, and reads settings drift before repairing it, including the drift from accepting Claude's auto mode offer. Finally it launches Codex from a paired Orca terminal and
 native chat, and drives Git prompts with a synthetic loopback model in stock Orca native Claude chat and in a
-paired Orca terminal running `claude --dangerously-skip-permissions`. It needs the upstream Claude and Codex
-downloads; it uses no agent account.
+paired Orca terminal running `claude --dangerously-skip-permissions`. Its saved-chat stage saves Claude chats
+under the stock Full access flag, removes the reset state to look like an installation from before the reset,
+and requires `yard orca sync` to reset both chats, record the running Orca as dirty and warn until a restart. It
+then drops the reset record, as a lost response, failed state write or crash would, and requires status to keep
+warning, `yard orca up` to restart Orca once with a new runtime id and no process left with the skip flag, the
+reset to complete with mode 0600, and the reopened chat to ask for Git approval. It needs the upstream Claude and
+Codex downloads; it uses no agent account.
 
 For a focused recheck of stock native-chat approval/reconnect, the managed relay and
 native/paired terminals, use:

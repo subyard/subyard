@@ -241,13 +241,64 @@ Orca's hook installation preserves the managed settings. Existing Orca sessions
 and native version files remain intact when initialization removes a recognized
 native command link. See [Claude configuration and adoption](configuration.md#coding-agent-compatibility).
 
+Orca's stock Claude launch default is `--dangerously-skip-permissions`. In a native
+Claude chat launched with that argument, Orca answers every permission prompt itself,
+including the yard's commit and push approvals. Subyard therefore replaces that stock
+default with an explicit empty argument setting, the same repair it applies to Codex:
+Claude then reads the yard's settings, and native chat shows each approval to the user.
+Claude terminals keep the managed prompts with or without the argument. Choosing **Full
+access** for an Orca chat, sending the argument from a paired Desktop or configuring it in
+custom Claude arguments is an explicit opt-out: Orca then approves commit and push in that
+chat without asking.
+
+Orca saves each chat's permission mode when the chat is created, so chats saved under the stock
+default keep Full access. After this update, Subyard's launch-default repair resets each of
+those saved Claude chats once, including running chats and ones whose tab is closed, to Orca's
+default mode and reports how many it reset. A chat process that started with Full access keeps
+it until Orca restarts, so any reset attempt, including one whose result is lost, requires one
+Orca restart. The `orca up` and `yard orca restart` plans show this as a saved Claude chat
+reset step: they reset chats that still need it, restart Orca once, which ends running agents
+and terminals in the service, and finish the reset in the new Orca. `yard orca sync` retries
+the reset but never restarts Orca; while a restart is needed it succeeds with a warning naming
+`yard orca restart` and `orca up`. Until the reset completes, the repair and `yard orca status`
+warn that saved Claude chats may still run Git without approval. If an `orca up` plan showed
+the reset step as already done but a reset then needs a restart while it runs, that `orca up`
+does not restart Orca; it warns and leaves the restart to `yard orca restart`. After a Subyard
+update, until `yard init` or `orca up` installs the current Orca project helper, `yard orca
+restart` restarts Orca without resetting chats and says so, and `yard orca status` warns that
+the reset state is unknown and saved Claude chats may still run Git without approval. The
+repair runs after project registration is ready: on `yard init`, project events, `yard orca
+sync` and an `orca up` whose registration or launch-default step applies; until registration is
+ready it does not run. Each chat is reset at most once, so choosing Full access again in a chat
+is respected.
+
+The reset finds chats through Orca's open tabs and Session History. A chat that a listing does
+show is reset even when the other listing fails or Session History is incomplete, including one
+with an unrelated broken history entry. The reset completes only after a pass that saw a
+complete listing, found nothing left to reset, met no refused chat and ran in a later Orca than
+the last reset attempt. Until then, each repair and `yard orca status` warn that the reset is
+incomplete; `yard orca sync` retries it. Orca can apply a reset and still refuse it, so a
+refused chat also needs an Orca restart: the repair advises switching that chat's mode to Ask,
+and each `orca up` or `yard orca restart` restarts Orca again until the chat is reset or no
+longer has Full access. A chat that never ran a turn and whose tab is closed appears in neither
+listing, and coverage of chats in other workspaces and worktrees has not been verified.
+
+The reset state is kept in `/srv/agents/orca/subyard-claude-chat-permissions.json` (mode 0600):
+the chats already reset, the Orca runtime of the last reset attempt, and whether the reset is
+complete. Passes run one at a time, and a pass that cannot finish within two minutes, for
+example against a stalled Orca, stops and stays incomplete. If the file is unreadable or
+invalid, the next repair warns, rewrites it and treats the running Orca as possibly holding a
+reset chat: the next `orca up` or `yard orca restart` completes the recovery with one restart
+and no manual step. Chats that were already reset before the file was lost may then be reset
+once more.
+
 Without the Claude integration, an Orca-installed Claude copy is reported as
 **unmanaged** by `yard integration status claude` and detailed `yard -Y NAME status`: self-updating,
 without Subyard's commit approval, persistence or instructions. Enabling Orca never
 selects Claude automatically. Subyard leaves `disabledTuiAgents` untouched. Orca's upstream `disabledTuiAgents` setting can contain
 `"claude"` to remove it from TUI launch choices; Subyard does not change that
 preference. It does not prevent manually running Claude in a terminal. The setting
-is defined by the [pinned Orca release](https://github.com/stablyai/orca/blob/b8ec5c8d170bcb9988e65de547a3a4e98b2885a9/src/shared/global-settings-types.ts).
+is defined by the [pinned Orca release](https://github.com/stablyai/orca/blob/c91a7a6ee3dc76090cafb33943961ae2235246d6/src/shared/global-settings-types.ts).
 
 Orca's Fetch, Pull and Push actions use the yard developer's ordinary Git configuration.
 The service keeps Orca's app profile at `/srv/agents/orca/config/orca` while Git reads
@@ -276,7 +327,9 @@ argument setting. With the default account, Codex then reads the yard's
 its approval policy and reviewer. The shipped configuration allows local work
 inside the yard while keeping user approval for matching commit/push rules.
 Orca may label this launch mode **Manual**; that label does not mean a read-only
-Codex sandbox.
+Codex sandbox. On Linux, Orca also passes `-c disable_paste_burst=true` to the Codex
+launches it builds on the server, so that prompts typed from another client are sent;
+it changes only Codex's paste detection.
 
 Paired desktops can also send their own stock YOLO argument. In the yard's
 default Bash shell, an Orca-only login function removes that exact argument
@@ -330,10 +383,10 @@ reads the yard configuration. To use Codex's fullscreen transcript instead, set
 `-c tui.fullscreen_transcript=true` for one launch. After updating Subyard, run
 `yard config apply` and start a new Codex session.
 
-`orca up` repairs fresh and existing stock defaults through Orca's settings API.
-The installed project hook also checks them on `orca sync` and subsequent
+`orca up` repairs fresh and existing stock Codex and Claude defaults through Orca's
+settings API. The installed project hook also checks them on `orca sync` and subsequent
 `yard init` runs while Orca is active. Other settings and explicitly customized
-Codex arguments are preserved; incompatible permission overrides cannot weaken native
+Codex and Claude arguments are preserved; incompatible permission overrides cannot weaken native
 Codex requirements. Use **Manual** with empty Codex arguments to follow the yard defaults.
 Run `yard init` after updating Subyard and start new Codex sessions; existing sessions
 are not reconfigured by this repair.
@@ -439,7 +492,7 @@ terminals, saved agent/chat state and linked worktrees until their contents have
 Do not edit Orca's database or manufacture IDs in Subyard's sidecar.
 
 For an explicitly selected local repo-backed setup with no remaining sessions, the pinned
-[native project CLI](https://github.com/stablyai/orca/blob/b8ec5c8d170bcb9988e65de547a3a4e98b2885a9/src/cli/specs/project.ts)
+[native project CLI](https://github.com/stablyai/orca/blob/c91a7a6ee3dc76090cafb33943961ae2235246d6/src/cli/specs/project.ts)
 supports this manual repair. Run it as the yard's development user against the managed server
 profile, replacing `PROJECT_ID` and `SETUP_ID` with the inspected native identities:
 
@@ -499,14 +552,17 @@ terminal of the development user, including those of another Orca instance that 
 started. It preserves the installed package, projects, saved session data and
 paired-client state. User lingering stays enabled after `down`.
 
-The profile pins Orca 1.4.244. Its [upstream release notes](https://github.com/stablyai/orca/releases/tag/v1.4.244)
-say it shares 1.4.243's terminal host, preserving attached terminals when updating from
-that version. Some terminal fixes require restarting the terminal host. Remote file and
-paired-terminal fixes also require updating the host server; open a new remote shell
-for the manual Codex copy fix. These notes do not establish terminal compatibility
-across every older version.
+The profile pins Orca 1.4.258. The [1.4.245 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.245)
+say that release starts a fresh terminal host for new terminals; terminals opened before
+the update keep running on the previous host and stay attached. The
+[1.4.254 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.254) make pairing
+codes single-use for updated clients and limit `orca serve` to localhost, LAN and Tailscale
+sources by default. The Subyard owner proxy connects to the server over guest loopback.
+These notes do not establish terminal compatibility across every older version.
 
-Account for terminal-host changes before rolling back the package. In particular,
-the [1.4.224 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.224)
+Account for terminal-host and saved-state changes before rolling back the package. The
+[1.4.252 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.252) warn that chats
+that used Plan mode cannot be opened by 1.4.251 after a downgrade, and the
+[1.4.224 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.224)
 warn that terminals started in 1.4.224 cannot be reached from 1.4.223 after a downgrade
 until Orca is upgraded again.
