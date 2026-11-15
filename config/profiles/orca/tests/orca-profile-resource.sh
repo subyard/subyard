@@ -1696,6 +1696,42 @@ fi
 grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \
   || fail 'unsafe hostname failure was not actionable'
 
+# The rendered project hook exits 0 in a yard whose guest facts do not select
+# Orca, before its marker check; a selected but stopped Orca with a missing
+# marker, or unreadable facts, still refuse with the init hint.
+hook_root="$TMP/selection-hook"
+mkdir -p "$hook_root/bin"
+printf '#!/bin/sh\nexit 3\n' >"$hook_root/bin/systemctl"
+chmod 0755 "$hook_root/bin/systemctl"
+: >"$hook_root/lock"
+(
+  RESOURCE_DIR="$ROOT/config/profiles/orca/resources/orca"
+  ORCA_CONTRACT_VERSION="$(sed -n 's/^ORCA_CONTRACT_VERSION=//p' "$RESOURCE_DIR/handler.sh")"
+  ORCA_UNIT=subyard-orca.service ORCA_REGISTRATION="$hook_root/registration"
+  ORCA_REGISTRATION_LOCK="$hook_root/lock" ORCA_REGISTRATION_DIGEST="$hook_root/marker"
+  ORCA_GUEST_FACTS="$hook_root/guest-runtime.json"
+  # shellcheck source=config/profiles/orca/resources/orca/registration-contract.sh
+  . "$RESOURCE_DIR/registration-contract.sh"
+  render_registration_hook >"$hook_root/sync"
+)
+chmod 0755 "$hook_root/sync"
+selection_facts() {
+  jq -n --argjson profiles "$1" '{schema:1,machine_id:"0",status:"current",target:{selected_profiles:$profiles},last_success:null,capabilities:"unknown",readiness:"unknown"}' \
+    >"$hook_root/guest-runtime.json"
+}
+selection_facts '["hermes"]'
+PATH="$hook_root/bin:$PATH" "$hook_root/sync" >"$hook_root/deselected.out" 2>&1 \
+  || { cat "$hook_root/deselected.out"; fail 'project hook refused a yard that does not select Orca'; }
+[ ! -s "$hook_root/deselected.out" ] || fail 'deselected project hook reported output'
+for facts in '["orca"]' missing; do
+  if [ "$facts" = missing ]; then rm -f "$hook_root/guest-runtime.json"; else selection_facts "$facts"; fi
+  if PATH="$hook_root/bin:$PATH" "$hook_root/sync" >"$hook_root/selected.out" 2>&1; then
+    fail "project hook accepted a missing marker with facts $facts"
+  fi
+  grep -Fq "Orca project helper is stale or incomplete; run 'yard init' first" "$hook_root/selected.out" \
+    || { cat "$hook_root/selected.out"; fail "project hook did not refuse a missing marker with facts $facts"; }
+done
+
 # Run the profile component's filesystem, wire and reconciliation contract tests in the core gate.
 python3 -B -m unittest discover -s "$ROOT/config/profiles/orca/tests/orca_registration"
 

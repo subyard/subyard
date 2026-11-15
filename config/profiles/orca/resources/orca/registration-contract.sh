@@ -30,6 +30,10 @@ render_registration_hook() {
   cat <<SYNC_HEAD
 #!/usr/bin/env bash
 set -euo pipefail
+# A yard that does not select Orca keeps an installed Orca but has nothing to
+# register. Only valid guest facts that omit orca skip the hook.
+selected="\$(jq -r 'if .schema == 1 and (.target.selected_profiles | type == "array") then (.target.selected_profiles | index("orca") != null) else "unknown" end' $ORCA_GUEST_FACTS 2>/dev/null)" || selected=unknown
+[ "\$selected" != false ] || exit 0
 exec 9<$ORCA_REGISTRATION_LOCK
 flock -s 9
 [ "\$(cat $ORCA_REGISTRATION_DIGEST 2>/dev/null)" = "$version" ] || {

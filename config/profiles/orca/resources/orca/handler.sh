@@ -54,6 +54,9 @@ ORCA_CODEX_BIN=/usr/local/libexec/subyard/orca-codex/codex
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
 ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
+# The rendered project hook reads the guest selection facts.
+# shellcheck disable=SC2034
+ORCA_GUEST_FACTS=/etc/subyard/guest-runtime.json
 ORCA_DISCOVERY_UNIT=subyard-orca-discovery.service
 ORCA_DISCOVERY_TIMER=subyard-orca-discovery.timer
 ORCA_CONTRACT_VERSION=7

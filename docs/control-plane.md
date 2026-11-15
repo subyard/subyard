@@ -1253,7 +1253,10 @@ still answers; Incus transport errors, host staging, file pushes, safety guards 
 in the same apply stay blocking. The Orca handler proves this by running each such command through a
 guest wrapper that maps the command's failure to status 200, which Incus never returns.
 Orca observes its runtime as `absent` in a yard that does not select it, so deselection plus init
-clears its pending item; deselection skips the runtime but leaves Orca installed.
+clears its pending item; deselection skips the runtime but leaves Orca installed. Its installed
+project hook exits 0, before its contract marker check, when the yard's guest runtime facts select
+profiles without Orca; a selected Orca with a stale marker, or unreadable facts, still refuse with
+the init hint.
 
 The owner records the typed failure under the configuration root as
 `activation-pending/v1/YARD/OWNER.json`, bound to the yard instance, the actual and desired

@@ -52,6 +52,7 @@ ORCA_CONTRACT_VERSION=5
 ORCA_UNIT=subyard-orca.service
 ORCA_REGISTRATION=/usr/local/libexec/subyard/orca-registration
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
+ORCA_GUEST_FACTS=/etc/subyard/guest-runtime.json
 ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_DISCOVERY_UNIT=subyard-orca-discovery.service
 ORCA_DISCOVERY_TIMER=subyard-orca-discovery.timer

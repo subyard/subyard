@@ -487,6 +487,9 @@ exercise_runtime_pending() {
     || { cat "$STATE_ROOT/runtime-pending-disable.txt"; die 'profile disable was refused while the yard waits for init'; }
   operator_yard -Y default init --yes > "$STATE_ROOT/runtime-pending-init-2.txt" 2>&1 \
     || { cat "$STATE_ROOT/runtime-pending-init-2.txt"; die 'yard init after profile disable did not converge'; }
+  # The installed Orca project hook skips a yard that no longer selects Orca.
+  ! grep -Fq 'Orca project helper is stale or incomplete' "$STATE_ROOT/runtime-pending-init-2.txt" \
+    || die 'the deselected Orca project hook refused yard init'
   ! operator_env test -e "$record" || die 'yard init after profile disable left the pending record'
   # Deselection skips the runtime without reapplying or uninstalling it.
   guest_yard default test ! -e /usr/local/libexec/subyard/orca-registration.sha256 \
