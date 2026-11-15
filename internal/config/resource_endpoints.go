@@ -40,11 +40,15 @@ func applySavedResourceEndpoints(
 	}
 	registry, err := loadResources(root)
 	if err != nil {
-		// Without metadata any profile listener may be an unread endpoint.
-		return func(name string) bool {
-			definition, ok := tracker.catalog.LookupSetting(name)
-			return ok && strings.HasPrefix(definition.Owner, "profile:")
-		}, fmt.Errorf("load resource endpoint metadata: %w", err)
+		// Without metadata any unset profile listener may be an unread endpoint;
+		// an explicit port is the value collisions must check.
+		unset := map[string]bool{}
+		for _, definition := range tracker.catalog.SettingCatalog() {
+			if definition.HostListener && strings.HasPrefix(definition.Owner, "profile:") && values[definition.Name] == "" {
+				unset[definition.Name] = true
+			}
+		}
+		return func(name string) bool { return unset[name] }, fmt.Errorf("load resource endpoint metadata: %w", err)
 	}
 	var refusals []error
 	unread := map[string]bool{}
@@ -74,7 +78,8 @@ func applySavedResourceEndpoints(
 		)
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("read saved endpoint for %s: %w", identity, err))
-			unread[definition.Proxy.HostPortSetting] = true
+			// Only a port the saved endpoint would provide stays unchecked.
+			unread[definition.Proxy.HostPortSetting] = values[definition.Proxy.HostPortSetting] == ""
 			continue
 		}
 		if !exists {

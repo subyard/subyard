@@ -3,6 +3,8 @@ package config
 import (
 	"slices"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // EnvironmentProfileSelection preserves authored intent while Environment carries
@@ -25,16 +27,19 @@ func resolveEnvironmentProfiles(configDir, yard string, values map[string]string
 			}
 		}
 	}
+	// Every broken candidate package is reported, not only the first.
+	var refusals []error
 	for _, name := range candidates {
 		eligible, _, err := EnvironmentProfileEligibility(configDir, yard, values, catalog, name)
 		if err != nil {
-			return selection, err
+			refusals = append(refusals, err)
+			continue
 		}
 		if eligible && !slices.Contains(selection.Effective, name) {
 			selection.Effective = append(selection.Effective, name)
 		}
 	}
-	return selection, nil
+	return selection, domain.CollectRefusals(refusals...)
 }
 
 // EnvironmentProfileEligibility applies package policy and yard-role restrictions

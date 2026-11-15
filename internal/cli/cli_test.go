@@ -337,6 +337,9 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		if !strings.Contains(stderr.String(), "YARD_TEMPLATE=test-vms") {
 			t.Fatalf("global %s omitted the migration command: %q", query, stderr.String())
 		}
+		if strings.Contains(stderr.String(), configHome) || !strings.Contains(stderr.String(), `retired in "yards/e2e-yard.env"`) {
+			t.Fatalf("global %s printed the registration by absolute path: %q", query, stderr.String())
+		}
 		if query == "yards" && !strings.Contains(stdout.String(), "NAME") {
 			t.Fatalf("global yards omitted its inventory header: %q", stdout.String())
 		}

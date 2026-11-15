@@ -926,3 +926,63 @@ func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
 		t.Fatalf("retired integration refusal: code=%d %s", code, stderr.String())
 	}
 }
+
+func TestInventoryQueriesRenderSiblingLoadRefusalsWithoutValues(t *testing.T) {
+	for _, assignment := range []string{"YARD_TEMPLATE=s3cr3tvalue\n", "CODING_TOOL_INTEGRATIONS=s3cr3tvalue\n"} {
+		root, _, configHome, environment := configCommandFixture(t)
+		writeConfigCommandFile(t, filepath.Join(configHome, "yards", "sibling", "config.env"), assignment)
+		for _, query := range []string{"status", "yards", "list"} {
+			var stdout, stderr bytes.Buffer
+			incus := lifecycleIncus()
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{query}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus})
+			if err != nil {
+				t.Fatal(err)
+			}
+			program.Run(context.Background())
+			output := stdout.String() + stderr.String()
+			if strings.Contains(output, "s3cr3tvalue") || strings.Contains(output, configHome) || !strings.Contains(output, `load yard "sibling": `) {
+				t.Errorf("%s with %q: %s", query, strings.TrimSpace(assignment), output)
+			}
+		}
+	}
+}
+
+func TestConfigSetReportsEveryRefusalAndFixedRootDiagnostics(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "tv", "config.env"), "YARD_TEMPLATE=test-vms\n")
+	run := func(extra []string, arguments ...string) string {
+		t.Helper()
+		var stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: append(slices.Clone(environment), extra...), WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code == 0 {
+			t.Fatalf("%v succeeded: %s", arguments, stderr.String())
+		}
+		return stderr.String()
+	}
+	for _, test := range []struct {
+		extra, arguments, want []string
+	}{
+		// A: a retired and an unknown integration in one exact write.
+		{nil, []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver missing-one", "--scope", "host", "--yes"},
+			[]string{"integration aiobserver is retired and can no longer be selected", "unknown integration"}},
+		// B: the yard role and an unknown integration together.
+		{nil, []string{"-Y", "tv", "config", "set", "CODING_TOOL_INTEGRATIONS", "missing-one", "--scope", "yard", "--yes"},
+			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "unknown integration"}},
+		{[]string{"SUBYARD_CONFIG_HOME=relative"}, []string{"config", "set", "SSH_PORT", "2390", "--scope", "host", "--yes"},
+			[]string{"SUBYARD_CONFIG_HOME must be absolute", "Next: set SUBYARD_CONFIG_HOME"}},
+	} {
+		output := run(test.extra, test.arguments...)
+		for _, want := range test.want {
+			if !strings.Contains(output, want) || strings.Contains(output, "missing-one") {
+				t.Errorf("%v lacks %q or names an unknown request: %s", test.arguments, want, output)
+			}
+		}
+	}
+	writeConfigCommandFile(t, filepath.Join(configHome, ".sync", "manifest.json"), `{"schemaVersion":3}`)
+	if output := run(nil, "config", "set", "SSH_PORT", "2390", "--scope", "host", "--yes"); !strings.Contains(output, "unsupported configuration sync manifest schema") || !strings.Contains(output, "Next: use a Subyard release") {
+		t.Fatalf("unsupported manifest diagnostic: %s", output)
+	}
+}

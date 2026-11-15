@@ -412,13 +412,15 @@ named in the loader code:
 - D3: source files apply in precedence order; the first refused file stops at its first refused line.
 - D4: native target discovery covers source and command-override refusals only.
 - D5: unresolved integration roots select nothing for later checks.
-- D6: failed role or profile constraints skip profile resolution.
+- D6: any earlier refusal (command override, asset source, integration, role or profile
+  constraint) skips profile resolution, which only adds shipped package integrity refusals.
 - D7: within a check, the SSH port range follows its parse, path checks follow an absolute path,
   the disk minimum follows its size parse and CPU validation follows its resolution.
 - D8: any refusal up to the context skips saved endpoints, derived ports and all collisions.
 - D9: a derived-port source failure skips collisions and the web preview check.
-- D10: an unreadable saved resource endpoint skips only collisions of the listener ports it would
-  provide (every profile listener when the resource metadata itself is unreadable).
+- D10: an unreadable saved resource endpoint skips only collisions of the unset listener ports it
+  would provide (every unset profile listener when the resource metadata itself is unreadable);
+  explicit ports keep their collisions.
 
 `HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
 `yard host rename` transactionally moves a registered Git owner subtree, commits the exact move

@@ -553,6 +553,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		identityRecovery, err = cli.admitDeveloperIdentity(ctx, yard, definition.Handler, commandArguments)
 		if err != nil {
 			cli.errorf("developer identity: %v", err)
+			if definition.Handler == "@config" {
+				cli.reportConfigNext(err)
+			}
 			return 1
 		}
 	}

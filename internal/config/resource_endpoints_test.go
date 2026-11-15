@@ -274,4 +274,12 @@ func TestUnreadableSavedEndpointKeepsIndependentPortChecks(t *testing.T) {
 	if !slices.Contains(diagnostic.Refusals, "WEB_PREVIEW_HOST_PORT collides with SSH_PORT; choose another port") || !diagnostic.Unclassified {
 		t.Fatalf("independent port checks were hidden: %#v", diagnostic)
 	}
+	// An explicit endpoint port keeps its collisions even though the read failed.
+	_, err = Load(LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, DisablePrivate: true, Environment: map[string]string{
+		"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture",
+		"SSH_PORT": "3000", "FIXTURE_HOST_PORT": "3000",
+	}})
+	if explicit := Diagnose("", err); !slices.Contains(explicit.Refusals, "SSH_PORT collides with FIXTURE_HOST_PORT; choose another port") {
+		t.Fatalf("an explicit endpoint port lost its collision: %#v (%v)", explicit, err)
+	}
 }

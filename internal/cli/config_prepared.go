@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -154,27 +153,9 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
 		return configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
 	}
-	if action == "set" {
-		if err := loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, false); err != nil {
-			return configUsage(err)
-		}
-	}
-	if action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
-		requested := strings.Fields(request.value)
-		if err := loaded.Catalog.CheckSelectableIntegrations(requested); err != nil {
-			return configUsage(err)
-		}
-		if _, err := loaded.Catalog.ResolveIntegrationSelection(loaded.Environment, requested); err != nil {
-			return configUsage(err)
-		}
-		if request.scope == config.ScopeYard && !loaded.Integrations.AllowsCodingTools && len(requested) != 0 {
-			return configUsage(domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools))
-		}
-	}
-	if request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
-		if err := config.ValidateYardTemplateIntegrations(loaded, request.value); err != nil {
-			return configUsage(err)
-		}
+	// The same collector as the plain authoring path reports every refusal.
+	if err := configScalarAuthoringRefusal(loaded, definition, request); err != nil {
+		return configUsage(err)
 	}
 	path, err := configScalarAuthoringPath(loaded, request.scope)
 	if err != nil {

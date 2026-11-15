@@ -72,6 +72,8 @@ const (
 	ConfigResourceShutdownUnverified
 	ConfigResourceIngressEnabled
 	ConfigIntegrationRetired
+	ConfigSyncManifestInvalid
+	ConfigSyncManifestUnsupported
 	ConfigConflictingCommandSettings
 )
 
@@ -141,6 +143,8 @@ var configRefusalTexts = map[ConfigRefusalCode]struct{ template, next string }{
 	ConfigDuplicateUnknownIntegration: {"duplicate agent", "list each coding tool integration once"},
 	ConfigResourceShutdownUnverified:  {"verify resource shutdown before changing %s: run %s %s in the running yard first", "start the yard, run that resource shutdown, then retry the change"},
 	ConfigResourceIngressEnabled:      {"run %s %s before changing %s; its public ingress or runtime is still enabled", "run that resource shutdown, then retry the change"},
+	ConfigSyncManifestInvalid:         {"configuration sync manifest is invalid", "restore the configuration sync manifest with yard config sync"},
+	ConfigSyncManifestUnsupported:     {"unsupported configuration sync manifest schema", "use a Subyard release that supports this configuration sync manifest"},
 	ConfigIntegrationRetired:          {"integration %s is retired and can no longer be selected", "remove the retired integration from CODING_TOOL_INTEGRATIONS"},
 	ConfigConflictingCommandSettings:  {"conflicting command environment settings %s and %s", "pass only the canonical setting in the command environment"},
 }

@@ -416,3 +416,17 @@ func TestDiagnoseGivesSourceErrorsANextStep(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvironmentProfileResolutionReportsEveryBrokenPackage(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, name := range []string{"one", "two"} {
+		if err := os.MkdirAll(filepath.Join(root, "profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, "profiles", name, "profile.conf"), []byte("PROVISION_SCOPE=unknown\n"), 0o644)
+	}
+	_, err := resolveEnvironmentProfiles(root, "named", environment{"ENVIRONMENT_PROFILES": "one two"}, Catalog{})
+	if got := strings.Join(Diagnose("", err).Refusals, "; "); got != `profile "one" has an unsupported PROVISION_SCOPE; profile "two" has an unsupported PROVISION_SCOPE` {
+		t.Fatalf("profile resolution refusals = %q", got)
+	}
+}

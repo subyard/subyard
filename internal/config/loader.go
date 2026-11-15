@@ -519,8 +519,9 @@ func load(
 		}
 	}
 	// Role, profile and context checks read independent settings, so each stage
-	// runs and every refusal is reported. Edge D6: failed constraints skip
-	// profile resolution.
+	// runs and every refusal is reported. Edge D6: any earlier refusal (command
+	// override, asset source, integration, role or profile constraint) skips
+	// profile resolution, which only adds shipped package integrity refusals.
 	var refusals []error
 	if err := validateProfileConstraints(configDir, yardName, values, roleRefusals...); err != nil {
 		refusals = append(refusals, refusalCauses(err)...)

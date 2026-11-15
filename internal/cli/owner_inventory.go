@@ -91,12 +91,14 @@ func (source cliOwnerSource) Yards(context.Context) ([]domain.Context, error) {
 	for _, name := range names {
 		loaded, err := source.cli.loadInventoryLoaded(name, source.loaded)
 		if err != nil {
+			home := source.loaded.Context.Paths.ConfigHome
 			if config.IsRetiredYardTemplate(err) {
 				fmt.Fprintf(source.cli.options.Stderr,
-					"Warning: skipping yard %q until its registration is migrated:\n%s\n", name, err)
+					"Warning: skipping yard %q until its registration is migrated:\n%s\n", name,
+					config.Diagnose(home, err).Message("its registration is invalid or unavailable"))
 				continue
 			}
-			return nil, fmt.Errorf("load yard %q: %w", name, err)
+			return nil, inventoryLoadError{name: name, home: home, cause: err}
 		}
 		if loaded.Context.AccessKind == domain.AccessLocal {
 			yards = append(yards, loaded.Context)
@@ -1020,3 +1022,19 @@ func (cli *CLI) ownerYardRouteWithMode(
 		hostID, yardName,
 	)
 }
+
+// inventoryLoadError renders a registered yard's load refusal through the single
+// config renderer, so inventory warnings never print values or absolute paths.
+type inventoryLoadError struct {
+	name, home string
+	cause      error
+}
+
+func (err inventoryLoadError) Error() string {
+	label := "a registered yard"
+	if domain.SafeName(err.name) {
+		label = fmt.Sprintf("%q", err.name)
+	}
+	return "load yard " + label + ": " + config.Diagnose(err.home, err.cause).Message("an input is invalid or unavailable")
+}
+func (err inventoryLoadError) Unwrap() error { return err.cause }
