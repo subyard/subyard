@@ -1280,11 +1280,13 @@ blocker with that yard's init step; a release ready proof never accepts findings
 release work remains, findings are warnings, so `yard migrate` still plans and repairs that work.
 `yard migrate` and `yard update` then exit non-zero; their result names every finding within the
 diagnostic bound and states that the release is ready, and `yard migrate --check`, `config status`
-and `yard status` show each one. A finding names the yard once, the profile, that the profile is
-not applied, the diagnostic `profile list` and both exits for that yard: fix the cause and run
-init, which repeats the same apply from the partial state, or run `profile disable ID` and then
-init. Its next step is the exact `yard -Y NAME init`. A yard name too long for the 480-byte record
-message is left to that next step, so the failure is still recorded.
+and `yard status` show each one. A finding names the yard, the profile, the diagnostic command
+`yard -Y NAME profile list`, that the profile is not applied, and both exits: fix the cause and
+run `yard -Y NAME init`, which repeats the same apply from the partial state, or run
+`yard -Y NAME profile disable ID` and then init. Its next step is the exact `yard -Y NAME init`.
+When those exact commands exceed the 480-byte record message, the finding names the yard once
+with the same steps, and a yard name too long even for that is left to the next step, so the
+failure is still recorded.
 
 These findings share the pending-configuration admission of materialized configuration: when every
 blocker is such a finding and no owner is unconverged, the direct CLI and RPC admit unrelated

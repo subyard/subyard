@@ -1356,7 +1356,9 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 }
 
 func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
-	for _, scenario := range []string{"repair", "failure", "declined"} {
+	// "converged": the fault was fixed and the runtime converged elsewhere (for
+	// example by the profile's own command), so init takes its hooks-only path.
+	for _, scenario := range []string{"repair", "converged", "failure", "declined"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			// A recorded yard-scoped runtime failure of this yard.
@@ -1372,12 +1374,16 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				t.Fatal(err)
 			}
 			record, _ := activationPendingRecordPath(configHome, "default", "sample-runtime")
+			if scenario == "converged" {
+				// A published owner HostID leaves no host step pending.
+				writeCLIFile(t, filepath.Join(configHome, "host-id"), "owner-a\n", 0o600)
+			}
 			platform := newInitPlatformFixture()
 			for stage := range platform.converged {
 				platform.converged[stage] = true
 			}
 			platform.converged[ports.ReconcileStageFinalize] = true
-			platform.converged[ports.ReconcileStageProfileRuntimes] = false
+			platform.converged[ports.ReconcileStageProfileRuntimes] = scenario == "converged"
 			if scenario == "failure" {
 				platform.applyErr = errors.New("injected ProfileRuntime installation failure")
 			}
@@ -1394,10 +1400,17 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 			}
 			code := program.Run(context.Background())
 			// Only a converged init resolves the recorded failure.
-			if _, err := os.Stat(record); (err == nil) != (scenario != "repair") {
+			resolved := scenario == "repair" || scenario == "converged"
+			if _, err := os.Stat(record); (err == nil) != !resolved {
 				t.Fatalf("pending record kept=%v after %s: %v", err == nil, scenario, err)
 			}
-			if scenario != "repair" {
+			if scenario == "converged" {
+				if code != 0 || platform.projectHooks != 1 || len(platform.applied) != 0 {
+					t.Fatalf("hooks-only init: code=%d hooks=%d applied=%v output=%s", code, platform.projectHooks, platform.applied, output.String())
+				}
+				return
+			}
+			if !resolved {
 				if code == 0 || platform.projectHooks != 0 || len(platform.applied) != 0 || strings.Contains(output.String(), "Subyard initialized") {
 					t.Fatalf("failed/declined repair ran hooks or reported success: code=%d hooks=%d applied=%v output=%s", code, platform.projectHooks, platform.applied, output.String())
 				}

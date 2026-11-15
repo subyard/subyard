@@ -764,6 +764,19 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 	return action, delta, nil
 }
 
+// retireResolvedPendingRecords runs on every converged init path: every runtime
+// of this yard is current, so recorded yard-scoped failures are resolved and
+// must not match a later state again.
+func (execution *initExecution) retireResolvedPendingRecords(cli *CLI) error {
+	if execution.loaded.Context.AccessKind != domain.AccessLocal {
+		return nil
+	}
+	if err := removeYardActivationPendingRecords(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName, cli.yardScopedRuntimeIDs()); err != nil {
+		return fmt.Errorf("retire resolved pending activation records: %w", err)
+	}
+	return nil
+}
+
 func (execution *initExecution) hooksOnly() bool {
 	return !execution.adopting() && (execution.legacyContinuation == nil || execution.legacyContinuation.before.Exists) && execution.profileSetup == nil && !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
 		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil && execution.orphanIngress == nil && !execution.orphanIngressDeferred
@@ -980,6 +993,10 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		}
 	}
 	if execution.hooksOnly() {
+		// Every stage, profile runtimes included, was verified current above.
+		if err := execution.retireResolvedPendingRecords(cli); err != nil {
+			return err
+		}
 		if err := execution.retryProjectHooks(ctx); err != nil {
 			return err
 		}
@@ -1068,12 +1085,8 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := reconciler.Apply(ctx, approved); err != nil {
 		return err
 	}
-	// Every runtime of this yard converged; recorded yard-scoped failures are
-	// resolved and must not match a later state again.
-	if execution.loaded.Context.AccessKind == domain.AccessLocal {
-		if err := removeYardActivationPendingRecords(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName, cli.yardScopedRuntimeIDs()); err != nil {
-			return fmt.Errorf("retire resolved pending activation records: %w", err)
-		}
+	if err := execution.retireResolvedPendingRecords(cli); err != nil {
+		return err
 	}
 	if err := execution.retryProjectHooks(ctx); err != nil {
 		return err

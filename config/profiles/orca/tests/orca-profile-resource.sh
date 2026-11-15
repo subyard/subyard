@@ -7,6 +7,9 @@ export TMPDIR=/tmp
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# Mocked guest commands read their stdin like native Incus; an inherited open
+# stdin would block them, so the contract never reads the caller's stdin.
+exec </dev/null
 
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
@@ -1058,24 +1061,29 @@ assert_runtime_diagnostics '[{"parameter":"orca.registration","installed":"unkno
 # (an Orca-only directory replaced by a file) leaves the hook that skips a yard
 # not selecting Orca, never the older hook that would refuse without its marker.
 staged_hook="$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
+staged_discover="$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/discover"
 codex_dir="$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex"
-sed -i '/^# A yard that does not select Orca/,/unselected ] || exit 0$/d' "$staged_hook"
-! grep -Fq subyard-orca-selection "$staged_hook" || fail 'fixture did not plant an older project hook'
+for helper in "$staged_hook" "$staged_discover"; do
+  sed -i '/^# A yard that does not select Orca/,/unselected ] || exit 0$/d' "$helper"
+  ! grep -Fq subyard-orca-selection "$helper" || fail "fixture did not plant an older $helper"
+done
 mv "$codex_dir" "$codex_dir.saved"
 : >"$codex_dir"
 observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
-  >"$TMP/runtime-hook-first.out" 2>&1; then
+  >"$TMP/runtime-hook-first.out" 2>&1 </dev/null; then
   fail 'runtime contract apply concealed a guest failure after the hook replacement'
 fi
 grep -Fxq "$typed_record apply yard-local" "$TMP/runtime-hook-first.out" \
   || { cat "$TMP/runtime-hook-first.out" >&2; fail 'the injected staging failure did not happen inside the guest step'; }
-grep -Fq subyard-orca-selection "$staged_hook" \
-  || fail 'a staging failure after the hook replacement left the older project hook'
-[ "$(stat -c %a "$staged_hook")" = 755 ] || fail 'the replaced project hook is not executable'
-! ls "$ORCA_TEST_GUEST/usr/local/libexec/subyard"/.orca-sync.* >/dev/null 2>&1 \
-  || fail 'hook replacement left its temporary file'
+for helper in "$staged_hook" "$staged_discover"; do
+  grep -Fq subyard-orca-selection "$helper" \
+    || fail "a staging failure after the helper replacement left the older $helper"
+  [ "$(stat -c %a "$helper")" = 755 ] || fail "the replaced $helper is not executable"
+done
+! ls "$ORCA_TEST_GUEST/usr/local/libexec/subyard"/.orca-sync.* "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration"/.discover.* \
+  >/dev/null 2>&1 || fail 'helper replacement left a temporary file'
 rm -f "$codex_dir"
 mv "$codex_dir.saved" "$codex_dir"
 observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"

@@ -184,8 +184,8 @@ func requirePendingRuntimeOutcome(t *testing.T, outcome releasetransition.Outcom
 		t.Fatalf("pending outcome: %#v", outcome)
 	}
 	for _, yard := range yards {
-		if !strings.Contains(outcome.Message, "yard "+yard+": profile sample runtime failed and is not applied; in that yard, run profile list to diagnose, "+
-			"then fix it and run init, or run profile disable sample and then init; the release is ready") {
+		if !strings.Contains(outcome.Message, "yard "+yard+": profile sample runtime failed, not applied; diagnose: yard -Y "+yard+" profile list; "+
+			"fix it and run yard -Y "+yard+" init, or run yard -Y "+yard+" profile disable sample then init; the release is ready") {
 			t.Fatalf("pending message omits yard %s: %s", yard, outcome.Message)
 		}
 	}
@@ -832,9 +832,9 @@ func TestPendingRecordBindsTheProfilePackage(t *testing.T) {
 	}
 }
 
-// The pending message names the yard once and stays within the record bound for
-// the longest yard name the next step allows; a longer one leaves the yard to
-// that next step instead of losing the record.
+// The pending message gives exact commands for ordinary yard names, names the
+// yard once when that form exceeds the record bound, and leaves a yard name too
+// long even for that to the exact next step instead of losing the record.
 func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 	for _, length := range []int{1, 80, 200, 300, 490} {
 		yard := strings.Repeat("7", length)
@@ -844,15 +844,29 @@ func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 		if err := record.validate(); err != nil {
 			t.Fatalf("yard name of %d bytes: %v (%d-byte message)", length, err, len(message))
 		}
-		if strings.Count(message, yard) > 1 {
-			t.Fatalf("yard name of %d bytes repeats: %q", length, message)
+		exact := "yard " + yard + ": profile orca runtime failed, not applied; diagnose: yard -Y " + yard + " profile list; fix it and run yard -Y " +
+			yard + " init, or run yard -Y " + yard + " profile disable orca then init"
+		once := "yard " + yard + ": profile orca runtime failed and is not applied; in that yard, run profile list to diagnose"
+		switch {
+		case len(exact) <= activationPendingMessageBytes:
+			if message != exact {
+				t.Fatalf("yard name of %d bytes lost the exact commands: %q", length, message)
+			}
+		case len(once) <= activationPendingMessageBytes:
+			if !strings.HasPrefix(message, once) || strings.Count(message, yard) != 1 {
+				t.Fatalf("yard name of %d bytes was not named once: %q", length, message)
+			}
+		default:
+			if strings.Contains(message, yard) {
+				t.Fatalf("yard name of %d bytes stayed in an over-long message: %q", length, message)
+			}
 		}
 		retry := shellquote.Command([]string{"yard", "-Y", yard, "init"})
 		if err := (releasetransition.V2PendingConfiguration{Message: message, Retry: retry}).Validate(); err != nil {
 			t.Fatalf("yard name of %d bytes: invalid finding: %v", length, err)
 		}
 	}
-	if message := runtimePendingMessage(strings.Repeat("7", 80), "orca"); !strings.HasPrefix(message, "yard "+strings.Repeat("7", 80)+": profile orca runtime failed") {
-		t.Fatalf("an 80-byte yard name was not named: %q", message)
+	if message := runtimePendingMessage(strings.Repeat("7", 80), "orca"); !strings.Contains(message, "yard -Y "+strings.Repeat("7", 80)+" profile disable orca then init") {
+		t.Fatalf("an 80-byte yard name lost the exact commands: %q", message)
 	}
 }

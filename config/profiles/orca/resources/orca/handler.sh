@@ -407,14 +407,18 @@ chmod 0644 "$lock"
 chown 0:0 "$lock"
 exec 9>"$lock"
 flock -x 9
-# Replace the hook first and atomically: after any later failure the installed
-# hook skips a yard that does not select Orca and refuses a selected one
-# without the marker, instead of an older release's hook refusing forever.
-install -d -m 0755 "$(dirname "$hook")"
+# Replace the project hook and the discovery helper first, each atomically:
+# after any later failure both skip a yard that does not select Orca and refuse
+# a selected one without the marker, instead of an older release's helper
+# refusing forever or still registering projects.
+install -d -m 0755 "$(dirname "$hook")" "$directory"
 next_hook="$(dirname "$lock")/.orca-sync.$$"
 install -m 0755 "$stage/orca-sync" "$next_hook"
 mv -fT -- "$next_hook" "$hook"
-install -d -m 0755 "$directory" "$(dirname "$discovery_service")" \
+next_discover="$directory/.discover.$$"
+install -m 0755 "$stage/discover" "$next_discover"
+mv -fT -- "$next_discover" "$directory/discover"
+install -d -m 0755 "$(dirname "$discovery_service")" \
   "$(dirname "$codex_profile")" "$(dirname "$codex_bin")"
 rm -f -- "$marker"
 for installed in "$directory"/*.py; do
@@ -422,7 +426,6 @@ for installed in "$directory"/*.py; do
   [ -f "$stage/${installed##*/}" ] || rm -f -- "$installed"
 done
 for source in "$stage"/*.py; do install -m 0644 "$source" "$directory/${source##*/}"; done
-install -m 0755 "$stage/discover" "$directory/discover"
 install -m 0644 "$stage/${discovery_service##*/}" "$discovery_service"
 install -m 0644 "$stage/${discovery_timer##*/}" "$discovery_timer"
 install -m 0644 "$stage/orca-codex-profile" "$codex_profile"
