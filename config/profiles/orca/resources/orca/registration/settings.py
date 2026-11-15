@@ -205,10 +205,6 @@ class _Observed:
             self._seen(self.rpc.runtime_id)
 
 
-class Refused(RpcError):
-    """Orca answered every attempt with a refusal: nothing was applied."""
-
-
 class PassResult(tuple):
     """(state name, reset count, whether an unreadable state was rewritten).
 
@@ -236,8 +232,8 @@ def _set_default_mode(rpc, session, before_send):
             break
         moved = ((result.get("refusal") or {}).get("details") or {}).get("reason") == "leaseMoved"
         if attempt or not moved:
-            # A refusal is an answer from the runtime that took the request: it applied nothing.
-            raise Refused("Orca refused a chat permission reset")
+            # Orca can apply the mode and still answer with a refusal, so the restart stays pending.
+            raise RpcError("Orca refused a chat permission reset")
     if rpc.call("agentSession.options", {"sessionId": session})["current"]["permissionMode"] != "own":
         raise RpcError("Orca did not reset a chat permission mode")
 
@@ -291,7 +287,6 @@ def _reset_pass(rpc, state):
             refused = True
             continue
         attempted = True
-        previous = data["dirty"]
         try:
             _set_default_mode(observed, session, mark_dirty)
             # Record each reset durably so that no chat is ever reset twice.
@@ -299,17 +294,6 @@ def _reset_pass(rpc, state):
             _save_chat_state(state, updated)
             data = updated
             count += 1
-        except Refused:
-            refused = True
-            if data["dirty"] != previous:
-                # Nothing was applied, so this attempt needs no restart. If restoring fails,
-                # the restart stays pending, which is safe.
-                try:
-                    restored = {**data, "dirty": previous}
-                    _save_chat_state(state, restored)
-                    data = restored
-                except OSError:
-                    pass
         except (RpcError, OSError, KeyError, TypeError, AttributeError):
             refused = True
     finished = clean and not refused and observed.runtimes == [runtime]

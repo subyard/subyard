@@ -277,9 +277,11 @@ show is reset even when the other listing fails or Session History is incomplete
 with an unrelated broken history entry. The reset completes only after a pass that saw a
 complete listing, found nothing left to reset, met no refused chat and ran in a later Orca than
 the last reset attempt. Until then, each repair and `yard orca status` warn that the reset is
-incomplete; `yard orca sync` retries it. A chat that never ran a turn and whose tab is closed
-appears in neither listing, and coverage of chats in other workspaces and worktrees has not
-been verified.
+incomplete; `yard orca sync` retries it. Orca can apply a reset and still refuse it, so a
+refused chat also needs an Orca restart: the repair advises switching that chat's mode to Ask,
+and each `orca up` or `yard orca restart` restarts Orca again until the chat is reset or no
+longer has Full access. A chat that never ran a turn and whose tab is closed appears in neither
+listing, and coverage of chats in other workspaces and worktrees has not been verified.
 
 The reset state is kept in `/srv/agents/orca/subyard-claude-chat-permissions.json` (mode 0600):
 the chats already reset, the Orca runtime of the last reset attempt, and whether the reset is
