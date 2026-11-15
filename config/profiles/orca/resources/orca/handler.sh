@@ -1335,10 +1335,10 @@ cmd_status() {
       while IFS= read -r diagnostic; do
         warn "$diagnostic"
       done < <(jq -r '.errors[], .warnings[]' <<<"$report")
-      # Protected records and pending work are expected; only an undetermined removed record warns.
+      # Protected records and pending work are expected; every undetermined record warns.
       while IFS=$'\t' read -r level diagnostic; do
         if [ "$level" = warn ]; then warn "$diagnostic"; else info "$diagnostic"; fi
-      done < <(jq -r '.cleanup[]? | [(if .removedProject and .retention != "protected" and .retention != "pending" then "warn" else "info" end),
+      done < <(jq -r '.cleanup[]? | [(if .retention == "undetermined" then "warn" else "info" end),
         "Orca cleanup pending: " + .path + ": " + .reason + "; " + .nextAction] | @tsv' <<<"$report")
       if jq -e '.discovery' <<<"$report" >/dev/null; then
         info "repository discovery: $(jq -r '.discovery.state + " (generation " + (.discovery.generation | tostring) + ")"' <<<"$report")"
