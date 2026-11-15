@@ -22,8 +22,35 @@ Dependency audits use current vulnerability databases separately from `make lint
 `dependency-audit.yml` runs daily at 04:47 UTC, on manual dispatch, and on pushes changing
 Go module files, either Veranda Cargo lockfile, or the audit workflow. Run
 `bash dev/audit-go.sh` and `bash dev/audit-rust.sh` locally to audit Go and both Rust lockfiles.
-Go vulnerability findings are report-only pending advisory triage; analyzer and installation
-errors still fail. CI publishes the full Go report in the job log; its step summary is
+Go audits block on every symbol-reachable ID outside
+[`dev/govulncheck-allowlist.json`](../dev/govulncheck-allowlist.json), matching govulncheck's
+default symbol-level policy: these are the called findings that make govulncheck's own text
+mode exit 3. Module/package-only findings are shown but do not fail the job or require exemptions.
+Analyzer, installation, malformed policy/report and invalid review-date
+errors also fail. Every allowlist entry needs an `id`, a nonempty `reason` explaining why the
+finding is accepted for Subyard's actual use, and a `review_by` date in `YYYY-MM-DD` form.
+The date remains valid through that UTC day; every expired entry fails, even if its ID no longer
+appears in the scan. Expiry alone turns the scheduled audit red the next UTC day without any code
+change, so review and renew entries before their date. All unlisted IDs and independent policy errors are reported in stable order.
+Allowlist IDs without a symbol finding in the scan produce warnings in stable order in the output
+and step summary; these warnings alone do not fail the job.
+
+Before adding or renewing an entry, run the pinned tool with `-show traces ./...`, inspect the
+upstream advisory and the Subyard call sites, and check for a compatible fixed dependency.
+The tool is cached as `.build/tools/govulncheck-1.1.4-$(go env GOVERSION)` after an audit run.
+Document the affected path and why it is not exercised (or the accepted risk) in the reason;
+set review no more than 92 days after the UTC run date; later dates fail the gate.
+Remove entries when fixed or no longer needed,
+and reassess client-library exemptions whenever Incus usage changes.
+An Incus client-library exemption says nothing about the separately installed Incus daemon.
+The 24 Incus findings are resolved in the v7 major line (fixed there or not affected), while
+the Go advisories record no v6 fixes. This change keeps the v6.23.0 client: the product installs
+the daemon from the LTS-6.0 line, and validating v7 client compatibility with 6.0 daemons belongs
+to a separate migration task.
+Run `TMPDIR=/tmp bash tests/lint-tools.sh` for the host-free policy and audit integration tests;
+the core contract suite already includes this check.
+
+CI publishes the full Go report and policy result in the job log; its step summary is
 capped at 900000 bytes, with a truncation notice pointing to the full job log.
 OSV-Scanner findings remain blocking. These checks need network access; tool downloads and
 Go build/module caches are reused without adding tool dependencies to `go.mod`.

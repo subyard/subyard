@@ -6,8 +6,9 @@ version=1.1.4
 tools="$ROOT/.build/tools"
 mkdir -p "$tools"
 report="$(mktemp "$tools/govulncheck-report.XXXXXX")"
+findings="$(mktemp "$tools/govulncheck-findings.XXXXXX")"
 download=
-trap 'rm -f -- "$report"; if [ -n "$download" ]; then rm -rf -- "$download"; fi' EXIT
+trap 'rm -f -- "$report" "$findings"; if [ -n "$download" ]; then rm -rf -- "$download"; fi' EXIT
 
 audit() {
   local compiler tool status=0
@@ -21,13 +22,13 @@ audit() {
     install -m 0755 "$download/govulncheck" "$download/tool" || return "$?"
     mv "$download/tool" "$tool" || return "$?"
   fi
-  # Execute directly: go run converts the analyzer's finding exit code 3 to 1.
-  "$tool" ./... || status=$?
-  if [ "$status" -eq 3 ]; then
-    printf '\nVulnerability findings are report-only pending advisory triage.\n'
-    return 0
-  fi
-  return "$status"
+  # JSON mode exits zero for findings; only the reviewed policy decides admission.
+  "$tool" -format json ./... > "$findings" || return "$?"
+  # Render the same human-readable report without running another scan. Conversion's
+  # exit 3 means findings were rendered, not that the allowlist policy passed.
+  "$tool" -mode convert < "$findings" || status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then return "$status"; fi
+  python3 -I "$ROOT/dev/check-govulncheck.py" "$findings" "$ROOT/dev/govulncheck-allowlist.json"
 }
 
 status=0
