@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -914,5 +915,47 @@ func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 	}
 	if message := runtimePendingMessage(strings.Repeat("7", 80), "orca"); !strings.Contains(message, "yard -Y "+strings.Repeat("7", 80)+" profile disable orca then init") {
 		t.Fatalf("an 80-byte yard name lost the exact commands: %q", message)
+	}
+}
+
+// While a yard waits for its init because of a declared runtime's recorded
+// failure, the operator's second exit stays open: disabling that profile in
+// the pending yard is admitted and authors the reduced selection, without a
+// release transition. The following init then removes the runtime and retires
+// the record (TestRuntimeRemovalResolvesThePendingYard and
+// TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard).
+func TestProfileDisableIsAdmittedOnAPendingRuntimeYard(t *testing.T) {
+	if os.Getenv("SUBYARD_SOURCE_QUERY_TOOLING_ROOT") != "" {
+		t.Skip("typed process-protocol fixture")
+	}
+	program, _, home := completedSourceAuthoringFixture(t, false, map[string]string{
+		"config/fixture-pending-runtime": "fixture\n",
+		"config/profiles/fixture-selected/profile.json": `{"schema_version":1,"selected_provision_only":true,` +
+			`"runtime":{"activation_id":"fixture-runtime","handler":"runtime.sh","failure_scope":"yard"}}`,
+		"config/profiles/fixture-selected/runtime.sh": "#!/bin/sh\nexit 99\n",
+	})
+	path := filepath.Join(home, "yards/default/config.env")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte("ENVIRONMENT_PROFILES=fixture-selected\n"), 0o600)
+	outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "default")
+	if err != nil || !program.pendingIntegrationConfigurationGate(outcome, inspection) ||
+		inspection.Blockers[0].Resource != "activation.fixture-runtime.pending-configuration" {
+		t.Fatalf("fixture is not a pending declared runtime: %#v %v", outcome, err)
+	}
+	history := activationRepairHistory(t, program.options.RepositoryRoot, home)
+	options := program.options
+	var output bytes.Buffer
+	options.Arguments, options.Stdout, options.Stderr = []string{"-Y", "default", "profile", "disable", "fixture-selected", "--yes"}, &output, &output
+	if code := runAliasRepairFixture(t, options); code != 0 {
+		t.Fatalf("profile disable on the pending yard: %d %s", code, output.String())
+	}
+	loaded, err := program.loadSelectionRepair("default")
+	if err != nil || strings.Contains(loaded.Environment["ENVIRONMENT_PROFILES"], "fixture-selected") {
+		t.Fatalf("profile disable did not author the reduced selection: %q %v", loaded.Environment["ENVIRONMENT_PROFILES"], err)
+	}
+	if !reflect.DeepEqual(history, activationRepairHistory(t, program.options.RepositoryRoot, home)) {
+		t.Fatal("profile disable on the pending yard changed release history")
 	}
 }

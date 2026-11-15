@@ -39,7 +39,7 @@ def read_only_commands(package):
 
 def read_only_stdin_commands(package):
     removal = current_removal(package)
-    return ([] if removal is None else [(['exec', 'yard', '--project', 'subyard', '--', 'bash', '-se', '--', 'observe', '/', None],
+    return ([] if removal is None else [(['exec', 'yard', '--project', 'subyard', '--', 'bash', '-se', '--', 'observe', '/', None, 'dev'],
                                          removal.read_bytes(), removed_observation(), 0, REMOVAL_DIGEST)]
             ) + registration_stdin_commands(package)
 

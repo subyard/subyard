@@ -891,10 +891,33 @@ service_enabled() {
 ORCA_REMOVAL_DESIRED="$(printf 'subyard-orca-runtime-removed-v1\n' | sha256sum | cut -d ' ' -f 1)"
 ORCA_REMOVAL_CONSEQUENCE="Orca stops and its wiring is removed from this yard; its state under /srv/agents/orca and the orca-ide package are kept"
 
+# The owner route of an unselected yard: absent, owned (a device whose receipt
+# matches, or only its metadata), or a refusal this yard must resolve: an
+# invalid receipt or an unmarked orca-server device, which is never removed.
+# Sets ORCA_REMOVAL_ROUTE and ORCA_REMOVAL_DEVICE; fails only when Incus cannot be read.
+removal_route_state() {
+  local marker saved devices
+  marker="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server "${PROJ[@]}")" || return 1
+  saved="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.deferred_publication.orca-server "${PROJ[@]}")" || return 1
+  devices="$(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}")" || return 1
+  ORCA_REMOVAL_DEVICE=0
+  if grep -Fxq "$ORCA_DEVICE" <<<"$devices"; then
+    ORCA_REMOVAL_DEVICE=1
+    if [ -z "$marker" ]; then ORCA_REMOVAL_ROUTE=unowned; return 0; fi
+    if ! [[ "$marker" =~ ^v1:[0-9a-f]{64}$ ]] || ! route_receipt_matches; then ORCA_REMOVAL_ROUTE=invalid; return 0; fi
+  elif [ -z "$marker" ] && [ -z "$saved" ]; then
+    ORCA_REMOVAL_ROUTE=absent; return 0
+  elif [ -n "$marker" ] && ! [[ "$marker" =~ ^v1:[0-9a-f]{64}$ ]]; then
+    ORCA_REMOVAL_ROUTE=invalid; return 0
+  fi
+  ORCA_REMOVAL_ROUTE="owned:$(printf '%s\n%s\n%s\n' "$ORCA_REMOVAL_DEVICE" "$marker" "$saved" | sha256sum | cut -d ' ' -f 1)"
+}
+
 observe_removal() {
   local observation route
-  observation="$(yexec bash -se -- observe / "$ORCA_REMOVAL_DESIRED" < "$RESOURCE_DIR/removal.bash")" || return 1
-  route="$(orca_route_state)" || return 1
+  observation="$(yexec bash -se -- observe / "$ORCA_REMOVAL_DESIRED" "${DEV_USER:-dev}" < "$RESOURCE_DIR/removal.bash")" || return 1
+  removal_route_state || return 1
+  route="$ORCA_REMOVAL_ROUTE"
   if [ "$route" = absent ]; then
     if [ "$(jq -r .state <<<"$observation")" = current ]; then
       printf '%s\n' "$observation"
@@ -907,28 +930,50 @@ observe_removal() {
   jq -c --arg consequence "$ORCA_REMOVAL_CONSEQUENCE" '. + {consequence:$consequence}' <<<"$observation"
 }
 
-# Remove every independent part and report all refusals. A failed host route
-# removal stays blocking; failures of guest commands that ran affect this yard.
+# Remove every independent part and report all refusals. Incus failures, a
+# guest that cannot be reached and ownership refusals inside the guest stay
+# blocking. A guest removal command that ran and failed, and a route this yard
+# must resolve itself, leave only this yard pending its init.
 apply_removal() {
-  local route host_refused=0 guest_refused=0
-  if route="$(orca_route_state)"; then
-    if [ "$route" != absent ] && ! remove_route; then
-      warn "Orca removal: could not remove the owner route"
-      host_refused=1
-    fi
+  local output="" class blocking=0 yard_local=0
+  if ! removal_route_state; then
+    warn "Orca removal: the owner route cannot be read"
+    blocking=1
   else
-    warn "Orca removal: the owner route metadata is invalid"
-    host_refused=1
+    case "$ORCA_REMOVAL_ROUTE" in
+      absent) ;;
+      unowned)
+        warn "Orca removal: refusing to remove the unmarked device '$ORCA_DEVICE'; remove it from the yard instance if it is not needed, then run '$(yard_cmd_hint) init'"
+        yard_local=1 ;;
+      invalid)
+        warn "Orca removal: the owner route receipt is invalid; inspect device '$ORCA_DEVICE' and user.subyard.resource.orca-server on the yard instance, then run '$(yard_cmd_hint) init'"
+        yard_local=1 ;;
+      owned:*)
+        # The receipt proves ownership of the device, so it stays until the device is gone.
+        if [ "$ORCA_REMOVAL_DEVICE" = 1 ] && ! incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null; then
+          warn "Orca removal: could not remove the owner route"; blocking=1
+        fi
+        [ "$blocking" -eq 1 ] || for key in user.subyard.resource.orca-server user.subyard.deferred_publication.orca-server; do
+          if [ -n "$(incus config get "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}")" ] &&
+            ! incus config unset "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}" >/dev/null; then
+            warn "Orca removal: could not clear $key"; blocking=1
+          fi
+        done
+        ;;
+    esac
   fi
   yard_local_begin
-  yexec bash -se -- apply / < "$RESOURCE_DIR/removal.bash" || guest_refused=1
-  if [ "$(daemon_scopes)" != "" ] && ! daemon_scopes stop >/dev/null; then
-    warn "Orca removal: Orca daemon scopes could not be stopped"
-    guest_refused=1
-  fi
+  output="$(yexec bash -se -- apply / "${DEV_USER:-dev}" < "$RESOURCE_DIR/removal.bash")" || {
+    class="$(cat -- "$ORCA_GUEST_STEP_STATUS" 2>/dev/null || true)"
+    if [ "$class" = guest-failed ] && ! grep -q '^subyard-orca-removal-blocking ' <<<"$output"; then
+      yard_local=1
+    else
+      blocking=1
+    fi
+  }
   yard_local_end
-  if [ "$host_refused" -eq 1 ]; then die "Orca removal is incomplete; retry yard init"; fi
-  if [ "$guest_refused" -eq 1 ]; then
+  if [ "$blocking" -eq 1 ]; then die "Orca removal is incomplete; retry yard init"; fi
+  if [ "$yard_local" -eq 1 ]; then
     yard_local_begin
     printf 'guest-failed\n' >"$ORCA_GUEST_STEP_STATUS"
     exit 1

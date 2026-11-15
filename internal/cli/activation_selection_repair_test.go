@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -485,6 +486,18 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 		engine = strings.Replace(engine, `"consequences":["repair release activation"]},"outcome"`, `"consequences":["repair release activation"]},"blockers":[{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"fixture unowned selected artifact","retry":"move fixture file aside"}],"outcome"`, 1)
 		testkit.WriteFile(t, enginePath, []byte(engine), 0700)
 
+	}
+	if _, pending := extraAssets["config/fixture-pending-runtime"]; pending {
+		// A declared yard-scoped runtime's recorded failure of the default yard,
+		// as completed readiness reports it.
+		enginePath := filepath.Join(root, "bin/yard-engine")
+		retry := strings.ReplaceAll(shellquote.Command([]string{"yard", "-Y", "default", "init"}), "'", `'\''`)
+		engine := string(mustReadConfigFixture(t, enginePath))
+		engine = strings.Replace(engine, `"status":"migration-required"`, `"status":"operator-action-required"`, 1)
+		engine = strings.Replace(engine, `"code":"transition-required"`, `"code":"dependency-unavailable"`, 1)
+		engine = strings.Replace(engine, `"message":"activation drift","retry":"run yard update"`, `"message":"yard default: profile fixture-selected runtime failed","retry":"`+retry+`","transaction":"tx-0123456789abcdef"`, 1)
+		engine = strings.Replace(engine, `"consequences":["repair release activation"]},"outcome"`, `"consequences":["repair release activation"]},"blockers":[{"code":"dependency-unavailable","resource":"activation.fixture-runtime.pending-configuration","message":"yard default: profile fixture-selected runtime failed","retry":"`+retry+`"}],"outcome"`, 1)
+		testkit.WriteFile(t, enginePath, []byte(engine), 0700)
 	}
 	if _, pending := extraAssets["config/fixture-pending-beside-drift"]; pending {
 		// Activation drift of the completed release with another yard's pending

@@ -1253,14 +1253,22 @@ still answers; Incus transport errors, host staging, file pushes, safety guards 
 in the same apply stay blocking. The Orca handler proves this by running each such command through a
 guest wrapper that maps the command's failure to status 200, which Incus never returns.
 A yard that does not select Orca converges to no Orca wiring: its runtime observes any wiring this
-profile or an older release installed as `stale`, with a removal consequence, and a yard without
-it as `current` at the removal digest with `ownership_absent`. The apply stops and disables the Orca service and discovery units, removes the owner
-route, the managed nft ingress table and every fixed Orca helper, hook, marker, lock and unit file,
-from any partial state and without running an installed Orca helper. Orca state under
-`/srv/agents/orca` and the `orca-ide` package are kept. Each independent removal refusal is
-reported; a failed guest command of a reachable yard is yard-local, a host route failure stays
-blocking. So `yard -Y NAME profile disable orca` and then init always remove Orca's wiring and
-clear its pending item; the removed project hook simply leaves init's approved hook set.
+profile or an older release installed, including running Orca daemon or terminal scopes of the
+development user, as `stale` with a removal consequence, and a yard without it as `current` at the
+removal digest with `ownership_absent`. A failed systemd, nft, user-manager or Incus query fails the
+observation; it is never read as absence. The apply removes the owner route only when its receipt
+proves ownership, stops and then disables the Orca service and discovery units, removes the managed
+nft ingress table only after the service is stopped, removes every fixed Orca helper, hook, marker,
+lock and unit file (the unit files and the helpers the main unit runs only once it is stopped), and
+stops the Orca scopes. It runs no Orca helper itself; stopping the service runs the unit's own stop
+commands. Orca state under `/srv/agents/orca` and the `orca-ide` package are kept. Each independent
+refusal is reported. A guest removal command that ran and failed, a malformed route receipt and an
+unmarked `orca-server` device leave only that yard pending its init, with a next step; a guest that
+cannot be reached, an Incus failure and an unowned nft table stay blocking. The ordinary release
+activation of `yard update` and the repair of `yard migrate` apply the same removal to every
+deselected yard, and their plans disclose it. So `yard -Y NAME profile disable orca` and then init
+always remove Orca's wiring and clear its pending item; the removed project hook simply leaves
+init's approved hook set.
 
 The owner records the typed failure under the configuration root as
 `activation-pending/v1/YARD/OWNER.json`, bound to the yard instance, the actual and desired

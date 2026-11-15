@@ -124,7 +124,9 @@ case "${1:-}" in
     fi
     case "${2:-} ${3:-}" in
       'device list')
-        [ -f "$route" ] && printf 'orca-server\n'
+        # An empty device list succeeds, as Incus does.
+        [ ! -e "$state_root/fail-device-list" ] || exit 1
+        if [ -f "$route" ]; then printf 'orca-server\n'; fi
         ;;
       'device get')
         [ -f "$route" ] || exit 1
@@ -174,39 +176,72 @@ case "${1:-}" in
       case " $* " in *' bash -s'*|*' /usr/bin/python3 -I -B - '*) ;; *) cat >/dev/null ;; esac
     fi
     case " $* " in
-      *' bash -se -- observe / '*|*' bash -se -- apply / ')
-        # The fixed-path removal of an unselected Orca, under the guest root.
+      *' bash -se -- observe / '*|*' bash -se -- apply / dev ')
+        # The fixed-path removal of an unselected Orca, under the guest root,
+        # against a small systemd, user-manager and unit model.
         arguments=("$@")
         for index in "${!arguments[@]}"; do
           [ "${arguments[$index]}" = -- ] && command=("${arguments[@]:$((index + 1))}")
         done
         command[1]="$guest"
-        export ORCA_TEST_STATE_ROOT="$state_root" ORCA_TEST_SERVICE_FILE="$service"
+        export ORCA_TEST_STATE_ROOT="$state_root" ORCA_TEST_SERVICE_FILE="$service" ORCA_TEST_GUEST_ROOT="$guest"
         systemctl() {
-          printf 'removal systemctl %s\n' "$*" >>"$ORCA_TEST_STATE_ROOT/commands.log"
-          local action="$1"
-          shift
-          case "$action" in
+          local root="$ORCA_TEST_STATE_ROOT" unit
+          printf 'removal systemctl %s\n' "$*" >>"$root/commands.log"
+          [ ! -e "$root/fail-removal-systemd" ] || return 1
+          case "$*" in
             daemon-reload) return 0 ;;
-            disable)
-              [ ! -e "$ORCA_TEST_STATE_ROOT/fail-removal-disable" ] || return 1
-              case "${*: -1}" in
-                subyard-orca.service) rm -f "$ORCA_TEST_SERVICE_FILE" ;;
-                subyard-orca-discovery.timer) rm -f "$ORCA_TEST_STATE_ROOT/discovery-active" "$ORCA_TEST_STATE_ROOT/discovery-enabled" ;;
-              esac
-              ;;
-            is-active|is-enabled)
-              case "$action ${*: -1}" in
-                *' subyard-orca.service') [ -f "$ORCA_TEST_SERVICE_FILE" ] ;;
-                'is-active subyard-orca-discovery.timer') [ -f "$ORCA_TEST_STATE_ROOT/discovery-active" ] ;;
-                'is-enabled subyard-orca-discovery.timer') [ -f "$ORCA_TEST_STATE_ROOT/discovery-enabled" ] ;;
-                *) return 1 ;;
-              esac
-              ;;
+            'show user@1234.service --property=ActiveState --value')
+              [ ! -e "$root/fail-manager-state" ] || return 1
+              if [ -e "$root/no-user-manager" ]; then printf 'inactive\n'; else printf 'active\n'; fi ;;
+            '--user list-units '*)
+              [ ! -e "$root/fail-user-bus" ] || return 1
+              if [ -e "$root/daemon-scope" ]; then
+                printf 'orca-daemon-fixture.scope loaded active running fixture\n'
+                printf 'orca_pty_orca_daemon_fixture_1.scope loaded active running fixture\n'
+              fi ;;
+            '--user stop -- '*)
+              [ ! -e "$root/fail-scope-stop" ] || return 1
+              rm -f "$root/daemon-scope" ;;
+            'show '*' --property=ActiveState --value')
+              unit="$2"
+              case "$unit" in
+                subyard-orca.service) if [ -f "$ORCA_TEST_SERVICE_FILE" ]; then printf 'active\n'; else printf 'inactive\n'; fi ;;
+                subyard-orca-discovery.timer) if [ -f "$root/discovery-active" ]; then printf 'active\n'; else printf 'inactive\n'; fi ;;
+                *) printf 'inactive\n' ;;
+              esac ;;
+            'show '*' --property=UnitFileState --value')
+              unit="$2"
+              case "$unit" in
+                subyard-orca.service)
+                  if [ -f "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$unit" ] && [ ! -e "$root/main-disabled" ]; then printf 'enabled\n'; else printf '\n'; fi ;;
+                subyard-orca-discovery.timer) if [ -f "$root/discovery-enabled" ]; then printf 'enabled\n'; else printf '\n'; fi ;;
+                *) printf '\n' ;;
+              esac ;;
+            'stop '*)
+              unit="$2"
+              case "$unit" in
+                subyard-orca.service)
+                  [ ! -e "$root/fail-removal-stop" ] || return 1
+                  # The unit's own stop removes its owned ingress guard.
+                  rm -f "$ORCA_TEST_SERVICE_FILE"
+                  [ "$(cat "$root/nft-mode" 2>/dev/null)" = foreign ] || rm -f "$root/ingress" ;;
+                subyard-orca-discovery.timer) rm -f "$root/discovery-active" ;;
+              esac ;;
+            'disable '*)
+              unit="$2"
+              # Disabling a unit whose file is gone fails, as systemd does.
+              [ -f "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$unit" ] || return 1
+              case "$unit" in
+                subyard-orca.service) touch "$root/main-disabled" ;;
+                subyard-orca-discovery.timer) rm -f "$root/discovery-enabled" ;;
+              esac ;;
             *) return 1 ;;
           esac
         }
-        export -f systemctl
+        id() { [ "$*" = '-u dev' ] && printf '1234\n'; }
+        runuser() { shift 6; "$@"; }
+        export -f systemctl id runuser
         /bin/bash -se -- "${command[@]}"
         ;;
       *' bash -se -- dev list '*|*' bash -se -- dev stop '*)
@@ -408,6 +443,7 @@ case "${1:-}" in
       *' systemctl is-active --quiet subyard-orca.service '*)
         [ -f "$service" ]
         ;;
+      *' systemctl enable subyard-orca.service '*) rm -f "$state_root/main-disabled" ;;
       *' systemctl enable --now subyard-orca-discovery.timer '*)
         touch "$state_root/discovery-enabled" "$state_root/discovery-active"
         ;;
@@ -491,6 +527,9 @@ state_root="$(cd "$(dirname "$0")/.." && pwd)"
 printf 'nft %s\n' "$*" >>"$state_root/commands.log"
 case "${1:-} ${2:-}" in
   'list table') [ -f "$state_root/ingress" ] ;;
+  'list tables')
+    [ ! -e "$state_root/fail-nft-list" ] || exit 1
+    [ ! -f "$state_root/ingress" ] || printf 'table inet subyard_orca\n' ;;
   'list chain')
     [ -f "$state_root/ingress" ] || exit 1
     mode="$(cat "$state_root/nft-mode" 2>/dev/null || printf owned)"
@@ -1788,38 +1827,115 @@ done
 push_count="$(cat "$ORCA_TEST_PUSH_COUNTER")"
 assert_removed_observation "$(unselected_observe)" 'uninstalled unselected Orca'
 [ "$(cat "$ORCA_TEST_PUSH_COUNTER")" -eq "$push_count" ] || fail 'unselected observation wrote guest files'
-# Each independent removal refusal is reported together; other parts are still
-# removed, and a failed guest command of a reachable yard is yard-local.
+removal_refused() { # <output> <blocking|yard-local> <context>
+  if unselected_apply "$observation" >"$1" 2>&1; then
+    cat "$1" >&2; fail "$3 was not refused"
+  fi
+  if [ "$2" = yard-local ]; then
+    grep -Fxq "$typed_record apply yard-local" "$1" || { cat "$1" >&2; fail "$3 was not yard-local"; }
+  else
+    ! grep -Fq "$typed_record" "$1" || { cat "$1" >&2; fail "$3 was reported as yard-local"; }
+  fi
+}
+retry_removal() { # <context>
+  observation="$(unselected_observe)" || fail "$1: removal could not be observed again"
+  # The core applies only a stale observation.
+  if [ "$(jq -r .state <<<"$observation")" = stale ]; then
+    unselected_apply "$observation" >/dev/null || fail "$1: removal did not finish on retry"
+  fi
+  assert_orca_removed "$1"
+}
+# A main unit that does not stop keeps its ingress guard, unit and helper files,
+# while every other part is removed; the guest refusal is yard-local.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+touch "$TMP/fail-removal-stop"
+observation="$(unselected_observe)"
+removal_refused "$TMP/removal-stop.out" yard-local 'a main unit that did not stop'
+grep -Fq 'Orca removal: could not stop subyard-orca.service' "$TMP/removal-stop.out" &&
+  grep -Fq 'Orca removal: subyard-orca.service is still running' "$TMP/removal-stop.out" \
+  || { cat "$TMP/removal-stop.out" >&2; fail 'a failed stop was not reported'; }
+[ -e "$ORCA_TEST_INGRESS" ] && [ -e "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service" ] &&
+  [ -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-ingress" ] \
+  || fail 'removal dropped the ingress guard or unit files of a running Orca'
+[ ! -e "$ORCA_TEST_ROUTE" ] && [ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] \
+  || fail 'a failed stop stopped the other removal steps'
+rm -f "$TMP/fail-removal-stop"
+retry_removal 'removal after a failed stop'
+# A unit whose file an earlier partial removal deleted still stops: stop and
+# disable are separate, and disable runs only for an enabled unit.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+rm -f "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service"
+observation="$(unselected_observe)"
+unselected_apply "$observation" >/dev/null || fail 'removal of a running unit without its file failed'
+assert_orca_removed 'removal of a running unit without its file'
+# Orca daemon scopes of the development user are part of the removal. An
+# unreadable user manager fails observation closed; a scope that does not stop
+# is yard-local and keeps the yard unconverged until it is gone.
+touch "$TMP/daemon-scope"
+observation="$(unselected_observe)"
+jq -e '.state == "stale"' <<<"$observation" >/dev/null || fail 'a running Orca daemon scope was observed as removed'
+touch "$TMP/fail-user-bus"
+if unselected_observe >"$TMP/removal-scopes-unreadable.out" 2>&1; then fail 'an unreadable user manager was observed as removed'; fi
+rm -f "$TMP/fail-user-bus"
+touch "$TMP/fail-scope-stop"
+removal_refused "$TMP/removal-scopes.out" yard-local 'a daemon scope that did not stop'
+grep -Fq 'Orca removal: Orca daemon scopes of dev are still running' "$TMP/removal-scopes.out" \
+  || { cat "$TMP/removal-scopes.out" >&2; fail 'a running daemon scope was not reported'; }
+jq -e '.state == "stale"' <<<"$(unselected_observe)" >/dev/null || fail 'a remaining daemon scope was observed as removed'
+rm -f "$TMP/fail-scope-stop"
+retry_removal 'removal after a daemon scope stop failure'
+[ ! -e "$TMP/daemon-scope" ] || fail 'removal left an Orca daemon scope'
+# Failed inspections never read as absence.
+for injected in fail-removal-systemd fail-nft-list fail-manager-state; do
+  touch "$TMP/$injected"
+  if unselected_observe >"$TMP/removal-$injected.out" 2>&1; then
+    fail "a failed inspection ($injected) was observed as removed"
+  fi
+  rm -f "$TMP/$injected"
+done
+# An unowned nft table is an ownership refusal: it stays blocking and is kept,
+# while the other parts are still removed.
 ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
 printf foreign >"$TMP/nft-mode"
-touch "$TMP/fail-removal-disable"
 observation="$(unselected_observe)"
-if unselected_apply "$observation" >"$TMP/removal-refused.out" 2>&1; then
-  fail 'removal concealed its refusals'
-fi
-grep -Fq 'Orca removal: could not stop and disable subyard-orca.service' "$TMP/removal-refused.out" &&
-  grep -Fq 'Orca removal: refusing to remove the unowned nft table inet subyard_orca' "$TMP/removal-refused.out" \
-  || { cat "$TMP/removal-refused.out" >&2; fail 'removal did not report every independent refusal'; }
-grep -Fxq "$typed_record apply yard-local" "$TMP/removal-refused.out" \
-  || fail 'a failed guest removal command was not reported as yard-local'
-[ ! -e "$ORCA_TEST_ROUTE" ] && [ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] \
-  || fail 'a removal refusal stopped the other removal steps'
-rm -f "$TMP/nft-mode" "$TMP/fail-removal-disable" "$TMP/ingress"
+removal_refused "$TMP/removal-foreign-table.out" blocking 'an unowned nft table'
+grep -Fq 'Orca removal: refusing to remove the unowned nft table inet subyard_orca' "$TMP/removal-foreign-table.out" \
+  || { cat "$TMP/removal-foreign-table.out" >&2; fail 'an unowned nft table was not reported'; }
+[ -e "$ORCA_TEST_INGRESS" ] || fail 'removal deleted an unowned nft table'
+[ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] || fail 'an ownership refusal stopped the other removal steps'
+rm -f "$TMP/nft-mode" "$TMP/ingress"
+retry_removal 'removal after an unowned nft table'
+# A guest the removal cannot reach stays blocking.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
 observation="$(unselected_observe)"
-unselected_apply "$observation" >/dev/null || fail 'removal did not finish after its refusals were resolved'
-assert_orca_removed 'repeated removal'
-# A host route failure stays blocking: it reports no yard-local record.
+touch "$TMP/fail-guest-transport"
+removal_refused "$TMP/removal-transport.out" blocking 'an unreachable guest'
+rm -f "$TMP/fail-guest-transport"
+retry_removal 'removal after a transport failure'
+# A host route failure stays blocking.
 ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
 touch "$TMP/fail-route-remove"
 observation="$(unselected_observe)"
-if unselected_apply "$observation" >"$TMP/removal-route.out" 2>&1; then
-  fail 'removal concealed a host route failure'
-fi
-! grep -Fq "$typed_record" "$TMP/removal-route.out" || fail 'a host route removal failure was reported as yard-local'
+removal_refused "$TMP/removal-route.out" blocking 'a host route removal failure'
+[ -n "$(cat "$TMP/config-user.subyard.resource.orca-server" 2>/dev/null)" ] \
+  || fail 'a failed route removal dropped the receipt that proves its ownership'
 rm -f "$TMP/fail-route-remove"
-observation="$(unselected_observe)"
-unselected_apply "$observation" >/dev/null || fail 'removal did not finish after the route failure'
-assert_orca_removed 'removal after a route failure'
+retry_removal 'removal after a route failure'
+# A malformed receipt and an unmarked orca-server device are never removed and
+# do not block other yards: removal observes them, refuses for this yard only
+# and names the next step.
+for route in invalid unowned; do
+  printf 'tcp:127.0.0.1:17678\ntcp:127.0.0.1:6768\n' >"$ORCA_TEST_ROUTE"
+  if [ "$route" = invalid ]; then printf 'not-a-receipt' >"$TMP/config-user.subyard.resource.orca-server"; fi
+  observation="$(unselected_observe)" || fail "an $route owner route failed observation"
+  jq -e '.state == "stale"' <<<"$observation" >/dev/null || fail "an $route owner route was observed as removed"
+  removal_refused "$TMP/removal-$route-route.out" yard-local "an $route owner route"
+  grep -Fq "then run 'yard init'" "$TMP/removal-$route-route.out" \
+    || grep -Fq 'then run' "$TMP/removal-$route-route.out" || { cat "$TMP/removal-$route-route.out" >&2; fail "an $route owner route named no next step"; }
+  [ -e "$ORCA_TEST_ROUTE" ] || fail "removal deleted an $route orca-server device"
+  rm -f "$ORCA_TEST_ROUTE" "$TMP/config-user.subyard.resource.orca-server"
+done
+assert_removed_observation "$(unselected_observe)" 'removal after the route was resolved'
 
 # Run the profile component's filesystem, wire and reconciliation contract tests in the core gate.
 python3 -B -m unittest discover -s "$ROOT/config/profiles/orca/tests/orca_registration"
