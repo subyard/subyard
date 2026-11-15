@@ -84,13 +84,16 @@ seed_sources() {
   sudo -n install -d -o "$OPERATOR" -g "$OPERATOR" -m 0700 "$GIT_ROOT"
   operator_env bash -c 'printf "%s\n" "$2" > "$1/.marker"; chmod 0600 "$1/.marker"' _ "$GIT_ROOT" "$MARKER"
   host_id="disabled-components-$TOKEN"
+  # The anchor seed selects Claude instead of Codex: the published Codex hook reads
+  # anonymous GitHub REST metadata, whose shared quota fails hosted runners.
+  # Codex is selected only after the candidate is installed.
   operator_env bash -c '
     set -eu
     root=$1; host=$2
     install -d -m 0700 "$root/source/hosts/$host/yards/default"
     printf "{\"schemaVersion\":1}\n" > "$root/source/subyard-config.json"
-    printf "CODING_TOOL_INTEGRATIONS=\047codex opencode\047\n" > "$root/source/hosts/$host/config.env"
-    printf "CODING_TOOL_INTEGRATIONS=codex\n" > "$root/source/hosts/$host/yards/default/config.env"
+    printf "CODING_TOOL_INTEGRATIONS=\047claude opencode\047\n" > "$root/source/hosts/$host/config.env"
+    printf "CODING_TOOL_INTEGRATIONS=claude\n" > "$root/source/hosts/$host/yards/default/config.env"
     find "$root/source" -type f -exec chmod 0600 {} +
     git -C "$root/source" init -q
     git -C "$root/source" add -- .
@@ -442,10 +445,10 @@ prepare_acceptance() {
   assert_disabled default
   assert_disabled hermes
   assert_inventory default 'local overrides' '[]' local-disabled
-  assert_inventory hermes 'local overrides' '["codex"]' local-disabled
+  assert_inventory hermes 'local overrides' '["claude"]' local-disabled
   # Supported resolver views prove absence restores host Git and explicit empty masks it.
   operator_yard -Y hermes config unset CODING_TOOL_INTEGRATIONS --scope yard --local --yes
-  assert_inventory hermes 'Git settings' '["codex","opencode"]' git-fallback
+  assert_inventory hermes 'Git settings' '["claude","opencode"]' git-fallback
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
   assert_inventory hermes 'local overrides' '[]' local-empty
   # Selection is init-owned: a ready release stays ready while its repair keeps the
@@ -459,7 +462,7 @@ prepare_acceptance() {
   { [ "$rc" != 0 ] && grep -Fq 'confirmation required' "$STATE_ROOT/all-local-plan.txt" &&
     grep -Fxq '  yard default: integration settings current' "$STATE_ROOT/all-local-plan.txt" &&
     grep -Fxq '  yard hermes:' "$STATE_ROOT/all-local-plan.txt" &&
-    grep -Fxq '    CODING_TOOL_INTEGRATIONS  codex -> (empty)' "$STATE_ROOT/all-local-plan.txt" &&
+    grep -Fxq '    CODING_TOOL_INTEGRATIONS  claude -> (empty)' "$STATE_ROOT/all-local-plan.txt" &&
     grep -Fq 'release.init.hermes' "$STATE_ROOT/all-local-plan.txt" &&
     ! grep -Fq 'release.init.default' "$STATE_ROOT/all-local-plan.txt"; } \
     || { cat "$STATE_ROOT/all-local-plan.txt"; die 'all-local repair plan omitted distinct pending selection per yard'; }
