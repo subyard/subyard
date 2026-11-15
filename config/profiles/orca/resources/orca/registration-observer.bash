@@ -4,13 +4,20 @@ desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; unit="$7"
 # orca-ide package alone is not an installed Orca contract.
 discovery_service="$8"; discovery_timer="$9"; shift 9
 codex_profile="$1"; codex_bin="$2"; shift 2
-present=0
-# Profile-owned contract paths may not be symbolic links.
+present=0 unsafe=""
+# Profile-owned contract paths may not be symbolic links. One is an explicit
+# stale installation, never current, so its apply refuses inside the guest and
+# `orca remove` can take it out.
 for artifact in "$unit" "$hook" "$directory" "$marker" "$lock" \
   "$discovery_service" "$discovery_timer" "$codex_profile" "$codex_bin" "$directory"/*.py; do
-  [ ! -L "$artifact" ] || { echo 'Orca runtime contract contains an unsafe symbolic link' >&2; exit 1; }
+  if [ -L "$artifact" ]; then unsafe+="unsafe-symbolic-link $artifact"$'\n'; present=1; continue; fi
   [ ! -e "$artifact" ] || present=1
 done
+if [ -n "$unsafe" ]; then
+  echo 'Orca runtime contract contains an unsafe symbolic link' >&2
+  printf '{"state":"stale","actual":"%s","desired":"%s"}\n' "$(printf '%s' "$unsafe" | sha256sum | awk '{print $1}')" "$desired"
+  exit 0
+fi
 if [ "$present" = 0 ]; then
   printf '{"state":"absent","actual":"","desired":""}\n'
   exit 0

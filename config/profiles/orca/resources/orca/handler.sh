@@ -846,6 +846,49 @@ observe_runtime_contract() {
     '.state = "stale" | .actual = $actual | .consequence = $consequence | if $diagnostics == "1" then .diagnostics = ([{parameter:"orca.main-unit",installed:"changed",desired:"current"}] + (if $registration_stale then [{parameter:"orca.registration",installed:"unknown",desired:"current"}] else [] end)) else . end' <<<"$observation"
 }
 
+# The observation bound to the native project catalog of a running Orca. A
+# running Orca whose catalog fingerprint is unavailable is an explicit stale
+# installation, never current with a conditional binding: its apply then ends
+# in the typed yard-local failure instead of blocking the release.
+observe_bound_runtime_contract() {
+  local observation hook_binding="" report
+  observation="$(observe_runtime_contract)" || return 1
+  if [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] &&
+    yexec systemctl is-active --quiet "$ORCA_UNIT"; then
+    report="$(project_registration_report source)" || report=""
+    hook_binding="$(jq -r '.catalogDigest // empty' <<<"$report" 2>/dev/null)" || hook_binding=""
+    if ! [[ "$hook_binding" =~ ^[0-9a-f]{64}$ ]]; then
+      [[ "$(jq -r .desired <<<"$observation")" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native hook catalog fingerprint unavailable'
+      warn 'Orca native hook catalog fingerprint unavailable; the Orca runtime is stale' >&2
+      observation="$(jq -c --arg actual "$(printf '%s native-catalog-unavailable\n' "$(jq -r .actual <<<"$observation")" | sha256sum | awk '{print $1}')" \
+        '.state = "stale" | .actual = $actual' <<<"$observation")"
+      hook_binding=""
+    fi
+  fi
+  jq -c --arg binding "$hook_binding" '. + {hook_binding:$binding}' <<<"$observation"
+}
+
+# An apply never writes through a symbolic link at a fixed Orca path; finding
+# one is a refusal of a guest-side check, which affects only this yard.
+refuse_unsafe_contract_links() {
+  local -a names=()
+  mapfile -t names < <(cd "$RESOURCE_DIR/registration" && printf '%s\n' ./*.py | sed 's#^./##')
+  yard_local_begin
+  yexec bash -se -- orca-link-check "$ORCA_SYNC" "$ORCA_REGISTRATION" "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" \
+    "/etc/systemd/system/$ORCA_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" \
+    "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_CONTRACT_DIGEST" "${names[@]}" <<'YARD' \
+    || die "Orca runtime contract contains an unsafe symbolic link; remove it, or run 'orca remove', then retry yard init"
+set -euo pipefail
+shift
+directory="$2"
+for path in "$@"; do
+  case "$path" in /*) ;; *) path="$directory/$path" ;; esac
+  if [ -L "$path" ]; then printf 'Orca runtime contract contains an unsafe symbolic link at %s\n' "$path" >&2; exit 1; fi
+done
+YARD
+  yard_local_end
+}
+
 apply_main_unit() {
   yard_local_begin
   inspect_main_unit || die "Orca service unit unavailable"
@@ -1861,14 +1904,7 @@ if [ "$sub" = _runtime-contract ]; then
         jq -e '.schema == 1 and (.missingMetadata | type == "array")' <<<"$ORCA_METADATA_PROJECTION" >/dev/null \
           || die 'invalid native metadata projection'
       fi
-      observation="$(observe_runtime_contract)" || exit 1
-      hook_binding=""
-      if [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ] &&
-        yexec systemctl is-active --quiet "$ORCA_UNIT";then
-        hook_binding="$(project_registration_report source | jq -r '.catalogDigest // empty')"
-        [[ "$hook_binding" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native hook catalog fingerprint unavailable'
-      fi
-      jq --arg binding "$hook_binding" '. + {hook_binding:$binding}' <<<"$observation"
+      observe_bound_runtime_contract || exit 1
       ;;
     apply)
       [ "$#" -eq 4 ] \
@@ -1876,7 +1912,7 @@ if [ "$sub" = _runtime-contract ]; then
       [[ "${2:-}" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "${3:-}" =~ ^[a-f0-9]{64}$ ]] &&
         [[ "${4:-}" =~ ^[a-f0-9]{64}$ ]] || die "invalid Orca runtime activation arguments"
       SUBYARD_OPERATION_ID="$2"
-      observation="$(observe_runtime_contract)" || exit 1
+      observation="$(observe_bound_runtime_contract)" || exit 1
       [ "$(jq -r .actual <<<"$observation")" = "$3" ] &&
         [ "$(jq -r .desired <<<"$observation")" = "$4" ] \
         || die "Orca runtime contract changed since assessment; retry yard init"
@@ -1889,6 +1925,7 @@ if [ "$sub" = _runtime-contract ]; then
           ORCA_RUNTIME_PHASE=apply
           ORCA_GUEST_STEP_STATUS="$(mktemp)"
           ensure_linger
+          refuse_unsafe_contract_links
           if [ "$(jq -r '.consequence // empty' <<<"$observation")" = "$ORCA_MAIN_UNIT_CONSEQUENCE" ]; then
             apply_main_unit
           else
@@ -1896,7 +1933,7 @@ if [ "$sub" = _runtime-contract ]; then
           fi
           cleanup_guest || die "Orca guest staging directory could not be removed"
           ORCA_RUNTIME_PHASE=verify
-          observation="$(observe_runtime_contract)" || die "Orca runtime contract cannot be verified"
+          observation="$(observe_bound_runtime_contract)" || die "Orca runtime contract cannot be verified"
           # The guest's own state did not reach the desired contract that this apply
           # installed; the observation that shows it was read from the guest.
           yard_local_begin

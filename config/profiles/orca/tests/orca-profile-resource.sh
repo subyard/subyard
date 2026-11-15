@@ -176,6 +176,17 @@ case "${1:-}" in
       case " $* " in *' bash -s'*|*' /usr/bin/python3 -I -B - '*) ;; *) cat >/dev/null ;; esac
     fi
     case " $* " in
+      *' bash -se -- orca-link-check '*)
+        # The fixed-path symbolic link refusal of an apply, under the guest root.
+        arguments=("$@")
+        for index in "${!arguments[@]}"; do
+          [ "${arguments[$index]}" = -- ] && command=("${arguments[@]:$((index + 1))}")
+        done
+        for index in "${!command[@]}"; do
+          case "${command[$index]}" in /*) command[$index]="$guest${command[$index]}" ;; esac
+        done
+        /bin/bash -se -- "${command[@]}"
+        ;;
       *' bash -se -- orca-remove-inspect '*|*' bash -se -- orca-remove-apply '*)
         # Fixed absolute Orca paths under the guest root, against a small model
         # of systemd units whose files and activity are separate.
@@ -704,8 +715,10 @@ if [ "${1:-}" = --source-observer-fixture ]; then
       || fail "runtime contract ignored orphaned $artifact"
     rm -f "$target"
     ln -s "$TMP/missing-contract-target" "$target"
-    if "$observer" _runtime-contract observe >"$TMP/contract-symlink.json" 2>"$TMP/contract-symlink.err"; then
-      fail "runtime contract accepted an orphaned symbolic link at $artifact"
+    # An unsafe link is an explicit stale installation, never current.
+    if ! "$observer" _runtime-contract observe >"$TMP/contract-symlink.json" 2>"$TMP/contract-symlink.err" ||
+      ! jq -e '.state == "stale" and .actual != .desired' "$TMP/contract-symlink.json" >/dev/null; then
+      fail "runtime contract did not report an orphaned symbolic link at $artifact as stale"
     fi
     rm -f "$target"
   done
@@ -972,10 +985,12 @@ observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-c
 jq -e '.state == "current" and (.actual | test("^[0-9a-f]{64}$")) and .actual == .desired' \
   <<<"$observation" >/dev/null || fail 'installed runtime contract was not observed as current'
 touch "$TMP/project-counts-fail"
-if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
-  >"$TMP/unavailable-binding.out" 2>&1; then
-  fail 'running native observation errors were downgraded to conditional scope'
-fi
+# A running Orca without a native catalog fingerprint is an explicit stale
+# installation, never current with a conditional binding.
+"$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
+  >"$TMP/unavailable-binding.out" 2>"$TMP/unavailable-binding.err" || fail 'an unavailable native catalog failed observation'
+jq -e '.state == "stale" and .actual != .desired and .hook_binding == ""' "$TMP/unavailable-binding.out" >/dev/null \
+  || fail 'running native observation errors were downgraded to conditional scope'
 rm -f "$TMP/project-counts-fail"
 
 touch "$TMP/project-cleanup-pending"
@@ -1811,6 +1826,37 @@ for installation in full half-applied symlinked; do
   assert_orca_removed "orca remove of a $installation Orca"
   [ -f "$ORCA_TEST_GUEST/tmp/unrelated" ] || fail 'orca remove followed a symbolic link'
 done
+# Observe-time faults of an installed Orca are explicit stale states: the
+# release apply ends in the typed yard-local failure, so the yard waits for its
+# init and `orca remove` takes Orca out.
+export SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE=00112233445566778899aabbccddeeff
+for fault in native-catalog unsafe-link; do
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+  case "$fault" in
+    native-catalog) touch "$TMP/project-counts-fail"; phase=verify ;;
+    unsafe-link)
+      printf 'kept\n' >"$TMP/link-target"
+      rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
+      ln -s "$TMP/link-target" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
+      phase=apply ;;
+  esac
+  observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe </dev/null)" \
+    || fail "a $fault fault failed observation instead of reporting stale"
+  jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null || fail "a $fault fault was not observed as stale"
+  if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-fault \
+    "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" >"$TMP/fault-$fault.out" 2>&1 </dev/null; then
+    fail "the apply of a $fault fault succeeded"
+  fi
+  grep -Fxq "subyard-profile-runtime-diagnostic-v1 $SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE $phase yard-local" "$TMP/fault-$fault.out" \
+    && grep -Fq "'yard -Y default orca remove'" "$TMP/fault-$fault.out" \
+    || { cat "$TMP/fault-$fault.out" >&2; fail "the apply of a $fault fault was not a typed yard-local failure naming orca remove"; }
+  [ "$fault" != unsafe-link ] || [ "$(cat "$TMP/link-target")" = kept ] || fail 'an apply wrote through an unsafe symbolic link'
+  run_orca remove --yes >"$TMP/remove-$fault.out" 2>&1 || { cat "$TMP/remove-$fault.out" >&2; fail "orca remove after a $fault fault failed"; }
+  assert_orca_removed "orca remove after a $fault fault"
+  [ "$fault" != unsafe-link ] || [ "$(cat "$TMP/link-target")" = kept ] || fail 'orca remove followed an unsafe symbolic link'
+  rm -f "$TMP/project-counts-fail"
+done
+unset SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE
 # A second remove is a no-op.
 assessment="$(SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" remove)"
 jq -e '.action == "remove" and .changed == false and all(.steps[]; .decision == "skip")' <<<"$assessment" >/dev/null \
