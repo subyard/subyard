@@ -28,9 +28,11 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           COMMIT: ${{ inputs.commit }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$WORKFLOW_SHA" = "$COMMIT"
 
   native-engine-arm64:
     needs: validate
@@ -41,8 +43,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.commit }}
           persist-credentials: false
+      - name: Require exact workflow and candidate commit
+        env:
+          COMMIT: ${{ inputs.commit }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -64,8 +70,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.commit }}
           persist-credentials: false
+      - name: Require exact workflow and candidate commit
+        env:
+          COMMIT: ${{ inputs.commit }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -108,8 +118,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.commit }}
           persist-credentials: false
+      - name: Require exact workflow and candidate commit
+        env:
+          COMMIT: ${{ inputs.commit }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

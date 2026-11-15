@@ -144,46 +144,63 @@ import sys
 root = Path(sys.argv[1])
 
 # Source-level contract for the repository's block-style workflow/job/step layout;
-# actionlint validates YAML separately. Keep cache settings scoped to their own step.
+# actionlint validates YAML separately. Cache settings never make an input ref safe.
 def workflow_jobs(text):
     return re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", text.split("\njobs:\n", 1)[1])
 
-def action_steps(job):
+def workflow_steps(job):
     for step in re.split(r"(?m)^      - ", job)[1:]:
         step = "        " + step
         action = re.search(r"(?m)^        uses: [\"']?([^@\s\"']+)@", step)
-        if action:
-            arguments = re.search(r"(?ms)^        with:\n(.*?)(?=^        \S|\Z)", step)
-            yield action[1], arguments[1] if arguments else ""
+        arguments = re.search(r"(?ms)^        with:\n(.*?)(?=^        \S|\Z)", step)
+        yield action[1] if action else "", arguments[1] if arguments else "", step
 
 def literal(arguments, key, value):
     setting = re.search(r"(?m)^          " + re.escape(key) + r":[ \t]*([^#\n]+)", arguments)
     return setting and setting[1].strip() in (value, f"'{value}'", f'"{value}"')
 
-for workflow in sorted((root / ".github/workflows").iterdir()):
-    if workflow.suffix not in (".yml", ".yaml"):
-        continue
-    text = workflow.read_text()
-    if not re.search(r"(?m)^  workflow_dispatch:", text):
-        continue
-    for job, body in workflow_jobs(text):
-        steps = list(action_steps(body))
-        input_checkout = any(action == "actions/checkout" and re.search(
-            r"(?m)^          ref:.*\binputs\s*[.\[]", arguments) for action, arguments in steps)
-        for action, arguments in steps:
-            context = f"{workflow.name}/{job}: {action}"
-            if action == "actions/setup-go" and (input_checkout or workflow.name == "release.yml"):
-                assert literal(arguments, "cache", "false"), context + " must set cache: false"
-            if input_checkout and action in ("actions/cache", "actions/cache/save"):
-                assert action == "actions/cache" and literal(arguments, "lookup-only", "true"), context + " must disable cache writes"
+EXACT_GUARD = '        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"\n'
 
-hosted = (root / ".github/workflows/release-vm.yml").read_text()
-assert not any(action == "actions/checkout" and re.search(r"(?m)^          ref:", arguments)
-               for _, body in workflow_jobs(hosted) for action, arguments in action_steps(body)), "hosted checkout must use github.sha by default"
-assert '      - name: Require exact workflow and candidate commit\n' in hosted
-assert '          COMMIT: ${{ inputs.commit }}\n' in hosted
-assert '          WORKFLOW_SHA: ${{ github.sha }}\n' in hosted
-assert '        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"\n' in hosted
+def dispatch_contract(name, text):
+    for job, body in workflow_jobs(text):
+        steps = list(workflow_steps(body))
+        for index, (action, arguments, _) in enumerate(steps):
+            context = f"{name}/{job}: {action}"
+            if action == "actions/checkout":
+                assert not re.search(r"(?m)^          ref:.*\binputs\s*[.\[]", arguments), context + " must not check out a dispatch input"
+                if name in ("release.yml", "release-vm.yml"):
+                    assert not re.search(r"(?m)^          ref:", arguments) or literal(arguments, "ref", "${{ github.sha }}"), context + " must check out the workflow SHA"
+                    guard = steps[index + 1][2] if index + 1 < len(steps) else ""
+                    assert all(line in guard for line in (
+                        '          COMMIT: ${{ inputs.commit }}\n',
+                        '          WORKFLOW_SHA: ${{ github.sha }}\n', EXACT_GUARD)), context + " must immediately require exact workflow and candidate commit"
+            if action == "actions/setup-go" and name == "release.yml":
+                assert literal(arguments, "cache", "false"), context + " must set cache: false"
+
+for workflow in sorted((root / ".github/workflows").iterdir()):
+    if workflow.suffix in (".yml", ".yaml"):
+        text = workflow.read_text()
+        if re.search(r"(?m)^  workflow_dispatch:", text):
+            dispatch_contract(workflow.name, text)
+
+# A disabled Go cache must never excuse an input checkout or a missing/late guard.
+release = (root / ".github/workflows/release.yml").read_text()
+for unsafe in (
+    release.replace('          persist-credentials: false\n', '          ref: ${{ inputs.commit }}\n          persist-credentials: false\n', 1),
+    release.replace(EXACT_GUARD, '        run: true\n', 1),
+    release.replace('          WORKFLOW_SHA: ${{ github.sha }}\n' + EXACT_GUARD,
+                    '          WORKFLOW_SHA: ${{ inputs.commit }}\n' + EXACT_GUARD, 1),
+    release.replace('      - name: Require exact workflow and candidate commit\n',
+                    '      - uses: actions/setup-go@abc\n      - name: Require exact workflow and candidate commit\n', 1),
+):
+    try:
+        dispatch_contract("release.yml", unsafe)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("dispatch contract accepted an unsafe release checkout")
+dispatch_contract("release.yml", release.replace('          persist-credentials: false\n',
+                  '          ref: ${{ github.sha }}\n          persist-credentials: false\n'))
 
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, root / path)
@@ -252,6 +269,7 @@ for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):
         assert "continue-on-error" not in exporter
 a = module("acceptance", "dev/release-acceptance.py")
 assert a.CI_HOSTED_POLICIES == {"911e6588dded3367817a8c21c5a849dd5b945b2e",
+                                "836bbd8229d65149c75731a2f9ea46f2aa45e241",
                                 a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes())}
 p = module("periodic", "dev/ci/plan-periodic-checks.py")
 plan = p.plan(root)

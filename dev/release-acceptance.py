@@ -267,8 +267,8 @@ CI_COUNTED_POLICIES = frozenset({
     "e392fe64fbd8d45fe359526bde1a1688c56646da",
     # Test release version moved above the 0.28.0 update anchor; engine self-check uses `yard version`.
     "e903d9e71d3d2a92bd04fe401f1b0b50d21b8017",
-    # Disable setup-go caches for candidate code checked out from dispatch inputs.
-    "ce17e64bdaab71c055a3d465d8f6c230c7d59d01",
+    # Dispatch at the candidate; checkout uses the workflow SHA with an exact commit guard.
+    "c91e74a532fb6624fd04107c3fe167f47ec36f55",
 })
 
 

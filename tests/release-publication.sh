@@ -158,11 +158,12 @@ class FakeGitHub:
         self.workflow_blob = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
         self.host_free_verify = True
         self.immutable = True
-        # Release workflow files by ref: the candidate commit and an unchanged default branch.
+        # Release workflow files by ref: the candidate commit and a default branch at that commit.
         workflow_files = dict(zip(m.WORKFLOW_REF_FILES, (CURRENT_POLICY, "1" * 40, "2" * 40)))
         self.files = {identity["commit"]: workflow_files, "master": dict(workflow_files)}
         self.default_branch = "master"
-        self.heads = []
+        self.heads = ["master"]
+        self.branch_heads = {"master": identity["commit"]}
 
     def api(self, path, method="GET", payload=None, missing=False):
         self.calls.append((path, method))
@@ -194,7 +195,8 @@ class FakeGitHub:
         if path.startswith("git/ref/heads/"):
             name = m.urllib.parse.unquote(path.removeprefix("git/ref/heads/"))
             if name in self.files and name != self.identity["commit"]:
-                return {"ref": "refs/heads/" + name}
+                return {"ref": "refs/heads/" + name, "object": {
+                    "type": "commit", "sha": self.branch_heads.get(name, self.identity["commit"])}}
             return None if missing else {}
         if path == "commits/" + self.identity["commit"]:
             return {"sha": self.identity["commit"]} if self.identity["commit"] in self.files else None
@@ -1383,9 +1385,25 @@ class Contracts(unittest.TestCase):
                  self.assertRaisesRegex(ValueError, "0.26.y: dev/release-assets.sh differs from the candidate"):
                 m.main()
             self.assertFalse((candidate / "publication.json").exists())
+            # Identical workflow files cannot publish through a different branch head.
+            self.github.branch_heads["master"] = "d" * 40
+            with self.assertRaisesRegex(ValueError, "master: head .* is not candidate"):
+                m.main()
+            self.assertFalse((candidate / "publication.json").exists())
+            # A saved request without dispatch intent must satisfy the same constraint.
+            pending = {"request": "retained-publication", "workflow_ref": "master",
+                       "attestation_sha256": m.identity_hash(document)}
+            m.write_json(candidate / "publication.json", pending)
+            retained = (candidate / "publication.json").read_bytes()
+            with self.assertRaisesRegex(ValueError, "master: head .* is not candidate"):
+                m.main()
+            self.assertEqual((candidate / "publication.json").read_bytes(), retained)
+            self.assertEqual(dispatched, [])
+            self.github.branch_heads["master"] = self.identity["commit"]
             self.assertEqual(m.main(), 0)
             # A retained publication request keeps its workflow ref after the branch moves.
             self.github.files["master"][".github/workflows/release-publish.yml"] = "e" * 40
+            self.github.branch_heads["master"] = "d" * 40
             self.assertEqual(m.main(), 0)
             with patch.object(sys, "argv", argv + ["--workflow-ref", "0.26.y"]), \
                  self.assertRaisesRegex(ValueError, "already uses workflow ref master"):
@@ -1874,7 +1892,9 @@ class Contracts(unittest.TestCase):
         self.assertNotIn("  push:", prep)
         self.assertNotIn("git/refs", prep)
         self.assertIn("contents: read", prep)
-        self.assertEqual(prep.count("uses: actions/checkout@"), prep.count("ref: ${{ inputs.commit }}"))
+        self.assertNotIn("          ref:", prep)
+        self.assertEqual(prep.count("uses: actions/checkout@"), prep.count("name: Require exact workflow and candidate commit"))
+        self.assertEqual(prep.count("uses: actions/setup-go@"), prep.count("cache: false"))
         for gate in ("native-engine-arm64", "make verify", "make cli-docs-check",
                      "dev/test-profiles.sh --e2e --list", "tests/real-host/adapter-contracts.sh", "dev/verify-release-upgrades.py"):
             self.assertIn(gate, prep)
@@ -2041,6 +2061,8 @@ class WorkflowRef(unittest.TestCase):
 
     def move_master(self):
         self.github.files["master"][".github/workflows/release.yml"] = "e" * 40
+        self.github.branch_heads["master"] = "d" * 40
+        self.github.heads.remove("master")
 
     def hotfix_branch(self, name="0.26.y"):
         self.github.files[name] = dict(self.github.files[self.commit])
@@ -2078,6 +2100,41 @@ class WorkflowRef(unittest.TestCase):
         self.assertEqual(self.dispatched, ["0.26.y"])
         self.assertEqual(json.loads(self.request.read_text())["workflow_ref"], "0.26.y")
 
+    def test_identical_workflow_files_do_not_allow_a_non_candidate_default_head(self):
+        self.github.branch_heads["master"] = "d" * 40
+        self.github.heads.remove("master")
+        for extra in ((), ("--workflow-ref", "master")):
+            message = self.refused(*extra)
+            self.assertIn("master: head " + "d" * 40 + " is not candidate " + self.commit, message)
+            self.assertIn("git push origin " + self.branch, message)
+        self.hotfix_branch()
+        self.assertEqual(self.prepare(), 0)
+        self.assertEqual(self.dispatched, ["0.26.y"])
+
+    def test_candidate_head_inventory_is_rechecked_before_selection(self):
+        self.move_master()
+        self.hotfix_branch()
+        self.github.branch_heads["0.26.y"] = "c" * 40
+        self.assertIn("0.26.y: head " + "c" * 40 + " is not candidate", self.refused())
+        del self.github.files["0.26.y"]
+        self.assertIn("0.26.y: branch not found", self.refused())
+
+    def test_undispatched_retained_preparation_rechecks_its_branch_without_retargeting(self):
+        self.request.parent.mkdir(parents=True)
+        state = {"request": "retained", "version": "1.2.3", "commit": self.commit,
+                 "repository": self.github.repository, "workflow_ref": "master"}
+        m.write_json(self.request, state)
+        retained = self.request.read_bytes()
+        self.github.branch_heads["master"] = "d" * 40
+        self.hotfix_branch()
+        with self.assertRaisesRegex(ValueError, "master: head .* is not candidate"):
+            self.prepare()
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(self.request.read_bytes(), retained)
+        self.github.branch_heads["master"] = self.commit
+        self.assertEqual(self.prepare(), 0)
+        self.assertEqual(self.dispatched, ["master"])
+
     def test_missing_published_baseline_blocks_preparation_and_reports_other_refusals(self):
         self.move_master()
         with patch.object(m, "published_upgrade_baseline_refusals", return_value=["published release v1.2.2 is missing from the baseline matrix"]):
@@ -2096,8 +2153,9 @@ class WorkflowRef(unittest.TestCase):
     def test_missing_branch_names_exact_release_branch_commands(self):
         self.move_master()
         message = self.refused()
-        self.assertIn("no workflow ref runs candidate " + self.commit + " unchanged:\n"
-                      "    master: .github/workflows/release.yml differs from the candidate", message)
+        self.assertIn("no workflow ref runs candidate " + self.commit + " unchanged:", message)
+        self.assertIn("master: head " + "d" * 40 + " is not candidate " + self.commit, message)
+        self.assertIn("master: .github/workflows/release.yml differs from the candidate", message)
         self.assertIn("then repeat this command:\n    git branch " + self.branch + " " + self.commit +
                       "\n    git push origin " + self.branch + "\n", message)
         files, self.github.files = self.github.files, {}
@@ -2152,6 +2210,9 @@ class WorkflowRef(unittest.TestCase):
 
     def test_resume_keeps_retained_ref_after_master_moves_and_refuses_a_conflicting_one(self):
         self.assertEqual(self.prepare(), 0)
+        state = json.loads(self.request.read_text())
+        state["dispatch_started"] = True
+        m.write_json(self.request, state)
         self.move_master()
         # The stable tag of this candidate's own publication must not block a resume.
         self.github.ref = {"object": {"type": "commit", "sha": self.commit}}
@@ -2517,6 +2578,7 @@ class HostedChecks(unittest.TestCase):
 
     def test_start_requires_candidate_head_branch_and_resumes_one_request(self):
         (self.directory / "ci-hosted.json").unlink()
+        self.github.heads = []
         with patch.object(m.a, "source_declares", return_value=True), patch.object(m.a, "hosted_checks", return_value=["profile:sample"]), \
              patch.object(m, "dispatch", return_value=self.run) as dispatch, redirect_stdout(io.StringIO()) as report:
             m.start_ci_hosted(self.github, self.directory, self.identity)

@@ -997,8 +997,11 @@ imports exact CI assets and submits bound acceptance without repackaging.
 
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
-release preparation and publication use explicit workflow dispatches, with no tag-triggered
-publication. Basic native ARM64 engine build,
+release preparation and publication use explicit workflow dispatches on a branch whose head is the
+candidate commit, with no tag-triggered publication. A non-head release needs a release branch
+pushed at that commit first, even when its workflow files match the default branch. Preparation
+checks out the workflow SHA and requires it and HEAD to equal the input commit before source
+execution. Basic native ARM64 engine build,
 execution and Go tests run on GitHub's ARM runner in CI and gate Release publication. ARM requires
 no local agent access or workflow authorization.
 The separate nightly/manual Deep CI adds only what that gate cannot find: it builds the runtime,
