@@ -385,6 +385,24 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			}
 			diagnostic.Refusals = append(diagnostic.Refusals, typed.render(source))
 			return
+		case interface {
+			PublicConfigLabel() string
+			Unwrap() error
+		}:
+			// A boundary label prefixes each classified cause; next steps are kept.
+			nested := ConfigDiagnostic{known: diagnostic.known}
+			nested.add(configHome, typed.Unwrap())
+			for _, refusal := range nested.Refusals {
+				if label := typed.PublicConfigLabel(); label != "" {
+					refusal = label + ": " + refusal
+				}
+				diagnostic.Refusals = append(diagnostic.Refusals, refusal)
+			}
+			for _, next := range nested.Next {
+				diagnostic.addNext(next)
+			}
+			diagnostic.Unclassified = diagnostic.Unclassified || nested.Unclassified
+			return
 		case interface{ PublicConfigDiagnostic() string }:
 			// A boundary's own fixed refusal text, naming only validated settings.
 			diagnostic.Refusals = append(diagnostic.Refusals, typed.PublicConfigDiagnostic())

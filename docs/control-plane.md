@@ -401,8 +401,10 @@ fixed diagnostics. An integration is named only when the shipped catalog contain
 Independent load stages merge their causes into one stable collection.
 
 Configuration diagnostics guarantee that no setting value, secret or absolute path is printed,
-that every typed code renders its fixed text and next step, and that all refusals within a stage
-are reported in stable order. A refusal can hide a later stage only along these edges, each
+including the retired-template guidance; that every typed code renders its fixed text and next
+step, with next steps printed only for config commands (the alias-repair retry applies to every
+command); and that all refusals within a stage are
+reported in stable order. A refusal can hide a later stage only along these edges, each
 named in the loader code:
 
 - D1: the bootstrap chain, including command alias conflicts, stops at its first failed step.
@@ -415,6 +417,8 @@ named in the loader code:
   the disk minimum follows its size parse and CPU validation follows its resolution.
 - D8: any refusal up to the context skips saved endpoints, derived ports and all collisions.
 - D9: a derived-port source failure skips collisions and the web preview check.
+- D10: an unreadable saved resource endpoint skips only collisions of the listener ports it would
+  provide (every profile listener when the resource metadata itself is unreadable).
 
 `HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
 `yard host rename` transactionally moves a registered Git owner subtree, commits the exact move

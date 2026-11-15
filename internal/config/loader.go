@@ -533,17 +533,18 @@ func load(
 	if err := domain.CollectRefusals(append(refusals, refusalCauses(err)...)...); err != nil {
 		return domain.Context{}, nil, err
 	}
-	if err := applySavedResourceEndpoints(root, options, ctx, values, tracker); err != nil {
-		return ctx, values, err
-	}
+	// Edge D10: an unreadable saved endpoint skips only the collisions of the
+	// listener ports it would provide; the other port checks still run.
+	unchecked, endpointErr := applySavedResourceEndpoints(root, options, ctx, values, tracker)
 	// Edge D9: a derived-port source failure skips collisions and the web
 	// preview check. Collisions are otherwise collected once per pair.
 	collisions := newPortCollisions()
+	collisions.unchecked = unchecked
 	if err := normalizeDerivedPorts(values, tracker, collisions); err != nil {
-		return ctx, values, err
+		return ctx, values, domain.CollectRefusals(append(refusalCauses(endpointErr), err)...)
 	}
 	webPreview := normalizeWebPreviewPort(values, tracker, ctx.SSHPort, collisions)
-	return ctx, values, domain.CollectRefusals(append(collisions.refusals, webPreview)...)
+	return ctx, values, domain.CollectRefusals(append(append(refusalCauses(endpointErr), collisions.refusals...), webPreview)...)
 }
 
 // refusalCauses lets independent stages merge into one stable collection.
@@ -559,14 +560,20 @@ func refusalCauses(err error) []error {
 
 // portCollisions reports each colliding listener pair once, whichever check finds it.
 type portCollisions struct {
-	seen     map[[2]string]bool
-	refusals []error
+	seen      map[[2]string]bool
+	refusals  []error
+	unchecked func(string) bool
 }
 
-func newPortCollisions() *portCollisions { return &portCollisions{seen: map[[2]string]bool{}} }
+func newPortCollisions() *portCollisions {
+	return &portCollisions{seen: map[[2]string]bool{}, unchecked: func(string) bool { return false }}
+}
 
 func (collisions *portCollisions) add(name, other string) {
 	pair := [2]string{min(name, other), max(name, other)}
+	if collisions.unchecked(name) || collisions.unchecked(other) {
+		return
+	}
 	if !collisions.seen[pair] {
 		collisions.seen[pair] = true
 		collisions.refusals = append(collisions.refusals, domain.SettingRefusal(domain.ConfigPortCollision, name, other))

@@ -792,9 +792,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		integrity := config.KnownCause{Err: ownerinventory.ErrIntegrity, Text: "owner inventory integrity validation failed: owner HostID mismatch or unverified response", Next: "repair the verified owner connection"}
 		diagnostic := config.Diagnose(configHome, err, integrity)
 		if len(diagnostic.Refusals) == 1 && !diagnostic.Unclassified && config.IsRetiredYardTemplate(err) {
-			// This owning diagnostic contains only a fixed retired schema and
-			// its supported replacement, never a supplied setting value.
-			cli.errorf("%v", err)
+			// The retired schema guidance, with the yard file relative to the config home.
+			cli.errorf("%s", diagnostic.Refusals[0])
 		} else if len(diagnostic.Refusals) == 1 && !diagnostic.Unclassified && errors.Is(err, ownerinventory.ErrIntegrity) {
 			cli.errorf("%s; %s", integrity.Text, integrity.Next)
 		} else {
@@ -804,11 +803,17 @@ func (cli *CLI) Run(ctx context.Context) int {
 				label = "selected yard"
 			}
 			cli.errorf("%s, config inspection: %s", label, diagnostic.Message("an input is invalid or unavailable; run config validate for scoped schema diagnostics"))
-			if retry := config.SourceAliasRepairRetry(configHome, yard, err); retry != "" {
-				diagnostic.Next = append([]string{retry}, diagnostic.Next...)
+			// Config next steps belong to config commands; the alias repair retry
+			// applies to every command that loads the conflicting source.
+			next := diagnostic.Next
+			if definition.Handler != "@config" {
+				next = nil
 			}
-			for _, next := range diagnostic.Next {
-				cli.errorf("Next: %s", next)
+			if retry := config.SourceAliasRepairRetry(configHome, yard, err); retry != "" {
+				next = append([]string{retry}, next...)
+			}
+			for _, step := range next {
+				cli.errorf("Next: %s", step)
 			}
 		}
 		return 2

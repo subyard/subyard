@@ -898,6 +898,24 @@ func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
 	if code := invalid.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "SSH_PORT") || !strings.Contains(stderr.String(), "Next: use a supported value for the named setting") || strings.Contains(stderr.String(), "nope") {
 		t.Fatalf("invalid scalar lacks a next step: code=%d %s", code, stderr.String())
 	}
+	for _, test := range []struct {
+		arguments, environment []string
+		want, refuse           string
+	}{
+		// A load refusal for another command prints its reason without config next steps.
+		{[]string{"status"}, []string{"SUBYARD_CONFIG_HOME=relative"}, "SUBYARD_CONFIG_HOME must be absolute", "Next:"},
+		// Each source refusal under a requested setting keeps its next step.
+		{[]string{"config", "set", "NO_SUCH_FIELD", "x", "SSH_PORT", "2223", "--scope", "host", "--git"}, nil, "Next: use a supported value for the named setting", ""},
+	} {
+		stderr.Reset()
+		command, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: test.arguments, Environment: append(slices.Clone(environment), test.environment...), WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := command.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), test.want) || test.refuse != "" && strings.Contains(stderr.String(), test.refuse) {
+			t.Errorf("%v: code=%d %s", test.arguments, code, stderr.String())
+		}
+	}
 	stderr.Reset()
 	retired, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
 	if err != nil {

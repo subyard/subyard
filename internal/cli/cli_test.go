@@ -377,8 +377,10 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 	if code := program.Run(context.Background()); code == 0 {
 		t.Fatal("teardown loaded the retired template")
 	}
+	// The registration is named relative to the config home, never by absolute path.
 	if len(retiredRunner.Requests) != 0 ||
-		!strings.Contains(retiredStderr.String(), yardFile) ||
+		strings.Contains(retiredStderr.String(), yardFile) ||
+		!strings.Contains(retiredStderr.String(), `retired in "yards/e2e-yard.env"`) ||
 		!strings.Contains(retiredStderr.String(), "YARD_TEMPLATE=test-vms") {
 		t.Fatalf("retired registration did not fail before teardown: requests=%#v stderr=%q",
 			retiredRunner.Requests, retiredStderr.String())

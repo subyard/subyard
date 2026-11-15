@@ -555,10 +555,12 @@ type configNamedRefusal struct {
 
 func (err configNamedRefusal) Error() string { return err.name + ": " + err.cause.Error() }
 func (err configNamedRefusal) Unwrap() error { return err.cause }
-func (err configNamedRefusal) PublicConfigDiagnostic() string {
-	message := config.Diagnose("", err.cause).Message("an input is invalid or unavailable")
+
+// PublicConfigLabel names the requested setting only when it has the shape of a
+// setting name; config.Diagnose renders the cause and its next steps beneath it.
+func (err configNamedRefusal) PublicConfigLabel() string {
 	if _, ok := domain.ConfigSettingName(err.name); ok {
-		return err.name + ": " + message
+		return err.name
 	}
-	return message
+	return ""
 }
