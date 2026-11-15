@@ -111,6 +111,9 @@ report_runtime_yard_failure() { # <status> <effect> <last guest command class>
   [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" 2>/dev/null)" = RUNNING ] || return 0
   yexec true >/dev/null 2>&1 || return 0
   printf 'subyard-profile-runtime-diagnostic-v1 %s %s yard-local\n' "$SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE" "$2" >&2
+  local yard="${PROG:-yard} -Y ${YARD_NAME:-default}"
+  printf "Orca: fix the cause and run '%s init', or remove Orca from this yard with '%s orca remove' and then run '%s init'\n" \
+    "$yard" "$yard" "$yard" >&2
 }
 
 # Bracket guest-side commands of a runtime apply; outside an apply both are no-ops.
@@ -1571,6 +1574,170 @@ require_no_resource_arguments() {
   [ "$#" -eq 0 ] || svc_usage_error "'$verb' does not accept additional arguments"
 }
 
+# `orca remove` takes Orca out of one yard by fixed paths only: the owned route,
+# the three Orca units and the profile's helper, hook, marker, lock, Codex and
+# unit files. State under /srv/agents/orca, the orca-ide package and lingering
+# stay; `orca up` installs Orca again. It runs no installed Orca helper itself.
+ORCA_REMOVE_UNITS=("$ORCA_DISCOVERY_TIMER" "$ORCA_DISCOVERY_UNIT" "$ORCA_UNIT")
+# Files of a unit that stay while that unit still runs: its stop needs them.
+ORCA_REMOVE_UNIT_FILES=("/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT"
+  "/etc/systemd/system/$ORCA_UNIT" "$ORCA_INGRESS" "$ORCA_CAPTURE")
+ORCA_REMOVE_PATHS=("$ORCA_SYNC" "$ORCA_REGISTRATION" "$ORCA_REGISTRATION_DIGEST" "$ORCA_CONTRACT_DIGEST"
+  "$ORCA_REGISTRATION_LOCK" "$ORCA_CODEX_PROFILE" "${ORCA_CODEX_BIN%/*}")
+
+# Print "<unit> <ActiveState> <UnitFileState>" per unit and "path-<index> present|absent"
+# per fixed path, in order (lstat, no symbolic link followed). Fails when the guest cannot answer.
+remove_inspection() {
+  yexec bash -se -- orca-remove-inspect "${#ORCA_REMOVE_UNITS[@]}" "${ORCA_REMOVE_UNITS[@]}" "${ORCA_REMOVE_UNIT_FILES[@]}" "${ORCA_REMOVE_PATHS[@]}" <<'YARD'
+set -euo pipefail
+shift
+count="$1"; shift
+for unit in "${@:1:$count}"; do
+  active="$(systemctl show "$unit" --property=ActiveState --value)"
+  enabled="$(systemctl show "$unit" --property=UnitFileState --value)"
+  printf '%s %s %s\n' "$unit" "${active:--}" "${enabled:--}"
+done
+shift "$count"
+index=0
+for path in "$@"; do
+  if [ -e "$path" ] || [ -L "$path" ]; then printf 'path-%s present\n' "$index"; else printf 'path-%s absent\n' "$index"; fi
+  index=$((index + 1))
+done
+YARD
+}
+
+# The owner route of this yard: "absent" when no owned route remains, "owned:<digest>"
+# for a receipted device or Orca's own metadata, "foreign" for an unreceipted or
+# mismatching orca-server device, which is never removed.
+remove_route_state() {
+  local marker saved devices device=0
+  marker="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server "${PROJ[@]}")" || return 1
+  saved="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.deferred_publication.orca-server "${PROJ[@]}")" || return 1
+  devices="$(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}")" || return 1
+  if grep -Fxq "$ORCA_DEVICE" <<<"$devices"; then
+    device=1
+    if ! [[ "$marker" =~ ^v1:[0-9a-f]{64}$ ]] || ! route_receipt_matches; then printf 'foreign'; return 0; fi
+  elif [ -z "$marker" ] && [ -z "$saved" ]; then
+    printf 'absent'; return 0
+  fi
+  printf 'owned:%s' "$(printf '%s\n%s\n%s\n' "$device" "$marker" "$saved" | sha256sum | awk '{print $1}')"
+}
+
+remove_unit_state() { # <inspection> <unit>
+  awk -v unit="$2" '$1 == unit {print $2 " " $3}' <<<"$1"
+}
+remove_unit_inactive() { case "$1" in inactive*|failed*) return 0 ;; esac; return 1; }
+remove_unit_enabled() { case "${1#* }" in enabled|enabled-runtime|linked|linked-runtime|alias) return 0 ;; esac; return 1; }
+
+emit_remove_assessment() {
+  local inspection route unit state observed path
+  inspection="$(remove_inspection)" || die "Orca removal cannot inspect the yard"
+  route="$(remove_route_state)" || die "Orca removal cannot read the owner route"
+  ORCA_STEPS='[]'
+  observed="$route"
+  [ "$route" != foreign ] || observed=absent
+  orca_step_add route "$ORCA_DEVICE" "$observed" absent "$(if [ "$observed" = absent ]; then printf skip; else printf apply; fi)" \
+    'no receipted Orca proxy device, saved publication or ownership receipt remains' 'remove the receipted Orca proxy device and its metadata'
+  for unit in "${ORCA_REMOVE_UNITS[@]}"; do
+    state="$(remove_unit_state "$inspection" "$unit")"
+    observed=inactive-disabled
+    if ! remove_unit_inactive "$state" || remove_unit_enabled "$state"; then observed="${state// //}"; fi
+    orca_step_add "unit-${unit//./-}" "$unit" "$observed" inactive-disabled "$(if [ "$observed" = inactive-disabled ]; then printf skip; else printf apply; fi)" \
+      "the Orca unit $unit is inactive and not enabled" "stop and disable the Orca unit $unit"
+  done
+  local index=0
+  for path in "${ORCA_REMOVE_UNIT_FILES[@]}" "${ORCA_REMOVE_PATHS[@]}"; do
+    observed="$(awk -v key="path-$index" '$1 == key {print $2}' <<<"$inspection")"
+    index=$((index + 1))
+    [ "$observed" = present ] || [ "$observed" = absent ] || die "Orca removal inspection omitted $path"
+    orca_step_add "file-$(basename "$path" | tr '.' '-')" "${path#/}" "$observed" absent "$(if [ "$observed" = absent ]; then printf skip; else printf apply; fi)" \
+      "the fixed Orca path $path is absent" "remove the fixed Orca path $path"
+  done
+  orca_steps_emit remove "$ORCA_STEPS"
+}
+
+cmd_remove() {
+  local route unit
+  route="$(remove_route_state)" || die "Orca removal cannot read the owner route"
+  case "$route" in
+    foreign) warn "Orca removal left the unreceipted device '$ORCA_DEVICE' untouched; remove it from the yard instance if it is not needed" ;;
+    owned:*)
+      # The receipt proves ownership of the device, so it goes only after the device.
+      if device_exists && ! incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null; then
+        warn "Orca removal could not remove the owner route"
+      elif ! device_exists; then
+        for key in user.subyard.resource.orca-server user.subyard.deferred_publication.orca-server; do
+          if [ -n "$(incus config get "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}")" ]; then
+            incus config unset "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}" >/dev/null || warn "Orca removal could not clear $key"
+          fi
+        done
+      fi
+      ;;
+  esac
+  yexec bash -se -- orca-remove-apply "${#ORCA_REMOVE_UNITS[@]}" "${ORCA_REMOVE_UNITS[@]}" "${#ORCA_REMOVE_UNIT_FILES[@]}" "${ORCA_REMOVE_UNIT_FILES[@]}" \
+    "${ORCA_REMOVE_PATHS[@]}" <<'YARD' || warn "Orca removal did not finish inside the yard"
+set -uo pipefail
+shift
+count="$1"; shift
+units=("${@:1:$count}"); shift "$count"
+count="$1"; shift
+unit_files=("${@:1:$count}"); shift "$count"
+paths=("$@")
+main="${units[2]}"
+warn() { printf 'Orca removal: %s\n' "$1" >&2; }
+active_state() { systemctl show "$1" --property=ActiveState --value; }
+for unit in "${units[@]}"; do
+  case "$(active_state "$unit")" in
+    inactive|failed) ;;
+    *) systemctl stop "$unit" >/dev/null 2>&1 || warn "could not stop $unit" ;;
+  esac
+  case "$(systemctl show "$unit" --property=UnitFileState --value)" in
+    enabled|enabled-runtime|linked|linked-runtime|alias) systemctl disable "$unit" >/dev/null 2>&1 || warn "could not disable $unit" ;;
+  esac
+done
+main_state="$(active_state "$main")" || main_state=unknown
+case "$main_state" in
+  inactive|failed)
+    # The ingress guard closes the Orca port while the service runs.
+    if command -v nft >/dev/null 2>&1 && tables="$(nft list tables)"; then
+      if grep -Fxq 'table inet subyard_orca' <<<"$tables"; then
+        if nft list chain inet subyard_orca input 2>/dev/null | grep -F 'comment "subyard-orca-managed"' >/dev/null; then
+          nft delete table inet subyard_orca || warn 'could not remove the Orca nft table inet subyard_orca'
+        else
+          warn 'left the unowned nft table inet subyard_orca untouched'
+        fi
+      fi
+    elif command -v nft >/dev/null 2>&1; then
+      warn 'could not inspect the Orca nft table'
+    fi
+    ;;
+  *) warn "kept the ingress guard and unit files while $main is still running" ;;
+esac
+for path in "${unit_files[@]}"; do
+  unit="${path##*/}"
+  case "$unit" in
+    "${units[0]}"|"${units[1]}") state="$(active_state "$unit")" || state=unknown ;;
+    *) state="$main_state" ;;
+  esac
+  case "$state" in inactive|failed) rm -f -- "$path" || warn "could not remove $path" ;; esac
+done
+for path in "${paths[@]}"; do rm -rf -- "$path" || warn "could not remove $path"; done
+systemctl daemon-reload || warn 'could not reload systemd units'
+YARD
+  if ! daemon_scopes stop >/dev/null; then
+    warn "Orca removal could not stop every Orca daemon or terminal scope"
+  fi
+  # Exit 0 only when every fixed step holds; otherwise list every unmet item.
+  local fresh unmet
+  fresh="$(emit_remove_assessment)"
+  unmet="$(jq -r '.steps[] | select(.decision != "skip") | "  " + .target + ": " + .observed' <<<"$fresh")"
+  if [ -n "$unmet" ]; then
+    printf 'Orca removal is incomplete; rerun %s orca remove after resolving:\n%s\n' "$(yard_cmd_hint)" "$unmet" >&2
+    exit 1
+  fi
+  ok "Orca removed from this yard; its state and the orca-ide package are kept"
+}
+
 validate_resource_arguments() {
   local verb="$1"
   shift
@@ -1619,6 +1786,10 @@ prepare_resource() { # <public-verb>
     down)
       svc_require_yard_running
       emit_down_assessment
+      ;;
+    remove)
+      svc_require_yard_running
+      emit_remove_assessment
       ;;
     is-up|status|logs)
       emit_resource_assessment "$verb" false
@@ -1756,6 +1927,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       up) validate_resource_arguments up "$@"; emit_up_assessment; exit ;;
       restart) validate_resource_arguments restart "$@"; emit_restart_assessment; exit ;;
       sync) validate_resource_arguments sync "$@"; emit_sync_assessment; exit ;;
+      remove) validate_resource_arguments remove "$@"; svc_require_yard_running; emit_remove_assessment; exit ;;
       down) ;;
       *) die "unsupported Orca native verifier" ;;
     esac
@@ -1765,7 +1937,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     ;;
   apply)
     case "$sub" in
-      up|is-up|status|pair|restart|sync|logs|down) ;;
+      up|is-up|status|pair|restart|sync|logs|down|remove) ;;
       *) die "unknown Orca apply verb '$sub'" ;;
     esac
     validate_resource_arguments "$sub" "$@"
@@ -1778,6 +1950,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       pair) cmd_pair "$@" ;;
       restart) orca_native_guard restart; cmd_restart ;;
       sync) orca_native_guard sync; cmd_sync ;;
+      remove) orca_native_guard remove; cmd_remove ;;
       logs) cmd_logs "$@" ;;
       down)
         if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
@@ -1800,7 +1973,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     case "$sub" in
       is-up) require_no_resource_arguments is-up "$@"; cmd_is_up ;;
       -h|--help|help|"")
-        printf 'Usage: %s orca <up|is-up|status|pair|restart|sync|logs|down>\n' "${PROG:-yard}"
+        printf 'Usage: %s orca <up|is-up|status|pair|restart|sync|logs|down|remove>\n' "${PROG:-yard}"
         printf '  pair [--mobile]  Issue a Desktop or mobile link after a brief service restart\n'
         ;;
       *) die "typed resource dispatcher required for 'yard orca $sub'" ;;

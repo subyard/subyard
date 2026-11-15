@@ -13,5 +13,6 @@ ACTION="restart restart yard-change reversible"
 ACTION="sync sync bounded-write not-needed"
 ACTION="logs logs read-only not-needed"
 ACTION="down down host-change reversible"
+ACTION="remove remove runtime-destruction recreatable"
 BRINGUP=up
 SHUTDOWN=down

@@ -19,5 +19,6 @@ func TestShippedResourceContract(t *testing.T) {
 		{Resource: "orca", LocalID: "sync", Verb: "sync", Effect: domain.ActionBoundedWrite, Recovery: domain.RecoveryNotNeeded},
 		{Resource: "orca", LocalID: "logs", Verb: "logs", Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded},
 		{Resource: "orca", LocalID: "down", Verb: "down", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactHostOS}, Recovery: domain.RecoveryReversible},
-	}, map[string][]string{"orca": {"up", "is-up", "status", "pair", "restart", "sync", "logs", "down"}}, []string{"config/profiles/orca/resources/orca.res"}, nil, nil, nil)
+		{Resource: "orca", LocalID: "remove", Verb: "remove", Effect: domain.ActionDestruction, Impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, Recovery: domain.RecoveryRecreatable},
+	}, map[string][]string{"orca": {"up", "is-up", "status", "pair", "restart", "sync", "logs", "down", "remove"}}, []string{"config/profiles/orca/resources/orca.res"}, nil, nil, nil)
 }
