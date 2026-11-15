@@ -75,11 +75,9 @@ def published_baseline_refusals(source, catalog):
             role = version
         else:
             role = pins.get(version)
-        allowed = ("refusal", "pin") if mode == "chain" else ("refusal",) if mode == "refusal" else ("anchor", "hop", "direct")
+        allowed = ("refusal",) if mode == "refusal" else ("anchor", "hop", "direct")
         if role not in allowed:
             errors.append(f"{entry['id']}: {mode} source {version} has role {role}")
-        if mode == "chain" and not hops:
-            errors.append(f"{entry['id']}: chain hop is unavailable")
     return errors
 
 sys.argv = [sys.argv[0]]
@@ -3125,6 +3123,13 @@ while True: time.sleep(1)
         for entry in catalog["checks"]:
             self.assertTrue((root / entry["command"][1]).is_file(), entry["id"])
         self.assertEqual(published_baseline_refusals(root, catalog), [])
+        self.assertEqual({entry["id"]: entry["command"][2:] for entry in catalog["checks"]
+                          if entry["command"][1] == "dev/e2e/published-upgrade.sh"}, {
+            "published-upgrade/anchor": ["anchor", "all"],
+            "published-upgrade/0.11.0": ["0.11.0", "refusal"],
+            "published-upgrade/0.17.3": ["0.17.3", "refusal"],
+            "published-upgrade/0.27.0": ["0.27.0", "refusal"],
+        })
         verifier = importlib.util.spec_from_file_location("upgrade_verifier", root / "dev/verify-release-upgrades.py")
         module = importlib.util.module_from_spec(verifier)
         sys.modules[verifier.name] = module
@@ -3148,8 +3153,8 @@ while True: time.sleep(1)
                 "1.1.0\t"+"a"*64+"\t"+"b"*64+"\thop\n"+
                 "1.2.0\t"+"a"*64+"\t"+"b"*64+"\thop\n"+
                 "3.0.0\t"+"c"*64+"\t"+"d"*64+"\trefusal\n")
-            catalog = {"checks": [{"id": "bad-chain", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.0.0", "chain"]},
-                                  {"id": "hop-chain", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.1.0", "chain"]},
+            catalog = {"checks": [{"id": "anchor-refusal", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.0.0", "refusal"]},
+                                  {"id": "hop-refusal", "command": ["bash", "dev/e2e/published-upgrade.sh", "1.1.0", "refusal"]},
                                   {"id": "hop-direct", "command": ["bash", "dev/e2e/published-upgrade.sh", "hop", "none"]}]}
             self.assertEqual(published_baseline_refusals(source, catalog), [
                 "expected exactly one hop row",
@@ -3158,14 +3163,14 @@ while True: time.sleep(1)
                 "hop 1.2.0: differs from UpdateHopVersion 1.5.0",
                 "hop 1.5.0: below anchor 2.0.0",
                 "refusal 3.0.0: outside the supported refusal window",
-                "bad-chain: chain source 1.0.0 has role anchor",
-                "hop-chain: chain source 1.1.0 has role hop",
+                "anchor-refusal: refusal source 1.0.0 has role anchor",
+                "hop-refusal: refusal source 1.1.0 has role hop",
                 "hop-direct: hop baseline is unavailable"])
             (source / "dev/e2e/published-upgrade-baselines.tsv").write_text("")
             self.assertEqual(published_baseline_refusals(source, catalog), [
                 "expected exactly one anchor row", "expected exactly one hop row", "hop 1.5.0: below anchor 2.0.0",
-                "bad-chain: chain source 1.0.0 has role None", "bad-chain: chain hop is unavailable",
-                "hop-chain: chain source 1.1.0 has role None", "hop-chain: chain hop is unavailable",
+                "anchor-refusal: refusal source 1.0.0 has role None",
+                "hop-refusal: refusal source 1.1.0 has role None",
                 "hop-direct: hop baseline is unavailable"])
 
     def test_core_vm_check_wrapper_runs_the_declared_command_on_its_slot(self):
@@ -3250,7 +3255,7 @@ while True: time.sleep(1)
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 24)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 22)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):

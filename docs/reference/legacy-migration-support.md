@@ -122,9 +122,9 @@ also verifies that continuation alone never authorizes full removal. Current-own
 projects retain their ordinary repeatable initialization contract.
 
 Release acceptance runs the direct update from the anchor (v0.28.0, with agents) and from the
-previous published release if it is neither the anchor nor the hop. The hop has no separate release
-check: the first boundary release reaches the candidate from it in both chains, and Periodic E2E
-keeps an agent-free `published:` upgrade from it. The immutable installer and archive digests live in
+previous published release if it is neither the anchor nor the hop. The hop row keeps the
+supported direct path covered by an agent-free `published:0.28.1` upgrade in Periodic E2E;
+the refusal checks below assert the hop command. The immutable installer and archive digests live in
 [`published-upgrade-baselines.tsv`](../../dev/e2e/published-upgrade-baselines.tsv); its fourth column
 labels `anchor` and `hop` (both also direct, exactly one each), `direct` and `refusal` expectations;
 `pin` rows supply immutable assets for fixture lookups only and never create matrix or periodic
@@ -132,11 +132,11 @@ checks. Release preparation refuses if the previous published release is not a d
 row or local release tags are unavailable. Candidate versions must sort above their direct baselines.
 
 Refusal coverage includes v0.11.0, v0.17.3 and v0.27.0, each asserting the hop command; pre-v0.11.0
-removal retains its own pinned harness and full-uninstall lane. The first boundary release
-additionally runs v0.11.0 → v0.28.1 → candidate and v0.27.0 → v0.28.1 → candidate. Fixtures that step
-an older install through the boundary use the hop; fixtures whose subject starts at an accepted
-source use the anchor. The complete old-source matrix remains frozen in the v0.28.0 tag; later
-candidate acceptance does not repeat it.
+removal retains its own pinned harness and full-uninstall lane. The one-time hop chains belong
+to the first boundary release, v0.29.0, whose acceptance runs from its release branch; master no
+longer includes them. Fixtures that step an older install through the boundary use the hop;
+fixtures whose subject starts at an accepted source use the anchor. The complete old-source
+matrix remains frozen in the v0.28.0 tag; later candidate acceptance does not repeat it.
 
 ## Moving the update boundary
 

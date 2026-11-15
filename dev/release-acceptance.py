@@ -279,9 +279,6 @@ CI_HOSTED_CHECKS = frozenset({
     "vm:published-upgrade/0.11.0",
     "vm:published-upgrade/0.17.3",
     "vm:published-upgrade/0.27.0",
-    # The two chains are required only for the first boundary release.
-    "vm:published-upgrade/0.11.0-chain",
-    "vm:published-upgrade/0.27.0-chain",
     "vm:integration-selection/container",
     "vm:integration-selection/special", "vm:disabled-components",
     "profile:test-vms/full-uninstall", "profile:github", "vm:p0-full-uninstall",
