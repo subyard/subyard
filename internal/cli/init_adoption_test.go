@@ -53,6 +53,8 @@ func adoptionFixture(t *testing.T) (*CLI, *initExecution, *adoptionIncus) {
 	fake := &adoptionIncus{Incus: incus}
 	runtime := execution.platform.(reconcileruntime.Runtime)
 	runtime.Environment = environmentList(structuredCommandContext(execution.loaded), nil)
+	// Host free space is not an input of these contracts; the storage floor owns its own tests.
+	runtime.Environment = append(runtime.Environment, "MIN_DISK_GIB=0", "RESUME_MIN_DISK_GIB=0")
 	// Incus isolates these namespaces by default on project creation.
 	fake.Reconcile.ProjectConfig["features.storage.buckets"] = "true"
 	fake.Reconcile.ProjectConfig["features.images"] = "true"

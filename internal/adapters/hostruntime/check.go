@@ -73,8 +73,14 @@ func (check HostCheck) Run(ctx context.Context, options CheckOptions) error {
 	findings := check.evaluate(facts, options)
 	failures, warnings := renderHostCheck(check.Output, findings)
 	if failures != 0 {
-		return fmt.Errorf("%w: %d hard requirement(s) failed, %d warning(s)",
-			ErrHostNotReady, failures, warnings)
+		var failed []string
+		for _, item := range findings {
+			if item.level == "fail" {
+				failed = append(failed, item.section+": "+item.message)
+			}
+		}
+		return fmt.Errorf("%w: %d hard requirement(s) failed, %d warning(s): %s",
+			ErrHostNotReady, failures, warnings, strings.Join(failed, "; "))
 	}
 	return nil
 }
