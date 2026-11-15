@@ -61,8 +61,7 @@ print('{"state":"absent","actual":"","desired":""}')
                          'RESTRICTED_DISK_PATHS ACCESS_KIND YARD_KIND INCUS_BRIDGE SSH_HOST DEV_UID '
                          'DEV_SUDO FORWARD_SSH_AGENT NESTED_E2E_VMS').split():
                 env[name] = ''
-            env.update(YARD_INSTANCE_NAME='yard', INCUS_PROJECT='subyard', DEV_USER='dev',
-                       ENVIRONMENT_PROFILES='orca')
+            env.update(YARD_INSTANCE_NAME='yard', INCUS_PROJECT='subyard', DEV_USER='dev')
             producer = subprocess.run([str(PROFILE/'runtime.sh'), 'observe'], input='', text=True,
                                       capture_output=True, env=env, timeout=10)
             self.assertEqual(producer.returncode, 0, producer.stderr)
@@ -93,53 +92,6 @@ print('{"state":"absent","actual":"","desired":""}')
                     self.assertTrue(marker.exists())
                     self.assertFalse(effect.exists())
 
-
-    def test_unselected_producer_reads_only_the_fixed_removal_observer(self):
-        harness = runpy.run_path(str(ROOT / 'dev/verify-release-upgrades.py'))
-        with tempfile.TemporaryDirectory(prefix='orca-unselected-', dir='/tmp') as temp:
-            root = Path(temp)
-            shim = root / 'incus'
-            shim.write_text('''#!/usr/bin/python3
-import json, os, pathlib, sys
-args = sys.argv[1:]
-with open(os.environ['CAPTURE'], 'a') as stream: stream.write(json.dumps(args) + '\\n')
-if args[:1] == ['config']: sys.exit(0)
-if args[:1] != ['exec']: sys.exit(99)
-pathlib.Path(os.environ['PAYLOAD']).write_bytes(sys.stdin.buffer.read())
-desired = __import__('hashlib').sha256(b'subyard-orca-runtime-removed-v1\\n').hexdigest()
-print(json.dumps({"state": "current", "actual": desired, "desired": desired, "ownership_absent": True}))
-''')
-            shim.chmod(0o700)
-            env = dict(os.environ, PATH=f'{root}:/usr/bin:/bin', CAPTURE=str(root/'argv'),
-                       PAYLOAD=str(root/'stdin'), SUBYARD_CONFIG_HOME=str(root/'config'),
-                       SUBYARD_ENGINE_CONTEXT='1', SUBYARD_ENGINE_CONTEXT_SCHEMA='1')
-            for name in ('SUBYARD_OPERATOR_HOME SUBYARD_CONFIG_DIR SUBYARD_HOME STORAGE_PATH HOST_BASE '
-                         'RESTRICTED_DISK_PATHS ACCESS_KIND YARD_KIND INCUS_BRIDGE SSH_HOST DEV_UID '
-                         'DEV_SUDO FORWARD_SSH_AGENT NESTED_E2E_VMS').split():
-                env[name] = ''
-            env.update(YARD_INSTANCE_NAME='yard', INCUS_PROJECT='subyard', DEV_USER='dev', ENVIRONMENT_PROFILES='')
-            producer = subprocess.run([str(PROFILE/'runtime.sh'), 'observe'], input='', text=True,
-                                      capture_output=True, env=env, timeout=10)
-            self.assertEqual(producer.returncode, 0, producer.stderr)
-            observed = json.loads(producer.stdout)
-            self.assertEqual((observed['state'], observed.get('ownership_absent')), ('current', True))
-            calls = [json.loads(line) for line in (root/'argv').read_text().splitlines()]
-            payload = (root/'stdin').read_bytes()
-            self.assertEqual(payload, (PROFILE/'resources/orca/removal.bash').read_bytes())
-            shims = root/'shims'; shims.mkdir()
-            control = root/'control'; control.write_text('{"instances": []}')
-            marker = root/'rejected'
-            harness['write_observation_incus'](shims, control, marker)
-            for call in calls:
-                with self.subTest(call=call):
-                    marker.unlink(missing_ok=True)
-                    result = subprocess.run([str(shims/'incus'), *call], input=payload if call[0] == 'exec' else b'',
-                                            capture_output=True, env=env, timeout=10)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertFalse(marker.exists())
-            changed = subprocess.run([str(shims/'incus'), *[call for call in calls if call[0] == 'exec'][0]],
-                                     input=payload + b'X', capture_output=True, env=env, timeout=10)
-            self.assertEqual(changed.returncode, 99)
 
     def test_historical_identity_and_transport_fail_closed(self):
         harness = runpy.run_path(str(ROOT / 'dev/verify-release-upgrades.py'))

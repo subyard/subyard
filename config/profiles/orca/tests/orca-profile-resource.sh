@@ -124,9 +124,7 @@ case "${1:-}" in
     fi
     case "${2:-} ${3:-}" in
       'device list')
-        # An empty device list succeeds, as Incus does.
-        [ ! -e "$state_root/fail-device-list" ] || exit 1
-        if [ -f "$route" ]; then printf 'orca-server\n'; fi
+        [ -f "$route" ] && printf 'orca-server\n'
         ;;
       'device get')
         [ -f "$route" ] || exit 1
@@ -154,7 +152,7 @@ case "${1:-}" in
         done
         printf '%s\n%s\n' "$listen" "$connect" > "$route"
         ;;
-      'device remove') [ ! -e "$state_root/fail-route-remove" ] || exit 1; rm -f "$route" ;;
+      'device remove') rm -f "$route" ;;
     esac
     ;;
   exec)
@@ -176,74 +174,6 @@ case "${1:-}" in
       case " $* " in *' bash -s'*|*' /usr/bin/python3 -I -B - '*) ;; *) cat >/dev/null ;; esac
     fi
     case " $* " in
-      *' bash -se -- observe / '*|*' bash -se -- apply / dev ')
-        # The fixed-path removal of an unselected Orca, under the guest root,
-        # against a small systemd, user-manager and unit model.
-        arguments=("$@")
-        for index in "${!arguments[@]}"; do
-          [ "${arguments[$index]}" = -- ] && command=("${arguments[@]:$((index + 1))}")
-        done
-        command[1]="$guest"
-        export ORCA_TEST_STATE_ROOT="$state_root" ORCA_TEST_SERVICE_FILE="$service" ORCA_TEST_GUEST_ROOT="$guest"
-        systemctl() {
-          local root="$ORCA_TEST_STATE_ROOT" unit
-          printf 'removal systemctl %s\n' "$*" >>"$root/commands.log"
-          [ ! -e "$root/fail-removal-systemd" ] || return 1
-          case "$*" in
-            daemon-reload) return 0 ;;
-            'show user@1234.service --property=ActiveState --value')
-              [ ! -e "$root/fail-manager-state" ] || return 1
-              if [ -e "$root/no-user-manager" ]; then printf 'inactive\n'; else printf 'active\n'; fi ;;
-            '--user list-units '*)
-              [ ! -e "$root/fail-user-bus" ] || return 1
-              if [ -e "$root/daemon-scope" ]; then
-                printf 'orca-daemon-fixture.scope loaded active running fixture\n'
-                printf 'orca_pty_orca_daemon_fixture_1.scope loaded active running fixture\n'
-              fi ;;
-            '--user stop -- '*)
-              [ ! -e "$root/fail-scope-stop" ] || return 1
-              rm -f "$root/daemon-scope" ;;
-            'show '*' --property=ActiveState --value')
-              unit="$2"
-              case "$unit" in
-                subyard-orca.service) if [ -f "$ORCA_TEST_SERVICE_FILE" ]; then printf 'active\n'; else printf 'inactive\n'; fi ;;
-                subyard-orca-discovery.timer) if [ -f "$root/discovery-active" ]; then printf 'active\n'; else printf 'inactive\n'; fi ;;
-                *) printf 'inactive\n' ;;
-              esac ;;
-            'show '*' --property=UnitFileState --value')
-              unit="$2"
-              case "$unit" in
-                subyard-orca.service)
-                  if [ -f "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$unit" ] && [ ! -e "$root/main-disabled" ]; then printf 'enabled\n'; else printf '\n'; fi ;;
-                subyard-orca-discovery.timer) if [ -f "$root/discovery-enabled" ]; then printf 'enabled\n'; else printf '\n'; fi ;;
-                *) printf '\n' ;;
-              esac ;;
-            'stop '*)
-              unit="$2"
-              case "$unit" in
-                subyard-orca.service)
-                  [ ! -e "$root/fail-removal-stop" ] || return 1
-                  # The unit's own stop removes its owned ingress guard.
-                  rm -f "$ORCA_TEST_SERVICE_FILE"
-                  [ "$(cat "$root/nft-mode" 2>/dev/null)" = foreign ] || rm -f "$root/ingress" ;;
-                subyard-orca-discovery.timer) rm -f "$root/discovery-active" ;;
-              esac ;;
-            'disable '*)
-              unit="$2"
-              # Disabling a unit whose file is gone fails, as systemd does.
-              [ -f "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$unit" ] || return 1
-              case "$unit" in
-                subyard-orca.service) touch "$root/main-disabled" ;;
-                subyard-orca-discovery.timer) rm -f "$root/discovery-enabled" ;;
-              esac ;;
-            *) return 1 ;;
-          esac
-        }
-        id() { [ "$*" = '-u dev' ] && printf '1234\n'; }
-        runuser() { shift 6; "$@"; }
-        export -f systemctl id runuser
-        /bin/bash -se -- "${command[@]}"
-        ;;
       *' bash -se -- dev list '*|*' bash -se -- dev stop '*)
         . "$state_root/daemon-manager-fixture.bash"
         daemon_manager_fixture "$state_root" "${*: -1}"
@@ -443,7 +373,6 @@ case "${1:-}" in
       *' systemctl is-active --quiet subyard-orca.service '*)
         [ -f "$service" ]
         ;;
-      *' systemctl enable subyard-orca.service '*) rm -f "$state_root/main-disabled" ;;
       *' systemctl enable --now subyard-orca-discovery.timer '*)
         touch "$state_root/discovery-enabled" "$state_root/discovery-active"
         ;;
@@ -527,9 +456,6 @@ state_root="$(cd "$(dirname "$0")/.." && pwd)"
 printf 'nft %s\n' "$*" >>"$state_root/commands.log"
 case "${1:-} ${2:-}" in
   'list table') [ -f "$state_root/ingress" ] ;;
-  'list tables')
-    [ ! -e "$state_root/fail-nft-list" ] || exit 1
-    [ ! -f "$state_root/ingress" ] || printf 'table inet subyard_orca\n' ;;
   'list chain')
     [ -f "$state_root/ingress" ] || exit 1
     mode="$(cat "$state_root/nft-mode" 2>/dev/null || printf owned)"
@@ -704,9 +630,9 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   observer="$ROOT/config/profiles/orca/resources/orca/handler.sh"
   cp "$ORCA_TEST_LOG" "$TMP/before-invalid-runtime"
   empty_digest="$(printf '%064d' 0)"
-  if ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract apply bad/operation "$empty_digest" "$empty_digest" \
+  if "$observer" _runtime-contract apply bad/operation "$empty_digest" "$empty_digest" \
     >"$TMP/invalid-runtime-id.out" 2>&1; then fail 'runtime contract accepted an invalid operation ID'; fi
-  if ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract apply valid-operation bad-digest "$empty_digest" \
+  if "$observer" _runtime-contract apply valid-operation bad-digest "$empty_digest" \
     >"$TMP/invalid-runtime-digest.out" 2>&1; then fail 'runtime contract accepted an invalid digest'; fi
   cmp "$ORCA_TEST_LOG" "$TMP/before-invalid-runtime" \
     || fail 'invalid runtime activation arguments reached the transport'
@@ -715,12 +641,12 @@ if [ "${1:-}" = --source-observer-fixture ]; then
     target="$ORCA_TEST_GUEST/$artifact"
     mkdir -p "${target%/*}"
     printf 'orphaned Codex integration\n' >"$target"
-    ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/codex-orphan.json"
+    "$observer" _runtime-contract observe >"$TMP/codex-orphan.json"
     jq -e '.state == "stale"' "$TMP/codex-orphan.json" >/dev/null \
       || fail "runtime contract ignored orphaned $artifact"
     rm -f "$target"
     ln -s "$TMP/missing-contract-target" "$target"
-    if ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/contract-symlink.json" 2>"$TMP/contract-symlink.err"; then
+    if "$observer" _runtime-contract observe >"$TMP/contract-symlink.json" 2>"$TMP/contract-symlink.err"; then
       fail "runtime contract accepted an orphaned symbolic link at $artifact"
     fi
     rm -f "$target"
@@ -729,7 +655,7 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   touch "$TMP/drain-exec-stdin"
   mkdir -p "$ORCA_TEST_GUEST/usr/bin"
   ln -s "$ORCA_TEST_GUEST/tmp/unrelated" "$ORCA_TEST_GUEST/usr/bin/orca-ide"
-  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/current.json"
+  "$observer" _runtime-contract observe >"$2/current.json"
   jq -e '.state == "current"' "$2/current.json" >/dev/null \
     || fail 'runtime contract refused the package-owned launcher symlink'
   rm -f "$ORCA_TEST_GUEST/usr/bin/orca-ide"
@@ -746,7 +672,7 @@ if [ "${1:-}" = --source-observer-fixture ]; then
         content) printf '# legacy Codex integration\n' >"$target" ;;
         mode) chmod 0600 "$target" ;;
       esac
-      ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/codex-artifact-stale.json"
+      "$observer" _runtime-contract observe >"$TMP/codex-artifact-stale.json"
       jq -e '.state == "stale" and .actual != .desired' "$TMP/codex-artifact-stale.json" >/dev/null \
         || fail "runtime contract accepted $drift drift in $artifact with intact helpers"
       cp -p "$TMP/codex-artifact" "$target"
@@ -754,18 +680,18 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   done
   rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex"
   printf '# legacy Codex login integration\n' >"$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh"
-  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$TMP/codex-launch-stale.json"
+  "$observer" _runtime-contract observe >"$TMP/codex-launch-stale.json"
   jq -e '.state == "stale" and .actual != .desired' "$TMP/codex-launch-stale.json" >/dev/null \
     || fail 'runtime contract accepted missing Codex chat launcher and legacy login integration'
   printf '# old helper\n' >>"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/reconcile.py"
   pushes="$(cat "$ORCA_TEST_PUSH_COUNTER")"
   stages="$(count_log 'mktemp -d /tmp/subyard-orca.')"
-  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/stale.json"
+  "$observer" _runtime-contract observe >"$2/stale.json"
   [ "$pushes" = "$(cat "$ORCA_TEST_PUSH_COUNTER")" ] || fail 'source observation pushed guest files'
   [ "$stages" = "$(count_log 'mktemp -d /tmp/subyard-orca.')" ] || fail 'source observation staged guest files'
-  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract apply source-observer-repair \
+  "$observer" _runtime-contract apply source-observer-repair \
     "$(jq -r .actual "$2/stale.json")" "$(jq -r .desired "$2/stale.json")" >"$TMP/applied.json"
-  ENVIRONMENT_PROFILES=orca "$observer" _runtime-contract observe >"$2/repaired.json"
+  "$observer" _runtime-contract observe >"$2/repaired.json"
   cmp -s "$TMP/expected-codex-profile" "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
     || fail 'runtime contract repair left the legacy Codex login integration'
   cmp -s "$TMP/expected-codex-bin" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex" \
@@ -857,7 +783,7 @@ done
   || fail 'pair restarted a stopped Orca service'
 [ "$(count_log '.pairing.url')" -eq 0 ] \
   || fail 'pair read a pairing capability while Orca was stopped'
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "absent" and .actual == "" and .desired == ""' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation did not distinguish an absent Orca installation'
 run_orca up --yes >"$TMP/up.out"
@@ -977,11 +903,11 @@ done
 grep -Fq -- "sync --host-name 'owner-host'" \
   "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" \
   || fail 'installed project hook did not receive the owner HostID'
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and (.actual | test("^[0-9a-f]{64}$")) and .actual == .desired' \
   <<<"$observation" >/dev/null || fail 'installed runtime contract was not observed as current'
 touch "$TMP/project-counts-fail"
-if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
   >"$TMP/unavailable-binding.out" 2>&1; then
   fail 'running native observation errors were downgraded to conditional scope'
 fi
@@ -997,11 +923,11 @@ grep -Fq 'Orca cleanup pending: /srv/workspaces/removed/src: session tabs are re
   || fail 'expected cleanup drift generated a warning'
 rm -f "$TMP/project-cleanup-pending"
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation accepted a missing completion marker'
 printf 'legacy-contract\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation accepted an old completion marker'
 push_count="$(cat "$ORCA_TEST_PUSH_COUNTER")"
@@ -1009,7 +935,7 @@ printf '# drift\n' >>"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registrati
 chmod 0644 "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.lock"
 printf 'legacy-contract\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation missed helper drift'
 [ "$(cat "$ORCA_TEST_PUSH_COUNTER")" -eq "$push_count" ] \
@@ -1043,7 +969,7 @@ rm -f "$TMP/chat-reset-needed"
 # carries it.
 export SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE=00112233445566778899aabbccddeeff
 typed_record="subyard-profile-runtime-diagnostic-v1 $SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE"
-if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
   orca-refresh "$(printf '%064d' 0)" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
   fail 'runtime contract apply accepted a stale assessment'
 fi
@@ -1061,7 +987,7 @@ for injected in host-staging push unsafe-guest-path guest-transport forged-guest
     guest-transport) touch "$TMP/fail-guest-transport"; expected='could not enable lingering' ;;
     forged-guest-record) touch "$TMP/forge-guest-record"; expected='unsafe temporary path' ;;
   esac
-  if TMPDIR="$host_tmp" ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  if TMPDIR="$host_tmp" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
     "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
     >"$TMP/runtime-$injected.out" 2>&1; then
     cat "$TMP/runtime-$injected.out" >&2
@@ -1078,7 +1004,7 @@ grep -Fq 'subyard-profile-runtime-diagnostic-v1 apply yard-local' "$TMP/runtime-
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
 touch "$TMP/fail-registration-marker"
-if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-interrupted.out" 2>&1; then
   fail 'runtime contract apply concealed an interruption before marker publication'
@@ -1087,9 +1013,9 @@ fi
   grep -Fxq "$typed_record apply yard-local" "$TMP/runtime-interrupted.out" \
   || fail 'a failed guest effect of the runtime apply was not reported as yard-local'
 # A guest-side failure whose staging cleanup also fails reports nothing.
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 touch "$TMP/fail-cleanup-once"
-if ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-cleanup-failed.out" 2>&1; then
   fail 'runtime contract apply concealed a failure with failed cleanup'
@@ -1104,13 +1030,13 @@ for leftover in "$ORCA_TEST_GUEST"/tmp/subyard-orca.[0-9]*; do
   [ ! -e "$leftover" ] || rm -rf -- "$leftover"
 done
 rm -f "$TMP/fail-registration-marker"
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe < /dev/null)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
   || fail 'interrupted runtime contract apply appeared current without its marker'
 assert_runtime_diagnostics() {
   local normal detailed
-  normal="$(ENVIRONMENT_PROFILES=orca SUBYARD_PROFILE_DIAGNOSTICS=0 "$ROOT/config/profiles/orca/runtime.sh" observe)"
-  detailed="$(ENVIRONMENT_PROFILES=orca SUBYARD_PROFILE_DIAGNOSTICS=1 "$ROOT/config/profiles/orca/runtime.sh" observe)"
+  normal="$(SUBYARD_PROFILE_DIAGNOSTICS=0 "$ROOT/config/profiles/orca/runtime.sh" observe)"
+  detailed="$(SUBYARD_PROFILE_DIAGNOSTICS=1 "$ROOT/config/profiles/orca/runtime.sh" observe)"
   jq -en --argjson normal "$normal" --argjson detailed "$detailed" --argjson expected "$1" '
     ($normal | has("diagnostics") | not) and
     ($detailed | del(.diagnostics)) == $normal and
@@ -1119,7 +1045,7 @@ assert_runtime_diagnostics() {
 }
 assert_runtime_diagnostics '[{"parameter":"orca.registration","installed":"unknown","desired":"current"}]'
 rm -f "$TMP/linger"
-ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+"$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-applied.json"
 jq -e '.state == "current" and .actual == .desired' "$TMP/runtime-applied.json" >/dev/null \
@@ -1145,14 +1071,14 @@ ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 run_orca s
 grep -Fq "service runs an outdated unit: its updated environment is not applied; run 'yard migrate' or 'yard orca up'" \
   "$TMP/status-unit-drift.out" || fail 'status did not report an unapplied service unit'
 observation="$(ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
-  ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired and
   .consequence == "Orca service restarts to apply its updated unit; Orca clients reconnect; agents or terminals running inside the service end"' \
   <<<"$observation" >/dev/null || fail "runtime contract did not disclose main-unit drift: $observation"
 assert_runtime_diagnostics '[{"parameter":"orca.main-unit","installed":"changed","desired":"current"}]'
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
-  ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-unit.json"
 jq -e '.state == "current" and .actual == .desired and (has("consequence") | not)' "$TMP/runtime-unit.json" >/dev/null \
   || fail 'runtime contract apply did not converge the main unit'
@@ -1161,14 +1087,14 @@ cmp -s "$TMP/current-unit" "$installed_unit" \
 [ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
   || fail 'runtime contract apply did not restart Orca once for its updated unit'
 touch "$TMP/need-daemon-reload"
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and (.consequence | length > 0)' <<<"$observation" >/dev/null \
   || fail 'runtime contract missed a unit change systemd has not loaded'
 rm -f "$TMP/need-daemon-reload"
 # Restore the configured endpoint; up republishes its contract marker for the restored unit.
 sed -i 's#--pairing-address legacy.example-tailnet.ts.net:17679#--pairing-address owner.example-tailnet.ts.net:17678#' "$installed_unit"
 run_orca up --yes >/dev/null
-observation="$(ENVIRONMENT_PROFILES=orca "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and .actual == .desired' <<<"$observation" >/dev/null \
   || fail 'runtime contract did not match the unit installed by up'
 assert_runtime_diagnostics '[]'
@@ -1767,175 +1693,6 @@ if ORCA_ADVERTISE_HOST='https://bad/path' ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_
 fi
 grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \
   || fail 'unsafe hostname failure was not actionable'
-
-# A yard that does not select Orca converges to no Orca wiring. The runtime
-# removes it by fixed paths from a full or half-applied installation, keeps
-# Orca state and the package, and is then current with proven ownership absence.
-orca_wiring=(
-  /usr/local/libexec/subyard/projects-changed.d/orca /usr/local/libexec/subyard/orca-registration
-  /usr/local/libexec/subyard/orca-registration.sha256 /usr/local/libexec/subyard/orca-contract.sha256
-  /usr/local/libexec/subyard/orca-registration.lock /usr/local/libexec/subyard/orca-ingress
-  /usr/local/libexec/subyard/orca-capture-ready /etc/profile.d/subyard-orca-codex.sh
-  /usr/local/libexec/subyard/orca-codex /etc/systemd/system/subyard-orca.service
-  /etc/systemd/system/subyard-orca-discovery.service /etc/systemd/system/subyard-orca-discovery.timer
-)
-unselected_observe() {
-  ENVIRONMENT_PROFILES="hermes" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe
-}
-unselected_apply() { # <observation>
-  ENVIRONMENT_PROFILES="hermes" "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-removal \
-    "$(jq -r .actual <<<"$1")" "$(jq -r .desired <<<"$1")"
-}
-assert_removed_observation() { # <observation> <context>
-  jq -e '.state == "current" and .ownership_absent == true and .actual == .desired and (.desired | test("^[0-9a-f]{64}$"))' \
-    <<<"$1" >/dev/null || fail "$2 was not observed as removed: $1"
-}
-assert_orca_removed() {
-  local path
-  for path in "${orca_wiring[@]}"; do
-    [ ! -e "$ORCA_TEST_GUEST$path" ] && [ ! -L "$ORCA_TEST_GUEST$path" ] || fail "$1 left $path"
-  done
-  assert_down "$1"
-  [ ! -e "$TMP/discovery-active" ] && [ ! -e "$TMP/discovery-enabled" ] || fail "$1 left discovery scheduled"
-  [ -f "$ORCA_TEST_GUEST/srv/agents/orca/state/persisted-grant" ] || fail "$1 removed Orca state"
-  ! grep -Eq 'apt-get (remove|purge)|dpkg (-r|-P|--remove|--purge)' "$ORCA_TEST_LOG" || fail "$1 removed the Orca package"
-}
-mkdir -p "$ORCA_TEST_GUEST/srv/agents/orca/state"
-touch "$ORCA_TEST_GUEST/srv/agents/orca/state/persisted-grant"
-for installation in full half-applied; do
-  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
-  [ -e "$ORCA_TEST_ROUTE" ] && [ -e "$ORCA_TEST_SERVICE" ] || fail 'fixture Orca is not running before removal'
-  if [ "$installation" = half-applied ]; then
-    # An interrupted older release: no marker, an older hook and discovery helper.
-    rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
-    printf '#!/bin/sh\nexit 1\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
-    printf '#!/bin/sh\nexit 1\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/discover"
-    rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/main.py"
-  fi
-  observation="$(unselected_observe)" || fail "unselected $installation Orca could not be observed"
-  jq -e '.state == "stale" and (.actual | test("^[0-9a-f]{64}$")) and (.desired | test("^[0-9a-f]{64}$")) and .actual != .desired and
-    .consequence == "Orca stops and its wiring is removed from this yard; its state under /srv/agents/orca and the orca-ide package are kept"' \
-    <<<"$observation" >/dev/null || fail "unselected $installation Orca was not observed as removal: $observation"
-  hook_runs="$(count_log 'projects-changed.d/orca')"
-  unselected_apply "$observation" >"$TMP/removal-$installation.json" || fail "removal of $installation Orca failed"
-  assert_removed_observation "$(cat "$TMP/removal-$installation.json")" "removal of $installation Orca"
-  [ "$(count_log 'projects-changed.d/orca')" -eq "$hook_runs" ] || fail "removal of $installation Orca ran an installed helper"
-  assert_orca_removed "removal of $installation Orca"
-  assert_removed_observation "$(unselected_observe)" "removed $installation Orca"
-done
-# Nothing installed: converged, and observation writes nothing.
-push_count="$(cat "$ORCA_TEST_PUSH_COUNTER")"
-assert_removed_observation "$(unselected_observe)" 'uninstalled unselected Orca'
-[ "$(cat "$ORCA_TEST_PUSH_COUNTER")" -eq "$push_count" ] || fail 'unselected observation wrote guest files'
-removal_refused() { # <output> <blocking|yard-local> <context>
-  if unselected_apply "$observation" >"$1" 2>&1; then
-    cat "$1" >&2; fail "$3 was not refused"
-  fi
-  if [ "$2" = yard-local ]; then
-    grep -Fxq "$typed_record apply yard-local" "$1" || { cat "$1" >&2; fail "$3 was not yard-local"; }
-  else
-    ! grep -Fq "$typed_record" "$1" || { cat "$1" >&2; fail "$3 was reported as yard-local"; }
-  fi
-}
-retry_removal() { # <context>
-  observation="$(unselected_observe)" || fail "$1: removal could not be observed again"
-  # The core applies only a stale observation.
-  if [ "$(jq -r .state <<<"$observation")" = stale ]; then
-    unselected_apply "$observation" >/dev/null || fail "$1: removal did not finish on retry"
-  fi
-  assert_orca_removed "$1"
-}
-# A main unit that does not stop keeps its ingress guard, unit and helper files,
-# while every other part is removed; the guest refusal is yard-local.
-ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
-touch "$TMP/fail-removal-stop"
-observation="$(unselected_observe)"
-removal_refused "$TMP/removal-stop.out" yard-local 'a main unit that did not stop'
-grep -Fq 'Orca removal: could not stop subyard-orca.service' "$TMP/removal-stop.out" &&
-  grep -Fq 'Orca removal: subyard-orca.service is still running' "$TMP/removal-stop.out" \
-  || { cat "$TMP/removal-stop.out" >&2; fail 'a failed stop was not reported'; }
-[ -e "$ORCA_TEST_INGRESS" ] && [ -e "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service" ] &&
-  [ -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-ingress" ] \
-  || fail 'removal dropped the ingress guard or unit files of a running Orca'
-[ ! -e "$ORCA_TEST_ROUTE" ] && [ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] \
-  || fail 'a failed stop stopped the other removal steps'
-rm -f "$TMP/fail-removal-stop"
-retry_removal 'removal after a failed stop'
-# A unit whose file an earlier partial removal deleted still stops: stop and
-# disable are separate, and disable runs only for an enabled unit.
-ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
-rm -f "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service"
-observation="$(unselected_observe)"
-unselected_apply "$observation" >/dev/null || fail 'removal of a running unit without its file failed'
-assert_orca_removed 'removal of a running unit without its file'
-# Orca daemon scopes of the development user are part of the removal. An
-# unreadable user manager fails observation closed; a scope that does not stop
-# is yard-local and keeps the yard unconverged until it is gone.
-touch "$TMP/daemon-scope"
-observation="$(unselected_observe)"
-jq -e '.state == "stale"' <<<"$observation" >/dev/null || fail 'a running Orca daemon scope was observed as removed'
-touch "$TMP/fail-user-bus"
-if unselected_observe >"$TMP/removal-scopes-unreadable.out" 2>&1; then fail 'an unreadable user manager was observed as removed'; fi
-rm -f "$TMP/fail-user-bus"
-touch "$TMP/fail-scope-stop"
-removal_refused "$TMP/removal-scopes.out" yard-local 'a daemon scope that did not stop'
-grep -Fq 'Orca removal: Orca daemon scopes of dev are still running' "$TMP/removal-scopes.out" \
-  || { cat "$TMP/removal-scopes.out" >&2; fail 'a running daemon scope was not reported'; }
-jq -e '.state == "stale"' <<<"$(unselected_observe)" >/dev/null || fail 'a remaining daemon scope was observed as removed'
-rm -f "$TMP/fail-scope-stop"
-retry_removal 'removal after a daemon scope stop failure'
-[ ! -e "$TMP/daemon-scope" ] || fail 'removal left an Orca daemon scope'
-# Failed inspections never read as absence.
-for injected in fail-removal-systemd fail-nft-list fail-manager-state; do
-  touch "$TMP/$injected"
-  if unselected_observe >"$TMP/removal-$injected.out" 2>&1; then
-    fail "a failed inspection ($injected) was observed as removed"
-  fi
-  rm -f "$TMP/$injected"
-done
-# An unowned nft table is an ownership refusal: it stays blocking and is kept,
-# while the other parts are still removed.
-ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
-printf foreign >"$TMP/nft-mode"
-observation="$(unselected_observe)"
-removal_refused "$TMP/removal-foreign-table.out" blocking 'an unowned nft table'
-grep -Fq 'Orca removal: refusing to remove the unowned nft table inet subyard_orca' "$TMP/removal-foreign-table.out" \
-  || { cat "$TMP/removal-foreign-table.out" >&2; fail 'an unowned nft table was not reported'; }
-[ -e "$ORCA_TEST_INGRESS" ] || fail 'removal deleted an unowned nft table'
-[ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] || fail 'an ownership refusal stopped the other removal steps'
-rm -f "$TMP/nft-mode" "$TMP/ingress"
-retry_removal 'removal after an unowned nft table'
-# A guest the removal cannot reach stays blocking.
-ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
-observation="$(unselected_observe)"
-touch "$TMP/fail-guest-transport"
-removal_refused "$TMP/removal-transport.out" blocking 'an unreachable guest'
-rm -f "$TMP/fail-guest-transport"
-retry_removal 'removal after a transport failure'
-# A host route failure stays blocking.
-ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
-touch "$TMP/fail-route-remove"
-observation="$(unselected_observe)"
-removal_refused "$TMP/removal-route.out" blocking 'a host route removal failure'
-[ -n "$(cat "$TMP/config-user.subyard.resource.orca-server" 2>/dev/null)" ] \
-  || fail 'a failed route removal dropped the receipt that proves its ownership'
-rm -f "$TMP/fail-route-remove"
-retry_removal 'removal after a route failure'
-# A malformed receipt and an unmarked orca-server device are never removed and
-# do not block other yards: removal observes them, refuses for this yard only
-# and names the next step.
-for route in invalid unowned; do
-  printf 'tcp:127.0.0.1:17678\ntcp:127.0.0.1:6768\n' >"$ORCA_TEST_ROUTE"
-  if [ "$route" = invalid ]; then printf 'not-a-receipt' >"$TMP/config-user.subyard.resource.orca-server"; fi
-  observation="$(unselected_observe)" || fail "an $route owner route failed observation"
-  jq -e '.state == "stale"' <<<"$observation" >/dev/null || fail "an $route owner route was observed as removed"
-  removal_refused "$TMP/removal-$route-route.out" yard-local "an $route owner route"
-  grep -Fq "then run 'yard init'" "$TMP/removal-$route-route.out" \
-    || grep -Fq 'then run' "$TMP/removal-$route-route.out" || { cat "$TMP/removal-$route-route.out" >&2; fail "an $route owner route named no next step"; }
-  [ -e "$ORCA_TEST_ROUTE" ] || fail "removal deleted an $route orca-server device"
-  rm -f "$ORCA_TEST_ROUTE" "$TMP/config-user.subyard.resource.orca-server"
-done
-assert_removed_observation "$(unselected_observe)" 'removal after the route was resolved'
 
 # Run the profile component's filesystem, wire and reconciliation contract tests in the core gate.
 python3 -B -m unittest discover -s "$ROOT/config/profiles/orca/tests/orca_registration"

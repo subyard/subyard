@@ -1058,8 +1058,8 @@ An unfinished repair of the already active release applies the installed selecti
 recorded, not desired configuration. `reduce-selection` refuses it before writing anything and
 names that installed selection: fix the failing component and run `yard migrate`. A profile runtime
 that declares a yard failure scope holds neither kind of activation: its typed failure completes the
-release and leaves that yard pending `yard -Y NAME init`, where `profile disable` and init apply the
-reduction. See [yard-scoped runtime failures](control-plane.md#yard-scoped-runtime-failures).
+release and leaves that yard pending `yard -Y NAME init`: fix the failing component and run that
+init. See [yard-scoped runtime failures](control-plane.md#yard-scoped-runtime-failures).
 
 After a completed transition, local selection `config set`, integration disable and profile
 disable can also reduce desired source while materialized configuration is stale. They use

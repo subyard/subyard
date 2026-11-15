@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -81,20 +80,6 @@ case " ${ENVIRONMENT_PROFILES:-} " in
 *) printf '%%s\n' '{"state":"absent","actual":"","desired":""}'; exit 0 ;;
 esac
 state='%[2]s'-$yard
-# A removal marker stands for an owner whose desired state is removal, as a
-# deselected profile's runtime: it removes its native state and is then current
-# at its removal digest with proven ownership absence.
-if [ -e '%[2]s'-removing-$yard ]; then
-  removed='{"state":"current","actual":"%[8]s","desired":"%[8]s","ownership_absent":true}'
-  if [ ! -f "$state" ]; then printf '%%s\n' "$removed"; exit 0; fi
-  actual=$(cat "$state")
-  case "$1" in
-  observe) printf '{"state":"stale","actual":"%%s","desired":"%%s"}\n' "$actual" %[8]s ;;
-  apply) [ "$3" = "$actual" ] && [ "$4" = %[8]s ] || exit 17; rm -f "$state"; printf '%%s\n' "$removed" ;;
-  *) exit 18 ;;
-  esac
-  exit 0
-fi
 [ -f "$state" ] || printf '%%s' %[3]s > "$state"
 actual=$(cat "$state")
 case "$1" in
@@ -108,7 +93,7 @@ apply)
   printf '{"state":"current","actual":"%%s","desired":"%%s"}\n' "$4" "$4" ;;
 *) exit 18 ;;
 esac
-`, runtime.calls, filepath.Join(root, "state"), strings.Repeat("a", 64), strings.Repeat("b", 64), filepath.Join(root, "fail"), strings.Repeat("d", 64), record, strings.Repeat("f", 64))), 0o700)
+`, runtime.calls, filepath.Join(root, "state"), strings.Repeat("a", 64), strings.Repeat("b", 64), filepath.Join(root, "fail"), strings.Repeat("d", 64), record)), 0o700)
 	return runtime
 }
 
@@ -200,7 +185,7 @@ func requirePendingRuntimeOutcome(t *testing.T, outcome releasetransition.Outcom
 	}
 	for _, yard := range yards {
 		if !strings.Contains(outcome.Message, "yard "+yard+": profile sample runtime failed, not applied; diagnose: yard -Y "+yard+" profile list; "+
-			"fix it and run yard -Y "+yard+" init, or run yard -Y "+yard+" profile disable sample then init; the release is ready") {
+			"fix it and run yard -Y "+yard+" init; the release is ready") {
 			t.Fatalf("pending message omits yard %s: %s", yard, outcome.Message)
 		}
 	}
@@ -289,38 +274,6 @@ func TestRuntimeOwnerRetiresStalePendingRecords(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("stale record was kept: %v", err)
-	}
-}
-
-// An owner whose desired state becomes removal (a deselected profile) removes
-// its partial state on the next repair; the yard's pending record is retired
-// and the release is ready, whatever partial state the failure left.
-func TestRuntimeRemovalResolvesThePendingYard(t *testing.T) {
-	scenario := newYardFailureScenario(t, true, true, "default")
-	scenario.runtime.failing(t, "default", true)
-	requirePendingRuntimeOutcome(t, scenario.converge(t), "default")
-	path, err := activationPendingRecordPath(scenario.request.ConfigHome, "default", "sample-runtime")
-	if err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(scenario.runtime.root, "state-removing-default"), nil, 0o600)
-	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady {
-		t.Fatalf("repair after removal: %#v", outcome)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("removal kept the pending record: %v", err)
-	}
-	if _, err := os.Stat(scenario.runtime.state("default")); !os.IsNotExist(err) {
-		t.Fatalf("removal kept the partial native state: %v", err)
-	}
-	ready := scenario.invoke(t, releasetransition.ProcessInspect, nil)
-	if ready.Inspection == nil || ready.Inspection.Outcome.Status != releasetransition.StatusReady || len(ready.Inspection.Blockers) != 0 {
-		payload, _ := json.Marshal(ready)
-		t.Fatalf("readiness after removal: %s", payload)
-	}
-	// Removal is idempotent: the absent owner needs nothing more.
-	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady || len(scenario.runtime.applies(t)) != 2 {
-		t.Fatalf("repeated repair after removal: %#v applies=%v", outcome, scenario.runtime.applies(t))
 	}
 }
 
@@ -892,7 +845,7 @@ func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 			t.Fatalf("yard name of %d bytes: %v (%d-byte message)", length, err, len(message))
 		}
 		exact := "yard " + yard + ": profile orca runtime failed, not applied; diagnose: yard -Y " + yard + " profile list; fix it and run yard -Y " +
-			yard + " init, or run yard -Y " + yard + " profile disable orca then init"
+			yard + " init"
 		once := "yard " + yard + ": profile orca runtime failed and is not applied; in that yard, run profile list to diagnose"
 		switch {
 		case len(exact) <= activationPendingMessageBytes:
@@ -913,49 +866,7 @@ func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 			t.Fatalf("yard name of %d bytes: invalid finding: %v", length, err)
 		}
 	}
-	if message := runtimePendingMessage(strings.Repeat("7", 80), "orca"); !strings.Contains(message, "yard -Y "+strings.Repeat("7", 80)+" profile disable orca then init") {
+	if message := runtimePendingMessage(strings.Repeat("7", 80), "orca"); !strings.Contains(message, "fix it and run yard -Y "+strings.Repeat("7", 80)+" init") {
 		t.Fatalf("an 80-byte yard name lost the exact commands: %q", message)
-	}
-}
-
-// While a yard waits for its init because of a declared runtime's recorded
-// failure, the operator's second exit stays open: disabling that profile in
-// the pending yard is admitted and authors the reduced selection, without a
-// release transition. The following init then removes the runtime and retires
-// the record (TestRuntimeRemovalResolvesThePendingYard and
-// TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard).
-func TestProfileDisableIsAdmittedOnAPendingRuntimeYard(t *testing.T) {
-	if os.Getenv("SUBYARD_SOURCE_QUERY_TOOLING_ROOT") != "" {
-		t.Skip("typed process-protocol fixture")
-	}
-	program, _, home := completedSourceAuthoringFixture(t, false, map[string]string{
-		"config/fixture-pending-runtime": "fixture\n",
-		"config/profiles/fixture-selected/profile.json": `{"schema_version":1,"selected_provision_only":true,` +
-			`"runtime":{"activation_id":"fixture-runtime","handler":"runtime.sh","failure_scope":"yard"}}`,
-		"config/profiles/fixture-selected/runtime.sh": "#!/bin/sh\nexit 99\n",
-	})
-	path := filepath.Join(home, "yards/default/config.env")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, path, []byte("ENVIRONMENT_PROFILES=fixture-selected\n"), 0o600)
-	outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "default")
-	if err != nil || !program.pendingIntegrationConfigurationGate(outcome, inspection) ||
-		inspection.Blockers[0].Resource != "activation.fixture-runtime.pending-configuration" {
-		t.Fatalf("fixture is not a pending declared runtime: %#v %v", outcome, err)
-	}
-	history := activationRepairHistory(t, program.options.RepositoryRoot, home)
-	options := program.options
-	var output bytes.Buffer
-	options.Arguments, options.Stdout, options.Stderr = []string{"-Y", "default", "profile", "disable", "fixture-selected", "--yes"}, &output, &output
-	if code := runAliasRepairFixture(t, options); code != 0 {
-		t.Fatalf("profile disable on the pending yard: %d %s", code, output.String())
-	}
-	loaded, err := program.loadSelectionRepair("default")
-	if err != nil || strings.Contains(loaded.Environment["ENVIRONMENT_PROFILES"], "fixture-selected") {
-		t.Fatalf("profile disable did not author the reduced selection: %q %v", loaded.Environment["ENVIRONMENT_PROFILES"], err)
-	}
-	if !reflect.DeepEqual(history, activationRepairHistory(t, program.options.RepositoryRoot, home)) {
-		t.Fatal("profile disable on the pending yard changed release history")
 	}
 }

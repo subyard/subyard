@@ -462,6 +462,6 @@ func (cli *CLI) inPlaceRepairSelectionRefusal(ctx context.Context, yard, configH
 	}
 	return fmt.Sprintf("the unfinished repair of active release %s applies the installed %s=%s that yard init recorded, not this source; "+
 		"fix the failing component and run yard migrate. A component that declares a yard failure scope instead completes the repair "+
-		"and waits for yard -Y %s init; disable it there and run that init",
+		"and waits for yard -Y %s init; fix the failing component there and run that init",
 		journal.Goal.Target, name, installed, yard)
 }

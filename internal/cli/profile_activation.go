@@ -359,16 +359,16 @@ func (reconciler *profileRuntimeActivationReconciler) pendingFacts(target config
 	}, nil
 }
 
-// runtimePendingMessage gives the exact commands of both exits. Only when that
+// runtimePendingMessage gives the exact commands of its exit. Only when that
 // form exceeds the record bound does it name the yard once, and for a yard name
 // too long even for that it leaves the yard to the finding's exact init step,
 // so a legal yard's typed failure is still recorded.
 func runtimePendingMessage(yard, profileName string) string {
 	if message := fmt.Sprintf("yard %[1]s: profile %[2]s runtime failed, not applied; diagnose: yard -Y %[1]s profile list; "+
-		"fix it and run yard -Y %[1]s init, or run yard -Y %[1]s profile disable %[2]s then init", yard, profileName); len(message) <= activationPendingMessageBytes {
+		"fix it and run yard -Y %[1]s init", yard, profileName); len(message) <= activationPendingMessageBytes {
 		return message
 	}
-	steps := fmt.Sprintf("run profile list to diagnose, then fix it and run init, or run profile disable %s and then init", profileName)
+	steps := "run profile list to diagnose, then fix it and run init"
 	if message := fmt.Sprintf("yard %s: profile %s runtime failed and is not applied; in that yard, %s", yard, profileName, steps); len(message) <= activationPendingMessageBytes {
 		return message
 	}

@@ -53,8 +53,7 @@ fixture_cleanup() {
         deselect-failure.log deselect-recovery-plan.json deselect-repair.log deselect-init.txt deselect-status.json \
         deselect-repeat.txt runtime-pending-up.txt runtime-pending-stale.json runtime-pending-failure.log \
         runtime-pending-check.json runtime-pending-record.json runtime-pending-unrelated.txt runtime-pending-init.txt \
-        runtime-pending-ready.json runtime-pending-failure-2.log runtime-pending-disable.txt runtime-pending-init-2.txt \
-        runtime-pending-ready-2.json 2>/dev/null || failed=1
+        runtime-pending-ready.json 2>/dev/null || failed=1
     fi
     # shellcheck source=config/profiles/hermes/tests/e2e/disabled-release-resource.sh
     . "$ROOT/config/profiles/hermes/tests/e2e/disabled-release-resource.sh"
@@ -472,46 +471,6 @@ exercise_runtime_pending() {
     || die 'the release is not ready after the pending yard init'
   guest_yard default test -s /usr/local/libexec/subyard/orca-registration.sha256 || die 'yard init did not reapply the Orca runtime'
   operator_yard -Y default orca down --yes
-  # Second exit: disable the profile and run init; the deselected runtime removes
-  # Orca's wiring by its fixed paths, even beside an older hook that would refuse.
-  guest_yard default sh -euc '
-    rm -f /usr/local/libexec/subyard/orca-registration.sha256
-    printf "#!/bin/sh\necho stale older Orca hook >&2\nexit 1\n" > "$2"
-    mv "$1" "$1.runtime-pending"
-    : > "$1"
-  ' _ "$fault_dir" /usr/local/libexec/subyard/projects-changed.d/orca
-  rc=0
-  operator_yard migrate --yes > "$STATE_ROOT/runtime-pending-failure-2.log" 2>&1 || rc=$?
-  [ "$rc" != 0 ] && grep -Fq 'or run yard -Y default profile disable orca then init' "$STATE_ROOT/runtime-pending-failure-2.log" \
-    || { cat "$STATE_ROOT/runtime-pending-failure-2.log"; die "second Orca runtime failure did not report its pending yard init (exit $rc)"; }
-  operator_env test -f "$record" || die 'the second yard-scoped failure was not recorded'
-  guest_yard default sh -euc 'mkdir -p /srv/agents/orca/state; : > /srv/agents/orca/state/runtime-pending-kept'
-  operator_yard -Y default profile disable orca --yes > "$STATE_ROOT/runtime-pending-disable.txt" 2>&1 \
-    || { cat "$STATE_ROOT/runtime-pending-disable.txt"; die 'profile disable was refused while the yard waits for init'; }
-  operator_yard -Y default init --yes > "$STATE_ROOT/runtime-pending-init-2.txt" 2>&1 \
-    || { cat "$STATE_ROOT/runtime-pending-init-2.txt"; die 'yard init after profile disable did not converge'; }
-  ! operator_env test -e "$record" || die 'yard init after profile disable left the pending record'
-  # Disable removed Orca's wiring and kept its state and package.
-  guest_yard default sh -euc '
-    for path in /usr/local/libexec/subyard/projects-changed.d/orca /usr/local/libexec/subyard/orca-registration \
-      /usr/local/libexec/subyard/orca-registration.sha256 /usr/local/libexec/subyard/orca-contract.sha256 \
-      /usr/local/libexec/subyard/orca-registration.lock /usr/local/libexec/subyard/orca-ingress \
-      /usr/local/libexec/subyard/orca-capture-ready /etc/profile.d/subyard-orca-codex.sh "$1" \
-      /etc/systemd/system/subyard-orca.service /etc/systemd/system/subyard-orca-discovery.service \
-      /etc/systemd/system/subyard-orca-discovery.timer; do
-      if [ -e "$path" ] || [ -L "$path" ]; then echo "left $path" >&2; exit 1; fi
-    done
-    for unit in subyard-orca.service subyard-orca-discovery.timer; do
-      if systemctl is-active --quiet "$unit" || systemctl is-enabled --quiet "$unit" 2>/dev/null; then echo "left $unit" >&2; exit 1; fi
-    done
-    if nft list table inet subyard_orca >/dev/null 2>&1; then echo "left the Orca nft table" >&2; exit 1; fi
-    test -f /srv/agents/orca/state/runtime-pending-kept
-    dpkg-query -W -f="\${Status}" orca-ide | grep -q "install ok installed"
-  ' _ "$fault_dir" || die 'profile disable and init did not remove the Orca wiring while keeping its state and package'
-  operator_yard migrate --check --json > "$STATE_ROOT/runtime-pending-ready-2.json"
-  jq -e '.outcome.status == "ready" and (.blockers | length) == 0' "$STATE_ROOT/runtime-pending-ready-2.json" >/dev/null \
-    || die 'the release is not ready after profile disable and init'
-  guest_yard default sh -euc 'rm -rf -- "$1.runtime-pending" /srv/agents/orca/state/runtime-pending-kept' _ "$fault_dir"
 }
 
 prepare_acceptance() {

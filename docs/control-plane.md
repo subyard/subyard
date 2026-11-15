@@ -1252,23 +1252,6 @@ A handler reports `yard-local` only when a guest-side command itself ran and fai
 still answers; Incus transport errors, host staging, file pushes, safety guards and a failed cleanup
 in the same apply stay blocking. The Orca handler proves this by running each such command through a
 guest wrapper that maps the command's failure to status 200, which Incus never returns.
-A yard that does not select Orca converges to no Orca wiring: its runtime observes any wiring this
-profile or an older release installed, including running Orca daemon or terminal scopes of the
-development user, as `stale` with a removal consequence, and a yard without it as `current` at the
-removal digest with `ownership_absent`. A failed systemd, nft, user-manager or Incus query fails the
-observation; it is never read as absence. The apply removes the owner route only when its receipt
-proves ownership, stops and then disables the Orca service and discovery units, removes the managed
-nft ingress table only after the service is stopped, removes every fixed Orca helper, hook, marker,
-lock and unit file (the unit files and the helpers the main unit runs only once it is stopped), and
-stops the Orca scopes. It runs no Orca helper itself; stopping the service runs the unit's own stop
-commands. Orca state under `/srv/agents/orca` and the `orca-ide` package are kept. Each independent
-refusal is reported. A guest removal command that ran and failed, a malformed route receipt and an
-unmarked `orca-server` device leave only that yard pending its init, with a next step; a guest that
-cannot be reached, an Incus failure and an unowned nft table stay blocking. The ordinary release
-activation of `yard update` and the repair of `yard migrate` apply the same removal to every
-deselected yard, and their plans disclose it. So `yard -Y NAME profile disable orca` and then init
-always remove Orca's wiring and clear its pending item; the removed project hook simply leaves
-init's approved hook set.
 
 The owner records the typed failure under the configuration root as
 `activation-pending/v1/YARD/OWNER.json`, bound to the yard instance, the actual and desired
@@ -1288,12 +1271,11 @@ release work remains, findings are warnings, so `yard migrate` still plans and r
 `yard migrate` and `yard update` then exit non-zero; their result names every finding within the
 diagnostic bound and states that the release is ready, and `yard migrate --check`, `config status`
 and `yard status` show each one. A finding names the yard, the profile, the diagnostic command
-`yard -Y NAME profile list`, that the profile is not applied, and both exits: fix the cause and
-run `yard -Y NAME init`, which repeats the same apply from the partial state, or run
-`yard -Y NAME profile disable ID` and then init. Its next step is the exact `yard -Y NAME init`.
-When those exact commands exceed the 480-byte record message, the finding names the yard once
-with the same steps, and a yard name too long even for that is left to the next step, so the
-failure is still recorded.
+`yard -Y NAME profile list`, that the profile is not applied, and its exit: fix the cause and run
+`yard -Y NAME init`, which repeats the same apply from the partial state. Its next step is the
+exact `yard -Y NAME init`. When those exact commands exceed the 480-byte record message, the
+finding names the yard once with the same steps, and a yard name too long even for that is left
+to the next step, so the failure is still recorded.
 
 These findings share the pending-configuration admission of materialized configuration: when every
 blocker is such a finding and no owner is unconverged, the direct CLI and RPC admit unrelated
