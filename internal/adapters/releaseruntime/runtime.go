@@ -17,6 +17,7 @@ import (
 	goruntime "runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -2253,26 +2254,107 @@ func (runtime *Runtime) fetch(ctx context.Context, options options, name, destin
 }
 
 func (runtime *Runtime) latestTag(ctx context.Context, repository string) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+repository+"/releases/latest", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://github.com/"+repository+"/releases/latest", nil)
 	if err != nil {
 		return "", err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	response, err := runtime.config.HTTPClient.Do(request)
+	// Keep the caller's transport, timeout and redirect policy without mutating
+	// its client. Reject insecure hops before sending another request.
+	client := *runtime.config.HTTPClient
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many latest release redirects")
+		}
+		if runtime.config.HTTPClient.CheckRedirect != nil {
+			if err := runtime.config.HTTPClient.CheckRedirect(request, via); err != nil {
+				return err
+			}
+		}
+		if request.URL.Scheme != "https" {
+			return errors.New("latest release redirects must use https")
+		}
+		if request.URL.Host != "github.com" || request.URL.User != nil {
+			return errors.New("latest release redirects must stay on github.com")
+		}
+		// GitHub canonicalizes renamed/transferred repositories through their
+		// latest endpoint. Keep tag validation bound to that canonical repository.
+		parts := strings.Split(request.URL.EscapedPath(), "/")
+		if len(parts) == 5 && parts[1] != "" && parts[2] != "" &&
+			parts[3] == "releases" && parts[4] == "latest" &&
+			request.URL.RawQuery == "" && !request.URL.ForceQuery && request.URL.Fragment == "" {
+			repository = parts[1] + "/" + parts[2]
+		}
+		return nil
+	}
+	response, err := client.Do(request)
 	if err != nil {
-		return "", errors.New("could not resolve the stable release")
+		return "", fmt.Errorf("could not resolve the stable release: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusTooManyRequests ||
+		(response.StatusCode == http.StatusForbidden &&
+			(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")) {
+		return "", &releaseRateLimitError{
+			StatusCode: response.StatusCode,
+			Reset:      response.Header.Get("X-RateLimit-Reset"),
+			RetryAfter: response.Header.Get("Retry-After"),
+		}
+	}
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GitHub latest release request returned %s", response.Status)
 	}
-	var payload struct {
-		Tag string `json:"tag_name"`
+	if response.Request == nil || response.Request.URL == nil {
+		return "", errors.New("latest release response has no redirect URL")
 	}
-	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload) != nil || payload.Tag == "" {
-		return "", errors.New("latest release has no valid tag")
+	resolved := response.Request.URL
+	parts := strings.Split(resolved.EscapedPath(), "/")
+	if resolved.Scheme != "https" || resolved.Host != "github.com" || resolved.User != nil ||
+		resolved.RawQuery != "" || resolved.ForceQuery || resolved.Fragment != "" ||
+		len(parts) != 6 || !strings.EqualFold(parts[1]+"/"+parts[2], repository) ||
+		parts[3] != "releases" || parts[4] != "tag" {
+		return "", errors.New("latest release redirect does not name a valid stable release tag")
 	}
-	return payload.Tag, nil
+	components := strings.Split(strings.TrimPrefix(parts[5], "v"), ".")
+	if len(components) != 3 {
+		return "", errors.New("latest release redirect does not name a valid stable release tag")
+	}
+	var version [3]uint64
+	for index, component := range components {
+		value, err := strconv.ParseUint(component, 10, 64)
+		if err != nil {
+			return "", errors.New("latest release redirect does not name a valid stable release tag")
+		}
+		version[index] = value
+	}
+	// Only reconstructed integers leave this HTTP boundary for filesystem paths.
+	tag := fmt.Sprintf("v%d.%d.%d", version[0], version[1], version[2])
+	if tag != parts[5] {
+		return "", errors.New("latest release redirect does not name a valid stable release tag")
+	}
+	return tag, nil
+}
+
+type releaseRateLimitError struct {
+	StatusCode int
+	Reset      string
+	RetryAfter string
+}
+
+func (failure *releaseRateLimitError) Error() string {
+	message := fmt.Sprintf("GitHub rate limit refused latest release request (HTTP %d)", failure.StatusCode)
+	if failure.Reset != "" {
+		message += " (reset at Unix time " + failure.Reset + ")"
+	} else {
+		message += " (reset time unavailable)"
+	}
+	if failure.RetryAfter != "" {
+		retryAfter := failure.RetryAfter
+		if _, err := strconv.ParseUint(retryAfter, 10, 64); err == nil {
+			retryAfter += " seconds"
+		}
+		message += " (retry after " + retryAfter + ")"
+	}
+	return message
 }
 
 func (runtime *Runtime) installWithOutput(
