@@ -22,7 +22,7 @@ class ReleaseObservationTest(unittest.TestCase):
             package = Path(temp)/'orca'
             resource = package/'resources/orca'
             resource.mkdir(parents=True)
-            for name in ('handler.sh', 'registration-contract.sh', 'registration-observer.bash'):
+            for name in ('handler.sh', 'registration-contract.sh', 'registration-observer.bash', 'fixed-paths'):
                 shutil.copyfile(PROFILE/'resources/orca'/name, resource/name)
             self.assertEqual(len(provider['read_only_stdin_commands'](package)), 1)
             for name in ('registration-contract.sh', 'registration-observer.bash'):

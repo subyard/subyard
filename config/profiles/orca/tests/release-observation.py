@@ -7,6 +7,13 @@ import re
 FIXTURES = Path(__file__).parent / 'fixtures/release-observation'
 
 
+def fixed_paths(resource):
+    """The profile's one fixed-path list, as the observer receives it."""
+    paths = [line.split()[1] for line in (resource / 'fixed-paths').read_text().splitlines()
+             if line.strip() and not line.startswith('#')]
+    return [str(len(paths)), *paths]
+
+
 def read_only_commands(package):
     return []
 
@@ -21,8 +28,9 @@ def read_only_stdin_commands(package):
         current_handler = current_resource / 'handler.sh'
         if (resource / 'handler.sh').read_bytes() != current_handler.read_bytes():
             return []
-        if any(path.is_symlink() or path.read_bytes() != (current_resource/path.name).read_bytes()
-               for path in (contract, observer)):
+        fixed = resource / 'fixed-paths'
+        if any(path.is_symlink() or not path.is_file() or path.read_bytes() != (current_resource/path.name).read_bytes()
+               for path in (contract, observer, fixed)):
             return []
     if not contract.is_file() or not observer.is_file():
         if contract.exists() or contract.is_symlink() or observer.exists() or observer.is_symlink():
@@ -80,6 +88,7 @@ registration_desired_digest
                '/etc/systemd/system/subyard-orca-discovery.service',
                '/etc/systemd/system/subyard-orca-discovery.timer',
                *(['/etc/profile.d/subyard-orca-codex.sh', '/usr/local/libexec/subyard/orca-codex/codex']
-                 if not historical or historical.get('codexPaths', False) else []), *names]
+                 if not historical or historical.get('codexPaths', False) else []),
+               *([] if historical else fixed_paths(resource)), *names]
     return [(command, observer.read_bytes(), '{"state":"absent","actual":"","desired":""}\n', 0,
              ['bash', '-c', script, 'orca-observation', str(resource), str(contract)])]

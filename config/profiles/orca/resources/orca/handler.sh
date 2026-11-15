@@ -67,6 +67,24 @@ ORCA_RUNTIME_PHASE=
 ORCA_RUNTIME_EFFECT=
 ORCA_GUEST_STEP_STATUS=
 
+# The one fixed-path list of this profile (resources/orca/fixed-paths): every
+# Orca-installed guest path, read by the observer's link check, the apply's
+# link refusal and `orca remove`, so the three can never diverge.
+ORCA_FIXED_PATHS=() ORCA_FIXED_UNIT_FILES=() ORCA_FIXED_UNIT_HELPERS=() ORCA_FIXED_OTHER_PATHS=()
+while read -r orca_kind orca_path; do
+  case "$orca_kind" in ''|'#'*) continue ;; esac
+  [[ "$orca_path" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$orca_path" != *..* ]] || {
+    printf 'invalid Orca fixed path list entry\n' >&2; exit 1; }
+  case "$orca_kind" in
+    unit) ORCA_FIXED_UNIT_FILES+=("$orca_path") ;;
+    unit-helper) ORCA_FIXED_UNIT_HELPERS+=("$orca_path") ;;
+    path) ORCA_FIXED_OTHER_PATHS+=("$orca_path") ;;
+    *) printf 'invalid Orca fixed path list entry\n' >&2; exit 1 ;;
+  esac
+  ORCA_FIXED_PATHS+=("$orca_path")
+done <"$RESOURCE_DIR/fixed-paths"
+unset orca_kind orca_path
+
 valid_guest_tmp_dir() {
   [[ "$1" =~ ^/tmp/subyard-orca\.[A-Za-z0-9]{6,}$ ]]
 }
@@ -361,7 +379,8 @@ observe_registration_contract() {
   yexec bash -se -- "$desired" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
     "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$ORCA_EXEC" \
     "/etc/systemd/system/$ORCA_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" \
-    "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "${names[@]}" < "$RESOURCE_DIR/registration-observer.bash"
+    "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" \
+    "${#ORCA_FIXED_PATHS[@]}" "${ORCA_FIXED_PATHS[@]}" "${names[@]}" < "$RESOURCE_DIR/registration-observer.bash"
 }
 
 stage_registration_contract() {
@@ -874,13 +893,11 @@ refuse_unsafe_contract_links() {
   local -a names=()
   mapfile -t names < <(cd "$RESOURCE_DIR/registration" && printf '%s\n' ./*.py | sed 's#^./##')
   yard_local_begin
-  yexec bash -se -- orca-link-check "$ORCA_SYNC" "$ORCA_REGISTRATION" "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" \
-    "/etc/systemd/system/$ORCA_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" \
-    "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_CONTRACT_DIGEST" "${names[@]}" <<'YARD' \
+  yexec bash -se -- orca-link-check "$ORCA_REGISTRATION" "${ORCA_FIXED_PATHS[@]}" "${names[@]}" <<'YARD' \
     || die "Orca runtime contract contains an unsafe symbolic link; remove it, or run 'orca remove', then retry yard init"
 set -euo pipefail
 shift
-directory="$2"
+directory="$1"; shift
 for path in "$@"; do
   case "$path" in /*) ;; *) path="$directory/$path" ;; esac
   if [ -L "$path" ]; then printf 'Orca runtime contract contains an unsafe symbolic link at %s\n' "$path" >&2; exit 1; fi
@@ -1622,11 +1639,11 @@ require_no_resource_arguments() {
 # unit files. State under /srv/agents/orca, the orca-ide package and lingering
 # stay; `orca up` installs Orca again. It runs no installed Orca helper itself.
 ORCA_REMOVE_UNITS=("$ORCA_DISCOVERY_TIMER" "$ORCA_DISCOVERY_UNIT" "$ORCA_UNIT")
+[ "${#ORCA_FIXED_UNIT_FILES[@]}" -eq 3 ] && [ "${ORCA_FIXED_UNIT_FILES[2]##*/}" = "$ORCA_UNIT" ] \
+  || { printf 'invalid Orca fixed unit file list\n' >&2; exit 1; }
 # Files of a unit that stay while that unit still runs: its stop needs them.
-ORCA_REMOVE_UNIT_FILES=("/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT"
-  "/etc/systemd/system/$ORCA_UNIT" "$ORCA_INGRESS" "$ORCA_CAPTURE")
-ORCA_REMOVE_PATHS=("$ORCA_SYNC" "$ORCA_REGISTRATION" "$ORCA_REGISTRATION_DIGEST" "$ORCA_CONTRACT_DIGEST"
-  "$ORCA_REGISTRATION_LOCK" "$ORCA_CODEX_PROFILE" "${ORCA_CODEX_BIN%/*}")
+ORCA_REMOVE_UNIT_FILES=("${ORCA_FIXED_UNIT_FILES[@]}" "${ORCA_FIXED_UNIT_HELPERS[@]}")
+ORCA_REMOVE_PATHS=("${ORCA_FIXED_OTHER_PATHS[@]}")
 
 # Print "<unit> <ActiveState> <UnitFileState>" per unit ("<unit> alias -" when its
 # fixed unit path is a symbolic link or systemd resolves the name to another
@@ -1639,12 +1656,10 @@ set -uo pipefail
 # Each query is independent: a failed one reports "unknown" and the rest go on.
 shift
 count="$1"; shift
-unit_files=("${@:$((count + 1)):$count}")
-index=0
 for unit in "${@:1:$count}"; do
-  if [ -L "${unit_files[$index]}" ]; then
-    printf '%s alias -\n' "$unit"
-  elif ! id="$(systemctl show "$unit" --property=Id --value)"; then
+  # Only a name systemd resolves to another unit is an alias; a same-name link
+  # at the unit path is the Orca unit itself and is inspected as such.
+  if ! id="$(systemctl show "$unit" --property=Id --value)"; then
     printf '%s unknown unknown\n' "$unit"
   elif [ "$id" != "$unit" ]; then
     printf '%s alias -\n' "$unit"
@@ -1654,14 +1669,17 @@ for unit in "${@:1:$count}"; do
   else
     printf '%s %s %s\n' "$unit" "${active:--}" "${enabled:--}"
   fi
-  index=$((index + 1))
 done
 table=absent
 if command -v nft >/dev/null 2>&1; then
   if ! tables="$(nft list tables)"; then
     table=unknown
   elif grep -Fxq 'table inet subyard_orca' <<<"$tables"; then
-    if ! chain="$(nft list chain inet subyard_orca input)"; then table=unknown
+    # Only the marked input chain proves Orca's ownership; a table read without
+    # that chain (an interrupted creation included) is foreign and never touched.
+    if ! listing="$(nft list table inet subyard_orca)"; then table=unknown
+    elif ! grep -Eq '^[[:space:]]*chain input \{' <<<"$listing"; then table=foreign
+    elif ! chain="$(nft list chain inet subyard_orca input)"; then table=unknown
     elif grep -F 'comment "subyard-orca-managed"' >/dev/null <<<"$chain"; then table=owned
     else table=foreign; fi
   fi
@@ -1757,7 +1775,7 @@ emit_remove_assessment() {
 }
 
 cmd_remove() {
-  local devices class
+  local devices class failed=0
   remove_route_state || { warn 'Orca removal cannot read the owner route; it stays until a rerun can'; ORCA_REMOVE_ROUTE=unknown; }
   case "$ORCA_REMOVE_ROUTE" in
     foreign) warn "Orca removal left the unreceipted device '$ORCA_DEVICE' untouched; remove it from the yard instance if it is not needed" ;;
@@ -1766,8 +1784,12 @@ cmd_remove() {
       # the device is confirmed gone.
       if [ "$ORCA_REMOVE_DEVICE" = 1 ]; then
         incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null || warn "Orca removal could not remove the owner route"
-        devices="$(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}")" || die "Orca removal cannot confirm the owner route removal"
-        grep -Fxq "$ORCA_DEVICE" <<<"$devices" || ORCA_REMOVE_DEVICE=0
+        if devices="$(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}")"; then
+          grep -Fxq "$ORCA_DEVICE" <<<"$devices" || ORCA_REMOVE_DEVICE=0
+        else
+          warn "Orca removal cannot confirm the owner route removal; its receipt stays"
+          failed=1
+        fi
       fi
       if [ "$ORCA_REMOVE_DEVICE" = 0 ]; then
         for key in user.subyard.resource.orca-server user.subyard.deferred_publication.orca-server; do
@@ -1798,12 +1820,12 @@ for index in "${!units[@]}"; do
   unit="${units[$index]}"
   # A fixed unit path that is a symbolic link, or a name systemd resolves to
   # another unit, is an alias: only the link goes, the unit it names is untouched.
-  if [ -L "${unit_files[$index]}" ]; then
-    id=link
-  elif ! id="$(systemctl show "$unit" --property=Id --value)"; then
+  if ! id="$(systemctl show "$unit" --property=Id --value)"; then
     # An unknown unit is neither stopped nor removed; the rerun retries it.
     warn "could not inspect $unit"; unknown[$unit]=1; continue
   fi
+  # Only a name systemd resolves to another unit is an alias: its link goes and
+  # the unit it names is untouched. A same-name link is the Orca unit itself.
   if [ "$id" != "$unit" ]; then
     alias[$unit]=1
     rm -f -- "${unit_files[$index]}" || warn "could not remove ${unit_files[$index]}"
@@ -1812,8 +1834,8 @@ for index in "${!units[@]}"; do
   inactive "$(active_state "$unit")" || systemctl stop "$unit" >/dev/null 2>&1 || warn "could not stop $unit"
   ! enabled "$(enabled_state "$unit")" || systemctl disable "$unit" >/dev/null 2>&1 || warn "could not disable $unit"
 done
+# A read ActiveState is never overridden.
 main_state="$(active_state "$main")" || main_state=unknown
-[ -z "${alias[$main]:-}" ] || main_state=inactive
 [ -z "${unknown[$main]:-}" ] || main_state=unknown
 if inactive "$main_state"; then
   # The ingress guard closes the Orca port while the service runs.
@@ -1821,7 +1843,11 @@ if inactive "$main_state"; then
     if ! tables="$(nft list tables)"; then
       warn 'could not inspect the Orca nft table'
     elif grep -Fxq 'table inet subyard_orca' <<<"$tables"; then
-      if ! chain="$(nft list chain inet subyard_orca input)"; then
+      if ! listing="$(nft list table inet subyard_orca)"; then
+        warn 'could not inspect the Orca nft table'
+      elif ! grep -Eq '^[[:space:]]*chain input \{' <<<"$listing"; then
+        warn 'left the nft table inet subyard_orca without the Orca input chain untouched'
+      elif ! chain="$(nft list chain inet subyard_orca input)"; then
         warn 'could not inspect the Orca nft table'
       elif grep -F 'comment "subyard-orca-managed"' >/dev/null <<<"$chain"; then
         nft delete table inet subyard_orca || warn 'could not remove the Orca nft table inet subyard_orca'
@@ -1844,7 +1870,15 @@ if inactive "$main_state"; then
 else
   warn "kept the ingress guard and unit files while $main is still running"
 fi
-for path in "${paths[@]}"; do rm -rf -- "$path" || warn "could not remove $path"; done
+for path in "${paths[@]}"; do
+  # A path below a fixed path that is a symbolic link is never reached through
+  # it; the link itself goes when its own entry is removed.
+  through_link=0
+  for other in "${paths[@]}"; do
+    case "$path" in "$other"/*) [ ! -L "$other" ] || through_link=1 ;; esac
+  done
+  [ "$through_link" -eq 1 ] || rm -rf -- "$path" || warn "could not remove $path"
+done
 systemctl daemon-reload || warn 'could not reload systemd units'
 YARD
   # Scopes are best effort inside the guest; a yard Incus cannot reach is not.
@@ -1853,8 +1887,8 @@ YARD
     if [ "$(cat -- "$class")" = guest-failed ]; then
       warn "Orca removal could not stop every Orca daemon or terminal scope"
     else
-      rm -f -- "$class"
-      die "Orca removal could not reach the yard to stop the Orca daemon scopes; rerun it"
+      warn "Orca removal could not reach the yard to stop the Orca daemon scopes; rerun it"
+      failed=1
     fi
   fi
   rm -f -- "$class"
@@ -1862,8 +1896,8 @@ YARD
   local fresh unmet
   fresh="$(emit_remove_assessment)"
   unmet="$(jq -r '.steps[] | select(.decision != "skip") | "  " + .target + ": " + .observed' <<<"$fresh")"
-  if [ -n "$unmet" ]; then
-    printf 'Orca removal is incomplete; rerun %s orca remove after resolving:\n%s\n' "$(yard_cmd_hint)" "$unmet" >&2
+  if [ -n "$unmet" ] || [ "$failed" -eq 1 ]; then
+    printf 'Orca removal is incomplete; rerun %s orca remove after resolving:\n%s\n' "$(yard_cmd_hint)" "${unmet:-  the reads or guest calls reported above}" >&2
     exit 1
   fi
   ok "Orca removed from this yard; its state and the orca-ide package are kept"

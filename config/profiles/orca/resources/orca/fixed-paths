@@ -1,0 +1,19 @@
+# The fixed guest paths this profile installs, one per line: "unit" for the
+# three Orca unit files (discovery timer, discovery service, main service, in
+# this order), "unit-helper" for the files the main unit runs, "path" for every
+# other helper, hook, marker, lock and Codex path. The observer's link check,
+# the apply's link refusal and `orca remove` all read this one list.
+unit /etc/systemd/system/subyard-orca-discovery.timer
+unit /etc/systemd/system/subyard-orca-discovery.service
+unit /etc/systemd/system/subyard-orca.service
+unit-helper /usr/local/libexec/subyard/orca-ingress
+unit-helper /usr/local/libexec/subyard/orca-capture-ready
+path /usr/local/libexec/subyard/projects-changed.d/orca
+path /usr/local/libexec/subyard/orca-registration/discover
+path /usr/local/libexec/subyard/orca-registration
+path /usr/local/libexec/subyard/orca-registration.sha256
+path /usr/local/libexec/subyard/orca-contract.sha256
+path /usr/local/libexec/subyard/orca-registration.lock
+path /etc/profile.d/subyard-orca-codex.sh
+path /usr/local/libexec/subyard/orca-codex/codex
+path /usr/local/libexec/subyard/orca-codex

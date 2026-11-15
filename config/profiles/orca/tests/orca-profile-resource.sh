@@ -317,7 +317,10 @@ case "${1:-}" in
         else
           mapped+=("${command[0]}")
           for index in 1 2 3 4 5 6 7 8 9 10; do mapped+=("$guest${command[$index]}"); done
-          mapped+=("${command[@]:11}")
+          # The shared fixed-path list follows its count; component names stay.
+          for argument in "${command[@]:11}"; do
+            case "$argument" in /*) mapped+=("$guest$argument") ;; *) mapped+=("$argument") ;; esac
+          done
         fi
         export ORCA_TEST_GUEST_ROOT="$guest" ORCA_TEST_STATE_ROOT="$state_root"
         stat() {
@@ -534,12 +537,17 @@ set -euo pipefail
 state_root="$(cd "$(dirname "$0")/.." && pwd)"
 printf 'nft %s\n' "$*" >>"$state_root/commands.log"
 case "${1:-} ${2:-}" in
-  'list table') [ -f "$state_root/ingress" ] ;;
+  'list table')
+    [ -f "$state_root/ingress" ] || exit 1
+    printf 'table inet subyard_orca {\n'
+    # An interrupted creation leaves the table without its input chain.
+    [ -e "$state_root/nft-no-chain" ] || printf '\tchain input {\n\t}\n'
+    printf '}\n' ;;
   'list tables')
     [ ! -e "$state_root/fail-nft-list" ] || exit 1
     [ ! -f "$state_root/ingress" ] || printf 'table inet subyard_orca\n' ;;
   'list chain')
-    [ -f "$state_root/ingress" ] || exit 1
+    [ -f "$state_root/ingress" ] && [ ! -e "$state_root/nft-no-chain" ] || exit 1
     mode="$(cat "$state_root/nft-mode" 2>/dev/null || printf owned)"
     # A finite stream larger than the pipe buffer exposes early-closing readers.
     python3 - "$mode" <<'PY'
@@ -1792,14 +1800,19 @@ grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \
 # `orca remove` takes Orca out of this yard by fixed paths: success means the
 # native verifier holds and the runtime observer reports absent. State, the
 # orca-ide package and lingering stay; `orca up` installs Orca again.
-orca_remove_paths=(
-  /usr/local/libexec/subyard/projects-changed.d/orca /usr/local/libexec/subyard/orca-registration
-  /usr/local/libexec/subyard/orca-registration.sha256 /usr/local/libexec/subyard/orca-contract.sha256
-  /usr/local/libexec/subyard/orca-registration.lock /usr/local/libexec/subyard/orca-ingress
-  /usr/local/libexec/subyard/orca-capture-ready /etc/profile.d/subyard-orca-codex.sh
-  /usr/local/libexec/subyard/orca-codex /etc/systemd/system/subyard-orca.service
-  /etc/systemd/system/subyard-orca-discovery.service /etc/systemd/system/subyard-orca-discovery.timer
-)
+# The profile's one fixed-path list.
+mapfile -t orca_remove_paths < <(awk '$1 ~ /^(unit|unit-helper|path)$/ {print $2}' "$ROOT/config/profiles/orca/resources/orca/fixed-paths")
+[ "${#orca_remove_paths[@]}" -ge 14 ] || fail 'the Orca fixed-path list is incomplete'
+# The observer's link check, the apply's link refusal and orca remove read that
+# one list, so they cannot diverge.
+handler_source="$ROOT/config/profiles/orca/resources/orca/handler.sh"
+for user in observe_registration_contract refuse_unsafe_contract_links; do
+  sed -n "/^$user() {/,/^}/p" "$handler_source" | grep -Fq '"${ORCA_FIXED_PATHS[@]}"' \
+    || fail "$user does not read the shared fixed-path list"
+done
+grep -Fxq 'ORCA_REMOVE_UNIT_FILES=("${ORCA_FIXED_UNIT_FILES[@]}" "${ORCA_FIXED_UNIT_HELPERS[@]}")' "$handler_source" &&
+  grep -Fxq 'ORCA_REMOVE_PATHS=("${ORCA_FIXED_OTHER_PATHS[@]}")' "$handler_source" \
+  || fail 'orca remove does not read the shared fixed-path list'
 assert_orca_removed() {
   local path
   for path in "${orca_remove_paths[@]}"; do
@@ -1832,11 +1845,11 @@ for installation in full half-applied symlinked; do
       ln -s "$ORCA_TEST_GUEST/tmp/unrelated" "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh"
       ;;
   esac
-  hook_runs="$(( $(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca') + $(count_log 'orca-ingress down') + $(count_log 'orca-registration/discover ') ))"
+  hook_runs="$(( $(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca') + $(count_log ' -- /usr/local/libexec/subyard/orca-ingress down') + $(count_log ' -- /usr/local/libexec/subyard/orca-registration/discover') ))"
   run_orca remove --yes >"$TMP/remove-$installation.out" 2>&1 || { cat "$TMP/remove-$installation.out" >&2; fail "orca remove of a $installation Orca failed"; }
   # The only guest helper that may run is the unit's own ExecStopPost while the
   # unit stops; remove itself never invokes an installed helper.
-  [ "$(( $(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca') + $(count_log 'orca-ingress down') + $(count_log 'orca-registration/discover ') ))" -eq "$hook_runs" ] \
+  [ "$(( $(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca') + $(count_log ' -- /usr/local/libexec/subyard/orca-ingress down') + $(count_log ' -- /usr/local/libexec/subyard/orca-registration/discover') ))" -eq "$hook_runs" ] \
     || fail "orca remove of a $installation Orca invoked an installed helper directly (only the unit's own ExecStopPost may run one)"
   assert_orca_removed "orca remove of a $installation Orca"
   [ -f "$ORCA_TEST_GUEST/tmp/unrelated" ] || fail 'orca remove followed a symbolic link'
@@ -1845,7 +1858,7 @@ done
 # release apply ends in the typed yard-local failure, so the yard waits for its
 # init and `orca remove` takes Orca out.
 export SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE=00112233445566778899aabbccddeeff
-for fault in native-catalog unsafe-link; do
+for fault in native-catalog unsafe-link linked-codex-dir linked-discover; do
   ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
   case "$fault" in
     native-catalog) touch "$TMP/project-counts-fail"; phase=verify ;;
@@ -1853,6 +1866,19 @@ for fault in native-catalog unsafe-link; do
       printf 'kept\n' >"$TMP/link-target"
       rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
       ln -s "$TMP/link-target" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
+      phase=apply ;;
+    linked-codex-dir)
+      # The fixed path is the orca-codex directory itself.
+      mkdir -p "$TMP/link-dir"
+      printf 'kept\n' >"$TMP/link-dir/codex"
+      cp "$TMP/link-dir/codex" "$TMP/link-target"
+      rm -rf "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex"
+      ln -s "$TMP/link-dir" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex"
+      phase=apply ;;
+    linked-discover)
+      printf 'kept\n' >"$TMP/link-target"
+      rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/discover"
+      ln -s "$TMP/link-target" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/discover"
       phase=apply ;;
   esac
   observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe </dev/null)" \
@@ -1865,10 +1891,12 @@ for fault in native-catalog unsafe-link; do
   grep -Fxq "subyard-profile-runtime-diagnostic-v1 $SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE $phase yard-local" "$TMP/fault-$fault.out" \
     && grep -Fq "'yard -Y default orca remove'" "$TMP/fault-$fault.out" \
     || { cat "$TMP/fault-$fault.out" >&2; fail "the apply of a $fault fault was not a typed yard-local failure naming orca remove"; }
-  [ "$fault" != unsafe-link ] || [ "$(cat "$TMP/link-target")" = kept ] || fail 'an apply wrote through an unsafe symbolic link'
+  [ "$fault" = native-catalog ] || [ "$(cat "$TMP/link-target")" = kept ] || fail "an apply wrote through an unsafe symbolic link ($fault)"
+  [ "$fault" != linked-codex-dir ] || [ "$(cat "$TMP/link-dir/codex")" = kept ] || fail 'an apply wrote through a linked orca-codex directory'
   run_orca remove --yes >"$TMP/remove-$fault.out" 2>&1 || { cat "$TMP/remove-$fault.out" >&2; fail "orca remove after a $fault fault failed"; }
   assert_orca_removed "orca remove after a $fault fault"
-  [ "$fault" != unsafe-link ] || [ "$(cat "$TMP/link-target")" = kept ] || fail 'orca remove followed an unsafe symbolic link'
+  [ "$fault" = native-catalog ] || [ "$(cat "$TMP/link-target")" = kept ] || fail "orca remove followed an unsafe symbolic link ($fault)"
+  [ "$fault" != linked-codex-dir ] || [ "$(cat "$TMP/link-dir/codex")" = kept ] || fail 'orca remove followed a linked orca-codex directory'
   rm -f "$TMP/project-counts-fail"
 done
 unset SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE
@@ -1925,6 +1953,46 @@ for calls in '2 3' 4; do
   run_orca remove --yes >/dev/null || fail "orca remove did not converge after a failed device list ($calls)"
   assert_orca_removed "orca remove after a failed device list ($calls)"
 done
+# A same-name link at the main unit path is the Orca unit itself, with or
+# without a daemon-reload: the plan shows its stop, the unit stops before its
+# guard and helpers go, and the link is removed.
+for reload in no-daemon-reload daemon-reload; do
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+  mkdir -p "$ORCA_TEST_GUEST/opt/units"
+  mv "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service" "$ORCA_TEST_GUEST/opt/units/subyard-orca.service"
+  ln -s "$ORCA_TEST_GUEST/opt/units/subyard-orca.service" "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service"
+  [ "$reload" = no-daemon-reload ] || printf 'systemctl daemon-reload\n' >>"$ORCA_TEST_LOG"
+  plan="$(SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" remove)"
+  jq -e '.steps[] | select(.id == "unit-subyard-orca-service") | .decision == "apply" and (.observed | startswith("active/"))' <<<"$plan" >/dev/null \
+    || fail "a same-name main unit link hid the stop from the remove plan ($reload): $plan"
+  run_orca remove --yes >"$TMP/remove-same-name.out" 2>&1 || { cat "$TMP/remove-same-name.out" >&2; fail "orca remove of a same-name unit link failed ($reload)"; }
+  grep -Fq 'remove systemctl stop subyard-orca.service' "$ORCA_TEST_LOG" || fail "orca remove did not stop a same-name linked main unit ($reload)"
+  [ -f "$ORCA_TEST_GUEST/opt/units/subyard-orca.service" ] || fail 'orca remove followed a same-name unit link'
+  assert_orca_removed "orca remove of a same-name unit link ($reload)"
+  rm -rf "$ORCA_TEST_GUEST/opt/units"
+done
+# A table without the Orca input chain is foreign: untouched, with a warning.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+touch "$TMP/keep-ingress-on-stop" "$TMP/nft-no-chain"
+run_orca remove --yes >"$TMP/remove-no-chain.out" 2>&1 || { cat "$TMP/remove-no-chain.out" >&2; fail 'orca remove with a chainless table failed'; }
+grep -Fq 'without the Orca input chain untouched' "$TMP/remove-no-chain.out" || fail 'a chainless nft table was not reported'
+[ -e "$ORCA_TEST_INGRESS" ] || fail 'orca remove deleted a chainless nft table'
+rm -f "$TMP/keep-ingress-on-stop" "$TMP/nft-no-chain" "$TMP/ingress"
+# A failed confirmation read and an unreachable yard while stopping scopes are
+# non-zero, but the guest removal still runs and every unmet item is listed.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+printf '4\n' >"$TMP/fail-device-list-calls"
+rm -f "$TMP/device-list-count"
+touch "$TMP/fail-guest-transport"
+if run_orca remove --yes >"$TMP/remove-continue.out" 2>&1; then fail 'orca remove concealed a failed confirmation read'; fi
+grep -Fq 'cannot confirm the owner route removal' "$TMP/remove-continue.out" &&
+  grep -Fq 'could not reach the yard to stop the Orca daemon scopes' "$TMP/remove-continue.out" &&
+  grep -Fq 'Orca removal is incomplete' "$TMP/remove-continue.out" \
+  || { cat "$TMP/remove-continue.out" >&2; fail 'orca remove stopped before its final listing'; }
+[ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] || fail 'a failed confirmation read skipped the guest removal'
+rm -f "$TMP/fail-device-list-calls" "$TMP/device-list-count" "$TMP/fail-guest-transport"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed confirmation read'
+assert_orca_removed 'orca remove after a failed confirmation read'
 # A failed device read is never a foreign device: the remove is non-zero and
 # keeps the route and its receipt.
 ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
