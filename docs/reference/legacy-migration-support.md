@@ -269,9 +269,10 @@ can therefore refuse with:
 If the V2 import is complete but an original V1 journal is unfinished, v0.28.x can refuse
 earlier, before that binding comparison. Its source-history reader reports
 `legacy transaction is not closed canonical history`
-(`v0.28.1:internal/migration/source_history.go:93`); source admission renders this as
-`release source admission: protected metadata is unsupported or unresolved (legacy history); finish pending publications or recovery intent with the exact sealed original owner before source repair`.
-The same manual step below applies to those retained V1 files.
+(`v0.28.1:internal/migration/source_history.go:93`). The v0.28.x source-repair commands render this as
+`release source admission: protected metadata is unsupported or unresolved (legacy history); finish pending publications or recovery intent with the exact sealed original owner before source repair`;
+`yard update` of v0.28.x does not show it, because its fallback reports the installed owner's
+original refusal instead. The same manual step below applies to those retained V1 files.
 
 Do not move these files during a running update. Once no update is running, move aside only
 these two paths from the configuration home
