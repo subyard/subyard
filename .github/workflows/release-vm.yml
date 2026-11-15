@@ -76,6 +76,7 @@ jobs:
           python3 -B dev/ci/release-vm.py --output "$RUNNER_TEMP/acceptance" \
             --destination "$RUNNER_TEMP/ci-hosted" --check "$CHECK"
       - name: Snapshot hosted check diagnostics
+        continue-on-error: true
         if: always()
         timeout-minutes: 2
         env:
@@ -85,8 +86,10 @@ jobs:
           bash dev/ci/periodic-e2e.sh diagnostics
           python3 -B dev/ci/release-vm.py --diagnostics --status "$STATUS" \
             --output "$RUNNER_TEMP/acceptance" --logs "$RUNNER_TEMP/hosted-logs" \
+            --evidence "$HOME/.subyard/e2e" \
             --destination "$RUNNER_TEMP/hosted-diagnostics" --check "$CHECK"
       - name: Upload hosted check diagnostics
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

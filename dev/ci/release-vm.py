@@ -56,21 +56,36 @@ DIAGNOSTIC_FILES = 128
 
 
 def sanitize(text):
-    # Same credential/long-token redaction used by the E2E failure reporters. Also
-    # remove terminal controls and private keys before printing untrusted log tails.
+    # Normalize terminal decoration before recognizing credentials. Quoted values
+    # consume escapes as pairs, including embedded JSON quotes and backslashes.
+    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+    text = re.sub(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"[^\x20-\x7e\n\t]", "", text)
+    quoted_value = r'''(?:"(?:\\[^\n]|[^"\\\n])*(?:"|$)|'(?:\\[^\n]|[^'\\\n])*(?:'|$)|[^\s,}]+)'''
     text = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)",
                   "[redacted private key]", text, flags=re.S)
     text = re.sub(r'(?i)(["\']?(?:token|password|secret|authorization|credential|api[_-]?key)[\w-]*["\']?\s*[:=]\s*)'
-                  r'(?:(?:Bearer|Basic)\s+)?(?:"[^"\n]*"|\'[^\'\n]*\'|[^\s,}]+)',
-                  r'\1"[redacted]"', text)
-    text = re.sub(r"\b[A-Z_][A-Z0-9_]*=(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s]+)", "[redacted assignment]", text)
+                  r'(?:(?:Bearer|Basic)\s+)?' + quoted_value,
+                  r'\1"[redacted]"', text, flags=re.M)
+    text = re.sub(r"\b([A-Z_][A-Z0-9_]*=)" + quoted_value, r'\1"[redacted]"', text, flags=re.M)
     text = re.sub(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[redacted]@", text)
-    text = re.sub(r"[A-Za-z0-9_+/=-]{32,}", "[redacted]", text)
-    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
-    return re.sub(r"[^\x20-\x7e\n\t]", "", text)
+    text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b",
+                  "[redacted]", text)
+    text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "[redacted]", text)
+    # Keep paths, filenames and key= prefixes. Unlabelled material needs a token
+    # shape: hex, SSH key prefix, or base64 material rather than path separators.
+    boundary = r"(?<![\w./-])"
+    end = r"(?![\w./-])"
+    text = re.sub(boundary + r"[a-fA-F0-9]{32,}" + end, "[redacted]", text)
+    text = re.sub(boundary + r"AAAA[BC][A-Za-z0-9+/]{30,}={0,2}" + end, "[redacted]", text)
+    text = re.sub(boundary + r"(?=[A-Za-z0-9+/]{40,}={0,2}" + end + r")"
+                  r"(?=[A-Za-z0-9/]*[+=])[A-Za-z0-9+/]+={0,2}" + end, "[redacted]", text)
+    text = re.sub(boundary + r"(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*[a-z])(?=[A-Za-z0-9]*[0-9])"
+                  r"(?:[A-Za-z0-9]{4}){10,}(?![\w./=-])", "[redacted]", text)
+    return text
 
 
-def diagnostic_snapshot(output, destination, check, status, logs=None):
+def diagnostic_snapshot(output, destination, check, status, logs=None, evidence=None):
     destination.mkdir(parents=True, exist_ok=False)
     summary = {"kind": "diagnostics-only", "check": check, "job_status": status,
                "execution": {key: os.environ.get(key) for key in
@@ -79,11 +94,17 @@ def diagnostic_snapshot(output, destination, check, status, logs=None):
                                "kernel": platform.release()}, "files": [], "omitted": 0}
     prefix = check.replace(":", "-").replace("/", "-") + "-"
     sources = [(output, pattern, Path("acceptance")) for pattern in
-               ("receipt.json", "events.jsonl", "attempts/*.json", "runs/*.json", prefix + "*.log", "*.log")]
+               ("receipt.json", "events.jsonl", "attempts/*.json", "runs/*.json", prefix + "*.log")]
+    if evidence is not None:
+        # P0's failure reporter owns these files (keeper, capacity, OOM and broker
+        # snapshots). Use the same bounds/redaction; never sweep other evidence.
+        sources += [(evidence, "**/evidence/p0-*.failure.log", Path("p0"))]
     if logs is not None:
-        sources += [(logs, pattern, Path("runner")) for pattern in ("*.log", "*.json", "*.tsv")]
+        sources += [(logs, pattern, Path("runner")) for pattern in ("check.log", "results.tsv", "*.log", "*.json")]
+    sources += [(output, "*.log", Path("acceptance"))]
     remaining = DIAGNOSTIC_TOTAL_BYTES
     cleanup, tails, seen = [], [], set()
+    failed_probes, probe_tails = [], {}
     for source, pattern, folder in sources:
         for path in sorted(source.glob(pattern)):
             relative = folder / path.relative_to(source)
@@ -112,17 +133,25 @@ def diagnostic_snapshot(output, destination, check, status, logs=None):
                 target.write_bytes(data)
                 remaining -= len(data)
                 summary["files"].append({"path": str(relative), "truncated": size > limit})
+                if folder == Path("runner") and path.name == "results.tsv":
+                    failed_probes = [re.sub(r"[^a-zA-Z0-9_-]", "-", fields[0]) for line in text.splitlines()
+                                     if len(fields := line.split("\t")) >= 2 and fields[1].startswith("fail(")]
                 if path.suffix == ".log":
                     lines = text.splitlines()
                     cleanup.extend(line[:512] for line in lines if "cleanup" in line.lower() or "lease released:" in line)
                     if path.name.startswith(prefix) or path.name == "check.log":
                         tails.extend(lines[-80:])
+                    if folder == Path("runner"):
+                        probe_tails[path.stem] = lines[-80:]
             except OSError:
                 summary["omitted"] += 1
     (destination / "cleanup.log").write_text("\n".join(cleanup[-200:]) + "\n" if cleanup else
         "No cleanup lines captured; cleanup is unconfirmed. See the check log and receipt.\n")
     (destination / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     if status != "success":
+        if not tails:
+            for probe in failed_probes:
+                tails.extend([f"runner/{probe}.log", *probe_tails.get(probe, [])])
         print("Failed hosted check log tail (sanitized; at most 80 lines / 16 KiB):")
         # Prefix every line so captured workflow commands cannot execute in Actions.
         budget = 16384
@@ -142,9 +171,10 @@ if __name__ == "__main__":
     parser.add_argument("--diagnostics", action="store_true", help="snapshot diagnostics without certifying PASS")
     parser.add_argument("--status", choices=("success", "failure", "cancelled"), default="failure")
     parser.add_argument("--logs", type=Path, help="fixed runner probe/log directory for diagnostics")
+    parser.add_argument("--evidence", type=Path, help="runner E2E state root containing P0 failure logs")
     args = parser.parse_args()
     if args.diagnostics:
-        diagnostic_snapshot(args.output.resolve(), args.destination.resolve(), args.check, args.status, args.logs)
+        diagnostic_snapshot(args.output.resolve(), args.destination.resolve(), args.check, args.status, args.logs, args.evidence)
     else:
         if args.check not in a.CI_HOSTED_CHECKS:
             parser.error("unknown hosted evidence check")

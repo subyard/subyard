@@ -992,8 +992,12 @@ Every Release VM job uploads `hosted-diagnostics-JOB_INDEX-ATTEMPT` from its `al
 including after failure, check timeout or cancellation. Find it under **Artifacts** on the workflow
 run page. It contains sanitized snapshots of `acceptance/<check>-*.log`, `receipt.json`,
 `events.jsonl`, attempt and invocation records, runner probe logs and broker events, plus an
-environment summary and `cleanup.log` (the captured cleanup/release lines; absent cleanup stays
-unconfirmed). Failed jobs also print a sanitized check-log tail, limited to 80 lines / 16 KiB.
+environment summary, bounded `p0-*.failure.log` snapshots from the runner E2E evidence directory,
+and `cleanup.log` (the captured cleanup/release lines; absent cleanup stays
+unconfirmed). Failed jobs also print a sanitized check-log tail, limited to 80 lines / 16 KiB;
+if setup failed before a check log exists, this shows the failed probe instead. Diagnostic steps
+are best effort: their failure cannot change a passing job into a failure or prevent counting
+otherwise valid hosted evidence.
 Snapshots retain the last 2 MiB per file, at most 128 files and 16 MiB of file content, plus bounded
 summary/cleanup metadata; the summary marks truncation, omitted files and the job outcome.
 They contain no source tree or release assets and expire after seven days. Check steps have a

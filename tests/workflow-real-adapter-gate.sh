@@ -158,10 +158,12 @@ for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):
     for step in snapshots + uploads:
         assert "        if: always()" in step
         assert "failure()" not in step
+        assert "continue-on-error: true" in step
     for step in snapshots:
         assert "periodic-e2e.sh diagnostics" in step
         assert "--diagnostics --status" in step
         assert '--logs "$RUNNER_TEMP/hosted-logs"' in step
+        assert '--evidence "$HOME/.subyard/e2e"' in step
         assert '--destination "$RUNNER_TEMP/hosted-diagnostics"' in step
     for step in uploads:
         assert "path: ${{ runner.temp }}/hosted-diagnostics/" in step
@@ -175,6 +177,9 @@ for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):
         evidence = next(step for step in steps if "name: ci-hosted-" in step)
         assert "if: always() && steps.evidence.outcome == 'success'" in evidence
         assert "id: evidence" in workflow
+        assert "continue-on-error" not in evidence
+        exporter = next(step for step in steps if step.startswith("name: Preserve native evidence"))
+        assert "continue-on-error" not in exporter
 a = module("acceptance", "dev/release-acceptance.py")
 assert a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes()) in a.CI_HOSTED_POLICIES
 p = module("periodic", "dev/ci/plan-periodic-checks.py")

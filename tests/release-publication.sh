@@ -2643,6 +2643,73 @@ class HostedChecks(unittest.TestCase):
         helper.diagnostic_snapshot(self.directory / "absent", self.directory / "early", "fixture", "success")
         self.assertIn("unconfirmed", (self.directory / "early/cleanup.log").read_text())
 
+    def test_diagnostic_redaction_preserves_locations_and_consumes_escaped_credentials(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        incident = ("RESULT profile:orca/managed-agents failed exit=1 "
+                    "log=/home/runner/work/_temp/acceptance/profile-orca-managed-agents-76bf920a.log")
+        locations = [incident, "    /srv/workspaces/Subyard/src/internal/adapters/reconcileruntime/"
+                     "integration_ownership_release_test.go:123: fixture failure",
+                     "log=/some/long/path/withseveralcomponentsandcharacters/check.failure.log"]
+        for line in locations:
+            self.assertEqual(helper.sanitize(line), line)
+        for credential in ('Authorization: \x1b[31mBearer fixture-auth\x1b[0m',
+                           'Authorization: \x1b]8;;https://example.com\x07Bearer fixture-auth\x1b]8;;\x07',
+                           'password="fixture-\\"escaped-suffix"',
+                           "password='fixture-\\'escaped-suffix'"):
+            sanitized = helper.sanitize(credential)
+            for fragment in ("fixture-auth", "fixture-", "escaped-suffix"):
+                self.assertNotIn(fragment, sanitized)
+        document = json.dumps({"password": 'fixture-"quoted"\\suffix', "context": "retained"})
+        sanitized = json.loads(helper.sanitize(document))
+        self.assertEqual(sanitized, {"password": "[redacted]", "context": "retained"})
+        tokens = ["ghp_" + "Ab1" * 12, "github_pat_" + "Ab1_" * 20,
+                  "ghs_" + "Cd2" * 12, "sk-proj-" + "Ef3_" * 20,
+                  "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.c2lnbmF0dXJl",
+                  base64.b64encode(bytes(range(64))).decode(),
+                  base64.b64encode(b"\xfb" * 48).decode(),
+                  base64.b64encode(b"fixture base64 key material" * 3).decode().rstrip("="),
+                  "AAAAB3NzaC1yc2E" + "aB2c" * 16, "ab12" * 16]
+        for token in tokens:
+            with self.subTest(token_shape=token[:8]):
+                self.assertEqual(helper.sanitize("key=" + token), "key=[redacted]")
+
+    def test_p0_failure_logs_and_early_probe_tail_are_retained_without_other_evidence(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        state = self.directory / "e2e-state"
+        logs = self.directory / "probe-logs"
+        logs.mkdir()
+        (logs / "results.tsv").write_text("prepare-host\tfail(23)\t1\ncheck:fixture\tskip\t0\n")
+        (logs / "prepare-host.log").write_text("fixture package install refused\n")
+        for route in ("services/owner/pool/generation", "yards/test-yard"):
+            evidence = state / route / "evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "p0-fixture.failure.log").write_text("padding\n" * 1000 +
+                "lease keeper: failed\nbroker status: unreachable\ncapacity: exhausted\n"
+                "reachability: refused\nkernel: oom-kill\npassword=fixture-p0-secret\n")
+            (evidence / "source.json").write_text("must not be collected")
+            (evidence / "assets.tar.gz").write_bytes(b"must not be collected")
+            (evidence / "p0-linked.failure.log").symlink_to(evidence / "p0-fixture.failure.log")
+        for check in ("vm:p0-full-uninstall", "p0:boundary"):
+            destination = self.directory / check.replace(":", "-")
+            with patch.object(helper, "DIAGNOSTIC_FILE_BYTES", 1024), redirect_stdout(io.StringIO()) as printed:
+                helper.diagnostic_snapshot(self.directory / "absent", destination, check, "failure", logs, state)
+            self.assertIn("fixture package install refused", printed.getvalue())
+            captured = list((destination / "p0").rglob("p0-fixture.failure.log"))
+            self.assertEqual(len(captured), 2)
+            for path in captured:
+                text = path.read_text()
+                self.assertLessEqual(path.stat().st_size, 1024)
+                for reason in ("lease keeper", "broker status", "capacity", "reachability", "oom-kill"):
+                    self.assertIn(reason, text)
+                self.assertNotIn("fixture-p0-secret", text)
+            self.assertFalse(list(destination.rglob("source.json")))
+            self.assertFalse(list(destination.rglob("assets.tar.gz")))
+            self.assertFalse(list(destination.rglob("p0-linked.failure.log")))
+
     def test_partial_malformed_and_oversized_sibling_artifacts_do_not_hide_success(self):
         self.run["conclusion"] = "failure"
         pages, download = self.github.pages, self.github.download

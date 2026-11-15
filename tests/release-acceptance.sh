@@ -202,6 +202,32 @@ exit "$COLLECTOR_EXIT"
             self.assertIn("fail(23)", (directory / "hosted-logs/results.tsv").read_text())
             self.assertIn("fixture failure", (directory / "hosted-logs/fixture.log").read_text())
 
+    def test_hosted_diagnostics_subcommand_reads_both_routes_without_a_candidate_bundle(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            workspace = directory / "workspace"
+            (workspace / "dev").mkdir(parents=True)
+            agent = workspace / "dev/agent-e2e.sh"
+            agent.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$TRACE"\nprintf \'{"events":"fixture"}\\n\'\n')
+            agent.chmod(0o700)
+            script = (root / "dev/ci/periodic-e2e.sh").read_text()
+            self.assertEqual(script.count("WORKSPACE=/srv/workspaces/Subyard/src"), 1)
+            runner = directory / "runner.sh"
+            runner.write_text(script.replace("WORKSPACE=/srv/workspaces/Subyard/src", "WORKSPACE=" + str(workspace)))
+            env = {**os.environ, "RUNNER_TEMP": str(directory), "HOME": str(directory / "home"),
+                   "TRACE": str(directory / "calls"), "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+            result = subprocess.run(["bash", str(runner), "diagnostics"], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((directory / "calls").read_text().splitlines(), [
+                "--logs --slot 1 -n 200 --json", "--yard test-yard --logs --slot 1 -n 200 --json"])
+            for route in ("service", "yard"):
+                self.assertEqual(json.loads((directory / f"hosted-logs/{route}-events.json").read_text()),
+                                 {"events": "fixture"})
+            env["GITHUB_ACTIONS"] = "false"
+            refused = subprocess.run(["bash", str(runner), "diagnostics"], env=env, text=True, capture_output=True)
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(len((directory / "calls").read_text().splitlines()), 2)
+
     def test_early_collector_failure_identifies_command_and_exit_without_output(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
