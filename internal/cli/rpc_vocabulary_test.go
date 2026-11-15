@@ -106,10 +106,9 @@ func TestRPCManifestMethodsAndDispatch(t *testing.T) {
 	// Only parse the method table, not incidental mentions in prose.
 	rows := regexp.MustCompile("(?m)^\\| `([^|]+) \\|").FindAllSubmatch(readme, -1)
 	actual = nil
+	names := regexp.MustCompile("[a-z]+(?:[.-][a-z]+)+")
 	for _, row := range rows {
-		for _, name := range regexp.MustCompile("[a-z]+(?:[.-][a-z]+)+").FindAllString(string(row[1]), -1) {
-			actual = append(actual, name)
-		}
+		actual = append(actual, names.FindAllString(string(row[1]), -1)...)
 	}
 	slices.Sort(actual)
 	if !slices.Equal(actual, want) {

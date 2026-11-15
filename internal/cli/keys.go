@@ -14,10 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/rpc"
 )
-
-const credentialPrepareCapability = rpc.CapabilityCredentialPrepareV1
 
 type credentialAdapter struct{ prepared credentialruntime.Prepared }
 
