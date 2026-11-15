@@ -478,14 +478,20 @@ terminals end. Deleting a project directory inside the yard by hand counts as re
 Absence is checked below the same workspace boundary as the completed scan; any remaining
 directory at that address, such as a bind mountpoint, keeps the sessions. A missing `src` alone,
 a scan error or a changed workspace boundary closes nothing. Tabs are selected by the exact
-repository ID, including linked worktrees of that record, and closed by worktree and tab ID;
+repository ID, including linked worktrees of that record wherever their path is, and closed
+by worktree and tab ID. Each live PTY of the record is first stopped through Orca's fenced
+exact stop, which acts only while that PTY is still live in the record's worktree. Remaining
 orphan terminals are closed by native handle while their local host and worktree still match.
-A PTY shared with another record, in either direction, stops the cleanup of that record:
-it is checked before the first close and again before each later close.
-Other repositories, their terminals and processes are never touched. Ownership, identity,
-removal authority and runtime are checked again immediately before each close, after its last
-read; an unconfirmed close is read back a few times within the budget, and the record is
-removed only after its tabs and terminals are confirmed absent.
+A PTY shared with another record, in either direction, leaves the record's ownership
+unproven: it is checked before the first close and again before each later close, the
+record is kept as protected, and its next action names the shared session to close in Orca.
+Other repositories, their terminals and processes are never touched. Before each close, the
+catalog, saved tabs and terminal inventory are read first; ownership, identity, shared PTYs,
+runtime and finally the removal authority are then checked on that data, and nothing is read
+between those checks and the request. Stock Orca has no atomic fence for closing a tab or a
+terminal handle, so a change made in the instant between the last read and Orca handling the
+request is not detected. An unconfirmed close is read back with backoff until the cleanup
+deadline, and the record is removed only after its tabs and terminals are confirmed absent.
 An absent checkout's terminal layouts can be removed when all belong to that exact checkout,
 explicitly lack a terminal handle, and a fresh, complete local terminal inventory has no matching
 worktree or saved PTY. This also checks orphan terminals. Saved tabs are read again before removal;
@@ -512,7 +518,8 @@ reason is never protected. Project hooks, periodic discovery, `orca up` and `orc
 succeed when the pass completed, no record is undetermined and only protected records of
 removed projects remain.
 Explicit `orca sync` stays strict: it fails until every removed project's record is gone.
-`status` shows protected and pending records as information and warns about undetermined ones.
+`status` shows protected and pending records as information and warns about every
+undetermined record, of a removed or an existing project.
 
 A nonzero project hook exit means its pass failed or its state is undetermined. One hook
 invocation shares a single 110-second budget below the dispatcher's 120-second limit. The

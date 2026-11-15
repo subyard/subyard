@@ -72,6 +72,15 @@ class Catalog:
                     snapshot["tabs"] = [tab for tab in snapshot["tabs"]
                                         if (tab.get("parentTabId") or tab["id"]) != params["tabId"]]
             result = {"closed": True}
+        elif method == "terminal.stopExact":
+            # Stock stops one PTY only while it is live in the named worktree.
+            worktree, (pty,) = params["worktree"][3:], params["expectedPtyIds"]
+            if not any(t["ptyId"] == pty and t["worktreeId"] == worktree and t["connected"]
+                       for t in self.terminals):
+                from transport import RpcError
+                raise RpcError("Orca runtime rejected terminal.stopExact")
+            self.terminals = [t for t in self.terminals if t["ptyId"] != pty]
+            result = {"stopped": 1, "stoppedPtyIds": [pty], "postStopVerified": True}
         elif method == "terminal.close":
             self.terminals = [t for t in self.terminals if t.get("handle") != params["terminal"]]
             result = {}

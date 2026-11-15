@@ -805,14 +805,15 @@ class ReconcileTests(unittest.TestCase):
         shutil.rmtree(self.root.parent)
         report = self.run_sync()
         self.assertFalse(report["ready"])
-        self.assertFalse(report["settled"])
+        self.assertTrue(report["settled"])
         self.assertEqual([], self.rpc.groups)
         self.assertEqual(repo["id"], self.sidecar()["projects"]["sample-id"]
                          ["confirmed_repos"][repo["path"]])
         self.assertEqual("session identity is ambiguous; repository is retained", report["cleanup"][0]["reason"])
-        self.assertEqual("undetermined", report["cleanup"][0]["retention"])
+        self.assertEqual("protected", report["cleanup"][0]["retention"])
         self.assertEqual(1, len(self.rpc.snapshots[0]["tabs"]))
-        self.assertFalse(any(method in ("session.tabs.close", "terminal.close") for method, _ in self.rpc.calls))
+        self.assertFalse(any(method in ("session.tabs.close", "terminal.close", "terminal.stopExact")
+                             for method, _ in self.rpc.calls))
         before = self.sidecar()
         self.assertFalse(self.run_sync(apply=False)["ready"])
         self.assertEqual(before, self.sidecar())
@@ -1866,7 +1867,7 @@ class RemovedProjectSessionTests(unittest.TestCase):
 
     def closes(self):
         return [(method, params) for method, params in self.rpc.calls
-                if method in ("session.tabs.close", "terminal.close")]
+                if method in ("session.tabs.close", "terminal.close", "terminal.stopExact")]
 
     def assert_untouched(self):
         tabs = {tab["id"] for item in self.rpc.snapshots for tab in item["tabs"]}
@@ -1885,11 +1886,13 @@ class RemovedProjectSessionTests(unittest.TestCase):
         report = self.run_sync()
         self.assertTrue(report["ready"], report)
         self.assertTrue(report["settled"])
-        self.assertEqual([("session.tabs.close", {"worktree": "id:" + self.repo["id"] + "::/srv/linked-elsewhere",
+        # The live orphan PTY is stopped through the server-side worktree fence first.
+        self.assertEqual([("terminal.stopExact", {"worktree": "id:" + self.repo["id"] + "::" + self.repo["path"],
+                                                 "expectedPtyIds": ["orphan-pty"], "targetOnly": True}),
+                          ("session.tabs.close", {"worktree": "id:" + self.repo["id"] + "::/srv/linked-elsewhere",
                                                  "tabId": "linked-tab", "reason": "user"}),
                           ("session.tabs.close", {"worktree": "id:" + self.repo["id"] + "::" + self.repo["path"],
-                                                 "tabId": "agent", "reason": "user"}),
-                          ("terminal.close", {"terminal": "orphan"})], self.closes())
+                                                 "tabId": "agent", "reason": "user"})], self.closes())
         self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
         self.assertNotIn(self.linked["id"], {repo["id"] for repo in self.rpc.repos})
         self.assertNotIn("sample-id", self.sidecar()["projects"])
@@ -1970,11 +1973,15 @@ class RemovedProjectSessionTests(unittest.TestCase):
         original = self.rpc.call
 
         def ignored(method, params=None, **kwargs):
+            if method == "terminal.stopExact":
+                raise self.error("Orca runtime rejected terminal.stopExact")
             if method == "terminal.close":
                 raise self.error("lost reply", unknown=True)
             return original(method, params, **kwargs)
         self.rpc.call = ignored
-        report = self.run_sync()
+        import time
+        report = self.reconcile(self.discover(self.workspaces), self.rpc, self.state,
+                                deadline=time.monotonic() + 1.5, host_name="owner-host")
         self.assertFalse(report["settled"])
         self.assertIn("terminal removal is unconfirmed", " ".join(report["errors"]))
         self.assertIn(self.repo, self.rpc.repos)
@@ -1985,9 +1992,9 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.rpc.terminals.append(self.terminal(self.other, "agent-pty", "foreign"))
         shutil.rmtree(self.root.parent)
         report = self.run_sync()
-        self.assertFalse(report["settled"])
-        self.assertEqual("undetermined", next(item for item in report["cleanup"]
-                                              if item["repoId"] == self.repo["id"])["retention"])
+        self.assertTrue(report["settled"])
+        self.assertEqual("protected", next(item for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"])["retention"])
         self.assertFalse(any(params["worktree"].startswith("id:" + self.repo["id"] + "::")
                              for method, params in self.closes() if method == "session.tabs.close"))
         self.assertIn("foreign", {t["handle"] for t in self.rpc.terminals})
@@ -2073,11 +2080,13 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.rpc.call = call
 
     def test_address_reappearing_during_any_pre_send_read_refuses_send(self):
-        for method, read in (("session.tabs.close", "session.tabs.listAll"), ("terminal.close", "terminal.list")):
-            with self.subTest(method=method):
+        for method, read in (("session.tabs.close", "session.tabs.listAll"), ("session.tabs.close", "terminal.list"),
+                             ("session.tabs.close", "repo.list"), ("terminal.stopExact", "terminal.list"),
+                             ("terminal.stopExact", "session.tabs.listAll")):
+            with self.subTest(method=method, read=read):
                 self.setUp()
                 self.sessions()
-                if method == "terminal.close":
+                if method == "terminal.stopExact":
                     self.rpc.snapshots = [item for item in self.rpc.snapshots
                                           if not item["worktree"].startswith(self.repo["id"] + "::")]
                 shutil.rmtree(self.root.parent)
@@ -2098,8 +2107,8 @@ class RemovedProjectSessionTests(unittest.TestCase):
                 self.rpc.terminals.append(foreign)
         self.during_send("session.tabs.close", appear)
         report = self.run_sync()
-        self.assertFalse(report["settled"])
-        self.assertEqual([], self.closes())
+        self.assertTrue(report["settled"])
+        self.assertFalse(any(method == "session.tabs.close" for method, _ in self.closes()))
         self.assertEqual("session identity is ambiguous; repository is retained",
                          next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])["reason"])
         self.assertIn("foreign", {t["handle"] for t in self.rpc.terminals})
@@ -2111,13 +2120,14 @@ class RemovedProjectSessionTests(unittest.TestCase):
         for apply in (False, True):
             report = self.run_sync(apply=apply)
             item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
-            self.assertEqual(("session identity is ambiguous; repository is retained", "undetermined"),
+            self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
                              (item["reason"], item["retention"]))
-            self.assertFalse(report["settled"])
+            self.assertIn("shares with another repository", item["nextAction"])
+        self.assertTrue(report["settled"])
         self.assertEqual([], self.closes())
         self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
 
-    def test_status_warns_for_remote_terminal_sharing_a_saved_pty(self):
+    def test_remote_terminal_sharing_a_saved_pty_protects_the_record(self):
         self.sessions()
         remote = dict(self.terminal(self.repo, "agent-pty", "remote"), executionHostId="ssh-1")
         self.rpc.terminals.append(remote)
@@ -2125,7 +2135,7 @@ class RemovedProjectSessionTests(unittest.TestCase):
         for apply in (False, True):
             report = self.run_sync(apply=apply)
             item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
-            self.assertEqual("undetermined", item["retention"])
+            self.assertEqual("protected", item["retention"])
         self.assertEqual([], self.closes())
 
     def test_unrelated_rootless_project_does_not_block_removed_cleanup(self):
@@ -2140,31 +2150,38 @@ class RemovedProjectSessionTests(unittest.TestCase):
                          (other["reason"], other["retention"], other["removedProject"]))
         self.assert_untouched()
 
-    def test_close_readback_polls_briefly_before_declaring_unconfirmed(self):
+    def test_close_readback_polls_until_teardown_finishes(self):
         import reconcile
         self.sessions()
-        self.rpc.snapshots = [self.rpc.snapshots[2]]
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
         shutil.rmtree(self.root.parent)
         original = self.rpc.call
-        pending = []
+        closing = []
         reads = 0
 
-        def delayed(method, params=None, **kwargs):
+        def slow_teardown(method, params=None, **kwargs):
             nonlocal reads
-            if method == "terminal.close":
-                original("repo.list", before_send=kwargs.get("before_send"))
-                pending.append(params["terminal"])
-                return {}
-            if method == "terminal.list" and pending:
+            if method == "session.tabs.close":
+                snapshot = next(item for item in self.rpc.snapshots if item["worktree"] == params["worktree"][3:])
+                kept = copy.deepcopy(snapshot["tabs"])
+                result = original(method, params, **kwargs)
+                closing.append((snapshot, snapshot["tabs"]))
+                snapshot["tabs"] = kept
+                reads = 0
+                return result
+            if method == "session.tabs.listAll" and closing:
                 reads += 1
-                if reads == 2:
-                    self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] not in pending]
+                if reads == 5:
+                    for snapshot, tabs in closing:
+                        snapshot["tabs"] = tabs
+                    closing.clear()
             return original(method, params, **kwargs)
-        self.rpc.call = delayed
-        with mock.patch.object(reconcile, "READBACK_INTERVAL", 0.01):
+        self.rpc.call = slow_teardown
+        with mock.patch.object(reconcile, "READBACK_INTERVAL", 0.01), \
+                mock.patch.object(reconcile, "READBACK_MAX_INTERVAL", 0.02):
             report = self.run_sync()
         self.assertTrue(report["settled"], report)
-        self.assertGreaterEqual(reads, 2)
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
 
     def test_incomplete_pass_of_an_active_project_never_settles(self):
         init_git(self.root / "second")
@@ -2190,6 +2207,56 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.assertEqual(("undetermined", False), (item["retention"], item["removedProject"]))
         self.assertFalse(report["settled"])
 
+
+    def test_attribution_or_shared_pty_changing_during_pre_send_reads_refuses_send(self):
+        def reattribute(nested):
+            if nested == "session.tabs.listAll":
+                for terminal in self.rpc.terminals:
+                    if terminal["handle"] == "orphan":
+                        terminal["worktreeId"] = self.other["id"] + "::" + self.other["path"]
+        for method, effect in (("terminal.stopExact", reattribute), ("terminal.close", reattribute)):
+            with self.subTest(method=method):
+                self.setUp()
+                self.sessions()
+                self.rpc.snapshots = [item for item in self.rpc.snapshots
+                                      if not item["worktree"].startswith(self.repo["id"] + "::")]
+                shutil.rmtree(self.root.parent)
+                original = self.rpc.call
+                if method == "terminal.close":
+                    def refuse_stop(name, params=None, **kwargs):
+                        if name == "terminal.stopExact":
+                            raise self.error("Orca runtime rejected terminal.stopExact")
+                        return original(name, params, **kwargs)
+                    self.rpc.call = refuse_stop
+                self.during_send(method, effect)
+                self.assertFalse(self.run_sync()["settled"])
+                self.assertFalse(any(name == method for name, _ in self.closes()), self.closes())
+                self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
+                self.assertIn(self.repo, self.rpc.repos)
+
+    def test_foreign_shared_pty_added_during_catalog_read_refuses_tab_close(self):
+        self.sessions()
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+        shutil.rmtree(self.root.parent)
+        foreign = self.terminal(self.other, "split-pty", "foreign")
+        self.during_send("session.tabs.close", lambda nested: nested == "repo.list"
+                         and foreign not in self.rpc.terminals and self.rpc.terminals.append(foreign))
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == self.repo["id"]))
+
+    def test_linked_worktree_tab_inside_an_active_project_is_closed_with_its_record(self):
+        # The tab belongs to the removed record by repository ID, wherever its path lives.
+        self.sessions()
+        inside = self.repo["id"] + "::" + str(self.other_root / "linked-checkout")
+        self.rpc.snapshots.append({"worktree": inside, "tabs": [{"id": "inside-tab"}]})
+        shutil.rmtree(self.root.parent)
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertIn(("session.tabs.close", {"worktree": "id:" + inside, "tabId": "inside-tab", "reason": "user"}),
+                      self.closes())
+        self.assert_untouched()
 
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
