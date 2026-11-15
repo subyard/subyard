@@ -2189,3 +2189,25 @@ class RemovedProjectSessionTests(unittest.TestCase):
         item = next(item for item in report["cleanup"] if item["repoId"] == second["id"])
         self.assertEqual(("undetermined", False), (item["retention"], item["removedProject"]))
         self.assertFalse(report["settled"])
+
+
+class StateLockTests(unittest.TestCase):
+    def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
+        import fcntl
+        import time
+        from state import State, StateError
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            with State(directory, True, time.monotonic() + 5):
+                pass
+            holder = os.open(Path(directory) / "subyard-registration.lock", os.O_RDWR)
+            self.addCleanup(os.close, holder)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            with self.assertRaisesRegex(StateError, "holds the lock"):
+                with State(directory, True, time.monotonic() + 0.2):
+                    pass
+            release = threading.Timer(0.3, fcntl.flock, (holder, fcntl.LOCK_UN))
+            release.start()
+            self.addCleanup(release.join)
+            started = time.monotonic()
+            with State(directory, True, time.monotonic() + 5):
+                self.assertGreaterEqual(time.monotonic() - started, 0.25)

@@ -21,17 +21,19 @@ registration_host_name() {
 }
 
 render_registration_hook() {
-  local version host_name mode="${1:-sync}" settings_command=':'
+  local version host_name mode="${1:-sync}" launch_command=':' reset_command=':'
   version="$(registration_contract_version)" || return 1
   host_name="$(registration_host_name)" || return 1
   if [ "$mode" != discover ]; then
-    settings_command="/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py --deadline \"\$deadline\""
+    launch_command="/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py --launch-defaults --deadline \"\$launch_deadline\""
+    reset_command="/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py --reset-chats --deadline \"\$deadline\""
   fi
   cat <<SYNC_HEAD
 #!/usr/bin/env bash
 set -euo pipefail
-# One budget below the dispatcher's 120 seconds covers lock wait, registration and settings.
-read -r registration_deadline deadline < <(/usr/bin/python3 -c 'import time; now = time.monotonic(); print(now + 95, now + 110)')
+# One budget below the dispatcher's 120 seconds: lock wait up to 10 s, required launch
+# defaults until 40 s, registration and cleanup until 95 s, the resumable chat reset until 110 s.
+read -r launch_deadline registration_deadline deadline < <(/usr/bin/python3 -c 'import time; now = time.monotonic(); print(now + 40, now + 95, now + 110)')
 exec 9<$ORCA_REGISTRATION_LOCK
 flock -s -w 10 9 || {
   printf "Orca project helper is busy; run yard orca status\n" >&2
@@ -45,6 +47,8 @@ systemctl is-active --quiet $ORCA_UNIT || exit 0
 if [ -n "\${SUBYARD_PROJECT_HOOK_BINDING:-}" ]; then
   export SUBYARD_ORCA_REGISTRATION_SCOPE="\$SUBYARD_PROJECT_HOOK_BINDING"
 fi
+launch_status=0
+$launch_command || launch_status=1
 # main.py exits with strict readiness; the hook succeeds from the validated settlement.
 report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py $mode --host-name '$host_name' --deadline "\$registration_deadline")" || true
 if ! jq -e '(.ready | type == "boolean") and (.settled | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
@@ -56,7 +60,8 @@ jq -r '.cleanup[]? | "Orca cleanup pending: " + .path + ": " + .reason + "; " + 
 jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
 status=0
 jq -e '.settled' <<<"\$report" >/dev/null || status=1
-[ "\$status" -ne 0 ] || $settings_command
+[ "\$status" -ne 0 ] || [ "\$launch_status" -ne 0 ] || $reset_command
+[ "\$launch_status" -eq 0 ] || status=1
 exit "\$status"
 SYNC_HEAD
 }

@@ -335,6 +335,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--reset-chats", action="store_true", help="run only the saved Claude chat reset")
+    mode.add_argument("--launch-defaults", action="store_true", help="run only the launch-default convergence")
     parser.add_argument("--state", default="/srv/agents/orca")
     # A project hook passes the absolute time.monotonic() deadline it shares with registration.
     parser.add_argument("--deadline", type=float, default=None)
@@ -348,6 +349,8 @@ def main():
         except Exception:
             print("Orca agent launch settings unavailable; run yard orca up", file=sys.stderr)
             return 1
+        if args.launch_defaults:
+            return 0
     try:
         # Session History scans saved transcripts, which can take longer than a settings call.
         deadline = time.monotonic() + PASS_BUDGET

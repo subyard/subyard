@@ -39,7 +39,9 @@ class State:
             if self.lock is not None:
                 if not stat.S_ISREG(os.fstat(self.lock).st_mode):
                     raise StateError("Registration lock is not a regular file")
-                end = min(self.deadline, time.monotonic() + 10)
+                # An applying pass waits within its whole budget: a long cleanup pass of
+                # another invocation (hook, sync or discovery) is not a failure by itself.
+                end = self.deadline if self.apply else min(self.deadline, time.monotonic() + 10)
                 while True:
                     try:
                         fcntl.flock(self.lock, (fcntl.LOCK_EX if self.apply else fcntl.LOCK_SH) | fcntl.LOCK_NB)

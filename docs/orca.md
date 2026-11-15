@@ -480,11 +480,12 @@ directory at that address, such as a bind mountpoint, keeps the sessions. A miss
 a scan error or a changed workspace boundary closes nothing. Tabs are selected by the exact
 repository ID, including linked worktrees of that record, and closed by worktree and tab ID;
 orphan terminals are closed by native handle while their local host and worktree still match.
-A saved PTY attributed to another record stops the cleanup of that record before any close.
+A PTY shared with another record, in either direction, stops the cleanup of that record:
+it is checked before the first close and again before each later close.
 Other repositories, their terminals and processes are never touched. Ownership, identity,
-removal authority and runtime are checked again immediately before each close; an
-unconfirmed close is read back, and the record is removed only after its tabs and terminals
-are confirmed absent.
+removal authority and runtime are checked again immediately before each close, after its last
+read; an unconfirmed close is read back a few times within the budget, and the record is
+removed only after its tabs and terminals are confirmed absent.
 An absent checkout's terminal layouts can be removed when all belong to that exact checkout,
 explicitly lack a terminal handle, and a fresh, complete local terminal inventory has no matching
 worktree or saved PTY. This also checks orphan terminals. Saved tabs are read again before removal;
@@ -514,8 +515,12 @@ Explicit `orca sync` stays strict: it fails until every removed project's record
 `status` shows protected and pending records as information and warns about undetermined ones.
 
 A nonzero project hook exit means its pass failed or its state is undetermined. One hook
-invocation shares a single budget below the dispatcher's limit across the lock wait,
-registration, session cleanup and launch settings. A pass interrupted by the budget keeps its
+invocation shares a single 110-second budget below the dispatcher's 120-second limit. The
+helper lock wait ends after 10 seconds. The required launch defaults converge first, within
+40 seconds of the start; their failure fails the hook after registration still runs.
+Registration and session cleanup follow, ending at 95 seconds or after 85 seconds of their
+own. The saved Claude chat reset uses the rest; an interrupted reset warns and resumes on the
+next apply. Waits for another registration invocation stay within the same budget. A pass interrupted by the budget keeps its
 confirmed progress but never settles, and the next hook, sync or discovery portion continues.
 
 Cleanup is skipped on registration or workspace-boundary errors. An unfinished background

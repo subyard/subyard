@@ -695,6 +695,12 @@ class ChatPermissionMigrationTests(unittest.TestCase):
             settings.main()
         self.assertEqual([shared, shared], deadlines)
 
+    def test_launch_defaults_mode_skips_the_chat_reset(self):
+        rpc = ChatRPC(full("a"), tabs=[tab("a")])
+        self.assertEqual((0, "", ""), self.run_main(rpc, "--launch-defaults"))
+        self.assertEqual([], rpc.resets())
+        self.assertFalse(self.path.exists())
+
     def test_lock_wait_is_bounded_by_the_pass_budget(self):
         rpc = ChatRPC(full("a"), tabs=[tab("a")])
         started = time.monotonic()

@@ -1052,13 +1052,16 @@ chmod 0755 "$hook_dir/bin/systemctl"
 cat >"$hook_dir/registration/main.py" <<'PY'
 import os, sys
 assert sys.argv[sys.argv.index("--deadline") + 1]
+open(os.environ["ORCA_TEST_HOOK_SETTINGS"], "a").write("registration\n")
 print(os.environ["ORCA_TEST_HOOK_REPORT"])
 raise SystemExit(int(os.environ["ORCA_TEST_HOOK_EXIT"]))
 PY
 cat >"$hook_dir/registration/settings.py" <<'PY'
 import os, sys
-assert sys.argv[1] == "--deadline" and float(sys.argv[2]) > 0
-open(os.environ["ORCA_TEST_HOOK_SETTINGS"], "w").close()
+assert sys.argv[1] in ("--launch-defaults", "--reset-chats") and sys.argv[2] == "--deadline"
+assert float(sys.argv[3]) > 0
+open(os.environ["ORCA_TEST_HOOK_SETTINGS"], "a").write(sys.argv[1] + "\n")
+raise SystemExit(int(sys.argv[1] == "--launch-defaults" and os.environ.get("ORCA_TEST_HOOK_LAUNCH_FAIL") == "1"))
 PY
 touch "$hook_dir/lock"
 (
@@ -1081,18 +1084,24 @@ run_hook() {
 }
 protected='{"ready":false,"settled":true,"registered":1,"total":1,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"repository belongs to another execution host","nextAction":"Inspect the exact repository in Orca; Subyard retains it","removedProject":true,"retention":"protected"}]}'
 run_hook sync "$protected" 1 || fail 'hook failed for settled protected cleanup'
-[ -e "$hook_dir/settings-ran" ] || fail 'settled hook skipped settings'
+[ "$(cat "$hook_dir/settings-ran")" = "$(printf -- '--launch-defaults\nregistration\n--reset-chats')" ] \
+  || fail 'settled hook did not run launch defaults before registration and the chat reset after it'
 grep -Fq 'Orca cleanup pending: /srv/workspaces/removed/src: repository belongs to another execution host' \
   "$hook_dir/err" || fail 'settled hook omitted the pending cleanup line'
 run_hook discover "$protected" 1 || fail 'discovery failed for settled protected cleanup'
-[ ! -e "$hook_dir/settings-ran" ] || fail 'discovery ran settings'
+[ "$(cat "$hook_dir/settings-ran")" = registration ] || fail 'discovery ran settings'
+if ORCA_TEST_HOOK_LAUNCH_FAIL=1 run_hook sync "$protected" 1; then
+  fail 'hook succeeded although required launch defaults failed'
+fi
+[ "$(cat "$hook_dir/settings-ran")" = "$(printf -- '--launch-defaults\nregistration')" ] \
+  || fail 'failed launch defaults skipped registration or still ran the chat reset'
 for report in \
   '{"ready":false,"settled":false,"registered":1,"total":1,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"workspace absence is unverified","nextAction":"Retry","removedProject":true,"retention":"undetermined"}]}' \
   '{"ready":false,"settled":false,"registered":0,"total":1,"errors":["Orca registration time budget exhausted"],"warnings":[]}' \
   '{"ready":true,"registered":1,"total":1,"errors":[],"warnings":[]}'; do
   for mode in sync discover; do
     if run_hook "$mode" "$report" 0; then fail "hook settled an unsettled or invalid report: $report"; fi
-    [ ! -e "$hook_dir/settings-ran" ] || fail 'unsettled hook ran settings'
+    ! grep -Fqx -- --reset-chats "$hook_dir/settings-ran" || fail 'unsettled hook ran the chat reset'
   done
 done
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
