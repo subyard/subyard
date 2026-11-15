@@ -14,7 +14,6 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-const latestReleaseURL = "https://github.com/Subyard/Subyard/releases/latest"
 const stableReleaseURL = "https://github.com/Subyard/Subyard/releases/tag/v1.2.3"
 
 // Both discovery paths must accept the same stable tags and name HTTP refusals.
@@ -132,6 +131,26 @@ func TestLatestTagRejectsInsecureRedirectHops(t *testing.T) {
 			_, err := New(Config{HTTPClient: client}).latestTag(context.Background(), "Subyard/Subyard")
 			if err == nil || !strings.Contains(err.Error(), "redirects must use https") {
 				t.Fatalf("insecure redirect error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLatestTagReturnsCanonicalNumericTag(t *testing.T) {
+	for _, version := range [][3]uint64{{0, 10, 200}, {12, 34, 56}, {^uint64(0), 0, 1}} {
+		want := fmt.Sprintf("v%d.%d.%d", version[0], version[1], version[2])
+		t.Run(want, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(request.URL.Path, "/releases/latest") {
+					return &http.Response{StatusCode: 302, Header: http.Header{
+						"Location": {"https://github.com/Subyard/Subyard/releases/tag/" + want},
+					}, Body: http.NoBody}, nil
+				}
+				return &http.Response{StatusCode: 200, Body: http.NoBody, Request: request}, nil
+			})}
+			got, err := New(Config{HTTPClient: client}).latestTag(context.Background(), "Subyard/Subyard")
+			if err != nil || got != want {
+				t.Fatalf("latestTag() = %q, %v; want numeric reconstruction %q", got, err, want)
 			}
 		})
 	}

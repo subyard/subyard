@@ -2314,10 +2314,21 @@ func (runtime *Runtime) latestTag(ctx context.Context, repository string) (strin
 		parts[3] != "releases" || parts[4] != "tag" {
 		return "", errors.New("latest release redirect does not name a valid stable release tag")
 	}
-	tag := parts[5]
-	version, err := semver.Parse(strings.TrimPrefix(tag, "v"))
-	if err != nil || len(version.Pre) != 0 || len(version.Build) != 0 ||
-		tag != "v"+version.String() {
+	components := strings.Split(strings.TrimPrefix(parts[5], "v"), ".")
+	if len(components) != 3 {
+		return "", errors.New("latest release redirect does not name a valid stable release tag")
+	}
+	var version [3]uint64
+	for index, component := range components {
+		value, err := strconv.ParseUint(component, 10, 64)
+		if err != nil {
+			return "", errors.New("latest release redirect does not name a valid stable release tag")
+		}
+		version[index] = value
+	}
+	// Only reconstructed integers leave this HTTP boundary for filesystem paths.
+	tag := fmt.Sprintf("v%d.%d.%d", version[0], version[1], version[2])
+	if tag != parts[5] {
 		return "", errors.New("latest release redirect does not name a valid stable release tag")
 	}
 	return tag, nil
