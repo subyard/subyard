@@ -1,10 +1,12 @@
 import copy
+import itertools
 import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -1024,7 +1026,8 @@ class ReconcileTests(unittest.TestCase):
                 report = self.run_sync()
                 self.assertTrue(report["ready"], report)
                 self.assertIn(repo, self.rpc.repos)
-                self.assertFalse(any(method == "terminal.list" for method, _ in self.rpc.calls))
+                self.assertFalse(any(method in ("session.tabs.close", "terminal.close", "terminal.stopExact")
+                                     for method, _ in self.rpc.calls))
 
     def test_cleanup_retains_stale_layout_for_a_different_worktree(self):
         repo = self.prepare_missing_repo()
@@ -1204,10 +1207,15 @@ class ReconcileTests(unittest.TestCase):
 
         self.rpc.call = refused
         report = self.run_sync()
-        self.assertFalse(report["ready"], report)
+        item = next(item for item in report["cleanup"] if item["repoId"] == repo["id"])
+        # A definitive refusal keeps the record protected and asks for a manual close.
+        self.assertEqual(("Orca refused a session close; repository is retained", "protected", True),
+                         (item["reason"], item["retention"], item["attention"]))
+        self.assertIn("by hand", item["nextAction"])
         self.assertIn(repo, self.rpc.repos)
         self.assertTrue(self.rpc.snapshots[0]["tabs"])
         self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+        self.assertEqual(1, sum(method == "session.tabs.close" for method, _ in self.rpc.calls))
 
     def test_stale_layout_close_keeps_repo_if_followup_tab_identity_is_invalid(self):
         repo = self.prepare_missing_repo()
@@ -1219,9 +1227,11 @@ class ReconcileTests(unittest.TestCase):
 
         self.rpc.after = malformed
         report = self.run_sync()
-        self.assertFalse(report["ready"], report)
+        # A tab without identity cannot be addressed exactly: the record stays protected.
         self.assertIn(repo, self.rpc.repos)
-        self.assertIn("Orca returned an invalid session tab identity; cleanup skipped", report["errors"])
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == repo["id"]))
         self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
 
     def test_timed_out_saved_tab_read_retries_once_and_positive_result_preserves_repo(self):
@@ -1386,7 +1396,7 @@ class ReconcileTests(unittest.TestCase):
         self.rpc.snapshots = []
         def reappear(method, params):
             if method == "session.tabs.listAll":
-                (self.root / "gone").mkdir()
+                (self.root / "gone").mkdir(exist_ok=True)
         self.rpc.after = reappear
         self.assertFalse(self.run_sync()["ready"])
         self.assertEqual(2, len(self.rpc.repos))
@@ -1948,10 +1958,11 @@ class RemovedProjectSessionTests(unittest.TestCase):
                 self.root.parent.mkdir()
         self.rpc.after = recreate
         report = self.run_sync()
-        self.assertFalse(report["settled"])
-        self.assertIn("candidate changed", " ".join(report["errors"]))
+        # Files at the address again mean the project is not removed: protected, nothing sent.
         self.assertEqual([], self.closes())
         self.assertIn(self.repo, self.rpc.repos)
+        self.assertEqual("protected", next(item for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"])["retention"])
 
     def test_unknown_close_reply_uses_readback(self):
         self.sessions()
@@ -1983,7 +1994,7 @@ class RemovedProjectSessionTests(unittest.TestCase):
         report = self.reconcile(self.discover(self.workspaces), self.rpc, self.state,
                                 deadline=time.monotonic() + 1.5, host_name="owner-host")
         self.assertFalse(report["settled"])
-        self.assertIn("terminal removal is unconfirmed", " ".join(report["errors"]))
+        self.assertIn("session cleanup is unconfirmed", " ".join(report["errors"]))
         self.assertIn(self.repo, self.rpc.repos)
         self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
 
@@ -2229,10 +2240,11 @@ class RemovedProjectSessionTests(unittest.TestCase):
                         return original(name, params, **kwargs)
                     self.rpc.call = refuse_stop
                 self.during_send(method, effect)
-                self.assertFalse(self.run_sync()["settled"])
+                self.run_sync()
+                # The re-attributed terminal is no longer this record's; it is never addressed.
                 self.assertFalse(any(name == method for name, _ in self.closes()), self.closes())
                 self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
-                self.assertIn(self.repo, self.rpc.repos)
+                self.assertNotIn("orphan-pty", self.rpc.killed)
 
     def test_foreign_shared_pty_added_during_catalog_read_refuses_tab_close(self):
         self.sessions()
@@ -2258,6 +2270,54 @@ class RemovedProjectSessionTests(unittest.TestCase):
                       self.closes())
         self.assert_untouched()
 
+    def test_terminal_rows_sharing_a_pty_across_records_protect_without_any_send(self):
+        # Astra r3: no saved tabs; two local live rows share one PTY across a removed and an active record.
+        self.rpc.snapshots = []
+        self.rpc.terminals = [self.terminal(self.repo, "shared", "h-removed"),
+                              self.terminal(self.other, "shared", "h-active")]
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(set(), self.rpc.killed)
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == self.repo["id"]))
+        self.assertTrue(report["settled"])
+
+    def test_definitive_refusals_protect_and_lost_replies_stay_undetermined(self):
+        import time
+        for case in ("rejected", "refused-reply", "lost"):
+            with self.subTest(case=case):
+                self.setUp()
+                self.sessions()
+                self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+                shutil.rmtree(self.root.parent)
+                original = self.rpc.call
+
+                def close(method, params=None, before_send=None):
+                    if method != "session.tabs.close":
+                        return original(method, params, before_send=before_send)
+                    before_send(self.rpc.runtime_id)
+                    self.rpc.calls.append((method, params))
+                    if case == "rejected":
+                        raise self.error("Orca runtime rejected session.tabs.close")
+                    if case == "refused-reply":
+                        return {"closed": True, "refused": True, "refusalReason": "live-host-pty"}
+                    raise self.error("lost reply", unknown=True, timed_out=True)
+                self.rpc.call = close
+                report = self.reconcile(self.discover(self.workspaces), self.rpc, self.state,
+                                        deadline=time.monotonic() + 1.5, host_name="owner-host")
+                item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+                self.assertIn(self.repo, self.rpc.repos)
+                self.assertEqual(1, sum(method == "session.tabs.close" for method, _ in self.rpc.calls))
+                if case == "lost":
+                    self.assertEqual("undetermined", item["retention"])
+                    self.assertFalse(report["settled"])
+                else:
+                    self.assertEqual(("protected", True), (item["retention"], item.get("attention")))
+                    self.assertIn("by hand", item["nextAction"])
+                    self.assertTrue(report["settled"], report)
+
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
         import fcntl
@@ -2278,3 +2338,80 @@ class StateLockTests(unittest.TestCase):
             started = time.monotonic()
             with State(directory, True, time.monotonic() + 5):
                 self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+
+class OwnershipInvariantTests(unittest.TestCase):
+    """Enumerated small states under the PTY-kill effect model: cleaning removed record A never
+    affects an object with another or unknown owner, and a completed cleanup leaves A empty."""
+
+    A = {"id": "a", "path": "/w/a/src", "executionHostId": "local", "connectionId": None}
+    B = {"id": "b", "path": "/w/b/src", "executionHostId": "local", "connectionId": None}
+    WT = {"A": "a::/w/a/src", "B": "b::/w/b/src"}
+
+    class Fence:
+        def __init__(self, rpc):
+            self.rpc = rpc
+
+        def same_runtime(self, runtime_id):
+            pass
+
+        def read(self):
+            from reconcile import _records, _session_snapshots, _terminal_census
+            return (_records(self.rpc, "repo.list", "repos"), _session_snapshots(self.rpc),
+                    _terminal_census(self.rpc))
+
+        def authorize(self, read_set):
+            pass
+
+    def states(self):
+        tab_opts = [None] + [(o, p, h) for o in "AB" for p in ("p", "q", None) for h in (None, "hx")]
+        row_opts = [None] + [(o, host, p, h) for o in "AB" for host in ("local", "remote")
+                             for p in ("p", "q") for h in ("unique", "hx")]
+        for t1, t2, r1, r2 in itertools.product(tab_opts, tab_opts[:7], row_opts, row_opts):
+            snapshots = {}
+            for index, tab in enumerate((t1, t2)):
+                if tab:
+                    item = {"id": "t%d" % index, "ptyId": tab[1]}
+                    if tab[2]:
+                        item["terminal"] = tab[2]
+                    snapshots.setdefault(self.WT[tab[0]], []).append(item)
+            rows = [{"ptyId": row[2], "worktreeId": self.WT[row[0]], "executionHostId": row[1],
+                     "handle": "h%d" % index if row[3] == "unique" else "hx", "connected": True}
+                    for index, row in enumerate((r1, r2)) if row]
+            yield [{"worktree": w, "tabs": tabs} for w, tabs in snapshots.items()], rows
+
+    def test_no_foreign_object_is_ever_affected(self):
+        import reconcile
+        from reconcile import _ownership, _remove_sessions
+        counts = {"states": 0, "cleaned": 0, "protected": 0, "unresolved": 0, "violations": 0}
+        with mock.patch.object(reconcile, "READBACK_INTERVAL", 0.0001), \
+                mock.patch.object(reconcile, "READBACK_MAX_INTERVAL", 0.0001):
+            for snapshots, rows in self.states():
+                counts["states"] += 1
+                rpc = Catalog()
+                rpc.repos = [dict(self.A), dict(self.B)]
+                rpc.snapshots, rpc.terminals = copy.deepcopy(snapshots), copy.deepcopy(rows)
+                own_a = lambda worktree, host="local": worktree.startswith("a::") and host == "local"
+                foreign_tabs = [tab for item in snapshots if not own_a(item["worktree"]) for tab in item["tabs"]]
+                foreign_rows = [row for row in rows if not own_a(row["worktreeId"], row["executionHostId"])]
+                foreign_keys = ({tab.get("ptyId") for tab in foreign_tabs} | {row["ptyId"] for row in foreign_rows}) - {None}
+                try:
+                    _remove_sessions(rpc, self.A, self.Fence(rpc), time.monotonic() + 0.05)
+                    outcome = "cleaned"
+                except reconcile.AmbiguousSession:
+                    outcome = "protected"
+                except reconcile.RpcError:
+                    outcome = "unresolved"
+                counts[outcome] += 1
+                remaining_tabs = [tab for item in rpc.snapshots for tab in item["tabs"]]
+                violated = (bool(foreign_keys & rpc.killed)
+                            or any(tab not in remaining_tabs for tab in foreign_tabs)
+                            or any(row not in rpc.terminals for row in foreign_rows))
+                if outcome == "cleaned":
+                    _, tabs, own_rows = _ownership(self.A, rpc.repos, rpc.snapshots, rpc.terminals)
+                    violated = violated or bool(tabs or own_rows)
+                counts["violations"] += violated
+                self.assertFalse(violated, (snapshots, rows, outcome, rpc.killed))
+        print("\nownership invariant:", counts)
+        self.assertGreater(counts["cleaned"], 0)
+        self.assertGreater(counts["protected"], 0)
