@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -522,35 +520,4 @@ func (store *POSIXV2Store) migrationOwnerCompletion(receipt MigrationOwnerReceip
 		return JournalRecord{}, invalid("migration owner supersession has no terminal successor evidence")
 	}
 	return cloneMigrationOwnerJournal(*terminal), nil
-}
-
-func (store *POSIXV2Store) validateMigrationOwnerPreparedJournal() error {
-	receipts, err := store.migrationOwnerReceipts()
-	if err != nil || len(receipts) != 1 {
-		return invalid("unbound prepared migration owner journal")
-	}
-	parent, present, err := store.openParent([]string{"release-transition", "v2"}, false)
-	if err != nil || !present {
-		return invalid("prepared migration owner journal parent is unavailable")
-	}
-	defer unix.Close(parent)
-	pending, err := readStagingAt(parent, ".journal.json.pending")
-	if err != nil || !pending.Exists {
-		return invalid("prepared migration owner journal is unavailable")
-	}
-	current, err := store.ReadCurrentJournal()
-	if err != nil {
-		return err
-	}
-	for _, receipt := range receipts {
-		expected, _ := MarshalJournal(receipt.Successor)
-		predecessor, _ := MarshalJournal(receipt.Predecessor)
-		// Staging carries no authority. Only the immutable receipt supplies the
-		// exact intended successor; the unchanged canonical predecessor guards
-		// completing or replacing this CAS staging file under the update lock.
-		if !bytes.HasPrefix(expected, pending.Payload) || !bytes.Equal(current.Payload, predecessor) {
-			return invalid("prepared migration owner journal conflicts with its immutable receipt")
-		}
-	}
-	return nil
 }

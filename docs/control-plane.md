@@ -1712,9 +1712,11 @@ complete counts as closed even if its journal stopped earlier: it stays under or
 journal copy remains. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
 
 Below the [update boundary](reference/legacy-migration-support.md#approved-support-boundary),
-releases after v0.28.x refuse the installed source. There, `$VERSION` must be a v0.28.x release:
-v0.28.x is the last series that owns the recoveries of earlier releases described below. After
-recovery, continue with `yard update --version 0.28.1 && yard update`.
+releases after v0.28.x refuse replacement while the installed source is from v0.11.0 to below
+v0.28.0. For generic newer-release recovery described above, `$VERSION` must name a compatible
+v0.28.x fix release. This does not include the v0.11.1 and v0.17.3 defects: their older,
+matching-registry recovery releases and commands are listed below. After recovery, take the
+published v0.28.1 hop, then update normally.
 
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
 migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own historical contracts.
@@ -1763,17 +1765,48 @@ is repaired in the anchor series). The earlier release stays active and yards an
 intact. Subyard never writes `block` itself, so only a manually set value reaches this stop.
 
 Historical v0.11.1 can stop after activation at `reconciling` with
-`transition.observation-scope`. Its recovery belongs to a verified historical standalone patch
-with the original registry; the current engine only reads the resulting superseded archives.
-Do not edit or delete journals, ledgers, transaction evidence or runtime links. Complete recovery
-with its compatible historical owner, then take the published v0.28.1 hop.
+`transition.observation-scope`. The official v0.11.2 standalone installer owns that recovery
+with the original registry. Run that historical installer, rather than asking the current
+release to select v0.11.2:
+
+```bash
+PATCH_VERSION=0.11.2
+(
+  set -eu
+  installer="$(mktemp)"
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    "https://github.com/Subyard/Subyard/releases/download/v${PATCH_VERSION}/subyard-install.sh" \
+    -o "$installer"
+  bash "$installer" --version "$PATCH_VERSION"
+)
+```
+
+The installer is interactive by default; review its replacement plan. Preserve journals,
+ledgers, transaction evidence and runtime links until recovery completes. Then take the
+published v0.28.1 hop and update normally. The current release only reads the retained
+superseded archives; with an explicit `--version` it refuses this unfinished below-anchor
+installation with `source-anchor-required`.
 
 Published v0.17.3 can reopen completed settings inspection during a same-release activation repair:
 a zero-step `reconciling` journal reports one `yard.<name>` unsupported-template blocker.
-The current caller preserves its historical retry hints, but its engine cannot delegate this repair.
-A verified historical bridge such as v0.18.6 retains the matching v0.17.3 registry and catalog;
-only that bridge owns the delegated recovery with the original sealed assets. Preserve settings,
-authorization and transaction evidence, finish that historical recovery, then take the hop.
+The verified historical v0.18.6 bridge retains the matching v0.17.3 registry and catalog and
+owns delegated recovery with the original sealed assets. After its runtime installer publishes
+v0.18.6 without activating it, use that candidate's exact printed launcher path (`<candidate-release>`
+is the verified v0.18.6 release identity):
+
+```bash
+"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default migrate --check --json
+"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default migrate
+yard migrate --check
+```
+
+Then take the published v0.28.1 hop and run `yard update`. The installed v0.17.3 launcher cannot
+perform the delegated repair. Preserve settings, authorization and transaction evidence.
+The current caller keeps its historical retry hints, but its engine cannot delegate this repair;
+with an explicit `--version` it refuses the unfinished below-anchor installation with
+`source-anchor-required`. These two recoveries require their historical registries, which differ
+from v0.28.x and the current release.
 
 Registry v2 contains only compiled, typed one-time capabilities. Activation reconcilers separately
 refresh materialized config, an already-active test-VM broker and an installed host power runtime;
