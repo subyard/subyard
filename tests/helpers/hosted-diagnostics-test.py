@@ -93,6 +93,12 @@ class Redaction(unittest.TestCase):
             data = b"before\n-----BEGIN " + kind + b"-----\nbody\n-----END OTHER PRIVATE KEY-----\n-----END " + kind + b"-----\nafter\n"
             self.assertEqual(render(data), b"before\n[redacted PEM]\nafter\n")
 
+    def test_env_values_cannot_disable_pem_delimiters(self):
+        data = b"before\n-----BEGIN PRIVATE KEY-----\nfixture-private-material\n-----END PRIVATE KEY-----\nafter\n"
+        for value in ("PRIVATE KEY", "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"):
+            with self.subTest(value=value):
+                self.assertEqual(render(data, {"FIXTURE_PASSWORD": value}), b"before\n[redacted PEM]\nafter\n")
+
     def test_key_larger_than_tail_is_removed_before_tail_cut(self):
         body = b"qwertyuiopASDFGHJKLzxcvbnmQWERTYUIasdfghjklZXCVBNM0123456789+/abcd\n" * 34000
         data = b"before\n-----BEGIN PRIVATE KEY-----\n" + body + b"-----END PRIVATE KEY-----\nafter\n"
@@ -152,6 +158,16 @@ class Capture(unittest.TestCase):
         self.assertEqual((self.destination / "acceptance" / self.check.name).read_bytes(), self.check.read_bytes())
         self.assertTrue(all(item["reason"] for item in summary["skipped"]))
         self.assertLessEqual(sum((self.destination / item["path"]).stat().st_size for item in summary["files"]), 256)
+
+    def test_print_budget_keeps_the_final_failure_line(self):
+        payload = (b"x" * 512 + b"\n") * 79 + b"FINAL FAILURE: guest socket missing\n"
+        self.check.write_bytes(payload)
+        printed, _ = self.snapshot()
+        tail = printed.splitlines()[1:]
+        self.assertEqual(tail[-1], "| FINAL FAILURE: guest socket missing")
+        self.assertLessEqual(len(tail), 80)
+        self.assertLessEqual(len(("\n".join(tail) + "\n").encode()), 16384)
+        self.assertEqual((self.destination / "acceptance" / self.check.name).read_bytes(), payload)
 
     def test_later_failure_keeps_the_already_printed_tail_and_summary(self):
         events = self.output / "events.jsonl"

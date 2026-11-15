@@ -108,11 +108,19 @@ class Redactor:
         return HEX.sub(tag, line)
 
     def write(self, stream, target):
+        # Detect PEM on original bytes so an env value cannot alter its delimiters.
+        with tempfile.TemporaryFile() as pem:
+            self.write_pem(stream, pem)
+            pem.seek(0)
+            for line in self.lines(pem):
+                target.write(self.plain(line))
+
+    def write_pem(self, stream, target):
         # Spool provisional output privately on disk. A matching END rolls back
         # even a key larger than the tail window. Without END, only BEGIN and
         # 128 following lines are suppressed; later diagnostic text survives.
         keys = []
-        for line in self.lines(stream):
+        for line in stream:
             while line:
                 endings = [(line.find(key[0]), index) for index, key in enumerate(keys) if key[0] in line]
                 if endings:
@@ -128,7 +136,7 @@ class Redactor:
                     break
                 begin = BEGIN_KEY.search(line)
                 if begin:
-                    target.write(self.plain(line[:begin.start()]))
+                    target.write(line[:begin.start()])
                     target.write(b"[redacted PEM]")
                     checkpoint = target.tell()
                     end = b"-----END " + begin["kind"] + b"-----"
@@ -139,7 +147,7 @@ class Redactor:
                         continue
                     target.write(b"\r\n" if line.endswith(b"\r\n") else b"\n" if line.endswith(b"\n") else b"")
                     break
-                target.write(self.plain(line))
+                target.write(line)
                 break
 
 
@@ -192,13 +200,17 @@ def diagnostic_snapshot(output, destination, check, status, logs=None, evidence=
             summary["files"].append({"path": str(relative), "truncated": truncated})
             if primary and status != "success":
                 print(f"Hosted check tail: {relative} (sanitized; at most 80 lines / 16 KiB)", flush=True)
-                for line in data.splitlines()[-80:]:
-                    rendered = b"| " + line[:512]
-                    if not print_lines or len(rendered) + 1 > print_bytes:
+                tail = []
+                for line in reversed(data.splitlines()[-80:]):
+                    rendered = (b"| " + line[:512]).decode("utf-8", errors="backslashreplace")
+                    size = len(rendered.encode("utf-8")) + 1
+                    if not print_lines or size > print_bytes:
                         break
-                    print(rendered.decode("utf-8", errors="backslashreplace"), flush=True)
-                    print_bytes -= len(rendered) + 1
+                    tail.append(rendered)
+                    print_bytes -= size
                     print_lines -= 1
+                for line in reversed(tail):
+                    print(line, flush=True)
             if relative.suffix == ".log":
                 for line in data.splitlines():
                     if b"cleanup" in line.lower() or b"lease released:" in line:
