@@ -332,6 +332,32 @@ if HOME="$TMP/unconfirmed-home" YARD_RUNTIME_ROOT="$TMP/unconfirmed-runtime" \
 fi
 [ ! -e "$TMP/unconfirmed-runtime" ] \
   || fail 'declined standalone bootstrap created a runtime'
+# Recognized pre-Go source-only installs refuse before any publication or shell edit.
+source_home="$TMP/retired-source-home"
+mkdir -p "$source_home/source/bin" "$source_home/source/config" \
+  "$source_home/source/completions" "$source_home/.local/bin"
+printf '# thin dispatcher over scripts/\n' > "$source_home/source/bin/yard"
+touch "$source_home/source/config/commands.registry" "$source_home/source/completions/yard.bash"
+for source_link in yard sy; do
+  ln -s "$source_home/source/bin/yard" "$source_home/.local/bin/$source_link"
+done
+printf 'preserved shell\n' > "$source_home/.bashrc"
+if HOME="$source_home" SUBYARD_HOME="$source_home/.subyard" \
+  SUBYARD_CONFIG_HOME="$source_home/.config/subyard" YARD_RUNTIME_ROOT="$source_home/.subyard/runtime" \
+  YARD_BIN_DIR="$source_home/.local/bin" YARD_RELEASE_BASE_URL="file://$release" \
+  "$release/subyard-install.sh" --version 1.0.0-test --yes > "$TMP/retired-source.log" 2>&1; then
+  fail 'bootstrap admitted a retired source-only installation'
+fi
+grep -Fq 'Sources before v0.11.0 are unsupported.' "$TMP/retired-source.log" \
+  && grep -Fq "bin/yard uninstall --full" "$TMP/retired-source.log" \
+  && grep -Fq 'After verified cleanup, install a new version separately.' "$TMP/retired-source.log" \
+  && [ ! -e "$source_home/.subyard" ] && [ ! -e "$source_home/.config" ] \
+  && [ "$(cat "$source_home/.bashrc")" = 'preserved shell' ] \
+  || fail 'retired source bootstrap lost guidance or changed the installation'
+for source_link in yard sy; do
+  [ "$(readlink "$source_home/.local/bin/$source_link")" = "$source_home/source/bin/yard" ] \
+    || fail 'retired source bootstrap changed an entrypoint'
+done
 staging_home="$TMP/staging-home"
 staging_runtime="$staging_home/runtime"
 mkdir -p "$staging_home/.config/subyard" "$staging_home/.subyard/recovery/pre-go-source"

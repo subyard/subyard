@@ -131,9 +131,14 @@ init before update, including structured configuration evidence and raw Codex ru
 agent jobs at the ownership, manifest and provisioning boundaries described in the VM guide;
 the no-agent matrix alone does not establish agent migration compatibility.
 
+Bootstrap checks runtime ownership before interpreting checkout markers. Another runtime gets
+`--runtime-root` guidance; only a dispatcher or valid pending recovery is classified as legacy.
+A native-only checkout gets neutral guidance. The diagnostic environment value
+`SUBYARD_SOURCE_INGRESS_V1_CLASS=legacy` accompanies its descriptor; it grants no authority.
+
 | Contract | Owning unit checks | Local integration | Physical gate | Trigger |
 | --- | --- | --- | --- | --- |
-| Legacy config normalization and pure stdin/stdout | `go:migration`: `TestNormalizeLegacyYardConfigContent` | `go:cli`: `TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery` runs CLI stdin/stdout against a real filesystem fixture | None; the CLI filesystem fixture owns normalization | Normalizer or source ingress changes |
+| Retired source ingress refuses without mutation | `go:cli`: `TestReleaseTransitionIngressFactoryRefusesSourceByClass` | `go:cli`: `TestRetiredSourceHelpersDoNotWritePathsDuringRecovery` preserves filesystem/journal/entrypoints; `shell:engine-release`: pre-Go bootstrap refuses before publication; `go:migration`: `TestBootstrapRediscoversInterruptedSourceIngressFromRecovery` preserves recovery; `TestBootstrapSourceClassificationMatrix` enumerates marker, runtime, journal and path combinations before writes | None; retained source ingress has host-free bootstrap coverage only | Source ingress or bootstrap changes |
 | Source authorization, journal binding and recovery | `go:releasetransition`: journal codecs and in-memory source inspection normalization | `go:releasetransition`: source order/drift/recovery over filesystem fixtures; `go:cli`: candidate process/source ingress checks; `shell:engine-release`: installer/update/rollback | `p0:source-upgrade`: pinned v0.11.0 creation through the shared hop, explicit legacy test-owner recreation and retained ordinary-yard data/identity/power | Transition/installer changes |
 | Config precedence, safe diagnostics and drift | `go:config`: `TestResolveIntegrationSelection` | `go:config`: precedence over persisted layers; `go:cli`: config paths/show/status/apply tests use persisted config fixtures and native materialization; `shell:engine-release`: installed process checks | `p0:source-upgrade`: config apply/status plus actual guest file hash | Config resolver/materializer changes |
 | Status space cache freshness and selectors | `go:adapters/statusruntime`: `TestDescribeSpaceCache` uses fixed time and an injected refresh request | `go:adapters/statusruntime`: cache persistence and synchronous/asynchronous refresh contracts; `go:cli`: `TestStatusRoutesSummaryAndExplicitYardSelectors` and `TestSpace*` | `dev/e2e/status-fast-acceptance.sh`: real container refresh, separate `/srv` mount and verified same-inode storage allocation; `p0:real-incus` retains VM adapter compatibility | Status cache or space measurement changes |

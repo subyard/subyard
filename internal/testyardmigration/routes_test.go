@@ -18,7 +18,7 @@ import (
 )
 
 func TestRouteConsumersObserveGitTemplateWithLocalSlotCount(t *testing.T) {
-	options, _ := routeConsumerFixture(t, StateCurrent, true)
+	options, state := routeConsumerFixture(t, StateCurrent, true)
 	root := filepath.Dir(options.ConfigHome)
 	options.RepositoryRoot = brokerRepository(t, filepath.Join(root, "candidate"))
 	options.Environment = withEnvironment(options.Environment, "SUBYARD_OPERATOR_HOME", root)
@@ -26,11 +26,12 @@ func TestRouteConsumersObserveGitTemplateWithLocalSlotCount(t *testing.T) {
 		"YARD_TEMPLATE=test-vms\nE2E_VM_SLOT_COUNT=3\n")
 	local := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
 	testkit.WriteFile(t, local, []byte("E2E_VM_SLOT_COUNT='4'\n"), 0o600)
-	before, err := PrepareRouteConsumers(context.Background(), options)
+	before, err := prepareRouteConsumers(context.Background(), options, false)
 	if err != nil {
 		t.Fatalf("layered route observation: %v", err)
 	}
-	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
+	write(t, state.defaultDevice, "correct\n")
+	if err := VerifyRouteConsumers(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	if err := VerifyRouteConsumers(context.Background(), options, before); err != nil {
@@ -63,46 +64,10 @@ func TestRouteConsumerActivationUsesGitTemplateWithLocalSlotOverride(t *testing.
 	}
 }
 
-func TestRouteConsumersCommitAttachesExistingRunningYard(t *testing.T) {
-	options, state := routeConsumerFixture(t, StateCurrent, true)
-	before, err := PrepareRouteConsumers(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.TrimSpace(read(t, state.defaultDevice)); got != "correct" {
-		t.Fatalf("default yard device state = %q", got)
-	}
-	calls := read(t, state.calls)
-	for _, expected := range []string{
-		"config device add yard subyard-e2e-routes disk --project subyard ",
-		"exec yard --project subyard -- /bin/sh -c ",
-		"exec yard-test-yard --project subyard-test-yard -- /bin/sh -c ",
-	} {
-		if !strings.Contains(calls, expected) {
-			t.Fatalf("Incus calls omitted %q:\n%s", expected, calls)
-		}
-	}
-	if err := VerifyRouteConsumers(context.Background(), options, before); err != nil {
-		t.Fatal(err)
-	}
-	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Count(
-		read(t, state.calls),
-		"config device add yard subyard-e2e-routes",
-	); got != 1 {
-		t.Fatalf("idempotent commit added the default route device %d times", got)
-	}
-}
-
 func TestRouteConsumersPrepareRejectsForeignDevice(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	write(t, state.defaultDevice, "wrong\n")
-	before, err := PrepareRouteConsumers(context.Background(), options)
+	before, err := prepareRouteConsumers(context.Background(), options, false)
 	if err == nil || before != "" || !strings.Contains(err.Error(), "foreign or drifted") {
 		t.Fatalf("foreign route device preparation = %q, %v", before, err)
 	}
@@ -112,85 +77,15 @@ func TestRouteConsumersPrepareRejectsForeignDevice(t *testing.T) {
 	}
 }
 
-func TestRouteConsumersCommitReconcilesStaleCanonicalRoute(t *testing.T) {
-	options, state := routeConsumerFixture(t, StateCurrent, true)
-	before, err := PrepareRouteConsumers(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, state.ownerAddress, "10.0.0.9\n")
-	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.TrimSpace(read(t, state.defaultDevice)); got != "correct" {
-		t.Fatalf("stale route was not reconciled before consumer mutation: %q", got)
-	}
-	if !strings.Contains(
-		read(t, state.yardCalls),
-		"-Y test-yard _migrate reconcile-test-vm-broker\n",
-	) {
-		t.Fatal("stale canonical route did not trigger bounded broker reconcile")
-	}
-}
-
-func TestRouteConsumerSnapshotSurvivesOwnerTransitionAndRejectsNewYard(t *testing.T) {
-	options, state := routeConsumerFixture(t, StateLegacyDirectory, true)
-	beforeLegacy, err := PrepareRouteConsumers(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldRegistration := filepath.Join(options.ConfigHome, "yards", LegacyYard)
-	newRegistration := filepath.Join(options.ConfigHome, "yards", CurrentYard)
-	if err := os.Rename(oldRegistration, newRegistration); err != nil {
-		t.Fatal(err)
-	}
-	write(t, state.owner, "current\n")
-	beforeCurrent, err := PrepareRouteConsumers(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if beforeLegacy != beforeCurrent {
-		t.Fatalf(
-			"owner transition changed prepared consumer snapshot:\nlegacy=%s\ncurrent=%s",
-			beforeLegacy,
-			beforeCurrent,
-		)
-	}
-	write(t, state.extra, "1\n")
-	err = CommitRouteConsumers(context.Background(), options, beforeLegacy)
-	if err == nil || !strings.Contains(err.Error(), "inventory changed") {
-		t.Fatalf("new consumer commit error = %v", err)
-	}
-	if got := strings.TrimSpace(read(t, state.defaultDevice)); got != "missing" {
-		t.Fatalf("new consumer reached mutation: %q", got)
-	}
-}
-
-func TestRouteConsumersCommitRepublishesMissingCanonicalRoute(t *testing.T) {
-	options, state := routeConsumerFixture(t, StateCurrent, false)
-	before, err := PrepareRouteConsumers(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(
-		read(t, state.yardCalls),
-		"-Y test-yard _migrate reconcile-test-vm-broker\n",
-	) {
-		t.Fatal("missing canonical route did not trigger bounded broker reconcile")
-	}
-}
-
 func TestRouteConsumersSkipGuestProbeForStoppedYard(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	write(t, state.defaultStatus, "STOPPED\n")
-	before, err := PrepareRouteConsumers(context.Background(), options)
+	before, err := prepareRouteConsumers(context.Background(), options, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
+	write(t, state.defaultDevice, "correct\n")
+	if err := VerifyRouteConsumers(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(read(t, state.calls), "exec yard --project subyard --") {
@@ -201,11 +96,12 @@ func TestRouteConsumersSkipGuestProbeForStoppedYard(t *testing.T) {
 func TestRouteConsumersSkipOwnerGuestProbeForStoppedCanonicalYard(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	write(t, state.ownerStatus, "STOPPED\n")
-	before, err := PrepareRouteConsumers(context.Background(), options)
+	before, err := prepareRouteConsumers(context.Background(), options, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
+	write(t, state.defaultDevice, "correct\n")
+	if err := VerifyRouteConsumers(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	calls := read(t, state.calls)
@@ -524,16 +420,15 @@ func TestRouteConsumersHistoricalMigrationPreservesConsumerContract(t *testing.T
 	writeIsolatedRouteTemplate(t, options)
 	write(t, filepath.Join(options.ConfigHome, "yards", "demo", "config.env"), "SSH_PORT=2233\nYARD_TEMPLATE=isolated\n")
 	ctx := context.Background()
-	before, err := PrepareRouteConsumers(ctx, options)
+	before, err := prepareRouteConsumers(ctx, options, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(before, `"yard":"demo"`) {
 		t.Fatal("historical snapshot changed its frozen whole-host consumer set")
 	}
-	if err := CommitRouteConsumers(ctx, options, before); err != nil {
-		t.Fatal(err)
-	}
+	write(t, state.defaultDevice, "correct\n")
+	write(t, state.extraDevice, "correct\n")
 	if err := VerifyRouteConsumers(ctx, options, before); err != nil {
 		t.Fatal(err)
 	}

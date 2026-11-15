@@ -991,7 +991,7 @@ esac
 				if err := reconciler.Reconcile(context.Background(), links); err != nil {
 					t.Fatal(err)
 				}
-				before, err := testyardmigration.PrepareRouteConsumers(context.Background(), options)
+				before, err := testyardmigration.PrepareRouteConsumersActivation(context.Background(), options)
 				if err != nil || testyardmigration.VerifyRouteConsumers(context.Background(), options, before) == nil {
 					t.Fatalf("one-time migration accepted absent backend: %s, %v", before, err)
 				}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,8 +43,8 @@ type managedYard struct {
 
 // PrepareRouteConsumerActivation distinguishes a retained registration from a
 // live owner backend. Teardown may retain settings, a project and data volumes;
-// release activation must not recreate its removed compute backend. The one-time
-// migration's Prepare/Commit/VerifyRouteConsumers contract remains unchanged.
+// release activation must not recreate its removed compute backend. Historical
+// route snapshots retain their separate verification contract.
 func PrepareRouteConsumerActivation(ctx context.Context, options Options) (state State, err error) {
 	defer func() {
 		err = routeDiagnostic(err, "owner registration or backend inspection failed", CurrentYard, "", "", false)
@@ -114,12 +113,6 @@ func prepareCanonicalRouteActivationBackend(ctx context.Context, options Options
 	return StateCurrent, nil
 }
 
-// PrepareRouteConsumers snapshots every existing non-owner local yard before
-// the preceding owner operation changes e2e-yard into test-yard.
-func PrepareRouteConsumers(ctx context.Context, options Options) (string, error) {
-	return prepareRouteConsumers(ctx, options, false)
-}
-
 // PrepareRouteConsumersActivation snapshots current route consumers according
 // to their effective host-access policy, independently of the frozen migration.
 func PrepareRouteConsumersActivation(ctx context.Context, options Options) (string, error) {
@@ -167,106 +160,6 @@ func prepareRouteConsumers(ctx context.Context, options Options, activation bool
 	return encodeRouteConsumersState(prepared)
 }
 
-// CommitRouteConsumers publishes the canonical route when needed and
-// live-attaches the shared read-only route registry to every prepared consumer.
-func CommitRouteConsumers(ctx context.Context, options Options, before string) error {
-	if err := validateOptions(&options); err != nil {
-		return err
-	}
-	prepared, err := decodeRouteConsumersState(before)
-	if err != nil {
-		return err
-	}
-	if options.RouteDevices != nil {
-		if err := ValidatePreparedRouteDevices(options, before, options.RouteDevices); err != nil {
-			return err
-		}
-		if options.CheckRouteDevices == nil {
-			return errors.New("original route device guard unavailable")
-		}
-		if err := options.CheckRouteDevices(ctx, options.RouteDevices); err != nil {
-			return err
-		}
-	}
-	if !prepared.Active {
-		return verifyRouteConsumers(ctx, options, false, prepared, false)
-	}
-	yards, err := validateCommitInventory(ctx, options, prepared, false, false)
-	if err != nil {
-		return err
-	}
-	routeReady, err := inspectCurrentRoute(options)
-	if err != nil {
-		return err
-	}
-	if !routeReady || !hasManagedYard(yards, CurrentYard) ||
-		managedYardRunning(yards, CurrentYard) {
-		if options.RouteDevices != nil && !options.RouteDevices.Broker {
-			return errors.New("route broker work was not prepared")
-		}
-		if err := run(
-			ctx,
-			options,
-			CurrentYard,
-			nil,
-			"_migrate",
-			"reconcile-test-vm-broker",
-		); err != nil {
-			return fmt.Errorf("publish canonical test-yard route: %w", err)
-		}
-	}
-	if err := validateRouteSource(options); err != nil {
-		return err
-	}
-	yards, err = validateCommitInventory(ctx, options, prepared, true, false)
-	if err != nil {
-		return err
-	}
-	if managedYardRunning(yards, CurrentYard) {
-		if err := validateCurrentRouteIdentity(ctx, options); err != nil {
-			return err
-		}
-	}
-	for _, yard := range yards {
-		if yard.Yard == LegacyYard || yard.Mounted || !yard.AllowsHostAccess {
-			continue
-		}
-		if options.RouteDevices != nil {
-			if err := applyOriginalRouteDevice(ctx, options, before, yard); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := runIncus(
-			ctx,
-			options,
-			"config",
-			"device",
-			"add",
-			yard.Instance,
-			routeDeviceName,
-			"disk",
-			"--project",
-			yard.Project,
-			"source="+routeSource(options),
-			"path="+routeGuestPath,
-			"readonly=true",
-		); err != nil {
-			return fmt.Errorf(
-				"attach shared E2E routes to %s/%s: %w",
-				yard.Project,
-				yard.Instance,
-				err,
-			)
-		}
-	}
-	if err := verifyRouteConsumers(ctx, options, true, prepared, false); err != nil {
-		return err
-	}
-	fmt.Fprintln(options.Stdout, "reconciled shared E2E routes in existing local yards")
-	return nil
-}
-
 // VerifyRouteConsumers checks the durable whole-host postcondition. Consumers
 // created after the migration are accepted only when their own init already
 // attached the exact product-owned device.
@@ -309,12 +202,6 @@ func VerifyRouteConsumersRollback(ctx context.Context, options Options, before s
 		return err
 	}
 	return validatePreparedSet(prepared.Consumers, nonOwnerYards(yards), false)
-}
-
-// ValidateRouteConsumersState validates the persisted typed-operation payload.
-func ValidateRouteConsumersState(before string) error {
-	_, err := decodeRouteConsumersState(before)
-	return err
 }
 
 func verifyRouteConsumers(
@@ -414,39 +301,6 @@ func verifyRouteConsumers(
 		}
 	}
 	return nil
-}
-
-func validateCommitInventory(
-	ctx context.Context,
-	options Options,
-	prepared routeConsumersState,
-	requireCurrent bool,
-	activation bool,
-) ([]managedYard, error) {
-	registration, err := inspectRegistration(options)
-	if err != nil {
-		return nil, err
-	}
-	if registration.state != StateCurrent {
-		return nil, fmt.Errorf(
-			"route consumer operation must follow owner migration; found %s registration",
-			registration.state,
-		)
-	}
-	yards, err := inspectRouteConsumerYards(ctx, options, activation)
-	if err != nil {
-		return nil, err
-	}
-	if hasManagedYard(yards, LegacyYard) {
-		return nil, errors.New("legacy e2e-yard instance remains before route reconciliation")
-	}
-	if requireCurrent && !hasManagedYard(yards, CurrentYard) {
-		return nil, errors.New("canonical test-yard instance is absent after route publication")
-	}
-	if err := validatePreparedSet(prepared.Consumers, nonOwnerYards(yards), true); err != nil {
-		return nil, fmt.Errorf("route consumer inventory changed before commit: %w", err)
-	}
-	return yards, nil
 }
 
 func managedYardRunning(yards []managedYard, name string) bool {
@@ -631,18 +485,6 @@ func validateCurrentRouteIdentity(ctx context.Context, options Options) error {
 	}
 	if observed.HostKey != expected.HostKey {
 		return errors.New("canonical test-yard route contains a stale host-key pin")
-	}
-	return nil
-}
-
-func validateRouteSource(options Options) error {
-	source := routeSource(options)
-	info, err := os.Lstat(source)
-	if err != nil {
-		return fmt.Errorf("inspect shared E2E route source: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("shared E2E route source is not a directory")
 	}
 	return nil
 }
