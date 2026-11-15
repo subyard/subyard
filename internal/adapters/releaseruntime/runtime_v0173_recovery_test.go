@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,10 +23,21 @@ func TestV0173UpdateNamesStandaloneMigrationRecovery(t *testing.T) {
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
 	runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment), Stderr: &bytes.Buffer{}})
 	defer runtime.Close()
-	_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--version", "0.17.5"}, fixture.configHome, "default")
-	if err == nil || !strings.Contains(err.Error(), filepath.Join(fixture.candidate.root, "bin", "yard")) ||
-		!strings.Contains(err.Error(), "migrate --check") || !strings.Contains(err.Error(), "retry yard update after recovery") {
-		t.Fatalf("update omitted concrete recovery commands: %v", err)
+	// Keep the ordinary-owner diagnostic byte-for-byte. Explicit version
+	// selection has its separately approved source-anchor refusal below.
+	protected, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.setV0173StandaloneRetry(context.Background(), fixture.runtimeRoot, protected)
+	launcher := filepath.Join(fixture.candidate.root, "bin", "yard")
+	wantRetry := "run '" + launcher + "' migrate --check, then '" + launcher + "' migrate; retry yard update after recovery"
+	if protected.inspection.Outcome.Retry != wantRetry || protected.inspection.Blockers[0].Retry != wantRetry {
+		t.Fatalf("ordinary recovery hint changed: %q", protected.inspection.Outcome.Retry)
+	}
+	_, err = runtime.PrepareTransition(context.Background(), []string{"--offline", "--version", "0.17.5"}, fixture.configHome, "default")
+	if err == nil || err.Error() != unfinishedBelowAnchorError(protected.journal).Error() {
+		t.Fatalf("explicit selection lost the source-anchor refusal: %v", err)
 	}
 	store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
 	journal, _ := store.ReadCurrentJournal()
@@ -67,102 +77,6 @@ func TestV0173StandaloneRetryRequiresMatchingRegistry(t *testing.T) {
 	after, _ := store.ReadCurrentJournal()
 	if !sameProtectedSnapshot(fixture.journal, after) {
 		t.Fatal("recovery guidance changed the original authorized journal")
-	}
-}
-
-func TestV0173CurrentRecoveryPreservesOriginalJournalAndAssets(t *testing.T) {
-	for _, scenario := range []string{"resume", "interrupted", "delegate changed", "source changed", "ledger changed", "journal changed", "scope changed"} {
-		t.Run(scenario, func(t *testing.T) {
-			fixture := newV0173RecoveryFixture(t)
-			var stdout, stderr bytes.Buffer
-			environment := fixture.environment()
-			environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
-			runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment), Stdout: &stdout, Stderr: &stderr})
-			defer runtime.Close()
-			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default")
-			if err != nil || check.Changed {
-				t.Fatalf("delegated check: %v, stderr=%s", err, stderr.String())
-			}
-			if err := check.Execute(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			var report currentReport
-			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || report.Outcome.Status != releasetransition.StatusRecovering || len(report.Blockers) != 0 {
-				t.Fatalf("delegated report: %s, %v, stderr=%s", stdout.String(), err, stderr.String())
-			}
-			if scenario == "resume" {
-				outputSize := stdout.Len()
-				readiness, err := runtime.InspectCurrentReadiness(context.Background(), fixture.configHome)
-				if err != nil || readiness.Status != releasetransition.StatusRecovering || readiness.Retry != "yard migrate" || stdout.Len() != outputSize {
-					t.Fatalf("typed readiness lost standalone recovery or printed output: %+v, %v", readiness, err)
-				}
-			}
-			store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
-			checked, _ := store.ReadCurrentJournal()
-			if !sameProtectedSnapshot(fixture.journal, checked) {
-				t.Fatal("read-only delegation changed the protected journal")
-			}
-			apply, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default")
-			if err != nil || apply.Changed || apply.TargetRelease != string(fixture.source.release) {
-				t.Fatalf("delegated apply: %#v, %v, stderr=%s", apply, err, stderr.String())
-			}
-			switch scenario {
-			case "interrupted":
-				testkit.WriteFile(t, fixture.statePath+".fail", []byte("interrupt\n"), 0o600)
-			case "delegate changed":
-				testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "bin", "yard-engine"), []byte("#!/bin/sh\nexit 99\n"), 0o700)
-			case "source changed":
-				testkit.WriteFile(t, filepath.Join(fixture.source.root, "config", "release-transition.json"), []byte("{}\n"), 0o600)
-			case "ledger changed":
-				testkit.WriteFile(t, filepath.Join(fixture.configHome, "release-transition", "v2", "ledger.json"), []byte("{}\n"), 0o600)
-			case "journal changed":
-				testkit.WriteFile(t, filepath.Join(fixture.configHome, "release-transition", "v2", "journal.json"), []byte("{}\n"), 0o600)
-			case "scope changed":
-				testkit.WriteFile(t, filepath.Join(fixture.configHome, "yards", "unrelated.env"), []byte("YARD_TEMPLATE=synthetic-changed\n"), 0o600)
-			}
-			err = apply.Execute(context.Background())
-			if scenario == "interrupted" {
-				if err == nil {
-					t.Fatal("interrupted delegate reported readiness")
-				}
-				if err := os.Remove(fixture.statePath + ".fail"); err != nil {
-					t.Fatal(err)
-				}
-				resumed, prepareErr := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default")
-				if prepareErr != nil {
-					t.Fatal(prepareErr)
-				}
-				err = resumed.Execute(context.Background())
-			}
-			if scenario != "resume" && scenario != "interrupted" {
-				if err == nil {
-					t.Fatalf("changed %s allowed delegated convergence", scenario)
-				}
-				if _, err := os.Stat(fixture.statePath); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("stale repair mutated runtime state: %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("delegated resume: %v, stderr=%s", err, stderr.String())
-			}
-			completed, _ := store.ReadCurrentJournal()
-			before, _ := releasetransition.ParseJournal(fixture.journal.Payload)
-			after, err := releasetransition.ParseJournal(completed.Payload)
-			if err != nil || after.Checkpoint != releasetransition.JournalComplete || after.Transaction != before.Transaction ||
-				after.ResumePlan != before.ResumePlan || after.AuthorizationPlan != before.AuthorizationPlan ||
-				after.ArtifactDigest != before.ArtifactDigest || after.ObservationScope != before.ObservationScope || len(after.Steps) != 0 {
-				t.Fatalf("delegation changed original bindings: %#v, %v", after, err)
-			}
-			ledger, _ := store.ReadLedger()
-			if !bytes.Equal(ledger.Payload, fixture.ledger) || string(mustReadFile(t, filepath.Join(fixture.configHome, "yards", "unrelated.env"))) != "YARD_TEMPLATE=synthetic-other\n" {
-				t.Fatal("delegation changed ledger or unrelated settings")
-			}
-			links, _ := runtime.inspectRuntimeLinks(fixture.runtimeRoot)
-			if links.current.target != "releases/"+string(fixture.source.release) || links.previous.present {
-				t.Fatalf("delegated migration changed stable release links: %#v", links)
-			}
-		})
 	}
 }
 

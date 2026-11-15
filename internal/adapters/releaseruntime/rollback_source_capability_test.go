@@ -272,7 +272,7 @@ func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T)
 				}
 				defer verifiedTarget.Close()
 				request.ArtifactDigest = verifiedTarget.manifestDigest
-				prepared, err = runtime.prepareVerifiedTransition(context.Background(), options{root: root}, verifiedOwner, verifiedTarget, request, nil)
+				prepared, err = runtime.prepareVerifiedTransition(context.Background(), options{root: root}, verifiedOwner, verifiedTarget, request)
 			} else {
 				prepared, err = prepareCandidateTransitionForTest(runtime, context.Background(), options{root: root}, candidate, request)
 			}
