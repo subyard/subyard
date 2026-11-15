@@ -5,7 +5,8 @@
 set -uo pipefail
 umask 022
 
-RESULTS="${RUNNER_TEMP:-/var/tmp}/periodic-e2e-results.tsv"
+RESULTS="${RUNNER_TEMP:-/var/tmp}/hosted-logs/results.tsv"
+LOGS="${RUNNER_TEMP:-/var/tmp}/hosted-logs"
 # Controllers attribute leases from the managed workspace path.
 WORKSPACE=/srv/workspaces/Subyard/src
 PACKAGES=(build-essential ca-certificates curl expect git jq make openssh-client openssh-server ripgrep shellcheck tar xz-utils zsh)
@@ -24,7 +25,8 @@ probe() {
   local name="$1" start=$SECONDS rc=0 result=pass
   shift
   printf '::group::%s\n' "$name"
-  (set -e; "$@") &
+  local log_name="${name//[^a-zA-Z0-9_-]/-}"
+  (set -e; "$@") 2>&1 | tee "$LOGS/$log_name.log" &
   wait "$!" || rc=$?
   printf '::endgroup::\n'
   [ "$rc" = 0 ] || { result="fail($rc)"; printf '::error title=%s::exit %s\n' "$name" "$rc"; }
@@ -188,7 +190,7 @@ run_check() {
   if [ "${1:-}" = run_collector_selection ]; then
     SUBYARD_E2E_ROUTE_REGISTRY="$HOME/.subyard/e2e/routes" "$@" </dev/null || status=$?
   else
-    controller_env "$@" </dev/null || status=$?
+    controller_env "$@" </dev/null 2>&1 | tee "$LOGS/check.log" || status=$?
   fi
   # The runner is gone afterwards, and only these events hold a refusal's or quarantine's reason.
   # Checks lease through either the service route or the yard route, with separate histories.
@@ -199,13 +201,12 @@ run_check() {
 }
 
 # Uploaded by the workflow after a failure: full lease events of both routes, including a failed
-# stop's console and Incus log tails, and the lanes' evidence and failure logs.
+# stop's console and Incus log tails. Never sweep private evidence trees or assets.
 keep_diagnostics() {
-  local output="$WORKSPACE/.build/periodic-diagnostics"
+  local output="$LOGS"
   install -d -m 0700 "$output"
-  controller_env dev/agent-e2e.sh --logs --slot 1 -n 200 --json </dev/null > "$output/service-events.json" 2>&1 || true
-  controller_env dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 200 --json </dev/null > "$output/yard-events.json" 2>&1 || true
-  find "$HOME/.subyard/e2e" -path '*/evidence/*' -type f -size -20M -exec cp -t "$output" {} + 2>/dev/null || true
+  timeout 20s env SUBYARD_E2E_ROUTE_REGISTRY="$HOME/.subyard/e2e/routes" dev/agent-e2e.sh --logs --slot 1 -n 200 --json </dev/null > "$output/service-events.json" 2>&1 || true
+  timeout 20s env SUBYARD_E2E_ROUTE_REGISTRY="$HOME/.subyard/e2e/routes" dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 200 --json </dev/null > "$output/yard-events.json" 2>&1 || true
 }
 
 run_collector_selection() {
@@ -238,7 +239,16 @@ check_probes() {
 }
 
 require_runner
+install -d -m 0700 "$LOGS"
 case "${1:-}" in
+  diagnostics)
+    # A separate always() step also runs after interruption; the original shell's
+    # failure handler need not have completed. Read broker events only, no lease.
+    [ -d "$WORKSPACE" ] && [ -f "$WORKSPACE/dev/agent-e2e.sh" ] || exit 0
+    cd "$WORKSPACE"
+    BUNDLE=''
+    keep_diagnostics
+    ;;
   check)
     [ "$#" -ge 4 ] || die 'usage: periodic-e2e.sh check ID BUNDLE COMMAND...'
     shift

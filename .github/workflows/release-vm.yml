@@ -61,20 +61,41 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/prepared
       - name: Run exact collector selection through the shared pool setup
+        timeout-minutes: 340
         env:
           CHECK: ${{ matrix.check }}
           VERSION: ${{ inputs.version }}
         run: |
           bash dev/ci/periodic-e2e.sh acceptance "$CHECK" "$RUNNER_TEMP/prepared" "$RUNNER_TEMP/acceptance" "$VERSION"
       - name: Preserve native evidence and verify terminal selection
+        id: evidence
         if: always()
         env:
           CHECK: ${{ matrix.check }}
         run: |
           python3 -B dev/ci/release-vm.py --output "$RUNNER_TEMP/acceptance" \
             --destination "$RUNNER_TEMP/ci-hosted" --check "$CHECK"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - name: Snapshot hosted check diagnostics
         if: always()
+        timeout-minutes: 2
+        env:
+          CHECK: ${{ matrix.check }}
+          STATUS: ${{ job.status }}
+        run: |
+          bash dev/ci/periodic-e2e.sh diagnostics
+          python3 -B dev/ci/release-vm.py --diagnostics --status "$STATUS" \
+            --output "$RUNNER_TEMP/acceptance" --logs "$RUNNER_TEMP/hosted-logs" \
+            --destination "$RUNNER_TEMP/hosted-diagnostics" --check "$CHECK"
+      - name: Upload hosted check diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: hosted-diagnostics-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hosted-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always() && steps.evidence.outcome == 'success'
         with:
           name: ci-hosted-${{ strategy.job-index }}
           path: ${{ runner.temp }}/ci-hosted/

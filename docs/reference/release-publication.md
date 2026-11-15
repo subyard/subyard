@@ -69,6 +69,14 @@ or release assets. Publication validates that evidence again and rechecks the Gi
 job success, exact head SHA and reviewed workflow blob, and prints `PUBLICATION ci_hosted=...`.
 Periodic E2E results remain background evidence and cannot count through this path.
 
+Failed, timed-out or cancelled hosted checks have a separate seven-day
+`hosted-diagnostics-JOB_INDEX-ATTEMPT` artifact on the Release VM run page, with bounded sanitized
+check logs, events, receipt/attempt/invocation records, cleanup output and environment summary.
+The job log also prints a bounded sanitized failure tail. These snapshots never become `ci-hosted`
+evidence; only a fully validated PASS with recorded cleanup produces that artifact.
+See [hosted check diagnostics](../testing.md#exact-candidate-hosted-release-checks) for limits,
+Periodic E2E artifact names and interruption caveats.
+
 ### Release levels
 
 | Level | When | Checks | Typical time |

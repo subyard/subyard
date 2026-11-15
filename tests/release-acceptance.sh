@@ -183,11 +183,24 @@ exit "$COLLECTOR_EXIT"
                     log.unlink(missing_ok=True)
                     env = dict(os.environ, PATH=str(tools) + ":" + os.environ["PATH"],
                         GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", READY=str(ready), TRACE=str(log),
-                        UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector))
+                        RUNNER_TEMP=str(directory), UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector))
                     result = subprocess.run(["bash", str(runner), "acceptance", "fixture", "prepared", "output", "test"],
                         cwd=directory, env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     self.assertEqual(log.read_text().splitlines(), trace)
+
+    def test_hosted_probe_preserves_failure_exit_and_captures_log(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            script = (root / "dev/ci/periodic-e2e.sh").read_text().split("\nrequire_runner\n")[0]
+            script += '\ninstall -d -m 0700 "$LOGS"\n: > "$RESULTS"\n'
+            script += "probe fixture bash -c 'echo fixture failure; exit 23'\nwrite_summary\n"
+            result = subprocess.run(["bash", "-c", script], cwd=directory,
+                env={**os.environ, "RUNNER_TEMP": str(directory), "GITHUB_STEP_SUMMARY": str(directory / "summary")},
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("fail(23)", (directory / "hosted-logs/results.tsv").read_text())
+            self.assertIn("fixture failure", (directory / "hosted-logs/fixture.log").read_text())
 
     def test_early_collector_failure_identifies_command_and_exit_without_output(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

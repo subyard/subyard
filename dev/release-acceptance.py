@@ -288,7 +288,7 @@ CI_HOSTED_CHECKS = frozenset({
     "profile:subyard-dev", "profile:openclaw", "profile:git-fetch", "profile:hermes",
 })
 # release-vm.yml Git blobs reviewed to execute one exact collector selection per job.
-CI_HOSTED_POLICIES = frozenset({"911e6588dded3367817a8c21c5a849dd5b945b2e"})
+CI_HOSTED_POLICIES = frozenset({"911e6588dded3367817a8c21c5a849dd5b945b2e", "9fdef412576c6fc4302b40864373609dfc38216e"})
 
 
 def hosted_checks(root, version, inventory):

@@ -2552,7 +2552,96 @@ class HostedChecks(unittest.TestCase):
             (runs / ("d" * 32 + ".json")).write_text(json.dumps(selection))
             with self.assertRaisesRegex(ValueError, "terminal|did not finish"):
                 helper.export(self.remote, self.directory / "failed-export", "profile:sample")
-            self.assertTrue((self.directory / "failed-export/receipt.json").is_file())
+            self.assertFalse((self.directory / "failed-export").exists())
+
+    def test_failed_selection_has_diagnostics_and_never_pass_evidence(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        source, receipt = m.a.load_bound(self.remote)
+        result = receipt["checks"]["profile:sample"]
+        log = self.remote / "profile-sample-12345678.log"
+        log.write_text("fixture failure: missing guest socket\n"
+                       "E2E_PHASE phase=cleanup/release state=end exit_code=0\n")
+        result.update(status="failed", exit_code=1, log=log.name, log_sha256=m.a.digest(log))
+        result["original_attempt"] = m.a.completed_attempt(self.remote, source, receipt, "profile:sample", result)
+        m.a.save(self.remote, receipt)
+        (self.remote / "events.jsonl").write_text('{"event":"check-result","status":"failed"}\n')
+        runs = self.remote / "runs"
+        runs.mkdir()
+        selection = {"selected": ["profile:sample"], "state": "finished", "capture_status": "recorded", "selected_status": "failed"}
+        record = runs / ("d" * 32 + ".json")
+        record.write_text(json.dumps(selection))
+        for outcome, native_status, code, termination, state in (
+            ("failure", "failed", 1, "exit", "finished"),
+            ("timeout", "failed", 124, "timeout", "finished"),
+            ("cancelled", "interrupted", 143, "signal", "running"),
+        ):
+            with self.subTest(outcome=outcome):
+                result.update(status=native_status, exit_code=code, termination=termination)
+                result["original_attempt"] = m.a.completed_attempt(self.remote, source, receipt, "profile:sample", result)
+                m.a.save(self.remote, receipt)
+                selection["state"] = state
+                record.write_text(json.dumps(selection))
+                destination = self.directory / outcome
+                with redirect_stdout(io.StringIO()) as printed:
+                    helper.diagnostic_snapshot(self.remote, destination, "profile:sample", "failure" if outcome == "timeout" else outcome)
+                self.assertIn("fixture failure: missing guest socket", printed.getvalue())
+                self.assertIn("cleanup/release", (destination / "cleanup.log").read_text())
+                self.assertTrue((destination / "acceptance" / log.name).is_file())
+                self.assertTrue((destination / "acceptance/events.jsonl").is_file())
+                self.assertTrue((destination / "acceptance/receipt.json").is_file())
+                self.assertTrue(list((destination / "acceptance/attempts").glob("*.json")))
+                self.assertTrue((destination / "acceptance/runs" / record.name).is_file())
+                self.assertEqual(json.loads((destination / "summary.json").read_text())["kind"], "diagnostics-only")
+                self.assertFalse((destination / "ci-execution.json").exists())
+                self.assertFalse((destination / "acceptance/source").exists())
+                with self.assertRaisesRegex(ValueError, "complete PASS"):
+                    helper.export(self.remote, self.directory / (outcome + "-evidence"), "profile:sample")
+                self.assertFalse((self.directory / (outcome + "-evidence")).exists())
+
+    def test_diagnostics_bound_sanitize_and_tolerate_missing_or_partial_collector(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        logs = self.directory / "runner-logs"
+        logs.mkdir()
+        partial = self.directory / "partial"
+        partial.mkdir()
+        (partial / "receipt.json").write_text('{"checks":')
+        (partial / "attempts").symlink_to(self.remote / "attempts", target_is_directory=True)
+        (logs / "check.log").write_text("padding\n" * 1000 +
+            '::error::untrusted command\npassword="fixture secret with spaces"\n'
+            '"token": "fixture-token"\nAuthorization: Bearer fixture-auth\n'
+            "ARBITRARY_VALUE=fixture-env\nhttps://user:fixture-url@example.com/path\n"
+            "-----BEGIN PRIVATE KEY-----\nfixture-key\n-----END PRIVATE KEY-----\n"
+            "E2E_PHASE phase=cleanup/release state=end exit_code=1\nfixture failure reason\n")
+        (logs / "00-linked.log").symlink_to(logs / "check.log")
+        for index in range(5):
+            (logs / f"extra-{index}.log").write_text("other logs\n" * 1000)
+        with patch.object(helper, "DIAGNOSTIC_FILE_BYTES", 1024), patch.object(helper, "DIAGNOSTIC_TOTAL_BYTES", 2048), \
+             redirect_stdout(io.StringIO()) as printed:
+            helper.diagnostic_snapshot(partial, self.directory / "diagnostic", "fixture", "cancelled", logs)
+        destination = self.directory / "diagnostic"
+        captured = (destination / "runner/check.log").read_text()
+        self.assertIn("fixture failure reason", captured)
+        for secret in ("fixture secret", "fixture-token", "fixture-auth", "fixture-env", "fixture-url", "fixture-key"):
+            self.assertNotIn(secret, captured)
+            self.assertNotIn(secret, printed.getvalue())
+        self.assertTrue(all(not line.startswith("::") for line in printed.getvalue().splitlines()))
+        self.assertLessEqual(len(printed.getvalue()), 16464)
+        self.assertFalse((destination / "runner/00-linked.log").exists())
+        self.assertFalse((destination / "acceptance/attempts").exists())
+        self.assertEqual((destination / "acceptance/receipt.json").read_text(), '{"checks":')
+        summary = json.loads((destination / "summary.json").read_text())
+        files = [destination / item["path"] for item in summary["files"]]
+        self.assertTrue(any(item["truncated"] for item in summary["files"]))
+        self.assertLessEqual(sum(path.stat().st_size for path in files), 2048)
+        self.assertGreater(summary["omitted"], 0)
+        self.assertIn("environment", summary)
+        # Even failure before prepare yields an explicit summary and unknown cleanup.
+        helper.diagnostic_snapshot(self.directory / "absent", self.directory / "early", "fixture", "success")
+        self.assertIn("unconfirmed", (self.directory / "early/cleanup.log").read_text())
 
     def test_partial_malformed_and_oversized_sibling_artifacts_do_not_hide_success(self):
         self.run["conclusion"] = "failure"

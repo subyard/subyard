@@ -139,6 +139,7 @@ grep -Fq 'bash dev/ci/periodic-e2e.sh acceptance' "$HOSTED_WORKFLOW" \
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import importlib.util
 from pathlib import Path
+import re
 import sys
 root = Path(sys.argv[1])
 def module(name, path):
@@ -146,6 +147,34 @@ def module(name, path):
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
     return result
+# Explicit workflow source contract: diagnostics run/upload independently of PASS,
+# and timeout reserves leave room for the always() steps before the job limit.
+for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):
+    workflow = (root / ".github/workflows" / filename).read_text()
+    steps = re.split(r"(?m)^      - ", workflow)
+    snapshots = [step for step in steps if step.startswith("name: Snapshot hosted check diagnostics\n")]
+    uploads = [step for step in steps if step.startswith("name: Upload hosted check diagnostics\n")]
+    assert len(snapshots) == len(uploads) == count
+    for step in snapshots + uploads:
+        assert "        if: always()" in step
+        assert "failure()" not in step
+    for step in snapshots:
+        assert "periodic-e2e.sh diagnostics" in step
+        assert "--diagnostics --status" in step
+        assert '--logs "$RUNNER_TEMP/hosted-logs"' in step
+        assert '--destination "$RUNNER_TEMP/hosted-diagnostics"' in step
+    for step in uploads:
+        assert "path: ${{ runner.temp }}/hosted-diagnostics/" in step
+        assert "if-no-files-found: error" in step
+        assert "name: ci-hosted-" not in step
+    runs = [step for step in steps if step.startswith(("name: Run the check\n", "name: Run exact collector selection", "name: Install the pool and hold one lease"))]
+    assert len(runs) == count
+    for step in runs:
+        assert "timeout-minutes: 340" in step or "timeout-minutes: 110" in step
+    if filename == "release-vm.yml":
+        evidence = next(step for step in steps if "name: ci-hosted-" in step)
+        assert "if: always() && steps.evidence.outcome == 'success'" in evidence
+        assert "id: evidence" in workflow
 a = module("acceptance", "dev/release-acceptance.py")
 assert a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes()) in a.CI_HOSTED_POLICIES
 p = module("periodic", "dev/ci/plan-periodic-checks.py")

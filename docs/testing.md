@@ -978,8 +978,7 @@ Veranda and live P0 acceptance remain separate checks.
 #### Exact-candidate hosted release checks
 
 `release-vm.yml` runs the explicit `CI_HOSTED_CHECKS` inventory against a downloaded preparation
-artifact, one fresh collector per job. It shares the Periodic E2E pool setup and preserves bounded
-receipts, original attempts/manifests, logs and invocation events even on failure. Job success requires
+artifact, one fresh collector per job. It shares the Periodic E2E pool setup. Job success requires
 a terminal recorded PASS for that exact selection and recorded cleanup; the collector's aggregate
 receipt stays incomplete while other checks are unrequested. `accept` waits up to six hours (override
 with `--ci-wait-seconds`, including `0`), counts verified successful jobs as `ci-hosted`, and runs only
@@ -988,6 +987,23 @@ stale attempts and missing cleanup refuse import. Publication rechecks GitHub ex
 See [release publication](reference/release-publication.md) for identity and policy rules. The local
 contracts are `tests/release-acceptance.sh`, `tests/release-publication.sh` and
 `tests/workflow-real-adapter-gate.sh`; they do not establish native hosted VM acceptance.
+
+Every Release VM job uploads `hosted-diagnostics-JOB_INDEX-ATTEMPT` from its `always()` steps,
+including after failure, check timeout or cancellation. Find it under **Artifacts** on the workflow
+run page. It contains sanitized snapshots of `acceptance/<check>-*.log`, `receipt.json`,
+`events.jsonl`, attempt and invocation records, runner probe logs and broker events, plus an
+environment summary and `cleanup.log` (the captured cleanup/release lines; absent cleanup stays
+unconfirmed). Failed jobs also print a sanitized check-log tail, limited to 80 lines / 16 KiB.
+Snapshots retain the last 2 MiB per file, at most 128 files and 16 MiB of file content, plus bounded
+summary/cleanup metadata; the summary marks truncation, omitted files and the job outcome.
+They contain no source tree or release assets and expire after seven days. Check steps have a
+340-minute limit within the 350-minute job budget (110/120 for the Periodic E2E pool), reserving
+time for diagnostic collection/upload. Runner loss or a forced
+termination that prevents final steps can still prevent upload.
+
+Diagnostic snapshots never count as evidence. The separate `ci-hosted-JOB_INDEX` artifact is
+uploaded only after strict validation of the complete selected PASS and cleanup; its retention
+remains 90 days.
 
 #### Periodic E2E on hosted runners
 
@@ -1007,10 +1023,14 @@ uncatalogued direct rows run agent-free and refusal rows run the refusal scenari
 except `boundary` and `cleanup`. The `pool` job first installs the candidate's `test-vms` service on a
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
-becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it. After
-a failed check the job prints the broker's lease events, since the runner and its evidence are gone
-afterwards. Jobs run as root on the runner and hold no secrets, so the workflow never runs pull
-request code.
+becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it.
+The `pool`, `check` and Intel `nested` jobs use the same bounded diagnostic snapshots and failed-log
+tails described above, uploaded on every outcome as `pool-diagnostics-ATTEMPT`,
+`diagnostics-JOB_INDEX-ATTEMPT` and `nested-diagnostics-JOB_INDEX-ATTEMPT`. Their `runner/check.log`
+contains check output, including native cleanup output, and their broker event records survive
+interruption when final steps can run. Logs are staged under the runner temporary directory rather
+than the managed candidate workspace; the upload path therefore matches the capture path. Jobs run
+as root on the runner and hold no secrets, so the workflow never runs pull request code.
 
 Checks that boot a VM inside the leased VM run only on Intel runners. Hosted runners are Azure
 Hyper-V VMs on Intel or AMD CPUs, and the runner label cannot choose one. On AMD, virtualization
