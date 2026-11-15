@@ -312,7 +312,8 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 				return reconciler.failure(target.Name, "apply", err)
 			}
 			if recordErr := reconciler.recordPending(target, observe, yardFailure); recordErr != nil {
-				return reconciler.failure(target.Name, "apply", err)
+				// Without its record the failure stays blocking; both causes are reported.
+				return reconciler.failure(target.Name, "apply", errors.Join(err, fmt.Errorf("record the yard-scoped failure: %w", recordErr)))
 			}
 			continue
 		}
