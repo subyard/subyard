@@ -784,7 +784,11 @@ def _send_and_confirm(rpc, repo, fence, action, deadline, refused_stops, allow_l
     except (CleanupRefusal, _Stale):
         raise
     except RpcError as error:
-        refused, unknown = not error.unknown, error.unknown
+        if not (error.rejected or error.unknown):
+            # Nothing was sent: a pre-send read or transport failure leaves this pass
+            # undetermined, never a refusal and never a fallback.
+            raise
+        refused, unknown = error.rejected, error.unknown
     def planned():
         # A record that became protected stops here: nothing more of it is sent.
         plan = _cleanup_plan(repo, fence.read(), refused_stops)
@@ -974,12 +978,19 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
             fence.same_runtime(runtime_id)
             read_set = fence.read()
             # The repository is removed only while its plan is empty.
-            if _cleanup_plan(repo, read_set) != []:
+            plan = _cleanup_plan(repo, read_set)
+            if plan is None:
+                raise AmbiguousSession(AMBIGUOUS_SESSION)
+            if plan:
                 raise RpcError("Orca cleanup session state changed; retry sync")
             fence.authorize(read_set)
 
         try:
             rpc.call("repo.rm", {"repo": "id:" + repo["id"]}, before_send=before_remove)
+        except AmbiguousSession:
+            # The record became protected just before removal: keep it and continue the pass.
+            cleanup_pass.outcomes[repo["id"]] = AMBIGUOUS_SESSION
+            continue
         except RpcError as error:
             if not error.unknown:
                 raise

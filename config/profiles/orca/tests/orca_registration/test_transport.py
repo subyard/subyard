@@ -207,3 +207,15 @@ class TransportTests(unittest.TestCase):
         with connection:
             connection.settimeout(0.5)
             self.assertEqual(b"", connection.recv(1))
+
+    def test_only_an_answered_rejection_is_definitive(self):
+        self.server(lambda request, _: (json.dumps({"id": request["id"], "ok": False, "error": {"message": "x"},
+                                                    "_meta": {"runtimeId": "runtime-1"}}) + "\n").encode())
+        with self.assertRaises(self.error) as raised:
+            self.client(self.metadata).call("session.tabs.close", {"worktree": "id:a::/w", "tabId": "t"})
+        self.assertTrue(raised.exception.rejected)
+        self.assertFalse(raised.exception.unknown)
+        self.metadata.unlink()
+        with self.assertRaises(self.error) as raised:
+            self.client(self.metadata).call("session.tabs.close", {"worktree": "id:a::/w", "tabId": "t"})
+        self.assertFalse(raised.exception.rejected or raised.exception.unknown)

@@ -14,10 +14,14 @@ import uuid
 
 
 class RpcError(Exception):
-    def __init__(self, message, unknown=False, timed_out=False):
+    """unknown: a write may have applied. rejected: the request was sent and Orca answered it
+    with a definitive refusal (an ok:false frame). Any other error happened before sending, or
+    concerns a read, and says nothing about the request's effect."""
+    def __init__(self, message, unknown=False, timed_out=False, rejected=False):
         super().__init__(message)
         self.unknown = unknown
         self.timed_out = timed_out
+        self.rejected = rejected
 
 
 class RuntimeRPC:
@@ -111,7 +115,7 @@ class RuntimeRPC:
                             raise RpcError("Orca runtime response runtime mismatch", unknown=write)
                         if frame.get("ok") is False and isinstance(frame.get("error"), dict):
                             # Do not echo upstream messages or codes: either can contain secrets.
-                            raise RpcError("Orca runtime rejected " + method)
+                            raise RpcError("Orca runtime rejected " + method, rejected=True)
                         if frame.get("ok") is not True or not isinstance(frame.get("result"), dict):
                             raise RpcError("Orca runtime returned invalid envelope", unknown=write)
                         return frame["result"]

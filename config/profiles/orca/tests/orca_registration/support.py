@@ -90,7 +90,7 @@ class Catalog:
             if not any(t["ptyId"] == pty and t["worktreeId"] == worktree and t["connected"]
                        for t in self.terminals):
                 from transport import RpcError
-                raise RpcError("Orca runtime rejected terminal.stopExact")
+                raise RpcError("Orca runtime rejected terminal.stopExact", rejected=True)
             self.kill([pty])
             result = {"stopped": 1, "stoppedPtyIds": [pty], "postStopVerified": True}
         elif method == "terminal.close":

@@ -1985,7 +1985,7 @@ class RemovedProjectSessionTests(unittest.TestCase):
 
         def ignored(method, params=None, **kwargs):
             if method == "terminal.stopExact":
-                raise self.error("Orca runtime rejected terminal.stopExact")
+                raise self.error("Orca runtime rejected terminal.stopExact", rejected=True)
             if method == "terminal.close":
                 raise self.error("lost reply", unknown=True)
             return original(method, params, **kwargs)
@@ -2236,7 +2236,7 @@ class RemovedProjectSessionTests(unittest.TestCase):
                 if method == "terminal.close":
                     def refuse_stop(name, params=None, **kwargs):
                         if name == "terminal.stopExact":
-                            raise self.error("Orca runtime rejected terminal.stopExact")
+                            raise self.error("Orca runtime rejected terminal.stopExact", rejected=True)
                         return original(name, params, **kwargs)
                     self.rpc.call = refuse_stop
                 self.during_send(method, effect)
@@ -2300,7 +2300,7 @@ class RemovedProjectSessionTests(unittest.TestCase):
                     before_send(self.rpc.runtime_id)
                     self.rpc.calls.append((method, params))
                     if case == "rejected":
-                        raise self.error("Orca runtime rejected session.tabs.close")
+                        raise self.error("Orca runtime rejected session.tabs.close", rejected=True)
                     if case == "refused-reply":
                         return {"closed": True, "refused": True, "refusalReason": "live-host-pty"}
                     raise self.error("lost reply", unknown=True, timed_out=True)
@@ -2317,6 +2317,68 @@ class RemovedProjectSessionTests(unittest.TestCase):
                     self.assertEqual(("protected", True), (item["retention"], item.get("attention")))
                     self.assertIn("by hand", item["nextAction"])
                     self.assertTrue(report["settled"], report)
+
+    def fail_pre_send_read(self, write_method, read_method="terminal.list"):
+        """Fail one read inside write_method's pre-send check, like a cold or incomplete read."""
+        original = self.rpc.call
+        state = {"armed": False, "done": False}
+
+        def call(method, params=None, before_send=None):
+            if method == write_method and not state["done"]:
+                state["armed"] = True
+            if method == read_method and state["armed"] and not state["done"]:
+                state["armed"], state["done"] = False, True
+                raise self.error("Orca runtime request timed out: " + read_method, timed_out=True)
+            return original(method, params, before_send=before_send)
+        self.rpc.call = call
+
+    def test_pre_send_failure_is_neither_a_refusal_nor_a_fallback(self):
+        for method in ("session.tabs.close", "terminal.stopExact"):
+            with self.subTest(method=method):
+                self.setUp()
+                self.sessions()
+                if method == "session.tabs.close":
+                    self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+                shutil.rmtree(self.root.parent)
+                self.fail_pre_send_read(method)
+                report = self.run_sync()
+                item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+                # Nothing was sent, so this pass is undetermined: no protection, no attention,
+                # and no unfenced terminal.close in place of the failed fenced stop.
+                self.assertEqual("undetermined", item["retention"])
+                self.assertNotIn("attention", item)
+                self.assertFalse(report["settled"])
+                self.assertFalse(any(name in ("terminal.close", method) for name, _ in self.closes()),
+                                 self.closes())
+                self.assertIn(self.repo, self.rpc.repos)
+
+    def test_record_turning_protected_just_before_removal_is_kept_and_the_pass_continues(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        state = {"reads": 0, "done": False}
+
+        def after(method, params):
+            empty = (not any(t["worktreeId"].startswith(self.repo["id"] + "::") for t in self.rpc.terminals)
+                     and not any(i["worktree"].startswith(self.repo["id"] + "::") and i["tabs"]
+                                 for i in self.rpc.snapshots))
+            if method == "session.tabs.listAll" and empty and not state["done"]:
+                state["reads"] += 1
+                if state["reads"] == 3:
+                    # Inside repo.rm's pre-send read: a PTY now shared with another record appears.
+                    state["done"] = True
+                    self.rpc.terminals += [self.terminal(self.repo, "shared", "h-a"),
+                                           self.terminal(self.other, "shared", "h-b")]
+        self.rpc.after = after
+        report = self.run_sync()
+        self.assertTrue(state["done"])
+        self.assertEqual([], report["errors"])
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == self.repo["id"]))
+        self.assertIn(self.repo, self.rpc.repos)
+        self.assertNotIn("shared", self.rpc.killed)
+        self.assertNotIn(self.linked["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertTrue(report["settled"], report)
 
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
