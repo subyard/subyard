@@ -4898,11 +4898,21 @@ func TestExistingProjectExportCarriesOperationIDIntoAssessment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { closePreparedSourceFixture(t, execution) })
 	if err := program.observeProjectAction(context.Background(), "export", execution); err != nil {
 		t.Fatalf("ordinary export assessment rejected the CLI operation ID: %v", err)
 	}
 	if execution.OperationID != "operation-export" {
 		t.Fatalf("operation ID=%q", execution.OperationID)
+	}
+}
+
+// Assessment retains the prepared archive for apply; the command boundary
+// normally closes it, so tests that stop at assessment close it themselves.
+func closePreparedSourceFixture(t *testing.T, execution *projectExecution) {
+	t.Helper()
+	if err := execution.closePreparedSource(); err != nil {
+		t.Error("close prepared project source:", err)
 	}
 }
 
@@ -4984,6 +4994,7 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 				Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}},
 				Record: record, OperationID: "operation-export-assessment",
 			}
+			t.Cleanup(func() { closePreparedSourceFixture(t, execution) })
 			if err := program.observeProjectAction(context.Background(), "export", execution); err != nil {
 				t.Fatal(err)
 			}
