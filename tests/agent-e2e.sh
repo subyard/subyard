@@ -6355,15 +6355,17 @@ for shape in ('missing-parent','missing-journal','unrelated-rename'):
  with tempfile.TemporaryDirectory(prefix='subyard-boundary-watch-',dir='/tmp') as directory:
   journal=pathlib.Path(directory)/'new/namespace/journal.json'; marker=pathlib.Path(directory)/'interrupted'
   if shape!='missing-parent': journal.parent.mkdir(parents=True)
-  publisher='''import json,os,pathlib,sys,time
+  publisher='''import json,os,pathlib,signal,sys,time
 p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True)
 q=p.with_name('unrelated.tmp'); q.write_text('other'); os.replace(q,q.with_suffix('.published'))
 time.sleep(.05)
 q=p.with_suffix('.tmp'); q.write_text(json.dumps({'transaction':'tx-owned','checkpoint':'reconciling'}))
 os.replace(q,p)
-time.sleep(10)
+# Stay at the checkpoint until the observer interrupts this process.
+signal.pause()
 '''
-  result=run([sys.executable,'-c',publisher,str(journal)],os.environ.copy(),timeout=5,interrupt_checkpoint=(journal,'reconciling',marker))
+  # Bound event observation generously enough for a loaded runner to schedule both processes.
+  result=run([sys.executable,'-c',publisher,str(journal)],os.environ.copy(),timeout=60,interrupt_checkpoint=(journal,'reconciling',marker))
   assert result.returncode!=0 and json.loads(marker.read_text())['checkpoint']=='reconciling',(shape,result)
 print('ok: first atomic journal observation')
 PY_BOUNDARY
