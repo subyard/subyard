@@ -267,6 +267,8 @@ CI_COUNTED_POLICIES = frozenset({
     "e392fe64fbd8d45fe359526bde1a1688c56646da",
     # Test release version moved above the 0.28.0 update anchor; engine self-check uses `yard version`.
     "e903d9e71d3d2a92bd04fe401f1b0b50d21b8017",
+    # Disable setup-go caches for candidate code checked out from dispatch inputs.
+    "ce17e64bdaab71c055a3d465d8f6c230c7d59d01",
 })
 
 
@@ -288,7 +290,12 @@ CI_HOSTED_CHECKS = frozenset({
     "profile:subyard-dev", "profile:openclaw", "profile:git-fetch", "profile:hermes",
 })
 # release-vm.yml Git blobs reviewed to execute one exact collector selection per job.
-CI_HOSTED_POLICIES = frozenset({"911e6588dded3367817a8c21c5a849dd5b945b2e", "836bbd8229d65149c75731a2f9ea46f2aa45e241"})
+CI_HOSTED_POLICIES = frozenset({
+    "911e6588dded3367817a8c21c5a849dd5b945b2e",
+    "836bbd8229d65149c75731a2f9ea46f2aa45e241",
+    # Checkout uses the workflow SHA; the exact workflow/candidate commit guard is retained.
+    "14d5180368026f77db2f4890ec5b3d0fd9706a24",
+})
 
 
 def hosted_checks(root, version, inventory):

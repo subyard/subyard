@@ -126,7 +126,7 @@ printf 'ok: CI and Release share the prepared-context real-adapter gate\n'
 # Source-level security contract for the exact-candidate hosted VM evidence producer.
 HOSTED_WORKFLOW="$ROOT/.github/workflows/release-vm.yml"
 for contract in '  workflow_dispatch:' '  actions: read' '    runs-on: ubuntu-24.04' \
-  '    timeout-minutes: 350' '      max-parallel: 12' '          ref: ${{ inputs.commit }}' \
+  '    timeout-minutes: 350' '      max-parallel: 12' \
   '          run-id: ${{ inputs.candidate_run }}' '          name: release-candidate-${{ inputs.candidate_attempt }}' \
   '          name: ci-hosted-${{ strategy.job-index }}' '        if: always()'; do
   grep -Fq "$contract" "$HOSTED_WORKFLOW" || fail "hosted workflow lacks exact-candidate contract: $contract"
@@ -142,6 +142,49 @@ from pathlib import Path
 import re
 import sys
 root = Path(sys.argv[1])
+
+# Source-level contract for the repository's block-style workflow/job/step layout;
+# actionlint validates YAML separately. Keep cache settings scoped to their own step.
+def workflow_jobs(text):
+    return re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", text.split("\njobs:\n", 1)[1])
+
+def action_steps(job):
+    for step in re.split(r"(?m)^      - ", job)[1:]:
+        step = "        " + step
+        action = re.search(r"(?m)^        uses: [\"']?([^@\s\"']+)@", step)
+        if action:
+            arguments = re.search(r"(?ms)^        with:\n(.*?)(?=^        \S|\Z)", step)
+            yield action[1], arguments[1] if arguments else ""
+
+def literal(arguments, key, value):
+    setting = re.search(r"(?m)^          " + re.escape(key) + r":[ \t]*([^#\n]+)", arguments)
+    return setting and setting[1].strip() in (value, f"'{value}'", f'"{value}"')
+
+for workflow in sorted((root / ".github/workflows").iterdir()):
+    if workflow.suffix not in (".yml", ".yaml"):
+        continue
+    text = workflow.read_text()
+    if not re.search(r"(?m)^  workflow_dispatch:", text):
+        continue
+    for job, body in workflow_jobs(text):
+        steps = list(action_steps(body))
+        input_checkout = any(action == "actions/checkout" and re.search(
+            r"(?m)^          ref:.*\binputs\s*[.\[]", arguments) for action, arguments in steps)
+        for action, arguments in steps:
+            context = f"{workflow.name}/{job}: {action}"
+            if action == "actions/setup-go" and (input_checkout or workflow.name == "release.yml"):
+                assert literal(arguments, "cache", "false"), context + " must set cache: false"
+            if input_checkout and action in ("actions/cache", "actions/cache/save"):
+                assert action == "actions/cache" and literal(arguments, "lookup-only", "true"), context + " must disable cache writes"
+
+hosted = (root / ".github/workflows/release-vm.yml").read_text()
+assert not any(action == "actions/checkout" and re.search(r"(?m)^          ref:", arguments)
+               for _, body in workflow_jobs(hosted) for action, arguments in action_steps(body)), "hosted checkout must use github.sha by default"
+assert '      - name: Require exact workflow and candidate commit\n' in hosted
+assert '          COMMIT: ${{ inputs.commit }}\n' in hosted
+assert '          WORKFLOW_SHA: ${{ github.sha }}\n' in hosted
+assert '        run: test "$WORKFLOW_SHA" = "$COMMIT" && test "$(git rev-parse HEAD)" = "$COMMIT"\n' in hosted
+
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, root / path)
     result = importlib.util.module_from_spec(spec)
