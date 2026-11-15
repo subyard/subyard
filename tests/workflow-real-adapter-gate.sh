@@ -218,7 +218,7 @@ plan = p.plan(root)
 entries = {entry["id"]: entry["command"] for group in plan.values() for entry in group["include"]}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
 config_sync = {"id": "periodic:config-sync",
-               "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
+               "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                            "bash", "dev/e2e/config-sync-acceptance.sh", "--slot", "1"]}
 assert plan["checks"]["include"].count(config_sync) == 1
 # Collector commands wrap core VM checks, so also inspect their underlying catalog commands.

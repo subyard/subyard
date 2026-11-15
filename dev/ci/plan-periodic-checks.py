@@ -17,10 +17,10 @@ NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnez
           "vm:p0-yard-maintenance"}
 # The release catalog runs the full P0 matrix as one check; here its lanes run on separate runners.
 SPLIT = {"vm:p0-full"}
-# Provisional until measured: 90m like other pair controllers, allowing cold provisioning and
-# runtime staging; 10m TERM grace covers two 120s guest cleanups and the 180s lease release.
+# A hosted run took 17 minutes; 45m leaves room for slower runners. The 10m TERM grace covers
+# two 120s guest cleanups and the 180s lease release.
 PERIODIC_ONLY = [{"id": "periodic:config-sync",
-                  "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
+                  "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                               "bash", "dev/e2e/config-sync-acceptance.sh", *SLOT]}]
 # Veranda GUI SHORT scenarios (veranda/desktop/README.md). They gate no CLI or engine release, so
 # they are periodic only and use their own bundle, which adds the GUI and engine ELFs. A manual

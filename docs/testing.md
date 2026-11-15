@@ -1129,8 +1129,8 @@ measure no resource budgets.
 
 The periodic-only `periodic:config-sync` check runs by default and can be selected with `checks`.
 It leases a standard pair for installed configuration sync over SSH/Git, using the ordinary candidate
-bundle. Its provisional controller budget is 90 minutes plus 10 minutes for TERM cleanup, pending
-measurement. It is outside the release catalog and release acceptance; changes listed in
+bundle. Its controller budget is 45 minutes plus 10 minutes for TERM cleanup; a hosted run took
+17 minutes. It is outside the release catalog and release acceptance; changes listed in
 [coverage ownership](#coverage-ownership) require this lane.
 
 A manual dispatch can name the check ids to run in `checks`. A check the planner marks `manual`, such
