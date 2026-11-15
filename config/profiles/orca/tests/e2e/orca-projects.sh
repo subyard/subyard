@@ -561,7 +561,8 @@ YARD
   catalog | jq -e --arg id "$removal_child_id" '.repos | all(.id != $id)' >/dev/null \
     || die 'partial removed-project cleanup retained the unprotected child'
   if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
-    # The removal hook closes the removed project's exact live session and removes its record.
+    # After the removal hook and this mode's own pass, the removed project's exact live
+    # session is closed and its record is gone, while another project's terminal survives.
     if [ "$mode" = sync ]; then
       yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err" \
         || die 'sync failed after cleaning the removed project sessions'
