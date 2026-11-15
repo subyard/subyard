@@ -189,7 +189,11 @@ case "${1:-}" in
           exit 255
         fi
       fi
-      ORCA_MOCK_GUEST_STEP=1 "$0" "${args[@]:0:$((separator + 1))}" "${args[@]:$((separator + 5))}" || exit 200
+      if ! ORCA_MOCK_GUEST_STEP=1 "$0" "${args[@]:0:$((separator + 1))}" "${args[@]:$((separator + 5))}"; then
+        # A failed guest command whose stderr does not end with a newline.
+        [ ! -e "$state_root/guest-stderr-no-newline" ] || printf 'partial guest output' >&2
+        exit 200
+      fi
       exit 0
     fi
     if [ -e "$state_root/drain-exec-stdin" ]; then
@@ -1121,12 +1125,15 @@ grep -Fq 'subyard-profile-runtime-diagnostic-v1 apply yard-local' "$TMP/runtime-
   || fail 'forged guest output did not reach the handler output'
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
 unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
-touch "$TMP/fail-registration-marker"
+touch "$TMP/fail-registration-marker" "$TMP/guest-stderr-no-newline"
 if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
   "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
   >"$TMP/runtime-interrupted.out" 2>&1; then
   fail 'runtime contract apply concealed an interruption before marker publication'
 fi
+# The record stays on its own line after guest stderr without a final newline.
+rm -f "$TMP/guest-stderr-no-newline"
+grep -Fq 'partial guest output' "$TMP/runtime-interrupted.out" || fail 'the fixture did not print unterminated guest stderr'
 [ "$(grep -c '^subyard-profile-runtime-diagnostic-v1 ' "$TMP/runtime-interrupted.out")" -eq 1 ] &&
   grep -Fxq "$typed_record apply yard-local" "$TMP/runtime-interrupted.out" \
   || fail 'a failed guest effect of the runtime apply was not reported as yard-local'

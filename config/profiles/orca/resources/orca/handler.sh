@@ -127,7 +127,9 @@ report_runtime_yard_failure() { # <status> <effect> <last guest command class>
   [[ "${SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE:-}" =~ ^[0-9a-f]{32}$ ]] || return 0
   [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" 2>/dev/null)" = RUNNING ] || return 0
   yexec true >/dev/null 2>&1 || return 0
-  printf 'subyard-profile-runtime-diagnostic-v1 %s %s yard-local\n' "$SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE" "$2" >&2
+  # A leading newline keeps the record on its own line after guest stderr
+  # that did not end with one.
+  printf '\nsubyard-profile-runtime-diagnostic-v1 %s %s yard-local\n' "$SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE" "$2" >&2
   local yard="${PROG:-yard} -Y ${YARD_NAME:-default}"
   printf "Orca: fix the cause and run '%s init', or remove Orca from this yard with '%s orca remove' and then run '%s init'\n" \
     "$yard" "$yard" "$yard" >&2
