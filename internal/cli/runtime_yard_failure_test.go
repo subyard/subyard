@@ -849,15 +849,15 @@ func TestPendingRecordBindsTheProfilePackage(t *testing.T) {
 func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 	for _, length := range []int{1, 80, 200, 300, 490} {
 		yard := strings.Repeat("7", length)
-		message := runtimePendingMessage(yard, "orca")
+		message := runtimePendingMessage(yard, "sample")
 		record := activationPendingRecord{SchemaVersion: activationPendingSchema, Yard: yard, Project: "subyard", Instance: "yard",
-			Owner: "orca-runtime", Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Inputs: strings.Repeat("c", 64), Message: message}
+			Owner: "sample-runtime", Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Inputs: strings.Repeat("c", 64), Message: message}
 		if err := record.validate(); err != nil {
 			t.Fatalf("yard name of %d bytes: %v (%d-byte message)", length, err, len(message))
 		}
-		exact := "yard " + yard + ": profile orca runtime failed, not applied; diagnose: yard -Y " + yard + " profile list; fix it and run yard -Y " +
+		exact := "yard " + yard + ": profile sample runtime failed, not applied; diagnose: yard -Y " + yard + " profile list; fix it and run yard -Y " +
 			yard + " init"
-		once := "yard " + yard + ": profile orca runtime failed and is not applied; in that yard, run profile list to diagnose"
+		once := "yard " + yard + ": profile sample runtime failed and is not applied; in that yard, run profile list to diagnose"
 		switch {
 		case len(exact) <= activationPendingMessageBytes:
 			if message != exact {
@@ -877,7 +877,7 @@ func TestRuntimePendingMessageFitsTheRecordBound(t *testing.T) {
 			t.Fatalf("yard name of %d bytes: invalid finding: %v", length, err)
 		}
 	}
-	if message := runtimePendingMessage(strings.Repeat("7", 80), "orca"); !strings.Contains(message, "fix it and run yard -Y "+strings.Repeat("7", 80)+" init") {
+	if message := runtimePendingMessage(strings.Repeat("7", 80), "sample"); !strings.Contains(message, "fix it and run yard -Y "+strings.Repeat("7", 80)+" init") {
 		t.Fatalf("an 80-byte yard name lost the exact commands: %q", message)
 	}
 }

@@ -305,7 +305,7 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 			}
 			testkit.WriteFile(t, hook, []byte(body), 0o700)
 			// A deselected profile's runtime removes its approved hook before hooks run.
-			removed := filepath.Join(hookdir, "orca")
+			removed := filepath.Join(hookdir, "removed-profile")
 			if scenario == "hook removed" {
 				testkit.WriteFile(t, removed, []byte("#!/bin/sh\nexit 1\n"), 0o700)
 			}
@@ -609,7 +609,7 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 func TestProjectHooksAcceptHookRemovedByEarlierRuntimeStage(t *testing.T) {
 	for _, scenario := range []string{"removed", "added"} {
 		t.Run(scenario, func(t *testing.T) {
-			owned, removed := "/usr/local/libexec/subyard/projects-changed.d/owned", "/usr/local/libexec/subyard/projects-changed.d/orca"
+			owned, removed := "/usr/local/libexec/subyard/projects-changed.d/owned", "/usr/local/libexec/subyard/projects-changed.d/removed-profile"
 			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest,
 				Hooks: []string{removed, owned}, Facts: map[string]string{owned: testRuntimeOldDigest, removed: testRuntimeOldDigest},
 				Resolved: map[string]string{owned: owned, removed: removed}}}
