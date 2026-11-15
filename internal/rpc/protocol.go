@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	MaxFrameSize    = 1024 * 1024
+	MaxFrameSize = 1024 * 1024
 )
 
 type Request struct {
@@ -42,11 +41,12 @@ type Response struct {
 }
 
 type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    ErrorCode `json:"code"`
+	Message string    `json:"message"`
+	relayed bool      // Set only when decoding an owner response; never serialized.
 }
 
-func (fault *Error) Error() string { return fault.Code + ": " + fault.Message }
+func (fault *Error) Error() string { return string(fault.Code) + ": " + fault.Message }
 
 type Codec struct {
 	reader *bufio.Reader
@@ -77,6 +77,9 @@ func (codec *Codec) ReadResponse() (Response, error) {
 	var response Response
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return Response{}, fmt.Errorf("decode RPC response: %w", err)
+	}
+	if response.Error != nil {
+		response.Error.relayed = true
 	}
 	return response, nil
 }
@@ -132,34 +135,34 @@ func writeAll(writer io.Writer, payload []byte) error {
 
 func validateRequest(request Request) error {
 	if request.Version != ProtocolVersion {
-		return &Error{Code: "incompatible_version", Message: fmt.Sprintf("protocol version %d is not supported", request.Version)}
+		return &Error{Code: CodeIncompatibleVersion, Message: fmt.Sprintf("protocol version %d is not supported", request.Version)}
 	}
 	if !validRPCIdentity(request.ID) {
-		return &Error{Code: "invalid_request", Message: "request ID is invalid"}
+		return &Error{Code: CodeInvalidRequest, Message: "request ID is invalid"}
 	}
 	if request.OperationID != "" && !validRPCIdentity(request.OperationID) {
-		return &Error{Code: "invalid_request", Message: "operation ID is invalid"}
+		return &Error{Code: CodeInvalidRequest, Message: "operation ID is invalid"}
 	}
 	if len(request.Params) != 0 && !json.Valid(request.Params) {
-		return &Error{Code: "invalid_request", Message: "params must be valid JSON"}
+		return &Error{Code: CodeInvalidRequest, Message: "params must be valid JSON"}
 	}
 	switch request.Type {
 	case "request":
 		if request.Method == "" {
-			return &Error{Code: "invalid_request", Message: "method is required"}
+			return &Error{Code: CodeInvalidRequest, Message: "method is required"}
 		}
 	case "cancel":
 		if request.OperationID == "" {
-			return &Error{Code: "invalid_request", Message: "operation ID is required"}
+			return &Error{Code: CodeInvalidRequest, Message: "operation ID is required"}
 		}
 		if request.Deadline != nil {
-			return &Error{Code: "invalid_request", Message: "cancel frame must not carry a deadline"}
+			return &Error{Code: CodeInvalidRequest, Message: "cancel frame must not carry a deadline"}
 		}
 	default:
-		return &Error{Code: "invalid_request", Message: fmt.Sprintf("unknown frame type %q", request.Type)}
+		return &Error{Code: CodeInvalidRequest, Message: fmt.Sprintf("unknown frame type %q", request.Type)}
 	}
 	if containsSensitiveJSON(request.Params) {
-		return &Error{Code: "secret_forbidden", Message: "secret-bearing fields are not accepted by RPC"}
+		return &Error{Code: CodeSecretForbidden, Message: "secret-bearing fields are not accepted by RPC"}
 	}
 	return nil
 }
@@ -235,12 +238,12 @@ func asFault(err error) *Error {
 		return fault
 	}
 	if errors.Is(err, contextCanceled) || errors.Is(err, context.Canceled) {
-		return &Error{Code: "cancelled", Message: "operation cancelled"}
+		return &Error{Code: CodeCancelled, Message: "operation cancelled"}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &Error{Code: "deadline_exceeded", Message: "operation deadline exceeded"}
+		return &Error{Code: CodeDeadlineExceeded, Message: "operation deadline exceeded"}
 	}
-	return &Error{Code: "internal", Message: err.Error()}
+	return &Error{Code: CodeInternal, Message: err.Error()}
 }
 
 var contextCanceled = errors.New("operation cancelled")

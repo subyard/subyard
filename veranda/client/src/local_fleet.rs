@@ -13,14 +13,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-const PROTOCOL_VERSION: u32 = 1;
+use crate::vocabulary::PROTOCOL_VERSION;
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
 #[cfg(test)]
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const EXIT_GRACE: Duration = Duration::from_millis(500);
 #[cfg(test)]
-const OWNER_INVENTORY_CAPABILITY: &str = "owner-inventory-v1";
+const OWNER_INVENTORY_CAPABILITY: &str = crate::vocabulary::Capability::OwnerInventoryV1.as_str();
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

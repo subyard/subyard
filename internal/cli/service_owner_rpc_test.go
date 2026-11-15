@@ -68,11 +68,11 @@ func TestOwnerServiceRPCWithInvalidWorkspaceAllowsOnlyBoundServiceOperations(t *
 	if !slices.Contains(session.capabilities, ownerServicesCapability) || slices.Contains(session.capabilities, "context") || slices.Contains(session.capabilities, "snapshot") {
 		t.Fatalf("unsafe fallback capabilities: %v", session.capabilities)
 	}
-	for _, method := range []string{"context.get", "snapshot.get", "owner.inventory", "project.list"} {
+	for _, method := range []string{"context.get", "system.snapshot", "owner.inventory", "project.list"} {
 		var result any
 		err := session.call(context.Background(), method, "refusal-"+method, struct{}{}, &result)
 		var failure *rpc.Error
-		if !errors.As(err, &failure) || failure.Code != "owner_configuration_invalid" || strings.Contains(failure.Message, "SSH_PORT") {
+		if !errors.As(err, &failure) || failure.Code != rpc.CodeCapabilityMissing || strings.Contains(failure.Message, "SSH_PORT") {
 			t.Fatalf("%s: %v", method, err)
 		}
 	}

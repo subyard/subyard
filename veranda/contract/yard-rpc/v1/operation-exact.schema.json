@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "operation-exact.schema.json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "stepSchema": {
+      "const": 1
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "command": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "effect": {
+          "enum": [
+            "read",
+            "mutate"
+          ]
+        },
+        "confirmation": {
+          "enum": [
+            "never",
+            "prompt-default-yes",
+            "prompt-default-no"
+          ]
+        },
+        "target": {
+          "enum": [
+            "local-controller",
+            "local-owner",
+            "remote-owner"
+          ]
+        },
+        "consequences": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "maxItems": 1024
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "observed": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "desired": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "decision": {
+                "enum": [
+                  "apply",
+                  "skip",
+                  "conditional"
+                ]
+              },
+              "preconditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "maxItems": 64
+              },
+              "dependsOn": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "maxItems": 64
+              },
+              "verify": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "consequence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "id",
+              "target",
+              "observed",
+              "desired",
+              "decision",
+              "verify"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "assessment": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "effect": {
+              "enum": [
+                "read",
+                "session",
+                "bounded-write",
+                "mutation",
+                "destruction"
+              ]
+            },
+            "changed": {
+              "type": "boolean"
+            },
+            "impacts": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "enum": [
+                  "local-metadata",
+                  "yard-runtime",
+                  "host-os",
+                  "host-network",
+                  "host-incus",
+                  "security",
+                  "trust",
+                  "access",
+                  "external-system",
+                  "shared-workload",
+                  "persistent-data"
+                ]
+              }
+            },
+            "recovery": {
+              "enum": [
+                "not-needed",
+                "reversible",
+                "recreatable",
+                "irreversible"
+              ]
+            },
+            "consequences": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "action",
+            "effect",
+            "changed",
+            "recovery"
+          ],
+          "additionalProperties": false
+        },
+        "confirmationRequest": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "consequences": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "default": {
+              "enum": [
+                "yes",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "summary",
+            "default"
+          ],
+          "additionalProperties": false
+        },
+        "confirmed": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "operationId",
+        "command",
+        "effect",
+        "confirmation",
+        "target",
+        "steps",
+        "confirmed",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "schema",
+    "stepSchema",
+    "plan",
+    "digest",
+    "expiresAt"
+  ],
+  "additionalProperties": false
+}

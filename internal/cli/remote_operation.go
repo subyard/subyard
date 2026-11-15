@@ -22,9 +22,9 @@ import (
 	"github.com/Subyard/Subyard/internal/state"
 )
 
-const exactPlanCapability = "operation-exact-plan-v1"
-const operationStepsCapability = "operation-steps-v1"
-const ownerServicesCapability = "owner-services-v1"
+const exactPlanCapability = rpc.CapabilityOperationExactPlanV1
+const operationStepsCapability = rpc.CapabilityOperationStepsV1
+const ownerServicesCapability = rpc.CapabilityOwnerServicesV1
 
 func ownerPreparedInvocation(definition command.Definition, arguments []string) bool {
 	if definition.Handler == "@config" {
@@ -173,7 +173,7 @@ func (session *ownerRPCSession) negotiate(ctx context.Context) error {
 	var response struct {
 		Capabilities []string `json:"capabilities"`
 	}
-	if err := session.call(ctx, "rpc.negotiate", "", struct{}{}, &response); err != nil {
+	if err := session.call(ctx, rpc.MethodRpcNegotiate, "", struct{}{}, &response); err != nil {
 		return err
 	}
 	if !slices.Contains(response.Capabilities, exactPlanCapability) {
@@ -207,7 +207,7 @@ type ownerOperationResponse struct {
 
 func (session *ownerRPCSession) execute(ctx context.Context, exact exactOperationPlan) (ownerOperationResponse, error) {
 	var response ownerOperationResponse
-	err := session.call(ctx, "operation.execute", exact.Plan.OperationID, struct {
+	err := session.call(ctx, rpc.MethodOperationExecute, exact.Plan.OperationID, struct {
 		Confirmed bool   `json:"confirmed"`
 		Digest    string `json:"digest"`
 	}{true, exact.Digest}, &response)
@@ -224,7 +224,7 @@ func (session *ownerRPCSession) integrationStatus(ctx context.Context, yard doma
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	var status integrationStatus
-	if err := session.call(ctx, "integration.status", operationID, struct {
+	if err := session.call(ctx, rpc.MethodIntegrationStatus, operationID, struct {
 		ID        string `json:"id"`
 		OwnerOnly bool   `json:"ownerOnly"`
 	}{id, true}, &status); err != nil {
@@ -300,7 +300,7 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 		Exact      bool     `json:"exact"`
 		StepSchema int      `json:"stepSchema"`
 	}{prepared.Definition.Name, withoutCommandConsent(prepared.Arguments), true, 1}
-	if err = session.call(planContext, "operation.plan", cli.ensureOperationID(), params, &exact); err != nil {
+	if err = session.call(planContext, rpc.MethodOperationPlan, cli.ensureOperationID(), params, &exact); err != nil {
 		return err
 	}
 	if err := session.validatePlan(exact, cli.ensureOperationID(), prepared.Definition.Name); err != nil {

@@ -20,7 +20,7 @@ import (
 // ValidateSessionParams preserves parameter validation before owner routing checks.
 func ValidateSessionParams(params SessionParams) error {
 	if params.Kind != "shell" && params.Kind != "resources" && params.Kind != "vscode" {
-		return &Error{Code: "invalid_params", Message: "unsupported session kind, scope or project selection"}
+		return &Error{Code: codeInvalidParams, Message: "unsupported session kind, scope or project selection"}
 	}
 	if params.Scope == "" {
 		params.Scope = "yard"
@@ -28,7 +28,7 @@ func ValidateSessionParams(params SessionParams) error {
 	if params.Scope != "yard" && params.Scope != "host" || params.ProjectID != "" && !domain.SafeID(params.ProjectID) ||
 		params.Scope == "host" && (params.ProjectID != "" || params.Kind == "vscode") ||
 		params.Kind == "resources" && params.ProjectID != "" || params.Kind == "vscode" && params.ProjectID == "" {
-		return &Error{Code: "invalid_params", Message: "unsupported session kind, scope or project selection"}
+		return &Error{Code: codeInvalidParams, Message: "unsupported session kind, scope or project selection"}
 	}
 	return nil
 }
@@ -72,7 +72,7 @@ func (service Service) PrepareSession(ctx context.Context, params SessionParams)
 	if params.Scope == "host" {
 		if params.Kind == "resources" {
 			if _, err := exec.LookPath("htop"); err != nil {
-				return result, &Error{Code: "session_tool_unavailable", Message: "host resources require htop; install htop on the owner host and retry"}
+				return result, &Error{Code: codeSessionToolUnavailable, Message: "host resources require htop; install htop on the owner host and retry"}
 			}
 			result.OwnerArguments = []string{"htop"}
 		} else {
@@ -87,19 +87,19 @@ func (service Service) PrepareSession(ctx context.Context, params SessionParams)
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		return result, &Error{Code: "session_yard_unavailable", Message: "yard session requires an already running yard; start it explicitly"}
+		return result, &Error{Code: codeSessionYardUnavailable, Message: "yard session requires an already running yard; start it explicitly"}
 	}
 	var record domain.ProjectRecord
 	if params.ProjectID != "" {
 		if !service.ProjectsAllowed {
-			return result, &Error{Code: "session_project_forbidden", Message: "this yard role does not permit project sessions"}
+			return result, &Error{Code: codeSessionProjectForbidden, Message: "this yard role does not permit project sessions"}
 		}
 		store, err := state.NewFileStore(yard.Paths.StateDir)
 		if err == nil {
 			record, err = store.GetReadOnly(ctx, params.ProjectID)
 		}
 		if err != nil {
-			return result, &Error{Code: "session_project_unavailable", Message: "project is not registered in the selected owner yard"}
+			return result, &Error{Code: codeSessionProjectUnavailable, Message: "project is not registered in the selected owner yard"}
 		}
 		result.ProjectID = record.ProjectID
 	}
@@ -114,17 +114,17 @@ func (service Service) PrepareSession(ctx context.Context, params SessionParams)
 		return result, nil
 	}
 	if !domain.SafeSSHTarget(yard.SSHHost) {
-		return result, &Error{Code: "session_ssh_unavailable", Message: "yard SSH transport is unavailable; reconcile the yard explicitly"}
+		return result, &Error{Code: codeSessionSshUnavailable, Message: "yard SSH transport is unavailable; reconcile the yard explicitly"}
 	}
 	if err := (application.ProjectActionRunner{Yard: yard, Instances: incus}).CheckCodeTargetReady(ctx); err != nil {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		return result, &Error{Code: "session_ssh_unavailable", Message: "yard SSH transport is unavailable; reconcile the yard explicitly"}
+		return result, &Error{Code: codeSessionSshUnavailable, Message: "yard SSH transport is unavailable; reconcile the yard explicitly"}
 	}
 	key, err := sessionGuestHostKey(yard)
 	if err != nil {
-		return result, &Error{Code: "session_host_key_unavailable", Message: "protected owner guest SSH pin is unavailable or ambiguous; reconcile the yard explicitly"}
+		return result, &Error{Code: codeSessionHostKeyUnavailable, Message: "protected owner guest SSH pin is unavailable or ambiguous; reconcile the yard explicitly"}
 	}
 	result.LocalArguments = []string{"yard", "-Y", yard.YardName, "code", record.ProjectID}
 	result.VSCode = &SessionVSCode{SSHAlias: yard.SSHHost, DevUser: yard.DevUser, Address: "127.0.0.1", Port: yard.SSHPort,

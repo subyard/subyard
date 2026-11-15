@@ -393,11 +393,11 @@ mod tests {
     fn shared_launch_descriptors_bind_exact_context() {
         for (fixture, kind) in [
             (
-                include_str!("../../../api/yard-rpc/v1/fixtures/session-shell.json"),
+                include_str!("../../contract/yard-rpc/v1/fixtures/session-shell.json"),
                 "shell",
             ),
             (
-                include_str!("../../../api/yard-rpc/v1/fixtures/session-vscode.json"),
+                include_str!("../../contract/yard-rpc/v1/fixtures/session-vscode.json"),
                 "vscode",
             ),
         ] {
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn copy_shell_command_prepares_the_owner_invocation_without_a_terminal() {
         let value: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../api/yard-rpc/v1/fixtures/session-shell.json"
+            "../../contract/yard-rpc/v1/fixtures/session-shell.json"
         ))
         .unwrap();
         let descriptor: Descriptor = serde_json::from_value(value["result"].clone()).unwrap();

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "profile-list",
+  "result": {
+    "schemaVersion": 1,
+    "yardName": "default",
+    "selection": {
+      "value": "sample",
+      "provenance": [
+        {
+          "scope": "yard",
+          "role": "local",
+          "status": "effective"
+        }
+      ],
+      "present": true,
+      "requested": [
+        "sample"
+      ],
+      "effective": [
+        "sample"
+      ]
+    },
+    "profiles": [
+      {
+        "name": "sample",
+        "descriptorVersion": 1,
+        "selected": true,
+        "provisionable": true,
+        "provisionScope": "shared",
+        "eligible": true,
+        "eligibility": "allowed",
+        "convergence": "current",
+        "resources": [],
+        "hasYardPreset": false,
+        "requested": true,
+        "effective": true,
+        "reason": "explicit-selection",
+        "sourceGroup": "local overrides"
+      },
+      {
+        "name": "resource-only",
+        "selected": false,
+        "provisionable": false,
+        "provisionScope": "shared",
+        "eligible": true,
+        "eligibility": "allowed",
+        "convergence": "not-applicable",
+        "resources": [
+          "sample-view"
+        ],
+        "hasYardPreset": true,
+        "requested": false,
+        "effective": false,
+        "reason": "excluded-by-replace-list",
+        "sourceGroup": "local overrides"
+      }
+    ]
+  }
+}

@@ -17,8 +17,8 @@ event envelopes. Request IDs and operation IDs are printable ASCII, 1–128 byte
 Protocol `version` is `1`. An absent operation ID defaults to the request ID.
 Responses may arrive out of request order: correlate by ID. A typed error has
 `code` and `message`; clients must not derive state by parsing that message.
-[`gate-error-codes.json`](gate-error-codes.json) lists every code a mutation
-returns when the release or configuration gate refuses it.
+[`vocabulary.json`](vocabulary.json) owns the protocol version, methods, capabilities,
+error codes and event names. Errors in its `release-gate` group require owner repair.
 
 Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 [`negotiate.schema.json`](negotiate.schema.json): `version`, `protocolMin`,
@@ -80,6 +80,7 @@ engine compatibility surface, not a client fallback.
 | `project.list` | optional `live` | `core-results.schema.json#/$defs/projects` |
 | `owner.inventory` | `{}` | `owner-inventory.schema.json` |
 | `release.readiness` | `{}` | `release-readiness.schema.json`, capability `release-readiness-v1` |
+| `yard.status.profile-dashboards` | `{}` | `core-results.schema.json#/$defs/status`, capability `yard-status-profile-dashboards-v1` |
 | `yard.status` | `{}` | `core-results.schema.json#/$defs/status` |
 | `credential.list` | `{}` | `core-results.schema.json#/$defs/credentials` |
 | `credential.status` | `{}` | `core-results.schema.json#/$defs/credentialStatus` |
@@ -225,3 +226,29 @@ exact digest is not a usable owner plan capability. Go's focused
 client tests consume these same files. Fixtures use only synthetic identities and
 paths. Schema/profile changes require an explicit compatible contract change or
 typed incompatibility; clients must not migrate unknown schemas themselves.
+
+## Vocabulary evolution
+
+The manifest's `revision` identifies a contract snapshot; clients branch only on
+negotiated capabilities, never on `revision`. Changes are additive: retain existing
+wire names, meanings and identifiers. `since` is the first manifest revision that
+records an entry (revision 1 includes the existing vocabulary). Capabilities declare
+`stability`, supported `sessions` (`workspace` or `owner-services`), and optional
+`deprecated` metadata. Deprecation does not remove support. Explicit `ident` values
+resolve generated identifier collisions and remain stable. New manifest sections
+are allowed; DTOs and their schemas remain handwritten.
+
+A new error code that requires new client behavior requires a new capability.
+Clients handle unknown codes generically, ignore unknown capabilities and fields,
+and handle unknown events without decoding them as a known event payload.
+`rpc-v1` names the base handshake support. Negotiation is always admitted;
+after it, the server gates each known method on its advertised capability and
+returns `capability_missing` before dispatch when absent. Negotiation and the gate
+run in input order, so a pipelined negotiate+call uses the same capability set.
+Feature capabilities can additionally constrain method parameters (for example,
+exact plans and complete operation steps); method gates do not replace those guards.
+
+Run `make rpc-vocabulary` after editing the manifest, then update Veranda's contract
+mirror and run `python3 veranda/dev/generate-vocabulary.py`. `make
+rpc-vocabulary-check` and Veranda's host-free check reject stale generated files;
+contract tests compare schemas, documented methods and the byte-equal mirror.

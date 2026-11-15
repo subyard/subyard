@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,11 @@ const DefaultMaxOperations = 128
 const writeProgressChunk = 4096
 
 var errWriteStall = errors.New("RPC client made no read progress within the write stall timeout")
+
+// StrictErrorCodes is enabled by session-hosting packages' test initialization
+// before any sessions start. It catches local vocabulary drift without rejecting
+// unknown remote codes or changing production's tolerant error handling.
+var StrictErrorCodes bool
 
 type Call struct {
 	ID          string
@@ -140,6 +146,15 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 				return
 			}
 			watchdog.Reset(stallTimeout)
+			if response.Error != nil && !response.Error.Code.Valid() {
+				if StrictErrorCodes && !response.Error.relayed {
+					panic(fmt.Sprintf("undeclared local RPC error code %q", response.Error.Code))
+				}
+				// A newer owner may return an ordinary code unknown to this relay.
+				// Keep the message and unrelated operations alive; never mutate a
+				// shared handler error or emit a code outside our vocabulary.
+				response.Error = &Error{Code: CodeInternal, Message: response.Error.Message}
+			}
 			err := codec.Write(response)
 			watchdog.Stop()
 			if stalled.Load() {
@@ -172,6 +187,7 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 		return nil
 	}
 
+	methodCapabilities := MethodCapabilities()
 	readErr := error(nil)
 	for ctx.Err() == nil {
 		request, err := codec.ReadRequest()
@@ -193,7 +209,7 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 			if cancel == nil {
 				_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
 					OperationID: request.OperationID,
-					Error:       &Error{Code: "operation_not_found", Message: "operation is not active"}})
+					Error:       &Error{Code: CodeOperationNotFound, Message: "operation is not active"}})
 			} else {
 				cancel(contextCanceled)
 				_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
@@ -202,7 +218,7 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 			}
 			continue
 		}
-		if request.Method == "rpc.negotiate" {
+		if request.Method == MethodRpcNegotiate {
 			negotiated.Store(true)
 			_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID, Result: map[string]any{
 				"version": ProtocolVersion, "protocolMin": ProtocolVersion, "protocolMax": ProtocolVersion,
@@ -213,7 +229,20 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 		if !negotiated.Load() {
 			_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
 				OperationID: request.OperationID,
-				Error:       &Error{Code: "negotiation_required", Message: "rpc.negotiate must be called first"}})
+				Error:       &Error{Code: CodeNegotiationRequired, Message: "rpc.negotiate must be called first"}})
+			continue
+		}
+		capability, known := methodCapabilities[request.Method]
+		if !known {
+			_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
+				OperationID: request.OperationID,
+				Error:       &Error{Code: CodeMethodNotFound, Message: request.Method}})
+			continue
+		}
+		if !slices.Contains(session.Capabilities, capability) {
+			_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
+				OperationID: request.OperationID,
+				Error:       &Error{Code: CodeCapabilityMissing, Message: fmt.Sprintf("method %s requires capability %s", request.Method, capability)}})
 			continue
 		}
 		operationID := request.OperationID
@@ -233,7 +262,7 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 			deadlineCancel()
 			_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
 				OperationID: operationID,
-				Error:       &Error{Code: "operation_capacity", Message: "too many active operations; retry after one finishes"}})
+				Error:       &Error{Code: CodeOperationCapacity, Message: "too many active operations; retry after one finishes"}})
 			continue
 		}
 		if _, duplicate := operations[operationID]; duplicate {
@@ -242,7 +271,7 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 			deadlineCancel()
 			_ = enqueue(Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
 				OperationID: operationID,
-				Error:       &Error{Code: "duplicate_operation", Message: "operation ID is already active"}})
+				Error:       &Error{Code: CodeDuplicateOperation, Message: "operation ID is already active"}})
 			continue
 		}
 		operations[operationID] = cancel

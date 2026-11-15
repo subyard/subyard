@@ -18,6 +18,10 @@ import (
 
 type errorTransport struct{ err error }
 
+func init() {
+	rpc.StrictErrorCodes = true
+}
+
 func (transport errorTransport) Call(context.Context, string, []byte) ([]byte, error) {
 	return nil, transport.err
 }
@@ -399,5 +403,37 @@ func TestReleaseReadinessCapabilitySkew(t *testing.T) {
 				t.Fatalf("readiness=%+v want status=%s", readiness, test.wantStatus)
 			}
 		})
+	}
+}
+
+type sessionTransport struct {
+	capabilities []string
+	dispatched   int
+}
+
+func (transport *sessionTransport) Call(ctx context.Context, _ string, request []byte) ([]byte, error) {
+	var output bytes.Buffer
+	err := (rpc.Session{Capabilities: transport.capabilities, DrainOnEOF: true, Handler: rpc.HandlerFunc(func(_ context.Context, call rpc.Call, _ rpc.Emit) (any, error) {
+		transport.dispatched++
+		return domain.YardStatus{State: "RUNNING"}, nil
+	})}).Serve(ctx, bytes.NewReader(request), &output)
+	return output.Bytes(), err
+}
+
+func TestPipelinedNegotiationUsesServerCapabilityGate(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		transport := &sessionTransport{}
+		if supported {
+			transport.capabilities = []string{rpc.CapabilityYardStatus}
+		}
+		client := Client{Transport: transport}
+		result, err := client.call(context.Background(), "status", rpc.MethodYardStatus, rpc.CapabilityYardStatus)
+		if supported {
+			if err != nil || transport.dispatched != 1 || !bytes.Contains(result, []byte("RUNNING")) {
+				t.Fatalf("pipelined call: result=%s err=%v dispatch=%d", result, err, transport.dispatched)
+			}
+		} else if !errors.Is(err, errCapabilityUnsupported) || transport.dispatched != 0 {
+			t.Fatalf("unsupported pipelined call: err=%v dispatch=%d", err, transport.dispatched)
+		}
 	}
 }

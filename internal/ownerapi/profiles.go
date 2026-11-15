@@ -61,7 +61,7 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 		Profiles: []Profile{}}
 	packages, err := profile.Packages(service.RepositoryRoot)
 	if err != nil {
-		return result, &Error{Code: "profile_catalog_invalid", Message: "shipped profile catalog is invalid"}
+		return result, &Error{Code: codeProfileCatalogInvalid, Message: "shipped profile catalog is invalid"}
 	}
 	declarations := loaded.Catalog.Profiles()
 	selection, explicit := loaded.Environment["ENVIRONMENT_PROFILES"], loaded.EnvironmentProfiles.Present
@@ -72,12 +72,12 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 		provisionable := pkg.Provision != nil
 		if provisionable {
 			if err := pkg.CheckProvisionHook(); err != nil {
-				return result, &Error{Code: "profile_catalog_invalid", Message: "shipped provision catalog is invalid"}
+				return result, &Error{Code: codeProfileCatalogInvalid, Message: "shipped provision catalog is invalid"}
 			}
 		}
 		scope, err := config.ProfileProvisionScope(loaded.Context.Paths.ConfigDir, name)
 		if err != nil {
-			return result, &Error{Code: "profile_catalog_invalid", Message: "shipped provision scope is invalid"}
+			return result, &Error{Code: codeProfileCatalogInvalid, Message: "shipped provision scope is invalid"}
 		}
 		entry := Profile{Name: name, Provisionable: provisionable, ProvisionScope: scope,
 			Selected: slices.Contains(strings.Fields(selection), name), Eligible: true,
@@ -91,7 +91,7 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 		}
 		entry.Eligible, entry.Eligibility, err = config.EnvironmentProfileEligibility(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, loaded.Environment, loaded.Catalog, name)
 		if err != nil {
-			return result, &Error{Code: "profile_catalog_invalid", Message: "shipped profile eligibility is invalid"}
+			return result, &Error{Code: codeProfileCatalogInvalid, Message: "shipped profile eligibility is invalid"}
 		}
 		entry.Requested = slices.Contains(loaded.EnvironmentProfiles.Requested, name)
 		entry.Effective, entry.SourceGroup = entry.Selected && entry.Eligible, sourceGroup

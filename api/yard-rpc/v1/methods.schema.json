@@ -6,6 +6,15 @@
     {
       "type": "object",
       "properties": {
+        "method": {"const": "yard.status.profile-dashboards"},
+        "params": {"type": "object", "additionalProperties": false}
+      },
+      "required": ["method", "params"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
         "method": {
           "const": "release.readiness"
         },

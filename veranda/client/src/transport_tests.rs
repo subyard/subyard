@@ -9,7 +9,7 @@ use std::path::PathBuf;
 const PRODUCT_VERSION: &str = "0.1.0-dev";
 const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../api/yard-rpc/v1/fixtures"
+    "/../contract/yard-rpc/v1/fixtures"
 );
 const OWNER: &str = r#"
 import datetime, json, os, struct, subprocess, sys, time
@@ -33,6 +33,8 @@ def read():
     return json.loads(body)
 
 def send(value):
+    if mode == 'future-vocabulary':
+        value['futureEnvelopeField'] = {'ignored':True}
     body = json.dumps(value, separators=(',', ':'), sort_keys=True).encode('utf8')
     sys.stdout.buffer.write(struct.pack('>I', len(body)) + body)
     sys.stdout.buffer.flush()
@@ -67,6 +69,9 @@ if mode == 'version-mismatch':
 elif mode == 'wire-mismatch':
     result['protocolMin'] = 2
     result['protocolMax'] = 2
+elif mode == 'future-vocabulary':
+    result['capabilities'].append('future-capability')
+    result['futureNegotiationField'] = {'ignored':True}
 elif mode == 'capability-missing':
     result['capabilities'].remove('owner-inventory-v1')
 # Go negotiation deliberately omits operationId; ordinary method responses
@@ -222,6 +227,12 @@ while True:
         pending = request
         event(1, 'operation.started', operation)
         continue
+    if mode == 'future-vocabulary':
+        burst_sequence += 1
+        event(burst_sequence, 'future.event', operation)
+        if method == 'synthetic.future':
+            reply(request, error='future_error')
+            continue
     if mode == 'malformed':
         send({'version':1, 'type':'response', 'id':request['id'], 'operationId':operation,
               'result':{}, 'error':{'code':'synthetic_failure'}})
@@ -1089,4 +1100,30 @@ fn correlation_framed_seal_retains_validated_receipt_during_held_classifier() {
     assert_eq!(row["started_micros"], terminal["started_micros"]);
     assert_eq!(terminal["outcome"]["Retired"], "Unknown");
     assert_eq!(delivered[0].receipt.as_ref().unwrap().started(), entered.1);
+}
+
+#[test]
+fn unknown_vocabulary_and_fields_keep_the_wire_session_usable() {
+    let fixture = OwnerFixture::new();
+    let (client, notifications) = fixture.open("future-vocabulary");
+    assert!(client.capabilities.iter().any(|c| c == "future-capability"));
+    client.require("owner-inventory-v1").unwrap();
+    let fault = client
+        .call(
+            "synthetic.future",
+            "op-future",
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+    assert_eq!(fault.code, "owner_request_failed");
+    assert!(!fault.message.contains("synthetic private owner text"));
+    let event = receive(&notifications);
+    assert_eq!(event.event, "future.event");
+    assert!(!event.stale);
+    let result = client
+        .call("system.ping", "op-ping", json!({}), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(result["pong"], true);
+    client.close();
 }

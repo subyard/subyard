@@ -30,7 +30,7 @@ func TestRPCConcurrentKeysPrepareKeepsSessionEnvironmentStable(t *testing.T) {
 	client, server := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- (rpc.Session{Handler: gated, Buffer: requests + 1, DrainOnEOF: true}).Serve(
+		done <- (rpc.Session{Capabilities: rpc.CapabilitiesForSession("workspace"), Handler: gated, Buffer: requests + 1, DrainOnEOF: true}).Serve(
 			context.Background(), server, server,
 		)
 	}()

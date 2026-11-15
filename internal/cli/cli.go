@@ -358,16 +358,16 @@ func (cli *CLI) inspectMutationGateInspection(
 
 // RPC error codes for release gate refusals that do not carry an outcome code.
 const (
-	rpcMutationGateFailedCode = "mutation_gate_failed"
-	rpcTransitionRequiredCode = "transition_required"
+	rpcMutationGateFailedCode = rpc.CodeMutationGateFailed
+	rpcTransitionRequiredCode = rpc.CodeTransitionRequired
 )
 
 func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) *rpc.Error {
 	payload, err := json.Marshal(publicInspectedMutationGateOutcome(outcome, inspection))
 	if err != nil {
-		return &rpc.Error{Code: string(outcome.Code), Message: outcome.Message}
+		return &rpc.Error{Code: rpc.ErrorCode(outcome.Code), Message: outcome.Message}
 	}
-	return &rpc.Error{Code: string(outcome.Code), Message: string(payload)}
+	return &rpc.Error{Code: rpc.ErrorCode(outcome.Code), Message: string(payload)}
 }
 
 func New(options Options) (*CLI, error) {
@@ -3987,17 +3987,9 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	handler := &rpcHandler{cli: cli, loaded: loaded, ownerServicesOnly: ownerServicesOnly, plans: make(map[string]*preparedCommand)}
 	defer handler.closePlans()
-	session := rpc.Session{Handler: handler, EngineVersion: Version, Capabilities: []string{
-		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
-		"projects", "yard-status", ownerinventory.ProfileDashboardStatusCapability, "credential-metadata", "credential-status",
-		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
-		ownerinventory.ReleaseReadinessCapability,
-		profileListCapability, settingsListCapability, hostSyncStatusCapability, sessionPrepareCapability,
-		yardBootstrapCapability,
-		credentialPrepareCapability, exactPlanCapability, operationStepsCapability, ownerServicesCapability,
-	}, DrainOnEOF: true}
+	session := rpc.Session{Handler: handler, EngineVersion: Version, Capabilities: rpc.CapabilitiesForSession("workspace"), DrainOnEOF: true}
 	if ownerServicesOnly {
-		session.Capabilities = []string{"cancellation", "deadlines", "operation-plan", "operation-execute", exactPlanCapability, operationStepsCapability, ownerServicesCapability}
+		session.Capabilities = rpc.CapabilitiesForSession("owner-services")
 	}
 	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
@@ -4085,27 +4077,20 @@ type rpcSnapshot struct {
 	CredentialStatus domain.CredentialStatus     `json:"credentialStatus"`
 }
 
-func operationRPCError(fallback string, err error) *rpc.Error {
+func operationRPCError(fallback rpc.ErrorCode, err error) *rpc.Error {
 	code := fallback
 	if errors.Is(err, domain.ErrPlanStale) {
-		code = domain.PlanStaleCode
+		code = rpc.CodePlanStale
 	} else if errors.Is(err, domain.ErrActionPolicyInvalid) ||
 		domain.ActionPolicyErrorClass(err) == domain.ActionPolicyInvalid {
-		code = domain.ActionPolicyInvalid
+		code = rpc.CodeActionPolicyInvalid
 	}
 	return &rpc.Error{Code: code, Message: err.Error()}
 }
 
 func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
-	if handler.ownerServicesOnly {
-		switch call.Method {
-		case "operation.plan", "operation.execute", "operation.discard":
-		default:
-			return nil, &rpc.Error{Code: "owner_configuration_invalid", Message: "workspace configuration is unavailable; only declared owner service operations are supported"}
-		}
-	}
 	switch call.Method {
-	case "integration.status":
+	case rpc.MethodIntegrationStatus:
 		var params struct {
 			ID        string `json:"id"`
 			OwnerOnly bool   `json:"ownerOnly,omitempty"`
@@ -4114,14 +4099,14 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, err
 		}
 		if params.OwnerOnly && handler.loaded.Context.AccessKind == domain.AccessRemote {
-			return nil, &rpc.Error{Code: "remote_owner_required", Message: "integration status must resolve to the owner host"}
+			return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "integration status must resolve to the owner host"}
 		}
 		return handler.cli.rpcOperation(call.OperationID).queryIntegrationStatus(ctx, handler.loaded, params.ID)
-	case "command.list":
+	case rpc.MethodCommandList:
 		return handler.commands(), nil
-	case "context.get":
+	case rpc.MethodContextGet:
 		return handler.loaded.Context, nil
-	case "keys.prepare":
+	case rpc.MethodKeysPrepare:
 		var params struct {
 			Arguments []string `json:"arguments"`
 		}
@@ -4130,20 +4115,20 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		definition, ok := handler.cli.manifest.Lookup("keys")
 		if !ok || definition.Visibility != command.VisibilityPublic {
-			return nil, &rpc.Error{Code: "command_not_found", Message: "keys"}
+			return nil, &rpc.Error{Code: rpc.CodeCommandNotFound, Message: "keys"}
 		}
 		operationCLI := handler.cli.rpcOperation(call.OperationID)
 		credentialRuntime, err := operationCLI.credentialRuntimeWithStreams(
 			handler.loaded, strings.NewReader(""), io.Discard, io.Discard,
 		)
 		if err != nil {
-			return nil, operationRPCError("plan_failed", err)
+			return nil, operationRPCError(rpc.CodePlanFailed, err)
 		}
 		prepared, err := credentialRuntime.Prepare(
 			ctx, definition.Arg0, keysWithoutConsent(params.Arguments),
 		)
 		if err != nil {
-			return nil, operationRPCError("plan_failed", err)
+			return nil, operationRPCError(rpc.CodePlanFailed, err)
 		}
 		orchestrator := operationCLI.operationOrchestrator(call.OperationID, handler.loaded, nil, &definition)
 		plan, err := orchestrator.PrepareAction(
@@ -4152,10 +4137,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			domain.ActionDelta{Changed: prepared.Changed, Consequences: prepared.Consequences},
 		)
 		if err != nil {
-			return nil, operationRPCError("plan_failed", err)
+			return nil, operationRPCError(rpc.CodePlanFailed, err)
 		}
 		return plan, nil
-	case "operation.plan":
+	case rpc.MethodOperationPlan:
 		handler.pruneExpiredPlans()
 		var params struct {
 			Command    string                       `json:"command"`
@@ -4170,20 +4155,20 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, err
 		}
 		if params.StepSchema < 0 || params.StepSchema > 1 || params.StepSchema != 0 && !params.Exact {
-			return nil, &rpc.Error{Code: "invalid_params", Message: "operation step schema requires exact planning"}
+			return nil, &rpc.Error{Code: rpc.CodeInvalidParams, Message: "operation step schema requires exact planning"}
 		}
 		if params.Source != nil && (params.Command != "sync" || !params.Exact || len(params.Arguments) != 0) {
-			return nil, &rpc.Error{Code: "invalid_params", Message: "retained source requires exact sync without arguments"}
+			return nil, &rpc.Error{Code: rpc.CodeInvalidParams, Message: "retained source requires exact sync without arguments"}
 		}
 		if params.Export != nil && (params.Command != "export" || !params.Exact || len(params.Arguments) != 0 || params.Source != nil) {
-			return nil, &rpc.Error{Code: "invalid_params", Message: "retained export requires exact export without arguments or copy source"}
+			return nil, &rpc.Error{Code: rpc.CodeInvalidParams, Message: "retained export requires exact export without arguments or copy source"}
 		}
 		if params.TargetYard != nil {
 			request, err := parseInitArguments(params.Arguments)
 			if params.Command != "init" || !params.Exact || params.Source != nil || params.Export != nil ||
 				!domain.SafeName(*params.TargetYard) || *params.TargetYard == "default" ||
 				err != nil || request.profile == "" {
-				return nil, &rpc.Error{Code: "invalid_params", Message: "targetYard requires exact init with a profile and a safe non-default yard name"}
+				return nil, &rpc.Error{Code: rpc.CodeInvalidParams, Message: "targetYard requires exact init with a profile and a safe non-default yard name"}
 			}
 		}
 		definition, ok := handler.cli.manifest.Lookup(params.Command)
@@ -4193,38 +4178,38 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 		}
 		if !ok || definition.Visibility != command.VisibilityPublic {
-			return nil, &rpc.Error{Code: "command_not_found", Message: params.Command}
+			return nil, &rpc.Error{Code: rpc.CodeCommandNotFound, Message: params.Command}
 		}
 		if handler.ownerServicesOnly && !handler.cli.declaredServiceCommand(definition) {
-			return nil, &rpc.Error{Code: "owner_configuration_invalid", Message: "workspace configuration is unavailable; only declared owner service operations are supported"}
+			return nil, &rpc.Error{Code: rpc.CodeOwnerConfigurationInvalid, Message: "workspace configuration is unavailable; only declared owner service operations are supported"}
 		}
 		if definition.Effect != command.EffectMutate {
-			return nil, &rpc.Error{Code: "command_not_mutating", Message: params.Command}
+			return nil, &rpc.Error{Code: rpc.CodeCommandNotMutating, Message: params.Command}
 		}
 		if definition.Handler == "@keys" && !credentialExactInvocation(definition, params.Arguments) {
-			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: "credentials require dedicated owner-local transport"}
+			return nil, &rpc.Error{Code: rpc.CodeInteractiveOrPayloadCommand, Message: "credentials require dedicated owner-local transport"}
 		}
 		if definition.Handler == "@config" && !configExactInvocation(handler.loaded, params.Arguments) {
-			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: "configuration authoring requires dedicated owner-local transport"}
+			return nil, &rpc.Error{Code: rpc.CodeInteractiveOrPayloadCommand, Message: "configuration authoring requires dedicated owner-local transport"}
 		}
 		if definition.Handler == "@resource" {
 			resource, found := handler.cli.resources.Lookup(params.Command)
 			if !found || !handler.cli.resourceExactInvocation(resource, params.Arguments) {
-				return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: "resource requires dedicated transport"}
+				return nil, &rpc.Error{Code: rpc.CodeInteractiveOrPayloadCommand, Message: "resource requires dedicated transport"}
 			}
 		}
 		if definition.Handler == "@integration" && !params.Exact {
-			return nil, &rpc.Error{Code: "exact_plan_required", Message: "integration requires operation-exact-plan-v1"}
+			return nil, &rpc.Error{Code: rpc.CodeExactPlanRequired, Message: "integration requires operation-exact-plan-v1"}
 		}
 		if params.Exact && handler.loaded.Context.AccessKind == domain.AccessRemote {
-			return nil, &rpc.Error{Code: "remote_owner_required", Message: "request the exact plan on the owner host"}
+			return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "request the exact plan on the owner host"}
 		}
 		behavior, err := resolveCoreCommand(definition)
 		if err != nil {
-			return nil, operationRPCError("invalid_params", err)
+			return nil, operationRPCError(rpc.CodeInvalidParams, err)
 		}
 		if behavior.prepare == nil || behavior.nonRPCReason != "" {
-			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
+			return nil, &rpc.Error{Code: rpc.CodeInteractiveOrPayloadCommand, Message: params.Command}
 		}
 		operationCLI := handler.cli.rpcOperation(call.OperationID)
 		operationLoaded := handler.loaded
@@ -4244,7 +4229,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, preparationRPCError(definition, err)
 			}
 			if operationLoaded.Context.AccessKind != domain.AccessLocal {
-				return nil, &rpc.Error{Code: "remote_owner_required", Message: "request the service operation on its owner host"}
+				return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "request the service operation on its owner host"}
 			}
 		}
 		if params.TargetYard != nil {
@@ -4258,7 +4243,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, preparationRPCError(definition, err)
 			}
 			if operationLoaded.Context.Paths.ConfigHome != handler.loaded.Context.Paths.ConfigHome {
-				return nil, &rpc.Error{Code: "owner_context_changed", Message: "bootstrap owner context changed; reconnect before planning"}
+				return nil, &rpc.Error{Code: rpc.CodeOwnerContextChanged, Message: "bootstrap owner context changed; reconnect before planning"}
 			}
 		}
 		if fault := operationCLI.admitRPCOperation(ctx, operationLoaded, definition, params.Arguments, false); fault != nil {
@@ -4285,10 +4270,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 		}()
 		if prepared.displayOnly != nil {
-			return nil, operationRPCError("command_not_mutating", errors.New("read-only commands do not require an operation plan"))
+			return nil, operationRPCError(rpc.CodeCommandNotMutating, errors.New("read-only commands do not require an operation plan"))
 		}
 		if params.StepSchema == 1 && (!prepared.stepsComplete || len(prepared.Plan.Steps) == 0) {
-			return nil, &rpc.Error{Code: "operation_steps_unsupported", Message: "this invocation does not supply a complete native step plan"}
+			return nil, &rpc.Error{Code: rpc.CodeOperationStepsUnsupported, Message: "this invocation does not supply a complete native step plan"}
 		}
 		plan := prepared.Plan
 		handler.plansMu.Lock()
@@ -4297,16 +4282,16 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			handler.plans = make(map[string]*preparedCommand)
 		}
 		if _, exists := handler.plans[plan.OperationID]; exists {
-			return nil, &rpc.Error{Code: "duplicate_plan", Message: plan.OperationID}
+			return nil, &rpc.Error{Code: rpc.CodeDuplicatePlan, Message: plan.OperationID}
 		}
 		if _, exists := handler.activeProjectCopies[plan.OperationID]; exists {
-			return nil, &rpc.Error{Code: "duplicate_plan", Message: plan.OperationID}
+			return nil, &rpc.Error{Code: rpc.CodeDuplicatePlan, Message: plan.OperationID}
 		}
 		if _, exists := handler.executingPlans[plan.OperationID]; exists {
-			return nil, &rpc.Error{Code: "duplicate_plan", Message: plan.OperationID}
+			return nil, &rpc.Error{Code: rpc.CodeDuplicatePlan, Message: plan.OperationID}
 		}
 		if len(handler.plans)+len(handler.activeProjectCopies)+len(handler.executingPlans) >= 64 {
-			return nil, &rpc.Error{Code: "too_many_plans", Message: "execute an existing plan or start a new RPC session"}
+			return nil, &rpc.Error{Code: rpc.CodeTooManyPlans, Message: "execute an existing plan or start a new RPC session"}
 		}
 		handler.plans[plan.OperationID] = prepared
 		keep = true
@@ -4320,7 +4305,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		return plan, nil
 
-	case "operation.execute":
+	case rpc.MethodOperationExecute:
 		var params struct {
 			Confirmed bool   `json:"confirmed"`
 			Digest    string `json:"digest,omitempty"`
@@ -4329,7 +4314,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, err
 		}
 		if !params.Confirmed {
-			return nil, &rpc.Error{Code: "confirmation_required", Message: "execute requires confirmed=true"}
+			return nil, &rpc.Error{Code: rpc.CodeConfirmationRequired, Message: "execute requires confirmed=true"}
 		}
 		handler.plansMu.Lock()
 		planned, ok := handler.plans[call.OperationID]
@@ -4344,7 +4329,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		handler.plansMu.Unlock()
 		if !ok {
-			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
+			return nil, &rpc.Error{Code: rpc.CodePlanNotFound, Message: call.OperationID}
 		}
 		retainCopy := false
 		defer func() {
@@ -4357,23 +4342,23 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}()
 		if bound {
 			if err := validateExactOperationPlan(exact, planned, params.Digest, handler.now()); err != nil {
-				return nil, operationRPCError("plan_binding_invalid", err)
+				return nil, operationRPCError(rpc.CodePlanBindingInvalid, err)
 			}
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
-			return nil, &rpc.Error{Code: "exact_plan_required", Message: "no exact plan is bound to this operation"}
+			return nil, &rpc.Error{Code: rpc.CodeExactPlanRequired, Message: "no exact plan is bound to this operation"}
 		}
 		if fault := planned.CLI.admitRPCOperation(ctx, planned.Loaded, planned.Definition, planned.Arguments, true); fault != nil {
 			return nil, fault
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {
-			return nil, &rpc.Error{Code: "remote_owner_required", Message: "execute this plan through owner-host SSH stdio"}
+			return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "execute this plan through owner-host SSH stdio"}
 		}
 		orchestrator := planned.CLI.operationOrchestrator(
 			call.OperationID, planned.Loaded, rpcOperationEvents{emit: emit}, &planned.Definition,
 		)
 		plan, err := planned.Confirm(ctx, orchestrator, true)
 		if err != nil {
-			return nil, operationRPCError("confirmation_failed", err)
+			return nil, operationRPCError(rpc.CodeConfirmationFailed, err)
 		}
 		result, err := planned.Execute(ctx, orchestrator, planned.CLI.options.Stderr)
 		if err != nil {
@@ -4385,20 +4370,20 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 			var commitErr *commandCommitError
 			if errors.As(err, &commitErr) {
-				return nil, &rpc.Error{Code: "state_commit_failed", Message: err.Error()}
+				return nil, &rpc.Error{Code: rpc.CodeStateCommitFailed, Message: err.Error()}
 			}
 			if errors.Is(err, domain.ErrPlanStale) || errors.Is(err, domain.ErrActionPolicyInvalid) ||
 				domain.ActionPolicyErrorClass(err) == domain.ActionPolicyInvalid {
-				return nil, operationRPCError("operation_failed", err)
+				return nil, operationRPCError(rpc.CodeOperationFailed, err)
 			}
 			return nil, err
 		}
 		if result.Status != "ok" {
-			return nil, &rpc.Error{Code: "adapter_failed", Message: result.ErrorCode}
+			return nil, &rpc.Error{Code: rpc.CodeAdapterFailed, Message: result.ErrorCode}
 		}
 		if planned.Project != nil && (planned.Project.ownerCopy != nil || planned.Project.ownerExport != nil) {
 			if !bound {
-				return nil, &rpc.Error{Code: "exact_plan_required", Message: "project copy requires an exact plan"}
+				return nil, &rpc.Error{Code: rpc.CodeExactPlanRequired, Message: "project copy requires an exact plan"}
 			}
 			handler.plansMu.Lock()
 			if handler.activeProjectCopies == nil {
@@ -4410,7 +4395,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 
 		return map[string]any{"plan": plan, "result": result}, nil
-	case "project.copy.finalize":
+	case rpc.MethodProjectCopyFinalize:
 		var params struct {
 			Digest string `json:"digest"`
 		}
@@ -4422,21 +4407,21 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		delete(handler.activeProjectCopies, call.OperationID)
 		handler.plansMu.Unlock()
 		if !exists {
-			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
+			return nil, &rpc.Error{Code: rpc.CodePlanNotFound, Message: call.OperationID}
 		}
 		defer copy.prepared.Close()
 		if !handler.now().Before(copy.exact.ExpiresAt) {
-			return nil, operationRPCError("plan_binding_invalid", fmt.Errorf("%w: operation plan expired", domain.ErrPlanStale))
+			return nil, operationRPCError(rpc.CodePlanBindingInvalid, fmt.Errorf("%w: operation plan expired", domain.ErrPlanStale))
 		}
 		if params.Digest == "" || params.Digest != copy.exact.Digest || params.Digest != exactOperationDigest(copy.prepared, copy.exact) {
-			return nil, &rpc.Error{Code: "plan_binding_invalid", Message: "project copy digest does not match the stored plan"}
+			return nil, &rpc.Error{Code: rpc.CodePlanBindingInvalid, Message: "project copy digest does not match the stored plan"}
 		}
 		result, err := copy.prepared.CLI.finalizeOwnerProjectTransfer(ctx, copy.prepared)
 		if err != nil {
-			return nil, operationRPCError("project_copy_failed", err)
+			return nil, operationRPCError(rpc.CodeProjectCopyFailed, err)
 		}
 		return map[string]any{"plan": copy.prepared.Plan, "result": result}, nil
-	case "operation.discard", "project.copy.abort":
+	case rpc.MethodOperationDiscard, rpc.MethodProjectCopyAbort:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
@@ -4450,13 +4435,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		delete(handler.exactPlans, call.OperationID)
 		handler.plansMu.Unlock()
 		if !exists {
-			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
+			return nil, &rpc.Error{Code: rpc.CodePlanNotFound, Message: call.OperationID}
 		}
 		if err := prepared.Close(); err != nil {
-			return nil, operationRPCError("plan_cleanup_failed", err)
+			return nil, operationRPCError(rpc.CodePlanCleanupFailed, err)
 		}
 		return map[string]any{"operationId": call.OperationID, "discarded": true}, nil
-	case "operation.route":
+	case rpc.MethodOperationRoute:
 		var params struct {
 			Command string `json:"command"`
 		}
@@ -4465,17 +4450,17 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		definition, ok := handler.cli.manifest.Lookup(params.Command)
 		if !ok || definition.Visibility != command.VisibilityPublic {
-			return nil, &rpc.Error{Code: "command_not_found", Message: params.Command}
+			return nil, &rpc.Error{Code: rpc.CodeCommandNotFound, Message: params.Command}
 		}
 		target, err := application.Route(handler.loaded.Context, domain.RemotePolicy(definition.Remote))
 		if err != nil {
-			return nil, &rpc.Error{Code: "route_denied", Message: err.Error()}
+			return nil, &rpc.Error{Code: rpc.CodeRouteDenied, Message: err.Error()}
 		}
 		return map[string]any{
 			"operationId": call.OperationID, "command": definition.Name, "effect": definition.Effect,
 			"target": target, "summary": definition.Summary,
 		}, nil
-	case "project.list":
+	case rpc.MethodProjectList:
 		var params struct {
 			Live bool `json:"live"`
 		}
@@ -4483,7 +4468,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, err
 		}
 		return handler.projects(ctx, params.Live)
-	case "profile.list":
+	case rpc.MethodProfileList:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
@@ -4493,13 +4478,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		query.cli = query.cli.rpcOperation(call.OperationID)
 		return boundedOwnerQuery(query.profileList(ctx))
-	case "session.prepare":
+	case rpc.MethodSessionPrepare:
 		var params ownerapi.SessionParams
 		if err := decodeRPCParams(call.Params, &params); err != nil {
 			return nil, err
 		}
 		return boundedOwnerQuery(handler.prepareSession(ctx, params))
-	case "settings.list":
+	case rpc.MethodSettingsList:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
@@ -4508,45 +4493,45 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, err
 		}
 		return boundedOwnerQuery(query.settingsList())
-	case "host.sync.status":
+	case rpc.MethodHostSyncStatus:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
 		return boundedOwnerQuery(handler.hostSyncStatus(ctx))
-	case "release.readiness":
+	case rpc.MethodReleaseReadiness:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
 		return handler.cli.releaseReadiness(ctx), nil
-	case "owner.inventory":
+	case rpc.MethodOwnerInventory:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
 		inventory, err := handler.cli.rpcOperation(call.OperationID).ownerInventoryReadOnly(ctx, handler.loaded)
 		if err != nil {
-			return nil, &rpc.Error{Code: "owner_inventory_failed", Message: err.Error()}
+			return nil, &rpc.Error{Code: rpc.CodeOwnerInventoryFailed, Message: err.Error()}
 		}
 		return inventory, nil
-	case "yard.status", "yard.status.profile-dashboards":
+	case rpc.MethodYardStatus, rpc.MethodYardStatusProfileDashboards:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
 		status, err := handler.status(ctx)
-		if call.Method == "yard.status" {
+		if call.Method == rpc.MethodYardStatus {
 			status = handler.cli.legacyDashboardStatus(status)
 		}
 		return status, err
-	case "credential.list":
+	case rpc.MethodCredentialList:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
 		return handler.credentials().ListMetadata(ctx)
-	case "credential.status":
+	case rpc.MethodCredentialStatus:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
 		return handler.credentialStatus(ctx)
-	case "incus.events":
+	case rpc.MethodIncusEvents:
 		var params struct {
 			Types []string `json:"types"`
 		}
@@ -4557,11 +4542,11 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			params.Types = []string{"lifecycle", "operation"}
 		}
 		if len(params.Types) > 8 {
-			return nil, &rpc.Error{Code: "invalid_params", Message: "too many Incus event types"}
+			return nil, &rpc.Error{Code: rpc.CodeInvalidParams, Message: "too many Incus event types"}
 		}
 		for _, eventType := range params.Types {
 			if !domain.SafeName(eventType) {
-				return nil, &rpc.Error{Code: "invalid_params", Message: "invalid Incus event type"}
+				return nil, &rpc.Error{Code: rpc.CodeInvalidParams, Message: "invalid Incus event type"}
 			}
 		}
 		incusPort, _ := handler.cli.statusPorts()
@@ -4582,14 +4567,14 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 					continue
 				}
 				if streamErr != nil {
-					return nil, &rpc.Error{Code: "incus_disconnected", Message: streamErr.Error()}
+					return nil, &rpc.Error{Code: rpc.CodeIncusDisconnected, Message: streamErr.Error()}
 				}
 			case <-ctx.Done():
 				return nil, context.Cause(ctx)
 			}
 		}
 		return map[string]any{"closed": true}, nil
-	case "system.snapshot", "system.resync":
+	case rpc.MethodSystemSnapshot, rpc.MethodSystemResync:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
@@ -4613,22 +4598,22 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			Context: handler.loaded.Context, Commands: handler.commands(), Projects: projects,
 			Status: status, Credentials: credentials, CredentialStatus: credentialStatus,
 		}
-		revision, err := emit("snapshot.ready", map[string]any{"complete": true})
+		revision, err := emit(rpc.EventSnapshotReady, map[string]any{"complete": true})
 		if err != nil {
 			return nil, err
 		}
 		snapshot.Revision = revision
 		return snapshot, nil
-	case "system.ping":
-		if _, err := emit("operation.started", map[string]any{"method": call.Method}); err != nil {
+	case rpc.MethodSystemPing:
+		if _, err := emit(rpc.EventOperationStarted, map[string]any{"method": call.Method}); err != nil {
 			return nil, err
 		}
-		if _, err := emit("operation.finished", map[string]any{"method": call.Method}); err != nil {
+		if _, err := emit(rpc.EventOperationFinished, map[string]any{"method": call.Method}); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true}, nil
 	default:
-		return nil, &rpc.Error{Code: "method_not_found", Message: call.Method}
+		return nil, &rpc.Error{Code: rpc.CodeMethodNotFound, Message: call.Method}
 	}
 }
 
@@ -4713,11 +4698,11 @@ func decodeRPCParams(raw json.RawMessage, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		return &rpc.Error{Code: "invalid_params", Message: err.Error()}
+		return &rpc.Error{Code: rpc.CodeInvalidParams, Message: err.Error()}
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return &rpc.Error{Code: "invalid_params", Message: "params have trailing data"}
+		return &rpc.Error{Code: rpc.CodeInvalidParams, Message: "params have trailing data"}
 	}
 	return nil
 }

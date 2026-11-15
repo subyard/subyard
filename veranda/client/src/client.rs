@@ -2230,7 +2230,7 @@ mod tests {
     use super::*;
     fn fixture(name: &str) -> Value {
         let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../api/yard-rpc/v1/fixtures")
+            .join("../contract/yard-rpc/v1/fixtures")
             .join(format!("{name}.json"));
         serde_json::from_slice::<Value>(&std::fs::read(file).unwrap()).unwrap()["result"].clone()
     }

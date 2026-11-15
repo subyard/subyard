@@ -15,13 +15,13 @@ import (
 	"github.com/Subyard/Subyard/internal/rpc"
 )
 
-const Capability = "owner-inventory-v1"
+const Capability = rpc.CapabilityOwnerInventoryV1
 
-const ReleaseReadinessCapability = "release-readiness-v1"
+const ReleaseReadinessCapability = rpc.CapabilityReleaseReadinessV1
 
 // ProfileDashboardStatusCapability preserves the legacy closed status response while
 // allowing controllers to render profile dashboard routes through VM guest SSH.
-const ProfileDashboardStatusCapability = "yard-status-profile-dashboards-v1"
+const ProfileDashboardStatusCapability = rpc.CapabilityYardStatusProfileDashboardsV1
 
 var errCapabilityUnsupported = errors.New("owner RPC capability unsupported")
 
@@ -97,7 +97,7 @@ func RefreshConnection(
 }
 
 func (client Client) fetch(ctx context.Context) (domain.OwnerInventory, error) {
-	raw, err := client.call(ctx, "inventory", "owner.inventory", Capability)
+	raw, err := client.call(ctx, "inventory", rpc.MethodOwnerInventory, Capability)
 	if err != nil {
 		return domain.OwnerInventory{}, err
 	}
@@ -112,9 +112,9 @@ func (client Client) fetch(ctx context.Context) (domain.OwnerInventory, error) {
 }
 
 func (client Client) YardStatus(ctx context.Context) (domain.YardStatus, error) {
-	raw, err := client.call(ctx, "status", "yard.status.profile-dashboards", ProfileDashboardStatusCapability)
+	raw, err := client.call(ctx, "status", rpc.MethodYardStatusProfileDashboards, ProfileDashboardStatusCapability)
 	if errors.Is(err, errCapabilityUnsupported) {
-		raw, err = client.call(ctx, "status", "yard.status", "yard-status")
+		raw, err = client.call(ctx, "status", rpc.MethodYardStatus, rpc.CapabilityYardStatus)
 	}
 	if err != nil {
 		return domain.YardStatus{}, err
@@ -127,7 +127,7 @@ func (client Client) YardStatus(ctx context.Context) (domain.YardStatus, error) 
 }
 
 func (client Client) ReleaseReadiness(ctx context.Context) (*domain.ReleaseReadiness, error) {
-	raw, err := client.call(ctx, "release-readiness", "release.readiness", ReleaseReadinessCapability)
+	raw, err := client.call(ctx, "release-readiness", rpc.MethodReleaseReadiness, ReleaseReadinessCapability)
 	if errors.Is(err, errCapabilityUnsupported) {
 		return nil, nil
 	}
@@ -149,7 +149,7 @@ func (client Client) call(ctx context.Context, id, method, capability string) (j
 	var request bytes.Buffer
 	codec := rpc.NewCodec(bytes.NewReader(nil), &request)
 	if err := codec.Write(rpc.Request{
-		Version: rpc.ProtocolVersion, Type: "request", ID: "negotiate", Method: "rpc.negotiate",
+		Version: rpc.ProtocolVersion, Type: "request", ID: "negotiate", Method: rpc.MethodRpcNegotiate,
 	}); err != nil {
 		return nil, err
 	}

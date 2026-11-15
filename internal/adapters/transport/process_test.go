@@ -19,6 +19,10 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func init() {
+	rpc.StrictErrorCodes = true
+}
+
 func TestRPCProcessHelper(t *testing.T) {
 	if os.Getenv("SUBYARD_RPC_PROCESS_HELPER") != "1" {
 		return
@@ -27,7 +31,7 @@ func TestRPCProcessHelper(t *testing.T) {
 		return map[string]any{"method": call.Method}, nil
 	})
 	err := (rpc.Session{
-		Handler: handler, Capabilities: []string{"snapshot"}, DrainOnEOF: true,
+		Handler: handler, Capabilities: []string{"snapshot", rpc.CapabilityOrderedEvents}, DrainOnEOF: true,
 	}).Serve(context.Background(), os.Stdin, os.Stdout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

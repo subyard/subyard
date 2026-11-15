@@ -2608,8 +2608,10 @@ before using old command names, preventing fallback to a historical owner's sele
 Owner-service SSH transport uses trusted installation paths independently of the controller's workspace
 configuration. If the RPC session yard is invalid, the existing stdio endpoint advertises a reduced
 capability set and accepts only declared owner-service plan, execute and discard calls. Other reads
-and mutations return `owner_configuration_invalid` before native effects. A service plan resolves its
-real runtime context before the existing release/admission gates; the restricted session does not
+and mutations requiring an unadvertised capability return `capability_missing` before native effects;
+undeclared methods return `method_not_found`. Planning a non-service command in this reduced context
+still returns `owner_configuration_invalid`. A service plan resolves its real runtime context before
+the existing release/admission gates; the restricted session does not
 bypass those gates. Remote status validates native service settings on the selected owner.
 
 ## Selected-yard cleanup

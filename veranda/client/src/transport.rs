@@ -2,6 +2,7 @@
 use crate::child_usage::{ChildKind, OwnedChild, UsageContext};
 use crate::local_fleet::{read_frame_captured, write_frame, NativeError};
 use crate::observation::{ReadProof, Source, Ticket, ValidatedEvent};
+use crate::vocabulary::{ErrorCode, PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -271,7 +272,7 @@ impl RpcClient {
                     Ok(frame) => frame,
                     Err(_) => break,
                 };
-                if frame.version != 1 {
+                if frame.version != PROTOCOL_VERSION {
                     break;
                 }
                 match frame.kind.as_str() {
@@ -385,9 +386,9 @@ impl RpcClient {
         }
         let raw = client.call("rpc.negotiate", "", json!({}), Duration::from_secs(8))?;
         let negotiation: Negotiation = serde_json::from_value(raw).map_err(|_| invalid())?;
-        if negotiation.version != 1
-            || negotiation.protocol_min > 1
-            || negotiation.protocol_max < 1
+        if negotiation.version != PROTOCOL_VERSION
+            || negotiation.protocol_min > PROTOCOL_VERSION
+            || negotiation.protocol_max < PROTOCOL_VERSION
             || !version(&negotiation.engine_version)
             || negotiation.capabilities.len() > 128
             || negotiation
@@ -518,7 +519,7 @@ impl RpcClient {
         }
         let id = format!("veranda-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         self.outgoing.lock().map_err(|_| disconnected())?.as_ref().ok_or_else(disconnected)?
-            .try_send(json!({"version":1,"type":"cancel","id":id,"operationId":operation_id}))
+            .try_send(json!({"version":PROTOCOL_VERSION,"type":"cancel","id":id,"operationId":operation_id}))
             .map_err(|_| NativeError::new("request_capacity", "The Yard cancellation queue is busy. Retry cancellation or disconnect the owner."))
     }
 
@@ -565,7 +566,7 @@ impl RpcClient {
                 },
             );
         }
-        let request = json!({"version":1,"type":kind,"id":id,"method":method,"operationId":operation_id,"params":params});
+        let request = json!({"version":PROTOCOL_VERSION,"type":kind,"id":id,"method":method,"operationId":operation_id,"params":params});
         let result = (|| {
             let outgoing = self.outgoing.lock().map_err(|_| disconnected())?;
             let outgoing = outgoing.as_ref().ok_or_else(disconnected)?;
@@ -616,7 +617,7 @@ impl RpcClient {
                     .filter(|request| !request.operation_id.is_empty())
                 {
                     let id = format!("veranda-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-                    let _ = outgoing.try_send(json!({"version":1,"type":"cancel","id":id,"operationId":request.operation_id}));
+                    let _ = outgoing.try_send(json!({"version":PROTOCOL_VERSION,"type":"cancel","id":id,"operationId":request.operation_id}));
                 }
             }
         }
@@ -744,90 +745,65 @@ fn disconnected() -> NativeError {
     )
 }
 
-/// Codes the owner returns when its release or configuration gate refuses a
-/// mutation; `api/yard-rpc/v1/gate-error-codes.json` is the shared list.
-const GATE_ERROR_CODES: &[&str] = &[
-    "mutation_gate_failed",
-    "transition_required",
-    "transition-required",
-    "recovery-pending",
-    "registry-invalid",
-    "unsupported-epoch",
-    "unsupported-kind",
-    "confirmation-required",
-    "operation-declined",
-    "plan-stale",
-    "migration-stale",
-    "resource-conflict",
-    "precondition-blocked",
-    "dependency-unavailable",
-    "verification-failed",
-    "activation-ambiguous",
-    "recovery-ambiguous",
-    "journal-invalid",
-    "rollback-incompatible",
-    "rollback-expired",
-];
-
 fn public_fault(code: &str) -> NativeError {
-    let (code, message) = match code {
-        "plan_stale" | "plan_binding_invalid" => (
+    let (code, message) = match ErrorCode::parse(code) {
+        Some(ErrorCode::PlanStale) | Some(ErrorCode::PlanBindingInvalid) => (
             "plan_stale",
             "The owner state or plan changed. Refresh and request a new plan before applying.",
         ),
-        "plan_not_found" => (
+        Some(ErrorCode::PlanNotFound) => (
             "plan_not_found",
             "The plan expired or was already used. Request a new plan.",
         ),
-        "cancelled" => (
+        Some(ErrorCode::Cancelled) => (
             "cancelled",
             "The operation was cancelled. Refresh to observe the owner state.",
         ),
-        "confirmation_required" => (
+        Some(ErrorCode::ConfirmationRequired) => (
             "confirmation_required",
             "Review and confirm the exact owner plan before applying.",
         ),
-        "operation_steps_unsupported" | "method_not_found" | "incompatible_version" => (
+        Some(ErrorCode::OperationStepsUnsupported) | Some(ErrorCode::MethodNotFound) | Some(ErrorCode::IncompatibleVersion) => (
             "incompatible_engine",
             "This Subyard release does not support the requested schema or operation. Install Veranda and Subyard from the same release.",
         ),
-        "secret_forbidden" | "interactive_or_payload_command" => (
+        Some(ErrorCode::SecretForbidden) | Some(ErrorCode::InteractiveOrPayloadCommand) => (
             "protected_operation",
             "This operation requires the owner's protected terminal transport.",
         ),
-        "session_tool_unavailable" => (
+        Some(ErrorCode::SessionToolUnavailable) => (
             "session_tool_unavailable",
             "Install htop on the selected owner for CPU / RAM, or open its host shell.",
         ),
-        "session_yard_unavailable" => (
+        Some(ErrorCode::SessionYardUnavailable) => (
             "session_yard_unavailable",
             "This yard is stopped or unavailable. Start it explicitly before opening a session.",
         ),
-        "session_ssh_unavailable" | "session_host_key_unavailable" => (
+        Some(ErrorCode::SessionSshUnavailable) | Some(ErrorCode::SessionHostKeyUnavailable) => (
             "session_ssh_unavailable",
             "Reconcile the selected yard explicitly to prepare its verified VS Code SSH access.",
         ),
-        "session_project_unavailable" => (
+        Some(ErrorCode::SessionProjectUnavailable) => (
             "session_project_unavailable",
             "The selected project is no longer registered. Refresh the yard and select it again.",
         ),
-        "session_project_forbidden" => (
+        Some(ErrorCode::SessionProjectForbidden) => (
             "session_project_forbidden",
             "This yard role does not permit project sessions.",
         ),
-        "profile_catalog_invalid" => (
+        Some(ErrorCode::ProfileCatalogInvalid) => (
             "incompatible_engine",
             "The owner profile catalog is incompatible or invalid. Install Veranda and Subyard from the same release.",
         ),
-        "owner_configuration_invalid" => (
+        Some(ErrorCode::OwnerConfigurationInvalid) => (
             "owner_configuration_invalid",
             "The owner configuration or profile catalog is invalid. Review owner diagnostics and install Veranda and Subyard from the same release.",
         ),
-        "owner_context_changed" => (
+        Some(ErrorCode::OwnerContextChanged) => (
             "owner_context_changed",
             "The owner context changed. Reconnect and refresh before continuing.",
         ),
-        code if GATE_ERROR_CODES.contains(&code) => (
+        Some(code) if code.is_release_gate() => (
             "owner_repair_required",
             "The owner requires release or configuration repair before this operation.",
         ),
@@ -853,19 +829,13 @@ mod tests {
 
     #[test]
     fn every_shared_gate_error_code_maps_to_owner_repair() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../api/yard-rpc/v1/gate-error-codes.json"
-        ))
-        .unwrap();
-        let codes: Vec<&str> = fixture["codes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|code| code.as_str().unwrap())
-            .collect();
-        assert_eq!(codes, GATE_ERROR_CODES);
-        for code in codes {
-            assert_eq!(public_fault(code).code, "owner_repair_required", "{code}");
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../contract/yard-rpc/v1/vocabulary.json"))
+                .unwrap();
+        for (code, entry) in fixture["errorCodes"].as_object().unwrap() {
+            if entry["group"] == "release-gate" {
+                assert_eq!(public_fault(code).code, "owner_repair_required", "{code}");
+            }
         }
         assert_eq!(
             public_fault("migration_required").code,

@@ -7,3 +7,7 @@ pub mod observation;
 pub mod sessions;
 pub mod ssh;
 pub mod transport;
+pub mod vocabulary;
+
+#[cfg(test)]
+mod vocabulary_tests;

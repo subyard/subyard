@@ -64,9 +64,12 @@ class RustLintTest(unittest.TestCase):
 
     def test_rust_only_includes_lints_and_tests_after_failure(self):
         with patch.object(sys, "argv", ["check-veranda.py", "--rust-only"]), \
+                patch.object(runner, "check", return_value=0) as vocabulary, \
                 patch.object(runner, "rust_lint", return_value=7) as lint, \
                 patch.object(runner, "rust_check", return_value=9) as tests:
             self.assertEqual(runner.main(), 7)
+        vocabulary.assert_called_once_with("generated Rust RPC vocabulary", [
+            sys.executable, "veranda/dev/generate-vocabulary.py", "--check"], lint.call_args.args[0])
         lint.assert_called_once()
         tests.assert_called_once_with(lint.call_args.args[0])
 

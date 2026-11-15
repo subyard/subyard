@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "profile-list.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "yardName": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "selection": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "role": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "status": {
+                "enum": [
+                  "effective",
+                  "overridden",
+                  "unset"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 8192
+              }
+            },
+            "required": [
+              "scope",
+              "role",
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1024
+        },
+        "requested": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        },
+        "effective": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        }
+      },
+      "required": [
+        "value",
+        "requested",
+        "effective",
+        "present",
+        "provenance"
+      ],
+      "additionalProperties": false
+    },
+    "profiles": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "descriptorVersion": {
+            "const": 1
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "requested": {
+            "type": "boolean"
+          },
+          "effective": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "sourceGroup": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "provisionable": {
+            "type": "boolean"
+          },
+          "provisionScope": {
+            "enum": [
+              "shared",
+              "dedicated"
+            ]
+          },
+          "eligible": {
+            "type": "boolean"
+          },
+          "eligibility": {
+            "enum": [
+              "allowed",
+              "exclusive-role",
+              "dedicated-role-required",
+              "lifecycle-only",
+              "policy-disabled"
+            ]
+          },
+          "convergence": {
+            "enum": [
+              "unknown",
+              "not-applicable",
+              "current",
+              "changes-required"
+            ]
+          },
+          "diagnostic": {
+            "enum": [
+              "not-selected",
+              "role-restricted",
+              "yard-unavailable",
+              "yard-not-running",
+              "check-unavailable"
+            ]
+          },
+          "resources": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "maxItems": 1024
+          },
+          "hasYardPreset": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "selected",
+          "provisionable",
+          "provisionScope",
+          "eligible",
+          "eligibility",
+          "convergence",
+          "resources",
+          "hasYardPreset",
+          "requested",
+          "effective",
+          "reason",
+          "sourceGroup"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 1024
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "yardName",
+    "selection",
+    "profiles"
+  ],
+  "additionalProperties": false
+}

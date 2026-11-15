@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "operation-exact",
+  "result": {
+    "schema": 1,
+    "stepSchema": 1,
+    "plan": {
+      "operationId": "selection-1",
+      "command": "config",
+      "effect": "mutate",
+      "confirmation": "prompt-default-yes",
+      "target": "local-owner",
+      "steps": [
+        {
+          "id": "config.write",
+          "target": "default/ENVIRONMENT_PROFILES",
+          "observed": "sample",
+          "desired": "sample resource-only",
+          "decision": "apply",
+          "preconditions": [
+            "selection still matches reviewed value"
+          ],
+          "verify": "owner configuration equals desired value",
+          "consequence": "save yard profile selection"
+        }
+      ],
+      "confirmed": false,
+      "createdAt": "2026-01-01T00:00:00Z"
+    },
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expiresAt": "2026-01-01T00:05:00Z"
+  },
+  "operationId": "selection-1"
+}

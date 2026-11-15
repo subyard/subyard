@@ -29,7 +29,7 @@ func TestDrainOnEOFFlushesAcceptedResponses(t *testing.T) {
 	handler := HandlerFunc(func(_ context.Context, call Call, _ Emit) (any, error) {
 		return map[string]any{"method": call.Method}, nil
 	})
-	if err := (Session{Handler: handler, DrainOnEOF: true}).Serve(
+	if err := (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler, DrainOnEOF: true}).Serve(
 		context.Background(), &input, &output,
 	); err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestSessionNegotiationEventsAndCancellation(t *testing.T) {
 	started := make(chan struct{})
 	handler := HandlerFunc(func(ctx context.Context, call Call, emit Emit) (any, error) {
 		switch call.Method {
-		case "events":
+		case MethodIncusEvents:
 			if _, err := emit("started", map[string]any{"ok": true}); err != nil {
 				return nil, err
 			}
@@ -55,7 +55,7 @@ func TestSessionNegotiationEventsAndCancellation(t *testing.T) {
 				return nil, err
 			}
 			return map[string]any{"done": true}, nil
-		case "slow":
+		case MethodOperationExecute:
 			close(started)
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -66,7 +66,7 @@ func TestSessionNegotiationEventsAndCancellation(t *testing.T) {
 	client, server := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- (Session{Handler: handler, Capabilities: []string{"events"}}).Serve(context.Background(), server, server)
+		done <- (Session{Handler: handler, Capabilities: CapabilitiesForSession("workspace")}).Serve(context.Background(), server, server)
 	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
@@ -74,7 +74,7 @@ func TestSessionNegotiationEventsAndCancellation(t *testing.T) {
 		t.Fatal(response.Error)
 	}
 	writeRequest(t, codec, Request{
-		Version: 1, Type: "request", ID: "e", OperationID: "operation-events", Method: "events",
+		Version: 1, Type: "request", ID: "e", OperationID: "operation-events", Method: MethodIncusEvents,
 	})
 	first := readResponse(t, codec)
 	second := readResponse(t, codec)
@@ -86,7 +86,7 @@ func TestSessionNegotiationEventsAndCancellation(t *testing.T) {
 		t.Fatalf("unexpected event flow: %#v %#v %#v", first, second, third)
 	}
 	writeRequest(t, codec, Request{
-		Version: 1, Type: "request", ID: "slow", OperationID: "operation-slow", Method: "slow",
+		Version: 1, Type: "request", ID: "slow", OperationID: "operation-slow", Method: MethodOperationExecute,
 	})
 	<-started
 	writeRequest(t, codec, Request{Version: 1, Type: "cancel", ID: "cancel", OperationID: "operation-slow"})
@@ -113,14 +113,16 @@ func TestCompletedOperationIDCanBeReusedAfterItsResponse(t *testing.T) {
 	})
 	client, server := net.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	go func() {
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
 	for index := range 256 {
 		requestID := fmt.Sprintf("phase-%d", index)
 		writeRequest(t, codec, Request{
-			Version: 1, Type: "request", ID: requestID, OperationID: "operation-phases", Method: "phase",
+			Version: 1, Type: "request", ID: requestID, OperationID: "operation-phases", Method: MethodOperationPlan,
 		})
 		response := readResponse(t, codec)
 		if response.ID != requestID || response.Error != nil {
@@ -140,19 +142,21 @@ func TestSessionRejectsUnnegotiatedVersionAndSecrets(t *testing.T) {
 		return nil, nil
 	})
 	client, server := net.Pipe()
-	go func() { _ = (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	go func() {
+		_ = (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 2, Type: "request", ID: "version", Method: "rpc.negotiate"})
 	if response := readResponse(t, codec); response.Error == nil || response.Error.Code != "incompatible_version" {
 		t.Fatalf("version accepted: %#v", response)
 	}
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "early", Method: "read"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "early", Method: MethodContextGet})
 	if response := readResponse(t, codec); response.Error == nil || response.Error.Code != "negotiation_required" {
 		t.Fatalf("unnegotiated call accepted: %#v", response)
 	}
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "secret", Method: "read", Params: json.RawMessage(`{"apiToken":"x"}`)})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "secret", Method: MethodContextGet, Params: json.RawMessage(`{"apiToken":"x"}`)})
 	if response := readResponse(t, codec); response.Error == nil || response.Error.Code != "secret_forbidden" {
 		t.Fatalf("secret-bearing call accepted: %#v", response)
 	}
@@ -169,13 +173,15 @@ func TestSessionAppliesRequestDeadline(t *testing.T) {
 	})
 	client, server := net.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	go func() {
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
 	expired := time.Unix(1, 0).UTC()
 	writeRequest(t, codec, Request{
-		Version: 1, Type: "request", ID: "expired", Method: "slow", Deadline: &expired,
+		Version: 1, Type: "request", ID: "expired", Method: MethodOperationExecute, Deadline: &expired,
 	})
 	response := readResponse(t, codec)
 	if response.Error == nil || response.Error.Code != "deadline_exceeded" {
@@ -214,11 +220,13 @@ func TestDisconnectCancelsOperation(t *testing.T) {
 	})
 	client, server := net.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	go func() {
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "work", Method: "slow"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "work", Method: MethodOperationExecute})
 	_ = client.Close()
 	select {
 	case <-cancelled:
@@ -245,13 +253,13 @@ func TestBackpressureDisconnectsClientThatStopsReading(t *testing.T) {
 	defer client.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- (Session{Handler: handler, Buffer: 1, WriteStallTimeout: 50 * time.Millisecond}).Serve(
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler, Buffer: 1, WriteStallTimeout: 50 * time.Millisecond}).Serve(
 			context.Background(), server, server)
 	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "flood", Method: "events"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "flood", Method: MethodIncusEvents})
 	select {
 	case err := <-done:
 		if err == nil || !strings.Contains(err.Error(), "write stall timeout") {
@@ -308,14 +316,14 @@ func TestEventBurstKeepsSessionAndOperationsAlive(t *testing.T) {
 	release := make(chan struct{})
 	handler := HandlerFunc(func(ctx context.Context, call Call, emit Emit) (any, error) {
 		switch call.Method {
-		case "hold":
+		case MethodOperationPlan:
 			select {
 			case <-release:
 				return map[string]any{"held": true}, nil
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
-		case "burst":
+		case MethodIncusEvents:
 			for index := 0; index < burst; index++ {
 				if _, err := emit("incus.lifecycle", map[string]any{"index": index}); err != nil {
 					return nil, err
@@ -330,12 +338,14 @@ func TestEventBurstKeepsSessionAndOperationsAlive(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	done := make(chan error, 1)
-	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	go func() {
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold", Method: "hold"})
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "burst", Method: "burst"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold", Method: MethodOperationPlan})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "burst", Method: MethodIncusEvents})
 	// The burst outruns the writer, exercising overflow deterministically.
 	select {
 	case <-emitted:
@@ -381,7 +391,7 @@ func TestContextCancellationInterruptsBlockedRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- (Session{Handler: HandlerFunc(func(context.Context, Call, Emit) (any, error) {
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: HandlerFunc(func(context.Context, Call, Emit) (any, error) {
 			return nil, nil
 		})}).Serve(ctx, server, server)
 	}()
@@ -406,7 +416,9 @@ func TestSessionsGiveSecondClientIndependentOrderedStream(t *testing.T) {
 	for _, clientID := range []string{"first", "second"} {
 		client, server := net.Pipe()
 		done := make(chan error, 1)
-		go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+		go func() {
+			done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+		}()
 		codec := NewCodec(client, client)
 		writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 		_ = readResponse(t, codec)
@@ -478,8 +490,8 @@ func TestSessionConcurrentEventsFollowRevisionOrder(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- (Session{
+			Capabilities: CapabilitiesForSession("workspace"),
 			Handler:      handler,
-			Capabilities: []string{"ordered-events"},
 			Buffer:       operationCount * 2,
 		}).Serve(context.Background(), server, server)
 	}()
@@ -491,7 +503,7 @@ func TestSessionConcurrentEventsFollowRevisionOrder(t *testing.T) {
 	for index := range operationCount {
 		operationID := fmt.Sprintf("operation-%d", index)
 		writeRequest(t, codec, Request{
-			Version: 1, Type: "request", ID: operationID, OperationID: operationID, Method: "events",
+			Version: 1, Type: "request", ID: operationID, OperationID: operationID, Method: MethodIncusEvents,
 		})
 	}
 	events := 0
@@ -526,10 +538,10 @@ func TestSessionConcurrentEventsFollowRevisionOrder(t *testing.T) {
 func TestSnapshotAndFollowingEventsShareMonotonicSessionRevision(t *testing.T) {
 	handler := HandlerFunc(func(_ context.Context, call Call, emit Emit) (any, error) {
 		switch call.Method {
-		case "snapshot":
+		case MethodSystemSnapshot:
 			revision, err := emit("snapshot.ready", map[string]any{"complete": true})
 			return map[string]any{"revision": revision}, err
-		case "events":
+		case MethodIncusEvents:
 			_, err := emit("incus.lifecycle", map[string]any{"action": "started"})
 			return map[string]any{"closed": true}, err
 		default:
@@ -538,14 +550,16 @@ func TestSnapshotAndFollowingEventsShareMonotonicSessionRevision(t *testing.T) {
 	})
 	client, server := net.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	go func() {
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "s", Method: "snapshot"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "s", Method: MethodSystemSnapshot})
 	snapshotEvent := readResponse(t, codec)
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "e", Method: "events"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "e", Method: MethodIncusEvents})
 	lifecycleEvent := readResponse(t, codec)
 	_ = readResponse(t, codec)
 	if snapshotEvent.Sequence != 1 || snapshotEvent.Revision != 1 || lifecycleEvent.Sequence != 2 ||
@@ -595,7 +609,7 @@ func (reader *oneByteReader) Read(target []byte) (int, error) {
 func TestEventBurstWithConcurrentReaderKeepsSessionAlive(t *testing.T) {
 	const burst = 5000
 	handler := HandlerFunc(func(_ context.Context, call Call, emit Emit) (any, error) {
-		if call.Method != "burst" {
+		if call.Method != MethodIncusEvents {
 			return map[string]any{"method": call.Method}, nil
 		}
 		for index := 0; index < burst; index++ {
@@ -608,11 +622,13 @@ func TestEventBurstWithConcurrentReaderKeepsSessionAlive(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	done := make(chan error, 1)
-	go func() { done <- (Session{Handler: handler}).Serve(context.Background(), server, server) }()
+	go func() {
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
+	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "burst", Method: "burst"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "burst", Method: MethodIncusEvents})
 	var previous uint64
 	for {
 		frame := readResponse(t, codec)
@@ -644,7 +660,7 @@ func TestEventBurstWithConcurrentReaderKeepsSessionAlive(t *testing.T) {
 func TestOperationCapacityRefusesExcessRequestsAndKeepsCancellation(t *testing.T) {
 	release := make(chan struct{})
 	handler := HandlerFunc(func(ctx context.Context, call Call, _ Emit) (any, error) {
-		if call.Method == "hold" {
+		if call.Method == MethodOperationPlan {
 			select {
 			case <-release:
 				return map[string]any{"held": true}, nil
@@ -658,13 +674,13 @@ func TestOperationCapacityRefusesExcessRequestsAndKeepsCancellation(t *testing.T
 	defer client.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- (Session{Handler: handler, MaxOperations: 2}).Serve(context.Background(), server, server)
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler, MaxOperations: 2}).Serve(context.Background(), server, server)
 	}()
 	codec := NewCodec(client, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold-1", Method: "hold"})
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold-2", Method: "hold"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold-1", Method: MethodOperationPlan})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "hold-2", Method: MethodOperationPlan})
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "excess", Method: "system.ping"})
 	if response := readResponse(t, codec); response.ID != "excess" || response.Error == nil ||
 		response.Error.Code != "operation_capacity" {
@@ -701,7 +717,7 @@ func TestUnreadClientCannotGrowAdmittedRequests(t *testing.T) {
 	client, server := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- (Session{Handler: handler, Buffer: 1, MaxOperations: 4, WriteStallTimeout: time.Minute}).Serve(
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler, Buffer: 1, MaxOperations: 4, WriteStallTimeout: time.Minute}).Serve(
 			context.Background(), server, server)
 	}()
 	codec := NewCodec(client, client)
@@ -749,14 +765,14 @@ func TestSlowSteadyReaderReceivesLargeFrameWithoutStall(t *testing.T) {
 	defer client.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- (Session{Handler: handler, WriteStallTimeout: 100 * time.Millisecond}).Serve(
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler, WriteStallTimeout: 100 * time.Millisecond}).Serve(
 			context.Background(), server, server)
 	}()
 	codec := NewCodec(slowReader{reader: client, delay: 10 * time.Millisecond}, client)
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, codec)
 	started := time.Now()
-	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "large", Method: "large"})
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "large", Method: MethodOwnerInventory})
 	response := readResponse(t, codec)
 	result, _ := response.Result.(map[string]any)
 	if response.Error != nil || result["large"] != large {
