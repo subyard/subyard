@@ -38,23 +38,7 @@ func (transition *V2Transition) sourceWorkStable(observation v2Observation) bool
 		}
 	}
 	for _, work := range observation.work {
-		if work.kind() == v2LedgerWork {
-			continue
-		}
-		if work.kind() != v2SettingsWork || work.migration.Kind != localSSHPortMigration ||
-			!transition.localSSHPortScopeStable(work.intent) {
-			return false
-		}
-		if work.settingsFile() != nil {
-			if !work.settingsFile().LocalSSHPort || work.settingsFile().validate() != nil || settingsIntent(work.migration, *work.settingsFile()) != work.intent {
-				return false
-			}
-		} else if observation.journal == nil || !slices.ContainsFunc(observation.journal.Steps, func(step JournalStep) bool {
-			return step.ID == work.intent.ID && step.Migration == work.intent.Migration && step.Resource == work.intent.Resource &&
-				step.Decision == work.intent.Decision && step.Expected == work.intent.Expected && step.Desired == work.intent.Desired
-		}) {
-			// Completed CAS work may no longer have a fresh file plan. Its exact
-			// durable step was already checked by protected recovery observation.
+		if work.kind() != v2BaselineWork {
 			return false
 		}
 	}
@@ -116,13 +100,6 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 	if observation.checkpointAuthority {
 		checkpointSource = ""
 		hasLedgerWork := false
-		hasCurrentLedgerWork := false
-		for _, work := range observation.work {
-			if work.kind() == v2LedgerWork {
-				hasLedgerWork = true
-				hasCurrentLedgerWork = true
-			}
-		}
 		// Completed ledger steps retain their historical readiness scope, but
 		// cannot become ledger work in a fresh activation-only repair. That
 		// repair must bind the checkpoint its zero-step journal will resume against.
@@ -135,7 +112,6 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 			checkpointSource = observation.checkpointSnapshot.Fingerprint
 		} else if transition.options.MigrationCheckpoint && journal != nil &&
 			journal.Checkpoint == JournalComplete &&
-			!hasCurrentLedgerWork &&
 			ledgerCheckpointHasSuffix(observation.migrationLedgerSnapshot.Checkpoint) {
 			// A fresh compaction journal following a completed legacy transaction
 			// binds the unchanged checkpoint authority. A journal whose marked

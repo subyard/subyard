@@ -243,7 +243,7 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 		pending = append(pending, domain.Pending...)
 	}
 	slices.Sort(pending)
-	if !slices.Equal(pending, []string{"canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2", "complete-registered-guest-disk-tmp-v3", "introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3", "register-existing-local-yards-v3"}) {
+	if len(pending) != 0 {
 		t.Fatalf("pending migrations = %v: %s", pending, stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(fixture.configHome, "release-transition")); !errors.Is(err, os.ErrNotExist) {
@@ -370,6 +370,9 @@ func TestCurrentReadyProcessHelper(t *testing.T) {
 			}
 		case "ledger":
 			path := filepath.Join(request.ConfigHome, "release-transition", "v2", "ledger.json")
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				testkit.WriteFile(t, path, nil, 0600)
+			}
 			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -552,53 +555,45 @@ func TestCurrentTransitionRejectsVersionSelectionAndCurrentDrift(t *testing.T) {
 
 func TestCurrentTransitionReportsPartialLedgerAndHumanNextAction(t *testing.T) {
 	fixture := newCurrentProcessFixture(t)
-	registry, _, err := releasetransition.ParseRegistryV2(fixture.registry, releasetransition.BuiltinCapabilityCatalog())
+	fixture.candidate = writeV0111ProcessRuntime(t, fixture, "0.29.0-candidate", "0.29.0", fixture.candidateTx, fixture.registry)
+	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/"+string(fixture.candidate.release), filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	payload := mustReadFile(t, filepath.Join("..", "..", "releasetransition", "history_v028.json"))
+	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger, err := releasetransition.BaselineLedgerV2(registry).Advance(registry, registry.Migrations[0])
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
-	if err != nil {
+	ledgerPath := filepath.Join(fixture.configHome, "release-transition/v2/ledger.json")
+	if err := os.MkdirAll(filepath.Dir(ledgerPath), 0700); err != nil {
 		t.Fatal(err)
 	}
-	ledgerPath := filepath.Join(fixture.configHome, "release-transition", "v2", "ledger.json")
-	if err := os.MkdirAll(filepath.Dir(ledgerPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(ledgerPath, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, ledgerPath, ledger, 0600)
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
-	var stdout bytes.Buffer
-	runtime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &stdout})
+	runtime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &bytes.Buffer{}})
 	defer runtime.Close()
-	prepared, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check"}, fixture.configHome, "recovery-yard")
-	if err != nil {
-		t.Fatal(err)
+	_, err = runtime.PrepareCurrentTransition(context.Background(), []string{"--check"}, fixture.configHome, "default")
+	if err == nil || !strings.Contains(err.Error(), "migration-manual-repair-required:") {
+		t.Fatalf("below-floor current must require repair: %v", err)
 	}
-	if err := prepared.Execute(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	for _, wanted := range []string{"applied: " + registry.Migrations[0].ID, "pending: " + registry.Migrations[1].ID, "Next: yard migrate", "activation.runtime-config"} {
-		if !strings.Contains(stdout.String(), wanted) {
-			t.Fatalf("missing %q in %s", wanted, stdout.String())
-		}
-	}
-	if strings.Contains(stdout.String(), "activation setting") {
-		t.Fatalf("runtime action described as a setting: %s", stdout.String())
-	}
-	if !bytes.Equal(mustReadFile(t, ledgerPath), payload) {
-		t.Fatal("check rewrote partial ledger")
+	if !bytes.Equal(ledger, mustReadFile(t, ledgerPath)) {
+		t.Fatal("refusal changed protected history")
 	}
 }
 
 func newCurrentInterruptedFixture(t *testing.T, preactivation bool) v0111ProcessFixture {
 	t.Helper()
 	fixture, _ := newV0111ProcessFixture(t)
+	fixture.registry = mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json"))
+	seedExistingCurrentLedger(t, fixture.configHome, fixture.registry)
 	fixture.previous = fixture.source.release
 	fixture.candidate = writeV0111ProcessRuntime(t, fixture, string(fixture.candidate.release), "0.11.2", fixture.candidateTx, fixture.registry)
 	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "current")); err != nil {
@@ -848,6 +843,8 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			fixture, _ := newV0111ProcessFixture(t)
+			fixture.registry = mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json"))
+			seedExistingCurrentLedger(t, fixture.configHome, fixture.registry)
 			executable, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)

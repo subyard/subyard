@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,47 +14,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 )
-
-func TestSourceActivationCarriesOnlyUnverifiedNativeIntentDesired(t *testing.T) {
-	for _, scenario := range []string{"both", "verified", "ambiguous", "complete"} {
-		t.Run(scenario, func(t *testing.T) {
-			a, b := Fingerprint(strings.Repeat("a", 64)), Fingerprint(strings.Repeat("b", 64))
-			native := nativeMigrationWork(PlannerStepIntent{ID: "native", Resource: "yard.default", Desired: a}, MigrationDefinitionV2{Kind: registeredYardsMigration, Domain: "owner-registration", FromEpoch: 2, ToEpoch: 3})
-			guest := nativeMigrationWork(PlannerStepIntent{ID: "guest", Resource: "yard.default", Desired: b}, MigrationDefinitionV2{Kind: guestDiskTmpMigration, Domain: "power-metadata", FromEpoch: 2, ToEpoch: 3})
-			observation := v2Observation{work: []v2Work{native, guest}, journal: &JournalRecord{Checkpoint: JournalMigrating}}
-			if scenario == "verified" {
-				observation.journal.Steps = []JournalStep{{ID: "native", Checkpoint: StepVerified}}
-			}
-			if scenario == "complete" {
-				observation.journal.Checkpoint = JournalComplete
-			}
-			if scenario == "ambiguous" {
-				duplicate := native
-				duplicate.intent.Desired = b
-				observation.work = append(observation.work, duplicate, native)
-			}
-			transition := &V2Transition{}
-			transition.retainSourceActivationView(&observation, nil)
-			if scenario == "complete" {
-				if observation.sourceActivationView != nil {
-					t.Fatal("completed history supplied pending repair authority")
-				}
-				return
-			}
-			view := observation.sourceActivationView
-			if view == nil || view.GuestDiskTmp["yard.default"] != b {
-				t.Fatal("pending guest intent missing")
-			}
-			want := a
-			if scenario == "verified" || scenario == "ambiguous" {
-				want = ""
-			}
-			if view.RegisteredYards["yard.default"] != want {
-				t.Fatal("verified or ambiguous native work supplied repair authority")
-			}
-		})
-	}
-}
 
 type sourceProjectionBackend struct {
 	applied    map[string]Fingerprint
@@ -92,14 +52,7 @@ func (owner *sourceProjectionOwner) desired(view *V2SourceActivationView) (Finge
 	registered := owner.owner.state == OwnerRegistrationCurrent
 	salt := owner.backend.nativeSalt
 	if view != nil {
-		if view.OwnerRegistration == nil || view.OwnerRegistration.Registration != fingerprintPayload(settings.Content) {
-			return "", errors.New("projection did not receive the exact post-settings owner before-state")
-		}
-		registered = true
 		salt = owner.projectionSalt
-	}
-	if settings.Exists && registered && !strings.Contains(string(settings.Content), "YARD_TEMPLATE='test-vms'") {
-		return "", errors.New("projection did not receive canonical settings")
 	}
 	payload, err := json.Marshal(struct {
 		ID               string
@@ -159,7 +112,7 @@ func TestPreparedSourceActivationPreservesNativeObservationFailure(t *testing.T)
 				t.Fatal(err)
 			}
 			transition.options.fault = func(point string) error {
-				if point == "after-owner-registration-commit" {
+				if point == "after-source-import-apply" {
 					owners[0].observationErr = fmt.Errorf("private-native-wrapper: %w", sourceActivationDiagnosticError{conflict: conflict})
 					owners[1].warnings = []string{"z current warning", "a current warning", "z current warning"}
 				}
@@ -266,7 +219,7 @@ func restartSourceProjection(t *testing.T, original *V2Transition, owners []*sou
 }
 
 func TestPreparedSourceActivationSharesOneConsentAndReconstructsAfterRestart(t *testing.T) {
-	for _, fault := range []string{"", "after-journal-authorized", "ingress-apply", "after-source-import-apply", "after-settings-cas", "after-owner-registration-commit", "before-checkpoint-publication"} {
+	for _, fault := range []string{"", "after-journal-authorized", "ingress-apply", "after-source-import-apply", "after-source-import-apply", "before-checkpoint-publication"} {
 		t.Run(fault, func(t *testing.T) {
 			transition, source, owners, backend := sourceProjectionFixture(t)
 			if fault == "ingress-apply" {
@@ -311,15 +264,11 @@ func TestPreparedSourceActivationSharesOneConsentAndReconstructsAfterRestart(t *
 				t.Fatalf("completion: %#v grants=%d applies=%d err=%v", outcome, grants, backend.applies, err)
 			}
 			owner := owners[0].owner
-			wantCommits := 1
-			if fault == "after-owner-registration-commit" {
-				// A crash before recording evidence replays the guarded commit.
-				wantCommits = 2
+			imported, err := os.ReadFile(owner.path)
+			if err != nil || !bytes.Equal(imported, []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n")) || owner.commits != 0 {
+				t.Fatalf("ingress/retired owner state: %q commits=%d %v", imported, owner.commits, err)
 			}
-			canonical, err := os.ReadFile(owner.path)
-			if err != nil || !strings.Contains(string(canonical), "YARD_TEMPLATE='test-vms'") || strings.Contains(string(canonical), "NESTED_E2E_VMS") || owner.commits != wantCommits || owner.state != OwnerRegistrationCurrent {
-				t.Fatalf("canonical settings/owner commit: bytes=%q commits=%d state=%s err=%v", canonical, owner.commits, owner.state, err)
-			}
+
 			checkpoint, err := transition.store.ReadMigrationCheckpoint()
 			if err != nil || !checkpoint.Exists {
 				t.Fatalf("missing checkpoint: exists=%t err=%v", checkpoint.Exists, err)
@@ -351,7 +300,7 @@ func TestPreparedSourceActivationRejectsChangedProjectionBeforeSourceWrites(t *t
 }
 
 func TestPreparedSourceActivationRejectsUnexpectedNativeDesiredBeforeActivation(t *testing.T) {
-	for _, fault := range []string{"after-owner-registration-commit", "before-reconciler-0"} {
+	for _, fault := range []string{"after-source-import-apply", "before-reconciler-0"} {
 		t.Run(fault, func(t *testing.T) {
 			transition, _, _, backend := sourceProjectionFixture(t)
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
@@ -378,7 +327,7 @@ func TestPreparedSourceActivationRejectsUnexpectedNativeDesiredBeforeActivation(
 }
 
 func TestPreparedSourceActivationRestartRejectsChangedDesired(t *testing.T) {
-	for _, fault := range []string{"after-journal-authorized", "after-owner-registration-commit", "after-reconciling"} {
+	for _, fault := range []string{"after-journal-authorized", "after-source-import-apply", "after-reconciling"} {
 		t.Run(fault, func(t *testing.T) {
 			transition, source, owners, backend := sourceProjectionFixture(t)
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
@@ -404,13 +353,13 @@ func TestPreparedSourceActivationRestartRejectsChangedDesired(t *testing.T) {
 			if err != nil || resume.Resume == nil {
 				t.Fatalf("resume: %#v err=%v", resume, err)
 			}
-			if fault == "after-owner-registration-commit" {
+			if fault == "after-source-import-apply" {
 				observed, err := transition.observe(context.Background(), goal)
 				if err != nil || !observed.sourceActivationPrepared {
 					t.Fatalf("native-exact owner handoff lost prepared guards: prepared=%t err=%v", observed.sourceActivationPrepared, err)
 				}
 				transition.options.fault = func(point string) error {
-					if point == "after-ledger-verified" {
+					if point == "after-step-verified" {
 						backend.nativeSalt = "unexpected drift after owner handoff"
 					}
 					return nil
@@ -472,117 +421,5 @@ func TestPreparedSourceActivationCompletedJournalUsesNativeDesired(t *testing.T)
 	checkpoint, err := transition.store.ReadMigrationCheckpoint()
 	if err != nil || checkpoint.Exists {
 		t.Fatalf("completed drift published checkpoint: %t err=%v", checkpoint.Exists, err)
-	}
-}
-
-func TestPreparedSourceActivationFreshGoalAfterSyntheticCompletedRegistryPrefix(t *testing.T) {
-	for _, direction := range []Direction{DirectionActivateTarget, DirectionActivatePrevious} {
-		t.Run(string(direction), func(t *testing.T) {
-			original, _, owners, backend := sourceProjectionFixture(t)
-			options := original.options
-			options.SourceIngress, options.Ingress = nil, nil
-			options.MigrationCheckpoint = false
-			previous := ReleaseID("release-b")
-			links := ReleaseLinks{Active: "release-a", Previous: &previous}
-			options.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return links, nil }
-			options.Releases.Previous = &previous
-			var prefix RegistryV2
-			if err := json.Unmarshal(options.RegistryPayload, &prefix); err != nil {
-				t.Fatal(err)
-			}
-			prefix.Migrations = []MigrationDefinitionV2{}
-			prefix.CurrentEpochs = map[string]int{}
-			for domain, epoch := range prefix.MinimumEpochs {
-				prefix.CurrentEpochs[domain] = epoch
-			}
-			priorOptions := options
-			var err error
-			priorOptions.RegistryPayload, err = json.Marshal(prefix)
-			if err != nil {
-				t.Fatal(err)
-			}
-			priorOptions.NewTransactionID = func() TransactionID { return "tx-history-" + TransactionID(direction) }
-			backend.applied[owners[0].id] = digestD
-			prior, err := NewV2Transition(priorOptions)
-			if err != nil {
-				t.Fatal(err)
-			}
-			priorGoal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-			inspection, err := prior.Inspect(context.Background(), priorGoal)
-			if err != nil || len(inspection.Blockers) != 0 {
-				t.Fatal(inspection, err)
-			}
-			outcome, err := prior.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-			if err != nil || outcome.Status != StatusReady {
-				t.Fatal(outcome, err)
-			}
-			historySnapshot, err := prior.store.ReadCurrentJournal()
-			if err != nil {
-				t.Fatal(err)
-			}
-			history, err := ParseJournal(historySnapshot.Payload)
-			if err != nil || history.Checkpoint != JournalComplete || len(history.Steps) != 0 {
-				t.Fatal(history, err)
-			}
-			if err := os.MkdirAll(filepath.Dir(owners[0].settings), 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(owners[0].settings, []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2225\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			options.Releases.Target, options.Direction = previous, direction
-			if direction == DirectionActivatePrevious {
-				options.RollbackTarget = &RollbackTarget{Version: "0.25.2", RegistryDigest: fingerprintPayload(options.RegistryPayload)}
-			}
-			activations, grants := 0, 0
-			options.ActivateLinks = func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
-				activations++
-				old := pair.From
-				links = ReleaseLinks{Active: pair.Target, Previous: &old}
-				return links, nil
-			}
-			options.VerifyAuthorization = func(plan PlanToken, grant Authorization) bool { grants++; return grant == v2TestAuthorization(plan) }
-			options.NewTransactionID = func() TransactionID { return "tx-fresh-" + TransactionID(direction) }
-			options.fault = func(point string) error {
-				if point == "after-owner-registration-commit" {
-					return errors.New("pause after authorized source commit")
-				}
-				return nil
-			}
-			fresh, err := NewV2Transition(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			goal := Goal{Target: previous, Direction: direction}
-			prepared, err := fresh.observe(context.Background(), goal)
-			if err != nil || len(prepared.blockers) != 0 || !prepared.sourceActivationPrepared || prepared.observationScope == history.ObservationScope {
-				t.Fatalf("fresh source goal borrowed completed history: prepared=%t blockers=%v scope=%s history=%s err=%v", prepared.sourceActivationPrepared, prepared.blockers, prepared.observationScope, history.ObservationScope, err)
-			}
-			unchanged, err := fresh.store.ReadCurrentJournal()
-			if err != nil || !slices.Equal(unchanged.Payload, historySnapshot.Payload) {
-				t.Fatal("fresh planning rewrote historical grant", err)
-			}
-			inspection, err = fresh.Inspect(context.Background(), goal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			outcome, err = fresh.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-			if err != nil || outcome.Status != StatusRecovering || grants != 1 || activations != 0 {
-				t.Fatal(outcome, grants, activations, err)
-			}
-			options.fault = nil
-			resumed, err := NewV2Transition(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			inspection, err = resumed.Inspect(context.Background(), goal)
-			if err != nil || inspection.Resume == nil || *inspection.Resume == history.Transaction || len(inspection.Blockers) != 0 {
-				t.Fatal(inspection, err)
-			}
-			outcome, err = resumed.Converge(context.Background(), Execution{Plan: inspection.Plan})
-			if err != nil || outcome.Status != StatusReady || grants != 1 || activations != 1 {
-				t.Fatal(outcome, grants, activations, err)
-			}
-		})
 	}
 }

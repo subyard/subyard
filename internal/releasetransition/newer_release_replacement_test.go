@@ -331,8 +331,7 @@ func stuckAt(t *testing.T, point string) (string, *ReleaseLinks, *JournalReplace
 
 func TestNewerReleaseLeavesNoCleanupDebtAfterPartialJournal(t *testing.T) {
 	for _, point := range []string{
-		"after-journal-authorized", "after-recovery", "after-step-evidence", "after-settings-cas",
-		"after-step-applied", "after-step-verified", "after-ledger-cas", "after-ledger-verified",
+		"after-journal-authorized",
 		"after-activation-intent", "after-target-active", "after-reconciling",
 	} {
 		t.Run(point, func(t *testing.T) {
@@ -390,7 +389,7 @@ func TestNewerReleaseLeavesNoCleanupDebtAfterPartialJournal(t *testing.T) {
 }
 
 func TestNewerReleaseFailureAfterReplacementReportsItsOwnJournal(t *testing.T) {
-	for _, point := range []string{"after-replacement-journal-cas", "after-settings-cas", "before-journal-complete"} {
+	for _, point := range []string{"after-replacement-journal-cas", "after-reconciling", "before-journal-complete"} {
 		t.Run(point, func(t *testing.T) {
 			configHome, links, replacement := stuckAt(t, "after-journal-authorized")
 			candidate := newerReleaseCandidate(t, configHome, links, newerReleaseFix, "0.11.6", replacement, digestB, "tx-fix")

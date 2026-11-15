@@ -163,6 +163,29 @@ func newV0173RecoveryFixture(t *testing.T) v0111ProcessFixture {
 		ArtifactDigest:      v0111FixtureFingerprintBytes(mustReadFile(t, filepath.Join(fixture.source.root, "runtime-files.sha256"))),
 		VerifyAuthorization: func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool { return grant != "" },
 	}
+	// Seed the completed historical ledger directly; current code has no owner
+	// or settings writer. The unchanged hint tests exercise activation only.
+	registry, _, err := releasetransition.ParseRegistryV2(fixture.registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedLedger := releasetransition.BaselineLedgerV2(registry)
+	for _, migration := range registry.Migrations {
+		completedLedger, err = completedLedger.Advance(registry, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledgerPayload, _, err := releasetransition.MarshalLedgerV2(completedLedger, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := filepath.Join(fixture.configHome, "release-transition/v2/ledger.json")
+	if err := os.MkdirAll(filepath.Dir(ledgerPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, ledgerPath, ledgerPayload, 0600)
+
 	initial, err := releasetransition.NewV2Transition(options)
 	if err != nil {
 		t.Fatalf("new initial transition: %v", err)

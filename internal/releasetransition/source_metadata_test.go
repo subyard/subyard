@@ -20,73 +20,12 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 		}
 		t.Run(name, func(t *testing.T) {
 			transition, home, _ := v2TransitionFixture(t, nil)
-			store, err := NewPOSIXV2Store(home)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// The published predecessor completed settings/owner epoch 2 while
-			// power remained at epoch 1, before the new cross-domain ordering.
-			oldRegistry, oldDigest := transition.registry, transition.registryDigest
-			ledger := BaselineLedgerV2(oldRegistry)
-			path, err := oldRegistry.PendingPath(ledger)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, migration := range path {
-				ledger, err = ledger.Advance(oldRegistry, migration)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if ledger.Domains["owner-registration"].Epoch != 2 || ledger.Domains["power-metadata"].Epoch != 1 {
-				t.Fatal("fixture lost the historical cross-domain prefix")
-			}
-			payload, _, err := MarshalLedgerV2(ledger, oldRegistry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			missing, err := store.ReadLedger()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := store.CompareAndSwapLedger(missing, payload); err != nil {
-				t.Fatal(err)
-			}
-			prior, err := store.ReadMigrationLedger(oldRegistry, oldDigest)
-			if err != nil {
-				t.Fatal(err)
-			}
-			payload, err = os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			registry, digest, err := ParseRegistryV2(payload, BuiltinCapabilityCatalog())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := store.ConvertMigrationLedger(prior, oldRegistry, oldDigest, registry, digest); err != nil {
-				t.Fatal(err)
-			}
-			options := transition.options
-			// The historical prefix has real native rows in both epoch-3 migrations.
-			// A later same-release journal must not change their terminal grammar.
-			options.RegisteredYards = []V2ActivationReconciler{&v2TestReconciler{id: "yard.first"}, &v2TestReconciler{id: "yard.second"}}
-			options.GuestDiskTmp = []V2ActivationReconciler{&v2TestReconciler{id: "yard.first"}, &v2TestReconciler{id: "yard.second"}}
-			options.RegistryPayload = payload
-			options.MigrationCheckpoint, options.SourceMigrationCheckpoint = true, true
-			transition, err = NewV2Transition(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-			inspection, err := transition.Inspect(context.Background(), goal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-			if err != nil || outcome.Status != StatusReady {
-				t.Fatalf("historical prefix upgrade: %+v %v", outcome, err)
-			}
+			seedFrozenReaderTree(t, home, "noncanonical-history-complete.json", true)
+			transition.registry, transition.registryDigest = historyV028, historyV028Digest
+			transition.options.RegistryPayload = historyV028Payload
+			store := transition.store
+			registry, digest := historyV028, historyV028Digest
+
 			snapshot, err := store.ReadCurrentJournal()
 			if err != nil {
 				t.Fatal(err)
@@ -110,11 +49,11 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			if retained {
 				transition, store = interruptSourceMetadataActivation(t, transition, store)
 				transition.options.fault = nil
-				inspection, err = transition.Inspect(context.Background(), goal)
+				inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
 				if err != nil {
 					t.Fatal(err)
 				}
-				outcome, err = transition.Converge(context.Background(), Execution{Plan: inspection.Plan})
+				outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan})
 				if err != nil || outcome.Status != StatusReady {
 					t.Fatalf("same-release follow-up: %+v %v", outcome, err)
 				}
@@ -368,22 +307,12 @@ func completedSourceMetadataFixture(t *testing.T) (*V2Transition, *POSIXV2Store)
 func completedSourceMetadataFixtureWithOwner(t *testing.T, owner V2OwnerRegistration) (*V2Transition, *POSIXV2Store) {
 	t.Helper()
 	transition, home, _ := v2TransitionFixture(t, nil)
+	seedLegacyReaderFixture(t, home, owner != nil)
+	transition.options.MigrationCheckpoint = false
 	if owner != nil {
 		transition.options.OwnerRegistration = owner
 	}
-	inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-	if err != nil || outcome.Status != StatusReady {
-		t.Fatalf("complete fixture: %v %v", outcome, err)
-	}
-	store, err := NewPOSIXV2Store(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return transition, store
+	return transition, transition.store
 }
 
 func TestSourceMetadataCompletedProofDoesNotObserveHistoricalResources(t *testing.T) {

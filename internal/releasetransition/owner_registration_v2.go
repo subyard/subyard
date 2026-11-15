@@ -2,11 +2,7 @@ package releasetransition
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"strings"
 )
 
@@ -85,33 +81,6 @@ type ownerRegistrationRecoveryV1 struct {
 	Before        OwnerRegistrationObservation `json:"before"`
 }
 
-func inspectOwnerRegistrationV2(
-	ctx context.Context,
-	port V2OwnerRegistration,
-	prospective V2SettingsSnapshotView,
-) (*ownerRegistrationV2Plan, error) {
-	if port == nil {
-		return nil, fmt.Errorf("owner-registration capability is unavailable")
-	}
-	observation, err := port.Prepare(ctx, prospective)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateOwnerRegistrationObservation(observation); err != nil {
-		return nil, err
-	}
-	if observation.State == OwnerRegistrationAbsent || observation.State == OwnerRegistrationCurrent {
-		return nil, nil
-	}
-	desired := observation
-	desired.State = OwnerRegistrationCurrent
-	return &ownerRegistrationV2Plan{
-		Before:              observation,
-		ExpectedFingerprint: ownerRegistrationFingerprint(observation),
-		DesiredFingerprint:  ownerRegistrationFingerprint(desired),
-	}, nil
-}
-
 func validateOwnerRegistrationObservation(observation OwnerRegistrationObservation) error {
 	if err := validateOwnerRegistrationState(observation.State); err != nil {
 		return err
@@ -159,29 +128,6 @@ func ownerRegistrationFingerprint(observation OwnerRegistrationObservation) Fing
 	return fingerprintPayload(payload)
 }
 
-func desiredOwnerRegistrationObservation(
-	before OwnerRegistrationObservation,
-) OwnerRegistrationObservation {
-	desired := before
-	desired.State = OwnerRegistrationCurrent
-	return desired
-}
-
-func ownerRegistrationProgressFingerprint(
-	progress OwnerRegistrationProgress,
-	expected Fingerprint,
-	desired Fingerprint,
-) (Fingerprint, error) {
-	switch progress {
-	case OwnerRegistrationExpected, OwnerRegistrationInProgress:
-		return expected, nil
-	case OwnerRegistrationDesired:
-		return desired, nil
-	default:
-		return "", invalid("unknown owner-registration progress %q", progress)
-	}
-}
-
 func validateOwnerRegistrationRecovery(
 	recovery ownerRegistrationRecoveryV1,
 	journal JournalRecord,
@@ -201,14 +147,6 @@ func validateOwnerRegistrationRecovery(
 	return validateOwnerRegistrationObservation(recovery.Before)
 }
 
-func newOwnerRecoveryToken() (string, error) {
-	payload := make([]byte, 16)
-	if _, err := rand.Read(payload); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(payload), nil
-}
-
 func validateOwnerRecoveryToken(token string) error {
 	if len(token) != 32 {
 		return invalid("owner-registration recovery token is invalid")
@@ -219,23 +157,4 @@ func validateOwnerRecoveryToken(token string) error {
 		}
 	}
 	return nil
-}
-
-func ownerRegistrationDiagnosticBlocker(err error, contexts ...context.Context) (Blocker, bool) {
-	if len(contexts) > 0 {
-		recordMigrationDiagnostics(contexts[0], err)
-	}
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if !errors.As(err, &diagnostic) {
-		return Blocker{}, false
-	}
-	message, retry := publicActivationDiagnostic(err, "", "install a compatible release, then run yard update --check")
-	if message == "" {
-		return Blocker{}, false
-	}
-	code := CodeDependencyUnavailable
-	if nativeMigrationRefusal(err) {
-		code = CodePreconditionBlocked
-	}
-	return Blocker{Code: code, Resource: "owner-registration." + ownerRegistrationResource, Message: message, Retry: retry}, true
 }

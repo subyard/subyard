@@ -247,6 +247,13 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 	if err != nil || registryDigest != verified.registryDigest {
 		return errors.New("source release has invalid or foreign V2 registry provenance")
 	}
+	if activeErr == nil && active.GTE(semver.MustParse(UpdateAnchorVersion)) {
+		if err := store.RequireRetiredMigrationCompletion(registry, registryDigest); err != nil {
+			if errors.Is(err, releasetransition.ErrRetiredMigrationRepair) || !activatedTakeover {
+				return err
+			}
+		}
+	}
 	if activatedTakeover {
 		history, historyErr := store.ReadMigrationLedger(registry, registryDigest)
 		var pending []releasetransition.MigrationDefinitionV2
@@ -325,4 +332,35 @@ func (runtime *Runtime) unfinishedSourceAnchorError(ctx context.Context, runtime
 		return unfinishedBelowAnchorError(journal)
 	}
 	return nil
+}
+
+// The current caller must refuse retired source work even when the ordinary
+// protected route would delegate inspection/resume to an installed older owner.
+func (runtime *Runtime) retiredSourceWorkError(ctx context.Context, root, configHome string) error {
+	links, err := releasetransition.NewRuntimeLinkStore(root)
+	if err != nil {
+		return nil
+	}
+	observed, err := links.Observe()
+	if err != nil {
+		return nil
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: observed.Active, root: filepath.Join(root, "releases", string(observed.Active))}, root, nil)
+	if err != nil {
+		return nil
+	}
+	defer verified.Close()
+	version, err := semver.Parse(verified.version)
+	if err != nil || version.LT(semver.MustParse(UpdateAnchorVersion)) || !strings.HasPrefix(string(observed.Active), verified.version+"-") {
+		return nil
+	}
+	registry, _, err := readVerifiedTransitionRegistry(verified)
+	if err != nil {
+		return err
+	}
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return err
+	}
+	return store.RequireRetiredMigrationCompletion(registry, verified.registryDigest)
 }

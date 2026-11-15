@@ -604,6 +604,9 @@ func (runtime *Runtime) PrepareTransition(
 			return Prepared{}, refusal
 		}
 	}
+	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome); refusal != nil {
+		return Prepared{}, refusal
+	}
 	var completedAdmission *SourceAdmission
 	// The original inspection result stays the answer for a same-target retry.
 	originalProtected, originalErr := protected, err

@@ -20,10 +20,16 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 	if err := RequireReader(root, home); err == nil {
 		t.Fatal("absent reader boundary admitted publication writes")
 	}
-	payload, err := os.ReadFile(filepath.Join(root, "config", "release-transition.json"))
+	payload, err := os.ReadFile(filepath.Join(root, "internal/releasetransition/history_v028.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	currentRoot := root
+	root = testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/release-transition.json"), payload, 0600)
 	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +75,9 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 	write()
 	if err := RequireReader(root, home); err != nil {
 		t.Fatalf("committed epoch-3 reader not admitted: %v", err)
+	}
+	if err := RequireReader(currentRoot, home); err != nil {
+		t.Fatalf("completed v0.28 history not admitted by current floor: %v", err)
 	}
 	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)

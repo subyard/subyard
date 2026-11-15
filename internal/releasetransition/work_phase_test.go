@@ -12,96 +12,23 @@ import (
 
 func TestV2InvalidWorkRecipesRefuseBeforeWrites(t *testing.T) {
 	transition, home, _ := v2TransitionFixture(t, nil)
-	observation, err := transition.observe(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var valid v2Work
-	for _, work := range observation.work {
-		if work.kind() == v2SettingsWork {
-			valid = work
-			break
-		}
-	}
-	intent := valid.intent
+	transition.options.Ingress = &v2IngressFixture{}
+	operation := V2IngressOperation{Kind: V2SourceImport, Decision: DecisionTransform, Expected: digestA, Desired: digestB}
+	intent := ingressIntent(operation)
 	step := JournalStep{ID: intent.ID, Migration: intent.Migration, Resource: intent.Resource, Decision: intent.Decision, Expected: intent.Expected, Desired: intent.Desired, Checkpoint: StepIntent}
 	journal := JournalRecord{Transaction: "tx-refused-work", Releases: transition.options.Releases, Steps: []JournalStep{step}}
-	var nilSettings *settingsWorkRecipe
-	var nilOwner *ownerWorkRecipe
-	var nilLedger *ledgerWorkRecipe
-	var nilIngress *ingressWorkRecipe
-	recipes := []v2WorkRecipe{nil, nilSettings, nilOwner, nilLedger, nilIngress, &settingsWorkRecipe{}, &ownerWorkRecipe{}, &ledgerWorkRecipe{}, &ingressWorkRecipe{}, &recordedSettingsWork{intent: intent}}
-	payload, _, err := MarshalLedgerV2(BaselineLedgerV2(transition.registry), transition.registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := transition.store.CompareAndSwapLedger(absentProtectedSnapshot(), payload); err != nil {
-		t.Fatal(err)
-	}
-	settingsBefore, err := os.ReadFile(valid.settingsFile().Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := snapshotStoreV2Tree(t, home)
-	for _, recipe := range recipes {
-		work := v2Work{intent: intent, migration: valid.migration, recipe: recipe}
-		snapshot := absentProtectedSnapshot()
-		bound, bindErr := transition.bindWorkStep(journal, 0, work)
-		if bindErr == nil {
-			if _, err := transition.convergeStep(context.Background(), &journal, &snapshot, bound, observation.links); err == nil {
-				t.Fatalf("invalid recipe %T accepted", recipe)
-			}
+	before := snapshotStoreV2TreeIfPresent(t, home)
+	for _, work := range []v2Work{{intent: intent}, {intent: intent, recipe: &ingressWorkRecipe{}}} {
+		if _, err := transition.bindWorkStep(journal, 0, work); err == nil {
+			t.Fatal("invalid recipe accepted")
 		}
-		if !bytes.Equal(before, snapshotStoreV2Tree(t, home)) {
-			t.Fatalf("invalid recipe %T wrote protected state", recipe)
-		}
-		current, err := os.ReadFile(valid.settingsFile().Path)
-		if err != nil || !bytes.Equal(current, settingsBefore) {
-			t.Fatalf("invalid recipe %T changed settings", recipe)
+		if !bytes.Equal(before, snapshotStoreV2TreeIfPresent(t, home)) {
+			t.Fatal("invalid recipe wrote")
 		}
 	}
 }
 
 func TestV2WorkConstructorsOwnNestedInputs(t *testing.T) {
-	transition, _, _ := v2TransitionFixture(t, nil)
-	observation, err := transition.observe(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, work := range observation.work {
-		if work.kind() == v2SettingsWork {
-			file := *work.settingsFile()
-			file.Desired = append([]byte(nil), file.Desired...)
-			file.Expected.Content = append([]byte(nil), file.Expected.Content...)
-			file.Before = append([]settingsV2BeforeValue(nil), file.Before...)
-			migration := work.migration
-			migration.DependsOn = []string{"dependency"}
-			owned := settingsMigrationWork(work.intent, migration, file)
-			file.Desired[0] ^= 1
-			file.Expected.Content[0] ^= 1
-			file.Before[0].Value = "changed"
-			migration.DependsOn[0] = "changed"
-			if bytes.Equal(file.Desired, owned.settingsFile().Desired) || bytes.Equal(file.Expected.Content, owned.settingsFile().Expected.Content) || owned.settingsFile().Before[0].Value == "changed" || owned.migration.DependsOn[0] == "changed" {
-				t.Fatal("settings work aliases constructor input")
-			}
-		}
-		if work.kind() == v2LedgerWork {
-			from := work.ledgerRecipe().from
-			from.snapshot.Payload = append([]byte(nil), from.snapshot.Payload...)
-			to := append([]byte(nil), work.ledgerRecipe().to...)
-			owned := ledgerMigrationWork(work.intent, work.migration, work.ledgerRecipe().edge, from, to)
-			if len(from.snapshot.Payload) > 0 {
-				from.snapshot.Payload[0] ^= 1
-				if bytes.Equal(from.snapshot.Payload, owned.ledgerRecipe().from.snapshot.Payload) {
-					t.Fatal("ledger work aliases before bytes")
-				}
-			}
-			to[0] ^= 1
-			if bytes.Equal(to, owned.ledgerRecipe().to) {
-				t.Fatal("ledger work aliases after bytes")
-			}
-		}
-	}
 	previous := ReleaseID("previous")
 	binding := V2IngressBinding{Releases: ReleasePair{Previous: &previous}, Steps: []V2IngressStepBinding{{Kind: V2SourceImport}}}
 	work := ingressMigrationWork(PlannerStepIntent{}, V2IngressOperation{}, binding)
@@ -212,17 +139,11 @@ func TestV2RejectsTypedNilAdapters(t *testing.T) {
 
 func TestBoundWorkStepRejectsZeroForeignAndChangedEvidencePhase(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
-	observation, err := transition.observe(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var work v2Work
-	for _, candidate := range observation.work {
-		if candidate.kind() == v2SettingsWork {
-			work = candidate
-			break
-		}
-	}
+	operation := V2IngressOperation{Kind: V2SourceImport, Decision: DecisionTransform, Expected: digestA, Desired: digestB}
+	transition.options.Ingress = &v2IngressFixture{}
+	work := ingressMigrationWork(ingressIntent(operation), operation, V2IngressBinding{})
+	observation := v2Observation{links: ReleaseLinks{Active: "release-a"}}
+
 	intent := work.intent
 	step := JournalStep{ID: intent.ID, Migration: intent.Migration, Resource: intent.Resource, Decision: intent.Decision, Expected: intent.Expected, Desired: intent.Desired, Checkpoint: StepIntent}
 	journal := JournalRecord{Transaction: "tx-bound-step", Releases: transition.options.Releases, Steps: []JournalStep{step}}
@@ -308,9 +229,6 @@ func TestNewPhaseConsumersRejectNilOwners(t *testing.T) {
 	var transition *V2Transition
 	if _, err := transition.bindWorkStep(JournalRecord{}, 0, v2Work{}); err == nil {
 		t.Fatal("nil work owner accepted")
-	}
-	if err := transition.validateLedgerWork(v2Work{}, JournalStep{}); err == nil {
-		t.Fatal("nil ledger owner accepted")
 	}
 	if _, err := transition.observedReadyProof(v2Observation{}); err == nil {
 		t.Fatal("nil readiness producer accepted")

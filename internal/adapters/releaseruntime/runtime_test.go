@@ -627,7 +627,7 @@ func TestFrozenRollbackRequiresMatchingCheckpointProjection(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
 			root := filepath.Dir(filepath.Dir(fixture.engine))
-			payload, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "release-transition.json"))
+			payload, err := os.ReadFile(filepath.Join("..", "..", "releasetransition", "history_v028.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2207,7 +2207,7 @@ esac
 	if err := os.WriteFile(fixture.engine, []byte(engine), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	registry := []byte("{}\n")
+	registry := mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json"))
 	registryPath := filepath.Join(
 		fixture.runtimeRoot, "releases", fixture.target, "config", "release-transition.json",
 	)

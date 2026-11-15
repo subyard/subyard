@@ -535,97 +535,20 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 		t.Fatal(err)
 	}
 	if migrateSSH {
-		// Generate actual SSH pin and ledger evidence under compact authority,
-		// with the compatibility projection retained at settings epoch two.
-		if err := os.Remove(f.journalPath); err != nil {
-			t.Fatal(err)
-		}
-		before := releasetransition.BaselineLedgerV2(registry)
-		for _, migration := range registry.Migrations {
-			if migration.Kind == "local-ssh-port-settings-v2-to-v3" {
-				break
-			}
-			before, err = before.Advance(registry, migration)
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		payload, _, err := releasetransition.MarshalLedgerV2(before, registry)
-		if err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), payload, 0o600)
-		writeProfileTestFile(t, filepath.Join(home, config.GitSettingsRelativePath, "config.env"), []byte("SSH_PORT=2240\n"), 0o600)
-		writeProfileTestFile(t, filepath.Join(home, config.GitSettingsRelativePath, "yards/named/config.env"), []byte("SSH_PORT=2241\n"), 0o600)
-	}
-	ledger, err := store.ReadMigrationLedger(registry, digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ConvertMigrationLedger(ledger, registry, digest, registry, digest); err != nil {
-		t.Fatal(err)
-	}
-	if migrateSSH {
-		links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
-		if err != nil {
-			t.Fatal(err)
-		}
-		actual, err := links.Observe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		actor := &processDriftReconciler{converged: true}
-		transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
-			RegisteredYards: []releasetransition.V2ActivationReconciler{}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{},
-			ConfigHome: home, OperatorHome: f.cli.env["HOME"], CandidateConfigDir: filepath.Join(root, "config"), RegistryPayload: mustReadConfigFixture(t, filepath.Join(root, "config/release-transition.json")), ArtifactDigest: journal.ArtifactDigest,
-			Releases: releasetransition.ReleasePair{From: actual.Active, Previous: actual.Previous, Target: actual.Active}, MigrationCheckpoint: true, SourceMigrationCheckpoint: true,
-			NewTransactionID:  func() releasetransition.TransactionID { return journal.Transaction },
-			OwnerRegistration: releaseTransitionOwnerFixture{}, Reconcilers: []releasetransition.V2ActivationReconciler{actor},
-			ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() }, ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {
-				return links.Activate(pair)
-			},
-			VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		goal := releasetransition.Goal{Target: actual.Active, Direction: releasetransition.DirectionActivateTarget}
-		inspection, err := transition.Inspect(context.Background(), goal)
-		if err != nil {
-			t.Fatal(err)
-		}
-		outcome, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "fixture-original-grant"})
-		if err != nil || outcome.Status != releasetransition.StatusReady {
-			t.Fatalf("actual SSH history: %#v %v", outcome, err)
-		}
-		journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, f.journalPath))
-		if err != nil || journal.Checkpoint != releasetransition.JournalComplete || len(journal.Steps) != 5 {
-			t.Fatalf("actual completed pin evidence: steps=%d err=%v", len(journal.Steps), err)
-		}
-		for _, step := range journal.Steps {
-			if step.Checkpoint != releasetransition.StepVerified {
-				t.Fatal("SSH step not verified")
-			}
-		}
-		state, err := store.ReadMigrationLedger(registry, digest)
-		if err != nil || !state.Checkpointed || state.Ledger.Domains["settings"].Epoch != 3 {
-			t.Fatal("actual compact SSH authority missing")
-		}
-		legacy, _, err := releasetransition.ParseLedgerV2(state.ProjectionSnapshot.Payload, registry)
-		if err != nil || legacy.Domains["settings"].Epoch != 2 {
-			t.Fatal("compatibility projection not retained")
-		}
-		for yard, port := range map[string]string{"default": "2240", "named": "2241"} {
-			path := filepath.Join(home, "yards", yard, "config.env")
-			values, err := config.ReadAssignments(path)
-			info, statErr := os.Stat(path)
-			if err != nil || statErr != nil || values["SSH_PORT"] != port || info.Mode().Perm() != 0o600 {
-				t.Fatalf("native pinCAS missing for %s", yard)
-			}
-		}
+		seedCompletedSSHCheckpoint(t, home, registry, digest)
+		seedNativeSSHPins(t, home)
 		fake := f.cli.options.Incus.(*testkit.Incus)
 		fake.Instances["subyard-named/yard-named"] = ports.InstanceInfo{Project: "subyard-named", Name: "yard-named", Status: "Running"}
+	} else {
+		ledger, err := store.ReadMigrationLedger(registry, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ConvertMigrationLedger(ledger, registry, digest, registry, digest); err != nil {
+			t.Fatal(err)
+		}
 	}
+
 	env := append(slices.Clone(f.cli.options.Environment), "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	f.cli.options.RepositoryRoot, f.cli.options.Environment = root, env
 	platform := newInitPlatformFixture()

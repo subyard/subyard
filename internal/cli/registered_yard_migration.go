@@ -16,20 +16,6 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
-func (cli *CLI) registeredYardMigrations(request releasetransition.ProcessRequest, guestTmp bool) []releasetransition.V2ActivationReconciler {
-	names, err := config.YardNames(cli.options.RepositoryRoot+"/config", request.ConfigHome)
-	if err != nil {
-		return []releasetransition.V2ActivationReconciler{&migration.RegisteredYardMigration{Yard: "enumeration", LoadTargets: func(context.Context, releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
-			return nil, err
-		}}}
-	}
-	result := []releasetransition.V2ActivationReconciler{}
-	for _, name := range names {
-		result = append(result, cli.registeredYardMigration(request, guestTmp, name))
-	}
-	return result
-}
-
 func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest, guestTmp bool, yard string) releasetransition.V2ActivationReconciler {
 	return &migration.RegisteredYardMigration{Yard: yard, ConfigHome: request.ConfigHome, Resources: cli.resources, GuestTmp: guestTmp,
 		Retired: func(ctx context.Context, journal releasetransition.JournalRecord) (bool, error) {

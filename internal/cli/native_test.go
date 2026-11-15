@@ -1413,6 +1413,9 @@ func prepareCLIOldRelease(t *testing.T, runtimeRoot string) {
 
 func writeCLIUpdateInstaller(t *testing.T, repositoryRoot string) {
 	t.Helper()
+	registry := mustReadConfigFixture(t, filepath.Join("..", "..", "config/release-transition.json"))
+	writeCLIFile(t, filepath.Join(repositoryRoot, "scripts/fixture-release-transition.json"), string(registry), 0600)
+
 	script := strings.ReplaceAll(`#!/bin/sh
 set -eu
 if [ -n "${RELEASE_CAPTURE:-}" ]; then
@@ -1501,7 +1504,7 @@ esac
 ENGINE
 printf '%s\n' '#!/bin/sh' 'if [ -n "${YARD_ENGINE_PATH:-}" ]; then exec "$YARD_ENGINE_PATH" "$@"; fi' 'printf "%s\\n" "$*" >> "$ACTIVE_CAPTURE"' > "$destination/bin/yard"
 chmod 700 "$destination/bin/yard-engine" "$destination/bin/yard"
-printf '{}\n' > "$destination/config/release-transition.json"
+cp "$(dirname "$0")/fixture-release-transition.json" "$destination/config/release-transition.json"
 (cd "$destination" && sha256sum ./bin/yard ./bin/yard-engine ./config/release-transition.json > runtime-files.sha256)
 [ "$publish_only" = true ] || exit 64
 printf '%s\n' "$target"

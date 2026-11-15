@@ -84,6 +84,7 @@ func TestPendingFindingsCompleteRepairAndBlockOnlyCompletedReadiness(t *testing.
 			transition, _, _ := v2TransitionFixture(t, nil)
 			reconciled := []string{}
 			owner := &pendingFindingActivation{id: "hook-runtime", findings: []V2PendingConfiguration{yardFinding("named")}, untyped: scenario == "untyped", reconciled: &reconciled}
+			transition.options.MigrationCheckpoint = false
 			transition.options.Reconcilers = []V2ActivationReconciler{owner, &pendingFindingActivation{id: "later-owner", reconciled: &reconciled}}
 			outcome := convergeFresh(t, transition)
 			journal := readDeferredJournal(t, transition)
@@ -131,6 +132,7 @@ func TestResumedRepairWithPendingFindingsCompletes(t *testing.T) {
 		return nil
 	})
 	reconciled := []string{}
+	transition.options.MigrationCheckpoint = false
 	transition.options.Reconcilers = []V2ActivationReconciler{&pendingFindingActivation{id: "hook-runtime", findings: []V2PendingConfiguration{yardFinding("named")}, reconciled: &reconciled}}
 	if outcome := convergeFresh(t, transition); outcome.ReachedGoal || interrupt {
 		t.Fatalf("fixture interruption: %#v", outcome)
@@ -159,6 +161,7 @@ func TestDriftOfRecordedFactsKeepsRecovery(t *testing.T) {
 		t.Run(fmt.Sprintf("drift-after=%d", driftAfter), func(t *testing.T) {
 			transition, _, _ := v2TransitionFixture(t, nil)
 			reconciled := []string{}
+			transition.options.MigrationCheckpoint = false
 			transition.options.Reconcilers = []V2ActivationReconciler{&pendingFindingActivation{id: "hook-runtime",
 				findings: []V2PendingConfiguration{yardFinding("named")}, reconciled: &reconciled, driftAfter: driftAfter}}
 			outcome := convergeFresh(t, transition)
@@ -175,6 +178,7 @@ func TestPendingFindingDoesNotBlockAnotherOwnersRepair(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	reconciled := []string{}
 	other := &pendingFindingActivation{id: "other-owner", reconciled: &reconciled}
+	transition.options.MigrationCheckpoint = false
 	transition.options.Reconcilers = []V2ActivationReconciler{
 		&pendingFindingActivation{id: "hook-runtime", findings: []V2PendingConfiguration{yardFinding("named")}, reconciled: &reconciled}, other,
 	}
@@ -202,6 +206,7 @@ func TestManyPendingYardsKeepTheirOwnInitSteps(t *testing.T) {
 		findings = append(findings, yardFinding(fmt.Sprintf("a-rather-long-descriptive-yard-name-%02d", index)))
 	}
 	reconciled := []string{}
+	transition.options.MigrationCheckpoint = false
 	transition.options.Reconcilers = []V2ActivationReconciler{&pendingFindingActivation{id: "hook-runtime", findings: findings, reconciled: &reconciled}}
 	outcome := convergeFresh(t, transition)
 	if outcome.Status != StatusOperatorActionRequired || outcome.Retry != "yard -Y a-rather-long-descriptive-yard-name-00 init" ||
@@ -233,6 +238,7 @@ func TestManyPendingYardsWithOtherDriftStayWithinWarningBounds(t *testing.T) {
 	}
 	reconciled := []string{}
 	other := &pendingFindingActivation{id: "other-owner", reconciled: &reconciled}
+	transition.options.MigrationCheckpoint = false
 	transition.options.Reconcilers = []V2ActivationReconciler{&pendingFindingActivation{id: "hook-runtime", findings: findings, reconciled: &reconciled}, other}
 	convergeFresh(t, transition)
 	other.recorded = false

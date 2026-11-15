@@ -83,215 +83,7 @@ func pairedRegisteredOwners(t *testing.T) (*RegisteredYardMigration, *Registered
 	tmp := &RegisteredYardMigration{Yard: owner.Yard, ConfigHome: owner.ConfigHome, Resources: owner.Resources, GuestTmp: true, LoadTargets: owner.LoadTargets}
 	return owner, tmp, native, path
 }
-func TestBothConcreteRegisteredOwnersShareOneDurableJournal(t *testing.T) {
-	for _, cut := range []string{"complete", "after-ssh", "after-endpoint", "marker-cut", "vm-rtc-cut", "unrelated-after-endpoint", "inherited-after-endpoint", "implicit-default-no-endpoint"} {
-		t.Run(cut, func(t *testing.T) {
-			owner, tmp, native, path := pairedRegisteredOwners(t)
-			if cut == "vm-rtc-cut" {
-				instance := native.Instances["fixture/yard"]
-				instance.Type = domain.YardVM
-				for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
-					values["volatile.vm.rtc_adjustment"], values["volatile.vm.rtc_offset"] = "0", "0"
-				}
-				native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
-				original := owner.LoadTargets
-				loader := func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
-					targets, err := original(ctx, view)
-					for index := range targets {
-						targets[index].Loaded.Context.YardKind = domain.YardVM
-						targets[index].Runtime.Yard.YardKind = domain.YardVM
-					}
-					return targets, err
-				}
-				owner.LoadTargets, tmp.LoadTargets = loader, loader
-			}
-			candidate := registeredSSHConfigFixture(t)
-			gitPath := filepath.Join(owner.ConfigHome, ".sync/settings/config.env")
-			if err := os.MkdirAll(filepath.Dir(gitPath), 0700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, gitPath, []byte("SSH_PORT=2240\n"), 0600)
-			implicit := cut == "implicit-default-no-endpoint"
-			if implicit {
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, gitPath, []byte("# No legacy SSH override.\n"), 0600)
-				instance := native.Instances["fixture/yard"]
-				instance.Devices, instance.LocalDevices = map[string]map[string]string{}, map[string]map[string]string{}
-				native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
-			}
-			original := owner.LoadTargets
-			activeCut := ""
-			loader := func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
-				assignments, err := config.ReadAssignments(path)
-				if err != nil && !(implicit && errors.Is(err, os.ErrNotExist)) {
-					return nil, err
-				}
-				ssh := assignments["SSH_PORT"] == "2240"
-				endpoint := assignments["SAMPLE_PORT"] == "32000"
-				if activeCut == "after-ssh" && ssh && !endpoint || activeCut == "after-endpoint" && endpoint {
-					return nil, errors.New("durable settings cut")
-				}
-				targets, err := original(ctx, view)
-				for index := range targets {
-					targets[index].Loaded.Context.SSHPort = 2240
-					targets[index].Runtime.Yard.SSHPort = 2240
-				}
-				return targets, err
-			}
-			owner.LoadTargets, tmp.LoadTargets = loader, loader
-			payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":2,"power-metadata":2,"settings":2,"project-state":1},"currentEpochs":{"owner-registration":3,"power-metadata":3,"settings":3,"project-state":1},"migrations":[{"id":"local-ssh-v3","domain":"settings","fromEpoch":2,"toEpoch":3,"kind":"local-ssh-port-settings-v2-to-v3"},{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3","dependsOn":["local-ssh-v3"]},{"id":"guest-tmp-v3","domain":"power-metadata","fromEpoch":2,"toEpoch":3,"kind":"registered-guest-disk-tmp-v2-to-v3","dependsOn":["registered-v3"]}]}`)
-			options := releasetransition.V2Options{CandidateConfigDir: candidate, ConfigHome: owner.ConfigHome, RegistryPayload: payload, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, Direction: releasetransition.DirectionActivateTarget, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
-				return releasetransition.ReleaseLinks{Active: "release-a"}, nil
-			}, RegisteredEndpointSettings: owner.Resources.EndpointSettingNames(), RegisteredYards: []releasetransition.V2ActivationReconciler{owner}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{tmp}, VerifyAuthorization: func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool {
-				return grant == "confirmed"
-			}}
-			if implicit {
-				options.RegisteredEndpointSettings = nil
-			}
-			transition, err := releasetransition.NewV2Transition(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
-			inspection, err := transition.Inspect(context.Background(), goal)
-			if err != nil || len(inspection.Blockers) != 0 {
-				t.Fatalf("inspect: %#v %v", inspection, err)
-			}
-			if _, err := os.Lstat(filepath.Join(owner.ConfigHome, "host-id")); !errors.Is(err, os.ErrNotExist) || native.grants != 0 {
-				t.Fatal("read-only inspection created owner identity or native grants", err)
-			}
-			native.failTmp = cut == "marker-cut" || cut == "vm-rtc-cut"
-			activeCut = cut
-			if strings.HasSuffix(cut, "-after-endpoint") {
-				activeCut = "after-endpoint"
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			native.cancelTmp = cancel
-			outcome, err := transition.Converge(ctx, releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
-			if cut != "complete" && !implicit {
-				if err == nil && outcome.Status == releasetransition.StatusReady {
-					t.Fatal("cut was completed")
-				}
-				if (cut == "marker-cut" || cut == "vm-rtc-cut") && native.Instances["fixture/yard"].LocalConfig["user.subyard.resource.sample-server"] == "" {
-					t.Fatalf("registration did not finish before cut: %#v %v", outcome, err)
-				}
-				if cut == "unrelated-after-endpoint" {
-					content, err := os.ReadFile(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					testkit.WriteFile(t, path, append(content, []byte("UNRELATED=value\n")...), 0600)
-				}
-				if cut == "inherited-after-endpoint" {
-					testkit.WriteFile(t, gitPath, []byte("SSH_PORT=2241\n"), 0600)
-				}
-				if cut == "vm-rtc-cut" {
-					// Incus updates its clock bookkeeping and pending-reset flag across a real
-					// VM stop/start. Model only those lifecycle outputs before a fresh process
-					// resumes the same durable migration; policy readiness uses the existing leaf fixture.
-					instance := native.Instances["fixture/yard"]
-					for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
-						values["volatile.vm.rtc_adjustment"], values["volatile.vm.rtc_offset"] = "1", "-1"
-						values["volatile.vm.needs_reset"] = "true"
-					}
-					native.Instances["fixture/yard"], native.Reconcile.Instance = instance, instance
-				}
-				reopened := *owner
-				reopened.prepared = nil
-				reopened.observedActual = ""
-				reopened.observedDesired = ""
-				options.RegisteredYards = []releasetransition.V2ActivationReconciler{&reopened}
-				options.GuestDiskTmp = []releasetransition.V2ActivationReconciler{&RegisteredYardMigration{Yard: tmp.Yard, ConfigHome: tmp.ConfigHome, Resources: tmp.Resources, GuestTmp: true, LoadTargets: tmp.LoadTargets}}
-				native.failTmp = false
-				activeCut = ""
-				transition, err = releasetransition.NewV2Transition(options)
-				if err != nil {
-					t.Fatal(err)
-				}
-				inspection, err = transition.Inspect(context.Background(), goal)
-				if strings.HasSuffix(cut, "-after-endpoint") {
-					if err == nil && len(inspection.Blockers) == 0 {
-						t.Fatal("unrelated authorized input drift accepted")
-					}
-					if native.grants != 0 {
-						t.Fatal("native grant preceded drift refusal")
-					}
-					return
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				outcome, err = transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
-			}
-			if err != nil || outcome.Status != releasetransition.StatusReady {
-				t.Fatalf("converge: %#v %v", outcome, err)
-			}
-			if _, err := os.Lstat(filepath.Join(owner.ConfigHome, "host-id")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("compatibility migration created an unrelated owner HostID", err)
-			}
-			values, err := config.ReadAssignments(path)
-			if !implicit && (err != nil || values["SSH_PORT"] != "2240" || values["SAMPLE_HOST"] != "127.0.0.1" || values["SAMPLE_PORT"] != "32000") {
-				t.Fatalf("retained endpoint: %#v %v", values, err)
-			}
-			if implicit {
-				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("unneeded default settings file created", err)
-				}
-			}
-			if native.Instances["fixture/yard"].Config["user.subyard.disk_tmp"] != "v1" {
-				t.Fatal("tmp receipt absent")
-			}
-			store, err := releasetransition.NewPOSIXV2Store(owner.ConfigHome)
-			if err != nil {
-				t.Fatal(err)
-			}
-			registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.InspectSourceMetadata(registry, digest, options.RegisteredEndpointSettings...); err != nil {
-				t.Fatal("durable source admission", err)
-			}
-			beforeAdmission, err := store.ReadCurrentJournal()
-			if err != nil {
-				t.Fatal(err)
-			}
-			unprovenNames := [][]string{nil, {"SSH_PORT"}}
-			if implicit {
-				unprovenNames = nil
-			}
-			for _, unproven := range unprovenNames {
-				if _, err := store.InspectSourceMetadata(registry, digest, unproven...); err == nil {
-					t.Fatal("source history admitted without original descriptor vocabulary")
-				}
-			}
-			afterAdmission, err := store.ReadCurrentJournal()
-			if err != nil || string(beforeAdmission.Payload) != string(afterAdmission.Payload) {
-				t.Fatal("source inspection changed journal")
-			}
 
-			if implicit {
-				freshOwner, freshTmp := *owner, *tmp
-				freshOwner.prepared, freshTmp.prepared = nil, nil
-				freshOwner.observedActual, freshOwner.observedDesired = "", ""
-				freshTmp.observedActual, freshTmp.observedDesired = "", ""
-				options.RegisteredYards = []releasetransition.V2ActivationReconciler{&freshOwner}
-				options.GuestDiskTmp = []releasetransition.V2ActivationReconciler{&freshTmp}
-				transition, err = releasetransition.NewV2Transition(options)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			repeat, err := transition.Inspect(context.Background(), goal)
-			if err != nil || repeat.Assessment.Changed {
-				t.Fatalf("repeat: %#v %v", repeat, err)
-			}
-		})
-	}
-}
 func TestGuestTmpBindsInheritedNativeStateBeforeMutation(t *testing.T) {
 	for _, change := range []string{"config", "device", "profile", "volume"} {
 		t.Run(change, func(t *testing.T) {
@@ -424,29 +216,7 @@ func registeredSSHConfigFixture(t *testing.T) string {
 	return destination
 }
 
-type aliasRetryNative struct {
-	*registeredNativeFixture
-	applies int
-	cancel  context.CancelFunc
-}
-
-func (n *aliasRetryNative) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-	action := request.Command[len(request.Command)-1]
-	if action == "apply" {
-		n.applies++
-		if n.cancel != nil {
-			cancel := n.cancel
-			n.cancel = nil
-			cancel()
-			return ports.InstanceExecResult{}, context.Canceled
-		}
-	}
-	if action == "check" || action == "assess" {
-		return ports.InstanceExecResult{ExitCode: 10}, &ports.GuestExitError{Code: 10}
-	}
-	return n.registeredNativeFixture.Exec(ctx, project, name, request)
-}
-func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
+func TestRegisteredBindingRetainsVerifiedAssetAliases(t *testing.T) {
 	base, native, _ := registeredMigrationFixture(t)
 	root := filepath.Dir(registeredSSHConfigFixture(t))
 	if err := os.Mkdir(filepath.Join(root, "scripts"), 0700); err != nil {
@@ -470,7 +240,6 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 	}
 	defer second.Close()
 	aliases := []string{fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), first.Fd()), fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), second.Fd())}
-	executor := &aliasRetryNative{registeredNativeFixture: native}
 	makeOwners := func(alias string) (*RegisteredYardMigration, *RegisteredYardMigration, *testkit.Prompt) {
 		prompt := &testkit.Prompt{Answers: []bool{false}}
 		load := func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
@@ -486,43 +255,14 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			runtime := reconcileruntime.Runtime{RepositoryRoot: alias, Incus: native, Executor: executor, NetworkPolicy: restartNetwork{}, Yard: loaded.Context}
+			runtime := reconcileruntime.Runtime{RepositoryRoot: alias, Incus: native, Executor: native, NetworkPolicy: restartNetwork{}, Yard: loaded.Context}
 			return []RegisteredYardTarget{{Loaded: loaded, Runtime: runtime}}, nil
 		}
 		owner := &RegisteredYardMigration{Yard: "default", ConfigHome: base.ConfigHome, Resources: base.Resources, LoadTargets: load}
 		tmp := &RegisteredYardMigration{Yard: "default", ConfigHome: base.ConfigHome, Resources: base.Resources, LoadTargets: load, GuestTmp: true}
 		return owner, tmp, prompt
 	}
-	owner, tmp, prompt := makeOwners(aliases[0])
-	payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":2,"power-metadata":2},"currentEpochs":{"owner-registration":3,"power-metadata":3},"migrations":[{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3"},{"id":"guest-tmp-v3","domain":"power-metadata","fromEpoch":2,"toEpoch":3,"kind":"registered-guest-disk-tmp-v2-to-v3","dependsOn":["registered-v3"]}]}`)
-	options := releasetransition.V2Options{CandidateConfigDir: aliases[0] + "/config", ConfigHome: base.ConfigHome, RegistryPayload: payload, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, Direction: releasetransition.DirectionActivateTarget, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
-		return releasetransition.ReleaseLinks{Active: "release-a"}, nil
-	}, RegisteredEndpointSettings: base.Resources.EndpointSettingNames(), RegisteredYards: []releasetransition.V2ActivationReconciler{owner}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{tmp}, VerifyAuthorization: func(_ releasetransition.PlanToken, a releasetransition.Authorization) bool { return a == "confirmed" }}
-	goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
-	transition, err := releasetransition.NewV2Transition(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil || len(inspection.Blockers) != 0 {
-		t.Fatalf("initial inspect: %#v %v", inspection, err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	executor.cancel = cancel
-	_, _ = transition.Converge(ctx, releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
-	cancel()
-	if len(prompt.Requests) != 0 || executor.applies != 1 {
-		t.Fatalf("did not reach first interruption: prompts=%d apply=%d", len(prompt.Requests), executor.applies)
-	}
-	store, err := releasetransition.NewPOSIXV2Store(base.ConfigHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := store.ReadCurrentJournal()
-	if err != nil || !before.Exists {
-		t.Fatal("missing durable interrupted journal", err)
-	}
-	owner, tmp, prompt = makeOwners(aliases[1])
+	_, tmp, _ := makeOwners(aliases[1])
 	// Only immutable asset labels may disappear from the descriptive binding.
 	plans, err := tmp.plans(context.Background())
 	if err != nil {
@@ -592,33 +332,6 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 		t.Fatal("explicit operator file values collapsed across aliases")
 	}
 
-	options.CandidateConfigDir = aliases[1] + "/config"
-	options.RegisteredYards = []releasetransition.V2ActivationReconciler{owner}
-	options.GuestDiskTmp = []releasetransition.V2ActivationReconciler{tmp}
-	transition, err = releasetransition.NewV2Transition(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inspection, err = transition.Inspect(context.Background(), goal)
-	if err != nil || inspection.Resume == nil || len(inspection.Blockers) != 0 {
-		t.Fatalf("reopened inspect: %#v %v", inspection, err)
-	}
-	_, _ = transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"})
-	if len(prompt.Requests) != 0 || executor.applies != 2 {
-		t.Fatalf("did not reach resumed native attempt: prompts=%d apply=%d", len(prompt.Requests), executor.applies)
-	}
-	after, err := store.ReadCurrentJournal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldJournal, err := releasetransition.ParseJournal(before.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newJournal, err := releasetransition.ParseJournal(after.Payload)
-	if err != nil || oldJournal.Transaction != newJournal.Transaction {
-		t.Fatal("retry replaced interrupted transaction", err)
-	}
 }
 
 func TestRegisteredDesiredIgnoresVMRestartOutputs(t *testing.T) {
@@ -819,76 +532,5 @@ func TestGuestTmpCompletionDoesNotRequireOrdinaryInitialization(t *testing.T) {
 				t.Fatal("invalid inspection caused effects")
 			}
 		})
-	}
-}
-
-type cutActivation struct{ cut bool }
-
-func (*cutActivation) ID() string { return "activation-cut" }
-func (activation *cutActivation) Observe(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks) (releasetransition.V2ActivationObservation, error) {
-	desired := releasetransition.Fingerprint(strings.Repeat("a", 64))
-	if activation.cut {
-		return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(strings.Repeat("b", 64)), Desired: desired}, nil
-	}
-	return releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true}, nil
-}
-func (activation *cutActivation) Reconcile(context.Context, releasetransition.ReleaseLinks) error {
-	if activation.cut {
-		return errors.New("activation cut")
-	}
-	return nil
-}
-
-// A later process must resume activation after both native steps were verified.
-// Each owner's recorded Desired has to hold after the other owner's published result.
-func TestFreshProcessResumesActivationAfterBothRegisteredOwnersVerified(t *testing.T) {
-	owner, tmp, native, _ := pairedRegisteredOwners(t)
-	candidate := registeredSSHConfigFixture(t)
-	payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":2,"power-metadata":2},"currentEpochs":{"owner-registration":3,"power-metadata":3},"migrations":[{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3"},{"id":"guest-tmp-v3","domain":"power-metadata","fromEpoch":2,"toEpoch":3,"kind":"registered-guest-disk-tmp-v2-to-v3","dependsOn":["registered-v3"]}]}`)
-	activation := &cutActivation{cut: true}
-	options := releasetransition.V2Options{CandidateConfigDir: candidate, ConfigHome: owner.ConfigHome, RegistryPayload: payload, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
-		Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, Direction: releasetransition.DirectionActivateTarget,
-		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
-			return releasetransition.ReleaseLinks{Active: "release-a"}, nil
-		},
-		RegisteredEndpointSettings: owner.Resources.EndpointSettingNames(),
-		RegisteredYards:            []releasetransition.V2ActivationReconciler{owner}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{tmp},
-		Reconcilers: []releasetransition.V2ActivationReconciler{activation},
-		VerifyAuthorization: func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool {
-			return grant == "confirmed"
-		},
-	}
-	transition, err := releasetransition.NewV2Transition(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil || len(inspection.Blockers) != 0 {
-		t.Fatalf("inspect: %#v %v", inspection, err)
-	}
-	if outcome, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "confirmed"}); err == nil && outcome.Status == releasetransition.StatusReady {
-		t.Fatal("cut activation reported ready")
-	}
-	if native.Instances["fixture/yard"].LocalConfig["user.subyard.disk_tmp"] != "v1" {
-		t.Fatal("guest migration did not publish its marker before the cut")
-	}
-	reopened, reopenedTmp := *owner, *tmp
-	reopened.prepared, reopened.observedActual, reopened.observedDesired = nil, "", ""
-	reopenedTmp.prepared, reopenedTmp.observedActual, reopenedTmp.observedDesired = nil, "", ""
-	options.RegisteredYards = []releasetransition.V2ActivationReconciler{&reopened}
-	options.GuestDiskTmp = []releasetransition.V2ActivationReconciler{&reopenedTmp}
-	activation.cut = false
-	transition, err = releasetransition.NewV2Transition(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resumed, err := transition.Inspect(context.Background(), goal)
-	if err != nil || len(resumed.Blockers) != 0 || resumed.Resume == nil {
-		t.Fatalf("fresh process could not resume: %#v %v", resumed.Blockers, err)
-	}
-	outcome, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: resumed.Plan, Authorization: "confirmed"})
-	if err != nil || outcome.Status != releasetransition.StatusReady {
-		t.Fatalf("resume: %#v %v", outcome, err)
 	}
 }

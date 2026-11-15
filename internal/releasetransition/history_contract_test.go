@@ -73,11 +73,11 @@ func TestV2PhaseCompilerBoundaries(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	cases := map[string]string{
-		"positive":               `func contract(t *V2Transition,p runtimeReadyProof,r authorityLedgerRevision,e mh.Edge) { t.publishCheckpointAfterReady(context.Background(),JournalRecord{},p);t.cleanupReady(context.Background(),"tx",p);ledgerMigrationWork(PlannerStepIntent{},MigrationDefinitionV2{},e,r,nil) }`,
+		"positive":               `func contract(t *V2Transition,p runtimeReadyProof) { t.publishCheckpointAfterReady(context.Background(),JournalRecord{},p);t.cleanupReady(context.Background(),"tx",p) }`,
 		"completion-publication": `func contract(t *V2Transition,p mh.Completion) {t.publishCheckpointAfterReady(context.Background(),JournalRecord{},p)}`,
 		"completion-success":     `func contract(t *V2Transition,p mh.Completion) {t.readyResult(p)}`,
-		"projection-authority":   `func contract(p compatibilityProjectionRevision,e mh.Edge) {ledgerMigrationWork(PlannerStepIntent{},MigrationDefinitionV2{},e,p,nil)}`,
-		"wrong-recipe":           `func contract(p ownerRegistrationV2Plan) { _ = settingsWorkRecipe{file:p} }`,
+		"projection-authority":   `func contract(p compatibilityProjectionRevision,r RegistryV2) {r.PendingPath(p)}`,
+		"wrong-recipe":           `func contract(p OwnerRegistrationObservation) { _ = ingressWorkRecipe{operation:p} }`,
 		"raw-work-phase":         `func contract(t *V2Transition,p v2Work) {t.convergeStep(context.Background(),&JournalRecord{},&ProtectedSnapshot{},p,ReleaseLinks{})}`,
 	}
 	for name, body := range cases {

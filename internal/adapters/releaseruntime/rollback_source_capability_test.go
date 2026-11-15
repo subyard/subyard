@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Subyard/Subyard/internal/testkit"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func bindRollbackFixtureRegistry(t *testing.T, candidate publishedCandidate, registry []byte) {
@@ -25,125 +25,49 @@ func bindRollbackFixtureRegistry(t *testing.T, candidate publishedCandidate, reg
 }
 
 func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
-	for _, kind := range []string{"registered-yards-v2-to-v3", "registered-guest-disk-tmp-v2-to-v3", "complete", "newer-checkpoint", "pending-checkpoint", "invalid-ledger", "invalid-checkpoint", "invalid-registry", "unknown-kind", "known-old-pending"} {
-		t.Run(kind, func(t *testing.T) {
+	// The retired native handlers cannot be authorized through an older target's
+	// capability probe. Source admission refuses before target selection/effects.
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollback=%t", rollback), func(t *testing.T) {
 			root := testkit.TempDir(t)
 			home := filepath.Join(root, "config")
-			if err := os.MkdirAll(filepath.Join(home, "release-transition/v2"), 0700); err != nil {
+			if err := os.MkdirAll(home, 0700); err != nil {
 				t.Fatal(err)
 			}
-			registryPayload := mustReadFile(t, filepath.Join("..", "..", "..", "config/release-transition.json"))
-			registry, digest, err := releasetransition.ParseRegistryV2(registryPayload, releasetransition.BuiltinCapabilityCatalog())
+			runtimeRoot := filepath.Join(root, "runtime")
+			candidate := writeVersionedRuntimeCandidate(t, runtimeRoot, "0.28.1-aaaaaaaaaaaa", "0.28.1", `#!/bin/sh
+case "$1" in --version) echo 'yard-engine 0.28.1';; *) exit 71;; esac
+`)
+			payload := mustReadFile(t, filepath.Join("..", "..", "releasetransition", "history_v028.json"))
+			bindRollbackFixtureRegistry(t, candidate, payload)
+			if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(runtimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if kind == "known-old-pending" {
-				registry.Migrations = registry.Migrations[:4]
-				registry.CurrentEpochs["owner-registration"], registry.CurrentEpochs["power-metadata"] = 2, 2
-				registryPayload, err = json.Marshal(registry)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			ledger := releasetransition.BaselineLedgerV2(registry)
-			for _, migration := range registry.Migrations {
-				if migration.Kind == kind || kind == "known-old-pending" || kind == "pending-checkpoint" && migration.Kind == "registered-guest-disk-tmp-v2-to-v3" {
-					break
-				}
-				ledger, err = ledger.Advance(registry, migration)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			ledgerPayload, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
+			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
 			if err != nil {
 				t.Fatal(err)
 			}
-			ledgerPath := filepath.Join(home, "release-transition/v2/ledger.json")
-			checkpointPath := filepath.Join(home, "release-transition/v2/history-checkpoint.json")
-			testkit.WriteFile(t, ledgerPath, ledgerPayload, 0600)
-			if kind == "newer-checkpoint" || kind == "pending-checkpoint" {
-				if kind == "newer-checkpoint" {
-					// A newer producer compacts a completed prefix without rewriting
-					// the legacy projection. The exact older target reads that proof.
-					registry.CurrentEpochs["power-metadata"] = 4
-					registry.Migrations = append(registry.Migrations, releasetransition.MigrationDefinitionV2{ID: "future-publication-ledger-v4", Domain: "power-metadata", FromEpoch: 3, ToEpoch: 4, Kind: "owner-publication-state-v1"})
-					newer, err := json.Marshal(registry)
-					if err != nil {
-						t.Fatal(err)
-					}
-					registry, digest, err = releasetransition.ParseRegistryV2(newer, releasetransition.BuiltinCapabilityCatalog())
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-				store, err := releasetransition.NewPOSIXV2Store(home)
-				if err != nil {
-					t.Fatal(err)
-				}
-				state, err := store.ReadMigrationLedger(registry, digest)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := store.ConvertMigrationLedger(state, registry, digest, registry, digest); err != nil {
-					t.Fatal(err)
-				}
+			path := filepath.Join(home, "release-transition/v2/ledger.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
 			}
-			if kind == "invalid-ledger" || kind == "known-old-pending" {
-				// The known old producer contract does not require a ledger read.
-				testkit.WriteFile(t, ledgerPath, []byte("{invalid"), 0600)
-			}
-			if kind == "invalid-checkpoint" {
-				testkit.WriteFile(t, checkpointPath, []byte("{invalid"), 0600)
-			}
-			if kind == "invalid-registry" {
-				registryPayload = []byte("{}")
-			}
-			if kind == "unknown-kind" {
-				registryPayload = bytes.ReplaceAll(registryPayload, []byte("registered-yards-v2-to-v3"), []byte("unimplemented-owner-v4"))
-			}
-			response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`
-			candidate := writeRuntimeCandidateFixture(t, root, response)
-			bindRollbackFixtureRegistry(t, candidate, registryPayload)
-			for link, target := range map[string]string{"current": "releases/release-a", "previous": "releases/release-b"} {
-				if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			sourcePath := filepath.Join(home, "config.env")
-			testkit.WriteFile(t, sourcePath, []byte("SSH_PORT=2244\n"), 0600)
-			beforeLedger := mustReadFile(t, ledgerPath)
-			beforeCheckpoint, beforeErr := os.ReadFile(checkpointPath)
-			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: home, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious}
-			var output bytes.Buffer
-			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": filepath.Dir(home)}), Stdout: &output, Stderr: &output})
+			testkit.WriteFile(t, path, ledger, 0600)
+			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot}), Stdout: &bytes.Buffer{}})
 			defer runtime.Close()
-			prepared, err := prepareCandidateTransitionForTest(runtime, context.Background(), options{root: root}, candidate, request)
-			allowed := kind == "complete" || kind == "newer-checkpoint" || kind == "known-old-pending"
-			if allowed {
-				if err != nil || prepared.run == nil {
-					t.Fatalf("compatible history refused: prepared=%+v err=%v", prepared, err)
-				}
-			} else {
-				var refusal publicReleaseInspectionError
-				if !errors.As(err, &refusal) || refusal.outcome.Code != releasetransition.CodeRollbackIncompatible || prepared.run != nil {
-					t.Fatalf("opaque pending work exposed an unsupported owner for consent: prepared=%+v err=%v", prepared, err)
-				}
+			args := []string{"--runtime-root", runtimeRoot}
+			if rollback {
+				args = append(args, "--rollback")
 			}
-			if !bytes.Equal(mustReadFile(t, ledgerPath), beforeLedger) || string(mustReadFile(t, sourcePath)) != "SSH_PORT=2244\n" || output.Len() != 0 {
-				t.Fatal("rollback inspection changed protected state or requested consent")
+			_, err = runtime.PrepareTransition(context.Background(), args, home, "default")
+			if err == nil || !strings.Contains(err.Error(), "migration-manual-repair-required:") {
+				t.Fatalf("below-floor source was admitted: %v", err)
 			}
-			afterCheckpoint, afterErr := os.ReadFile(checkpointPath)
-			if !bytes.Equal(beforeCheckpoint, afterCheckpoint) || (beforeErr == nil) != (afterErr == nil) {
-				t.Fatal("rollback inspection changed checkpoint authority")
-			}
-			for link, target := range map[string]string{"current": "releases/release-a", "previous": "releases/release-b"} {
-				if actual, err := os.Readlink(filepath.Join(root, link)); err != nil || actual != target {
-					t.Fatal("rollback inspection changed stable links", actual, err)
-				}
-			}
-			if _, err := os.Stat(filepath.Join(home, "release-transition/v2/journal.json")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("rollback inspection published a journal", err)
+			if !bytes.Equal(ledger, mustReadFile(t, path)) {
+				t.Fatal("refusal rewrote source")
 			}
 		})
 	}
@@ -194,7 +118,7 @@ func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T)
 		name, scope, decision, probe                  string
 		resume, registryless, stale, allowed, queried bool
 	}{
-		{name: "aware-opaque-owner", queried: true, probe: "fixed", allowed: true},
+		{name: "aware-opaque-owner", queried: false, probe: "fixed", allowed: true},
 		{name: "aware-owner", queried: true, scope: "yard.test-yard", decision: "reset", probe: "fixed", allowed: true},
 		{name: "unknown-contract", queried: true, scope: "owner-registration", decision: "canonicalize", probe: "unknown"},
 		{name: "malformed-capability", queried: true, scope: "yard", decision: "canonicalize", probe: "malformed"},

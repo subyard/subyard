@@ -16,7 +16,7 @@ import (
 func TestGitIdentitySettingsArePortableStrings(t *testing.T) {
 	wantScopes := []SettingScope{ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand}
 	for _, name := range []string{"GIT_USER_NAME", "GIT_USER_EMAIL"} {
-		definition, ok := LookupSetting(name)
+		definition, ok := (Catalog{}).LookupSetting(name)
 		if !ok || definition.Kind != SettingScalar || definition.Type != SettingString ||
 			!definition.Syncable || definition.Owner != "yard-runtime" || definition.Application != SettingYardInit ||
 			!slices.Equal(definition.Scopes, wantScopes) {
@@ -325,9 +325,9 @@ func TestCatalogExportsDoNotChangeValidationOrDeclarations(t *testing.T) {
 		t.Fatal("export changed derived default")
 	}
 	// Core catalog values have the same ownership contract.
-	core, _ := LookupSetting("SSH_PORT")
+	core, _ := (Catalog{}).LookupSetting("SSH_PORT")
 	core.Scopes[0] = ScopeCommand
-	againCore, _ := LookupSetting("SSH_PORT")
+	againCore, _ := (Catalog{}).LookupSetting("SSH_PORT")
 	if againCore.Scopes[0] == ScopeCommand {
 		t.Fatal("core catalog aliases caller")
 	}

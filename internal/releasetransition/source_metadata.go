@@ -286,6 +286,16 @@ func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registr
 		}
 	}
 	for _, step := range journal.Steps {
+		if step.ID == baselineLedgerStep {
+			if err := validateTerminalBaseline(journal, step, registry); err != nil {
+				return err
+			}
+			if err := store.terminalStepArtifacts(journal, step, MigrationDefinitionV2{}); err != nil {
+				return err
+			}
+			last = step.Desired
+			continue
+		}
 		edge, known := edges[step.Migration]
 		if !known || !advanced[step.Migration] || step.Checkpoint != StepVerified || step.Evidence == nil {
 			return errors.New("source repair requires supported terminal migration evidence")
@@ -317,7 +327,11 @@ func (store *POSIXV2Store) terminalStepArtifacts(journal JournalRecord, step Jou
 	if step.Checkpoint != StepVerified || step.Evidence == nil {
 		return errors.New("terminal step is not verified")
 	}
-	if step.ID == migration.ID+".ledger" {
+	if step.ID == baselineLedgerStep {
+		if step.Evidence.Recovery != "" {
+			return invalid("baseline ledger evidence cannot carry recovery data")
+		}
+	} else if step.ID == migration.ID+".ledger" {
 		if step.Resource != "ledger."+migration.Domain || step.Decision != DecisionTransform || step.Evidence.Recovery != "" {
 			return errors.New("terminal ledger step grammar is unsupported")
 		}
@@ -405,7 +419,20 @@ func (store *POSIXV2Store) sourceRetainedTerminalEvidence(transaction Transactio
 		}
 		verified[step] = evidence
 	}
-	path, err := registry.PendingPath(BaselineLedgerV2(registry))
+	if evidence, exists := verified[baselineLedgerStep]; exists {
+		intent, _, err := baselineLedgerIntent(registry)
+		if err != nil {
+			return bound, err
+		}
+		bound.Releases = evidence.Releases
+		step := JournalStep{ID: intent.ID, Migration: intent.Migration, Resource: intent.Resource, Decision: intent.Decision, Expected: intent.Expected, Desired: intent.Desired, Checkpoint: StepVerified, Evidence: &evidence}
+		if err := validateTerminalBaseline(bound, step, registry); err != nil {
+			return bound, err
+		}
+		bound.Steps = append(bound.Steps, step)
+		delete(verified, baselineLedgerStep)
+	}
+	path, err := registry.historyData().PendingPath(BaselineLedgerV2(registry.historyData()))
 	if err != nil {
 		return bound, err
 	}

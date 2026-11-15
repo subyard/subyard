@@ -922,7 +922,7 @@ func TestConfigApplyRepairRejectsMissingCorruptAndPendingLedgers(t *testing.T) {
 			}
 		}},
 		{name: "pending", mutate: func(t *testing.T, path string) {
-			registryPayload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
+			registryPayload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "internal/releasetransition/history_v028.json"))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -35,26 +35,7 @@ func (transition *V2Transition) retainSourceActivationView(observation *v2Observ
 	if settings == nil {
 		settings = posixV2SettingsSnapshotView{configHome: transition.options.ConfigHome}
 	}
-	view := &V2SourceActivationView{Settings: settings, RegisteredYards: map[string]Fingerprint{}, GuestDiskTmp: map[string]Fingerprint{}}
-	for _, work := range observation.work {
-		verified := observation.journal != nil && slices.ContainsFunc(observation.journal.Steps, func(step JournalStep) bool { return step.ID == work.intent.ID && step.Checkpoint == StepVerified })
-		if work.kind() == v2NativeWork && nativeMigration(work.migration) && !verified {
-			desired := view.RegisteredYards
-			if work.migration.Kind == guestDiskTmpMigration {
-				desired = view.GuestDiskTmp
-			}
-			if before, exists := desired[work.intent.Resource]; exists && before != work.intent.Desired {
-				desired[work.intent.Resource] = "" // Ambiguous work supplies no proof.
-			} else {
-				desired[work.intent.Resource] = work.intent.Desired
-			}
-		}
-		if work.ownerPlan() != nil {
-			before := work.ownerPlan().Before
-			view.OwnerRegistration = &before
-		}
-	}
-	observation.sourceActivationView = view
+	observation.sourceActivationView = &V2SourceActivationView{Settings: settings, RegisteredYards: map[string]Fingerprint{}, GuestDiskTmp: map[string]Fingerprint{}}
 }
 
 func pendingSourceActivationWork(observation v2Observation) bool {
@@ -67,7 +48,7 @@ func pendingSourceActivationWork(observation v2Observation) bool {
 		journal = nil
 	}
 	for _, work := range observation.work {
-		if work.kind() != v2SettingsWork && work.kind() != v2OwnerWork && work.kind() != v2IngressWork && work.kind() != v2NativeWork {
+		if work.kind() != v2IngressWork {
 			continue
 		}
 		verified := false

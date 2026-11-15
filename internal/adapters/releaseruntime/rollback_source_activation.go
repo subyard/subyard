@@ -33,57 +33,6 @@ func rollbackHasSourceWork(inspection releasetransition.Inspection) bool {
 	return false
 }
 
-// These original producers declare every source mutation in Decisions; pending
-// metadata-only edges do not require another capability. New kinds stay opaque
-// until their inspection contract is explicitly established here.
-func rollbackSourceDecisionsComplete(kind string) bool {
-	switch kind {
-	case "test-vms-settings-v1-to-v2", "test-yard-owner-v1-to-v2",
-		"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1":
-		return true
-	default:
-		return false
-	}
-}
-
-func rollbackHasPendingOpaqueWork(ctx context.Context, target *verifiedPublishedCandidate, configHome string) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	registry, digest, err := readVerifiedTransitionRegistry(target)
-	if err != nil {
-		return false, err
-	}
-	opaque := false
-	for _, migration := range registry.Migrations {
-		opaque = opaque || !rollbackSourceDecisionsComplete(migration.Kind)
-	}
-	if !opaque {
-		return false, nil
-	}
-	store, err := releasetransition.NewPOSIXV2Store(configHome)
-	if err != nil {
-		return false, err
-	}
-	state, err := store.ReadMigrationLedger(registry, digest)
-	if err != nil {
-		return false, err
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	pending, err := registry.PendingPath(state.Ledger)
-	if err != nil {
-		return false, err
-	}
-	for _, migration := range pending {
-		if !rollbackSourceDecisionsComplete(migration.Kind) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func (runtime *Runtime) inspectRollbackSourceActivation(ctx context.Context, owner, target *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest, inspection releasetransition.Inspection,
 ) (*releasetransition.Outcome, error) {
@@ -93,9 +42,6 @@ func (runtime *Runtime) inspectRollbackSourceActivation(ctx context.Context, own
 	}
 	required := rollbackHasSourceWork(inspection)
 	var err error
-	if !required {
-		required, err = rollbackHasPendingOpaqueWork(ctx, target, request.ConfigHome)
-	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return nil, contextErr
 	}

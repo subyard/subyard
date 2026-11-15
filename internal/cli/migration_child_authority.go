@@ -13,10 +13,6 @@ import (
 type migrationChildAuthorityKey struct{}
 type migrationChildAuthority struct{ action, yard string }
 
-func ownerMigrationChildContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, migrationChildAuthorityKey{}, migrationChildAuthority{"reconcile-power-reconciler", testyardmigration.LegacyYard})
-}
-
 func routeMigrationChildContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, migrationChildAuthorityKey{}, migrationChildAuthority{"reconcile-test-vm-broker", testyardmigration.CurrentYard})
 }

@@ -116,6 +116,9 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		}
 		return Prepared{}, redactReleaseInspectionError(err)
 	}
+	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome); refusal != nil {
+		return Prepared{}, refusal
+	}
 	if protected != nil && yard == "default" && protected.journal.Checkpoint != releasetransition.JournalComplete &&
 		protected.journal.Goal.Target == current && currentScopeBlocker(protected.inspection) {
 		protected, err = runtime.recoverCurrentScope(ctx, parsed.root, configHome, before, protected)
@@ -279,6 +282,11 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 			return fmt.Errorf("%w: current release or protected metadata changed after inspection; run yard migrate --check again", domain.ErrPlanStale)
 		}
 		if err := execute(ctx); err != nil {
+			if inspection.Outcome.Status == releasetransition.StatusReady && !inspection.Assessment.Changed {
+				if stale := runtime.revalidateCurrentSnapshot(parsed.root, configHome, before); stale != nil {
+					return stale
+				}
+			}
 			return err
 		}
 		var outcome releasetransition.Outcome

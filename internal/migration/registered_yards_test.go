@@ -632,53 +632,21 @@ func TestRegisteredBindingRecordsOwnerIngressEndpoint(t *testing.T) {
 	}
 }
 
-func TestRegisteredProxyVerdictRetainsOtherYardsAndDependencies(t *testing.T) {
-	for _, dependency := range []bool{false, true} {
-		t.Run(fmt.Sprint(dependency), func(t *testing.T) {
-			owner, native, _ := registeredMigrationFixture(t)
-			native.Reconcile.ProjectConfig["user.subyard.operator_uid"] = "private-owner-value"
-			native.Instances["fixture/yard"].LocalDevices["sample-server"]["nat"] = "true"
-			owners := []releasetransition.V2ActivationReconciler{owner}
-			if dependency {
-				owners = append(owners, &RegisteredYardMigration{Yard: "unavailable", LoadTargets: func(context.Context, releasetransition.V2SettingsSnapshotView) ([]RegisteredYardTarget, error) {
-					return nil, errors.New("private transport value")
-				}})
-			}
-			payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":2},"currentEpochs":{"owner-registration":3},"migrations":[{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3"}]}`)
-			transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: owner.ConfigHome, RegistryPayload: payload, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
-				return releasetransition.ReleaseLinks{Active: "release-a"}, nil
-			}, RegisteredYards: owners, VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
-			plan, err := transition.Inspect(context.Background(), goal)
-			if err != nil {
-				t.Fatalf("inspection escaped: %v", err)
-			}
-			if err := releasetransition.ValidateProcessInspection(goal, plan); err != nil {
-				t.Fatal(err)
-			}
-			code := releasetransition.CodePreconditionBlocked
-			if dependency {
-				code = releasetransition.CodeDependencyUnavailable
-			}
-			if plan.Outcome == nil || plan.Outcome.Code != code {
-				t.Fatalf("wrong outcome: %#v", plan)
-			}
-			for _, want := range []string{"yard default:", "options outside its typed resource contract", "registered project owner differs"} {
-				if !strings.Contains(plan.Outcome.Message, want) {
-					t.Fatalf("hidden %q: %#v", want, plan.Outcome)
-				}
-			}
-			if strings.Contains(plan.Outcome.Message, "private") || strings.Contains(plan.Outcome.Retry, "install a compatible release") != dependency {
-				t.Fatalf("unsafe/misleading outcome: %#v", plan.Outcome)
-			}
-			result, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: plan.Plan, Authorization: "confirmed"})
-			if err != nil || result.Code != code || native.grants != 0 {
-				t.Fatalf("refused update: %#v %v grants=%d", result, err, native.grants)
-			}
-		})
+func TestRegisteredProxyVerdictRetainsIndependentDiagnostics(t *testing.T) {
+	owner, native, _ := registeredMigrationFixture(t)
+	native.Reconcile.ProjectConfig["user.subyard.operator_uid"] = "private-owner-value"
+	native.Instances["fixture/yard"].LocalDevices["sample-server"]["nat"] = "true"
+	_, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err == nil {
+		t.Fatal("unsafe native state admitted")
+	}
+	for _, want := range []string{"yard default:", "options outside its typed resource contract", "registered project owner differs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("hidden %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "private") || native.grants != 0 {
+		t.Fatalf("unsafe inspection: %v grants=%d", err, native.grants)
 	}
 }
 

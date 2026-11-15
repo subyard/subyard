@@ -9,9 +9,9 @@ import (
 	"github.com/blang/semver/v4"
 )
 
-// CapabilityDescriptor identifies one compiled migration implementation. Its
-// canonical policy, bounds, and recovery semantics are part of the catalog
-// digest and cannot be supplied or changed by registry data.
+// CapabilityDescriptor freezes a historical migration contract for readers.
+// Its policy and recovery grammar bind old journal catalog digests. These
+// descriptors supply no executable migration implementation.
 type CapabilityDescriptor struct {
 	Kind                  string                `json:"kind"`
 	Domain                string                `json:"domain"`
@@ -24,8 +24,9 @@ type RollbackCompatibility string
 
 const RollbackCompatibilityBackwardCompatibleNoOp RollbackCompatibility = "backward-compatible-no-op"
 
-// CapabilityCatalog is an immutable allowlist of compiled implementations.
-// Registry data may select a kind, but cannot supply or alter its semantics.
+// CapabilityCatalog is the immutable vocabulary of understood history.
+// The live registry selects no historical migration, and the engine has no
+// planner or effect dispatch for these descriptors.
 type CapabilityCatalog struct {
 	descriptors []CapabilityDescriptor
 	byKind      map[string]CapabilityDescriptor

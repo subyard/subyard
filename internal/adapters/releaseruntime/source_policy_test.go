@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -520,7 +521,7 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			}
 			engine := []byte("#!/bin/sh\nprintf 'yard-engine " + UpdateAnchorVersion + "\\n'\n")
 			testkit.WriteFile(t, filepath.Join(root, "bin/yard-engine"), engine, 0700)
-			registryBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "config/release-transition.json"))
+			registryBytes, err := os.ReadFile(filepath.Join("..", "..", "releasetransition", "history_v028.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -615,7 +616,7 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			if (err == nil) != allowed {
 				t.Fatalf("authority %s allowed=%t: %v", state, allowed, err)
 			}
-			if !allowed {
+			if !allowed && !errors.Is(err, releasetransition.ErrRetiredMigrationRepair) {
 				if strings.Contains(err.Error(), "uninstall --full") || strings.Contains(err.Error(), "next:") ||
 					!strings.HasPrefix(err.Error(), "replacement-authority-required: ") || !strings.Contains(err.Error(), "known-good backup") {
 					t.Fatalf("unsafe damaged-history guidance: %v", err)
@@ -713,4 +714,37 @@ func TestPrepareTransitionExplicitVersionRefusesUnfinishedBelowAnchor(t *testing
 			}
 		}
 	})
+}
+
+func TestRetiredHistoryAdmissionDistinguishesFreshRegistryBaseline(t *testing.T) {
+	for _, original := range []bool{false, true} {
+		t.Run(fmt.Sprintf("original=%t", original), func(t *testing.T) {
+			path := filepath.Join("..", "..", "..", "config", "release-transition.json")
+			if original {
+				path = filepath.Join("..", "..", "releasetransition", "history_v028.json")
+			}
+			registry, digest, err := releasetransition.ParseRegistryV2(mustReadFile(t, path), releasetransition.BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			pathToCurrent, pathErr := registry.PendingPath(releasetransition.BaselineLedgerV2(registry))
+			fresh := pathErr == nil && len(pathToCurrent) == 0
+			if fresh == original {
+				t.Fatal("absent history was interpreted without its source registry")
+			}
+			home := testkit.TempDir(t)
+			store, err := releasetransition.NewPOSIXV2Store(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.RequireRetiredMigrationCompletion(registry, digest)
+			if original && !errors.Is(err, releasetransition.ErrRetiredMigrationRepair) || !original && err != nil {
+				t.Fatalf("baseline admission: %v", err)
+			}
+			entries, err := os.ReadDir(home)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("read-only admission wrote: %v %v", entries, err)
+			}
+		})
+	}
 }

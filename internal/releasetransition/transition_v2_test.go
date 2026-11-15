@@ -102,36 +102,6 @@ func TestV2RollbackCompatibilityBlocksBeforeAssessmentAuthorizationOrMutation(t 
 	}
 }
 
-func TestV2RollbackCompatibilityAllowsPendingMigrationsAtPublishedLegacyFloor(t *testing.T) {
-	for _, state := range []string{"absent", "baseline", "partial"} {
-		for _, version := range []string{"0.11.0", "0.11.1"} {
-			t.Run(state+"/"+version, func(t *testing.T) {
-				fixture := newV2RollbackBoundaryFixtureWithLedger(t, version, "", nil, state)
-				goal := Goal{Target: "release-a", Direction: DirectionActivatePrevious}
-				inspection, err := fixture.transition.Inspect(context.Background(), goal)
-				if err != nil || len(inspection.Blockers) != 0 || inspection.Outcome == nil ||
-					inspection.Outcome.Status != StatusMigrationRequired || !inspection.Assessment.Changed {
-					t.Fatalf("compatible rollback inspection = %#v, err=%v", inspection, err)
-				}
-				outcome, err := fixture.transition.Converge(context.Background(), Execution{
-					Plan: inspection.Plan, Authorization: "confirmed",
-				})
-				if err != nil || outcome.Status != StatusReady || outcome.Active != "release-a" {
-					t.Fatalf("compatible rollback convergence = %#v, err=%v", outcome, err)
-				}
-				if *fixture.authorizes != 1 || *fixture.activations != 1 {
-					t.Fatalf("rollback authorizations=%d activations=%d", *fixture.authorizes, *fixture.activations)
-				}
-				inspection, err = fixture.transition.Inspect(context.Background(), goal)
-				if err != nil || len(inspection.Blockers) != 0 || inspection.Outcome == nil ||
-					inspection.Outcome.Status != StatusReady || inspection.Assessment.Changed {
-					t.Fatalf("completed rollback inspection = %#v, err=%v", inspection, err)
-				}
-			})
-		}
-	}
-}
-
 func TestV2RollbackCompatibilityAllowsPublishedLegacyFloorAndBindsStaleTarget(t *testing.T) {
 	fixture := newV2RollbackBoundaryFixture(t, "0.11.0", "", nil)
 	goal := Goal{Target: "release-a", Direction: DirectionActivatePrevious}
@@ -295,128 +265,6 @@ func (fixture v2RollbackBoundaryFixture) assertUnchanged(t *testing.T, requireNo
 	}
 }
 
-func TestV2TransitionCanonicalizesAndResetsOnce(t *testing.T) {
-	transition, configHome, path := v2TransitionFixture(t, nil)
-	inspection, err := transition.Inspect(context.Background(), Goal{
-		Target: "release-a", Direction: DirectionActivateTarget,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inspection.Resume != nil || len(inspection.Blockers) != 0 ||
-		len(inspection.Decisions) != 2 || !inspection.Assessment.Changed {
-		t.Fatalf("inspection = %#v", inspection)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome.Status != StatusReady || !outcome.ReachedGoal || outcome.Code != CodeReady ||
-		outcome.Transaction == nil {
-		t.Fatalf("outcome = %#v", outcome)
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(content), "YARD_TEMPLATE='test-vms'") ||
-		strings.Contains(string(content), "NESTED_E2E_VMS") {
-		t.Fatalf("migrated settings = %q", content)
-	}
-	store, _ := NewPOSIXV2Store(configHome)
-	ledgerSnapshot, err := store.ReadLedger()
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := v2TestRegistry(t)
-	ledger, _, err := ParseLedgerV2(ledgerSnapshot.Payload, registry)
-	if err != nil || ledger.Domains["settings"].Epoch != 2 {
-		t.Fatalf("ledger = %#v, err=%v", ledger, err)
-	}
-
-	repeat, err := transition.Inspect(context.Background(), Goal{
-		Target: "release-a", Direction: DirectionActivateTarget,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if repeat.Resume != nil || repeat.Assessment.Changed || len(repeat.Decisions) != 0 {
-		t.Fatalf("repeat inspection = %#v", repeat)
-	}
-	repeatedOutcome, err := transition.Converge(context.Background(), Execution{Plan: repeat.Plan})
-	if err != nil || repeatedOutcome.Status != StatusReady || !repeatedOutcome.ReachedGoal {
-		t.Fatalf("repeat outcome = %#v, err=%v", repeatedOutcome, err)
-	}
-}
-
-func TestV2TransitionRejectsLateInheritedSettingsDriftBeforeCAS(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		drift func(t *testing.T, transition *V2Transition, configHome string)
-	}{
-		{
-			name: "shared file",
-			drift: func(t *testing.T, _ *V2Transition, configHome string) {
-				path := filepath.Join(configHome, "overrides/shared/config.env")
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte("NESTED_E2E_VMS=0\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "host file",
-			drift: func(t *testing.T, _ *V2Transition, configHome string) {
-				if err := os.WriteFile(
-					filepath.Join(configHome, "config.env"), []byte("NESTED_E2E_VMS=0\n"), 0o600,
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "command environment",
-			drift: func(t *testing.T, transition *V2Transition, _ string) {
-				transition.options.InheritedSettingIDs = []string{"NESTED_E2E_VMS"}
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			drifted := false
-			var transition *V2Transition
-			var configHome string
-			transition, configHome, path := v2TransitionFixture(t, func(point string) error {
-				if point == "after-step-evidence" && !drifted {
-					test.drift(t, transition, configHome)
-					drifted = true
-				}
-				return nil
-			})
-			inspection, err := transition.Inspect(context.Background(), Goal{
-				Target: "release-a", Direction: DirectionActivateTarget,
-			})
-			if err != nil || len(inspection.Blockers) != 0 {
-				t.Fatalf("inspection = %#v, err=%v", inspection, err)
-			}
-			outcome, err := transition.Converge(context.Background(), Execution{
-				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-			})
-			if err != nil || outcome.Status != StatusOperatorActionRequired ||
-				outcome.Code != CodeMigrationStale {
-				t.Fatalf("late inherited drift outcome = %#v, err=%v", outcome, err)
-			}
-			content, err := os.ReadFile(path)
-			if err != nil || !strings.Contains(string(content), "YARD_TEMPLATE=e2e-vms") {
-				t.Fatalf("late inherited drift mutated yard settings: %q, err=%v", content, err)
-			}
-		})
-	}
-}
-
 func TestV2TransitionIgnoresUnrelatedInheritedSettingsDrift(t *testing.T) {
 	drifted := false
 	var configHome string
@@ -545,357 +393,6 @@ func assertV2InspectionPublicOutcome(
 		(transaction != nil && (public.Outcome.Transaction == nil ||
 			*public.Outcome.Transaction != *transaction)) {
 		t.Fatalf("inspection public outcome = %#v from %s", public.Outcome, payload)
-	}
-}
-
-func TestV2TransitionResumesOwnerRegistrationAfterCommit(t *testing.T) {
-	owner := &v2TestOwnerRegistration{state: OwnerRegistrationLegacyDirectory}
-	stop := errors.New("stop after owner registration commit")
-	activeFault := "after-owner-registration-commit"
-	transition, configHome, _ := v2TransitionFixture(t, func(point string) error {
-		if point == activeFault {
-			return stop
-		}
-		return nil
-	})
-	transition.options.OwnerRegistration = owner
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil || len(inspection.Blockers) != 0 || !inspection.Assessment.Changed {
-		t.Fatalf("owner inspection = %#v, err=%v", inspection, err)
-	}
-	interrupted, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || interrupted.Status != StatusRecovering ||
-		interrupted.Code != CodeVerificationFailed {
-		t.Fatalf("owner commit fault outcome = %#v, err=%v", interrupted, err)
-	}
-	if owner.state != OwnerRegistrationCurrent || owner.commits != 1 {
-		t.Fatalf("owner after commit = %#v", owner)
-	}
-	activeFault = ""
-	resume, err := transition.Inspect(context.Background(), goal)
-	if err != nil || resume.Resume == nil {
-		t.Fatalf("owner resume = %#v, err=%v", resume, err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || outcome.Status != StatusReady || owner.commits != 2 {
-		t.Fatalf("owner outcome = %#v owner=%#v err=%v", outcome, owner, err)
-	}
-	store, _ := NewPOSIXV2Store(configHome)
-	ledgerSnapshot, err := store.ReadLedger()
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := v2TestRegistry(t)
-	ledger := BaselineLedgerV2(registry)
-	if ledgerSnapshot.Exists {
-		ledger, _, err = ParseLedgerV2(ledgerSnapshot.Payload, registry)
-	}
-	if err != nil || ledger.Domains["owner-registration"].Epoch != 2 {
-		t.Fatalf("owner ledger = %#v, err=%v", ledger, err)
-	}
-}
-
-func TestV2OwnerRecoveryPersistsOpaqueTokenBeforeMutation(t *testing.T) {
-	owner := &v2TestOwnerRegistration{state: OwnerRegistrationLegacyDirectory}
-	stop := errors.New("stop after owner recovery publication")
-	recoveryBoundaries := 0
-	transition, configHome, _ := v2TransitionFixture(t, func(point string) error {
-		if point == "after-recovery" {
-			recoveryBoundaries++
-			if recoveryBoundaries == 2 {
-				return stop
-			}
-		}
-		return nil
-	})
-	transition.options.OwnerRegistration = owner
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || outcome.Status != StatusRecovering {
-		t.Fatalf("recovery boundary outcome = %#v, err=%v", outcome, err)
-	}
-	store, err := NewPOSIXV2Store(configHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	journalSnapshot, err := store.ReadCurrentJournal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal, err := ParseJournal(journalSnapshot.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ownerStep JournalStep
-	for _, step := range journal.Steps {
-		if step.Resource == ownerRegistrationResource {
-			ownerStep = step
-			break
-		}
-	}
-	if ownerStep.ID == "" {
-		t.Fatalf("owner recovery step missing from %#v", journal.Steps)
-	}
-	recovery, err := store.ReadRecovery(journal.Transaction, ownerStep.ID)
-	if err != nil || !recovery.Exists {
-		t.Fatalf("owner recovery = %#v, err=%v", recovery, err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(recovery.Payload, &payload); err != nil {
-		t.Fatal(err)
-	}
-	token, ok := payload["token"].(string)
-	if !ok || len(token) != 32 {
-		t.Fatalf("owner recovery token = %#v", payload["token"])
-	}
-	for _, character := range token {
-		if !strings.ContainsRune("0123456789abcdef", character) {
-			t.Fatalf("owner recovery token is unsafe: %q", token)
-		}
-	}
-	if owner.commits != 0 {
-		t.Fatalf("owner mutated before recovery token publication: %#v", owner)
-	}
-}
-
-func TestV2TransitionRejectsRegistrationIdentityDriftBeforeCommit(t *testing.T) {
-	owner := &v2TestOwnerRegistration{
-		state: OwnerRegistrationLegacyDirectory, registration: digestB,
-	}
-	transition, configHome, _ := v2TransitionFixture(t, nil)
-	transition.options.OwnerRegistration = owner
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner.registration = digestC
-
-	outcome, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || outcome.Status != StatusOperatorActionRequired ||
-		outcome.Code != CodePlanStale || owner.commits != 0 {
-		t.Fatalf("owner identity drift outcome = %#v owner=%#v err=%v", outcome, owner, err)
-	}
-	journal, err := transition.store.ReadCurrentJournal()
-	if err != nil || journal.Exists {
-		t.Fatalf("owner identity drift published journal = %#v, err=%v", journal, err)
-	}
-	if _, err := os.Lstat(filepath.Join(configHome, "release-transition")); !os.IsNotExist(err) {
-		t.Fatalf("owner identity drift created protected state: %v", err)
-	}
-}
-
-func TestV2TransitionResumesOwnerRegistrationFromIntermediateProgress(t *testing.T) {
-	owner := &v2TestOwnerRegistration{
-		state: OwnerRegistrationLegacyDirectory, interruptCommit: true,
-	}
-	transition, _, _ := v2TransitionFixture(t, nil)
-	transition.options.OwnerRegistration = owner
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil || len(inspection.Blockers) != 0 || !inspection.Assessment.Changed {
-		t.Fatalf("owner inspection = %#v, err=%v", inspection, err)
-	}
-	interrupted, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || interrupted.Status != StatusRecovering || interrupted.Transaction == nil {
-		t.Fatalf("interrupted owner convergence = %#v, err=%v", interrupted, err)
-	}
-
-	resume, err := transition.Inspect(context.Background(), goal)
-	if err != nil || resume.Resume == nil || resume.Outcome == nil ||
-		resume.Outcome.Status != StatusRecovering {
-		t.Fatalf("owner intermediate inspection = %#v, err=%v", resume, err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || outcome.Status != StatusReady || owner.state != OwnerRegistrationCurrent ||
-		owner.commits != 2 {
-		t.Fatalf("resumed owner convergence = %#v owner=%#v err=%v", outcome, owner, err)
-	}
-}
-
-func TestV2NewOwnerImpactReplacesUnmutatedPreActivationJournal(t *testing.T) {
-	activeFault := true
-	transition, configHome, _ := v2TransitionFixture(t, func(point string) error {
-		if activeFault && point == "after-journal-authorized" {
-			return errors.New("stop after the first authorization")
-		}
-		return nil
-	})
-	transactions := []TransactionID{"tx-test-001", "tx-test-002"}
-	transition.options.NewTransactionID = func() TransactionID {
-		transaction := transactions[0]
-		transactions = transactions[1:]
-		return transaction
-	}
-	owner := &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}
-	transition.options.OwnerRegistration = owner
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	first, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	interrupted, err := transition.Converge(context.Background(), Execution{
-		Plan: first.Plan, Authorization: v2TestAuthorization(first.Plan),
-	})
-	if err != nil || interrupted.Status != StatusRecovering || interrupted.Transaction == nil ||
-		*interrupted.Transaction != "tx-test-001" {
-		t.Fatalf("first transaction = %#v, err=%v", interrupted, err)
-	}
-
-	activeFault = false
-	resume, err := transition.InspectProcessV1(context.Background(), goal)
-	if err != nil || resume.Resume == nil {
-		t.Fatalf("owner resume inspection = %#v, err=%v", resume, err)
-	}
-	owner.state = OwnerRegistrationLegacyDirectory
-	stale, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || stale.Code != CodePlanStale || owner.commits != 0 {
-		t.Fatalf("stale owner resume = %#v, commits=%d, err=%v", stale, owner.commits, err)
-	}
-	if err := ValidateProcessConvergence(goal, resume, stale); err != nil {
-		t.Fatalf("invalid stale owner resume: %v", err)
-	}
-	replacement, err := transition.Inspect(context.Background(), goal)
-	if err != nil || replacement.Resume != nil || replacement.Outcome == nil ||
-		replacement.Outcome.Status != StatusMigrationRequired ||
-		replacement.Outcome.Code != CodeTransitionRequired || replacement.Plan == first.Plan {
-		t.Fatalf("owner replacement inspection = %#v, err=%v", replacement, err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{
-		Plan: replacement.Plan, Authorization: v2TestAuthorization(replacement.Plan),
-	})
-	if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil ||
-		*outcome.Transaction != "tx-test-002" || owner.state != OwnerRegistrationCurrent {
-		t.Fatalf("owner replacement outcome = %#v owner=%#v err=%v", outcome, owner, err)
-	}
-	archive, err := transition.store.ReadSupersededJournal("tx-test-002")
-	if err != nil || archive.Exists {
-		t.Fatalf("pre-activation replacement archive = %#v, err=%v", archive, err)
-	}
-	if _, err := os.Stat(filepath.Join(
-		configHome, "release-transition", "v2", "transactions", "tx-test-001",
-	)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unmutated source transaction unexpectedly has artifacts: %v", err)
-	}
-
-	owner.state = OwnerRegistrationLegacyDirectory
-	laterOptions := transition.options
-	laterLinks := &ReleaseLinks{Active: "release-a"}
-	laterOptions.Releases = ReleasePair{From: "release-a", Target: "release-b"}
-	laterOptions.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return *laterLinks, nil }
-	laterOptions.ActivateLinks = func(
-		_ context.Context,
-		pair ReleasePair,
-	) (ReleaseLinks, error) {
-		*laterLinks = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
-		return *laterLinks, nil
-	}
-	laterOptions.NewTransactionID = func() TransactionID { return "tx-test-003" }
-	later, err := NewV2Transition(laterOptions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledgerSnapshot, err := later.store.ReadLedger()
-	if err != nil {
-		t.Fatal(err)
-	}
-	baselinePayload, _, err := MarshalLedgerV2(BaselineLedgerV2(later.registry), later.registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := later.store.CompareAndSwapLedger(ledgerSnapshot, baselinePayload); err != nil {
-		t.Fatal(err)
-	}
-	laterGoal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
-	laterInspection, err := later.Inspect(context.Background(), laterGoal)
-	if err != nil || laterInspection.Outcome == nil ||
-		laterInspection.Outcome.Status != StatusMigrationRequired {
-		t.Fatalf("later transition inspection = %#v, outcome=%#v, err=%v", laterInspection, laterInspection.Outcome, err)
-	}
-	laterOutcome, err := later.Converge(context.Background(), Execution{
-		Plan: laterInspection.Plan, Authorization: v2TestAuthorization(laterInspection.Plan),
-	})
-	if err != nil || laterOutcome.Status != StatusReady || laterOutcome.Transaction == nil ||
-		*laterOutcome.Transaction != "tx-test-003" || len(laterOutcome.Warnings) != 0 {
-		t.Fatalf("later transition outcome = %#v, err=%v", laterOutcome, err)
-	}
-	if _, err := later.Inspect(context.Background(), laterGoal); err != nil {
-		t.Fatalf("historical logical predecessor blocked later inspection: %v", err)
-	}
-	oldArchive, err := later.store.ReadSupersededJournal("tx-test-002")
-	if err != nil || oldArchive.Exists {
-		t.Fatalf("historical component was not cleaned up: %#v, err=%v", oldArchive, err)
-	}
-	if _, err := os.Stat(filepath.Join(
-		configHome, "release-transition", "v2", "transactions", "tx-test-003",
-	)); err != nil {
-		t.Fatalf("current transaction was not retained: %v", err)
-	}
-}
-
-func TestV2NewOwnerImpactFailsClosedAfterAuthorizedMigrationMutation(t *testing.T) {
-	activeFault := true
-	transition, configHome, _ := v2TransitionFixture(t, func(point string) error {
-		if activeFault && point == "after-settings-cas" {
-			return errors.New("stop after an authorized settings mutation")
-		}
-		return nil
-	})
-	owner := &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}
-	transition.options.OwnerRegistration = owner
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	first, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	interrupted, err := transition.Converge(context.Background(), Execution{
-		Plan: first.Plan, Authorization: v2TestAuthorization(first.Plan),
-	})
-	if err != nil || interrupted.Status != StatusRecovering || interrupted.Transaction == nil {
-		t.Fatalf("mutated transaction = %#v, err=%v", interrupted, err)
-	}
-
-	activeFault = false
-	owner.state = OwnerRegistrationLegacyDirectory
-	resume, err := transition.Inspect(context.Background(), goal)
-	if err != nil || resume.Resume == nil || resume.Outcome == nil ||
-		resume.Outcome.Status != StatusOperatorActionRequired ||
-		resume.Outcome.Code != CodeMigrationStale {
-		t.Fatalf("new owner impact after mutation = %#v, err=%v", resume, err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || outcome.Status != StatusOperatorActionRequired ||
-		outcome.Code != CodeMigrationStale || owner.commits != 0 {
-		t.Fatalf("new owner impact convergence = %#v owner=%#v err=%v", outcome, owner, err)
-	}
-	store, err := NewPOSIXV2Store(configHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledgerSnapshot, err := store.ReadLedger()
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := v2TestRegistry(t)
-	ledger := BaselineLedgerV2(registry)
-	if ledgerSnapshot.Exists {
-		ledger, _, err = ParseLedgerV2(ledgerSnapshot.Payload, registry)
-	}
-	if err != nil || ledger.Domains["owner-registration"].Epoch != 1 {
-		t.Fatalf("owner ledger advanced past new impact: %#v, err=%v", ledger, err)
 	}
 }
 
@@ -1172,92 +669,6 @@ func seedV0111PostActivationJournal(
 	return journal, snapshot, ledgerSnapshot.Payload
 }
 
-func TestV2TransitionResumesEveryDurableCheckpointWithoutNewAuthorization(t *testing.T) {
-	points := []string{
-		"after-journal-authorized", "after-recovery", "after-step-evidence",
-		"after-settings-cas", "after-step-applied", "after-step-verified",
-		"after-ledger-cas", "after-ledger-verified", "after-journal-complete",
-	}
-	for _, point := range points {
-		t.Run(point, func(t *testing.T) {
-			injected := errors.New("injected transition fault")
-			activeFault := point
-			transition, _, _ := v2TransitionFixture(t, func(actual string) error {
-				if actual == activeFault {
-					return injected
-				}
-				return nil
-			})
-			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-			inspection, err := transition.Inspect(context.Background(), goal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			interrupted, err := transition.Converge(context.Background(), Execution{
-				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-			})
-			if err != nil {
-				t.Fatalf("fault outcome = %#v, err=%v", interrupted, err)
-			}
-			if point == "after-journal-complete" {
-				if interrupted.Status != StatusReady {
-					t.Fatalf("completed fault outcome = %#v", interrupted)
-				}
-			} else if interrupted.Status != StatusRecovering ||
-				interrupted.Code != CodeVerificationFailed {
-				t.Fatalf("recoverable fault outcome = %#v", interrupted)
-			}
-			activeFault = ""
-			resume, err := transition.Inspect(context.Background(), goal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if point != "after-journal-complete" && resume.Resume == nil {
-				t.Fatalf("checkpoint %s did not expose resumable transaction: %#v", point, resume)
-			}
-			outcome, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-			if err != nil || outcome.Status != StatusReady || !outcome.ReachedGoal {
-				t.Fatalf("resumed outcome = %#v, err=%v", outcome, err)
-			}
-		})
-	}
-}
-
-func TestV2TransitionResumeRetainsLedgerOnlySettingsScope(t *testing.T) {
-	for _, faultPoint := range []string{"after-journal-authorized", "after-ledger-cas"} {
-		t.Run(faultPoint, func(t *testing.T) {
-			transition, configHome, settingsPath := v2TransitionFixture(t, func(point string) error {
-				if point == faultPoint {
-					return errors.New("interrupt settings ledger migration")
-				}
-				return nil
-			})
-			testkit.WriteFile(t, settingsPath, []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
-			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-			inspection, err := transition.Inspect(context.Background(), goal)
-			if err != nil || len(inspection.Blockers) != 0 {
-				t.Fatalf("inspection = %#v, err=%v", inspection, err)
-			}
-			interrupted, err := transition.Converge(context.Background(), Execution{
-				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-			})
-			if err != nil || interrupted.Status != StatusRecovering {
-				t.Fatalf("interrupted migration = %#v, err=%v", interrupted, err)
-			}
-			transition.options.fault = nil
-			testkit.WriteFile(t, filepath.Join(configHome, "yards", "ordinary.env"),
-				[]byte("YARD_TEMPLATE=other-template\n"), 0o600)
-			resume, err := transition.Inspect(context.Background(), goal)
-			if err != nil || resume.Outcome == nil ||
-				resume.Outcome.Status != StatusOperatorActionRequired ||
-				resume.Outcome.Code != CodePreconditionBlocked || len(resume.Blockers) != 1 ||
-				resume.Blockers[0].Resource != "yard.ordinary" {
-				t.Fatalf("ledger-only settings scope = %#v, err=%v", resume, err)
-			}
-		})
-	}
-}
-
 func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
 	for _, drift := range []bool{false, true} {
 		t.Run(fmt.Sprintf("drift=%t", drift), func(t *testing.T) {
@@ -1330,116 +741,6 @@ func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
 	}
 }
 
-func TestV2TransitionBlocksThirdResourceStateWithoutOverwrite(t *testing.T) {
-	injected := errors.New("stop before settings CAS")
-	active := true
-	transition, _, path := v2TransitionFixture(t, func(point string) error {
-		if active && point == "after-step-evidence" {
-			return injected
-		}
-		return nil
-	})
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	interrupted, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || interrupted.Status != StatusRecovering ||
-		interrupted.Code != CodeVerificationFailed {
-		t.Fatalf("fault outcome = %#v, err=%v", interrupted, err)
-	}
-	third := []byte("YARD_TEMPLATE=test-vms\nNESTED_E2E_VMS=1\n")
-	if err := os.WriteFile(path, third, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	active = false
-	resume, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resume.Outcome == nil ||
-		resume.Outcome.Status != StatusOperatorActionRequired ||
-		resume.Outcome.Code != CodeMigrationStale || resume.Resume == nil ||
-		len(resume.Blockers) == 0 || resume.Blockers[0].Code != CodeMigrationStale {
-		t.Fatalf("third-state inspection = %#v", resume)
-	}
-	beforeConverge, err := os.ReadFile(path)
-	if err != nil || string(beforeConverge) != string(third) {
-		t.Fatalf("read-only inspection changed third state: %q, err=%v", beforeConverge, err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome.Status != StatusOperatorActionRequired || outcome.Code != CodeMigrationStale {
-		t.Fatalf("third-state outcome = %#v", outcome)
-	}
-	actual, err := os.ReadFile(path)
-	if err != nil || string(actual) != string(third) {
-		t.Fatalf("third state was overwritten: %q, err=%v", actual, err)
-	}
-}
-
-func TestV2TransitionBindsRecoveryToExactBeforeState(t *testing.T) {
-	injected := errors.New("stop after recovery evidence")
-	active := true
-	transition, configHome, settingsPath := v2TransitionFixture(t, func(point string) error {
-		if active && point == "after-recovery" {
-			return injected
-		}
-		return nil
-	})
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	interrupted, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || interrupted.Status != StatusRecovering ||
-		interrupted.Code != CodeVerificationFailed {
-		t.Fatalf("fault outcome = %#v, err=%v", interrupted, err)
-	}
-	recoveryPath := filepath.Join(
-		configHome, "release-transition", "v2", "transactions", "tx-test-001", "recovery",
-		"canonicalize-test-vms-settings-v2.hermes.json",
-	)
-	payload, err := os.ReadFile(recoveryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var recovery settingsRecoveryV1
-	if err := json.Unmarshal(payload, &recovery); err != nil {
-		t.Fatal(err)
-	}
-	recovery.Before[0].Value = "test-vms"
-	payload, err = json.Marshal(recovery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(recoveryPath, append(payload, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	active = false
-	resume, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || outcome.Status != StatusOperatorActionRequired ||
-		outcome.Code != CodeRecoveryAmbiguous {
-		t.Fatalf("mismatched typed recovery outcome = %#v, err=%v", outcome, err)
-	}
-	actual, err := os.ReadFile(settingsPath)
-	if err != nil || !strings.Contains(string(actual), "YARD_TEMPLATE=e2e-vms") {
-		t.Fatalf("settings changed despite recovery mismatch: %q, err=%v", actual, err)
-	}
-}
-
 func TestV2TransitionRejectsNonInitialLinksBeforeAnyMutation(t *testing.T) {
 	for name, links := range map[string]ReleaseLinks{
 		"target without journal": {Active: "release-b", Previous: releaseIDPointer("release-a")},
@@ -1449,6 +750,8 @@ func TestV2TransitionRejectsNonInitialLinksBeforeAnyMutation(t *testing.T) {
 			transition, configHome, settingsPath := v2TransitionFixtureWithReleases(
 				t, nil, ReleasePair{From: "release-a", Target: "release-b"}, links,
 			)
+			originalSettings, _ := os.ReadFile(settingsPath)
+			originalLedger, _ := transition.store.ReadLedger()
 			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
 			inspection, err := transition.Inspect(context.Background(), goal)
 			if err != nil || len(inspection.Blockers) != 1 ||
@@ -1460,13 +763,13 @@ func TestV2TransitionRejectsNonInitialLinksBeforeAnyMutation(t *testing.T) {
 				t.Fatalf("outcome = %#v, err=%v", outcome, err)
 			}
 			content, err := os.ReadFile(settingsPath)
-			if err != nil || !strings.Contains(string(content), "YARD_TEMPLATE=e2e-vms") {
+			if err != nil || !bytes.Equal(content, originalSettings) {
 				t.Fatalf("settings mutated: %q, err=%v", content, err)
 			}
 			store, _ := NewPOSIXV2Store(configHome)
 			ledger, ledgerErr := store.ReadLedger()
 			journal, journalErr := store.ReadCurrentJournal()
-			if ledgerErr != nil || journalErr != nil || ledger.Exists || journal.Exists {
+			if ledgerErr != nil || journalErr != nil || !sameProtectedSnapshot(ledger, originalLedger) || journal.Exists {
 				t.Fatalf("metadata mutated: ledger=%#v journal=%#v errors=%v/%v",
 					ledger, journal, ledgerErr, journalErr)
 			}
@@ -1628,7 +931,7 @@ func TestFreshV2TransitionResumesOriginalPairAtStableLinkCheckpoints(t *testing.
 }
 
 func TestV2TransitionReturnsStructuredOutcomeAfterMutationFault(t *testing.T) {
-	for _, point := range []string{"after-settings-cas", "after-step-applied", "after-target-active"} {
+	for _, point := range []string{"after-journal-authorized", "after-target-active"} {
 		t.Run(point, func(t *testing.T) {
 			links := ReleaseLinks{Active: "release-a"}
 			releases := ReleasePair{From: "release-a", Target: "release-a"}
@@ -1681,7 +984,7 @@ func TestV2TransitionGuardsCheckpointLinksBeforeMutation(t *testing.T) {
 		unexpected ReleaseLinks
 	}{
 		{name: "authorized", fault: "after-journal-authorized", unexpected: ReleaseLinks{Active: "release-b", Previous: releaseIDPointer("release-a")}},
-		{name: "migrating", fault: "after-step-evidence", unexpected: ReleaseLinks{Active: "foreign", Previous: releaseIDPointer("release-old")}},
+		{name: "authorized foreign links", fault: "after-journal-authorized", unexpected: ReleaseLinks{Active: "foreign", Previous: releaseIDPointer("release-old")}},
 		{name: "activation intent", fault: "after-activation-intent", unexpected: ReleaseLinks{Active: "foreign", Previous: releaseIDPointer("release-old")}},
 		{name: "target active", fault: "after-target-active", unexpected: ReleaseLinks{Active: "release-a"}},
 		{name: "reconciling", fault: "after-reconciling", unexpected: ReleaseLinks{Active: "release-a"}},
@@ -2259,6 +1562,7 @@ func TestV2ActivationConsequencesReachProcessInspectionAndBindConsent(t *testing
 			if change == "native binding" {
 				reconciler.binding = digestA
 			}
+			transition.options.MigrationCheckpoint = false
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
 			inspection, err := transition.InspectProcessV1(context.Background(), goal)
@@ -2469,7 +1773,7 @@ func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
 }
 
 func TestV2TransitionPreservesPublicCauseAcrossSecondaryActivationFailures(t *testing.T) {
-	for _, branch := range []string{"reobserve", "release observation", "settings blocker", "unknown state", "bounded diagnostic"} {
+	for _, branch := range []string{"reobserve", "release observation", "unknown state", "bounded diagnostic"} {
 		for _, public := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/public=%t", branch, public), func(t *testing.T) {
 				transition, configHome, _ := v2TransitionFixture(t, nil)
@@ -2575,14 +1879,14 @@ func TestV2TransitionBoundsPublicCauseAndRecoveryExplanation(t *testing.T) {
 }
 
 func TestV2TransitionPreservesPublicCauseAfterMutation(t *testing.T) {
-	for _, branch := range []string{"recovering", "terminal recovery", "release observation", "settings blocker", "stale settings"} {
+	for _, branch := range []string{"recovering", "terminal recovery", "release observation"} {
 		t.Run(branch, func(t *testing.T) {
 			diagnostic := v2PublicActivationError{"yard hermes: settings reconciliation failed", "run yard -Y hermes status"}
 			failed := false
 			reconciler := &v2TestReconciler{}
 			var configHome, settingsPath string
 			transition, home, path := v2TransitionFixture(t, func(point string) error {
-				faultPoint := "after-settings-cas"
+				faultPoint := "after-journal-authorized"
 				if branch == "terminal recovery" {
 					faultPoint = "after-journal-complete"
 				}
@@ -2659,6 +1963,7 @@ func TestV2TransitionActivationOnlyRepairPreservesFailureAndResumes(t *testing.T
 	diagnostic := v2PublicActivationError{
 		"yard demo: runtime reconciliation failed", "run yard -Y demo status",
 	}
+	transition.options.MigrationCheckpoint = false
 	transition.options.Reconcilers = []V2ActivationReconciler{
 		&v2FailingReconciler{id: "test-runtime", reconcileErr: diagnostic},
 	}
@@ -2792,7 +2097,7 @@ func TestV2TransitionReducesPostMutationFailureWhileHoldingUpdateLock(t *testing
 	lockHeld := false
 	var probeErr error
 	transition, configHome, _ := v2TransitionFixture(t, func(point string) error {
-		if point == "after-settings-cas" {
+		if point == "after-journal-authorized" {
 			reducing = true
 			return errors.New("interrupted after settings mutation")
 		}
@@ -3044,7 +2349,7 @@ func TestFreshV2CompletedConvergeObservesOnlyUnderLock(t *testing.T) {
 			ctx := context.Background()
 			transition, configHome, _ := v2TransitionFixture(t, nil)
 			transition.options.MigrationCheckpoint = test.checkpointed
-			reconciler := &v2TestReconciler{converged: true, warnings: []string{"runtime probe warning"}}
+			reconciler := &v2TestReconciler{converged: false, warnings: []string{"runtime probe warning"}}
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
 			initial, err := transition.Inspect(ctx, goal)
@@ -3308,24 +2613,6 @@ func (owner *v2TestOwnerRegistration) Commit(
 	return nil
 }
 
-func TestV2TransitionRunsOwnerCleanupBeforeRecoveryGC(t *testing.T) {
-	owner := &v2TestOwnerRegistration{state: OwnerRegistrationLegacyDirectory}
-	transition, _, _ := v2TransitionFixture(t, nil)
-	transition.options.OwnerRegistration = owner
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 0 ||
-		owner.cleanups != 1 {
-		t.Fatalf("owner cleanup outcome = %#v owner=%#v err=%v", outcome, owner, err)
-	}
-}
-
 func TestV2ActivationWarningsReachOutcomesAndClearAfterRepair(t *testing.T) {
 	t.Run("invalid public warnings are rejected", func(t *testing.T) {
 		for _, warning := range []string{"", "unsafe\nmessage", strings.Repeat("x", maxDiagnosticText+1)} {
@@ -3381,42 +2668,6 @@ func TestV2ActivationWarningsReachOutcomesAndClearAfterRepair(t *testing.T) {
 			t.Fatalf("execution retained cleared warning: %#v, err=%v", outcome, err)
 		}
 	})
-}
-
-func TestV2TransitionRetainsRecoveryUntilOwnerCleanupSucceeds(t *testing.T) {
-	cleanupErr := errors.New("owner archive cleanup unavailable")
-	owner := &v2TestOwnerRegistration{
-		state: OwnerRegistrationLegacyDirectory, cleanupErr: cleanupErr,
-	}
-	transition, _, _ := v2TransitionFixture(t, nil)
-	transition.options.OwnerRegistration = owner
-	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{
-		warnings: []string{"yard stopped: refresh deferred"},
-	}}
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 2 ||
-		outcome.Warnings[0] != "recovery cleanup is pending" ||
-		outcome.Warnings[1] != "yard stopped: refresh deferred" || owner.cleanups != 1 {
-		t.Fatalf("failed owner cleanup outcome = %#v owner=%#v err=%v", outcome, owner, err)
-	}
-	owner.cleanupErr = nil
-	resume, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome, err = transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 1 ||
-		outcome.Warnings[0] != "yard stopped: refresh deferred" ||
-		owner.cleanups != 2 {
-		t.Fatalf("resumed owner cleanup outcome = %#v owner=%#v err=%v", outcome, owner, err)
-	}
 }
 
 type v2FailingReconciler struct {
@@ -3546,8 +2797,9 @@ func v2TransitionFixtureWithReleases(
 	configHome := settingsV2Fixture(t, map[string]string{
 		"yards/hermes/config.env": "YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n",
 	})
+	seedLegacyCompletedLedger(t, configHome)
 	transition, err := NewV2Transition(V2Options{
-		ConfigHome: configHome, Releases: releases,
+		ConfigHome: configHome, Releases: releases, MigrationCheckpoint: true, SourceMigrationCheckpoint: true,
 		ObserveLinks:    func(context.Context) (ReleaseLinks, error) { return links, nil },
 		RegistryPayload: v2RegistryPayload(t), ArtifactDigest: digestA,
 		OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
@@ -3569,7 +2821,8 @@ func v2TestAuthorization(plan PlanToken) Authorization {
 
 func v2RegistryPayload(t *testing.T) []byte {
 	t.Helper()
-	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload := append([]byte(nil), historyV028Payload...)
+	var err error
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3643,56 +2896,6 @@ type v2RefusingFreshOwner struct{ *v2TestOwnerRegistration }
 
 func (*v2RefusingFreshOwner) FreshWarning(context.Context, V2SettingsSnapshotView) (string, error) {
 	return "test-yard requires recreation; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms", nil
-}
-
-func TestV2FreshOwnerWarningPreservesAssessmentWithoutWriting(t *testing.T) {
-	interrupted := false
-	transition, _, _ := v2TransitionFixture(t, func(point string) error {
-		if point == "after-settings-cas" && !interrupted {
-			interrupted = true
-			return errors.New("interrupt before owner ledger completion")
-		}
-		return nil
-	})
-	owner := &v2RefusingFreshOwner{&v2TestOwnerRegistration{state: OwnerRegistrationLegacyDirectory}}
-	transition.options.OwnerRegistration = owner
-	warning, _ := owner.FreshWarning(context.Background(), nil)
-	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{converged: true, warnings: []string{warning}}}
-	before, err := transition.store.ReadCurrentJournal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil || len(inspection.Blockers) != 0 || (inspection.Outcome == nil || len(inspection.Outcome.Warnings) == 0) {
-		t.Fatalf("fresh warning hid assessment: %+v %v", inspection, err)
-	}
-	after, err := transition.store.ReadCurrentJournal()
-	if err != nil || after.Exists != before.Exists || owner.commits != 0 {
-		t.Fatal("inspection wrote protected state", err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-	if err != nil || outcome.Status != StatusRecovering || outcome.Transaction == nil || !interrupted || owner.commits != 0 {
-		t.Fatalf("did not interrupt the preserved-owner transaction: %+v %v", outcome, err)
-	}
-	// Reopen durable state after source mutation. A deliberately excluded owner
-	// is still excluded; a journaled owner effect must never use this policy.
-	transition, err = NewV2Transition(transition.options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resume, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil || len(resume.Blockers) != 0 || resume.Resume == nil || *resume.Resume != *outcome.Transaction {
-		t.Fatalf("preserved owner became a new impact on resume: %+v %v", resume, err)
-	}
-	outcome, err = transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) == 0 || owner.commits != 0 {
-		t.Fatalf("preserved owner prevented resumed activation: %+v %v", outcome, err)
-	}
-	inspected, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
-	if err != nil || inspected.Outcome == nil || inspected.Outcome.Status != StatusReady || len(inspected.Outcome.Warnings) == 0 {
-		t.Fatalf("fresh check lost ready warning: %+v %v", inspected, err)
-	}
-
 }
 
 func TestPublicActivationDiagnosticPreservesWrappedFallbackAndSafeActions(t *testing.T) {

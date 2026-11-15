@@ -684,8 +684,7 @@ func secretLike(name, value string) bool {
 }
 
 // Core-only helpers are used by isolated contracts. Operations use their loaded catalog.
-func LookupSetting(name string) (SettingDefinition, bool) { return (Catalog{}).LookupSetting(name) }
-func SettingCatalog() []SettingDefinition                 { return (Catalog{}).SettingCatalog() }
+func SettingCatalog() []SettingDefinition { return (Catalog{}).SettingCatalog() }
 func ValidateSetting(scope SettingScope, name, value string, syncable bool) error {
 	return (Catalog{}).ValidateSetting(scope, name, value, syncable)
 }

@@ -172,11 +172,8 @@ type V2Transition struct {
 type v2WorkKind string
 
 const (
-	v2NativeWork   v2WorkKind = "registered-native"
-	v2SettingsWork v2WorkKind = "settings"
-	v2OwnerWork    v2WorkKind = "owner-registration"
-	v2LedgerWork   v2WorkKind = "ledger"
 	v2IngressWork  v2WorkKind = "ingress"
+	v2BaselineWork v2WorkKind = "ledger-baseline"
 )
 
 type v2Observation struct {
@@ -327,12 +324,9 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, migration := range registry.Migrations {
-		if nativeMigration(migration) && (migration.Kind == registeredYardsMigration && options.RegisteredYards == nil || migration.Kind == guestDiskTmpMigration && options.GuestDiskTmp == nil) {
-			return nil, errors.New("v2 transition requires the registered yard migration owner")
-		}
-		if migration.Kind == "test-yard-owner-v1-to-v2" && options.OwnerRegistration == nil {
-			return nil, errors.New("v2 transition requires the owner-registration capability port")
+	if len(registry.historyData().Migrations) > len(registry.Migrations) {
+		if err := store.RequireRetiredMigrationCompletion(registry, registryDigest); err != nil {
+			return nil, err
 		}
 	}
 	policy, err := newV2ActionPolicy()
@@ -1201,9 +1195,6 @@ func (transition *V2Transition) cleanupReady(
 	if err != nil {
 		return Outcome{}, err
 	}
-	if err := transition.cleanupOwnerRegistration(ctx, transaction); err != nil {
-		return withActivationWarnings(outcome, []string{"recovery cleanup is pending"}), nil
-	}
 	if err := transition.inject("before-recovery-gc"); err == nil {
 		err = transition.store.RetireReplacedTransactions(transaction, transition.registry)
 		if err != nil {
@@ -1218,51 +1209,6 @@ func (transition *V2Transition) cleanupReady(
 		}
 	}
 	return withActivationWarnings(outcome, []string{"recovery cleanup is pending"}), nil
-}
-
-func (transition *V2Transition) cleanupOwnerRegistration(
-	ctx context.Context,
-	transaction TransactionID,
-) error {
-	snapshot, err := transition.store.ReadCurrentJournal()
-	if err != nil || !snapshot.Exists {
-		return err
-	}
-	journal, err := ParseJournal(snapshot.Payload)
-	if err != nil {
-		return err
-	}
-	if journal.Transaction != transaction || journal.Checkpoint != JournalComplete {
-		return invalid("owner cleanup journal is not the completed transaction")
-	}
-	found := false
-	for _, step := range journal.Steps {
-		if step.Resource != ownerRegistrationResource {
-			continue
-		}
-		if found || step.Checkpoint != StepVerified {
-			return invalid("owner cleanup step is invalid")
-		}
-		found = true
-		recovery, err := transition.store.ReadRecovery(journal.Transaction, step.ID)
-		if err != nil {
-			return err
-		}
-		if !recovery.Exists {
-			return nil
-		}
-		before, err := transition.ownerRegistrationBefore(ctx, journal, step, nil)
-		if err != nil {
-			return err
-		}
-		if !before.TerminalCleanup || transition.options.OwnerRegistration == nil {
-			return invalid("owner cleanup capability is unavailable")
-		}
-		if err := transition.options.OwnerRegistration.Commit(ctx, before); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (transition *V2Transition) reducePostMutationFailure(
@@ -1787,6 +1733,18 @@ func (transition *V2Transition) canReplacePreActivationJournal(
 		len(observation.blockers) == 0 {
 		return false
 	}
+	for _, step := range journal.Steps {
+		if step.Checkpoint == StepApplied || step.Checkpoint == StepVerified {
+			return false
+		}
+		if step.Checkpoint == StepEvidence {
+			for _, actual := range observation.observations {
+				if actual.Resource == step.Resource && actual.Fingerprint == step.Desired {
+					return false
+				}
+			}
+		}
+	}
 	for _, blocker := range observation.blockers {
 		if blocker.Code != CodePlanStale {
 			return false
@@ -1814,17 +1772,7 @@ func (transition *V2Transition) checkpointSourceCompatibilityBlocker(observation
 	}, nil
 }
 
-func (transition *V2Transition) observeFresh(
-	ctx context.Context,
-	observation *v2Observation,
-) (resultErr error) {
-	defer func() {
-		if resultErr != nil && len(observation.blockers) > 0 {
-			resultErr = &blockedInspectionError{cause: resultErr, blockers: slices.Clone(observation.blockers)}
-		}
-	}()
-	// Exact authorized resume keeps its original bindings. A fresh replan after
-	// replacing a stale incomplete journal must prove source compatibility again.
+func (transition *V2Transition) observeFresh(ctx context.Context, observation *v2Observation) error {
 	blocker, err := transition.checkpointSourceCompatibilityBlocker(*observation)
 	if err != nil {
 		return err
@@ -1833,171 +1781,37 @@ func (transition *V2Transition) observeFresh(
 		observation.blockers = append(observation.blockers, *blocker)
 		return nil
 	}
-	var ingressAfterSettings *V2IngressOperation
-	var settingsView V2SettingsSnapshotView
-	if transition.options.Ingress != nil {
-		ingress, inspectErr := transition.options.Ingress.Inspect(ctx, nil)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		ingress, inspectErr = normalizeV2IngressInspection(ingress)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		observation.decisions = append(observation.decisions, ingress.Decisions...)
-		observation.blockers = append(observation.blockers, ingress.Blockers...)
-		settingsView = ingress.Prospective
-		for index := range ingress.Operations {
-			operation := ingress.Operations[index]
-			if operation.Kind == V2SourceEntrypoints {
-				copy := operation
-				ingressAfterSettings = &copy
-			} else {
-				transition.appendFreshIngressWork(observation, operation)
-			}
-		}
-	}
 	pending, err := transition.registry.PendingPath(observation.ledger)
 	if err != nil {
 		return err
 	}
-	ledger := observation.ledger
-	ledgerSnapshot := observation.ledgerSnapshot
-	for _, migration := range pending {
-		switch migration.Kind {
-		case registeredYardsMigration, guestDiskTmpMigration:
-			var err error
-			settingsView, err = transition.appendNativeMigration(ctx, observation, migration, settingsView)
-			if err != nil {
-				return err
-			}
-		case "owner-publication-state-v1":
-			// Canonical power and owning receipt values retain their existing
-			// representation. The captured/applied/verified ledger transform
-			// publishes the reader boundary before runtime activation: epoch-1
-			// owners may not be activated against detached listener state.
-			if migration.Domain != "power-metadata" || migration.FromEpoch != 1 || migration.ToEpoch != 2 {
-				return invalid("owner publication migration requires power-metadata 1 to 2")
-			}
-			observation.decisions = append(observation.decisions, RedactedDecision{
-				Resource: "power-metadata", Scope: "power-metadata", Decision: DecisionTransform,
-				Result: "optional-publication-reader-v1",
-			})
-			observation.activationConsequences = append(observation.activationConsequences,
-				"preserve exact optional publication state; rollback to an epoch-1 power reader becomes unavailable")
-		case localSSHPortMigration:
-			plan, inspectErr := transition.inspectLocalSSHPorts(settingsView)
-			if inspectErr != nil {
-				return inspectErr
-			}
-			observation.decisions = append(observation.decisions, plan.Decisions...)
-			observation.blockers = append(observation.blockers, plan.Blockers...)
-			for index := range plan.Files {
-				file := plan.Files[index]
-				if err := file.validate(); err != nil {
-					return err
-				}
-				intent := settingsIntent(migration, file)
-				observation.intents = append(observation.intents, intent)
-				observation.observations = append(observation.observations, ResourceObservation{Resource: "yard." + file.Yard, Class: "local-ssh-port-settings-v1", Fingerprint: file.ExpectedFingerprint})
-				observation.work = append(observation.work, settingsMigrationWork(intent, migration, file))
-			}
-			settingsView = settingsViewAfterPlan(transition.options.ConfigHome, settingsView, plan.Files)
-		case "test-vms-settings-v1-to-v2":
-			capability := newTestVMSettingsV2Capability(
-				transition.options.ConfigHome, transition.options.InheritedSettingIDs,
-				settingsView,
-			)
-			capability.candidateConfigDir = transition.options.CandidateConfigDir
-			plan, inspectErr := capability.Inspect()
-			if inspectErr != nil {
-				return inspectErr
-			}
-			observation.decisions = append(observation.decisions, plan.Decisions...)
-			observation.blockers = append(observation.blockers, plan.Blockers...)
-			for index := range plan.Files {
-				file := plan.Files[index]
-				if err := file.validate(); err != nil {
-					return err
-				}
-				intent := settingsIntent(migration, file)
-				observation.intents = append(observation.intents, intent)
-				observation.observations = append(observation.observations, ResourceObservation{
-					Resource: "yard." + file.Yard, Class: "yard-settings-file-v1",
-					Fingerprint: file.ExpectedFingerprint,
-				})
-				observation.work = append(observation.work, settingsMigrationWork(intent, migration, file))
-			}
-			settingsView = settingsViewAfterPlan(
-				transition.options.ConfigHome, settingsView, plan.Files,
-			)
-		case "test-yard-owner-v1-to-v2":
-			plan, inspectErr := transition.inspectUnjournaledOwnerRegistration(ctx, observation, settingsView)
-			if inspectErr != nil {
-				if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
-					observation.blockers = append(observation.blockers, blocker)
-				} else {
-					return inspectErr
-				}
-			}
-			if plan != nil {
-				intent := PlannerStepIntent{
-					ID:        migration.ID + "." + ownerRegistrationResource,
-					Migration: migration.ID, Resource: ownerRegistrationResource,
-					Decision: DecisionCanonicalize,
-					Expected: plan.ExpectedFingerprint, Desired: plan.DesiredFingerprint,
-				}
-				observation.decisions = append(observation.decisions, RedactedDecision{
-					Resource: ownerRegistrationResource, Scope: "owner-registration",
-					Decision: DecisionCanonicalize, Result: "test-yard",
-				})
-				observation.intents = append(observation.intents, intent)
-				observation.observations = append(observation.observations, ResourceObservation{
-					Resource: "owner-registration." + ownerRegistrationResource,
-					Class:    "test-yard-owner-v1", Fingerprint: plan.ExpectedFingerprint,
-				})
-				observation.work = append(observation.work, ownerMigrationWork(intent, migration, *plan))
-			}
-		default:
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: CodeUnsupportedKind, Resource: "migration." + migration.ID,
-				Message: "the pending migration kind is not compiled into this engine",
-				Retry:   "install an engine that supports the migration registry",
-			})
-			continue
-		}
-		if migration.Kind == "test-vms-settings-v1-to-v2" && ingressAfterSettings != nil {
-			transition.appendFreshIngressWork(observation, *ingressAfterSettings)
-			ingressAfterSettings = nil
-		}
-		edge, advanceErr := nextLedgerEdge(transition.registry, ledger, migration)
-		if advanceErr != nil {
-			return advanceErr
-		}
-		advanced := ledgerFromAuthority(edge.After())
-		payload, desired, marshalErr := MarshalLedgerV2(advanced, transition.registry)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		ledgerIntent := PlannerStepIntent{
-			ID: migration.ID + ".ledger", Migration: migration.ID,
-			Resource: "ledger." + migration.Domain, Decision: DecisionTransform,
-			Expected: ledgerSnapshot.Fingerprint, Desired: desired,
-		}
-		observation.intents = append(observation.intents, ledgerIntent)
-		observation.observations = append(observation.observations, ResourceObservation{
-			Resource: ledgerIntent.Resource, Class: "domain-ledger-v2",
-			Fingerprint: ledgerSnapshot.Fingerprint,
-		})
-		observation.work = append(observation.work, ledgerMigrationWork(ledgerIntent, migration, edge, authorityLedgerRevision{ledgerSnapshot}, payload))
-		ledger = advanced
-		ledgerSnapshot = protectedSnapshotFromPayload(payload)
+	if len(pending) != 0 {
+		return retiredMigrationRepairError()
 	}
-	if ingressAfterSettings != nil {
-		transition.appendFreshIngressWork(observation, *ingressAfterSettings)
+	if transition.initialLedgerBootstrap(*observation) {
+		if err := transition.appendBaselineWork(observation, nil); err != nil {
+			return err
+		}
+	} else if len(transition.registry.RetiredPrefixes) != 0 && !observation.migrationLedgerSnapshot.AuthoritySnapshot.Exists {
+		return retiredMigrationRepairError()
 	}
-	observation.prospectiveSettings = settingsView
-	transition.retainSourceActivationView(observation, settingsView)
+	if transition.options.Ingress != nil {
+		ingress, err := transition.options.Ingress.Inspect(ctx, nil)
+		if err != nil {
+			return err
+		}
+		ingress, err = normalizeV2IngressInspection(ingress)
+		if err != nil {
+			return err
+		}
+		observation.decisions = append(observation.decisions, ingress.Decisions...)
+		observation.blockers = append(observation.blockers, ingress.Blockers...)
+		for _, operation := range ingress.Operations {
+			transition.appendFreshIngressWork(observation, operation)
+		}
+		observation.prospectiveSettings = ingress.Prospective
+	}
+	transition.retainSourceActivationView(observation, observation.prospectiveSettings)
 	return nil
 }
 
@@ -2014,450 +1828,76 @@ func (transition *V2Transition) appendFreshIngressWork(
 	observation.work = append(observation.work, ingressMigrationWork(intent, operation, V2IngressBinding{}))
 }
 
-// Preserve excluded owners consistently before and after authorization. An
-// existing journaled owner effect retains its exact recorded recovery contract.
-func (transition *V2Transition) inspectUnjournaledOwnerRegistration(ctx context.Context, observation *v2Observation, view V2SettingsSnapshotView) (*ownerRegistrationV2Plan, error) {
-	if guard, ok := transition.options.OwnerRegistration.(interface {
-		FreshWarning(context.Context, V2SettingsSnapshotView) (string, error)
-	}); ok {
-		warning, err := guard.FreshWarning(ctx, view)
-		if err != nil {
-			return nil, err
-		}
-		if warning != "" {
-			observation.activationWarnings = append(observation.activationWarnings, warning)
-			return nil, nil
-		}
-	}
-	return inspectOwnerRegistrationV2(ctx, transition.options.OwnerRegistration, view)
-}
-
-func (transition *V2Transition) observeResume(
-	ctx context.Context,
-	observation *v2Observation,
-) error {
+func (transition *V2Transition) observeResume(ctx context.Context, observation *v2Observation) error {
 	journal := observation.journal
-	if journal.ArtifactDigest != transition.options.ArtifactDigest ||
-		journal.RegistryDigest != transition.registryDigest ||
-		journal.CatalogDigest != transition.catalog.Digest() {
-		observation.blockers = append(observation.blockers, Blocker{
-			Code: CodePlanStale, Resource: "transition.bindings",
-			Message: "the authorized migration bindings differ from this engine",
-			Retry:   "run yard update --check",
-		})
+	if journal.ArtifactDigest != transition.options.ArtifactDigest || journal.RegistryDigest != transition.registryDigest || journal.CatalogDigest != transition.catalog.Digest() {
+		observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: "transition.bindings", Message: "the authorized migration bindings differ from this engine", Retry: "run yard update --check"})
 	}
-	ingressBinding := V2IngressBinding{
-		Transaction: journal.Transaction, Plan: journal.AuthorizationPlan,
-		Releases: journal.Releases, Steps: ingressStepBindings(journal.Steps),
-	}
-	var ingressPlan V2IngressInspection
+	binding := V2IngressBinding{Transaction: journal.Transaction, Plan: journal.AuthorizationPlan, Releases: journal.Releases, Steps: ingressStepBindings(journal.Steps)}
+	var ingress V2IngressInspection
 	var err error
 	if transition.options.Ingress != nil {
-		ingressPlan, err = transition.options.Ingress.Inspect(ctx, &ingressBinding)
+		ingress, err = transition.options.Ingress.Inspect(ctx, &binding)
 		if err != nil {
 			return err
 		}
-		ingressPlan, err = normalizeV2IngressInspection(ingressPlan)
+		ingress, err = normalizeV2IngressInspection(ingress)
 		if err != nil {
 			return err
 		}
-		observation.blockers = append(observation.blockers, ingressPlan.Blockers...)
+		observation.blockers = append(observation.blockers, ingress.Blockers...)
 	}
-	ownerSettingsView := ingressPlan.Prospective
-	planned := map[string]settingsV2FilePlan{}
-	settingsPredecessorPending := map[string]bool{}
-	for _, migration := range transition.registry.Migrations {
-		if !slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID }) {
-			continue
-		}
-		var capabilityPlan settingsV2Plan
-		switch migration.Kind {
-		case "test-vms-settings-v1-to-v2":
-			capability := newTestVMSettingsV2Capability(transition.options.ConfigHome, transition.options.InheritedSettingIDs, ownerSettingsView)
-			capability.candidateConfigDir = transition.options.CandidateConfigDir
-			capabilityPlan, err = capability.Inspect()
-		case localSSHPortMigration:
-			capabilityPlan, err = transition.inspectLocalSSHPorts(ownerSettingsView)
-		case registeredYardsMigration:
-			capabilityPlan, err = transition.inspectRegisteredSettings(ctx, migration, ownerSettingsView, observation.links)
-		default:
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		observation.blockers = append(observation.blockers, capabilityPlan.Blockers...)
-		for _, file := range capabilityPlan.Files {
-			planned[migration.ID+":"+file.Yard] = file
-		}
-		ownerSettingsView = settingsViewAfterPlan(transition.options.ConfigHome, ownerSettingsView, capabilityPlan.Files)
-	}
-	observation.prospectiveSettings = ownerSettingsView
-	ledgerEdges, reconstructErr := ledgerTrace(transition.registry, observation.ledger, journal.Steps)
-	if reconstructErr != nil {
-		return reconstructErr
-	}
-	journalSettings := make(map[string]struct{})
-	plannedIngress := make(map[V2IngressOperationKind]V2IngressOperation, len(ingressPlan.Operations))
-	for _, operation := range ingressPlan.Operations {
-		plannedIngress[operation.Kind] = operation
-	}
-	journalIngress := make(map[V2IngressOperationKind]struct{})
-	journalOwner := false
-	journalOwnerMigration := false
-	migrationStarted := false
-	sourceImportPending := false
-	ownerRegistrationDeferred := false
-	replacedNative := map[string]bool{}
 	for _, step := range journal.Steps {
-		if step.Checkpoint == StepApplied || step.Checkpoint == StepVerified {
-			migrationStarted = true
-		}
-		intent := PlannerStepIntent{
-			ID: step.ID, Migration: step.Migration, Resource: step.Resource,
-			Decision: step.Decision, Expected: step.Expected, Desired: step.Desired,
-		}
-		observation.intents = append(observation.intents, intent)
-		if kind, valid := ingressOperationKindForIntent(intent); valid {
-			operation, planned := plannedIngress[kind]
-			if !planned || operation.Decision != step.Decision ||
-				operation.Expected != step.Expected || operation.Desired != step.Desired ||
-				(step.Checkpoint != StepIntent &&
-					(step.Evidence == nil || operation.Static != step.Evidence.Recovery)) ||
-				transition.options.Ingress == nil {
-				observation.blockers = append(observation.blockers, Blocker{
-					Code: CodePlanStale, Resource: step.Resource,
-					Message: "the journaled ingress operation cannot be reconstructed exactly",
-					Retry:   "run yard update --check",
-				})
-				continue
-			}
-			bound, bindErr := ingressStep(ingressBinding, operation)
-			if bindErr != nil {
-				return bindErr
-			}
-			actual, observeErr := transition.options.Ingress.Observe(ctx, bound)
-			if observeErr != nil || (actual != step.Expected && actual != step.Desired) {
-				observation.blockers = append(observation.blockers, Blocker{
-					Code: CodeMigrationStale, Resource: step.Resource,
-					Message: "the journaled ingress operation changed outside the authorized transition",
-					Retry:   "run yard update --check",
-				})
-				continue
-			}
-			if step.Checkpoint == StepEvidence && actual == step.Desired {
-				migrationStarted = true
-			}
-			if kind == V2SourceImport && actual == step.Expected {
-				sourceImportPending = true
-				ownerRegistrationDeferred = true
-			}
-			journalIngress[kind] = struct{}{}
-			_, _, _, scope, class := ingressOperationIDs(kind)
-			observation.decisions = append(observation.decisions, RedactedDecision{
-				Resource: step.Resource, Scope: scope,
-				Decision: step.Decision, Result: "journaled",
-			})
-			observation.observations = append(observation.observations, ResourceObservation{
-				Resource: step.Resource, Class: class, Fingerprint: actual,
-			})
-			observation.work = append(observation.work, ingressMigrationWork(intent, operation, ingressBinding))
-			continue
-		}
-		migration, exists := transition.migration(step.Migration)
-		if !exists {
-			return invalid("journal references unknown migration %q", step.Migration)
-		}
-		if migration.Kind == "test-yard-owner-v1-to-v2" {
-			journalOwnerMigration = true
-		}
-		if strings.HasPrefix(step.Resource, "ledger.") {
-			edge, known := ledgerEdges[migration.ID]
-			if !known {
-				return invalid("journaled ledger transition cannot be reconstructed")
-			}
-			ledgerFrom, ledgerTo := edge.from, edge.to
-			observation.observations = append(observation.observations, ResourceObservation{
-				Resource: step.Resource, Class: "domain-ledger-v2",
-				Fingerprint: observation.ledgerSnapshot.Fingerprint,
-			})
-			if step.Checkpoint == StepEvidence &&
-				observation.ledgerSnapshot.Fingerprint == step.Desired {
-				migrationStarted = true
-			}
-			observation.work = append(observation.work, ledgerMigrationWork(intent, migration, edge.witness, authorityLedgerRevision{ledgerFrom}, ledgerTo))
-			continue
-		}
-		if nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") {
-			// Later rows for a replaced instance require the same fresh assessment.
-			if replacedNative[step.Resource] {
-				continue
-			}
-			work := nativeMigrationWork(intent, migration)
-			retired, err := transition.retiredNativeBinding(ctx, migration, step.Resource, *journal)
-			if err != nil {
+		intent := PlannerStepIntent{ID: step.ID, Migration: step.Migration, Resource: step.Resource, Decision: step.Decision, Expected: step.Expected, Desired: step.Desired}
+		if step.ID == baselineLedgerStep {
+			if err := transition.appendBaselineWork(observation, &step); err != nil {
 				return err
 			}
-			if retired {
-				if (journal.Checkpoint == JournalAuthorized || journal.Checkpoint == JournalMigrating) && initialReleaseLinks(observation.links, journal.Releases) {
-					observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: step.Resource, Message: "the selected yard environment was explicitly recreated; migration requires a fresh plan and authorization", Retry: "run yard migrate --check"})
-				} else if step.Checkpoint != StepVerified {
-					observation.blockers = append(observation.blockers, Blocker{Code: CodeRecoveryAmbiguous, Resource: step.Resource, Message: "a recreated yard has an unverified post-activation native migration step", Retry: "run yard update --check"})
-				}
-				observation.work = append(observation.work, work)
-				observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
-				continue
-			}
-			if step.Checkpoint == StepVerified {
-				// Activation legitimately changes finished rows. Preserve the released
-				// completion boundary: native identity pins apply while migrating.
-				if journal.Checkpoint != JournalMigrating {
-					observation.work = append(observation.work, work)
-					observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
-					continue
-				}
-				replaced, err := transition.nativeIdentityReplaced(ctx, *journal, step, work, ownerSettingsView)
-				if err != nil {
-					return err
-				}
-				if replaced {
-					code, retry := CodeMigrationStale, "inspect release links with yard update --check; recover the original owner before retrying"
-					if initialReleaseLinks(observation.links, journal.Releases) {
-						code, retry = CodePlanStale, "run yard update for a fresh plan and confirmation"
-						replacedNative[step.Resource] = true
-					}
-					observation.blockers = append(observation.blockers, Blocker{Code: code, Resource: step.Resource,
-						Message: "the yard instance of a finished migration row was replaced outside the authorized transition", Retry: retry})
-					continue
-				}
-				if laterNativeRow(journal.Steps, step) {
-					observation.work = append(observation.work, work)
-					observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: step.Desired})
-					continue
-				}
-			}
-			actual, err := transition.nativeFingerprint(ctx, work, observation.links, ownerSettingsView)
-			if hasMigrationRefusal(err) {
-				observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err, ctx))
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			if actual != step.Expected && actual != step.Desired {
-				return invalid("registered yard migration changed outside its bound plan")
-			}
-			observation.work = append(observation.work, work)
-			observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: actual})
 			continue
 		}
-		if migration.Kind == "test-yard-owner-v1-to-v2" {
-			if step.Resource != ownerRegistrationResource {
-				return invalid("journaled owner-registration intent is invalid")
+		kind, valid := ingressOperationKindForIntent(intent)
+		if !valid {
+			// Frozen effects have no mutation recipe in this engine. The installed
+			// owner or explicit newer-release replacement owns their continuation.
+			if step.Checkpoint != StepVerified {
+				return retiredMigrationRepairError()
 			}
-			journalOwner = true
-			before, bindErr := transition.ownerRegistrationBefore(
-				ctx, *journal, step, ownerSettingsView,
-			)
-			if bindErr != nil {
-				blocker := Blocker{
-					Code: CodeMigrationStale, Resource: "owner-registration." + step.Resource,
-					Message: "the journaled owner registration identity changed outside the authorized transition",
-					Retry:   "run yard update --check",
-				}
-				blocker.Message, blocker.Retry = publicActivationDiagnostic(bindErr, blocker.Message, blocker.Retry)
-				recordMigrationDiagnostics(ctx, bindErr)
-				observation.blockers = append(observation.blockers, blocker)
-				continue
-			}
-			progress := OwnerRegistrationExpected
-			var observeErr error
-			if !ownerRegistrationDeferred {
-				progress, observeErr = transition.options.OwnerRegistration.Observe(ctx, before)
-			}
-			if observeErr != nil {
-				blocker := Blocker{
-					Code: CodeMigrationStale, Resource: "owner-registration." + step.Resource,
-					Message: "the journaled owner registration cannot be observed safely",
-					Retry:   "repair the test-yard owner topology, then run yard update",
-				}
-				blocker.Message, blocker.Retry = publicActivationDiagnostic(observeErr, blocker.Message, blocker.Retry)
-				recordMigrationDiagnostics(ctx, observeErr)
-				observation.blockers = append(observation.blockers, blocker)
-				continue
-			}
-			actual, progressErr := ownerRegistrationProgressFingerprint(
-				progress, step.Expected, step.Desired,
-			)
-			if progressErr != nil {
-				return progressErr
-			}
-			if actual != step.Expected && actual != step.Desired {
-				observation.blockers = append(observation.blockers, Blocker{
-					Code: CodeMigrationStale, Resource: "owner-registration." + step.Resource,
-					Message: "the journaled owner registration changed outside the authorized transition",
-					Retry:   "run yard update --check",
-				})
-			}
-			observation.decisions = append(observation.decisions, RedactedDecision{
-				Resource: step.Resource, Scope: "owner-registration",
-				Decision: step.Decision, Result: "journaled",
-			})
-			observation.observations = append(observation.observations, ResourceObservation{
-				Resource: "owner-registration." + step.Resource,
-				Class:    "test-yard-owner-v1", Fingerprint: actual,
-			})
-			observation.work = append(observation.work, ownerMigrationWork(intent, migration, ownerRegistrationV2Plan{Before: before, ExpectedFingerprint: step.Expected, DesiredFingerprint: step.Desired}))
+			observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: step.Resource, Message: "the verified historical journal requires its installed owner or newer-release replacement", Retry: "run yard update --check"})
 			continue
 		}
-		if !settingsWorkMigration(migration) {
-			return invalid("journal references unsupported migration kind %q", migration.Kind)
-		}
-		journalSettings[migration.ID+":"+step.Resource] = struct{}{}
-		var file *settingsV2FilePlan
-		if plannedFile, ok := planned[migration.ID+":"+step.Resource]; ok {
-			copy := plannedFile
-			file = &copy
-		}
-		if file != nil && (file.Decision != step.Decision ||
-			file.ExpectedFingerprint != step.Expected || file.DesiredFingerprint != step.Desired) {
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: CodePlanStale, Resource: "yard." + step.Resource,
-				Message: "the journaled yard settings plan cannot be reconstructed exactly",
-				Retry:   "run yard update --check",
-			})
+		index := slices.IndexFunc(ingress.Operations, func(op V2IngressOperation) bool { return op.Kind == kind })
+		if index < 0 || transition.options.Ingress == nil {
+			observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: step.Resource, Message: "the journaled ingress operation cannot be reconstructed exactly", Retry: "run yard update --check"})
 			continue
 		}
-		// A same-file successor describes the output of a predecessor that has not
-		// written yet. Its current bytes may not even load under the target release.
-		deferred := settingsPredecessorPending[step.Resource] && step.Checkpoint == StepIntent
-		var observeErr error
-		if !deferred && sourceImportPending && file != nil {
-			deferred, observeErr = transition.settingsAwaitSourceImport(*file)
-		}
-		var actual Fingerprint
-		if deferred {
-			actual = step.Expected
-		} else if observeErr == nil {
-			_, _, actual, observeErr = transition.observeJournalSettingsWork(*journal, step, migration)
-		}
-		if observeErr != nil {
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: CodeMigrationStale, Resource: "yard." + step.Resource,
-				Message: "the journaled yard settings cannot be observed safely",
-				Retry:   "repair the named yard settings, then run yard update",
-			})
+		operation := ingress.Operations[index]
+		if ingressIntent(operation) != intent || step.Checkpoint != StepIntent && (step.Evidence == nil || step.Evidence.Recovery != operation.Static) {
+			observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: step.Resource, Message: "the journaled ingress operation cannot be reconstructed exactly", Retry: "run yard update --check"})
 			continue
 		}
-		if actual == step.Expected && step.Expected != step.Desired {
-			settingsPredecessorPending[step.Resource] = true
+		bound, err := ingressStep(binding, operation)
+		if err != nil {
+			return err
 		}
-		if step.Checkpoint == StepEvidence && actual == step.Desired {
-			migrationStarted = true
+		actual, err := transition.options.Ingress.Observe(ctx, bound)
+		if err != nil {
+			return err
 		}
 		if actual != step.Expected && actual != step.Desired {
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: CodeMigrationStale, Resource: "yard." + step.Resource,
-				Message: "the journaled yard settings changed outside the authorized transition",
-				Retry:   "run yard update --check",
-			})
-		}
-		if step.Resource == legacyOwnerRegistrationYard && actual == step.Expected {
-			ownerRegistrationDeferred = true
-		}
-		observation.decisions = append(observation.decisions, RedactedDecision{
-			Resource: "yard." + step.Resource, Scope: "yard",
-			Decision: step.Decision, Result: "journaled",
-		})
-		observation.observations = append(observation.observations, ResourceObservation{
-			Resource: "yard." + step.Resource, Class: "yard-settings-file-v1",
-			Fingerprint: actual,
-		})
-		if file != nil {
-			observation.work = append(observation.work, settingsMigrationWork(intent, migration, *file))
-		} else if actual == step.Desired && step.Checkpoint != StepIntent {
-			observation.work = append(observation.work, v2Work{intent: intent, migration: cloneWorkMigration(migration), recipe: &recordedSettingsWork{intent: intent}})
-		} else {
-			observation.blockers = append(observation.blockers, Blocker{Code: CodeRecoveryAmbiguous, Resource: "yard." + step.Resource, Message: "the expected settings recipe cannot be reconstructed", Retry: "run yard update --check"})
-		}
-	}
-	for yard := range planned {
-		if _, authorized := journalSettings[yard]; !authorized {
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: CodePlanStale, Resource: "yard." + yard,
-				Message: "a new migration impact appeared after authorization",
-				Retry:   "run yard update --check",
-			})
-		}
-	}
-	for kind := range plannedIngress {
-		if _, authorized := journalIngress[kind]; !authorized {
-			_, _, resource, _, _ := ingressOperationIDs(kind)
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: CodePlanStale, Resource: resource,
-				Message: "a new ingress impact appeared after authorization",
-				Retry:   "run yard update --check",
-			})
-		}
-	}
-	if journalOwnerMigration && !journalOwner {
-		plan, inspectErr := transition.inspectUnjournaledOwnerRegistration(ctx, observation, nil)
-		if inspectErr != nil {
-			if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
-				observation.blockers = append(observation.blockers, blocker)
-			} else {
-				return inspectErr
-			}
-		}
-		if plan != nil {
-			code := CodePlanStale
-			message := "a new owner-registration migration impact appeared after authorization"
-			if migrationStarted {
-				code = CodeMigrationStale
-				message = "a new owner-registration impact appeared after authorized migration work began"
-			}
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: code, Resource: "owner-registration." + ownerRegistrationResource,
-				Message: message, Retry: "run yard update --check",
-			})
-		}
-	}
-	for _, migration := range transition.registry.Migrations {
-		if !nativeMigration(migration) {
+			observation.blockers = append(observation.blockers, Blocker{Code: CodeMigrationStale, Resource: step.Resource, Message: "the journaled ingress operation changed outside the authorized transition", Retry: "run yard update --check"})
 			continue
 		}
-		pending := false
-		for _, step := range journal.Steps {
-			if step.Migration == migration.ID {
-				pending = true
-			}
-		}
-		if !pending {
-			continue
-		}
-		for _, owner := range transition.nativeOwners(migration) {
-			found := slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID && step.Resource == owner.ID() })
-			if !found {
-				actual, err := owner.Observe(ctx, transition.options.Releases, observation.links)
-				if err != nil {
-					return err
-				}
-				if !actual.Converged {
-					retired, err := transition.retiredNativeBinding(ctx, migration, owner.ID(), *journal)
-					if err != nil {
-						return err
-					}
-					if retired && (journal.Checkpoint == JournalAuthorized || journal.Checkpoint == JournalMigrating) && initialReleaseLinks(observation.links, journal.Releases) {
-						observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: owner.ID(), Message: "a recreated selected yard requires fresh migration authorization", Retry: "run yard migrate --check"})
-						continue
-					}
-					return invalid("registered yard target list expanded after authorization")
-				}
-			}
-		}
+		observation.intents = append(observation.intents, intent)
+		_, _, _, scope, class := ingressOperationIDs(kind)
+		observation.decisions = append(observation.decisions, RedactedDecision{Resource: step.Resource, Scope: scope, Decision: step.Decision, Result: "journaled"})
+		observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: class, Fingerprint: actual})
+		observation.work = append(observation.work, ingressMigrationWork(intent, operation, binding))
 	}
-	observation.prospectiveSettings = ownerSettingsView
-	transition.retainSourceActivationView(observation, ownerSettingsView)
+	if len(ingress.Operations) != len(ingressStepBindings(journal.Steps)) {
+		observation.blockers = append(observation.blockers, Blocker{Code: CodePlanStale, Resource: "source.ingress", Message: "the source import work changed after authorization", Retry: "run yard update --check"})
+	}
+	observation.prospectiveSettings = ingress.Prospective
+	transition.retainSourceActivationView(observation, ingress.Prospective)
 	return nil
 }
 
@@ -2485,41 +1925,16 @@ func (transition *V2Transition) convergeStep(
 		work.ingressRecipe().binding = binding
 	}
 	var recovery Fingerprint
-	needsRecovery := work.kind() == v2SettingsWork || work.kind() == v2OwnerWork ||
-		(work.kind() == v2IngressWork && work.ingressRecipe() != nil &&
-			work.ingressRecipe().operation.Kind == V2LegacyV1Import)
-	if needsRecovery {
-		var err error
-		switch work.kind() {
-		case v2SettingsWork:
-			recovery, err = transition.ensureRecovery(*journal, *step, work)
-		case v2OwnerWork:
-			var token string
-			recovery, token, err = transition.ensureOwnerRecovery(*journal, *step, work)
-			if err == nil && work.ownerPlan() != nil {
-				work.ownerPlan().Before.RecoveryToken = token
-			}
-		case v2IngressWork:
-			recovery = work.ingressRecipe().operation.Static
-			err = validateFingerprint(recovery, "legacy ingress static fingerprint")
-		}
-		if err != nil {
+	if work.kind() == v2IngressWork && work.ingressRecipe().operation.Kind == V2LegacyV1Import {
+		recovery = work.ingressRecipe().operation.Static
+		if err := validateFingerprint(recovery, "legacy ingress static fingerprint"); err != nil {
 			return Outcome{}, err
 		}
-		if step.Checkpoint != StepIntent &&
-			(step.Evidence == nil || step.Evidence.Recovery != recovery) {
+		if step.Checkpoint != StepIntent && (step.Evidence == nil || step.Evidence.Recovery != recovery) {
 			return Outcome{}, invalid("journaled migration recovery binding is missing or stale")
 		}
 	}
 	if step.Checkpoint == StepIntent {
-		if err := transition.pinNativeIdentity(ctx, *journal, *step, work); err != nil {
-			return Outcome{}, err
-		}
-		if work.kind() == v2SettingsWork || work.kind() == v2OwnerWork {
-			if err := transition.inject("after-recovery"); err != nil {
-				return Outcome{}, err
-			}
-		}
 		evidence := evidenceFor(*journal, *step, EvidenceCaptured, step.Expected, recovery)
 		if err := transition.persistEvidence(evidence); err != nil {
 			return Outcome{}, err
@@ -2540,121 +1955,20 @@ func (transition *V2Transition) convergeStep(
 		if err != nil {
 			return Outcome{}, err
 		}
-		if actual == step.Expected || work.kind() == v2OwnerWork && actual == step.Desired {
-			switch work.kind() {
-			case v2NativeWork:
-				if err := transition.nativeOwner(work.migration, work.intent.Resource).Reconcile(ctx, links); err != nil {
+		if actual == step.Expected {
+			if work.kind() == v2BaselineWork {
+				if err := transition.applyBaselineLedger(ctx, work); err != nil {
 					return Outcome{}, err
 				}
-			case v2SettingsWork:
-				if work.settingsFile() == nil {
-					return v2OperatorOutcome(links, journal.Goal.Target,
-						transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
-						"the expected settings recipe cannot be reconstructed",
-						"run yard update --check"), nil
-				}
-				expected, path, observed, observeErr := transition.observeSettingsMigrationWork(
-					work.migration, work.intent.Resource,
-				)
-				if observeErr != nil || path != work.settingsFile().Path ||
-					observed != step.Expected {
-					return v2OperatorOutcome(links, journal.Goal.Target,
-						transactionIDPointer(journal.Transaction), CodeMigrationStale,
-						"the settings resource changed before its protected update",
-						"run yard update --check"), nil
-				}
-				if work.migration.Kind == registeredYardsMigration {
-					plan, err := transition.inspectRegisteredSettings(ctx, work.migration, nil, links)
-					if err != nil {
-						return Outcome{}, err
-					}
-					if len(plan.Blockers) != 0 {
-						return Outcome{}, migrationBlockerError{plan.Blockers[0]}
-					}
-					matched := slices.ContainsFunc(plan.Files, func(file settingsV2FilePlan) bool {
-						return file.Path == path && file.ExpectedFingerprint == step.Expected && file.DesiredFingerprint == step.Desired
-					})
-					if !matched {
-						return Outcome{}, invalid("registered endpoint source changed before settings CAS")
-					}
-				}
-				publish := config.CompareAndSwapPersistentFile
-				if work.migration.Kind == localSSHPortMigration || work.migration.Kind == registeredYardsMigration {
-					publish = config.CompareAndSwapLocalSettingsFile
-				}
-				if err := publish(transition.options.ConfigHome, work.settingsFile().Path, expected, work.settingsFile().Desired); err != nil && !errors.Is(err, config.ErrPersistentTargetStale) {
+			} else {
+				stepRequest, err := transition.ingressStepForWork(work)
+				if err != nil {
 					return Outcome{}, err
-				}
-				if err := transition.inject("after-settings-cas"); err != nil {
-					return Outcome{}, err
-				}
-			case v2OwnerWork:
-				if work.ownerPlan() == nil || transition.options.OwnerRegistration == nil {
-					return v2OperatorOutcome(links, journal.Goal.Target,
-						transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
-						"the expected owner-registration recipe cannot be reconstructed",
-						"run yard update --check"), nil
-				}
-				if err := transition.options.OwnerRegistration.Commit(ctx, work.ownerPlan().Before); err != nil {
-					return Outcome{}, err
-				}
-				if err := transition.inject("after-owner-registration-commit"); err != nil {
-					return Outcome{}, err
-				}
-			case v2IngressWork:
-				stepRequest, requestErr := transition.ingressStepForWork(work)
-				if requestErr != nil {
-					return Outcome{}, requestErr
 				}
 				if err := transition.options.Ingress.Apply(ctx, stepRequest); err != nil {
 					return Outcome{}, err
 				}
 				if err := transition.inject("after-source-" + string(stepRequest.Kind) + "-apply"); err != nil {
-					return Outcome{}, err
-				}
-			case v2LedgerWork:
-				if err := work.ledgerRecipe().edge.Validate(); err != nil {
-					return Outcome{}, invalid("%v", err)
-				}
-				if len(work.ledgerRecipe().to) == 0 {
-					return Outcome{}, invalid("journaled ledger recipe is missing")
-				}
-				checkpointSnapshot, checkpointErr := transition.store.ReadMigrationCheckpoint()
-				if checkpointErr != nil {
-					return Outcome{}, checkpointErr
-				}
-				if transition.options.MigrationCheckpoint || checkpointSnapshot.Exists {
-					actual, readErr := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
-					if readErr != nil {
-						return Outcome{}, readErr
-					}
-					virtual, _, marshalErr := MarshalLedgerV2(actual.Ledger, transition.registry)
-					if marshalErr != nil {
-						return Outcome{}, marshalErr
-					}
-					if !actual.Checkpointed && !actual.ProjectionSnapshot.Exists {
-						virtual = nil
-					}
-					var virtualSnapshot ProtectedSnapshot
-					if virtual == nil {
-						virtualSnapshot = absentProtectedSnapshot()
-					} else {
-						virtualSnapshot = protectedSnapshotFromPayload(virtual)
-					}
-					if !sameProtectedSnapshot(virtualSnapshot, work.ledgerRecipe().from.snapshot) {
-						return Outcome{}, ErrProtectedStoreStale
-					}
-					next, _, parseErr := ParseLedgerV2(work.ledgerRecipe().to, transition.registry)
-					if parseErr != nil {
-						return Outcome{}, parseErr
-					}
-					if err := transition.store.CompareAndSwapMigrationLedger(actual, next, transition.registry, transition.registryDigest); err != nil && !errors.Is(err, ErrProtectedStoreStale) {
-						return Outcome{}, err
-					}
-				} else if err := transition.store.CompareAndSwapLedger(work.ledgerRecipe().from.snapshot, work.ledgerRecipe().to); err != nil && !errors.Is(err, ErrProtectedStoreStale) {
-					return Outcome{}, err
-				}
-				if err := transition.inject("after-ledger-cas"); err != nil {
 					return Outcome{}, err
 				}
 			}
@@ -2676,11 +1990,6 @@ func (transition *V2Transition) convergeStep(
 		step.Checkpoint, step.Evidence = StepApplied, &evidence
 		if err := transition.persistJournal(journal, journalSnapshot); err != nil {
 			return Outcome{}, err
-		}
-		if work.kind() == v2SettingsWork || work.kind() == v2OwnerWork || work.kind() == v2NativeWork {
-			if err := transition.inject("after-step-applied"); err != nil {
-				return Outcome{}, err
-			}
 		}
 	}
 	if step.Checkpoint == StepApplied {
@@ -2740,11 +2049,7 @@ func (transition *V2Transition) convergeStep(
 		if err := transition.persistJournal(journal, journalSnapshot); err != nil {
 			return Outcome{}, err
 		}
-		point := "after-step-verified"
-		if work.kind() == v2LedgerWork {
-			point = "after-ledger-verified"
-		}
-		if err := transition.inject(point); err != nil {
+		if err := transition.inject("after-step-verified"); err != nil {
 			return Outcome{}, err
 		}
 	}
@@ -2843,160 +2148,6 @@ func (transition *V2Transition) persistEvidence(record EvidenceRecord) error {
 	)
 }
 
-func (transition *V2Transition) ensureRecovery(
-	journal JournalRecord,
-	step JournalStep,
-	work v2Work,
-) (Fingerprint, error) {
-	existing, err := transition.store.ReadRecovery(journal.Transaction, step.ID)
-	if err != nil {
-		return "", err
-	}
-	if existing.Exists {
-		var recovery settingsRecoveryV1
-		if err := decodeBoundedRecord(existing.Payload, 4096, &recovery); err != nil {
-			return "", err
-		}
-		if err := validateSettingsRecovery(recovery, journal, step); err != nil {
-			return "", err
-		}
-		if recovery.Kind != settingsRecoveryKind(work.migration) {
-			return "", invalid("settings recovery kind differs from its compiled migration")
-		}
-		if err := validateEndpointRecovery(recovery, transition.options.RegisteredEndpointSettings); err != nil {
-			return "", err
-		}
-		if work.settingsFile() != nil && !slices.Equal(recovery.Before, work.settingsFile().Before) {
-			return "", invalid("typed settings recovery does not match the inspected before state")
-		}
-		return existing.Fingerprint, nil
-	}
-	if work.settingsFile() == nil {
-		return "", invalid("settings recovery evidence is missing before mutation")
-	}
-	recovery := settingsRecoveryV1{
-		SchemaVersion: 1, Transaction: journal.Transaction,
-		Step: step.ID, Migration: step.Migration, Yard: step.Resource,
-		Expected: step.Expected,
-		Before:   slices.Clone(work.settingsFile().Before),
-	}
-	if kind := settingsRecoveryKind(work.migration); kind != "" {
-		recovery.SchemaVersion, recovery.Kind = 2, kind
-	}
-	if err := validateSettingsRecovery(recovery, journal, step); err != nil {
-		return "", err
-	}
-	if err := validateEndpointRecovery(recovery, transition.options.RegisteredEndpointSettings); err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(recovery)
-	if err != nil {
-		return "", err
-	}
-	payload = append(payload, '\n')
-	if err := transition.store.CreateRecovery(journal.Transaction, step.ID, payload); err != nil {
-		return "", err
-	}
-	return fingerprintPayload(payload), nil
-}
-
-func (transition *V2Transition) ensureOwnerRecovery(
-	journal JournalRecord,
-	step JournalStep,
-	work v2Work,
-) (Fingerprint, string, error) {
-	existing, err := transition.store.ReadRecovery(journal.Transaction, step.ID)
-	if err != nil {
-		return "", "", err
-	}
-	if existing.Exists {
-		var recovery ownerRegistrationRecoveryV1
-		if err := decodeBoundedRecord(existing.Payload, 4096, &recovery); err != nil {
-			return "", "", err
-		}
-		if err := validateOwnerRegistrationRecovery(recovery, journal, step); err != nil {
-			return "", "", err
-		}
-		if work.ownerPlan() != nil && ownerRegistrationFingerprint(recovery.Before) !=
-			ownerRegistrationFingerprint(work.ownerPlan().Before) {
-			return "", "", invalid("typed owner-registration recovery does not match the inspected before state")
-		}
-		return existing.Fingerprint, recovery.Token, nil
-	}
-	if work.ownerPlan() == nil {
-		return "", "", invalid("owner-registration recovery evidence is missing before mutation")
-	}
-	token, err := newOwnerRecoveryToken()
-	if err != nil {
-		return "", "", err
-	}
-	before := work.ownerPlan().Before
-	before.RecoveryToken = ""
-	before.TerminalCleanup = false
-	recovery := ownerRegistrationRecoveryV1{
-		SchemaVersion: 1, Transaction: journal.Transaction,
-		Step: step.ID, Migration: step.Migration, Resource: step.Resource,
-		Expected: step.Expected, Token: token, Before: before,
-	}
-	if err := validateOwnerRegistrationRecovery(recovery, journal, step); err != nil {
-		return "", "", err
-	}
-	payload, err := json.Marshal(recovery)
-	if err != nil {
-		return "", "", err
-	}
-	payload = append(payload, '\n')
-	if err := transition.store.CreateRecovery(journal.Transaction, step.ID, payload); err != nil {
-		return "", "", err
-	}
-	return fingerprintPayload(payload), token, nil
-}
-
-func (transition *V2Transition) ownerRegistrationBefore(
-	ctx context.Context,
-	journal JournalRecord,
-	step JournalStep,
-	prospective V2SettingsSnapshotView,
-) (OwnerRegistrationObservation, error) {
-	existing, err := transition.store.ReadRecovery(journal.Transaction, step.ID)
-	if err != nil {
-		return OwnerRegistrationObservation{}, err
-	}
-	if existing.Exists {
-		var recovery ownerRegistrationRecoveryV1
-		if err := decodeBoundedRecord(existing.Payload, 4096, &recovery); err != nil {
-			return OwnerRegistrationObservation{}, err
-		}
-		if err := validateOwnerRegistrationRecovery(recovery, journal, step); err != nil {
-			return OwnerRegistrationObservation{}, err
-		}
-		before := recovery.Before
-		before.RecoveryToken = recovery.Token
-		before.TerminalCleanup = step.Checkpoint == StepVerified
-		return before, nil
-	}
-	if step.Checkpoint != StepIntent || transition.options.OwnerRegistration == nil {
-		return OwnerRegistrationObservation{}, invalid(
-			"journaled owner-registration recovery binding is unavailable",
-		)
-	}
-	before, err := transition.options.OwnerRegistration.Prepare(ctx, prospective)
-	if err != nil {
-		return OwnerRegistrationObservation{}, err
-	}
-	if err := validateOwnerRegistrationObservation(before); err != nil {
-		return OwnerRegistrationObservation{}, err
-	}
-	if before.State == OwnerRegistrationAbsent || before.State == OwnerRegistrationCurrent ||
-		ownerRegistrationFingerprint(before) != step.Expected ||
-		ownerRegistrationFingerprint(desiredOwnerRegistrationObservation(before)) != step.Desired {
-		return OwnerRegistrationObservation{}, invalid(
-			"journaled owner-registration before identity is stale",
-		)
-	}
-	return before, nil
-}
-
 func validateSettingsRecovery(
 	recovery settingsRecoveryV1,
 	journal JournalRecord,
@@ -3047,137 +2198,32 @@ func validateSettingsRecovery(
 	return nil
 }
 
-func (transition *V2Transition) workFingerprint(
-	ctx context.Context,
-	work v2Work,
-	journal JournalRecord,
-) (Fingerprint, error) {
-	switch work.kind() {
-	case v2NativeWork:
-		actual, err := transition.nativeFingerprint(ctx, work, ReleaseLinks{})
-		if err != nil {
-			return "", err
-		}
-		if work.migration.Kind == guestDiskTmpMigration {
-			for _, step := range journal.Steps {
-				// Applied evidence proves the authorized attempt, not that every
-				// yard succeeded. Marker-derived activation warnings retain pending work.
-				if step.ID == work.intent.ID && (step.Checkpoint == StepApplied || step.Checkpoint == StepVerified) {
-					return step.Desired, nil
-				}
-			}
-		}
-		return actual, nil
-	case v2IngressWork:
-		step, err := transition.ingressStepForWork(work)
-		if err != nil {
-			return "", err
-		}
-		actual, err := transition.options.Ingress.Observe(ctx, step)
-		if err != nil {
-			return "", err
-		}
-		if err := validateFingerprint(actual, "ingress actual fingerprint"); err != nil {
-			return "", err
-		}
-		return actual, nil
-	case v2SettingsWork:
-		index := slices.IndexFunc(journal.Steps, func(step JournalStep) bool { return step.ID == work.intent.ID })
-		if index < 0 {
-			return "", invalid("settings work has no authorized journal step")
-		}
-		_, _, actual, err := transition.observeJournalSettingsWork(journal, journal.Steps[index], work.migration)
-		if err != nil {
-			return "", err
-		}
-		return actual, nil
-	case v2OwnerWork:
-		if work.ownerPlan() == nil || transition.options.OwnerRegistration == nil {
-			return "", invalid("owner-registration work is unavailable")
-		}
-		progress, err := transition.options.OwnerRegistration.Observe(ctx, work.ownerPlan().Before)
-		if err != nil {
-			return "", err
-		}
-		return ownerRegistrationProgressFingerprint(
-			progress, work.ownerPlan().ExpectedFingerprint, work.ownerPlan().DesiredFingerprint,
-		)
-	case v2LedgerWork:
-		snapshot, _, err := transition.readLedgerSemanticSnapshot()
-		if err != nil {
-			return "", err
-		}
-		return snapshot.Fingerprint, nil
-	default:
-		return "", invalid("unknown v2 migration work kind")
+func (transition *V2Transition) workFingerprint(ctx context.Context, work v2Work, journal JournalRecord) (Fingerprint, error) {
+	if work.kind() == v2BaselineWork {
+		snapshot, err := transition.store.ReadLedger()
+		return snapshot.Fingerprint, err
 	}
+	step, err := transition.ingressStepForWork(work)
+	if err != nil {
+		return "", err
+	}
+	return transition.options.Ingress.Observe(ctx, step)
 }
 
 func (transition *V2Transition) ingressStepForWork(work v2Work) (V2IngressStep, error) {
-	if transition.options.Ingress == nil || work.ingressRecipe() == nil || work.ingressRecipe() == nil {
+	if transition.options.Ingress == nil || work.ingressRecipe() == nil {
 		return V2IngressStep{}, invalid("ingress work is unavailable")
 	}
 	return ingressStep(work.ingressRecipe().binding, work.ingressRecipe().operation)
 }
 
-func (transition *V2Transition) observeYard(
-	yard string,
-) (config.PersistentFileSnapshot, string, error) {
-	if !domain.SafeName(yard) {
-		return config.PersistentFileSnapshot{}, "", invalid("journal yard is unsafe")
-	}
-	input, _, err := observeSettingsV2Yard(transition.options.ConfigHome, nil, yard)
-	if err != nil {
-		return config.PersistentFileSnapshot{}, "", errors.New("journaled yard settings ownership is ambiguous")
-	}
-	snapshot, label, err := selectSettingsV2Yard(input)
-	if err != nil {
-		return config.PersistentFileSnapshot{}, "", err
-	}
-	return snapshot, filepath.Join(transition.options.ConfigHome, filepath.FromSlash(label)), nil
-}
-
-func (transition *V2Transition) observeSettingsWork(
-	yard string,
-) (config.PersistentFileSnapshot, string, Fingerprint, error) {
-	snapshot, path, err := transition.observeYard(yard)
-	if err != nil {
-		return config.PersistentFileSnapshot{}, "", "", err
-	}
-	_, inheritance, blocker, err := newTestVMSettingsV2Capability(
-		transition.options.ConfigHome, transition.options.InheritedSettingIDs,
-	).observeInheritedSettings()
-	if err != nil {
-		return config.PersistentFileSnapshot{}, "", "", err
-	}
-	if blocker != nil {
-		return config.PersistentFileSnapshot{}, "", "", errors.New(blocker.Message)
-	}
-	return snapshot, path, settingsV2ResourceFingerprint(snapshot, inheritance), nil
-}
-
-func (transition *V2Transition) settingsAwaitSourceImport(file settingsV2FilePlan) (bool, error) {
-	nestedPath := filepath.Join(transition.options.ConfigHome, "yards", file.Yard, "config.env")
-	if !file.Expected.Exists || file.Path != nestedPath {
-		return false, nil
-	}
-	observed, _, err := observeSettingsV2Yard(transition.options.ConfigHome, nil, file.Yard)
-	if err != nil {
-		return false, err
-	}
-	return settingsV2AwaitSourceImport(file.Expected, file.Path == nestedPath, observed), nil
-}
-
-func (transition *V2Transition) migration(id string) (MigrationDefinitionV2, bool) {
-	for _, migration := range transition.registry.Migrations {
-		if migration.ID == id {
-			return migration, true
-		}
-	}
-	return MigrationDefinitionV2{}, false
-}
-
 func (transition *V2Transition) fixedPoint(observation v2Observation) bool {
+	if len(transition.registry.RetiredPrefixes) != 0 && !observation.migrationLedgerSnapshot.AuthoritySnapshot.Exists {
+		return false
+	}
+	if pendingSourceActivationWork(observation) {
+		return false
+	}
 	pending, err := transition.registry.PendingPath(observation.ledger)
 	if err != nil || len(pending) != 0 || !observation.activationFixed {
 		return false
@@ -4150,16 +3196,6 @@ func (transition *V2Transition) inject(point string) error {
 		return transition.options.fault(point)
 	}
 	return nil
-}
-
-func settingsIntent(
-	migration MigrationDefinitionV2,
-	file settingsV2FilePlan,
-) PlannerStepIntent {
-	return PlannerStepIntent{
-		ID: migration.ID + "." + file.Yard, Migration: migration.ID, Resource: file.Yard,
-		Decision: file.Decision, Expected: file.ExpectedFingerprint, Desired: file.DesiredFingerprint,
-	}
 }
 
 func evidenceFor(

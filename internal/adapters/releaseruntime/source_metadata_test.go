@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,13 +13,41 @@ import (
 	"strings"
 	"testing"
 
-	"errors"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 const sourceAdmissionProcessEnvironment = "SUBYARD_TEST_SOURCE_ADMISSION_PROCESS"
-const sourceAdmissionRegistry = `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`
+const sourceAdmissionRegistry = `{
+  "schemaVersion": 2,
+  "minimumEpochs": {
+    "owner-registration": 3,
+    "power-metadata": 3,
+    "project-state": 1,
+    "settings": 3
+  },
+  "currentEpochs": {
+    "owner-registration": 3,
+    "power-metadata": 3,
+    "project-state": 1,
+    "settings": 3
+  },
+  "migrations": [],
+  "retiredPrefixes": {
+    "owner-registration": {
+      "throughEpoch": 3,
+      "digest": "f612c2a88cfb6a2f1f3194acf13b933d3009d8853c9f093e07e5cad491c1aab6"
+    },
+    "power-metadata": {
+      "throughEpoch": 3,
+      "digest": "7692dc70c24e437966ba441be41204ec2642f3ceda004ef3492dd10c6826467d"
+    },
+    "settings": {
+      "throughEpoch": 3,
+      "digest": "559acd8e21b67b9f4516f44ec2c67f655898a9094147d5686c3816990c47855e"
+    }
+  }
+}`
 
 // The candidate runs the ordinary engine; only the historical owner's Observe
 // is unavailable. This exercises admission without inventing a second engine.
@@ -152,6 +181,7 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			old := writeVersionedRuntimeCandidate(t, runtimeRoot, "1.2.3-original", "1.2.3", oldEngine)
 			artifact := sealSourceAdmissionCandidate(t, old)
 			links, _ := releasetransition.NewRuntimeLinkStore(runtimeRoot)
+			seedExistingCurrentLedger(t, home, []byte(sourceAdmissionRegistry))
 			original, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: home,
 				RegistryPayload: []byte(sourceAdmissionRegistry), ArtifactDigest: artifact,
 				Releases:     releasetransition.ReleasePair{From: "release-a", Target: old.release},
@@ -175,15 +205,7 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			if err != nil || outcome.Status != releasetransition.StatusReady {
 				t.Fatalf("original fixture: %v %v", outcome, err)
 			}
-			registry, _, err := releasetransition.ParseRegistryV2([]byte(sourceAdmissionRegistry), releasetransition.BuiltinCapabilityCatalog())
-			if err != nil {
-				t.Fatal(err)
-			}
-			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, filepath.Join(home, "release-transition", "v2", "ledger.json"), ledger, 0o600)
+
 			journalPath := filepath.Join(home, "release-transition", "v2", "journal.json")
 			before := mustReadFile(t, journalPath)
 			bundle := []byte("synthetic verified publication input")
@@ -375,4 +397,27 @@ func TestSameTargetRefusalReportsOriginalInspection(t *testing.T) {
 	if err != nil || prepared.Changed || prepared.run == nil {
 		t.Fatalf("check refusal is not a read-only report: %#v %v", prepared, err)
 	}
+}
+
+// These fixtures describe an already installed source, not initial bootstrap.
+func seedExistingCurrentLedger(t *testing.T, home string, payload []byte) {
+	t.Helper()
+	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := releasetransition.BaselineLedgerV2(registry)
+	pending, err := registry.PendingPath(ledger)
+	if err != nil || len(pending) != 0 {
+		t.Fatal("fixture requires completed current epochs", err)
+	}
+	data, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "release-transition/v2/ledger.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, data, 0600)
 }

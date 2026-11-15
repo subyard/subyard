@@ -969,12 +969,11 @@ read-only config or integration status command. Known integration ownership conf
 their validated path and inspection command across the release boundary; they must not send
 `migrate --check` back to itself as the only next step.
 
-Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
-reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
-unknown or ambiguous state produces a structured operator-action outcome without overwriting it.
-Settings migration classifies direct yard templates against the verified candidate's configuration
-catalog and shipped template contract. Supported templates outside the migration's resource scope
-are preserved byte for byte; unknown, dynamic or duplicate template assignments still block.
+Historical capabilities classified their bounded resources as preserve, transform, canonicalize,
+reset or block before confirmation. Those journaled decisions and typed results remain readable.
+The current engine has no planner or effects for the retired settings, owner-registration and
+power-metadata migrations; below-floor or unverified historical work requires manual repair.
+Generic source ingress and activation retain their own ownership, classification and consent checks.
 
 `yard migrate --check` reports readiness of the exact installed `current` release: per-domain
 recorded and required epochs, applied and pending migration IDs, transaction/step checkpoints,
@@ -1058,18 +1057,28 @@ same-version retry, source import and explicit rollback all use the candidate-ow
 `_release-transition` process contract. Rollback is a newly inspected `activate-previous` goal and
 requires an intact retained runtime within its compatibility horizon.
 
-Fresh rollback with pending settings, owner-registration or source-install changes also requires
-the retained owner to advertise safe prospective source activation. An unsupported owner refuses
-with `rollback-incompatible` before consent or mutation. Complete current-release migrations
-with `yard migrate`, then retry `yard update --rollback`; otherwise retain an owner with
-compatible rollback source planning. Retrying the unchanged retained owner cannot add that support. Compatible rollback without source work remains available. An already-authorized
-transaction continues with its original pinned owner rather than acquiring a new grant.
-Retained inspections can omit registered-yard and guest-disk work from their Decisions.
-For these opaque kinds, the caller checks the exact retained registry and authoritative
-ledger/checkpoint. Pending opaque work requires the same capability even when it may
-ultimately be a no-op; completed opaque work does not. A stopped yard with an absent disk-/tmp
-marker alone does not block rollback once these ledger epochs are complete. Unverifiable
-history refuses rollback.
+The current registry starts fresh installations at owner-registration 3, power-metadata 3,
+project-state 1 and settings 3. Its initial bootstrap records one journaled baseline-ledger step
+with empty `Applied`, before profile activation; it executes none of the historical migrations.
+The historical six-step vocabulary,
+original catalog identities, typed evidence and prefix digests remain frozen reader data.
+Completed v0.28.x ledgers retain their original `Applied` lists, checkpoints and pinned projection
+bytes. A fully verified unfinished v0.28.x journal can still be replaced before or after activation,
+even before checkpoint publication. Its successor does not replay historical effects.
+
+A ledger below the live floor or an unfinished unverified historical migration step refuses with
+`migration-manual-repair-required` before any write. An older source with no ledger still has its
+original below-floor baseline; absence alone does not prove a fresh current installation.
+Manual repair must preserve the runtime, user data and protected evidence; do not uninstall.
+Ordinary installed-owner resume remains available when no retired handler is needed.
+
+Compatible rollback delegates to the verified retained target's own engine. Original `Applied`
+prefixes and checkpoint proofs remain readable by v0.28.0/v0.28.1; registry digests need not be
+identical across the update. Fresh rollback with generic source-install work still requires the
+retained owner to advertise safe prospective source activation. Native ownership, network guards,
+explicit consent and migration-independent initialization, adoption and disk-/tmp maintenance
+remain in their owning operations. A stopped yard's absent disk-/tmp marker alone does not block
+rollback once the migration epochs are complete. Unverifiable history refuses rollback.
 
 An installed runtime whose bundled installer predates immutable `--publish-only` cannot be changed
 retroactively. Re-running the verified standalone bootstrap is its one-time bridge: the downloaded

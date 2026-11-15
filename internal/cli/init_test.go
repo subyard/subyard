@@ -2213,3 +2213,8 @@ func TestInitReportsEveryUnobservablePendingRecordOwner(t *testing.T) {
 		}
 	}
 }
+
+// Synthetic parent authority for the hidden-command boundary tests.
+func ownerMigrationChildContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, migrationChildAuthorityKey{}, migrationChildAuthority{"reconcile-power-reconciler", testyardmigration.LegacyYard})
+}

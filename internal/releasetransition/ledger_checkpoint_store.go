@@ -51,8 +51,26 @@ func ParseMigrationLedger(
 		if err != nil {
 			return MigrationLedgerSnapshot{}, err
 		}
-		ledger, err := checkpoint.LedgerView(registry)
+		declaredProjection := false
+		if projection.Exists {
+			projected, _, parseErr := ParseLedgerV2(projection.Payload, registry)
+			declared, declaredErr := registry.declaredHistoryRegistry()
+			if parseErr == nil && declaredErr == nil {
+				if _, err := declared.History(projected.Domains); err == nil {
+					declaredProjection = true
+				}
+			}
+		}
+		var ledger LedgerV2
+		if declaredProjection {
+			ledger, err = checkpoint.ledgerView(registry, registry.MinimumEpochs)
+		} else {
+			ledger, err = checkpoint.LedgerView(registry)
+		}
 		if err != nil {
+			return MigrationLedgerSnapshot{}, err
+		}
+		if err := registry.requireMinimumLedger(ledger); err != nil {
 			return MigrationLedgerSnapshot{}, err
 		}
 		return MigrationLedgerSnapshot{
@@ -68,6 +86,9 @@ func ParseMigrationLedger(
 		if err != nil {
 			return MigrationLedgerSnapshot{}, err
 		}
+	}
+	if err := registry.requireMinimumLedger(ledger); err != nil {
+		return MigrationLedgerSnapshot{}, err
 	}
 	return MigrationLedgerSnapshot{
 		Ledger: ledger, AuthoritySnapshot: projection,
@@ -88,6 +109,9 @@ func (store *POSIXV2Store) CompareAndSwapMigrationLedger(
 		return errors.New("release transition store is required")
 	}
 	if err := registry.ValidateLedger(next); err != nil {
+		return err
+	}
+	if err := registry.requireMinimumLedger(next); err != nil {
 		return err
 	}
 	current, err := store.ReadMigrationLedger(registry, registryDigest)
@@ -231,6 +255,11 @@ func checkpointFullyCompactsLedger(
 }
 
 func ledgerAtRegistryEpochs(source LedgerV2, registry RegistryV2) (LedgerV2, error) {
+	if registry.requireMinimumLedger(source) == nil {
+		if _, authority, err := registry.historyAuthority(source); err == nil {
+			return ledgerFromAuthority(authority), nil
+		}
+	}
 	ledger := LedgerV2{SchemaVersion: LedgerSchemaV2, Domains: make(map[string]DomainLedgerV2, len(registry.MinimumEpochs))}
 	for domain := range source.Domains {
 		if _, exists := registry.MinimumEpochs[domain]; !exists {

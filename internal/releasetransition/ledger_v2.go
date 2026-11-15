@@ -55,10 +55,20 @@ func BaselineLedgerV2(registry RegistryV2) LedgerV2 {
 }
 
 func (registry RegistryV2) historyAuthority(ledger LedgerV2) (migrationhistory.Registry, migrationhistory.Authority, error) {
-	owner, err := registry.historyRegistry()
+	owner, err := registry.declaredHistoryRegistry()
 	if err != nil {
 		return owner, migrationhistory.Authority{}, err
 	}
+	if ledger.SchemaVersion == LedgerSchemaV2 {
+		if authority, err := owner.History(ledger.Domains); err == nil {
+			return owner, authority, nil
+		}
+	}
+	owner, err = registry.historyRegistry()
+	if err != nil {
+		return owner, migrationhistory.Authority{}, err
+	}
+
 	if ledger.SchemaVersion != LedgerSchemaV2 {
 		return owner, migrationhistory.Authority{}, invalid("unsupported ledger schema %d", ledger.SchemaVersion)
 	}
@@ -115,6 +125,6 @@ func (registry RegistryV2) appliedPrefix(domain string, epoch int) []string {
 	if err != nil {
 		return nil
 	}
-	applied, _ := owner.Applied(domain, registry.MinimumEpochs[domain], epoch)
+	applied, _ := owner.Applied(domain, registry.historyData().MinimumEpochs[domain], epoch)
 	return applied
 }
