@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,8 @@ func TestProjectHookFailureHasPublicActivationDiagnostic(t *testing.T) {
 		{ports.InstanceExecResult{ExitCode: 124, Stderr: []byte("private stderr")}, nil, "timed out"},
 		{ports.InstanceExecResult{ExitCode: 137}, nil, "timed out"},
 		{ports.InstanceExecResult{Stderr: []byte("private stderr")}, errors.New("private transport output"), "could not be executed"},
+		{ports.InstanceExecResult{}, fmt.Errorf("private transport: %w", context.Canceled), "were cancelled"},
+		{ports.InstanceExecResult{}, fmt.Errorf("private transport: %w", context.DeadlineExceeded), "timed out"},
 	} {
 		err := RunProjectHooks(context.Background(), domain.Context{YardName: "sample"}, func(context.Context, ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 			return test.result, test.err

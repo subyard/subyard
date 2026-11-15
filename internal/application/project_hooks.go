@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -29,6 +30,10 @@ func RunProjectHooks(ctx context.Context, yard domain.Context,
 	}
 	failure := &ProjectHookFailure{Yard: yard.YardName, Reason: "exited unsuccessfully"}
 	switch {
+	case errors.Is(err, context.Canceled):
+		failure.Reason = "were cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		failure.Reason = "timed out"
 	case err != nil:
 		failure.Reason = "could not be executed"
 	case result.ExitCode == 124 || result.ExitCode == 137:
