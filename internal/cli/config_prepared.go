@@ -139,12 +139,12 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	if err != nil || definition.Kind != config.SettingScalar || (definition.Sensitive && (len(protected) == 0 || !protected[0])) {
 		return configUsageText("only non-sensitive scalar settings support exact authoring")
 	}
-	if action == "set" {
-		if err := loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, request.git); err != nil {
-			return configUsage(err)
-		}
-	}
 	if request.git {
+		if action == "set" {
+			if err := loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, true); err != nil {
+				return configUsage(err)
+			}
+		}
 		if !definition.Syncable {
 			return configUsageText(request.name + " cannot be saved in Git")
 		}

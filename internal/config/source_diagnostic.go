@@ -346,7 +346,7 @@ func Diagnose(configHome string, err error, known ...KnownCause) ConfigDiagnosti
 func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 	for current := err; current != nil; current = errors.Unwrap(current) {
 		if index := slices.IndexFunc(diagnostic.known, func(cause KnownCause) bool { return cause.Err == current }); index >= 0 {
-			diagnostic.Refusals = append(diagnostic.Refusals, diagnostic.known[index].Text)
+			diagnostic.addRefusal(diagnostic.known[index].Text)
 			diagnostic.addNext(diagnostic.known[index].Next)
 			return
 		}
@@ -354,19 +354,19 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			current = domain.NewConfigRefusal(domain.ConfigUnknownYard)
 		}
 		if current == ErrLegacyGitSettingsMigration {
-			diagnostic.Refusals = append(diagnostic.Refusals, current.Error())
+			diagnostic.addRefusal(current.Error())
 			return
 		}
 		if text, next, ok := operationSentinel(current); ok {
 			// Operation sentinels keep their own fixed text, never the generic tail.
-			diagnostic.Refusals = append(diagnostic.Refusals, text)
+			diagnostic.addRefusal(text)
 			diagnostic.addNext(next)
 			return
 		}
 		switch typed := current.(type) {
 		case *SourceError:
 			message, _ := SourceDiagnostic(configHome, typed)
-			diagnostic.Refusals = append(diagnostic.Refusals, message)
+			diagnostic.addRefusal(message)
 			if typed.Path != "" {
 				diagnostic.addNext("correct the named configuration source, then run config validate")
 			} else {
@@ -374,7 +374,7 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			}
 			return
 		case *domain.ConfigRefusal:
-			diagnostic.Refusals = append(diagnostic.Refusals, typed.Error())
+			diagnostic.addRefusal(typed.Error())
 			diagnostic.addNext(typed.Next())
 			return
 		case *retiredYardTemplateError:
@@ -383,7 +383,7 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			if relative, err := filepath.Rel(filepath.Clean(configHome), filepath.Clean(typed.yardFile)); configHome != "" && err == nil && filepath.IsLocal(relative) {
 				source = strconv.QuoteToASCII(filepath.ToSlash(relative))
 			}
-			diagnostic.Refusals = append(diagnostic.Refusals, typed.render(source))
+			diagnostic.addRefusal(typed.render(source))
 			return
 		case interface {
 			PublicConfigLabel() string
@@ -396,7 +396,7 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 				if label := typed.PublicConfigLabel(); label != "" {
 					refusal = label + ": " + refusal
 				}
-				diagnostic.Refusals = append(diagnostic.Refusals, refusal)
+				diagnostic.addRefusal(refusal)
 			}
 			for _, next := range nested.Next {
 				diagnostic.addNext(next)
@@ -405,7 +405,7 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			return
 		case interface{ PublicConfigDiagnostic() string }:
 			// A boundary's own fixed refusal text, naming only validated settings.
-			diagnostic.Refusals = append(diagnostic.Refusals, typed.PublicConfigDiagnostic())
+			diagnostic.addRefusal(typed.PublicConfigDiagnostic())
 			return
 		case *domain.Refusals:
 			for _, cause := range typed.Unwrap() {
@@ -437,6 +437,14 @@ func operationSentinel(err error) (text, next string, ok bool) {
 		return "operation timed out", "run the command again", true
 	}
 	return "", "", false
+}
+
+// addRefusal keeps one copy of each rendered refusal; distinct values that
+// render alike would otherwise repeat the same fixed text.
+func (diagnostic *ConfigDiagnostic) addRefusal(refusal string) {
+	if !slices.Contains(diagnostic.Refusals, refusal) {
+		diagnostic.Refusals = append(diagnostic.Refusals, refusal)
+	}
 }
 
 func (diagnostic *ConfigDiagnostic) addNext(next string) {

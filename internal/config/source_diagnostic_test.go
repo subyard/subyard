@@ -309,7 +309,8 @@ func TestIntegrationSelectionReportsEveryRefusalNamingOnlyShippedIntegrations(t 
 	values := environment{"AGENT_sample_COMMAND": "sample", "AGENT_canary_COMMAND": "true"}
 	_, err = catalog.ResolveIntegrationSelection(values, []string{"missing-a", "missing-b", "missing-a", "sample", "sample", "canary", "canary"})
 	diagnostic := Diagnose("", err)
-	want := []string{"duplicate agent", "duplicate agent", `duplicate agent "sample"`, "unknown integration", "unknown integration"}
+	// Refusals that render alike appear once.
+	want := []string{"duplicate agent", `duplicate agent "sample"`, "unknown integration"}
 	if strings.Join(diagnostic.Refusals, "\n") != strings.Join(want, "\n") || strings.Contains(diagnostic.Message(""), "missing-") ||
 		strings.Contains(diagnostic.Message(""), "canary") || diagnostic.Unclassified {
 		t.Fatalf("integration refusals = %#v (%v)", diagnostic, err)

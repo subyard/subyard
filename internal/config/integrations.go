@@ -98,16 +98,17 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 // dependency closure. DependencyReasons records direct dependents for disable
 // guards and status explanations; it is not another desired-state store.
 func ResolveIntegrationSelection(values map[string]string, requested []string) (IntegrationSelection, error) {
-	return resolveIntegrationSelection(values, requested, func(string) bool { return false })
+	never := func(string) bool { return false }
+	return resolveIntegrationSelection(values, requested, never, never)
 }
 
 // ResolveIntegrationSelection also names a refused integration when it is one
 // this catalog ships; metadata settings alone never make a name printable.
 func (settings Catalog) ResolveIntegrationSelection(values map[string]string, requested []string) (IntegrationSelection, error) {
-	return resolveIntegrationSelection(values, requested, settings.ShippedIntegration)
+	return resolveIntegrationSelection(values, requested, settings.ShippedIntegration, settings.RetiredIntegration)
 }
 
-func resolveIntegrationSelection(values map[string]string, requested []string, shipped func(string) bool) (IntegrationSelection, error) {
+func resolveIntegrationSelection(values map[string]string, requested []string, shipped, retired func(string) bool) (IntegrationSelection, error) {
 	result := IntegrationSelection{
 		Requested: append([]string{}, requested...), Effective: []string{}, Present: true,
 		DependencyReasons: map[string][]string{}, AllowsCodingTools: values["ALLOWS_CODING_TOOLS"] != "false" && values["ALLOWS_CODING_TOOLS"] != "0",
@@ -137,7 +138,8 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 		if selected[agent]++; selected[agent] == 2 {
 			refusals = append(refusals, refusal(domain.ConfigDuplicateIntegration, domain.ConfigDuplicateUnknownIntegration, agent))
 		}
-		if selected[agent] == 1 && !knownAgent(agent) {
+		// A retired integration has its own refusal; it is not also unknown.
+		if selected[agent] == 1 && !knownAgent(agent) && !retired(agent) {
 			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownIntegration), agent))
 		}
 	}
