@@ -819,9 +819,9 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards/valid/config.env"), "YARD_TEMPLATE=restricted\nYARD_KIND=vm\nENVIRONMENT_PROFILES=service\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards/broken/config.env"), "YARD_TEMPLATE=restricted\nENVIRONMENT_PROFILES='service route'\nHOST_CLAUDE_MD=/srv/SENTINEL.md\n")
 	permits, route, kind := `selected yard role permits only environment profile "service"`, `profile "route" requires host access`, "selected yard role requires YARD_KIND=vm"
-	run := func(arguments ...string) (int, string) {
+	run := func(extra []string, arguments ...string) (int, string) {
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: append(slices.Clone(environment), extra...), WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -831,14 +831,19 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 		code      int
 		arguments []string
 		want      []string
+		extra     []string
 	}{
-		{2, []string{"-Y", "broken", "config", "show"}, []string{"yard broken, config inspection: ", permits, route, kind, "selected yard role forbids non-empty HOST_CLAUDE_MD", "yard: Next: deselect"}},
-		{1, []string{"-Y", "broken", "config", "validate"}, []string{"yard broken: prospective configuration: ", permits, route, kind, "\nRetry: deselect"}},
-		{1, []string{"-Y", "broken", "config", "validate", "--json"}, []string{`"diagnostic":"prospective configuration: profile \"route\" requires host access`, kind, `"retry":"deselect`}},
-		{1, []string{"-Y", "valid", "config", "set", "ENVIRONMENT_PROFILES", "service route", "--scope", "yard", "--yes"}, []string{"prospective configuration: ", permits, route, "yard: Next: deselect"}},
+		{2, []string{"-Y", "broken", "config", "show"}, []string{"yard broken, config inspection: ", permits, route, kind, "selected yard role forbids non-empty HOST_CLAUDE_MD", "yard: Next: deselect"}, nil},
+		{1, []string{"-Y", "broken", "config", "validate"}, []string{"yard broken: prospective configuration: ", permits, route, kind, "\nRetry: deselect"}, nil},
+		{1, []string{"-Y", "broken", "config", "validate", "--json"}, []string{`"diagnostic":"prospective configuration: profile \"route\" requires host access`, kind, `"retry":"deselect`}, nil},
+		{1, []string{"-Y", "valid", "config", "set", "ENVIRONMENT_PROFILES", "service route", "--scope", "yard", "--yes"}, []string{"prospective configuration: ", permits, route, "yard: Next: deselect"}, nil},
+		{2, []string{"-Y", "valid", "config", "set", "YARD_TEMPLATE", "sentinel-canary-value", "--scope", "yard", "--yes"}, []string{"unknown YARD_TEMPLATE", "yard: Next: set YARD_TEMPLATE"}, nil},
+		{2, []string{"config", "show"}, []string{"selected yard, config inspection: invalid yard name", "yard: Next: "}, []string{"SUBYARD_YARD=SENTINEL_CANARY"}},
+		{2, []string{"config", "show"}, []string{"selected yard, config inspection: invalid yard name"}, []string{"SUBYARD_YARD=bad\x1bname"}},
+		{1, []string{"config", "validate", "--json"}, []string{`"diagnostic":"local configuration root is unavailable: SUBYARD_CONFIG_HOME must be absolute"`, `"retry":"set SUBYARD_CONFIG_HOME`}, []string{"SUBYARD_CONFIG_HOME=relative"}},
 	} {
-		code, output := run(test.arguments...)
-		if code != test.code || strings.Contains(output, "SENTINEL") || strings.Contains(output, "invalid or unavailable") {
+		code, output := run(test.extra, test.arguments...)
+		if code != test.code || strings.Contains(strings.ToUpper(output), "SENTINEL") || strings.Contains(output, "\x1b") || strings.Contains(output, "invalid or unavailable") {
 			t.Fatalf("%v: code=%d output=%s", test.arguments, code, output)
 		}
 		for _, expected := range test.want {

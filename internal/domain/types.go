@@ -143,24 +143,26 @@ func NormalizeContext(ctx Context) (Context, error) {
 		{"state dir", &ctx.Paths.StateDir},
 	}
 	var refusals []error
+	unusable := map[string]bool{}
 	for _, field := range fields {
 		if !filepath.IsAbs(*field.value) {
 			refusals = append(refusals, NewConfigRefusal(ConfigPathNotAbsolute, ConfigName{field.name}))
+			unusable[field.name] = true
 			continue
 		}
 		*field.value = filepath.Clean(*field.value)
 	}
-	if err := CollectRefusals(refusals...); err != nil {
-		return Context{}, err
-	}
-	if err := ctx.Validate(); err != nil {
+	if err := CollectRefusals(append(refusals, ctx.validate(unusable)...)...); err != nil {
 		return Context{}, err
 	}
 	return ctx, nil
 }
 
 // Validate reports every independent context refusal in stable order.
-func (ctx Context) Validate() error {
+func (ctx Context) Validate() error { return CollectRefusals(ctx.validate(nil)...) }
+
+// validate skips path checks for paths that already failed normalization.
+func (ctx Context) validate(unusable map[string]bool) []error {
 	var refusals []error
 	refuse := func(code ConfigRefusalCode, names ...ConfigName) {
 		refusals = append(refusals, NewConfigRefusal(code, names...))
@@ -187,6 +189,9 @@ func (ctx Context) Validate() error {
 		refuse(ConfigDevUIDNegative)
 	}
 	for _, path := range []struct{ name, value string }{{"host base", ctx.Paths.HostBase}, {"data home", ctx.Paths.DataHome}} {
+		if unusable[path.name] {
+			continue
+		}
 		if path.value != filepath.Clean(path.value) {
 			refuse(ConfigPathNotNormalized, ConfigName{path.name})
 		} else if broadHostPath(path.value, ctx.Paths.OperatorHome) {
@@ -203,7 +208,7 @@ func (ctx Context) Validate() error {
 	if ctx.AccessKind == AccessRemote && !SafeName(ctx.OwnerYardName) {
 		refuse(ConfigOwnerYardNameRequired)
 	}
-	return CollectRefusals(refusals...)
+	return refusals
 }
 
 func broadHostPath(path, operatorHome string) bool {

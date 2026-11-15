@@ -40,6 +40,12 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 	if errors.Is(err, errNetworkUsage) || errors.Is(err, errHostUsage) || errors.Is(err, errConfigUsage) {
 		code = 2
 	}
+	var authoring configAuthoringFailure
+	var prospective configProspectiveError
+	if errors.As(err, &authoring) && !errors.As(err, &prospective) {
+		cli.reportConfigRefusal(prefix, authoring.home, authoring.cause)
+		return code
+	}
 	cli.errorf("%s: %v", prefix, err)
 	cli.reportConfigNext(err)
 	return code

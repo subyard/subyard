@@ -547,7 +547,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 	admission := cli.admission(definition, core, resourceDefinition, profileResource, commandArguments, explicit)
 	readOnlyInvocation := admission.readOnly
 	identityRecovery := false
-	if !readOnlyInvocation && definition.Handler != "@release-transition" {
+	// Schema validation only reads configuration and reports its own root refusals.
+	if !readOnlyInvocation && definition.Handler != "@release-transition" && admission.early != earlyConfigValidate {
 		var err error
 		identityRecovery, err = cli.admitDeveloperIdentity(ctx, yard, definition.Handler, commandArguments)
 		if err != nil {
@@ -788,15 +789,21 @@ func (cli *CLI) Run(ctx context.Context) int {
 			operatorHome = cli.env["HOME"]
 		}
 		configHome, _ := config.ResolveConfigHome(operatorHome, cli.env)
-		diagnostic := config.Diagnose(configHome, err)
+		integrity := config.KnownCause{Err: ownerinventory.ErrIntegrity, Text: "owner inventory integrity validation failed: owner HostID mismatch or unverified response", Next: "repair the verified owner connection"}
+		diagnostic := config.Diagnose(configHome, err, integrity)
 		if len(diagnostic.Refusals) == 1 && !diagnostic.Unclassified && config.IsRetiredYardTemplate(err) {
 			// This owning diagnostic contains only a fixed retired schema and
 			// its supported replacement, never a supplied setting value.
 			cli.errorf("%v", err)
-		} else if len(diagnostic.Refusals) == 0 && errors.Is(err, ownerinventory.ErrIntegrity) {
-			cli.errorf("owner inventory integrity validation failed: owner HostID mismatch or unverified response; repair the verified owner connection")
+		} else if len(diagnostic.Refusals) == 1 && !diagnostic.Unclassified && errors.Is(err, ownerinventory.ErrIntegrity) {
+			cli.errorf("%s; %s", integrity.Text, integrity.Next)
 		} else {
-			cli.errorf("yard %s, config inspection: %s", yard, diagnostic.Message("an input is invalid or unavailable; run config validate for scoped schema diagnostics"))
+			label := "yard " + yard
+			// The yard comes from arguments or SUBYARD_YARD; print only validated names.
+			if parts := strings.Split(yard, "/"); len(parts) > 2 || slices.ContainsFunc(parts, func(part string) bool { return !domain.SafeName(part) }) {
+				label = "selected yard"
+			}
+			cli.errorf("%s, config inspection: %s", label, diagnostic.Message("an input is invalid or unavailable; run config validate for scoped schema diagnostics"))
 			if retry := config.SourceAliasRepairRetry(configHome, yard, err); retry != "" {
 				diagnostic.Next = append([]string{retry}, diagnostic.Next...)
 			}

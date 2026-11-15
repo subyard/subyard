@@ -392,7 +392,10 @@ unvalidated value in its error text appends it after the wrapped refusal; the re
 the refusal. Producers collect independent role and profile
 refusals with `domain.CollectRefusals`. `config.Diagnose` is the single CLI renderer for load,
 `config set` and `config validate` failures; it walks the collected causes and marks any other
-cause unclassified instead of printing its text.
+cause unclassified instead of printing its text. A raw cause wrapped beside a typed refusal is
+explained by it; boundary-owned fixed texts and sentinels enter as `PublicConfigDiagnostic` or
+`config.KnownCause`. Independent load stages merge their causes into one
+stable collection.
 
 `HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
 `yard host rename` transactionally moves a registered Git owner subtree, commits the exact move

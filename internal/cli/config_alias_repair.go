@@ -373,7 +373,25 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 	values := cli.configSourceEnvironment()
 	home, err := config.ResolveConfigHome(values["SUBYARD_OPERATOR_HOME"], values)
 	if err != nil {
-		cli.errorf("config validate: local configuration root is unavailable")
+		diagnostic := config.Diagnose("", err)
+		message := "local configuration root is unavailable: " + diagnostic.Message("an input is invalid or unavailable")
+		if structured {
+			type row struct {
+				Yard       string `json:"yard"`
+				Valid      bool   `json:"valid"`
+				Diagnostic string `json:"diagnostic"`
+				Retry      string `json:"retry,omitempty"`
+			}
+			_ = json.NewEncoder(cli.options.Stdout).Encode(struct {
+				SchemaVersion  int   `json:"schemaVersion"`
+				Configurations []row `json:"configurations"`
+			}{1, []row{{Yard: yard, Diagnostic: message, Retry: strings.Join(diagnostic.Next, "; ")}}})
+			return 1
+		}
+		cli.errorf("config validate: %s", message)
+		for _, next := range diagnostic.Next {
+			cli.errorf("Next: %s", next)
+		}
 		return 1
 	}
 	configDir := values["SUBYARD_CONFIG_DIR"]

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,14 +98,10 @@ func ResolveIntegrationSelection(values map[string]string, requested []string) (
 		Requested: append([]string{}, requested...), Effective: []string{}, Present: true,
 		DependencyReasons: map[string][]string{}, AllowsCodingTools: values["ALLOWS_CODING_TOOLS"] != "false" && values["ALLOWS_CODING_TOOLS"] != "0",
 	}
-	selected := make(map[string]bool, len(requested))
-	for _, agent := range requested {
-		if selected[agent] {
-			return result, namedRefusal(domain.ConfigDuplicateIntegration, domain.ConfigIntegrationName, agent)
-		}
-		selected[agent] = true
-	}
 	knownAgent := func(agent string) bool {
+		if !domain.SafeName(agent) {
+			return false
+		}
 		for _, suffix := range integrationMetadataSuffixes {
 			if _, found := values["AGENT_"+agent+"_"+suffix]; found {
 				return true
@@ -112,10 +109,26 @@ func ResolveIntegrationSelection(values map[string]string, requested []string) (
 		}
 		return false
 	}
-	for _, agent := range requested {
-		if !domain.SafeName(agent) || !knownAgent(agent) {
-			return result, namedRefusal(domain.ConfigUnknownIntegration, domain.ConfigIntegrationName, agent)
+	// Only a shipped integration is named in the rendered diagnostic; the
+	// supplied text of any other request stays in the Go error only.
+	refusal := func(known, unknown domain.ConfigRefusalCode, agent string) error {
+		if name, ok := domain.ConfigIntegrationName(agent); ok && knownAgent(agent) {
+			return domain.NewConfigRefusal(known, name)
 		}
+		return fmt.Errorf("%w %q", domain.NewConfigRefusal(unknown), agent)
+	}
+	var refusals []error
+	selected := make(map[string]int, len(requested))
+	for _, agent := range requested {
+		if selected[agent]++; selected[agent] == 2 {
+			refusals = append(refusals, refusal(domain.ConfigDuplicateIntegration, domain.ConfigDuplicateUnknownIntegration, agent))
+		}
+		if selected[agent] == 1 && !knownAgent(agent) {
+			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownIntegration), agent))
+		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return result, err
 	}
 	visiting := make(map[string]bool)
 	visited := make(map[string]bool)
@@ -198,7 +211,7 @@ func ValidateYardTemplateIntegrations(loaded Loaded, template string) error {
 	values := cloneEnvironment(loaded.Environment)
 	delete(values, "ALLOWS_CODING_TOOLS")
 	if err := loaded.Catalog.applyEnvFileValidated(path, values, ScopeShipped, false, nil); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template)
 		}
 		return err

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -251,6 +252,14 @@ func TestDiagnoseRendersEveryClassifiedRefusalWithoutValues(t *testing.T) {
 		!strings.Contains(message, "configuration: SSH_PORT (scalar settings): invalid port value") || len(mixed.Refusals) != len(want)+1 {
 		t.Fatalf("mixed diagnostic = %q", message)
 	}
+	if explained := Diagnose("", fmt.Errorf("%w: %w", domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), errors.New("raw SENTINEL"))); explained.Unclassified || explained.Message("generic") != "SSH_PORT must be numeric" {
+		t.Fatalf("raw cause under a typed refusal = %#v", explained)
+	}
+	integrity := errors.New("integrity SENTINEL")
+	known := Diagnose("", domain.CollectRefusals(fmt.Errorf("owner: %w", integrity), domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize)), KnownCause{Err: integrity, Text: "integrity failed", Next: "repair the owner"})
+	if known.Unclassified || known.Message("") != "block storage requires an explicit SRV_VOLUME_SIZE; integrity failed" || !slices.Contains(known.Next, "repair the owner") {
+		t.Fatalf("known cause = %#v", known)
+	}
 	if stale := Diagnose("", fmt.Errorf("%w: %w", err, domain.ErrPlanStale)); stale.Unclassified || len(stale.Refusals) != len(want) {
 		t.Fatalf("known sentinel made the diagnostic incomplete: %#v", stale)
 	}
@@ -280,5 +289,71 @@ func TestDiagnoseNamesShippedPackageSymlinkWithoutPath(t *testing.T) {
 	diagnostic := Diagnose("", err)
 	if message := diagnostic.Message("generic"); message != "shipped package directory must not traverse symlinks" || len(diagnostic.Next) != 1 {
 		t.Fatalf("shipped package diagnostic = %q (%v)", message, err)
+	}
+}
+
+func TestIntegrationSelectionReportsEveryRefusalNamingOnlyShippedIntegrations(t *testing.T) {
+	values := environment{"AGENT_codex_COMMAND": "codex"}
+	_, err := ResolveIntegrationSelection(values, []string{"missing-a", "missing-b", "missing-a", "codex", "codex"})
+	diagnostic := Diagnose("", err)
+	want := []string{`duplicate agent "codex"`, "duplicate agent", "unknown integration", "unknown integration"}
+	if strings.Join(diagnostic.Refusals, "\n") != strings.Join(want, "\n") || strings.Contains(diagnostic.Message(""), "missing-") || diagnostic.Unclassified {
+		t.Fatalf("integration refusals = %#v (%v)", diagnostic, err)
+	}
+}
+
+func TestLoadReportsIndependentRefusalsAcrossStages(t *testing.T) {
+	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample","settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped","command"],"application":"yard-init","minimum":1024,"maximum":65535,"optional":true,"host_listener":true},{"name":"SAMPLE_ALT_PORT","type":"port","scopes":["shipped","command"],"application":"yard-init","minimum":1024,"maximum":65535,"optional":true,"host_listener":true}]}`)
+	writeCatalogProfile(t, root, "fixture", `{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true},{"name":"FIXTURE_ALT_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true}]}`)
+	load := func(environment map[string]string) ConfigDiagnostic {
+		t.Helper()
+		_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: environment, DisablePrivate: true})
+		if err == nil {
+			t.Fatal("invalid configuration loaded")
+		}
+		return Diagnose("", err)
+	}
+	ports := load(map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "ENVIRONMENT_PROFILES": "fixture",
+		"SAMPLE_PORT": "3000", "SAMPLE_ALT_PORT": "3000", "FIXTURE_PORT": "4000", "FIXTURE_ALT_PORT": "4000"})
+	if got := strings.Join(ports.Refusals, "\n"); got != "FIXTURE_PORT collides with FIXTURE_ALT_PORT; choose another port\nSAMPLE_ALT_PORT collides with SAMPLE_PORT; choose another port" {
+		t.Fatalf("collisions = %q", got)
+	}
+	stages := load(map[string]string{"DEV_SUDO": "2", "FORWARD_SSH_AGENT": "2", "HOST_BASE": "/srv/a", "RESTRICTED_DISK_PATHS": "/srv/b", "SSH_PORT": "SENTINEL"})
+	message := stages.Message("generic")
+	for _, want := range []string{"DEV_SUDO", "FORWARD_SSH_AGENT"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("command refusals lack %s: %s", want, message)
+		}
+	}
+	if strings.Contains(message, "SENTINEL") || stages.Unclassified {
+		t.Fatalf("command refusals = %q", message)
+	}
+	home := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "subyard", "yards", "default"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(home, ".config", "subyard", "config.env"), []byte("HOST_BASE=/srv/a\nRESTRICTED_DISK_PATHS=/srv/b\nE2E_VM_DISK=9GiB\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(home, ".config", "subyard", "yards", "default", "config.env"), []byte("VM_CPU_WEIGHT=1000\n"), 0o600)
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{}, DisablePrivate: true})
+	context := Diagnose("", err)
+	message = context.Message("generic")
+	for _, want := range []string{"require YARD_KIND=vm", "HOST_BASE must equal RESTRICTED_DISK_PATHS", "E2E_VM_DISK must be at least 10GiB"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("stage refusals lack %q: %s", want, message)
+		}
+	}
+	if context.Unclassified {
+		t.Fatalf("stage refusals = %q", message)
+	}
+}
+
+func TestDiagnoseRendersRetiredTemplateRelativeToConfigHome(t *testing.T) {
+	home := testkit.TempDir(t)
+	err := retiredE2EVMTemplateError("named", filepath.Join(home, "yards", "named", "config.env"))
+	if message := Diagnose(home, err).Message(""); strings.Contains(message, home) || !strings.Contains(message, `retired in "yards/named/config.env"`) {
+		t.Fatalf("retired diagnostic = %q", message)
+	}
+	if message := Diagnose("", err).Message(""); strings.Contains(message, home) {
+		t.Fatalf("retired diagnostic without home = %q", message)
 	}
 }

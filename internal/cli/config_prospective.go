@@ -98,6 +98,15 @@ func (err configProspectiveError) Error() string {
 }
 func (err configProspectiveError) Unwrap() error { return err.cause }
 
+// reportConfigRefusal prints a config refusal only through config.Diagnose.
+func (cli *CLI) reportConfigRefusal(prefix, home string, err error) {
+	diagnostic := config.Diagnose(home, err)
+	cli.errorf("%s: %s", prefix, diagnostic.Message("an input is invalid or unavailable"))
+	for _, next := range diagnostic.Next {
+		cli.errorf("Next: %s", next)
+	}
+}
+
 // reportConfigNext prints the fixed next steps of a prospective config refusal.
 func (cli *CLI) reportConfigNext(err error) {
 	var prospective configProspectiveError

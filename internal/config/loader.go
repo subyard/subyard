@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -81,13 +82,23 @@ func (loaded Loaded) AssetValidationInputs() []string {
 }
 
 type retiredYardTemplateError struct {
-	diagnostic string
+	yardName, yardFile string
 }
 
 var ErrUnknownYard = errors.New("unknown yard")
 
-func (err *retiredYardTemplateError) Error() string {
-	return err.diagnostic
+func (err *retiredYardTemplateError) Error() string { return err.render(err.yardFile) }
+
+func (err *retiredYardTemplateError) render(source string) string {
+	return fmt.Sprintf(`YARD_TEMPLATE "e2e-vms" is retired in %s
+replace its YARD_TEMPLATE assignment with:
+  YARD_TEMPLATE=test-vms
+then verify the unchanged yard identity:
+  yard -Y %s check
+  yard -Y %s status
+to retire that yard after the config migration:
+  yard -Y %s test-vms status
+  yard -Y %s teardown`, source, err.yardName, err.yardName, err.yardName, err.yardName)
 }
 
 func IsRetiredYardTemplate(err error) bool {
@@ -429,18 +440,24 @@ func load(
 	commandLayer := tracker.addLayer(
 		"command", "command override", "environment", true, settingAny,
 	)
-	for name, value := range commandEnvironment {
+	var commandRefusals []error
+	for _, name := range slices.Sorted(maps.Keys(commandEnvironment)) {
+		value := commandEnvironment[name]
 		if IsProfileOnlySetting(name) {
 			tracker.observeProfileOnly(commandLayer, name, value, "", 0)
 			continue
 		}
 		if _, ok := tracker.catalog.LookupSetting(name); ok {
 			if err := tracker.catalog.ValidateSetting(ScopeCommand, name, value, false); err != nil {
-				return domain.Context{}, nil, sourceContext("", 0, recognizedSettingKey(tracker.catalog, name), "command override", err)
+				commandRefusals = append(commandRefusals, sourceContext("", 0, recognizedSettingKey(tracker.catalog, name), "command override", err))
+				continue
 			}
 		}
 		values[name] = value
 		tracker.record(commandLayer, name, value, "environment", 0, "")
+	}
+	if err := domain.CollectRefusals(commandRefusals...); err != nil {
+		return domain.Context{}, nil, err
 	}
 	values["SUBYARD_CONFIG_DIR"] = configDir
 	// Config-directory env files are compatibility defaults, not authority for
@@ -485,27 +502,55 @@ func load(
 			}
 		}
 	}
+	// Role, profile and context checks read independent settings, so each stage
+	// runs and every refusal is reported. Profile resolution needs valid constraints.
+	var refusals []error
 	if err := validateProfileConstraints(configDir, yardName, values, roleRefusals...); err != nil {
-		return domain.Context{}, nil, err
+		refusals = append(refusals, refusalCauses(err)...)
+	} else if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
+		refusals = append(refusals, err)
 	}
-	if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
-		return domain.Context{}, nil, err
-	}
-
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
-	if err == nil {
-		err = applySavedResourceEndpoints(root, options, ctx, values, tracker)
+	if err := domain.CollectRefusals(append(refusals, refusalCauses(err)...)...); err != nil {
+		return domain.Context{}, nil, err
 	}
-	if err == nil {
-		err = normalizeDerivedPorts(values, tracker)
+	if err := applySavedResourceEndpoints(root, options, ctx, values, tracker); err != nil {
+		return ctx, values, err
 	}
-	if err == nil {
-		err = normalizeWebPreviewPort(values, tracker, ctx.SSHPort)
+	// Derived ports need their source ports; collisions are collected once per pair.
+	collisions := newPortCollisions()
+	if err := normalizeDerivedPorts(values, tracker, collisions); err != nil {
+		return ctx, values, err
 	}
-	return ctx, values, err
+	webPreview := normalizeWebPreviewPort(values, tracker, ctx.SSHPort, collisions)
+	return ctx, values, domain.CollectRefusals(append(collisions.refusals, webPreview)...)
 }
 
-func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPort int) error {
+// refusalCauses lets independent stages merge into one stable collection.
+func refusalCauses(err error) []error {
+	if refusals, ok := err.(*domain.Refusals); ok {
+		return refusals.Unwrap()
+	}
+	return []error{err}
+}
+
+// portCollisions reports each colliding listener pair once, whichever check finds it.
+type portCollisions struct {
+	seen     map[[2]string]bool
+	refusals []error
+}
+
+func newPortCollisions() *portCollisions { return &portCollisions{seen: map[[2]string]bool{}} }
+
+func (collisions *portCollisions) add(name, other string) {
+	pair := [2]string{min(name, other), max(name, other)}
+	if !collisions.seen[pair] {
+		collisions.seen[pair] = true
+		collisions.refusals = append(collisions.refusals, domain.SettingRefusal(domain.ConfigPortCollision, name, other))
+	}
+}
+
+func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPort int, collisions *portCollisions) error {
 	const name = "WEB_PREVIEW_HOST_PORT"
 	if values[name] == "" {
 		values[name] = strconv.Itoa(1024 + (sshPort+30000-1024)%64512)
@@ -515,7 +560,6 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 	if err != nil || port < 1024 || port > 65535 || strconv.Itoa(port) != values[name] {
 		return domain.SettingRefusal(domain.ConfigSettingCanonicalPort, name)
 	}
-	var collisions []error
 	profiles := strings.Fields(values["ENVIRONMENT_PROFILES"])
 	for _, definition := range tracker.catalog.SettingCatalog() {
 		if !definition.HostListener || definition.Name == name {
@@ -528,13 +572,15 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 			continue
 		}
 		if listenerPort, err := strconv.Atoi(values[definition.Name]); err == nil && listenerPort == port {
-			collisions = append(collisions, domain.SettingRefusal(domain.ConfigPortCollision, name, definition.Name))
+			collisions.add(name, definition.Name)
 		}
 	}
-	return domain.CollectRefusals(collisions...)
+	return nil
 }
 
-func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
+// normalizeDerivedPorts returns only a derived-source failure; collisions are
+// recorded in collisions.
+func normalizeDerivedPorts(values environment, tracker *settingTracker, collisions *portCollisions) error {
 	var derive func(string) error
 	derive = func(name string) error {
 		definition, ok := tracker.catalog.LookupSetting(name)
@@ -557,15 +603,15 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 		tracker.normalize(name, values[name], "derived from "+definition.DefaultFrom.Setting)
 		return nil
 	}
+	var sources []error
 	for _, definition := range tracker.catalog.SettingCatalog() {
-		if err := derive(definition.Name); err != nil {
-			return err
-		}
+		sources = append(sources, derive(definition.Name))
+	}
+	if err := domain.CollectRefusals(sources...); err != nil {
+		return err
 	}
 	// Integration listeners preserve reservations against configured peer listeners,
 	// including packages whose service is stopped or not yet initialized.
-	var collisions []error
-	reported := map[[2]string]bool{}
 	for _, definition := range tracker.catalog.SettingCatalog() {
 		owner, integration := strings.CutPrefix(definition.Owner, "integration:")
 		if !integration || !definition.HostListener || !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), owner) {
@@ -578,22 +624,22 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 			if other, ok := strings.CutPrefix(peer.Owner, "integration:"); ok && !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), other) {
 				continue
 			}
-			pair := [2]string{min(definition.Name, peer.Name), max(definition.Name, peer.Name)}
-			if values[peer.Name] == values[definition.Name] && !reported[pair] {
-				reported[pair] = true
-				collisions = append(collisions, domain.SettingRefusal(domain.ConfigPortCollision, definition.Name, peer.Name))
+			if values[peer.Name] == values[definition.Name] {
+				collisions.add(definition.Name, peer.Name)
 			}
 		}
 	}
-	if len(collisions) != 0 {
-		// The general check below would report the same pairs again.
-		return domain.CollectRefusals(collisions...)
-	}
-	return validateHostListenerCollisions(values, tracker.catalog)
+	addHostListenerCollisions(values, tracker.catalog, collisions)
+	return nil
 }
 
 func validateHostListenerCollisions(values map[string]string, settings Catalog) error {
-	var collisions []error
+	collisions := newPortCollisions()
+	addHostListenerCollisions(values, settings, collisions)
+	return domain.CollectRefusals(collisions.refusals...)
+}
+
+func addHostListenerCollisions(values map[string]string, settings Catalog, collisions *portCollisions) {
 	ports := map[string]string{}
 	for _, definition := range settings.SettingCatalog() {
 		if !definition.HostListener {
@@ -610,12 +656,11 @@ func validateHostListenerCollisions(values map[string]string, settings Catalog) 
 			continue
 		}
 		if previous := ports[value]; previous != "" {
-			collisions = append(collisions, domain.SettingRefusal(domain.ConfigPortCollision, definition.Name, previous))
+			collisions.add(definition.Name, previous)
 			continue
 		}
 		ports[value] = definition.Name
 	}
-	return domain.CollectRefusals(collisions...)
 }
 
 func normalizeAgentPersistLinks(
@@ -1204,15 +1249,7 @@ func pathPresent(path string) bool {
 }
 
 func retiredE2EVMTemplateError(yardName, yardFile string) error {
-	return &retiredYardTemplateError{diagnostic: fmt.Sprintf(`YARD_TEMPLATE "e2e-vms" is retired in %s
-replace its YARD_TEMPLATE assignment with:
-  YARD_TEMPLATE=test-vms
-then verify the unchanged yard identity:
-  yard -Y %s check
-  yard -Y %s status
-to retire that yard after the config migration:
-  yard -Y %s test-vms status
-  yard -Y %s teardown`, yardFile, yardName, yardName, yardName, yardName)}
+	return &retiredYardTemplateError{yardName: yardName, yardFile: yardFile}
 }
 
 func environmentFrom(explicit map[string]string) environment {

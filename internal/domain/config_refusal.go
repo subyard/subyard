@@ -68,6 +68,7 @@ const (
 	ConfigProfileNameInvalid
 	ConfigUnknownIntegration
 	ConfigDuplicateIntegration
+	ConfigDuplicateUnknownIntegration
 	ConfigConflictingCommandSettings
 )
 
@@ -127,14 +128,15 @@ var configRefusalTexts = map[ConfigRefusalCode]struct{ template, next string }{
 	ConfigOwnerEndpointRequired:          {"remote yard context requires an owner endpoint", "set OWNER_ENDPOINT for the remote yard"},
 	ConfigOwnerYardNameRequired:          {"remote yard context requires a canonical owner yard name", "set OWNER_YARD_NAME to a canonical yard name"},
 	// Producers append the unvalidated value after these texts; boundaries omit it.
-	ConfigYardNameInvalid:            {"invalid yard name", "use a lower-case yard name of letters, digits, '-' or '_'"},
-	ConfigUnknownYard:                {"unknown yard", "run yard yards to list registered yards"},
-	ConfigYardTemplateInvalid:        {"invalid YARD_TEMPLATE", "set YARD_TEMPLATE to a shipped yard template name"},
-	ConfigUnknownYardTemplate:        {"unknown YARD_TEMPLATE", "set YARD_TEMPLATE to a shipped yard template name"},
-	ConfigProfileNameInvalid:         {"invalid environment profile", "select environment profiles by their shipped names"},
-	ConfigUnknownIntegration:         {"unknown integration %q", "select coding tool integrations by their shipped names"},
-	ConfigDuplicateIntegration:       {"duplicate agent %q", "list each coding tool integration once"},
-	ConfigConflictingCommandSettings: {"conflicting command environment settings %s and %s", "pass only the canonical setting in the command environment"},
+	ConfigYardNameInvalid:             {"invalid yard name", "use a lower-case yard name of letters, digits, '-' or '_'"},
+	ConfigUnknownYard:                 {"unknown yard", "run yard yards to list registered yards"},
+	ConfigYardTemplateInvalid:         {"invalid YARD_TEMPLATE", "set YARD_TEMPLATE to a shipped yard template name"},
+	ConfigUnknownYardTemplate:         {"unknown YARD_TEMPLATE", "set YARD_TEMPLATE to a shipped yard template name"},
+	ConfigProfileNameInvalid:          {"invalid environment profile", "select environment profiles by their shipped names"},
+	ConfigUnknownIntegration:          {"unknown integration", "select coding tool integrations by their shipped names"},
+	ConfigDuplicateIntegration:        {"duplicate agent %q", "list each coding tool integration once"},
+	ConfigDuplicateUnknownIntegration: {"duplicate agent", "list each coding tool integration once"},
+	ConfigConflictingCommandSettings:  {"conflicting command environment settings %s and %s", "pass only the canonical setting in the command environment"},
 }
 
 // ConfigName is a profile, setting or yard-kind name that passed validation. Its
