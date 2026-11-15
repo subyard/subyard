@@ -2,7 +2,6 @@ package releasetransition
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -75,33 +74,16 @@ func TestOwnerPrivatePublicationKilledWriter(t *testing.T) {
 func TestMigrationOwnerPrivatePrefixKillFreshRetry(t *testing.T) {
 	for _, cutName := range []string{"zero", "early", "late"} {
 		t.Run(cutName, func(t *testing.T) {
-			candidate, request, links := migrationOwnerFixture(t)
-			ctx := context.Background()
-			goal := Goal{Target: "release-c", Direction: DirectionActivateTarget}
-			inspection, err := candidate.Inspect(ctx, goal)
+			candidate, receipt, links := migrationOwnerReaderFixture(t, false)
+			payload, err := MarshalMigrationOwnerReceipt(receipt)
 			if err != nil {
 				t.Fatal(err)
 			}
-			candidate.options.fault = func(point string) error {
-				if point == "after-migration-owner-receipt" {
-					return errors.New("capture intended bytes before journal")
-				}
-				return nil
-			}
-			candidate.Converge(ctx, Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-			receipts, err := candidate.store.migrationOwnerReceipts()
-			if err != nil || len(receipts) != 1 {
-				t.Fatalf("receipt fixture: %v %v", receipts, err)
-			}
-			var payload []byte
-			for id, receipt := range receipts {
-				payload, err = MarshalMigrationOwnerReceipt(receipt)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Remove(filepath.Join(candidate.options.ConfigHome, filepath.Join(migrationOwnerReceiptParts...), string(id)+".json")); err != nil {
-					t.Fatal(err)
-				}
+			// The old engine's intended bytes are a direct fixture. A killed
+			// private publisher must expose neither a prefix nor a reservation.
+			seedMigrationOwnerReceipt(t, candidate, receipt)
+			if err := os.Remove(filepath.Join(candidate.options.ConfigHome, filepath.Join(migrationOwnerReceiptParts...), string(receipt.Successor.Transaction)+".json")); err != nil {
+				t.Fatal(err)
 			}
 			cut := 0
 			if cutName == "early" {
@@ -126,39 +108,25 @@ func TestMigrationOwnerPrivatePrefixKillFreshRetry(t *testing.T) {
 			if !bytes.Equal(before, snapshotStoreV2Tree(t, candidate.options.ConfigHome)) || links.Active != "release-b" {
 				t.Fatal("private write changed predecessor")
 			}
-			options := candidate.options
-			options.fault = nil
-			restarted, err := NewV2Transition(options)
-			if err != nil {
+			if reserved, err := candidate.store.journalIsReserved(receipt.Predecessor.Transaction); err != nil || reserved {
+				t.Fatalf("private staging became reservation: %v %v", reserved, err)
+			}
+			if err := candidate.store.createOwnerImmutable(migrationOwnerReceiptParts, string(receipt.Successor.Transaction)+".json", payload); err != nil {
 				t.Fatal(err)
 			}
-			inspection, err = restarted.Inspect(ctx, goal)
-			if err != nil || len(inspection.Blockers) != 0 || inspection.Resume != nil {
-				t.Fatalf("fresh inspection: %+v %v", inspection, err)
+			receipts, err := candidate.store.migrationOwnerReceipts()
+			if err != nil || len(receipts) != 1 {
+				t.Fatalf("fresh publication: %v %v", receipts, err)
 			}
-			outcome, err := restarted.Converge(ctx, Execution{Plan: inspection.Plan})
-			if err == nil && outcome.Status == StatusReady {
-				t.Fatal("private staging bypassed fresh consent")
-			}
-			if !bytes.Equal(before, snapshotStoreV2Tree(t, candidate.options.ConfigHome)) {
-				t.Fatal("missing-consent refusal wrote protected state")
-			}
-			outcome, err = restarted.Converge(ctx, Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-			if err != nil || outcome.Status != StatusReady || links.Active != "release-c" {
-				t.Fatalf("fresh retry: %+v %v", outcome, err)
-			}
-			receipts, err = restarted.store.migrationOwnerReceipts()
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, receipt := range receipts {
-				if receipt.Predecessor.Transaction != request.Transaction {
+			for _, actual := range receipts {
+				if actual.Replacement != receipt.Replacement {
 					t.Fatal("wrong predecessor")
 				}
-				if err := restarted.store.migrationOwnerEvidence(receipt.Predecessor); err != nil {
+				if err := candidate.store.migrationOwnerEvidence(actual.Predecessor); err != nil {
 					t.Fatal(err)
 				}
 			}
+
 		})
 	}
 }

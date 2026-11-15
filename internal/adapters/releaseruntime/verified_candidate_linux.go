@@ -460,21 +460,7 @@ func (runtime *Runtime) runVerifiedCandidate(
 	stdout io.Writer,
 	grant releasetransition.Authorization,
 ) error {
-	return runtime.runVerifiedRuntimeEngine(
-		ctx, candidate, candidate, runtimeRoot, arguments, stdin, stdout, grant,
-	)
-}
-
-func (runtime *Runtime) runVerifiedRuntimeEngine(
-	ctx context.Context,
-	assets, engine *verifiedPublishedCandidate,
-	runtimeRoot string,
-	arguments []string,
-	stdin io.Reader,
-	stdout io.Writer,
-	grant releasetransition.Authorization,
-) error {
-	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
+	if candidate == nil || candidate.root == nil || candidate.engine == nil {
 		return errors.New("verified published runtime is unavailable")
 	}
 	extra := make([]*os.File, 0, 3)
@@ -508,16 +494,16 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		extra = append(extra, placeholder)
 	}
 	rootChildFD := 3 + len(extra)
-	extra = append(extra, assets.root)
+	extra = append(extra, candidate.root)
 	engineChildFD := 3 + len(extra)
-	extra = append(extra, engine.engine)
+	extra = append(extra, candidate.engine)
 	enginePath := fmt.Sprintf("/proc/self/fd/%d", engineChildFD)
 	command := exec.CommandContext(ctx, enginePath, arguments...)
 	command.Args[0] = "yard-engine"
 	command.ExtraFiles = extra
 	repositoryRoot := fmt.Sprintf("/proc/self/fd/%d", rootChildFD)
 	if runtime.pinnedCandidateRoot != nil &&
-		runtime.pinnedCandidateRelease == assets.candidate.release {
+		runtime.pinnedCandidateRelease == candidate.candidate.release {
 		repositoryRoot = fmt.Sprintf(
 			"/proc/%d/fd/%d", os.Getpid(), runtime.pinnedCandidateRoot.Fd(),
 		)
@@ -560,42 +546,28 @@ func (runtime *Runtime) invokeVerifiedCandidateTransition(
 	request releasetransition.ProcessRequest,
 	grant releasetransition.Authorization,
 ) (releasetransition.ProcessResponse, error) {
-	return runtime.invokeVerifiedRuntimeTransition(ctx, candidate, candidate, request, grant)
-}
-
-func (runtime *Runtime) invokeVerifiedRuntimeTransition(
-	ctx context.Context,
-	assets, engine *verifiedPublishedCandidate,
-	request releasetransition.ProcessRequest,
-	grant releasetransition.Authorization,
-) (releasetransition.ProcessResponse, error) {
-	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
-		return releasetransition.ProcessResponse{},
-			errors.New("verified published runtime is unavailable")
+	if candidate == nil || candidate.root == nil || candidate.engine == nil {
+		return releasetransition.ProcessResponse{}, errors.New("verified published runtime is unavailable")
 	}
-	if assets.registryDigest == "" {
+	if candidate.registryDigest == "" {
 		return releasetransition.ProcessResponse{},
 			errors.New("published runtime manifest does not bind release transition registry")
 	}
-	if engine.registryDigest != assets.registryDigest {
-		return releasetransition.ProcessResponse{},
-			errors.New("verified runtime engine and assets have incompatible release transition registries")
-	}
-	if err := runtime.pinCandidateRoot(assets); err != nil {
+	if err := runtime.pinCandidateRoot(candidate); err != nil {
 		return releasetransition.ProcessResponse{}, err
 	}
-	if request.RegistryDigest != "" && request.RegistryDigest != assets.registryDigest {
+	if request.RegistryDigest != "" && request.RegistryDigest != candidate.registryDigest {
 		return releasetransition.ProcessResponse{},
 			errors.New("published runtime registry changed after inspection")
 	}
-	request.RegistryDigest = assets.registryDigest
+	request.RegistryDigest = candidate.registryDigest
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return releasetransition.ProcessResponse{}, err
 	}
 	var stdout boundedResponseBuffer
-	if err := runtime.runVerifiedRuntimeEngine(
-		ctx, assets, engine, request.RuntimeRoot, []string{"_release-transition"},
+	if err := runtime.runVerifiedCandidate(
+		ctx, candidate, request.RuntimeRoot, []string{"_release-transition"},
 		bytes.NewReader(append(payload, '\n')), &stdout, grant,
 	); err != nil {
 		return releasetransition.ProcessResponse{},

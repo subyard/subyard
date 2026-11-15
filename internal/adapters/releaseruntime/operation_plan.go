@@ -43,24 +43,16 @@ func releaseOperationSteps(request releasetransition.ProcessRequest, inspection 
 	return append(steps, step)
 }
 
-func releaseOperationBinding(request releasetransition.ProcessRequest, inspection releasetransition.Inspection, owner, target candidateVerification, links any, recovery *replacementRevalidation) string {
-	var source any
-	if recovery != nil {
-		source = struct {
-			Root             string
-			Digest, Registry any
-			Journal          releasetransition.ProtectedSnapshot
-		}{recovery.source.candidate.root, recovery.source.digest, recovery.source.registryDigest, recovery.journalSnapshot}
-	}
+func releaseOperationBinding(request releasetransition.ProcessRequest, inspection releasetransition.Inspection, owner, target candidateVerification, links any) string {
 	payload, err := json.Marshal(struct {
 		Request                       releasetransition.ProcessRequest
 		Inspection                    releasetransition.Inspection
 		OwnerRoot, TargetRoot         string
 		OwnerDigest, TargetDigest     any
 		OwnerRegistry, TargetRegistry any
-		Links, Recovery               any
+		Links                         any
 	}{
-		request, inspection, owner.candidate.root, target.candidate.root, owner.digest, target.digest, owner.registryDigest, target.registryDigest, links, source})
+		request, inspection, owner.candidate.root, target.candidate.root, owner.digest, target.digest, owner.registryDigest, target.registryDigest, links})
 	if err != nil {
 		panic("release operation binding must be encodable")
 	}

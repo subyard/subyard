@@ -150,7 +150,7 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 		// An older owner may reject the optional probe before V1 fallback.
 		processRuntime.config.Stderr = io.Discard
 	}
-	if err := processRuntime.runVerifiedRuntimeEngine(ctx, owner, owner, runtimeRoot, []string{"_release-transition"},
+	if err := processRuntime.runVerifiedCandidate(ctx, owner, runtimeRoot, []string{"_release-transition"},
 		bytes.NewReader(append(payload, '\n')), &stdout, grant); err != nil {
 		return releasetransition.RecoveryProcessResponse{}, fmt.Errorf("verified recovery process failed: %w", err)
 	}
@@ -207,16 +207,12 @@ func activationRecoveryOperationBinding(binding string, request *releasetransiti
 func (runtime *Runtime) invokePreparedTransitionExecution(
 	ctx context.Context,
 	owner *verifiedPublishedCandidate,
-	delegate *candidateVerification,
 	request releasetransition.ProcessRequest,
 	grant releasetransition.Authorization,
 	recoveryRequest *releasetransition.RecoveryProcessRequest,
 ) (releasetransition.ProcessResponse, error) {
 	if recoveryRequest == nil {
-		return runtime.invokeTransitionExecution(ctx, owner, delegate, request, grant)
-	}
-	if delegate != nil {
-		return releasetransition.ProcessResponse{}, errors.New("fresh activation recovery cannot delegate to another owner")
+		return runtime.invokeVerifiedCandidateTransition(ctx, owner, request, grant)
 	}
 	recovery := *recoveryRequest
 	recovery.Mode = releasetransition.RecoveryProcessMode(request.Mode)
@@ -236,9 +232,6 @@ func (runtime *Runtime) invokePreparedTransitionExecution(
 }
 
 func (runtime *Runtime) validateFreshRecoveryConvergence(request releasetransition.RecoveryProcessRequest, outcome releasetransition.Outcome) error {
-	if request.MigrationOwner != nil {
-		return validateMigrationOwnerConvergence(request, outcome)
-	}
 	if outcome.Transaction == nil || *outcome.Transaction == request.Recovery.Transaction {
 		if outcome.Status == releasetransition.StatusReady {
 			return errors.New("fresh recovery returned ready without a successor transaction")

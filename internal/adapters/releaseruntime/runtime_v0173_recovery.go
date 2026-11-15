@@ -2,9 +2,6 @@ package releaseruntime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -15,9 +12,7 @@ import (
 	"github.com/blang/semver/v4"
 )
 
-// The published v0.17.3 engine reopens settings inspection while resuming an
-// activation-only journal. A verified newer engine can resume that exact work
-// with the original runtime assets and durable authorization.
+// Preserve the published v0.17.3 recovery diagnostic for ordinary owner resume.
 func isV0173ActivationOnlyBlocker(protected *protectedTransitionInspection) bool {
 	if protected == nil || protected.target.version != "0.17.3" ||
 		protected.owner != protected.target || !protected.activationReconciliationOwned {
@@ -58,95 +53,4 @@ func (runtime *Runtime) setV0173StandaloneRetry(ctx context.Context, root string
 	}
 	protected.inspection.Blockers[0].Retry = retry
 	protected.inspection.Outcome.Retry = retry
-}
-
-func (runtime *Runtime) inspectV0173ActivationOnlyRecovery(
-	ctx context.Context,
-	root string,
-	before currentSnapshot,
-	protected *protectedTransitionInspection,
-) (*protectedTransitionInspection, *candidateVerification) {
-	if !isV0173ActivationOnlyBlocker(protected) || !before.ledger.Exists {
-		return protected, nil
-	}
-	domains, err := runtime.currentDomains(ctx, root, protected.owner, before)
-	if err != nil {
-		return protected, nil
-	}
-	for _, state := range domains {
-		if len(state.Pending) != 0 || state.Epoch != state.RequiredEpoch {
-			return protected, nil
-		}
-	}
-	delegate, available := runtime.verifiedStandaloneCandidateRoot(ctx, root)
-	if !available {
-		return protected, nil
-	}
-	defer delegate.Close()
-	version, err := semver.Parse(delegate.version)
-	if err != nil || !version.GT(semver.MustParse("0.17.3")) ||
-		delegate.registryDigest != protected.journal.RegistryDigest ||
-		!strings.HasPrefix(string(delegate.candidate.release), delegate.version+"-") {
-		return protected, nil
-	}
-	assets, err := runtime.verifyPublishedCandidate(ctx, protected.owner.candidate, root, &protected.owner.digest)
-	if err != nil {
-		return protected, nil
-	}
-	defer assets.Close()
-	response, err := runtime.invokeVerifiedRuntimeTransition(ctx, assets, delegate, protected.request, "")
-	if err != nil || response.Inspection == nil || response.Outcome != nil || !response.ActivationReconciliationOwned {
-		return protected, nil
-	}
-	inspection := *response.Inspection
-	if err := releasetransition.ValidateProcessInspection(protected.journal.Goal, inspection); err != nil ||
-		len(inspection.Blockers) != 0 || inspection.Resume == nil ||
-		*inspection.Resume != protected.journal.Transaction || inspection.Plan != protected.journal.ResumePlan ||
-		inspection.Outcome.Status != releasetransition.StatusRecovering ||
-		inspection.Outcome.Transaction == nil || *inspection.Outcome.Transaction != protected.journal.Transaction {
-		return protected, nil
-	}
-	recovered := *protected
-	recovered.inspection = inspection
-	receipt := candidateVerification{
-		candidate: delegate.candidate, digest: delegate.manifestDigest,
-		version: delegate.version, registryDigest: delegate.registryDigest,
-	}
-	return &recovered, &receipt
-}
-
-func (runtime *Runtime) invokeTransitionExecution(
-	ctx context.Context,
-	assets *verifiedPublishedCandidate,
-	delegate *candidateVerification,
-	request releasetransition.ProcessRequest,
-	grant releasetransition.Authorization,
-) (releasetransition.ProcessResponse, error) {
-	if delegate == nil {
-		return runtime.invokeVerifiedCandidateTransition(ctx, assets, request, grant)
-	}
-	verified, err := runtime.verifyPublishedCandidate(ctx, delegate.candidate, request.RuntimeRoot, &delegate.digest)
-	if err != nil {
-		return releasetransition.ProcessResponse{}, fmt.Errorf("reverify recovery engine: %w", err)
-	}
-	defer verified.Close()
-	if verified.version != delegate.version || verified.registryDigest != delegate.registryDigest {
-		return releasetransition.ProcessResponse{}, fmt.Errorf("%w: recovery engine changed after inspection", domain.ErrPlanStale)
-	}
-	return runtime.invokeVerifiedRuntimeTransition(ctx, assets, verified, request, grant)
-}
-
-func delegatedReleaseOperationBinding(binding string, delegate *candidateVerification) string {
-	if delegate == nil {
-		return binding
-	}
-	payload, err := json.Marshal(struct {
-		Binding, Root, Version string
-		Digest, Registry       releasetransition.Fingerprint
-	}{binding, delegate.candidate.root, delegate.version, delegate.digest, delegate.registryDigest})
-	if err != nil {
-		panic("recovery engine binding must be encodable")
-	}
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:])
 }

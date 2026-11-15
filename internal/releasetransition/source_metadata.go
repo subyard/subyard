@@ -585,19 +585,6 @@ type sourceMetadataInput struct {
 // This is a bounded inventory of the existing typed store, including absence,
 // pending records, directory identities, and unrelated recovery namespaces.
 func (store *POSIXV2Store) sourceMetadataInventory() (Fingerprint, error) {
-	return store.sourceMetadataInventoryWithMigrationOwner(false)
-}
-
-func (store *POSIXV2Store) sourceMetadataInventoryWithoutMigrationOwner() (Fingerprint, error) {
-	// Publication changes this namespace, so its bytes cannot join the predecessor
-	// binding. Validate its complete typed grammar before excluding it instead.
-	if _, err := store.migrationOwnerReceipts(); err != nil {
-		return "", err
-	}
-	return store.sourceMetadataInventoryWithMigrationOwner(true)
-}
-
-func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude bool) (Fingerprint, error) {
 	inputs := map[string]sourceMetadataInput{}
 	remaining := 8192
 	remainingBytes := int64(32 << 20)
@@ -618,11 +605,6 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 			return err
 		}
 		inputs[key] = metadataInput(stat, "")
-		if exclude && len(parts) == 1 {
-			input := inputs[key]
-			input.Links = 0
-			inputs[key] = input
-		}
 		entries, _, err := store.readDirectoryEntries(parts, remaining)
 		if err != nil {
 			return err
@@ -634,16 +616,7 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 		for _, entry := range entries {
 			name := entry.Name()
 			child := append(slices.Clone(parts), name)
-			if exclude && len(child) == 2 && child[1] == "migration-owner" {
-				continue
-			}
 			if strings.HasSuffix(name, ".pending") {
-				if exclude && len(child) == 3 && child[1] == "v2" && name == ".journal.json.pending" {
-					if err := store.validateMigrationOwnerPreparedJournal(); err != nil {
-						return err
-					}
-					continue
-				}
 				return errors.New("finish the pending protected publication with its sealed owner before source repair")
 			}
 			if entry.IsDir() {

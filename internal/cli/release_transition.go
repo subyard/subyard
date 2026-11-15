@@ -2094,12 +2094,6 @@ func executeReleaseTransitionRequest(
 	}); ok {
 		transitionOptions.RegisteredYards, transitionOptions.GuestDiskTmp, transitionOptions.RegisteredEndpointSettings = owner.registeredMigrationOwners()
 	}
-	transitionOptions.MigrationOwnerReplacement = request.MigrationOwnerReplacement
-	if request.MigrationOwnerReplacement != nil {
-		transitionOptions.MigrationOwnerAssets = func(ctx context.Context) (releasetransition.MigrationOwnerAssetsProof, error) {
-			return releaseruntime.VerifyMigrationOwnerReplacementAssets(ctx, repositoryRoot, request)
-		}
-	}
 	transitionOptions.CompletedMetadata = func(ctx context.Context) (releasetransition.Fingerprint, error) {
 		runtime := releaseruntime.NewSourceInspector(repositoryRoot, io.Discard)
 		defer runtime.Close()

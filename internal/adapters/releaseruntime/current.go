@@ -123,10 +123,6 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 			return Prepared{}, err
 		}
 	}
-	var delegate *candidateVerification
-	if protected != nil {
-		protected, delegate = runtime.inspectV0173ActivationOnlyRecovery(ctx, parsed.root, before, protected)
-	}
 	var owner, target candidateVerification
 	var request releasetransition.ProcessRequest
 	var inspection releasetransition.Inspection
@@ -262,7 +258,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 	if protected != nil {
 		recoveryRequest = protected.recoveryRequest
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil, delegate, recoveryRequest)
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, recoveryRequest)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -275,7 +271,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		inspection.Outcome.Status == releasetransition.StatusReady &&
 		!inspection.Assessment.Changed && inspection.Resume == nil &&
 		request.SourceIngress == nil && request.Replacement == nil &&
-		request.MigrationOwnerReplacement == nil && recoveryRequest == nil && delegate == nil
+		request.MigrationOwnerReplacement == nil && recoveryRequest == nil
 	execute := prepared.run
 	prepared.run = func(ctx context.Context) error {
 		actual, err := runtime.readCurrentSnapshot(parsed.root, configHome)

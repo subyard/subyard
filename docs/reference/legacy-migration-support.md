@@ -174,10 +174,13 @@ The boundary itself deletes no product code. A later removal (proved unreachable
 deletion) starts from these facts of the current candidate:
 
 - **Unfinished journals it no longer continues:** every unfinished transition while the installed
-  release is below v0.28.0, whoever started it: the candidate refuses before the engine, including
-  the historical owner fixes of v0.11.1, v0.17.3 and v0.21.0, so their replacement and recovery paths
-  are not reached from admission. It continues only its own exact transaction (same target,
-  direction and artifact digest); at or above the anchor the engine keeps ordinary resume,
+  release is below v0.28.0, whoever started it: explicit `--version` selection refuses with
+  `source-anchor-required` in the outer caller, before candidate selection. Without `--version`,
+  the installed release still finishes its own exact journal and retains its historical retry hints.
+  The current engine no longer writes the v0.11.1/v0.21.0 historical replacements or delegates
+  v0.17.3 repair; their completed-history readers and frozen capability probe remain.
+  Child admission still admits only its own exact transaction (same target, direction and artifact
+  digest) below the anchor; at or above the anchor the engine keeps ordinary resume,
   newer-release replacement and the post-activation takeover of an anchor-series journal.
 - **Readers an install completed on the anchor still needs:** the V2 journal and runtime links, the
   migration ledger and its history checkpoint and projection at the unchanged `minimumEpochs`, and
@@ -319,9 +322,11 @@ Retirement guidance must state the v0.11.0 source boundary, affected V1 formats,
 data loss and the user's separate clean-install step. Diagnose unsupported legacy state when
 encountered through source-version admission; ordinary commands do not inspect V1 files and
 ready operation needs no deprecation warning. Supported V2 unfinished
-transactions retain their exact sealed owners, artifacts and evidence until closure. The separately negotiated `migration-ledger-owner-replacement-v1` contract may retain an exactly proved
-defective owner as typed superseded evidence and select a freshly authorized forward candidate;
-it never manufactures old activation readiness. Compatible retained rollback within the support
+transactions retain their exact sealed owners, artifacts and evidence until closure. Historical
+`migration-ledger-owner-replacement-v1` receipts retain the exactly proved defective owner as
+superseded evidence and bind its authorized successor. The current engine reads these receipts
+and successor completion records but creates no new historical replacement; v0.11.1 superseded
+archives also remain readable. Neither history reader manufactures old activation readiness. Compatible retained rollback within the support
 boundary remains protected. Refusing an old
 upgrade never authorizes deleting its data. Only an explicitly confirmed full uninstall may
 remove its owned data without migration; ordinary evidence cleanup still requires proven closure
