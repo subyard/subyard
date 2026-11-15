@@ -1010,8 +1010,7 @@ Veranda and live P0 acceptance remain separate checks.
 #### Exact-candidate hosted release checks
 
 `release-vm.yml` runs the explicit `CI_HOSTED_CHECKS` inventory against a downloaded preparation
-artifact, one fresh collector per job. It shares the Periodic E2E pool setup and preserves bounded
-receipts, original attempts/manifests, logs and invocation events even on failure. Job success requires
+artifact, one fresh collector per job. It shares the Periodic E2E pool setup. Job success requires
 a terminal recorded PASS for that exact selection and recorded cleanup; the collector's aggregate
 receipt stays incomplete while other checks are unrequested. `accept` waits up to six hours (override
 with `--ci-wait-seconds`, including `0`), counts verified successful jobs as `ci-hosted`, and runs only
@@ -1020,6 +1019,67 @@ stale attempts and missing cleanup refuse import. Publication rechecks GitHub ex
 See [release publication](reference/release-publication.md) for identity and policy rules. The local
 contracts are `tests/release-acceptance.sh`, `tests/release-publication.sh` and
 `tests/workflow-real-adapter-gate.sh`; they do not establish native hosted VM acceptance.
+
+Every Release VM job attempts to upload `hosted-diagnostics-JOB_INDEX-ATTEMPT` from its
+`always()` steps, including after failure, check timeout or cancellation. Find artifacts on the
+workflow run page. Contents differ by workflow:
+
+| Artifact | Contents, when produced by the check |
+| --- | --- |
+| Release VM `hosted-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `acceptance/<check>-*.log`, other collector logs, `acceptance/receipt.json`, `acceptance/events.jsonl`, `acceptance/attempts/*.json` and `acceptance/runs/*.json`; `runner/` probe logs/results and broker events; `p0/` failure snapshots; `cleanup.log` and `summary.json` |
+| Periodic `pool-diagnostics-ATTEMPT`, `diagnostics-JOB_INDEX-ATTEMPT`, `nested-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `runner/check.log`, probe logs, `runner/results.tsv` and service/yard broker events; available `p0/` failure snapshots; `cleanup.log` and `summary.json`. These jobs have no collector output under `$RUNNER_TEMP/acceptance`, so no `acceptance/`, receipt, original attempt or invocation records |
+| Release VM `ci-hosted-JOB_INDEX` | Strict validated native PASS evidence: `ci-execution.json`, receipt, events, logs, original attempts/manifests and invocation records. This is separate from diagnostic snapshots |
+
+`p0/` preserves the route-relative paths of `p0-*.failure.log` (keeper, redacted broker status,
+capacity, reachability and OOM snapshots). `cleanup.log` contains captured cleanup/release lines;
+absent cleanup stays unconfirmed. `summary.json` records execution IDs, check/job outcome,
+environment facts, truncation and omitted-file counts. Early setup failure can leave only a subset
+of files. Intel-skipped nested jobs do not upload a snapshot.
+
+Diagnostic redaction is a convenience for disposable test values, not a security boundary.
+The workflows refuse repository `secrets` references and restrict `github.token` to the artifact
+download and control steps; the workflow contract checks those sites. Capture applies exactly four
+rules, in one line-oriented pass shared by all files and the printed tail:
+
+1. Mask exact values of at least eight characters from environment variables whose names contain
+   a whole word `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `CREDENTIAL`, `CREDENTIALS`,
+   `COOKIE`, `API_KEY`, `PRIVATE_KEY`, `ACCESS_KEY` or `SIGNING_KEY` (case-insensitive; underscores
+   separate words). Names ending in `_FILE`, `_PATH`, `_DIR` or `_SOCK` are excluded. Values are
+   never learned from log text or JSON fields.
+2. Replace paired `-----BEGIN … PRIVATE KEY-----` through the matching END with `[redacted PEM]`.
+   If no matching END exists, suppress the BEGIN line and at most 128 following lines, retaining
+   later diagnostic text. Certificates and orphaned base64 bodies have no masking rule.
+3. Mask `gh[pousr]_[A-Za-z0-9]{36,}`, `github_pat_[A-Za-z0-9_]{20,}` and JWTs matching
+   `eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`.
+4. Replace hex runs of at least 64 characters, including runs glued to identifiers, with
+   `[hexN:TAG]`, where TAG is the first eight hex characters of SHA-256 of the matched bytes.
+   Equal values have equal tags; different values remain distinguishable. Shorter hex runs,
+   including 40-character git SHAs and 32-character IDs, remain unchanged.
+
+There are no label, flag, URL, entropy or control-normalization rules. Unknown passwords,
+Authorization/Cookie values, URL userinfo, `sk-`/base62/base64url strings, SSH public keys and
+fingerprints remain visible unless they match one of the four rules. Prose, instance/test names,
+paths and file locations are preserved outside those matches. Native `ci-hosted` evidence retains
+its original bytes, and Periodic check output is also present in the job log.
+
+Capture streams the check log first (`acceptance/<check>-*.log` or `runner/check.log`; otherwise
+failed probes selected from `runner/results.tsv`), writes it and prints its tail before opening
+other records. Remaining order is runs, receipt, attempts, events, P0 failure logs, broker events
+and other logs. Each file is independent; `summary.json` is written in `finally` and records skip
+reasons. There is no whole-input byte budget. A private temporary disk spool preserves PEM state
+across arbitrarily long keys; only the last 2 MiB of sanitized output per file is retained in memory
+for the artifact. Capture retains at most 128 files and 16 MiB of file content, plus summary/cleanup
+metadata. Snapshots contain no source tree or release assets and expire after seven days.
+Failed jobs print at most 80 lines / 16 KiB. Diagnostic steps are best effort: their failure cannot
+change a passing job into a failure or prevent counting otherwise valid hosted evidence.
+The lightweight redaction/capture tests can run independently with
+`python3 -B tests/helpers/hosted-diagnostics-test.py`; the publication owner also runs them.
+
+Check steps have a 340-minute limit within the 350-minute job budget (110/120 for the Periodic E2E
+pool), reserving time for diagnostic collection/upload. Runner loss or a forced termination that
+prevents final steps can still prevent upload. Diagnostic snapshots never count as evidence. The
+separate `ci-hosted-JOB_INDEX` artifact is uploaded only after strict validation of the complete
+selected PASS and cleanup; its retention remains 90 days.
 
 #### Periodic E2E on hosted runners
 
@@ -1039,10 +1099,14 @@ uncatalogued direct rows run agent-free and refusal rows run the refusal scenari
 except `boundary` and `cleanup`. The `pool` job first installs the candidate's `test-vms` service on a
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
-becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it. After
-a failed check the job prints the broker's lease events, since the runner and its evidence are gone
-afterwards. Jobs run as root on the runner and hold no secrets, so the workflow never runs pull
-request code.
+becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it.
+The `pool`, `check` and Intel `nested` jobs use the bounded runner/P0 snapshots and failed-log
+tails listed above, uploaded on every outcome as `pool-diagnostics-ATTEMPT`,
+`diagnostics-JOB_INDEX-ATTEMPT` and `nested-diagnostics-JOB_INDEX-ATTEMPT`. Their `runner/check.log`
+contains check output, including native cleanup output, and their broker event records survive
+interruption when final steps can run. Logs are staged under the runner temporary directory rather
+than the managed candidate workspace; the upload path therefore matches the capture path. Jobs run
+as root on the runner and hold no secrets, so the workflow never runs pull request code.
 
 Checks that boot a VM inside the leased VM run only on Intel runners. Hosted runners are Azure
 Hyper-V VMs on Intel or AMD CPUs, and the runner label cannot choose one. On AMD, virtualization

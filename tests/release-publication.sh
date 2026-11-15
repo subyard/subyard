@@ -2,6 +2,7 @@
 # Host-free release orchestration, binding and recovery contracts.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$ROOT/tests/helpers/hosted-diagnostics-test.py"
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import base64
 import copy
@@ -2552,7 +2553,89 @@ class HostedChecks(unittest.TestCase):
             (runs / ("d" * 32 + ".json")).write_text(json.dumps(selection))
             with self.assertRaisesRegex(ValueError, "terminal|did not finish"):
                 helper.export(self.remote, self.directory / "failed-export", "profile:sample")
-            self.assertTrue((self.directory / "failed-export/receipt.json").is_file())
+            self.assertFalse((self.directory / "failed-export").exists())
+
+    def test_failed_selection_has_diagnostics_and_never_pass_evidence(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        source, receipt = m.a.load_bound(self.remote)
+        result = receipt["checks"]["profile:sample"]
+        log = self.remote / "profile-sample-12345678.log"
+        log.write_text("fixture failure: missing guest socket\n"
+                       "E2E_PHASE phase=cleanup/release state=end exit_code=0\n")
+        result.update(status="failed", exit_code=1, log=log.name, log_sha256=m.a.digest(log))
+        result["original_attempt"] = m.a.completed_attempt(self.remote, source, receipt, "profile:sample", result)
+        m.a.save(self.remote, receipt)
+        (self.remote / "events.jsonl").write_text('{"event":"check-result","status":"failed"}\n')
+        runs = self.remote / "runs"
+        runs.mkdir()
+        selection = {"selected": ["profile:sample"], "state": "finished", "capture_status": "recorded", "selected_status": "failed"}
+        record = runs / ("d" * 32 + ".json")
+        record.write_text(json.dumps(selection))
+        for outcome, native_status, code, termination, state in (
+            ("failure", "failed", 1, "exit", "finished"),
+            ("timeout", "failed", 124, "timeout", "finished"),
+            ("cancelled", "interrupted", 143, "signal", "running"),
+        ):
+            with self.subTest(outcome=outcome):
+                result.update(status=native_status, exit_code=code, termination=termination)
+                result["original_attempt"] = m.a.completed_attempt(self.remote, source, receipt, "profile:sample", result)
+                m.a.save(self.remote, receipt)
+                selection["state"] = state
+                record.write_text(json.dumps(selection))
+                destination = self.directory / outcome
+                with redirect_stdout(io.StringIO()) as printed:
+                    helper.diagnostic_snapshot(self.remote, destination, "profile:sample", "failure" if outcome == "timeout" else outcome)
+                self.assertIn("fixture failure: missing guest socket", printed.getvalue())
+                self.assertIn("cleanup/release", (destination / "cleanup.log").read_text())
+                self.assertTrue((destination / "acceptance" / log.name).is_file())
+                self.assertTrue((destination / "acceptance/events.jsonl").is_file())
+                self.assertTrue((destination / "acceptance/receipt.json").is_file())
+                self.assertTrue(list((destination / "acceptance/attempts").glob("*.json")))
+                self.assertTrue((destination / "acceptance/runs" / record.name).is_file())
+                self.assertEqual(json.loads((destination / "summary.json").read_text())["kind"], "diagnostics-only")
+                self.assertFalse((destination / "ci-execution.json").exists())
+                self.assertFalse((destination / "acceptance/source").exists())
+                with self.assertRaisesRegex(ValueError, "complete PASS"):
+                    helper.export(self.remote, self.directory / (outcome + "-evidence"), "profile:sample")
+                self.assertFalse((self.directory / (outcome + "-evidence")).exists())
+
+    def test_p0_failure_logs_and_early_probe_tail_are_retained_without_other_evidence(self):
+        spec = importlib.util.spec_from_file_location("hosted_export", ROOT / "dev/ci/release-vm.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        state = self.directory / "e2e-state"
+        logs = self.directory / "probe-logs"
+        logs.mkdir()
+        (logs / "results.tsv").write_text("prepare-host\tfail(23)\t1\ncheck:fixture\tskip\t0\n")
+        (logs / "prepare-host.log").write_text("fixture package install refused\n")
+        for route in ("services/owner/pool/generation", "yards/test-yard"):
+            evidence = state / route / "evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "p0-fixture.failure.log").write_text("padding\n" * 1000 +
+                "lease keeper: failed\nbroker status: unreachable\ncapacity: exhausted\n"
+                "reachability: refused\nkernel: oom-kill\npassword=fixture-p0-secret\n")
+            (evidence / "source.json").write_text("must not be collected")
+            (evidence / "assets.tar.gz").write_bytes(b"must not be collected")
+            (evidence / "p0-linked.failure.log").symlink_to(evidence / "p0-fixture.failure.log")
+        for check in ("vm:p0-full-uninstall", "p0:boundary"):
+            destination = self.directory / check.replace(":", "-")
+            with patch.dict(os.environ, {"FIXTURE_PASSWORD": "fixture-p0-secret"}), \
+                 patch.object(helper, "DIAGNOSTIC_FILE_BYTES", 1024), redirect_stdout(io.StringIO()) as printed:
+                helper.diagnostic_snapshot(self.directory / "absent", destination, check, "failure", logs, state)
+            self.assertIn("fixture package install refused", printed.getvalue())
+            captured = list((destination / "p0").rglob("p0-fixture.failure.log"))
+            self.assertEqual(len(captured), 2)
+            for path in captured:
+                text = path.read_text()
+                self.assertLessEqual(path.stat().st_size, 1024)
+                for reason in ("lease keeper", "broker status", "capacity", "reachability", "oom-kill"):
+                    self.assertIn(reason, text)
+                self.assertNotIn("fixture-p0-secret", text)
+            self.assertFalse(list(destination.rglob("source.json")))
+            self.assertFalse(list(destination.rglob("assets.tar.gz")))
+            self.assertFalse(list(destination.rglob("p0-linked.failure.log")))
 
     def test_partial_malformed_and_oversized_sibling_artifacts_do_not_hide_success(self):
         self.run["conclusion"] = "failure"

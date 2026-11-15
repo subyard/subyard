@@ -183,11 +183,50 @@ exit "$COLLECTOR_EXIT"
                     log.unlink(missing_ok=True)
                     env = dict(os.environ, PATH=str(tools) + ":" + os.environ["PATH"],
                         GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", READY=str(ready), TRACE=str(log),
-                        UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector))
+                        RUNNER_TEMP=str(directory), UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector))
                     result = subprocess.run(["bash", str(runner), "acceptance", "fixture", "prepared", "output", "test"],
                         cwd=directory, env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     self.assertEqual(log.read_text().splitlines(), trace)
+
+    def test_hosted_probe_preserves_failure_exit_and_captures_log(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            script = (root / "dev/ci/periodic-e2e.sh").read_text().split("\nrequire_runner\n")[0]
+            script += '\ninstall -d -m 0700 "$LOGS"\n: > "$RESULTS"\n'
+            script += "probe fixture bash -c 'echo fixture failure; exit 23'\nwrite_summary\n"
+            result = subprocess.run(["bash", "-c", script], cwd=directory,
+                env={**os.environ, "RUNNER_TEMP": str(directory), "GITHUB_STEP_SUMMARY": str(directory / "summary")},
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("fail(23)", (directory / "hosted-logs/results.tsv").read_text())
+            self.assertIn("fixture failure", (directory / "hosted-logs/fixture.log").read_text())
+
+    def test_hosted_diagnostics_subcommand_reads_both_routes_without_a_candidate_bundle(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            workspace = directory / "workspace"
+            (workspace / "dev").mkdir(parents=True)
+            agent = workspace / "dev/agent-e2e.sh"
+            agent.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$TRACE"\nprintf \'{"events":"fixture"}\\n\'\n')
+            agent.chmod(0o700)
+            script = (root / "dev/ci/periodic-e2e.sh").read_text()
+            self.assertEqual(script.count("WORKSPACE=/srv/workspaces/Subyard/src"), 1)
+            runner = directory / "runner.sh"
+            runner.write_text(script.replace("WORKSPACE=/srv/workspaces/Subyard/src", "WORKSPACE=" + str(workspace)))
+            env = {**os.environ, "RUNNER_TEMP": str(directory), "HOME": str(directory / "home"),
+                   "TRACE": str(directory / "calls"), "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+            result = subprocess.run(["bash", str(runner), "diagnostics"], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((directory / "calls").read_text().splitlines(), [
+                "--logs --slot 1 -n 200 --json", "--yard test-yard --logs --slot 1 -n 200 --json"])
+            for route in ("service", "yard"):
+                self.assertEqual(json.loads((directory / f"hosted-logs/{route}-events.json").read_text()),
+                                 {"events": "fixture"})
+            env["GITHUB_ACTIONS"] = "false"
+            refused = subprocess.run(["bash", str(runner), "diagnostics"], env=env, text=True, capture_output=True)
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(len((directory / "calls").read_text().splitlines()), 2)
 
     def test_early_collector_failure_identifies_command_and_exit_without_output(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
