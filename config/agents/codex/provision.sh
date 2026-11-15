@@ -10,7 +10,7 @@ RUNTIME_LINK="$INSTALL_ROOT/codex"
 BIN_LINK="${CODEX_BIN_LINK:-/usr/local/bin/codex}"
 CHECK_PATH="${CODEX_CHECK_PATH:-/usr/local/bin/codex-policy-check}"
 REQUIREMENTS_PATH="${CODEX_REQUIREMENTS_PATH:-/etc/codex/requirements.toml}"
-RELEASE_API_URL=https://api.github.com/repos/openai/codex/releases/latest
+RELEASE_LATEST_URL=https://github.com/openai/codex/releases/latest
 RELEASE_BASE_URL=https://github.com/openai/codex/releases/download
 ARCH="${CODEX_ARCH:-}"
 DEV_USER="${DEV_USER:-dev}"
@@ -356,29 +356,48 @@ cleanup() {
 trap cleanup EXIT
 
 artifact="codex-package-${TARGET}.tar.gz"
-metadata="$tmp/release.json"
-# Release downloads retry transient failures, including GitHub 5xx outages;
-# the asset is still checked against the digest bound below.
-# GitHub supplies each official release asset's SHA-256 digest. Bind the tag,
-# filename, URL and digest from one response; never fall back to an unchecked URL.
-curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --retry 6 --retry-all-errors --retry-max-time 600 --connect-timeout 20 --max-time 60 \
-  --header 'Accept: application/vnd.github+json' \
-  --output "$metadata" "$RELEASE_API_URL" || die "latest release metadata download failed"
-release="$(jq -ers --arg artifact "$artifact" --arg base "$RELEASE_BASE_URL" '
-  if length == 1 then .[0] else error("expected one release") end |
-  select(.draft == false and .prerelease == false) |
-  .tag_name as $tag |
-  select($tag | test("^rust-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) |
-  [.assets[] | select(.name == $artifact)] |
-  select(length == 1) | .[0] |
-  select(.state == "uploaded") |
-  select(.browser_download_url == ($base + "/" + $tag + "/" + $artifact)) |
-  select(.digest | test("^sha256:[0-9a-f]{64}$")) |
-  [($tag | ltrimstr("rust-v")), (.digest | ltrimstr("sha256:")), .browser_download_url] |
-  @tsv
-' "$metadata" 2>/dev/null)" || die "latest release metadata lacks a verified stable artifact for $ARCH"
-IFS=$'\t' read -r VERSION EXPECTED_SHA256 url <<< "$release"
+# Public release URLs avoid GitHub's shared anonymous REST quota. Retry transient
+# failures ourselves: curl's normal retries also retry 429 rate-limit refusals.
+download_metadata() {
+  local attempt result response status reset retry_after reason
+  # Four 60-second attempts and three 2-second pauses bound each metadata request.
+  for attempt in 1 2 3 4; do
+    : > "$tmp/headers"
+    if response="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --retry 0 --connect-timeout 20 --max-time 60 --dump-header "$tmp/headers" \
+      --write-out $'%{http_code}\n%{url_effective}' --output "$1" "${@:2}")"; then
+      metadata_url="${response#*$'\n'}"
+      return 0
+    else result=$?; fi
+    status=''
+    # Only curl's HTTP refusal exit identifies a failing HTTP response. A transport
+    # failure can leave http_code pointing to a successful redirect or partial 200.
+    [ "$result" != 22 ] || status="${response%%$'\n'*}"
+    reason="release metadata download failed${status:+ (HTTP $status)}"
+    if [ "$status" = 429 ] || { [ "$status" = 403 ] && \
+      grep -Eiq $'^x-ratelimit-remaining: *0\r?$|^retry-after:' "$tmp/headers"; }; then
+      reset="$(awk 'tolower($1) == "x-ratelimit-reset:" {gsub(/\r/, "", $2); print $2}' "$tmp/headers")"
+      retry_after="$(awk 'tolower($1) == "retry-after:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); print}' "$tmp/headers")"
+      if [[ "$retry_after" =~ ^[0-9]+$ ]]; then retry_after="$retry_after seconds"; fi
+      reason="GitHub rate limit refused release metadata${reset:+ (reset at Unix time $reset)}${retry_after:+ (retry after $retry_after)}"
+      break
+    fi
+    case "$status" in ''|5??) ;; *) break ;; esac
+    [ "$attempt" = 4 ] || sleep 2
+  done
+  if is_release_target "$current_target" && is_working_binary "$INSTALL_ROOT/$current_target"; then
+    install_check
+    release_standalone_shadow
+    run_check
+    printf 'Retained working Codex %s at %s; latest release could not be verified: %s\n' "$BINARY_VERSION" "$BIN_LINK" "$reason"
+    exit 0
+  fi
+  die "$reason"
+}
+download_metadata /dev/null --head "$RELEASE_LATEST_URL"
+[[ "$metadata_url" =~ ^https://github\.com/openai/codex/releases/tag/rust-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]] \
+  || die "latest release redirect does not name an official stable Codex release"
+VERSION="${BASH_REMATCH[1]}"
 
 if is_release_target "$current_target" && is_working_binary "$INSTALL_ROOT/$current_target"; then
   # A stale latest-release response must not roll back a newer working install.
@@ -394,6 +413,15 @@ if is_release_target "$current_target" && is_working_binary "$INSTALL_ROOT/$curr
     exit 0
   fi
 fi
+
+# OpenAI publishes this SHA-256 manifest with the packages. Pin both the checksum
+# source and archive to the resolved stable tag; never download an unchecked binary.
+url="$RELEASE_BASE_URL/rust-v$VERSION/$artifact"
+download_metadata "$tmp/SHA256SUMS" "$RELEASE_BASE_URL/rust-v$VERSION/codex-package_SHA256SUMS"
+EXPECTED_SHA256="$(jq -Rers --arg artifact "$artifact" '
+  [split("\n")[] | select(endswith($artifact))] | select(length == 1) |
+  .[0] | rtrimstr("  " + $artifact) | select(test("^[0-9a-f]{64}$"))
+' "$tmp/SHA256SUMS")" || die "release checksum manifest lacks a unique SHA-256 for $artifact"
 
 # Keep this function local: provision hooks are delivered on stdin, without repo helpers.
 download_artifact() {

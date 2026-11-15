@@ -98,15 +98,17 @@ sha_no_binary="$(make_bad_archive 8.8.5 no_binary_tar)"
 cat > "$fake_bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-out='' url='' retries='' all_errors='' retry_time=''
+out='' url='' retries='' headers='' write_out='' head=0
 args=("$@")
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output|-o) out="$2"; shift 2 ;;
     --output=*) out="${1#*=}"; shift ;;
     --retry) retries="$2"; shift 2 ;;
-    --retry-all-errors) all_errors=1; shift ;;
-    --retry-max-time) retry_time="$2"; shift 2 ;;
+    --retry-all-errors) exit 91 ;;
+    --dump-header) headers="$2"; shift 2 ;;
+    --write-out) write_out="$2"; shift 2 ;;
+    --head) head=1; shift ;;
     --header|-H|--proto|--proto-redir|--connect-timeout|--max-time|--speed-limit|--speed-time|--continue-at) shift 2 ;;
     --*) shift ;;
     *) url="$1"; shift ;;
@@ -114,11 +116,39 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$out" ] && [ -n "$url" ]
 printf '%s\n' "$url" >> "$CODEX_TEST_CURL_LOG"
+# Discovery must not spend REST quota or internally retry rate-limit refusals.
 case "$url" in
-  https://api.github.com/repos/openai/codex/releases/latest)
-    # Metadata still outlasts a short 5xx outage with its own bounded retries.
-    [ "$retries" = 6 ] && [ "$all_errors" = 1 ] && [ "$retry_time" -ge 600 ]
-    cp -- "$CODEX_TEST_RELEASES/latest.json" "$out" ;;
+  */latest|*/codex-package_SHA256SUMS)
+    [ "$retries" = 0 ] && [ "$write_out" = $'%{http_code}\n%{url_effective}' ]
+    if { [ "${CODEX_TEST_METADATA_FAILURE:-}" = all ] || [ "${CODEX_TEST_METADATA_FAILURE:-}" = "${url##*/}" ]; } && \
+      { [ -z "${CODEX_TEST_METADATA_ONCE_DIR:-}" ] || [ ! -e "$CODEX_TEST_METADATA_ONCE_DIR/${url##*/}" ]; }; then
+      [ -z "${CODEX_TEST_METADATA_ONCE_DIR:-}" ] || touch "$CODEX_TEST_METADATA_ONCE_DIR/${url##*/}"
+      status="${CODEX_TEST_METADATA_STATUS:-503}"
+      printf 'HTTP/2 302\r\nLocation: https://github.com/fixture\r\n\r\n' > "$headers"
+      if [ "$status" = redirect-reset ]; then
+        printf '302\n%s' "$url"
+        exit 56
+      fi
+      case "$status" in secondary|plain-403) status=403 ;; esac
+      printf 'HTTP/2 %s\r\n' "$status" >> "$headers"
+      if [ "${CODEX_TEST_METADATA_STATUS:-}" = secondary ]; then
+        printf 'Retry-After: 60\r\n' >> "$headers"
+      fi
+      if [ "${CODEX_TEST_METADATA_STATUS:-}" = 403 ]; then
+        printf 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1800000000\r\n' >> "$headers"
+      fi
+      printf '%s\n%s' "$status" "$url"
+      exit 22
+    fi ;;
+esac
+case "$url" in
+  https://github.com/openai/codex/releases/latest)
+    [ "$head" = 1 ]
+    printf '200\n'
+    cat "$CODEX_TEST_RELEASES/latest-url" ;;
+  https://github.com/openai/codex/releases/download/*/codex-package_SHA256SUMS)
+    cp -- "$CODEX_TEST_RELEASES/${url#https://github.com/openai/codex/releases/download/}" "$out"
+    printf '200\n%s' "$url" ;;
   https://github.com/openai/codex/releases/download/*)
     bash "$SUBYARD_TEST_ARTIFACT_CURL" \
       "$CODEX_TEST_RELEASES/${url#https://github.com/openai/codex/releases/download/}" "${args[@]}" ;;
@@ -156,14 +186,9 @@ fetch_count() {
 }
 
 set_latest() { # <version> <amd64-sha> <arm64-sha>
-  jq -n --arg version "$1" --arg amd64 "$2" --arg arm64 "$3" '
-    def asset($target; $sha):
-      ("codex-package-" + $target + "-unknown-linux-musl.tar.gz") as $name |
-      {name: $name, state: "uploaded", digest: ("sha256:" + $sha),
-       browser_download_url: ("https://github.com/openai/codex/releases/download/rust-v" + $version + "/" + $name)};
-    {tag_name: ("rust-v" + $version), draft: false, prerelease: false,
-     assets: [asset("x86_64"; $amd64), asset("aarch64"; $arm64)]}
-  ' > "$releases/latest.json"
+  printf 'https://github.com/openai/codex/releases/tag/rust-v%s' "$1" > "$releases/latest-url"
+  printf '%s  codex-package-x86_64-unknown-linux-musl.tar.gz\n%s  codex-package-aarch64-unknown-linux-musl.tar.gz\n' \
+    "$2" "$3" > "$releases/rust-v$1/codex-package_SHA256SUMS"
 }
 
 run_hook() { # <arch> <root> [environment assignments...]
@@ -190,7 +215,7 @@ check="$root/usr/local/bin/codex-policy-check"
 requirements="$root/etc/codex/requirements.toml"
 set_latest 0.147.0 "$sha_147_amd64" "$sha_147_arm64"
 run_hook amd64 "$root" >/dev/null
-[ "$(fetch_count)" -eq 2 ] || fail "fresh install did not fetch release metadata and artifact"
+[ "$(fetch_count)" -eq 3 ] || fail "fresh install did not fetch release redirect, checksum manifest and artifact"
 [ -f "$runtime" ] && [ ! -L "$runtime" ] && [ -x "$runtime" ] \
   || fail "managed runtime is not an executable regular file"
 [ "$(stat -c '%a' "$runtime")" = 755 ] || fail "runtime mode is not 0755"
@@ -231,10 +256,10 @@ run_hook amd64 "$root" >/dev/null
 [ -f "$CODEX_TEST_BWRAP_READY" ] || fail "current native install did not repair bubblewrap"
 [ "$(wc -l < "$CODEX_TEST_APT_LOG")" -eq 2 ] || fail "dependency repair did not install only bubblewrap"
 CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "repaired sandbox dependency failed readiness"
-[ "$(fetch_count)" -eq 3 ] || fail "same-version rerun did not only resolve metadata"
+[ "$(fetch_count)" -eq 4 ] || fail "same-version rerun did not only resolve metadata"
 set_latest 0.148.0 "$sha_148_amd64" "$sha_148_arm64"
 run_hook amd64 "$root" >/dev/null
-[ "$(fetch_count)" -eq 5 ] || fail "upgrade did not fetch metadata and artifact"
+[ "$(fetch_count)" -eq 7 ] || fail "upgrade did not fetch release redirect, checksum manifest and artifact"
 [ "$("$link" --version)" = 'codex-cli 0.148.0' ] || fail "upgrade did not publish the current version"
 [ "$(readlink "$runtime_link")" = releases/0.148.0/bin/codex ] || fail "upgrade did not move the runtime link"
 [ -x "$release_root/0.147.0/bin/codex" ] || fail "upgrade removed the release it replaced"
@@ -243,7 +268,7 @@ CODEX_CHECK_DEV_USER="$(id -un)" "$tmp/initial-check" >/dev/null \
   || fail "readiness check rejected an updated working runtime"
 set_latest 0.147.0 "$sha_147_amd64" "$sha_147_arm64"
 run_hook amd64 "$root" >/dev/null
-[ "$(fetch_count)" -eq 6 ] || fail "older release metadata downloaded an artifact"
+[ "$(fetch_count)" -eq 8 ] || fail "older release metadata downloaded an artifact"
 [ "$("$link" --version)" = 'codex-cli 0.148.0' ] || fail "older release metadata downgraded a working runtime"
 
 # The approval mode converges on -> off -> on; other requirements stay mandatory.
@@ -313,37 +338,91 @@ if run_hook amd64 "$root" >/dev/null 2>"$tmp/readiness.err"; then
 fi
 [ "$(sha256sum "$runtime" | cut -d' ' -f1)" = "$before" ] || fail "readiness failure replaced the runtime"
 
-# Missing, ambiguous or untrusted release metadata fails before any artifact download.
+# Untrusted redirects and missing, ambiguous or malformed checksums fail closed.
 set_latest 0.149.0 "$sha_149_amd64" "$sha_148_arm64"
-cp "$releases/latest.json" "$tmp/valid-metadata.json"
-for mutation in \
-  '.draft = true' \
-  '.prerelease = true' \
-  '.tag_name = "rust-v0.149.0-alpha.1"' \
-  'del(.draft)' \
-  '.assets = []' \
-  '.assets += [.assets[0]]' \
-  '.assets[0].digest = null' \
-  '.assets[0].digest = "sha256:invalid"' \
-  '.assets[0].digest = "sha512:0123456789"' \
-  '.assets[0].browser_download_url = "https://example.invalid/codex.tar.gz"' \
-  '.assets[0].state = "new"'; do
-  jq "$mutation" "$tmp/valid-metadata.json" > "$releases/latest.json"
+for target in \
+  'https://github.com/openai/codex/releases/tag/rust-v0.149.0-alpha.1' \
+  'https://github.com/openai/codex/releases/tag/rust-v00.149.0' \
+  'https://github.com/openai/codex/releases/tag/rust-v0.149.0/extra' \
+  'https://githubXcom/openai/codex/releases/tag/rust-v0.149.0' \
+  'https://example.invalid/openai/codex/releases/tag/rust-v0.149.0'; do
+  printf '%s' "$target" > "$releases/latest-url"
   count="$(fetch_count)"
   if run_hook amd64 "$root" >/dev/null 2>"$tmp/metadata.err"; then
-    fail "invalid release metadata unexpectedly succeeded: $mutation"
+    fail "untrusted release redirect unexpectedly succeeded: $target"
   fi
-  [ "$(fetch_count)" -eq "$((count + 1))" ] || fail "invalid metadata fetched an artifact: $mutation"
-  [ "$(sha256sum "$runtime" | cut -d' ' -f1)" = "$before" ] || fail "invalid metadata replaced the runtime"
+  [ "$(fetch_count)" -eq "$((count + 1))" ] || fail "untrusted redirect fetched a checksum manifest"
 done
-printf '{invalid json\n' > "$releases/latest.json"
-if run_hook amd64 "$root" >/dev/null 2>"$tmp/json.err"; then
-  fail "malformed release metadata unexpectedly succeeded"
-fi
-mv "$releases/latest.json" "$releases/unavailable.json"
-if run_hook amd64 "$root" >/dev/null 2>"$tmp/unavailable.err"; then
-  fail "unavailable release metadata unexpectedly succeeded"
-fi
+set_latest 0.149.0 "$sha_149_amd64" "$sha_148_arm64"
+artifact=codex-package-x86_64-unknown-linux-musl.tar.gz
+valid_sum="$sha_149_amd64  $artifact"
+for manifest in '' "$zeros  other.tar.gz" "invalid  $artifact" "sha256:$valid_sum" \
+  "$sha_149_amd64 $artifact" "$valid_sum"$'\n'"$valid_sum"; do
+  printf '%s\n' "$manifest" > "$releases/rust-v0.149.0/codex-package_SHA256SUMS"
+  count="$(fetch_count)"
+  if run_hook amd64 "$root" >/dev/null 2>"$tmp/metadata.err"; then
+    fail "invalid checksum manifest unexpectedly succeeded"
+  fi
+  [ "$(fetch_count)" -eq "$((count + 2))" ] || fail "invalid checksums fetched an artifact"
+done
+
+# Fresh installs recover from one transient failure at each metadata endpoint.
+for status in 503 redirect-reset; do
+  once="$tmp/transient-$status"
+  mkdir -p "$once"
+  count="$(fetch_count)"
+  set_latest 0.149.0 "$sha_149_amd64" "$sha_148_arm64"
+  run_hook amd64 "$tmp/transient-install-$status" CODEX_TEST_METADATA_FAILURE=all \
+    CODEX_TEST_METADATA_STATUS="$status" CODEX_TEST_METADATA_ONCE_DIR="$once" >/dev/null
+  [ "$(fetch_count)" -eq "$((count + 5))" ] || fail "transient metadata failures did not retry each endpoint once"
+  [ "$("$tmp/transient-install-$status/usr/local/bin/codex" --version)" = 'codex-cli 0.149.0' ] \
+    || fail "transient metadata failure prevented a fresh install"
+done
+
+# Unavailable discovery retains only a working managed runtime and still repairs policy.
+# Rate limits stop immediately; transient failures exhaust the bounded retry budget.
+set_latest 0.149.0 "$sha_149_amd64" "$sha_148_arm64"
+for failure in all codex-package_SHA256SUMS; do
+  for status in 403 secondary 429 plain-403 404 503 redirect-reset; do
+    count="$(fetch_count)"
+    requests=1
+    case "$status" in 503|redirect-reset) requests=4 ;; esac
+    [ "$failure" = all ] || requests=$((requests + 1))
+    rm "$requirements"
+    run_hook amd64 "$root" CODEX_TEST_METADATA_FAILURE="$failure" CODEX_TEST_METADATA_STATUS="$status" \
+      >"$tmp/unavailable.out" 2>"$tmp/unavailable.err"
+    [ "$(fetch_count)" -eq "$((count + requests))" ] || fail "wrong metadata retry count: $failure $status"
+    grep -Fq 'Retained working Codex 0.148.0' "$tmp/unavailable.out" || fail "working install was not retained"
+    grep -Fq 'latest release could not be verified' "$tmp/unavailable.out" || fail "fallback claimed to be current"
+    CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "fallback did not repair policy/readiness"
+    count="$(fetch_count)"
+    if run_hook amd64 "$tmp/unavailable-fresh" CODEX_TEST_METADATA_FAILURE="$failure" CODEX_TEST_METADATA_STATUS="$status" \
+      >/dev/null 2>"$tmp/unavailable.err"; then fail "fresh install accepted unavailable metadata"; fi
+    [ "$(fetch_count)" -eq "$((count + requests))" ] || fail "wrong fresh metadata retry count: $failure $status"
+    case "$status" in
+      403) grep -Fq 'GitHub rate limit' "$tmp/unavailable.err" && grep -Fq 'reset at Unix time 1800000000' "$tmp/unavailable.err" || fail "missing rate-limit/reset diagnostic" ;;
+      secondary) grep -Fq 'GitHub rate limit' "$tmp/unavailable.err" && grep -Fq 'retry after 60 seconds' "$tmp/unavailable.err" || fail "missing rate-limit/retry-after diagnostic" ;;
+      429) grep -Fq 'GitHub rate limit' "$tmp/unavailable.err" || fail "missing rate-limit diagnostic" ;;
+      plain-403|404) grep -Fq "HTTP ${status#plain-}" "$tmp/unavailable.err" || fail "missing HTTP refusal diagnostic"
+        if grep -Fq 'rate limit' "$tmp/unavailable.err"; then fail "ordinary HTTP refusal labelled a rate limit"; fi ;;
+      503) grep -Fq 'HTTP 503' "$tmp/unavailable.err" || fail "missing metadata failure diagnostic" ;;
+      redirect-reset) grep -Fq 'release metadata download failed' "$tmp/unavailable.err" || fail "missing transport failure diagnostic"
+        if grep -Fq 'HTTP 302' "$tmp/unavailable.err"; then fail "transport failure reported a successful redirect status"; fi ;;
+    esac
+  done
+done
+# A present but unhealthy/writable runtime cannot qualify for the availability fallback.
+for broken in permissions readiness; do
+  cp "$runtime" "$tmp/saved-runtime"
+  case "$broken" in
+    permissions) chmod 0777 "$runtime" ;;
+    readiness) cp "$tmp/build-9.9.7-amd64-9.9.7/bin/codex" "$runtime" ;;
+  esac
+  if run_hook amd64 "$root" CODEX_TEST_METADATA_FAILURE=all >/dev/null 2>"$tmp/unavailable.err"; then
+    fail "$broken runtime accepted unavailable metadata"
+  fi
+  install -m 0755 "$tmp/saved-runtime" "$runtime"
+done
 [ "$(sha256sum "$runtime" | cut -d' ' -f1)" = "$before" ] || fail "metadata failure replaced the runtime"
 [ "$(sha256sum "$tmp/home/.codex/auth.json" | cut -d' ' -f1)" = "$auth_before" ] \
   || fail "failed upgrades changed yard-local Codex authorization"
