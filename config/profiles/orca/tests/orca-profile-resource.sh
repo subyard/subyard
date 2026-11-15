@@ -124,8 +124,13 @@ case "${1:-}" in
     fi
     case "${2:-} ${3:-}" in
       'device list')
-        # An empty device list succeeds, as Incus does.
+        # An empty device list succeeds, as Incus does. Chosen calls can fail.
         [ ! -e "$state_root/fail-device-list" ] || exit 1
+        if [ -e "$state_root/fail-device-list-calls" ]; then
+          calls="$(( $(cat "$state_root/device-list-count" 2>/dev/null || printf 0) + 1 ))"
+          printf '%s\n' "$calls" >"$state_root/device-list-count"
+          ! grep -qx "$calls" "$state_root/fail-device-list-calls" || exit 1
+        fi
         if [ -f "$route" ]; then printf 'orca-server\n'; fi
         ;;
       'device get')
@@ -204,6 +209,11 @@ case "${1:-}" in
           [ ! -e "$root/fail-remove-systemd" ] || return 1
           case "$*" in
             daemon-reload) return 0 ;;
+            *' --property=Id --value')
+              # A unit path that is a symbolic link names the unit it points to.
+              if [ -L "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$2" ]; then
+                basename "$(readlink "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$2")"
+              else printf '%s\n' "$2"; fi ;;
             *' --property=ActiveState --value')
               case "$2" in
                 subyard-orca.service) if [ -f "$ORCA_TEST_SERVICE_FILE" ]; then printf 'active\n'; else printf 'inactive\n'; fi ;;
@@ -223,12 +233,13 @@ case "${1:-}" in
                   [ ! -e "$root/fail-remove-stop" ] || return 1
                   # The unit's own stop removes its owned ingress guard.
                   rm -f "$ORCA_TEST_SERVICE_FILE"
-                  [ "$(cat "$root/nft-mode" 2>/dev/null)" = foreign ] || rm -f "$root/ingress" ;;
+                  [ "$(cat "$root/nft-mode" 2>/dev/null)" = foreign ] || [ -e "$root/keep-ingress-on-stop" ] || rm -f "$root/ingress" ;;
                 subyard-orca-discovery.timer) rm -f "$root/discovery-active" ;;
               esac ;;
             'disable '*)
               # Disabling a unit whose file is gone fails, as systemd does.
               [ -f "$ORCA_TEST_GUEST_ROOT/etc/systemd/system/$2" ] || return 1
+              [ ! -e "$root/fail-remove-disable" ] || return 1
               case "$2" in
                 subyard-orca.service) touch "$root/main-disabled" ;;
                 subyard-orca-discovery.timer) rm -f "$root/discovery-enabled" ;;
@@ -542,7 +553,7 @@ for _ in range(64):
 PY
     [ "$mode" != error ] || exit 42
     ;;
-  'delete table') rm -f "$state_root/ingress" ;;
+  'delete table') [ ! -e "$state_root/fail-nft-delete" ] || exit 1; rm -f "$state_root/ingress" ;;
   'add table') touch "$state_root/ingress" ;;
 esac
 MOCK
@@ -1871,8 +1882,10 @@ grep -Fq 'subyard-orca.service: active/' "$TMP/remove-stop.out" &&
   grep -Fq '/etc/systemd/system/subyard-orca.service: present' "$TMP/remove-stop.out" &&
   grep -Fq '/usr/local/libexec/subyard/orca-ingress: present' "$TMP/remove-stop.out" \
   || { cat "$TMP/remove-stop.out" >&2; fail 'orca remove did not list every unmet item'; }
-[ -e "$ORCA_TEST_INGRESS" ] && [ -e "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service" ] \
-  || fail 'orca remove dropped the guard or unit file of a running Orca'
+[ -e "$ORCA_TEST_INGRESS" ] && [ -e "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service" ] &&
+  [ -e "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca-discovery.timer" ] &&
+  [ -e "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca-discovery.service" ] \
+  || fail 'orca remove dropped the guard or a unit file of a running Orca'
 [ ! -e "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" ] || fail 'a running unit stopped the other removal steps'
 rm -f "$TMP/fail-remove-stop"
 run_orca remove --yes >/dev/null || fail 'orca remove did not converge on rerun after a failed stop'
@@ -1883,6 +1896,50 @@ ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
 rm -f "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service"
 run_orca remove --yes >/dev/null || fail 'orca remove of a running unit without its file failed'
 assert_orca_removed 'orca remove of a running unit without its file'
+# A unit path that is a symbolic link to another unit is removed as a link; the
+# unit it names is never stopped or disabled.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+printf '[Unit]\nDescription=not Orca\n' >"$ORCA_TEST_GUEST/etc/systemd/system/cron.service"
+rm -f "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca-discovery.service"
+ln -s "$ORCA_TEST_GUEST/etc/systemd/system/cron.service" "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca-discovery.service"
+run_orca remove --yes >"$TMP/remove-alias.out" 2>&1 || { cat "$TMP/remove-alias.out" >&2; fail 'orca remove of an aliased unit path failed'; }
+! grep -Eq 'remove systemctl (stop|disable) (cron|subyard-orca-discovery)\.service' "$ORCA_TEST_LOG" \
+  || fail 'orca remove stopped or disabled the unit an aliased unit path names'
+[ -f "$ORCA_TEST_GUEST/etc/systemd/system/cron.service" ] || fail 'orca remove followed an aliased unit path'
+assert_orca_removed 'orca remove of an aliased unit path'
+rm -f "$ORCA_TEST_GUEST/etc/systemd/system/cron.service"
+# A failed Incus read never looks like absence, and the receipt that proves the
+# device is Orca's stays until the device is confirmed gone.
+for calls in '2 3' 4; do
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+  printf '%s\n' $calls >"$TMP/fail-device-list-calls"
+  rm -f "$TMP/device-list-count"
+  if run_orca remove --yes >"$TMP/remove-list.out" 2>&1; then fail "orca remove concealed a failed device list ($calls)"; fi
+  [ -n "$(cat "$TMP/config-user.subyard.resource.orca-server" 2>/dev/null)" ] \
+    || fail "orca remove cleared the route receipt after a failed device list ($calls)"
+  rm -f "$TMP/fail-device-list-calls" "$TMP/device-list-count"
+  run_orca remove --yes >/dev/null || fail "orca remove did not converge after a failed device list ($calls)"
+  assert_orca_removed "orca remove after a failed device list ($calls)"
+done
+# A unit whose disable failed keeps its unit file, so a rerun can disable it.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+touch "$TMP/fail-remove-disable"
+if run_orca remove --yes >"$TMP/remove-disable.out" 2>&1; then fail 'orca remove concealed a failed disable'; fi
+grep -Fq 'subyard-orca-discovery.timer: inactive/enabled' "$TMP/remove-disable.out" \
+  || { cat "$TMP/remove-disable.out" >&2; fail 'a failed disable was not listed'; }
+[ -e "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca-discovery.timer" ] || fail 'orca remove dropped the unit file of a unit it could not disable'
+rm -f "$TMP/fail-remove-disable"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed disable'
+assert_orca_removed 'orca remove after a failed disable'
+# A failed removal of the owned ingress table is an unmet item.
+ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
+touch "$TMP/keep-ingress-on-stop" "$TMP/fail-nft-delete"
+if run_orca remove --yes >"$TMP/remove-nft.out" 2>&1; then fail 'orca remove concealed a failed removal of its ingress table'; fi
+grep -Fq 'inet/subyard_orca: owned' "$TMP/remove-nft.out" || { cat "$TMP/remove-nft.out" >&2; fail 'the owned ingress table was not listed'; }
+rm -f "$TMP/fail-nft-delete"
+run_orca remove --yes >/dev/null || fail 'orca remove did not converge after a failed ingress table removal'
+rm -f "$TMP/keep-ingress-on-stop"
+assert_orca_removed 'orca remove after a failed ingress table removal'
 # An unreceipted orca-server device and an unowned nft table are left untouched
 # with a warning; they are not Orca's to remove.
 ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >/dev/null
