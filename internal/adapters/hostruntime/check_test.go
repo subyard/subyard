@@ -103,6 +103,8 @@ func TestHostCheckUsesLowerRepairFloorForExistingYard(t *testing.T) {
 	}
 	if err := check.Run(context.Background(), CheckOptions{}); !errors.Is(err, ErrHostNotReady) {
 		t.Fatalf("fresh yard accepted low storage: %v", err)
+	} else if !strings.Contains(err.Error(), "Storage (/storage): only 100 GiB free on /; need >= 999999 GiB") {
+		t.Fatalf("refusal does not name the failed requirement: %v", err)
 	}
 	var output bytes.Buffer
 	check.Output = &output
