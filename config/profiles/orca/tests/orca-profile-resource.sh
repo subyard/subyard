@@ -786,6 +786,13 @@ done
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "absent" and .actual == "" and .desired == ""' <<<"$observation" >/dev/null \
   || fail 'runtime contract observation did not distinguish an absent Orca installation'
+# The kept orca-ide package launcher alone is not an installed Orca contract.
+mkdir -p "$ORCA_TEST_GUEST/usr/bin"
+printf '#!/bin/sh\n' >"$ORCA_TEST_GUEST/usr/bin/orca-ide"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "absent" and .actual == "" and .desired == ""' <<<"$observation" >/dev/null \
+  || fail 'the orca-ide launcher alone was observed as an installed Orca contract'
+rm -f "$ORCA_TEST_GUEST/usr/bin/orca-ide"
 run_orca up --yes >"$TMP/up.out"
 [ -e "$TMP/linger" ] || fail 'up did not enable lingering'
 linger_count="$(count_log 'loginctl enable-linger dev')"

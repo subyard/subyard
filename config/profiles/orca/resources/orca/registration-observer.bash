@@ -1,10 +1,11 @@
 set -euo pipefail
-desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; executable="$6"; unit="$7"
+desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; unit="$7"
+# The package launcher argument ($6) stays in the fixed transport, but the kept
+# orca-ide package alone is not an installed Orca contract.
 discovery_service="$8"; discovery_timer="$9"; shift 9
 codex_profile="$1"; codex_bin="$2"; shift 2
 present=0
-# The package launcher may be a symlink; profile-owned contract paths may not.
-[ ! -e "$executable" ] && [ ! -L "$executable" ] || present=1
+# Profile-owned contract paths may not be symbolic links.
 for artifact in "$unit" "$hook" "$directory" "$marker" "$lock" \
   "$discovery_service" "$discovery_timer" "$codex_profile" "$codex_bin" "$directory"/*.py; do
   [ ! -L "$artifact" ] || { echo 'Orca runtime contract contains an unsafe symbolic link' >&2; exit 1; }
