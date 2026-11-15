@@ -84,13 +84,16 @@ seed_sources() {
   sudo -n install -d -o "$OPERATOR" -g "$OPERATOR" -m 0700 "$GIT_ROOT"
   operator_env bash -c 'printf "%s\n" "$2" > "$1/.marker"; chmod 0600 "$1/.marker"' _ "$GIT_ROOT" "$MARKER"
   host_id="disabled-components-$TOKEN"
+  # The anchor seed selects Claude instead of Codex: the published Codex hook reads
+  # anonymous GitHub REST metadata, whose shared quota fails hosted runners.
+  # Codex is selected only after the candidate is installed.
   operator_env bash -c '
     set -eu
     root=$1; host=$2
     install -d -m 0700 "$root/source/hosts/$host/yards/default"
     printf "{\"schemaVersion\":1}\n" > "$root/source/subyard-config.json"
-    printf "CODING_TOOL_INTEGRATIONS=\047codex opencode\047\n" > "$root/source/hosts/$host/config.env"
-    printf "CODING_TOOL_INTEGRATIONS=codex\n" > "$root/source/hosts/$host/yards/default/config.env"
+    printf "CODING_TOOL_INTEGRATIONS=\047claude opencode\047\n" > "$root/source/hosts/$host/config.env"
+    printf "CODING_TOOL_INTEGRATIONS=claude\n" > "$root/source/hosts/$host/yards/default/config.env"
     find "$root/source" -type f -exec chmod 0600 {} +
     git -C "$root/source" init -q
     git -C "$root/source" add -- .
@@ -277,7 +280,7 @@ exercise_recovery() {
   local rc=0 transaction current previous
   # Selection is init-owned on a ready release: the repair keeps the installed view and
   # the selected provisioner runs in the post-repair yard init, never as activation work.
-  operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS 'codex claude' --scope yard --local --yes
+  operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS claude --scope yard --local --yes
   guest_yard hermes sh -euc 'test ! -e /usr/local/bin/curl; test ! -e /var/tmp/subyard-disabled-components-hook'
   cat > "$STATE_ROOT/native-curl.sh" <<'FAULT'
 #!/bin/sh
@@ -328,7 +331,7 @@ FAULT
   operator_yard -Y hermes init --yes > "$STATE_ROOT/recovery-init.txt" 2>&1 \
     || { cat "$STATE_ROOT/recovery-init.txt"; die 'yard init did not complete after the fault was removed'; }
   operator_yard -Y hermes integration status --json > "$STATE_ROOT/recovery-status.json"
-  jq -e '(.selection.effective | sort) == ["claude","codex"]' "$STATE_ROOT/recovery-status.json" >/dev/null \
+  jq -e '.selection.effective == ["claude"]' "$STATE_ROOT/recovery-status.json" >/dev/null \
     || die 'recovered yard init did not apply the selected integrations'
   sudo -n jq -e --arg transaction "$transaction" '.checkpoint == "complete" and .transaction == $transaction' \
     "$V2_JOURNAL" >/dev/null || die 'ordinary yard init changed the release journal'
@@ -364,6 +367,7 @@ exercise_failed_deselect() {
     || { cat "$STATE_ROOT/deselect-assets.before"; die 'installed claude settings are missing before deselection'; }
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS codex --scope yard --local --yes
   # The remaining selected provisioner fails after inventory apply, before the hooks.
+  # Codex is first selected here: a fresh install cannot keep a working release.
   cat > "$STATE_ROOT/deselect-curl.sh" <<'FAULT'
 #!/bin/sh
 # subyard-disabled-components-curl-v1
@@ -442,10 +446,10 @@ prepare_acceptance() {
   assert_disabled default
   assert_disabled hermes
   assert_inventory default 'local overrides' '[]' local-disabled
-  assert_inventory hermes 'local overrides' '["codex"]' local-disabled
+  assert_inventory hermes 'local overrides' '["claude"]' local-disabled
   # Supported resolver views prove absence restores host Git and explicit empty masks it.
   operator_yard -Y hermes config unset CODING_TOOL_INTEGRATIONS --scope yard --local --yes
-  assert_inventory hermes 'Git settings' '["codex","opencode"]' git-fallback
+  assert_inventory hermes 'Git settings' '["claude","opencode"]' git-fallback
   operator_yard -Y hermes config set CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
   assert_inventory hermes 'local overrides' '[]' local-empty
   # Selection is init-owned: a ready release stays ready while its repair keeps the
@@ -459,7 +463,7 @@ prepare_acceptance() {
   { [ "$rc" != 0 ] && grep -Fq 'confirmation required' "$STATE_ROOT/all-local-plan.txt" &&
     grep -Fxq '  yard default: integration settings current' "$STATE_ROOT/all-local-plan.txt" &&
     grep -Fxq '  yard hermes:' "$STATE_ROOT/all-local-plan.txt" &&
-    grep -Fxq '    CODING_TOOL_INTEGRATIONS  codex -> (empty)' "$STATE_ROOT/all-local-plan.txt" &&
+    grep -Fxq '    CODING_TOOL_INTEGRATIONS  claude -> (empty)' "$STATE_ROOT/all-local-plan.txt" &&
     grep -Fq 'release.init.hermes' "$STATE_ROOT/all-local-plan.txt" &&
     ! grep -Fq 'release.init.default' "$STATE_ROOT/all-local-plan.txt"; } \
     || { cat "$STATE_ROOT/all-local-plan.txt"; die 'all-local repair plan omitted distinct pending selection per yard'; }
