@@ -2759,15 +2759,11 @@ if grep -Fq 'mask --runtime --now incus.service' \
   "$ROOT/dev/e2e/p0-broker-recovery.sh"; then
   fail "P0 broker recovery fault injection drains unrelated held leases"
 fi
-grep -Fq 'SUBYARD_SOURCE_INGRESS_V1_ROOT' \
-  "$ROOT/dev/bootstrap-runtime.sh" \
-  && ! grep -Fq '_release-transition' "$ROOT/scripts/migrate-source-install.sh" \
-  && ! grep -Eq '_migrate[[:space:]]+(apply|finalize|rollback|cleanup)' \
-    "$ROOT/scripts/migrate-source-install.sh" \
-  && grep -Fq '[ ! -e "$recovery_root/source-plan" ]' \
-    "$ROOT/scripts/migrate-source-install.sh" \
-  && ! grep -Fq '_migrate-test-yard' "$ROOT/dev/bootstrap-runtime.sh" \
-  || fail "source bootstrap does not use the unified release transition lifecycle"
+grep -Fq 'SOURCE_INGRESS_ROOT' "$ROOT/dev/bootstrap-runtime.sh" \
+  && grep -Fq 'Sources before v0.11.0 are unsupported.' "$ROOT/dev/bootstrap-runtime.sh" \
+  && [ ! -e "$ROOT/scripts/migrate-source-install.sh" ] \
+  && [ ! -e "$ROOT/scripts/restore-source-install.sh" ] \
+  || fail "retired source bootstrap lacks its refusal or still ships mutation scripts"
 grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' \
   "$ROOT/tests/engine-release.sh" \
   && grep -Fq 'export SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit"' \

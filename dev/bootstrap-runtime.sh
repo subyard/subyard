@@ -165,26 +165,32 @@ if [ -z "${YARD_LOGIN_RC:-}" ]; then
   esac
 fi
 
-# Detect the bounded pre-Go source ingress before any installation mutation.
-# The verified candidate repeats ownership, containment and manifest checks.
+# Recovery is an explicit legacy signal; launcher markers alone may be ambiguous.
 SOURCE_INGRESS_ROOT=''
+SOURCE_INGRESS_CLASS=none
+physical_runtime_root="$(readlink -f -- "$RUNTIME_ROOT")" || physical_runtime_root="$RUNTIME_ROOT"
+# Runtime ownership takes precedence over checkout markers and recovery metadata:
+# another runtime must be selected explicitly before assessing its source state.
 yard_link="$BIN_DIR/yard"
 sy_link="$BIN_DIR/sy"
+yard_target=''
+candidate_source=''
 if [ -L "$yard_link" ] && [ -L "$sy_link" ]; then
   yard_target="$(readlink -f -- "$yard_link")" || yard_target=''
   sy_target="$(readlink -f -- "$sy_link")" || sy_target=''
   if [ -n "$yard_target" ] && [ "$yard_target" = "$sy_target" ]; then
     case "$yard_target" in
-      "$RUNTIME_ROOT"/*) ;;
       */bin/yard)
         candidate_source="$(cd "$(dirname "$yard_target")/.." && pwd -P)"
-        if [ "$yard_target" = "$candidate_source/bin/yard" ] &&
-           [ -f "$candidate_source/config/commands.registry" ] &&
-           [ -f "$candidate_source/completions/yard.bash" ] &&
-           { grep -Fq 'thin dispatcher over scripts/' "$yard_target" ||
-             grep -Fq 'Stable launcher for a release-installed native Go control-plane engine.' \
-               "$yard_target"; }; then
-          SOURCE_INGRESS_ROOT="$candidate_source"
+        candidate_parent="$(dirname "$candidate_source")"
+        source_runtime="$(dirname "$candidate_parent")"
+        if [ "$(basename "$candidate_parent")" = releases ] &&
+           [ -f "$candidate_source/bin/yard-engine" ] && [ -L "$source_runtime/current" ] &&
+           [ "$source_runtime" != "$physical_runtime_root" ]; then
+          SOURCE_INGRESS_CLASS=runtime
+          printf 'bootstrap-runtime: entrypoints belong to runtime %s; re-run with --runtime-root %q\n' \
+            "$source_runtime" "$source_runtime" >&2
+          exit 1
         fi
         ;;
     esac
@@ -225,12 +231,17 @@ if [ -z "$SOURCE_INGRESS_ROOT" ] &&
           printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
           exit 1
           ;;
-        "$HOME"/*) SOURCE_INGRESS_ROOT="$recovered_source" ;;
-        *)
-          printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
-          exit 1
-          ;;
       esac
+      physical_home="$(readlink -f -- "$HOME")" || physical_home=''
+      physical_source="$(readlink -f -- "$recovered_source")" || physical_source=''
+      if [ -n "$physical_home" ] && [ -n "$physical_source" ] &&
+         [[ "$physical_source" == "$physical_home"/* ]]; then
+        SOURCE_INGRESS_ROOT="$recovered_source"
+        SOURCE_INGRESS_CLASS=legacy
+      else
+        printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
+        exit 1
+      fi
       ;;
     *)
       printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
@@ -238,6 +249,34 @@ if [ -z "$SOURCE_INGRESS_ROOT" ] &&
       ;;
   esac
 fi
+# A pending recovery keeps its exact source descriptor and owner. Without it,
+# only the dispatcher proves a legacy source; a native marker stays ambiguous.
+if [ -z "$SOURCE_INGRESS_ROOT" ] && [ -n "$candidate_source" ]; then
+  case "$yard_target" in
+    "$physical_runtime_root"/*) ;;
+    *)
+      if [ -f "$candidate_source/config/commands.registry" ] &&
+         [ -f "$candidate_source/completions/yard.bash" ]; then
+        if grep -Fq 'thin dispatcher over scripts/' "$yard_target"; then
+          SOURCE_INGRESS_ROOT="$candidate_source"
+          SOURCE_INGRESS_CLASS=legacy
+        elif grep -Fq 'Stable launcher for a release-installed native Go control-plane engine.' "$yard_target"; then
+          SOURCE_INGRESS_CLASS=checkout
+          printf 'bootstrap-runtime: entrypoints point at the checkout %s; if this is an installation older than v0.11.0, see docs/reference/legacy-migration-support.md\n' "$candidate_source" >&2
+          exit 1
+        fi
+      fi
+      ;;
+  esac
+fi
+# Source-only installations cannot enter the supported update boundary. Refuse
+# before publishing a runtime or changing their entrypoints. Existing protected
+# journals still route through their exact sealed release owner.
+if [ -n "$SOURCE_INGRESS_ROOT" ] && [ "$existing_runtime" = 0 ]; then
+  printf '%s\n' "bootstrap-runtime: Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately." >&2
+  exit 1
+fi
+
 need_path_line=1
 case ":$PATH:" in *":$BIN_DIR:"*) need_path_line=0 ;; esac
 if [ -f "$RC" ] && grep -qF "export PATH=\"$BIN_DIR:" "$RC"; then
@@ -251,10 +290,9 @@ printf '  - complete the installed release transition before publishing CLI entr
 printf '  - link yard and sy under %s;\n' "$BIN_DIR"
 printf '  - configure login PATH and shell completion.\n'
 if [ -n "$SOURCE_INGRESS_ROOT" ]; then
-  printf '  - migrate the recognized source install through the release transition.\n'
+  printf '  - assess the recognized source state with the selected release before continuing.\n'
 fi
-if [ "$ASSUME_YES" != 1 ] && [ "$existing_runtime" = 0 ] &&
-   [ -z "$SOURCE_INGRESS_ROOT" ]; then
+if [ "$ASSUME_YES" != 1 ] && [ "$existing_runtime" = 0 ]; then
   if [ ! -t 1 ] || [ ! -r /dev/tty ]; then
     printf 'bootstrap-runtime: confirmation requires a terminal; rerun with --yes for automation\n' >&2
     exit 1
@@ -367,7 +405,6 @@ if [ "$existing_runtime" = 0 ]; then
   "$publisher" --runtime-root "$RUNTIME_ROOT" \
     --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance"
   candidate="$(readlink -f -- "$RUNTIME_ROOT/current")"
-  [ -z "$SOURCE_INGRESS_ROOT" ] || run_transition=1
 else
   published_release="$("$publisher" --runtime-root "$RUNTIME_ROOT" --publish-only \
     --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance")"
@@ -398,6 +435,9 @@ if [ "$run_transition" = 1 ]; then
   fi
   if [ -n "$SOURCE_INGRESS_ROOT" ]; then
     transition_environment+=(
+      # Diagnostic class travels with the descriptor through CommandInputs to
+      # the candidate factory. It grants no migration or deletion authority.
+      "SUBYARD_SOURCE_INGRESS_V1_CLASS=$SOURCE_INGRESS_CLASS"
       "SUBYARD_SOURCE_INGRESS_V1_ROOT=$SOURCE_INGRESS_ROOT"
       "SUBYARD_SOURCE_INGRESS_V1_DATA=$DATA_HOME"
       "SUBYARD_SOURCE_INGRESS_V1_BIN=$BIN_DIR"

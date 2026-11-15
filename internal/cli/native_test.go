@@ -2877,7 +2877,7 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 	}
 }
 
-func TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery(t *testing.T) {
+func TestRetiredSourceHelpersDoNotWritePathsDuringRecovery(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	runtimeRoot := filepath.Join(root, "runtime-v2")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
@@ -2925,22 +2925,16 @@ func TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery(t *testing.T) 
 		}
 		return program.runMigration(context.Background(), "default", arguments), stdout.String(), stderr.String()
 	}
-	if code, stdout, stderr := run("YARD_TEMPLATE=e2e-vms\nSSH_PORT=3333\n", []string{"normalize-yard-config"}); code != 0 || stdout != "YARD_TEMPLATE=test-vms\nSSH_PORT=3333\n" || stderr != "" {
-		t.Fatalf("accepted normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
-	}
-	if code, stdout, stderr := run("YARD_TEMPLATE=e2e-vms\n", []string{
-		"normalize-yard-config", filepath.Join(pathRoot, "legacy.env"), destination,
-	}); code != 2 || stdout != "" || stderr == "" {
-		t.Fatalf("path normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
-	}
-	for _, test := range []struct{ input, diagnostic string }{
-		{input: "PROFILE=e2e-vms\nYARD_TEMPLATE=$PROFILE\n"},
-		{input: strings.Repeat("x", (1<<20)+1), diagnostic: "yard: source-install yard config normalization: legacy yard config exceeds its size bound\n"},
-	} {
-		if code, stdout, stderr := run(test.input, []string{"normalize-yard-config"}); code != 1 || stdout != "" || stderr == "" || test.diagnostic != "" && stderr != test.diagnostic {
-			t.Fatalf("invalid normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	for _, action := range []string{"normalize-yard-config", "overlay-manifest"} {
+		for _, arguments := range [][]string{{action}, {action, filepath.Join(pathRoot, "legacy.env"), destination}} {
+			code, stdout, stderr := run("YARD_TEMPLATE=e2e-vms\nSSH_PORT=3333\n", arguments)
+			want := "yard: state migration " + action + ": " + releaseruntime.LegacyReinstallGuidance + "\n"
+			if code != 2 || stdout != "" || stderr != want {
+				t.Fatalf("retired source helper %v: code=%d stdout=%q stderr=%q", arguments, code, stdout, stderr)
+			}
 		}
 	}
+
 	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("path normalization created destination: %v", err)
 	}

@@ -19,6 +19,63 @@ import (
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
+func TestReleaseTransitionIngressFactoryRefusesSourceByClass(t *testing.T) {
+	for _, class := range []string{"legacy", "runtime", "checkout", "", "unknown"} {
+		t.Run(class, func(t *testing.T) {
+			program := &CLI{baseEnv: map[string]string{"SUBYARD_SOURCE_INGRESS_V1_CLASS": class}}
+			factory := program.releaseTransitionIngressFactory(releasetransition.ProcessRequest{
+				SourceIngress: &releasetransition.SourceIngressRequest{SourceRoot: "/checkout"},
+			})
+			_, err := factory(releasetransition.ReleasePair{})
+			want := "entrypoints point at the checkout /checkout; if this is an installation older than v0.11.0, see docs/reference/legacy-migration-support.md"
+			if class == "legacy" {
+				want = releaseruntime.LegacyReinstallGuidance
+			}
+			if err == nil || err.Error() != want {
+				t.Fatalf("source ingress class %q: %v", class, err)
+			}
+		})
+	}
+}
+
+func TestReleaseTransitionIngressFactoryRefusesRuntimeDirectoryWithoutUninstallAdvice(t *testing.T) {
+	root := testkit.TempDir(t)
+	runtimeRoot := filepath.Join(root, "runtime")
+	sourceRoot := filepath.Join(runtimeRoot, "releases", "installed")
+	sibling := filepath.Join(root, "runtime-other")
+	for _, path := range []string{sourceRoot, sibling} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "runtime-alias")
+	if err := os.Symlink(runtimeRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	sourceAlias := filepath.Join(root, "source-alias")
+	if err := os.Symlink(sourceRoot, sourceAlias); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, source, runtime, want string }{
+		{"physical", sourceRoot, runtimeRoot, "source ingress path is inside the runtime root"},
+		{"runtime-alias", sourceRoot, alias + "/", "source ingress path is inside the runtime root"},
+		{"source-alias", sourceAlias, runtimeRoot, "source ingress path is inside the runtime root"},
+		{"prefix-sibling", sibling, runtimeRoot, "entrypoints point at the checkout " + sibling + "; if this is an installation older than v0.11.0, see docs/reference/legacy-migration-support.md"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			program := &CLI{}
+			factory := program.releaseTransitionIngressFactory(releasetransition.ProcessRequest{
+				RuntimeRoot:   test.runtime,
+				SourceIngress: &releasetransition.SourceIngressRequest{SourceRoot: test.source},
+			})
+			_, err := factory(releasetransition.ReleasePair{})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("source ingress refusal: %v", err)
+			}
+		})
+	}
+}
+
 func TestReleaseTransitionWritesFilteredMigrationDiagnostics(t *testing.T) {
 	root := testkit.TempDir(t)
 	home, runtimeRoot := filepath.Join(root, "config"), filepath.Join(root, "runtime")

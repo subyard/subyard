@@ -818,6 +818,20 @@ func (cli *CLI) releaseTransitionIngressFactory(
 	request releasetransition.ProcessRequest,
 ) func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error) {
 	return func(releases releasetransition.ReleasePair) (releasetransition.V2Ingress, error) {
+		if request.SourceIngress != nil {
+			sourceRoot, sourceErr := filepath.EvalSymlinks(request.SourceIngress.SourceRoot)
+			runtimeRoot, runtimeErr := filepath.EvalSymlinks(request.RuntimeRoot)
+			if sourceErr == nil && runtimeErr == nil && filepath.IsAbs(sourceRoot) && filepath.IsAbs(runtimeRoot) && pathWithinCLI(sourceRoot, runtimeRoot) {
+				return nil, errors.New("source ingress path is inside the runtime root")
+			}
+			// Bootstrap passes a diagnostic class beside the descriptor in the
+			// inherited environment; missing/unknown classes stay non-destructive.
+			if cli.baseEnv["SUBYARD_SOURCE_INGRESS_V1_CLASS"] == "legacy" {
+				return nil, errors.New(releaseruntime.LegacyReinstallGuidance)
+			}
+			return nil, fmt.Errorf("entrypoints point at the checkout %s; if this is an installation older than v0.11.0, see docs/reference/legacy-migration-support.md", request.SourceIngress.SourceRoot)
+		}
+
 		testYard, err := cli.releaseTransitionTestYardOptions(request)
 		if err != nil {
 			return nil, err
@@ -846,23 +860,7 @@ func (cli *CLI) releaseTransitionIngressFactory(
 		if err != nil {
 			return nil, err
 		}
-		compatibility := &migration.V2CompatibilityIngress{Legacy: legacy}
-		if request.SourceIngress == nil {
-			return compatibility, nil
-		}
-		source, err := migration.NewV2SourceIngress(migration.V2SourceIngressOptions{
-			Descriptor:     *request.SourceIngress,
-			RepositoryRoot: testYard.RepositoryRoot,
-			RuntimeRoot:    request.RuntimeRoot,
-			ConfigHome:     testYard.ConfigHome,
-			Environment:    testYard.Environment,
-			Stderr:         testYard.Stderr,
-		})
-		if err != nil {
-			return nil, err
-		}
-		compatibility.Source = source
-		return compatibility, nil
+		return &migration.V2CompatibilityIngress{Legacy: legacy}, nil
 	}
 }
 

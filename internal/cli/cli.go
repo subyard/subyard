@@ -2511,43 +2511,11 @@ func projectStateRequiresProjects(arguments []string, ownerEndpoint bool) bool {
 }
 
 func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []string) int {
-	if len(arguments) == 1 && arguments[0] == "normalize-yard-config" {
-		payload, err := io.ReadAll(io.LimitReader(cli.options.Stdin, migration.MaxLegacyYardConfigBytes+1))
-		if err != nil {
-			cli.errorf("source-install yard config normalization: %v", err)
-			return 1
-		}
-		normalized, err := migration.NormalizeLegacyYardConfigContent(payload)
-		if err != nil {
-			cli.errorf("source-install yard config normalization: %v", err)
-			return 1
-		}
-		if _, err := cli.options.Stdout.Write(normalized); err != nil {
-			cli.errorf("source-install yard config normalization: %v", err)
-			return 1
-		}
-		return 0
+	if len(arguments) != 0 && (arguments[0] == "normalize-yard-config" || arguments[0] == "overlay-manifest") {
+		cli.errorf("state migration %s: %s", arguments[0], releaseruntime.LegacyReinstallGuidance)
+		return 2
 	}
-	if (len(arguments) == 2 || len(arguments) == 4) && arguments[0] == "overlay-manifest" {
-		var manifest migration.SourceInstallManifest
-		var err error
-		if len(arguments) == 2 {
-			manifest, err = migration.DiscoverSourceInstall(arguments[1])
-		} else {
-			manifest, err = migration.DiscoverSourceInstallWithRoots(
-				arguments[1], arguments[2], arguments[3],
-			)
-		}
-		if err != nil {
-			cli.errorf("source-install overlay manifest: %v", err)
-			return 1
-		}
-		if err := json.NewEncoder(cli.options.Stdout).Encode(manifest); err != nil {
-			cli.errorf("source-install overlay manifest: %v", err)
-			return 1
-		}
-		return 0
-	}
+
 	if len(arguments) != 1 ||
 		(arguments[0] != "paths" && arguments[0] != "check" &&
 			arguments[0] != "apply" && arguments[0] != "finalize" &&

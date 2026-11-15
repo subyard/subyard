@@ -17,7 +17,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/ports"
 )
 
 const (
@@ -27,21 +26,16 @@ const (
 
 type Options struct {
 	// ProspectiveFiles is used only by read-only activation planning.
-	ProspectiveFiles *config.ProspectiveFiles
-	Executable       string
-	RepositoryRoot   string
-	Incus            string
-	ConfigHome       string
-	DataHome         string
-	Environment      []string
-	Stdout           io.Writer
-	Stderr           io.Writer
-	RunYard          func(context.Context, string, io.Writer, ...string) error
-	// RouteDevices is a native caller's original exact device authority. Nil
-	// preserves the existing standalone migration command contract.
-	RouteDevices              *PreparedRouteDevices
-	ApplyRouteDevice          func(context.Context, ports.PreparedReadOnlyDisk) error
-	CheckRouteDevices         func(context.Context, *PreparedRouteDevices) error
+	ProspectiveFiles          *config.ProspectiveFiles
+	Executable                string
+	RepositoryRoot            string
+	Incus                     string
+	ConfigHome                string
+	DataHome                  string
+	Environment               []string
+	Stdout                    io.Writer
+	Stderr                    io.Writer
+	RunYard                   func(context.Context, string, io.Writer, ...string) error
 	EnsureImageProject        func(context.Context, string, bool) error
 	RecordRegistrationRestore func(PreparedOwnerMember) error
 	fault                     func(string) error

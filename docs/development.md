@@ -175,11 +175,10 @@ release directory and atomically rotates
 `current`/`previous`. See [release migrations](control-plane.md#release-migrations) for the runtime
 contract and [real-host acceptance](real-host-acceptance.md) for its test lane. First install and
 runtime execution require no Go or source checkout; interrupted or incompatible releases cannot
-replace the working runtime. Recognized pre-0.1 source installs enter the same assessed release
-transition. Its bounded [`scripts/migrate-source-install.sh`](../scripts/migrate-source-install.sh)
-leaf publishes recovery facts before importing config and later switches shell entrypoints; it does
-not authorize, activate or roll back a release. An interruption resumes from the protected outer
-journal and observed facts.
+replace the working runtime. Source installations before v0.11.0 require verified full uninstall and a separate clean installation;
+the bootstrap refuses before first runtime publication. Retained anchor-series journals continue
+through their exact sealed owner and keep its original assets and evidence. See the
+[legacy support policy](reference/legacy-migration-support.md).
 
 Profile provisioning keeps downloads and temporary files in operation-owned disk scratch under
 `/var/lib/subyard/profile-operation-v4`. A private temporary mount catches direct
