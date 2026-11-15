@@ -147,6 +147,33 @@ def module(name, path):
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
     return result
+# Token access is limited to these step-scoped transport/control uses. VM and
+# diagnostic steps must never receive repository secrets or github.token.
+token_sites = {
+    "release-vm.yml": {("check", "actions/download-artifact", "github-token: ${{ github.token }}")},
+    "periodic-e2e.yml": {
+        ("changes", "Compare with the last finished run", "GH_TOKEN: ${{ github.token }}"),
+        ("supersede", "Replace earlier runs on this branch", "GH_TOKEN: ${{ github.token }}"),
+        ("reschedule", "Retry nested VM checks that landed on AMD", "GH_TOKEN: ${{ github.token }}"),
+    },
+}
+for filename, allowed in token_sites.items():
+    workflow = (root / ".github/workflows" / filename).read_text()
+    assert not re.search(r"\bsecrets\s*(?:\.|\[)", workflow, re.I), filename
+    job = step = None
+    sites = set()
+    for line in workflow.split("\njobs:\n", 1)[1].splitlines():
+        if match := re.fullmatch(r"  ([a-z][a-z0-9-]*):", line):
+            job = match[1]
+        if line.startswith("      - name: "):
+            step = line.removeprefix("      - name: ")
+        elif line.startswith("      - uses: "):
+            step = line.removeprefix("      - uses: ").split("@", 1)[0]
+        if re.search(r"github\s*(?:\.\s*token|\[\s*['\"]token['\"]\s*\])", line):
+            site = (job, step, line.strip())
+            assert site in allowed, (filename, site)
+            sites.add(site)
+    assert sites == allowed, filename
 # Explicit workflow source contract: diagnostics run/upload independently of PASS,
 # and timeout reserves leave room for the always() steps before the job limit.
 for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):

@@ -3,8 +3,7 @@
 import argparse
 import importlib.util
 import hashlib
-import math
-from collections import Counter
+import tempfile
 import json
 import os
 import platform
@@ -56,114 +55,101 @@ def export(output, destination, check):
 DIAGNOSTIC_FILE_BYTES = 2 << 20
 DIAGNOSTIC_TOTAL_BYTES = 16 << 20
 DIAGNOSTIC_FILES = 128
-DIAGNOSTIC_INPUT_BYTES = 128 << 20
 
 
-SECRET_NAME = re.compile(r"TOKEN|SECRET|PASS|KEY|CREDENTIAL|AUTH|COOKIE|SESSION", re.I)
-VALUE = r'''(?:\[redacted\]|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\s,;}\]]+)'''
-LABEL = re.compile(r'''(?<![\w/-])(?P<label>["']?(?:[\w-]*(?:token|secret|password|passphrase|key)|pass|passwd|auth|credentials?)["']?)'''
-                   r"(?P<sep>[ \t]*(?::|=)[ \t]*|[ \t]+)(?P<value>" + VALUE + ")", re.I | re.S)
-FLAGS = re.compile(r"(?P<label>--(?:password|token|secret|passphrase|api-key))"
-                   r"(?P<sep>[ \t]*=[ \t]*|[ \t]+)(?P<value>" + VALUE + ")", re.I | re.S)
-HEADERS = re.compile(r'''(?<![\w-])(?P<label>["']?(?:proxy-authorization|authorization|set-cookie|cookie)["']?)'''
-                     r"(?P<sep>[ \t]*(?::|=)[ \t]*|[ \t]+)(?P<value>[^\n]*)", re.I)
-BEARER = re.compile(r"(?P<label>\bBearer)(?P<sep>[ \t]+)(?P<value>" + VALUE + ")", re.I | re.S)
+SECRET_NAME = re.compile(r"(?<![A-Z0-9])(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|COOKIE|API_KEY|PRIVATE_KEY|ACCESS_KEY|SIGNING_KEY)(?![A-Z0-9])", re.I)
+SECRET_PATH = re.compile(r"_(?:FILE|PATH|DIR|SOCK)$", re.I)
+BEGIN_KEY = re.compile(rb"-----BEGIN (?P<kind>[A-Z0-9 ]*PRIVATE KEY)-----")
+TOKEN = re.compile(rb"gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,}|eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+HEX = re.compile(rb"[a-fA-F0-9]{64,}")
 
 
-def normalize(text):
-    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
-    text = re.sub(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]", "", text)
-    return re.sub(r"[^\x20-\x7e\n\t]", "", text)
+class Redactor:
+    """The four diagnostic rules; no values are learned from input text."""
+
+    def __init__(self, environ=None):
+        environ = os.environ if environ is None else environ
+        values = {os.fsencode(value) for name, value in environ.items()
+                  if SECRET_NAME.search(name) and not SECRET_PATH.search(name) and len(value) >= 8}
+        self.exact = re.compile(b"|".join(re.escape(value) for value in sorted(values, key=lambda value: (-len(value), value)))) if values else None
+        self.overlap = max(map(len, values), default=1) - 1
+
+    def lines(self, stream):
+        # A bounded overlap lets literal env values span reads and newlines.
+        if self.exact is None:
+            yield from stream
+            return
+        carry, pending = b"", b""
+        while True:
+            chunk = stream.read(65536)
+            carry += chunk
+            cut = max(0, len(carry) - self.overlap) if chunk else len(carry)
+            for match in self.exact.finditer(carry):
+                if match.start() < cut < match.end():
+                    cut = match.start()
+                    break
+            pending += self.exact.sub(b"[redacted]", carry[:cut])
+            carry = carry[cut:]
+            parts = pending.split(b"\n")
+            pending = parts.pop()
+            for line in parts:
+                yield line + b"\n"
+            if not chunk:
+                if pending:
+                    yield pending
+                return
+
+    @staticmethod
+    def plain(line):
+        line = TOKEN.sub(b"[redacted]", line)
+        def tag(match):
+            value = match[0]
+            return f"[hex{len(value)}:{hashlib.sha256(value).hexdigest()[:8]}]".encode()
+        return HEX.sub(tag, line)
+
+    def write(self, stream, target):
+        # Spool provisional output privately on disk. A matching END rolls back
+        # even a key larger than the tail window. Without END, only BEGIN and
+        # 128 following lines are suppressed; later diagnostic text survives.
+        keys = []
+        for line in self.lines(stream):
+            while line:
+                endings = [(line.find(key[0]), index) for index, key in enumerate(keys) if key[0] in line]
+                if endings:
+                    offset, index = min(endings)
+                    end, checkpoint, _ = keys[index]
+                    target.seek(checkpoint)
+                    target.truncate()
+                    keys = keys[:index]
+                    line = line[offset + len(end):]
+                    continue
+                if keys and keys[-1][2]:
+                    keys[-1][2] -= 1
+                    break
+                begin = BEGIN_KEY.search(line)
+                if begin:
+                    target.write(self.plain(line[:begin.start()]))
+                    target.write(b"[redacted PEM]")
+                    checkpoint = target.tell()
+                    end = b"-----END " + begin["kind"] + b"-----"
+                    keys.append([end, checkpoint, 128])
+                    rest = line[begin.end():]
+                    if end in rest:
+                        line = rest
+                        continue
+                    target.write(b"\r\n" if line.endswith(b"\r\n") else b"\n" if line.endswith(b"\n") else b"")
+                    break
+                target.write(self.plain(line))
+                break
 
 
-def unquote(value):
-    if value.startswith(('"', "'")):
-        try:
-            return json.loads(value)
-        except ValueError:
-            return re.sub(r'''\\(["'\\])''', r"\1", value[1:-1] if value.endswith(value[0]) else value[1:])
-    return value
+def capture_tail(stream, limit, redactor):
+    with tempfile.TemporaryFile() as spool:
+        redactor.write(stream, spool)
+        size = spool.tell()
+        spool.seek(max(0, size - limit))
+        return spool.read(limit), size > limit
 
-
-def path_value(value):
-    return value.startswith(("/", "./", "../", "~/", "file://")) or bool(re.fullmatch(r"[\w.-]+(?:/[\w.@+ :-]+)+", value))
-
-
-def labelled_secrets(text):
-    normalized = normalize(text)
-    for rule in (LABEL, FLAGS, HEADERS, BEARER):
-        for match in rule.finditer(normalized):
-            value = unquote(match["value"])
-            if rule is LABEL and path_value(value):
-                continue
-            if not value.startswith("-----BEGIN") or "\n" in value:
-                yield value
-            if rule is HEADERS and "authorization" in match["label"].lower():
-                fields = value.split(None, 1)
-                if len(fields) == 2:
-                    yield fields[1]
-    try:
-        document = json.loads(text)
-    except ValueError:
-        return
-    pending = [document]
-    while pending:
-        value = pending.pop()
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if isinstance(item, str) and SECRET_NAME.search(key) and not path_value(item):
-                    yield item
-                elif isinstance(item, (dict, list)):
-                    pending.append(item)
-        elif isinstance(value, list):
-            pending.extend(value)
-
-
-def secret_values(texts=()):
-    values = {value for key, value in os.environ.items() if SECRET_NAME.search(key) and len(value) >= 8}
-    # Broker contexts may be JSON in an environment variable or in a captured
-    # record. Inspect only in-process values and allowlisted snapshot inputs.
-    for text in (*os.environ.values(), *texts):
-        values.update(value for value in labelled_secrets(text) if len(value) >= 8)
-        if len(values) > 4096 or sum(map(len, values)) > 1 << 20:
-            raise ValueError("diagnostic secret masking table exceeds bounds")
-    return values
-
-
-def sanitize(text, secrets=None):
-    if secrets is None:
-        secrets = secret_values((text,))
-    if secrets:
-        exact = re.compile("|".join(map(re.escape, sorted(secrets, key=lambda value: (-len(value), value)))))
-        text = exact.sub("[redacted]", text)
-    text = normalize(text)
-    # Whole-input PEM handling precedes any tail cut. Also suppress orphaned
-    # base64 body blocks or the final body line next to an END marker.
-    text = re.sub(r"-----BEGIN ([A-Z0-9 ]{1,60})-----.*?(?:-----END \1-----|$)", "[redacted PEM]", text, flags=re.S)
-    text = re.sub(r"(?m)(?:^(?![a-fA-F0-9]+$)[A-Za-z0-9+/]{48,76}={0,2}[ \t]*(?:\n|$)){2,}"
-                  r"(?:^[A-Za-z0-9+/]{1,76}={0,2}[ \t]*(?:\n|$))?", "[redacted PEM body]\n", text)
-    text = re.sub(r"(?m)^[A-Za-z0-9+/]{1,76}={0,2}\n(?=-----END [A-Z0-9 ]+-----)", "[redacted PEM body]\n", text)
-    def mask_label(match):
-        if path_value(unquote(match["value"])):
-            return match[0]
-        quote = match["value"][0] if match["value"].startswith(('"', "'")) else ""
-        return match["label"] + match["sep"] + quote + "[redacted]" + quote
-    text = HEADERS.sub(lambda match: match["label"] + match["sep"] + '"[redacted]"', text)
-    for rule in (FLAGS, BEARER):
-        text = rule.sub(lambda match: match["label"] + match["sep"] + '"[redacted]"', text)
-    text = LABEL.sub(mask_label, text)
-    text = re.sub(r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:)[^@\s/]*(@)", r"\1[redacted]\2", text)
-    text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b", "[redacted]", text)
-    text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "[redacted]", text)
-    def hex_tag(match):
-        value = match[0]
-        return f"[hex{len(value)}:{hashlib.sha256(value.lower().encode()).hexdigest()[:8]}]"
-    text = re.sub(r"(?<![a-fA-F0-9])[a-fA-F0-9]{32,}(?![a-fA-F0-9])", hex_tag, text)
-    def entropy_mask(match):
-        value = match[0]
-        entropy = -sum((count / len(value)) * math.log2(count / len(value)) for count in Counter(value).values())
-        return "[redacted]" if entropy >= 4 else value
-    return re.sub(r"(?<![\w./-])[A-Za-z0-9_+-]{32,}={0,2}(?![\w./=-])", entropy_mask, text)
 
 def diagnostic_snapshot(output, destination, check, status, logs=None, evidence=None):
     destination.mkdir(parents=True, exist_ok=False)
@@ -171,88 +157,97 @@ def diagnostic_snapshot(output, destination, check, status, logs=None, evidence=
                "execution": {key: os.environ.get(key) for key in
                              ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA")},
                "environment": {"system": platform.system(), "machine": platform.machine(),
-                               "kernel": platform.release()}, "files": [], "omitted": 0}
+                               "kernel": platform.release()}, "files": [], "omitted": 0, "skipped": []}
+    redactor = Redactor()
+    remaining, print_bytes, print_lines = DIAGNOSTIC_TOTAL_BYTES, 16384, 80
+    seen, cleanup = set(), []
     prefix = check.replace(":", "-").replace("/", "-") + "-"
-    sources = [(output, pattern, Path("acceptance")) for pattern in
-               ("receipt.json", "events.jsonl", "attempts/*.json", "runs/*.json", prefix + "*.log")]
-    if evidence is not None:
-        # P0's failure reporter owns these files (keeper, capacity, OOM and broker
-        # snapshots). Use the same bounds/redaction; never sweep other evidence.
-        sources += [(evidence, "**/evidence/p0-*.failure.log", Path("p0"))]
-    if logs is not None:
-        sources += [(logs, pattern, Path("runner")) for pattern in ("check.log", "results.tsv", "*.log", "*.json")]
-    sources += [(output, "*.log", Path("acceptance"))]
-    # Read whole bounded inputs first, so PEM/quoted-value context is never lost
-    # at a tail boundary and broker secrets in one record mask other input logs.
-    inputs, seen = [], set()
-    input_remaining = DIAGNOSTIC_INPUT_BYTES
-    summary["input_limit_bytes"] = DIAGNOSTIC_INPUT_BYTES
-    for source, pattern, folder in sources:
-        for path in sorted(source.glob(pattern)):
-            relative = folder / path.relative_to(source)
-            if relative in seen:
-                continue
-            seen.add(relative)
-            if len(inputs) >= DIAGNOSTIC_FILES:
-                summary["omitted"] += 1
-                continue
-            try:
-                if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_file():
-                    summary["omitted"] += 1
-                    continue
-                with path.open("rb") as stream:
-                    data = stream.read(input_remaining + 1)
-                if len(data) > input_remaining:
-                    summary["omitted"] += 1
-                    continue
-                input_remaining -= len(data)
-                inputs.append((relative, path.name, folder, data.decode("utf-8", errors="replace")))
-            except OSError:
-                summary["omitted"] += 1
-    secrets = secret_values(item[3] for item in inputs)
-    remaining = DIAGNOSTIC_TOTAL_BYTES
-    cleanup, tails = [], []
-    failed_probes, probe_tails = [], {}
-    for relative, name, folder, content in inputs:
-        if remaining <= 0:
-            summary["omitted"] += 1
-            continue
-        sanitized = sanitize(content, secrets).encode()
-        limit = min(remaining, DIAGNOSTIC_FILE_BYTES)
-        data = sanitized[-limit:]
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        remaining -= len(data)
-        summary["files"].append({"path": str(relative), "truncated": len(sanitized) > limit})
-        text = data.decode()
-        if folder == Path("runner") and name == "results.tsv":
-            failed_probes = [re.sub(r"[^a-zA-Z0-9_-]", "-", fields[0]) for line in text.splitlines()
-                             if len(fields := line.split("\t")) >= 2 and fields[1].startswith("fail(")]
-        if relative.suffix == ".log":
-            lines = text.splitlines()
-            cleanup.extend(line[:512] for line in lines if "cleanup" in line.lower() or "lease released:" in line)
-            if name.startswith(prefix) or name == "check.log":
-                tails.extend(lines[-80:])
-            if folder == Path("runner"):
-                probe_tails[relative.stem] = lines[-80:]
-    (destination / "cleanup.log").write_text("\n".join(cleanup[-200:]) + "\n" if cleanup else
-        "No cleanup lines captured; cleanup is unconfirmed. See the check log and receipt.\n")
-    (destination / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    if status != "success":
-        if not tails:
-            for probe in failed_probes:
-                tails.extend([f"runner/{probe}.log", *probe_tails.get(probe, [])])
-        print("Failed hosted check log tail (sanitized; at most 80 lines / 16 KiB):")
-        # Prefix every line so captured workflow commands cannot execute in Actions.
-        budget = 16384
-        for line in tails[-80:]:
-            rendered = "| " + line[:512]
-            if len(rendered) + 1 > budget:
-                break
-            print(rendered)
-            budget -= len(rendered) + 1
 
+    def skip(path, reason):
+        summary["omitted"] += 1
+        summary["skipped"].append({"path": str(path), "reason": reason})
+
+    def capture(path, source, folder, primary=False):
+        nonlocal remaining, print_bytes, print_lines
+        relative = folder / path.relative_to(source)
+        if relative in seen:
+            return
+        seen.add(relative)
+        try:
+            if len(summary["files"]) >= DIAGNOSTIC_FILES:
+                skip(relative, "file limit")
+                return
+            if remaining <= 0:
+                skip(relative, "total byte limit")
+                return
+            if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_file():
+                skip(relative, "not a regular file or symlink path")
+                return
+            with path.open("rb") as stream:
+                data, truncated = capture_tail(stream, min(remaining, DIAGNOSTIC_FILE_BYTES), redactor)
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            remaining -= len(data)
+            summary["files"].append({"path": str(relative), "truncated": truncated})
+            if primary and status != "success":
+                print(f"Hosted check tail: {relative} (sanitized; at most 80 lines / 16 KiB)", flush=True)
+                for line in data.splitlines()[-80:]:
+                    rendered = b"| " + line[:512]
+                    if not print_lines or len(rendered) + 1 > print_bytes:
+                        break
+                    print(rendered.decode("utf-8", errors="backslashreplace"), flush=True)
+                    print_bytes -= len(rendered) + 1
+                    print_lines -= 1
+            if relative.suffix == ".log":
+                for line in data.splitlines():
+                    if b"cleanup" in line.lower() or b"lease released:" in line:
+                        cleanup.append(line[:512])
+                        cleanup[:] = cleanup[-200:]
+            return bool(data)
+        except Exception as error:
+            skip(relative, type(error).__name__ + (f" errno={error.errno}" if isinstance(error, OSError) else ""))
+
+    try:
+        # Nothing except failed-probe selection is opened before the check log.
+        primary = [(path, output, Path("acceptance")) for path in sorted(output.glob(prefix + "*.log"))]
+        if logs is not None and (logs / "check.log").exists():
+            primary.append((logs / "check.log", logs, Path("runner")))
+        captured_check = False
+        for path, source, folder in primary:
+            captured_check = capture(path, source, folder, primary=True) or captured_check
+        if not captured_check and logs is not None:
+            try:
+                with (logs / "results.tsv").open("rb") as stream:
+                    for line in redactor.lines(stream):
+                        fields = line.split(b"\t")
+                        if len(fields) >= 2 and fields[1].startswith(b"fail("):
+                            name = re.sub(rb"[^a-zA-Z0-9_-]", b"-", fields[0]).decode()
+                            capture(logs / (name + ".log"), logs, Path("runner"), primary=True)
+            except OSError as error:
+                skip("runner/results.tsv", type(error).__name__ + f" errno={error.errno}")
+        sources = [(output, pattern, Path("acceptance")) for pattern in
+                   ("runs/*.json", "receipt.json", "attempts/*.json", "events.jsonl")]
+        if evidence is not None:
+            sources += [(evidence, "**/evidence/p0-*.failure.log", Path("p0"))]
+        if logs is not None:
+            sources += [(logs, pattern, Path("runner")) for pattern in ("*.json", "results.tsv", "*.log")]
+        sources += [(output, "*.log", Path("acceptance"))]
+        for source, pattern, folder in sources:
+            try:
+                for path in sorted(source.glob(pattern)):
+                    capture(path, source, folder)
+            except OSError as error:
+                skip(folder / pattern, type(error).__name__ + f" errno={error.errno}")
+    except Exception as error:
+        skip("snapshot", type(error).__name__)
+    finally:
+        try:
+            (destination / "cleanup.log").write_bytes(b"\n".join(cleanup) + b"\n" if cleanup else
+                b"No cleanup lines captured; cleanup is unconfirmed. See the check log and receipt.\n")
+        except OSError as error:
+            skip("cleanup.log", type(error).__name__ + f" errno={error.errno}")
+        (destination / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
