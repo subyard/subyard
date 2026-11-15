@@ -33,6 +33,7 @@ esac
 SH
 cat > "$TMP/bin/incus" <<'SH'
 #!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'incus %s\n' "$*" >> "$TEST_EFFECT_LOG"
 case "${1:-}" in
   --version)
     if [ "${TEST_UID:-1000}" = 0 ] && [ "${TEST_SWAP_AFTER_VALIDATION:-0}" = 1 ]; then
@@ -41,14 +42,30 @@ case "${1:-}" in
     fi
     printf '%s\n' "${TEST_INCUS_VERSION:-6.0.6}"
     ;;
+  version)
+    # The installer must query the local daemon, not the caller's default remote.
+    [ "${2:-}" = local: ] || exit 97
+    server="${TEST_INCUS_SERVER_VERSION-${TEST_INCUS_VERSION:-6.0.6}}"
+    [ -z "${TEST_SERVER_VERSION_FILE:-}" ] || server="$(cat "$TEST_SERVER_VERSION_FILE")"
+    printf 'Client version: %s\nServer version: %s\n' "${TEST_INCUS_VERSION:-6.0.6}" "$server"
+    exit "${TEST_SERVER_QUERY_RC:-0}"
+    ;;
   storage|network) exit 0 ;;
   *) exit 0 ;;
 esac
 SH
 cat > "$TMP/bin/systemctl" <<'SH'
 #!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'systemctl %s\n' "$*" >> "$TEST_EFFECT_LOG"
 case "${1:-}" in
   is-active) printf 'inactive\n' ;;
+  try-restart)
+    if [ "${TEST_RESTART_RC:-0}" != 0 ]; then
+      printf 'fixture restart refused: injected service failure\n' >&2
+      exit "$TEST_RESTART_RC"
+    fi
+    [ -z "${TEST_SERVER_VERSION_FILE:-}" ] || printf '%s\n' "$TEST_INCUS_VERSION" > "$TEST_SERVER_VERSION_FILE"
+    ;;
 esac
 exit 0
 SH
@@ -290,18 +307,15 @@ done
 
 # A successful package command must not let an Incus version below the required floor continue.
 cp -R "$ROOT/scripts" "$TMP/version-scripts"
-cat > "$TMP/version-scripts/lib/host.sh" <<'SH'
-#!/usr/bin/env bash
-require_root() { [ "$(id -u)" -eq 0 ]; }
-nm_unmanaged_guard() { :; }
-add_zabbly_lts_repo() { :; }
-subyard_home_validate_root() {
-  SUBYARD_VALIDATED_HOME="$1"
-}
-SH
+# Execute the real host adapter, relocating only its absolute /etc paths into
+# the fixture. No host functions are replaced; PATH peers cannot mutate the host.
+sed -i "s|/etc/|$TMP/etc/|g" "$TMP/version-scripts/lib/host.sh"
+mkdir -p "$TMP/etc/apt/"{keyrings,sources.list.d,preferences.d}
+printf 'VERSION_CODENAME=test\n' > "$TMP/etc/os-release"
+printf 'fixture-key\n' > "$TMP/etc/apt/keyrings/zabbly.asc"
 version_bin="$TMP/version-bin"
 mkdir "$version_bin"
-for command_name in bash dirname cut realpath awk dpkg find stat cp sed sort grep tr install cat python3; do
+for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
 for command_name in getent id systemctl; do
@@ -309,15 +323,45 @@ for command_name in getent id systemctl; do
 done
 cat > "$version_bin/apt-cache" <<'SH'
 #!/usr/bin/env bash
-printf '  Candidate: 6.0.6\n'
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'apt-cache %s\n' "$*" >> "$TEST_EFFECT_LOG"
+printf '  Candidate: %s\n' "${TEST_DISTRO_CANDIDATE-6.0.6}"
 SH
 cat > "$version_bin/apt-get" <<'SH'
 #!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'apt-get %s\n' "$*" >> "$TEST_EFFECT_LOG"
+if [ "${1:-}" = "${TEST_APT_FAIL_COMMAND:-install}" ]; then
+  [ "${TEST_APT_RC:-0}" = 0 ] || exit "$TEST_APT_RC"
+fi
 case " $* " in
   *' install '*) cp "$TEST_INCUS_FIXTURE" "$TEST_FAKE_BIN/incus" ;;
 esac
 SH
-chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get"
+cat > "$version_bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected signing-key download\n' >&2
+exit 99
+SH
+cat > "$version_bin/dpkg" <<'SH'
+#!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'dpkg %s\n' "$*" >> "$TEST_EFFECT_LOG"
+exec /usr/bin/dpkg "$@"
+SH
+cat > "$version_bin/install" <<'SH'
+#!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'install %s\n' "$*" >> "$TEST_EFFECT_LOG"
+case "${*: -1}" in "$TEST_FIXTURE_ROOT"/*) ;; *) exit 99 ;; esac
+exec /usr/bin/install "$@"
+SH
+# The package replaces the initial executable, keeping installed and final
+# versions separate without making package effects implicit in --version.
+cat > "$TMP/incus-initial" <<'SH'
+#!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'incus %s\n' "$*" >> "$TEST_EFFECT_LOG"
+if [ "${1:-}" = --version ]; then printf '%s\n' "${TEST_INITIAL_INCUS_VERSION:-6.0.5}"; fi
+SH
+chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get" "$version_bin/curl" \
+  "$version_bin/dpkg" "$version_bin/install" "$TMP/incus-initial"
+export TEST_FIXTURE_ROOT="$TMP"
 
 for package_path in upgrade install; do
   for mode in normal upgrade-only; do
@@ -357,6 +401,170 @@ for package_path in upgrade install; do
           ;;
       esac
     done
+  done
+done
+
+# Every source-selection row runs in both modes, including selector/candidate
+# combinations ignored for an installed version. All physical peers share one log.
+source_case=0
+for installed in 6.0.6 7.0.0 6.0.5 none; do
+  for selector in auto zabbly; do
+    for distro_candidate in 6.0.5 6.0.6 '(none)' ''; do
+      case "$installed:$selector:$distro_candidate" in
+        6.0.6:*|7.0.0:*) expected=none ;;
+        6.0.5:*) expected=zabbly-upgrade ;;
+        none:auto:6.0.6) expected=distro ;;
+        *) expected=zabbly ;;
+      esac
+      for mode in normal upgrade-only; do
+        source_case=$((source_case + 1))
+        label="$installed/$selector/$distro_candidate/$mode"
+        source_home="$TMP/source-$source_case/.subyard"
+        mkdir -p "$source_home/incus/storage"
+        rm -f "$version_bin/incus" "$TMP/etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources"
+        [ "$installed" = none ] || cp "$TMP/incus-initial" "$version_bin/incus"
+        source_args=()
+        [ "$selector" = auto ] || source_args+=(--zabbly)
+        [ "$mode" = normal ] || source_args+=(--upgrade-only)
+        effect_log="$TMP/source-$source_case.effects"
+        : > "$effect_log"
+        source_output="$TMP/source-$source_case.out"
+        if ! TEST_UID=0 TEST_INITIAL_INCUS_VERSION="$installed" TEST_INCUS_VERSION=6.0.6 \
+          TEST_DISTRO_CANDIDATE="$distro_candidate" \
+          TEST_INCUS_FIXTURE="$TMP/bin/incus" TEST_FAKE_BIN="$version_bin" \
+          TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+          TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+          run_installer "$source_home" "${source_args[@]}" >"$source_output" 2>&1; then
+          cat "$source_output" >&2
+          fail "$label source selection failed"
+        fi
+        guard_line="$(sed -n '/^systemctl is-active NetworkManager$/=' "$effect_log" | sed -n '1p')"
+        [ -n "$guard_line" ] || fail "$label did not run the real NetworkManager guard"
+        package_line="$(sed -n '/^apt-get /=' "$effect_log" | sed -n '1p')"
+        restart_line="$(sed -n '/^systemctl try-restart incus.service$/=' "$effect_log")"
+        install_line="$(sed -n '/^apt-get install /=' "$effect_log")"
+        repo_line="$(sed -n '/^install -d -m 0755 /=' "$effect_log" | sed -n '1p')"
+        if [ "$expected" = none ]; then
+          [ -z "$package_line$restart_line" ] || fail "$label changed packages for a sufficient Incus version"
+          grep -Fq "incus present ($installed) >= 6.0.6" "$source_output" \
+            || fail "$label did not select the present version"
+        else
+          [ -n "$package_line" ] && [ "$guard_line" -lt "$package_line" ] \
+            || fail "$label package effect preceded NetworkManager guard"
+          [ -n "$install_line" ] || fail "$label did not install Incus"
+        fi
+        if [ "$expected" = zabbly-upgrade ]; then
+          [ -n "$restart_line" ] && [ "$install_line" -lt "$restart_line" ] \
+            && [ "$guard_line" -lt "$restart_line" ] \
+            || fail "$label restart did not follow guarded installation"
+          grep -Fq 'incus upgraded (6.0.6)' "$source_output" || fail "$label did not select upgrade"
+        else
+          [ -z "$restart_line" ] || fail "$label unexpectedly restarted Incus"
+        fi
+        case "$expected" in
+          zabbly*)
+            [ -n "$repo_line" ] && [ "$guard_line" -lt "$repo_line" ] \
+              || fail "$label repository effect preceded NetworkManager guard"
+            grep -Fq 'URIs: https://pkgs.zabbly.com/incus/lts-6.0' \
+              "$TMP/etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources" \
+              || fail "$label did not select Zabbly"
+            ;;
+          *)
+            [ ! -e "$TMP/etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources" ] \
+              || fail "$label unexpectedly added Zabbly"
+            ;;
+        esac
+        ! grep -Fq 'could not list existing Incus bridges' "$source_output" \
+          || fail "$label emitted a spurious Incus inventory warning"
+        guard_count="$(grep -c '^systemctl is-active NetworkManager$' "$effect_log")"
+        if [ "$mode" = normal ]; then
+          [ "$guard_count" -eq 2 ] || fail "$label omitted the post-init guard reconcile"
+        else
+          [ "$guard_count" -eq 1 ] || fail "$label repeated the early guard"
+        fi
+      done
+    done
+  done
+done
+printf 'ok: %s Incus source/mode cases preserve guarded package ordering\n' "$source_case"
+
+# Package and restart failures must stop at the operation boundary in both modes.
+for mode in normal upgrade-only; do
+  for failure in repo install restart; do
+    failure_home="$TMP/failure-$mode-$failure/.subyard"
+    mkdir -p "$failure_home/incus/storage"
+    cp "$TMP/incus-initial" "$version_bin/incus"
+    failure_args=()
+    [ "$mode" = normal ] || failure_args+=(--upgrade-only)
+    apt_rc=0 restart_rc=0 apt_command=install
+    case "$failure" in
+      repo) apt_rc=9; apt_command=update; expected_error='could not set up the Zabbly LTS-6.0 repo' ;;
+      install) apt_rc=9; expected_error='incus upgrade failed' ;;
+      restart) restart_rc=9; expected_error='incus restart failed' ;;
+    esac
+    if TEST_UID=0 TEST_INCUS_VERSION=6.0.6 TEST_APT_RC="$apt_rc" TEST_RESTART_RC="$restart_rc" \
+      TEST_APT_FAIL_COMMAND="$apt_command" \
+      TEST_INCUS_FIXTURE="$TMP/bin/incus" TEST_FAKE_BIN="$version_bin" \
+      TEST_COMMAND_PATH="$version_bin" TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+      run_installer "$failure_home" "${failure_args[@]}" >"$TMP/failure.out" 2>&1; then
+      fail "$mode accepted $failure failure"
+    fi
+    grep -Fq "$expected_error" "$TMP/failure.out" || fail "$mode omitted the $failure failure diagnostic"
+    ! grep -Eq 'Phase 1 done|Incus is|incus upgraded' "$TMP/failure.out" \
+      || fail "$mode printed success after $failure failure"
+    if [ "$failure" = restart ]; then
+      grep -Fq 'fixture restart refused: injected service failure' "$TMP/failure.out" \
+        || fail "$mode hid the daemon restart failure reason"
+      printf '6.0.5\n' > "$TMP/server-version"
+      effect_log="$TMP/retry-$mode.effects"
+      # The package was already replaced by the failed attempt. A fresh run must
+      # finish the stale daemon restart, then leave the equal version alone.
+      for attempt in retry completed; do
+        : > "$effect_log"
+        if ! TEST_UID=0 TEST_INCUS_VERSION=6.0.6 TEST_SERVER_VERSION_FILE="$TMP/server-version" \
+          TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+          TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+          run_installer "$failure_home" "${failure_args[@]}" >"$TMP/retry.out" 2>&1; then
+          cat "$TMP/retry.out" >&2
+          fail "$mode $attempt after a failed daemon restart did not succeed"
+        fi
+        ! grep -q '^apt-get ' "$effect_log" || fail "$mode $attempt reinstalled the package"
+        if [ "$attempt" = retry ]; then
+          [ "$(grep -c '^systemctl try-restart incus.service$' "$effect_log")" -eq 1 ] \
+            || fail "$mode rerun did not restart the stale daemon exactly once"
+          guard_line="$(sed -n '/^systemctl is-active NetworkManager$/=' "$effect_log" | sed -n '1p')"
+          restart_line="$(sed -n '/^systemctl try-restart incus.service$/=' "$effect_log")"
+          [ "$guard_line" -lt "$restart_line" ] || fail "$mode rerun restarted before NetworkManager guard"
+          [ "$(cat "$TMP/server-version")" = 6.0.6 ] || fail "$mode rerun left the old daemon running"
+        else
+          ! grep -q '^systemctl try-restart ' "$effect_log" || fail "$mode restarted the current daemon"
+        fi
+      done
+    fi
+  done
+done
+
+# A sufficient installed package needs no restart for equal, newer or unknown
+# daemon versions. A failed query must not use even a partially returned version.
+for mode in normal upgrade-only; do
+  server_home="$TMP/server-$mode/.subyard"
+  mkdir -p "$server_home/incus/storage"
+  server_args=()
+  [ "$mode" = normal ] || server_args+=(--upgrade-only)
+  for server_version in 6.0.6 7.0.0 unreachable '' query-failed; do
+    cp "$TMP/bin/incus" "$version_bin/incus"
+    query_rc=0
+    if [ "$server_version" = query-failed ]; then server_version=6.0.5; query_rc=9; fi
+    : > "$TMP/server-version.effects"
+    if ! TEST_UID=0 TEST_INCUS_VERSION=6.0.6 TEST_INCUS_SERVER_VERSION="$server_version" \
+      TEST_SERVER_QUERY_RC="$query_rc" TEST_COMMAND_PATH="$version_bin" \
+      TEST_EFFECT_LOG="$TMP/server-version.effects" TEST_DISPATCHER_PATH='' \
+      TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+      run_installer "$server_home" "${server_args[@]}" >"$TMP/server-version.out" 2>&1; then
+      fail "$mode rejected daemon version '$server_version' (query status $query_rc)"
+    fi
+    ! grep -Eq '^apt-get |^systemctl try-restart ' "$TMP/server-version.effects" \
+      || fail "$mode changed packages or restarted daemon version '$server_version' (query status $query_rc)"
   done
 done
 
