@@ -119,35 +119,42 @@ class Redactor:
         # Spool provisional output privately on disk. A matching END rolls back
         # even a key larger than the tail window. Without END, only BEGIN and
         # 128 following lines are suppressed; later diagnostic text survives.
-        keys = []
+        # A new BEGIN closes an unclosed key: lines still in its budget stay
+        # suppressed, text kept after the budget becomes final.
+        key = None
         for line in stream:
             while line:
-                endings = [(line.find(key[0]), index) for index, key in enumerate(keys) if key[0] in line]
-                if endings:
-                    offset, index = min(endings)
-                    end, checkpoint, _ = keys[index]
-                    target.seek(checkpoint)
-                    target.truncate()
-                    keys = keys[:index]
-                    line = line[offset + len(end):]
-                    continue
-                if keys and keys[-1][2]:
-                    keys[-1][2] -= 1
-                    break
                 begin = BEGIN_KEY.search(line)
-                if begin:
-                    target.write(line[:begin.start()])
-                    target.write(b"[redacted PEM]")
-                    checkpoint = target.tell()
-                    end = b"-----END " + begin["kind"] + b"-----"
-                    keys.append([end, checkpoint, 128])
-                    rest = line[begin.end():]
-                    if end in rest:
-                        line = rest
+                if key is not None:
+                    end, checkpoint, budget = key
+                    offset = line.find(end)
+                    if offset >= 0 and (begin is None or offset < begin.start()):
+                        target.seek(checkpoint)
+                        target.truncate()
+                        key = None
+                        line = line[offset + len(end):]
                         continue
-                    target.write(b"\r\n" if line.endswith(b"\r\n") else b"\n" if line.endswith(b"\n") else b"")
+                    if begin is None:
+                        if budget:
+                            key[2] -= 1
+                        else:
+                            target.write(line)
+                        break
+                    if not budget:
+                        target.write(line[:begin.start()])
+                elif begin is None:
+                    target.write(line)
                     break
-                target.write(line)
+                else:
+                    target.write(line[:begin.start()])
+                target.write(b"[redacted PEM]")
+                end = b"-----END " + begin["kind"] + b"-----"
+                key = [end, target.tell(), 128]
+                rest = line[begin.end():]
+                if end in rest or BEGIN_KEY.search(rest):
+                    line = rest
+                    continue
+                target.write(b"\r\n" if line.endswith(b"\r\n") else b"\n" if line.endswith(b"\n") else b"")
                 break
 
 

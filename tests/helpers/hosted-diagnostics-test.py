@@ -116,6 +116,18 @@ class Redaction(unittest.TestCase):
         self.assertEqual(tail, expected[-64:])
         self.assertTrue(truncated)
 
+    def test_unclosed_key_ends_at_the_next_begin(self):
+        lines = [f"diagnostic line {index}\n".encode() for index in range(1, 141)]
+        pair = b"-----BEGIN PRIVATE KEY-----\nsecond body\n-----END PRIVATE KEY-----\n"
+        early = b"before\n-----BEGIN RSA PRIVATE KEY-----\nfirst body\n" + b"-----BEGIN RSA PRIVATE KEY-----\n" + pair + b"after\n"
+        self.assertEqual(render(early), b"before\n[redacted PEM]\n[redacted PEM]\n[redacted PEM]\nafter\n")
+        data = b"before\n-----BEGIN PRIVATE KEY-----\n" + b"".join(lines) + b"mid " + pair + b"after\n"
+        expected = b"before\n[redacted PEM]\n" + b"".join(lines[128:]) + b"mid [redacted PEM]\nafter\n"
+        self.assertEqual(render(data), expected)
+        tail, truncated = m.capture_tail(io.BytesIO(data), 64, m.Redactor({}))
+        self.assertEqual(tail, expected[-64:])
+        self.assertTrue(truncated)
+
     def test_realistic_corpus_changes_only_the_four_matches(self):
         digest = b"ab12cd34" * 8
         token = b"ghs_" + b"Ab1" * 12
