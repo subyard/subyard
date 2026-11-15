@@ -403,6 +403,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 			failed = true
 			result.Diagnostic = (configProspectiveError{home, err}).Error()
 			result.Retry = config.SourceAliasRepairRetry(home, name, err)
+			if next := config.Diagnose(home, err).Next; result.Retry == "" && len(next) != 0 {
+				result.Retry = strings.Join(next, "; ")
+			}
 			if result.Retry == "" {
 				result.Retry = "restore the identified source or use its supported schema migration, then run config validate"
 			}

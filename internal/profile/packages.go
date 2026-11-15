@@ -97,7 +97,7 @@ func packageDirectory(root string) (string, error) {
 	}
 	info, err := os.Stat(current)
 	if err != nil || !info.IsDir() {
-		return "", errors.New("shipped package directory is unavailable")
+		return "", domain.NewConfigRefusal(domain.ConfigShippedPackageUnavailable)
 	}
 	for _, part := range strings.Split(remaining, "/") {
 		if part == "" {
@@ -106,10 +106,10 @@ func packageDirectory(root string) (string, error) {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("%w: %w", domain.NewConfigRefusal(domain.ConfigShippedPackageUnavailable), err)
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("shipped package directory must not traverse symlinks")
+			return "", domain.NewConfigRefusal(domain.ConfigShippedPackageSymlink)
 		}
 	}
 	return root, nil

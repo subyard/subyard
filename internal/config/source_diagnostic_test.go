@@ -218,3 +218,57 @@ func TestOwnerMetadataDiagnosticsStayLocalAndPreserveCauses(t *testing.T) {
 		}
 	}
 }
+
+func TestDiagnoseRendersEveryClassifiedRefusalWithoutValues(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "route-client"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "profiles", "route-client", "profile.conf"), []byte("REQUIRES_HOST_ACCESS=1\n"), 0o644)
+	prior := []error{
+		fmt.Errorf("%w in /secret/SENTINEL", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools)),
+		namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, "AGENT_SAMPLE_SOURCE"),
+	}
+	err := validateProfileConstraints(root, "default", environment{
+		"ENVIRONMENT_PROFILES": "route-client", "EXCLUSIVE_ENVIRONMENT_PROFILE": "route-client",
+		"ALLOWS_HOST_ACCESS": "false", "HOST_LINKS": "SENTINEL", "FORWARD_SSH_AGENT": "SENTINEL",
+	}, prior...)
+	diagnostic := Diagnose("", fmt.Errorf("yard default: %w", err))
+	want := []string{
+		"exclusive environment profiles require a dedicated named yard",
+		`profile "route-client" requires host access; this yard role sets ALLOWS_HOST_ACCESS=false, so deselect the profile or use a yard that allows host access`,
+		"selected yard role forbids non-empty AGENT_SAMPLE_SOURCE",
+		"selected yard role forbids non-empty HOST_LINKS",
+		"selected yard role requires FORWARD_SSH_AGENT=0",
+		"yard role forbids non-empty CODING_TOOL_INTEGRATIONS",
+	}
+	if strings.Join(diagnostic.Refusals, "\n") != strings.Join(want, "\n") || diagnostic.Unclassified || len(diagnostic.Next) < 2 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+	mixed := Diagnose("", domain.CollectRefusals(err, errors.New("raw SENTINEL"), sourceError("", 0, "SSH_PORT", "scalar settings", "invalid port value", nil)))
+	message := mixed.Message("generic tail")
+	if !mixed.Unclassified || strings.Contains(message, "SENTINEL") || !strings.HasSuffix(message, "; generic tail") ||
+		!strings.Contains(message, "configuration: SSH_PORT (scalar settings): invalid port value") || len(mixed.Refusals) != len(want)+1 {
+		t.Fatalf("mixed diagnostic = %q", message)
+	}
+	if opaque := Diagnose("", errors.New("raw SENTINEL")); !opaque.Unclassified || opaque.Message("generic") != "generic" {
+		t.Fatalf("unclassified diagnostic = %#v", opaque)
+	}
+}
+
+func TestDiagnoseNamesShippedPackageSymlinkWithoutPath(t *testing.T) {
+	root := testkit.TempDir(t)
+	target := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(target, "sample"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(target, "sample", "profile.conf"), []byte("PROVISION_SCOPE=dedicated\n"), 0o644)
+	if err := os.Symlink(target, filepath.Join(root, "profiles")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ProfileProvisionScope(root, "sample")
+	diagnostic := Diagnose("", err)
+	if message := diagnostic.Message("generic"); message != "shipped package directory must not traverse symlinks" || len(diagnostic.Next) != 1 {
+		t.Fatalf("shipped package diagnostic = %q (%v)", message, err)
+	}
+}

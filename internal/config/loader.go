@@ -161,7 +161,7 @@ func load(
 		commandEnvironment["SUBYARD_OPERATOR_HOME"] = options.OperatorHome
 	}
 	if values["SUBYARD_OPERATOR_HOME"] == "" {
-		return domain.Context{}, nil, errors.New("operator home is required")
+		return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigOperatorHomeRequired)
 	}
 	configHome, err := bootstrapConfigHome(values)
 	if err != nil {
@@ -180,9 +180,7 @@ func load(
 		return domain.Context{}, nil, err
 	}
 	if pending && !options.AllowPendingTransaction {
-		return domain.Context{}, nil, errors.New(
-			"an interrupted configuration transaction requires recovery with yard config sync",
-		)
+		return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
 	}
 	dataHome := values["SUBYARD_HOME"]
 	if dataHome == "" {
@@ -472,20 +470,22 @@ func load(
 	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
 		return domain.Context{}, nil, err
 	}
-	if err := resolveLoadedIntegrations(values, tracker); err != nil {
+	integrationRefusal, err := resolveLoadedIntegrations(values, tracker)
+	if err != nil {
 		return domain.Context{}, nil, err
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
+	roleRefusals := []error{integrationRefusal}
 	if values["ALLOWS_HOST_ACCESS"] == "false" {
 		for _, owner := range tracker.catalog.Integrations() {
 			for _, artifact := range owner.Artifacts {
 				if artifact.SourceSetting != "" && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
-					return domain.Context{}, nil, fmt.Errorf("selected yard role forbids non-empty %s", artifact.SourceSetting)
+					roleRefusals = append(roleRefusals, namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, artifact.SourceSetting))
 				}
 			}
 		}
 	}
-	if err := validateProfileConstraints(configDir, yardName, values); err != nil {
+	if err := validateProfileConstraints(configDir, yardName, values, roleRefusals...); err != nil {
 		return domain.Context{}, nil, err
 	}
 	if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
@@ -645,7 +645,7 @@ func bootstrapConfigHome(values environment) (string, error) {
 		}
 	}
 	if !filepath.IsAbs(configHome) {
-		return "", errors.New("SUBYARD_CONFIG_HOME must be absolute")
+		return "", domain.NewConfigRefusal(domain.ConfigHomeNotAbsolute)
 	}
 	return filepath.Clean(configHome), nil
 }

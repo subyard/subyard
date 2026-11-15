@@ -1,0 +1,40 @@
+package domain
+
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+func TestConfigRefusalRendersOnlyValidatedNames(t *testing.T) {
+	const sentinel = "secret value/SENTINEL"
+	for _, name := range []func(string) (ConfigName, bool){ConfigProfileName, ConfigSettingName, ConfigYardKindName} {
+		invalid, ok := name(sentinel)
+		if ok {
+			t.Fatal("constructor accepted an arbitrary value")
+		}
+		for code := range configRefusalTexts {
+			if text := NewConfigRefusal(code, invalid).Error(); strings.Contains(text, "SENTINEL") {
+				t.Fatalf("code %d rendered an unvalidated value: %s", code, text)
+			}
+		}
+	}
+	profile, _ := ConfigProfileName("route-client")
+	setting, _ := ConfigSettingName("HOST_LINKS")
+	kind, _ := ConfigYardKindName("vm")
+	for refusal, want := range map[*ConfigRefusal]string{
+		NewConfigRefusal(ConfigProfileRequiresHostAccess, profile): `profile "route-client" requires host access; this yard role sets ALLOWS_HOST_ACCESS=false, so deselect the profile or use a yard that allows host access`,
+		NewConfigRefusal(ConfigRoleForbidsSetting, setting):        "selected yard role forbids non-empty HOST_LINKS",
+		NewConfigRefusal(ConfigRoleRequiresYardKind, kind):         "selected yard role requires YARD_KIND=vm",
+		NewConfigRefusal(ConfigRoleForbidsSetting):                 "configuration refusal",
+	} {
+		if refusal.Error() != want || refusal.Next() == "" {
+			t.Fatalf("refusal = %q, next %q; want %q", refusal, refusal.Next(), want)
+		}
+	}
+	var typed *ConfigRefusal
+	if fallback := UnclassifiedConfigRefusal(ConfigRolePermitsOnlyProfile, sentinel); errors.As(fallback, &typed) ||
+		fallback.Error() != `selected yard role permits only environment profile "`+sentinel+`"` {
+		t.Fatalf("unvalidated fallback = %v", fallback)
+	}
+}

@@ -714,8 +714,9 @@ func TestConfigProspectiveOverridesCannotMaskPersistentProfileConstraints(t *tes
 	if err != nil || string(content) != before {
 		t.Fatal("invalid persistent draft was written")
 	}
-	if strings.Contains(stderr.String(), "profile \"fixture\"") {
-		t.Fatal("schema diagnostic exposed a setting value")
+	// Profile names are safe refusal metadata; assigned values are not rendered.
+	if output := stderr.String(); !strings.Contains(output, `profile "fixture" requires its dedicated named-yard preset`) || strings.Contains(output, "2444") || strings.Contains(output, "2398") {
+		t.Fatalf("schema diagnostic lacks the refusal or exposes a value: %s", output)
 	}
 }
 
@@ -792,5 +793,58 @@ func TestConfigApplyAndRPCAuthoringIgnoreProfileOnlyAssignments(t *testing.T) {
 	execute("ignored-unset", `{"command":"config","arguments":["unset","YARD_CAPS","--scope","host"],"exact":true}`)
 	if after, err := os.ReadFile(host); err != nil || string(after) != "SSH_PORT='2390'\n" {
 		t.Fatalf("RPC config unset left %q: %v", after, err)
+	}
+}
+
+func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(root, "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(registry), "\n") {
+		if strings.HasPrefix(line, "config|") {
+			manifest = append(manifest, []byte(line+"\n")...)
+		}
+	}
+	writeConfigCommandFile(t, filepath.Join(root, "config", "commands.registry"), string(manifest))
+	writeConfigCommandFile(t, filepath.Join(root, "config/yards/profiles/restricted.env"), "REQUIRED_YARD_KIND=vm\nEXCLUSIVE_ENVIRONMENT_PROFILE=service\nALLOWS_HOST_ACCESS=false\nALLOWS_CODING_TOOLS=false\n")
+	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROVISION_SCOPE=dedicated\n")
+	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/route/profile.conf"), "REQUIRES_HOST_ACCESS=1\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards/valid/config.env"), "YARD_TEMPLATE=restricted\nYARD_KIND=vm\nENVIRONMENT_PROFILES=service\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards/broken/config.env"), "YARD_TEMPLATE=restricted\nENVIRONMENT_PROFILES='service route'\nHOST_CLAUDE_MD=/srv/SENTINEL.md\n")
+	permits, route, kind := `selected yard role permits only environment profile "service"`, `profile "route" requires host access`, "selected yard role requires YARD_KIND=vm"
+	run := func(arguments ...string) (int, string) {
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return program.Run(context.Background()), stdout.String() + stderr.String()
+	}
+	for _, test := range []struct {
+		code      int
+		arguments []string
+		want      []string
+	}{
+		{2, []string{"-Y", "broken", "config", "show"}, []string{"yard broken, config inspection: ", permits, route, kind, "selected yard role forbids non-empty HOST_CLAUDE_MD", "yard: Next: deselect"}},
+		{1, []string{"-Y", "broken", "config", "validate"}, []string{"yard broken: prospective configuration: ", permits, route, kind, "\nRetry: deselect"}},
+		{1, []string{"-Y", "broken", "config", "validate", "--json"}, []string{`"diagnostic":"prospective configuration: profile \"route\" requires host access`, kind, `"retry":"deselect`}},
+		{1, []string{"-Y", "valid", "config", "set", "ENVIRONMENT_PROFILES", "service route", "--scope", "yard", "--yes"}, []string{"prospective configuration: ", permits, route}},
+	} {
+		code, output := run(test.arguments...)
+		if code != test.code || strings.Contains(output, "SENTINEL") || strings.Contains(output, "invalid or unavailable") {
+			t.Fatalf("%v: code=%d output=%s", test.arguments, code, output)
+		}
+		for _, expected := range test.want {
+			if !strings.Contains(output, expected) {
+				t.Errorf("%v lacks %q: %s", test.arguments, expected, output)
+			}
+		}
 	}
 }

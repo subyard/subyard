@@ -94,10 +94,7 @@ type configProspectiveError struct {
 }
 
 func (err configProspectiveError) Error() string {
-	if diagnostic, ok := config.SourceDiagnostic(err.home, err.cause); ok {
-		return "prospective configuration: " + diagnostic
-	}
-	return "prospective configuration: an affected configuration input is invalid or unavailable"
+	return "prospective configuration: " + config.Diagnose(err.home, err.cause).Message("an affected configuration input is invalid or unavailable")
 }
 func (err configProspectiveError) Unwrap() error { return err.cause }
 

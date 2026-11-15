@@ -33,7 +33,9 @@ func normalizeLegacySelection(name, value string) string {
 	return value
 }
 
-func resolveLoadedIntegrations(values environment, tracker *settingTracker) error {
+// resolveLoadedIntegrations returns a role refusal separately from load errors,
+// so the loader collects it with the other independent role refusals.
+func resolveLoadedIntegrations(values environment, tracker *settingTracker) (refusal, err error) {
 	requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
 	var retired []string
 	for _, definition := range tracker.catalog.Integrations() {
@@ -56,7 +58,7 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) erro
 	}
 	selection, err := ResolveIntegrationSelection(values, requested)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	_, selection.Present = values["CODING_TOOL_INTEGRATIONS"]
 	slices.Sort(retired)
@@ -74,8 +76,8 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) erro
 		// An inherited default can be suppressed; a concrete forbidden request cannot.
 		for _, assignment := range assignments {
 			layer := tracker.layers[assignment.Layer]
-			if (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
-				return fmt.Errorf("yard role forbids non-empty CODING_TOOL_INTEGRATIONS in %s", assignment.Path)
+			if refusal == nil && (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
+				refusal = fmt.Errorf("%w in %s", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools), assignment.Path)
 			}
 		}
 		selection.Suppressed = len(selection.Requested) != 0
@@ -84,7 +86,7 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) erro
 	}
 	values["CODING_TOOL_INTEGRATIONS"] = strings.Join(selection.Effective, " ")
 	tracker.integrations = selection
-	return nil
+	return refusal, nil
 }
 
 // ResolveIntegrationSelection validates roots and computes the existing ordered
@@ -162,7 +164,7 @@ func WithIntegrationSelection(loaded Loaded, requested []string) (Loaded, error)
 		return Loaded{}, err
 	}
 	if !selection.AllowsCodingTools && len(requested) != 0 {
-		return Loaded{}, fmt.Errorf("yard role forbids non-empty CODING_TOOL_INTEGRATIONS")
+		return Loaded{}, domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools)
 	}
 	selection.Retired = loaded.Integrations.Retired
 	loaded.Environment = cloneEnvironment(loaded.Environment)
@@ -209,7 +211,7 @@ func ValidateYardTemplateIntegrations(loaded Loaded, template string) error {
 			continue
 		}
 		if resolution.Scope == "command" || (resolution.Scope == "yard" && resolution.Role == "scalar settings") {
-			return fmt.Errorf("selected yard template forbids coding tool integrations; clear the yard's CODING_TOOL_INTEGRATIONS and remove temporary selection overrides before changing YARD_TEMPLATE")
+			return domain.NewConfigRefusal(domain.ConfigTemplateForbidsCodingTools)
 		}
 	}
 	return nil

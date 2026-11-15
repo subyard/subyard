@@ -788,19 +788,21 @@ func (cli *CLI) Run(ctx context.Context) int {
 			operatorHome = cli.env["HOME"]
 		}
 		configHome, _ := config.ResolveConfigHome(operatorHome, cli.env)
-		if source, ok := config.SourceDiagnostic(configHome, err); ok {
-			cli.errorf("yard %s, config inspection: %s", yard, source)
-			if retry := config.SourceAliasRepairRetry(configHome, yard, err); retry != "" {
-				cli.errorf("Next: %s", retry)
-			}
-		} else if config.IsRetiredYardTemplate(err) {
+		diagnostic := config.Diagnose(configHome, err)
+		if len(diagnostic.Refusals) == 1 && !diagnostic.Unclassified && config.IsRetiredYardTemplate(err) {
 			// This owning diagnostic contains only a fixed retired schema and
 			// its supported replacement, never a supplied setting value.
 			cli.errorf("%v", err)
-		} else if errors.Is(err, ownerinventory.ErrIntegrity) {
+		} else if len(diagnostic.Refusals) == 0 && errors.Is(err, ownerinventory.ErrIntegrity) {
 			cli.errorf("owner inventory integrity validation failed: owner HostID mismatch or unverified response; repair the verified owner connection")
 		} else {
-			cli.errorf("yard %s, config inspection: an input is invalid or unavailable; run config validate for scoped schema diagnostics", yard)
+			cli.errorf("yard %s, config inspection: %s", yard, diagnostic.Message("an input is invalid or unavailable; run config validate for scoped schema diagnostics"))
+			if retry := config.SourceAliasRepairRetry(configHome, yard, err); retry != "" {
+				diagnostic.Next = append([]string{retry}, diagnostic.Next...)
+			}
+			for _, next := range diagnostic.Next {
+				cli.errorf("Next: %s", next)
+			}
 		}
 		return 2
 	}

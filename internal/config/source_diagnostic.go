@@ -315,3 +315,55 @@ func SourceAliasRepairRetry(home, yard string, cause error) string {
 	}
 	return fmt.Sprintf("choose the desired value explicitly, then run yard -Y %s config repair-alias %s CHOSEN_VALUE --scope %s --local --check", yard, source.Key, scope)
 }
+
+// ConfigDiagnostic is the value-free rendering of a configuration load or
+// validation failure: every classified refusal in its collected order, fixed
+// next steps, and whether some cause has no public classification.
+type ConfigDiagnostic struct {
+	Refusals     []string
+	Next         []string
+	Unclassified bool
+}
+
+// Diagnose classifies each independent cause of err. It renders only source
+// diagnostics, retired-template guidance and typed refusals, never other text.
+func Diagnose(configHome string, err error) ConfigDiagnostic {
+	var diagnostic ConfigDiagnostic
+	diagnostic.add(configHome, err)
+	return diagnostic
+}
+
+func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		switch typed := current.(type) {
+		case *SourceError:
+			message, _ := SourceDiagnostic(configHome, typed)
+			diagnostic.Refusals = append(diagnostic.Refusals, message)
+			return
+		case *domain.ConfigRefusal:
+			diagnostic.Refusals = append(diagnostic.Refusals, typed.Error())
+			if !slices.Contains(diagnostic.Next, typed.Next()) {
+				diagnostic.Next = append(diagnostic.Next, typed.Next())
+			}
+			return
+		case *retiredYardTemplateError:
+			diagnostic.Refusals = append(diagnostic.Refusals, typed.diagnostic)
+			return
+		case interface{ Unwrap() []error }:
+			for _, cause := range typed.Unwrap() {
+				diagnostic.add(configHome, cause)
+			}
+			return
+		}
+	}
+	diagnostic.Unclassified = true
+}
+
+// Message joins the refusals; an unclassified cause adds the generic tail.
+func (diagnostic ConfigDiagnostic) Message(generic string) string {
+	messages := slices.Clone(diagnostic.Refusals)
+	if diagnostic.Unclassified {
+		messages = append(messages, generic)
+	}
+	return strings.Join(messages, "; ")
+}

@@ -385,6 +385,13 @@ The validated context contract includes:
 
 Source-only domain modules do not load configuration themselves.
 
+Configuration refusals that may be shown are `config.SourceError`, the retired-template diagnostic
+and `domain.ConfigRefusal`: a closed code with a fixed template and next step, built only from
+validated profile, setting or yard-kind names. Producers collect independent role and profile
+refusals with `domain.CollectRefusals`. `config.Diagnose` is the single CLI renderer for load,
+`config set` and `config validate` failures; it walks the collected causes and marks any other
+cause unclassified instead of printing its text.
+
 `HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
 `yard host rename` transactionally moves a registered Git owner subtree, commits the exact move
 locally, and updates identity/cache provenance without changing runtime resource names. Explicit
