@@ -93,47 +93,6 @@ func seedMigrationOwnerTerminal(t *testing.T, candidate *V2Transition, receipt M
 	return terminal
 }
 
-func TestMigrationOwnerJournalStagingRequiresReceiptAndUnchangedPredecessor(t *testing.T) {
-	for _, mutant := range []string{"zero", "truncated", "nonprefix", "unsafe", "foreign-predecessor", "missing-receipt"} {
-		t.Run(mutant, func(t *testing.T) {
-			c, r, links := migrationOwnerReaderFixture(t, false)
-			if mutant != "missing-receipt" {
-				seedMigrationOwnerReceipt(t, c, r)
-			}
-			intended := mustJournalPayload(t, r.Successor)
-			payload := []byte{}
-			mode := os.FileMode(0600)
-			switch mutant {
-			case "truncated":
-				payload = intended[:len(intended)/2]
-			case "nonprefix":
-				payload = []byte("foreign staging\n")
-			case "unsafe":
-				mode = 0644
-			case "foreign-predecessor":
-				changed := r.Predecessor
-				changed.ObservationScope = digestC
-				changed.IntentDigest = bindJournalIntent(changed.AuthorizationPlan, changed.ResumePlan, changed.ObservationScope, changed.Steps)
-				seedOwnerFile(t, c, []string{"release-transition", "v2"}, "journal.json", mustJournalPayload(t, changed))
-			}
-			testkit.WriteFile(t, filepath.Join(c.options.ConfigHome, "release-transition", "v2", ".journal.json.pending"), payload, mode)
-			before := snapshotStoreV2Tree(t, c.options.ConfigHome)
-			err := c.store.validateMigrationOwnerPreparedJournal()
-			if (mutant == "zero" || mutant == "truncated") != (err == nil) {
-				t.Fatalf("staging %s: %v", mutant, err)
-			}
-			if !bytes.Equal(before, snapshotStoreV2Tree(t, c.options.ConfigHome)) || links.Active != "release-b" {
-				t.Fatal("reader changed predecessor or staging")
-			}
-			if err == nil {
-				if err := c.store.migrationOwnerEvidence(r.Predecessor); err != nil {
-					t.Fatal(err)
-				}
-			}
-		})
-	}
-}
-
 func TestMigrationOwnerLegacyReceiptStaging(t *testing.T) {
 	for _, size := range []int{0, 18, -1, -2} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {

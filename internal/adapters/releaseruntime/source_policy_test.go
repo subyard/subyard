@@ -690,4 +690,27 @@ func TestPrepareTransitionExplicitVersionRefusesUnfinishedBelowAnchor(t *testing
 			}
 		}
 	}
+
+	t.Run("environment version without explicit option", func(t *testing.T) {
+		fixture := newV0111CandidateRoutingFixture(t)
+		environment := fixture.environment()
+		environment["YARD_RELEASE_VERSION"] = fixture.candidateVersion
+		runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment),
+			Installer: fixture.installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		defer runtime.Close()
+		before := fixture.snapshot(t)
+		_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--runtime-root", fixture.runtimeRoot}, fixture.configHome, "default")
+		want := "an unfinished or unsafe release transition permits only exact target " + fixture.sourceID + "; next: run the verified standalone release with --offline and its exact --version"
+		if err == nil || err.Error() != want {
+			t.Fatalf("environment-only version changed the ordinary retry hint: %v, want %q", err, want)
+		}
+		if !bytes.Equal(before, fixture.snapshot(t)) {
+			t.Fatal("environment-only selection changed protected history or links")
+		}
+		for _, path := range []string{fixture.publicationCapture, fixture.candidateCalls} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("environment-only selection published or invoked a replacement candidate: %s %v", path, err)
+			}
+		}
+	})
 }

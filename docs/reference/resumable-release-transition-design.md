@@ -405,15 +405,16 @@ bindings and retained transactions. Cleanup keeps those artifacts and captures s
 before a later journal replaces it. An unfinished predecessor is superseded evidence, never
 activation readiness. Canonical owner-completion records retain private immutable publication;
 partial legacy receipt staging, unsafe files and conflicting records remain untouched and refuse.
-A prepared journal prefix is evidence only when bound by its canonical receipt and unchanged
-predecessor; staging itself supplies no authority.
+Source admission refuses pending journal publications; the retired receipt-bound prepared-journal
+continuation is no longer implemented.
 
 The current engine also no longer writes v0.11.1 post-activation superseded archives or delegates
 v0.17.3 activation repair. Archive codecs and transaction graph readers remain necessary for
 completed installations. These retirements change no frozen process/journal/activation-recovery
 meaning, domain epoch floor, retained rollback checks or generic activation-only recovery.
-Explicit `--version` selection with an unfinished journal below the anchor returns the existing
-`source-anchor-required` guidance. Ordinary installed-owner resume and historical retry hints
+Explicit `--version` selection with an unfinished journal and an installed release from v0.11.0
+to below v0.28.0 returns the existing `source-anchor-required` guidance. Sources before v0.11.0
+retain the full-uninstall and separate clean-install policy. Ordinary installed-owner resume and historical retry hints
 remain available without `--version`; historical recovery still belongs to its compatible release.
 
 Released-binary acceptance retains a supported baseline for each distinct caller, producer or

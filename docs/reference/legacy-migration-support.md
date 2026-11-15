@@ -174,7 +174,7 @@ The boundary itself deletes no product code. A later removal (proved unreachable
 deletion) starts from these facts of the current candidate:
 
 - **Unfinished journals it no longer continues:** every unfinished transition while the installed
-  release is below v0.28.0, whoever started it: explicit `--version` selection refuses with
+  release is from v0.11.0 to below v0.28.0, whoever started it: explicit `--version` selection refuses with
   `source-anchor-required` in the outer caller, before candidate selection. Without `--version`,
   the installed release still finishes its own exact journal and retains its historical retry hints.
   The current engine no longer writes the v0.11.1/v0.21.0 historical replacements or delegates
