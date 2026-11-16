@@ -948,21 +948,23 @@ final_release="$TMP/final-release"
     || fail 'prerelease current did not finish before the release update'
 )
 # An unparsable installed version never runs its migrate before the update refusal.
-malformed_release="$TMP/malformed-release"
-"$ROOT/dev/package-engine.sh" --output-dir "$malformed_release" --version 1.0.bad \
-  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" >/dev/null
-(
-  retry_environment "$TMP/bootstrap-malformed-home"
-  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
-  publish_first "$malformed_release/subyard-1.0.bad-linux-amd64.tar.gz"
-  if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-malformed.log" 2>&1; then
-    fail 'installer updated an unparsable installed version'
-  fi
-  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
-  [ ! -e "$protected/journal.json" ] && [ ! -e "$protected/ledger.json" ] && [ ! -e "$protected/history-checkpoint.json" ] \
-    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.0.bad-* ]] \
-    || { cat "$TMP/bootstrap-malformed.log" >&2; fail 'unparsable installed version received protected writes'; }
-)
+for malformed_version in 1.0.bad 1.0.0-rc.01; do
+  malformed_release="$TMP/malformed-release-$malformed_version"
+  "$ROOT/dev/package-engine.sh" --output-dir "$malformed_release" --version "$malformed_version" \
+    --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" >/dev/null
+  (
+    retry_environment "$TMP/bootstrap-malformed-home-$malformed_version"
+    export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+    publish_first "$malformed_release/subyard-$malformed_version-linux-amd64.tar.gz"
+    if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-malformed-$malformed_version.log" 2>&1; then
+      fail "installer updated unparsable installed version $malformed_version"
+    fi
+    protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+    [ ! -e "$protected/journal.json" ] && [ ! -e "$protected/ledger.json" ] && [ ! -e "$protected/history-checkpoint.json" ] \
+      && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/"$malformed_version"-* ]] \
+      || { cat "$TMP/bootstrap-malformed-$malformed_version.log" >&2; fail "unparsable installed version $malformed_version received protected writes"; }
+  )
+done
 
 # A verified standalone bootstrap is the one-time bridge for an active runtime
 # whose installed release installer predates immutable publish-only support.

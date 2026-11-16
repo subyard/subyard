@@ -502,7 +502,10 @@ if [ "$run_transition" = 1 ] && [ -z "$SOURCE_INGRESS_ROOT" ] &&
    [ ! -e "$RUNTIME_ROOT/previous" ] && [ ! -L "$RUNTIME_ROOT/previous" ]; then
   current_release="$(readlink -- "$RUNTIME_ROOT/current")" || current_release=''
   # The publisher names each release <version>-<first 12 hex digits of its digest>.
-  if [[ "$current_release" =~ ^releases/((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?)-[0-9a-f]{12}$ ]]; then
+  # A prerelease identifier is numeric without leading zeros or contains a non-digit.
+  prerelease_identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+  release_pattern="^releases/((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-$prerelease_identifier(\\.$prerelease_identifier)*)?)-[0-9a-f]{12}\$"
+  if [[ "$current_release" =~ $release_pattern ]]; then
     current_version="${BASH_REMATCH[1]}" current_major="${BASH_REMATCH[2]}"
     current_minor="${BASH_REMATCH[3]}" current_patch="${BASH_REMATCH[4]}" current_prerelease="${BASH_REMATCH[5]}"
     # Supported installations start at v0.28.0; its prereleases precede it.
