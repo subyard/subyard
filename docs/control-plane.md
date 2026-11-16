@@ -1907,7 +1907,10 @@ under the resource's owning lock, and passes the approved bounded plan to native
 implements the read-only `verify` phase: its returned steps must retain the same targets and desired
 states and report `skip` with observed state equal to desired. The generic RPC endpoint dispatches
 safe mutating resource invocations through this prepared path; v1 handlers fail closed for exact
-RPC mutation. Read, session and protected actions keep their dedicated contracts. Public fields are
+RPC mutation. Bring-up and shutdown of an owner public-ingress resource run only through this
+prepared path, which admits the owner barrier before the yard lock; a v1 plan or non-exact action
+for them is refused before any lock or change. Read, session and protected actions keep their
+dedicated contracts. Public fields are
 bounded safe text; payloads, commands and protected content never enter the resource projection.
 Native identities use explicit namespaces such as `incus:`, `container:` or `invocation:`;
 safe fingerprints carry a digest label. Long unlabeled identifiers are checked as possible
