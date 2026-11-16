@@ -13,7 +13,9 @@ while [ "$#" -gt 0 ]; do
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || { printf 'acceptance: --slot N is required\n' >&2; exit 2; }
 case "$lane" in
-  full) lanes=(bootstrap existing-yard resource projects ssh-agent codex-permissions managed-agents identity-rename stuck-recovery) ;;
+  # The default run takes every manifest lane except those marked periodic-only.
+  full) mapfile -t lanes < <(jq -r '.lanes[] | select(.periodic_only != true) | .id' \
+          "$ROOT/config/profiles/orca/tests/e2e/acceptance-lanes.json") ;;
   bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals|managed-agents|claude-recovery|identity-rename|stuck-recovery) lanes=("$lane") ;;
   *) printf 'acceptance: invalid lane: %s\n' "$lane" >&2; exit 2 ;;
 esac

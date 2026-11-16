@@ -758,7 +758,8 @@ execute declared preflights after successful local gates and collect results in 
 before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfinished `running`
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
-every runnable release lane; `--only profile:NAME/ID` requests one lane. Available approved slots take the
+every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
+periodic-only lane as an unknown check. Available approved slots take the
 next queued check after their controller exits. A typed `blocked/capacity_memory` or
 `blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
 next independent check. After all first-pass controllers finish, capacity-blocked checks are
