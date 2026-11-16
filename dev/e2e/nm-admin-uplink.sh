@@ -539,8 +539,10 @@ fresh-resume)
   printf 'INCUS_BRIDGE=br0\n' >> "$SUBYARD_CONFIG_HOME/yards/$other/config.env"
   chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$other/config.env"
   if owner "$launcher" -Y "$other" init --yes >"$STATE/init-br0.log" 2>&1; then die 'init accepted INCUS_BRIDGE=br0'; fi
-  grep -Fq 'the yard bridge br0 is not an Incus-managed bridge' "$STATE/init-br0.log" \
+  # Incus itself may refuse the profile NIC first; either way br0 is never guarded or pinned.
+  grep -Eq 'the yard bridge br0 is not an Incus-managed bridge|Failed to load network "br0"' "$STATE/init-br0.log" \
     || die "INCUS_BRIDGE=br0 refusal: $(tail -5 "$STATE/init-br0.log")"
+  ! grep -Fq 'device set br0' "$STATE/init-br0.log" || die 'init pinned br0'
   [ "$(device_state br0)" = connected ] && [ "$(address_of br0)" = 198.19.0.1/24 ] || die 'INCUS_BRIDGE=br0 touched br0'
   grep -Eq 'interface-name:br0(,|$)' "$guard" && die 'the guard lists br0'
   rm -rf "$SUBYARD_CONFIG_HOME/yards/$other"
