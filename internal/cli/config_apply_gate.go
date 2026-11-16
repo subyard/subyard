@@ -312,11 +312,9 @@ func (cli *CLI) lockConfigApplyRepair(
 	if err != nil {
 		return nil, err
 	}
-	unlock := func() {}
-	if ctx.Value(releaseLockHeldKey{}) == nil {
-		if unlock, err = store.Lock(); err != nil {
-			return nil, err
-		}
+	unlock, err := store.Lock()
+	if err != nil {
+		return nil, err
 	}
 	refreshed, err := cli.prepareActivationRepair(
 		ctx, permit.yard, permit.allLocal, permit.gate, activationRepairMode{selectedNames: permit.selectedTargetNames},

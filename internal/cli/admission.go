@@ -272,16 +272,28 @@ func (cli *CLI) admitReleaseGate(
 	arguments []string,
 	yes bool,
 ) (permits recoveryPermits, code int, done bool) {
+	history, historyErr := cli.readReleaseHistory()
 	outcome, gateInspection, gateErr := cli.inspectCommandMutationGate(ctx, yard, admission.handler, arguments)
+	if gateErr == nil {
+		gateErr = historyErr
+	}
 	if gateErr != nil {
 		cli.errorf("inspect release transition: %v", gateErr)
 		return permits, 1, true
 	}
 	if outcome == nil {
+		if err := cli.admitHistory(history, true); err != nil {
+			cli.errorf("%v", err)
+			return permits, 1, true
+		}
 		return permits, 0, false
 	}
 	request := gateRequest{yard: yard, handler: admission.handler, arguments: arguments, definition: resourceDefinition, profileResource: admission.handler == "", stop: admission.stop}
 	if admitted, gate, scoped := cli.decideGate(ctx, request, outcome, gateInspection); admitted != nil {
+		if err := cli.admitHistory(history, false); err != nil {
+			cli.errorf("%v", err)
+			return permits, 1, true
+		}
 		cli.gateAdmitted = admitted
 		return permits, 0, false
 	} else if scoped {
@@ -359,16 +371,28 @@ func (cli *CLI) admitTeardownGate(
 	yard string,
 	arguments []string,
 ) (int, bool) {
+	history, historyErr := cli.readReleaseHistory()
 	outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
+	if gateErr == nil {
+		gateErr = historyErr
+	}
 	if gateErr != nil {
 		cli.errorf("inspect release transition: %v", gateErr)
 		return 1, true
 	}
 	if outcome == nil {
+		if err := cli.admitHistory(history, true); err != nil {
+			cli.errorf("%v", err)
+			return 1, true
+		}
 		return 0, false
 	}
 	request := gateRequest{yard: yard, handler: "@teardown", arguments: arguments}
 	if admitted, gate, scoped := cli.decideGate(ctx, request, outcome, gateInspection); admitted != nil {
+		if err := cli.admitHistory(history, false); err != nil {
+			cli.errorf("%v", err)
+			return 1, true
+		}
 		cli.gateAdmitted = admitted
 		return 0, false
 	} else if scoped {

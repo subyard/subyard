@@ -174,7 +174,11 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 		if link.A == link.B {
 			return networkArgumentError("a link needs two distinct local yards")
 		}
-		// A link changes both yards; neither may be one limited to its repair.
+		// A link changes both yards; neither may be one limited to its repair,
+		// and the effect boundary re-decides both.
+		if prepared.CLI.gateAdmitted != nil {
+			prepared.CLI.gateAdmitted.request.touched = slices.Clone(names)
+		}
 		if blocked := prepared.CLI.repairOnlyYards(names); len(blocked) != 0 {
 			return fmt.Errorf("yard %s needs repair first; next: %s", blocked[0], prepared.CLI.repairNextStep(blocked[0]))
 		}

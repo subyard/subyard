@@ -54,6 +54,13 @@ func lockOwnerOperation(ctx context.Context, configHome, name string) (func(), e
 			file.Close()
 			return nil, fmt.Errorf("lock integrations: %w", err)
 		}
+		if waiting := ctx.Value(lockWaitNoticeKey{}); waiting != nil {
+			// Say once that another operation holds the yard, instead of waiting silently.
+			if notice, ok := waiting.(func(string)); ok {
+				notice(name)
+			}
+			ctx = context.WithValue(ctx, lockWaitNoticeKey{}, nil)
+		}
 		select {
 		case <-ctx.Done():
 			file.Close()
@@ -62,3 +69,6 @@ func lockOwnerOperation(ctx context.Context, configHome, name string) (func(), e
 		}
 	}
 }
+
+// lockWaitNoticeKey carries a function told once when a lock is held elsewhere.
+type lockWaitNoticeKey struct{}

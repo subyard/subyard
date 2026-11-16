@@ -262,7 +262,7 @@ func (cli *CLI) yardGateAdmits(gate yardGate, yard, handler string, arguments []
 	// waits while any yard's pending contract refuses configuration.
 	if !profileResource && handler == "@config" && configWritesEveryYard(arguments) {
 		for _, name := range gate.order {
-			if other := gate.state(name); other.pending && !other.repairOnly() {
+			if gate.state(name).pending {
 				return false
 			}
 		}
@@ -337,6 +337,9 @@ type gateRequest struct {
 	definition      resource.Definition
 	profileResource bool
 	stop            bool
+	// touched are other yards the handler acts on (link endpoints, aggregate
+	// targets); the re-decision requires each still open to it.
+	touched []string
 }
 
 // rpcGateRequest is the RPC form of an invocation, decided like the CLI's:
@@ -368,49 +371,110 @@ func (cli *CLI) decideGate(ctx context.Context, request gateRequest, outcome *re
 		return nil, gate, false
 	}
 	if cli.yardGateAdmits(gate, request.yard, request.handler, request.arguments, request.definition, request.profileResource) {
+		for _, yard := range request.touched {
+			if state := gate.state(yard); yard != request.yard && (state.repairOnly() || state.pending) {
+				return nil, gate, true
+			}
+		}
 		return &gateAdmission{request: request, gate: &gate}, gate, true
 	}
 	return nil, gate, true
 }
 
-// lockAdmittedRepair revalidates, after consent and before any effect, the
-// admission of an invocation behind a non-ready gate. It holds the protected
-// release lock that migrate and update hold, so the command never runs over a
-// transition that started meanwhile; the caller releases it after its effects.
-func (cli *CLI) lockAdmittedRepair(ctx context.Context) (context.Context, func(), error) {
-	if cli.gateAdmitted == nil || ctx.Value(releaseLockHeldKey{}) != nil {
-		return ctx, func() {}, nil
-	}
+// historyCheckOnReadyRelease decides whether the effect boundary also compares
+// release history for commands admitted on a ready release: a migrate or
+// update that completed or failed in another terminal while consent was
+// pending then refuses the command. Operator decision (a); true is the
+// recommended answer, false limits the check to degraded admissions.
+const historyCheckOnReadyRelease = true
+
+// releaseHistoryToken identifies the protected release history: journal,
+// ledger compatibility projection and checkpoint, as the bounded repairs bind them.
+type releaseHistoryToken struct {
+	journal, ledger, checkpoint string
+	checkpointed                bool
+}
+
+func (cli *CLI) readReleaseHistory() (*releaseHistoryToken, error) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
-		return ctx, nil, fmt.Errorf("%w: release state is unavailable for the admitted repair", domain.ErrPlanStale)
+		return nil, err
 	}
 	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
 	if err != nil {
-		return ctx, nil, err
+		return nil, err
 	}
-	unlock, err := store.Lock()
+	journal, err := store.ReadCurrentJournal()
 	if err != nil {
-		return ctx, nil, err
+		return nil, err
 	}
-	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, cli.gateAdmitted.request.yard)
-	if err == nil && outcome != nil {
-		if admitted, _, _ := cli.decideGate(ctx, cli.gateAdmitted.request, outcome, inspection); admitted == nil {
-			err = fmt.Errorf("%w: the release changed after confirmation: %s", domain.ErrPlanStale, strings.TrimSpace(mutationGateRefusalText(outcome, inspection)))
-		} else {
-			cli.gateAdmitted = admitted
-		}
-	}
+	ledger, err := store.ReadLedger()
 	if err != nil {
-		unlock()
-		return ctx, nil, err
+		return nil, err
 	}
-	return context.WithValue(ctx, releaseLockHeldKey{}, true), unlock, nil
+	checkpoint, err := store.ReadMigrationCheckpoint()
+	if err != nil {
+		return nil, err
+	}
+	return &releaseHistoryToken{journal: string(journal.Fingerprint), ledger: string(ledger.Fingerprint),
+		checkpoint: string(checkpoint.Fingerprint), checkpointed: checkpoint.Exists}, nil
 }
 
-// releaseLockHeldKey marks a context whose invocation holds the protected
-// release lock; nested bounded repairs reuse it instead of waiting on it.
-type releaseLockHeldKey struct{}
+// admitHistory records the history an admission inspected. It is read before
+// and after the inspection and must agree, so the decision and the token
+// describe the same history.
+func (cli *CLI) admitHistory(before *releaseHistoryToken, ready bool) error {
+	if ready && !historyCheckOnReadyRelease {
+		return nil
+	}
+	after, err := cli.readReleaseHistory()
+	if err != nil {
+		return err
+	}
+	if (before == nil) != (after == nil) || before != nil && *before != *after {
+		return fmt.Errorf("%w: the release changed during admission; rerun the command", domain.ErrPlanStale)
+	}
+	cli.admittedHistory = after
+	return nil
+}
+
+// beginEffects is the one effect boundary. It runs once, after consent and
+// before any effect: from the prepared command under the owner barrier that
+// every journal writer holds, or from the orchestrator for adapters run
+// without one. The admitted history must be unchanged, and a command admitted
+// behind a non-ready gate is re-decided once, with the yards it touches.
+// Handlers never call it.
+func (cli *CLI) beginEffects(ctx context.Context) error {
+	if cli.effectsBegun {
+		return nil
+	}
+	cli.effectsBegun = true
+	if cli.admittedHistory != nil {
+		current, err := cli.readReleaseHistory()
+		if err != nil {
+			return err
+		}
+		if current == nil || *current != *cli.admittedHistory {
+			return fmt.Errorf("%w: the release changed after confirmation; rerun the command", domain.ErrPlanStale)
+		}
+	}
+	if cli.gateAdmitted == nil {
+		return nil
+	}
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, cli.gateAdmitted.request.yard)
+	if err != nil {
+		return err
+	}
+	if outcome == nil {
+		return nil
+	}
+	admitted, _, _ := cli.decideGate(ctx, cli.gateAdmitted.request, outcome, inspection)
+	if admitted == nil {
+		return fmt.Errorf("%w: the release changed after confirmation: %s", domain.ErrPlanStale, strings.TrimSpace(mutationGateRefusalText(outcome, inspection)))
+	}
+	cli.gateAdmitted = admitted
+	return nil
+}
 
 // otherYardFindings reports each other implicated yard once, with its step.
 func (gate yardGate) otherYardFindings(yard string) []releasetransition.Blocker {
@@ -437,7 +501,7 @@ func (cli *CLI) skipGatedYards(targets []configTarget, selected string, report b
 		return targets
 	}
 	gate := cli.gateAdmitted.gate
-	return slices.DeleteFunc(slices.Clone(targets), func(target configTarget) bool {
+	kept := slices.DeleteFunc(slices.Clone(targets), func(target configTarget) bool {
 		state := gate.state(target.Name)
 		if target.Name == selected || !state.repairOnly() && !state.pending {
 			return false
@@ -447,6 +511,12 @@ func (cli *CLI) skipGatedYards(targets []configTarget, selected string, report b
 		}
 		return true
 	})
+	touched := make([]string, 0, len(kept))
+	for _, target := range kept {
+		touched = append(touched, target.Name)
+	}
+	cli.gateAdmitted.request.touched = touched
+	return kept
 }
 
 // skipInvalidYards keeps a multi-yard verb going when other yards' own

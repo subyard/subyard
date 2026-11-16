@@ -521,7 +521,9 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		}
 	}
 	applier := cli.options.Config
-	if applier == nil && cli.permits.configApply != nil {
+	// Behind a non-ready gate the apply runs in this process: one admission per
+	// operator command, no child that would need its own.
+	if applier == nil && (cli.permits.configApply != nil || cli.gateAdmitted != nil) {
 		applier = releaseTransitionConfigApplier{cli: &copyCLI}
 	}
 	if applier == nil {

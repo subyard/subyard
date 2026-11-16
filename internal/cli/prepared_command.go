@@ -601,13 +601,6 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		return domain.AdapterResult{}, err
 	}
 	defer finish()
-	// A command admitted behind a non-ready release gate rechecks that
-	// admission after consent and holds the release lock through its effects.
-	ctx, unlockRelease, err := prepared.CLI.lockAdmittedRepair(ctx)
-	if err != nil {
-		return domain.AdapterResult{}, err
-	}
-	defer unlockRelease()
 	if prepared.Loaded.Context.AccessKind == domain.AccessLocal && !prepared.remotePhased {
 		recovery := prepared.CLI.fullTeardownRecovery != "" || (prepared.Plan.Assessment != nil && prepared.Plan.Assessment.Action == "yard.teardown.full")
 		unlock, lockErr := prepared.CLI.acquireOwnerMutation(ctx, prepared.ownerAdmission, recovery, false)
@@ -619,6 +612,14 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 			return domain.AdapterResult{}, err
 		}
 	}
+	// The one effect boundary: under the owner barrier, after consent and
+	// before any effect, the admitted release state must still hold.
+	if err := prepared.CLI.beginEffects(ctx); err != nil {
+		return domain.AdapterResult{}, err
+	}
+	ctx = context.WithValue(ctx, lockWaitNoticeKey{}, func(name string) {
+		fmt.Fprintf(prepared.CLI.options.Stderr, "yard: waiting for another operation that holds %s\n", name)
+	})
 	noOp := func() (domain.AdapterResult, error) {
 		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok"}, nil
 	}

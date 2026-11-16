@@ -1361,10 +1361,18 @@ yards and host commands stay open. `config apply --all-local` skips and reports 
 repair, yards with pending findings and yards whose own configuration cannot be loaded; a host or
 shared setting waits while any yard has pending findings; `network link` refuses a yard limited to
 repair, and `network isolation` names such yards. An owner's failure in one yard carries what it
-observed in the others, so one failed yard never hides another's drift. A command admitted behind a
-non-ready gate rechecks its admission after consent, under the protected release lock that migrate
-and update hold, and keeps that lock through its effects; a transition started meanwhile refuses it.
-The direct CLI and RPC share this admission. An init succeeds when its own yard converged and
+observed in the others, so one failed yard never hides another's drift. The direct CLI and RPC share this admission. Admission records the release history (journal, ledger
+projection and checkpoint) it inspected, read before and after the inspection. One effect boundary,
+after consent and before any effect, compares that history and re-decides a command admitted behind a
+non-ready gate, including the other yards it touches; a change refuses it as plan-stale. The prepared
+command runs the boundary under the owner barrier that every journal writer holds; adapters run
+without a prepared command pass it in the orchestrator; legacy resource ingress passes it before its
+yard lock; sessions and wires check at start only; `shell` and `_project-state` have no consent step,
+so their admission is the boundary. Gate admission never takes the release update lock. The lock order
+is owner barrier, then the release update lock (only converge and the bounded in-handler
+configuration repairs), then the per-yard lock, innermost; a wait for a yard lock is announced. A
+`config apply` admitted behind a non-ready gate applies in its own process, so one operator command
+is admitted once. An init succeeds when its own yard converged and
 reports the other yards' findings. The default yard's
 own invalid configuration underlies every yard, so then every yard admits only its repair commands.
 An invalid configuration of another yard is that yard's finding; host power and host key tools
@@ -1377,8 +1385,8 @@ every yard-scoped owner leaves it to its own init like a stopped yard, decided o
 process and only narrowing within it, with one warning naming `yard -Y NAME init`. Only init
 finalize sets the mark; `start` and `stop` keep it. The power reconciler, at boot and on its start
 and publication retries, never powers such a yard in any state, reports it and restores the other
-yards. A test-VM broker yard in that state is left to its init too; an initialized broker yard
-stays a host owner. Release work holds the per-yard lock init holds,
+yards. A test-VM broker yard in that state is left to its init too, before any guest probe, reported as
+a stopped yard with stopped intent; an initialized broker yard stays a host owner. Release work holds the per-yard lock init holds,
 so release repair and init of one yard never interleave.
 
 After a failed observation or apply in a running yard, the core probes its guest agent: when Incus

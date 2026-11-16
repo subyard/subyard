@@ -408,50 +408,6 @@ func TestAdmittedRepairRechecksReleaseAfterConsent(t *testing.T) {
 	}
 }
 
-// The protected release lock serializes an admitted repair with migrate.
-func TestAdmittedRepairWaitsForTheReleaseLock(t *testing.T) {
-	scenario := newYardFailureScenario(t, true, true, "default", "named")
-	inspect := scenario.replayReleaseEngine(t)
-	scenario.converge(t)
-	observeFailing(t, scenario, "named")
-	recordReadiness(t, scenario, inspect)
-	program, _, _, _ := scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
-	outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "named")
-	if err != nil {
-		t.Fatal(err)
-	}
-	admitted, _, _ := program.decideGate(context.Background(), gateRequest{yard: "named", handler: "@teardown", arguments: []string{"--yes"}}, outcome, inspection)
-	if admitted == nil {
-		t.Fatal("teardown of the failed yard was not admitted")
-	}
-	program.gateAdmitted = admitted
-	store, err := releasetransition.NewPOSIXV2Store(scenario.request.ConfigHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release, err := store.Lock() // as a running migrate holds it
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, unlock, err := program.lockAdmittedRepair(context.Background())
-		if err == nil {
-			unlock()
-		}
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		t.Fatalf("admitted teardown did not wait for migrate: %v", err)
-	case <-time.After(300 * time.Millisecond):
-	}
-	release()
-	if err := <-done; err != nil {
-		t.Fatalf("admitted teardown after migrate: %v", err)
-	}
-}
-
 // A declared shutdown verb is a repair command of a yard limited to repair,
 // for the direct CLI and RPC alike; other verbs are not.
 func TestShutdownVerbIsARepairCommandForCLIAndRPC(t *testing.T) {
@@ -550,5 +506,76 @@ func TestHostSettingWaitsForAnotherYardsPendingInit(t *testing.T) {
 	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "a host or shared setting reaches yard named") ||
 		!strings.Contains(stderr.String(), "next: yard -Y named init") && !strings.Contains(stderr.String(), "next: 'yard' '-Y' 'named' 'init'") {
 		t.Fatalf("host setting beside a pending yard: code=%d %s%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// Gate admission and its effect boundary never take the release update lock,
+// which Converge takes inside the owner barrier: an admitted repair finishes
+// while a converge holds it, in either order, so neither can deadlock.
+func TestAdmittedRepairNeverWaitsForTheReleaseUpdateLock(t *testing.T) {
+	for _, order := range []string{"converge-first", "repair-first"} {
+		t.Run(order, func(t *testing.T) {
+			scenario := newYardFailureScenario(t, true, true, "default", "named")
+			inspect := scenario.replayReleaseEngine(t)
+			scenario.converge(t)
+			observeFailing(t, scenario, "named")
+			recordReadiness(t, scenario, inspect)
+			store, err := releasetransition.NewPOSIXV2Store(scenario.request.ConfigHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var release func()
+			if order == "converge-first" {
+				if release, err = store.Lock(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			done := make(chan bool, 1)
+			go func() { done <- gateRefused(t, scenario, "-Y", "named", "stop") }()
+			select {
+			case refused := <-done:
+				if refused {
+					t.Fatal("stop of the failed yard was refused")
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("admitted repair waited for the release update lock")
+			}
+			if release != nil {
+				release()
+			} else if unlock, err := store.Lock(); err != nil {
+				t.Fatal(err)
+			} else {
+				unlock()
+			}
+		})
+	}
+}
+
+// The effect boundary compares the release history the admission saw: a
+// migrate that rewrote the journal while consent was pending refuses the
+// command before any effect, on a ready release too.
+func TestEffectBoundaryRefusesChangedHistory(t *testing.T) {
+	if !historyCheckOnReadyRelease {
+		t.Skip("history check limited to degraded admissions")
+	}
+	scenario := newYardFailureScenario(t, true, true, "default", "named")
+	inspect := scenario.replayReleaseEngine(t)
+	scenario.converge(t)
+	recordReadiness(t, scenario, inspect)
+	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, scenario.fixture.journalPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.Transaction = "tx-ffffffffffffffffffffffffffffffff"
+	rewritten, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := confirmingPrompt{during: func() { testkit.WriteFile(t, scenario.fixture.journalPath, rewritten, 0o600) }}
+	program, _, stdout, stderr := scenario.fixture.program(t, []string{"-Y", "default", "stop"}, prompt, func(nestedCall, io.Writer) int { return 0 })
+	code := program.Run(context.Background())
+	incus := scenario.fixture.cli.options.Incus.(*testkit.Incus)
+	if code == 0 || !strings.Contains(stderr.String(), "the release changed after confirmation") || len(incus.PowerUpdates) != 0 {
+		t.Fatalf("stop ran over a changed history: code=%d updates=%v\n%s%s", code, incus.PowerUpdates, stdout, stderr)
 	}
 }

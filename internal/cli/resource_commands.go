@@ -536,11 +536,9 @@ func (runner *resourceApplyRunner) Run(
 	if err := validateResourceHandler(runner.definition.HandlerPath()); err != nil {
 		return result, "", err
 	}
-	ctx, unlockRelease, err := runner.cli.lockAdmittedRepair(ctx)
-	if err != nil {
+	if err := runner.cli.beginEffects(ctx); err != nil {
 		return result, "", err
 	}
-	defer unlockRelease()
 	if runner.exact != nil {
 		return runner.runExactResource(ctx, request)
 	}

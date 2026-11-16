@@ -130,8 +130,12 @@ type CLI struct {
 	releaseTransitionChild       bool
 	permits                      recoveryPermits
 	// gateAdmitted records how a non-ready release gate admitted this
-	// invocation; execution rechecks it under the release lock.
-	gateAdmitted              *gateAdmission
+	// invocation; the effect boundary re-decides it.
+	gateAdmitted *gateAdmission
+	// admittedHistory is the release history the gate admission observed; the
+	// effect boundary requires it unchanged. effectsBegun marks that boundary.
+	admittedHistory *releaseHistoryToken
+	effectsBegun    bool
 	allowResetYard            bool
 	resourceSessionTransport  string
 	resourceWire              string
@@ -3387,7 +3391,7 @@ func (cli *CLI) operationPlanner(operationID string) *application.Orchestrator {
 	if clock == nil {
 		clock = wallClock{}
 	}
-	return &application.Orchestrator{Clock: clock, IDs: fixedIDSource{value: operationID}, Actions: cli.coreActions}
+	return &application.Orchestrator{Clock: clock, IDs: fixedIDSource{value: operationID}, Actions: cli.coreActions, BeforeEffects: cli.beginEffects}
 }
 
 func structuredAdapterContext(yard domain.Context) map[string]string {
@@ -4313,6 +4317,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, operationRPCError("identity_recovery_failed", identityErr)
 		}
 		if !releaseRecoveryCommand(definition) && !cleanupRecovery && !identityRecovery {
+			history, historyErr := operationCLI.readReleaseHistory()
+			if historyErr != nil {
+				return nil, operationRPCError(rpcMutationGateFailedCode, historyErr)
+			}
 			outcome, gateInspection, gateErr := operationCLI.inspectCommandMutationGate(
 				ctx, operationLoaded.Context.YardName, definition.Handler, params.Arguments,
 			)
@@ -4325,6 +4333,9 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 					return nil, mutationGateRPCError(outcome, gateInspection)
 				}
 				operationCLI.gateAdmitted = admitted
+			}
+			if err := operationCLI.admitHistory(history, outcome == nil); err != nil {
+				return nil, operationRPCError(rpcMutationGateFailedCode, err)
 			}
 		}
 		var prepared *preparedCommand
@@ -4439,6 +4450,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, operationRPCError("identity_recovery_failed", identityErr)
 		}
 		if !releaseRecoveryCommand(planned.Definition) && !cleanupRecovery && !identityRecovery {
+			history, historyErr := planned.CLI.readReleaseHistory()
+			if historyErr != nil {
+				return nil, operationRPCError(rpcMutationGateFailedCode, historyErr)
+			}
 			outcome, gateInspection, gateErr := planned.CLI.inspectCommandMutationGate(
 				ctx, planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments,
 			)
@@ -4451,6 +4466,9 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 					return nil, mutationGateRPCError(outcome, gateInspection)
 				}
 				planned.CLI.gateAdmitted = admitted
+			}
+			if err := planned.CLI.admitHistory(history, outcome == nil); err != nil {
+				return nil, operationRPCError(rpcMutationGateFailedCode, err)
 			}
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {

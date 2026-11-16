@@ -22,6 +22,9 @@ type Orchestrator struct {
 	Audit              ports.AuditSink
 	Events             ports.EventSink
 	Actions            *domain.ActionRegistry
+	// BeforeEffects is the caller's effect boundary for adapters run without
+	// a prepared command that already passed it; nil means none.
+	BeforeEffects      func(context.Context) error
 	mu                 sync.Mutex
 	revision           uint64
 	planAuthorizations map[string]domain.OperationPlan
@@ -339,6 +342,11 @@ func (orchestrator *Orchestrator) RunAdapter(
 	}
 	if !orchestrator.adapterPlanAuthorized(plan) {
 		return domain.AdapterResult{}, "", fmt.Errorf("%w: operation plan is not authorized", domain.ErrActionPolicyInvalid)
+	}
+	if orchestrator.BeforeEffects != nil {
+		if err := orchestrator.BeforeEffects(ctx); err != nil {
+			return domain.AdapterResult{}, "", err
+		}
 	}
 
 	if orchestrator.Runner == nil {
