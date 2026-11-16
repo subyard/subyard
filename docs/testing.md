@@ -694,7 +694,10 @@ request VM execution. Core VM checks are the lanes in `dev/e2e/release-vm-checks
 and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
 selects one family. A catalog entry's optional `requires` lists sibling checks that must also pass
 whenever that check is requested or recorded; preparation records them in the receipt and the
-candidate's catalog must still match. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
+candidate's catalog must still match. Selecting a check also runs its required checks that have not
+passed for the candidate, so `run --only vm:p0-full --slots 1 2 3` runs the full P0 outside a release:
+`vm:p0-full --split-covered` plus its split checks; `--exclude` keeps a required check not run and the
+result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
 runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
 the next check; a refusal, interruption, timeout, cleanup failure or attempt without a lease stops the slot,
 so an unusable slot cannot turn later checks into failures. One collector owns a candidate's receipt

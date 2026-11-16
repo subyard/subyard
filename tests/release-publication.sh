@@ -2866,7 +2866,7 @@ class HostedChecks(unittest.TestCase):
              patch.object(m, "wait_ci_hosted", side_effect=record("wait")):
             m.accept_checks(self.github, self.directory, self.identity, [], [], False, [], 60)
         self.assertEqual(calls, [("run", (), [])])
-        # A failed local pass is reported without waiting for hosted jobs.
+        # A failed local pass is reported without waiting for hosted jobs or running them locally.
         calls.clear()
         receipt = json.loads((self.output / "receipt.json").read_text())
         failed = {**receipt, "result": "failed"}
@@ -2875,8 +2875,8 @@ class HostedChecks(unittest.TestCase):
              patch.object(m.json, "loads", side_effect=lambda text, *args, **kwargs: failed if text == (self.output / "receipt.json").read_text() else json.JSONDecoder().decode(text)), \
              patch.object(m, "wait_ci_hosted", side_effect=record("wait")), \
              patch.object(m, "collect_ci", side_effect=record("collect")):
-            m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60)
-        self.assertEqual([call[0] for call in calls], ["run", "collect", "run"])
+            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 1)
+        self.assertEqual([call[0] for call in calls], ["run", "collect"])
 
     def test_wait_is_bounded_and_zero_override_collects_without_wait(self):
         with patch.object(m, "discover") as discover:

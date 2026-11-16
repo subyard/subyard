@@ -3341,7 +3341,7 @@ class FullSplitRequirement(unittest.TestCase):
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 report = m.preflight(output, only=["vm:p0-full"], with_vms=True)
             rows = {item["id"]: item for item in report["checks"]}
-            self.assertTrue(rows["vm:p0-split"]["required"] and not rows["vm:p0-split"]["selected"])
+            self.assertTrue(rows["vm:p0-split"]["required"] and rows["vm:p0-split"]["selected"])
             # A recorded but unselected owner still makes its split check required.
             recorded = copy.deepcopy(receipt)
             recorded["checks"]["vm:p0-full"] = {"status": "pending"}
@@ -3370,36 +3370,43 @@ class FullSplitRequirement(unittest.TestCase):
             report = m.preflight(only=["vm:p0-full"], with_vms=True)
         rows = {item["id"]: item for item in report["checks"]}
         for name in m.core_vm_requirements(root)["vm:p0-full"]:
-            self.assertTrue(rows[name]["required"] and not rows[name]["selected"], name)
+            self.assertTrue(rows[name]["required"] and rows[name]["selected"], name)
 
-    def test_run_only_full_requires_split_checks(self):
+    def test_run_only_full_runs_its_split_checks(self):
         # Synthetic receipt: an otherwise passing candidate with optional VM checks not run.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary)
-            checks = {name: ["true"] for name in ("verify", "p0-release-smoke", "vm:p0-full", "vm:p0-split")}
-            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
-                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
-                       "requirements": {"vm:p0-full": ["vm:p0-split"]},
-                       "checks": {name: {"status": "passed"} if name in ("verify", "p0-release-smoke")
-                                  else m.OPTIONAL_VM_NOT_RUN.copy() for name in checks}}
-            calls, stdout = [], io.StringIO()
-            def execute(name, *args, **kwargs):
-                calls.append(name)
-                return {"status": "passed", "exit_code": 0}
-            with patch.object(m, "load_bound", return_value=(output, receipt)), \
-                 patch.object(m, "commands", return_value=checks), \
-                 patch.object(m, "execution_environment", return_value={}), \
-                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
-                 patch.object(m, "execute", side_effect=execute), redirect_stdout(stdout):
-                self.assertEqual(m.run_checks(output, [1], ["vm:p0-full"], False), 1)
-            self.assertEqual(calls, ["vm:p0-full"])
-            self.assertEqual(receipt["checks"]["vm:p0-split"]["status"], "pending")
-            self.assertEqual(receipt["result"], "incomplete")
-            self.assertIn("overall=incomplete", stdout.getvalue())
-            invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
-            self.assertEqual((invocation["selected"], invocation["requested"]), (["vm:p0-full"], ["vm:p0-full", "vm:p0-split"]))
-            self.assert_requires_split(receipt)
+        checks = {name: ["true"] for name in ("verify", "p0-release-smoke", "vm:p0-full", "vm:p0-split")}
+        for case, split, rerun, exclude, calls_expected, code, result in (
+                ("fresh", m.OPTIONAL_VM_NOT_RUN.copy(), False, [], ["vm:p0-full", "vm:p0-split"], 0, "passed"),
+                ("passed-split-not-rerun", {"status": "passed"}, True, [], ["vm:p0-full"], 0, "passed"),
+                ("excluded-split", m.OPTIONAL_VM_NOT_RUN.copy(), False, ["vm:p0-split"], ["vm:p0-full"], 1, "incomplete")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "requirements": {"vm:p0-full": ["vm:p0-split"]},
+                           "checks": {"verify": {"status": "passed"}, "p0-release-smoke": {"status": "passed"},
+                                      "vm:p0-full": m.OPTIONAL_VM_NOT_RUN.copy(), "vm:p0-split": split}}
+                calls, stdout = [], io.StringIO()
+                def execute(name, *args, **kwargs):
+                    calls.append(name)
+                    return {"status": "passed", "exit_code": 0}
+                with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                     patch.object(m, "commands", return_value=checks), \
+                     patch.object(m, "execution_environment", return_value={}), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m, "execute", side_effect=execute), redirect_stdout(stdout):
+                    self.assertEqual(m.run_checks(output, [1], ["vm:p0-full"], rerun, exclude=exclude), code)
+                self.assertEqual(calls, calls_expected)
+                self.assertEqual(receipt["result"], result)
+                self.assertIn("overall=" + result, stdout.getvalue())
+                invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+                selected = ["vm:p0-full"] if exclude else ["vm:p0-full", "vm:p0-split"]
+                self.assertEqual((invocation["selected"], invocation["requested"]), (selected, ["vm:p0-full", "vm:p0-split"]))
+                if exclude:
+                    # Required, not run, and recorded as an operator exclusion that keeps the result incomplete.
+                    self.assertEqual(receipt["checks"]["vm:p0-split"]["status"], "pending")
+                    self.assertEqual(receipt["operator_exclusions"], ["vm:p0-split"])
 
     def test_imported_full_requires_split_checks(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

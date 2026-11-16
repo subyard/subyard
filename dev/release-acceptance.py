@@ -398,6 +398,11 @@ def optional_vm_unrequired(name, result, required):
     return optional_vm_not_run(name, result) and name not in required
 
 
+def selected_requirements(receipt, names):
+    """Checks that these selected checks require and that a run therefore also selects."""
+    return set(required_vm_checks({name: {"status": "pending"} for name in names}, receipt.get("requirements", {}))) - set(names)
+
+
 def with_requirements(receipt, names):
     """Names plus the checks required when these are requested, together with recorded owners."""
     requested = {**receipt["checks"], **{name: {"status": "pending"} for name in names}}
@@ -1122,6 +1127,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                     receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     checks = receipt["checks"]
     selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
+    selected |= selected_requirements(receipt, selected)
     excluded = select_checks(checks, exclude)
     if "p0-release-smoke" in excluded:
         raise ValueError("p0-release-smoke is required and cannot be excluded")
@@ -1309,7 +1315,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
     prioritized = select_checks(checks, first)
     selected |= prioritized
-    # A requested check also requests what it requires; the selection to run stays exact.
+    # A selected check also runs what it requires, such as vm:p0-full its split checks; a
+    # required check that already passed is not rerun, and an excluded one stays not run.
+    dependencies = selected_requirements(receipt, selected)
+    selected |= dependencies
     requested = with_requirements(receipt, selected)
     excluded = select_checks(checks, exclude)
     if "p0-release-smoke" in excluded:
@@ -1328,7 +1337,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     capacity_wait = env.pop("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
-               and (rerun or receipt["checks"][name]["status"] != "passed")]
+               and ((rerun and name not in dependencies) or receipt["checks"][name]["status"] != "passed")]
     live = [name for name in pending if is_live(name)]
     durations = duration_estimates(receipt, previous)
     live.sort(key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
