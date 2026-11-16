@@ -61,7 +61,7 @@ func RunBootPower(
 		if domain.SafeName(yard.Yard) {
 			next = "yard -Y " + yard.Yard + " init"
 		}
-		fmt.Fprintf(stdout, "subyard-power: %s is not initialized; left stopped; next: %s\n", yard.Instance, next)
+		fmt.Fprintf(stdout, "subyard-power: %s is not initialized; skipped; next: %s\n", yard.Instance, next)
 	}
 	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning)+len(result.Waiting)+len(result.PublicationWaiting)+len(result.Uninitialized) == 0 {
 		fmt.Fprintln(stdout, "subyard-power: no managed yards")

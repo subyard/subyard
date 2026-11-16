@@ -208,3 +208,23 @@ func (err guestAgentLostError) ActivationDiagnostic() (string, string) {
 	message += fmt.Sprintf("; retry yard migrate, and if it persists run yard -Y %s stop --force, then yard -Y %s start, then yard migrate", err.yard, err.yard)
 	return message, "run yard migrate"
 }
+
+// observedYardsError is an owner's failure in some yards together with what
+// it observed in the others, so a failure in one yard never hides another
+// yard's drift. Without attribution of the failure itself it attributes
+// nothing, which keeps the release gate host-wide.
+type observedYardsError struct {
+	error
+	home     string
+	observed []releasetransition.V2YardAttribution
+}
+
+func (err observedYardsError) Unwrap() error { return err.error }
+
+func (err observedYardsError) ActivationYardFindings() []releasetransition.V2YardAttribution {
+	own, ok := activationYardFindings(err.error, "", true, err.home)
+	if !ok {
+		return nil
+	}
+	return append(own, err.observed...)
+}

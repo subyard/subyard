@@ -1353,11 +1353,19 @@ after plan binding and only for completed history: decisions with scope `yard-at
 unchanged, so an older CLI stays closed. The CLI accepts only its own yard-scoped owners (profile
 runtimes, core guest runtime, materialized configuration), reads the journal and ledger itself, and
 treats anything outside the grammar as host-wide. A yard that is not converged admits only its
-repair commands: `init` (including `--reset`), `teardown`, `start`, `stop`, `shell`, `config`,
-`profile` or `integration disable` and profile resource shutdown verbs. A yard with only typed
-pending findings keeps unrelated commands, its plain init and resource verbs. Other yards and host
-commands stay open, and `config apply --all-local` skips and reports yards limited to repair. An
-init succeeds when its own yard converged and reports the other yards' findings. The default yard's
+repair commands: plain `init` and `init --reset` (other init modes change what the yard is or do
+only part of its convergence), `teardown`, `start`, `stop`, `shell`, `config`, `profile` or
+`integration disable` and profile resource shutdown verbs; its next step is its own init. A yard
+with only typed pending findings keeps unrelated commands, its plain init and resource verbs. Other
+yards and host commands stay open. `config apply --all-local` skips and reports yards limited to
+repair, yards with pending findings and yards whose own configuration cannot be loaded; a host or
+shared setting waits while any yard has pending findings; `network link` refuses a yard limited to
+repair, and `network isolation` names such yards. An owner's failure in one yard carries what it
+observed in the others, so one failed yard never hides another's drift. A command admitted behind a
+non-ready gate rechecks its admission after consent, under the protected release lock that migrate
+and update hold, and keeps that lock through its effects; a transition started meanwhile refuses it.
+The direct CLI and RPC share this admission. An init succeeds when its own yard converged and
+reports the other yards' findings. The default yard's
 own invalid configuration underlies every yard, so then every yard admits only its repair commands.
 An invalid configuration of another yard is that yard's finding; host power and host key tools
 serve the yards that load. `yard status` states the release once, as `active and complete; yard NAME
@@ -1367,8 +1375,10 @@ non-ready status.
 A yard whose last init did not finish (`user.subyard.initialized=false`) is not part of the release:
 every yard-scoped owner leaves it to its own init like a stopped yard, decided once per engine
 process and only narrowing within it, with one warning naming `yard -Y NAME init`. Only init
-finalize sets the mark; `start` and `stop` keep it. The boot power reconciler leaves such a yard
-stopped, reports it and restores the other yards. Release work holds the per-yard lock init holds,
+finalize sets the mark; `start` and `stop` keep it. The power reconciler, at boot and on its start
+and publication retries, never powers such a yard in any state, reports it and restores the other
+yards. A test-VM broker yard in that state is left to its init too; an initialized broker yard
+stays a host owner. Release work holds the per-yard lock init holds,
 so release repair and init of one yard never interleave.
 
 After a failed observation or apply in a running yard, the core probes its guest agent: when Incus
@@ -1379,8 +1389,9 @@ migrate`. A guest exit status is an answer, not agent loss. Ordinary updates sti
 activation for a yard with invalid configuration, an unreachable agent or an unknown failure; they
 proceed without a stopped, absent or uninitialized yard. The guest temporary-storage step keeps its
 own rules above.
-While an activation of the active release is unfinished, `yard -Y NAME stop` and `stop --force` of a
-local yard are admitted, so the activation can finish without it; teardown is not.
+While an activation of the active release is unfinished, including when its inspection is refused
+by an observation such as a lost guest agent, `yard -Y NAME stop` and `stop --force` of a local yard
+are admitted, so the activation can finish without it; teardown is not.
 
 Releases before this gate could lock a host after a failed first init of a new yard: every command
 was refused until the broken yard stopped. On such a host, stop that yard's instance once with

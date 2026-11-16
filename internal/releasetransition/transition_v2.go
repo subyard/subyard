@@ -3604,6 +3604,11 @@ func (observation *v2Observation) attributeYard(owner, kind, yard string) {
 // activationErrorYards returns the yard findings of a failure only when every
 // cause attributes all of its parts to yards.
 func activationErrorYards(err error) ([]V2YardAttribution, bool) {
+	// An owner's failure may carry the other yards' observed findings with it.
+	if attributed, ok := err.(ActivationYardError); ok {
+		findings := attributed.ActivationYardFindings()
+		return findings, len(findings) != 0
+	}
 	var findings []V2YardAttribution
 	for _, cause := range refusalCauses(err) {
 		var attributed ActivationYardError

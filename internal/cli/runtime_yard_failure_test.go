@@ -762,7 +762,6 @@ func TestConfigurationCommandsOnUnpendingYardWhileAnotherIsPending(t *testing.T)
 			for _, arguments := range [][]string{
 				{"-Y", "default", "init", "--yes"},
 				{"-Y", "default", "config", "set", "LIMITS_MEMORY", "4GiB", "--scope", "yard", "--local", "--yes"},
-				{"-Y", "default", "config", "set", "LIMITS_MEMORY", "4GiB", "--scope", "host", "--local", "--yes"},
 				{"-Y", "default", "profile", "enable", "sample", "--yes"},
 			} {
 				var stdout, stderr bytes.Buffer

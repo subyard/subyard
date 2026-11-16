@@ -601,6 +601,13 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		return domain.AdapterResult{}, err
 	}
 	defer finish()
+	// A command admitted behind a non-ready release gate rechecks that
+	// admission after consent and holds the release lock through its effects.
+	ctx, unlockRelease, err := prepared.CLI.lockAdmittedRepair(ctx)
+	if err != nil {
+		return domain.AdapterResult{}, err
+	}
+	defer unlockRelease()
 	if prepared.Loaded.Context.AccessKind == domain.AccessLocal && !prepared.remotePhased {
 		recovery := prepared.CLI.fullTeardownRecovery != "" || (prepared.Plan.Assessment != nil && prepared.Plan.Assessment.Action == "yard.teardown.full")
 		unlock, lockErr := prepared.CLI.acquireOwnerMutation(ctx, prepared.ownerAdmission, recovery, false)

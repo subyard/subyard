@@ -256,7 +256,10 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		}
 	}
 	if err := domain.CollectRefusals(failures...); err != nil {
-		return releasetransition.V2ActivationObservation{}, err
+		if reconciler.id == "key-tools-runtime" {
+			return releasetransition.V2ActivationObservation{}, err
+		}
+		return releasetransition.V2ActivationObservation{}, observedYardsError{err, reconciler.request.ConfigHome, yards}
 	}
 	slices.Sort(warnings)
 	warnings = slices.Compact(warnings)

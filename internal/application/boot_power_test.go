@@ -169,14 +169,16 @@ func TestBootPowerReconcilerRestoresDesiredState(t *testing.T) {
 	}
 }
 
-// A yard whose init never finished is left stopped and reported; it does not
-// keep the other yards from being restored.
-func TestBootPowerLeavesUninitializedYardStoppedAndRestoresOthers(t *testing.T) {
+// A yard whose init never finished is skipped and reported in any power state,
+// including a transitional one; the other yards are restored.
+func TestBootPowerSkipsUninitializedYardsAndRestoresOthers(t *testing.T) {
 	broken := managedPowerInstance("p", "broken", "Running", domain.PowerRunning)
 	broken.Config["user.subyard.initialized"] = "false"
+	starting := managedPowerInstance("p", "starting", "Starting", domain.PowerRunning)
+	starting.Config["user.subyard.initialized"] = "false"
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		"p/broken": broken,
-		"p/start":  managedPowerInstance("p", "start", "Stopped", domain.PowerRunning),
+		"p/broken": broken, "p/starting": starting,
+		"p/start": managedPowerInstance("p", "start", "Stopped", domain.PowerRunning),
 	}}
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
@@ -187,15 +189,11 @@ func TestBootPowerLeavesUninitializedYardStoppedAndRestoresOthers(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result.Started, []string{"p/start"}) || !reflect.DeepEqual(result.Stopped, []string{"p/broken"}) ||
-		!reflect.DeepEqual(result.Uninitialized, []BootUninitialized{{Instance: "p/broken", Yard: "broken"}}) {
+	if !reflect.DeepEqual(result.Started, []string{"p/start"}) || len(result.Stopped) != 0 ||
+		!reflect.DeepEqual(result.Uninitialized, []BootUninitialized{{Instance: "p/broken", Yard: "broken"}, {Instance: "p/starting", Yard: "starting"}}) {
 		t.Fatalf("unexpected result: %#v", result)
 	}
-	wantUpdates := []testkit.InstancePowerUpdate{
-		{Project: "p", Name: "broken", Action: "stop"},
-		{Project: "p", Name: "start", Action: "start"},
-	}
-	if !reflect.DeepEqual(fake.PowerUpdates, wantUpdates) {
+	if !reflect.DeepEqual(fake.PowerUpdates, []testkit.InstancePowerUpdate{{Project: "p", Name: "start", Action: "start"}}) {
 		t.Fatalf("unexpected power updates: %#v", fake.PowerUpdates)
 	}
 }

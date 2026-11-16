@@ -25,8 +25,8 @@ type BootPowerResult struct {
 	Waiting            []BootAddressWait
 	PublicationWaiting []BootAddressWait
 	PublicationErrors  []error
-	// Uninitialized yards never finished init; they are left stopped while
-	// the other yards are restored.
+	// Uninitialized yards never finished init; they are skipped and reported
+	// while the other yards are restored.
 	Uninitialized []BootUninitialized
 }
 
@@ -75,20 +75,12 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 	if err != nil {
 		return result, err
 	}
+	// A yard whose init did not finish is never powered here, in any state:
+	// a stopped one stays down, and a running one may be in its init or
+	// under the operator's diagnosis. The other yards are restored.
 	for _, instance := range uninitialized {
-		reference := instanceReference(instance)
 		yard, _ := instance.EffectiveConfig(powerYardNameKey)
-		switch strings.ToLower(instance.Status) {
-		case "stopped":
-		case "running":
-			if err := reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "stop", false); err != nil {
-				return result, fmt.Errorf("stop uninitialized %s: %w", reference, err)
-			}
-			result.Stopped = append(result.Stopped, reference)
-		default:
-			return result, fmt.Errorf("cannot leave uninitialized %s stopped from state %q", reference, instance.Status)
-		}
-		result.Uninitialized = append(result.Uninitialized, BootUninitialized{Instance: reference, Yard: yard})
+		result.Uninitialized = append(result.Uninitialized, BootUninitialized{Instance: instanceReference(instance), Yard: yard})
 	}
 	if len(instances) == 0 {
 		return result, nil

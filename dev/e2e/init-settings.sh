@@ -216,12 +216,20 @@ if yard integration enable claude --yes > "$STATE/failed-hook.log" 2>&1; then
   exit 1
 fi
 guest rm -- /var/lib/subyard-fixture-hook-fail
-yard integration enable claude --yes
-printf 'PASS: direct integration enable retries a failed hook without migrate\n'
+# The failed hook leaves this yard's integration drift: enable is not one of its
+# repair commands, and the refusal names the yard's own init as the next step.
+if yard integration enable claude --yes > "$STATE/retry-refusal.log" 2>&1; then
+  printf 'init-settings: integration enable ran on a yard limited to repair\n' >&2
+  exit 1
+fi
+grep -Fq 'release gate: yard default needs repair' "$STATE/retry-refusal.log"
+grep -Fq 'next: yard -Y default init' "$STATE/retry-refusal.log"
+yard init --yes
+printf 'PASS: a failed integration hook is repaired by the yard init\n'
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("applied_settings",None); open(p,"w").write(json.dumps(value))'
-yard integration enable claude --yes
+yard init --yes
 guest python3 -c 'import json; value=json.load(open("/var/lib/subyard/integrations/inventory.json")); assert value["applied_settings"]["AGENT_claude_COMMAND"] == "fixture-agent-next"'
-printf 'PASS: converged integration retry restores the applied baseline\n'
+printf 'PASS: yard init restores the applied baseline\n'
 guest mv /usr/local/libexec/subyard/projects-changed /usr/local/libexec/subyard/projects-changed.fixture-backup
 if yard stop --yes > "$STATE/missing-owned-file.log" 2>&1; then
   printf 'init-settings: applied baseline concealed a missing owned dispatcher\n' >&2

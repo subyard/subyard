@@ -939,8 +939,10 @@ ordinary init. Corrupt installed artifacts and unsafe configuration retain their
 | Custom integration inputs | `AGENT_<id>_COMMAND`, `_CHECK`, `_HEALTH`, `_PROJECTS_CHANGED`, `_DEPENDS`, `_PERSIST` and configured provisioning paths |
 | Credential tools | `SUBYARD_AGE_VERSION`, `SUBYARD_SOPS_VERSION` and their `SHA256_AMD64`/`SHA256_ARM64` pins |
 
-A failed `integration enable` can be retried directly after its hook is repaired.
-The retry obtains a fresh native plan and retains the completed release journal.
+A failed `integration enable` leaves that yard's integration drift. While it remains, the yard
+admits only its repair commands, so `integration enable` is refused; after the hook is repaired,
+run `yard -Y NAME init`, which applies the same integration with a fresh native plan and retains
+the completed release journal.
 The protected integration inventory retains validated non-secret applied inputs.
 A failed apply keeps the previous baseline; successful verification publishes the
 new one. Before editing an older installation without that baseline, authoring

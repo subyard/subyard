@@ -269,17 +269,6 @@ func (cli *CLI) prepareActivationRepair(
 	}, nil
 }
 
-func validSlotCountRepairObservation(observation ports.RuntimeObservation) bool {
-	if observation.HookBinding != "" ||
-		!validConfigApplyActivationObservation(releasetransition.V2ActivationObservation{
-			Actual: releasetransition.Fingerprint(observation.Actual), Desired: releasetransition.Fingerprint(observation.Desired),
-		}) {
-		return false
-	}
-	return observation.State == ports.RuntimeStateCurrent && observation.Actual == observation.Desired ||
-		observation.State == ports.RuntimeStateStale && observation.Actual != observation.Desired
-}
-
 func readConfigApplyRegistry(root string) ([]byte, error) {
 	file, err := os.OpenFile(filepath.Join(root, "config", "release-transition.json"), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -323,9 +312,11 @@ func (cli *CLI) lockConfigApplyRepair(
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := store.Lock()
-	if err != nil {
-		return nil, err
+	unlock := func() {}
+	if ctx.Value(releaseLockHeldKey{}) == nil {
+		if unlock, err = store.Lock(); err != nil {
+			return nil, err
+		}
 	}
 	refreshed, err := cli.prepareActivationRepair(
 		ctx, permit.yard, permit.allLocal, permit.gate, activationRepairMode{selectedNames: permit.selectedTargetNames},

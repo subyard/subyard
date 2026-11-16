@@ -129,9 +129,9 @@ type CLI struct {
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
 	permits                      recoveryPermits
-	// gateYards is the yard-scoped gate that admitted this invocation, if any;
-	// multi-yard verbs skip and report the yards it leaves to repair.
-	gateYards                 *yardGate
+	// gateAdmitted records how a non-ready release gate admitted this
+	// invocation; execution rechecks it under the release lock.
+	gateAdmitted              *gateAdmission
 	allowResetYard            bool
 	resourceSessionTransport  string
 	resourceWire              string
@@ -4319,8 +4319,12 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if gateErr != nil {
 				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
-			if outcome != nil && !operationCLI.gateAdmitsOrdinary(operationLoaded.Context.YardName, definition.Handler, params.Arguments, outcome, gateInspection) {
-				return nil, mutationGateRPCError(outcome, gateInspection)
+			if outcome != nil {
+				admitted, _, _ := operationCLI.decideGate(ctx, operationCLI.rpcGateRequest(operationLoaded.Context.YardName, definition, params.Command, params.Arguments), outcome, gateInspection)
+				if admitted == nil {
+					return nil, mutationGateRPCError(outcome, gateInspection)
+				}
+				operationCLI.gateAdmitted = admitted
 			}
 		}
 		var prepared *preparedCommand
@@ -4441,8 +4445,12 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if gateErr != nil {
 				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
-			if outcome != nil && !planned.CLI.gateAdmitsOrdinary(planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments, outcome, gateInspection) {
-				return nil, mutationGateRPCError(outcome, gateInspection)
+			if outcome != nil {
+				admitted, _, _ := planned.CLI.decideGate(ctx, planned.CLI.rpcGateRequest(planned.Loaded.Context.YardName, planned.Definition, planned.Definition.Name, planned.Arguments), outcome, gateInspection)
+				if admitted == nil {
+					return nil, mutationGateRPCError(outcome, gateInspection)
+				}
+				planned.CLI.gateAdmitted = admitted
 			}
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {

@@ -1624,6 +1624,9 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 		consequences = append([]string{"reactivate the verified retained previous runtime"}, consequences...)
 	}
 	for _, decision := range inspection.Decisions {
+		if decision.Scope == releasetransition.YardAttributionScope {
+			continue
+		}
 		consequences = append(consequences, releaseDecisionConsequence(decision))
 	}
 	changed := inspection.Assessment.Changed

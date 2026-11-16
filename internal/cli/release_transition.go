@@ -717,6 +717,15 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 			// Release repair leaves a deferred broker yard untouched; its state
 			// stays in Desired, like the materialized configuration of that yard.
 			deferred := err == nil && cli.activation != nil && cli.activation.repair && cli.activation.pending.decided(ctx, releasetransition.ReleasePair{})[yard]
+			// A broker yard whose init did not finish is left to that init, like
+			// every yard-scoped owner leaves it; an initialized one stays host-level.
+			if err == nil && !deferred && yard != "" {
+				if loaded, loadErr := cli.resolveReleaseTransitionContext(ctx, yard, request.ConfigHome, files); loadErr == nil {
+					// A failed read is left to the broker's own observation, which reports it.
+					uninitialized, probeErr := cli.releaseActivationOperation(request).releaseYardUninitialized(ctx, configTarget{Name: yard, Loaded: loaded})
+					deferred = probeErr == nil && uninitialized
+				}
+			}
 			return activationApplicability{
 				state: string(state), applies: state == testyardmigration.BrokerRuntimeActive && !deferred,
 				target: yard,
@@ -1295,7 +1304,14 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	deferring := reconciler.cli.activation != nil && reconciler.cli.activation.repair && files == nil
 	pending, err := reconciler.deferPendingYards(refusals, spans, &activationTargets, &consequences, deferring)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
+		// The yards observed beside the refused ones keep their drift.
+		var observed []releasetransition.V2YardAttribution
+		for _, target := range activationTargets {
+			if target.Assessment.Changed || target.Assessment.State == "drift" || target.IntegrationChanged {
+				observed = append(observed, releasetransition.V2YardAttribution{Yard: target.Name, Kind: releasetransition.YardFindingDrift})
+			}
+		}
+		return releasetransition.V2ActivationObservation{}, observedYardsError{err, reconciler.configHome, observed}
 	}
 	assessed := config.AssessMaterializationActivation(activationTargets)
 	// The frozen protocol requires a sorted warning list.

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/command"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
@@ -134,7 +136,7 @@ func (cli *CLI) yardScopedGate(outcome *releasetransition.Outcome, inspection *r
 	if !cli.completedHistoryClean(*outcome) {
 		return gate, false
 	}
-	for owner, items := range attribution {
+	for _, items := range attribution {
 		for _, item := range items {
 			state := gate.yards[item.yard]
 			if state == nil {
@@ -144,7 +146,7 @@ func (cli *CLI) yardScopedGate(outcome *releasetransition.Outcome, inspection *r
 			}
 			switch item.kind {
 			case releasetransition.YardFindingDrift:
-				state.drift = drift[owner] || state.drift
+				state.drift = true
 			case releasetransition.YardFindingFailed:
 				state.failed = true
 			case releasetransition.YardFindingUnreachable:
@@ -232,7 +234,14 @@ func (cli *CLI) yardRepairInvocation(handler string, arguments []string, definit
 		return err == nil && definition.Shutdown != "" && invocation.verb == definition.Shutdown
 	}
 	switch handler {
-	case "@init", "@teardown", "@lifecycle", "@config", "@shell":
+	case "@init":
+		// Plain init repeats the yard's whole convergence and --reset rebuilds it;
+		// --configs, --profile, --adopt and --continue-legacy change what the yard
+		// is or does only part of the work, so they wait until it is converged.
+		request, err := parseInitArguments(arguments)
+		return err == nil && !request.adopt && !request.continueLegacy && request.profile == "" &&
+			(request.mode == initReconcile || request.mode == initReset)
+	case "@teardown", "@lifecycle", "@config", "@shell":
 		return true
 	case "@profile", "@integration":
 		for _, argument := range arguments {
@@ -248,6 +257,15 @@ func (cli *CLI) yardRepairInvocation(handler string, arguments []string, definit
 func (cli *CLI) yardGateAdmits(gate yardGate, yard, handler string, arguments []string, definition resource.Definition, profileResource bool) bool {
 	if !profileResource && slices.Contains(hostCommandHandlers, handler) {
 		return true
+	}
+	// A host or shared setting reaches every yard's desired configuration, so it
+	// waits while any yard's pending contract refuses configuration.
+	if !profileResource && handler == "@config" && configWritesEveryYard(arguments) {
+		for _, name := range gate.order {
+			if other := gate.state(name); other.pending && !other.repairOnly() {
+				return false
+			}
+		}
 	}
 	state := gate.state(yard)
 	switch {
@@ -276,7 +294,7 @@ func yardNextStep(yard string, state yardGateState) string {
 	case state.failed:
 		return "yard -Y " + yard + " init"
 	case state.drift:
-		return "yard migrate"
+		return "yard -Y " + yard + " init"
 	case state.retry != "":
 		return state.retry
 	}
@@ -286,6 +304,15 @@ func yardNextStep(yard string, state yardGateState) string {
 // yardGateRefusal is the one text refusal of a yard that admits only repair.
 func yardGateRefusal(yard string, gate yardGate) string {
 	state := gate.state(yard)
+	if !state.repairOnly() && !state.pending {
+		// Only a host or shared setting is refused for another yard's sake.
+		for _, name := range gate.order {
+			if other := gate.state(name); other.pending {
+				return fmt.Sprintf("release gate: a host or shared setting reaches yard %s, whose pending configuration refuses it\nnext: %s, then repeat this setting",
+					name, yardNextStep(name, other))
+			}
+		}
+	}
 	cause := "the release is active and complete, but this yard needs attention"
 	if len(state.messages) != 0 {
 		cause = state.messages[0]
@@ -303,11 +330,87 @@ func yardGateRefusal(yard string, gate yardGate) string {
 		yard, cause, yardNextStep(yard, state))
 }
 
-// gateAdmitsOrdinary is the one admission the direct CLI and RPC share.
-func (cli *CLI) gateAdmitsOrdinary(yard, handler string, arguments []string, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
-	gate, ok := cli.yardScopedGate(outcome, inspection)
-	return ok && cli.yardGateAdmits(gate, yard, handler, arguments, resource.Definition{}, false)
+// gateRequest is one invocation as the release gate decides it.
+type gateRequest struct {
+	yard, handler   string
+	arguments       []string
+	definition      resource.Definition
+	profileResource bool
+	stop            bool
 }
+
+// rpcGateRequest is the RPC form of an invocation, decided like the CLI's:
+// profile resource verbs keep their definition and stop keeps its exit.
+func (cli *CLI) rpcGateRequest(yard string, definition command.Definition, name string, arguments []string) gateRequest {
+	request := gateRequest{yard: yard, handler: definition.Handler, arguments: arguments,
+		stop: definition.Handler == "@lifecycle" && definition.Name == "stop" && !commandHelpRequested(arguments)}
+	if resourceDefinition, found := cli.resources.Lookup(name); found && definition.Handler == "@resource" {
+		request.handler, request.definition, request.profileResource = "", resourceDefinition, true
+	}
+	return request
+}
+
+// gateAdmission is how a non-ready gate admitted an invocation: by the
+// yard-scoped gate, or as the bounded stop over an unfinished activation.
+type gateAdmission struct {
+	request gateRequest
+	gate    *yardGate
+}
+
+// decideGate is the one admission of the direct CLI and RPC behind a non-ready
+// gate. scoped reports a yard-scoped refusal the caller renders by yard.
+func (cli *CLI) decideGate(ctx context.Context, request gateRequest, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) (*gateAdmission, yardGate, bool) {
+	if request.stop && cli.unfinishedActivationStop(ctx, request.yard, outcome, inspection) {
+		return &gateAdmission{request: request}, yardGate{}, false
+	}
+	gate, ok := cli.yardScopedGate(outcome, inspection)
+	if !ok {
+		return nil, gate, false
+	}
+	if cli.yardGateAdmits(gate, request.yard, request.handler, request.arguments, request.definition, request.profileResource) {
+		return &gateAdmission{request: request, gate: &gate}, gate, true
+	}
+	return nil, gate, true
+}
+
+// lockAdmittedRepair revalidates, after consent and before any effect, the
+// admission of an invocation behind a non-ready gate. It holds the protected
+// release lock that migrate and update hold, so the command never runs over a
+// transition that started meanwhile; the caller releases it after its effects.
+func (cli *CLI) lockAdmittedRepair(ctx context.Context) (context.Context, func(), error) {
+	if cli.gateAdmitted == nil || ctx.Value(releaseLockHeldKey{}) != nil {
+		return ctx, func() {}, nil
+	}
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return ctx, nil, fmt.Errorf("%w: release state is unavailable for the admitted repair", domain.ErrPlanStale)
+	}
+	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
+	if err != nil {
+		return ctx, nil, err
+	}
+	unlock, err := store.Lock()
+	if err != nil {
+		return ctx, nil, err
+	}
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, cli.gateAdmitted.request.yard)
+	if err == nil && outcome != nil {
+		if admitted, _, _ := cli.decideGate(ctx, cli.gateAdmitted.request, outcome, inspection); admitted == nil {
+			err = fmt.Errorf("%w: the release changed after confirmation: %s", domain.ErrPlanStale, strings.TrimSpace(mutationGateRefusalText(outcome, inspection)))
+		} else {
+			cli.gateAdmitted = admitted
+		}
+	}
+	if err != nil {
+		unlock()
+		return ctx, nil, err
+	}
+	return context.WithValue(ctx, releaseLockHeldKey{}, true), unlock, nil
+}
+
+// releaseLockHeldKey marks a context whose invocation holds the protected
+// release lock; nested bounded repairs reuse it instead of waiting on it.
+type releaseLockHeldKey struct{}
 
 // otherYardFindings reports each other implicated yard once, with its step.
 func (gate yardGate) otherYardFindings(yard string) []releasetransition.Blocker {
@@ -327,51 +430,50 @@ func (gate yardGate) otherYardFindings(yard string) []releasetransition.Blocker 
 }
 
 // skipGatedYards leaves out, and reports once, the other yards a multi-yard
-// verb must not touch while they admit only their own repair commands.
+// verb must not touch: those limited to repair and those whose pending
+// contract refuses configuration.
 func (cli *CLI) skipGatedYards(targets []configTarget, selected string, report bool) []configTarget {
-	if cli.gateYards == nil {
+	if cli.gateAdmitted == nil || cli.gateAdmitted.gate == nil {
 		return targets
 	}
+	gate := cli.gateAdmitted.gate
 	return slices.DeleteFunc(slices.Clone(targets), func(target configTarget) bool {
-		state := cli.gateYards.state(target.Name)
-		if target.Name == selected || !state.repairOnly() {
+		state := gate.state(target.Name)
+		if target.Name == selected || !state.repairOnly() && !state.pending {
 			return false
 		}
 		if report {
-			fmt.Fprintf(cli.options.Stderr, "yard: skipped yard %s: it needs repair; next: %s\n", target.Name, yardNextStep(target.Name, state))
+			fmt.Fprintf(cli.options.Stderr, "yard: skipped yard %s: it needs attention; next: %s\n", target.Name, yardNextStep(target.Name, state))
 		}
 		return true
 	})
 }
 
-// unfinishedActivationStop admits stopping one local yard while an activation
-// of the active release is unfinished. A stopped yard is deferred like any
-// stopped yard, so the release can complete without it; stop keeps its own
-// session guards, and --force its own consent. Nothing else is admitted there.
-func (cli *CLI) unfinishedActivationStop(ctx context.Context, yard string, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
-	if outcome.Status != releasetransition.StatusRecovering || outcome.Active == "" || outcome.Active != outcome.Target ||
-		inspection == nil || inspection.Outcome != outcome || inspection.Resume == nil {
-		return false
+// skipInvalidYards keeps a multi-yard verb going when other yards' own
+// configuration cannot be loaded: those yards are skipped and reported. The
+// selected yard's, or any other, refusal stays the verb's error.
+func (cli *CLI) skipInvalidYards(targets []configTarget, err error, loaded config.Loaded, report bool) ([]configTarget, error) {
+	if err == nil {
+		return targets, nil
 	}
-	options, available, err := cli.mutationGateReleaseOptions()
-	if err != nil || !available {
-		return false
+	home := loaded.Context.Paths.ConfigHome
+	findings, ok := activationYardFindings(err, "", true, home)
+	for _, finding := range findings {
+		ok = ok && finding.Kind == releasetransition.YardFindingConfig && finding.Yard != loaded.Context.YardName && finding.Yard != "default"
 	}
-	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
-	if err != nil {
-		return false
+	if !ok {
+		return targets, err
 	}
-	snapshot, err := store.ReadCurrentJournal()
-	if err != nil || !snapshot.Exists {
-		return false
+	if report {
+		reported := map[string]bool{}
+		for _, finding := range findings {
+			if !reported[finding.Yard] {
+				reported[finding.Yard] = true
+				fmt.Fprintf(cli.options.Stderr, "yard: skipped yard %s: its configuration is invalid; next: yard -Y %s config validate\n", finding.Yard, finding.Yard)
+			}
+		}
 	}
-	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	if err != nil || journal.Checkpoint != releasetransition.JournalReconciling || journal.Transaction != *inspection.Resume ||
-		journal.Goal.Target != outcome.Active {
-		return false
-	}
-	loaded, err := cli.loadContext(yard)
-	return err == nil && loaded.Context.AccessKind == domain.AccessLocal
+	return targets, nil
 }
 
 // statusYardGate classifies the local release for status when it is neither
@@ -407,6 +509,11 @@ func (cli *CLI) printYardAttention(gate yardGate, yard string) {
 	if _, implicated := gate.yards[yard]; !implicated && !gate.everyYard {
 		return
 	}
+	if gate.everyYard && yard != "default" {
+		fmt.Fprintln(cli.options.Stdout, "  attention the default yard's configuration is invalid; it underlies this yard")
+		fmt.Fprintf(cli.options.Stdout, "    next: %s\n", yardNextStep("default", gate.state("default")))
+		return
+	}
 	messages := state.messages
 	if len(messages) == 0 {
 		messages = []string{"this yard needs attention"}
@@ -415,4 +522,66 @@ func (cli *CLI) printYardAttention(gate yardGate, yard string) {
 		fmt.Fprintf(cli.options.Stdout, "  attention %s\n", message)
 	}
 	fmt.Fprintf(cli.options.Stdout, "    next: %s\n", yardNextStep(yard, state))
+}
+
+// unfinishedActivationStop admits stopping one local yard while an activation
+// of the active release is unfinished. A stopped yard is deferred like any
+// stopped yard, so the release can complete without it; stop keeps its own
+// session guards, and --force its own consent. Nothing else is admitted there.
+func (cli *CLI) unfinishedActivationStop(ctx context.Context, yard string, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
+	// An unfinished journal reports recovering, or operator-action-required
+	// when an observation, such as of a lost guest agent, is refused.
+	if outcome.Status != releasetransition.StatusRecovering && outcome.Status != releasetransition.StatusOperatorActionRequired ||
+		outcome.Active == "" || outcome.Active != outcome.Target ||
+		inspection == nil || inspection.Outcome != outcome || inspection.Resume == nil {
+		return false
+	}
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return false
+	}
+	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
+	if err != nil {
+		return false
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return false
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Checkpoint != releasetransition.JournalReconciling || journal.Transaction != *inspection.Resume ||
+		journal.Goal.Target != outcome.Active {
+		return false
+	}
+	loaded, err := cli.loadContext(yard)
+	return err == nil && loaded.Context.AccessKind == domain.AccessLocal
+}
+
+// configWritesEveryYard reports a configuration write at host or shared scope.
+func configWritesEveryYard(arguments []string) bool {
+	arguments = configArguments(arguments)
+	if len(arguments) == 0 || !slices.Contains([]string{"set", "unset"}, arguments[0]) {
+		return false
+	}
+	request, err := parseConfigAuthoringRequest(arguments[0], arguments[1:], false)
+	return err != nil || request.git || request.scope == config.ScopeHost || request.scope == config.ScopeShared
+}
+
+// repairOnlyYards names, in order, the given yards the admitting gate limits
+// to their own repair commands.
+func (cli *CLI) repairOnlyYards(names []string) []string {
+	if cli.gateAdmitted == nil || cli.gateAdmitted.gate == nil {
+		return nil
+	}
+	var blocked []string
+	for _, name := range names {
+		if cli.gateAdmitted.gate.state(name).repairOnly() {
+			blocked = append(blocked, name)
+		}
+	}
+	return blocked
+}
+
+func (cli *CLI) repairNextStep(yard string) string {
+	return yardNextStep(yard, cli.gateAdmitted.gate.state(yard))
 }

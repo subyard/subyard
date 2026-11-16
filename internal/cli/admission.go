@@ -277,14 +277,14 @@ func (cli *CLI) admitReleaseGate(
 		cli.errorf("inspect release transition: %v", gateErr)
 		return permits, 1, true
 	}
-	if outcome == nil || admission.stop && cli.unfinishedActivationStop(ctx, yard, outcome, gateInspection) {
+	if outcome == nil {
 		return permits, 0, false
 	}
-	if gate, ok := cli.yardScopedGate(outcome, gateInspection); ok {
-		if cli.yardGateAdmits(gate, yard, admission.handler, arguments, resourceDefinition, admission.handler == "") {
-			cli.gateYards = &gate
-			return permits, 0, false
-		}
+	request := gateRequest{yard: yard, handler: admission.handler, arguments: arguments, definition: resourceDefinition, profileResource: admission.handler == "", stop: admission.stop}
+	if admitted, gate, scoped := cli.decideGate(ctx, request, outcome, gateInspection); admitted != nil {
+		cli.gateAdmitted = admitted
+		return permits, 0, false
+	} else if scoped {
 		cli.writeYardGateRefusal(yard, gate)
 		return permits, 1, true
 	}
@@ -367,10 +367,11 @@ func (cli *CLI) admitTeardownGate(
 	if outcome == nil {
 		return 0, false
 	}
-	if gate, ok := cli.yardScopedGate(outcome, gateInspection); ok {
-		if cli.yardGateAdmits(gate, yard, "@teardown", arguments, resource.Definition{}, false) {
-			return 0, false
-		}
+	request := gateRequest{yard: yard, handler: "@teardown", arguments: arguments}
+	if admitted, gate, scoped := cli.decideGate(ctx, request, outcome, gateInspection); admitted != nil {
+		cli.gateAdmitted = admitted
+		return 0, false
+	} else if scoped {
 		cli.writeYardGateRefusal(yard, gate)
 		return 1, true
 	}
