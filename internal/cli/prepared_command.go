@@ -258,6 +258,11 @@ func (cli *CLI) admitOwnerWrite(ctx context.Context, loaded config.Loaded) (func
 }
 
 func (cli *CLI) acquireOwnerMutation(ctx context.Context, admission ownerWriteAdmission, recovery, established bool) (func(), error) {
+	unlock, err := cli.acquireOwnerMutationBarrier(ctx, admission, recovery, established)
+	return traceLock(lockRankOwnerBarrier, unlock, err)
+}
+
+func (cli *CLI) acquireOwnerMutationBarrier(ctx context.Context, admission ownerWriteAdmission, recovery, established bool) (func(), error) {
 	cli.initializeOwnerAdmission()
 	if cli.ownerMutationLock != nil {
 		borrowed, err := uninstall.BorrowOwnerLock(admission.home)

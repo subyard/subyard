@@ -16,7 +16,26 @@ import (
 // consent. A separate lock avoids holding the configuration reader/CAS lock
 // during potentially slow guest installation.
 func lockIntegrationYard(ctx context.Context, loaded config.Loaded) (func(), error) {
-	return lockOwnerOperation(ctx, loaded.Context.Paths.ConfigHome, filepath.Join("integration-locks", loaded.Context.YardName+".lock"))
+	unlock, err := lockOwnerOperation(ctx, loaded.Context.Paths.ConfigHome, filepath.Join("integration-locks", loaded.Context.YardName+".lock"))
+	return traceLock(lockRankYard, unlock, err)
+}
+
+// Lock ranks of the one lock order: owner barrier, release update lock,
+// per-yard lock. lockTrace, when set by tests, observes acquires and releases.
+const (
+	lockRankOwnerBarrier  = 1
+	lockRankReleaseUpdate = 2
+	lockRankYard          = 3
+)
+
+var lockTrace func(rank int) (released func())
+
+func traceLock(rank int, unlock func(), err error) (func(), error) {
+	if err != nil || lockTrace == nil {
+		return unlock, err
+	}
+	released := lockTrace(rank)
+	return func() { released(); unlock() }, nil
 }
 
 func lockOwnerOperation(ctx context.Context, configHome, name string) (func(), error) {

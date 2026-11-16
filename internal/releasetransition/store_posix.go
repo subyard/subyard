@@ -807,10 +807,26 @@ func (store *POSIXV2Store) readTransactionGraph() (*v2TransactionGraph, error) {
 // Lock acquires the compatibility-horizon update lock also used by migration
 // v1. It is a convergence-only operation and may create the protected lock
 // directory and file.
+// LockTrace, when set by tests, observes each acquire and release of the
+// release update lock, for the lock-order contract.
+var LockTrace func() (released func())
+
 func (store *POSIXV2Store) Lock() (func(), error) {
 	if store == nil {
 		return nil, errors.New("release transition store is required")
 	}
+	if LockTrace != nil {
+		unlock, err := store.lock()
+		if err != nil {
+			return nil, err
+		}
+		released := LockTrace()
+		return func() { released(); unlock() }, nil
+	}
+	return store.lock()
+}
+
+func (store *POSIXV2Store) lock() (func(), error) {
 	parent, present, err := store.openParent([]string{"migrations"}, true)
 	if err != nil {
 		return nil, err
