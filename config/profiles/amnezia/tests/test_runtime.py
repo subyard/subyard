@@ -191,10 +191,11 @@ esac
                 ssh = binary / 'ssh'
                 ssh.write_text('''#!/bin/sh
 case "$*" in
-  *failure-capture.py*)
+  *"python3 - collect"*)
     [ "$FAULT" != transport ] || exit 19
     [ "$FAULT" != stalled ] || exec sleep 100
     [ "$FAULT" != signal-during-capture ] || sleep 0.3
+    cmp -s - "$CAPTURE" || exit 18
     exec python3 "$CAPTURE" collect ;;
   *) [ "$ORIGINAL" = 0 ] || test -s "$OUTPUT/failure.tar"; touch "$CLEANED" ;;
 esac

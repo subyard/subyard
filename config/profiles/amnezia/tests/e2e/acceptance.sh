@@ -42,11 +42,12 @@ diagnose_failure() {
   install -m 0600 /dev/null "$OUTPUT/failure.tar"
   install -m 0600 /dev/null "$OUTPUT/capture-transport.log"
   install -m 0600 /dev/null "$OUTPUT/capture-result"
-  command="$(quote_ssh_command python3 "${GUEST_DIRS[1]}/src/config/profiles/amnezia/tests/e2e/failure-capture.py" collect)" || return 2
+  # Send the probe inline: a failed re-staging after reboot leaves no guest source tree.
+  command="$(quote_ssh_command python3 - collect)" || return 2
   (
     ulimit -f 128
     timeout --signal=TERM --kill-after=2 110 ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- "$command" \
-      </dev/null 2>"$OUTPUT/capture-transport.log"
+      <"$ROOT/config/profiles/amnezia/tests/e2e/failure-capture.py" 2>"$OUTPUT/capture-transport.log"
   ) | head -c 3145728 >"$OUTPUT/failure.tar"
   codes=("${PIPESTATUS[@]}")
   printf 'transport_exit_code=%s\narchive_pipe_exit_code=%s\nduration_seconds=%s\narchive_bytes=%s\n' \
@@ -258,7 +259,7 @@ prepare_native_clients() {
 }
 
 reboot_owner() {
-  local before after='' down=0 ready=0
+  local before after='' down=0 ready=0 rc
   printf 'amnezia_acceptance_stage=owner-host-reboot\n'
   before="$(guest 1 cat /proc/sys/kernel/random/boot_id </dev/null)"
   cleanup_guest 1
@@ -279,9 +280,35 @@ reboot_owner() {
     [ -n "$after" ] && [ "$after" != "$before" ] && { ready=1; break; }
     sleep 1
   done
-  [ "$ready" = 1 ] || die 'owner host did not return with a new boot ID'
-  prepare_guest 1 "$bundle" "$bundle_hash"
+  [ "$ready" = 1 ] || { owner_boot_evidence; die 'owner host did not return with a new boot ID'; }
+  prepare_guest 1 "$bundle" "$bundle_hash" || { rc=$?; owner_boot_evidence; return "$rc"; }
   verify_boot_result
+}
+
+# Print bounded owner boot evidence after a failed reboot return. The staged worktree may
+# be absent, so the probe is sent inline; IPv4 addresses are masked.
+owner_boot_evidence() {
+  local command attempt
+  command="$(quote_ssh_command sudo -n bash -c '
+    journalctl --list-boots --no-pager | tail -n 3
+    cut -d" " -f1 /proc/uptime
+    free -m
+    journalctl -b -k -o short-monotonic --no-pager \
+      | grep -iE "out of memory|oom|killed process|link is (down|up)|carrier|reset" | tail -n 30
+    journalctl -b -o short-monotonic --no-pager -u ssh.service -u ssh.socket \
+      -u subyard-power-reconcile.service -u systemd-networkd.service -u networking.service \
+      -u incus.service -u incus.socket -u cloud-init.service -u cloud-final.service | tail -n 150
+    systemctl list-jobs --no-pager | head -n 30
+  ')" || return 0
+  printf 'amnezia_acceptance_stage=owner-boot-evidence\n' >&2
+  for attempt in 1 2 3; do
+    timeout --foreground --signal=KILL 30 ssh -F "$CLIENT_CONFIG" -T \
+      -o ConnectTimeout=5 -o ConnectionAttempts=1 e2e-vm-1 -- "$command" </dev/null 2>&1 \
+      | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/IPV4/g; s/^/amnezia_owner_boot: /' | head -c 65536 >&2
+    [ "${PIPESTATUS[0]}" != 0 ] || return 0
+    printf 'amnezia_owner_boot_evidence_attempt=%s failed\n' "$attempt" >&2
+    sleep 5
+  done
 }
 
 verify_boot_result() {
