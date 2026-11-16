@@ -472,9 +472,9 @@ func New(options Options) (*CLI, error) {
 func (cli *CLI) Run(ctx context.Context) int {
 	cli.localMetadataDiagnostics = !cli.releaseTransitionChild
 	cli.configResources, cli.configResourcesRoot = nil, ""
-	// Paths before the release gate (early dispatch, teardown pre-admission,
-	// migrate) own their release admission; the gate replaces this below.
-	cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
+	// No admission until a path decides one: each path before the release
+	// gate sets exempt where it dispatches, and the gate sets the rest below.
+	cli.gateAdmitted = nil
 	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
 	yard, explicit, yes, remaining, err := parseGlobals(arguments, cli.env["SUBYARD_YARD"])
@@ -544,6 +544,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 			return 1
 		}
 	}
+	if admission.early != earlyNone {
+		// Early dispatch owns its release admission.
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
+	}
 	switch admission.early {
 	case earlyNetworkHelp:
 		cli.networkUsage()
@@ -563,6 +567,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	}
 	cli.env["SUBYARD_YARD"] = yard
+	if admission.early != earlyNone {
+		// Early dispatch owns its release admission.
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
+	}
 	switch admission.early {
 	case earlyCurrentMigration:
 		return cli.runCurrentMigration(ctx, definition, commandArguments, explicit, yes)

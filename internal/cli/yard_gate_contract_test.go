@@ -18,6 +18,8 @@ import (
 
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 // The verdict table is the gate's contract. Columns are the selected yard's
@@ -43,6 +45,7 @@ func TestVerdictTable(t *testing.T) {
 		{"policy change of another yard", gateSubject{declared: true, host: true, pending: true, acts: []yardAction{{yard: other, refusePending: true}}}},
 		{"apply --all-local", gateSubject{declared: true, member: memberConfig, acts: []yardAction{{yard: other, optional: true}}}},
 		{"sync writing another yard", configSyncSubject([]string{"yards/other/config.env"}, nil)},
+		{"sync refreshing another yard", configSyncSubject([]string{"yards/selected/config.env"}, []string{"other"})},
 	}
 	columns := []string{"oo", "op", "or", "po", "pp", "pr", "ro", "rp", "rr"}
 	want := map[string][]string{
@@ -59,6 +62,7 @@ func TestVerdictTable(t *testing.T) {
 		"policy change of another yard":   {"ok", "refuse", "refuse", "ok", "refuse", "refuse", "ok", "refuse", "refuse"},
 		"apply --all-local":               {"ok", "skip", "skip", "refuse", "refuse", "refuse", "repair", "repair+skip", "repair+skip"},
 		"sync writing another yard":       {"ok", "refuse", "ok", "refuse", "refuse", "refuse", "repair", "refuse", "repair"},
+		"sync refreshing another yard":    {"ok", "refuse", "refuse", "refuse", "refuse", "refuse", "repair", "refuse", "refuse"},
 	}
 	state := func(code byte) *yardGateState {
 		switch code {
@@ -318,7 +322,7 @@ func TestAdmissionIsReadOnlyByTheGate(t *testing.T) {
 		"gateRecord":   {"yard_gate_verdict.go:gateAdmission", "yard_gate_verdict.go:gateSkipped", "cli.go:Handle"},
 		"gateDeclared": {"yard_gate_verdict.go:setGateSubject", "yard_gate_verdict.go:gateSubject"},
 		"gatePlanned":  {"yard_gate_verdict.go:bindGate", "cli.go:Handle"},
-		"gateAdmitted": {"admission.go:admitReleaseGate", "admission.go:admitTeardownGate", "admission.go:admitRPCOperation", "cli.go:Run", "cli.go:Handle", "cli.go:runReleaseTransitionYardCommandIO", "yard_gate_verdict.go:gateAdmission", "yard_scoped_gate.go:guardEffects", "resource_commands.go:runResourceCommand"},
+		"gateAdmitted": {"admission.go:admitReleaseGate", "admission.go:admitTeardownGate", "admission.go:admitTeardownInvocation", "admission.go:admitRPCOperation", "cli.go:Run", "cli.go:Handle", "cli.go:runReleaseTransitionYardCommandIO", "yard_gate_verdict.go:gateAdmission", "yard_scoped_gate.go:guardEffects", "resource_commands.go:runResourceCommand"},
 	}
 	files, err := filepath.Glob(filepath.Join(repositoryRoot(t), "internal/cli/*.go"))
 	if err != nil {
@@ -400,10 +404,30 @@ func TestDifferentialAdmissionOracle(t *testing.T) {
 	}
 	harness := newRepairHarnessWith(t, func(yardFailureScenario, string) {})
 	t.Chdir(harness.scenario.fixture.cli.options.RepositoryRoot)
+	// The fixture registry carries every command the oracle runs.
+	registry := filepath.Join(harness.scenario.fixture.cli.options.RepositoryRoot, "config", "commands.registry")
+	present := map[string]bool{}
+	for _, line := range strings.Split(string(mustReadConfigFixture(t, registry)), "\n") {
+		if fields := strings.Split(line, "|"); len(fields) > 1 && !strings.HasPrefix(line, "#") {
+			present[fields[0]] = true
+			for _, alias := range strings.Split(fields[1], ",") {
+				present[alias] = alias != ""
+			}
+		}
+	}
+	for _, line := range strings.Split(string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "commands.registry"))), "\n") {
+		fields := strings.Split(line, "|")
+		if len(fields) < 2 || strings.HasPrefix(line, "#") || present[fields[0]] || fields[1] != "" && present[fields[1]] {
+			continue
+		}
+		testkit.WriteFile(t, registry, append(mustReadConfigFixture(t, registry), line+"\n"...), 0o600)
+	}
 	var bound []*preparedCommand
 	gateBindObserver = func(prepared *preparedCommand) { bound = append(bound, prepared) }
 	t.Cleanup(func() { gateBindObserver = nil })
 	program := &CLI{}
+	networkPolicy, _ := yardnetwork.Decode(nil)
+	networkHost := &networkCLIHost{policy: networkPolicy, allowWrites: true, ready: true}
 	snapshot := func() string {
 		var digest strings.Builder
 		for _, root := range []string{filepath.Join(harness.scenario.request.ConfigHome, "yards"), filepath.Join(harness.scenario.request.ConfigHome, "overrides")} {
@@ -411,7 +435,7 @@ func TestDifferentialAdmissionOracle(t *testing.T) {
 				digest.WriteString(path + "=" + string(mustReadConfigFixtureOrEmpty(path)) + "\n")
 			}
 		}
-		return fmt.Sprintf("%d/%s", harness.effects(), digest.String())
+		return fmt.Sprintf("%d/%d/%s", harness.effects(), networkHost.writes, digest.String())
 	}
 	shapes, effective := 0, 0
 	for _, definition := range shippedManifest(t).Commands() {
@@ -452,7 +476,8 @@ func TestDifferentialAdmissionOracle(t *testing.T) {
 				options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
 				options.Prompt = confirmingPrompt{during: func() {}}
 				options.Stdin = strings.NewReader("")
-				options.AdapterRunner, options.InitPlatform, options.NetworkPolicy = harness.adapter, harness.platform, allowTestNetworkPolicy()
+				options.AdapterRunner, options.InitPlatform = harness.adapter, harness.platform
+				options.NetworkPolicy = &yardnetwork.Service{Host: networkHost, Lock: testNetworkPolicyLock{}}
 				cli, err := New(options)
 				if err != nil {
 					t.Fatal(err)
@@ -461,6 +486,9 @@ func TestDifferentialAdmissionOracle(t *testing.T) {
 				cli.sourceBinding = harness.bindSources
 				cli.Run(ctx)
 				cancel()
+				if strings.Contains(stderr.String(), "unknown command") {
+					t.Fatalf("yard %s never reached its handler: %s", strings.Join(arguments, " "), stderr.String())
+				}
 				if snapshot() == before {
 					continue
 				}

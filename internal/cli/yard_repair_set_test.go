@@ -733,6 +733,12 @@ func TestHealthyYardStaysOpenBesideABrokenOne(t *testing.T) {
 // host; ready makes the host network inspectable for isolation and reconcile.
 func networkRun(t *testing.T, scenario yardFailureScenario, ready bool, arguments ...string) (int, string, *networkCLIHost) {
 	t.Helper()
+	return networkRunWith(t, scenario, func(host *networkCLIHost) { host.ready = ready }, arguments...)
+}
+
+// networkRunWith lets configure set the host policy before the command.
+func networkRunWith(t *testing.T, scenario yardFailureScenario, configure func(*networkCLIHost), arguments ...string) (int, string, *networkCLIHost) {
+	t.Helper()
 	root := scenario.fixture.cli.options.RepositoryRoot
 	registry := filepath.Join(root, "config", "commands.registry")
 	if !strings.Contains(string(mustReadConfigFixture(t, registry)), "\nnetwork|") {
@@ -743,7 +749,8 @@ func networkRun(t *testing.T, scenario yardFailureScenario, ready bool, argument
 		}
 	}
 	policy, _ := yardnetwork.Decode(nil)
-	host := &networkCLIHost{policy: policy, allowWrites: true, ready: ready}
+	host := &networkCLIHost{policy: policy, allowWrites: true}
+	configure(host)
 	var stdout, stderr bytes.Buffer
 	options := scenario.fixture.cli.options
 	options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
@@ -1213,11 +1220,12 @@ func filesUnder(t *testing.T, root string) []string {
 }
 
 // A sync is gated by the yards its plan writes and the yards whose consumers
-// it refreshes. As a configuration repair it may write and refresh a yard that
-// needs repair; a written pending yard refuses it before publication, and a
-// change it cannot place in one yard reaches every yard.
+// it refreshes. As a configuration repair it may write a yard that needs
+// repair and refresh one limited only by drift; a failed consumer and a
+// written pending yard refuse it before publication, and a change it cannot
+// place in one yard reaches every yard.
 func TestConfigSyncIsGatedByTheYardsItWrites(t *testing.T) {
-	gate := yardGate{yards: map[string]*yardGateState{"named": {failed: true}, "pending": {pending: true}}, order: []string{"named", "pending"}}
+	gate := yardGate{yards: map[string]*yardGateState{"named": {failed: true}, "drifted": {drift: true}, "pending": {pending: true}}, order: []string{"drifted", "named", "pending"}}
 	for _, test := range []struct {
 		name      string
 		paths     []string
@@ -1227,14 +1235,15 @@ func TestConfigSyncIsGatedByTheYardsItWrites(t *testing.T) {
 		{"healthy target", []string{"yards/default/config.env"}, []string{"default"}, nil},
 		{"written pending yard", []string{"yards/pending/config.env"}, nil, []string{"pending"}},
 		{"written yard that needs repair", []string{"yards/named/config.env"}, nil, nil},
-		{"consumer that needs repair", []string{"yards/default/config.env"}, []string{"default", "named"}, nil},
+		{"consumer limited by drift", []string{"yards/default/config.env"}, []string{"default", "drifted"}, nil},
+		{"consumer that failed", []string{"yards/default/config.env"}, []string{"default", "named"}, []string{"named"}},
 		{"shared change", []string{"shared/config.env"}, nil, []string{"pending"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			verdict := gate.verdict("default", configSyncSubject(test.paths, test.consumers))
 			var refused []string
 			for _, refusal := range verdict.refusals {
-				for _, yard := range []string{"named", "pending"} {
+				for _, yard := range []string{"drifted", "named", "pending"} {
 					if strings.Contains(refusal.Error(), "yard "+yard) {
 						refused = append(refused, yard)
 					}
@@ -1506,4 +1515,50 @@ func TestShellIntoARepairOnlyYardNeedsNoInstalledTooling(t *testing.T) {
 	if code := program.Run(context.Background()); code != 0 || len(mustReadConfigFixtureOrEmpty(log)) == 0 {
 		t.Fatalf("shell without installed tooling: code=%d\n%s%s", code, stdout.String(), stderr.String())
 	}
+}
+
+// A network policy plan acts on every yard it stops or starts, not only the
+// yards named: a reconcile that starts a pending yard that needs repair, and a
+// link under isolation that restarts a drifted third yard or a pending
+// endpoint, are refused before consent, naming that yard.
+func TestNetworkPlansAreGatedByEveryYardTheyRestart(t *testing.T) {
+	t.Run("reconcile starting a yard that needs repair", func(t *testing.T) {
+		harness := newRepairHarness(t)
+		code, output, host := networkRunWith(t, harness.scenario, func(host *networkCLIHost) {
+			host.ready = true
+			host.policy.PendingStart = []string{"named"}
+		}, "-Y", "default", "network", "reconcile")
+		if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first") {
+			t.Fatalf("reconcile starting a yard that needs repair: code=%d writes=%d\n%s", code, host.writes, output)
+		}
+	})
+	t.Run("link restarting a drifted third yard", func(t *testing.T) {
+		harness := newRepairHarness(t)
+		third := filepath.Join(harness.scenario.request.ConfigHome, "yards", "third", "config.env")
+		if err := os.MkdirAll(filepath.Dir(third), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, third, []byte("SSH_PORT=2224\n"), 0o600)
+		code, output, host := networkRunWith(t, harness.scenario, func(host *networkCLIHost) {
+			host.ready = true
+			host.policy.Isolation = true
+		}, "-Y", "default", "network", "link", "default", "third")
+		if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first") {
+			t.Fatalf("link restarting a drifted yard that needs repair: code=%d writes=%d\n%s", code, host.writes, output)
+		}
+	})
+	t.Run("link restarting a pending endpoint", func(t *testing.T) {
+		scenario := newYardFailureScenario(t, true, true, "default", "named")
+		inspect := scenario.replayReleaseEngine(t)
+		scenario.runtime.failing(t, "named", true)
+		requirePendingRuntimeOutcome(t, scenario.converge(t), "named")
+		recordReadiness(t, scenario, inspect)
+		code, output, host := networkRunWith(t, scenario, func(host *networkCLIHost) {
+			host.ready = true
+			host.policy.Isolation = true
+		}, "-Y", "default", "network", "link", "default", "named")
+		if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named has pending configuration") {
+			t.Fatalf("link restarting a pending endpoint: code=%d writes=%d\n%s", code, host.writes, output)
+		}
+	})
 }

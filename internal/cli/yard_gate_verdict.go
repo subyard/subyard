@@ -82,6 +82,9 @@ type yardAction struct {
 	// refusePending also refuses a required action on a yard with pending
 	// findings: one that stops, restarts or reconfigures that yard.
 	refusePending bool
+	// driftOnly refuses a yard with any finding but drift: a configuration
+	// refresh repairs drift only.
+	driftOnly bool
 }
 
 // gateSubject is what the release gate knows about one prepared invocation.
@@ -194,6 +197,8 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 		case action.optional && (state.repairOnly() || state.pending):
 			result.skip = append(result.skip, action.yard)
 		case action.optional:
+		case action.driftOnly && (state.failed || state.config || state.unreachable):
+			refuse(action.yard, fmt.Errorf("yard %s needs %s before its configuration is refreshed", action.yard, yardNextStep(action.yard, state)))
 		case state.repairOnly() && !configRepair:
 			refuse(action.yard, fmt.Errorf("yard %s needs repair first; next: %s", action.yard, yardNextStep(action.yard, state)))
 		case state.pending && action.refusePending:
@@ -292,7 +297,7 @@ func configSyncSubject(paths []string, consumers []string) gateSubject {
 		}
 	}
 	for _, consumer := range consumers {
-		subject.acts = append(subject.acts, yardAction{yard: consumer, refusePending: true})
+		subject.acts = append(subject.acts, yardAction{yard: consumer, refusePending: true, driftOnly: true})
 	}
 	return subject
 }

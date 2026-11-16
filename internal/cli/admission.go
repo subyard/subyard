@@ -402,6 +402,7 @@ func (cli *CLI) admitTeardownInvocation(ctx context.Context, definition command.
 			if slices.Contains(arguments, "--yes") || cli.env["ASSUME_YES"] == "1" {
 				retry = append(retry, "--yes")
 			}
+			cli.gateAdmitted = &gateAdmission{kind: admissionExempt} // the recovery owns its admission
 			return cli.runFullTeardownRecovery(ctx, retry), true
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			cli.errorf("full uninstall recovery inventory: %v", statErr)
