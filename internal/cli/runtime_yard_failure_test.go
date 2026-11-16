@@ -153,7 +153,7 @@ func (scenario yardFailureScenario) invoke(t *testing.T, mode releasetransition.
 	response, err := executeReleaseTransitionRequest(context.Background(), program.options.RepositoryRoot, request,
 		func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool { return grant != "" },
 		append([]releasetransition.V2ActivationReconciler{program.profileActivationReconciler(request, "sample-runtime")}, scenario.owners...),
-		releaseTransitionOwnerFixture{}, nil)
+		nil)
 	if err != nil {
 		t.Fatal(err)
 	}
