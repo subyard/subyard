@@ -202,12 +202,12 @@ func (settings Catalog) Integrations() []profile.IntegrationDefinition {
 	return result
 }
 
-// RetiredIntegration reports a shipped package kept only for migration.
 // ShippedIntegration reports whether id names an integration package in this catalog.
 func (settings Catalog) ShippedIntegration(id string) bool {
 	return slices.ContainsFunc(settings.integrations, func(definition profile.IntegrationDefinition) bool { return definition.Name == id })
 }
 
+// RetiredIntegration reports a shipped package kept only for migration.
 func (settings Catalog) RetiredIntegration(id string) bool {
 	return slices.ContainsFunc(settings.integrations, func(definition profile.IntegrationDefinition) bool {
 		return definition.Retired && definition.Name == id
