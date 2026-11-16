@@ -14,6 +14,7 @@ INSTANCE=''
 POWER_UNIT=''
 POWER_RECONCILER=''
 SG_PROOF=''
+YARD_NAME=''
 RELEASE=''
 VERSION=''
 LAUNCHER=''
@@ -168,7 +169,7 @@ cleanup() {
     if { [ -z "$project_marker" ] || [ "$project_marker" = "$MARKER" ]; } \
       && [ -x "$LAUNCHER" ] && [ -f "$OPERATOR_HOME/.config/subyard/config.env" ] \
       && grep -Fqx "# $MARKER" "$OPERATOR_HOME/.config/subyard/config.env"; then
-      operator_yard teardown --yes >/dev/null 2>&1 || rc=3
+      operator_yard -Y "$YARD_NAME" teardown --yes >/dev/null 2>&1 || rc=3
     else
       printf 'incus-group-reexec-e2e: refusing to remove ambiguous project %s\n' \
         "$PROJECT" >&2
@@ -317,10 +318,11 @@ chmod 0600 "$STATE/.marker"
 OPERATOR="sy-group-$token"
 OPERATOR_HOME="$STATE/home"
 SUDOERS="/etc/sudoers.d/subyard-group-reexec-$token"
-# The default yard needs no yard file, so its first init runs on a cold
-# installation; any yard registration would make native state worth inspecting.
-PROJECT=subyard
-INSTANCE=yard
+# Plain init of a new named yard writes its own definition: no yard file exists
+# beforehand, so the first init runs on a cold installation.
+YARD_NAME="group-reexec-$token"
+PROJECT="subyard-$YARD_NAME"
+INSTANCE="yard-$YARD_NAME"
 POWER_UNIT="/etc/systemd/system/$MARKER.service"
 POWER_RECONCILER="$STATE/power/yard-boot-reconcile"
 SG_PROOF="$STATE/sg-invocations"
@@ -411,13 +413,6 @@ id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fxq incus-admin \
 [ ! -s "$SG_PROOF" ] || die 'public installer invoked sg'
 ok 'public installer completed the cold release transition without Incus access'
 
-ssh_port=$((36000 + ($$ % 12000)))
-for _ in $(seq 1 100); do
-  ss -Hln "sport = :$ssh_port" 2>/dev/null | grep -q . || break
-  ssh_port=$((ssh_port + 1))
-done
-ss -Hln "sport = :$ssh_port" 2>/dev/null | grep -q . \
-  && die 'could not reserve an unused loopback SSH port'
 
 base_image=subyard-e2e-debian-13-cloud-container
 if ! incus image info "$base_image" --project default >/dev/null 2>&1; then
@@ -426,7 +421,6 @@ fi
 # Host-wide settings are not yard state: the installation stays cold.
 cat > "$OPERATOR_HOME/.config/subyard/config.env" <<EOF
 # $MARKER
-SSH_PORT=$ssh_port
 YARD_IMAGE=$base_image
 YARD_IMAGE_FALLBACK=images:ubuntu/24.04
 CODING_TOOL_INTEGRATIONS=
@@ -435,7 +429,6 @@ HOST_BASE=$OPERATOR_HOME/host
 HOST_MOUNTS=
 RESTRICTED_DISK_PATHS=$OPERATOR_HOME/host
 FORWARD_SSH_AGENT=0
-DEV_UID=1357
 # Release readiness observes persisted power paths, not command overrides.
 SUBYARD_POWER_RECONCILER_PATH=$POWER_RECONCILER
 SUBYARD_POWER_UNIT_PATH=$POWER_UNIT
@@ -443,8 +436,10 @@ EOF
 chown "$OPERATOR:$OPERATOR" "$OPERATOR_HOME/.config/subyard/config.env"
 chmod 0600 "$OPERATOR_HOME/.config/subyard/config.env"
 
-[ "$(setting default SSH_PORT)" = "$ssh_port" ] \
-  || die 'default yard did not resolve its host-wide SSH port'
+[ "$(setting default SSH_PORT)" = 2222 ] \
+  || die 'fresh default yard did not start with shipped SSH_PORT 2222'
+[ ! -e "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME" ] \
+  || die 'named yard definition exists before its first init'
 
 # Initialize only the existing native lock contract, without actor grants or
 # network readiness. Its retained inode is the unrelated-access preservation oracle.
@@ -468,21 +463,23 @@ PYLOCK
 then
   die 'fresh actor can already acquire the native policy lock'
 fi
-info 'running the first init of the installed runtime while retaining its approved parent'
+info 'running the first named init of the installed runtime while retaining its approved parent'
 
 first_output="$STATE/first-init.out"
-if ! operator_yard init --yes > "$first_output" 2>&1; then
+if ! operator_env DEV_UID=1357 "$LAUNCHER" -Y "$YARD_NAME" init --yes > "$first_output" 2>&1; then
   tail -n 160 "$first_output" >&2 || true
   # Owner-level readiness facts only: plan step IDs, decisions and the outcome.
   operator_yard migrate --check --json 2>/dev/null | jq -c 'del(.domains)' 2>/dev/null | head -c 8000 >&2 || true
   printf '\n' >&2
   operator_yard migrate --check 2>&1 | sed -nE 's/^  \[(apply|skip|conditional)\] ([A-Za-z0-9_.:-]+).*/  [\1] \2/p; /observed:|desired:/p' | head -n 80 >&2 || true
-  die 'first init did not survive incus-admin activation'
+  die 'first named init did not survive incus-admin activation'
 fi
+named_port="$(setting "$YARD_NAME" SSH_PORT)"
+case "$named_port" in ''|2222|*[!0-9]*) die "named yard did not receive its own SSH port: $named_port" ;; esac
 grep -Fq "added $OPERATOR to incus-admin" "$first_output" \
   || die 'product installer did not add the fixture operator to incus-admin'
-grep -Fq "SSH_PORT $ssh_port is unique across configured yards" "$first_output" \
-  || die 'retained init did not validate the configured SSH port in isolated contexts'
+grep -Fq "SSH_PORT $named_port is unique across configured yards" "$first_output" \
+  || die 'retained init did not validate the named SSH port in isolated contexts'
 grep -Fq 'Subyard initialized' "$first_output" \
   || die 'retained first init did not complete'
 [ ! -s "$SG_PROOF" ] || die 'first init replaced its approved parent through sg'
@@ -515,7 +512,7 @@ case "$initial_state" in STOPPED | RUNNING) ;;
 esac
 info 'starting the initialized yard (a no-op when running) to inspect its provisioned identity'
 start_output="$STATE/start.out"
-if ! operator_yard start --yes > "$start_output" 2>&1; then
+if ! operator_yard -Y "$YARD_NAME" start --yes > "$start_output" 2>&1; then
   tail -n 120 "$start_output" >&2 || true
   die 'could not start the initialized yard for identity verification'
 fi
@@ -526,10 +523,12 @@ if ! actual_dev_uid="$(incus exec "$INSTANCE" --project "$PROJECT" -- id -u dev)
   die 'running yard did not expose its provisioned dev account for UID verification'
 fi
 [ "$actual_dev_uid" = 1357 ] \
-  || die "configured DEV_UID resolved to $actual_dev_uid instead of 1357"
-[ "$(setting default SSH_PORT)" = "$ssh_port" ] \
-  || die 'first init changed the configured SSH port'
-ok 'retained parent applied the configured identity and SSH port'
+  || die "explicit DEV_UID launch override resolved to $actual_dev_uid instead of 1357"
+[ "$(setting default SSH_PORT)" = 2222 ] \
+  || die 'named init polluted the default SSH port'
+[ "$(setting "$YARD_NAME" SSH_PORT)" = "$named_port" ] \
+  || die 'named init changed the named SSH port'
+ok 'retained parent preserved the explicit override and named-yard boundary'
 
 instance_snapshot() {
   local state config_hash init_start
@@ -544,7 +543,7 @@ instance_snapshot() {
 before="$(instance_snapshot)"
 retry_output="$STATE/retry-init.out"
 info 're-running init to verify convergence'
-if ! operator_yard init --yes > "$retry_output" 2>&1; then
+if ! operator_env DEV_UID=1357 "$LAUNCHER" -Y "$YARD_NAME" init --yes > "$retry_output" 2>&1; then
   tail -n 160 "$retry_output" >&2 || true
   die 'repeated init failed'
 fi
@@ -557,7 +556,7 @@ fi
 [ "$(instance_snapshot)" = "$before" ] \
   || die 'repeated init restarted or mutated the converged yard'
 [ ! -s "$SG_PROOF" ] || die 'converged retry unexpectedly invoked sg'
-[ "$(setting default SSH_PORT)" = "$ssh_port" ] \
-  || die 'converged retry changed the configured SSH port'
+[ "$(setting default SSH_PORT)" = 2222 ] \
+  || die 'converged retry polluted the default SSH port'
 
-printf 'ok: the public installer and first init work before incus-admin membership is active, retaining exact approval through native operator access\n'
+printf 'ok: the public installer and first named init work before incus-admin membership is active, retaining exact approval through native operator access\n'
