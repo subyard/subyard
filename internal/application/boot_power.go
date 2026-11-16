@@ -25,6 +25,13 @@ type BootPowerResult struct {
 	Waiting            []BootAddressWait
 	PublicationWaiting []BootAddressWait
 	PublicationErrors  []error
+	// Uninitialized yards never finished init; they are left stopped while
+	// the other yards are restored.
+	Uninitialized []BootUninitialized
+}
+
+type BootUninitialized struct {
+	Instance, Yard string
 }
 
 type BootAddressWait struct {
@@ -51,7 +58,7 @@ type BootPowerReconciler struct {
 }
 
 func (reconciler BootPowerReconciler) HasManaged(ctx context.Context) (bool, error) {
-	instances, err := reconciler.listManaged(ctx, false)
+	instances, _, err := reconciler.listManaged(ctx, false)
 	return len(instances) != 0, err
 }
 
@@ -64,9 +71,27 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 	if err := reconciler.EnsureNetworkLock(); err != nil {
 		return result, fmt.Errorf("initialize host network policy lock: %w", err)
 	}
-	instances, err := reconciler.waitForManaged(ctx, true)
-	if err != nil || len(instances) == 0 {
+	instances, uninitialized, err := reconciler.waitForManaged(ctx, true)
+	if err != nil {
 		return result, err
+	}
+	for _, instance := range uninitialized {
+		reference := instanceReference(instance)
+		yard, _ := instance.EffectiveConfig(powerYardNameKey)
+		switch strings.ToLower(instance.Status) {
+		case "stopped":
+		case "running":
+			if err := reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "stop", false); err != nil {
+				return result, fmt.Errorf("stop uninitialized %s: %w", reference, err)
+			}
+			result.Stopped = append(result.Stopped, reference)
+		default:
+			return result, fmt.Errorf("cannot leave uninitialized %s stopped from state %q", reference, instance.Status)
+		}
+		result.Uninitialized = append(result.Uninitialized, BootUninitialized{Instance: reference, Yard: yard})
+	}
+	if len(instances) == 0 {
+		return result, nil
 	}
 	bridges := managedBridges(instances)
 	for _, instance := range instances {
@@ -207,13 +232,13 @@ func bootNetworkYard(instance ports.InstanceInfo) yardnetwork.Yard {
 func (reconciler BootPowerReconciler) listManaged(
 	ctx context.Context,
 	validate bool,
-) ([]ports.InstanceInfo, error) {
+) ([]ports.InstanceInfo, []ports.InstanceInfo, error) {
 	if reconciler.Inventory == nil {
-		return nil, errors.New("instance inventory is required")
+		return nil, nil, errors.New("instance inventory is required")
 	}
 	instances, err := reconciler.Inventory.ListInstances(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return filterManagedInstances(instances, validate)
 }
@@ -221,9 +246,9 @@ func (reconciler BootPowerReconciler) listManaged(
 func (reconciler BootPowerReconciler) waitForManaged(
 	ctx context.Context,
 	validate bool,
-) ([]ports.InstanceInfo, error) {
+) ([]ports.InstanceInfo, []ports.InstanceInfo, error) {
 	if reconciler.Inventory == nil {
-		return nil, errors.New("instance inventory is required")
+		return nil, nil, errors.New("instance inventory is required")
 	}
 	clock := reconciler.Clock
 	if clock == nil {
@@ -244,11 +269,11 @@ func (reconciler BootPowerReconciler) waitForManaged(
 		}
 		lastErr = err
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		remaining := deadline.Sub(clock.Now())
 		if remaining <= 0 || errors.Is(readinessContext.Err(), context.DeadlineExceeded) {
-			return nil, incusReadinessTimeout(timeout, lastErr)
+			return nil, nil, incusReadinessTimeout(timeout, lastErr)
 		}
 		delay := time.Second
 		if remaining < delay {
@@ -256,12 +281,12 @@ func (reconciler BootPowerReconciler) waitForManaged(
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-readinessContext.Done():
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return nil, incusReadinessTimeout(timeout, lastErr)
+			return nil, nil, incusReadinessTimeout(timeout, lastErr)
 		case <-clock.After(delay):
 		}
 	}
@@ -281,8 +306,11 @@ type bootWallClock struct{}
 func (bootWallClock) Now() time.Time                             { return time.Now() }
 func (bootWallClock) After(delay time.Duration) <-chan time.Time { return time.After(delay) }
 
-func filterManagedInstances(instances []ports.InstanceInfo, validate bool) ([]ports.InstanceInfo, error) {
+// filterManagedInstances returns the managed instances and, when validating,
+// separately those whose init never finished (initialized=false).
+func filterManagedInstances(instances []ports.InstanceInfo, validate bool) ([]ports.InstanceInfo, []ports.InstanceInfo, error) {
 	managed := make([]ports.InstanceInfo, 0, len(instances))
+	var uninitialized []ports.InstanceInfo
 	for _, instance := range instances {
 		metadata := parsePowerMetadata(instance)
 		if metadata.Managed.State == fieldAbsent || metadata.Managed.State == fieldEmpty ||
@@ -290,23 +318,29 @@ func filterManagedInstances(instances []ports.InstanceInfo, validate bool) ([]po
 			continue
 		}
 		if metadata.Managed.State != fieldValid {
-			return nil, fmt.Errorf("%s has invalid managed power metadata", instanceReference(instance))
+			return nil, nil, fmt.Errorf("%s has invalid managed power metadata", instanceReference(instance))
 		}
 		if validate {
+			if metadata.Initialized.State == fieldValid && !metadata.Initialized.Value {
+				uninitialized = append(uninitialized, instance)
+				continue
+			}
 			if err := validateManagedPower(instance); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		managed = append(managed, instance)
 	}
-	sort.Slice(managed, func(left, right int) bool {
-		return instanceReference(managed[left]) < instanceReference(managed[right])
-	})
-	return managed, nil
+	for _, list := range [][]ports.InstanceInfo{managed, uninitialized} {
+		sort.Slice(list, func(left, right int) bool {
+			return instanceReference(list[left]) < instanceReference(list[right])
+		})
+	}
+	return managed, uninitialized, nil
 }
 
 func (reconciler BootPowerReconciler) stopRunningFailClosed(ctx context.Context, reason error) error {
-	instances, err := reconciler.listManaged(ctx, false)
+	instances, _, err := reconciler.listManaged(ctx, false)
 	if err != nil {
 		return errors.Join(reason, fmt.Errorf("list yards for fail-closed stop: %w", err))
 	}

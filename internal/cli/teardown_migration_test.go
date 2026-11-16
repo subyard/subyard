@@ -128,8 +128,8 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 						t.Fatalf("full uninstall inspected the migration owner: %v", err)
 					}
 				} else if strings.HasPrefix(state, "V2") {
-					var outcome mutationGateOutcome
-					if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil ||
+					outcome, err := decodeGateRefusal(stderr.Bytes())
+					if err != nil ||
 						(outcome.Status != "recovering" && outcome.Status != "operator-action-required") {
 						t.Fatalf("ordinary mutation bypassed migration gate: %s, %v", stderr.String(), err)
 					}
@@ -192,8 +192,8 @@ func TestCanonicalTeardownMutationGatePreservesOwnerInventory(t *testing.T) {
 			if code := program.Run(context.Background()); code != 1 {
 				t.Fatalf("canonical teardown bypassed migration gate: code=%d stderr=%s", code, stderr.String())
 			}
-			var outcome mutationGateOutcome
-			if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil || outcome.Code == "" {
+			outcome, err := decodeGateRefusal(stderr.Bytes())
+			if err != nil || outcome.Code == "" {
 				t.Fatalf("canonical teardown lost migration diagnostic: %s, %v", stderr.String(), err)
 			}
 			if !slices.Equal(before, nativeTreeSnapshot(t, ownerRoot)) {

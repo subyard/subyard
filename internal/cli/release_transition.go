@@ -856,7 +856,9 @@ func (cli *CLI) powerActivationReconciler(
 			for _, target := range targets {
 				powerYards = append(powerYards, target.Loaded.Context)
 			}
-			if err != nil {
+			// Host power serves the yards that load. A yard whose own configuration
+			// is invalid is reported by the yard-scoped owners, not here.
+			if err != nil && (len(targets) == 0 || !onlyYardConfigRefusals(err, request.ConfigHome)) {
 				return nil, err
 			}
 			return operation.initPlatformWithDispatcher(
@@ -1298,7 +1300,20 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	assessed := config.AssessMaterializationActivation(activationTargets)
 	// The frozen protocol requires a sorted warning list.
 	slices.Sort(warnings)
-	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings), Pending: pending}, nil
+	var yards []releasetransition.V2YardAttribution
+	for _, target := range activationTargets {
+		kind := ""
+		switch {
+		case target.Assessment.State == "deferred" && reconciler.pendingDeferral().deferred(target.Name):
+			kind = releasetransition.YardFindingPending
+		case target.Assessment.Changed || target.Assessment.State == "drift" || target.IntegrationChanged:
+			kind = releasetransition.YardFindingDrift
+		}
+		if kind != "" {
+			yards = append(yards, releasetransition.V2YardAttribution{Yard: target.Name, Kind: kind})
+		}
+	}
+	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings), Pending: pending, Yards: yards}, nil
 }
 
 // yardObservationSpan marks where one yard's refusals and consequences begin,

@@ -129,15 +129,18 @@ type CLI struct {
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
 	permits                      recoveryPermits
-	allowResetYard               bool
-	resourceSessionTransport     string
-	resourceWire                 string
-	fullTeardownRecovery         string
-	ownerMutationLock            *uninstall.Tree
-	ownerMutationLockExpected    *uninstall.Tree
-	ownerAdmission               *ownerWriteAdmission
-	ownerAdmissionMutex          *sync.Mutex
-	localMetadataDiagnostics     bool
+	// gateYards is the yard-scoped gate that admitted this invocation, if any;
+	// multi-yard verbs skip and report the yards it leaves to repair.
+	gateYards                 *yardGate
+	allowResetYard            bool
+	resourceSessionTransport  string
+	resourceWire              string
+	fullTeardownRecovery      string
+	ownerMutationLock         *uninstall.Tree
+	ownerMutationLockExpected *uninstall.Tree
+	ownerAdmission            *ownerWriteAdmission
+	ownerAdmissionMutex       *sync.Mutex
+	localMetadataDiagnostics  bool
 	// configGitSSH shares one SSH connection across a configuration command.
 	configGitSSH *configGitSSHSession
 
@@ -4302,7 +4305,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if gateErr != nil {
 				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
-			if outcome != nil && !operationCLI.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
+			if outcome != nil && !operationCLI.gateAdmitsOrdinary(operationLoaded.Context.YardName, definition.Handler, params.Arguments, outcome, gateInspection) {
 				if definition.Handler == "@init" {
 					var permit *configApplyRepairPermit
 					permit, outcome, gateErr = operationCLI.prepareInitAdmission(
@@ -4435,7 +4438,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if gateErr != nil {
 				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
-			if outcome != nil && !planned.CLI.ordinaryCommandAdmitted(planned.Definition.Handler, outcome, gateInspection) {
+			if outcome != nil && !planned.CLI.gateAdmitsOrdinary(planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments, outcome, gateInspection) {
 				if planned.Definition.Handler != "@init" || planned.CLI.permits.profileInit == nil ||
 					!sameConfigApplyGate(planned.CLI.permits.profileInit.gate, *outcome) {
 					return nil, mutationGateRPCError(outcome, gateInspection)

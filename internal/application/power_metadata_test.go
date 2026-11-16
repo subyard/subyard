@@ -79,7 +79,7 @@ func TestPowerPhasesIgnoreUnusedInvalidFields(t *testing.T) {
 	if converged, err := powerMetadataConverged(instance, domain.Context{}); converged || err != nil {
 		t.Fatalf("unmanaged convergence consumed invalid fields: converged=%v err=%v", converged, err)
 	}
-	if managed, err := filterManagedInstances([]ports.InstanceInfo{instance}, true); len(managed) != 0 || err != nil {
+	if managed, _, err := filterManagedInstances([]ports.InstanceInfo{instance}, true); len(managed) != 0 || err != nil {
 		t.Fatalf("boot filter consumed invalid unmanaged fields: managed=%#v err=%v", managed, err)
 	}
 	// Boot validation ignores managed/name; filtering owns managed classification.

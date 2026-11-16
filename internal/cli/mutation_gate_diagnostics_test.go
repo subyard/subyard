@@ -53,6 +53,14 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 				}
 				payload = []byte(fault.Message)
 			}
+			if transport == "CLI" {
+				// The CLI renders the same inspection as text: one cause, one next step.
+				if !bytes.Equal(payload, []byte(mutationGateRefusalPrefix+" release operator-action-required (dependency-unavailable): active release-a, target 1.2.3-aaaaaaaaaaaa, transaction tx-0123456789abcdef; this command is not run\n"+
+					"yard: cause: fixture dependency is unavailable\nyard: next: restore fixture dependency")) {
+					t.Fatalf("CLI refusal=%q", payload)
+				}
+				return // RPC below keeps the structured outcome and its later-readiness check
+			}
 			var refused mutationGateOutcome
 			if err := json.Unmarshal(payload, &refused); err != nil {
 				t.Fatalf("refusal JSON=%q: %v", payload, err)

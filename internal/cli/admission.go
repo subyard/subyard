@@ -2,8 +2,9 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
@@ -87,6 +88,8 @@ type invocationAdmission struct {
 	configSync    bool
 	syncCheck     bool
 	syncStatus    bool
+	// stop is yard stop, the one exit admitted over an unfinished activation.
+	stop bool
 }
 
 // handlerAdmission refines manifest policy for one core handler.
@@ -225,6 +228,7 @@ func (cli *CLI) admission(
 		result.recovery = recoveryResourceShutdown
 	}
 
+	result.stop = core && definition.Handler == "@lifecycle" && definition.Name == "stop" && !help
 	result.teardownScope = core && definition.Handler == "@teardown" && !help
 	result.ownerRecovery = !result.readOnly && !result.registrationRepair && !(core && policy.ownsRecovery)
 	result.readOnlyRoute = result.readOnly || result.registrationRepair || (core && policy.readOnlyRoute)
@@ -303,7 +307,18 @@ func (cli *CLI) admitReleaseGate(
 		cli.errorf("inspect release transition: %v", gateErr)
 		return permits, 1, true
 	}
-	if outcome == nil || cli.ordinaryCommandAdmitted(admission.handler, outcome, gateInspection) {
+	if outcome == nil || admission.stop && cli.unfinishedActivationStop(ctx, yard, outcome, gateInspection) {
+		return permits, 0, false
+	}
+	if gate, ok := cli.yardScopedGate(outcome, gateInspection); ok {
+		if cli.yardGateAdmits(gate, yard, admission.handler, arguments, resourceDefinition, admission.handler == "") {
+			cli.gateYards = &gate
+			return permits, 0, false
+		}
+		cli.writeYardGateRefusal(yard, gate)
+		return permits, 1, true
+	}
+	if cli.ordinaryCommandAdmitted(admission.handler, outcome, gateInspection) {
 		return permits, 0, false
 	}
 	switch admission.recovery {
@@ -363,11 +378,56 @@ func (cli *CLI) admitReleaseGate(
 	return permits, 1, true
 }
 
+// writeMutationGateRefusal renders a host-wide refusal as text: the release
+// state, one deduplicated cause and one next step. RPC keeps the structured
+// outcome; migrate --check reports every finding.
 func (cli *CLI) writeMutationGateRefusal(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) {
-	if err := json.NewEncoder(cli.options.Stderr).Encode(publicInspectedMutationGateOutcome(outcome, inspection)); err != nil {
-		cli.errorf("write release transition outcome: %v", err)
+	fmt.Fprint(cli.options.Stderr, mutationGateRefusalText(outcome, inspection))
+}
+
+func (cli *CLI) writeYardGateRefusal(yard string, gate yardGate) {
+	for _, line := range strings.Split(yardGateRefusal(yard, gate), "\n") {
+		cli.errorf("%s", line)
 	}
 }
+
+func mutationGateRefusalText(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) string {
+	public := publicInspectedMutationGateOutcome(outcome, inspection)
+	causes := []string{}
+	retry := public.Action
+	for _, blocker := range public.Blockers {
+		if !slices.Contains(causes, blocker.Message) {
+			causes = append(causes, blocker.Message)
+		}
+		if retry == "" {
+			retry = blocker.Retry
+		}
+	}
+	if len(causes) == 0 && public.Message != "" {
+		causes = append(causes, public.Message)
+	}
+	var text strings.Builder
+	transaction := ""
+	if public.Transaction != nil {
+		transaction = ", transaction " + string(*public.Transaction)
+	}
+	fmt.Fprintf(&text, "%s release %s (%s): active %s, target %s%s; this command is not run\n",
+		mutationGateRefusalPrefix, public.Status, public.Code, firstNonempty(string(public.Active), "unknown"), firstNonempty(string(public.Target), "unknown"), transaction)
+	if len(causes) != 0 {
+		cause := causes[0]
+		if len(causes) > 1 {
+			cause += fmt.Sprintf(" (and %d more; yard migrate --check)", len(causes)-1)
+		}
+		fmt.Fprintf(&text, "yard: cause: %s\n", cause)
+	}
+	if retry != "" {
+		fmt.Fprintf(&text, "yard: next: %s\n", retry)
+	}
+	return text.String()
+}
+
+// mutationGateRefusalPrefix opens every gate refusal on stderr.
+const mutationGateRefusalPrefix = "yard: release gate:"
 
 // admitTeardownGate consults the deferred teardown gate after scope selection.
 func (cli *CLI) admitTeardownGate(
@@ -381,7 +441,17 @@ func (cli *CLI) admitTeardownGate(
 		cli.errorf("inspect release transition: %v", gateErr)
 		return nil, 1, true
 	}
-	if outcome == nil || cli.ordinaryCommandAdmitted("@teardown", outcome, gateInspection) {
+	if outcome == nil {
+		return nil, 0, false
+	}
+	if gate, ok := cli.yardScopedGate(outcome, gateInspection); ok {
+		if cli.yardGateAdmits(gate, yard, "@teardown", arguments, resource.Definition{}, false) {
+			return nil, 0, false
+		}
+		cli.writeYardGateRefusal(yard, gate)
+		return nil, 1, true
+	}
+	if cli.ordinaryCommandAdmitted("@teardown", outcome, gateInspection) {
 		return nil, 0, false
 	}
 	permit, err := cli.prepareTeardownRepair(ctx, loaded, arguments, *outcome)

@@ -59,6 +59,8 @@ type releaseConfiguration struct {
 	yards    map[string]releaseYardConfiguration
 	// pending is the activation's one deferral record for pending configuration.
 	pending pendingYardDeferral
+	// uninitialized names yards left to their own init in this process.
+	uninitialized map[string]bool
 }
 
 type releaseYardConfiguration struct {

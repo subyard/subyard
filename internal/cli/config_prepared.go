@@ -106,8 +106,10 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 		if err != nil {
 			return err
 		}
+		targets = prepared.CLI.skipGatedYards(targets, prepared.Loaded.Context.YardName, true)
 		execution, err := prepared.CLI.prepareConfigApply(ctx, targets, func() ([]configTarget, error) {
-			return prepared.CLI.refreshLocalConfigTargets(prepared.Loaded, allLocal)
+			refreshed, err := prepared.CLI.refreshLocalConfigTargets(prepared.Loaded, allLocal)
+			return prepared.CLI.skipGatedYards(refreshed, prepared.Loaded.Context.YardName, false), err
 		})
 		if err != nil {
 			return err

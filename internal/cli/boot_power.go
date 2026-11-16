@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -55,7 +56,14 @@ func RunBootPower(
 		fmt.Fprintf(stdout, "subyard-power: waiting-for-address %s: %s\n",
 			waiting.Instance, strings.Join(waiting.Addresses, ", "))
 	}
-	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning)+len(result.Waiting)+len(result.PublicationWaiting) == 0 {
+	for _, yard := range result.Uninitialized {
+		next := "yard init"
+		if domain.SafeName(yard.Yard) {
+			next = "yard -Y " + yard.Yard + " init"
+		}
+		fmt.Fprintf(stdout, "subyard-power: %s is not initialized; left stopped; next: %s\n", yard.Instance, next)
+	}
+	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning)+len(result.Waiting)+len(result.PublicationWaiting)+len(result.Uninitialized) == 0 {
 		fmt.Fprintln(stdout, "subyard-power: no managed yards")
 		return 0
 	}

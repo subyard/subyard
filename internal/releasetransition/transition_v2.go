@@ -136,6 +136,32 @@ type V2ActivationObservation struct {
 	// yards' inits. The engine reports them as pending configuration blockers of
 	// completed history, and as warnings while other release work remains.
 	Pending []V2PendingConfiguration `json:"pending,omitempty"`
+	// Yards attributes a yard-scoped owner's drift and pending findings to their
+	// yards. An unconverged owner without a drift entry stays unattributed.
+	Yards []V2YardAttribution `json:"-"`
+}
+
+// Yard attribution kinds. Only these cross the inspection, in this grammar.
+const (
+	YardFindingDrift   = "drift"
+	YardFindingFailed  = "failed"
+	YardFindingPending = "pending"
+	// YardFindingConfig is a yard whose own configuration source is invalid.
+	YardFindingConfig = "config"
+	// YardAttributionScope is the decision scope of one attributed yard finding:
+	// resource activation.<owner>, decision preserve, result "<kind> <yard>".
+	YardAttributionScope = "yard-attribution"
+)
+
+type V2YardAttribution struct {
+	Yard, Kind string
+}
+
+// ActivationYardError attributes every part of a yard-scoped owner's failure
+// to yards. It returns nil when any part belongs to no single yard.
+type ActivationYardError interface {
+	error
+	ActivationYardFindings() []V2YardAttribution
 }
 
 // V2PendingConfiguration is one finding with its yard's next step.
@@ -202,6 +228,11 @@ type v2Observation struct {
 	activationScope                  []v2ActivationScope
 	activationConsequences           []string
 	activationWarnings               []string
+	// yardAttribution are completed-history findings attributed to yards; the
+	// inspection reports them after planning, never as plan facts.
+	yardAttribution []RedactedDecision
+	// unattributed is set when any yard-scoped finding could not be attributed.
+	unattributed bool
 	activationPending                []v2PendingActivation
 	activationObservationFailure     error
 	observationScope                 Fingerprint
@@ -419,7 +450,7 @@ func (transition *V2Transition) inspect(ctx context.Context, goal Goal, processV
 	transition.cacheMu.Unlock()
 	return Inspection{
 		Plan: plan, Assessment: observation.assessment.Clone(),
-		Decisions: slices.Clone(observation.decisions),
+		Decisions: observation.withYardAttribution(slices.Clone(observation.decisions)),
 		Blockers:  slices.Clone(observation.blockers), Outcome: &outcome,
 	}, nil
 }
@@ -3478,6 +3509,13 @@ func (transition *V2Transition) observeActivation(
 		}
 		actual, err := results[index].actual, results[index].err
 		if err != nil {
+			if findings, ok := activationErrorYards(err); ok {
+				for _, finding := range findings {
+					observation.attributeYard(id, finding.Kind, finding.Yard)
+				}
+			} else {
+				observation.unattributed = true
+			}
 			if observation.activationObservationFailure == nil {
 				observation.activationObservationFailure = err
 			}
@@ -3502,6 +3540,14 @@ func (transition *V2Transition) observeActivation(
 			return invalid("release transition reported too many activation warnings")
 		}
 		observation.activationConsequences = append(observation.activationConsequences, actual.Planned...)
+		drifted := false
+		for _, yard := range actual.Yards {
+			drifted = drifted || yard.Kind == YardFindingDrift
+			observation.attributeYard(id, yard.Kind, yard.Yard)
+		}
+		if !actual.Converged && !drifted {
+			observation.unattributed = true
+		}
 		if !actual.Converged {
 			observation.activationConsequences = append(observation.activationConsequences, actual.Consequences...)
 			observation.decisions = append(observation.decisions, RedactedDecision{
@@ -3535,6 +3581,52 @@ func (transition *V2Transition) observeActivation(
 	promoteActivationPending(observation)
 	observation.activationWarnings = canonicalWarnings(observation.activationWarnings)
 	return nil
+}
+
+// attributeYard records one yard finding of an owner in the closed grammar.
+// A finding outside it leaves the inspection unattributed, which keeps every
+// yard behind the release gate.
+func (observation *v2Observation) attributeYard(owner, kind, yard string) {
+	result := kind + " " + yard
+	if !slices.Contains([]string{YardFindingDrift, YardFindingFailed, YardFindingPending, YardFindingConfig}, kind) ||
+		!domain.SafeName(yard) || len(result) > maxRedactedText || validateSafeID("activation."+owner, "owner") != nil {
+		observation.unattributed = true
+		return
+	}
+	decision := RedactedDecision{Resource: "activation." + owner, Scope: YardAttributionScope, Decision: DecisionPreserve, Result: result}
+	if !slices.Contains(observation.yardAttribution, decision) {
+		observation.yardAttribution = append(observation.yardAttribution, decision)
+	}
+}
+
+// activationErrorYards returns the yard findings of a failure only when every
+// cause attributes all of its parts to yards.
+func activationErrorYards(err error) ([]V2YardAttribution, bool) {
+	var findings []V2YardAttribution
+	for _, cause := range refusalCauses(err) {
+		var attributed ActivationYardError
+		if !errors.As(cause, &attributed) {
+			return nil, false
+		}
+		own := attributed.ActivationYardFindings()
+		if len(own) == 0 {
+			return nil, false
+		}
+		findings = append(findings, own...)
+	}
+	return findings, len(findings) != 0
+}
+
+// withYardAttribution adds completed history's yard findings to an inspection's
+// decisions after its plan is bound. Any unattributed finding, or more than the
+// protocol can carry, omits them all.
+func (observation v2Observation) withYardAttribution(decisions []RedactedDecision) []RedactedDecision {
+	completed := observation.journal != nil && observation.journal.Checkpoint == JournalComplete && observation.journal.Goal == observation.goal
+	if !completed || observation.unattributed || len(observation.yardAttribution) == 0 ||
+		len(decisions)+len(observation.yardAttribution) > MaxPlanItems {
+		return decisions
+	}
+	return append(decisions, observation.yardAttribution...)
 }
 
 // promoteActivationPending is the only place pending findings become release

@@ -1195,6 +1195,13 @@ func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) ([]
 	if outcome == nil {
 		return nil, nil
 	}
+	// Other yards' findings wait for their own repair; this init needs only
+	// its own yard converged in a clean completed release.
+	if gate, ok := cli.yardScopedGate(outcome, inspection); ok {
+		if state := gate.state(yard); !state.repairOnly() && !state.pending {
+			return gate.otherYardFindings(yard), nil
+		}
+	}
 	if cli.otherYardsPendingOnly(outcome, inspection, yard) {
 		return slices.Clone(inspection.Blockers), nil
 	}

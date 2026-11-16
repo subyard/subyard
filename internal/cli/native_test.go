@@ -2853,8 +2853,14 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 		Transaction *string `json:"transaction"`
 		Action      string  `json:"action"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil {
-		t.Fatalf("mutation gate output is not structured JSON: %q: %v", stderr.String(), err)
+	decoded, err := decodeGateRefusal(stderr.Bytes())
+	if err != nil {
+		t.Fatalf("mutation gate output is not a gate refusal: %q: %v", stderr.String(), err)
+	}
+	outcome.Status, outcome.Code, outcome.Active, outcome.Target, outcome.Action = string(decoded.Status), string(decoded.Code), string(decoded.Active), string(decoded.Target), decoded.Action
+	if decoded.Transaction != nil {
+		transaction := string(*decoded.Transaction)
+		outcome.Transaction = &transaction
 	}
 	if outcome.Status != "recovering" || outcome.Code != "recovery-pending" ||
 		outcome.Active != "release-a" || outcome.Previous != nil ||
@@ -3178,7 +3184,15 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		Transaction *string `json:"transaction"`
 		Action      string  `json:"action"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &gated); err != nil ||
+	decoded, err := decodeGateRefusal(stderr.Bytes())
+	if err == nil {
+		gated.Status, gated.Code, gated.Active, gated.Target, gated.Action = string(decoded.Status), string(decoded.Code), string(decoded.Active), string(decoded.Target), decoded.Action
+		if decoded.Transaction != nil {
+			transaction := string(*decoded.Transaction)
+			gated.Transaction = &transaction
+		}
+	}
+	if err != nil ||
 		gated.Status != "recovering" || gated.Code != "recovery-pending" ||
 		gated.Active != "release-a" || gated.Target != "1.2.3-aaaaaaaaaaaa" ||
 		gated.Transaction == nil || *gated.Transaction != "tx-0123456789abcdef" ||
@@ -3356,8 +3370,8 @@ func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.
 			strings.Contains(stderr.String(), runtimeRoot) || strings.Contains(stderr.String(), configHome) {
 			t.Fatalf("redacted CLI gate: code=%d stderr=%q", code, stderr.String())
 		}
-		var outcome mutationGateOutcome
-		if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil ||
+		outcome, err := decodeGateRefusal(stderr.Bytes())
+		if err != nil ||
 			outcome.Status != releasetransition.StatusOperatorActionRequired ||
 			outcome.Code != releasetransition.CodeDependencyUnavailable ||
 			outcome.Active != "release-a" || outcome.Target != "1.2.3-aaaaaaaaaaaa" ||
@@ -3425,8 +3439,8 @@ func TestV2MutationGateReportsCorruptJournalAsStructuredOutcome(t *testing.T) {
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("corrupt journal gate: code=%d stderr=%q", code, stderr.String())
 	}
-	var outcome mutationGateOutcome
-	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil ||
+	outcome, err := decodeGateRefusal(stderr.Bytes())
+	if err != nil ||
 		outcome.Status != releasetransition.StatusOperatorActionRequired ||
 		outcome.Code != releasetransition.CodeJournalInvalid ||
 		outcome.Active != "release-a" || outcome.Previous != nil || outcome.Target != "unknown" ||

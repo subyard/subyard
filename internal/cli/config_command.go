@@ -1258,7 +1258,8 @@ func (cli *CLI) assessConfigTarget(
 	if err := domain.NativeTargetOwnership(target.Loaded.Context, info.Config); err != nil {
 		return configTargetAssessment{NativeOwner: nativeOwner}, domain.CollectRefusals(prepareErr, err)
 	}
-	if !strings.EqualFold(info.Status, "running") {
+	// Release work leaves a yard whose last init did not finish to that init.
+	if !strings.EqualFold(info.Status, "running") || cli.activation != nil && instanceUninitialized(target, info) {
 		assessment, err := finish("stopped")
 		assessment.StoppedInstance = &info
 		return assessment, err

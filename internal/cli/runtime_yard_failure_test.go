@@ -436,7 +436,7 @@ func TestPendingRuntimeConfigurationReadersAndAdmission(t *testing.T) {
 	// Integration plans are outside this owner; they are current.
 	integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("c", 64), Scope: strings.Repeat("c", 64)}}
 	scenario.fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return integrations }
-	gateRefusal := `"code":"dependency-unavailable"`
+	gateRefusal := mutationGateRefusalPrefix
 	for _, test := range []struct {
 		arguments []string
 		gated     bool
@@ -771,7 +771,7 @@ func TestOnlyDeclaredPendingOwnersOpenOrdinaryCommands(t *testing.T) {
 					t.Fatal(err)
 				}
 				program.Run(context.Background())
-				if refused := strings.Contains(stderr.String(), `"code":"dependency-unavailable"`); refused != test.gated {
+				if refused := strings.Contains(stderr.String(), mutationGateRefusalPrefix); refused != test.gated {
 					t.Fatalf("yard %s gate refusal=%t want %t: %s%s", strings.Join(arguments, " "), refused, test.gated, stdout.String(), stderr.String())
 				}
 			}
@@ -816,7 +816,7 @@ func TestConfigurationCommandsOnUnpendingYardWhileAnotherIsPending(t *testing.T)
 				}
 				code := program.Run(context.Background())
 				t.Logf("yard %s => %d %s%s", strings.Join(arguments, " "), code, stdout.String(), stderr.String())
-				if refused := strings.Contains(stderr.String(), `"code":"dependency-unavailable"`); refused != test.gated {
+				if refused := strings.Contains(stderr.String(), mutationGateRefusalPrefix); refused != test.gated {
 					t.Fatalf("yard %s gate refusal=%t want %t: %s%s", strings.Join(arguments, " "), refused, test.gated, stdout.String(), stderr.String())
 				}
 			}
