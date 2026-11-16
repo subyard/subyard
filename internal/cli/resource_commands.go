@@ -182,6 +182,12 @@ func (cli *CLI) runResourceCommand(
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		return 0
 	}
+	// Legacy ingress takes its yard lock before the adapter runs, so it passes
+	// the effect boundary here, after consent and before that innermost lock.
+	if err := cli.beginEffects(ctx); err != nil {
+		cli.errorf("%s: %v", definition.Command, err)
+		return 1
+	}
 	if ingress != nil && assessment.Changed {
 		unlock, lockErr := lockIntegrationYard(ctx, loaded)
 		if lockErr != nil {
