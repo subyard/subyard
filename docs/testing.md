@@ -1136,11 +1136,14 @@ concurrency group.
 
 Standard VM checks for a pull request run here, not as a required status check. Dispatch the lanes
 selected by the risk policy on the pushed branch (ids as printed by `dev/ci/plan-periodic-checks.py`)
-and watch the run; its candidate identity is the branch head commit at dispatch:
+and watch the run; its candidate identity is the branch head commit at dispatch. Intel retries
+test the branch head at their start, so watch them too: a required check counts only when green on
+the current branch head. A parent run that finished before a later push does not cover the new head.
 
 ```sh
 subyard-github run -- gh workflow run periodic-e2e.yml --ref BRANCH -f checks='ID ...'
-subyard-github run -- gh run list --workflow periodic-e2e.yml --branch BRANCH --limit 1
+subyard-github run -- gh run list --workflow periodic-e2e.yml --branch BRANCH --commit HEAD_SHA \
+  --json databaseId,displayTitle,status,conclusion
 subyard-github run -- gh run watch RUN_ID --exit-status
 ```
 

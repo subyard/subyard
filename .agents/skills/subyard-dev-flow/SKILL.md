@@ -70,9 +70,12 @@ coordinator, and do not create or close shared task files or start another full 
   preparation, and target that base; branch from an unmerged PR branch only with the operator's
   agreement. Commit and push your branch without asking. Never commit or push the private overlay.
 - After review accepts the candidate, commit it. A fresh [describer](roles/describer.md) session
-  returns the title and body. Save the body outside the repository, append the output of
+  returns the title and body from the diff and your short public brief: problem, expected
+  behavior, checks run and known limits, without private details. Save the body outside the
+  repository, append the output of
   `python3 dev/pr-stats.py --base origin/BASE --review-cycles N --purpose AREA=TEXT ...
-  [--check NAME=URL ...]`, push, and run
+  [--check NAME=URL ...]` (areas: `product`, `tests`, `fixtures and tools`, `documentation`),
+  push, and run
   `subyard-github run -- gh pr create --base BASE --title TITLE --body-file FILE`; add `--draft`
   while checks you still owe must pass before merging, then
   `subyard-github run -- gh pr ready NUMBER`. Update the body with
@@ -80,6 +83,8 @@ coordinator, and do not create or close shared task files or start another full 
 - Run standard VM checks as a [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners)
   on the PR branch and watch them; use leased VMs for non-standard states, reproduction and
   targeted cases. Dispatched runs are not PR checks: pass their run URLs as `--check`.
+  A required check counts only when green on the current branch head, including its Intel retry
+  runs; after a push, rerun what the risk policy selects for the new changes.
 - Fix findings and red checks with new commits; never rewrite reviewed commits. Rebase only for a
   conflict or a base change the task needs, resolve conflicts by hand, and force-push only your
   branch with `--force-with-lease`.
@@ -92,8 +97,8 @@ coordinator, and do not create or close shared task files or start another full 
   review is a task step. While it is still open push small fixes; after a substantial change with
   auto-merge on, run `subyard-github run -- gh pr merge NUMBER --disable-auto` and ask again.
   After the merge, fixes go into a new PR.
-- After a task, fix your red open PRs:
-  `subyard-github run -- gh pr list --author @me --json number,statusCheckRollup`.
+- Fix red checks of your own task's PR. All agent PRs share one GitHub identity: leave other
+  tasks' PRs to their owners.
 - Public PRs, commits and comments carry no attribution and no operator conversation.
 
 ## Choose checks by risk
@@ -193,10 +198,12 @@ The coordinator owns original requirements, editable scope, one shared task and 
    change stays review-pending if an independent reviewer is unavailable; self-review cannot
    replace it. Only the coordinator closes the shared task and responds to the operator.
 
-A review round is one review of a frozen candidate that returns confirmed findings. After the
-third failed round, before another repair, ask a fresh session of the strongest available model
-why the candidate does not converge. After the fourth, and no later than the fifth, stop and
-consult the operator.
+A review round is one review of a frozen candidate that returns confirmed P1 or P2 findings;
+`--review-cycles` counts these rounds. The developer fixes P3-only findings and the coordinator
+checks the fix without another round. Before another repair, ask a fresh session of the strongest
+available model why the candidate does not converge: after the second failed round when a fix
+introduced a new defect in the same mechanism or the design must change, otherwise after the
+third. After the fourth, and no later than the fifth, stop and consult the operator.
 
 Keep assignments compact: role and canonical coordinator/developer targets, working directory,
 requirements, editable scope/exclusions, known facts and source links, acceptance,
@@ -213,6 +220,9 @@ establish runner/cleanup status; agent termination does not drain a lease. At ch
 or a concrete stall, obtain one targeted ownership/blocker result, report partial work and any
 blocker, then choose owned interruption/takeover or a reasoned continuation with a new finite
 bound. Loss of context and missed deadlines never imply success or a silent extension.
+
+While long checks run, report only completion, failure or a needed decision, not unchanged
+status. Ask the operator a question once, then wait for the answer.
 
 Execution, polling/cursors, native outcomes, repair and evidence handling belong to the testing
 guide's [execution protocol](../../../docs/testing.md#execution-and-reporting-principles).

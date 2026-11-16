@@ -21,8 +21,13 @@ whole passing suite. Justify a needed extra check; request it through the coordi
 when it requires writes. If concurrent edits change the candidate, stop and report
 affected scope; recheck only invalidated claims after writing stops. Do not stash,
 reset or commit other work, bypass approvals or perform operator-only actions.
+In the first round also state whether a simpler approach would meet the requirements.
+Separately list the risks you see in the solution for long-term maintenance and future bugs,
+such as complexity, duplicated rules or fragile coupling. They are not findings and do not start
+another round; the coordinator decides what to do with them.
 Return findings, no findings in reviewed scope, or incomplete. Each finding needs
-priority, file/line, a violated requirement/behavior and reproduction or concrete
+priority (P1 breaks a requirement, data or security; P2 another contract or check gap; P3 minor),
+file/line, a violated requirement/behavior and reproduction or concrete
 consequence. Name candidate identity and unverified claims/coverage limits. No
 findings does not prove absence of defects or establish acceptance. Before compaction
 send concise remaining review state to the coordinator.
