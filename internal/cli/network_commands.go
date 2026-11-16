@@ -229,6 +229,16 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 	if err != nil {
 		return err
 	}
+	// Isolation and reconcile change the policy of, and may stop and restart,
+	// the yards the plan updates: each is a required action, refused when it
+	// needs repair or has pending findings.
+	if args[0] == "isolation" || args[0] == "reconcile" {
+		subject := gateSubject{declared: true, host: true, pending: true}
+		for _, update := range plan.Updates {
+			subject.acts = append(subject.acts, yardAction{yard: update.Yard.Name, refusePending: true})
+		}
+		prepared.setGateSubject(subject)
+	}
 	actionDelta := func(p yardnetwork.Plan) (domain.ActionID, domain.ActionDelta, error) {
 		action := domain.ActionID("yard.network.save")
 		consequences := []string{"save explicit network links on this host; isolation remains disabled"}

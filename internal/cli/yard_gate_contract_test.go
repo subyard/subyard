@@ -39,6 +39,8 @@ func TestVerdictTable(t *testing.T) {
 		{"local host setting", configAuthoringSubject("selected", []configAuthoringRequest{{scope: "host"}})},
 		{"Git setting", configAuthoringSubject("selected", []configAuthoringRequest{{scope: "yard", git: true}})},
 		{"link to another yard", gateSubject{declared: true, host: true, pending: true, acts: []yardAction{{yard: other}}}},
+		{"link from the selected yard", gateSubject{declared: true, host: true, pending: true, acts: []yardAction{{yard: "selected"}, {yard: other}}}},
+		{"policy change of another yard", gateSubject{declared: true, host: true, pending: true, acts: []yardAction{{yard: other, refusePending: true}}}},
 		{"apply --all-local", gateSubject{declared: true, member: memberConfig, acts: []yardAction{{yard: other, optional: true}}}},
 		{"sync writing another yard", configSyncSubject([]string{"yards/other/config.env"}, nil)},
 	}
@@ -53,6 +55,8 @@ func TestVerdictTable(t *testing.T) {
 		"local host setting":              {"ok", "refuse", "ok", "refuse", "refuse", "refuse", "repair", "refuse", "repair"},
 		"Git setting":                     {"ok", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse"},
 		"link to another yard":            {"ok", "ok", "refuse", "ok", "ok", "refuse", "ok", "ok", "refuse"},
+		"link from the selected yard":     {"ok", "ok", "refuse", "ok", "ok", "refuse", "refuse", "refuse", "refuse"},
+		"policy change of another yard":   {"ok", "refuse", "refuse", "ok", "refuse", "refuse", "ok", "refuse", "refuse"},
 		"apply --all-local":               {"ok", "skip", "skip", "refuse", "refuse", "refuse", "repair", "repair+skip", "repair+skip"},
 		"sync writing another yard":       {"ok", "refuse", "ok", "refuse", "refuse", "refuse", "repair", "refuse", "repair"},
 	}
@@ -269,6 +273,8 @@ func TestGoldenCommandTable(t *testing.T) {
 // completeArguments completes a verb so its handler's parser accepts it.
 func completeArguments(name, verb string) []string {
 	switch name + " " + verb {
+	case "network link", "network unlink":
+		return []string{"default", "named"}
 	case "ssh-agent unlock":
 		return []string{"--key", "/tmp/key", "--ttl", "1h"}
 	case "profile status", "profile enable", "profile disable", "profile setup":
@@ -311,6 +317,7 @@ func TestAdmissionIsReadOnlyByTheGate(t *testing.T) {
 	allowed := map[string][]string{
 		"gateRecord":   {"yard_gate_verdict.go:gateAdmission", "yard_gate_verdict.go:gateSkipped", "cli.go:Handle"},
 		"gateDeclared": {"yard_gate_verdict.go:setGateSubject", "yard_gate_verdict.go:gateSubject"},
+		"gatePlanned":  {"yard_gate_verdict.go:bindGate", "cli.go:Handle"},
 		"gateAdmitted": {"admission.go:admitReleaseGate", "admission.go:admitTeardownGate", "admission.go:admitRPCOperation", "cli.go:Run", "cli.go:Handle", "cli.go:runReleaseTransitionYardCommandIO", "yard_gate_verdict.go:gateAdmission", "yard_scoped_gate.go:guardEffects", "resource_commands.go:runResourceCommand"},
 	}
 	files, err := filepath.Glob(filepath.Join(repositoryRoot(t), "internal/cli/*.go"))

@@ -11,7 +11,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
@@ -286,6 +285,8 @@ func (cli *CLI) admitReleaseGate(
 		cli.writeYardGateRefusal(refusal)
 		return 1, true
 	}
+	// The fallback repairs own their completed-history permits.
+	cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	if admission.completedScalarAuthoring {
 		if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, arguments, yes, *outcome, gateInspection); handled {
 			return code, true
@@ -459,19 +460,12 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 	return nil
 }
 
-// plannedRepairCurrent refuses an RPC execution whose release history or
-// installed source changed since the repair admission of its plan.
+// plannedRepairCurrent refuses early an RPC execution whose release history
+// or installed source changed since the repair admission of its plan;
+// Execute compares them again under the owner barrier.
 func (cli *CLI) plannedRepairCurrent(ctx context.Context, planned *gateAdmission) *rpc.Error {
-	stale := operationRPCError(rpcMutationGateFailedCode, fmt.Errorf("%w: the release changed after the plan; plan the command again", domain.ErrPlanStale))
-	current, err := cli.readReleaseHistory()
-	if err != nil || current == nil || *current != planned.history {
-		return stale
-	}
-	if planned.sources != nil {
-		sources, err := cli.repairSources(ctx)
-		if err != nil || *sources != *planned.sources {
-			return stale
-		}
+	if err := planned.bindingCurrent(ctx, cli); err != nil {
+		return operationRPCError(rpcMutationGateFailedCode, err)
 	}
 	return nil
 }

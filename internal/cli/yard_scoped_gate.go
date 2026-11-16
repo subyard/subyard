@@ -450,7 +450,9 @@ func (cli *CLI) admitGate(
 		return nil, outcome, inspection, nil, scoped, fmt.Errorf("%w: the release changed during admission; rerun the command", domain.ErrPlanStale)
 	}
 	admitted.history = *after
-	if admitted.kind == admissionRepair {
+	// A shell into a yard that needs repair diagnoses it with any tooling; its
+	// history was still recorded above.
+	if admitted.kind == admissionRepair && request.handler != "@shell" {
 		if admitted.sources, err = cli.repairSources(ctx); err != nil {
 			return nil, outcome, inspection, nil, scoped, err
 		}
@@ -629,6 +631,61 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 		}
 	}
 	return nil
+}
+
+// consumerRefreshAdmission decides the refresh of the yards a published
+// configuration change reaches, on the release state after publication. A
+// ready release runs the ordinary child. Otherwise the refresh is a repair of
+// those consumer yards and carries what such a repair carries: a yard-scoped
+// gate in which each consumer is open or limited to repair only by drift, the
+// installed source bound, this inspection made under the owner barrier the
+// sync holds, and release history unchanged by the refresh. Anything else is
+// refused with each consumer's own next step.
+func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names []string) (bool, func() error, error) {
+	done := func() error { return nil }
+	refuse := func(cause string) (bool, func() error, error) {
+		steps := make([]string, 0, len(names))
+		for _, name := range names {
+			steps = append(steps, "yard -Y "+name+" config apply")
+		}
+		return false, nil, fmt.Errorf("configuration was published, but its refresh is refused: %s; next: %s", cause, strings.Join(steps, ", "))
+	}
+	if cli.ownerMutationLock == nil {
+		return refuse("it runs only under the owner barrier")
+	}
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
+	if err != nil {
+		return false, nil, err
+	}
+	if outcome == nil {
+		return false, done, nil
+	}
+	gate, ok := cli.yardScopedGate(outcome, inspection)
+	if !ok {
+		return refuse(strings.TrimSpace(strings.ReplaceAll(mutationGateRefusalText(outcome, inspection), "\n", "; ")))
+	}
+	for _, name := range names {
+		if state := gate.state(name); state.failed || state.config || state.unreachable || state.pending {
+			return refuse(fmt.Sprintf("yard %s needs %s first", name, yardNextStep(name, state)))
+		}
+	}
+	history, err := cli.readReleaseHistory()
+	if err != nil || history == nil {
+		return refuse("its release history cannot be read")
+	}
+	if _, err := cli.repairSources(ctx); err != nil {
+		return refuse("a repair runs only with the installed release's own tooling")
+	}
+	admission := &gateAdmission{kind: admissionRepair, request: gateRequest{yard: yard, handler: "@config", name: "config"}, history: *history, rechecked: true}
+	return true, func() error {
+		for _, name := range names {
+			admission.request.yard = name
+			if err := admission.verifyAfterEffect(ctx, cli); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil
 }
 
 // guardEffects refuses an adapter while a repair admission has not passed its

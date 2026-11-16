@@ -472,7 +472,9 @@ func New(options Options) (*CLI, error) {
 func (cli *CLI) Run(ctx context.Context) int {
 	cli.localMetadataDiagnostics = !cli.releaseTransitionChild
 	cli.configResources, cli.configResourcesRoot = nil, ""
-	cli.gateAdmitted = nil
+	// Paths before the release gate (early dispatch, teardown pre-admission,
+	// migrate) own their release admission; the gate replaces this below.
+	cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
 	yard, explicit, yes, remaining, err := parseGlobals(arguments, cli.env["SUBYARD_YARD"])
@@ -615,6 +617,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes); done {
 			return code
 		}
+	case admission.gate == gateSkipRead && admission.handler == "@client-projects":
+		// Desktop client integration writes only host-local client files and
+		// never yard or release state; the gate exempts it as on master.
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	case admission.gate == gateSkipRead:
 		cli.gateAdmitted = &gateAdmission{kind: admissionRead}
 	default:
@@ -4386,13 +4392,18 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
 			return nil, &rpc.Error{Code: rpc.CodeExactPlanRequired, Message: "no exact plan is bound to this operation"}
 		}
-		planned.CLI.gateAdmitted = planned.gateAdmission()
+		planAdmission := planned.gateAdmission()
+		planned.CLI.gateAdmitted = planAdmission
 		if fault := planned.CLI.admitRPCOperation(ctx, planned.Loaded, planned.Definition, planned.Arguments, true); fault != nil {
 			return nil, fault
 		}
 		// The execute-time admission is the one of record; Execute decides the
-		// plan's subject on it.
+		// plan's subject on it. A plan made under a repair keeps that repair's
+		// binding, which Execute compares again under the owner barrier.
 		planned.gateRecord = planned.CLI.gateAdmitted
+		if planAdmission.repair() {
+			planned.gatePlanned = planAdmission
+		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {
 			return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "execute this plan through owner-host SSH stdio"}
 		}

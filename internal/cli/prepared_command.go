@@ -198,6 +198,9 @@ type preparedCommand struct {
 	// its prepare declared to the gate. Only the gate methods read them.
 	gateRecord   *gateAdmission
 	gateDeclared *gateSubject
+	// gatePlanned is the repair an RPC plan was made under, when execute
+	// re-admitted it.
+	gatePlanned *gateAdmission
 	// gateSkip are the optional actions its early verdict left out; repairing
 	// is set by Execute's binding decision for a repair.
 	gateSkip  []string

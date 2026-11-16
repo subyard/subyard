@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -78,6 +79,9 @@ const (
 type yardAction struct {
 	yard     string
 	optional bool
+	// refusePending also refuses a required action on a yard with pending
+	// findings: one that stops, restarts or reconfigures that yard.
+	refusePending bool
 }
 
 // gateSubject is what the release gate knows about one prepared invocation.
@@ -179,16 +183,21 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 				yard, yardNextStep(yard, state)))
 		}
 	}
+	// A host command skipped the selected yard's check: each yard it acts on is
+	// checked here, the selected one included.
 	for _, action := range subject.acts {
-		if action.yard == selected || refused[action.yard] || slices.Contains(result.skip, action.yard) {
+		if action.yard == selected && !subject.host || refused[action.yard] || slices.Contains(result.skip, action.yard) {
 			continue
 		}
 		state := gate.state(action.yard)
 		switch {
 		case action.optional && (state.repairOnly() || state.pending):
 			result.skip = append(result.skip, action.yard)
+		case action.optional:
 		case state.repairOnly() && !configRepair:
 			refuse(action.yard, fmt.Errorf("yard %s needs repair first; next: %s", action.yard, yardNextStep(action.yard, state)))
+		case state.pending && action.refusePending:
+			refuse(action.yard, fmt.Errorf("yard %s has pending configuration that this command would act on; next: %s", action.yard, yardNextStep(action.yard, state)))
 		}
 	}
 	return result
@@ -283,7 +292,7 @@ func configSyncSubject(paths []string, consumers []string) gateSubject {
 		}
 	}
 	for _, consumer := range consumers {
-		subject.acts = append(subject.acts, yardAction{yard: consumer})
+		subject.acts = append(subject.acts, yardAction{yard: consumer, refusePending: true})
 	}
 	return subject
 }
@@ -328,19 +337,21 @@ var gateDispatchedElsewhere = map[string]string{
 	"@resource":           "svc resolves to its resource invocation, which is admitted as that resource",
 }
 
-// planHasEffect reports a plan that changes state: a changed mutating or
-// destructive assessment, or a step it applies.
+// planHasEffect reports a plan that may change state: a step it applies, a
+// changed assessment with any effect but read, or a mutating plan that asks
+// for consent with neither an assessment nor steps to show otherwise.
 func planHasEffect(plan domain.OperationPlan) bool {
-	if plan.Assessment != nil && plan.Assessment.Changed &&
-		(plan.Assessment.Effect == domain.ActionMutation || plan.Assessment.Effect == domain.ActionDestruction) {
-		return true
-	}
 	for _, step := range plan.Steps {
 		if step.Decision == domain.StepApply || step.Decision == domain.StepConditional {
 			return true
 		}
 	}
-	return false
+	if plan.Assessment == nil {
+		// Without an assessment or steps, a mutating plan that asks for
+		// consent cannot show it is a reader.
+		return len(plan.Steps) == 0 && plan.Effect != domain.CommandRead && plan.Confirmation != domain.ConfirmationNever
+	}
+	return plan.Assessment.Changed && plan.Assessment.Effect != domain.ActionRead
 }
 
 // Gate state of a prepared command. Only these methods read its admission.
@@ -411,6 +422,23 @@ func (prepared *preparedCommand) gateSkipped(targets []configTarget, report bool
 	})
 }
 
+// bindingCurrent requires the release history and installed source a repair
+// admission was made on; under the owner barrier no writer can change them.
+func (admission *gateAdmission) bindingCurrent(ctx context.Context, cli *CLI) error {
+	stale := fmt.Errorf("%w: the release changed after the plan; plan the command again", domain.ErrPlanStale)
+	current, err := cli.readReleaseHistory()
+	if err != nil || current == nil || *current != admission.history {
+		return stale
+	}
+	if admission.sources != nil {
+		sources, err := cli.repairSources(ctx)
+		if err != nil || *sources != *admission.sources {
+			return stale
+		}
+	}
+	return nil
+}
+
 // gateBindObserver, set only by tests, sees every prepared command that
 // reaches its binding gate decision.
 var gateBindObserver func(*preparedCommand)
@@ -423,9 +451,19 @@ func (prepared *preparedCommand) bindGate(ctx context.Context) error {
 	if gateBindObserver != nil {
 		gateBindObserver(prepared)
 	}
+	if planned := prepared.gatePlanned; planned != nil {
+		if err := planned.bindingCurrent(ctx, prepared.CLI); err != nil {
+			return err
+		}
+	}
 	admission := prepared.gateAdmission()
 	if admission == nil {
-		return nil
+		// Every invocation and RPC operation carries an explicit kind; only a
+		// test builds a prepared command outside them.
+		if testing.Testing() {
+			return nil
+		}
+		return errors.New("internal error: a prepared command reached execution without a release gate admission")
 	}
 	subject := prepared.gateSubject()
 	switch admission.kind {

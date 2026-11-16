@@ -729,34 +729,41 @@ func TestHealthyYardStaysOpenBesideABrokenOne(t *testing.T) {
 	}
 }
 
-// A network link changes both yards. An endpoint with only pending
-// configuration keeps its ordinary commands, so the link is applied; an
-// endpoint that needs repair, in either position, refuses the link at prepare,
-// before its consent, naming that yard.
-func TestNetworkLinkEndpointsBehindTheYardGate(t *testing.T) {
-	link := func(t *testing.T, scenario yardFailureScenario, arguments ...string) (int, string, *networkCLIHost) {
-		t.Helper()
-		root := scenario.fixture.cli.options.RepositoryRoot
-		registry := filepath.Join(root, "config", "commands.registry")
-		if !strings.Contains(string(mustReadConfigFixture(t, registry)), "\nnetwork|") {
-			for _, line := range strings.Split(string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "commands.registry"))), "\n") {
-				if strings.HasPrefix(line, "network|") {
-					testkit.WriteFile(t, registry, append(mustReadConfigFixture(t, registry), line+"\n"...), 0o600)
-				}
+// networkRun runs one network command on a scenario with a recording policy
+// host; ready makes the host network inspectable for isolation and reconcile.
+func networkRun(t *testing.T, scenario yardFailureScenario, ready bool, arguments ...string) (int, string, *networkCLIHost) {
+	t.Helper()
+	root := scenario.fixture.cli.options.RepositoryRoot
+	registry := filepath.Join(root, "config", "commands.registry")
+	if !strings.Contains(string(mustReadConfigFixture(t, registry)), "\nnetwork|") {
+		for _, line := range strings.Split(string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "commands.registry"))), "\n") {
+			if strings.HasPrefix(line, "network|") {
+				testkit.WriteFile(t, registry, append(mustReadConfigFixture(t, registry), line+"\n"...), 0o600)
 			}
 		}
-		policy, _ := yardnetwork.Decode(nil)
-		host := &networkCLIHost{policy: policy, allowWrites: true}
-		var stdout, stderr bytes.Buffer
-		options := scenario.fixture.cli.options
-		options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
-		options.Prompt = confirmingPrompt{during: func() {}}
-		options.NetworkPolicy = &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{}}
-		program, err := New(options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return program.Run(context.Background()), stdout.String() + stderr.String(), host
+	}
+	policy, _ := yardnetwork.Decode(nil)
+	host := &networkCLIHost{policy: policy, allowWrites: true, ready: ready}
+	var stdout, stderr bytes.Buffer
+	options := scenario.fixture.cli.options
+	options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
+	options.Prompt = confirmingPrompt{during: func() {}}
+	options.NetworkPolicy = &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{}}
+	program, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return program.Run(context.Background()), stdout.String() + stderr.String(), host
+}
+
+// A link acts on both endpoints, whichever is selected: an endpoint with only
+// pending configuration keeps the link, one that needs repair refuses it at
+// prepare, by name. Isolation and reconcile act on every yard whose policy
+// they change, and a yard that needs repair or has pending findings refuses them.
+func TestNetworkCommandsAreGatedByTheYardsTheyActOn(t *testing.T) {
+	link := func(t *testing.T, scenario yardFailureScenario, arguments ...string) (int, string, *networkCLIHost) {
+		t.Helper()
+		return networkRun(t, scenario, false, arguments...)
 	}
 	t.Run("pending endpoint", func(t *testing.T) {
 		scenario := newYardFailureScenario(t, true, true, "default", "named")
@@ -769,16 +776,40 @@ func TestNetworkLinkEndpointsBehindTheYardGate(t *testing.T) {
 			t.Fatalf("link to a pending yard: code=%d writes=%d\n%s", code, host.writes, output)
 		}
 	})
-	for _, arguments := range [][]string{{"default", "named"}, {"named", "default"}} {
-		t.Run("repair endpoint "+strings.Join(arguments, "-"), func(t *testing.T) {
+	for _, test := range []struct{ selected, a, b string }{{"default", "default", "named"}, {"default", "named", "default"}, {"named", "named", "default"}, {"named", "default", "named"}} {
+		t.Run("repair endpoint "+test.a+"-"+test.b+" from "+test.selected, func(t *testing.T) {
 			harness := newRepairHarness(t)
-			code, output, host := link(t, harness.scenario, append([]string{"-Y", "default", "network", "link"}, arguments...)...)
+			code, output, host := link(t, harness.scenario, "-Y", test.selected, "network", "link", test.a, test.b)
 			if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first; next: yard -Y named init") ||
 				strings.Contains(output, "Operation plan") {
 				t.Fatalf("link to a yard that needs repair: code=%d writes=%d\n%s", code, host.writes, output)
 			}
 		})
 	}
+	// Reconcile with nothing to change acts on no yard.
+	if code, output, _ := networkRun(t, newRepairHarness(t).scenario, true, "-Y", "default", "network", "reconcile"); code != 0 {
+		t.Fatalf("reconcile without work: code=%d\n%s", code, output)
+	}
+	for _, arguments := range [][]string{{"isolation", "on"}} {
+		t.Run(strings.Join(arguments, " ")+" beside a yard that needs repair", func(t *testing.T) {
+			harness := newRepairHarness(t)
+			code, output, host := networkRun(t, harness.scenario, true, append([]string{"-Y", "default", "network"}, arguments...)...)
+			if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first") || strings.Contains(output, "Operation plan") {
+				t.Fatalf("%v beside a yard that needs repair: code=%d writes=%d\n%s", arguments, code, host.writes, output)
+			}
+		})
+	}
+	t.Run("isolation on beside a pending yard", func(t *testing.T) {
+		scenario := newYardFailureScenario(t, true, true, "default", "named")
+		inspect := scenario.replayReleaseEngine(t)
+		scenario.runtime.failing(t, "named", true)
+		requirePendingRuntimeOutcome(t, scenario.converge(t), "named")
+		recordReadiness(t, scenario, inspect)
+		code, output, host := networkRun(t, scenario, true, "-Y", "default", "network", "isolation", "on")
+		if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named has pending configuration") {
+			t.Fatalf("isolation beside a pending yard: code=%d writes=%d\n%s", code, host.writes, output)
+		}
+	})
 }
 
 // Removal repairs need the installed release they were admitted on. The
@@ -1381,5 +1412,98 @@ func TestReadAdmissionRunsNoEffect(t *testing.T) {
 	if _, err := prepared.Execute(context.Background(), orchestrator, io.Discard); err == nil || !strings.Contains(err.Error(), "admitted as read-only") ||
 		harness.effects() != before {
 		t.Fatalf("read admission ran an effect: %v effects %d->%d", err, before, harness.effects())
+	}
+}
+
+// A plan made under a repair keeps that repair's binding through execute: when
+// execute is re-admitted on a ready release and a writer changes release
+// history while it waits for the owner barrier, the binding compared under the
+// barrier refuses it with no effect.
+func TestRPCPlannedRepairBindingIsComparedUnderTheBarrier(t *testing.T) {
+	harness := newRepairHarness(t)
+	harness.scenario.fixture.cli.options.AdapterRunner = harness.adapter
+	_, unlock, err := uninstall.OwnerLock(context.Background(), harness.scenario.fixture.cli.env["SUBYARD_HOME"], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipped := harness.flippedJournal(t)
+	var once sync.Once
+	var output string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		output = harness.rpcPlanExecute(t, "stop", nil, func() {
+			// The yard was repaired outside history before execute.
+			testkit.WriteFile(t, harness.inspect, harness.ready, 0o600)
+			// Execute checks the planned binding early, then waits for the
+			// barrier; meanwhile another migration writes history.
+			harness.admittedSignal = func() {
+				once.Do(func() {
+					go func() {
+						time.Sleep(200 * time.Millisecond)
+						testkit.WriteFile(t, harness.scenario.fixture.journalPath, flipped, 0o600)
+						unlock()
+					}()
+				})
+			}
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("RPC execute deadlocked")
+	}
+	if !strings.Contains(output, "the release changed after the plan") || harness.effects() != 0 {
+		t.Fatalf("RPC execute over history changed under the barrier: effects=%d\n%s", harness.effects(), output)
+	}
+}
+
+// A published configuration change refreshes its consumers in process only as
+// their repair, decided on the state after publication: a ready release runs
+// the ordinary child; a consumer limited to repair only by drift is refreshed
+// with the installed source bound; a consumer with another finding, or tooling
+// that is not the installed release's, is refused with its next step.
+func TestConfigSyncConsumerRefreshIsAConsumerRepair(t *testing.T) {
+	harness := newRepairHarnessWith(t, func(scenario yardFailureScenario, _ string) {
+		observeFailing(t, scenario, "named", true)
+		testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("d", 64)), 0o600)
+	})
+	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
+	program.ownerMutationLock = &uninstall.Tree{} // held by the publishing sync
+	program.sourceBinding = harness.bindSources
+	inProcess, finish, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default"})
+	if err != nil || !inProcess || finish == nil || finish() != nil {
+		t.Fatalf("drifted consumer: inProcess=%t err=%v", inProcess, err)
+	}
+	if _, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default", "named"}); err == nil ||
+		!strings.Contains(err.Error(), "next: yard -Y default config apply, yard -Y named config apply") {
+		t.Fatalf("failed consumer: %v", err)
+	}
+	program.sourceBinding = nil // the real proof refuses this fixture CLI
+	if _, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default"}); err == nil ||
+		!strings.Contains(err.Error(), "installed release's own tooling") {
+		t.Fatalf("consumer refresh with other tooling: %v", err)
+	}
+	testkit.WriteFile(t, harness.inspect, harness.ready, 0o600)
+	if inProcess, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default", "named"}); err != nil || inProcess {
+		t.Fatalf("ready release: inProcess=%t err=%v", inProcess, err)
+	}
+}
+
+// A shell into a yard that needs repair diagnoses it with any tooling: it is
+// not bound to the installed release's source.
+func TestShellIntoARepairOnlyYardNeedsNoInstalledTooling(t *testing.T) {
+	harness := newRepairHarness(t)
+	log, environment := harness.installIncusCLI(t)
+	var stdout, stderr bytes.Buffer
+	options := harness.scenario.fixture.cli.options
+	options.Arguments, options.Stdout, options.Stderr = []string{"-Y", "named", "shell", "--", "true"}, &stdout, &stderr
+	options.Environment = append(slices.Clone(options.Environment), environment...)
+	program, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || len(mustReadConfigFixtureOrEmpty(log)) == 0 {
+		t.Fatalf("shell without installed tooling: code=%d\n%s%s", code, stdout.String(), stderr.String())
 	}
 }
