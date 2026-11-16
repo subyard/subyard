@@ -436,7 +436,7 @@ export TEST_FIXTURE_ROOT="$TMP"
 
 for package_path in upgrade install; do
   for mode in normal upgrade-only; do
-    for version in 6.0.5 '?' 6.0.6; do
+    for version in 6.0.5 '?' 6.0.6 6.0.7; do
       rm -f "$version_bin/incus"
       [ "$package_path" = install ] || cp "$TMP/bin/incus" "$version_bin/incus"
       fixture_name="$package_path-$mode-${version//[^A-Za-z0-9]/x}"
@@ -453,10 +453,17 @@ for package_path in upgrade install; do
       status=$?
       set -e
       case "$version" in
-        6.0.6)
+        6.0.6|6.0.7)
           [ "$status" -eq 0 ] || fail "$package_path $mode installer rejected the required Incus version"
-          grep -Eq 'incus (installed|present) \(6\.0\.6\)' "$version_output" \
+          grep -Eq "incus (installed|present) \($version\)" "$version_output" \
             || fail "$package_path $mode installer omitted the verified Incus success result"
+          if [ "$version" = 6.0.6 ]; then
+            grep -Fq 'incus 6.0.6 is supported; 6.0.7 is recommended' "$version_output" \
+              || fail 'supported Incus omitted the recommendation note'
+          else
+            ! grep -Fq 'is recommended' "$version_output" \
+              || fail 'recommended Incus printed an unnecessary recommendation note'
+          fi
           ;;
         *)
           [ "$status" -ne 0 ] \

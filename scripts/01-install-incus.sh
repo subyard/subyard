@@ -34,6 +34,7 @@ for _a in "$@"; do
 done; unset _a
 # Nested Docker (project-env boxes) needs the CVE-2025-52881 AppArmor fix in Incus 6.0.6 LTS.
 MIN_INCUS_VER="${MIN_INCUS_VER:-6.0.6}"
+RECOMMENDED_INCUS_VER=6.0.7
 
 # Grant incus-admin to the real operator (SUDO_USER under sudo), not root.
 OPERATOR_USER="${SUBYARD_USER:-${SUDO_USER:-${USER:-root}}}"
@@ -255,6 +256,9 @@ apply_incus_source() { # <plan>
 }
 
 apply_incus_source "$incus_source"
+if dpkg --compare-versions "$(_iver)" lt "$RECOMMENDED_INCUS_VER"; then
+  info "incus $(_iver) is supported; $RECOMMENDED_INCUS_VER is recommended"
+fi
 
 # --upgrade-only: ensuring the version is all this run does — group/storage/init are 'yard init's job.
 if [ "$UPGRADE_ONLY" = 1 ]; then

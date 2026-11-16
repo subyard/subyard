@@ -19,7 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
-	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v7/shared/api"
 )
 
 func migrationProjectFixture(t *testing.T, yard string) (*CLI, config.Loaded, *incusclient.Client, *atomic.Int32, *testkit.IncusServer) {

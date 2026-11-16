@@ -208,13 +208,8 @@ func (runtime *Runtime) doctorChecks(ctx context.Context, want map[string]string
 			return doctorCheck([]string{"required inner Incus command is missing", "required qemu-system-x86_64 command is missing", "required nft command is missing"}[index], fmt.Errorf("required command is missing: %s", command))
 		}
 	}
-	version, _, err := runtime.Runner.Run(ctx, cfg.Incus, []string{"--version"}, nil, nil)
-	if err != nil {
-		return doctorCheck("inner Incus version cannot be inspected", err)
-	}
-	if !runtime.commandOK(ctx, "dpkg", "--compare-versions",
-		strings.TrimSpace(string(version)), "ge", "6.0.6") {
-		return doctorCheck("inner Incus is too old", nil)
+	if err := runtime.doctorIncusVersion(ctx); err != nil {
+		return err
 	}
 	if !runtime.commandOK(ctx, "systemctl", "is-active", "--quiet", "incus.service") {
 		return doctorCheck("inner Incus is inactive", nil)
@@ -382,4 +377,17 @@ var netParseIP = func(value string) []byte {
 
 func oneLine(value string) string {
 	return strings.Join(strings.Fields(value), " ")
+}
+
+// doctorIncusVersion checks the private test backend, not the operator's host daemon.
+func (runtime *Runtime) doctorIncusVersion(ctx context.Context) error {
+	version, _, err := runtime.Runner.Run(ctx, runtime.Config.Incus, []string{"--version"}, nil, nil)
+	if err != nil {
+		return doctorCheck("inner Incus version cannot be inspected", err)
+	}
+	if !runtime.commandOK(ctx, "dpkg", "--compare-versions",
+		strings.TrimSpace(string(version)), "ge", "6.0.7") {
+		return doctorCheck("inner Incus is too old", nil)
+	}
+	return nil
 }

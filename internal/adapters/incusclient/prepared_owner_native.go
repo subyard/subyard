@@ -7,7 +7,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
-	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v7/shared/api"
 )
 
 func (client *Client) PrepareImageProject(ctx context.Context, project string, shared bool) (ports.PreparedImageProject, error) {

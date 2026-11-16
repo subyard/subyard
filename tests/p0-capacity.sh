@@ -777,7 +777,7 @@ printf '%s\n' \
   'set -euo pipefail' \
   'case "$*" in' \
   '  info) ;;' \
-  '  --version) printf "6.0.6\n" ;;' \
+  '  --version) printf "6.0.7\n" ;;' \
   '  "storage show default --project default") ;;' \
   '  "network show incusbr0 --project default") ;;' \
   '  "admin waitready") ;;' \

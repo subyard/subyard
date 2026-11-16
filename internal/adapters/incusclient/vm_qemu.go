@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	incus "github.com/lxc/incus/v6/client"
+	incus "github.com/lxc/incus/v7/client"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )

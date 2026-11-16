@@ -40,13 +40,14 @@ upstream advisory and the Subyard call sites, and check for a compatible fixed d
 The tool is cached as `.build/tools/govulncheck-1.1.4-$(go env GOVERSION)` after an audit run.
 Document the affected path and why it is not exercised (or the accepted risk) in the reason;
 set review no more than 92 days after the UTC run date; later dates fail the gate.
-Remove entries when fixed or no longer needed,
-and reassess client-library exemptions whenever Incus usage changes.
-An Incus client-library exemption says nothing about the separately installed Incus daemon.
-The 24 Incus findings are resolved in the v7 major line (fixed there or not affected), while
-the Go advisories record no v6 fixes. This change keeps the v6.23.0 client: the product installs
-the daemon from the LTS-6.0 line, and validating v7 client compatibility with 6.0 daemons belongs
-to a separate migration task.
+Remove entries when fixed or no longer needed.
+Subyard uses the `github.com/lxc/incus/v7` client at v7.6.0; the former 24 Incus v6
+allowlist entries have been removed. Client dependency audits do not cover the separately
+installed daemon. The daemon minimum is 6.0.6: it remains supported, is never refused
+for its version and is not upgraded automatically. The recommended and tested version
+is 6.0.7. Distributions below the minimum install from Zabbly LTS-6.0, which serves the
+latest 6.0.x. Disposable VM fixtures require at least 6.0.7; compatibility lanes exercise
+the v7 client against that LTS daemon, rather than an Incus 7 daemon.
 Run `TMPDIR=/tmp bash tests/lint-tools.sh` for the host-free policy and audit integration tests;
 the core contract suite already includes this check.
 
