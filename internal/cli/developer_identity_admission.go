@@ -45,11 +45,12 @@ func (cli *CLI) admitDeveloperIdentity(ctx context.Context, yard, handler string
 	}
 	loaded, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: firstNonempty(cli.baseEnv["SUBYARD_OPERATOR_HOME"], cli.baseEnv["HOME"]), YardName: yard, Environment: cli.baseEnv})
 	if err != nil {
-		return false, err
+		// Configuration refusals render without values; the gate's own texts stay as they are.
+		return false, yardLoadError(yard, root, err)
 	}
 	peers, err := cli.powerYardContexts(loaded)
 	if err != nil {
-		return false, err
+		return false, inventoryLoadError{prefix: "load registered yards", home: root, cause: err}
 	}
 	inputs, err := cli.captureOwnerInputs(loaded, "", peers)
 	if err != nil {

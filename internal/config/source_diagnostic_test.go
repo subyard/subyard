@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -216,5 +217,217 @@ func TestOwnerMetadataDiagnosticsStayLocalAndPreserveCauses(t *testing.T) {
 		if got := MetadataAccessReason(test.cause); !strings.Contains(got, test.want) || strings.Contains(got, "SECRET") {
 			t.Fatal(got)
 		}
+	}
+}
+
+func TestDiagnoseRendersEveryClassifiedRefusalWithoutValues(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "route-client"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "profiles", "route-client", "profile.conf"), []byte("REQUIRES_HOST_ACCESS=1\n"), 0o644)
+	prior := []error{
+		fmt.Errorf("%w in /secret/SENTINEL", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools)),
+		namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, "AGENT_SAMPLE_SOURCE"),
+	}
+	err := validateProfileConstraints(root, "default", environment{
+		"ENVIRONMENT_PROFILES": "route-client", "EXCLUSIVE_ENVIRONMENT_PROFILE": "route-client",
+		"ALLOWS_HOST_ACCESS": "false", "HOST_LINKS": "SENTINEL", "FORWARD_SSH_AGENT": "SENTINEL",
+	}, prior...)
+	diagnostic := Diagnose("", fmt.Errorf("yard default: %w", err))
+	want := []string{
+		"exclusive environment profiles require a dedicated named yard",
+		`profile "route-client" requires host access; this yard role sets ALLOWS_HOST_ACCESS=false, so deselect the profile or use a yard that allows host access`,
+		"selected yard role forbids non-empty AGENT_SAMPLE_SOURCE",
+		"selected yard role forbids non-empty HOST_LINKS",
+		"selected yard role requires FORWARD_SSH_AGENT=0",
+		"yard role forbids non-empty CODING_TOOL_INTEGRATIONS",
+	}
+	if strings.Join(diagnostic.Refusals, "\n") != strings.Join(want, "\n") || diagnostic.Unclassified || len(diagnostic.Next) < 2 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+	mixed := Diagnose("", domain.CollectRefusals(err, errors.New("raw SENTINEL"), sourceError("", 0, "SSH_PORT", "scalar settings", "invalid port value", nil)))
+	message := mixed.Message("generic tail")
+	if !mixed.Unclassified || strings.Contains(message, "SENTINEL") || !strings.HasSuffix(message, "; generic tail") ||
+		!strings.Contains(message, "configuration: SSH_PORT (scalar settings): invalid port value") || len(mixed.Refusals) != len(want)+1 {
+		t.Fatalf("mixed diagnostic = %q", message)
+	}
+	if explained := Diagnose("", domain.WithRefusalCause(domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), errors.New("raw SENTINEL"))); explained.Unclassified || explained.Message("generic") != "SSH_PORT must be numeric" {
+		t.Fatalf("raw cause under a typed refusal = %#v", explained)
+	}
+	for _, joined := range []error{
+		errors.Join(domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize), errors.New("raw SENTINEL")),
+		fmt.Errorf("%w: %w", domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize), errors.New("raw SENTINEL")),
+	} {
+		if independent := Diagnose("", joined); !independent.Unclassified || independent.Message("generic") != "block storage requires an explicit SRV_VOLUME_SIZE; generic" {
+			t.Fatalf("an independent raw cause was treated as explained: %#v", independent)
+		}
+	}
+	integrity := errors.New("integrity SENTINEL")
+	known := Diagnose("", domain.CollectRefusals(fmt.Errorf("owner: %w", integrity), domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize)), KnownCause{Err: integrity, Text: "integrity failed", Next: "repair the owner"})
+	if known.Unclassified || known.Message("") != "block storage requires an explicit SRV_VOLUME_SIZE; integrity failed" || !slices.Contains(known.Next, "repair the owner") {
+		t.Fatalf("known cause = %#v", known)
+	}
+	if stale := Diagnose("", fmt.Errorf("%w: %w", err, domain.ErrPlanStale)); stale.Unclassified || len(stale.Refusals) != len(want)+1 || !slices.Contains(stale.Refusals, domain.ErrPlanStale.Error()) {
+		t.Fatalf("known sentinel made the diagnostic incomplete: %#v", stale)
+	}
+	values := Diagnose("", domain.CollectRefusals(
+		fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), "SENTINEL", "/SENTINEL"),
+		fmt.Errorf("%w %q", ErrUnknownYard, "SENTINEL"),
+	))
+	if message := values.Message("generic"); message != "unknown YARD_TEMPLATE; unknown yard" || values.Unclassified {
+		t.Fatalf("value-suffixed refusals = %q", message)
+	}
+	if opaque := Diagnose("", errors.New("raw SENTINEL")); !opaque.Unclassified || opaque.Message("generic") != "generic" {
+		t.Fatalf("unclassified diagnostic = %#v", opaque)
+	}
+}
+
+func TestDiagnoseNamesShippedPackageSymlinkWithoutPath(t *testing.T) {
+	root := testkit.TempDir(t)
+	target := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(target, "sample"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(target, "sample", "profile.conf"), []byte("PROVISION_SCOPE=dedicated\n"), 0o644)
+	if err := os.Symlink(target, filepath.Join(root, "profiles")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ProfileProvisionScope(root, "sample")
+	diagnostic := Diagnose("", err)
+	if message := diagnostic.Message("generic"); message != "shipped package directory must not traverse symlinks" || len(diagnostic.Next) != 1 {
+		t.Fatalf("shipped package diagnostic = %q (%v)", message, err)
+	}
+}
+
+func TestIntegrationSelectionReportsEveryRefusalNamingOnlyShippedIntegrations(t *testing.T) {
+	catalog, err := LoadCatalog(integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Metadata settings alone, such as an operator-authored AGENT_canary_COMMAND, do not ship a name.
+	values := environment{"AGENT_sample_COMMAND": "sample", "AGENT_canary_COMMAND": "true"}
+	_, err = catalog.ResolveIntegrationSelection(values, []string{"missing-a", "missing-b", "missing-a", "sample", "sample", "canary", "canary"})
+	diagnostic := Diagnose("", err)
+	// Refusals that render alike appear once.
+	want := []string{"duplicate agent", `duplicate agent "sample"`, "unknown integration"}
+	if strings.Join(diagnostic.Refusals, "\n") != strings.Join(want, "\n") || strings.Contains(diagnostic.Message(""), "missing-") ||
+		strings.Contains(diagnostic.Message(""), "canary") || diagnostic.Unclassified {
+		t.Fatalf("integration refusals = %#v (%v)", diagnostic, err)
+	}
+	if _, err := ResolveIntegrationSelection(values, []string{"sample", "sample"}); Diagnose("", err).Message("") != "duplicate agent" {
+		t.Fatalf("selection without a catalog named an integration: %v", err)
+	}
+}
+
+func TestLoadReportsIndependentRefusalsAcrossStages(t *testing.T) {
+	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample","settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped","command"],"application":"yard-init","minimum":1024,"maximum":65535,"optional":true,"host_listener":true},{"name":"SAMPLE_ALT_PORT","type":"port","scopes":["shipped","command"],"application":"yard-init","minimum":1024,"maximum":65535,"optional":true,"host_listener":true}]}`)
+	writeCatalogProfile(t, root, "fixture", `{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true},{"name":"FIXTURE_ALT_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true},{"name":"FIXTURE_THIRD_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true}]}`)
+	load := func(environment map[string]string) ConfigDiagnostic {
+		t.Helper()
+		_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: environment, DisablePrivate: true})
+		if err == nil {
+			t.Fatal("invalid configuration loaded")
+		}
+		return Diagnose("", err)
+	}
+	ports := load(map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "ENVIRONMENT_PROFILES": "fixture",
+		"SAMPLE_PORT": "3000", "SAMPLE_ALT_PORT": "3000", "FIXTURE_PORT": "4000", "FIXTURE_ALT_PORT": "4000", "FIXTURE_THIRD_PORT": "4000"})
+	if got := strings.Join(ports.Refusals, "\n"); got != "FIXTURE_PORT collides with FIXTURE_ALT_PORT; choose another port\nFIXTURE_THIRD_PORT collides with FIXTURE_ALT_PORT; choose another port\nFIXTURE_THIRD_PORT collides with FIXTURE_PORT; choose another port\nSAMPLE_ALT_PORT collides with SAMPLE_PORT; choose another port" {
+		t.Fatalf("collisions = %q", got)
+	}
+	stages := load(map[string]string{"DEV_SUDO": "2", "FORWARD_SSH_AGENT": "2", "HOST_BASE": "/srv/a", "RESTRICTED_DISK_PATHS": "/srv/b", "SSH_PORT": "SENTINEL"})
+	message := stages.Message("generic")
+	for _, want := range []string{"DEV_SUDO", "FORWARD_SSH_AGENT"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("command refusals lack %s: %s", want, message)
+		}
+	}
+	if strings.Contains(message, "SENTINEL") || stages.Unclassified {
+		t.Fatalf("command refusals = %q", message)
+	}
+	home := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "subyard", "yards", "default"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(home, ".config", "subyard", "config.env"), []byte("HOST_BASE=/srv/a\nRESTRICTED_DISK_PATHS=/srv/b\nE2E_VM_DISK=9GiB\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(home, ".config", "subyard", "yards", "default", "config.env"), []byte("VM_CPU_WEIGHT=1000\n"), 0o600)
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "missing-sentinel", "DEV_SUDO": "2"}, DisablePrivate: true})
+	context := Diagnose("", err)
+	message = context.Message("generic")
+	for _, want := range []string{"require YARD_KIND=vm", "HOST_BASE must equal RESTRICTED_DISK_PATHS", "E2E_VM_DISK must be at least 10GiB", "unknown integration", "DEV_SUDO (command override)"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("stage refusals lack %q: %s", want, message)
+		}
+	}
+	if context.Unclassified || strings.Contains(message, "sentinel") {
+		t.Fatalf("stage refusals = %q", message)
+	}
+	aliases := Diagnose("", normalizeLegacyEnvironment(environment{"AGENTS": "codex", "CODING_TOOL_INTEGRATIONS": "claude", "YARD_PROFILES": "one", "ENVIRONMENT_PROFILES": "two"}))
+	if got := strings.Join(aliases.Refusals, "\n"); got != "conflicting command environment settings CODING_TOOL_INTEGRATIONS and AGENTS\nconflicting command environment settings ENVIRONMENT_PROFILES and YARD_PROFILES" {
+		t.Fatalf("alias conflicts = %q", got)
+	}
+}
+
+func TestDiagnoseRendersRetiredTemplateRelativeToConfigHome(t *testing.T) {
+	home := testkit.TempDir(t)
+	err := retiredE2EVMTemplateError("named", filepath.Join(home, "yards", "named", "config.env"))
+	if message := Diagnose(home, err).Message(""); strings.Contains(message, home) || !strings.Contains(message, `retired in "yards/named/config.env"`) {
+		t.Fatalf("retired diagnostic = %q", message)
+	}
+	if message := Diagnose("", err).Message(""); strings.Contains(message, home) {
+		t.Fatalf("retired diagnostic without home = %q", message)
+	}
+}
+
+func TestLoadCollectsAssetPathAndCodingToolRoleRefusals(t *testing.T) {
+	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
+	if err := os.MkdirAll(filepath.Join(root, "config", "yards", "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config", "yards", "profiles", "nocode.env"), []byte("ALLOWS_CODING_TOOLS=false\n"), 0o600)
+	home := testkit.TempDir(t)
+	yard := filepath.Join(home, ".config", "subyard", "yards", "work")
+	if err := os.MkdirAll(yard, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(yard, "config.env"), []byte("YARD_TEMPLATE=nocode\nCODING_TOOL_INTEGRATIONS=missing-sentinel\nVM_CPU_WEIGHT=1000\n"), 0o600)
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "work", DisablePrivate: true, Environment: map[string]string{
+		"AGENT_alpha_RULES": filepath.Join(home, "missing-alpha"), "AGENT_beta_CONFIG": filepath.Join(home, "missing-beta"),
+	}})
+	diagnostic := Diagnose(filepath.Join(home, ".config", "subyard"), err)
+	message := diagnostic.Message("generic")
+	for _, want := range []string{"AGENT_alpha_RULES", "AGENT_beta_CONFIG", "require YARD_KIND=vm", "yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "unknown integration"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("load refusals lack %q: %s", want, message)
+		}
+	}
+	if strings.Contains(message, "sentinel") || strings.Contains(message, home) || diagnostic.Unclassified || len(diagnostic.Next) == 0 {
+		t.Fatalf("load refusals = %q (%#v)", message, diagnostic)
+	}
+}
+
+func TestDiagnoseGivesSourceErrorsANextStep(t *testing.T) {
+	for _, source := range []error{
+		sourceError("", 0, "SSH_PORT", "scalar settings", "invalid port value", nil),
+		sourceError("/home/config.env", 3, "SSH_PORT", "scalar settings", "invalid port value", nil),
+	} {
+		if diagnostic := Diagnose("/home", source); len(diagnostic.Next) != 1 {
+			t.Fatalf("source diagnostic lacks a next step: %#v", diagnostic)
+		}
+	}
+}
+
+func TestEnvironmentProfileResolutionReportsEveryBrokenPackage(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, name := range []string{"one", "two"} {
+		if err := os.MkdirAll(filepath.Join(root, "profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, "profiles", name, "profile.conf"), []byte("PROVISION_SCOPE=unknown\n"), 0o644)
+	}
+	_, err := resolveEnvironmentProfiles(root, "named", environment{"ENVIRONMENT_PROFILES": "one two"}, Catalog{})
+	if got := strings.Join(Diagnose("", err).Refusals, "; "); got != `profile "one" has an unsupported PROVISION_SCOPE; profile "two" has an unsupported PROVISION_SCOPE` {
+		t.Fatalf("profile resolution refusals = %q", got)
 	}
 }

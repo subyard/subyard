@@ -38,7 +38,7 @@ func configAuthoringDefinition(catalog config.Catalog, action string, scope conf
 		return catalog.ValidateSettingName(scope, name, syncable)
 	}
 	if action != "unset" {
-		return config.SettingDefinition{}, fmt.Errorf("%s is declared only by environment profiles; select the profile instead", name)
+		return config.SettingDefinition{}, configPublicRefusal(name + " is declared only by environment profiles; select the profile instead")
 	}
 	return catalog.ValidateSettingName(config.ScopeShipped, name, syncable)
 }
@@ -62,9 +62,10 @@ func (cli *CLI) runConfigAuthoring(
 		cli.errorf("config %s: %v", action, err)
 		return 2
 	}
+	home := loaded.Context.Paths.ConfigHome
 	if len(requests) > 1 {
 		if err := cli.configGitScalarsRefusal(loaded, requests); err != nil {
-			cli.errorf("config %s: %v", action, err)
+			cli.reportConfigRefusal("config "+action, home, err)
 			return 2
 		}
 		return cli.runConfigGitAuthoring(ctx, loaded, requests, nil)
@@ -72,12 +73,12 @@ func (cli *CLI) runConfigAuthoring(
 	request := requests[0]
 	definition, err := configAuthoringDefinition(loaded.Catalog, action, request.scope, request.name, action == "import" || action == "edit")
 	if err != nil {
-		cli.errorf("config %s: %v", action, err)
+		cli.reportConfigRefusal("config "+action, home, err)
 		return 2
 	}
 	if !request.git {
 		if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
-			cli.errorf("config %s: %v", action, err)
+			cli.reportConfigRefusal("config "+action, home, err)
 			return 1
 		}
 	}
@@ -87,7 +88,7 @@ func (cli *CLI) runConfigAuthoring(
 	}
 	if action == "set" || action == "unset" {
 		if err := configScalarAuthoringRefusal(loaded, definition, request); err != nil {
-			cli.errorf("config %s: %v", action, err)
+			cli.reportConfigRefusal("config "+action, home, err)
 			return 2
 		}
 		if request.git {
@@ -167,10 +168,10 @@ func configScalarAuthoringRefusal(loaded config.Loaded, definition config.Settin
 // cannot be written this way is not writable, so state checks do not apply.
 func configScalarSyntaxRefusals(loaded config.Loaded, definition config.SettingDefinition, request configAuthoringRequest) ([]error, bool) {
 	if request.git && (!definition.Syncable || definition.Sensitive) {
-		return []error{fmt.Errorf("%s cannot be saved in Git", request.name)}, false
+		return []error{configPublicRefusal(request.name + " cannot be saved in Git")}, false
 	}
 	if definition.Kind != config.SettingScalar {
-		return []error{fmt.Errorf("%s is a file setting; use config import or config edit", request.name)}, false
+		return []error{configPublicRefusal(request.name + " is a file setting; use config import or config edit")}, false
 	}
 	var refusals []error
 	if request.action == "set" {
@@ -189,11 +190,11 @@ func configScalarStateRefusals(state config.Loaded, request configAuthoringReque
 	var refusals []error
 	if request.action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
 		requested := strings.Fields(request.value)
-		if _, err := config.ResolveIntegrationSelection(state.Environment, requested); err != nil {
+		if _, err := state.Catalog.ResolveIntegrationSelection(state.Environment, requested); err != nil {
 			refusals = append(refusals, err)
 		}
 		if request.scope == config.ScopeYard && !state.Integrations.AllowsCodingTools && len(requested) != 0 {
-			refusals = append(refusals, errors.New("yard role forbids non-empty CODING_TOOL_INTEGRATIONS"))
+			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools))
 		}
 	}
 	if request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
@@ -213,11 +214,11 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 	for _, request := range requests {
 		definition, err := configAuthoringDefinition(loaded.Catalog, request.action, request.scope, request.name, false)
 		if err != nil {
-			refusals = append(refusals, fmt.Errorf("%s: %w", request.name, err))
+			refusals = append(refusals, configNamedRefusal{request.name, err})
 			continue
 		}
 		if prior, ok := seen[definition.Name]; ok {
-			refusals = append(refusals, fmt.Errorf("%s and %s assign the same setting", prior, request.name))
+			refusals = append(refusals, configPublicRefusal(prior+" and "+request.name+" assign the same setting"))
 		}
 		seen[definition.Name] = request.name
 		syntax, _ := configScalarSyntaxRefusals(loaded, definition, request)
@@ -543,4 +544,23 @@ func readConfigPersistentSnapshot(root, path string) (config.PersistentFileSnaps
 		return config.PersistentFileSnapshot{}, nil
 	}
 	return snapshot, err
+}
+
+// configNamedRefusal labels a setting-name refusal with the requested name when
+// it has the shape of a setting name; it is an argument, never a value.
+type configNamedRefusal struct {
+	name  string
+	cause error
+}
+
+func (err configNamedRefusal) Error() string { return err.name + ": " + err.cause.Error() }
+func (err configNamedRefusal) Unwrap() error { return err.cause }
+
+// PublicConfigLabel names the requested setting only when it has the shape of a
+// setting name; config.Diagnose renders the cause and its next steps beneath it.
+func (err configNamedRefusal) PublicConfigLabel() string {
+	if _, ok := domain.ConfigSettingName(err.name); ok {
+		return err.name
+	}
+	return ""
 }

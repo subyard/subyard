@@ -8,6 +8,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerservice"
 )
@@ -40,7 +41,25 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 	if errors.Is(err, errNetworkUsage) || errors.Is(err, errHostUsage) || errors.Is(err, errConfigUsage) {
 		code = 2
 	}
+	// Only configuration validation and usage causes go through the renderer.
+	var authoring configAuthoringFailure
+	var usage configUsageError
+	var prospective configProspectiveError
+	if !errors.As(err, &prospective) {
+		if errors.As(err, &authoring) {
+			cli.reportConfigRefusal(prefix, authoring.home, authoring.cause)
+			return code
+		}
+		if errors.As(err, &usage) {
+			home, _ := config.ResolveConfigHome(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), cli.env)
+			cli.reportConfigRefusal(prefix, home, usage.cause)
+			return code
+		}
+	}
 	cli.errorf("%s: %v", prefix, err)
+	if definition.Handler == "@config" {
+		cli.reportConfigNext(err)
+	}
 	return code
 }
 

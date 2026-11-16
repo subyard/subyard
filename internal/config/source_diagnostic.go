@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -314,4 +315,149 @@ func SourceAliasRepairRetry(home, yard string, cause error) string {
 		return "run config validate; restore the owning source or use its supported schema migration"
 	}
 	return fmt.Sprintf("choose the desired value explicitly, then run yard -Y %s config repair-alias %s CHOSEN_VALUE --scope %s --local --check", yard, source.Key, scope)
+}
+
+// ConfigDiagnostic is the value-free rendering of a configuration load or
+// validation failure: every classified refusal in its collected order, fixed
+// next steps, and whether some cause has no public classification.
+type ConfigDiagnostic struct {
+	Refusals     []string
+	Next         []string
+	Unclassified bool
+	known        []KnownCause
+}
+
+// KnownCause is a boundary's own sentinel with fixed, value-free text.
+type KnownCause struct {
+	Err        error
+	Text, Next string
+}
+
+// Diagnose classifies each independent cause of err. It renders only source
+// diagnostics, retired-template guidance, typed refusals and known causes,
+// never other text.
+func Diagnose(configHome string, err error, known ...KnownCause) ConfigDiagnostic {
+	diagnostic := ConfigDiagnostic{known: known}
+	diagnostic.add(configHome, err)
+	diagnostic.known = nil
+	return diagnostic
+}
+
+func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if index := slices.IndexFunc(diagnostic.known, func(cause KnownCause) bool { return cause.Err == current }); index >= 0 {
+			diagnostic.addRefusal(diagnostic.known[index].Text)
+			diagnostic.addNext(diagnostic.known[index].Next)
+			return
+		}
+		if current == ErrUnknownYard {
+			current = domain.NewConfigRefusal(domain.ConfigUnknownYard)
+		}
+		if current == ErrLegacyGitSettingsMigration {
+			diagnostic.addRefusal(current.Error())
+			return
+		}
+		if text, next, ok := operationSentinel(current); ok {
+			// Operation sentinels keep their own fixed text, never the generic tail.
+			diagnostic.addRefusal(text)
+			diagnostic.addNext(next)
+			return
+		}
+		switch typed := current.(type) {
+		case *SourceError:
+			message, _ := SourceDiagnostic(configHome, typed)
+			diagnostic.addRefusal(message)
+			if typed.Path != "" {
+				diagnostic.addNext("correct the named configuration source, then run config validate")
+			} else {
+				diagnostic.addNext("use a supported value for the named setting")
+			}
+			return
+		case *domain.ConfigRefusal:
+			diagnostic.addRefusal(typed.Error())
+			diagnostic.addNext(typed.Next())
+			return
+		case *retiredYardTemplateError:
+			// Like source diagnostics, name the yard file relative to the config home.
+			source := "the yard's config.env"
+			if relative, err := filepath.Rel(filepath.Clean(configHome), filepath.Clean(typed.yardFile)); configHome != "" && err == nil && filepath.IsLocal(relative) {
+				source = strconv.QuoteToASCII(filepath.ToSlash(relative))
+			}
+			diagnostic.addRefusal(typed.render(source))
+			return
+		case interface {
+			PublicConfigLabel() string
+			Unwrap() error
+		}:
+			// A boundary label prefixes each classified cause; next steps are kept.
+			nested := ConfigDiagnostic{known: diagnostic.known}
+			nested.add(configHome, typed.Unwrap())
+			for _, refusal := range nested.Refusals {
+				if label := typed.PublicConfigLabel(); label != "" {
+					refusal = label + ": " + refusal
+				}
+				diagnostic.addRefusal(refusal)
+			}
+			for _, next := range nested.Next {
+				diagnostic.addNext(next)
+			}
+			diagnostic.Unclassified = diagnostic.Unclassified || nested.Unclassified
+			return
+		case interface{ PublicConfigDiagnostic() string }:
+			// A boundary's own fixed refusal text, naming only validated settings.
+			diagnostic.addRefusal(typed.PublicConfigDiagnostic())
+			return
+		case *domain.Refusals:
+			for _, cause := range typed.Unwrap() {
+				diagnostic.add(configHome, cause)
+			}
+			return
+		case *domain.ConfigRefusalCause:
+			// The raw detail is explained by its typed refusal.
+			diagnostic.add(configHome, typed.Refusal)
+			return
+		case interface{ Unwrap() []error }:
+			// Joined or multi-wrapped causes are independent; each is classified.
+			for _, cause := range typed.Unwrap() {
+				diagnostic.add(configHome, cause)
+			}
+			return
+		}
+	}
+	diagnostic.Unclassified = true
+}
+
+func operationSentinel(err error) (text, next string, ok bool) {
+	switch err {
+	case domain.ErrPlanStale:
+		return err.Error(), "run the command again to review a fresh plan", true
+	case context.Canceled:
+		return "operation was cancelled", "", true
+	case context.DeadlineExceeded:
+		return "operation timed out", "run the command again", true
+	}
+	return "", "", false
+}
+
+// addRefusal keeps one copy of each rendered refusal; distinct values that
+// render alike would otherwise repeat the same fixed text.
+func (diagnostic *ConfigDiagnostic) addRefusal(refusal string) {
+	if !slices.Contains(diagnostic.Refusals, refusal) {
+		diagnostic.Refusals = append(diagnostic.Refusals, refusal)
+	}
+}
+
+func (diagnostic *ConfigDiagnostic) addNext(next string) {
+	if next != "" && !slices.Contains(diagnostic.Next, next) {
+		diagnostic.Next = append(diagnostic.Next, next)
+	}
+}
+
+// Message joins the refusals; an unclassified cause adds the generic tail.
+func (diagnostic ConfigDiagnostic) Message(generic string) string {
+	messages := slices.Clone(diagnostic.Refusals)
+	if diagnostic.Unclassified || len(messages) == 0 {
+		messages = append(messages, generic)
+	}
+	return strings.Join(messages, "; ")
 }

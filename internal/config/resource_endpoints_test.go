@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -159,7 +160,7 @@ func TestLoadSavedEndpointIsScopedToSelectedLocalYard(t *testing.T) {
 			ctx := resourceEndpointTestContext(root, operatorHome, configHome, dataHome, test.yard, test.yard != "remote")
 			tracker := newSettingTracker()
 			calls := 0
-			if err := applySavedResourceEndpoints(root, LoadOptions{
+			if _, err := applySavedResourceEndpoints(root, LoadOptions{
 				Resources:  func(root string) (resource.Registry, error) { calls++; return resource.Load(root) },
 				SyncSource: test.syncSource, LayerPaths: test.layerPaths,
 			}, ctx, values, tracker); err != nil {
@@ -254,5 +255,31 @@ func TestCapturedResourceDeclarationsKeepSavedEndpointsFresh(t *testing.T) {
 		if !strings.Contains(effectiveSettingDetail(loaded.Settings["FIXTURE_HOST_PORT"]), "saved endpoint allocation") {
 			t.Fatal("saved endpoint provenance lost")
 		}
+	}
+}
+
+func TestUnreadableSavedEndpointKeepsIndependentPortChecks(t *testing.T) {
+	root := syntheticResourceRoot(t)
+	operatorHome := testkit.TempDir(t)
+	dataHome := filepath.Join(operatorHome, ".subyard")
+	writeSavedEndpointFixture(t, dataHome, `{not json`)
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, DisablePrivate: true, Environment: map[string]string{
+		"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture",
+		"SSH_PORT": "3000", "WEB_PREVIEW_HOST_PORT": "3000", "FIXTURE_ADVERTISE_HOST": "owner.example.ts.net",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "read saved endpoint for fixture.fixture") {
+		t.Fatalf("unreadable endpoint was not reported: %v", err)
+	}
+	diagnostic := Diagnose("", err)
+	if !slices.Contains(diagnostic.Refusals, "WEB_PREVIEW_HOST_PORT collides with SSH_PORT; choose another port") || !diagnostic.Unclassified {
+		t.Fatalf("independent port checks were hidden: %#v", diagnostic)
+	}
+	// An explicit endpoint port keeps its collisions even though the read failed.
+	_, err = Load(LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, DisablePrivate: true, Environment: map[string]string{
+		"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture",
+		"SSH_PORT": "3000", "FIXTURE_HOST_PORT": "3000",
+	}})
+	if explicit := Diagnose("", err); !slices.Contains(explicit.Refusals, "SSH_PORT collides with FIXTURE_HOST_PORT; choose another port") {
+		t.Fatalf("an explicit endpoint port lost its collision: %#v (%v)", explicit, err)
 	}
 }

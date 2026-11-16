@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // LockRoot holds a process-scoped advisory lock on the configuration directory.
@@ -18,7 +20,7 @@ func LockRoot(root string, exclusive bool) (func(), error) {
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return nil, errors.New("configuration root must be a real directory")
+		return nil, domain.NewConfigRefusal(domain.ConfigRootNotDirectory)
 	}
 	directory, err := os.Open(root)
 	if err != nil {

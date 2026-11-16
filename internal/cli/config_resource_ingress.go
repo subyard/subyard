@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strings"
 
@@ -39,14 +38,14 @@ func (cli *CLI) checkResourceConfigChange(ctx context.Context, loaded config.Loa
 		}
 		output, err := cli.prepareResource(ctx, cli.resourceShutdownContext(ctx, loaded, definition, definition.Shutdown), definition, []string{definition.Shutdown})
 		if err != nil {
-			return fmt.Errorf("verify resource shutdown before changing %s: run %s %s in the running yard first", request.name, definition.Command, definition.Shutdown)
+			return resourceRefusal(domain.ConfigResourceShutdownUnverified, request.name, definition.Command, definition.Shutdown)
 		}
 		assessment, err := cli.resources.AssessPrepareResult(cli.coreActions, definition.Command, definition.Shutdown, output)
 		if err != nil {
 			return err
 		}
 		if assessment.Changed {
-			return fmt.Errorf("run %s %s before changing %s; its public ingress or runtime is still enabled", definition.Command, definition.Shutdown, request.name)
+			return resourceRefusal(domain.ConfigResourceIngressEnabled, definition.Command, definition.Shutdown, request.name)
 		}
 	}
 	return nil
@@ -60,4 +59,21 @@ func (cli *CLI) checkResourceConfigChanges(ctx context.Context, loaded config.Lo
 		refusals = append(refusals, cli.checkResourceConfigChange(ctx, loaded, request))
 	}
 	return domain.CollectRefusals(refusals...)
+}
+
+// resourceRefusal types an ingress refusal over a setting name and shipped
+// command words, in template order; any other text stays unclassified.
+func resourceRefusal(code domain.ConfigRefusalCode, words ...string) error {
+	names := make([]domain.ConfigName, len(words))
+	for index, word := range words {
+		name, ok := domain.ConfigSettingName(word)
+		if !ok {
+			name, ok = domain.ConfigCommandName(word)
+		}
+		if !ok {
+			return domain.UnclassifiedConfigRefusal(code, words...)
+		}
+		names[index] = name
+	}
+	return domain.NewConfigRefusal(code, names...)
 }

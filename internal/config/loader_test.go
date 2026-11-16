@@ -1,6 +1,7 @@
 package config
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -748,11 +749,11 @@ func TestE2EConfigValidation(t *testing.T) {
 		"E2E_VM_MEMORY": "4GiB", "E2E_VM_DISK": "10GiB",
 		"E2E_VM_SLOT_COUNT": "2", "E2E_VM_BOOT_TIMEOUT": "300",
 	}
-	if err := validateE2EConfig(valid); err != nil {
+	if err := validateE2EConfig(valid, true); err != nil {
 		t.Fatal(err)
 	}
 	valid["E2E_DISK_BUDGET"] = "0GiB"
-	if err := validateE2EConfig(valid); err != nil {
+	if err := validateE2EConfig(valid, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateSetting(ScopeYard, "E2E_DISK_BUDGET", "0GiB", false); err != nil {
@@ -773,9 +774,16 @@ func TestE2EConfigValidation(t *testing.T) {
 			values[key] = current
 		}
 		values[name] = value
-		if err := validateE2EConfig(values); err == nil {
+		if err := validateE2EConfig(values, true); err == nil {
 			t.Errorf("%s=%q was accepted", name, value)
 		}
+	}
+	invalid := maps.Clone(valid)
+	invalid["E2E_VM_IMAGE"], invalid["E2E_VM_MEMORY"], invalid["E2E_VM_DISK"], invalid["E2E_VM_BOOT_TIMEOUT"] = "-SENTINEL", "4GB", "9GiB", "29"
+	diagnostic := Diagnose("", validateE2EConfig(invalid, true))
+	want := "E2E_VM_BOOT_TIMEOUT must be an integer from 30 to 1800; E2E_VM_DISK must be at least 10GiB; E2E_VM_IMAGE contains unsafe characters; E2E_VM_MEMORY must use a positive MiB or GiB value"
+	if message := diagnostic.Message("generic"); message != want || diagnostic.Unclassified {
+		t.Fatalf("E2E refusals = %q", message)
 	}
 }
 

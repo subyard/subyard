@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -81,13 +82,23 @@ func (loaded Loaded) AssetValidationInputs() []string {
 }
 
 type retiredYardTemplateError struct {
-	diagnostic string
+	yardName, yardFile string
 }
 
 var ErrUnknownYard = errors.New("unknown yard")
 
-func (err *retiredYardTemplateError) Error() string {
-	return err.diagnostic
+func (err *retiredYardTemplateError) Error() string { return err.render(err.yardFile) }
+
+func (err *retiredYardTemplateError) render(source string) string {
+	return fmt.Sprintf(`YARD_TEMPLATE "e2e-vms" is retired in %s
+replace its YARD_TEMPLATE assignment with:
+  YARD_TEMPLATE=test-vms
+then verify the unchanged yard identity:
+  yard -Y %s check
+  yard -Y %s status
+to retire that yard after the config migration:
+  yard -Y %s test-vms status
+  yard -Y %s teardown`, source, err.yardName, err.yardName, err.yardName, err.yardName)
 }
 
 func IsRetiredYardTemplate(err error) bool {
@@ -140,6 +151,8 @@ func load(
 			delete(values, name)
 		}
 	}
+	// Edge D1: the bootstrap chain (command alias conflicts, operator and config
+	// home, root lock, pending transaction) stops the load at its first failed step.
 	if err := normalizeLegacyEnvironment(values); err != nil {
 		return domain.Context{}, nil, err
 	}
@@ -161,7 +174,7 @@ func load(
 		commandEnvironment["SUBYARD_OPERATOR_HOME"] = options.OperatorHome
 	}
 	if values["SUBYARD_OPERATOR_HOME"] == "" {
-		return domain.Context{}, nil, errors.New("operator home is required")
+		return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigOperatorHomeRequired)
 	}
 	configHome, err := bootstrapConfigHome(values)
 	if err != nil {
@@ -180,9 +193,7 @@ func load(
 		return domain.Context{}, nil, err
 	}
 	if pending && !options.AllowPendingTransaction {
-		return domain.Context{}, nil, errors.New(
-			"an interrupted configuration transaction requires recovery with yard config sync",
-		)
+		return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
 	}
 	dataHome := values["SUBYARD_HOME"]
 	if dataHome == "" {
@@ -244,6 +255,8 @@ func load(
 		}
 		tracker.record(defaultLayer, definition.Name, values[definition.Name], integrationDefaultSources[definition.Owner], 0, "profile default")
 	}
+	// Edge D3: source files apply in precedence order; the first refused file,
+	// at its first refused line, stops the load.
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		path := filepath.Join(configDir, name)
 		if err := applyOptionalTracked(path, values, tracker, defaultLayer); err != nil {
@@ -260,8 +273,10 @@ func load(
 	if yardName == "" {
 		yardName = "default"
 	}
+	// Edge D2: yard identity (name, registration, template) must resolve before
+	// its sources can be selected.
 	if !domain.SafeName(yardName) {
-		return domain.Context{}, nil, fmt.Errorf("invalid yard name %q", yardName)
+		return domain.Context{}, nil, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigYardNameInvalid), yardName)
 	}
 	resetFallback, err := options.ProspectiveFiles.fallbackReset(configHome, yardName)
 	if err != nil {
@@ -431,19 +446,28 @@ func load(
 	commandLayer := tracker.addLayer(
 		"command", "command override", "environment", true, settingAny,
 	)
-	for name, value := range commandEnvironment {
+	var commandRefusals []error
+	for _, name := range slices.Sorted(maps.Keys(commandEnvironment)) {
+		value := commandEnvironment[name]
 		if IsProfileOnlySetting(name) {
 			tracker.observeProfileOnly(commandLayer, name, value, "", 0)
 			continue
 		}
 		if _, ok := tracker.catalog.LookupSetting(name); ok {
 			if err := tracker.catalog.ValidateSetting(ScopeCommand, name, value, false); err != nil {
-				return domain.Context{}, nil, sourceContext("", 0, recognizedSettingKey(tracker.catalog, name), "command override", err)
+				commandRefusals = append(commandRefusals, sourceContext("", 0, recognizedSettingKey(tracker.catalog, name), "command override", err))
+				if len(tracker.assignments[name]) == 0 {
+					// The refused value came only from the command; later checks must not see it.
+					delete(values, name)
+				}
+				continue
 			}
 		}
 		values[name] = value
 		tracker.record(commandLayer, name, value, "environment", 0, "")
 	}
+	// A refused override is not applied; later independent checks still run on
+	// the remaining layers and every refusal is reported together below.
 	values["SUBYARD_CONFIG_DIR"] = configDir
 	// Config-directory env files are compatibility defaults, not authority for
 	// immutable package inputs. Report the same canonical value hooks receive.
@@ -462,50 +486,102 @@ func load(
 		"derived", "derived", "resolver normalization", true, settingScalar, "E2E_VM_CPU",
 	)
 	if options.NativeTargetOnly {
+		// Edge D4: native target discovery reports source and command-override
+		// refusals only; later checks are not part of address discovery.
 		// Address discovery does not require guest-account, port or provisioner
 		// readiness. Scalar source parsing and registration checks above still apply.
 		for _, entry := range []struct{ key, value string }{{"ACCESS_KIND", "local"}, {"INCUS_PROJECT", "subyard"}, {"YARD_INSTANCE_NAME", "yard"}, {"SSH_HOST", "yard"}} {
 			setDefault(values, entry.key, entry.value, tracker, defaultLayer)
 		}
+		if err := domain.CollectRefusals(commandRefusals...); err != nil {
+			return domain.Context{}, nil, err
+		}
 		return domain.Context{YardName: yardName, AccessKind: domain.AccessKind(values["ACCESS_KIND"]), IncusProject: values["INCUS_PROJECT"], YardInstanceName: values["YARD_INSTANCE_NAME"], SSHHost: values["SSH_HOST"], Paths: domain.RuntimePaths{RepositoryRoot: root, ConfigDir: configDir, ConfigHome: configHome, OperatorHome: values["SUBYARD_OPERATOR_HOME"], DataHome: values["SUBYARD_HOME"], HostBase: values["HOST_BASE"]}}, values, nil
 	}
-	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
-		return domain.Context{}, nil, err
-	}
-	if err := resolveLoadedIntegrations(values, tracker); err != nil {
-		return domain.Context{}, nil, err
+	// One collection point: command overrides, asset sources, integration
+	// selection, role, profile and context refusals are reported together.
+	roleRefusals := append(commandRefusals, refusalCauses(normalizeAgentAssetPaths(values, tracker))...)
+	integrationRefusal, err := resolveLoadedIntegrations(values, tracker)
+	roleRefusals = append(roleRefusals, integrationRefusal)
+	if err != nil {
+		// Edge D5: unresolved integration roots select nothing for the checks below.
+		roleRefusals = append(roleRefusals, refusalCauses(err)...)
+		values["CODING_TOOL_INTEGRATIONS"] = ""
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
 	if values["ALLOWS_HOST_ACCESS"] == "false" {
 		for _, owner := range tracker.catalog.Integrations() {
 			for _, artifact := range owner.Artifacts {
 				if artifact.SourceSetting != "" && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
-					return domain.Context{}, nil, fmt.Errorf("selected yard role forbids non-empty %s", artifact.SourceSetting)
+					roleRefusals = append(roleRefusals, namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, artifact.SourceSetting))
 				}
 			}
 		}
 	}
-	if err := validateProfileConstraints(configDir, yardName, values); err != nil {
-		return domain.Context{}, nil, err
+	// Role, profile and context checks read independent settings, so each stage
+	// runs and every refusal is reported. Edge D6: any earlier refusal (command
+	// override, asset source, integration, role or profile constraint) skips
+	// profile resolution, which only adds shipped package integrity refusals.
+	var refusals []error
+	if err := validateProfileConstraints(configDir, yardName, values, roleRefusals...); err != nil {
+		refusals = append(refusals, refusalCauses(err)...)
+	} else if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
+		refusals = append(refusals, err)
 	}
-	if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
-		return domain.Context{}, nil, err
-	}
-
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
-	if err == nil {
-		err = applySavedResourceEndpoints(root, options, ctx, values, tracker)
+	// Edge D8: any refusal up to the context skips saved endpoints, derived
+	// ports and all collision checks, which need a valid context.
+	if err := domain.CollectRefusals(append(refusals, refusalCauses(err)...)...); err != nil {
+		return domain.Context{}, nil, err
 	}
-	if err == nil {
-		err = normalizeDerivedPorts(values, tracker)
+	// Edge D10: an unreadable saved endpoint skips only the collisions of the
+	// listener ports it would provide; the other port checks still run.
+	unchecked, endpointErr := applySavedResourceEndpoints(root, options, ctx, values, tracker)
+	// Edge D9: a derived-port source failure skips collisions and the web
+	// preview check. Collisions are otherwise collected once per pair.
+	collisions := newPortCollisions()
+	collisions.unchecked = unchecked
+	if err := normalizeDerivedPorts(values, tracker, collisions); err != nil {
+		return ctx, values, domain.CollectRefusals(append(refusalCauses(endpointErr), err)...)
 	}
-	if err == nil {
-		err = normalizeWebPreviewPort(values, tracker, ctx.SSHPort)
-	}
-	return ctx, values, err
+	webPreview := normalizeWebPreviewPort(values, tracker, ctx.SSHPort, collisions)
+	return ctx, values, domain.CollectRefusals(append(append(refusalCauses(endpointErr), collisions.refusals...), webPreview)...)
 }
 
-func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPort int) error {
+// refusalCauses lets independent stages merge into one stable collection.
+func refusalCauses(err error) []error {
+	if refusals, ok := err.(*domain.Refusals); ok {
+		return refusals.Unwrap()
+	}
+	if err == nil {
+		return nil
+	}
+	return []error{err}
+}
+
+// portCollisions reports each colliding listener pair once, whichever check finds it.
+type portCollisions struct {
+	seen      map[[2]string]bool
+	refusals  []error
+	unchecked func(string) bool
+}
+
+func newPortCollisions() *portCollisions {
+	return &portCollisions{seen: map[[2]string]bool{}, unchecked: func(string) bool { return false }}
+}
+
+func (collisions *portCollisions) add(name, other string) {
+	pair := [2]string{min(name, other), max(name, other)}
+	if collisions.unchecked(name) || collisions.unchecked(other) {
+		return
+	}
+	if !collisions.seen[pair] {
+		collisions.seen[pair] = true
+		collisions.refusals = append(collisions.refusals, domain.SettingRefusal(domain.ConfigPortCollision, name, other))
+	}
+}
+
+func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPort int, collisions *portCollisions) error {
 	const name = "WEB_PREVIEW_HOST_PORT"
 	if values[name] == "" {
 		values[name] = strconv.Itoa(1024 + (sshPort+30000-1024)%64512)
@@ -513,7 +589,7 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 	}
 	port, err := strconv.Atoi(values[name])
 	if err != nil || port < 1024 || port > 65535 || strconv.Itoa(port) != values[name] {
-		return fmt.Errorf("%s must be a canonical port in range 1024..65535", name)
+		return domain.SettingRefusal(domain.ConfigSettingCanonicalPort, name)
 	}
 	profiles := strings.Fields(values["ENVIRONMENT_PROFILES"])
 	for _, definition := range tracker.catalog.SettingCatalog() {
@@ -527,14 +603,15 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 			continue
 		}
 		if listenerPort, err := strconv.Atoi(values[definition.Name]); err == nil && listenerPort == port {
-			return fmt.Errorf("%s collides with %s; choose another port", name, definition.Name)
+			collisions.add(name, definition.Name)
 		}
 	}
-
 	return nil
 }
 
-func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
+// normalizeDerivedPorts returns only a derived-source failure; collisions are
+// recorded in collisions.
+func normalizeDerivedPorts(values environment, tracker *settingTracker, collisions *portCollisions) error {
 	var derive func(string) error
 	derive = func(name string) error {
 		definition, ok := tracker.catalog.LookupSetting(name)
@@ -546,7 +623,7 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 		}
 		source, err := strconv.Atoi(values[definition.DefaultFrom.Setting])
 		if err != nil {
-			return fmt.Errorf("derived port %s has invalid source", name)
+			return domain.SettingRefusal(domain.ConfigDerivedPortSource, name)
 		}
 		width := definition.Maximum - definition.Minimum + 1
 		value := (source + definition.DefaultFrom.Offset - definition.Minimum) % width
@@ -557,10 +634,12 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 		tracker.normalize(name, values[name], "derived from "+definition.DefaultFrom.Setting)
 		return nil
 	}
+	var sources []error
 	for _, definition := range tracker.catalog.SettingCatalog() {
-		if err := derive(definition.Name); err != nil {
-			return err
-		}
+		sources = append(sources, derive(definition.Name))
+	}
+	if err := domain.CollectRefusals(sources...); err != nil {
+		return err
 	}
 	// Integration listeners preserve reservations against configured peer listeners,
 	// including packages whose service is stopped or not yet initialized.
@@ -577,15 +656,22 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 				continue
 			}
 			if values[peer.Name] == values[definition.Name] {
-				return fmt.Errorf("%s collides with %s; choose another port", definition.Name, peer.Name)
+				collisions.add(definition.Name, peer.Name)
 			}
 		}
 	}
-	return validateHostListenerCollisions(values, tracker.catalog)
+	addHostListenerCollisions(values, tracker.catalog, collisions)
+	return nil
 }
 
 func validateHostListenerCollisions(values map[string]string, settings Catalog) error {
-	ports := map[string]string{}
+	collisions := newPortCollisions()
+	addHostListenerCollisions(values, settings, collisions)
+	return domain.CollectRefusals(collisions.refusals...)
+}
+
+func addHostListenerCollisions(values map[string]string, settings Catalog, collisions *portCollisions) {
+	ports := map[string][]string{}
 	for _, definition := range settings.SettingCatalog() {
 		if !definition.HostListener {
 			continue
@@ -600,12 +686,12 @@ func validateHostListenerCollisions(values map[string]string, settings Catalog) 
 		if value == "" {
 			continue
 		}
-		if previous := ports[value]; previous != "" {
-			return fmt.Errorf("%s collides with %s; choose another port", definition.Name, previous)
+		// Every listener already on this port collides with this one.
+		for _, previous := range ports[value] {
+			collisions.add(definition.Name, previous)
 		}
-		ports[value] = definition.Name
+		ports[value] = append(ports[value], definition.Name)
 	}
-	return nil
 }
 
 func normalizeAgentPersistLinks(
@@ -645,7 +731,7 @@ func bootstrapConfigHome(values environment) (string, error) {
 		}
 	}
 	if !filepath.IsAbs(configHome) {
-		return "", errors.New("SUBYARD_CONFIG_HOME must be absolute")
+		return "", domain.NewConfigRefusal(domain.ConfigHomeNotAbsolute)
 	}
 	return filepath.Clean(configHome), nil
 }
@@ -656,7 +742,7 @@ func ResolveConfigHome(operatorHome string, source map[string]string) (string, e
 		values["SUBYARD_OPERATOR_HOME"] = operatorHome
 	}
 	if values["SUBYARD_OPERATOR_HOME"] == "" {
-		return "", errors.New("operator home is required")
+		return "", domain.NewConfigRefusal(domain.ConfigOperatorHomeRequired)
 	}
 	return bootstrapConfigHome(values)
 }
@@ -784,14 +870,13 @@ func regularFileExists(path string) (bool, error) {
 	return true, nil
 }
 
+// normalizeAgentAssetPaths checks every AGENT_* file source in sorted order and
+// returns all refusals; a refused source keeps its authored value.
 func normalizeAgentAssetPaths(
 	values environment,
 	tracker *settingTracker,
 ) error {
-	for name, value := range values {
-		if !sourceValuedAgentSetting(name) || value == "" {
-			continue
-		}
+	normalize := func(name, value string) error {
 		if !filepath.IsAbs(value) {
 			return tracker.sourceError(name, "must name an absolute regular file", nil)
 		}
@@ -800,35 +885,37 @@ func normalizeAgentAssetPaths(
 			if err != nil || !snapshot.Exists {
 				return tracker.sourceError(name, "file setting source is not openable", err)
 			}
-			tracker.assetValidationInputs = append(tracker.assetValidationInputs, path)
-			values[name] = path
-			if path != value {
-				tracker.normalize(name, path, "normalized absolute path")
+		} else {
+			source := tracker.fileSource(path)
+			info, err := os.Lstat(source)
+			if err != nil {
+				return tracker.sourceError(name, "file setting source is not openable", err)
 			}
-			continue
-		}
-		source := tracker.fileSource(path)
-		info, err := os.Lstat(source)
-		if err != nil {
-			return tracker.sourceError(name, "file setting source is not openable", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return tracker.sourceError(name, "must name a regular non-symlink file", nil)
-		}
-		file, err := os.Open(source)
-		if err != nil {
-			return tracker.sourceError(name, "file setting source is not openable", err)
-		}
-		if err := file.Close(); err != nil {
-			return tracker.sourceError(name, "cannot close file setting source", err)
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return tracker.sourceError(name, "must name a regular non-symlink file", nil)
+			}
+			file, err := os.Open(source)
+			if err != nil {
+				return tracker.sourceError(name, "file setting source is not openable", err)
+			}
+			if err := file.Close(); err != nil {
+				return tracker.sourceError(name, "cannot close file setting source", err)
+			}
 		}
 		tracker.assetValidationInputs = append(tracker.assetValidationInputs, path)
 		values[name] = path
 		if path != value {
 			tracker.normalize(name, path, "normalized absolute path")
 		}
+		return nil
 	}
-	return nil
+	var refusals []error
+	for _, name := range slices.Sorted(maps.Keys(values)) {
+		if value := values[name]; sourceValuedAgentSetting(name) && value != "" {
+			refusals = append(refusals, normalize(name, value))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }
 
 func sourceValuedAgentSetting(name string) bool {
@@ -908,7 +995,7 @@ func applyYardConfigTracked(
 func applyYardTemplateTracked(configDir, yardName, template, yardFile string, values environment, tracker *settingTracker) error {
 	if template != "" {
 		if !domain.SafeName(template) {
-			return fmt.Errorf("invalid YARD_TEMPLATE %q in %s", template, yardFile)
+			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
 		}
 		if template == "e2e-vms" {
 			return retiredE2EVMTemplateError(yardName, yardFile)
@@ -917,12 +1004,12 @@ func applyYardTemplateTracked(configDir, yardName, template, yardFile string, va
 		info, err := os.Stat(templateFile)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("unknown YARD_TEMPLATE %q in %s", template, yardFile)
+				return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
 			}
 			return err
 		}
 		if info.IsDir() {
-			return fmt.Errorf("unknown YARD_TEMPLATE %q in %s", template, yardFile)
+			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
 		}
 		settings := Catalog{}
 		if tracker != nil {
@@ -1157,22 +1244,23 @@ func canonicalSettingName(name string) string {
 
 func normalizeLegacyEnvironment(values environment) error {
 	discardRetiredSettings(values)
-	for legacy, canonical := range legacySettingNames {
+	var conflicts []error
+	for _, legacy := range slices.Sorted(maps.Keys(legacySettingNames)) {
+		canonical := legacySettingNames[legacy]
 		legacyValue, hasLegacy := values[legacy]
 		if !hasLegacy {
 			continue
 		}
 		legacyValue = normalizeLegacySelection(legacy, legacyValue)
 		if canonicalValue, hasCanonical := values[canonical]; hasCanonical && canonicalValue != legacyValue {
-			return fmt.Errorf(
-				"conflicting command environment settings %s=%q and %s=%q",
-				canonical, canonicalValue, legacy, legacyValue,
-			)
+			// Command values may be secrets, so even the error text names only settings.
+			conflicts = append(conflicts, domain.SettingRefusal(domain.ConfigConflictingCommandSettings, canonical, legacy))
+			continue
 		}
 		values[canonical] = legacyValue
 		delete(values, legacy)
 	}
-	return nil
+	return domain.CollectRefusals(conflicts...)
 }
 
 func applyOptionalTracked(
@@ -1196,15 +1284,7 @@ func pathPresent(path string) bool {
 }
 
 func retiredE2EVMTemplateError(yardName, yardFile string) error {
-	return &retiredYardTemplateError{diagnostic: fmt.Sprintf(`YARD_TEMPLATE "e2e-vms" is retired in %s
-replace its YARD_TEMPLATE assignment with:
-  YARD_TEMPLATE=test-vms
-then verify the unchanged yard identity:
-  yard -Y %s check
-  yard -Y %s status
-to retire that yard after the config migration:
-  yard -Y %s test-vms status
-  yard -Y %s teardown`, yardFile, yardName, yardName, yardName, yardName)}
+	return &retiredYardTemplateError{yardName: yardName, yardFile: yardFile}
 }
 
 func environmentFrom(explicit map[string]string) environment {
@@ -1346,48 +1426,40 @@ func contextFrom(
 	dataHome := values["SUBYARD_HOME"]
 	hostBase := values["HOST_BASE"]
 	restrictedBase := values["RESTRICTED_DISK_PATHS"]
+	// Each check reads only its own settings, so every refusal is reported.
+	var refusals []error
 	if hostBase != restrictedBase {
-		return domain.Context{}, errors.New("HOST_BASE must equal RESTRICTED_DISK_PATHS")
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigHostBaseMismatch))
 	}
 	stateDir := values["SUBYARD_STATE_DIR"]
 	if stateDir == "" {
 		stateDir = filepath.Join(configHome, "projects")
 	}
 	sshPort, err := optionalInt(values["SSH_PORT"])
+	sshPortRefused := err != nil // Edge D7: the SSH port range is checked only after it parses.
 	if err != nil {
-		return domain.Context{}, fmt.Errorf("SSH_PORT: %w", err)
+		refusals = append(refusals, domain.WithRefusalCause(domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), err))
 	}
 	devUID, err := strconv.Atoi(values["DEV_UID"])
 	if err != nil {
-		return domain.Context{}, fmt.Errorf("DEV_UID must be numeric")
+		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingNumeric, "DEV_UID"))
 	}
-	forwardAgent, err := zeroOne(values["FORWARD_SSH_AGENT"], "FORWARD_SSH_AGENT")
-	if err != nil {
-		return domain.Context{}, err
-	}
-	devSudo, err := zeroOne(values["DEV_SUDO"], "DEV_SUDO")
-	if err != nil {
-		return domain.Context{}, err
-	}
-	nestedE2EVMs, err := zeroOne(values["NESTED_E2E_VMS"], "NESTED_E2E_VMS")
-	if err != nil {
-		return domain.Context{}, err
-	}
+	forwardAgent, devSudo, nestedE2EVMs := zeroOne(values, "FORWARD_SSH_AGENT", &refusals), zeroOne(values, "DEV_SUDO", &refusals), zeroOne(values, "NESTED_E2E_VMS", &refusals)
 	rawE2EVMCPU := values["E2E_VM_CPU"]
 	e2eVMCPU, err := resolveE2EVMCPU(rawE2EVMCPU, runtime.NumCPU())
 	if err != nil {
-		return domain.Context{}, err
+		refusals = append(refusals, err)
+	} else {
+		values["E2E_VM_CPU"] = e2eVMCPU
+		if e2eVMCPU != rawE2EVMCPU {
+			tracker.record(
+				normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
+				"resolved from "+rawE2EVMCPU,
+			)
+		}
 	}
-	values["E2E_VM_CPU"] = e2eVMCPU
-	if e2eVMCPU != rawE2EVMCPU {
-		tracker.record(
-			normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
-			"resolved from "+rawE2EVMCPU,
-		)
-	}
-	if err := validateE2EConfig(values); err != nil {
-		return domain.Context{}, err
-	}
+	// Edge D7: the CPU count is validated only after it resolves.
+	refusals = append(refusals, refusalCauses(validateE2EConfig(values, err == nil))...)
 	ctx := domain.Context{
 		YardName:         yardName,
 		AccessKind:       domain.AccessKind(values["ACCESS_KIND"]),
@@ -1420,22 +1492,34 @@ func contextFrom(
 	if ctx.AccessKind == domain.AccessRemote && ctx.OwnerYardName == "" {
 		ctx.OwnerYardName = "default"
 	}
-	return domain.NormalizeContext(ctx)
+	normalized, err := domain.NormalizeContext(ctx)
+	if len(refusals) == 0 {
+		return normalized, err
+	}
+	// Context validation is independent of the setting checks above, except that
+	// an unparsed SSH_PORT already explains the port range refusal.
+	for _, cause := range refusalCauses(err) {
+		var typed *domain.ConfigRefusal
+		if !(sshPortRefused && errors.As(cause, &typed) && typed.Code() == domain.ConfigSSHPortRange) {
+			refusals = append(refusals, cause)
+		}
+	}
+	return domain.Context{}, domain.CollectRefusals(refusals...)
 }
 
 func resolveE2EVMCPU(value string, hostCPUs int) (string, error) {
 	if value != "" && value != "auto" {
 		if strings.Trim(value, "0123456789") != "" {
-			return "", errors.New("E2E_VM_CPU must be auto or a positive integer")
+			return "", domain.NewConfigRefusal(domain.ConfigE2EVMCPU)
 		}
 		count, err := strconv.Atoi(value)
 		if err != nil || count < 1 {
-			return "", errors.New("E2E_VM_CPU must be auto or a positive integer")
+			return "", domain.NewConfigRefusal(domain.ConfigE2EVMCPU)
 		}
 		return strconv.Itoa(count), nil
 	}
 	if hostCPUs < 1 {
-		return "", errors.New("cannot resolve E2E_VM_CPU: host CPU count is unavailable")
+		return "", domain.NewConfigRefusal(domain.ConfigHostCPUUnavailable)
 	}
 	count := hostCPUs * 2 / 3
 	if count < 1 {
@@ -1454,73 +1538,63 @@ func optionalInt(value string) (int, error) {
 	return strconv.Atoi(value)
 }
 
-func zeroOne(value, name string) (bool, error) {
-	switch value {
+func zeroOne(values environment, name string, refusals *[]error) bool {
+	switch values[name] {
 	case "0":
-		return false, nil
+		return false
 	case "1":
-		return true, nil
+		return true
 	default:
-		return false, fmt.Errorf("%s must be 0 or 1", name)
+		*refusals = append(*refusals, domain.SettingRefusal(domain.ConfigSettingZeroOne, name))
+		return false
 	}
 }
 
-func validateE2EConfig(values environment) error {
-	positive := func(name string) (int, error) {
-		value, err := strconv.Atoi(values[name])
-		if err != nil || value < 1 {
-			return 0, fmt.Errorf("%s must be a positive integer", name)
-		}
-		return value, nil
+// validateE2EConfig reports every independent E2E setting refusal; checkCPU is
+// false when E2E_VM_CPU already failed to resolve.
+func validateE2EConfig(values environment, checkCPU bool) error {
+	var refusals []error
+	if value, err := strconv.Atoi(values["E2E_VM_CPU"]); checkCPU && (err != nil || value < 1) {
+		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingPositiveInteger, "E2E_VM_CPU"))
 	}
-	if _, err := positive("E2E_VM_CPU"); err != nil {
-		return err
-	}
-	sizeMiB := func(name string) (int, error) {
+	sizeMiB := func(name string) (int, bool) {
 		value := values[name]
 		factor, raw := 1, strings.TrimSuffix(value, "MiB")
 		if strings.HasSuffix(value, "GiB") {
 			factor, raw = 1024, strings.TrimSuffix(value, "GiB")
-		} else if raw == value {
-			return 0, fmt.Errorf("%s must use a positive MiB or GiB value", name)
 		}
 		amount, err := strconv.Atoi(raw)
-		if err != nil || amount < 1 {
-			return 0, fmt.Errorf("%s must use a positive MiB or GiB value", name)
+		if raw == value || err != nil || amount < 1 {
+			refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingPositiveSize, name))
+			return 0, false
 		}
-		return amount * factor, nil
+		return amount * factor, true
 	}
-	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
-		if name == "E2E_DISK_BUDGET" && values[name] == "0GiB" {
-			continue
-		}
-		if _, err := sizeMiB(name); err != nil {
-			return err
+	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD", "E2E_VM_MEMORY"} {
+		if name != "E2E_DISK_BUDGET" || values[name] != "0GiB" {
+			sizeMiB(name)
 		}
 	}
-	if _, err := sizeMiB("E2E_VM_MEMORY"); err != nil {
-		return err
+	// Edge D7: the disk minimum applies only after the size parses.
+	if disk, ok := sizeMiB("E2E_VM_DISK"); ok && disk < 10*1024 {
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigE2EVMDiskMinimum))
 	}
-	if disk, err := sizeMiB("E2E_VM_DISK"); err != nil {
-		return err
-	} else if disk < 10*1024 {
-		return errors.New("E2E_VM_DISK must be at least 10GiB")
-	}
-	for name, bounds := range map[string][2]int{
-		"E2E_VM_SLOT_COUNT": {1, 1<<20 - 1}, "E2E_VM_BOOT_TIMEOUT": {30, 1800},
-	} {
-		value, err := strconv.Atoi(values[name])
-		if err != nil || value < bounds[0] || value > bounds[1] {
-			return fmt.Errorf("%s must be an integer from %d to %d", name, bounds[0], bounds[1])
+	for _, bound := range []struct {
+		name     string
+		min, max int
+		code     domain.ConfigRefusalCode
+	}{{"E2E_VM_SLOT_COUNT", 1, 1<<20 - 1, domain.ConfigE2EVMSlotCountRange}, {"E2E_VM_BOOT_TIMEOUT", 30, 1800, domain.ConfigE2EVMBootTimeoutRange}} {
+		if value, err := strconv.Atoi(values[bound.name]); err != nil || value < bound.min || value > bound.max {
+			refusals = append(refusals, domain.NewConfigRefusal(bound.code))
 		}
 	}
 	image := values["E2E_VM_IMAGE"]
 	if image == "" || strings.HasPrefix(image, "-") || strings.ContainsFunc(image, func(char rune) bool {
 		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/@+-", char)
 	}) {
-		return errors.New("E2E_VM_IMAGE contains unsafe characters")
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigE2EVMImageUnsafe))
 	}
-	return nil
+	return domain.CollectRefusals(refusals...)
 }
 
 func applyEnvFileValidated(path string, values environment, scope SettingScope, syncable bool, observer assignmentObserver) error {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -26,7 +27,7 @@ type profileConstraintDeclaration struct {
 func profileDeclaration(configDir, name string) (profileConstraintDeclaration, error) {
 	declaration := profileConstraintDeclaration{scope: "shared"}
 	if !domain.SafeName(name) {
-		return declaration, fmt.Errorf("invalid environment profile %q", name)
+		return declaration, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigProfileNameInvalid), name)
 	}
 	pkg, err := profile.ResolvePackageInConfig(configDir, name)
 	if errors.Is(err, os.ErrNotExist) {
@@ -45,7 +46,7 @@ func profileDeclaration(configDir, name string) (profileConstraintDeclaration, e
 	case "dedicated":
 		declaration.scope = "dedicated"
 	default:
-		problems = append(problems, fmt.Errorf("profile %q has an unsupported PROVISION_SCOPE", name))
+		problems = append(problems, namedRefusal(domain.ConfigProfileUnsupportedScope, domain.ConfigProfileName, name))
 	}
 	// A profile whose runtime needs an owner-host route declares it, so a yard role
 	// without host access refuses the selection instead of provisioning a dead client.
@@ -54,24 +55,35 @@ func profileDeclaration(configDir, name string) (profileConstraintDeclaration, e
 	case "1":
 		declaration.requiresHostAccess = true
 	default:
-		problems = append(problems, fmt.Errorf("profile %q has an unsupported REQUIRES_HOST_ACCESS", name))
+		problems = append(problems, namedRefusal(domain.ConfigProfileUnsupportedHostAccess, domain.ConfigProfileName, name))
 	}
 	return declaration, domain.CollectRefusals(problems...)
 }
 
-func validateProfileConstraints(configDir, yard string, values environment) error {
-	var refusals []error
+// namedRefusal types a refusal when its name validates; otherwise the same text
+// stays unclassified, so an operation boundary does not render the value.
+func namedRefusal(code domain.ConfigRefusalCode, validate func(string) (domain.ConfigName, bool), value string) error {
+	if name, ok := validate(value); ok {
+		return domain.NewConfigRefusal(code, name)
+	}
+	return domain.UnclassifiedConfigRefusal(code, value)
+}
+
+// validateProfileConstraints returns every role and profile placement refusal;
+// prior lists refusals found earlier in the same load.
+func validateProfileConstraints(configDir, yard string, values environment, prior ...error) error {
+	refusals := slices.Clone(prior)
 	if required := values["REQUIRED_YARD_KIND"]; required != "" && values["YARD_KIND"] != required {
-		refusals = append(refusals, fmt.Errorf("selected yard role requires YARD_KIND=%s", required))
+		refusals = append(refusals, namedRefusal(domain.ConfigRoleRequiresYardKind, domain.ConfigYardKindName, required))
 	}
 	exclusive := values["EXCLUSIVE_ENVIRONMENT_PROFILE"]
 	if exclusive != "" && yard == "default" {
-		refusals = append(refusals, fmt.Errorf("exclusive environment profiles require a dedicated named yard"))
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigExclusiveRequiresNamedYard))
 	}
 	noHostAccess := values["ALLOWS_HOST_ACCESS"] == "false"
 	for _, profile := range strings.Fields(values["ENVIRONMENT_PROFILES"]) {
 		if exclusive != "" && profile != exclusive {
-			refusals = append(refusals, fmt.Errorf("selected yard role permits only environment profile %q", exclusive))
+			refusals = append(refusals, namedRefusal(domain.ConfigRolePermitsOnlyProfile, domain.ConfigProfileName, exclusive))
 		}
 		declaration, err := profileDeclaration(configDir, profile)
 		if err != nil {
@@ -79,11 +91,10 @@ func validateProfileConstraints(configDir, yard string, values environment) erro
 			continue
 		}
 		if declaration.scope == "dedicated" && exclusive != profile {
-			refusals = append(refusals, fmt.Errorf("profile %q requires its dedicated named-yard preset", profile))
+			refusals = append(refusals, namedRefusal(domain.ConfigProfileRequiresDedicatedPreset, domain.ConfigProfileName, profile))
 		}
 		if declaration.requiresHostAccess && noHostAccess {
-			refusals = append(refusals, fmt.Errorf(
-				"profile %q requires host access; this yard role sets ALLOWS_HOST_ACCESS=false, so deselect the profile or use a yard that allows host access", profile))
+			refusals = append(refusals, namedRefusal(domain.ConfigProfileRequiresHostAccess, domain.ConfigProfileName, profile))
 		}
 	}
 	if noHostAccess {
@@ -92,22 +103,22 @@ func validateProfileConstraints(configDir, yard string, values environment) erro
 			"HOST_OPENCODE_AGENTS_MD", "YARD_CAPABILITIES",
 		} {
 			if strings.TrimSpace(values[name]) != "" {
-				refusals = append(refusals, fmt.Errorf("selected yard role forbids non-empty %s", name))
+				refusals = append(refusals, namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, name))
 			}
 		}
 		for _, name := range []string{"FORWARD_SSH_AGENT", "NESTED_E2E_VMS"} {
 			if value := values[name]; value != "" && value != "0" {
-				refusals = append(refusals, fmt.Errorf("selected yard role requires %s=0", name))
+				refusals = append(refusals, namedRefusal(domain.ConfigRoleRequiresDisabled, domain.ConfigSettingName, name))
 			}
 		}
 	}
 	if values["VM_FREE_PAGE_REPORTING"] == "1" || values["VM_PIN_IPV4"] == "1" || values["SRV_VOLUME_TYPE"] == "block" || values["VM_CPU_WEIGHT"] != "" {
 		if values["YARD_KIND"] != "vm" {
-			refusals = append(refusals, fmt.Errorf("VM page reporting, CPU weight, IPv4 pinning and block storage require YARD_KIND=vm"))
+			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigVMFeaturesRequireVM))
 		}
 	}
 	if values["SRV_VOLUME_TYPE"] == "block" && values["SRV_VOLUME_SIZE"] == "" {
-		refusals = append(refusals, fmt.Errorf("block storage requires an explicit SRV_VOLUME_SIZE"))
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize))
 	}
 	return domain.CollectRefusals(refusals...)
 }

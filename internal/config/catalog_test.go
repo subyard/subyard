@@ -264,8 +264,9 @@ func TestProfileDefaultsLayersAndListenerCollision(t *testing.T) {
 	tracker := newSettingTracker()
 	tracker.catalog = settings
 	values := environment{"SSH_PORT": "2345", "ENVIRONMENT_PROFILES": "fixture", "FIXTURE_PORT": "2345"}
-	if err := normalizeDerivedPorts(values, tracker); err == nil {
-		t.Fatal("profile host listener collision was ignored")
+	collisions := newPortCollisions()
+	if err := normalizeDerivedPorts(values, tracker, collisions); err != nil || len(collisions.refusals) == 0 {
+		t.Fatalf("profile host listener collision was ignored: %v", err)
 	}
 }
 

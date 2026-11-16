@@ -40,7 +40,7 @@ func SelectMaterializationSources(values map[string]string, developer string, sc
 		for _, definition := range definitions {
 			for _, artifact := range definition.Artifacts {
 				if artifact.SourceSetting != "" && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
-					return nil, fmt.Errorf("selected yard role forbids non-empty %s", artifact.SourceSetting)
+					return nil, domain.SettingRefusal(domain.ConfigRoleForbidsSetting, artifact.SourceSetting)
 				}
 			}
 		}

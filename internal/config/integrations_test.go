@@ -36,7 +36,9 @@ func TestRetiredIntegrationSelectionIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = catalog.CheckSelectableIntegrations([]string{"retired-one", "sample", "retired-two", "retired-one"})
-	if err == nil || err.Error() != "integration retired-one, retired-two is retired and can no longer be selected" {
+	diagnostic := Diagnose("", err)
+	if err == nil || strings.Join(diagnostic.Refusals, "; ") != "integration retired-one is retired and can no longer be selected; integration retired-two is retired and can no longer be selected" ||
+		diagnostic.Unclassified || len(diagnostic.Next) != 1 {
 		t.Fatalf("retired selection refusal = %v", err)
 	}
 }

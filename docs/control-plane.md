@@ -385,6 +385,43 @@ The validated context contract includes:
 
 Source-only domain modules do not load configuration themselves.
 
+Configuration refusals that may be shown are `config.SourceError`, the retired-template diagnostic
+and `domain.ConfigRefusal`: a closed code with a fixed template and next step, built only from
+validated profile, setting, integration or yard-kind names. A producer that must keep an
+unvalidated value in its error text appends it after the wrapped refusal; the renderer prints only
+the refusal. Producers collect independent role and profile
+refusals with `domain.CollectRefusals`. `config.Diagnose` is the single CLI renderer for load,
+`config set` and `config validate` failures; it walks the collected causes and marks any other
+cause unclassified instead of printing its text. A raw OS or parse cause attached with
+`domain.WithRefusalCause` is explained by its refusal; joined or multi-wrapped causes stay
+independent. Boundary-owned fixed texts and sentinels enter as `PublicConfigDiagnostic` or
+`config.KnownCause`; operation sentinels such as a stale plan keep their own text. The CLI renders
+only configuration validation and usage causes this way; other preparation failures keep their
+fixed diagnostics. An integration is named only when the shipped catalog contains it.
+Independent load stages merge their causes into one stable collection.
+
+Configuration diagnostics guarantee that no setting value, secret or absolute path is printed,
+including the retired-template guidance; that every typed code renders its fixed text and next
+step, with next steps printed only for config commands (the alias-repair retry applies to every
+command); and that all refusals within a stage are
+reported in stable order. A refusal can hide a later stage only along these edges, each
+named in the loader code:
+
+- D1: the bootstrap chain, including command alias conflicts, stops at its first failed step.
+- D2: yard identity (name, registration, template) resolves before sources are selected.
+- D3: source files apply in precedence order; the first refused file stops at its first refused line.
+- D4: native target discovery covers source and command-override refusals only.
+- D5: unresolved integration roots select nothing for later checks.
+- D6: any earlier refusal (command override, asset source, integration, role or profile
+  constraint) skips profile resolution, which only adds shipped package integrity refusals.
+- D7: within a check, the SSH port range follows its parse, path checks follow an absolute path,
+  the disk minimum follows its size parse and CPU validation follows its resolution.
+- D8: any refusal up to the context skips saved endpoints, derived ports and all collisions.
+- D9: a derived-port source failure skips collisions and the web preview check.
+- D10: an unreadable saved resource endpoint skips only collisions of the unset listener ports it
+  would provide (every unset profile listener when the resource metadata itself is unreadable);
+  explicit ports keep their collisions.
+
 `HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
 `yard host rename` transactionally moves a registered Git owner subtree, commits the exact move
 locally, and updates identity/cache provenance without changing runtime resource names. Explicit

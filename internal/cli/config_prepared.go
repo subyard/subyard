@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -16,6 +15,31 @@ import (
 )
 
 var errConfigUsage = errors.New("invalid config invocation")
+
+// configPublicRefusal is a fixed CLI config refusal naming only validated settings.
+type configPublicRefusal string
+
+func (refusal configPublicRefusal) Error() string                  { return string(refusal) }
+func (refusal configPublicRefusal) PublicConfigDiagnostic() string { return string(refusal) }
+
+// configUsageError marks an invalid invocation and keeps its cause typed for rendering.
+type configUsageError struct{ cause error }
+
+func (err configUsageError) Error() string    { return errConfigUsage.Error() + ": " + err.cause.Error() }
+func (err configUsageError) Unwrap() error    { return err.cause }
+func (configUsageError) Is(target error) bool { return target == errConfigUsage }
+func configUsage(cause error) error           { return configUsageError{cause} }
+func configUsageText(text string) error       { return configUsageError{configPublicRefusal(text)} }
+
+// configAuthoringFailure routes a configuration validation refusal through
+// config.Diagnose. Other preparation failures keep their own fixed diagnostics.
+type configAuthoringFailure struct {
+	home  string
+	cause error
+}
+
+func (err configAuthoringFailure) Error() string { return err.cause.Error() }
+func (err configAuthoringFailure) Unwrap() error { return err.cause }
 
 // Internal activation and protected authoring already own their native capture;
 // they do not discover a new public command in the active child registry.
@@ -98,11 +122,11 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action string, arguments []string, protected ...bool) error {
 	requests, err := parseConfigAuthoringRequests(action, arguments, false)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errConfigUsage, err)
+		return configUsage(err)
 	}
 	if len(requests) > 1 {
 		if err := prepared.CLI.configGitScalarsRefusal(prepared.Loaded, requests); err != nil {
-			return fmt.Errorf("%w: %v", errConfigUsage, err)
+			return configUsage(err)
 		}
 		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage(requests), authoring: requests})
 	}
@@ -113,47 +137,29 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	cli, loaded := prepared.CLI, prepared.Loaded
 	definition, err := configAuthoringDefinition(loaded.Catalog, action, request.scope, request.name, false)
 	if err != nil || definition.Kind != config.SettingScalar || (definition.Sensitive && (len(protected) == 0 || !protected[0])) {
-		return fmt.Errorf("%w: only non-sensitive scalar settings support exact authoring", errConfigUsage)
-	}
-	if action == "set" {
-		if err := loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, request.git); err != nil {
-			return fmt.Errorf("%w: %v", errConfigUsage, err)
-		}
+		return configUsageText("only non-sensitive scalar settings support exact authoring")
 	}
 	if request.git {
+		if action == "set" {
+			if err := loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, true); err != nil {
+				return configUsage(err)
+			}
+		}
 		if !definition.Syncable {
-			return fmt.Errorf("%w: %s cannot be saved in Git", errConfigUsage, request.name)
+			return configUsageText(request.name + " cannot be saved in Git")
 		}
 		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage([]configAuthoringRequest{request}), authoring: []configAuthoringRequest{request}})
 	}
 	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
-		return err
+		return configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
 	}
-	if action == "set" {
-		if err := loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, false); err != nil {
-			return fmt.Errorf("%w: %v", errConfigUsage, err)
-		}
-	}
-	if action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
-		requested := strings.Fields(request.value)
-		if err := loaded.Catalog.CheckSelectableIntegrations(requested); err != nil {
-			return fmt.Errorf("%w: %v", errConfigUsage, err)
-		}
-		if _, err := config.ResolveIntegrationSelection(loaded.Environment, requested); err != nil {
-			return fmt.Errorf("%w: %v", errConfigUsage, err)
-		}
-		if request.scope == config.ScopeYard && !loaded.Integrations.AllowsCodingTools && len(requested) != 0 {
-			return fmt.Errorf("%w: yard role forbids non-empty CODING_TOOL_INTEGRATIONS", errConfigUsage)
-		}
-	}
-	if request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
-		if err := config.ValidateYardTemplateIntegrations(loaded, request.value); err != nil {
-			return fmt.Errorf("%w: %v", errConfigUsage, err)
-		}
+	// The same collector as the plain authoring path reports every refusal.
+	if err := configScalarAuthoringRefusal(loaded, definition, request); err != nil {
+		return configUsage(err)
 	}
 	path, err := configScalarAuthoringPath(loaded, request.scope)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errConfigUsage, err)
+		return configUsage(err)
 	}
 	baseline, err := readConfigAuthoringTarget(path)
 	if err != nil {

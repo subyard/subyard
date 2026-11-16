@@ -91,12 +91,14 @@ func (source cliOwnerSource) Yards(context.Context) ([]domain.Context, error) {
 	for _, name := range names {
 		loaded, err := source.cli.loadInventoryLoaded(name, source.loaded)
 		if err != nil {
+			home := source.loaded.Context.Paths.ConfigHome
 			if config.IsRetiredYardTemplate(err) {
 				fmt.Fprintf(source.cli.options.Stderr,
-					"Warning: skipping yard %q until its registration is migrated:\n%s\n", name, err)
+					"Warning: skipping yard %q until its registration is migrated:\n%s\n", name,
+					config.Diagnose(home, err).Message("its registration is invalid or unavailable"))
 				continue
 			}
-			return nil, fmt.Errorf("load yard %q: %w", name, err)
+			return nil, yardLoadError(name, home, err)
 		}
 		if loaded.Context.AccessKind == domain.AccessLocal {
 			yards = append(yards, loaded.Context)
@@ -291,7 +293,7 @@ func (cli *CLI) allOwnerInventories(
 	}
 	legacy, err := cli.remoteControl(loaded, 0).List(ctx)
 	if err != nil {
-		return append(results, ownerInventoryResult{err: err})
+		return legacyRouteResult(results, loaded.Context.Paths.ConfigHome, err)
 	}
 	for index := range connections {
 		original := connections[index]
@@ -467,7 +469,7 @@ func (cli *CLI) observeOwnerInventories(
 	}
 	legacy, err := cli.remoteControl(loaded, 0).List(ctx)
 	if err != nil {
-		return append(results, ownerInventoryResult{err: err})
+		return legacyRouteResult(results, loaded.Context.Paths.ConfigHome, err)
 	}
 	knownDestinations := make(map[string]struct{}, len(connections))
 	for index := range connections {
@@ -1019,4 +1021,34 @@ func (cli *CLI) ownerYardRouteWithMode(
 			"register it with yard remote add before a project mutation",
 		hostID, yardName,
 	)
+}
+
+// inventoryLoadError renders a configuration load refusal through the single
+// config renderer, so inventory warnings never print values or absolute paths.
+type inventoryLoadError struct {
+	prefix, home string
+	cause        error
+}
+
+func yardLoadError(name, home string, cause error) error {
+	label := "a registered yard"
+	if domain.SafeName(name) {
+		label = fmt.Sprintf("%q", name)
+	}
+	return inventoryLoadError{prefix: "load yard " + label, home: home, cause: cause}
+}
+
+func (err inventoryLoadError) Error() string {
+	return err.prefix + ": " + config.Diagnose(err.home, err.cause).Message("an input is invalid or unavailable")
+}
+func (err inventoryLoadError) Unwrap() error { return err.cause }
+
+// legacyRouteResult reports a legacy route listing failure, unless it repeats the
+// configuration source refusal the local inventory already reports.
+func legacyRouteResult(results []ownerInventoryResult, home string, err error) []ownerInventoryResult {
+	var legacy, local *config.SourceError
+	if errors.As(err, &legacy) && errors.As(results[0].err, &local) && legacy.Path == local.Path {
+		return results
+	}
+	return append(results, ownerInventoryResult{err: inventoryLoadError{prefix: "load legacy remote routes", home: home, cause: err}})
 }

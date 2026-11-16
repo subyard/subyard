@@ -1011,6 +1011,13 @@ invalid persistent profile or integration constraints.
 initial default-yard load. It is read-only and does not claim materialized configuration or release
 readiness. `config status` reports materialized assets only; use release assessment for release readiness.
 
+A refused configuration load, `config set` or `config validate` reports every independent
+classified refusal in stable order: source diagnostics, yard-role and profile constraints,
+setting, port and context checks, shipped package and configuration-root states, each with its
+fixed next step. These texts name
+profiles and settings but never their values; any other cause is summarized by a generic
+"invalid or unavailable" tail.
+
 A conflicting literal legacy/canonical source can prevent ordinary loading and release assessment.
 Choose the desired value explicitly; verified installed or separately staged tooling exposes a bounded
 source repair before those gates:

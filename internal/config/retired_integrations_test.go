@@ -47,7 +47,7 @@ func TestRemovedIntegrationSettingsRemainReadable(t *testing.T) {
 						t.Fatalf("removed assignment escaped: %s", name)
 					}
 				}
-				if err := loaded.Catalog.CheckSelectableIntegrations([]string{"retiredone", "retiredtwo"}); err == nil || err.Error() != "integration retiredone, retiredtwo is retired and can no longer be selected" {
+				if err := loaded.Catalog.CheckSelectableIntegrations([]string{"retiredone", "retiredtwo"}); err == nil || err.Error() != "integration retiredone is retired and can no longer be selected; integration retiredtwo is retired and can no longer be selected" {
 					t.Fatalf("selection refusal: %v", err)
 				}
 				for _, item := range loaded.IntegrationInventory() {

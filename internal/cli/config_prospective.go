@@ -94,12 +94,33 @@ type configProspectiveError struct {
 }
 
 func (err configProspectiveError) Error() string {
-	if diagnostic, ok := config.SourceDiagnostic(err.home, err.cause); ok {
-		return "prospective configuration: " + diagnostic
-	}
-	return "prospective configuration: an affected configuration input is invalid or unavailable"
+	return "prospective configuration: " + config.Diagnose(err.home, err.cause).Message("an affected configuration input is invalid or unavailable")
 }
 func (err configProspectiveError) Unwrap() error { return err.cause }
+
+// reportConfigRefusal prints a config refusal only through config.Diagnose.
+func (cli *CLI) reportConfigRefusal(prefix, home string, err error) {
+	diagnostic := config.Diagnose(home, err)
+	cli.errorf("%s: %s", prefix, diagnostic.Message("an input is invalid or unavailable"))
+	for _, next := range diagnostic.Next {
+		cli.errorf("Next: %s", next)
+	}
+}
+
+// reportConfigNext prints every fixed next step config.Diagnose finds. Callers
+// pass only errors from a config command boundary.
+func (cli *CLI) reportConfigNext(err error) {
+	home, cause := "", err
+	var prospective configProspectiveError
+	if errors.As(err, &prospective) {
+		home, cause = prospective.home, prospective.cause
+	} else {
+		home, _ = config.ResolveConfigHome(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), cli.env)
+	}
+	for _, next := range config.Diagnose(home, cause).Next {
+		cli.errorf("Next: %s", next)
+	}
+}
 
 func (plan *configProspective) inspect(draft, locked bool) (binding, semantics string, result error) {
 	defer func() {
@@ -144,11 +165,11 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 				return err
 			}
 			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
-				return errors.New("configuration dependency directory has unsafe type or permissions")
+				return domain.NewConfigRefusal(domain.ConfigDependencyDirectoryUnsafe)
 			}
 			stat, ok := info.Sys().(*syscall.Stat_t)
 			if !ok || stat.Uid != uint32(os.Getuid()) {
-				return errors.New("configuration dependency directory is not operator-owned")
+				return domain.NewConfigRefusal(domain.ConfigDependencyDirectoryNotOwned)
 			}
 			directories[directory] = config.PersistentFileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode, UID: stat.Uid, GID: stat.Gid}
 		}

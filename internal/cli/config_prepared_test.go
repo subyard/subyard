@@ -714,8 +714,9 @@ func TestConfigProspectiveOverridesCannotMaskPersistentProfileConstraints(t *tes
 	if err != nil || string(content) != before {
 		t.Fatal("invalid persistent draft was written")
 	}
-	if strings.Contains(stderr.String(), "profile \"fixture\"") {
-		t.Fatal("schema diagnostic exposed a setting value")
+	// Profile names are safe refusal metadata; assigned values are not rendered.
+	if output := stderr.String(); !strings.Contains(output, `profile "fixture" requires its dedicated named-yard preset`) || strings.Contains(output, "2444") || strings.Contains(output, "2398") {
+		t.Fatalf("schema diagnostic lacks the refusal or exposes a value: %s", output)
 	}
 }
 
@@ -792,5 +793,222 @@ func TestConfigApplyAndRPCAuthoringIgnoreProfileOnlyAssignments(t *testing.T) {
 	execute("ignored-unset", `{"command":"config","arguments":["unset","YARD_CAPS","--scope","host"],"exact":true}`)
 	if after, err := os.ReadFile(host); err != nil || string(after) != "SSH_PORT='2390'\n" {
 		t.Fatalf("RPC config unset left %q: %v", after, err)
+	}
+}
+
+func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(root, "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(registry), "\n") {
+		if strings.HasPrefix(line, "config|") {
+			manifest = append(manifest, []byte(line+"\n")...)
+		}
+	}
+	writeConfigCommandFile(t, filepath.Join(root, "config", "commands.registry"), string(manifest))
+	writeConfigCommandFile(t, filepath.Join(root, "config/yards/profiles/restricted.env"), "REQUIRED_YARD_KIND=vm\nEXCLUSIVE_ENVIRONMENT_PROFILE=service\nALLOWS_HOST_ACCESS=false\nALLOWS_CODING_TOOLS=false\n")
+	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROVISION_SCOPE=dedicated\n")
+	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/route/profile.conf"), "REQUIRES_HOST_ACCESS=1\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards/valid/config.env"), "YARD_TEMPLATE=restricted\nYARD_KIND=vm\nENVIRONMENT_PROFILES=service\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards/broken/config.env"), "YARD_TEMPLATE=restricted\nENVIRONMENT_PROFILES='service route'\nHOST_CLAUDE_MD=/srv/SENTINEL.md\n")
+	permits, route, kind := `selected yard role permits only environment profile "service"`, `profile "route" requires host access`, "selected yard role requires YARD_KIND=vm"
+	run := func(extra []string, arguments ...string) (int, string) {
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: append(slices.Clone(environment), extra...), WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return program.Run(context.Background()), stdout.String() + stderr.String()
+	}
+	for _, test := range []struct {
+		code      int
+		arguments []string
+		want      []string
+		extra     []string
+	}{
+		{2, []string{"-Y", "broken", "config", "show"}, []string{"yard broken, config inspection: ", permits, route, kind, "selected yard role forbids non-empty HOST_CLAUDE_MD", "yard: Next: deselect"}, nil},
+		{1, []string{"-Y", "broken", "config", "validate"}, []string{"yard broken: prospective configuration: ", permits, route, kind, "\nRetry: deselect"}, nil},
+		{1, []string{"-Y", "broken", "config", "validate", "--json"}, []string{`"diagnostic":"prospective configuration: profile \"route\" requires host access`, kind, `"retry":"deselect`}, nil},
+		{1, []string{"-Y", "valid", "config", "set", "ENVIRONMENT_PROFILES", "service route", "--scope", "yard", "--yes"}, []string{"prospective configuration: ", permits, route, "yard: Next: deselect"}, nil},
+		{2, []string{"-Y", "valid", "config", "set", "YARD_TEMPLATE", "sentinel-canary-value", "--scope", "yard", "--yes"}, []string{"unknown YARD_TEMPLATE", "yard: Next: set YARD_TEMPLATE"}, nil},
+		{2, []string{"config", "show"}, []string{"selected yard, config inspection: invalid yard name", "yard: Next: "}, []string{"SUBYARD_YARD=SENTINEL_CANARY"}},
+		{2, []string{"config", "show"}, []string{"selected yard, config inspection: invalid yard name"}, []string{"SUBYARD_YARD=bad\x1bname"}},
+		{1, []string{"config", "validate", "--json"}, []string{`"diagnostic":"local configuration root is unavailable: SUBYARD_CONFIG_HOME must be absolute"`, `"retry":"set SUBYARD_CONFIG_HOME`}, []string{"SUBYARD_CONFIG_HOME=relative"}},
+	} {
+		code, output := run(test.extra, test.arguments...)
+		if code != test.code || strings.Contains(strings.ToUpper(output), "SENTINEL") || strings.Contains(output, "\x1b") || strings.Contains(output, "invalid or unavailable") {
+			t.Fatalf("%v: code=%d output=%s", test.arguments, code, output)
+		}
+		for _, expected := range test.want {
+			if !strings.Contains(output, expected) {
+				t.Errorf("%v lacks %q: %s", test.arguments, expected, output)
+			}
+		}
+	}
+}
+
+func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.manifest.Lookup("config")
+	for _, test := range []struct {
+		err  error
+		want []string
+	}{
+		{resourceRefusal(domain.ConfigResourceIngressEnabled, "sample", "stop", "ENVIRONMENT_PROFILES"), []string{
+			"prepare config: run sample stop before changing ENVIRONMENT_PROFILES; its public ingress or runtime is still enabled", "Next: run that resource shutdown"}},
+		{domain.ErrPlanStale, []string{"prepare config: operation plan is stale"}},
+		{context.Canceled, []string{"prepare config: context canceled"}},
+		{configUsage(domain.SettingRefusal(domain.ConfigSettingNumeric, "DEV_UID")), []string{"prepare config: DEV_UID must be numeric", "Next: set the named setting"}},
+	} {
+		stderr.Reset()
+		program.reportPreparationError(definition, test.err)
+		for _, want := range test.want {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("%v: output lacks %q: %s", test.err, want, stderr.String())
+			}
+		}
+		if strings.Contains(stderr.String(), "invalid or unavailable") {
+			t.Errorf("%v rendered as an invalid input: %s", test.err, stderr.String())
+		}
+	}
+	// Next steps belong to config commands only; other operations keep their own guidance.
+	other, _ := program.manifest.Lookup("init")
+	stderr.Reset()
+	program.reportPreparationError(other, domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize))
+	if strings.Contains(stderr.String(), "Next:") {
+		t.Fatalf("a non-config command printed a config next step: %s", stderr.String())
+	}
+	stderr.Reset()
+	invalid, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "SSH_PORT", "nope", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := invalid.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "SSH_PORT") || !strings.Contains(stderr.String(), "Next: use a supported value for the named setting") || strings.Contains(stderr.String(), "nope") {
+		t.Fatalf("invalid scalar lacks a next step: code=%d %s", code, stderr.String())
+	}
+	for _, test := range []struct {
+		arguments, environment []string
+		want, refuse           string
+	}{
+		// A load refusal for another command prints its reason without config next steps.
+		{[]string{"status"}, []string{"SUBYARD_CONFIG_HOME=relative"}, "SUBYARD_CONFIG_HOME must be absolute", "Next:"},
+		// Each source refusal under a requested setting keeps its next step.
+		{[]string{"config", "set", "NO_SUCH_FIELD", "x", "SSH_PORT", "2223", "--scope", "host", "--git"}, nil, "Next: use a supported value for the named setting", ""},
+	} {
+		stderr.Reset()
+		command, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: test.arguments, Environment: append(slices.Clone(environment), test.environment...), WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := command.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), test.want) || test.refuse != "" && strings.Contains(stderr.String(), test.refuse) {
+			t.Errorf("%v: code=%d %s", test.arguments, code, stderr.String())
+		}
+	}
+	stderr.Reset()
+	retired, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := retired.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "integration aiobserver is retired and can no longer be selected") ||
+		!strings.Contains(stderr.String(), "Next: remove the retired integration") || strings.Contains(stderr.String(), "unknown integration") {
+		t.Fatalf("retired integration refusal: code=%d %s", code, stderr.String())
+	}
+}
+
+func TestInventoryQueriesRenderSiblingLoadRefusalsWithoutValues(t *testing.T) {
+	for _, assignment := range []string{"YARD_TEMPLATE=s3cr3tvalue\n", "CODING_TOOL_INTEGRATIONS=s3cr3tvalue\n", "export s3cr3tvalue\n", "SSH_PORT='s3cr3tvalue\n", "SSH_PORT=$(s3cr3tvalue)\n"} {
+		root, _, configHome, environment := configCommandFixture(t)
+		writeConfigCommandFile(t, filepath.Join(configHome, "yards", "sibling", "config.env"), assignment)
+		for _, query := range []string{"status", "yards", "list"} {
+			var stdout, stderr bytes.Buffer
+			incus := lifecycleIncus()
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{query}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus})
+			if err != nil {
+				t.Fatal(err)
+			}
+			program.Run(context.Background())
+			output := stdout.String() + stderr.String()
+			// The root cause is reported once, not again by the legacy route listing.
+			if strings.Contains(output, "s3cr3tvalue") || strings.Contains(output, configHome) || !strings.Contains(output, `load yard "sibling": `) || strings.Contains(output, "load legacy remote routes") {
+				t.Errorf("%s with %q: %s", query, strings.TrimSpace(assignment), output)
+			}
+		}
+	}
+}
+
+func TestConfigSetReportsEveryRefusalAndFixedRootDiagnostics(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "tv", "config.env"), "YARD_TEMPLATE=test-vms\n")
+	run := func(extra []string, arguments ...string) string {
+		t.Helper()
+		var stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: append(slices.Clone(environment), extra...), WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code == 0 {
+			t.Fatalf("%v succeeded: %s", arguments, stderr.String())
+		}
+		return stderr.String()
+	}
+	for _, test := range []struct {
+		extra, arguments, want []string
+	}{
+		// A: a retired and an unknown integration in one exact write.
+		{nil, []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver missing-one", "--scope", "host", "--yes"},
+			[]string{"integration aiobserver is retired and can no longer be selected", "unknown integration"}},
+		// B: the yard role and an unknown integration together.
+		{nil, []string{"-Y", "tv", "config", "set", "CODING_TOOL_INTEGRATIONS", "missing-one", "--scope", "yard", "--yes"},
+			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "unknown integration"}},
+		// A syntax refusal does not hide the role or retired refusals.
+		{nil, []string{"-Y", "tv", "config", "set", "CODING_TOOL_INTEGRATIONS", "claude,codex", "--scope", "yard", "--yes"},
+			[]string{"invalid name value", "yard role forbids non-empty CODING_TOOL_INTEGRATIONS"}},
+		{nil, []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver Bad!", "--scope", "host", "--yes"},
+			[]string{"invalid name value", "integration aiobserver is retired and can no longer be selected"}},
+		{[]string{"SUBYARD_CONFIG_HOME=relative"}, []string{"config", "set", "SSH_PORT", "2390", "--scope", "host", "--yes"},
+			[]string{"SUBYARD_CONFIG_HOME must be absolute", "Next: set SUBYARD_CONFIG_HOME"}},
+	} {
+		output := run(test.extra, test.arguments...)
+		for _, want := range test.want {
+			if !strings.Contains(output, want) || strings.Contains(output, "missing-one") || strings.Contains(output, "Bad!") || strings.Count(output, "unknown integration") > 1 {
+				t.Errorf("%v lacks %q or names an unknown request: %s", test.arguments, want, output)
+			}
+		}
+	}
+	writeConfigCommandFile(t, filepath.Join(configHome, ".sync", "manifest.json"), `{"schemaVersion":3}`)
+	if output := run(nil, "config", "set", "SSH_PORT", "2390", "--scope", "host", "--yes"); !strings.Contains(output, "unsupported configuration sync manifest schema") || !strings.Contains(output, "Next: use a Subyard release") {
+		t.Fatalf("unsupported manifest diagnostic: %s", output)
+	}
+}
+
+func TestDeveloperIdentityGateRendersLoadRefusalsWithoutValues(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "idy", "config.env"), "YARD_TEMPLATE=s3cr3tvalue\n")
+	digest := strings.Repeat("a", 64)
+	marker, err := json.Marshal(config.DeveloperIdentityMarker{Schema: 1, Yard: "idy", Inputs: digest, Identity: digest, Release: digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, config.DeveloperIdentityMarkerPath(configHome, "idy"), marker, 0o600)
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "idy", "init"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code == 0 || strings.Contains(stderr.String(), "s3cr3tvalue") || strings.Contains(stderr.String(), configHome) ||
+		!strings.Contains(stderr.String(), `developer identity: load yard "idy": unknown YARD_TEMPLATE`) {
+		t.Fatalf("identity gate load refusal: code=%d %s", code, stderr.String())
 	}
 }
