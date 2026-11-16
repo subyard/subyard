@@ -76,7 +76,7 @@ power_nm_prepare_reader() {
   if sudo -n true </dev/null 2>/dev/null; then
     :
   elif [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" = 1 ]; then
-    power_fail "sudo authorization expired; re-run 'yard start' in an operator terminal"
+    power_fail "sudo authorization expired; re-run the yard command in an operator terminal"
     return 1
   elif ! power_operator_terminal; then
     power_fail "sudo authorization is required to verify NetworkManager configuration; re-run the yard command in an operator terminal"
@@ -112,7 +112,7 @@ power_nm_guard_effective() { # <bridge>
     if [ "$(id -u)" -eq 0 ]; then
       power_fail "cannot read NetworkManager's effective configuration"
     else
-      power_fail "cannot read NetworkManager's effective configuration as root — run 'sudo -v'"
+      power_fail "cannot read NetworkManager's effective configuration as root; check that 'sudo -n NetworkManager --print-config' works, then re-run the yard command"
     fi
     return 1
   }

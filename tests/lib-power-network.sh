@@ -213,6 +213,21 @@ case "$POWER_ERROR" in *"operator terminal"*) ;; *) fail "no-terminal sudo refus
 grep -Fxq -- '-v' "$MOCK_SUDO_LOG" && fail "no-terminal sudo attempted a password prompt"
 [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" != 1 ] || fail "no-terminal refusal recorded preauthorization"
 
+# The real /dev/tty probe: setsid leaves no controlling terminal.
+reset_case
+if output="$(ROOT="$ROOT" setsid -w bash -c '
+  . "$ROOT/scripts/lib-power.sh"
+  power_nm_prepare_reader || { printf "%s\n" "$POWER_ERROR"; exit 1; }
+' </dev/null 2>&1)"; then fail "sudo without a controlling terminal was accepted"; fi
+case "$output" in *"required to verify"*"operator terminal"*) ;; *) fail "terminal probe refusal is unclear: $output" ;; esac
+grep -Fxq -- '-v' "$MOCK_SUDO_LOG" && fail "terminal probe attempted a password prompt"
+
+reset_case
+SUBYARD_SUDO_PREAUTHORIZED=1
+if power_nm_prepare_reader; then fail "expired preauthorized sudo was accepted"; fi
+case "$POWER_ERROR" in *"authorization expired"*"yard command"*) ;; *) fail "expired sudo refusal is unclear: $POWER_ERROR" ;; esac
+grep -Fxq -- '-v' "$MOCK_SUDO_LOG" && fail "expired preauthorized sudo attempted a password prompt"
+
 reset_case
 MOCK_SUDO_N_RC=1
 power_nm_prepare_reader || fail "sudo preparation failed before read-error case"
