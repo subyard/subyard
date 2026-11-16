@@ -8,13 +8,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot) [ "$#" -ge 2 ] || { printf 'acceptance: --slot needs a value\n' >&2; exit 2; }; slot="$2"; shift 2 ;;
     --lane) [ "$#" -ge 2 ] || { printf 'acceptance: --lane needs a value\n' >&2; exit 2; }; lane="$2"; shift 2 ;;
-    *) printf 'usage: acceptance.sh --slot N [--lane full|bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals|managed-agents|claude-recovery|identity-rename]\n' >&2; exit 2 ;;
+    *) printf 'usage: acceptance.sh --slot N [--lane full|bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals|managed-agents|claude-recovery|identity-rename|stuck-recovery]\n' >&2; exit 2 ;;
   esac
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || { printf 'acceptance: --slot N is required\n' >&2; exit 2; }
 case "$lane" in
-  full) lanes=(bootstrap existing-yard resource projects ssh-agent codex-permissions managed-agents identity-rename) ;;
-  bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals|managed-agents|claude-recovery|identity-rename) lanes=("$lane") ;;
+  full) lanes=(bootstrap existing-yard resource projects ssh-agent codex-permissions managed-agents identity-rename stuck-recovery) ;;
+  bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals|managed-agents|claude-recovery|identity-rename|stuck-recovery) lanes=("$lane") ;;
   *) printf 'acceptance: invalid lane: %s\n' "$lane" >&2; exit 2 ;;
 esac
 
@@ -54,6 +54,11 @@ for lane in "${lanes[@]}"; do
       bash "$runner" --slot "$slot" --vm-count 1 --purpose claude-recovery --vm 1 -- \
         env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_MANAGED_AGENTS=1 \
         SUBYARD_E2E_ORCA_CLAUDE_RECOVERY_ONLY=1 bash "$bootstrap" ;;
+    stuck-recovery)
+      # Published anchor -> published 0.29.0 (stuck) -> candidate through --version.
+      bash "$runner" --slot "$slot" --vm-count 1 --purpose orca-bootstrap --vm 1 -- \
+        env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_STUCK_RECOVERY=1 \
+        SUBYARD_E2E_ORCA_UPGRADE_TARGET=0.29.0 bash "$bootstrap" ;;
     identity-rename)
       bash "$runner" --slot "$slot" --vm-count 1 --purpose orca-identity --vm 1 -- \
         bash config/profiles/orca/tests/e2e/identity-rename.sh ;;

@@ -44,6 +44,7 @@ cat > "$tmp/expected" <<'CALLS'
 --slot 7 --vm-count 1 --purpose codex-permissions --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 --slot 7 --vm-count 1 --purpose managed-agents --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_MANAGED_AGENTS=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 --slot 7 --vm-count 1 --purpose orca-identity --vm 1 -- bash config/profiles/orca/tests/e2e/identity-rename.sh
+--slot 7 --vm-count 1 --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_STUCK_RECOVERY=1 SUBYARD_E2E_ORCA_UPGRADE_TARGET=0.29.0 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 CALLS
 : > "$PROFILE_CONTROLLER_CALLS"
 bash "$tmp/$controller" --slot 7
@@ -54,7 +55,7 @@ diff -u "$tmp/expected" "$PROFILE_CONTROLLER_CALLS"
 
 manifest="$ROOT/config/profiles/orca/tests/e2e/acceptance-lanes.json"
 jq -e '.schema_version == 1 and [.lanes[].id] ==
-  ["bootstrap", "existing-yard", "resource", "projects", "ssh-agent", "codex-permissions", "managed-agents", "identity-rename"] and
+  ["bootstrap", "existing-yard", "resource", "projects", "ssh-agent", "codex-permissions", "managed-agents", "identity-rename", "stuck-recovery"] and
   all(.lanes[]; .arguments == ["--lane", .id])' "$manifest" > /dev/null
 jq -r '.lanes[].id' "$manifest" > "$tmp/lanes"
 index=0

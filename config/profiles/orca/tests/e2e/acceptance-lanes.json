@@ -8,6 +8,7 @@
     {"id": "ssh-agent", "arguments": ["--lane", "ssh-agent"]},
     {"id": "codex-permissions", "arguments": ["--lane", "codex-permissions"]},
     {"id": "managed-agents", "arguments": ["--lane", "managed-agents"]},
-    {"id": "identity-rename", "arguments": ["--lane", "identity-rename"]}
+    {"id": "identity-rename", "arguments": ["--lane", "identity-rename"]},
+    {"id": "stuck-recovery", "arguments": ["--lane", "stuck-recovery"]}
   ]
 }
