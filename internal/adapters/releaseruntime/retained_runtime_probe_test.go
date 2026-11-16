@@ -25,6 +25,7 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 	for _, scenario := range []string{"failed-query", "malformed-query", "invalid-inspection", "invalid-payload", "history", "profile-owner-loss", "changed-core", "execute-recheck", "source-work-refusal"} {
 		t.Run(scenario, func(t *testing.T) {
 			runtime, active, target, home, installed := retainedRuntimeFixture(t)
+			seedExistingCurrentLedger(t, home, []byte(sourceAdmissionRegistry))
 			defer runtime.Close()
 			root := filepath.Dir(active)
 			runtimeRoot := filepath.Join(root, "runtime")

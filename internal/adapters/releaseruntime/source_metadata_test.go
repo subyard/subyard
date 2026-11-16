@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -149,8 +150,9 @@ func sealSourceAdmissionCandidate(t *testing.T, candidate publishedCandidate) re
 }
 
 func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *testing.T) {
-	for _, drift := range []string{"none", "journal replacement", "catalog", "registry", "sealed asset", "unfinished", "unfinished same target", "current repair", "current repair old-wire", "current repair replacement", "private draft", "private draft parent replacement", "private draft parent mode", "private draft immutable hardlink"} {
+	for _, drift := range []string{"missing history", "missing history without journal", "none", "journal replacement", "catalog", "registry", "sealed asset", "unfinished", "unfinished same target", "current repair", "current repair old-wire", "current repair replacement", "private draft", "private draft parent replacement", "private draft parent mode", "private draft immutable hardlink"} {
 		t.Run(drift, func(t *testing.T) {
+			missingHistory := strings.HasPrefix(drift, "missing history")
 			ctx := context.Background()
 			root := testkit.TempDir(t)
 			runtimeRoot, home := filepath.Join(root, "runtime"), filepath.Join(root, "config")
@@ -182,7 +184,7 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			artifact := sealSourceAdmissionCandidate(t, old)
 			links, _ := releasetransition.NewRuntimeLinkStore(runtimeRoot)
 			seedExistingCurrentLedger(t, home, []byte(sourceAdmissionRegistry))
-			original, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: home,
+			original, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: home, MigrationCheckpoint: missingHistory, SourceMigrationCheckpoint: missingHistory,
 				RegistryPayload: []byte(sourceAdmissionRegistry), ArtifactDigest: artifact,
 				Releases:     releasetransition.ReleasePair{From: "release-a", Target: old.release},
 				ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
@@ -211,7 +213,7 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			bundle := []byte("synthetic verified publication input")
 			candidateID := fmt.Sprintf("1.2.4-%x", sha256.Sum256(bundle))[:18]
 			candidateRoot := runtimeRoot
-			if strings.HasPrefix(drift, "private draft") {
+			if strings.HasPrefix(drift, "private draft") || missingHistory {
 				candidateRoot = filepath.Join(root, "candidate-template")
 			}
 			phaseLog := filepath.Join(root, "candidate-phases")
@@ -225,8 +227,13 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
 				testkit.WriteFile(t, filepath.Join(cache, name+suffix), bundle, 0o600)
 			}
+			draftWrites := filepath.Join(root, "installer-writes")
+			audit := ""
+			if missingHistory {
+				audit = fmt.Sprintf("find \"$destination\" -type f -print > %q\n", draftWrites)
+			}
 			installer := filepath.Join(root, "installer")
-			testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nwhile [ $# -gt 0 ]; do case \"$1\" in --runtime-root) shift; destination=$1;; esac; shift; done\nmkdir -p \"$destination/releases\"\ncp -a %q \"$destination/releases/%s\"\nprintf 'releases/%s\\n'\n", candidate.root, candidateID, candidateID)), 0o700)
+			testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nwhile [ $# -gt 0 ]; do case \"$1\" in --runtime-root) shift; destination=$1;; esac; shift; done\nmkdir -p \"$destination/releases\"\ncp -a %q \"$destination/releases/%s\"\n%sprintf 'releases/%s\\n'\n", candidate.root, candidateID, audit, candidateID)), 0o700)
 			adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}), Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 			defer adapter.Close()
 			if drift == "catalog" || strings.HasPrefix(drift, "unfinished") {
@@ -264,7 +271,36 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			if drift == "unfinished same target" || strings.HasPrefix(drift, "current repair") {
 				version = "1.2.3"
 			}
+			var beforeTree map[string]string
+			if missingHistory {
+				for _, name := range []string{"ledger.json", "history-checkpoint.json"} {
+					if err := os.Remove(filepath.Join(home, "release-transition/v2", name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if drift == "missing history without journal" {
+					if err := os.Remove(journalPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+				beforeTree = sourceAdmissionTreeSnapshot(t, root)
+			}
 			prepared, err := adapter.PrepareTransition(ctx, []string{"--offline", "--version", version}, home, "default")
+			if missingHistory {
+				if audit, readErr := os.ReadFile(draftWrites); readErr == nil {
+					t.Errorf("installer wrote private draft before refusal:\n%s", audit)
+				} else if !os.IsNotExist(readErr) {
+					t.Fatal(readErr)
+				}
+				if !errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) || err.Error() != releasetransition.ErrMigrationLedgerAbsent.Error() {
+					t.Errorf("wrong missing-history refusal: %v", err)
+				}
+				if !reflect.DeepEqual(beforeTree, sourceAdmissionTreeSnapshot(t, root)) {
+					t.Error("missing-history refusal changed installation, cache or protected bytes")
+				}
+				return
+			}
+
 			if drift == "catalog" || drift == "registry" || drift == "sealed asset" || strings.HasPrefix(drift, "unfinished") {
 				if err == nil {
 					t.Fatal("unsupported original history admitted a new candidate")
@@ -420,4 +456,145 @@ func seedExistingCurrentLedger(t *testing.T, home string, payload []byte) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, path, data, 0600)
+}
+
+// Ignore only the fixture's process/audit logs; include all installation/cache
+// paths, modes and bytes. Transient staging is separately witnessed by installer-writes.
+func sourceAdmissionTreeSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "old-observe-called" || rel == "candidate-phases" || rel == "installer-writes" {
+			return nil
+		}
+		value := info.Mode().String()
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			value += ":" + target
+		} else if !info.IsDir() {
+			payload, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			value += fmt.Sprintf(":%x", sha256.Sum256(payload))
+		}
+		files[rel] = value
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestInitialBootstrapRoutesResumeWithAbsentLedger(t *testing.T) {
+	ctx := context.Background()
+	root := testkit.TempDir(t)
+	home, runtimeRoot := filepath.Join(root, "config"), filepath.Join(root, "runtime")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 0.29.0\\n';; _release-transition) %s=ready exec %q -test.run '^TestSourceAdmissionCandidateProcessHelper$';; *) exit 64;; esac\n", sourceAdmissionProcessEnvironment, executable)
+	candidate := writeVersionedRuntimeCandidate(t, runtimeRoot, "0.29.0-first", "0.29.0", engine)
+	artifact := sealSourceAdmissionCandidate(t, candidate)
+	if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := releasetransition.NewPOSIXV2Store(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted := false
+	original, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: home, RegistryPayload: []byte(sourceAdmissionRegistry), ArtifactDigest: artifact,
+		Releases: releasetransition.ReleasePair{From: candidate.release, Target: candidate.release},
+		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+			snapshot, err := store.ReadCurrentJournal()
+			if err != nil {
+				return releasetransition.ReleaseLinks{}, err
+			}
+			if snapshot.Exists && !interrupted {
+				interrupted = true
+				return releasetransition.ReleaseLinks{}, errors.New("stop after initial journal publication")
+			}
+			return links.Observe()
+		},
+		NewTransactionID:    func() releasetransition.TransactionID { return "tx-initial-bootstrap" },
+		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := original.Inspect(ctx, releasetransition.Goal{Target: candidate.release, Direction: releasetransition.DirectionActivateTarget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot}), Installer: "/missing", Stdout: &output, Stderr: &bytes.Buffer{}})
+	defer adapter.Close()
+	preview, err := adapter.PrepareCurrentTransition(ctx, []string{"--check", "--json"}, home, "default")
+	if err != nil {
+		t.Fatal("initial current bootstrap refused absent authority", err)
+	}
+	if err := preview.Execute(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var initialReport currentReport
+	if err := json.Unmarshal(output.Bytes(), &initialReport); err != nil || initialReport.Outcome.Status != releasetransition.StatusMigrationRequired || initialReport.Outcome.ReachedGoal {
+		t.Fatalf("initial bootstrap readiness: %s %v", output.String(), err)
+	}
+	output.Reset()
+	out, err := original.Converge(ctx, releasetransition.Execution{Plan: plan.Plan, Authorization: "original-bootstrap-consent"})
+	if err != nil || !interrupted || out.Status != releasetransition.StatusRecovering {
+		t.Fatalf("bootstrap interruption: %#v %v", out, err)
+	}
+	ledger, err := store.ReadLedger()
+	if err != nil || ledger.Exists {
+		t.Fatalf("baseline already published: %#v %v", ledger, err)
+	}
+	initial, err := releasetransition.ParseJournal(mustReadFile(t, filepath.Join(home, "release-transition/v2/journal.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check, err := adapter.PrepareCurrentTransition(ctx, []string{"--check"}, home, "default")
+	if err != nil {
+		t.Fatal("current bootstrap inspection refused absent authority", err)
+	}
+	if err := check.Execute(ctx); err != nil {
+		t.Fatal(err)
+	}
+	resume, err := adapter.PrepareTransition(ctx, nil, home, "default")
+	if err != nil {
+		t.Fatal("installed owner could not resume initial ledger publication", err)
+	}
+	if !resume.RepairCurrent || resume.nativePlan != initial.ResumePlan {
+		t.Fatalf("bootstrap lost its transaction: %#v", resume)
+	}
+	if err := resume.Execute(ctx); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(mustReadFile(t, filepath.Join(home, "release-transition/v2/journal.json")))
+	if err != nil || journal.Transaction != "tx-initial-bootstrap" || journal.Checkpoint != releasetransition.JournalComplete || journal.AuthorizationPlan != initial.AuthorizationPlan || journal.AuthorizationDigest != initial.AuthorizationDigest {
+		t.Fatalf("bootstrap resume: %#v %v", journal, err)
+	}
+	ledger, err = store.ReadLedger()
+	if err != nil || !ledger.Exists {
+		t.Fatalf("resumed bootstrap did not publish baseline: %v", err)
+	}
 }

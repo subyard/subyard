@@ -154,46 +154,55 @@ func TestMigrationLedgerStateOperations(t *testing.T) {
 		}
 	}
 	for _, cut := range []string{"", "after-journal-authorized", "before-baseline-ledger", "after-baseline-ledger", "after-step-verified", "after-target-active", "after-reconciling", "before-reconciler-0", "after-reconciler-0", "before-checkpoint-publication", "after-checkpoint-publication"} {
-		rows = append(rows, row{"fresh/" + cut, func(t *testing.T) {
-			home := testkit.TempDir(t)
-			options, _ := bootstrapConsumerOptions(t, home)
-			hit := false
-			if cut != "" {
-				options.fault = func(point string) error {
-					if point == cut && !hit {
-						hit = true
-						return errors.New("state-table interruption")
+		for _, capability := range []bool{false, true} {
+			rows = append(rows, row{fmt.Sprintf("fresh/%s/cap=%t", cut, capability), func(t *testing.T) {
+				home := testkit.TempDir(t)
+				options, store := bootstrapConsumerOptions(t, home)
+				options.MigrationCheckpoint = capability
+				checkpointCut := cut == "before-checkpoint-publication" || cut == "after-checkpoint-publication"
+				wantHit := cut != "" && (capability || !checkpointCut)
+				hit := false
+				if cut != "" {
+					options.fault = func(point string) error {
+						if point == cut && !hit {
+							hit = true
+							return errors.New("state-table interruption")
+						}
+						return nil
 					}
-					return nil
 				}
-			}
-			engine, err := NewV2Transition(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			goal := Goal{Target: options.Releases.Target, Direction: DirectionActivateTarget}
-			first, err := engine.Inspect(context.Background(), goal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			same, err := engine.Inspect(context.Background(), goal)
-			if err != nil || first.Plan != same.Plan {
-				t.Fatal("fresh Inspect changed plan", err)
-			}
-			out, err := engine.Converge(context.Background(), Execution{Plan: first.Plan, Authorization: v2TestAuthorization(first.Plan)})
-			wantStatus, wantCode := StatusRecovering, CodeVerificationFailed
-			if cut == "" || cut == "after-checkpoint-publication" {
-				wantStatus, wantCode = StatusReady, CodeReady
-			}
-			if len(out.Warnings) != 0 || err != nil || out.Status != wantStatus || out.Code != wantCode {
-				t.Fatalf("fresh interruption: %#v %v", out, err)
-			}
-			if cut != "" && !hit {
-				t.Fatal("fresh cut not reached")
-			}
-			options.fault = nil
-			ledgerStateReady(t, home, options)
-		}})
+				engine, err := NewV2Transition(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				goal := Goal{Target: options.Releases.Target, Direction: DirectionActivateTarget}
+				first, err := engine.Inspect(context.Background(), goal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				same, err := engine.Inspect(context.Background(), goal)
+				if err != nil || first.Plan != same.Plan {
+					t.Fatal("fresh Inspect changed plan", err)
+				}
+				out, err := engine.Converge(context.Background(), Execution{Plan: first.Plan, Authorization: v2TestAuthorization(first.Plan)})
+				wantStatus, wantCode := StatusRecovering, CodeVerificationFailed
+				if !wantHit || cut == "after-checkpoint-publication" {
+					wantStatus, wantCode = StatusReady, CodeReady
+				}
+				if len(out.Warnings) != 0 || err != nil || out.Status != wantStatus || out.Code != wantCode {
+					t.Fatalf("fresh interruption: %#v %v", out, err)
+				}
+				if hit != wantHit {
+					t.Fatalf("fresh cut hit=%t, want %t", hit, wantHit)
+				}
+				options.fault = nil
+				ledgerStateReady(t, home, options)
+				checkpoint, err := store.ReadMigrationCheckpoint()
+				if err != nil || checkpoint.Exists != capability {
+					t.Fatalf("checkpoint capability=%t: exists=%t err=%v", capability, checkpoint.Exists, err)
+				}
+			}})
+		}
 	}
 	for _, baseline := range []bool{false, true} {
 		rows = append(rows, row{fmt.Sprintf("replacement/absent/baseline=%t", baseline), func(t *testing.T) {

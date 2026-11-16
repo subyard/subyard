@@ -116,7 +116,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		}
 		return Prepared{}, redactReleaseInspectionError(err)
 	}
-	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome); refusal != nil {
+	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome, false); refusal != nil {
 		return Prepared{}, refusal
 	}
 	if protected != nil && yard == "default" && protected.journal.Checkpoint != releasetransition.JournalComplete &&

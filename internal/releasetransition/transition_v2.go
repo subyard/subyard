@@ -2212,6 +2212,10 @@ func (transition *V2Transition) ingressStepForWork(work v2Work) (V2IngressStep, 
 }
 
 func (transition *V2Transition) fixedPoint(observation v2Observation) bool {
+	// A bootstrap baseline is planned state until its CAS publishes authority.
+	if !observation.migrationLedgerSnapshot.AuthoritySnapshot.Exists {
+		return false
+	}
 	if pendingSourceActivationWork(observation) {
 		return false
 	}

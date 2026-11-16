@@ -1067,8 +1067,11 @@ bytes. A fully verified unfinished v0.28.x journal can still be replaced before 
 even before checkpoint publication. Its successor does not replay historical effects.
 
 A ledger below the live floor or an unfinished unverified historical migration step refuses with
-`migration-manual-repair-required` before any write. An older source with no ledger still has its
-original below-floor baseline; absence alone does not prove a fresh current installation.
+`migration-manual-repair-required` before any write. If both `ledger.json` and
+`history-checkpoint.json` are missing, reading authority reports `protected migration history is absent:
+ledger.json and history-checkpoint.json are missing`; it does not infer a below-floor baseline.
+Completed sources at or above v0.28.0 refuse missing authority before staging a candidate. Only
+initial bootstrap or an unfinished baseline publication can admit absence for planning.
 Manual repair must preserve the runtime, user data and protected evidence; do not uninstall.
 Ordinary installed-owner resume remains available when no retired handler is needed.
 

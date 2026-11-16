@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,6 +297,53 @@ func TestBootstrapLedgerHistorySurvivesNextTransition(t *testing.T) {
 		}
 		if _, err := engine.store.closedTransactionEvidence("tx-bootstrap-history", engine.registry); err != nil {
 			t.Fatal("pinned initial ledger publication was not retained", err)
+		}
+	}
+}
+
+func TestFreshBootstrapRequiresPublishedLedgerForReady(t *testing.T) {
+	for _, checkpoint := range []bool{false, true} {
+		for _, readyReconciler := range []bool{false, true} {
+			t.Run(fmt.Sprintf("checkpoint=%t/ready-reconciler=%t", checkpoint, readyReconciler), func(t *testing.T) {
+				home := testkit.TempDir(t)
+				release := ReleaseID("0.30.0-bbbbbbbbbbbb")
+				links := &ReleaseLinks{Active: release}
+				options := currentHistoryOptions(t, home, links, release)
+				options.MigrationCheckpoint = checkpoint
+				if readyReconciler {
+					options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{converged: true}}
+				}
+				engine, err := NewV2Transition(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				goal := Goal{Target: release, Direction: DirectionActivateTarget}
+				plan, err := engine.Inspect(context.Background(), goal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ledger, err := engine.store.ReadLedger()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ledger.Exists || plan.Outcome == nil || plan.Outcome.Status != StatusMigrationRequired || plan.Outcome.Code != CodeTransitionRequired || plan.Outcome.ReachedGoal || !plan.Assessment.Changed || len(plan.Outcome.Warnings) != 0 {
+					t.Fatalf("unpublished baseline reported complete: ledger=%t inspection=%#v", ledger.Exists, plan)
+				}
+				out, err := engine.Converge(context.Background(), Execution{Plan: plan.Plan})
+				if err != nil || out.Status != StatusOperatorActionRequired || out.Code != CodeConfirmationRequired || out.ReachedGoal || len(out.Warnings) != 0 {
+					t.Fatalf("unpublished baseline bypassed consent: %#v %v", out, err)
+				}
+				for _, name := range []string{"ledger.json", "journal.json", migrationLedgerCheckpointName} {
+					if _, err := os.Lstat(filepath.Join(home, "release-transition/v2", name)); !os.IsNotExist(err) {
+						t.Fatalf("unconfirmed bootstrap wrote %s: %v", name, err)
+					}
+				}
+				ledgerStateReady(t, home, options)
+				ledger, err = engine.store.ReadLedger()
+				if err != nil || !ledger.Exists {
+					t.Fatalf("confirmed bootstrap did not publish ledger: %v", err)
+				}
+			})
 		}
 	}
 }

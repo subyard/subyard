@@ -808,6 +808,7 @@ func TestProtectedPublishedRollbackCompletionRemainsReadOnly(t *testing.T) {
 	for _, scenario := range []string{"ready", "same-release", "pending", "artifact", "owner", "current", "previous", "reported-previous", "blocked", "blocked-foreign-transaction", "blocked-foreign-links", "standalone-ready"} {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+			seedExistingCurrentLedger(t, fixture.configHome, mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json")))
 			capture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "historical-request")
 			reportedPrevious := "release-a"
 			if scenario == "reported-previous" {
@@ -1097,6 +1098,7 @@ func TestPrepareTransitionUsesExactPublishedRecoveryWithoutLatestOrPublication(t
 
 func TestPrepareTransitionRepairsCompletedActivationDriftWithOneGrant(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	seedExistingCurrentLedger(t, fixture.configHome, mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json")))
 	marker := filepath.Join(filepath.Dir(fixture.runtimeRoot), "repair-started")
 	grants := filepath.Join(filepath.Dir(fixture.runtimeRoot), "repair-grants")
 	repairTransaction := "tx-fedcba9876543210"

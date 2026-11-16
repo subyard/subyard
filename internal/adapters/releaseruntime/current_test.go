@@ -476,6 +476,7 @@ func TestCurrentDomainsReportsCheckpointAuthorityBeyondPinnedProjection(t *testi
 
 func TestStaleCompletedRepairKeepsPlanStaleCurrentRetry(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	seedExistingCurrentLedger(t, fixture.configHome, mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json")))
 	marker := filepath.Join(filepath.Dir(fixture.runtimeRoot), "plan-stale")
 	initialPlan := "plan-v1-" + strings.Repeat("1", 64)
 	recheckedPlan := "plan-v1-" + strings.Repeat("2", 64)

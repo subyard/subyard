@@ -1065,6 +1065,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				if output, err := installer.CombinedOutput(); err != nil {
 					t.Fatalf("publish exact fixture candidate: %v %s", err, output)
 				}
+				seedRegistryLedgerFixture(t, environmentValue(environment, "SUBYARD_CONFIG_HOME"), mustReadConfigFixture(t, filepath.Join(runtimeRoot, "current", "config", "release-transition.json")))
 			}
 			if test.rollback {
 				prepareCLIReleaseLinks(t, runtimeRoot, true)
